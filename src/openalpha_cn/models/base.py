@@ -5,6 +5,18 @@ from typing import Any, Protocol
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class ModelCapabilities(BaseModel):
+    """Machine-readable limits used for safe model selection."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    context_window: int | None = Field(default=None, gt=0)
+    max_output_tokens: int | None = Field(default=None, gt=0)
+    reasoning: bool = False
+    usage_reporting: bool = False
+    structured_output_modes: tuple[str, ...] = ("json_schema", "json_object")
+
+
 class ModelMetadata(BaseModel):
     """Non-secret model provider capabilities and credential requirements."""
 
@@ -14,6 +26,7 @@ class ModelMetadata(BaseModel):
     model: str = Field(min_length=1, max_length=256)
     credential_env_vars: tuple[str, ...]
     structured_output: bool
+    capabilities: ModelCapabilities = ModelCapabilities()
 
 
 class ModelProvider(Protocol):
