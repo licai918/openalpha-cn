@@ -71,18 +71,18 @@ This plan implements `openalpha-cn-v1-spec.md` in thin, independently verifiable
 
 ## Phase 5: Research and decision vertical slice
 
-- [ ] Task 5.1: Define agent, tool, router, risk, and memory contracts.
-- [ ] Task 5.2: Implement deterministic baseline market, theme, capital, and risk agents.
-- [ ] Task 5.3: Implement optional LLM model provider boundary and structured-output validation.
-- [ ] Task 5.4: Implement signal construction, abstention, and invalidation rules.
-- [ ] Task 5.5: Append decisions and run manifests to the ledger.
+- [x] Task 5.1: Define agent, tool, router, risk, and memory contracts.
+- [x] Task 5.2: Implement deterministic baseline market, theme, capital, and risk agents.
+- [x] Task 5.3: Implement optional LLM model provider boundary and structured-output validation.
+- [x] Task 5.4: Implement signal construction, abstention, and invalidation rules.
+- [x] Task 5.5: Append decisions and run manifests to the ledger.
 
 ### Checkpoint 5
 
-- [ ] A research run goes from evidence to signal to decision.
-- [ ] Every conclusion cites evidence IDs.
-- [ ] Insufficient evidence returns an explicit abstention.
-- [ ] Retry and recovery are idempotent.
+- [x] A research run goes from evidence to signal to decision.
+- [x] Every conclusion cites evidence IDs.
+- [x] Insufficient evidence returns an explicit abstention.
+- [x] Retry and recovery are idempotent.
 
 ## Phase 6: Replay, backtest, and attribution
 
