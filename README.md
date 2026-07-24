@@ -96,40 +96,7 @@
   />
 </p>
 
-## 两种使用方式
-
-### 1. 自托管 OpenAlpha CN
-
-推荐使用 Docker Compose：
-
-```powershell
-git clone https://github.com/ss8875/openalpha-cn.git
-Set-Location openalpha-cn
-docker compose -f deploy/compose.yml up -d --build
-Start-Process http://127.0.0.1:8000
-```
-
-运行数据保存在独立 Docker 卷中。仓库包含：
-
-- 四时间戳 Point-in-Time 证据与防前视查询；
-- 涨停、炸板、连板、题材、催化、公告、资金等 A 股证据语义；
-- 可复现的市场、题材和资金智能体，外加结构化模型扩展边界；
-- `SignalFrame`、`DecisionLedger`、`RunManifest`、风险门和显式弃权；
-- 实时研究与历史回放共用的 `run_cycle`；
-- A 股 T+1、整手、停牌、涨跌停锁单和交易成本约束；
-- 60 个交易日、300 个事件的冻结回放语料；
-- 规则、因子、智能体归因；
-- REST API、Python SDK、CLI 和响应式研究工作台。
-
-不使用 Docker 时，开发者可以执行：
-
-```powershell
-uv sync --locked --all-extras --dev
-uv run openalpha doctor
-uv run openalpha serve
-```
-
-### 2. 不想本地部署
+## 不想本地部署
 
 可直接下载 **链邻涨停复盘策略软件 1.0.9**：
 
@@ -154,6 +121,94 @@ Get-FileHash .\Lianlin-LimitUp-Review-Setup-1.0.9-x64.exe -Algorithm SHA256
 </p>
 
 <p align="center">扫码添加微信，咨询安装、部署、数据接入和产品使用问题。</p>
+
+## 安装说明
+
+### 安装链邻涨停复盘策略软件
+
+适用于不希望配置 Python、Node、数据库和 OpenAlpha CN 运行环境的 64 位 Windows 用户。
+
+#### 第 1 步：下载安装包
+
+点击上方“下载 Windows x64 安装版”，或进入 [链邻桌面软件 Release 页面](https://github.com/ss8875/openalpha-cn/releases/tag/chainlin-desktop-v1.0.9) 下载：
+
+`Lianlin-LimitUp-Review-Setup-1.0.9-x64.exe`
+
+只使用 `github.com/ss8875/openalpha-cn` 发布的文件；不要运行从网盘、聊天群或不明网站转发的同名安装包。
+
+#### 第 2 步：校验文件
+
+打开安装包所在目录，在 PowerShell 中执行：
+
+```powershell
+Get-FileHash .\Lianlin-LimitUp-Review-Setup-1.0.9-x64.exe -Algorithm SHA256
+```
+
+确认以下两项完全一致：
+
+- 文件大小：`144,902,921 bytes`
+- SHA-256：`0DDD3AF69C671C3AF0F7AEC90D57B77363705E38E871B49D640C7A2D0D05838B`
+
+如果大小或哈希不一致，请删除该文件并从 GitHub Release 重新下载，不要继续安装。
+
+#### 第 3 步：运行安装程序
+
+1. 双击 `Lianlin-LimitUp-Review-Setup-1.0.9-x64.exe`。
+2. 当前安装包未做数字签名，Windows 可能显示 SmartScreen 提示。
+3. 只有在下载地址、文件大小和 SHA-256 均已核验正确后，才点击“更多信息”并选择“仍要运行”。
+4. 如果出现 Windows 用户账户控制提示，请再次确认文件名和来源，然后允许安装程序运行。
+
+#### 第 4 步：完成安装
+
+按照安装向导选择安装位置和快捷方式选项，确认后等待安装完成。安装结束后，可从安装完成页、Windows 开始菜单或桌面快捷方式启动软件；具体入口以安装向导实际创建的项目为准。
+
+#### 第 5 步：遇到问题
+
+- 无法下载：进入 [Release 页面](https://github.com/ss8875/openalpha-cn/releases/tag/chainlin-desktop-v1.0.9) 重新下载。
+- 哈希不一致：不要运行，删除后重新下载。
+- SmartScreen 拦截：先完成哈希校验，再按上面的安全步骤处理。
+- 安装或使用仍有问题：扫描上方微信二维码，咨询安装、数据接入和产品使用。
+
+### 安装 OpenAlpha CN
+
+适用于希望连接自己的数据源、扩展 Provider 或智能体、使用 API/SDK/CLI/Web 的开发者和研究者。
+
+#### 方式一：Docker Compose
+
+准备 Git、Docker Desktop 或 Docker Engine，并确认 `docker compose version` 可以正常执行。
+
+```powershell
+git clone https://github.com/ss8875/openalpha-cn.git
+Set-Location openalpha-cn
+docker compose -f deploy/compose.yml up -d --build
+docker compose -f deploy/compose.yml ps
+Start-Process http://127.0.0.1:8000
+```
+
+浏览器打开 `http://127.0.0.1:8000`。接口文档位于 `http://127.0.0.1:8000/docs`，健康检查地址为 `http://127.0.0.1:8000/health`。
+
+停止服务但保留研究数据：
+
+```powershell
+docker compose -f deploy/compose.yml down
+```
+
+运行数据保存在独立 Docker 卷中。不要执行 `down --volumes`，除非明确要删除本地研究证据、运行记录和决策账本。
+
+#### 方式二：Python 源码环境
+
+准备 Python 3.11 或 3.12，并安装 `uv`：
+
+```powershell
+git clone https://github.com/ss8875/openalpha-cn.git
+Set-Location openalpha-cn
+Copy-Item .env.example .env
+uv sync --locked --all-extras --dev
+uv run openalpha doctor
+uv run openalpha serve
+```
+
+服务默认只监听本机 `127.0.0.1:8000`。数据源 Token 和模型密钥由用户写入本地 `.env`，不要提交到 Git。完整配置、备份、恢复和升级方法见[详细部署方案](docs/deployment/production.zh-CN.md)。
 
 ## 数据优势如何体现
 
