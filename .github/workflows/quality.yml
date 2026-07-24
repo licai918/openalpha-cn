@@ -25,7 +25,7 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1f # v7
 
       - name: Install uv and Python
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
@@ -54,3 +54,103 @@ jobs:
 
       - name: Verify generated files are synchronized
         run: git diff --exit-code
+
+  web:
+    name: Web quality and browser flow
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1f # v7
+
+      - name: Install Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+
+      - name: Install pinned pnpm
+        run: npm install --global pnpm@11.9.0
+
+      - name: Install locked dependencies
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+
+      - name: Audit Node dependencies
+        working-directory: web
+        run: pnpm audit --audit-level high --registry https://registry.npmjs.org
+
+      - name: Lint
+        working-directory: web
+        run: pnpm lint
+
+      - name: Unit test
+        working-directory: web
+        run: pnpm test
+
+      - name: Build
+        working-directory: web
+        run: pnpm build
+
+      - name: Install Chromium
+        working-directory: web
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Browser golden flow
+        working-directory: web
+        run: pnpm test:e2e
+
+      - name: Upload browser report on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: playwright-report
+          path: web/playwright-report/
+          retention-days: 7
+
+  security:
+    name: Publication and dependency security
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1f # v7
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.32"
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Verify public source boundary
+        run: uv run --no-project python scripts/verify_publication.py
+
+      - name: Verify feature destination reconciliation
+        run: uv run --no-project python scripts/build_feature_coverage.py --check
+
+      - name: Export locked runtime dependencies
+        run: uv export --locked --no-dev --no-emit-project --output-file .audit-requirements.txt
+
+      - name: Audit Python dependencies
+        run: uvx --from pip-audit pip-audit --requirement .audit-requirements.txt
+
+  container:
+    name: Container persistence recovery
+    runs-on: ubuntu-latest
+    needs: [python, web, security]
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1f # v7
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.32"
+          python-version: "3.12"
+
+      - name: Validate Compose configuration
+        run: docker compose --file deploy/compose.yml config --quiet
+
+      - name: Prove restart recovery
+        run: uv run --no-project python scripts/verify_compose_recovery.py

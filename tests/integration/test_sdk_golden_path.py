@@ -61,4 +61,4 @@ def test_sdk_imports_evidence_runs_research_and_queries_state(tmp_path: Path) ->
 
     assert research.decision.final_action == "watch"
     assert sdk.query_evidence(as_of=NOW, subject="000001.SZ") == evidence
-    assert sdk.health() == {"status": "ok", "version": "0.1.0"}
+    assert sdk.health() == {"status": "ok", "version": "1.0.0"}

@@ -35,7 +35,7 @@ describe("OpenAlpha workbench", () => {
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
         if (url === "/health") {
-          return Response.json({ status: "ok", version: "0.1.0" });
+          return Response.json({ status: "ok", version: "1.0.0" });
         }
         if (url.startsWith("/api/v1/evidence")) {
           return Response.json({ items: [evidence] });

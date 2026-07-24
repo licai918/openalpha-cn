@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "openalpha-cn"
-version = "0.1.0"
+version = "1.0.0"
 description = "Evidence-traceable, point-in-time multi-agent research for China A shares"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -13,7 +13,7 @@ license-files = ["LICENSE"]
 authors = [{ name = "ss8875" }]
 keywords = ["a-share", "multi-agent", "quant-research", "point-in-time"]
 classifiers = [
-  "Development Status :: 2 - Pre-Alpha",
+  "Development Status :: 5 - Production/Stable",
   "Operating System :: Microsoft :: Windows",
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3.11",

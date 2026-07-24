@@ -27,3 +27,14 @@ uv run openalpha evidence build .\events.json `
 
 The HTTP endpoint intentionally accepts structured records rather than a server
 filesystem path. Local file access remains a CLI responsibility.
+
+## Research, replay, and attribution
+
+- `POST /api/v1/research/run` executes the shared research core from verified evidence.
+- `POST /api/v1/backtests/replay` executes a supplied versioned frozen corpus.
+- `POST /api/v1/backtests/validate` accepts a previously returned research result and a future outcome observation, verifies content-derived IDs, and returns reconciled attribution.
+
+The default declared request limit is 8 MiB. Configure it with
+`OPENALPHA_MAX_REQUEST_BYTES`. The service is local-first and has no public
+multi-tenant authentication; use a TLS/authentication gateway before any
+network exposure.

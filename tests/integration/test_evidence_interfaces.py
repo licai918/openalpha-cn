@@ -100,9 +100,36 @@ def test_cli_and_api_return_the_same_evidence_snapshot(tmp_path: Path) -> None:
 def test_api_exposes_health_and_versioned_openapi(tmp_path: Path) -> None:
     client = TestClient(create_app(runtime_dir=tmp_path / "runtime"))
 
-    assert client.get("/health").json() == {"status": "ok", "version": "0.1.0"}
+    health = client.get("/health")
+    assert health.json() == {"status": "ok", "version": "1.0.0"}
+    assert health.headers["x-content-type-options"] == "nosniff"
+    assert health.headers["x-frame-options"] == "DENY"
+    assert health.headers["content-security-policy"].startswith("default-src 'self'")
     schema = client.get("/openapi.json").json()
     assert "/api/v1/evidence/build" in schema["paths"]
+
+
+def test_api_serves_built_web_assets_without_shadowing_routes(tmp_path: Path) -> None:
+    web_dir = tmp_path / "web"
+    web_dir.mkdir()
+    (web_dir / "index.html").write_text("<h1>OpenAlpha CN</h1>", encoding="utf-8")
+    client = TestClient(create_app(runtime_dir=tmp_path / "runtime", web_dir=web_dir))
+
+    assert client.get("/").text == "<h1>OpenAlpha CN</h1>"
+    assert client.get("/health").json()["status"] == "ok"
+
+
+def test_api_rejects_declared_oversized_request_body(tmp_path: Path) -> None:
+    client = TestClient(create_app(runtime_dir=tmp_path / "runtime", max_request_bytes=32))
+
+    response = client.post(
+        "/api/v1/evidence/build",
+        content=b"x" * 33,
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 413
+    assert response.json() == {"detail": "Request body exceeds configured limit."}
 
 
 def test_api_persists_and_queries_built_evidence(tmp_path: Path) -> None:
@@ -187,3 +214,22 @@ def test_api_runs_research_from_structured_evidence(tmp_path: Path) -> None:
         "factor",
         "agent",
     }
+
+    tampered = response.json()
+    tampered["signal"]["signal_id"] = "sig_tampered"
+    rejected = client.post(
+        "/api/v1/backtests/validate",
+        json={
+            "research": tampered,
+            "observation": {
+                "observation_start": AS_OF.isoformat(),
+                "observation_end": (AS_OF + timedelta(days=5)).isoformat(),
+                "start_price": 10.0,
+                "end_price": 11.0,
+                "benchmark_return": 0.02,
+                "transaction_cost": 0.005,
+            },
+        },
+    )
+    assert rejected.status_code == 422
+    assert rejected.json() == {"detail": "Research result failed integrity validation."}

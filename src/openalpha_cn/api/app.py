@@ -7,7 +7,10 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from openalpha_cn import __version__
 from openalpha_cn.backtest.replay import ReplayCorpus, ReplayReport, ReplayRunner
@@ -57,6 +60,62 @@ class OutcomeApiRequest(BaseModel):
     observation: OutcomeObservation
 
 
+class SecurityHeadersMiddleware:
+    """Apply browser hardening headers and reject declared oversized bodies."""
+
+    _HEADERS = (
+        (
+            b"content-security-policy",
+            (
+                b"default-src 'self'; base-uri 'self'; frame-ancestors 'none'; "
+                b"form-action 'self'; img-src 'self' data:; "
+                b"script-src 'self'; style-src 'self'; connect-src 'self'"
+            ),
+        ),
+        (b"x-content-type-options", b"nosniff"),
+        (b"x-frame-options", b"DENY"),
+        (b"referrer-policy", b"no-referrer"),
+        (b"permissions-policy", b"camera=(), microphone=(), geolocation=()"),
+        (b"cross-origin-opener-policy", b"same-origin"),
+    )
+
+    def __init__(self, app: ASGIApp, *, max_request_bytes: int) -> None:
+        self.app = app
+        self.max_request_bytes = max_request_bytes
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers", ()))
+        raw_length = headers.get(b"content-length")
+        if raw_length is not None:
+            try:
+                content_length = int(raw_length)
+            except ValueError:
+                response = JSONResponse(
+                    status_code=400,
+                    content={"detail": "Invalid Content-Length header."},
+                )
+                await response(scope, receive, send)
+                return
+            if content_length > self.max_request_bytes:
+                response = JSONResponse(
+                    status_code=413,
+                    content={"detail": "Request body exceeds configured limit."},
+                )
+                await response(scope, receive, send)
+                return
+
+        async def send_with_security_headers(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                message["headers"] = [*message.get("headers", ()), *self._HEADERS]
+            await send(message)
+
+        await self.app(scope, receive, send_with_security_headers)
+
+
 def _parse_research_result(payload: dict[str, Any]) -> ResearchRunResult:
     """Rebuild a strict result while verifying its content-derived identifiers."""
     clean = {**payload}
@@ -88,9 +147,21 @@ def _parse_research_result(payload: dict[str, Any]) -> ResearchRunResult:
     return result
 
 
-def create_app(*, runtime_dir: Path | None = None) -> FastAPI:
+def create_app(
+    *,
+    runtime_dir: Path | None = None,
+    web_dir: Path | None = None,
+    max_request_bytes: int | None = None,
+) -> FastAPI:
     """Create an isolated application instance for serving and tests."""
     root = runtime_dir or Path(os.getenv("OPENALPHA_RUNTIME_DIR", "./runtime"))
+    request_limit = (
+        int(os.getenv("OPENALPHA_MAX_REQUEST_BYTES", str(8 * 1024 * 1024)))
+        if max_request_bytes is None
+        else max_request_bytes
+    )
+    if request_limit < 1:
+        raise ValueError("max_request_bytes must be positive")
     root.mkdir(parents=True, exist_ok=True)
     evidence_store = ParquetEvidenceStore(root / "evidence")
     run_repository = SQLiteRunRepository(root / "state.sqlite3")
@@ -106,6 +177,10 @@ def create_app(*, runtime_dir: Path | None = None) -> FastAPI:
         allow_credentials=False,
         allow_methods=["GET", "POST"],
         allow_headers=["Content-Type"],
+    )
+    application.add_middleware(
+        SecurityHeadersMiddleware,
+        max_request_bytes=request_limit,
     )
 
     @application.get("/health")
@@ -184,10 +259,26 @@ def create_app(*, runtime_dir: Path | None = None) -> FastAPI:
         try:
             research = _parse_research_result(request.research)
         except (KeyError, TypeError, ValueError) as error:
-            raise HTTPException(status_code=422, detail=str(error)) from error
+            raise HTTPException(
+                status_code=422,
+                detail="Research result failed integrity validation.",
+            ) from error
         return OutcomeValidator().validate(
             research=research,
             observation=request.observation,
+        )
+
+    configured_web_dir = web_dir
+    if configured_web_dir is None and os.getenv("OPENALPHA_WEB_DIR"):
+        configured_web_dir = Path(os.environ["OPENALPHA_WEB_DIR"])
+    if configured_web_dir is not None:
+        index = configured_web_dir / "index.html"
+        if not index.is_file():
+            raise ValueError(f"web_dir does not contain index.html: {configured_web_dir}")
+        application.mount(
+            "/",
+            StaticFiles(directory=configured_web_dir, html=True),
+            name="web",
         )
 
     return application

@@ -1,0 +1,40 @@
+name: openalpha-cn
+
+services:
+  openalpha:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: openalpha-cn:local
+    init: true
+    restart: unless-stopped
+    read_only: true
+    ports:
+      - "127.0.0.1:${OPENALPHA_PORT:-8000}:8000"
+    environment:
+      OPENALPHA_RUNTIME_DIR: /data
+      OPENALPHA_WEB_DIR: /app/web-dist
+      OPENALPHA_MAX_REQUEST_BYTES: ${OPENALPHA_MAX_REQUEST_BYTES:-8388608}
+    volumes:
+      - openalpha-runtime:/data
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
+      retries: 5
+
+volumes:
+  openalpha-runtime:

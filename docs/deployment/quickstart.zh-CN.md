@@ -1,39 +1,50 @@
-# OpenAlpha CN 部署快速开始
+# OpenAlpha CN 快速部署
 
-## 开发环境
+完整的生产边界、备份、恢复、升级和回滚见[详细部署方案](production.zh-CN.md)。
 
-要求：
-
-- Windows 10/11 或当前受支持的 Linux；
-- Python 3.11 或 3.12；
-- uv；
-- Git。
+## Docker Compose（推荐）
 
 ```powershell
 git clone https://github.com/ss8875/openalpha-cn.git
 Set-Location openalpha-cn
-Copy-Item .env.example .env
-uv sync --all-extras --dev
-uv run openalpha doctor
-uv run pytest
+docker compose -f deploy/compose.yml up -d --build
+docker compose -f deploy/compose.yml ps
+Start-Process http://127.0.0.1:8000
 ```
 
-真实 Token 只写入本地 `.env`，不要发到 Issue、聊天记录、运行报告或 Git 历史。
-
-## 当前可用命令
+停止但保留数据：
 
 ```powershell
-uv run openalpha version
-uv run openalpha doctor
-uv run openalpha doctor --json
+docker compose -f deploy/compose.yml down
 ```
 
-随着垂直切片完成，本文会增加 API、Web、Docker、数据导入和历史回放命令。未实现的命令不会提前写入快速开始。
+不要执行 `down --volumes`，除非明确要删除本地研究证据和账本。
+
+## Python 本地运行
+
+```powershell
+Copy-Item .env.example .env
+uv sync --locked --all-extras --dev
+uv run openalpha doctor
+uv run openalpha serve
+```
+
+Web 开发服务器：
+
+```powershell
+Set-Location web
+pnpm install --frozen-lockfile
+pnpm dev
+```
 
 ## 不想自行部署
 
-可以从 `chainlin-desktop-v1.0.9` Release 下载链邻涨停复盘策略软件 Windows x64 安装版。当前安装包未进行数字签名，下载后请按 Release 公布的 SHA-256 校验文件。
+[下载链邻涨停复盘策略软件 1.0.9](https://github.com/ss8875/openalpha-cn/releases/download/chainlin-desktop-v1.0.9/Lianlin-LimitUp-Review-Setup-1.0.9-x64.exe)
+
+安装包未签名；请先核验 Release 公布的 `144,902,921 bytes` 和 SHA-256：
+
+`0DDD3AF69C671C3AF0F7AEC90D57B77363705E38E871B49D640C7A2D0D05838B`
 
 ![链邻软件与 OpenAlpha CN 部署微信咨询](../../assets/brand/platform-wechat-banner.png)
 
-扫码可咨询安装、部署和产品使用问题。所有研究内容均不构成投资建议。
+扫码可咨询安装、部署、数据接入和产品使用问题。

@@ -27,7 +27,7 @@ const evidence = {
 
 test.beforeEach(async ({ page }) => {
   await page.route("**/health", (route) =>
-    route.fulfill({ json: { status: "ok", version: "0.1.0" } })
+    route.fulfill({ json: { status: "ok", version: "1.0.0" } })
   );
   await page.route("**/api/v1/evidence?**", (route) =>
     route.fulfill({ json: { items: [evidence] } })

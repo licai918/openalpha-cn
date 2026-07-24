@@ -1,3 +1,5 @@
+import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -22,6 +24,7 @@ def test_wechat_banner_is_a_real_png_asset() -> None:
 
 def test_public_repository_metadata_is_present() -> None:
     required = [
+        "Dockerfile",
         "CHANGELOG.md",
         "CONTRIBUTING.md",
         "LICENSE",
@@ -31,6 +34,16 @@ def test_public_repository_metadata_is_present() -> None:
     ]
 
     assert [name for name in required if not (ROOT / name).is_file()] == []
+
+
+def test_container_delivery_has_persistence_and_recovery_verification() -> None:
+    compose = (ROOT / "deploy" / "compose.yml").read_text(encoding="utf-8")
+    verification = ROOT / "scripts" / "verify_compose_recovery.py"
+
+    assert "openalpha-runtime:/data" in compose
+    assert "read_only: true" in compose
+    assert "no-new-privileges:true" in compose
+    assert verification.is_file()
 
 
 def test_quality_workflow_covers_supported_platforms_and_locked_dependencies() -> None:
@@ -43,3 +56,33 @@ def test_quality_workflow_covers_supported_platforms_and_locked_dependencies() -
     assert "uv sync --locked --all-extras --dev" in workflow
     assert "permissions:" in workflow
     assert "contents: read" in workflow
+    assert "pnpm install --frozen-lockfile" in workflow
+    assert "pip-audit" in workflow
+    assert "verify_publication.py" in workflow
+    assert "verify_compose_recovery.py" in workflow
+
+
+def test_publication_gate_accepts_tracked_release_sources() -> None:
+    result = subprocess.run(
+        [sys.executable, "scripts/verify_publication.py", "--json"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_feature_coverage_artifacts_are_reconciled() -> None:
+    result = subprocess.run(
+        [sys.executable, "scripts/build_feature_coverage.py", "--check"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert '"unreviewed": 0' in result.stdout
+    assert '"unknown": 0' in result.stdout

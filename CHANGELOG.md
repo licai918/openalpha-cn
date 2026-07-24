@@ -1,20 +1,27 @@
 # Changelog
 
-All notable changes to OpenAlpha CN are recorded here.
-
-The format follows Keep a Changelog, and versions follow Semantic Versioning.
+All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-07-24
+
 ### Added
 
-- Approved v1 specification and implementation plan.
-- Local-first runtime architecture decision.
-- MIT repository policy and security boundaries.
-- Python package, uv lockfile, verified `version` and `doctor` CLI commands.
-- Chinese and English project entry pages.
-- ChainLin desktop download and consultation placement plan.
+- Four-clock point-in-time evidence contracts and content-addressed snapshots.
+- SQLite WAL ledgers plus Parquet/DuckDB evidence storage.
+- File, BYOT Tushare, and optional allowlisted AKShare provider adapters.
+- A-share market-event, theme, catalyst, disclosure, and capital normalizers.
+- Deterministic multi-agent research, structured model output, bounded retry, router, risk gate, memory, and immutable manifests.
+- Same-path live/replay/backtest engine, A-share execution constraints, 300-event frozen replay corpus, outcome validation, and reconciled attribution.
+- REST API, Python SDK, CLI, responsive React workbench, and Playwright golden flow.
+- Non-root read-only Docker Compose deployment with persistent-volume recovery verification.
+- Windows/Linux CI, dependency audits, publication safety scan, and 100% feature-destination ledger.
 
-## [0.1.0] - Unreleased
+### Security
 
-The first development release will contain the repository foundation and the initial point-in-time evidence vertical slice.
+- Restricted CORS origins, strict Pydantic boundary validation, request size limit, browser security headers, BYOT credentials, and public-release secret/artifact checks.
+
+### Boundaries
+
+- No live broker execution, short/cover execution, commercial data resale, or bundled provider credentials.

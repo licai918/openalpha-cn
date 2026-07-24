@@ -1,0 +1,35 @@
+{
+  "category_distribution": {
+    "agent": 9,
+    "backtest": 9,
+    "boundary": 5,
+    "decision": 7,
+    "evidence": 9,
+    "interface": 8,
+    "operations": 11,
+    "provider": 6,
+    "storage": 5,
+    "temporal": 3
+  },
+  "generated_on": "2026-07-24",
+  "reconciliation": {
+    "all_terminal": true,
+    "category_sum_matches_total": true,
+    "status_sum_matches_total": true,
+    "unique_feature_ids": true
+  },
+  "schema_version": "openalpha-feature-coverage/v1",
+  "status_distribution": {
+    "DEFERRED": 2,
+    "ENHANCED_REPLACEMENT": 12,
+    "EXCLUDED": 4,
+    "NATIVE_COMPLETE": 54
+  },
+  "totals": {
+    "all_features": 72,
+    "true_completed_features": 66,
+    "true_completion_rate_pct": 91.67,
+    "unknown": 0,
+    "unreviewed": 0
+  }
+}
