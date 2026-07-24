@@ -68,6 +68,22 @@ python_version = "3.11"
 strict = true
 packages = ["openalpha_cn"]
 
+[[tool.mypy.overrides]]
+# Optional AKShare transitive stubs may use the executing interpreter's syntax.
+# Keep the core checked against Python 3.11 without type-checking third-party internals.
+module = [
+  "akshare",
+  "akshare.*",
+  "duckdb",
+  "duckdb.*",
+  "numpy",
+  "numpy.*",
+  "pandas",
+  "pandas.*",
+]
+follow_imports = "skip"
+ignore_missing_imports = true
+
 [tool.coverage.run]
 branch = true
 source = ["openalpha_cn"]
