@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -30,8 +30,10 @@ from openalpha_cn.evidence.service import (
     build_evidence,
     parse_serialized_evidence,
 )
+from openalpha_cn.runtime.batch import BatchProgressEvent, BatchResearchService, BatchResearchTask
 from openalpha_cn.runtime.engine import ResearchEngine, ResearchRunRequest, ResearchRunResult
 from openalpha_cn.runtime.memory import MemoryEntry
+from openalpha_cn.storage.batch import SQLiteBatchTaskStore
 from openalpha_cn.storage.memory import SQLiteResearchMemory
 from openalpha_cn.storage.parquet import ParquetEvidenceStore
 from openalpha_cn.storage.recovery import RunRecoveryState, SQLiteRecoveryStore
@@ -79,6 +81,16 @@ class PortfolioApiRequest(BaseModel):
     order: PortfolioOrder
     market: MarketBar
     limits: PortfolioLimits = PortfolioLimits()
+
+
+class BatchSubmitRequest(BaseModel):
+    """A bounded set of immutable research requests."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    batch_id: str = Field(min_length=1, max_length=128)
+    requests: tuple[ResearchRunRequest, ...] = Field(min_length=1, max_length=1000)
+    max_concurrency: int = Field(default=4, ge=1, le=32)
 
 
 class SecurityHeadersMiddleware:
@@ -188,6 +200,21 @@ def create_app(
     run_repository = SQLiteRunRepository(root / "state.sqlite3")
     memory = SQLiteResearchMemory(root / "state.sqlite3")
     recovery_store = SQLiteRecoveryStore(root / "state.sqlite3")
+    batch_store = SQLiteBatchTaskStore(root / "state.sqlite3")
+    batch_store.recover_interrupted(now=datetime.now(UTC))
+
+    def run_one(request: ResearchRunRequest) -> ResearchRunResult:
+        return ResearchEngine(
+            repository=run_repository,
+            memory=memory,
+            clock=lambda: datetime.now(UTC),
+        ).run_cycle(request)
+
+    batch_service = BatchResearchService(
+        store=batch_store,
+        runner=run_one,
+        clock=lambda: datetime.now(UTC),
+    )
     application = FastAPI(
         title="OpenAlpha CN API",
         version=__version__,
@@ -264,6 +291,62 @@ def create_app(
             clock=lambda: datetime.now(UTC),
         )
         return engine.run_cycle(request)
+
+    @application.post("/api/v1/research/batches", status_code=202)
+    def batch_submit(
+        request: BatchSubmitRequest,
+        background_tasks: BackgroundTasks,
+    ) -> BatchResearchTask:
+        """Queue a bounded research batch and start it after the response."""
+        try:
+            task = batch_service.submit(
+                batch_id=request.batch_id,
+                requests=request.requests,
+                max_concurrency=request.max_concurrency,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        # FastAPI background task contract:
+        # https://fastapi.tiangolo.com/tutorial/background-tasks/
+        background_tasks.add_task(batch_service.run, request.batch_id)
+        return task
+
+    @application.get("/api/v1/research/batches")
+    def batch_list() -> tuple[BatchResearchTask, ...]:
+        """List durable research batches."""
+        return batch_store.list()
+
+    @application.get("/api/v1/research/batches/{batch_id}")
+    def batch_get(batch_id: str) -> BatchResearchTask:
+        """Return the latest batch state."""
+        task = batch_store.get(batch_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="Batch was not found.")
+        return task
+
+    @application.get("/api/v1/research/batches/{batch_id}/events")
+    def batch_events(batch_id: str) -> tuple[BatchProgressEvent, ...]:
+        """Return append-only progress events for polling clients."""
+        if batch_store.get(batch_id) is None:
+            raise HTTPException(status_code=404, detail="Batch was not found.")
+        return batch_store.list_events(batch_id)
+
+    @application.post("/api/v1/research/batches/{batch_id}/cancel")
+    def batch_cancel(batch_id: str) -> BatchResearchTask:
+        """Request cooperative cancellation of pending batch work."""
+        try:
+            return batch_service.cancel(batch_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Batch was not found.") from error
+
+    @application.post("/api/v1/research/batches/{batch_id}/retry", status_code=202)
+    def batch_retry(batch_id: str, background_tasks: BackgroundTasks) -> BatchResearchTask:
+        """Retry failed items using their existing run recovery state."""
+        task = batch_store.get(batch_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="Batch was not found.")
+        background_tasks.add_task(batch_service.run, batch_id)
+        return task
 
     @application.get("/api/v1/memory/{subject}")
     def memory_query(subject: str) -> tuple[MemoryEntry, ...]:

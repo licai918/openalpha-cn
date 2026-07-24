@@ -18,8 +18,10 @@ from openalpha_cn.backtest.replay import ReplayCorpus, ReplayReport, ReplayRunne
 from openalpha_cn.domain.evidence import EvidenceSnapshot
 from openalpha_cn.evidence.service import build_file_evidence
 from openalpha_cn.providers.base import ProviderMetadata, utc_now
+from openalpha_cn.runtime.batch import BatchResearchService, BatchResearchTask
 from openalpha_cn.runtime.engine import ResearchEngine, ResearchRunRequest, ResearchRunResult
 from openalpha_cn.runtime.memory import MemoryEntry
+from openalpha_cn.storage.batch import SQLiteBatchTaskStore
 from openalpha_cn.storage.memory import SQLiteResearchMemory
 from openalpha_cn.storage.parquet import ParquetEvidenceStore
 from openalpha_cn.storage.recovery import RunRecoveryState, SQLiteRecoveryStore
@@ -44,6 +46,8 @@ class OpenAlphaSDK:
         self.repository = SQLiteRunRepository(runtime_dir / "state.sqlite3")
         self.memory = SQLiteResearchMemory(runtime_dir / "state.sqlite3")
         self.recovery_store = SQLiteRecoveryStore(runtime_dir / "state.sqlite3")
+        self.batch_store = SQLiteBatchTaskStore(runtime_dir / "state.sqlite3")
+        self.batch_store.recover_interrupted(now=self.clock())
 
     def health(self) -> dict[str, str]:
         """Return SDK and package readiness."""
@@ -94,6 +98,26 @@ class OpenAlphaSDK:
     def get_recovery(self, run_id: str) -> RunRecoveryState | None:
         """Inspect the durable node-level recovery state for one run."""
         return self.recovery_store.get(run_id)
+
+    def run_batch(
+        self,
+        *,
+        batch_id: str,
+        requests: Sequence[ResearchRunRequest],
+        max_concurrency: int = 4,
+    ) -> BatchResearchTask:
+        """Submit and synchronously complete one durable bounded batch."""
+        service = BatchResearchService(
+            store=self.batch_store,
+            runner=self.run_research,
+            clock=self.clock,
+        )
+        service.submit(
+            batch_id=batch_id,
+            requests=requests,
+            max_concurrency=max_concurrency,
+        )
+        return service.run(batch_id)
 
     def execute_portfolio_order(
         self,
