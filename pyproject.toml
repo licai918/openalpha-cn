@@ -21,6 +21,7 @@ classifiers = [
   "Topic :: Office/Business :: Financial :: Investment",
 ]
 dependencies = [
+  "pydantic>=2.12,<3",
   "typer>=0.21.0,<1",
 ]
 
