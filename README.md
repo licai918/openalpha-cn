@@ -2,7 +2,7 @@
 
 面向中国 A 股的证据可追溯、时间点一致、多智能体可验证的开源投研系统。
 
-[English](README.en.md) · [部署方案](docs/deployment/production.zh-CN.md) · [数据接口](docs/api/data-interface.zh-CN.md) · [为什么能形成优势](docs/why-openalpha-cn.zh-CN.md) · [功能台账](docs/release/openalpha-v1-feature-ledger.md)
+[English](README.en.md) · [部署方案](docs/deployment/production.zh-CN.md) · [数据接口](docs/api/data-interface.zh-CN.md) · [三方源码对账](docs/audits/three-upstream-source-audit-20260724.md) · [为什么能形成优势](docs/why-openalpha-cn.zh-CN.md) · [功能台账](docs/release/openalpha-v1-feature-ledger.md)
 
 ## ✨ 核心特性
 
@@ -19,12 +19,14 @@
 - **证据驱动协作**：市场事件、题材催化和资金流智能体经证据感知路由协作，每项输出都引用 `evidence_id`。
 - **结构化决策链**：用 `SignalFrame`、`DecisionLedger`、风险门和显式弃权替代无法审计的自由文本结论。
 - **模型可插拔**：无 LLM 时可确定性运行；接入模型后强制结构化输出、Schema 校验和有界重试。
+- **安全 BYOK**：内置 OpenAI-compatible Provider，支持 OpenAI、DeepSeek、Qwen、Ollama 或用户自建兼容端点；密钥只从环境变量读取。
 
 ### 🔁 同路径回放与归因
 
 - **同一研究内核**：实时研究、历史回放与验证共用 `run_cycle`，避免线上逻辑和回测逻辑各走一套。
 - **确定性回放**：内置 60 个交易日、300 个代表性事件的冻结语料，验证结果一致性和已知前视违规。
 - **结果可解释**：统一计入 A 股交易约束与成本，并提供规则、因子和智能体归因。
+- **组合账本**：维护现金、持仓批次、估值、费用和已实现盈亏，并对单仓与总敞口执行硬限制。
 
 ### 🔌 开放的数据与使用接口
 
@@ -35,8 +37,8 @@
 ### 🛡️ 可复现的工程底座
 
 - **完整复现清单**：`EvidenceSnapshot` 内容寻址；`RunManifest` 记录代码、配置、Provider、模型、Prompt、随机种子和环境版本。
-- **可恢复运行**：SQLite WAL 保存运行、决策和 Checkpoint，研究任务支持幂等恢复；Docker 卷验证重启后证据仍然存在。
-- **完成度可审计**：72 项功能全部具有唯一 ID、源码证据、测试证据和终态去向，`UNREVIEWED=0`、`UNKNOWN=0`。
+- **可恢复运行**：SQLite WAL 保存运行、决策、持久记忆和节点 Checkpoint；中断后从下一节点恢复，请求或图结构变化会拒绝误用旧状态。
+- **完成度可审计**：功能台账中的每项能力都具有唯一 ID、源码证据、测试证据和终态去向，`UNREVIEWED=0`、`UNKNOWN=0`。
 
 ## 🧠 五图读懂 OpenAlpha CN
 
@@ -250,7 +252,9 @@ OpenAlpha CN 整合 TradingAgents 和 AI Hedge Fund 的优势，接入 A 股数�
 | 构建/查询证据 | `POST /api/v1/evidence/build` / `GET /api/v1/evidence` |
 | 市场事件/题材 | `GET /api/v1/market/events` / `GET /api/v1/themes` |
 | 多智能体研究 | `POST /api/v1/research/run` |
+| 持久研究记忆 / 运行恢复 | `GET /api/v1/memory/{subject}` / `GET /api/v1/runs/{run_id}/recovery` |
 | 冻结语料回放 | `POST /api/v1/backtests/replay` |
+| A 股组合账本 | `POST /api/v1/portfolio/execute` |
 | 结果与归因 | `POST /api/v1/backtests/validate` |
 | OpenAPI | `GET /docs` / `GET /openapi.json` |
 

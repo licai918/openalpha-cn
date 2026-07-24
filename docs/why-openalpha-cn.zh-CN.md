@@ -8,9 +8,11 @@ OpenAlpha CN 不以“Agent 数量更多”作为主要卖点，而以 **A 股�
 
 - TradingAgents：`a33fd4c0f134485a43553a2c23a63cb14adbd88f`，Apache-2.0；
 - AI Hedge Fund：`e7c784f118866c5dba8fc2c4ee545f08cc611c61`，MIT；
+- TradingAgents-CN：`74783e8817d6cf6de29867880631cc555153f36b`，核心 Apache-2.0，
+  `app/` 与 `frontend/` 为专有许可；
 - 共识别 257 项上游功能，原规划真实覆盖 132 项（51.36%），未审计和未知均为 0。
 
-OpenAlpha CN v1 没有复制两个仓库，而是优先实现审计中最影响可信度的缺口：统一 PIT 合同、内容寻址证据、显式失败/弃权、确定性 `run_cycle`、版本化 Run Manifest、有界重试、A 股执行约束和结果归因。
+OpenAlpha CN v1 没有复制三个仓库，而是优先实现审计中最影响可信度的缺口：统一 PIT 合同、内容寻址证据、显式失败/弃权、确定性 `run_cycle`、版本化 Run Manifest、有界重试、A 股执行约束和结果归因。
 
 ## 六个胜负手
 
@@ -56,6 +58,7 @@ v1 已建立这些地基。后续可并行扩展事件族、Provider、Agent 和
 - 不把 AI Hedge Fund v2 或 Web Flow Builder 的 WIP 愿景算作稳定能力；
 - 不把 TradingAgents/AI Hedge Fund 源码复制进本仓库；
 - 不公开链邻数据库、用户知识库、Token 或商业原始数据；
-- 组合现金/持仓逐日核算和图形化 Agent 编排明确延后。
+- 大规模批量任务中心和图形化 Agent 编排明确延后。
 
-完整状态见[功能去向台账](release/openalpha-v1-feature-ledger.md)。
+完整状态见[功能去向台账](release/openalpha-v1-feature-ledger.md)和
+[三方固定源码版本对账](audits/three-upstream-source-audit-20260724.md)。

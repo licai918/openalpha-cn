@@ -20,3 +20,21 @@ The compatibility test fails when runtime models and checked-in schemas differ.
 Changing an existing `/v1` contract requires a reviewed compatibility decision;
 breaking changes use a new schema version and coexist with the old version
 during migration.
+
+## Runtime records
+
+The following strict Pydantic records are also exposed through the Python SDK
+and HTTP API. They are runtime contracts rather than exported canonical research
+schemas:
+
+- `RunRecoveryState`: request digest, graph signature, completed node results,
+  next-node index, attempt count, status, timestamps, and failure type;
+- `MemoryEntry`: decision-linked durable research memory;
+- `PortfolioState`: cash, position lots, valuation marks, fees, and realized PnL;
+- `PortfolioOrder` and `PortfolioTransition`: one order intent and its immutable
+  accepted/rejected before-and-after result;
+- `PortfolioLimits`: maximum single-position and total-exposure weights.
+
+All reject paths are explicit. A rejected portfolio order returns the unchanged
+state and a reason; a recovery request with a changed immutable input or graph
+signature raises a conflict instead of silently reusing stale state.

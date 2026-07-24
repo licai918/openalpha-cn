@@ -6,8 +6,10 @@
     "decision": 7,
     "evidence": 9,
     "interface": 8,
+    "model": 1,
     "operations": 11,
     "provider": 6,
+    "recovery": 2,
     "storage": 5,
     "temporal": 3
   },
@@ -20,15 +22,15 @@
   },
   "schema_version": "openalpha-feature-coverage/v1",
   "status_distribution": {
-    "DEFERRED": 2,
-    "ENHANCED_REPLACEMENT": 12,
+    "DEFERRED": 1,
+    "ENHANCED_REPLACEMENT": 16,
     "EXCLUDED": 4,
     "NATIVE_COMPLETE": 54
   },
   "totals": {
-    "all_features": 72,
-    "true_completed_features": 66,
-    "true_completion_rate_pct": 91.67,
+    "all_features": 75,
+    "true_completed_features": 70,
+    "true_completion_rate_pct": 93.33,
     "unknown": 0,
     "unreviewed": 0
   }

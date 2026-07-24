@@ -2,7 +2,7 @@
 
 Evidence-traceable, point-in-time, multi-agent research for China A shares.
 
-[中文](README.md) · [Deployment](docs/deployment/production.zh-CN.md) · [Data API](docs/api/data-interface.zh-CN.md) · [Feature ledger](docs/release/openalpha-v1-feature-ledger.md)
+[中文](README.md) · [Deployment](docs/deployment/production.zh-CN.md) · [Data API](docs/api/data-interface.zh-CN.md) · [Three-upstream source audit](docs/audits/three-upstream-source-audit-20260724.md) · [Feature ledger](docs/release/openalpha-v1-feature-ledger.md)
 
 ## Self-host
 
@@ -16,7 +16,11 @@ docker compose -f deploy/compose.yml up -d --build
 
 Open `http://127.0.0.1:8000`. Runtime evidence and ledgers live in a dedicated persistent volume.
 
-OpenAlpha CN provides four-clock point-in-time evidence, A-share event semantics, deterministic baseline agents, a structured model boundary, typed signals and decisions, A-share execution constraints, same-path replay, reconciled attribution, REST, Python SDK, CLI, and a responsive research workbench.
+OpenAlpha CN provides four-clock point-in-time evidence, A-share event semantics,
+deterministic baseline agents, a secure OpenAI-compatible BYOK model boundary,
+typed signals and decisions, durable per-agent resume and research memory,
+A-share execution and portfolio constraints, same-path replay, reconciled
+attribution, REST, Python SDK, CLI, and a responsive research workbench.
 
 ## Prefer a ready-to-use Windows application?
 
@@ -35,8 +39,10 @@ OpenAlpha CN competes on verifiability rather than the number of agent personas:
 - separate event, availability, ingestion, and revision clocks;
 - content-addressed evidence and strict anti-look-ahead rules;
 - deterministic operation without an LLM, plus schema validation and bounded retries when a model is used;
+- durable node checkpoints that reject changed requests or graph signatures;
 - one research core shared by live, replay, and backtest modes;
 - A-share T+1, board lot, suspension, limit-lock, and transaction-cost constraints;
+- immutable cash/lot/mark/fee/PnL portfolio transitions with exposure clamps;
 - evidence-linked decisions and reconciled rule/factor/agent attribution.
 
 The project accepts user-owned CSV, JSON, JSONL, and Parquet data, BYOT Tushare, and an optional constrained AKShare adapter. It does not redistribute commercial raw datasets or expose a hosted data resale proxy.

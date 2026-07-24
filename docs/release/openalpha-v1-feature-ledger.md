@@ -4,8 +4,8 @@
 
 ## 对账结论
 
-- 功能总数: 72
-- 当前真实完成: 66 (91.67%)
+- 功能总数: 75
+- 当前真实完成: 70 (93.33%)
 - `UNREVIEWED=0`
 - `UNKNOWN=0`
 
@@ -13,8 +13,8 @@
 
 | 状态 | 数量 |
 |---|---:|
-| `DEFERRED` | 2 |
-| `ENHANCED_REPLACEMENT` | 12 |
+| `DEFERRED` | 1 |
+| `ENHANCED_REPLACEMENT` | 16 |
 | `EXCLUDED` | 4 |
 | `NATIVE_COMPLETE` | 54 |
 
@@ -60,7 +60,9 @@
 | `OA-DEC-004` | decision | Risk gate | `NATIVE_COMPLETE` | `src/openalpha_cn/decisions/risk.py#RiskGate` | `tests/integration/test_research_cycle.py` |
 | `OA-DEC-005` | decision | Run manifest | `NATIVE_COMPLETE` | `src/openalpha_cn/domain/run.py#RunManifest` | `tests/unit/domain/test_records.py` |
 | `OA-DEC-006` | decision | Idempotent research recovery | `NATIVE_COMPLETE` | `src/openalpha_cn/runtime/engine.py#ResearchEngine` | `tests/integration/test_research_cycle.py` |
-| `OA-DEC-007` | decision | Research memory contract | `NATIVE_COMPLETE` | `src/openalpha_cn/runtime/memory.py#ResearchMemory` | `tests/integration/test_research_cycle.py` |
+| `OA-DEC-007` | decision | Durable research memory | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/storage/memory.py#SQLiteResearchMemory` | `tests/integration/test_recovery_and_memory.py;tests/integration/test_sdk_golden_path.py` |
+| `OA-MCR-001` | recovery | Node-level checkpoint resume | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/storage/recovery.py#SQLiteRecoveryStore;src/openalpha_cn/runtime/engine.py#ResearchEngine` | `tests/integration/test_recovery_and_memory.py` |
+| `OA-MCR-002` | recovery | Request and graph signature isolation | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/storage/recovery.py#RunRecoveryState;src/openalpha_cn/runtime/engine.py#ResearchEngine` | `tests/integration/test_recovery_and_memory.py` |
 | `OA-BT-001` | backtest | Shared run cycle | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/runtime/engine.py#ResearchEngine` | `tests/integration/test_research_cycle.py;tests/replay/test_frozen_corpus.py` |
 | `OA-BT-002` | backtest | Frozen replay corpus | `NATIVE_COMPLETE` | `src/openalpha_cn/backtest/replay.py#ReplayCorpus` | `tests/replay/test_frozen_corpus.py` |
 | `OA-BT-003` | backtest | Determinism replay | `NATIVE_COMPLETE` | `src/openalpha_cn/backtest/replay.py#ReplayRunner` | `tests/replay/test_frozen_corpus.py` |
@@ -69,7 +71,7 @@
 | `OA-BT-006` | backtest | A-share transaction costs | `NATIVE_COMPLETE` | `src/openalpha_cn/backtest/execution.py#AShareCostModel` | `tests/unit/backtest/test_execution.py` |
 | `OA-BT-007` | backtest | Outcome validation | `NATIVE_COMPLETE` | `src/openalpha_cn/backtest/validation.py#OutcomeValidator` | `tests/unit/backtest/test_validation.py` |
 | `OA-BT-008` | backtest | Rule factor agent attribution | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/backtest/validation.py#OutcomeValidator` | `tests/unit/backtest/test_validation.py` |
-| `OA-BT-009` | backtest | Portfolio cash and holdings simulator | `DEFERRED` | `docs/specs/openalpha-cn-v1-spec.md#Out-of-scope` | `docs/specs/openalpha-cn-v1-spec.md` |
+| `OA-BT-009` | backtest | Portfolio cash and holdings simulator | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/backtest/portfolio.py#PortfolioSimulator` | `tests/unit/backtest/test_portfolio.py;tests/integration/test_portfolio_interfaces.py` |
 | `OA-IFACE-001` | interface | Versioned REST API | `NATIVE_COMPLETE` | `src/openalpha_cn/api/app.py#create_app` | `tests/integration/test_evidence_interfaces.py` |
 | `OA-IFACE-002` | interface | Python SDK | `NATIVE_COMPLETE` | `src/openalpha_cn/sdk.py#OpenAlphaSDK` | `tests/integration/test_sdk_golden_path.py` |
 | `OA-IFACE-003` | interface | CLI evidence flow | `NATIVE_COMPLETE` | `src/openalpha_cn/cli.py#evidence_build` | `tests/integration/test_evidence_interfaces.py` |
@@ -78,6 +80,7 @@
 | `OA-IFACE-006` | interface | Research workbench | `NATIVE_COMPLETE` | `web/src/App.tsx#App` | `web/src/App.test.tsx;web/e2e/golden-flow.spec.ts` |
 | `OA-IFACE-007` | interface | Explicit UI states | `NATIVE_COMPLETE` | `web/src/App.tsx#App` | `web/src/App.test.tsx;web/e2e/golden-flow.spec.ts` |
 | `OA-IFACE-008` | interface | JSON schema distribution | `NATIVE_COMPLETE` | `src/openalpha_cn/domain/schema.py#export_schemas` | `tests/unit/domain/test_schema_export.py` |
+| `OA-MODEL-001` | model | Secure OpenAI-compatible BYOK provider | `NATIVE_COMPLETE` | `src/openalpha_cn/models/openai_compatible.py#OpenAICompatibleProvider` | `tests/unit/models/test_openai_compatible.py;tests/integration/test_sdk_golden_path.py` |
 | `OA-OPS-001` | operations | Locked Python environment | `NATIVE_COMPLETE` | `pyproject.toml#project;uv.lock` | `tests/unit/test_repository_assets.py` |
 | `OA-OPS-002` | operations | Locked web environment | `NATIVE_COMPLETE` | `web/package.json#packageManager;web/pnpm-lock.yaml` | `web/src/App.test.tsx` |
 | `OA-OPS-003` | operations | Cross-platform CI | `NATIVE_COMPLETE` | `github:.github/workflows/quality.yml` | `tests/unit/test_repository_assets.py` |

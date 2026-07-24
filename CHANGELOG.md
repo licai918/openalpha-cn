@@ -4,6 +4,23 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- Durable per-agent recovery with request-digest and graph-signature isolation.
+- SQLite-backed decision memory exposed through the SDK and HTTP API.
+- Deterministic A-share portfolio accounting with cash, T+1/FIFO lots, costs,
+  realized PnL, and hard single-position/total-exposure limits.
+- Secure OpenAI-compatible BYOK model provider with structured-output validation
+  and custom-agent injection through the Python SDK.
+- Fixed-SHA source audit against TradingAgents, AI Hedge Fund, and
+  TradingAgents-CN.
+
+### Changed
+
+- The feature ledger now contains 75 terminally reviewed capabilities, with 70
+  supported by local source and test evidence (`93.33%` true completion,
+  `UNREVIEWED=0`, `UNKNOWN=0`).
+
 ## [1.0.0] - 2026-07-24
 
 ### Added
