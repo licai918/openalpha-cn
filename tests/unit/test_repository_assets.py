@@ -31,3 +31,15 @@ def test_public_repository_metadata_is_present() -> None:
     ]
 
     assert [name for name in required if not (ROOT / name).is_file()] == []
+
+
+def test_quality_workflow_covers_supported_platforms_and_locked_dependencies() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "quality.yml").read_text(encoding="utf-8")
+
+    assert "ubuntu-latest" in workflow
+    assert "windows-latest" in workflow
+    assert '"3.11"' in workflow
+    assert '"3.12"' in workflow
+    assert "uv sync --locked --all-extras --dev" in workflow
+    assert "permissions:" in workflow
+    assert "contents: read" in workflow

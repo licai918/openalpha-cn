@@ -23,4 +23,3 @@ Every incorporated third-party dependency and any copied or adapted source code 
 ## ChainLin desktop application
 
 The ChainLin Limit-Up Review installer is distributed as a separate GitHub Release asset. It is not source code in this repository and is not automatically licensed under OpenAlpha CN's MIT License.
-

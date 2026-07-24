@@ -37,4 +37,3 @@ uv run openalpha doctor --json
 ![链邻软件与 OpenAlpha CN 部署微信咨询](../../assets/brand/platform-wechat-banner.png)
 
 扫码可咨询安装、部署和产品使用问题。所有研究内容均不构成投资建议。
-

@@ -59,4 +59,3 @@ Read the [v1 specification](docs/specs/openalpha-cn-v1-spec.md), [implementation
 ## License
 
 OpenAlpha CN source code is released under the [MIT License](LICENSE). Third-party data, models, brand assets, and the ChainLin desktop installer retain their own licensing boundaries. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-

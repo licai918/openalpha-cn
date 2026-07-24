@@ -18,4 +18,3 @@ The format follows Keep a Changelog, and versions follow Semantic Versioning.
 ## [0.1.0] - Unreleased
 
 The first development release will contain the repository foundation and the initial point-in-time evidence vertical slice.
-

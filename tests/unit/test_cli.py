@@ -22,3 +22,11 @@ def test_doctor_json_reports_required_runtime_checks() -> None:
     assert payload["status"] == "ok"
     assert payload["checks"]["python"]["ok"] is True
     assert payload["checks"]["timezone"]["ok"] is True
+
+
+def test_doctor_human_output_names_each_runtime_check() -> None:
+    result = runner.invoke(app, ["doctor"])
+
+    assert result.exit_code == 0
+    assert "PASS python" in result.stdout
+    assert "PASS timezone" in result.stdout
