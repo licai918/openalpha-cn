@@ -114,9 +114,9 @@ OpenAlpha CN 不把“多接几个行情 API”当作数据优势。优势落在
 
 详见[数据接口与合规边界](docs/api/data-interface.zh-CN.md)。
 
-## 与高星项目竞争的核心
+## 核心独特优势
 
-TradingAgents 和 AI Hedge Fund 强在角色编排与社区影响力。OpenAlpha CN 的竞争重点不是复制更多“投资大师人格”，而是：
+OpenAlpha CN 整合 TradingAgents 和 AI Hedge Fund 的优势，接入 A 股数据源，更适合 A 股涨停量化分析。OpenAlpha CN 的竞争重点不是复制更多“投资大师人格”，而是：
 
 1. A 股原生事件语义和交易约束；
 2. 证据首次可知时间与防未来函数；

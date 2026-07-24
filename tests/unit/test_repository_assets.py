@@ -15,6 +15,9 @@ def test_readme_exposes_self_host_and_chainlin_paths() -> None:
     assert "### 🔁 同路径回放与归因" in readme
     assert "### 🔌 开放的数据与使用接口" in readme
     assert "### 🛡️ 可复现的工程底座" in readme
+    assert "## 核心独特优势" in readme
+    assert "更适合 A 股涨停量化分析" in readme
+    assert "强在角色编排与社区影响力" not in readme
     assert "自托管 OpenAlpha CN" in readme
     assert "链邻涨停复盘策略软件" in readme
     assert "chainlin-desktop-v1.0.9" in readme
