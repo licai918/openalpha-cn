@@ -13,6 +13,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from openalpha_cn import __version__
+from openalpha_cn.agents.base import AgentResult
+from openalpha_cn.agents.committee import DeliberationCommittee, DeliberationOutcome
+from openalpha_cn.backtest.event_study import EventStudy, EventStudyReport, EventStudyRequest
 from openalpha_cn.backtest.execution import MarketBar
 from openalpha_cn.backtest.multi_day import (
     PortfolioBacktestReport,
@@ -28,6 +31,7 @@ from openalpha_cn.backtest.portfolio import (
 )
 from openalpha_cn.backtest.replay import ReplayCorpus, ReplayReport, ReplayRunner
 from openalpha_cn.backtest.validation import OutcomeObservation, OutcomeValidator
+from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.domain.validation import ValidationResult
 from openalpha_cn.evidence.service import (
     EvidenceBuildRequest,
@@ -107,6 +111,15 @@ class PortfolioBacktestRequest(BaseModel):
     initial: PortfolioState
     steps: tuple[PortfolioBacktestStep, ...] = Field(min_length=1)
     limits: PortfolioLimits = PortfolioLimits()
+
+
+class DeliberationApiRequest(BaseModel):
+    """Aggregate signal plus agent cases for optional committee review."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    signal: SignalFrame
+    agent_results: tuple[AgentResult, ...] = ()
 
 
 class SecurityHeadersMiddleware:
@@ -309,6 +322,14 @@ def create_app(
         )
         return engine.run_cycle(request)
 
+    @application.post("/api/v1/research/deliberate")
+    def research_deliberate(request: DeliberationApiRequest) -> DeliberationOutcome:
+        """Run an explicit, ablatable bull/bear and risk committee."""
+        return DeliberationCommittee().review(
+            signal=request.signal,
+            results=request.agent_results,
+        )
+
     @application.post("/api/v1/research/batches", status_code=202)
     def batch_submit(
         request: BatchSubmitRequest,
@@ -413,6 +434,11 @@ def create_app(
             limits=request.limits,
             ledger=portfolio_ledger,
         ).run(initial=request.initial, steps=request.steps)
+
+    @application.post("/api/v1/backtests/event-study")
+    def event_study(request: EventStudyRequest) -> EventStudyReport:
+        """Compute CAR, t-statistic, and deterministic bootstrap confidence."""
+        return EventStudy().analyze(request)
 
     @application.post("/api/v1/backtests/validate")
     def validate_outcome(request: OutcomeApiRequest) -> ValidationResult:

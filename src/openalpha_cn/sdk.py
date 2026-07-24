@@ -5,7 +5,9 @@ from datetime import datetime
 from pathlib import Path
 
 from openalpha_cn import __version__
-from openalpha_cn.agents.base import ResearchAgent
+from openalpha_cn.agents.base import AgentResult, ResearchAgent
+from openalpha_cn.agents.committee import DeliberationCommittee, DeliberationOutcome
+from openalpha_cn.backtest.event_study import EventStudy, EventStudyReport, EventStudyRequest
 from openalpha_cn.backtest.execution import MarketBar
 from openalpha_cn.backtest.multi_day import (
     PortfolioBacktestReport,
@@ -21,6 +23,7 @@ from openalpha_cn.backtest.portfolio import (
 )
 from openalpha_cn.backtest.replay import ReplayCorpus, ReplayReport, ReplayRunner
 from openalpha_cn.domain.evidence import EvidenceSnapshot
+from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.evidence.service import build_file_evidence
 from openalpha_cn.providers.base import ProviderMetadata, utc_now
 from openalpha_cn.runtime.batch import BatchResearchService, BatchResearchTask
@@ -125,6 +128,19 @@ class OpenAlphaSDK:
             max_concurrency=max_concurrency,
         )
         return service.run(batch_id)
+
+    def deliberate(
+        self,
+        *,
+        signal: SignalFrame,
+        agent_results: tuple[AgentResult, ...],
+    ) -> DeliberationOutcome:
+        """Run the optional bull/bear and risk committee with ablation output."""
+        return DeliberationCommittee().review(signal=signal, results=agent_results)
+
+    def run_event_study(self, request: EventStudyRequest) -> EventStudyReport:
+        """Compute event CAR and deterministic significance statistics."""
+        return EventStudy().analyze(request)
 
     def execute_portfolio_order(
         self,
