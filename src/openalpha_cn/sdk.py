@@ -1,10 +1,11 @@
 """Local-first Python SDK for OpenAlpha CN's complete research flow."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
 
 from openalpha_cn import __version__
+from openalpha_cn.agents.base import ResearchAgent
 from openalpha_cn.backtest.execution import MarketBar
 from openalpha_cn.backtest.portfolio import (
     PortfolioLimits,
@@ -33,10 +34,12 @@ class OpenAlphaSDK:
         *,
         runtime_dir: Path,
         clock: Callable[[], datetime] = utc_now,
+        agents: Sequence[ResearchAgent] | None = None,
     ) -> None:
         self.runtime_dir = runtime_dir
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         self.clock = clock
+        self.agents = None if agents is None else tuple(agents)
         self.evidence_store = ParquetEvidenceStore(runtime_dir / "evidence")
         self.repository = SQLiteRunRepository(runtime_dir / "state.sqlite3")
         self.memory = SQLiteResearchMemory(runtime_dir / "state.sqlite3")
@@ -80,6 +83,7 @@ class OpenAlphaSDK:
             repository=self.repository,
             memory=self.memory,
             clock=self.clock,
+            agents=self.agents,
         )
         return engine.run_cycle(request)
 

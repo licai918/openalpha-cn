@@ -2,6 +2,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+from openalpha_cn.agents.baseline import CapitalAgent
 from openalpha_cn.providers.base import ProviderMetadata
 from openalpha_cn.runtime.engine import ResearchRunRequest
 from openalpha_cn.sdk import OpenAlphaSDK
@@ -72,3 +73,23 @@ def test_sdk_imports_evidence_runs_research_and_queries_state(tmp_path: Path) ->
     assert recovery is not None
     assert recovery.status == "succeeded"
     assert recovery.next_agent_index == 1
+
+    custom = OpenAlphaSDK(
+        runtime_dir=tmp_path / "custom-runtime",
+        clock=lambda: NOW,
+        agents=(CapitalAgent(),),
+    )
+    custom_result = custom.run_research(
+        ResearchRunRequest(
+            run_id="sdk-custom-agent-run",
+            mode="live",
+            subject="000001.SZ",
+            as_of=NOW,
+            evidence=evidence,
+            code_commit="0123456789abcdef",
+            config_digest="a" * 64,
+            random_seed=7,
+        )
+    )
+    assert custom_result.signal.direction == "abstain"
+    assert custom_result.agent_results == ()
