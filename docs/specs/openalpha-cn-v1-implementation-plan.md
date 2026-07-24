@@ -1,0 +1,144 @@
+# OpenAlpha CN v1 Implementation Plan
+
+This plan implements `openalpha-cn-v1-spec.md` in thin, independently verifiable vertical slices.
+
+## Phase 1: Repository foundation
+
+- [ ] Task 1.1: Establish repository policy and metadata
+  - Acceptance: MIT license, repository instructions, ignore rules, attributes, security and contribution boundaries exist.
+  - Verify: repository validation test passes; secret/runtime/binary patterns are ignored.
+  - Files: `AGENTS.md`, `LICENSE`, `.gitignore`, `.gitattributes`, `SECURITY.md`
+
+- [ ] Task 1.2: Establish the Python package and stable developer commands
+  - Acceptance: package installs with `uv`; CLI exposes `version` and `doctor`.
+  - Verify: CLI unit tests fail before implementation and pass after implementation.
+  - Files: `pyproject.toml`, `src/openalpha_cn/__init__.py`, `src/openalpha_cn/cli.py`, `tests/unit/test_cli.py`
+
+- [ ] Task 1.3: Establish project documentation and product split
+  - Acceptance: README explains OpenAlpha CN, self-host path, ChainLin download path, license split, and investment disclaimer.
+  - Verify: documentation link and asset validation test passes.
+  - Files: `README.md`, `README.en.md`, `THIRD_PARTY_NOTICES.md`, `assets/brand/platform-wechat-banner.png`
+
+### Checkpoint 1
+
+- [ ] `uv sync --all-extras --dev` succeeds.
+- [ ] `uv run pytest` succeeds.
+- [ ] `uv run ruff check .` succeeds.
+- [ ] repository is initialized on `main`.
+
+## Phase 2: Point-in-time contracts
+
+- [ ] Task 2.1: Implement strict timezone and visibility rules.
+- [ ] Task 2.2: Implement immutable `EvidenceSnapshot`.
+- [ ] Task 2.3: Implement `SignalFrame`, `DecisionLedger`, `RunManifest`, and `ValidationResult`.
+- [ ] Task 2.4: Add JSON schema export and compatibility tests.
+
+### Checkpoint 2
+
+- [ ] Naive datetimes are rejected.
+- [ ] Evidence after `as_of` is rejected.
+- [ ] Stable payloads produce stable IDs and hashes.
+- [ ] Contract schemas are versioned and checked into `docs/api/schemas`.
+
+## Phase 3: Storage and providers
+
+- [ ] Task 3.1: Implement SQLite run and checkpoint repository.
+- [ ] Task 3.2: Implement Parquet event store and DuckDB point-in-time query.
+- [ ] Task 3.3: Define the shared provider contract and explicit failure model.
+- [ ] Task 3.4: Implement file provider for CSV, JSONL, JSON, and Parquet.
+- [ ] Task 3.5: Implement Tushare BYOT adapter.
+- [ ] Task 3.6: Implement optional AKShare research adapter.
+
+### Checkpoint 3
+
+- [ ] Provider contract suite passes for every enabled provider.
+- [ ] External-provider tests use frozen payloads and no real credentials.
+- [ ] Failed providers never appear as successful empty datasets.
+- [ ] Historical query returns only records visible at `as_of`.
+
+## Phase 4: Evidence vertical slice
+
+- [ ] Task 4.1: Normalize limit-up, broken-board, and consecutive-board events.
+- [ ] Task 4.2: Normalize disclosure, theme, catalyst, and capital observations.
+- [ ] Task 4.3: Build evidence snapshots with provenance and quality flags.
+- [ ] Task 4.4: Expose snapshot creation through CLI and REST API.
+
+### Checkpoint 4
+
+- [ ] A user can import frozen events and create a traceable evidence snapshot.
+- [ ] Every evidence item has source, time, URI policy, and content hash.
+- [ ] API and CLI return the same structured snapshot.
+
+## Phase 5: Research and decision vertical slice
+
+- [ ] Task 5.1: Define agent, tool, router, risk, and memory contracts.
+- [ ] Task 5.2: Implement deterministic baseline market, theme, capital, and risk agents.
+- [ ] Task 5.3: Implement optional LLM model provider boundary and structured-output validation.
+- [ ] Task 5.4: Implement signal construction, abstention, and invalidation rules.
+- [ ] Task 5.5: Append decisions and run manifests to the ledger.
+
+### Checkpoint 5
+
+- [ ] A research run goes from evidence to signal to decision.
+- [ ] Every conclusion cites evidence IDs.
+- [ ] Insufficient evidence returns an explicit abstention.
+- [ ] Retry and recovery are idempotent.
+
+## Phase 6: Replay, backtest, and attribution
+
+- [ ] Task 6.1: Implement shared `run_cycle` clock and mode adapters.
+- [ ] Task 6.2: Implement A-share execution constraints and transaction costs.
+- [ ] Task 6.3: Implement outcome validation and benchmark comparison.
+- [ ] Task 6.4: Implement factor and agent attribution.
+- [ ] Task 6.5: Build 60-trading-day / 300-event frozen replay corpus.
+
+### Checkpoint 6
+
+- [ ] Live and replay modes share the same decision core.
+- [ ] Known look-ahead violations are zero.
+- [ ] Frozen-payload replay success is at least 99%.
+- [ ] Attribution reconciles with total simulated outcome.
+
+## Phase 7: SDK, API, CLI, and web
+
+- [ ] Task 7.1: Stabilize OpenAPI and Python SDK interfaces.
+- [ ] Task 7.2: Implement market/event/theme/evidence/research/backtest endpoints.
+- [ ] Task 7.3: Implement the research workbench shell and health/data-status view.
+- [ ] Task 7.4: Implement evidence inspection and research-run flow.
+- [ ] Task 7.5: Implement decision, replay, and attribution views.
+
+### Checkpoint 7
+
+- [ ] API, SDK, CLI, and web complete the same golden flow.
+- [ ] Browser console is clean.
+- [ ] Loading, error, stale-data, and insufficient-evidence states are visible.
+- [ ] Critical Playwright flow passes.
+
+## Phase 8: Delivery and publication
+
+- [ ] Task 8.1: Complete Docker Compose and persistent-volume recovery tests.
+- [ ] Task 8.2: Complete Windows/Linux CI, security, license, and packaging gates.
+- [ ] Task 8.3: Complete Chinese/English documentation and release handoff.
+- [ ] Task 8.4: Publish source repository and `v1.0.0`.
+- [ ] Task 8.5: Publish ChainLin installer under `chainlin-desktop-v1.0.9`.
+- [ ] Task 8.6: Verify anonymous clone, container start, installer download, and checksums.
+
+### Final checkpoint
+
+- [ ] All v1 specification success criteria pass.
+- [ ] All features have a unique destination and evidence.
+- [ ] `UNREVIEWED=0`; `UNKNOWN=0`.
+- [ ] No secret, user database, or unlicensed raw dataset is published.
+- [ ] Release handoff records commit SHA, tags, assets, sizes, hashes, CI, and known limitations.
+
+## Risk register
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| Third-party data redistribution rights are unclear | High | BYOT/local adapters, no bundled raw data, provider-level license metadata |
+| Historical data contains look-ahead revisions | High | Four timestamps, immutable revisions, replay guards and fixtures |
+| LLM output is nondeterministic | High | Structured contracts, frozen outputs, deterministic baseline, abstention |
+| Desktop installer is unsigned | Medium | Explicit warning, SHA-256, antivirus scan, later code signing |
+| Large scope produces incomplete surfaces | High | Feature flags, vertical slices, checkpoint gates |
+| Windows and Linux path/runtime differences | Medium | Dual-platform CI from first checkpoint |
+

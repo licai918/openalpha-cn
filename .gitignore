@@ -1,0 +1,58 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node
+node_modules/
+web/dist/
+playwright-report/
+test-results/
+
+# Runtime data and generated outputs
+runtime/
+data/private/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.duckdb
+*.parquet
+dist/
+build/
+coverage/
+
+# Release staging and binary installers
+release-staging/
+*.exe
+*.msi
+*.dmg
+*.AppImage
+
+# Logs and caches
+*.log
+.cache/
+.audit-cache/
+.tools/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
