@@ -13,6 +13,14 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from openalpha_cn import __version__
+from openalpha_cn.backtest.execution import MarketBar
+from openalpha_cn.backtest.portfolio import (
+    PortfolioLimits,
+    PortfolioOrder,
+    PortfolioSimulator,
+    PortfolioState,
+    PortfolioTransition,
+)
 from openalpha_cn.backtest.replay import ReplayCorpus, ReplayReport, ReplayRunner
 from openalpha_cn.backtest.validation import OutcomeObservation, OutcomeValidator
 from openalpha_cn.domain.validation import ValidationResult
@@ -60,6 +68,17 @@ class OutcomeApiRequest(BaseModel):
 
     research: dict[str, Any]
     observation: OutcomeObservation
+
+
+class PortfolioApiRequest(BaseModel):
+    """One stateless portfolio transition request."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    state: PortfolioState
+    order: PortfolioOrder
+    market: MarketBar
+    limits: PortfolioLimits = PortfolioLimits()
 
 
 class SecurityHeadersMiddleware:
@@ -268,6 +287,15 @@ def create_app(
             random_seed=request.random_seed,
         )
         return runner.run(corpus=request.corpus, state_path=root / "api-replay.sqlite3")
+
+    @application.post("/api/v1/portfolio/execute")
+    def portfolio_execute(request: PortfolioApiRequest) -> PortfolioTransition:
+        """Apply A-share execution, T+1, costs, and exposure limits."""
+        return PortfolioSimulator(limits=request.limits).execute_order(
+            state=request.state,
+            order=request.order,
+            market=request.market,
+        )
 
     @application.post("/api/v1/backtests/validate")
     def validate_outcome(request: OutcomeApiRequest) -> ValidationResult:

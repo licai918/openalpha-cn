@@ -7,6 +7,13 @@ from openalpha_cn.backtest.execution import (
     ExecutionResult,
     MarketBar,
 )
+from openalpha_cn.backtest.portfolio import (
+    PortfolioLimits,
+    PortfolioOrder,
+    PortfolioSimulator,
+    PortfolioState,
+    PortfolioTransition,
+)
 from openalpha_cn.backtest.replay import ReplayCorpus, ReplayReport, ReplayRunner
 from openalpha_cn.backtest.validation import OutcomeObservation, OutcomeValidator
 
@@ -18,6 +25,11 @@ __all__ = [
     "MarketBar",
     "OutcomeObservation",
     "OutcomeValidator",
+    "PortfolioLimits",
+    "PortfolioOrder",
+    "PortfolioSimulator",
+    "PortfolioState",
+    "PortfolioTransition",
     "ReplayCorpus",
     "ReplayReport",
     "ReplayRunner",

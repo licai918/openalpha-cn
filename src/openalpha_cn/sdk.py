@@ -5,6 +5,14 @@ from datetime import datetime
 from pathlib import Path
 
 from openalpha_cn import __version__
+from openalpha_cn.backtest.execution import MarketBar
+from openalpha_cn.backtest.portfolio import (
+    PortfolioLimits,
+    PortfolioOrder,
+    PortfolioSimulator,
+    PortfolioState,
+    PortfolioTransition,
+)
 from openalpha_cn.backtest.replay import ReplayCorpus, ReplayReport, ReplayRunner
 from openalpha_cn.domain.evidence import EvidenceSnapshot
 from openalpha_cn.evidence.service import build_file_evidence
@@ -82,6 +90,21 @@ class OpenAlphaSDK:
     def get_recovery(self, run_id: str) -> RunRecoveryState | None:
         """Inspect the durable node-level recovery state for one run."""
         return self.recovery_store.get(run_id)
+
+    def execute_portfolio_order(
+        self,
+        *,
+        state: PortfolioState,
+        order: PortfolioOrder,
+        market: MarketBar,
+        limits: PortfolioLimits | None = None,
+    ) -> PortfolioTransition:
+        """Apply one order through the deterministic A-share portfolio core."""
+        return PortfolioSimulator(limits=limits).execute_order(
+            state=state,
+            order=order,
+            market=market,
+        )
 
     def replay(
         self,
