@@ -9,6 +9,12 @@ ROOT = Path(__file__).resolve().parents[2]
 def test_readme_exposes_self_host_and_chainlin_paths() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
+    assert "## ✨ 核心特性" in readme
+    assert "### 🇨🇳 A 股原生证据体系" in readme
+    assert "### 🤖 可验证的多智能体决策" in readme
+    assert "### 🔁 同路径回放与归因" in readme
+    assert "### 🔌 开放的数据与使用接口" in readme
+    assert "### 🛡️ 可复现的工程底座" in readme
     assert "自托管 OpenAlpha CN" in readme
     assert "链邻涨停复盘策略软件" in readme
     assert "chainlin-desktop-v1.0.9" in readme
