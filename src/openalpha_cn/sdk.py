@@ -25,6 +25,14 @@ from openalpha_cn.backtest.replay import ReplayCorpus, ReplayReport, ReplayRunne
 from openalpha_cn.domain.evidence import EvidenceSnapshot
 from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.evidence.service import build_file_evidence
+from openalpha_cn.product.research import (
+    ResearchReport,
+    ResearchReportFactory,
+    ResearchScreener,
+    ScreeningCriteria,
+    ScreeningResult,
+    WatchlistEntry,
+)
 from openalpha_cn.providers.base import ProviderMetadata, utc_now
 from openalpha_cn.runtime.batch import BatchResearchService, BatchResearchTask
 from openalpha_cn.runtime.engine import ResearchEngine, ResearchRunRequest, ResearchRunResult
@@ -33,6 +41,7 @@ from openalpha_cn.storage.batch import SQLiteBatchTaskStore
 from openalpha_cn.storage.memory import SQLiteResearchMemory
 from openalpha_cn.storage.parquet import ParquetEvidenceStore
 from openalpha_cn.storage.portfolio import SQLitePortfolioLedger
+from openalpha_cn.storage.product import SQLiteReportStore, SQLiteWatchlistStore
 from openalpha_cn.storage.recovery import RunRecoveryState, SQLiteRecoveryStore
 from openalpha_cn.storage.sqlite import SQLiteRunRepository
 
@@ -57,6 +66,8 @@ class OpenAlphaSDK:
         self.recovery_store = SQLiteRecoveryStore(runtime_dir / "state.sqlite3")
         self.batch_store = SQLiteBatchTaskStore(runtime_dir / "state.sqlite3")
         self.portfolio_ledger = SQLitePortfolioLedger(runtime_dir / "state.sqlite3")
+        self.watchlist_store = SQLiteWatchlistStore(runtime_dir / "state.sqlite3")
+        self.report_store = SQLiteReportStore(runtime_dir / "state.sqlite3")
         self.batch_store.recover_interrupted(now=self.clock())
 
     def health(self) -> dict[str, str]:
@@ -141,6 +152,33 @@ class OpenAlphaSDK:
     def run_event_study(self, request: EventStudyRequest) -> EventStudyReport:
         """Compute event CAR and deterministic significance statistics."""
         return EventStudy().analyze(request)
+
+    def screen(
+        self,
+        *,
+        results: tuple[ResearchRunResult, ...],
+        criteria: ScreeningCriteria,
+    ) -> ScreeningResult:
+        """Filter and rank structured research results."""
+        return ResearchScreener().screen(results=results, criteria=criteria)
+
+    def put_watchlist(self, entry: WatchlistEntry) -> None:
+        """Create or intentionally update one local watchlist entry."""
+        self.watchlist_store.put(entry)
+
+    def list_watchlist(self) -> tuple[WatchlistEntry, ...]:
+        """List the local observation pool."""
+        return self.watchlist_store.list()
+
+    def create_report(self, result: ResearchRunResult) -> ResearchReport:
+        """Generate and persist one evidence-linked report."""
+        report = ResearchReportFactory().build(result)
+        self.report_store.append(report)
+        return report
+
+    def list_reports(self, *, subject: str | None = None) -> tuple[ResearchReport, ...]:
+        """List generated reports, optionally by subject."""
+        return self.report_store.list(subject=subject)
 
     def execute_portfolio_order(
         self,

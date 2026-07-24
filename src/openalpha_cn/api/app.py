@@ -39,6 +39,14 @@ from openalpha_cn.evidence.service import (
     build_evidence,
     parse_serialized_evidence,
 )
+from openalpha_cn.product.research import (
+    ResearchReport,
+    ResearchReportFactory,
+    ResearchScreener,
+    ScreeningCriteria,
+    ScreeningResult,
+    WatchlistEntry,
+)
 from openalpha_cn.runtime.batch import BatchProgressEvent, BatchResearchService, BatchResearchTask
 from openalpha_cn.runtime.engine import ResearchEngine, ResearchRunRequest, ResearchRunResult
 from openalpha_cn.runtime.memory import MemoryEntry
@@ -46,6 +54,7 @@ from openalpha_cn.storage.batch import SQLiteBatchTaskStore
 from openalpha_cn.storage.memory import SQLiteResearchMemory
 from openalpha_cn.storage.parquet import ParquetEvidenceStore
 from openalpha_cn.storage.portfolio import SQLitePortfolioLedger
+from openalpha_cn.storage.product import SQLiteReportStore, SQLiteWatchlistStore
 from openalpha_cn.storage.recovery import RunRecoveryState, SQLiteRecoveryStore
 from openalpha_cn.storage.sqlite import SQLiteRunRepository
 
@@ -120,6 +129,23 @@ class DeliberationApiRequest(BaseModel):
 
     signal: SignalFrame
     agent_results: tuple[AgentResult, ...] = ()
+
+
+class ScreeningApiRequest(BaseModel):
+    """Serialized verified research results plus screening criteria."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    research: tuple[dict[str, Any], ...]
+    criteria: ScreeningCriteria = ScreeningCriteria()
+
+
+class ReportApiRequest(BaseModel):
+    """One serialized research result to turn into an immutable report."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    research: dict[str, Any]
 
 
 class SecurityHeadersMiddleware:
@@ -231,6 +257,8 @@ def create_app(
     recovery_store = SQLiteRecoveryStore(root / "state.sqlite3")
     batch_store = SQLiteBatchTaskStore(root / "state.sqlite3")
     portfolio_ledger = SQLitePortfolioLedger(root / "state.sqlite3")
+    watchlist_store = SQLiteWatchlistStore(root / "state.sqlite3")
+    report_store = SQLiteReportStore(root / "state.sqlite3")
     batch_store.recover_interrupted(now=datetime.now(UTC))
 
     def run_one(request: ResearchRunRequest) -> ResearchRunResult:
@@ -329,6 +357,61 @@ def create_app(
             signal=request.signal,
             results=request.agent_results,
         )
+
+    @application.post("/api/v1/screen")
+    def screen(request: ScreeningApiRequest) -> ScreeningResult:
+        """Rank verified research results by explicit screening criteria."""
+        try:
+            results = tuple(_parse_research_result(item) for item in request.research)
+        except (KeyError, TypeError, ValueError) as error:
+            raise HTTPException(
+                status_code=422,
+                detail="Research result failed integrity validation.",
+            ) from error
+        return ResearchScreener().screen(results=results, criteria=request.criteria)
+
+    @application.post("/api/v1/watchlist")
+    def watchlist_put(entry: WatchlistEntry) -> WatchlistEntry:
+        """Create or intentionally update one watchlist entry."""
+        watchlist_store.put(entry)
+        return entry
+
+    @application.get("/api/v1/watchlist")
+    def watchlist_list() -> tuple[WatchlistEntry, ...]:
+        """List the durable local observation pool."""
+        return watchlist_store.list()
+
+    @application.post("/api/v1/watchlist/{subject}/remove")
+    def watchlist_remove(subject: str) -> dict[str, bool]:
+        """Remove one watchlist entry."""
+        return {"removed": watchlist_store.remove(subject)}
+
+    @application.post("/api/v1/reports")
+    def report_create(request: ReportApiRequest) -> ResearchReport:
+        """Generate and append one evidence-linked research report."""
+        try:
+            result = _parse_research_result(request.research)
+        except (KeyError, TypeError, ValueError) as error:
+            raise HTTPException(
+                status_code=422,
+                detail="Research result failed integrity validation.",
+            ) from error
+        report = ResearchReportFactory().build(result)
+        report_store.append(report)
+        return report
+
+    @application.get("/api/v1/reports")
+    def report_list(subject: str | None = None) -> tuple[ResearchReport, ...]:
+        """List immutable generated reports."""
+        return report_store.list(subject=subject)
+
+    @application.get("/api/v1/reports/{report_id}")
+    def report_get(report_id: str) -> ResearchReport:
+        """Load one immutable report by content-derived ID."""
+        report = report_store.get(report_id)
+        if report is None:
+            raise HTTPException(status_code=404, detail="Report was not found.")
+        return report
 
     @application.post("/api/v1/research/batches", status_code=202)
     def batch_submit(
