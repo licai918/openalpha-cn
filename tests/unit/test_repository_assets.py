@@ -76,7 +76,14 @@ def test_readme_brain_map_series_is_complete_and_ordered() -> None:
         assert "五脑区导航" in content
 
     assert "链邻数据接口 API" in combined_content
-    assert "规划目标" in combined_content
+    assert "已实现 · 统一替代入口" in combined_content
+    assert "规划目标" not in combined_content
+    assert "目标\uff1a实时获取" not in combined_content
+    assert "持久批量任务中心" in combined_content
+    assert "Bull / Bear 辩论" in combined_content
+    assert "不可变组合转移账本" in combined_content
+    assert "CAR · t 统计量" in combined_content
+    assert "结构化研究筛选" in combined_content
     assert "Tushare" not in combined_content
     assert "AKShare" not in combined_content
 

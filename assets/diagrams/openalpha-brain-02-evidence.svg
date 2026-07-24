@@ -1,15 +1,15 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900" role="img" aria-labelledby="title desc">
   <title id="title">证据感知｜先回答“当时能不能知道”</title>
-  <desc id="desc">数据优势不等于多接几个接口；真正的优势是来源、时间、修订和内容哈希都可追溯。</desc>
+  <desc id="desc">链邻统一入口先通过认证、限流、PIT 与错误分类，再生成来源、时间、修订和内容哈希可追溯的证据。</desc>
   <defs>
     <filter id="shadow" x="-20%" y="-20%" width="140%" height="160%">
-      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#27324A" flood-opacity=".10"/>
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#27324A" flood-opacity=".10" />
     </filter>
     <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/>
+      <path d="M0,0 L10,5 L0,10 z" fill="context-stroke" />
     </marker>
     <pattern id="dots" width="28" height="28" patternUnits="userSpaceOnUse">
-      <circle cx="2" cy="2" r="1.5" fill="#D8DEEB"/>
+      <circle cx="2" cy="2" r="1.5" fill="#D8DEEB" />
     </pattern>
     <style>
       text { font-family: Inter, "Noto Sans SC", "Microsoft YaHei", Arial, sans-serif; }
@@ -26,15 +26,88 @@
       .navLabel { font-size: 17px; font-weight: 720; }
     </style>
   </defs>
-  <rect width="1440" height="900" fill="#F7F8FC"/>
-  <rect width="1440" height="900" fill="url(#dots)" opacity=".36"/>
-  <rect x="64" y="46" width="158" height="34" rx="17" fill="#0F9F8F" stroke="#0F9F8F" /><text x="143" y="69" class="pill" text-anchor="middle" fill="#FFFFFF">OPENALPHA · 02</text><text x="64" y="116" class="title" text-anchor="start">证据感知｜先回答“当时能不能知道”</text><text x="64" y="154" class="subtitle" text-anchor="start">数据优势不等于多接几个接口；真正的优势是来源、时间、修订和内容哈希都可追溯。</text><g transform="translate(1270 42)">
-      <path d="M48 10c-19 0-34 14-34 32 0 9 4 17 10 23-2 4-3 9-2 14 2 12 13 21 26 21h29c15 0 27-11 27-25 0-7-3-13-8-18 2-5 2-11 0-17-4-12-16-20-29-19-5-7-11-11-19-11Z" fill="#0F9F8F" opacity=".12"/>
-      <circle cx="42" cy="44" r="7" fill="#0F9F8F"/>
-      <circle cx="70" cy="33" r="7" fill="#0F9F8F" opacity=".8"/>
-      <circle cx="82" cy="65" r="7" fill="#0F9F8F" opacity=".65"/>
-      <path d="M48 43 64 35M47 49 76 62M72 39 80 58" stroke="#0F9F8F" stroke-width="3" stroke-linecap="round"/>
-    </g>
-  <text x="64" y="205" class="kicker" text-anchor="start" fill="#0F9F8F">合法数据输入</text><rect x="52" y="228" width="262" height="112" rx="22" fill="#FFFFFF" stroke="#D9DFEA" filter="url(#shadow)"/><rect x="52" y="228" width="8" height="112" rx="4" fill="#0F9F8F"/><text x="80" y="273" class="cardTitle" text-anchor="start">链邻数据接口 API</text><text x="80" y="312" class="body" text-anchor="start">规划目标 · 替代第三方接口</text><rect x="52" y="365" width="262" height="112" rx="22" fill="#FFFFFF" stroke="#D9DFEA" filter="url(#shadow)"/><rect x="52" y="365" width="8" height="112" rx="4" fill="#0F9F8F"/><text x="80" y="410" class="cardTitle" text-anchor="start">实时 A 股数据</text><text x="80" y="449" class="body" text-anchor="start">目标：实时获取 · 更精准</text><rect x="52" y="502" width="262" height="112" rx="22" fill="#FFFFFF" stroke="#D9DFEA" filter="url(#shadow)"/><rect x="52" y="502" width="8" height="112" rx="4" fill="#0F9F8F"/><text x="80" y="547" class="cardTitle" text-anchor="start">用户自有文件</text><text x="80" y="586" class="body" text-anchor="start">CSV · JSON · JSONL · Parquet</text><rect x="368" y="276" width="252" height="286" rx="22" fill="#FFFFFF" stroke="#D9DFEA" filter="url(#shadow)"/><rect x="368" y="276" width="8" height="286" rx="4" fill="#0F9F8F"/><text x="396" y="311" class="kicker" text-anchor="start" fill="#0F9F8F">数据入口闸门</text><text x="396" y="348" class="cardTitle" text-anchor="start">Provider 合同</text><text x="396" y="384" class="body" text-anchor="start">来源与许可</text><text x="396" y="414" class="body" text-anchor="start">凭据与限流</text><text x="396" y="444" class="body" text-anchor="start">新鲜度与缓存</text><text x="396" y="474" class="body" text-anchor="start">失败必须显式</text><text x="396" y="504" class="body" text-anchor="start">禁止空结果伪成功</text><text x="748" y="205" class="kicker" text-anchor="start" fill="#0F9F8F">四时钟时间线</text><rect x="674" y="228" width="154" height="86" rx="18" fill="#FFFFFF" stroke="#D7DDE8" /><text x="751" y="261" class="cardTitle" text-anchor="middle">事件发生</text><text x="751" y="288" class="small" text-anchor="middle">event_time</text><rect x="850" y="228" width="154" height="86" rx="18" fill="#DDF7F2" stroke="#0F9F8F" /><text x="927" y="261" class="cardTitle" text-anchor="middle">首次可知</text><text x="927" y="288" class="small" text-anchor="middle">available_time</text><rect x="1026" y="228" width="154" height="86" rx="18" fill="#FFFFFF" stroke="#D7DDE8" /><text x="1103" y="261" class="cardTitle" text-anchor="middle">系统入库</text><text x="1103" y="288" class="small" text-anchor="middle">ingested_time</text><rect x="1202" y="228" width="154" height="86" rx="18" fill="#FFFFFF" stroke="#D7DDE8" /><text x="1279" y="261" class="cardTitle" text-anchor="middle">数据修订</text><text x="1279" y="288" class="small" text-anchor="middle">revision_time</text><rect x="742" y="350" width="510" height="172" rx="22" fill="#FFFFFF" stroke="#D9DFEA" filter="url(#shadow)"/><rect x="742" y="350" width="8" height="172" rx="4" fill="#0F9F8F"/><text x="770" y="385" class="kicker" text-anchor="start" fill="#0F9F8F">不可变 · 内容寻址</text><text x="770" y="422" class="cardTitle" text-anchor="start">EvidenceSnapshot</text><text x="770" y="458" class="body" text-anchor="start">evidence_id + source_uri + content_hash</text><text x="770" y="488" class="body" text-anchor="start">A 股语义：涨停 / 炸板 / 连板 / 题材 / 催化 / 公告 / 资金</text><rect x="678" y="570" width="648" height="74" rx="20" fill="#E9F8F5" stroke="#B7E8DE" /><text x="1002" y="600" class="cardTitle" text-anchor="middle">Parquet 分区  →  DuckDB PIT 查询  →  只读证据工具</text><text x="1002" y="627" class="small" text-anchor="middle">只向下一脑区交付决策时刻已经可见的 evidence_id</text><path d="M 314 284 C 344 284, 340 330, 358 330" fill="none" stroke="#0F9F8F" stroke-width="3" marker-end="url(#arrow)"/><path d="M 314 421 L 358 421" fill="none" stroke="#0F9F8F" stroke-width="3" marker-end="url(#arrow)"/><path d="M 314 558 C 344 558, 340 510, 358 510" fill="none" stroke="#0F9F8F" stroke-width="3" marker-end="url(#arrow)"/><path d="M 620 421 L 732 421" fill="none" stroke="#0F9F8F" stroke-width="3" marker-end="url(#arrow)"/><path d="M 995 522 L 995 562" fill="none" stroke="#0F9F8F" stroke-width="3" marker-end="url(#arrow)"/><rect x="1244" y="680" width="132" height="34" rx="17" fill="#0F9F8F" stroke="#0F9F8F" /><text x="1310" y="703" class="pill" text-anchor="middle" fill="#FFFFFF">→ 研判脑区</text>
-  <text x="64" y="766" class="navCaption" text-anchor="start">五脑区导航｜从数据感知到验证反馈的完整认知链</text><rect x="64" y="792" width="216" height="58" rx="18" fill="#FFFFFF" stroke="#D7DDE8" /><text x="98" y="828" class="navNumber" text-anchor="middle" fill="#64748B">01</text><text x="134" y="827" class="navLabel" text-anchor="start" fill="#0F172A">全脑总览</text><path d="M 286 821 L 316 821" fill="none" stroke="#C5CDDA" stroke-width="3" marker-end="url(#arrow)"/><rect x="328" y="792" width="216" height="58" rx="18" fill="#0F9F8F" stroke="#0F9F8F" filter="url(#shadow)"/><text x="362" y="828" class="navNumber" text-anchor="middle" fill="#FFFFFF">02</text><text x="398" y="827" class="navLabel" text-anchor="start" fill="#FFFFFF">证据感知</text><path d="M 550 821 L 580 821" fill="none" stroke="#0F9F8F" stroke-width="3" marker-end="url(#arrow)"/><rect x="592" y="792" width="216" height="58" rx="18" fill="#FFFFFF" stroke="#D7DDE8" /><text x="626" y="828" class="navNumber" text-anchor="middle" fill="#64748B">03</text><text x="662" y="827" class="navLabel" text-anchor="start" fill="#0F172A">智能体研判</text><path d="M 814 821 L 844 821" fill="none" stroke="#C5CDDA" stroke-width="3" marker-end="url(#arrow)"/><rect x="856" y="792" width="216" height="58" rx="18" fill="#FFFFFF" stroke="#D7DDE8" /><text x="890" y="828" class="navNumber" text-anchor="middle" fill="#64748B">04</text><text x="926" y="827" class="navLabel" text-anchor="start" fill="#0F172A">风险决策</text><path d="M 1078 821 L 1108 821" fill="none" stroke="#C5CDDA" stroke-width="3" marker-end="url(#arrow)"/><rect x="1120" y="792" width="216" height="58" rx="18" fill="#FFFFFF" stroke="#D7DDE8" /><text x="1154" y="828" class="navNumber" text-anchor="middle" fill="#64748B">05</text><text x="1190" y="827" class="navLabel" text-anchor="start" fill="#0F172A">回放与开放</text>
+  <rect width="1440" height="900" fill="#F7F8FC" />
+  <rect width="1440" height="900" fill="url(#dots)" opacity=".36" />
+  <rect x="64" y="46" width="158" height="34" rx="17" fill="#0F9F8F" stroke="#0F9F8F" />
+  <text x="143" y="69" class="pill" text-anchor="middle" fill="#FFFFFF">OPENALPHA · 02</text>
+  <text x="64" y="116" class="title" text-anchor="start">证据感知｜先回答“当时能不能知道”</text>
+  <text x="64" y="154" class="subtitle" text-anchor="start">链邻统一入口先通过认证、限流、PIT 与错误分类，再生成来源、时间、修订和内容哈希可追溯的证据。</text>
+  <g transform="translate(1270 42)">
+    <path d="M48 10c-19 0-34 14-34 32 0 9 4 17 10 23-2 4-3 9-2 14 2 12 13 21 26 21h29c15 0 27-11 27-25 0-7-3-13-8-18 2-5 2-11 0-17-4-12-16-20-29-19-5-7-11-11-19-11Z" fill="#0F9F8F" opacity=".12" />
+    <circle cx="42" cy="44" r="7" fill="#0F9F8F" />
+    <circle cx="70" cy="33" r="7" fill="#0F9F8F" opacity=".8" />
+    <circle cx="82" cy="65" r="7" fill="#0F9F8F" opacity=".65" />
+    <path d="M48 43 64 35M47 49 76 62M72 39 80 58" stroke="#0F9F8F" stroke-width="3" stroke-linecap="round" />
+  </g>
+  <text x="64" y="205" class="kicker" text-anchor="start" fill="#0F9F8F">合法数据输入</text>
+  <rect x="52" y="228" width="262" height="112" rx="22" fill="#FFFFFF" stroke="#D9DFEA" filter="url(#shadow)" />
+  <rect x="52" y="228" width="8" height="112" rx="4" fill="#0F9F8F" />
+  <text x="80" y="273" class="cardTitle" text-anchor="start">链邻数据接口 API</text>
+  <text x="80" y="312" class="body" text-anchor="start">已实现 · 统一替代入口</text>
+  <rect x="52" y="365" width="262" height="112" rx="22" fill="#FFFFFF" stroke="#D9DFEA" filter="url(#shadow)" />
+  <rect x="52" y="365" width="8" height="112" rx="4" fill="#0F9F8F" />
+  <text x="80" y="410" class="cardTitle" text-anchor="start">授权实时 A 股数据</text>
+  <text x="80" y="449" class="body" text-anchor="start">时效 / 精度以链邻服务为准</text>
+  <rect x="52" y="502" width="262" height="112" rx="22" fill="#FFFFFF" stroke="#D9DFEA" filter="url(#shadow)" />
+  <rect x="52" y="502" width="8" height="112" rx="4" fill="#0F9F8F" />
+  <text x="80" y="547" class="cardTitle" text-anchor="start">用户自有文件</text>
+  <text x="80" y="586" class="body" text-anchor="start">CSV · JSON · JSONL · Parquet</text>
+  <rect x="368" y="276" width="252" height="286" rx="22" fill="#FFFFFF" stroke="#D9DFEA" filter="url(#shadow)" />
+  <rect x="368" y="276" width="8" height="286" rx="4" fill="#0F9F8F" />
+  <text x="396" y="311" class="kicker" text-anchor="start" fill="#0F9F8F">数据入口闸门</text>
+  <text x="396" y="348" class="cardTitle" text-anchor="start">Provider 合同</text>
+  <text x="396" y="384" class="body" text-anchor="start">Bearer 认证 · 客户端限流</text>
+  <text x="396" y="414" class="body" text-anchor="start">PIT 可见性 · 数据修订</text>
+  <text x="396" y="444" class="body" text-anchor="start">来源 · 许可 · 新鲜度</text>
+  <text x="396" y="474" class="body" text-anchor="start">认证 / 限流 / 服务错误分类</text>
+  <text x="396" y="504" class="body" text-anchor="start">失败显式 · 禁止空成功</text>
+  <text x="748" y="205" class="kicker" text-anchor="start" fill="#0F9F8F">四时钟时间线</text>
+  <rect x="674" y="228" width="154" height="86" rx="18" fill="#FFFFFF" stroke="#D7DDE8" />
+  <text x="751" y="261" class="cardTitle" text-anchor="middle">事件发生</text>
+  <text x="751" y="288" class="small" text-anchor="middle">event_time</text>
+  <rect x="850" y="228" width="154" height="86" rx="18" fill="#DDF7F2" stroke="#0F9F8F" />
+  <text x="927" y="261" class="cardTitle" text-anchor="middle">首次可知</text>
+  <text x="927" y="288" class="small" text-anchor="middle">available_time</text>
+  <rect x="1026" y="228" width="154" height="86" rx="18" fill="#FFFFFF" stroke="#D7DDE8" />
+  <text x="1103" y="261" class="cardTitle" text-anchor="middle">系统入库</text>
+  <text x="1103" y="288" class="small" text-anchor="middle">ingested_time</text>
+  <rect x="1202" y="228" width="154" height="86" rx="18" fill="#FFFFFF" stroke="#D7DDE8" />
+  <text x="1279" y="261" class="cardTitle" text-anchor="middle">数据修订</text>
+  <text x="1279" y="288" class="small" text-anchor="middle">revision_time</text>
+  <rect x="742" y="350" width="510" height="172" rx="22" fill="#FFFFFF" stroke="#D9DFEA" filter="url(#shadow)" />
+  <rect x="742" y="350" width="8" height="172" rx="4" fill="#0F9F8F" />
+  <text x="770" y="385" class="kicker" text-anchor="start" fill="#0F9F8F">不可变 · 内容寻址</text>
+  <text x="770" y="422" class="cardTitle" text-anchor="start">EvidenceSnapshot</text>
+  <text x="770" y="458" class="body" text-anchor="start">evidence_id + source_uri + content_hash</text>
+  <text x="770" y="488" class="body" text-anchor="start">A 股语义：涨停 / 炸板 / 连板 / 题材 / 催化 / 公告 / 资金</text>
+  <rect x="678" y="570" width="648" height="74" rx="20" fill="#E9F8F5" stroke="#B7E8DE" />
+  <text x="1002" y="600" class="cardTitle" text-anchor="middle">Parquet 分区  →  DuckDB PIT 查询  →  只读证据工具</text>
+  <text x="1002" y="627" class="small" text-anchor="middle">只向下一脑区交付决策时刻已经可见的 evidence_id</text>
+  <path d="M 314 284 C 344 284, 340 330, 358 330" fill="none" stroke="#0F9F8F" stroke-width="3" marker-end="url(#arrow)" />
+  <path d="M 314 421 L 358 421" fill="none" stroke="#0F9F8F" stroke-width="3" marker-end="url(#arrow)" />
+  <path d="M 314 558 C 344 558, 340 510, 358 510" fill="none" stroke="#0F9F8F" stroke-width="3" marker-end="url(#arrow)" />
+  <path d="M 620 421 L 732 421" fill="none" stroke="#0F9F8F" stroke-width="3" marker-end="url(#arrow)" />
+  <path d="M 995 522 L 995 562" fill="none" stroke="#0F9F8F" stroke-width="3" marker-end="url(#arrow)" />
+  <rect x="1244" y="680" width="132" height="34" rx="17" fill="#0F9F8F" stroke="#0F9F8F" />
+  <text x="1310" y="703" class="pill" text-anchor="middle" fill="#FFFFFF">→ 研判脑区</text>
+  <text x="64" y="766" class="navCaption" text-anchor="start">五脑区导航｜从数据感知到验证反馈的完整认知链</text>
+  <rect x="64" y="792" width="216" height="58" rx="18" fill="#FFFFFF" stroke="#D7DDE8" />
+  <text x="98" y="828" class="navNumber" text-anchor="middle" fill="#64748B">01</text>
+  <text x="134" y="827" class="navLabel" text-anchor="start" fill="#0F172A">全脑总览</text>
+  <path d="M 286 821 L 316 821" fill="none" stroke="#C5CDDA" stroke-width="3" marker-end="url(#arrow)" />
+  <rect x="328" y="792" width="216" height="58" rx="18" fill="#0F9F8F" stroke="#0F9F8F" filter="url(#shadow)" />
+  <text x="362" y="828" class="navNumber" text-anchor="middle" fill="#FFFFFF">02</text>
+  <text x="398" y="827" class="navLabel" text-anchor="start" fill="#FFFFFF">证据感知</text>
+  <path d="M 550 821 L 580 821" fill="none" stroke="#0F9F8F" stroke-width="3" marker-end="url(#arrow)" />
+  <rect x="592" y="792" width="216" height="58" rx="18" fill="#FFFFFF" stroke="#D7DDE8" />
+  <text x="626" y="828" class="navNumber" text-anchor="middle" fill="#64748B">03</text>
+  <text x="662" y="827" class="navLabel" text-anchor="start" fill="#0F172A">批量研判</text>
+  <path d="M 814 821 L 844 821" fill="none" stroke="#C5CDDA" stroke-width="3" marker-end="url(#arrow)" />
+  <rect x="856" y="792" width="216" height="58" rx="18" fill="#FFFFFF" stroke="#D7DDE8" />
+  <text x="890" y="828" class="navNumber" text-anchor="middle" fill="#64748B">04</text>
+  <text x="926" y="827" class="navLabel" text-anchor="start" fill="#0F172A">双委决策</text>
+  <path d="M 1078 821 L 1108 821" fill="none" stroke="#C5CDDA" stroke-width="3" marker-end="url(#arrow)" />
+  <rect x="1120" y="792" width="216" height="58" rx="18" fill="#FFFFFF" stroke="#D7DDE8" />
+  <text x="1154" y="828" class="navNumber" text-anchor="middle" fill="#64748B">05</text>
+  <text x="1190" y="827" class="navLabel" text-anchor="start" fill="#0F172A">验证产品</text>
 </svg>
