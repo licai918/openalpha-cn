@@ -61,15 +61,24 @@ def test_readme_brain_map_series_is_complete_and_ordered() -> None:
     references = [f"./assets/diagrams/{name}" for name in diagrams]
     positions = [readme.index(reference) for reference in references]
     assert positions == sorted(positions)
+    assert "以下五图在信息表达上参考" not in readme
+    assert "下面五张图按实际使用顺序展示系统如何工作" in readme
 
+    combined_content = ""
     for name in diagrams:
         content = (ROOT / "assets" / "diagrams" / name).read_text(encoding="utf-8")
+        combined_content += content
         assert content.startswith("<svg")
         ET.fromstring(content)
         assert 'width="1440"' in content
         assert 'height="900"' in content
         assert "OPENALPHA" in content
         assert "五脑区导航" in content
+
+    assert "链邻数据接口 API" in combined_content
+    assert "规划目标" in combined_content
+    assert "Tushare" not in combined_content
+    assert "AKShare" not in combined_content
 
 
 def test_public_repository_metadata_is_present() -> None:

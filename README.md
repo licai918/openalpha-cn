@@ -40,7 +40,9 @@
 
 ## 🧠 五图读懂 OpenAlpha CN
 
-以下五图在信息表达上参考 [TradingAgents](https://github.com/TauricResearch/TradingAgents) 的专业角色协作链路，以及 [AI Hedge Fund](https://github.com/virattt/ai-hedge-fund) 的多角色、风险与组合决策结构；图中功能、名称和边界全部以 OpenAlpha CN 的本地源码与测试台账为准。
+OpenAlpha CN 将数据接入、时间点证据、多智能体研判、风险决策、回放验证和多端使用串联为完整研究闭环。下面五张图按实际使用顺序展示系统如何工作。
+
+**链邻数据接口 API** 将作为规划中的统一数据入口，目标是替代分散的第三方接口，为 A 股涨停、题材、资金和行情研究提供更及时、口径更一致的数据；完成适配与验证后再作为默认 Provider 启用。
 
 五张图共用同一条“五脑区导航”，依次组成 OpenAlpha CN 的 **A 股研究大脑**：
 
