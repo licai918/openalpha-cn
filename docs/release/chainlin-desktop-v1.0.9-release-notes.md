@@ -18,6 +18,12 @@ Get-FileHash .\Lianlin-LimitUp-Review-Setup-1.0.9-x64.exe -Algorithm SHA256
 
 链邻桌面软件是单独发行的商业/产品软件，不自动适用 OpenAlpha CN 仓库的 MIT 许可证。
 
-![链邻软件与 OpenAlpha CN 部署微信咨询](https://raw.githubusercontent.com/ss8875/openalpha-cn/v1.0.0/assets/brand/platform-wechat-banner.png)
+<p align="center">
+  <img
+    src="https://raw.githubusercontent.com/ss8875/openalpha-cn/main/assets/brand/wechat-contact-qr.jpg"
+    alt="扫码添加微信，咨询链邻软件与 OpenAlpha CN"
+    width="360"
+  />
+</p>
 
-扫码咨询安装、产品使用、数据接入或 OpenAlpha CN 部署。
+<p align="center">扫码添加微信，咨询安装、产品使用、数据接入或 OpenAlpha CN 部署。</p>

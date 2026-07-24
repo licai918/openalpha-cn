@@ -2,8 +2,6 @@
 
 面向中国 A 股的证据可追溯、时间点一致、多智能体可验证的开源投研系统。
 
-> 当前版本：`v1.0.0`。仅用于研究、教学与复盘，不构成任何投资建议，不承诺收益，也不连接实盘下单。
-
 [English](README.en.md) · [部署方案](docs/deployment/production.zh-CN.md) · [数据接口](docs/api/data-interface.zh-CN.md) · [为什么能形成优势](docs/why-openalpha-cn.zh-CN.md) · [功能台账](docs/release/openalpha-v1-feature-ledger.md)
 
 ## 两种使用方式
@@ -57,13 +55,13 @@ Get-FileHash .\Lianlin-LimitUp-Review-Setup-1.0.9-x64.exe -Algorithm SHA256
 
 <p align="center">
   <img
-    src="./assets/brand/platform-wechat-banner.png"
-    alt="链邻软件与 OpenAlpha CN 部署微信咨询"
-    width="720"
+    src="./assets/brand/wechat-contact-qr.jpg"
+    alt="扫码添加微信，咨询链邻软件与 OpenAlpha CN"
+    width="360"
   />
 </p>
 
-<p align="center">扫码咨询安装、部署、数据接入和产品使用问题。</p>
+<p align="center">扫码添加微信，咨询安装、部署、数据接入和产品使用问题。</p>
 
 ## 数据优势如何体现
 

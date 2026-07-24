@@ -45,6 +45,12 @@ pnpm dev
 
 `0DDD3AF69C671C3AF0F7AEC90D57B77363705E38E871B49D640C7A2D0D05838B`
 
-![链邻软件与 OpenAlpha CN 部署微信咨询](../../assets/brand/platform-wechat-banner.png)
+<p align="center">
+  <img
+    src="../../assets/brand/wechat-contact-qr.jpg"
+    alt="扫码添加微信，咨询链邻软件与 OpenAlpha CN"
+    width="360"
+  />
+</p>
 
-扫码可咨询安装、部署、数据接入和产品使用问题。
+<p align="center">扫码添加微信，咨询安装、部署、数据接入和产品使用问题。</p>

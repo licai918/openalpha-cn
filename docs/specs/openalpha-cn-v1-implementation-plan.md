@@ -15,9 +15,9 @@ This plan implements `openalpha-cn-v1-spec.md` in thin, independently verifiable
   - Files: `pyproject.toml`, `src/openalpha_cn/__init__.py`, `src/openalpha_cn/cli.py`, `tests/unit/test_cli.py`
 
 - [x] Task 1.3: Establish project documentation and product split
-  - Acceptance: README explains OpenAlpha CN, self-host path, ChainLin download path, license split, and investment disclaimer.
+  - Acceptance: README explains OpenAlpha CN, self-host path, ChainLin download path, license split, and product boundary.
   - Verify: documentation link and asset validation test passes.
-  - Files: `README.md`, `README.en.md`, `THIRD_PARTY_NOTICES.md`, `assets/brand/platform-wechat-banner.png`
+  - Files: `README.md`, `README.en.md`, `THIRD_PARTY_NOTICES.md`, `assets/brand/wechat-contact-qr.jpg`
 
 ### Checkpoint 1
 

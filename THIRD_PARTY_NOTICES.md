@@ -4,13 +4,12 @@ OpenAlpha CN source code is licensed under MIT. That license does not automatica
 
 ## Brand asset
 
-`assets/brand/platform-wechat-banner.png`
+`assets/brand/wechat-contact-qr.jpg`
 
-- Source: `https://github.com/ss8875/LL-AcademicSkillsHub/raw/main/assets/brand/platform-promo/platform-wechat-banner.png`
-- Source repository: `https://github.com/ss8875/LL-AcademicSkillsHub`
-- SHA-256: `6593308461799D46535BDFF4FA3280BAC39EEED1CB577AF5A59992EEB7ADB4D2`
+- Source: owner-provided WeChat contact QR image, supplied on 2026-07-24
+- SHA-256: `A619D0051CE6BD1B836C91C445B527F67B505940CB3092DF11DDC5CA93B06B15`
 - Use: OpenAlpha CN and ChainLin deployment/product consultation
-- Boundary: retained as an owner-provided brand asset; it is not a market dataset
+- Boundary: retained byte-for-byte as an owner-provided contact asset; it is not a market dataset
 
 ## Data adapters
 

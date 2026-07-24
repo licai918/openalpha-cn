@@ -1,3 +1,4 @@
+import hashlib
 import subprocess
 import sys
 from pathlib import Path
@@ -11,14 +12,18 @@ def test_readme_exposes_self_host_and_chainlin_paths() -> None:
     assert "自托管 OpenAlpha CN" in readme
     assert "链邻涨停复盘策略软件" in readme
     assert "chainlin-desktop-v1.0.9" in readme
-    assert "不构成任何投资建议" in readme
+    assert "当前版本" not in readme
+    assert "assets/brand/wechat-contact-qr.jpg" in readme
 
 
-def test_wechat_banner_is_a_real_png_asset() -> None:
-    banner = ROOT / "assets" / "brand" / "platform-wechat-banner.png"
-    content = banner.read_bytes()
+def test_wechat_contact_qr_is_the_owner_provided_jpeg() -> None:
+    qr_image = ROOT / "assets" / "brand" / "wechat-contact-qr.jpg"
+    content = qr_image.read_bytes()
 
-    assert content.startswith(b"\x89PNG\r\n\x1a\n")
+    assert content.startswith(b"\xff\xd8\xff")
+    assert hashlib.sha256(content).hexdigest().upper() == (
+        "A619D0051CE6BD1B836C91C445B527F67B505940CB3092DF11DDC5CA93B06B15"
+    )
     assert len(content) > 100_000
 
 

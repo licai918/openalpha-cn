@@ -2,8 +2,6 @@
 
 Evidence-traceable, point-in-time, multi-agent research for China A shares.
 
-> Current release: `v1.0.0`. Research, education, and review only. No investment advice, return promise, or live broker execution.
-
 [中文](README.md) · [Deployment](docs/deployment/production.zh-CN.md) · [Data API](docs/api/data-interface.zh-CN.md) · [Feature ledger](docs/release/openalpha-v1-feature-ledger.md)
 
 ## Self-host
