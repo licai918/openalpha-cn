@@ -1,0 +1,114 @@
+{
+  "additionalProperties": false,
+  "description": "An immutable, evidence-linked research conclusion or abstention.",
+  "properties": {
+    "abstention_reason": {
+      "anyOf": [
+        {
+          "maxLength": 2000,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Abstention Reason"
+    },
+    "as_of": {
+      "format": "date-time",
+      "title": "As Of",
+      "type": "string"
+    },
+    "confidence": {
+      "maximum": 1,
+      "minimum": 0,
+      "title": "Confidence",
+      "type": "number"
+    },
+    "confirmation_conditions": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Confirmation Conditions",
+      "type": "array"
+    },
+    "direction": {
+      "enum": [
+        "bullish",
+        "bearish",
+        "neutral",
+        "abstain"
+      ],
+      "title": "Direction",
+      "type": "string"
+    },
+    "evidence_ids": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Evidence Ids",
+      "type": "array"
+    },
+    "horizon": {
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "Horizon",
+      "type": "string"
+    },
+    "invalidation_conditions": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Invalidation Conditions",
+      "type": "array"
+    },
+    "risk_flags": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Risk Flags",
+      "type": "array"
+    },
+    "schema_version": {
+      "const": "signal-frame/v1",
+      "default": "signal-frame/v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "signal_id": {
+      "description": "Return the stable content-derived signal identifier.",
+      "readOnly": true,
+      "title": "Signal Id",
+      "type": "string"
+    },
+    "strength": {
+      "maximum": 1,
+      "minimum": -1,
+      "title": "Strength",
+      "type": "number"
+    },
+    "subject": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Subject",
+      "type": "string"
+    }
+  },
+  "required": [
+    "subject",
+    "as_of",
+    "direction",
+    "strength",
+    "confidence",
+    "horizon",
+    "signal_id"
+  ],
+  "title": "SignalFrame",
+  "type": "object"
+}

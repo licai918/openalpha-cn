@@ -28,17 +28,17 @@ This plan implements `openalpha-cn-v1-spec.md` in thin, independently verifiable
 
 ## Phase 2: Point-in-time contracts
 
-- [ ] Task 2.1: Implement strict timezone and visibility rules.
-- [ ] Task 2.2: Implement immutable `EvidenceSnapshot`.
-- [ ] Task 2.3: Implement `SignalFrame`, `DecisionLedger`, `RunManifest`, and `ValidationResult`.
-- [ ] Task 2.4: Add JSON schema export and compatibility tests.
+- [x] Task 2.1: Implement strict timezone and visibility rules.
+- [x] Task 2.2: Implement immutable `EvidenceSnapshot`.
+- [x] Task 2.3: Implement `SignalFrame`, `DecisionLedger`, `RunManifest`, and `ValidationResult`.
+- [x] Task 2.4: Add JSON schema export and compatibility tests.
 
 ### Checkpoint 2
 
-- [ ] Naive datetimes are rejected.
-- [ ] Evidence after `as_of` is rejected.
-- [ ] Stable payloads produce stable IDs and hashes.
-- [ ] Contract schemas are versioned and checked into `docs/api/schemas`.
+- [x] Naive datetimes are rejected.
+- [x] Evidence after `as_of` is rejected.
+- [x] Stable payloads produce stable IDs and hashes.
+- [x] Contract schemas are versioned and checked into `docs/api/schemas`.
 
 ## Phase 3: Storage and providers
 

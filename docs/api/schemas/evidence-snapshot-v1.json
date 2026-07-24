@@ -1,0 +1,132 @@
+{
+  "$defs": {
+    "JsonValue": {},
+    "Timeline": {
+      "description": "The four clocks required to reproduce what was knowable at a point in time.",
+      "properties": {
+        "available_time": {
+          "format": "date-time",
+          "title": "Available Time",
+          "type": "string"
+        },
+        "event_time": {
+          "format": "date-time",
+          "title": "Event Time",
+          "type": "string"
+        },
+        "ingested_time": {
+          "format": "date-time",
+          "title": "Ingested Time",
+          "type": "string"
+        },
+        "revision_time": {
+          "format": "date-time",
+          "title": "Revision Time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "event_time",
+        "available_time",
+        "ingested_time",
+        "revision_time"
+      ],
+      "title": "Timeline",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "One immutable evidence item with stable identity and four time clocks.",
+  "properties": {
+    "content_hash": {
+      "description": "Return the SHA-256 digest of the canonical structured payload.",
+      "readOnly": true,
+      "title": "Content Hash",
+      "type": "string"
+    },
+    "evidence_id": {
+      "description": "Return a stable evidence ID derived from provenance and content.",
+      "readOnly": true,
+      "title": "Evidence Id",
+      "type": "string"
+    },
+    "kind": {
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "Kind",
+      "type": "string"
+    },
+    "payload": {
+      "$ref": "#/$defs/JsonValue"
+    },
+    "redistribution": {
+      "enum": [
+        "allowed",
+        "restricted",
+        "unknown"
+      ],
+      "title": "Redistribution",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "evidence-snapshot/v1",
+      "default": "evidence-snapshot/v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Source Id",
+      "type": "string"
+    },
+    "source_license": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Source License",
+      "type": "string"
+    },
+    "source_uri": {
+      "anyOf": [
+        {
+          "maxLength": 2048,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Source Uri"
+    },
+    "subject": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Subject",
+      "type": "string"
+    },
+    "summary": {
+      "maxLength": 4000,
+      "minLength": 1,
+      "title": "Summary",
+      "type": "string"
+    },
+    "timeline": {
+      "$ref": "#/$defs/Timeline"
+    }
+  },
+  "required": [
+    "subject",
+    "kind",
+    "timeline",
+    "source_id",
+    "source_license",
+    "redistribution",
+    "summary",
+    "payload",
+    "content_hash",
+    "evidence_id"
+  ],
+  "title": "EvidenceSnapshot",
+  "type": "object"
+}
