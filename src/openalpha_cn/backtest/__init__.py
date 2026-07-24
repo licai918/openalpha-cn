@@ -7,6 +7,7 @@ from openalpha_cn.backtest.execution import (
     ExecutionResult,
     MarketBar,
 )
+from openalpha_cn.backtest.replay import ReplayCorpus, ReplayReport, ReplayRunner
 from openalpha_cn.backtest.validation import OutcomeObservation, OutcomeValidator
 
 __all__ = [
@@ -17,4 +18,7 @@ __all__ = [
     "MarketBar",
     "OutcomeObservation",
     "OutcomeValidator",
+    "ReplayCorpus",
+    "ReplayReport",
+    "ReplayRunner",
 ]
