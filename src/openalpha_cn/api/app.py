@@ -14,6 +14,11 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from openalpha_cn import __version__
 from openalpha_cn.backtest.execution import MarketBar
+from openalpha_cn.backtest.multi_day import (
+    PortfolioBacktestReport,
+    PortfolioBacktestRunner,
+    PortfolioBacktestStep,
+)
 from openalpha_cn.backtest.portfolio import (
     PortfolioLimits,
     PortfolioOrder,
@@ -36,6 +41,7 @@ from openalpha_cn.runtime.memory import MemoryEntry
 from openalpha_cn.storage.batch import SQLiteBatchTaskStore
 from openalpha_cn.storage.memory import SQLiteResearchMemory
 from openalpha_cn.storage.parquet import ParquetEvidenceStore
+from openalpha_cn.storage.portfolio import SQLitePortfolioLedger
 from openalpha_cn.storage.recovery import RunRecoveryState, SQLiteRecoveryStore
 from openalpha_cn.storage.sqlite import SQLiteRunRepository
 
@@ -91,6 +97,16 @@ class BatchSubmitRequest(BaseModel):
     batch_id: str = Field(min_length=1, max_length=128)
     requests: tuple[ResearchRunRequest, ...] = Field(min_length=1, max_length=1000)
     max_concurrency: int = Field(default=4, ge=1, le=32)
+
+
+class PortfolioBacktestRequest(BaseModel):
+    """Initial state and ordered daily transitions for a portfolio backtest."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    initial: PortfolioState
+    steps: tuple[PortfolioBacktestStep, ...] = Field(min_length=1)
+    limits: PortfolioLimits = PortfolioLimits()
 
 
 class SecurityHeadersMiddleware:
@@ -201,6 +217,7 @@ def create_app(
     memory = SQLiteResearchMemory(root / "state.sqlite3")
     recovery_store = SQLiteRecoveryStore(root / "state.sqlite3")
     batch_store = SQLiteBatchTaskStore(root / "state.sqlite3")
+    portfolio_ledger = SQLitePortfolioLedger(root / "state.sqlite3")
     batch_store.recover_interrupted(now=datetime.now(UTC))
 
     def run_one(request: ResearchRunRequest) -> ResearchRunResult:
@@ -374,11 +391,28 @@ def create_app(
     @application.post("/api/v1/portfolio/execute")
     def portfolio_execute(request: PortfolioApiRequest) -> PortfolioTransition:
         """Apply A-share execution, T+1, costs, and exposure limits."""
-        return PortfolioSimulator(limits=request.limits).execute_order(
+        transition = PortfolioSimulator(limits=request.limits).execute_order(
             state=request.state,
             order=request.order,
             market=request.market,
         )
+        portfolio_ledger.append(transition)
+        return transition
+
+    @application.get("/api/v1/portfolio/ledger")
+    def portfolio_ledger_query(
+        subject: str | None = None,
+    ) -> tuple[PortfolioTransition, ...]:
+        """List immutable order/execution transitions."""
+        return portfolio_ledger.list(subject=subject)
+
+    @application.post("/api/v1/backtests/portfolio")
+    def portfolio_backtest(request: PortfolioBacktestRequest) -> PortfolioBacktestReport:
+        """Run a multi-day A-share portfolio report and persist transitions."""
+        return PortfolioBacktestRunner(
+            limits=request.limits,
+            ledger=portfolio_ledger,
+        ).run(initial=request.initial, steps=request.steps)
 
     @application.post("/api/v1/backtests/validate")
     def validate_outcome(request: OutcomeApiRequest) -> ValidationResult:

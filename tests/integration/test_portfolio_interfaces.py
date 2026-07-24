@@ -50,3 +50,5 @@ def test_sdk_and_api_share_the_same_portfolio_execution_contract(tmp_path: Path)
     assert response.json() == sdk_result.model_dump(mode="json")
     assert response.json()["status"] == "filled"
     assert response.json()["after"]["positions"][0]["quantity"] == 100
+    assert len(client.get("/api/v1/portfolio/ledger").json()) == 1
+    assert len(sdk.list_portfolio_transitions()) == 1

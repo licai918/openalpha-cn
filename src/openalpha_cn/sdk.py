@@ -7,6 +7,11 @@ from pathlib import Path
 from openalpha_cn import __version__
 from openalpha_cn.agents.base import ResearchAgent
 from openalpha_cn.backtest.execution import MarketBar
+from openalpha_cn.backtest.multi_day import (
+    PortfolioBacktestReport,
+    PortfolioBacktestRunner,
+    PortfolioBacktestStep,
+)
 from openalpha_cn.backtest.portfolio import (
     PortfolioLimits,
     PortfolioOrder,
@@ -24,6 +29,7 @@ from openalpha_cn.runtime.memory import MemoryEntry
 from openalpha_cn.storage.batch import SQLiteBatchTaskStore
 from openalpha_cn.storage.memory import SQLiteResearchMemory
 from openalpha_cn.storage.parquet import ParquetEvidenceStore
+from openalpha_cn.storage.portfolio import SQLitePortfolioLedger
 from openalpha_cn.storage.recovery import RunRecoveryState, SQLiteRecoveryStore
 from openalpha_cn.storage.sqlite import SQLiteRunRepository
 
@@ -47,6 +53,7 @@ class OpenAlphaSDK:
         self.memory = SQLiteResearchMemory(runtime_dir / "state.sqlite3")
         self.recovery_store = SQLiteRecoveryStore(runtime_dir / "state.sqlite3")
         self.batch_store = SQLiteBatchTaskStore(runtime_dir / "state.sqlite3")
+        self.portfolio_ledger = SQLitePortfolioLedger(runtime_dir / "state.sqlite3")
         self.batch_store.recover_interrupted(now=self.clock())
 
     def health(self) -> dict[str, str]:
@@ -128,11 +135,34 @@ class OpenAlphaSDK:
         limits: PortfolioLimits | None = None,
     ) -> PortfolioTransition:
         """Apply one order through the deterministic A-share portfolio core."""
-        return PortfolioSimulator(limits=limits).execute_order(
+        transition = PortfolioSimulator(limits=limits).execute_order(
             state=state,
             order=order,
             market=market,
         )
+        self.portfolio_ledger.append(transition)
+        return transition
+
+    def list_portfolio_transitions(
+        self,
+        *,
+        subject: str | None = None,
+    ) -> tuple[PortfolioTransition, ...]:
+        """List immutable portfolio order/execution records."""
+        return self.portfolio_ledger.list(subject=subject)
+
+    def run_portfolio_backtest(
+        self,
+        *,
+        initial: PortfolioState,
+        steps: tuple[PortfolioBacktestStep, ...],
+        limits: PortfolioLimits | None = None,
+    ) -> PortfolioBacktestReport:
+        """Run and persist a multi-day portfolio backtest."""
+        return PortfolioBacktestRunner(
+            limits=limits,
+            ledger=self.portfolio_ledger,
+        ).run(initial=initial, steps=steps)
 
     def replay(
         self,
