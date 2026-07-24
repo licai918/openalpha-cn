@@ -21,7 +21,9 @@ classifiers = [
   "Topic :: Office/Business :: Financial :: Investment",
 ]
 dependencies = [
+  "duckdb>=1.5,<2",
   "pydantic>=2.12,<3",
+  "pytz>=2025.2",
   "typer>=0.21.0,<1",
 ]
 
