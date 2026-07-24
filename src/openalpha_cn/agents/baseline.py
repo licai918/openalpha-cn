@@ -1,0 +1,150 @@
+"""Deterministic A-share baseline agents."""
+
+from collections.abc import Mapping
+from typing import Literal, cast
+
+from openalpha_cn.agents.base import AgentContext, AgentResult
+from openalpha_cn.domain.evidence import EvidenceSnapshot
+from openalpha_cn.domain.signal import SignalFrame
+
+
+def _family(item: EvidenceSnapshot) -> str:
+    payload = item.payload
+    if not isinstance(payload, Mapping):
+        return ""
+    return str(payload.get("family", ""))
+
+
+def _facts(item: EvidenceSnapshot) -> Mapping[str, object]:
+    payload = item.payload
+    if not isinstance(payload, Mapping):
+        return {}
+    facts = payload.get("facts")
+    return facts if isinstance(facts, Mapping) else {}
+
+
+def _quality_flags(items: tuple[EvidenceSnapshot, ...]) -> tuple[str, ...]:
+    flags: set[str] = set()
+    for item in items:
+        payload = item.payload
+        if not isinstance(payload, Mapping):
+            continue
+        raw_flags = payload.get("quality_flags", ())
+        if isinstance(raw_flags, tuple):
+            flags.update(str(flag) for flag in cast(tuple[object, ...], raw_flags))
+    return tuple(sorted(flags))
+
+
+def _number(value: object, *, default: float = 0.0) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return default
+    return float(value)
+
+
+class MarketAgent:
+    """Score limit-up, consecutive-board, and broken-board evidence."""
+
+    agent_id = "market-agent"
+    evidence_families = frozenset({"market_event"})
+
+    def analyze(self, context: AgentContext) -> AgentResult:
+        items = tuple(item for item in context.evidence if _family(item) == "market_event")
+        scores = {
+            "limit_up": 0.65,
+            "consecutive_board": 0.85,
+            "broken_board": -0.65,
+        }
+        strength = sum(scores.get(item.kind, 0.0) for item in items) / len(items)
+        direction: Literal["bullish", "bearish", "neutral"] = (
+            "bullish" if strength > 0.15 else "bearish" if strength < -0.15 else "neutral"
+        )
+        signal = SignalFrame(
+            subject=context.subject,
+            as_of=context.as_of,
+            direction=direction,
+            strength=strength,
+            confidence=min(0.9, 0.55 + len(items) * 0.1),
+            horizon="5d",
+            evidence_ids=tuple(item.evidence_id for item in items),
+            confirmation_conditions=("Event strength persists with confirming volume.",),
+            invalidation_conditions=("Price closes below the event-day low.",),
+            risk_flags=_quality_flags(items),
+        )
+        return AgentResult(
+            agent_id=self.agent_id,
+            signal=signal,
+            rationale="Deterministic board-event score from visible market evidence.",
+        )
+
+
+class ThemeAgent:
+    """Score theme evidence using its normalized relevance value."""
+
+    agent_id = "theme-agent"
+    evidence_families = frozenset({"theme", "catalyst", "disclosure"})
+
+    def analyze(self, context: AgentContext) -> AgentResult:
+        items = tuple(item for item in context.evidence if _family(item) in self.evidence_families)
+        scores: list[float] = []
+        for item in items:
+            facts = _facts(item)
+            score = _number(facts.get("score"), default=0.6)
+            scores.append(max(-1.0, min(1.0, (score - 0.5) * 2)))
+        strength = sum(scores) / len(scores)
+        direction: Literal["bullish", "bearish", "neutral"] = (
+            "bullish" if strength > 0.15 else "bearish" if strength < -0.15 else "neutral"
+        )
+        signal = SignalFrame(
+            subject=context.subject,
+            as_of=context.as_of,
+            direction=direction,
+            strength=strength,
+            confidence=min(0.85, 0.5 + len(items) * 0.1),
+            horizon="10d",
+            evidence_ids=tuple(item.evidence_id for item in items),
+            confirmation_conditions=("Theme evidence gains independent confirmation.",),
+            invalidation_conditions=("Catalyst timing or theme relevance weakens.",),
+            risk_flags=_quality_flags(items),
+        )
+        return AgentResult(
+            agent_id=self.agent_id,
+            signal=signal,
+            rationale="Deterministic theme and catalyst relevance score.",
+        )
+
+
+class CapitalAgent:
+    """Score normalized capital-flow evidence."""
+
+    agent_id = "capital-agent"
+    evidence_families = frozenset({"capital"})
+
+    def analyze(self, context: AgentContext) -> AgentResult:
+        items = tuple(item for item in context.evidence if _family(item) == "capital")
+        net_inflow = sum(_number(_facts(item).get("net_inflow")) for item in items)
+        strength = 0.4 if net_inflow > 0 else -0.4 if net_inflow < 0 else 0.0
+        direction: Literal["bullish", "bearish", "neutral"] = (
+            "bullish" if strength > 0 else "bearish" if strength < 0 else "neutral"
+        )
+        signal = SignalFrame(
+            subject=context.subject,
+            as_of=context.as_of,
+            direction=direction,
+            strength=strength,
+            confidence=0.6,
+            horizon="5d",
+            evidence_ids=tuple(item.evidence_id for item in items),
+            confirmation_conditions=("Net inflow remains positive across the next observation.",),
+            invalidation_conditions=("Capital flow reverses materially.",),
+            risk_flags=_quality_flags(items),
+        )
+        return AgentResult(
+            agent_id=self.agent_id,
+            signal=signal,
+            rationale="Deterministic sign-based capital-flow score.",
+        )
+
+
+def baseline_agents() -> tuple[MarketAgent, ThemeAgent, CapitalAgent]:
+    """Return built-in agents in stable routing order."""
+    return (MarketAgent(), ThemeAgent(), CapitalAgent())

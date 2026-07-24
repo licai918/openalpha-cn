@@ -42,6 +42,9 @@ class SQLiteRunRepository:
                     FOREIGN KEY (run_id) REFERENCES runs(run_id)
                 );
 
+                CREATE UNIQUE INDEX IF NOT EXISTS decisions_run_id_uq
+                ON decisions(run_id);
+
                 CREATE TABLE IF NOT EXISTS checkpoints (
                     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                     run_id TEXT NOT NULL,
@@ -105,6 +108,15 @@ class SQLiteRunRepository:
             row = connection.execute(
                 "SELECT payload FROM decisions WHERE decision_id = ?",
                 (decision_id,),
+            ).fetchone()
+        return None if row is None else DecisionLedger.model_validate_json(row[0])
+
+    def get_decision_for_run(self, run_id: str) -> DecisionLedger | None:
+        """Load the single immutable decision associated with a run."""
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT payload FROM decisions WHERE run_id = ?",
+                (run_id,),
             ).fetchone()
         return None if row is None else DecisionLedger.model_validate_json(row[0])
 
