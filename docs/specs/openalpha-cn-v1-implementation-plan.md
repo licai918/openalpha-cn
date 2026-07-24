@@ -86,18 +86,18 @@ This plan implements `openalpha-cn-v1-spec.md` in thin, independently verifiable
 
 ## Phase 6: Replay, backtest, and attribution
 
-- [ ] Task 6.1: Implement shared `run_cycle` clock and mode adapters.
-- [ ] Task 6.2: Implement A-share execution constraints and transaction costs.
-- [ ] Task 6.3: Implement outcome validation and benchmark comparison.
-- [ ] Task 6.4: Implement factor and agent attribution.
-- [ ] Task 6.5: Build 60-trading-day / 300-event frozen replay corpus.
+- [x] Task 6.1: Implement shared `run_cycle` clock and mode adapters.
+- [x] Task 6.2: Implement A-share execution constraints and transaction costs.
+- [x] Task 6.3: Implement outcome validation and benchmark comparison.
+- [x] Task 6.4: Implement factor and agent attribution.
+- [x] Task 6.5: Build 60-trading-day / 300-event frozen replay corpus.
 
 ### Checkpoint 6
 
-- [ ] Live and replay modes share the same decision core.
-- [ ] Known look-ahead violations are zero.
-- [ ] Frozen-payload replay success is at least 99%.
-- [ ] Attribution reconciles with total simulated outcome.
+- [x] Live and replay modes share the same decision core.
+- [x] Known look-ahead violations are zero.
+- [x] Frozen-payload replay success is at least 99%.
+- [x] Attribution reconciles with total simulated outcome.
 
 ## Phase 7: SDK, API, CLI, and web
 
