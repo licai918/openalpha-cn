@@ -38,6 +38,64 @@
 - **可恢复运行**：SQLite WAL 保存运行、决策和 Checkpoint，研究任务支持幂等恢复；Docker 卷验证重启后证据仍然存在。
 - **完成度可审计**：72 项功能全部具有唯一 ID、源码证据、测试证据和终态去向，`UNREVIEWED=0`、`UNKNOWN=0`。
 
+## 🧠 五图读懂 OpenAlpha CN
+
+以下五图在信息表达上参考 [TradingAgents](https://github.com/TauricResearch/TradingAgents) 的专业角色协作链路，以及 [AI Hedge Fund](https://github.com/virattt/ai-hedge-fund) 的多角色、风险与组合决策结构；图中功能、名称和边界全部以 OpenAlpha CN 的本地源码与测试台账为准。
+
+五张图共用同一条“五脑区导航”，依次组成 OpenAlpha CN 的 **A 股研究大脑**：
+
+`全脑总览 → 证据感知 → 智能体研判 → 风险决策 → 回放与开放 → 反馈到下一轮证据和规则`
+
+### 01｜全脑总览：五个脑区组成研究闭环
+
+<p align="center">
+  <img
+    src="./assets/diagrams/openalpha-brain-01-overview.svg"
+    alt="OpenAlpha CN A 股研究大脑五脑区全景图"
+    width="1200"
+  />
+</p>
+
+### 02｜证据感知：先回答“当时能不能知道”
+
+<p align="center">
+  <img
+    src="./assets/diagrams/openalpha-brain-02-evidence.svg"
+    alt="OpenAlpha CN 数据接入、四时钟时间线与证据快照解析图"
+    width="1200"
+  />
+</p>
+
+### 03｜智能体研判：角色围绕证据协作
+
+<p align="center">
+  <img
+    src="./assets/diagrams/openalpha-brain-03-agents.svg"
+    alt="OpenAlpha CN 证据感知路由、多智能体协作与结构化信号解析图"
+    width="1200"
+  />
+</p>
+
+### 04｜风险决策：形成可审计的研究动作
+
+<p align="center">
+  <img
+    src="./assets/diagrams/openalpha-brain-04-decision.svg"
+    alt="OpenAlpha CN 风险门、A 股约束与决策账本解析图"
+    width="1200"
+  />
+</p>
+
+### 05｜回放与开放：验证结果服务下一轮判断
+
+<p align="center">
+  <img
+    src="./assets/diagrams/openalpha-brain-05-replay-interfaces.svg"
+    alt="OpenAlpha CN 同路径回放、记忆恢复、验证归因与开放接口解析图"
+    width="1200"
+  />
+</p>
+
 ## 两种使用方式
 
 ### 1. 自托管 OpenAlpha CN

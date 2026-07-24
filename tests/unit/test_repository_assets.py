@@ -1,6 +1,7 @@
 import hashlib
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -34,6 +35,30 @@ def test_wechat_contact_qr_is_the_owner_provided_jpeg() -> None:
         "A619D0051CE6BD1B836C91C445B527F67B505940CB3092DF11DDC5CA93B06B15"
     )
     assert len(content) > 100_000
+
+
+def test_readme_brain_map_series_is_complete_and_ordered() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    diagrams = [
+        "openalpha-brain-01-overview.svg",
+        "openalpha-brain-02-evidence.svg",
+        "openalpha-brain-03-agents.svg",
+        "openalpha-brain-04-decision.svg",
+        "openalpha-brain-05-replay-interfaces.svg",
+    ]
+
+    references = [f"./assets/diagrams/{name}" for name in diagrams]
+    positions = [readme.index(reference) for reference in references]
+    assert positions == sorted(positions)
+
+    for name in diagrams:
+        content = (ROOT / "assets" / "diagrams" / name).read_text(encoding="utf-8")
+        assert content.startswith("<svg")
+        ET.fromstring(content)
+        assert 'width="1440"' in content
+        assert 'height="900"' in content
+        assert "OPENALPHA" in content
+        assert "五脑区导航" in content
 
 
 def test_public_repository_metadata_is_present() -> None:
