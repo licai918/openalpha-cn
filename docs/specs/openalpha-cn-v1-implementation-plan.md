@@ -4,27 +4,27 @@ This plan implements `openalpha-cn-v1-spec.md` in thin, independently verifiable
 
 ## Phase 1: Repository foundation
 
-- [ ] Task 1.1: Establish repository policy and metadata
+- [x] Task 1.1: Establish repository policy and metadata
   - Acceptance: MIT license, repository instructions, ignore rules, attributes, security and contribution boundaries exist.
   - Verify: repository validation test passes; secret/runtime/binary patterns are ignored.
   - Files: `AGENTS.md`, `LICENSE`, `.gitignore`, `.gitattributes`, `SECURITY.md`
 
-- [ ] Task 1.2: Establish the Python package and stable developer commands
+- [x] Task 1.2: Establish the Python package and stable developer commands
   - Acceptance: package installs with `uv`; CLI exposes `version` and `doctor`.
   - Verify: CLI unit tests fail before implementation and pass after implementation.
   - Files: `pyproject.toml`, `src/openalpha_cn/__init__.py`, `src/openalpha_cn/cli.py`, `tests/unit/test_cli.py`
 
-- [ ] Task 1.3: Establish project documentation and product split
+- [x] Task 1.3: Establish project documentation and product split
   - Acceptance: README explains OpenAlpha CN, self-host path, ChainLin download path, license split, and investment disclaimer.
   - Verify: documentation link and asset validation test passes.
   - Files: `README.md`, `README.en.md`, `THIRD_PARTY_NOTICES.md`, `assets/brand/platform-wechat-banner.png`
 
 ### Checkpoint 1
 
-- [ ] `uv sync --all-extras --dev` succeeds.
-- [ ] `uv run pytest` succeeds.
-- [ ] `uv run ruff check .` succeeds.
-- [ ] repository is initialized on `main`.
+- [x] `uv sync --all-extras --dev` succeeds.
+- [x] `uv run pytest` succeeds.
+- [x] `uv run ruff check .` succeeds.
+- [x] repository is initialized on `main`.
 
 ## Phase 2: Point-in-time contracts
 
@@ -141,4 +141,3 @@ This plan implements `openalpha-cn-v1-spec.md` in thin, independently verifiable
 | Desktop installer is unsigned | Medium | Explicit warning, SHA-256, antivirus scan, later code signing |
 | Large scope produces incomplete surfaces | High | Feature flags, vertical slices, checkpoint gates |
 | Windows and Linux path/runtime differences | Medium | Dual-platform CI from first checkpoint |
-

@@ -1,9 +1,9 @@
 # OpenAlpha CN v1 Specification
 
-Status: Approved for implementation  
-Owner: ss8875  
-License: MIT  
-Local repository: `D:\d-soft\openalpha-cn`  
+Status: Approved for implementation
+Owner: ss8875
+License: MIT
+Local repository: `D:\d-soft\openalpha-cn`
 Remote repository: `https://github.com/ss8875/openalpha-cn`
 
 ## 1. Objective

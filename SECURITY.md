@@ -25,4 +25,3 @@ OpenAlpha CN never requires credentials to be committed. Provider and model cred
 ## Investment and data boundary
 
 OpenAlpha CN is a research tool, not an execution or custody service. A security report must not contain broker passwords, order credentials, production tokens, customer datasets, or third-party data that the reporter cannot lawfully share.
-

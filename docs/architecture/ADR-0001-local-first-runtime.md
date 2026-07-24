@@ -1,6 +1,6 @@
 # ADR-0001: Local-first single-node runtime
 
-Date: 2026-07-24  
+Date: 2026-07-24
 Status: Accepted
 
 ## Context
@@ -38,4 +38,3 @@ Negative:
 ## Guardrail
 
 Domain and provider contracts must not import SQLite or DuckDB implementation types. Storage replacement must not change `EvidenceSnapshot`, `SignalFrame`, `DecisionLedger`, `RunManifest`, or `ValidationResult`.
-
