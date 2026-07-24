@@ -42,19 +42,19 @@ This plan implements `openalpha-cn-v1-spec.md` in thin, independently verifiable
 
 ## Phase 3: Storage and providers
 
-- [ ] Task 3.1: Implement SQLite run and checkpoint repository.
-- [ ] Task 3.2: Implement Parquet event store and DuckDB point-in-time query.
-- [ ] Task 3.3: Define the shared provider contract and explicit failure model.
-- [ ] Task 3.4: Implement file provider for CSV, JSONL, JSON, and Parquet.
-- [ ] Task 3.5: Implement Tushare BYOT adapter.
-- [ ] Task 3.6: Implement optional AKShare research adapter.
+- [x] Task 3.1: Implement SQLite run and checkpoint repository.
+- [x] Task 3.2: Implement Parquet event store and DuckDB point-in-time query.
+- [x] Task 3.3: Define the shared provider contract and explicit failure model.
+- [x] Task 3.4: Implement file provider for CSV, JSONL, JSON, and Parquet.
+- [x] Task 3.5: Implement Tushare BYOT adapter.
+- [x] Task 3.6: Implement optional AKShare research adapter.
 
 ### Checkpoint 3
 
-- [ ] Provider contract suite passes for every enabled provider.
-- [ ] External-provider tests use frozen payloads and no real credentials.
-- [ ] Failed providers never appear as successful empty datasets.
-- [ ] Historical query returns only records visible at `as_of`.
+- [x] Provider contract suite passes for every enabled provider.
+- [x] External-provider tests use frozen payloads and no real credentials.
+- [x] Failed providers never appear as successful empty datasets.
+- [x] Historical query returns only records visible at `as_of`.
 
 ## Phase 4: Evidence vertical slice
 

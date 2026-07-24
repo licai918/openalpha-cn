@@ -14,8 +14,12 @@ OpenAlpha CN source code is licensed under MIT. That license does not automatica
 
 ## Data adapters
 
-- Tushare Pro requires a user-held account and Token. OpenAlpha CN does not redistribute credentials, service access, or bundled raw datasets.
-- AKShare code is available under its upstream license, while its documentation states that provided data is intended primarily for academic research. The adapter is optional and disabled by default.
+- Tushare Pro requires a user-held account and Token. Terms:
+  `https://tushare.pro/document/1?doc_id=405`. OpenAlpha CN does not redistribute
+  credentials, service access, or bundled raw datasets.
+- AKShare installation documentation:
+  `https://akshare.akfamily.xyz/installation.html`. The adapter is optional,
+  allowlisted, and disabled by default; upstream data rights remain source-specific.
 - Exchange, disclosure, news, portal, and commercial-provider data remain subject to their source-specific terms.
 
 Every incorporated third-party dependency and any copied or adapted source code must be recorded here with its source URL, locked version or commit, license, and modification notes before release.

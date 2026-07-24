@@ -25,6 +25,7 @@ dependencies = [
   "pydantic>=2.12,<3",
   "pytz>=2025.2",
   "typer>=0.21.0,<1",
+  "tzdata>=2025.2",
 ]
 
 [project.urls]
@@ -34,6 +35,11 @@ Issues = "https://github.com/ss8875/openalpha-cn/issues"
 
 [project.scripts]
 openalpha = "openalpha_cn.cli:main"
+
+[project.optional-dependencies]
+akshare = [
+    "akshare>=1.18.38,<2",
+]
 
 [dependency-groups]
 dev = [
