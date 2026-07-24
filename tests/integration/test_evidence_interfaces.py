@@ -188,6 +188,15 @@ def test_api_runs_research_from_structured_evidence(tmp_path: Path) -> None:
     assert response.json()["decision"]["final_action"] == "watch"
     assert response.json()["signal"]["evidence_ids"] == [built["items"][0]["evidence_id"]]
 
+    memory = client.get("/api/v1/memory/000001.SZ")
+    recovery = client.get("/api/v1/runs/api-golden-run/recovery")
+
+    assert memory.status_code == 200
+    assert memory.json()[0]["decision_id"] == response.json()["decision"]["decision_id"]
+    assert recovery.status_code == 200
+    assert recovery.json()["status"] == "succeeded"
+    assert recovery.json()["next_agent_index"] == 1
+
     validation = client.post(
         "/api/v1/backtests/validate",
         json={

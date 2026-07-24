@@ -23,8 +23,10 @@ from openalpha_cn.evidence.service import (
     parse_serialized_evidence,
 )
 from openalpha_cn.runtime.engine import ResearchEngine, ResearchRunRequest, ResearchRunResult
-from openalpha_cn.runtime.memory import InMemoryResearchMemory
+from openalpha_cn.runtime.memory import MemoryEntry
+from openalpha_cn.storage.memory import SQLiteResearchMemory
 from openalpha_cn.storage.parquet import ParquetEvidenceStore
+from openalpha_cn.storage.recovery import RunRecoveryState, SQLiteRecoveryStore
 from openalpha_cn.storage.sqlite import SQLiteRunRepository
 
 
@@ -165,7 +167,8 @@ def create_app(
     root.mkdir(parents=True, exist_ok=True)
     evidence_store = ParquetEvidenceStore(root / "evidence")
     run_repository = SQLiteRunRepository(root / "state.sqlite3")
-    memory = InMemoryResearchMemory()
+    memory = SQLiteResearchMemory(root / "state.sqlite3")
+    recovery_store = SQLiteRecoveryStore(root / "state.sqlite3")
     application = FastAPI(
         title="OpenAlpha CN API",
         version=__version__,
@@ -242,6 +245,19 @@ def create_app(
             clock=lambda: datetime.now(UTC),
         )
         return engine.run_cycle(request)
+
+    @application.get("/api/v1/memory/{subject}")
+    def memory_query(subject: str) -> tuple[MemoryEntry, ...]:
+        """Return durable decision-linked memory for one subject."""
+        return memory.list(subject=subject)
+
+    @application.get("/api/v1/runs/{run_id}/recovery")
+    def recovery_query(run_id: str) -> RunRecoveryState:
+        """Return node-level progress used to resume an interrupted run."""
+        state = recovery_store.get(run_id)
+        if state is None:
+            raise HTTPException(status_code=404, detail="Recovery state was not found.")
+        return state
 
     @application.post("/api/v1/backtests/replay")
     def replay(request: ReplayApiRequest) -> ReplayReport:

@@ -1,5 +1,6 @@
 """Shared deterministic research cycle used by live, replay, and backtest modes."""
 
+import hashlib
 import platform
 from collections.abc import Callable, Sequence
 from datetime import datetime
@@ -12,11 +13,13 @@ from openalpha_cn.agents.baseline import baseline_agents
 from openalpha_cn.decisions.risk import RiskGate
 from openalpha_cn.domain.decision import AgentDecision, DecisionLedger
 from openalpha_cn.domain.evidence import EvidenceSnapshot
+from openalpha_cn.domain.json_value import canonical_json_bytes
 from openalpha_cn.domain.run import ArtifactDigest, RunManifest, VersionRef
 from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.domain.time import ensure_aware
 from openalpha_cn.runtime.memory import MemoryEntry, ResearchMemory
 from openalpha_cn.runtime.router import AgentRouter
+from openalpha_cn.storage.recovery import RunRecoveryState, SQLiteRecoveryStore
 from openalpha_cn.storage.sqlite import SQLiteRunRepository
 
 
@@ -75,6 +78,7 @@ class ResearchEngine:
         agents: Sequence[ResearchAgent] | None = None,
         router: AgentRouter | None = None,
         risk_gate: RiskGate | None = None,
+        recovery_store: SQLiteRecoveryStore | None = None,
     ) -> None:
         self.repository = repository
         self.memory = memory
@@ -82,11 +86,11 @@ class ResearchEngine:
         self.agents = tuple(agents or baseline_agents())
         self.router = router or AgentRouter()
         self.risk_gate = risk_gate or RiskGate()
+        self.recovery_store = recovery_store or SQLiteRecoveryStore(repository.path)
 
     def run_cycle(self, request: ResearchRunRequest) -> ResearchRunResult:
         """Execute the same evidence-to-decision path for every run mode."""
         existing_manifest = self.repository.get_run(request.run_id)
-        run_time = existing_manifest.started_at if existing_manifest else ensure_aware(self.clock())
         context = AgentContext(
             run_id=request.run_id,
             subject=request.subject,
@@ -94,7 +98,19 @@ class ResearchEngine:
             evidence=request.evidence,
         )
         selected = self.router.route(agents=self.agents, evidence=request.evidence)
-        agent_results = tuple(agent.analyze(context) for agent in selected)
+        recovery = self._load_or_start_recovery(
+            request=request,
+            selected=selected,
+            started_at=(
+                existing_manifest.started_at if existing_manifest else ensure_aware(self.clock())
+            ),
+        )
+        run_time = existing_manifest.started_at if existing_manifest else recovery.started_at
+        agent_results = self._run_agents_with_recovery(
+            context=context,
+            selected=selected,
+            recovery=recovery,
+        )
         signal = self._aggregate(request=request, results=agent_results)
         risk_decision = self.risk_gate.evaluate(signal)
         final_action = self._final_action(signal=signal, risk_decision=risk_decision)
@@ -161,7 +177,119 @@ class ResearchEngine:
                 summary=f"{final_action}: {signal.direction} at confidence {signal.confidence:.2f}",
             )
         )
+        current_recovery = self.recovery_store.get(request.run_id)
+        if current_recovery is None:
+            raise RuntimeError(f"recovery state disappeared during run: {request.run_id}")
+        self.recovery_store.save(
+            self._updated_recovery(
+                current_recovery,
+                status="succeeded",
+                error_type=None,
+                updated_at=ensure_aware(self.clock()),
+            )
+        )
         return result
+
+    def _load_or_start_recovery(
+        self,
+        *,
+        request: ResearchRunRequest,
+        selected: tuple[ResearchAgent, ...],
+        started_at: datetime,
+    ) -> RunRecoveryState:
+        request_digest = hashlib.sha256(
+            canonical_json_bytes(request.model_dump(mode="json"))
+        ).hexdigest()
+        agent_ids = tuple(agent.agent_id for agent in selected)
+        graph_signature = hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "schema": "research-graph/v1",
+                    "agent_ids": agent_ids,
+                    "terminal": "risk-gate/v1",
+                }
+            )
+        ).hexdigest()
+        existing = self.recovery_store.get(request.run_id)
+        if existing is not None:
+            if existing.request_digest != request_digest:
+                raise RunConflictError(
+                    f"run_id conflicts with an immutable request: {request.run_id}"
+                )
+            if existing.graph_signature != graph_signature:
+                raise RunConflictError(
+                    f"run_id conflicts with the recovery graph signature: {request.run_id}"
+                )
+            return existing
+        state = RunRecoveryState(
+            run_id=request.run_id,
+            request_digest=request_digest,
+            graph_signature=graph_signature,
+            agent_ids=agent_ids,
+            next_agent_index=0,
+            status="running",
+            started_at=started_at,
+            updated_at=started_at,
+        )
+        self.recovery_store.save(state)
+        return state
+
+    def _run_agents_with_recovery(
+        self,
+        *,
+        context: AgentContext,
+        selected: tuple[ResearchAgent, ...],
+        recovery: RunRecoveryState,
+    ) -> tuple[AgentResult, ...]:
+        state = recovery
+        if state.status == "failed":
+            state = self._updated_recovery(
+                state,
+                status="running",
+                attempt_count=state.attempt_count + 1,
+                error_type=None,
+                updated_at=ensure_aware(self.clock()),
+            )
+            self.recovery_store.save(state)
+        results = list(state.completed_results)
+        for index in range(state.next_agent_index, len(selected)):
+            agent = selected[index]
+            try:
+                result = agent.analyze(context)
+            except Exception as error:
+                self.recovery_store.save(
+                    self._updated_recovery(
+                        state,
+                        status="failed",
+                        error_type=type(error).__name__,
+                        updated_at=ensure_aware(self.clock()),
+                    )
+                )
+                raise
+            if result.agent_id != agent.agent_id:
+                raise ValueError(
+                    f"agent result ID mismatch: expected {agent.agent_id}, got {result.agent_id}"
+                )
+            results.append(result)
+            state = self._updated_recovery(
+                state,
+                completed_results=tuple(results),
+                next_agent_index=index + 1,
+                status="running",
+                error_type=None,
+                updated_at=ensure_aware(self.clock()),
+            )
+            self.recovery_store.save(state)
+        return tuple(results)
+
+    @staticmethod
+    def _updated_recovery(
+        state: RunRecoveryState,
+        **updates: object,
+    ) -> RunRecoveryState:
+        payload = state.model_dump(mode="python", exclude_computed_fields=True)
+        payload.update(updates)
+        return RunRecoveryState.model_validate(payload)
 
     def _persist_idempotently(self, result: ResearchRunResult) -> None:
         existing_manifest = self.repository.get_run(result.manifest.run_id)

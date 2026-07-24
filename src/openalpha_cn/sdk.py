@@ -10,8 +10,10 @@ from openalpha_cn.domain.evidence import EvidenceSnapshot
 from openalpha_cn.evidence.service import build_file_evidence
 from openalpha_cn.providers.base import ProviderMetadata, utc_now
 from openalpha_cn.runtime.engine import ResearchEngine, ResearchRunRequest, ResearchRunResult
-from openalpha_cn.runtime.memory import InMemoryResearchMemory
+from openalpha_cn.runtime.memory import MemoryEntry
+from openalpha_cn.storage.memory import SQLiteResearchMemory
 from openalpha_cn.storage.parquet import ParquetEvidenceStore
+from openalpha_cn.storage.recovery import RunRecoveryState, SQLiteRecoveryStore
 from openalpha_cn.storage.sqlite import SQLiteRunRepository
 
 
@@ -29,7 +31,8 @@ class OpenAlphaSDK:
         self.clock = clock
         self.evidence_store = ParquetEvidenceStore(runtime_dir / "evidence")
         self.repository = SQLiteRunRepository(runtime_dir / "state.sqlite3")
-        self.memory = InMemoryResearchMemory()
+        self.memory = SQLiteResearchMemory(runtime_dir / "state.sqlite3")
+        self.recovery_store = SQLiteRecoveryStore(runtime_dir / "state.sqlite3")
 
     def health(self) -> dict[str, str]:
         """Return SDK and package readiness."""
@@ -71,6 +74,14 @@ class OpenAlphaSDK:
             clock=self.clock,
         )
         return engine.run_cycle(request)
+
+    def list_memory(self, *, subject: str) -> tuple[MemoryEntry, ...]:
+        """Return decision-linked research memory that survives restarts."""
+        return self.memory.list(subject=subject)
+
+    def get_recovery(self, run_id: str) -> RunRecoveryState | None:
+        """Inspect the durable node-level recovery state for one run."""
+        return self.recovery_store.get(run_id)
 
     def replay(
         self,

@@ -62,3 +62,13 @@ def test_sdk_imports_evidence_runs_research_and_queries_state(tmp_path: Path) ->
     assert research.decision.final_action == "watch"
     assert sdk.query_evidence(as_of=NOW, subject="000001.SZ") == evidence
     assert sdk.health() == {"status": "ok", "version": "1.0.0"}
+
+    reopened = OpenAlphaSDK(runtime_dir=tmp_path / "runtime", clock=lambda: NOW)
+    memory = reopened.list_memory(subject="000001.SZ")
+    recovery = reopened.get_recovery("sdk-golden-run")
+
+    assert len(memory) == 1
+    assert memory[0].decision_id == research.decision.decision_id
+    assert recovery is not None
+    assert recovery.status == "succeeded"
+    assert recovery.next_agent_index == 1
