@@ -119,17 +119,17 @@ This plan implements `openalpha-cn-v1-spec.md` in thin, independently verifiable
 - [x] Task 8.1: Complete Docker Compose and persistent-volume recovery tests.
 - [x] Task 8.2: Complete Windows/Linux CI, security, license, and packaging gates.
 - [x] Task 8.3: Complete Chinese/English documentation and release handoff.
-- [ ] Task 8.4: Publish source repository and `v1.0.0`.
-- [ ] Task 8.5: Publish ChainLin installer under `chainlin-desktop-v1.0.9`.
-- [ ] Task 8.6: Verify anonymous clone, container start, installer download, and checksums.
+- [x] Task 8.4: Publish source repository and `v1.0.0`.
+- [x] Task 8.5: Publish ChainLin installer under `chainlin-desktop-v1.0.9`.
+- [x] Task 8.6: Verify anonymous clone, container start, installer download, and checksums.
 
 ### Final checkpoint
 
-- [ ] All v1 specification success criteria pass.
-- [ ] All features have a unique destination and evidence.
-- [ ] `UNREVIEWED=0`; `UNKNOWN=0`.
-- [ ] No secret, user database, or unlicensed raw dataset is published.
-- [ ] Release handoff records commit SHA, tags, assets, sizes, hashes, CI, and known limitations.
+- [x] All v1 specification success criteria pass.
+- [x] All features have a unique destination and evidence.
+- [x] `UNREVIEWED=0`; `UNKNOWN=0`.
+- [x] No secret, user database, or unlicensed raw dataset is published.
+- [x] Release handoff records commit SHA, tags, assets, sizes, hashes, CI, and known limitations.
 
 ## Risk register
 
