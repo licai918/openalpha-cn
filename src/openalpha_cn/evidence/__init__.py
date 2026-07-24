@@ -6,6 +6,7 @@ from openalpha_cn.evidence.service import (
     EvidenceBuildResponse,
     build_evidence,
     build_file_evidence,
+    parse_serialized_evidence,
 )
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     "EvidenceBuilder",
     "build_evidence",
     "build_file_evidence",
+    "parse_serialized_evidence",
 ]

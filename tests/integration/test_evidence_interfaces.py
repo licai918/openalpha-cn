@@ -96,9 +96,66 @@ def test_cli_and_api_return_the_same_evidence_snapshot(tmp_path: Path) -> None:
     assert response.json()["items"][0]["evidence_id"].startswith("ev_")
 
 
-def test_api_exposes_health_and_versioned_openapi() -> None:
-    client = TestClient(create_app())
+def test_api_exposes_health_and_versioned_openapi(tmp_path: Path) -> None:
+    client = TestClient(create_app(runtime_dir=tmp_path / "runtime"))
 
     assert client.get("/health").json() == {"status": "ok", "version": "0.1.0"}
     schema = client.get("/openapi.json").json()
     assert "/api/v1/evidence/build" in schema["paths"]
+
+
+def test_api_persists_and_queries_built_evidence(tmp_path: Path) -> None:
+    source = tmp_path / "events.json"
+    write_source(source)
+    provider = FileProvider(path=source, metadata=metadata(), clock=lambda: AS_OF)
+    batch = provider.fetch(ProviderRequest(dataset="events", as_of=AS_OF))
+    client = TestClient(create_app(runtime_dir=tmp_path / "runtime"))
+
+    built = client.post(
+        "/api/v1/evidence/build",
+        json={
+            "metadata": metadata().model_dump(mode="json"),
+            "batch": batch.model_dump(mode="json", exclude_computed_fields=True),
+        },
+    )
+    queried = client.get(
+        "/api/v1/evidence",
+        params={"as_of": AS_OF.isoformat(), "subject": "000001.SZ"},
+    )
+
+    assert built.status_code == 200
+    assert queried.status_code == 200
+    assert queried.json() == built.json()
+
+
+def test_api_runs_research_from_structured_evidence(tmp_path: Path) -> None:
+    source = tmp_path / "events.json"
+    write_source(source)
+    provider = FileProvider(path=source, metadata=metadata(), clock=lambda: AS_OF)
+    batch = provider.fetch(ProviderRequest(dataset="events", as_of=AS_OF))
+    client = TestClient(create_app(runtime_dir=tmp_path / "runtime"))
+    built = client.post(
+        "/api/v1/evidence/build",
+        json={
+            "metadata": metadata().model_dump(mode="json"),
+            "batch": batch.model_dump(mode="json", exclude_computed_fields=True),
+        },
+    ).json()
+
+    response = client.post(
+        "/api/v1/research/run",
+        json={
+            "run_id": "api-golden-run",
+            "mode": "live",
+            "subject": "000001.SZ",
+            "as_of": AS_OF.isoformat(),
+            "evidence": built["items"],
+            "code_commit": "0123456789abcdef",
+            "config_digest": "e" * 64,
+            "random_seed": 7,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["decision"]["final_action"] == "watch"
+    assert response.json()["signal"]["evidence_ids"] == [built["items"][0]["evidence_id"]]

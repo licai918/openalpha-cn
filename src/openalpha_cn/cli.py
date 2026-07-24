@@ -12,8 +12,11 @@ import typer
 import uvicorn
 
 from openalpha_cn import __version__
-from openalpha_cn.evidence.service import build_file_evidence
+from openalpha_cn.backtest.replay import ReplayCorpus
+from openalpha_cn.evidence.service import build_file_evidence, parse_serialized_evidence
 from openalpha_cn.providers.base import ProviderMetadata
+from openalpha_cn.runtime.engine import ResearchRunRequest
+from openalpha_cn.sdk import OpenAlphaSDK
 
 app = typer.Typer(
     name="openalpha",
@@ -22,6 +25,10 @@ app = typer.Typer(
 )
 evidence_app = typer.Typer(help="Build and inspect point-in-time evidence.")
 app.add_typer(evidence_app, name="evidence")
+research_app = typer.Typer(help="Run evidence-linked multi-agent research.")
+app.add_typer(research_app, name="research")
+replay_app = typer.Typer(help="Validate frozen point-in-time replay corpora.")
+app.add_typer(replay_app, name="replay")
 
 
 class Redistribution(StrEnum):
@@ -30,6 +37,14 @@ class Redistribution(StrEnum):
     allowed = "allowed"
     restricted = "restricted"
     unknown = "unknown"
+
+
+class RunMode(StrEnum):
+    """Supported shared research-cycle modes."""
+
+    live = "live"
+    replay = "replay"
+    backtest = "backtest"
 
 
 @app.command()
@@ -103,6 +118,57 @@ def evidence_build(
         metadata=metadata,
     )
     typer.echo(response.model_dump_json())
+
+
+@research_app.command("run")
+def research_run(
+    evidence_path: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
+    runtime_dir: Annotated[Path, typer.Option("--runtime-dir")] = Path("./runtime"),
+    run_id: Annotated[str, typer.Option("--run-id")] = "local-run",
+    mode: Annotated[RunMode, typer.Option("--mode")] = RunMode.live,
+    subject: Annotated[str, typer.Option("--subject")] = "",
+    as_of: Annotated[str, typer.Option("--as-of")] = "",
+    code_commit: Annotated[str, typer.Option("--code-commit")] = "development",
+    config_digest: Annotated[str, typer.Option("--config-digest")] = "0" * 64,
+    random_seed: Annotated[int, typer.Option("--random-seed")] = 7,
+) -> None:
+    """Run multi-agent research from serialized EvidenceSnapshot items."""
+    raw = json.loads(evidence_path.read_text(encoding="utf-8"))
+    raw_items = raw.get("items") if isinstance(raw, dict) else raw
+    evidence = parse_serialized_evidence(raw_items)
+    point_in_time = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
+    sdk = OpenAlphaSDK(runtime_dir=runtime_dir)
+    result = sdk.run_research(
+        ResearchRunRequest(
+            run_id=run_id,
+            mode=mode.value,
+            subject=subject,
+            as_of=point_in_time,
+            evidence=evidence,
+            code_commit=code_commit,
+            config_digest=config_digest,
+            random_seed=random_seed,
+        )
+    )
+    typer.echo(result.model_dump_json())
+
+
+@replay_app.command("run")
+def replay_run(
+    corpus_path: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
+    runtime_dir: Annotated[Path, typer.Option("--runtime-dir")] = Path("./runtime"),
+    code_commit: Annotated[str, typer.Option("--code-commit")] = "development",
+    config_digest: Annotated[str, typer.Option("--config-digest")] = "0" * 64,
+    random_seed: Annotated[int, typer.Option("--random-seed")] = 7,
+) -> None:
+    """Run and validate a frozen replay corpus."""
+    report = OpenAlphaSDK(runtime_dir=runtime_dir).replay(
+        corpus=ReplayCorpus.load(corpus_path),
+        code_commit=code_commit,
+        config_digest=config_digest,
+        random_seed=random_seed,
+    )
+    typer.echo(report.model_dump_json())
 
 
 @app.command()
