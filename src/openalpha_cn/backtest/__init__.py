@@ -7,6 +7,7 @@ from openalpha_cn.backtest.execution import (
     ExecutionResult,
     MarketBar,
 )
+from openalpha_cn.backtest.validation import OutcomeObservation, OutcomeValidator
 
 __all__ = [
     "AShareExecutionPolicy",
@@ -14,4 +15,6 @@ __all__ = [
     "ExecutionRequest",
     "ExecutionResult",
     "MarketBar",
+    "OutcomeObservation",
+    "OutcomeValidator",
 ]
