@@ -1,5 +1,17 @@
 """Evidence normalization and snapshot construction."""
 
 from openalpha_cn.evidence.builder import EvidenceBuilder
+from openalpha_cn.evidence.service import (
+    EvidenceBuildRequest,
+    EvidenceBuildResponse,
+    build_evidence,
+    build_file_evidence,
+)
 
-__all__ = ["EvidenceBuilder"]
+__all__ = [
+    "EvidenceBuildRequest",
+    "EvidenceBuildResponse",
+    "EvidenceBuilder",
+    "build_evidence",
+    "build_file_evidence",
+]

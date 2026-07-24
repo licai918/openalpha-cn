@@ -22,10 +22,12 @@ classifiers = [
 ]
 dependencies = [
   "duckdb>=1.5,<2",
+  "fastapi>=0.135,<1",
   "pydantic>=2.12,<3",
   "pytz>=2025.2",
   "typer>=0.21.0,<1",
   "tzdata>=2025.2",
+  "uvicorn>=0.41,<1",
 ]
 
 [project.urls]
@@ -43,6 +45,7 @@ akshare = [
 
 [dependency-groups]
 dev = [
+  "httpx2>=2.9.0",
   "mypy>=1.19.0,<2",
   "pytest>=9.0.0,<10",
   "pytest-cov>=7.0.0,<8",

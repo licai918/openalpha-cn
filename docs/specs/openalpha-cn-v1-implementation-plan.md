@@ -58,16 +58,16 @@ This plan implements `openalpha-cn-v1-spec.md` in thin, independently verifiable
 
 ## Phase 4: Evidence vertical slice
 
-- [ ] Task 4.1: Normalize limit-up, broken-board, and consecutive-board events.
-- [ ] Task 4.2: Normalize disclosure, theme, catalyst, and capital observations.
-- [ ] Task 4.3: Build evidence snapshots with provenance and quality flags.
-- [ ] Task 4.4: Expose snapshot creation through CLI and REST API.
+- [x] Task 4.1: Normalize limit-up, broken-board, and consecutive-board events.
+- [x] Task 4.2: Normalize disclosure, theme, catalyst, and capital observations.
+- [x] Task 4.3: Build evidence snapshots with provenance and quality flags.
+- [x] Task 4.4: Expose snapshot creation through CLI and REST API.
 
 ### Checkpoint 4
 
-- [ ] A user can import frozen events and create a traceable evidence snapshot.
-- [ ] Every evidence item has source, time, URI policy, and content hash.
-- [ ] API and CLI return the same structured snapshot.
+- [x] A user can import frozen events and create a traceable evidence snapshot.
+- [x] Every evidence item has source, time, URI policy, and content hash.
+- [x] API and CLI return the same structured snapshot.
 
 ## Phase 5: Research and decision vertical slice
 
