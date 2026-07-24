@@ -1,16 +1,18 @@
 {
   "category_distribution": {
     "agent": 9,
-    "backtest": 9,
+    "backtest": 11,
+    "batch": 4,
     "boundary": 5,
-    "decision": 7,
+    "decision": 8,
     "evidence": 9,
     "interface": 8,
-    "model": 1,
+    "model": 4,
     "operations": 11,
-    "provider": 6,
+    "product": 3,
+    "provider": 7,
     "recovery": 2,
-    "storage": 5,
+    "storage": 6,
     "temporal": 3
   },
   "generated_on": "2026-07-24",
@@ -22,15 +24,16 @@
   },
   "schema_version": "openalpha-feature-coverage/v1",
   "status_distribution": {
+    "ADAPTER_COMPLETE": 1,
     "DEFERRED": 1,
-    "ENHANCED_REPLACEMENT": 16,
+    "ENHANCED_REPLACEMENT": 20,
     "EXCLUDED": 4,
-    "NATIVE_COMPLETE": 54
+    "NATIVE_COMPLETE": 64
   },
   "totals": {
-    "all_features": 75,
-    "true_completed_features": 70,
-    "true_completion_rate_pct": 93.33,
+    "all_features": 90,
+    "true_completed_features": 85,
+    "true_completion_rate_pct": 94.44,
     "unknown": 0,
     "unreviewed": 0
   }

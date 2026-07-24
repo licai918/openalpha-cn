@@ -6,6 +6,18 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Added
 
+- Durable bounded-concurrency batch research with progress events, cooperative
+  cancellation, item retry, and restart recovery.
+- Model capability registry, classified transient retry, and SQLite token/cost
+  usage accounting.
+- Immutable portfolio transition ledger and multi-day return, benchmark,
+  turnover, capacity, and exposure reports.
+- Contract-first ChainLin BYOK data Provider with PIT/revision clocks, Bearer
+  authentication, client rate limiting, and explicit failure categories.
+- Ablatable bull/bear and three-perspective risk committee.
+- Event-study CAR, t-statistic, and deterministic Bootstrap confidence interval.
+- Structured screening, durable watchlists, and immutable report center through
+  REST and Python SDK interfaces.
 - Durable per-agent recovery with request-digest and graph-signature isolation.
 - SQLite-backed decision memory exposed through the SDK and HTTP API.
 - Deterministic A-share portfolio accounting with cash, T+1/FIFO lots, costs,
@@ -17,8 +29,8 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Changed
 
-- The feature ledger now contains 75 terminally reviewed capabilities, with 70
-  supported by local source and test evidence (`93.33%` true completion,
+- The feature ledger now contains 90 terminally reviewed capabilities, with 85
+  supported by local source and test evidence (`94.44%` true completion,
   `UNREVIEWED=0`, `UNKNOWN=0`).
 
 ## [1.0.0] - 2026-07-24

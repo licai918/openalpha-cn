@@ -4,8 +4,8 @@
 
 ## 对账结论
 
-- 功能总数: 75
-- 当前真实完成: 70 (93.33%)
+- 功能总数: 90
+- 当前真实完成: 85 (94.44%)
 - `UNREVIEWED=0`
 - `UNKNOWN=0`
 
@@ -13,10 +13,11 @@
 
 | 状态 | 数量 |
 |---|---:|
+| `ADAPTER_COMPLETE` | 1 |
 | `DEFERRED` | 1 |
-| `ENHANCED_REPLACEMENT` | 16 |
+| `ENHANCED_REPLACEMENT` | 20 |
 | `EXCLUDED` | 4 |
-| `NATIVE_COMPLETE` | 54 |
+| `NATIVE_COMPLETE` | 64 |
 
 ## 功能明细
 
@@ -97,6 +98,21 @@
 | `OA-BOUND-003` | boundary | No hosted commercial data proxy | `EXCLUDED` | `docs/data/providers.zh-CN.md#Redistribution` | `tests/unit/test_repository_assets.py` |
 | `OA-BOUND-004` | boundary | No embedded provider secrets | `EXCLUDED` | `SECURITY.md#Credential-handling` | `tests/unit/test_repository_assets.py` |
 | `OA-BOUND-005` | boundary | Graphical agent flow builder | `DEFERRED` | `docs/specs/openalpha-cn-v1-spec.md#Out-of-scope` | `docs/specs/openalpha-cn-v1-spec.md` |
+| `OA-BATCH-001` | batch | Durable batch task queue | `NATIVE_COMPLETE` | `src/openalpha_cn/runtime/batch.py#BatchResearchTask;src/openalpha_cn/storage/batch.py#SQLiteBatchTaskStore` | `tests/integration/test_batch_research.py` |
+| `OA-BATCH-002` | batch | Bounded batch concurrency | `NATIVE_COMPLETE` | `src/openalpha_cn/runtime/batch.py#BatchResearchService` | `tests/integration/test_batch_research.py` |
+| `OA-BATCH-003` | batch | Batch progress and cancellation | `NATIVE_COMPLETE` | `src/openalpha_cn/runtime/batch.py#BatchProgressEvent` | `tests/integration/test_batch_research.py` |
+| `OA-BATCH-004` | batch | Interrupted batch recovery | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/storage/batch.py#SQLiteBatchTaskStore` | `tests/integration/test_batch_research.py` |
+| `OA-MODEL-002` | model | Model capability registry | `NATIVE_COMPLETE` | `src/openalpha_cn/models/governance.py#ModelRegistry` | `tests/unit/models/test_model_governance.py` |
+| `OA-MODEL-003` | model | Classified model retry | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/models/openai_compatible.py#OpenAICompatibleProvider;src/openalpha_cn/models/governance.py#ModelRetryPolicy` | `tests/unit/models/test_model_governance.py` |
+| `OA-MODEL-004` | model | Model usage and cost ledger | `NATIVE_COMPLETE` | `src/openalpha_cn/models/governance.py#SQLiteModelUsageStore` | `tests/unit/models/test_model_governance.py` |
+| `OA-PROV-007` | provider | ChainLin contract-first provider | `ADAPTER_COMPLETE` | `src/openalpha_cn/providers/chainlin.py#ChainLinDataProvider` | `tests/contract/providers/test_chainlin_provider.py` |
+| `OA-DEC-008` | decision | Ablatable bull bear and risk committee | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/agents/committee.py#DeliberationCommittee` | `tests/unit/agents/test_deliberation_committee.py;tests/integration/test_advanced_research_interfaces.py` |
+| `OA-BT-010` | backtest | Event-study statistical inference | `NATIVE_COMPLETE` | `src/openalpha_cn/backtest/event_study.py#EventStudy` | `tests/unit/backtest/test_event_study.py;tests/integration/test_advanced_research_interfaces.py` |
+| `OA-BT-011` | backtest | Multi-day portfolio report | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/backtest/multi_day.py#PortfolioBacktestRunner` | `tests/integration/test_portfolio_ledger_backtest.py` |
+| `OA-DATA-006` | storage | Immutable portfolio transition ledger | `NATIVE_COMPLETE` | `src/openalpha_cn/storage/portfolio.py#SQLitePortfolioLedger` | `tests/integration/test_portfolio_ledger_backtest.py;tests/integration/test_portfolio_interfaces.py` |
+| `OA-PRODUCT-001` | product | Structured research screening | `NATIVE_COMPLETE` | `src/openalpha_cn/product/research.py#ResearchScreener` | `tests/integration/test_research_product.py` |
+| `OA-PRODUCT-002` | product | Durable watchlist | `NATIVE_COMPLETE` | `src/openalpha_cn/storage/product.py#SQLiteWatchlistStore` | `tests/integration/test_research_product.py` |
+| `OA-PRODUCT-003` | product | Immutable report center | `NATIVE_COMPLETE` | `src/openalpha_cn/product/research.py#ResearchReportFactory;src/openalpha_cn/storage/product.py#SQLiteReportStore` | `tests/integration/test_research_product.py` |
 
 ## 边界
 

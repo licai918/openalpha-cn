@@ -31,6 +31,14 @@ filesystem path. Local file access remains a CLI responsibility.
 ## Research, replay, and attribution
 
 - `POST /api/v1/research/run` executes the shared research core from verified evidence.
+- `POST /api/v1/research/batches` queues bounded concurrent research;
+  `GET /api/v1/research/batches/{batch_id}` and `/events` expose durable state
+  and progress; `/cancel` and `/retry` are explicit control operations.
+- `POST /api/v1/research/deliberate` returns evidence-linked bull/bear cases,
+  three risk perspectives, and an ablation delta.
+- `POST /api/v1/screen` filters verified research results; `GET/POST
+  /api/v1/watchlist` manages the local observation pool; `GET/POST
+  /api/v1/reports` manages immutable generated reports.
 - `GET /api/v1/memory/{subject}` returns durable decision-linked research memory.
 - `GET /api/v1/runs/{run_id}/recovery` exposes the durable node checkpoint used
   to resume an interrupted run; an unknown run returns `404`.
@@ -38,6 +46,11 @@ filesystem path. Local file access remains a CLI responsibility.
 - `POST /api/v1/portfolio/execute` applies one deterministic A-share portfolio
   transition, including cash, T+1, board-lot, suspension, price-limit, fee, FIFO,
   single-position, and total-exposure checks.
+- `GET /api/v1/portfolio/ledger` lists immutable accepted/rejected transitions.
+- `POST /api/v1/backtests/portfolio` returns multi-day return, benchmark,
+  active return, turnover, capacity, and exposure attribution.
+- `POST /api/v1/backtests/event-study` computes CAR, t-statistic, and a seeded
+  Bootstrap confidence interval.
 - `POST /api/v1/backtests/validate` accepts a previously returned research result and a future outcome observation, verifies content-derived IDs, and returns reconciled attribution.
 
 The portfolio endpoint is intentionally stateless: callers submit the immutable

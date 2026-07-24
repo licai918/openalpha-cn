@@ -29,11 +29,11 @@ MIT 项目。本项目只对其功能行为做独立实现和对账。
 |---|---|---|---|---|
 | 多角色研究 | 四类分析师、多空辩论、交易员、三方风险讨论、组合经理 | 19 类投资/因子 Agent、风险经理、组合经理 | 延续 TradingAgents 图并增加中国市场分析 | 已有证据路由、三类 A 股基线 Agent、结构化模型 Agent；未原样复制全部人格 |
 | Graph/Router | LangGraph 条件路由、辩论轮次、SQLite checkpoint | v1 并行 Agent 汇总；v2 基金周期仍为 WIP | 条件图、工具循环上限和中文流程 | OpenAlpha 自有确定性 `run_cycle`，新增按节点恢复、请求摘要和图签名隔离 |
-| 数据 | 海外行情、新闻、社交、宏观、多 Provider | Financial Datasets 的价格、财务、新闻、内部人交易 | Tushare、AKShare、BaoStock、Yahoo、Finnhub、多级缓存 | A 股事件证据、文件/Tushare/AKShare Provider、四时钟 PIT；链邻 API 仍是规划接入 |
+| 数据 | 海外行情、新闻、社交、宏观、多 Provider | Financial Datasets 的价格、财务、新闻、内部人交易 | Tushare、AKShare、BaoStock、Yahoo、Finnhub、多级缓存 | A 股事件证据、文件/Tushare/AKShare、链邻合同 Provider 与四时钟 PIT |
 | 模型 | 多家云模型、Ollama、OpenAI-compatible | 多家模型及结构化调用 | DeepSeek、Qwen、Google、OpenAI 等配置中心 | 新增安全 BYOK 的 OpenAI-compatible Provider；SDK 可注入自定义 Agent |
 | 决策与组合 | 研究结论、风险辩论、组合经理 | 权重、订单、组合、long/short 回测 | 研究报告和纸面账户接口 | `SignalFrame`/`DecisionLedger`/风险门；新增现金、持仓批次、T+1、FIFO、费用与敞口硬限制 |
 | 记忆与恢复 | 决策日志、反思记忆、节点 checkpoint/resume | v1 主要为单次运行；v2/app 有运行持久化 WIP | Chroma/Mongo/Redis、任务状态与报告 | 新增 SQLite 持久记忆与节点级恢复；不可变决策账本继续保留 |
-| 用户产品面 | 交互 CLI | CLI、回测 CLI、WIP Flow Web | 登录、批量分析、队列、SSE/WebSocket、筛选、自选、报告、调度、缓存/数据库/日志管理 | REST、SDK、CLI、React 工作台；批量任务和管理中心仍待补 |
+| 用户产品面 | 交互 CLI | CLI、回测 CLI、WIP Flow Web | 登录、批量分析、队列、SSE/WebSocket、筛选、自选、报告、调度、缓存/数据库/日志管理 | REST、SDK、CLI、React 工作台、持久批量任务、筛选、观察池和报告中心 |
 | 质量与安全 | CI、测试、路径加固、结构化输出 | v1 回测测试较完整；app/v2 标注 WIP | 大量测试/调试脚本，但 GitHub Actions 主要做镜像发布与上游同步 | Linux/Windows、浏览器、容器恢复、安全与发布扫描均为必需检查 |
 
 上游源码证据示例：
@@ -102,3 +102,21 @@ OpenAlpha CN 不以 Agent 数量或页面数量取胜，而以以下可验收指
 - TradingAgents-CN 专有许可的后端/前端源码；
 - AI Hedge Fund `app/`、`v2/` 中没有稳定测试证据的 WIP 界面；
 - 只增加人格名称、但没有独立数据、决策权或消融增量的 Agent。
+
+## 2026-07-24 后续补齐结果
+
+上述 P0/P1 中的十大能力已经作为可测试增量落地：
+
+1. 批量任务、并发、进度、取消、重试和重启恢复；
+2. 模型能力表、分类退避、Token/成本记录；
+3. 组合、订单与成交不可变 Ledger；
+4. 链邻 API 合同、认证、PIT/修订、限流和合约测试；
+5. 可消融 Bull/Bear 与三视角风险委员会；
+6. CAR、t 统计量和 Bootstrap 置信区间；
+7. 结构化股票筛选；
+8. 持久观察池；
+9. 内容寻址报告中心；
+10. 多日组合、基准、换手、容量和暴露归因。
+
+剩余 `DEFERRED` 只有任意 Agent 图形化编排器；它仍不计入完成率，因为当前没有
+必要用一个缺少安全 Schema 的自由拖拽界面替代已经稳定的显式 Graph 合同。

@@ -1,6 +1,6 @@
 # 当前交接入口
 
-当前开发交接：[`release/handoff-main-20260724.md`](release/handoff-main-20260724.md)
+当前开发交接：[`release/handoff-main-20260724-ten-capabilities.md`](release/handoff-main-20260724-ten-capabilities.md)
 
 维护者依次读取：
 

@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ss8875/openalpha-cn/docs/api/chainlin-data-v1.schema.json",
+  "title": "ChainLin Data API response v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "records"],
+  "properties": {
+    "schema_version": {"const": "chainlin-data/v1"},
+    "no_data_reason": {"type": "string", "minLength": 1},
+    "records": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "subject",
+          "kind",
+          "event_time",
+          "available_time",
+          "revision_time",
+          "summary",
+          "payload"
+        ],
+        "properties": {
+          "subject": {"type": "string", "minLength": 1, "maxLength": 128},
+          "kind": {"type": "string", "minLength": 1, "maxLength": 64},
+          "event_time": {"type": "string", "format": "date-time"},
+          "available_time": {"type": "string", "format": "date-time"},
+          "revision_time": {"type": "string", "format": "date-time"},
+          "source_uri": {"type": ["string", "null"], "maxLength": 2048},
+          "summary": {"type": "string", "minLength": 1, "maxLength": 4000},
+          "payload": {"type": "object"}
+        }
+      }
+    }
+  }
+}

@@ -20,7 +20,8 @@ OpenAlpha CN provides four-clock point-in-time evidence, A-share event semantics
 deterministic baseline agents, a secure OpenAI-compatible BYOK model boundary,
 typed signals and decisions, durable per-agent resume and research memory,
 A-share execution and portfolio constraints, same-path replay, reconciled
-attribution, REST, Python SDK, CLI, and a responsive research workbench.
+attribution, durable batch research, a ChainLin contract Provider, screening,
+watchlists, reports, REST, Python SDK, CLI, and a responsive research workbench.
 
 ## Prefer a ready-to-use Windows application?
 
@@ -40,9 +41,13 @@ OpenAlpha CN competes on verifiability rather than the number of agent personas:
 - content-addressed evidence and strict anti-look-ahead rules;
 - deterministic operation without an LLM, plus schema validation and bounded retries when a model is used;
 - durable node checkpoints that reject changed requests or graph signatures;
+- bounded concurrent batches with progress, cancellation, retry, and restart recovery;
+- classified model retry plus persistent token and configured-cost accounting;
 - one research core shared by live, replay, and backtest modes;
 - A-share T+1, board lot, suspension, limit-lock, and transaction-cost constraints;
 - immutable cash/lot/mark/fee/PnL portfolio transitions with exposure clamps;
+- multi-day portfolio reports and event-study significance inference;
+- ablatable bull/bear and three-perspective risk committee;
 - evidence-linked decisions and reconciled rule/factor/agent attribution.
 
 The project accepts user-owned CSV, JSON, JSONL, and Parquet data, BYOT Tushare, and an optional constrained AKShare adapter. It does not redistribute commercial raw datasets or expose a hosted data resale proxy.

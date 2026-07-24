@@ -27,12 +27,16 @@
 - **确定性回放**：内置 60 个交易日、300 个代表性事件的冻结语料，验证结果一致性和已知前视违规。
 - **结果可解释**：统一计入 A 股交易约束与成本，并提供规则、因子和智能体归因。
 - **组合账本**：维护现金、持仓批次、估值、费用和已实现盈亏，并对单仓与总敞口执行硬限制。
+- **多日组合报告**：统一输出收益、基准、主动收益、换手、最大订单容量和标的暴露归因。
+- **事件统计检验**：提供 CAR、t 统计量和可复现的 Bootstrap 置信区间，不用单条收益曲线代替显著性。
 
 ### 🔌 开放的数据与使用接口
 
 - **合规数据接入**：支持用户自有 CSV、JSON、JSONL、Parquet，用户自带 Token 的 Tushare Pro，以及默认关闭的可选 AKShare Adapter。
 - **失败必须显式**：Provider 统一声明凭据、来源、许可、时效、限流与失败语义，禁止把数据错误伪装成“空结果成功”。
 - **多入口一致**：同一能力通过 REST API、Python SDK、CLI 和响应式 React 研究工作台开放。
+- **批量任务中心**：任务、并发上限、逐项进度、取消、重试和重启恢复均持久化。
+- **研究产品接口**：提供结构化筛选、观察池和内容寻址报告中心。
 
 ### 🛡️ 可复现的工程底座
 
@@ -44,7 +48,7 @@
 
 OpenAlpha CN 将数据接入、时间点证据、多智能体研判、风险决策、回放验证和多端使用串联为完整研究闭环。下面五张图按实际使用顺序展示系统如何工作。
 
-**链邻数据接口 API** 将作为规划中的统一数据入口，目标是替代分散的第三方接口，为 A 股涨停、题材、资金和行情研究提供更及时、口径更一致的数据；完成适配与验证后再作为默认 Provider 启用。
+**链邻数据接口 API** 已具备合同优先的 BYOK Provider，统一约束 Bearer 认证、四时钟 PIT、数据修订、客户端限流和失败分类。用户配置真实服务地址、Token 与数据授权后即可启用；仓库不内置或转售链邻商业数据。
 
 五张图共用同一条“五脑区导航”，依次组成 OpenAlpha CN 的 **A 股研究大脑**：
 
@@ -252,9 +256,13 @@ OpenAlpha CN 整合 TradingAgents 和 AI Hedge Fund 的优势，接入 A 股数�
 | 构建/查询证据 | `POST /api/v1/evidence/build` / `GET /api/v1/evidence` |
 | 市场事件/题材 | `GET /api/v1/market/events` / `GET /api/v1/themes` |
 | 多智能体研究 | `POST /api/v1/research/run` |
+| 批量研究与进度 | `POST /api/v1/research/batches` / `GET /api/v1/research/batches/{batch_id}/events` |
+| 多空辩论与风险委员会 | `POST /api/v1/research/deliberate` |
+| 筛选、观察池、报告 | `POST /api/v1/screen` / `GET /api/v1/watchlist` / `GET /api/v1/reports` |
 | 持久研究记忆 / 运行恢复 | `GET /api/v1/memory/{subject}` / `GET /api/v1/runs/{run_id}/recovery` |
 | 冻结语料回放 | `POST /api/v1/backtests/replay` |
 | A 股组合账本 | `POST /api/v1/portfolio/execute` |
+| 多日组合 / 事件研究 | `POST /api/v1/backtests/portfolio` / `POST /api/v1/backtests/event-study` |
 | 结果与归因 | `POST /api/v1/backtests/validate` |
 | OpenAPI | `GET /docs` / `GET /openapi.json` |
 
