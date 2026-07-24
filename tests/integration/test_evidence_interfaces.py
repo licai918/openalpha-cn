@@ -1,7 +1,8 @@
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
@@ -159,3 +160,30 @@ def test_api_runs_research_from_structured_evidence(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert response.json()["decision"]["final_action"] == "watch"
     assert response.json()["signal"]["evidence_ids"] == [built["items"][0]["evidence_id"]]
+
+    validation = client.post(
+        "/api/v1/backtests/validate",
+        json={
+            "research": response.json(),
+            "observation": {
+                "observation_start": AS_OF.isoformat(),
+                "observation_end": (AS_OF + timedelta(days=5)).isoformat(),
+                "start_price": 10.0,
+                "end_price": 11.0,
+                "benchmark_return": 0.02,
+                "transaction_cost": 0.005,
+                "data_quality_notes": ["Synthetic outcome."],
+            },
+        },
+    )
+
+    assert validation.status_code == 200
+    payload = validation.json()
+    assert payload["signal_id"] == response.json()["signal"]["signal_id"]
+    assert payload["decision_id"] == response.json()["decision"]["decision_id"]
+    assert payload["net_active_return"] == pytest.approx(0.075)
+    assert {term["category"] for term in payload["attribution"]} == {
+        "rule",
+        "factor",
+        "agent",
+    }

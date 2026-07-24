@@ -20,6 +20,8 @@ htmlcov/
 # Node
 node_modules/
 web/dist/
+web/*.tsbuildinfo
+web/vite.config.js
 playwright-report/
 test-results/
 

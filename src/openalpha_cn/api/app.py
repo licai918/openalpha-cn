@@ -5,12 +5,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from openalpha_cn import __version__
 from openalpha_cn.backtest.replay import ReplayCorpus, ReplayReport, ReplayRunner
+from openalpha_cn.backtest.validation import OutcomeObservation, OutcomeValidator
+from openalpha_cn.domain.validation import ValidationResult
 from openalpha_cn.evidence.service import (
     EvidenceBuildRequest,
     EvidenceBuildResponse,
@@ -44,6 +46,46 @@ class ResearchApiRequest(ResearchRunRequest):
             return parse_serialized_evidence(value)
         except ValueError:
             return value
+
+
+class OutcomeApiRequest(BaseModel):
+    """A serialized research result plus its later observed outcome."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    research: dict[str, Any]
+    observation: OutcomeObservation
+
+
+def _parse_research_result(payload: dict[str, Any]) -> ResearchRunResult:
+    """Rebuild a strict result while verifying its content-derived identifiers."""
+    clean = {**payload}
+    claimed_signal_id = clean.get("signal", {}).get("signal_id")
+    claimed_decision_id = clean.get("decision", {}).get("decision_id")
+
+    signal = {**clean["signal"]}
+    signal.pop("signal_id", None)
+    clean["signal"] = signal
+
+    decision = {**clean["decision"]}
+    decision.pop("decision_id", None)
+    clean["decision"] = decision
+
+    agent_results = []
+    for item in clean.get("agent_results", []):
+        agent = {**item}
+        agent_signal = {**agent["signal"]}
+        agent_signal.pop("signal_id", None)
+        agent["signal"] = agent_signal
+        agent_results.append(agent)
+    clean["agent_results"] = agent_results
+
+    result = ResearchRunResult.model_validate(clean)
+    if claimed_signal_id != result.signal.signal_id:
+        raise ValueError("research signal_id does not match its content")
+    if claimed_decision_id != result.decision.decision_id:
+        raise ValueError("research decision_id does not match its content")
+    return result
 
 
 def create_app(*, runtime_dir: Path | None = None) -> FastAPI:
@@ -135,6 +177,18 @@ def create_app(*, runtime_dir: Path | None = None) -> FastAPI:
             random_seed=request.random_seed,
         )
         return runner.run(corpus=request.corpus, state_path=root / "api-replay.sqlite3")
+
+    @application.post("/api/v1/backtests/validate")
+    def validate_outcome(request: OutcomeApiRequest) -> ValidationResult:
+        """Validate an observed outcome and reconcile rule/factor/agent attribution."""
+        try:
+            research = _parse_research_result(request.research)
+        except (KeyError, TypeError, ValueError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return OutcomeValidator().validate(
+            research=research,
+            observation=request.observation,
+        )
 
     return application
 

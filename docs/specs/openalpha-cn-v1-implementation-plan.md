@@ -101,18 +101,18 @@ This plan implements `openalpha-cn-v1-spec.md` in thin, independently verifiable
 
 ## Phase 7: SDK, API, CLI, and web
 
-- [ ] Task 7.1: Stabilize OpenAPI and Python SDK interfaces.
-- [ ] Task 7.2: Implement market/event/theme/evidence/research/backtest endpoints.
-- [ ] Task 7.3: Implement the research workbench shell and health/data-status view.
-- [ ] Task 7.4: Implement evidence inspection and research-run flow.
-- [ ] Task 7.5: Implement decision, replay, and attribution views.
+- [x] Task 7.1: Stabilize OpenAPI and Python SDK interfaces.
+- [x] Task 7.2: Implement market/event/theme/evidence/research/backtest endpoints.
+- [x] Task 7.3: Implement the research workbench shell and health/data-status view.
+- [x] Task 7.4: Implement evidence inspection and research-run flow.
+- [x] Task 7.5: Implement decision, replay, and attribution views.
 
 ### Checkpoint 7
 
-- [ ] API, SDK, CLI, and web complete the same golden flow.
-- [ ] Browser console is clean.
-- [ ] Loading, error, stale-data, and insufficient-evidence states are visible.
-- [ ] Critical Playwright flow passes.
+- [x] API, SDK, CLI, and web complete the same golden flow.
+- [x] Browser console is clean.
+- [x] Loading, error, stale-data, and insufficient-evidence states are visible.
+- [x] Critical Playwright flow passes.
 
 ## Phase 8: Delivery and publication
 
