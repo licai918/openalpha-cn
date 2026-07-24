@@ -1,11 +1,8 @@
 """Immutable, content-addressed evidence contracts."""
 
-import json
-from collections.abc import Mapping
 from datetime import datetime
 from hashlib import sha256
-from types import MappingProxyType
-from typing import Literal, Self, cast
+from typing import Literal, Self
 
 from pydantic import (
     BaseModel,
@@ -17,33 +14,8 @@ from pydantic import (
     model_validator,
 )
 
+from openalpha_cn.domain.json_value import canonical_json_bytes, freeze_json, thaw_json
 from openalpha_cn.domain.time import Timeline, is_visible_at
-
-
-def _freeze(value: JsonValue) -> object:
-    if isinstance(value, dict):
-        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
-    if isinstance(value, list):
-        return tuple(_freeze(item) for item in value)
-    return value
-
-
-def _thaw(value: object) -> JsonValue:
-    if isinstance(value, Mapping):
-        return {str(key): _thaw(item) for key, item in value.items()}
-    if isinstance(value, tuple):
-        return [_thaw(item) for item in value]
-    return cast(JsonValue, value)
-
-
-def _canonical_json(value: object) -> bytes:
-    return json.dumps(
-        _thaw(value),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode()
 
 
 class EvidenceSnapshot(BaseModel):
@@ -68,19 +40,19 @@ class EvidenceSnapshot(BaseModel):
 
     @model_validator(mode="after")
     def freeze_payload(self) -> Self:
-        _canonical_json(self.payload)
-        object.__setattr__(self, "payload", _freeze(self.payload))
+        canonical_json_bytes(self.payload)
+        object.__setattr__(self, "payload", freeze_json(self.payload))
         return self
 
     @field_serializer("payload")
     def serialize_payload(self, value: JsonValue) -> JsonValue:
-        return _thaw(value)
+        return thaw_json(value)
 
     @computed_field(return_type=str)  # type: ignore[prop-decorator]
     @property
     def content_hash(self) -> str:
         """Return the SHA-256 digest of the canonical structured payload."""
-        return sha256(_canonical_json(self.payload)).hexdigest()
+        return sha256(canonical_json_bytes(self.payload)).hexdigest()
 
     @computed_field(return_type=str)  # type: ignore[prop-decorator]
     @property
