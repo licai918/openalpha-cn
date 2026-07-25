@@ -1,4 +1,5 @@
 import hashlib
+import re
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
@@ -86,6 +87,31 @@ def test_readme_brain_map_series_is_complete_and_ordered() -> None:
     assert "结构化研究筛选" in combined_content
     assert "Tushare" not in combined_content
     assert "AKShare" not in combined_content
+
+
+def test_marketing_pack_contains_100_distinct_source_grounded_plans() -> None:
+    content = (ROOT / "docs" / "marketing" / "openalpha-cn-100-promotion-plans.zh-CN.md").read_text(
+        encoding="utf-8"
+    )
+    pattern = re.compile(
+        r"(?ms)^###\s+(\d{3})\uff5c.*?"
+        r"^\*\*开场钩子\uff1a\*\*\s+(.*?)\r?\n\r?\n"
+        r"\*\*推广正文\uff1a\*\*\s+(.*?)\r?\n\r?\n"
+        r"\*\*建议渠道\uff1a\*\*"
+    )
+    plans = pattern.findall(content)
+    ids = [int(plan_id) for plan_id, _, _ in plans]
+    hooks = [hook.strip() for _, hook, _ in plans]
+    body_lengths = [len("".join(body.split())) for _, _, body in plans]
+
+    assert ids == list(range(1, 101))
+    assert len(set(hooks)) == 100
+    assert min(body_lengths) >= 300
+    assert max(body_lengths) <= 420
+    assert all("TradingAgents" in body for _, _, body in plans)
+    assert all("AI Hedge Fund" in body for _, _, body in plans)
+    assert "链邻 Provider 已实现客户端合同" in content
+    assert "不承诺收益" in content
 
 
 def test_public_repository_metadata_is_present() -> None:

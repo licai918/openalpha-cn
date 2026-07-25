@@ -27,6 +27,11 @@
 - 五图已按 1440×900 实际渲染检查，未发现文字越界、卡片遮挡或断链；
 - 仓库资产测试会阻止图稿退回过时的“规划目标”表述，并检查批量任务、
   双委员会、组合账本、事件统计和研究产品等关键能力。
+- `docs/marketing/openalpha-cn-100-promotion-plans.zh-CN.md` 提供 100 条约
+  350 字的中文推广方案，按十类传播角度编排；100 个开场钩子完全唯一，
+  每条同时说明 TradingAgents、AI Hedge Fund 的借鉴点、A 股补强点与下载行动。
+- 推广文案已做结构化校验：编号 1–100 连续，正文 313–408 字、平均
+  354.3 字；不把链邻客户端 Provider 写成仓库自带商业数据，也不承诺收益或实盘能力。
 
 ## 关键边界
 
@@ -52,10 +57,10 @@
 
 ## 验证记录
 
-- 后端：103 passed
+- 后端：104 passed
 - 覆盖率：87.16%（门禁 80%）
 - Ruff：通过
-- Ruff format：126 files already formatted
+- Ruff format：127 files already formatted
 - mypy：64 个源码模块无问题
 - Python sdist/wheel：构建成功
 - Web ESLint：通过
@@ -64,7 +69,7 @@
 - Playwright 桌面/移动端：4 passed
 - Docker Compose 重启持久化：通过，临时容器、网络和卷已清理
 - 功能台账：90 / 85 / 94.44%，`UNREVIEWED=0`、`UNKNOWN=0`
-- 发布安全扫描：178 个文件，0 blocker
+- 发布安全扫描：179 个文件，0 blocker
 
 ## 实现提交
 
