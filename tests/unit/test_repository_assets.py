@@ -140,6 +140,7 @@ def test_container_delivery_has_persistence_and_recovery_verification() -> None:
 
 def test_quality_workflow_covers_supported_platforms_and_locked_dependencies() -> None:
     workflow = (ROOT / ".github" / "workflows" / "quality.yml").read_text(encoding="utf-8")
+    pnpm_workspace = (ROOT / "web" / "pnpm-workspace.yaml").read_text(encoding="utf-8")
 
     assert "ubuntu-latest" in workflow
     assert "windows-latest" in workflow
@@ -152,6 +153,7 @@ def test_quality_workflow_covers_supported_platforms_and_locked_dependencies() -
     assert "pip-audit" in workflow
     assert "verify_publication.py" in workflow
     assert "verify_compose_recovery.py" in workflow
+    assert "brace-expansion: 5.0.8" in pnpm_workspace
 
 
 def test_publication_gate_accepts_tracked_release_sources() -> None:

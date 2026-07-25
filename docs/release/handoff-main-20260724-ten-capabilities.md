@@ -32,6 +32,9 @@
   每条同时说明 TradingAgents、AI Hedge Fund 的借鉴点、A 股补强点与下载行动。
 - 推广文案已做结构化校验：编号 1–100 连续，正文 313–408 字、平均
   354.3 字；不把链邻客户端 Provider 写成仓库自带商业数据，也不承诺收益或实盘能力。
+- GitHub 在推广文案提交后新增 `brace-expansion` 高危 DoS 公告；Web 使用
+  `pnpm-workspace.yaml` override 将两条 ESLint 间接依赖统一到已修复的
+  `5.0.8`，冻结安装、audit、lint、Vitest、构建和 Playwright 均通过。
 
 ## 关键边界
 
@@ -69,7 +72,7 @@
 - Playwright 桌面/移动端：4 passed
 - Docker Compose 重启持久化：通过，临时容器、网络和卷已清理
 - 功能台账：90 / 85 / 94.44%，`UNREVIEWED=0`、`UNKNOWN=0`
-- 发布安全扫描：179 个文件，0 blocker
+- 发布安全扫描：180 个文件，0 blocker
 
 ## 实现提交
 
