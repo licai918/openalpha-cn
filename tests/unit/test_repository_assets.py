@@ -89,6 +89,56 @@ def test_readme_brain_map_series_is_complete_and_ordered() -> None:
     assert "AKShare" not in combined_content
 
 
+def test_readme_api_relationship_map_series_is_complete_and_source_grounded() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    diagrams = [
+        "openalpha-api-01-landscape.svg",
+        "openalpha-api-02-evidence-dataflow.svg",
+        "openalpha-api-03-research-orchestration.svg",
+        "openalpha-api-04-decision-products.svg",
+        "openalpha-api-05-validation-loop.svg",
+    ]
+
+    references = [f"./assets/diagrams/{name}" for name in diagrams]
+    positions = [readme.index(reference) for reference in references]
+    assert positions == sorted(positions)
+    assert positions[-1] < readme.index("## 公开 API")
+    assert "## 🧭 五张 API 数据与功能关系图" in readme
+    assert "实线表示服务端自动调用" in readme
+    assert "虚线表示调用方显式组合" in readme
+
+    combined_content = ""
+    for name in diagrams:
+        content = (ROOT / "assets" / "diagrams" / name).read_text(encoding="utf-8")
+        combined_content += content
+        assert content.startswith("<svg")
+        ET.fromstring(content)
+        assert 'width="1440"' in content
+        assert 'height="900"' in content
+        assert "OPENALPHA · API" in content
+        assert "API 关系导航" in content
+
+    required_source_terms = [
+        "POST /api/v1/evidence/build",
+        "ProviderMetadata + ProviderBatch",
+        "EvidenceSnapshot",
+        "四时钟 PIT",
+        "POST /api/v1/research/run",
+        "ResearchEngine.run_cycle",
+        "POST /api/v1/research/batches",
+        "POST /api/v1/research/deliberate",
+        "POST /api/v1/portfolio/execute",
+        "不可变 PortfolioTransition",
+        "POST /api/v1/backtests/replay",
+        "POST /api/v1/backtests/event-study",
+        "POST /api/v1/backtests/validate",
+        "不连接实盘券商",
+    ]
+    assert all(term in combined_content for term in required_source_terms)
+    assert "不自动训练模型" in combined_content
+    assert "服务端自动抓取数据" not in combined_content
+
+
 def test_marketing_pack_contains_100_distinct_source_grounded_plans() -> None:
     content = (ROOT / "docs" / "marketing" / "openalpha-cn-100-promotion-plans.zh-CN.md").read_text(
         encoding="utf-8"

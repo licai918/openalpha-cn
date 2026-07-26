@@ -1,0 +1,129 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900" role="img" aria-labelledby="title desc">
+  <title id="title">研究编排链｜单次与批量 API 汇入同一 run_cycle</title>
+  <desc id="desc">无论 live、replay 还是 backtest，研究请求都经过同一证据路由、Agent 聚合、风险门和持久化路径。</desc>
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="7" stdDeviation="9" flood-color="#27324A" flood-opacity=".10" />
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 z" fill="context-stroke" />
+    </marker>
+    <pattern id="dots" width="28" height="28" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.5" fill="#D8DEEB" />
+    </pattern>
+    <style>
+      text { font-family: Inter, "Noto Sans SC", "Microsoft YaHei", Arial, sans-serif; }
+      .title { font-size: 36px; font-weight: 760; fill: #0F172A; letter-spacing: -.4px; }
+      .subtitle { font-size: 18px; font-weight: 450; fill: #64748B; }
+      .section { font-size: 14px; font-weight: 800; letter-spacing: 1.1px; }
+      .cardTitle { font-size: 21px; font-weight: 760; fill: #0F172A; }
+      .body { font-size: 16px; font-weight: 500; fill: #334155; }
+      .small { font-size: 14px; font-weight: 520; fill: #64748B; }
+      .endpoint { font-size: 14px; font-weight: 720; fill: #26324A; }
+      .pill { font-size: 14px; font-weight: 780; letter-spacing: .35px; }
+      .arrowLabel { font-size: 13px; font-weight: 700; fill: #64748B; }
+      .navCaption { font-size: 15px; font-weight: 650; fill: #64748B; letter-spacing: .4px; }
+      .navNumber { font-size: 15px; font-weight: 800; }
+      .navLabel { font-size: 17px; font-weight: 720; }
+    </style>
+  </defs>
+  <rect width="1440" height="900" fill="#F7F8FC" />
+  <rect width="1440" height="900" fill="url(#dots)" opacity=".36" />
+  <rect x="64" y="42" width="188" height="34" rx="17" fill="#5968F2" />
+  <text x="158" y="65" class="pill" text-anchor="middle" fill="#FFFFFF">OPENALPHA · API 03</text>
+  <text x="64" y="112" class="title">研究编排链｜单次与批量 API 汇入同一 run_cycle</text>
+  <text x="64" y="148" class="subtitle">无论 live、replay 还是 backtest，研究请求都经过同一证据路由、Agent 聚合、风险门和持久化路径。</text>
+  <rect x="64" y="214" width="290" height="160" rx="18" fill="#FFFFFF" stroke="#D9DFEA" filter="url(#shadow)" />
+  <rect x="64" y="214" width="7" height="160" rx="3.5" fill="#7C5CE7" />
+  <text x="88" y="246" class="cardTitle">单次研究</text>
+  <rect x="86" y="256" width="248" height="27" rx="9" fill="#7C5CE7" opacity=".10" />
+  <text x="96" y="275" class="endpoint">POST /api/v1/research/run</text>
+  <text x="88" y="310" class="body">ResearchApiRequest</text>
+  <text x="88" y="335" class="body">验证序列化 evidence_id</text>
+  <text x="88" y="360" class="body">同步返回完整结果</text>
+  <rect x="64" y="414" width="290" height="220" rx="18" fill="#FFFFFF" stroke="#D9DFEA" filter="url(#shadow)" />
+  <rect x="64" y="414" width="7" height="220" rx="3.5" fill="#5968F2" />
+  <text x="88" y="446" class="cardTitle">持久批量研究</text>
+  <rect x="86" y="456" width="248" height="27" rx="9" fill="#5968F2" opacity=".10" />
+  <text x="96" y="475" class="endpoint">POST /api/v1/research/batches</text>
+  <text x="88" y="510" class="body">1–1000 个不可变请求</text>
+  <text x="88" y="535" class="body">1–32 并发</text>
+  <text x="88" y="560" class="body">events / cancel / retry</text>
+  <text x="88" y="585" class="body">SQLite 状态与重启恢复</text>
+  <text x="88" y="610" class="body">逐项复用同一 runner</text>
+  <rect x="410" y="246" width="300" height="352" rx="18" fill="#FFFFFF" stroke="#D9DFEA" filter="url(#shadow)" />
+  <rect x="410" y="246" width="7" height="352" rx="3.5" fill="#7C5CE7" />
+  <text x="434" y="278" class="cardTitle">ResearchEngine.run_cycle</text>
+  <text x="434" y="306" class="body">1  校验 subject / as_of / PIT</text>
+  <text x="434" y="331" class="body">2  AgentRouter 按证据族路由</text>
+  <text x="434" y="356" class="body">3  节点级 checkpoint / resume</text>
+  <text x="434" y="381" class="body">4  聚合结构化 SignalFrame</text>
+  <text x="434" y="406" class="body">5  RiskGate：pass / reduce / block</text>
+  <text x="434" y="431" class="body">6  final_action：watch / avoid / abstain</text>
+  <path d="M 356 294 L 402 294" fill="none" stroke="#7C5CE7" stroke-width="3" marker-end="url(#arrow)" />
+  <path d="M 356 520 C 386 520, 380 470, 402 470" fill="none" stroke="#5968F2" stroke-width="3" marker-end="url(#arrow)" />
+  <rect x="770" y="206" width="280" height="140" rx="18" fill="#FFFFFF" stroke="#D9DFEA" filter="url(#shadow)" />
+  <rect x="770" y="206" width="7" height="140" rx="3.5" fill="#0F9F8F" />
+  <text x="794" y="238" class="cardTitle">证据感知 Agent</text>
+  <text x="794" y="266" class="body">市场事件</text>
+  <text x="794" y="291" class="body">题材催化</text>
+  <text x="794" y="316" class="body">资金观察</text>
+  <rect x="770" y="382" width="280" height="140" rx="18" fill="#FFFFFF" stroke="#D9DFEA" filter="url(#shadow)" />
+  <rect x="770" y="382" width="7" height="140" rx="3.5" fill="#E89422" />
+  <text x="794" y="414" class="cardTitle">结果聚合与风险</text>
+  <text x="794" y="442" class="body">SignalFrame</text>
+  <text x="794" y="467" class="body">显式弃权</text>
+  <text x="794" y="492" class="body">RiskGate</text>
+  <rect x="770" y="558" width="280" height="140" rx="18" fill="#FFFFFF" stroke="#D9DFEA" filter="url(#shadow)" />
+  <rect x="770" y="558" width="7" height="140" rx="3.5" fill="#1688D4" />
+  <text x="794" y="590" class="cardTitle">ResearchRunResult</text>
+  <text x="794" y="618" class="body">signal + decision</text>
+  <text x="794" y="643" class="body">manifest + agent_results</text>
+  <path d="M 712 330 L 762 276" fill="none" stroke="#0F9F8F" stroke-width="3" marker-end="url(#arrow)" />
+  <path d="M 910 348 L 910 374" fill="none" stroke="#7C5CE7" stroke-width="3" marker-end="url(#arrow)" />
+  <path d="M 910 524 L 910 550" fill="none" stroke="#1688D4" stroke-width="3" marker-end="url(#arrow)" />
+  <rect x="1098" y="206" width="266" height="316" rx="18" fill="#F2F4F8" stroke="#D9DFEA" filter="url(#shadow)" />
+  <rect x="1098" y="206" width="7" height="316" rx="3.5" fill="#64748B" />
+  <text x="1122" y="238" class="cardTitle">自动持久化</text>
+  <text x="1122" y="266" class="body">RunManifest</text>
+  <text x="1122" y="291" class="body">DecisionLedger</text>
+  <text x="1122" y="316" class="body">ResearchMemory</text>
+  <text x="1122" y="341" class="body">RunRecoveryState</text>
+  <text x="1122" y="366" class="body">请求摘要 / 图签名隔离</text>
+  <text x="1122" y="391" class="body">SQLite WAL</text>
+  <path d="M 1052 610 C 1076 610, 1072 510, 1090 510" fill="none" stroke="#64748B" stroke-width="3" marker-end="url(#arrow)" />
+  <rect x="1098" y="562" width="266" height="100" rx="18" fill="#FFFFFF" stroke="#D9DFEA" filter="url(#shadow)" />
+  <rect x="1098" y="562" width="7" height="100" rx="3.5" fill="#E89422" />
+  <text x="1122" y="594" class="cardTitle">可选委员会 API</text>
+  <rect x="1120" y="604" width="224" height="27" rx="9" fill="#E89422" opacity=".10" />
+  <text x="1130" y="623" class="endpoint">POST /api/v1/research/deliberate</text>
+  <text x="1122" y="658" class="body">调用方显式传入 signal + agent_results</text>
+  <path d="M 1052 650 L 1090 650" fill="none" stroke="#E89422" stroke-width="3" stroke-dasharray="8 7" marker-end="url(#arrow)" />
+  <path d="M 72 732 L 126 732" fill="none" stroke="#5968F2" stroke-width="3" marker-end="url(#arrow)" />
+  <text x="140" y="737" class="small">服务端自动调用 / 持久化</text>
+  <path d="M 380 732 L 434 732" fill="none" stroke="#E89422" stroke-width="3" stroke-dasharray="8 7" marker-end="url(#arrow)" />
+  <text x="448" y="737" class="small">调用方显式组合 / 反馈</text>
+  <rect x="746" y="717" width="16" height="16" rx="4" fill="#64748B" opacity=".16" stroke="#64748B" />
+  <text x="774" y="737" class="small">SQLite / Parquet 持久状态</text>
+  <text x="1060" y="737" class="small">边界：不连接实盘券商</text>
+  <text x="64" y="780" class="navCaption">API 关系导航｜从数据合同到验证反馈的五层公开能力</text>
+  <rect x="64" y="802" width="216" height="58" rx="18" fill="#FFFFFF" stroke="#D7DDE8" />
+  <text x="98" y="838" class="navNumber" text-anchor="middle" fill="#64748B">01</text>
+  <text x="134" y="837" class="navLabel" fill="#0F172A">API 全景</text>
+  <path d="M 286 831 L 316 831" fill="none" stroke="#C5CDDA" stroke-width="3" marker-end="url(#arrow)" />
+  <rect x="328" y="802" width="216" height="58" rx="18" fill="#FFFFFF" stroke="#D7DDE8" />
+  <text x="362" y="838" class="navNumber" text-anchor="middle" fill="#64748B">02</text>
+  <text x="398" y="837" class="navLabel" fill="#0F172A">证据数据</text>
+  <path d="M 550 831 L 580 831" fill="none" stroke="#C5CDDA" stroke-width="3" marker-end="url(#arrow)" />
+  <rect x="592" y="802" width="216" height="58" rx="18" fill="#5968F2" stroke="#5968F2" filter="url(#shadow)" />
+  <text x="626" y="838" class="navNumber" text-anchor="middle" fill="#FFFFFF">03</text>
+  <text x="662" y="837" class="navLabel" fill="#FFFFFF">研究编排</text>
+  <path d="M 814 831 L 844 831" fill="none" stroke="#5968F2" stroke-width="3" marker-end="url(#arrow)" />
+  <rect x="856" y="802" width="216" height="58" rx="18" fill="#FFFFFF" stroke="#D7DDE8" />
+  <text x="890" y="838" class="navNumber" text-anchor="middle" fill="#64748B">04</text>
+  <text x="926" y="837" class="navLabel" fill="#0F172A">决策产品</text>
+  <path d="M 1078 831 L 1108 831" fill="none" stroke="#C5CDDA" stroke-width="3" marker-end="url(#arrow)" />
+  <rect x="1120" y="802" width="216" height="58" rx="18" fill="#FFFFFF" stroke="#D7DDE8" />
+  <text x="1154" y="838" class="navNumber" text-anchor="middle" fill="#64748B">05</text>
+  <text x="1190" y="837" class="navLabel" fill="#0F172A">验证闭环</text>
+</svg>

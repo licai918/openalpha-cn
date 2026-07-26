@@ -36,6 +36,22 @@
   `pnpm-workspace.yaml` override 将两条 ESLint 间接依赖统一到已修复的
   `5.0.8`，冻结安装、audit、lint、Vitest、构建和 Playwright 均通过。
 
+## API 关系脑图补充（2026-07-26）
+
+- README 的“公开 API”表格上方新增五张 1440×900 SVG 关系图，依次解释：
+  API 全景、Provider 到时间点证据、单次/批量研究编排、决策到研究产品、
+  回放统计与归因闭环。
+- 图中实线只表示 `create_app` 内部真实发生的调用或持久化；虚线表示调用方
+  必须显式完成的组合，避免把委员会、报告、观察池或组合订单误画成
+  `run_cycle` 的自动副作用。
+- 数据图明确 `/api/v1/evidence/build` 接收 `ProviderMetadata + ProviderBatch`，
+  服务端不自动抓取 Provider 数据；组合图明确研究结果不会自动下单，公开接口
+  不连接实盘券商。
+- `scripts/generate_api_relationship_diagrams.py` 可确定性重建五图；仓库资产测试
+  检查顺序、README 位置、SVG 合法性、关键端点、源码合同名称和安全边界。
+- 五图均已使用 Chromium 按 1440×900 实际渲染复核，未发现文字越界、卡片遮挡
+  或错误的自动调用关系。
+
 ## 关键边界
 
 - 链邻 Provider 是已实现、已做冻结合约测试的客户端适配器；真实调用仍要求用户

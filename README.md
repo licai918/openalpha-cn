@@ -264,6 +264,91 @@ OpenAlpha CN 整合 TradingAgents 和 AI Hedge Fund 的优势，接入 A 股数�
 
 源码审计基线、差异化结论和后续边界见[竞争优势说明](docs/why-openalpha-cn.zh-CN.md)。
 
+## 🧭 五张 API 数据与功能关系图
+
+OpenAlpha CN 的公开 API 不是一组彼此孤立的地址，而是围绕同一份可验证数据逐层展开：
+调用方先把合法来源的数据整理为统一 Provider 合同，系统再生成时间点证据；单次研究和批量
+研究复用同一 `ResearchEngine.run_cycle`；研究结果由调用方显式送入委员会、筛选、报告、
+观察池或组合核算；最后由回放、事件统计、组合报告和结果归因完成验证闭环。
+
+图中**实线表示服务端自动调用或持久化**，**虚线表示调用方显式组合或人工反馈**。这个区别
+非常重要：研究结果不会自动变成组合订单，验证结果也不会自动训练模型。
+
+### API 关系图 01｜四类入口共享五条功能链
+
+REST、Python SDK、Typer CLI 和 React 工作台最终进入同一 FastAPI 公共边界。请求经过
+Pydantic Schema、请求大小限制与安全响应头后，分别流向证据、研究、研究产品、组合和验证
+五条功能链；运行数据统一沉淀到 Parquet 与 SQLite WAL，而不是由各入口维护不同状态。
+
+<p align="center">
+  <img
+    src="./assets/diagrams/openalpha-api-01-landscape.svg"
+    alt="OpenAlpha CN 四类调用入口与五条公开 API 功能链全景图"
+    width="1200"
+  />
+</p>
+
+### API 关系图 02｜Provider 数据如何变成可研究证据
+
+链邻 API、用户文件、Tushare 和可选 AKShare Adapter 位于调用方或 Provider 侧。
+`POST /api/v1/evidence/build` 只接收结构化 `ProviderMetadata + ProviderBatch`，不会在
+服务端自动抓取数据。记录通过 Schema、四时钟 PIT 和 A 股事件规范化后生成内容寻址的
+`EvidenceSnapshot`，写入 Parquet，再由证据、市场事件和题材查询接口按 `as_of` 提供给研究。
+
+<p align="center">
+  <img
+    src="./assets/diagrams/openalpha-api-02-evidence-dataflow.svg"
+    alt="OpenAlpha CN ProviderBatch、四时钟、EvidenceSnapshot 与证据查询 API 数据链"
+    width="1200"
+  />
+</p>
+
+### API 关系图 03｜单次与批量研究如何汇入同一内核
+
+`POST /api/v1/research/run` 直接运行一次研究；批量 API 则把最多 1000 个不可变请求放入
+持久队列，以 1–32 的受控并发逐项调用同一 `run_cycle`。证据感知路由选择市场、题材和
+资金 Agent，节点级 Checkpoint 支持恢复，聚合后的 `SignalFrame` 经过风险门生成
+`ResearchRunResult`，同时持久化运行清单、决策账本、研究记忆和恢复状态。
+
+<p align="center">
+  <img
+    src="./assets/diagrams/openalpha-api-03-research-orchestration.svg"
+    alt="OpenAlpha CN 单次研究、批量任务、run_cycle、Agent 路由和持久恢复关系图"
+    width="1200"
+  />
+</p>
+
+### API 关系图 04｜研究结论如何转化为产品与组合资产
+
+`ResearchRunResult` 是下游功能的可信交汇点。调用方可把 `signal + agent_results` 送入
+Bull/Bear 与三视角风险委员会，把完整研究结果送入筛选或不可变报告，也可以明确选择标的
+加入观察池。组合 API 还要求调用方单独提交 `PortfolioState`、`PortfolioOrder`、
+`MarketBar` 和限制条件，通过 T+1、整手、停牌、涨跌停、费用与敞口检查后，才产生
+不可变 `PortfolioTransition`；它不会根据研究结论自动下单，也不连接实盘券商。
+
+<p align="center">
+  <img
+    src="./assets/diagrams/openalpha-api-04-decision-products.svg"
+    alt="OpenAlpha CN 双委员会、筛选、报告、观察池与 A 股组合转移 API 关系图"
+    width="1200"
+  />
+</p>
+
+### API 关系图 05｜回放、统计和归因如何形成验证闭环
+
+冻结语料回放再次调用同一 `run_cycle`，用于检查确定性和前视问题；多日组合 API 计算
+收益、基准、换手、容量和暴露；事件研究 API 给出 CAR、t 统计量和确定性 Bootstrap
+置信区间；结果验证 API 则先复核内容派生 ID，再把未来观察归因到规则、因子和 Agent。
+这些结果由研究者审阅后用于调整数据质量、路由、风险阈值和筛选条件，不会自动修改模型。
+
+<p align="center">
+  <img
+    src="./assets/diagrams/openalpha-api-05-validation-loop.svg"
+    alt="OpenAlpha CN 回放、多日组合、事件统计、结果归因与下一轮研究反馈闭环图"
+    width="1200"
+  />
+</p>
+
 ## 公开 API
 
 | 能力 | 入口 |
