@@ -1,128 +1,171 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900" role="img" aria-labelledby="title desc">
-  <title id="title">批量智能体研判｜让角色围绕证据规模化协作</title>
-  <desc id="desc">持久批量队列、证据感知路由、模型治理与结构化输出共同约束多智能体研究。</desc>
+  <title id="title">把证据规模化为可反驳、可审计的结构化观点</title>
+  <desc id="desc">单次与批量任务复用同一研究内核；角色由证据类型路由，模型只在治理边界内增强，不替代确定性基线。</desc>
   <defs>
-    <filter id="shadow" x="-20%" y="-20%" width="140%" height="160%">
-      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#27324A" flood-opacity=".10" />
+    <linearGradient id="bgGradient" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#091727" />
+      <stop offset=".48" stop-color="#07111E" />
+      <stop offset="1" stop-color="#050C16" />
+    </linearGradient>
+    <radialGradient id="ambient" cx="0" cy="0" r="1" gradientTransform="translate(1160 40) rotate(135) scale(600 420)">
+      <stop offset="0" stop-color="#A78BFA" stop-opacity=".16" />
+      <stop offset=".62" stop-color="#A78BFA" stop-opacity=".025" />
+      <stop offset="1" stop-color="#A78BFA" stop-opacity="0" />
+    </radialGradient>
+    <linearGradient id="activeNav" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#A78BFA" stop-opacity=".30" />
+      <stop offset="1" stop-color="#A78BFA" stop-opacity=".08" />
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="150%" height="170%">
+      <feDropShadow dx="0" dy="16" stdDeviation="20" flood-color="#000000" flood-opacity=".34" />
     </filter>
-    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L10,5 L0,10 z" fill="context-stroke" />
-    </marker>
-    <pattern id="dots" width="28" height="28" patternUnits="userSpaceOnUse">
-      <circle cx="2" cy="2" r="1.5" fill="#D8DEEB" />
+    <filter id="softGlow" x="-100%" y="-100%" width="300%" height="300%">
+      <feGaussianBlur stdDeviation="7" result="blur" />
+      <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
+    </filter>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#6D87A3" stroke-width=".55" opacity=".12" />
     </pattern>
+    <marker id="arrow" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L11 5.5L0 11Z" fill="context-stroke" />
+    </marker>
     <style>
-      text { font-family: Inter, "Noto Sans SC", "Microsoft YaHei", Arial, sans-serif; }
-      .title { font-size: 38px; font-weight: 760; fill: #0F172A; letter-spacing: -.5px; }
-      .subtitle { font-size: 19px; font-weight: 450; fill: #64748B; }
-      .cardTitle { font-size: 23px; font-weight: 720; fill: #0F172A; }
-      .kicker { font-size: 14px; font-weight: 760; letter-spacing: 1.2px; }
-      .body { font-size: 17px; font-weight: 470; fill: #334155; }
-      .small { font-size: 15px; font-weight: 500; fill: #64748B; }
-      .pill { font-size: 14px; font-weight: 760; letter-spacing: .4px; }
-      .metric { font-size: 28px; font-weight: 780; fill: #0F172A; }
-      .navCaption { font-size: 15px; font-weight: 650; fill: #64748B; letter-spacing: .4px; }
-      .navNumber { font-size: 15px; font-weight: 800; }
-      .navLabel { font-size: 17px; font-weight: 720; }
+      text { font-family: Geist, "Plus Jakarta Sans", "Noto Sans SC", "Microsoft YaHei", sans-serif; }
+      .eyebrow { font-size: 13px; font-weight: 760; letter-spacing: 1.8px; }
+      .title { font-size: 34px; font-weight: 760; letter-spacing: -.5px; }
+      .subtitle { font-size: 16px; font-weight: 480; }
+      .micro { font-size: 11px; font-weight: 760; letter-spacing: 1.25px; }
+      .cardTitle { font-size: 20px; font-weight: 720; }
+      .body { font-size: 14px; font-weight: 490; }
+      .small { font-size: 12px; font-weight: 520; }
+      .mono { font-size: 12px; font-weight: 680; font-family: Geist Mono, "Noto Sans Mono CJK SC", monospace; }
+      .metric { font-size: 28px; font-weight: 780; letter-spacing: -.5px; }
+      .nav { font-size: 13px; font-weight: 680; }
+      .navNum { font-size: 12px; font-weight: 800; }
     </style>
   </defs>
-  <rect width="1440" height="900" fill="#F7F8FC" />
-  <rect width="1440" height="900" fill="url(#dots)" opacity=".36" />
-  <rect x="64" y="46" width="158" height="34" rx="17" fill="#7C5CE7" stroke="#7C5CE7" />
-  <text x="143" y="69" class="pill" text-anchor="middle" fill="#FFFFFF">OPENALPHA · 03</text>
-  <text x="64" y="116" class="title" text-anchor="start">批量智能体研判｜让角色围绕证据规模化协作</text>
-  <text x="64" y="154" class="subtitle" text-anchor="start">持久批量队列、证据感知路由、模型治理与结构化输出共同约束多智能体研究。</text>
-  <g transform="translate(1270 42)">
-    <path d="M48 10c-19 0-34 14-34 32 0 9 4 17 10 23-2 4-3 9-2 14 2 12 13 21 26 21h29c15 0 27-11 27-25 0-7-3-13-8-18 2-5 2-11 0-17-4-12-16-20-29-19-5-7-11-11-19-11Z" fill="#7C5CE7" opacity=".12" />
-    <circle cx="42" cy="44" r="7" fill="#7C5CE7" />
-    <circle cx="70" cy="33" r="7" fill="#7C5CE7" opacity=".8" />
-    <circle cx="82" cy="65" r="7" fill="#7C5CE7" opacity=".65" />
-    <path d="M48 43 64 35M47 49 76 62M72 39 80 58" stroke="#7C5CE7" stroke-width="3" stroke-linecap="round" />
+  <rect width="1440" height="900" fill="#07111E" />
+  <rect width="1440" height="900" fill="url(#bgGradient)" />
+  <rect width="1440" height="900" fill="url(#ambient)" />
+  <rect width="1440" height="900" fill="url(#grid)" />
+  <rect x="64" y="42" width="42" height="4" rx="2" fill="#A78BFA" filter="url(#softGlow)" />
+  <text x="64" y="72" class="eyebrow" fill="#A78BFA">OPENALPHA CN · RESEARCH OS / 03</text>
+  <text x="64" y="115" class="title" fill="#F4F7FB">研究编排｜把证据规模化为可反驳、可审计的结构化观点</text>
+  <text x="64" y="148" class="subtitle" fill="#96A8BE">单次与批量任务复用同一研究内核；角色由证据类型路由，模型只在治理边界内增强，不替代确定性基线。</text>
+  <g transform="translate(1210 50)" opacity=".92">
+    <circle cx="44" cy="30" r="28" fill="#A78BFA" opacity=".09" />
+    <path d="M18 42L40 20L56 32L75 11" fill="none" stroke="#A78BFA" stroke-width="2.2" />
+    <circle cx="18" cy="42" r="4" fill="#A78BFA" /><circle cx="40" cy="20" r="4" fill="#A78BFA" />
+    <circle cx="56" cy="32" r="4" fill="#A78BFA" /><circle cx="75" cy="11" r="4" fill="#A78BFA" />
   </g>
-  <rect x="54" y="244" width="260" height="214" rx="22" fill="#FFFFFF" stroke="#D9DFEA" filter="url(#shadow)" />
-  <rect x="54" y="244" width="8" height="214" rx="4" fill="#0F9F8F" />
-  <text x="82" y="279" class="kicker" text-anchor="start" fill="#0F9F8F">只读证据输入</text>
-  <text x="82" y="316" class="cardTitle" text-anchor="start">EvidenceSnapshot</text>
-  <text x="82" y="352" class="body" text-anchor="start">PIT 可见证据</text>
-  <text x="82" y="382" class="body" text-anchor="start">稳定 evidence_id</text>
-  <text x="82" y="412" class="body" text-anchor="start">来源 / 时间 / 哈希</text>
-  <rect x="76" y="492" width="216" height="92" rx="18" fill="#F0EDFF" stroke="#D8D0FF" />
-  <text x="184" y="525" class="cardTitle" text-anchor="middle">EvidenceLookupTool</text>
-  <text x="184" y="553" class="small" text-anchor="middle">智能体只能查询证据</text>
-  <rect x="372" y="198" width="212" height="86" rx="18" fill="#F0EDFF" stroke="#D8D0FF" />
-  <text x="478" y="230" class="cardTitle" text-anchor="middle">持久批量任务中心</text>
-  <text x="478" y="258" class="small" text-anchor="middle">1–32 并发 · 进度 · 取消</text>
-  <text x="478" y="278" class="small" text-anchor="middle">重试 · 重启恢复</text>
-  <rect x="372" y="308" width="212" height="164" rx="22" fill="#FFFFFF" stroke="#D9DFEA" filter="url(#shadow)" />
-  <rect x="372" y="308" width="8" height="164" rx="4" fill="#7C5CE7" />
-  <text x="400" y="343" class="kicker" text-anchor="start" fill="#7C5CE7">证据感知路由</text>
-  <text x="400" y="380" class="cardTitle" text-anchor="start">AgentRouter</text>
-  <text x="400" y="416" class="body" text-anchor="start">按证据类型选择角色</text>
-  <text x="400" y="446" class="body" text-anchor="start">记录 routing_path</text>
-  <rect x="642" y="198" width="286" height="116" rx="22" fill="#FFFFFF" stroke="#D9DFEA" filter="url(#shadow)" />
-  <rect x="642" y="198" width="8" height="116" rx="4" fill="#6D5CE8" />
-  <rect x="666" y="220" width="54" height="34" rx="17" fill="#6D5CE8" stroke="#6D5CE8" />
-  <text x="693" y="243" class="pill" text-anchor="middle" fill="#FFFFFF">A1</text>
-  <text x="736" y="243" class="cardTitle" text-anchor="start">市场事件智能体</text>
-  <text x="670" y="282" class="body" text-anchor="start">涨停 · 炸板 · 连板</text>
-  <rect x="642" y="340" width="286" height="116" rx="22" fill="#FFFFFF" stroke="#D9DFEA" filter="url(#shadow)" />
-  <rect x="642" y="340" width="8" height="116" rx="4" fill="#8B67E8" />
-  <rect x="666" y="362" width="54" height="34" rx="17" fill="#8B67E8" stroke="#8B67E8" />
-  <text x="693" y="385" class="pill" text-anchor="middle" fill="#FFFFFF">A2</text>
-  <text x="736" y="385" class="cardTitle" text-anchor="start">题材催化智能体</text>
-  <text x="670" y="424" class="body" text-anchor="start">题材 · 公告 · 催化</text>
-  <rect x="642" y="482" width="286" height="116" rx="22" fill="#FFFFFF" stroke="#D9DFEA" filter="url(#shadow)" />
-  <rect x="642" y="482" width="8" height="116" rx="4" fill="#A074E2" />
-  <rect x="666" y="504" width="54" height="34" rx="17" fill="#A074E2" stroke="#A074E2" />
-  <text x="693" y="527" class="pill" text-anchor="middle" fill="#FFFFFF">A3</text>
-  <text x="736" y="527" class="cardTitle" text-anchor="start">资金流智能体</text>
-  <text x="670" y="566" class="body" text-anchor="start">资金观察 · 确认条件</text>
-  <rect x="646" y="622" width="278" height="58" rx="18" fill="#F0EDFF" stroke="#D8D0FF" />
-  <text x="785" y="648" class="body" text-anchor="middle">确定性基线｜无 LLM 也可运行</text>
-  <rect x="1000" y="244" width="366" height="290" rx="22" fill="#FFFFFF" stroke="#D9DFEA" filter="url(#shadow)" />
-  <rect x="1000" y="244" width="8" height="290" rx="4" fill="#7C5CE7" />
-  <text x="1028" y="279" class="kicker" text-anchor="start" fill="#7C5CE7">统一结构化输出</text>
-  <text x="1028" y="316" class="cardTitle" text-anchor="start">SignalFrame</text>
-  <text x="1028" y="352" class="body" text-anchor="start">方向 · 强度 · 置信度 · 周期</text>
-  <text x="1028" y="382" class="body" text-anchor="start">evidence_ids</text>
-  <text x="1028" y="412" class="body" text-anchor="start">确认条件 / 失效条件</text>
-  <text x="1028" y="442" class="body" text-anchor="start">risk_flags</text>
-  <text x="1028" y="472" class="body" text-anchor="start">证据不足时显式 abstain</text>
-  <rect x="1000" y="562" width="366" height="118" rx="18" fill="#F7F5FF" stroke="#D8D0FF" />
-  <text x="1026" y="595" class="cardTitle" text-anchor="start">模型治理与结构化调用</text>
-  <text x="1026" y="625" class="small" text-anchor="start">能力注册 · 408/429/5xx 分类重试</text>
-  <text x="1026" y="651" class="small" text-anchor="start">Token / 尝试次数 / 估算成本持久账本</text>
-  <text x="1026" y="672" class="small" text-anchor="start">Schema 校验 · 不覆盖证据边界</text>
-  <path d="M 314 350 L 362 350" fill="none" stroke="#7C5CE7" stroke-width="3" marker-end="url(#arrow)" />
-  <path d="M 314 284 L 362 241" fill="none" stroke="#7C5CE7" stroke-width="3" marker-end="url(#arrow)" />
-  <path d="M 478 284 L 478 298" fill="none" stroke="#7C5CE7" stroke-width="3" marker-end="url(#arrow)" />
-  <path d="M 292 538 C 338 538, 330 452, 362 452" fill="none" stroke="#7C5CE7" stroke-width="3" stroke-dasharray="8 8" marker-end="url(#arrow)" />
-  <path d="M 584 390 C 614 390, 614 256, 634 256" fill="none" stroke="#7C5CE7" stroke-width="3" marker-end="url(#arrow)" />
-  <path d="M 584 390 C 614 390, 614 398, 634 398" fill="none" stroke="#7C5CE7" stroke-width="3" marker-end="url(#arrow)" />
-  <path d="M 584 390 C 614 390, 614 540, 634 540" fill="none" stroke="#7C5CE7" stroke-width="3" marker-end="url(#arrow)" />
-  <path d="M 928 256 C 960 256, 960 390, 990 390" fill="none" stroke="#7C5CE7" stroke-width="3" marker-end="url(#arrow)" />
-  <path d="M 928 398 C 960 398, 960 390, 990 390" fill="none" stroke="#7C5CE7" stroke-width="3" marker-end="url(#arrow)" />
-  <path d="M 928 540 C 960 540, 960 390, 990 390" fill="none" stroke="#7C5CE7" stroke-width="3" marker-end="url(#arrow)" />
-  <rect x="1230" y="690" width="146" height="34" rx="17" fill="#7C5CE7" stroke="#7C5CE7" />
-  <text x="1303" y="713" class="pill" text-anchor="middle" fill="#FFFFFF">→ 决策脑区</text>
-  <text x="64" y="766" class="navCaption" text-anchor="start">五脑区导航｜从数据感知到验证反馈的完整认知链</text>
-  <rect x="64" y="792" width="216" height="58" rx="18" fill="#FFFFFF" stroke="#D7DDE8" />
-  <text x="98" y="828" class="navNumber" text-anchor="middle" fill="#64748B">01</text>
-  <text x="134" y="827" class="navLabel" text-anchor="start" fill="#0F172A">全脑总览</text>
-  <path d="M 286 821 L 316 821" fill="none" stroke="#C5CDDA" stroke-width="3" marker-end="url(#arrow)" />
-  <rect x="328" y="792" width="216" height="58" rx="18" fill="#FFFFFF" stroke="#D7DDE8" />
-  <text x="362" y="828" class="navNumber" text-anchor="middle" fill="#64748B">02</text>
-  <text x="398" y="827" class="navLabel" text-anchor="start" fill="#0F172A">证据感知</text>
-  <path d="M 550 821 L 580 821" fill="none" stroke="#C5CDDA" stroke-width="3" marker-end="url(#arrow)" />
-  <rect x="592" y="792" width="216" height="58" rx="18" fill="#7C5CE7" stroke="#7C5CE7" filter="url(#shadow)" />
-  <text x="626" y="828" class="navNumber" text-anchor="middle" fill="#FFFFFF">03</text>
-  <text x="662" y="827" class="navLabel" text-anchor="start" fill="#FFFFFF">批量研判</text>
-  <path d="M 814 821 L 844 821" fill="none" stroke="#7C5CE7" stroke-width="3" marker-end="url(#arrow)" />
-  <rect x="856" y="792" width="216" height="58" rx="18" fill="#FFFFFF" stroke="#D7DDE8" />
-  <text x="890" y="828" class="navNumber" text-anchor="middle" fill="#64748B">04</text>
-  <text x="926" y="827" class="navLabel" text-anchor="start" fill="#0F172A">双委决策</text>
-  <path d="M 1078 821 L 1108 821" fill="none" stroke="#C5CDDA" stroke-width="3" marker-end="url(#arrow)" />
-  <rect x="1120" y="792" width="216" height="58" rx="18" fill="#FFFFFF" stroke="#D7DDE8" />
-  <text x="1154" y="828" class="navNumber" text-anchor="middle" fill="#64748B">05</text>
-  <text x="1190" y="827" class="navLabel" text-anchor="start" fill="#0F172A">验证产品</text>
+  <line x1="898" y1="171" x2="938" y2="171" stroke="#2DD4BF" stroke-width="2.2" marker-end="url(#arrow)" />
+  <text x="948" y="175" class="small" fill="#96A8BE" text-anchor="start" opacity="1">自动执行 / 持久化</text>
+  <line x1="1108" y1="171" x2="1148" y2="171" stroke="#FBBF24" stroke-width="2.2" stroke-dasharray="7 7" marker-end="url(#arrow)" />
+  <text x="1158" y="175" class="small" fill="#96A8BE" text-anchor="start" opacity="1">显式组合 / 人工反馈</text>
+  <circle cx="76" cy="210" r="14" fill="#2DD4BF" fill-opacity=".16" stroke="#2DD4BF" stroke-opacity=".45" />
+  <text x="76" y="214" class="navNum" fill="#2DD4BF" text-anchor="middle" opacity="1">A</text>
+  <text x="100" y="214" class="micro" fill="#2DD4BF" text-anchor="start" opacity="1">同一输入契约</text>
+  <rect x="64" y="232" width="244" height="164" rx="22" fill="#0C1928" stroke="#263A52" filter="url(#shadow)" />
+  <rect x="65" y="233" width="242" height="162" rx="21" fill="none" stroke="#FFFFFF" stroke-opacity=".035" />
+  <rect x="64" y="254" width="3" height="120" rx="1.5" fill="#2DD4BF" />
+  <text x="88" y="261" class="micro" fill="#2DD4BF" text-anchor="start" opacity="1">READ-ONLY INPUT</text>
+  <text x="88" y="294" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">EvidenceSnapshot</text>
+  <text x="88" y="323" class="body" fill="#96A8BE" text-anchor="start" opacity="1">PIT 可见证据</text>
+  <text x="88" y="347" class="body" fill="#96A8BE" text-anchor="start" opacity="1">稳定 evidence_id</text>
+  <text x="88" y="371" class="body" fill="#96A8BE" text-anchor="start" opacity="1">来源 / 时间 / 哈希</text>
+  <rect x="64" y="420" width="244" height="198" rx="22" fill="#0C1928" stroke="#263A52" filter="url(#shadow)" />
+  <rect x="65" y="421" width="242" height="196" rx="21" fill="none" stroke="#FFFFFF" stroke-opacity=".035" />
+  <rect x="64" y="442" width="3" height="154" rx="1.5" fill="#A78BFA" />
+  <text x="88" y="449" class="micro" fill="#A78BFA" text-anchor="start" opacity="1">1–32 CONCURRENCY</text>
+  <text x="88" y="482" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">持久批量任务中心</text>
+  <text x="88" y="511" class="body" fill="#96A8BE" text-anchor="start" opacity="1">进度事件 · 取消 · 重试</text>
+  <text x="88" y="535" class="body" fill="#96A8BE" text-anchor="start" opacity="1">Checkpoint · 宕机恢复</text>
+  <text x="88" y="559" class="body" fill="#96A8BE" text-anchor="start" opacity="1">每个标的复用同一 runner</text>
+  <text x="88" y="583" class="body" fill="#96A8BE" text-anchor="start" opacity="1">无旁路分析逻辑</text>
+  <rect x="85" y="640" width="202" height="28" rx="14" fill="#A78BFA" fill-opacity="0.12" stroke="#A78BFA" stroke-opacity=".38" />
+  <text x="186.0" y="659" class="small" fill="#A78BFA" text-anchor="middle" opacity="1">单次 / 批量同源</text>
+  <circle cx="357" cy="210" r="14" fill="#A78BFA" fill-opacity=".16" stroke="#A78BFA" stroke-opacity=".45" />
+  <text x="357" y="214" class="navNum" fill="#A78BFA" text-anchor="middle" opacity="1">B</text>
+  <text x="381" y="214" class="micro" fill="#A78BFA" text-anchor="start" opacity="1">确定性研究内核</text>
+  <rect x="346" y="232" width="286" height="386" rx="22" fill="#0C1928" stroke="#263A52" filter="url(#shadow)" />
+  <rect x="347" y="233" width="284" height="384" rx="21" fill="none" stroke="#FFFFFF" stroke-opacity=".035" />
+  <rect x="346" y="254" width="3" height="342" rx="1.5" fill="#A78BFA" />
+  <text x="370" y="261" class="micro" fill="#A78BFA" text-anchor="start" opacity="1">ORCHESTRATION KERNEL</text>
+  <text x="370" y="294" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">ResearchEngine.run_cycle</text>
+  <text x="370" y="323" class="body" fill="#96A8BE" text-anchor="start" opacity="1">EvidenceLookupTool 只读查询</text>
+  <text x="370" y="347" class="body" fill="#96A8BE" text-anchor="start" opacity="1">AgentRouter 记录 routing_path</text>
+  <text x="370" y="371" class="body" fill="#96A8BE" text-anchor="start" opacity="1">按证据类型选择专业角色</text>
+  <text x="370" y="395" class="body" fill="#96A8BE" text-anchor="start" opacity="1">汇总 SignalFrame</text>
+  <text x="370" y="419" class="body" fill="#96A8BE" text-anchor="start" opacity="1">RiskGate：pass / reduce / block</text>
+  <text x="370" y="443" class="body" fill="#96A8BE" text-anchor="start" opacity="1">证据不足 → 显式弃权</text>
+  <text x="370" y="467" class="body" fill="#96A8BE" text-anchor="start" opacity="1">写入 RunManifest / DecisionLedger</text>
+  <path d="M308 314L346 314" fill="none" stroke="#2DD4BF" stroke-width="2.2" marker-end="url(#arrow)" />
+  <path d="M308 518L346 518" fill="none" stroke="#A78BFA" stroke-width="2.2" marker-end="url(#arrow)" />
+  <circle cx="681" cy="210" r="14" fill="#A78BFA" fill-opacity=".16" stroke="#A78BFA" stroke-opacity=".45" />
+  <text x="681" y="214" class="navNum" fill="#A78BFA" text-anchor="middle" opacity="1">C</text>
+  <text x="705" y="214" class="micro" fill="#A78BFA" text-anchor="start" opacity="1">专业角色协作</text>
+  <rect x="670" y="232" width="292" height="110" rx="20" fill="#0C1928" stroke="#263A52" />
+  <rect x="688" y="249" width="54" height="28" rx="14" fill="#2DD4BF" fill-opacity="0.2" stroke="#2DD4BF" stroke-opacity=".38" />
+  <text x="715.0" y="268" class="small" fill="#2DD4BF" text-anchor="middle" opacity="1">A1</text>
+  <text x="758" y="275" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">市场事件智能体</text>
+  <text x="694" y="311" class="body" fill="#96A8BE" text-anchor="start" opacity="1">涨停 · 炸板 · 连板</text>
+  <rect x="670" y="362" width="292" height="110" rx="20" fill="#0C1928" stroke="#263A52" />
+  <rect x="688" y="379" width="54" height="28" rx="14" fill="#A78BFA" fill-opacity="0.2" stroke="#A78BFA" stroke-opacity=".38" />
+  <text x="715.0" y="398" class="small" fill="#A78BFA" text-anchor="middle" opacity="1">A2</text>
+  <text x="758" y="405" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">题材催化智能体</text>
+  <text x="694" y="441" class="body" fill="#96A8BE" text-anchor="start" opacity="1">题材 · 公告 · 催化</text>
+  <rect x="670" y="492" width="292" height="110" rx="20" fill="#0C1928" stroke="#263A52" />
+  <rect x="688" y="509" width="54" height="28" rx="14" fill="#38BDF8" fill-opacity="0.2" stroke="#38BDF8" stroke-opacity=".38" />
+  <text x="715.0" y="528" class="small" fill="#38BDF8" text-anchor="middle" opacity="1">A3</text>
+  <text x="758" y="535" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">资金流智能体</text>
+  <text x="694" y="571" class="body" fill="#96A8BE" text-anchor="start" opacity="1">资金观察 · 确认条件</text>
+  <path d="M632 330H650V287H670" fill="none" stroke="#2DD4BF" stroke-width="2.2" marker-end="url(#arrow)" opacity="1" />
+  <path d="M632 400H670" fill="none" stroke="#A78BFA" stroke-width="2.2" marker-end="url(#arrow)" opacity="1" />
+  <path d="M632 470H650V547H670" fill="none" stroke="#38BDF8" stroke-width="2.2" marker-end="url(#arrow)" opacity="1" />
+  <rect x="670" y="624" width="292" height="46" rx="16" fill="#102033" stroke="#A78BFA" stroke-opacity=".36" />
+  <text x="816" y="653" class="small" fill="#A78BFA" text-anchor="middle" opacity="1">确定性基线｜无 LLM 也可运行</text>
+  <circle cx="1011" cy="210" r="14" fill="#FBBF24" fill-opacity=".16" stroke="#FBBF24" stroke-opacity=".45" />
+  <text x="1011" y="214" class="navNum" fill="#FBBF24" text-anchor="middle" opacity="1">D</text>
+  <text x="1035" y="214" class="micro" fill="#FBBF24" text-anchor="start" opacity="1">结构化研究产物</text>
+  <rect x="1000" y="232" width="376" height="278" rx="22" fill="#0C1928" stroke="#263A52" filter="url(#shadow)" />
+  <rect x="1001" y="233" width="374" height="276" rx="21" fill="none" stroke="#FFFFFF" stroke-opacity=".035" />
+  <rect x="1000" y="254" width="3" height="234" rx="1.5" fill="#FBBF24" />
+  <text x="1024" y="261" class="micro" fill="#FBBF24" text-anchor="start" opacity="1">AUDITABLE OUTPUT</text>
+  <text x="1024" y="294" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">ResearchRunResult</text>
+  <text x="1024" y="323" class="body" fill="#96A8BE" text-anchor="start" opacity="1">SignalFrame：方向 / 强度 / 置信度 / 周期</text>
+  <text x="1024" y="347" class="body" fill="#96A8BE" text-anchor="start" opacity="1">evidence_ids / signal_ids / risk_flags</text>
+  <text x="1024" y="371" class="body" fill="#96A8BE" text-anchor="start" opacity="1">确认条件 / 失效条件</text>
+  <text x="1024" y="395" class="body" fill="#96A8BE" text-anchor="start" opacity="1">watch / avoid / abstain</text>
+  <text x="1024" y="419" class="body" fill="#96A8BE" text-anchor="start" opacity="1">agent_outputs / routing_path / 成本</text>
+  <path d="M962 287H980V340H1000" fill="none" stroke="#FBBF24" stroke-width="2.2" marker-end="url(#arrow)" opacity="1" />
+  <path d="M962 417H1000" fill="none" stroke="#FBBF24" stroke-width="2.2" marker-end="url(#arrow)" opacity="1" />
+  <path d="M962 547H980V470H1000" fill="none" stroke="#FBBF24" stroke-width="2.2" marker-end="url(#arrow)" opacity="1" />
+  <rect x="1000" y="532" width="376" height="138" rx="22" fill="#0C1928" stroke="#263A52" filter="url(#shadow)" />
+  <rect x="1001" y="533" width="374" height="136" rx="21" fill="none" stroke="#FFFFFF" stroke-opacity=".035" />
+  <rect x="1000" y="554" width="3" height="94" rx="1.5" fill="#FB7185" />
+  <text x="1024" y="561" class="micro" fill="#FB7185" text-anchor="start" opacity="1">OPTIONAL MODEL ENHANCEMENT</text>
+  <text x="1024" y="594" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">模型治理边界</text>
+  <text x="1024" y="623" class="body" fill="#96A8BE" text-anchor="start" opacity="1">能力注册 · Schema 校验 · 408/429/5xx 重试</text>
+  <text x="1024" y="647" class="body" fill="#96A8BE" text-anchor="start" opacity="1">Token / 尝试次数 / 估算成本持久化</text>
+  <text x="64" y="785" class="micro" fill="#96A8BE" text-anchor="start" opacity="1">研究闭环导航</text>
+  <text x="200" y="785" class="small" fill="#6F829A" text-anchor="start" opacity="1">每一脑区交付一个可验证产物，最终回到下一轮证据与规则</text>
+  <rect x="64" y="806" width="240" height="52" rx="16" fill="#0B1726" stroke="#263A52" />
+  <text x="86" y="838" class="navNum" fill="#647890" text-anchor="start" opacity="1">01</text>
+  <text x="119" y="838" class="nav" fill="#B7C4D4" text-anchor="start" opacity="1">系统总览</text>
+  <path d="M309 832H315" stroke="#263A52" stroke-width="1.7" marker-end="url(#arrow)" />
+  <rect x="320" y="806" width="240" height="52" rx="16" fill="#0B1726" stroke="#263A52" />
+  <text x="342" y="838" class="navNum" fill="#647890" text-anchor="start" opacity="1">02</text>
+  <text x="375" y="838" class="nav" fill="#B7C4D4" text-anchor="start" opacity="1">证据平面</text>
+  <path d="M565 832H571" stroke="#263A52" stroke-width="1.7" marker-end="url(#arrow)" />
+  <rect x="576" y="806" width="240" height="52" rx="16" fill="url(#activeNav)" stroke="#A78BFA" stroke-opacity=".64" />
+  <text x="598" y="838" class="navNum" fill="#A78BFA" text-anchor="start" opacity="1">03</text>
+  <text x="631" y="838" class="nav" fill="#F4F7FB" text-anchor="start" opacity="1">研究编排</text>
+  <path d="M821 832H827" stroke="#A78BFA" stroke-width="1.7" marker-end="url(#arrow)" />
+  <rect x="832" y="806" width="240" height="52" rx="16" fill="#0B1726" stroke="#263A52" />
+  <text x="854" y="838" class="navNum" fill="#647890" text-anchor="start" opacity="1">04</text>
+  <text x="887" y="838" class="nav" fill="#B7C4D4" text-anchor="start" opacity="1">决策约束</text>
+  <path d="M1077 832H1083" stroke="#263A52" stroke-width="1.7" marker-end="url(#arrow)" />
+  <rect x="1088" y="806" width="240" height="52" rx="16" fill="#0B1726" stroke="#263A52" />
+  <text x="1110" y="838" class="navNum" fill="#647890" text-anchor="start" opacity="1">05</text>
+  <text x="1143" y="838" class="nav" fill="#B7C4D4" text-anchor="start" opacity="1">验证反馈</text>
 </svg>

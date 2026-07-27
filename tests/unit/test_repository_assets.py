@@ -74,7 +74,10 @@ def test_readme_brain_map_series_is_complete_and_ordered() -> None:
         assert 'width="1440"' in content
         assert 'height="900"' in content
         assert "OPENALPHA" in content
-        assert "五脑区导航" in content
+        assert "研究闭环导航" in content
+        assert "Geist" in content
+        assert "Inter" not in content
+        assert "Arial" not in content
 
     assert "链邻数据接口 API" in combined_content
     assert "已实现 · 统一替代入口" in combined_content
@@ -85,6 +88,18 @@ def test_readme_brain_map_series_is_complete_and_ordered() -> None:
     assert "不可变组合转移账本" in combined_content
     assert "CAR · t 统计量" in combined_content
     assert "结构化研究筛选" in combined_content
+    assert "自动执行 / 持久化" in combined_content
+    assert "显式组合 / 人工反馈" in combined_content
+    assert "EvidenceSnapshot" in combined_content
+    assert "ResearchEngine.run_cycle" in combined_content
+    assert "ResearchRunResult" in combined_content
+    assert "DeliberationOutcome" in combined_content
+    assert "PortfolioTransition" in combined_content
+    assert "ValidationResult" in combined_content
+    assert "四时钟 PIT" in combined_content
+    assert "显式弃权" in combined_content
+    assert "不自动下单" in combined_content
+    assert "不自动训练模型" in combined_content
     assert "Tushare" not in combined_content
     assert "AKShare" not in combined_content
 

@@ -62,60 +62,60 @@
 
 ## 🧠 五图读懂 OpenAlpha CN
 
-OpenAlpha CN 将数据接入、时间点证据、批量多智能体研判、双委员会风控、组合账本、统计验证和研究产品串联为完整研究闭环。下面五张图按实际使用顺序展示系统如何工作。
+OpenAlpha CN 不是把智能体角色堆在一起，而是把 **A 股事实、时间点证据、结构化研究、风险裁决、组合会计与统计验证** 组织成一套可复现的研究操作系统。下面五张图按实际使用顺序展示系统如何工作。
 
 **链邻数据接口 API** 已具备合同优先的 BYOK Provider，统一约束 Bearer 认证、四时钟 PIT、数据修订、客户端限流和失败分类。用户配置真实服务地址、Token 与数据授权后即可启用；仓库不内置或转售链邻商业数据。
 
-五张图共用同一条“五脑区导航”，依次组成 OpenAlpha CN 的 **A 股研究大脑**：
+五张图共用同一条“研究闭环导航”。图中 **实线表示系统自动执行或持久化**，**虚线表示调用方显式组合或人工反馈**；每一图都交付一个可以被下一图消费、也可以独立复核的结构化产物：
 
-`全脑总览 → 证据感知 → 批量研判 → 双委员会与组合决策 → 回放验证与研究产品 → 反馈到下一轮证据和规则`
+`市场事实 → EvidenceSnapshot → ResearchRunResult → DeliberationOutcome / PortfolioTransition → ValidationResult → 人工审阅后反馈到下一轮证据与规则`
 
-### 01｜全脑总览：五个脑区组成研究闭环
+### 01｜系统总览：一条由证据 ID 与不可变账本闭合的研究链
 
 <p align="center">
   <img
     src="./assets/diagrams/openalpha-brain-01-overview.svg"
-    alt="OpenAlpha CN A 股研究大脑五脑区全景图"
+    alt="OpenAlpha CN 从 A 股事实到验证反馈的研究操作系统全景图"
     width="1200"
   />
 </p>
 
-### 02｜证据感知：先回答“当时能不能知道”
+### 02｜证据平面：先证明“当时可知”，再讨论模型是否聪明
 
 <p align="center">
   <img
     src="./assets/diagrams/openalpha-brain-02-evidence.svg"
-    alt="OpenAlpha CN 数据接入、四时钟时间线与证据快照解析图"
+    alt="OpenAlpha CN 授权数据、Provider 治理、四时钟 PIT 与 EvidenceSnapshot 证据平面图"
     width="1200"
   />
 </p>
 
-### 03｜批量智能体研判：角色围绕证据规模化协作
+### 03｜研究编排：让专业角色围绕同一证据规模化协作
 
 <p align="center">
   <img
     src="./assets/diagrams/openalpha-brain-03-agents.svg"
-    alt="OpenAlpha CN 持久批量队列、证据感知路由、模型治理与结构化信号解析图"
+    alt="OpenAlpha CN 持久批量任务、确定性研究内核、专业智能体与 ResearchRunResult 编排图"
     width="1200"
   />
 </p>
 
-### 04｜双委员会与组合决策：从观点分歧到可审计持仓变化
+### 04｜决策约束：把观点分歧压缩成可解释、可审计的状态变化
 
 <p align="center">
   <img
     src="./assets/diagrams/openalpha-brain-04-decision.svg"
-    alt="OpenAlpha CN Bull Bear 辩论、三态风险委员会、风险门与不可变组合账本解析图"
+    alt="OpenAlpha CN 显式 Bull Bear 研究委员会、风险裁决与 PortfolioTransition 组合会计图"
     width="1200"
   />
 </p>
 
-### 05｜回放验证与研究产品：让结果进入下一轮判断
+### 05｜验证反馈：回答是否有效、为何有效、下一轮应该改什么
 
 <p align="center">
   <img
     src="./assets/diagrams/openalpha-brain-05-replay-interfaces.svg"
-    alt="OpenAlpha CN 同路径回放、多日组合报告、事件统计检验、筛选观察池报告中心与开放接口解析图"
+    alt="OpenAlpha CN 同路径回放、事件统计、多日组合报告、ValidationResult 与人工反馈图"
     width="1200"
   />
 </p>
