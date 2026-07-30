@@ -3,10 +3,12 @@
 当前工作区：[`specs/v2/`](specs/v2/) — OpenAlpha CN v2 智能研究与选股平台改造
 
 - 范围、实测基线与决策依据：[`specs/v2/openalpha-cn-v2-prd.md`](specs/v2/openalpha-cn-v2-prd.md)
-- 阶段、闸门与任务清单：[`specs/v2/openalpha-cn-v2-roadmap.md`](specs/v2/openalpha-cn-v2-roadmap.md)
+- 阶段、闸门与 110 个 issue 切片：[`specs/v2/openalpha-cn-v2-roadmap.md`](specs/v2/openalpha-cn-v2-roadmap.md)
+- 四缝审计证据与缺口证明：[`specs/v2/openalpha-cn-v2-seam-audit.md`](specs/v2/openalpha-cn-v2-seam-audit.md)
 
-当前状态：v2 实现尚未开始。下一步是 P0 的 `T0.1` —— 扩展 `scripts/build_feature_coverage.py`
-做 AST 符号校验，并修正 v1 台账中 7 处失效符号引用（PRD §1.3 B3 与 Implementation Decision 29）。
+当前状态：v2 实现尚未开始。下一步是 `V2-P0A-001` —— 扩展 `scripts/build_feature_coverage.py`
+做 AST 符号校验（当前 `_paths()` 在 `#` 处截断，73/77 个符号引用从未被解析），
+并修正 v1 台账中 7 处失效符号引用（PRD §1.3 B3 与 Implementation Decision 29）。
 
 维护者依次读取：
 

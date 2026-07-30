@@ -4,7 +4,7 @@ Status: Approved for implementation planning — 范围已按实测基线与使�
 Revision: v2.1（取代 `openalpha-cn-v2-research-platform-prd.md` 的 Proposed 版）
 Baseline: `main` @ `8d13065`，实测于 2026-07-29
 Compatibility baseline: OpenAlpha CN v1 contracts and local-first runtime
-配套文档: `openalpha-cn-v2-roadmap.md`（开发路线图与闸门）
+配套文档: `openalpha-cn-v2-roadmap.md`（开发路线图与闸门）· `openalpha-cn-v2-seam-audit.md`（四缝审计证据与缺口证明）
 
 ## 使用者画像与约束
 
@@ -54,7 +54,29 @@ Proposed 版按"可分发的开源研究平台"撰写。本版按"个人研究�
 **B3 — 能力台账校验只查文件不查符号。**
 `scripts/build_feature_coverage.py` 的 `_paths()` 在 `#` 处截断路径后只做 `path.exists()`，从不校验符号。因此 v1 台账中 7 处不存在的符号一直通过校验：`MarketEventAgent`（实际 `MarketAgent`）、`ThemeCatalystAgent`（`ThemeAgent`）、`CapitalFlowAgent`（`CapitalAgent`）、`StructuredModelAgent`（`StructuredSignalAgent`）、`AShareExecutionModel`（`AShareExecutionPolicy`）、`AShareCostModel`（`CostSchedule`）、`AkShareProvider`（`AKShareProvider`）。
 
-功能本身存在（非虚报能力），但台账是手工维护、未被机器校验的。Implementation Decision 29 要把台账当作 v2 闸门，而闸门当前会放过不存在的引用。
+功能本身存在（非虚报能力），但台账是手工维护、未被机器校验的。根因是 `scripts/build_feature_coverage.py:36` 把 `file#symbol` 在 `#` 处截断后只做 `path.exists()` —— 77 个源码引用中 73 个带 `#symbol`，**无一被解析**。Implementation Decision 29 要把台账当作 v2 闸门，而闸门当前会放过不存在的引用。
+
+**B4 — 没有任何迁移机制，且契约设计使升版双向不可读。**
+全库无 `PRAGMA user_version`、无 `schema_migrations` 表、无 `ALTER TABLE`、无 alembic（`src/` 内 grep 零命中；唯一命中是 `docs/api/contracts.md:20-22` 的政策散文）。9 张表全部靠 `CREATE TABLE IF NOT EXISTS` 隐式建立，建表是构造 store 的副作用。更严重的是行是不透明 JSON + `extra="forbid"` + `Literal[".../v1"]`：**任何新增字段都使旧行对新代码不可读、新行对旧代码不可读**，且没有任何代码路径能区分或升级版本（`storage/sqlite.py:84` 遇 `/v2` 直接硬失败）。
+
+**这条决定 Decision 36 的可行性** —— 三项破坏性契约变更必须先有迁移机制才能落地。
+
+**B5 — `ValidationResult` 不被任何 store 持久化。**
+它只由 `POST /api/v1/backtests/validate`（`api/app.py:526-539`）返回，无任何写入路径。工作台第 4 页（组合与归因看板，S79）**没有数据源**。
+
+**B6 — 可复现性声明目前部分是空的。**
+`random_seed` 被记录后从未被读取（全库唯一实际播种是 `event_study.py:71`，用的是另一个字段）；`code_commit` 从不从 git 取，真实值是字面量 `"development"`/`"web-development"`；`config_digest` 从不计算，是 `"0"*64`。三者**都是 `decision_id` 的输入** ⇒ 不同代码与不同配置产生相同决策 ID。此外 `DecisionLedger.created_at` 也在 ID 内，而 `engine.py:105` 只在 run 行已存在时复用 `started_at`，故**首次运行无法仅凭输入复现**。
+
+**B7 — 结构地基有三处必须先修的债。**
+① `storage/` 向上依赖 4 个上层包（唯一的反向依赖），已存在一个被 `TYPE_CHECKING` 掩盖的真实循环（`storage/batch.py:8` ↔ `runtime/batch.py:15-16`），任何 `storage/panel.py` 引用研究契约就立刻成环；② **两个手工同步的组装根**（`api/app.py:254-269` ≡ `sdk.py:63-113`），v2 新增 5 层意味着 10 处装配要人工保持一致；③ `runtime/engine.py` 一个文件承担契约 + 恢复 + 聚合 + 政策四份职责，而 4 个下游**只为契约**而 import 它。
+
+**B8 — `.parquet`/`.duckdb`/`.sqlite3` 是发布拦截后缀。**
+`scripts/verify_publication.py:14-28` 的 `BLOCKED_SUFFIXES` 会让任何签入的面板 fixture 直接让 `security` job 失败 ⇒ 面板 fixture 必须运行时生成。另外 `features.csv` 点名全部 34 个 Python 测试文件 + 2 个 web 测试文件，**任何测试树重组都是三制品同步变更**。
+
+**B9 — 无配置对象、无调度原语、无结构化日志。**
+无 dotenv/pydantic-settings ⇒ `.env` 只对 Compose 生效，`openalpha serve`/SDK/pytest 全部无视它；`.env.example` 声明的 12 个变量只有 3 个被读，`OPENALPHA_LOG_LEVEL`/`HOST`/`PORT` 是死变量。全库零调度原语（grep `cron\|scheduler\|apscheduler\|celery` 零命中），而 Daily 档需要带 next-fire-time 与 lease/lock 的持久作业表、按交易日的幂等键、catch-up 政策、日历依赖与崩溃恢复 —— 全部不存在，且没有迁移机制去加这些表。`src/` 内零 logging 配置。
+
+**B4–B9 的后果**：这些是 P1 之前必须关闭的前置债，原先不可见。Decision 30 的切片顺序因此在 P0 与 P1 之间插入一个结构地基阶段。完整的 103 条 finding 与逐条的关闭 issue 见 `openalpha-cn-v2-seam-audit.md`。
 
 ### 1.4 与 Proposed 版假设的其余差距
 
@@ -354,7 +376,7 @@ Proposed 版按可分发开源平台撰写。个人自用场景下，下列能�
 27. **【修正】导出为许可感知的最小版。** 报告包含证据引用与许可摘要，但排除受限原始载荷。**具体到本部署：不导出 Tushare 原始 payload。**
 28. **保留显式人工控制。** 研究结果不自动成为订单；验证结果不自动重训或晋升模型；候选变化不自动进入自选股或 Paper Portfolio。每次转换是显式的使用者或配置政策动作，并记入台账。
 29. **【修正】使用能力台账治理，且台账本身必须机器可验证。** 每项 PRD 能力获得稳定 ID、实现去向、行为测试证据与终态状态。UI 控件、schema、mock 与文档本身不计完成。**`scripts/build_feature_coverage.py` 当前仅校验文件存在（`_paths()` 在 `#` 处截断后 `path.exists()`），必须扩展为 AST 符号断言，并修正现有 7 处失效引用（见 §1.3 B3）。这是 v2 第一个提交。**
-30. **【修正】通过垂直切片交付，顺序按数据正确性依赖排。** 推荐顺序：**P0 地基校正与能力探测 → P1 面板数据平面 → P2 PIT 红队闸门（独立必过）→ P3 因子层 → P4 候选排序与模型基线 → P5 组合、验证与 4 页工作台**。每个切片保持可安装并行使一条完整的公开使用者行为。详见 `openalpha-cn-v2-roadmap.md`。
+30. **【修正】通过垂直切片交付，顺序按数据正确性依赖排。** 推荐顺序：**P0.A 治理与探测 → P0.B 结构地基与迁移机制 → P1 面板数据平面 → P2 PIT 红队闸门（独立必过）→ P3 因子层 → P4 候选排序与模型基线 → P5 组合、验证与 4 页工作台**。P0.B 由四缝审计的 B4–B9 触发，是 P1/P4 的硬前置。除 P0.A/P0.B 为纯地基外，每个切片保持可安装并行使一条完整的公开使用者行为。切片已细化为 110 个 issue，逐条映射到 Story 与 Decision，详见 `openalpha-cn-v2-roadmap.md`。
 
 ### 新增 Implementation Decisions
 
