@@ -11,7 +11,7 @@ Compatibility baseline: OpenAlpha CN v1 contracts and local-first runtime
 本 PRD 的范围由以下已确认约束决定，任何范围讨论都应回到这三条：
 
 1. **使用者是个人量化研究者**，非团队、非多租户、非对外服务。
-2. **数据来源是付费 Tushare Pro**（具体积分档位待 P0 能力探测确认）；**无 L1/L2/逐笔 tick 数据**。
+2. **数据来源是付费 Tushare Pro**（2026-07-30 实测：P1 所需 16 个数据集全部可取，见 roadmap §6）；**无 L1/L2/逐笔 tick 数据**。
 3. **终端定位是研究终端**，不是实时行情终端。实时行情、盘口、逐笔、分时推送整体不在范围内。
 
 Proposed 版按"可分发的开源研究平台"撰写。本版按"个人研究者自用、可选择性开源"重写范围，工程纪律不打折，平台化开销显著削减。
@@ -201,7 +201,7 @@ Proposed 版按可分发开源平台撰写。个人自用场景下，下列能�
 | S8 | Data catalog: subjects/fields/date/revision coverage/freshness | **IN** | P1 |
 | S9 | PIT integrity checks for four clocks | **IN** | P1 + P2 |
 | S10 | Historical universe membership and delisted securities preserved | **IN** | 生存偏差控制，不可省 |
-| S11 | Historical industry classifications and benchmark constituents | **IN**（受积分约束可降级） | 若探测不可用，中性化退化为市值中性化并标注 |
+| S11 | Historical industry classifications and benchmark constituents | **IN** | `index_weight` / `index_classify` / `index_member_all` 均实测可用，无需降级 |
 | S12 | Corporate actions and adjustment policies versioned | **IN** | 复权因子，不可省 |
 | S13 | Missing/stale/duplicated/revised records summarized by dataset | **IN** | P1 |
 | S14 | Failed daily datasets block dependent research explicitly | **IN** | fail-closed |
@@ -455,4 +455,4 @@ Proposed 版按可分发开源平台撰写。个人自用场景下，下列能�
 - 初始验收使用合成 fixture。进入 Research 或 Daily 档需要使用者配置自有合法数据并显式接受 Provider 条款。
 - **两项待定决策**（不阻塞 P0 启动，但会改变 P0 的 ADR 内容）：
   1. **是否继续维护开源分发。** 仓库为 MIT 且有公开地址与推广文档。本版默认个人研究优先，将 Demo 档位、发布扫描与完整迁移测试降级。若决定对外发布 v2，需加回这三项（约 +3–4 周），且 Demo 冻结数据集须重新设计为不含 Tushare 原始数据。
-  2. **Tushare 积分档位未知。** 本 PRD 不猜接口门槛；P0 能力探测将测出账号实际可取接口。若 `index_weight` 或行业分类历史不可用，S11/S19 降级为自建静态股票池 + 市值中性化，并在每份因子报告中标注该限制。
+  2. ~~**Tushare 积分档位未知。**~~ **已解决（2026-07-30 实测）**：P1 全部候选数据集 16/16 返回 `code=0`，含 `index_weight`、`index_classify`(SW2021 L1)、`index_member_all` 与四张财务表。S11/S19 **不需要降级**，行业中性化可用真实行业分类。`balancesheet` 单标的单期返回 2 行，证实 `ann_date`/`f_ann_date` 修正记录真实存在。明细见 `openalpha-cn-v2-roadmap.md` §6。`V2-P0A-004` 仍需把探测做成 `doctor` 的正式能力，因为限流与积分随账号变化且需在每次 `panel build` 前 fail-closed。
