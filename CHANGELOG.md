@@ -32,6 +32,11 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 - The feature ledger now contains 90 terminally reviewed capabilities, with 85
   supported by local source and test evidence (`94.44%` true completion,
   `UNREVIEWED=0`, `UNKNOWN=0`).
+- The repository work pointer now targets v2. `AGENTS.md`, `CONTRIBUTING.md` and
+  `docs/HANDOFF_CURRENT.md` reference the `docs/specs/v2/` workspace, which holds
+  the re-scoped PRD, a 110-issue roadmap across seven phases, and a four-seam
+  code audit whose 103 findings each map to a closing issue. The v1 spec remains
+  the contract baseline.
 
 ## [1.0.0] - 2026-07-24
 

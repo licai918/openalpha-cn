@@ -398,6 +398,22 @@ pnpm test:e2e
 uv run python scripts/verify_compose_recovery.py
 ```
 
+## 开发方向
+
+活跃开发方向是 v2：把 OpenAlpha CN 从可验证的研究契约底座，升级为个人可日常使用的 A 股研究与选股环境 —— 面板数据平面、PIT 因子库、Walk-forward 预测模型、候选排序、组合与验证，以及四页研究工作台。
+
+工作区在 [docs/specs/v2/](docs/specs/v2/)：
+
+| 文档 | 内容 |
+|---|---|
+| [PRD](docs/specs/v2/openalpha-cn-v2-prd.md) | 范围、实测基线与实现决策 |
+| [开发路线图](docs/specs/v2/openalpha-cn-v2-roadmap.md) | 七个阶段 110 个 issue，含依赖、闸门与需求映射 |
+| [四缝审计](docs/specs/v2/openalpha-cn-v2-seam-audit.md) | 103 条带 `file:line` 证据的 finding，逐条对应关闭 issue |
+
+参与开发前先读 [AGENTS.md](AGENTS.md) 的 v2 硬性规则与 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
+v2 的输出定位为研究与决策支持：不连接实盘券商、不代替使用者判断、不承诺收益。工程完成度不等于研究有效性 —— 只有预先登记的样本外指标、扣成本增量价值、多重检验控制，以及在结果已知之前落库的预测，才构成信号真实性的证据。
+
 ## 许可证
 
 OpenAlpha CN 源码采用 [MIT License](LICENSE)。第三方数据、模型、服务、品牌素材与链邻桌面安装程序保留各自授权边界，见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
