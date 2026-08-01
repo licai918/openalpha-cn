@@ -92,6 +92,51 @@ def test_reference_to_a_missing_symbol_raises_and_names_the_symbol(
     assert "pkg.py" in str(excinfo.value)
 
 
+def test_reference_to_a_class_name_is_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "pkg.py"
+    source.write_text("class RealClass:\n    pass\n", encoding="utf-8")
+    csv_path = tmp_path / "features.csv"
+    _write_csv(csv_path, local_source_evidence="pkg.py#RealClass", test_evidence="pkg.py")
+    _point_at_tmp_root(monkeypatch, tmp_path, csv_path)
+
+    rows = bfc._load()
+
+    assert rows[0]["feature_id"] == "TST-001"
+
+
+def test_reference_to_a_method_inside_a_class_body_is_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "pkg.py"
+    source.write_text(
+        "class RealClass:\n    def real_method(self):\n        return 1\n",
+        encoding="utf-8",
+    )
+    csv_path = tmp_path / "features.csv"
+    _write_csv(csv_path, local_source_evidence="pkg.py#real_method", test_evidence="pkg.py")
+    _point_at_tmp_root(monkeypatch, tmp_path, csv_path)
+
+    rows = bfc._load()
+
+    assert rows[0]["feature_id"] == "TST-001"
+
+
+def test_reference_to_a_module_level_variable_is_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "pkg.py"
+    source.write_text("REAL_VARIABLE = 1\n", encoding="utf-8")
+    csv_path = tmp_path / "features.csv"
+    _write_csv(csv_path, local_source_evidence="pkg.py#REAL_VARIABLE", test_evidence="pkg.py")
+    _point_at_tmp_root(monkeypatch, tmp_path, csv_path)
+
+    rows = bfc._load()
+
+    assert rows[0]["feature_id"] == "TST-001"
+
+
 def test_non_python_fragment_reference_only_checks_file_existence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
