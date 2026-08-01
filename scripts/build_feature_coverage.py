@@ -6,6 +6,7 @@ import argparse
 import ast
 import csv
 import json
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -29,6 +30,13 @@ TRUE_COMPLETE = {
     "ADAPTER_COMPLETE",
     "ENHANCED_REPLACEMENT",
 }
+
+ACCEPTANCE_KINDS = {"pytest", "ci-job", "not-applicable", "legacy-prose"}
+NOT_APPLICABLE_STATUSES = {"EXCLUDED", "DEFERRED"}
+
+_PYTEST_NODE_ID = re.compile(
+    r"^(?P<path>[\w./-]+\.py)::(?:(?P<cls>[A-Za-z_]\w*)::)?(?P<func>[A-Za-z_]\w*)$"
+)
 
 
 def _paths(value: str) -> list[Path]:
@@ -88,6 +96,101 @@ def _module_symbols(path: Path) -> set[str]:
     return names
 
 
+def _pytest_module_functions(path: Path) -> set[str]:
+    """Top-level test function names declared in `path`."""
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    return {
+        node.name for node in tree.body if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+    }
+
+
+def _pytest_class_methods(path: Path, class_name: str) -> set[str]:
+    """Method names declared inside `class_name` in `path` (empty if the class is absent)."""
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            return {
+                member.name
+                for member in node.body
+                if isinstance(member, ast.FunctionDef | ast.AsyncFunctionDef)
+            }
+    return set()
+
+
+def _workflow_job_ids(path: Path) -> set[str]:
+    """Job ids declared directly under the top-level `jobs:` key of a workflow file."""
+    ids: set[str] = set()
+    in_jobs = False
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not in_jobs:
+            if line.rstrip() == "jobs:":
+                in_jobs = True
+            continue
+        if line and not line.startswith(" "):
+            break
+        match = re.match(r"^ {2}([A-Za-z0-9_-]+):", line)
+        if match:
+            ids.add(match.group(1))
+    return ids
+
+
+def _validate_pytest_acceptance(feature_id: str, value: str) -> None:
+    match = _PYTEST_NODE_ID.match(value)
+    if not match:
+        raise ValueError(f"{feature_id} has a malformed pytest node id: {value}")
+    path = ROOT / match["path"]
+    if not path.exists():
+        raise ValueError(f"{feature_id} references a missing pytest file: {match['path']}")
+    class_name = match["cls"]
+    func_name = match["func"]
+    known = (
+        _pytest_class_methods(path, class_name) if class_name else _pytest_module_functions(path)
+    )
+    if func_name not in known:
+        raise ValueError(f"{feature_id} references undefined symbols: [{value}]")
+
+
+def _validate_ci_job_acceptance(feature_id: str, value: str) -> None:
+    parts = value.split("::")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise ValueError(f"{feature_id} has a malformed ci-job reference: {value}")
+    workflow_part, job_id = parts
+    workflow_path = ROOT / workflow_part
+    if not workflow_path.exists():
+        raise ValueError(f"{feature_id} references a missing workflow file: {workflow_part}")
+    if job_id not in _workflow_job_ids(workflow_path):
+        raise ValueError(f"{feature_id} references undefined symbols: [{value}]")
+
+
+def _validate_acceptance(row: dict[str, str]) -> None:
+    """Enforce the per-`acceptance_kind` rules for `row["acceptance_test"]`.
+
+    - `pytest`: `acceptance_test` must be a pytest node id (`path.py::test_name` or
+      `path.py::TestClass::test_name`) pointing at a real, AST-verified test.
+    - `ci-job`: `acceptance_test` must be `<workflow-file>::<job-id>` where the job id
+      is declared in that workflow's `jobs:` block.
+    - `not-applicable`: only permitted when `coverage_status` is `EXCLUDED` or `DEFERRED`.
+    - `legacy-prose`: unvalidated historical prose, counted by `_summary`.
+    """
+    feature_id = row["feature_id"]
+    kind = row["acceptance_kind"]
+    value = row["acceptance_test"]
+    if not kind:
+        raise ValueError(f"{feature_id} has no acceptance_kind")
+    if kind not in ACCEPTANCE_KINDS:
+        raise ValueError(f"{feature_id} has an unknown acceptance_kind: {kind}")
+    if kind == "pytest":
+        _validate_pytest_acceptance(feature_id, value)
+    elif kind == "ci-job":
+        _validate_ci_job_acceptance(feature_id, value)
+    elif kind == "not-applicable" and row["coverage_status"] not in NOT_APPLICABLE_STATUSES:
+        raise ValueError(
+            f"{feature_id} uses acceptance_kind=not-applicable but coverage_status is "
+            f"{row['coverage_status']!r}, expected one of {sorted(NOT_APPLICABLE_STATUSES)}"
+        )
+    # "legacy-prose" requires no further validation.
+
+
 def _load() -> list[dict[str, str]]:
     with CSV_PATH.open(encoding="utf-8", newline="") as handle:
         rows = list(csv.DictReader(handle))
@@ -100,6 +203,7 @@ def _load() -> list[dict[str, str]]:
             raise ValueError(f"{row['feature_id']} has invalid status: {status}")
         if not row["acceptance_test"]:
             raise ValueError(f"{row['feature_id']} has no acceptance test")
+        _validate_acceptance(row)
         if status in TRUE_COMPLETE:
             missing = [
                 str(path.relative_to(ROOT))
@@ -127,6 +231,7 @@ def _summary(rows: list[dict[str, str]]) -> dict[str, object]:
     by_category = Counter(row["category"] for row in rows)
     completed = sum(by_status[status] for status in TRUE_COMPLETE)
     total = len(rows)
+    legacy_acceptance_rows = sum(1 for row in rows if row["acceptance_kind"] == "legacy-prose")
     return {
         "schema_version": "openalpha-feature-coverage/v1",
         "generated_on": "2026-07-24",
@@ -136,6 +241,7 @@ def _summary(rows: list[dict[str, str]]) -> dict[str, object]:
             "true_completion_rate_pct": round(completed / total * 100, 2),
             "unreviewed": 0,
             "unknown": 0,
+            "legacy_acceptance_rows": legacy_acceptance_rows,
         },
         "status_distribution": dict(sorted(by_status.items())),
         "category_distribution": dict(sorted(by_category.items())),
@@ -164,6 +270,8 @@ def _markdown(rows: list[dict[str, str]], summary: dict[str, object]) -> str:
         f"({totals['true_completion_rate_pct']}%)",
         f"- `UNREVIEWED={totals['unreviewed']}`",
         f"- `UNKNOWN={totals['unknown']}`",
+        f"- `legacy_acceptance_rows={totals['legacy_acceptance_rows']}` "
+        "(历史散文验收、尚未绑定为可执行 pytest/CI 断言)",
         "",
         "## 状态分布",
         "",
@@ -178,15 +286,15 @@ def _markdown(rows: list[dict[str, str]], summary: dict[str, object]) -> str:
             "",
             "## 功能明细",
             "",
-            "| ID | 类别 | 功能 | 状态 | 源码证据 | 测试证据 |",
-            "|---|---|---|---|---|---|",
+            "| ID | 类别 | 功能 | 状态 | 源码证据 | 测试证据 | 验收类型 | 验收证据 |",
+            "|---|---|---|---|---|---|---|---|",
         ]
     )
     for row in rows:
         lines.append(
             f"| `{row['feature_id']}` | {row['category']} | {row['feature_name']} | "
             f"`{row['coverage_status']}` | `{row['local_source_evidence']}` | "
-            f"`{row['test_evidence']}` |"
+            f"`{row['test_evidence']}` | `{row['acceptance_kind']}` | `{row['acceptance_test']}` |"
         )
     lines.extend(
         [

@@ -8,6 +8,7 @@
 - 当前真实完成: 85 (94.44%)
 - `UNREVIEWED=0`
 - `UNKNOWN=0`
+- `legacy_acceptance_rows=86` (历史散文验收、尚未绑定为可执行 pytest/CI 断言)
 
 ## 状态分布
 
@@ -21,98 +22,98 @@
 
 ## 功能明细
 
-| ID | 类别 | 功能 | 状态 | 源码证据 | 测试证据 |
-|---|---|---|---|---|---|
-| `OA-TIME-001` | temporal | Aware datetime contract | `NATIVE_COMPLETE` | `src/openalpha_cn/domain/time.py#ensure_aware` | `tests/unit/domain/test_time.py` |
-| `OA-TIME-002` | temporal | Four-clock timeline | `NATIVE_COMPLETE` | `src/openalpha_cn/domain/time.py#Timeline` | `tests/unit/domain/test_time.py` |
-| `OA-TIME-003` | temporal | Point-in-time visibility | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/domain/time.py#is_visible_at` | `tests/unit/domain/test_time.py;tests/unit/domain/test_evidence.py` |
-| `OA-EVID-001` | evidence | Immutable evidence snapshot | `NATIVE_COMPLETE` | `src/openalpha_cn/domain/evidence.py#EvidenceSnapshot` | `tests/unit/domain/test_evidence.py` |
-| `OA-EVID-002` | evidence | Content-addressed evidence | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/domain/evidence.py#EvidenceSnapshot` | `tests/unit/domain/test_evidence.py` |
-| `OA-EVID-003` | evidence | Serialized evidence verification | `NATIVE_COMPLETE` | `src/openalpha_cn/evidence/service.py#parse_serialized_evidence` | `tests/integration/test_evidence_interfaces.py` |
-| `OA-EVID-004` | evidence | Limit-up normalization | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/evidence/builder.py#EvidenceBuilder` | `tests/unit/evidence/test_builder.py` |
-| `OA-EVID-005` | evidence | Broken-board normalization | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/evidence/builder.py#EvidenceBuilder` | `tests/unit/evidence/test_builder.py` |
-| `OA-EVID-006` | evidence | Consecutive-board normalization | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/evidence/builder.py#EvidenceBuilder` | `tests/unit/evidence/test_builder.py` |
-| `OA-EVID-007` | evidence | Disclosure normalization | `NATIVE_COMPLETE` | `src/openalpha_cn/evidence/builder.py#EvidenceBuilder` | `tests/unit/evidence/test_builder.py` |
-| `OA-EVID-008` | evidence | Theme and catalyst normalization | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/evidence/builder.py#EvidenceBuilder` | `tests/unit/evidence/test_builder.py` |
-| `OA-EVID-009` | evidence | Capital observation normalization | `NATIVE_COMPLETE` | `src/openalpha_cn/evidence/builder.py#EvidenceBuilder` | `tests/unit/evidence/test_builder.py` |
-| `OA-DATA-001` | storage | Append-only run ledger | `NATIVE_COMPLETE` | `src/openalpha_cn/storage/sqlite.py#SQLiteRunRepository` | `tests/integration/storage/test_sqlite_repository.py` |
-| `OA-DATA-002` | storage | Append-only decision ledger | `NATIVE_COMPLETE` | `src/openalpha_cn/storage/sqlite.py#SQLiteRunRepository` | `tests/integration/storage/test_sqlite_repository.py` |
-| `OA-DATA-003` | storage | Checkpoint records | `NATIVE_COMPLETE` | `src/openalpha_cn/storage/sqlite.py#SQLiteRunRepository` | `tests/integration/storage/test_sqlite_repository.py` |
-| `OA-DATA-004` | storage | Parquet evidence partitions | `NATIVE_COMPLETE` | `src/openalpha_cn/storage/parquet.py#ParquetEvidenceStore` | `tests/integration/storage/test_parquet_evidence_store.py` |
-| `OA-DATA-005` | storage | DuckDB PIT query | `NATIVE_COMPLETE` | `src/openalpha_cn/storage/parquet.py#ParquetEvidenceStore` | `tests/integration/storage/test_parquet_evidence_store.py` |
-| `OA-PROV-001` | provider | Shared provider contract | `NATIVE_COMPLETE` | `src/openalpha_cn/providers/base.py#DataProvider` | `tests/contract/providers/test_file_provider.py` |
-| `OA-PROV-002` | provider | Explicit provider failures | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/providers/base.py#ProviderFailure` | `tests/contract/providers/test_tushare_provider.py;tests/contract/providers/test_akshare_provider.py` |
-| `OA-PROV-003` | provider | File provider | `NATIVE_COMPLETE` | `src/openalpha_cn/providers/file.py#FileProvider` | `tests/contract/providers/test_file_provider.py` |
-| `OA-PROV-004` | provider | Tushare BYOT adapter | `NATIVE_COMPLETE` | `src/openalpha_cn/providers/tushare.py#TushareProvider` | `tests/contract/providers/test_tushare_provider.py` |
-| `OA-PROV-005` | provider | AKShare optional adapter | `NATIVE_COMPLETE` | `src/openalpha_cn/providers/akshare.py#AKShareProvider` | `tests/contract/providers/test_akshare_provider.py` |
-| `OA-PROV-006` | provider | Provider policy metadata | `NATIVE_COMPLETE` | `src/openalpha_cn/providers/base.py#ProviderMetadata` | `tests/contract/providers/test_file_provider.py` |
-| `OA-AGENT-001` | agent | Agent extension contract | `NATIVE_COMPLETE` | `src/openalpha_cn/agents/base.py#ResearchAgent` | `tests/integration/test_research_cycle.py` |
-| `OA-AGENT-002` | agent | Market event agent | `NATIVE_COMPLETE` | `src/openalpha_cn/agents/baseline.py#MarketAgent` | `tests/integration/test_research_cycle.py` |
-| `OA-AGENT-003` | agent | Theme catalyst agent | `NATIVE_COMPLETE` | `src/openalpha_cn/agents/baseline.py#ThemeAgent` | `tests/integration/test_research_cycle.py` |
-| `OA-AGENT-004` | agent | Capital flow agent | `NATIVE_COMPLETE` | `src/openalpha_cn/agents/baseline.py#CapitalAgent` | `tests/integration/test_research_cycle.py` |
-| `OA-AGENT-005` | agent | Evidence-aware router | `NATIVE_COMPLETE` | `src/openalpha_cn/runtime/router.py#AgentRouter` | `tests/integration/test_research_cycle.py` |
-| `OA-AGENT-006` | agent | Structured model boundary | `NATIVE_COMPLETE` | `src/openalpha_cn/agents/model.py#StructuredSignalAgent` | `tests/unit/agents/test_model_agent.py` |
-| `OA-AGENT-007` | agent | Bounded model retry | `NATIVE_COMPLETE` | `src/openalpha_cn/agents/model.py#StructuredSignalAgent` | `tests/unit/agents/test_model_agent.py` |
-| `OA-AGENT-008` | agent | Read-only evidence tool | `NATIVE_COMPLETE` | `src/openalpha_cn/tools/evidence.py#EvidenceLookupTool` | `tests/unit/tools/test_evidence_lookup.py` |
-| `OA-AGENT-009` | agent | Deterministic baseline | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/agents/baseline.py#baseline_agents` | `tests/integration/test_research_cycle.py;tests/replay/test_frozen_corpus.py` |
-| `OA-DEC-001` | decision | Typed signal frame | `NATIVE_COMPLETE` | `src/openalpha_cn/domain/signal.py#SignalFrame` | `tests/unit/domain/test_signal.py` |
-| `OA-DEC-002` | decision | Typed abstention | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/domain/signal.py#SignalFrame` | `tests/unit/domain/test_signal.py` |
-| `OA-DEC-003` | decision | Decision ledger | `NATIVE_COMPLETE` | `src/openalpha_cn/domain/decision.py#DecisionLedger` | `tests/unit/domain/test_records.py` |
-| `OA-DEC-004` | decision | Risk gate | `NATIVE_COMPLETE` | `src/openalpha_cn/decisions/risk.py#RiskGate` | `tests/integration/test_research_cycle.py` |
-| `OA-DEC-005` | decision | Run manifest | `NATIVE_COMPLETE` | `src/openalpha_cn/domain/run.py#RunManifest` | `tests/unit/domain/test_records.py` |
-| `OA-DEC-006` | decision | Idempotent research recovery | `NATIVE_COMPLETE` | `src/openalpha_cn/runtime/engine.py#ResearchEngine` | `tests/integration/test_research_cycle.py` |
-| `OA-DEC-007` | decision | Durable research memory | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/storage/memory.py#SQLiteResearchMemory` | `tests/integration/test_recovery_and_memory.py;tests/integration/test_sdk_golden_path.py` |
-| `OA-MCR-001` | recovery | Node-level checkpoint resume | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/storage/recovery.py#SQLiteRecoveryStore;src/openalpha_cn/runtime/engine.py#ResearchEngine` | `tests/integration/test_recovery_and_memory.py` |
-| `OA-MCR-002` | recovery | Request and graph signature isolation | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/storage/recovery.py#RunRecoveryState;src/openalpha_cn/runtime/engine.py#ResearchEngine` | `tests/integration/test_recovery_and_memory.py` |
-| `OA-BT-001` | backtest | Shared run cycle | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/runtime/engine.py#ResearchEngine` | `tests/integration/test_research_cycle.py;tests/replay/test_frozen_corpus.py` |
-| `OA-BT-002` | backtest | Frozen replay corpus | `NATIVE_COMPLETE` | `src/openalpha_cn/backtest/replay.py#ReplayCorpus` | `tests/replay/test_frozen_corpus.py` |
-| `OA-BT-003` | backtest | Determinism replay | `NATIVE_COMPLETE` | `src/openalpha_cn/backtest/replay.py#ReplayRunner` | `tests/replay/test_frozen_corpus.py` |
-| `OA-BT-004` | backtest | Look-ahead guard | `NATIVE_COMPLETE` | `src/openalpha_cn/backtest/replay.py#ReplayCase` | `tests/replay/test_frozen_corpus.py` |
-| `OA-BT-005` | backtest | A-share execution constraints | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/backtest/execution.py#AShareExecutionPolicy` | `tests/unit/backtest/test_execution.py` |
-| `OA-BT-006` | backtest | A-share transaction costs | `NATIVE_COMPLETE` | `src/openalpha_cn/backtest/execution.py#CostSchedule` | `tests/unit/backtest/test_execution.py` |
-| `OA-BT-007` | backtest | Outcome validation | `NATIVE_COMPLETE` | `src/openalpha_cn/backtest/validation.py#OutcomeValidator` | `tests/unit/backtest/test_validation.py` |
-| `OA-BT-008` | backtest | Rule factor agent attribution | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/backtest/validation.py#OutcomeValidator` | `tests/unit/backtest/test_validation.py` |
-| `OA-BT-009` | backtest | Portfolio cash and holdings simulator | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/backtest/portfolio.py#PortfolioSimulator` | `tests/unit/backtest/test_portfolio.py;tests/integration/test_portfolio_interfaces.py` |
-| `OA-IFACE-001` | interface | Versioned REST API | `NATIVE_COMPLETE` | `src/openalpha_cn/api/app.py#create_app` | `tests/integration/test_evidence_interfaces.py` |
-| `OA-IFACE-002` | interface | Python SDK | `NATIVE_COMPLETE` | `src/openalpha_cn/sdk.py#OpenAlphaSDK` | `tests/integration/test_sdk_golden_path.py` |
-| `OA-IFACE-003` | interface | CLI evidence flow | `NATIVE_COMPLETE` | `src/openalpha_cn/cli.py#evidence_build` | `tests/integration/test_evidence_interfaces.py` |
-| `OA-IFACE-004` | interface | CLI research flow | `NATIVE_COMPLETE` | `src/openalpha_cn/cli.py#research_run` | `tests/integration/test_cli_research.py` |
-| `OA-IFACE-005` | interface | CLI replay flow | `NATIVE_COMPLETE` | `src/openalpha_cn/cli.py#replay_run` | `tests/unit/test_cli.py` |
-| `OA-IFACE-006` | interface | Research workbench | `NATIVE_COMPLETE` | `web/src/App.tsx#App` | `web/src/App.test.tsx;web/e2e/golden-flow.spec.ts` |
-| `OA-IFACE-007` | interface | Explicit UI states | `NATIVE_COMPLETE` | `web/src/App.tsx#App` | `web/src/App.test.tsx;web/e2e/golden-flow.spec.ts` |
-| `OA-IFACE-008` | interface | JSON schema distribution | `NATIVE_COMPLETE` | `src/openalpha_cn/domain/schema.py#export_schemas` | `tests/unit/domain/test_schema_export.py` |
-| `OA-MODEL-001` | model | Secure OpenAI-compatible BYOK provider | `NATIVE_COMPLETE` | `src/openalpha_cn/models/openai_compatible.py#OpenAICompatibleProvider` | `tests/unit/models/test_openai_compatible.py;tests/integration/test_sdk_golden_path.py` |
-| `OA-OPS-001` | operations | Locked Python environment | `NATIVE_COMPLETE` | `pyproject.toml#project;uv.lock` | `tests/unit/test_repository_assets.py` |
-| `OA-OPS-002` | operations | Locked web environment | `NATIVE_COMPLETE` | `web/package.json#packageManager;web/pnpm-lock.yaml` | `web/src/App.test.tsx` |
-| `OA-OPS-003` | operations | Cross-platform CI | `NATIVE_COMPLETE` | `github:.github/workflows/quality.yml` | `tests/unit/test_repository_assets.py` |
-| `OA-OPS-004` | operations | Multi-stage container | `NATIVE_COMPLETE` | `Dockerfile#runtime` | `tests/unit/test_repository_assets.py` |
-| `OA-OPS-005` | operations | Persistent container volume | `NATIVE_COMPLETE` | `deploy/compose.yml#openalpha-runtime` | `scripts/verify_compose_recovery.py` |
-| `OA-OPS-006` | operations | Read-only container hardening | `NATIVE_COMPLETE` | `deploy/compose.yml#services` | `tests/unit/test_repository_assets.py` |
-| `OA-OPS-007` | operations | Browser security headers | `NATIVE_COMPLETE` | `src/openalpha_cn/api/app.py#SecurityHeadersMiddleware` | `tests/integration/test_evidence_interfaces.py` |
-| `OA-OPS-008` | operations | Request size boundary | `NATIVE_COMPLETE` | `src/openalpha_cn/api/app.py#SecurityHeadersMiddleware` | `tests/integration/test_evidence_interfaces.py` |
-| `OA-OPS-009` | operations | Secret and artifact publication gate | `NATIVE_COMPLETE` | `scripts/verify_publication.py#main` | `tests/unit/test_repository_assets.py` |
-| `OA-OPS-010` | operations | Dependency vulnerability audit | `NATIVE_COMPLETE` | `github:.github/workflows/quality.yml` | `tests/unit/test_repository_assets.py` |
-| `OA-OPS-011` | operations | MIT source release | `NATIVE_COMPLETE` | `LICENSE#MIT;THIRD_PARTY_NOTICES.md` | `tests/unit/test_repository_assets.py` |
-| `OA-BOUND-001` | boundary | No live broker execution | `EXCLUDED` | `docs/specs/openalpha-cn-v1-spec.md#Non-goals` | `docs/specs/openalpha-cn-v1-spec.md` |
-| `OA-BOUND-002` | boundary | No short or cover execution | `EXCLUDED` | `docs/specs/openalpha-cn-v1-spec.md#Non-goals` | `docs/specs/openalpha-cn-v1-spec.md` |
-| `OA-BOUND-003` | boundary | No hosted commercial data proxy | `EXCLUDED` | `docs/data/providers.zh-CN.md#Redistribution` | `tests/unit/test_repository_assets.py` |
-| `OA-BOUND-004` | boundary | No embedded provider secrets | `EXCLUDED` | `SECURITY.md#Credential-handling` | `tests/unit/test_repository_assets.py` |
-| `OA-BOUND-005` | boundary | Graphical agent flow builder | `DEFERRED` | `docs/specs/openalpha-cn-v1-spec.md#Out-of-scope` | `docs/specs/openalpha-cn-v1-spec.md` |
-| `OA-BATCH-001` | batch | Durable batch task queue | `NATIVE_COMPLETE` | `src/openalpha_cn/runtime/batch.py#BatchResearchTask;src/openalpha_cn/storage/batch.py#SQLiteBatchTaskStore` | `tests/integration/test_batch_research.py` |
-| `OA-BATCH-002` | batch | Bounded batch concurrency | `NATIVE_COMPLETE` | `src/openalpha_cn/runtime/batch.py#BatchResearchService` | `tests/integration/test_batch_research.py` |
-| `OA-BATCH-003` | batch | Batch progress and cancellation | `NATIVE_COMPLETE` | `src/openalpha_cn/runtime/batch.py#BatchProgressEvent` | `tests/integration/test_batch_research.py` |
-| `OA-BATCH-004` | batch | Interrupted batch recovery | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/storage/batch.py#SQLiteBatchTaskStore` | `tests/integration/test_batch_research.py` |
-| `OA-MODEL-002` | model | Model capability registry | `NATIVE_COMPLETE` | `src/openalpha_cn/models/governance.py#ModelRegistry` | `tests/unit/models/test_model_governance.py` |
-| `OA-MODEL-003` | model | Classified model retry | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/models/openai_compatible.py#OpenAICompatibleProvider;src/openalpha_cn/models/governance.py#ModelRetryPolicy` | `tests/unit/models/test_model_governance.py` |
-| `OA-MODEL-004` | model | Model usage and cost ledger | `NATIVE_COMPLETE` | `src/openalpha_cn/models/governance.py#SQLiteModelUsageStore` | `tests/unit/models/test_model_governance.py` |
-| `OA-PROV-007` | provider | ChainLin contract-first provider | `ADAPTER_COMPLETE` | `src/openalpha_cn/providers/chainlin.py#ChainLinDataProvider` | `tests/contract/providers/test_chainlin_provider.py` |
-| `OA-DEC-008` | decision | Ablatable bull bear and risk committee | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/agents/committee.py#DeliberationCommittee` | `tests/unit/agents/test_deliberation_committee.py;tests/integration/test_advanced_research_interfaces.py` |
-| `OA-BT-010` | backtest | Event-study statistical inference | `NATIVE_COMPLETE` | `src/openalpha_cn/backtest/event_study.py#EventStudy` | `tests/unit/backtest/test_event_study.py;tests/integration/test_advanced_research_interfaces.py` |
-| `OA-BT-011` | backtest | Multi-day portfolio report | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/backtest/multi_day.py#PortfolioBacktestRunner` | `tests/integration/test_portfolio_ledger_backtest.py` |
-| `OA-DATA-006` | storage | Immutable portfolio transition ledger | `NATIVE_COMPLETE` | `src/openalpha_cn/storage/portfolio.py#SQLitePortfolioLedger` | `tests/integration/test_portfolio_ledger_backtest.py;tests/integration/test_portfolio_interfaces.py` |
-| `OA-PRODUCT-001` | product | Structured research screening | `NATIVE_COMPLETE` | `src/openalpha_cn/product/research.py#ResearchScreener` | `tests/integration/test_research_product.py` |
-| `OA-PRODUCT-002` | product | Durable watchlist | `NATIVE_COMPLETE` | `src/openalpha_cn/storage/product.py#SQLiteWatchlistStore` | `tests/integration/test_research_product.py` |
-| `OA-PRODUCT-003` | product | Immutable report center | `NATIVE_COMPLETE` | `src/openalpha_cn/product/research.py#ResearchReportFactory;src/openalpha_cn/storage/product.py#SQLiteReportStore` | `tests/integration/test_research_product.py` |
+| ID | 类别 | 功能 | 状态 | 源码证据 | 测试证据 | 验收类型 | 验收证据 |
+|---|---|---|---|---|---|---|---|
+| `OA-TIME-001` | temporal | Aware datetime contract | `NATIVE_COMPLETE` | `src/openalpha_cn/domain/time.py#ensure_aware` | `tests/unit/domain/test_time.py` | `legacy-prose` | `Naive datetime fixtures fail validation.` |
+| `OA-TIME-002` | temporal | Four-clock timeline | `NATIVE_COMPLETE` | `src/openalpha_cn/domain/time.py#Timeline` | `tests/unit/domain/test_time.py` | `legacy-prose` | `All four clocks survive round trip.` |
+| `OA-TIME-003` | temporal | Point-in-time visibility | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/domain/time.py#is_visible_at` | `tests/unit/domain/test_time.py;tests/unit/domain/test_evidence.py` | `legacy-prose` | `Future-known evidence is rejected.` |
+| `OA-EVID-001` | evidence | Immutable evidence snapshot | `NATIVE_COMPLETE` | `src/openalpha_cn/domain/evidence.py#EvidenceSnapshot` | `tests/unit/domain/test_evidence.py` | `legacy-prose` | `Mutation is rejected and serialization is stable.` |
+| `OA-EVID-002` | evidence | Content-addressed evidence | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/domain/evidence.py#EvidenceSnapshot` | `tests/unit/domain/test_evidence.py` | `legacy-prose` | `Equal content produces equal IDs and tampering is detected.` |
+| `OA-EVID-003` | evidence | Serialized evidence verification | `NATIVE_COMPLETE` | `src/openalpha_cn/evidence/service.py#parse_serialized_evidence` | `tests/integration/test_evidence_interfaces.py` | `legacy-prose` | `Tampered identifiers fail validation.` |
+| `OA-EVID-004` | evidence | Limit-up normalization | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/evidence/builder.py#EvidenceBuilder` | `tests/unit/evidence/test_builder.py` | `legacy-prose` | `Frozen limit-up input yields validated evidence.` |
+| `OA-EVID-005` | evidence | Broken-board normalization | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/evidence/builder.py#EvidenceBuilder` | `tests/unit/evidence/test_builder.py` | `legacy-prose` | `Frozen broken-board input yields validated evidence.` |
+| `OA-EVID-006` | evidence | Consecutive-board normalization | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/evidence/builder.py#EvidenceBuilder` | `tests/unit/evidence/test_builder.py` | `legacy-prose` | `Frozen board-count input yields validated evidence.` |
+| `OA-EVID-007` | evidence | Disclosure normalization | `NATIVE_COMPLETE` | `src/openalpha_cn/evidence/builder.py#EvidenceBuilder` | `tests/unit/evidence/test_builder.py` | `legacy-prose` | `Disclosure fixture passes schema validation.` |
+| `OA-EVID-008` | evidence | Theme and catalyst normalization | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/evidence/builder.py#EvidenceBuilder` | `tests/unit/evidence/test_builder.py` | `legacy-prose` | `Theme and catalyst fixtures remain distinguishable.` |
+| `OA-EVID-009` | evidence | Capital observation normalization | `NATIVE_COMPLETE` | `src/openalpha_cn/evidence/builder.py#EvidenceBuilder` | `tests/unit/evidence/test_builder.py` | `legacy-prose` | `Capital fixture produces a traceable snapshot.` |
+| `OA-DATA-001` | storage | Append-only run ledger | `NATIVE_COMPLETE` | `src/openalpha_cn/storage/sqlite.py#SQLiteRunRepository` | `tests/integration/storage/test_sqlite_repository.py` | `legacy-prose` | `Repeated equal writes are idempotent and conflicts fail.` |
+| `OA-DATA-002` | storage | Append-only decision ledger | `NATIVE_COMPLETE` | `src/openalpha_cn/storage/sqlite.py#SQLiteRunRepository` | `tests/integration/storage/test_sqlite_repository.py` | `legacy-prose` | `Decision round trip preserves the stable ID.` |
+| `OA-DATA-003` | storage | Checkpoint records | `NATIVE_COMPLETE` | `src/openalpha_cn/storage/sqlite.py#SQLiteRunRepository` | `tests/integration/storage/test_sqlite_repository.py` | `legacy-prose` | `Checkpoint order and digest survive restart.` |
+| `OA-DATA-004` | storage | Parquet evidence partitions | `NATIVE_COMPLETE` | `src/openalpha_cn/storage/parquet.py#ParquetEvidenceStore` | `tests/integration/storage/test_parquet_evidence_store.py` | `legacy-prose` | `Appended evidence is queryable after reopen.` |
+| `OA-DATA-005` | storage | DuckDB PIT query | `NATIVE_COMPLETE` | `src/openalpha_cn/storage/parquet.py#ParquetEvidenceStore` | `tests/integration/storage/test_parquet_evidence_store.py` | `legacy-prose` | `Query excludes evidence unavailable at as_of.` |
+| `OA-PROV-001` | provider | Shared provider contract | `NATIVE_COMPLETE` | `src/openalpha_cn/providers/base.py#DataProvider` | `tests/contract/providers/test_file_provider.py` | `legacy-prose` | `Enabled providers satisfy the common contract.` |
+| `OA-PROV-002` | provider | Explicit provider failures | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/providers/base.py#ProviderFailure` | `tests/contract/providers/test_tushare_provider.py;tests/contract/providers/test_akshare_provider.py` | `legacy-prose` | `A failed provider never appears as successful empty data.` |
+| `OA-PROV-003` | provider | File provider | `NATIVE_COMPLETE` | `src/openalpha_cn/providers/file.py#FileProvider` | `tests/contract/providers/test_file_provider.py` | `legacy-prose` | `All supported formats produce equivalent batches.` |
+| `OA-PROV-004` | provider | Tushare BYOT adapter | `NATIVE_COMPLETE` | `src/openalpha_cn/providers/tushare.py#TushareProvider` | `tests/contract/providers/test_tushare_provider.py` | `legacy-prose` | `Frozen HTTP responses pass and missing token fails.` |
+| `OA-PROV-005` | provider | AKShare optional adapter | `NATIVE_COMPLETE` | `src/openalpha_cn/providers/akshare.py#AKShareProvider` | `tests/contract/providers/test_akshare_provider.py` | `legacy-prose` | `Allowlisted datasets work and unknown datasets fail.` |
+| `OA-PROV-006` | provider | Provider policy metadata | `NATIVE_COMPLETE` | `src/openalpha_cn/providers/base.py#ProviderMetadata` | `tests/contract/providers/test_file_provider.py` | `legacy-prose` | `Policy fields are mandatory and extra fields fail.` |
+| `OA-AGENT-001` | agent | Agent extension contract | `NATIVE_COMPLETE` | `src/openalpha_cn/agents/base.py#ResearchAgent` | `tests/integration/test_research_cycle.py` | `legacy-prose` | `A conforming agent participates in a cycle.` |
+| `OA-AGENT-002` | agent | Market event agent | `NATIVE_COMPLETE` | `src/openalpha_cn/agents/baseline.py#MarketAgent` | `tests/integration/test_research_cycle.py` | `legacy-prose` | `Market evidence yields a cited signal.` |
+| `OA-AGENT-003` | agent | Theme catalyst agent | `NATIVE_COMPLETE` | `src/openalpha_cn/agents/baseline.py#ThemeAgent` | `tests/integration/test_research_cycle.py` | `legacy-prose` | `Theme evidence routes to the theme agent.` |
+| `OA-AGENT-004` | agent | Capital flow agent | `NATIVE_COMPLETE` | `src/openalpha_cn/agents/baseline.py#CapitalAgent` | `tests/integration/test_research_cycle.py` | `legacy-prose` | `Capital evidence routes to the capital agent.` |
+| `OA-AGENT-005` | agent | Evidence-aware router | `NATIVE_COMPLETE` | `src/openalpha_cn/runtime/router.py#AgentRouter` | `tests/integration/test_research_cycle.py` | `legacy-prose` | `Unsupported agents do not run.` |
+| `OA-AGENT-006` | agent | Structured model boundary | `NATIVE_COMPLETE` | `src/openalpha_cn/agents/model.py#StructuredSignalAgent` | `tests/unit/agents/test_model_agent.py` | `legacy-prose` | `Invalid model output is never returned as a signal.` |
+| `OA-AGENT-007` | agent | Bounded model retry | `NATIVE_COMPLETE` | `src/openalpha_cn/agents/model.py#StructuredSignalAgent` | `tests/unit/agents/test_model_agent.py` | `legacy-prose` | `Valid retry succeeds and exhausted budget fails explicitly.` |
+| `OA-AGENT-008` | agent | Read-only evidence tool | `NATIVE_COMPLETE` | `src/openalpha_cn/tools/evidence.py#EvidenceLookupTool` | `tests/unit/tools/test_evidence_lookup.py` | `legacy-prose` | `Tool result contains only visible evidence.` |
+| `OA-AGENT-009` | agent | Deterministic baseline | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/agents/baseline.py#baseline_agents` | `tests/integration/test_research_cycle.py;tests/replay/test_frozen_corpus.py` | `legacy-prose` | `Same inputs produce byte-equivalent research outputs.` |
+| `OA-DEC-001` | decision | Typed signal frame | `NATIVE_COMPLETE` | `src/openalpha_cn/domain/signal.py#SignalFrame` | `tests/unit/domain/test_signal.py` | `legacy-prose` | `Directional signals require evidence and valid bounds.` |
+| `OA-DEC-002` | decision | Typed abstention | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/domain/signal.py#SignalFrame` | `tests/unit/domain/test_signal.py` | `legacy-prose` | `Abstention requires a reason and zero strength.` |
+| `OA-DEC-003` | decision | Decision ledger | `NATIVE_COMPLETE` | `src/openalpha_cn/domain/decision.py#DecisionLedger` | `tests/unit/domain/test_records.py` | `legacy-prose` | `All referenced signal IDs reconcile.` |
+| `OA-DEC-004` | decision | Risk gate | `NATIVE_COMPLETE` | `src/openalpha_cn/decisions/risk.py#RiskGate` | `tests/integration/test_research_cycle.py` | `legacy-prose` | `Risk flags can block a final action.` |
+| `OA-DEC-005` | decision | Run manifest | `NATIVE_COMPLETE` | `src/openalpha_cn/domain/run.py#RunManifest` | `tests/unit/domain/test_records.py` | `legacy-prose` | `Terminal lifecycle and artifact digests validate.` |
+| `OA-DEC-006` | decision | Idempotent research recovery | `NATIVE_COMPLETE` | `src/openalpha_cn/runtime/engine.py#ResearchEngine` | `tests/integration/test_research_cycle.py` | `legacy-prose` | `Equal rerun succeeds and conflicting run ID fails.` |
+| `OA-DEC-007` | decision | Durable research memory | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/storage/memory.py#SQLiteResearchMemory` | `tests/integration/test_recovery_and_memory.py;tests/integration/test_sdk_golden_path.py` | `legacy-prose` | `Completed research survives SDK/API restart and conflicting replacement is rejected.` |
+| `OA-MCR-001` | recovery | Node-level checkpoint resume | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/storage/recovery.py#SQLiteRecoveryStore;src/openalpha_cn/runtime/engine.py#ResearchEngine` | `tests/integration/test_recovery_and_memory.py` | `legacy-prose` | `An injected interruption resumes at the next agent.` |
+| `OA-MCR-002` | recovery | Request and graph signature isolation | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/storage/recovery.py#RunRecoveryState;src/openalpha_cn/runtime/engine.py#ResearchEngine` | `tests/integration/test_recovery_and_memory.py` | `legacy-prose` | `Changed config digest or agent graph raises RunConflictError.` |
+| `OA-BT-001` | backtest | Shared run cycle | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/runtime/engine.py#ResearchEngine` | `tests/integration/test_research_cycle.py;tests/replay/test_frozen_corpus.py` | `legacy-prose` | `Mode changes do not fork decision logic.` |
+| `OA-BT-002` | backtest | Frozen replay corpus | `NATIVE_COMPLETE` | `src/openalpha_cn/backtest/replay.py#ReplayCorpus` | `tests/replay/test_frozen_corpus.py` | `legacy-prose` | `Corpus contains 60 sessions and 300 unique cases.` |
+| `OA-BT-003` | backtest | Determinism replay | `NATIVE_COMPLETE` | `src/openalpha_cn/backtest/replay.py#ReplayRunner` | `tests/replay/test_frozen_corpus.py` | `legacy-prose` | `All frozen cases replay deterministically.` |
+| `OA-BT-004` | backtest | Look-ahead guard | `NATIVE_COMPLETE` | `src/openalpha_cn/backtest/replay.py#ReplayCase` | `tests/replay/test_frozen_corpus.py` | `legacy-prose` | `Known look-ahead violations remain zero.` |
+| `OA-BT-005` | backtest | A-share execution constraints | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/backtest/execution.py#AShareExecutionPolicy` | `tests/unit/backtest/test_execution.py` | `legacy-prose` | `Forbidden buys and sells return explicit reasons.` |
+| `OA-BT-006` | backtest | A-share transaction costs | `NATIVE_COMPLETE` | `src/openalpha_cn/backtest/execution.py#CostSchedule` | `tests/unit/backtest/test_execution.py` | `legacy-prose` | `Buy and sell cost fixtures match configured rules.` |
+| `OA-BT-007` | backtest | Outcome validation | `NATIVE_COMPLETE` | `src/openalpha_cn/backtest/validation.py#OutcomeValidator` | `tests/unit/backtest/test_validation.py` | `legacy-prose` | `Net active return reconciles exactly.` |
+| `OA-BT-008` | backtest | Rule factor agent attribution | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/backtest/validation.py#OutcomeValidator` | `tests/unit/backtest/test_validation.py` | `legacy-prose` | `Attribution sum equals net active return.` |
+| `OA-BT-009` | backtest | Portfolio cash and holdings simulator | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/backtest/portfolio.py#PortfolioSimulator` | `tests/unit/backtest/test_portfolio.py;tests/integration/test_portfolio_interfaces.py` | `legacy-prose` | `Buy/sell transitions reconcile cash, FIFO basis, costs, T+1, and exposure limits.` |
+| `OA-IFACE-001` | interface | Versioned REST API | `NATIVE_COMPLETE` | `src/openalpha_cn/api/app.py#create_app` | `tests/integration/test_evidence_interfaces.py` | `legacy-prose` | `OpenAPI lists every v1 route and golden flow passes.` |
+| `OA-IFACE-002` | interface | Python SDK | `NATIVE_COMPLETE` | `src/openalpha_cn/sdk.py#OpenAlphaSDK` | `tests/integration/test_sdk_golden_path.py` | `legacy-prose` | `SDK completes the frozen golden path.` |
+| `OA-IFACE-003` | interface | CLI evidence flow | `NATIVE_COMPLETE` | `src/openalpha_cn/cli.py#evidence_build` | `tests/integration/test_evidence_interfaces.py` | `legacy-prose` | `CLI and API emit equal evidence.` |
+| `OA-IFACE-004` | interface | CLI research flow | `NATIVE_COMPLETE` | `src/openalpha_cn/cli.py#research_run` | `tests/integration/test_cli_research.py` | `legacy-prose` | `CLI emits a cited decision.` |
+| `OA-IFACE-005` | interface | CLI replay flow | `NATIVE_COMPLETE` | `src/openalpha_cn/cli.py#replay_run` | `tests/unit/test_cli.py` | `legacy-prose` | `CLI returns replay statistics.` |
+| `OA-IFACE-006` | interface | Research workbench | `NATIVE_COMPLETE` | `web/src/App.tsx#App` | `web/src/App.test.tsx;web/e2e/golden-flow.spec.ts` | `legacy-prose` | `Desktop and mobile golden flows pass without console errors.` |
+| `OA-IFACE-007` | interface | Explicit UI states | `NATIVE_COMPLETE` | `web/src/App.tsx#App` | `web/src/App.test.tsx;web/e2e/golden-flow.spec.ts` | `legacy-prose` | `Each non-happy state is visible and actionable.` |
+| `OA-IFACE-008` | interface | JSON schema distribution | `NATIVE_COMPLETE` | `src/openalpha_cn/domain/schema.py#export_schemas` | `tests/unit/domain/test_schema_export.py` | `legacy-prose` | `Generated schemas equal checked-in files.` |
+| `OA-MODEL-001` | model | Secure OpenAI-compatible BYOK provider | `NATIVE_COMPLETE` | `src/openalpha_cn/models/openai_compatible.py#OpenAICompatibleProvider` | `tests/unit/models/test_openai_compatible.py;tests/integration/test_sdk_golden_path.py` | `legacy-prose` | `Schema is sent, JSON is validated, missing credentials fail before network, and secrets are absent from metadata.` |
+| `OA-OPS-001` | operations | Locked Python environment | `NATIVE_COMPLETE` | `pyproject.toml#project;uv.lock` | `tests/unit/test_repository_assets.py` | `legacy-prose` | `Locked install succeeds on supported Python versions.` |
+| `OA-OPS-002` | operations | Locked web environment | `NATIVE_COMPLETE` | `web/package.json#packageManager;web/pnpm-lock.yaml` | `web/src/App.test.tsx` | `legacy-prose` | `Frozen install lint test and build pass.` |
+| `OA-OPS-003` | operations | Cross-platform CI | `NATIVE_COMPLETE` | `github:.github/workflows/quality.yml` | `tests/unit/test_repository_assets.py` | `legacy-prose` | `Workflow includes locked installs tests lint types builds audits and replay.` |
+| `OA-OPS-004` | operations | Multi-stage container | `NATIVE_COMPLETE` | `Dockerfile#runtime` | `tests/unit/test_repository_assets.py` | `legacy-prose` | `Container health endpoint and web root return 200.` |
+| `OA-OPS-005` | operations | Persistent container volume | `NATIVE_COMPLETE` | `deploy/compose.yml#openalpha-runtime` | `scripts/verify_compose_recovery.py` | `ci-job` | `.github/workflows/quality.yml::container` |
+| `OA-OPS-006` | operations | Read-only container hardening | `NATIVE_COMPLETE` | `deploy/compose.yml#services` | `tests/unit/test_repository_assets.py` | `legacy-prose` | `Compose config contains all hardening controls.` |
+| `OA-OPS-007` | operations | Browser security headers | `NATIVE_COMPLETE` | `src/openalpha_cn/api/app.py#SecurityHeadersMiddleware` | `tests/integration/test_evidence_interfaces.py` | `legacy-prose` | `Health and static responses include required headers.` |
+| `OA-OPS-008` | operations | Request size boundary | `NATIVE_COMPLETE` | `src/openalpha_cn/api/app.py#SecurityHeadersMiddleware` | `tests/integration/test_evidence_interfaces.py` | `legacy-prose` | `Oversized requests return HTTP 413.` |
+| `OA-OPS-009` | operations | Secret and artifact publication gate | `NATIVE_COMPLETE` | `scripts/verify_publication.py#main` | `tests/unit/test_repository_assets.py` | `legacy-prose` | `Publication scan reports zero blockers.` |
+| `OA-OPS-010` | operations | Dependency vulnerability audit | `NATIVE_COMPLETE` | `github:.github/workflows/quality.yml` | `tests/unit/test_repository_assets.py` | `legacy-prose` | `No known high or critical vulnerability remains.` |
+| `OA-OPS-011` | operations | MIT source release | `NATIVE_COMPLETE` | `LICENSE#MIT;THIRD_PARTY_NOTICES.md` | `tests/unit/test_repository_assets.py` | `legacy-prose` | `GitHub recognizes the license and release tag matches source.` |
+| `OA-BOUND-001` | boundary | No live broker execution | `EXCLUDED` | `docs/specs/openalpha-cn-v1-spec.md#Non-goals` | `docs/specs/openalpha-cn-v1-spec.md` | `not-applicable` | `Repository contains no broker credential or order submission path.` |
+| `OA-BOUND-002` | boundary | No short or cover execution | `EXCLUDED` | `docs/specs/openalpha-cn-v1-spec.md#Non-goals` | `docs/specs/openalpha-cn-v1-spec.md` | `not-applicable` | `Execution model exposes no short or cover action.` |
+| `OA-BOUND-003` | boundary | No hosted commercial data proxy | `EXCLUDED` | `docs/data/providers.zh-CN.md#Redistribution` | `tests/unit/test_repository_assets.py` | `legacy-prose` | `Repository and releases contain no restricted raw dataset.` |
+| `OA-BOUND-004` | boundary | No embedded provider secrets | `EXCLUDED` | `SECURITY.md#Credential-handling` | `tests/unit/test_repository_assets.py` | `legacy-prose` | `Tracked-file scan finds no secret value.` |
+| `OA-BOUND-005` | boundary | Graphical agent flow builder | `DEFERRED` | `docs/specs/openalpha-cn-v1-spec.md#Out-of-scope` | `docs/specs/openalpha-cn-v1-spec.md` | `not-applicable` | `Future version requires schema-safe graph validation.` |
+| `OA-BATCH-001` | batch | Durable batch task queue | `NATIVE_COMPLETE` | `src/openalpha_cn/runtime/batch.py#BatchResearchTask;src/openalpha_cn/storage/batch.py#SQLiteBatchTaskStore` | `tests/integration/test_batch_research.py` | `legacy-prose` | `Submitted tasks and item results survive store reopen.` |
+| `OA-BATCH-002` | batch | Bounded batch concurrency | `NATIVE_COMPLETE` | `src/openalpha_cn/runtime/batch.py#BatchResearchService` | `tests/integration/test_batch_research.py` | `legacy-prose` | `Worker count is validated between 1 and 32.` |
+| `OA-BATCH-003` | batch | Batch progress and cancellation | `NATIVE_COMPLETE` | `src/openalpha_cn/runtime/batch.py#BatchProgressEvent` | `tests/integration/test_batch_research.py` | `legacy-prose` | `Progress is append ordered and queued items cancel explicitly.` |
+| `OA-BATCH-004` | batch | Interrupted batch recovery | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/storage/batch.py#SQLiteBatchTaskStore` | `tests/integration/test_batch_research.py` | `legacy-prose` | `Restart requeues only running items.` |
+| `OA-MODEL-002` | model | Model capability registry | `NATIVE_COMPLETE` | `src/openalpha_cn/models/governance.py#ModelRegistry` | `tests/unit/models/test_model_governance.py` | `legacy-prose` | `Duplicate registrations fail and secrets are absent.` |
+| `OA-MODEL-003` | model | Classified model retry | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/models/openai_compatible.py#OpenAICompatibleProvider;src/openalpha_cn/models/governance.py#ModelRetryPolicy` | `tests/unit/models/test_model_governance.py` | `legacy-prose` | `429 retries while 401 fails immediately.` |
+| `OA-MODEL-004` | model | Model usage and cost ledger | `NATIVE_COMPLETE` | `src/openalpha_cn/models/governance.py#SQLiteModelUsageStore` | `tests/unit/models/test_model_governance.py` | `legacy-prose` | `Usage survives reopen and reconciles configured prices.` |
+| `OA-PROV-007` | provider | ChainLin contract-first provider | `ADAPTER_COMPLETE` | `src/openalpha_cn/providers/chainlin.py#ChainLinDataProvider` | `tests/contract/providers/test_chainlin_provider.py` | `legacy-prose` | `Frozen contract preserves clocks and classifies auth rate limit and upstream errors.` |
+| `OA-DEC-008` | decision | Ablatable bull bear and risk committee | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/agents/committee.py#DeliberationCommittee` | `tests/unit/agents/test_deliberation_committee.py;tests/integration/test_advanced_research_interfaces.py` | `legacy-prose` | `Output includes evidence-linked cases risk votes and ablation delta.` |
+| `OA-BT-010` | backtest | Event-study statistical inference | `NATIVE_COMPLETE` | `src/openalpha_cn/backtest/event_study.py#EventStudy` | `tests/unit/backtest/test_event_study.py;tests/integration/test_advanced_research_interfaces.py` | `legacy-prose` | `Fixed samples reproduce CAR t-stat and interval.` |
+| `OA-BT-011` | backtest | Multi-day portfolio report | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/backtest/multi_day.py#PortfolioBacktestRunner` | `tests/integration/test_portfolio_ledger_backtest.py` | `legacy-prose` | `Cash and reported metrics reconcile across multiple dates.` |
+| `OA-DATA-006` | storage | Immutable portfolio transition ledger | `NATIVE_COMPLETE` | `src/openalpha_cn/storage/portfolio.py#SQLitePortfolioLedger` | `tests/integration/test_portfolio_ledger_backtest.py;tests/integration/test_portfolio_interfaces.py` | `legacy-prose` | `Equal replay is idempotent and conflicting order ID fails.` |
+| `OA-PRODUCT-001` | product | Structured research screening | `NATIVE_COMPLETE` | `src/openalpha_cn/product/research.py#ResearchScreener` | `tests/integration/test_research_product.py` | `legacy-prose` | `Results are deterministically sorted and retain decision IDs.` |
+| `OA-PRODUCT-002` | product | Durable watchlist | `NATIVE_COMPLETE` | `src/openalpha_cn/storage/product.py#SQLiteWatchlistStore` | `tests/integration/test_research_product.py` | `legacy-prose` | `Entries survive reopen and remove explicitly.` |
+| `OA-PRODUCT-003` | product | Immutable report center | `NATIVE_COMPLETE` | `src/openalpha_cn/product/research.py#ResearchReportFactory;src/openalpha_cn/storage/product.py#SQLiteReportStore` | `tests/integration/test_research_product.py` | `legacy-prose` | `Report IDs are content derived and equal append is idempotent.` |
 
 ## 边界
 
