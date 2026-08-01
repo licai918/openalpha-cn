@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import csv
 import json
 from collections import Counter
@@ -40,6 +41,53 @@ def _paths(value: str) -> list[Path]:
     return paths
 
 
+def _symbol_refs(value: str) -> list[tuple[Path, str]]:
+    """Return the (file, symbol) pairs for each `path.py#symbol` reference in `value`.
+
+    Non-Python targets and fragment-less references are omitted: they are covered
+    by the file-existence check in `_load` alone, never by AST parsing.
+    """
+    refs: list[tuple[Path, str]] = []
+    for item in value.split(";"):
+        raw_path, separator, symbol = item.partition("#")
+        if not separator:
+            continue
+        if raw_path.startswith("github:"):
+            raw_path = raw_path.removeprefix("github:")
+        path = ROOT / raw_path
+        if path.suffix == ".py":
+            refs.append((path, symbol))
+    return refs
+
+
+def _class_body_symbols(body: list[ast.stmt]) -> set[str]:
+    names: set[str] = set()
+    for member in body:
+        if isinstance(member, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            names.add(member.name)
+        elif isinstance(member, ast.Assign):
+            names.update(target.id for target in member.targets if isinstance(target, ast.Name))
+        elif isinstance(member, ast.AnnAssign) and isinstance(member.target, ast.Name):
+            names.add(member.target.id)
+    return names
+
+
+def _module_symbols(path: Path) -> set[str]:
+    """Names declared at module top level or within a class body of `path`."""
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            names.add(node.name)
+            if isinstance(node, ast.ClassDef):
+                names.update(_class_body_symbols(node.body))
+        elif isinstance(node, ast.Assign):
+            names.update(target.id for target in node.targets if isinstance(target, ast.Name))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+    return names
+
+
 def _load() -> list[dict[str, str]]:
     with CSV_PATH.open(encoding="utf-8", newline="") as handle:
         rows = list(csv.DictReader(handle))
@@ -61,6 +109,16 @@ def _load() -> list[dict[str, str]]:
             ]
             if missing:
                 raise ValueError(f"{row['feature_id']} references missing evidence: {missing}")
+            missing_symbols = [
+                f"{path.relative_to(ROOT)}#{symbol}"
+                for field in ("local_source_evidence", "test_evidence")
+                for path, symbol in _symbol_refs(row[field])
+                if symbol not in _module_symbols(path)
+            ]
+            if missing_symbols:
+                raise ValueError(
+                    f"{row['feature_id']} references undefined symbols: {missing_symbols}"
+                )
     return rows
 
 

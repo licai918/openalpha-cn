@@ -44,15 +44,15 @@
 | `OA-PROV-002` | provider | Explicit provider failures | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/providers/base.py#ProviderFailure` | `tests/contract/providers/test_tushare_provider.py;tests/contract/providers/test_akshare_provider.py` |
 | `OA-PROV-003` | provider | File provider | `NATIVE_COMPLETE` | `src/openalpha_cn/providers/file.py#FileProvider` | `tests/contract/providers/test_file_provider.py` |
 | `OA-PROV-004` | provider | Tushare BYOT adapter | `NATIVE_COMPLETE` | `src/openalpha_cn/providers/tushare.py#TushareProvider` | `tests/contract/providers/test_tushare_provider.py` |
-| `OA-PROV-005` | provider | AKShare optional adapter | `NATIVE_COMPLETE` | `src/openalpha_cn/providers/akshare.py#AkShareProvider` | `tests/contract/providers/test_akshare_provider.py` |
+| `OA-PROV-005` | provider | AKShare optional adapter | `NATIVE_COMPLETE` | `src/openalpha_cn/providers/akshare.py#AKShareProvider` | `tests/contract/providers/test_akshare_provider.py` |
 | `OA-PROV-006` | provider | Provider policy metadata | `NATIVE_COMPLETE` | `src/openalpha_cn/providers/base.py#ProviderMetadata` | `tests/contract/providers/test_file_provider.py` |
 | `OA-AGENT-001` | agent | Agent extension contract | `NATIVE_COMPLETE` | `src/openalpha_cn/agents/base.py#ResearchAgent` | `tests/integration/test_research_cycle.py` |
-| `OA-AGENT-002` | agent | Market event agent | `NATIVE_COMPLETE` | `src/openalpha_cn/agents/baseline.py#MarketEventAgent` | `tests/integration/test_research_cycle.py` |
-| `OA-AGENT-003` | agent | Theme catalyst agent | `NATIVE_COMPLETE` | `src/openalpha_cn/agents/baseline.py#ThemeCatalystAgent` | `tests/integration/test_research_cycle.py` |
-| `OA-AGENT-004` | agent | Capital flow agent | `NATIVE_COMPLETE` | `src/openalpha_cn/agents/baseline.py#CapitalFlowAgent` | `tests/integration/test_research_cycle.py` |
+| `OA-AGENT-002` | agent | Market event agent | `NATIVE_COMPLETE` | `src/openalpha_cn/agents/baseline.py#MarketAgent` | `tests/integration/test_research_cycle.py` |
+| `OA-AGENT-003` | agent | Theme catalyst agent | `NATIVE_COMPLETE` | `src/openalpha_cn/agents/baseline.py#ThemeAgent` | `tests/integration/test_research_cycle.py` |
+| `OA-AGENT-004` | agent | Capital flow agent | `NATIVE_COMPLETE` | `src/openalpha_cn/agents/baseline.py#CapitalAgent` | `tests/integration/test_research_cycle.py` |
 | `OA-AGENT-005` | agent | Evidence-aware router | `NATIVE_COMPLETE` | `src/openalpha_cn/runtime/router.py#AgentRouter` | `tests/integration/test_research_cycle.py` |
-| `OA-AGENT-006` | agent | Structured model boundary | `NATIVE_COMPLETE` | `src/openalpha_cn/agents/model.py#StructuredModelAgent` | `tests/unit/agents/test_model_agent.py` |
-| `OA-AGENT-007` | agent | Bounded model retry | `NATIVE_COMPLETE` | `src/openalpha_cn/agents/model.py#StructuredModelAgent` | `tests/unit/agents/test_model_agent.py` |
+| `OA-AGENT-006` | agent | Structured model boundary | `NATIVE_COMPLETE` | `src/openalpha_cn/agents/model.py#StructuredSignalAgent` | `tests/unit/agents/test_model_agent.py` |
+| `OA-AGENT-007` | agent | Bounded model retry | `NATIVE_COMPLETE` | `src/openalpha_cn/agents/model.py#StructuredSignalAgent` | `tests/unit/agents/test_model_agent.py` |
 | `OA-AGENT-008` | agent | Read-only evidence tool | `NATIVE_COMPLETE` | `src/openalpha_cn/tools/evidence.py#EvidenceLookupTool` | `tests/unit/tools/test_evidence_lookup.py` |
 | `OA-AGENT-009` | agent | Deterministic baseline | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/agents/baseline.py#baseline_agents` | `tests/integration/test_research_cycle.py;tests/replay/test_frozen_corpus.py` |
 | `OA-DEC-001` | decision | Typed signal frame | `NATIVE_COMPLETE` | `src/openalpha_cn/domain/signal.py#SignalFrame` | `tests/unit/domain/test_signal.py` |
@@ -68,8 +68,8 @@
 | `OA-BT-002` | backtest | Frozen replay corpus | `NATIVE_COMPLETE` | `src/openalpha_cn/backtest/replay.py#ReplayCorpus` | `tests/replay/test_frozen_corpus.py` |
 | `OA-BT-003` | backtest | Determinism replay | `NATIVE_COMPLETE` | `src/openalpha_cn/backtest/replay.py#ReplayRunner` | `tests/replay/test_frozen_corpus.py` |
 | `OA-BT-004` | backtest | Look-ahead guard | `NATIVE_COMPLETE` | `src/openalpha_cn/backtest/replay.py#ReplayCase` | `tests/replay/test_frozen_corpus.py` |
-| `OA-BT-005` | backtest | A-share execution constraints | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/backtest/execution.py#AShareExecutionModel` | `tests/unit/backtest/test_execution.py` |
-| `OA-BT-006` | backtest | A-share transaction costs | `NATIVE_COMPLETE` | `src/openalpha_cn/backtest/execution.py#AShareCostModel` | `tests/unit/backtest/test_execution.py` |
+| `OA-BT-005` | backtest | A-share execution constraints | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/backtest/execution.py#AShareExecutionPolicy` | `tests/unit/backtest/test_execution.py` |
+| `OA-BT-006` | backtest | A-share transaction costs | `NATIVE_COMPLETE` | `src/openalpha_cn/backtest/execution.py#CostSchedule` | `tests/unit/backtest/test_execution.py` |
 | `OA-BT-007` | backtest | Outcome validation | `NATIVE_COMPLETE` | `src/openalpha_cn/backtest/validation.py#OutcomeValidator` | `tests/unit/backtest/test_validation.py` |
 | `OA-BT-008` | backtest | Rule factor agent attribution | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/backtest/validation.py#OutcomeValidator` | `tests/unit/backtest/test_validation.py` |
 | `OA-BT-009` | backtest | Portfolio cash and holdings simulator | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/backtest/portfolio.py#PortfolioSimulator` | `tests/unit/backtest/test_portfolio.py;tests/integration/test_portfolio_interfaces.py` |
