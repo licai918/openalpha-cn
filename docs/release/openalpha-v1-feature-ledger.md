@@ -116,7 +116,7 @@
 | `OA-PRODUCT-003` | product | Immutable report center | `NATIVE_COMPLETE` | `src/openalpha_cn/product/research.py#ResearchReportFactory;src/openalpha_cn/storage/product.py#SQLiteReportStore` | `tests/integration/test_research_product.py` | `legacy-prose` | `Report IDs are content derived and equal append is idempotent.` |
 | `OA-OPS-012` | operations | Provider capability and credential declaration | `NATIVE_COMPLETE` | `src/openalpha_cn/cli.py#doctor;src/openalpha_cn/cli.py#_credential_report;src/openalpha_cn/cli.py#_capability_report;src/openalpha_cn/providers/base.py#ProviderMetadata` | `tests/unit/test_cli.py` | `pytest` | `tests/unit/test_cli.py::test_doctor_never_leaks_credential_value_in_human_or_json_output` |
 | `OA-OPS-013` | operations | Doctor live capability probe | `NATIVE_COMPLETE` | `src/openalpha_cn/cli.py#doctor;src/openalpha_cn/cli.py#_probe_report` | `tests/unit/test_cli.py` | `pytest` | `tests/unit/test_cli.py::test_doctor_probe_reports_provider_failure_category_verbatim` |
-| `OA-OPS-014` | operations | Layered import gate with shrink-only baseline | `NATIVE_COMPLETE` | `pyproject.toml;docs/architecture/import-layering-baseline.toml` | `tests/unit/test_import_layering.py` | `pytest` | `tests/unit/test_import_layering.py::test_domain_layer_gate_rejects_a_newly_introduced_forbidden_stdlib_import` |
+| `OA-OPS-014` | operations | Layered import gate with shrink-only baseline | `NATIVE_COMPLETE` | `pyproject.toml;docs/architecture/import-layering-baseline.toml` | `tests/unit/test_import_layering.py` | `pytest` | `tests/unit/test_import_layering.py::test_domain_purity_holds_against_every_dynamically_discovered_sibling_subpackage` |
 
 ## 边界
 

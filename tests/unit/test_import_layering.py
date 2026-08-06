@@ -6,6 +6,12 @@ proves the gate that enforces it is real (rejects a freshly introduced violation
 the pre-existing baseline of 7 measured violations
 (`docs/architecture/import-layering-baseline.toml`) can only shrink, and proves the legal
 downward dependency of `runtime`/`backtest` on `storage` is never mis-flagged.
+
+It also proves the domain-purity rule independently of import-linter's static
+`forbidden_modules` enumeration in `pyproject.toml`: siblings of `domain` are discovered
+from the real directory structure at runtime, so a subpackage added after the enumeration
+was written (e.g. a future `panel/`, `factors/`, or alpha-model package) is covered
+automatically instead of silently falling outside the gate.
 """
 
 from __future__ import annotations
@@ -129,6 +135,51 @@ def test_domain_layer_gate_rejects_a_newly_introduced_cross_subpackage_import() 
         limit_to_contracts=("domain-purity",),
     )
     assert exit_code == 0
+
+
+def _sibling_subpackages_of_domain() -> list[str]:
+    """Subpackage directories under `src/openalpha_cn/`, excluding `domain` itself.
+
+    Discovered from the real directory structure at runtime rather than hand-copied from
+    `pyproject.toml`'s `forbidden_modules`, so a subpackage added later is picked up with
+    no config edit and no human remembering to update an enumeration.
+    """
+    src_root = ROOT / "src" / "openalpha_cn"
+    return sorted(
+        entry.name
+        for entry in src_root.iterdir()
+        if entry.is_dir()
+        and entry.name != "domain"
+        and not entry.name.startswith("__")
+        and (entry / "__init__.py").exists()
+    )
+
+
+def test_domain_purity_holds_against_every_dynamically_discovered_sibling_subpackage() -> None:
+    """`domain-purity`'s `forbidden_modules` in `pyproject.toml` is a static enumeration of
+    the subpackages that exist today. A subpackage added later (e.g. a future `panel/`,
+    `factors/`, or alpha-model package for v2) is invisible to that list until a human
+    remembers to add an entry — `lint-imports` reports `0 broken` even if `domain/` imports
+    it. This test is independent of that static config: it enumerates sibling subpackages
+    from the real directory structure and checks the actual import graph with `grimp`
+    directly, so a newly added package is covered automatically.
+    """
+    siblings = _sibling_subpackages_of_domain()
+    assert siblings, "expected at least one sibling subpackage under src/openalpha_cn/"
+
+    graph = grimp.build_graph("openalpha_cn")
+    violations = [
+        sibling
+        for sibling in siblings
+        if graph.direct_import_exists(
+            importer="openalpha_cn.domain",
+            imported=f"openalpha_cn.{sibling}",
+            as_packages=True,
+        )
+    ]
+    assert not violations, (
+        f"openalpha_cn.domain directly imports forbidden sibling subpackage(s): {violations}"
+    )
 
 
 def test_legal_downward_imports_from_runtime_and_backtest_into_storage_are_not_flagged() -> None:
