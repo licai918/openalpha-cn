@@ -47,6 +47,7 @@ class AKShareProvider:
         source_license="AKShare and upstream-source terms",
         redistribution="restricted",
         credential_env_vars=(),
+        supported_datasets=("stock_zh_a_hist",),
         caching_policy="provider-defined",
         rate_limit="Defined by each AKShare upstream source.",
         freshness="Daily records use a conservative 16:30 Asia/Shanghai availability time.",

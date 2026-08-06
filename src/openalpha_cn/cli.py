@@ -1,9 +1,10 @@
 """Command-line entry point for OpenAlpha CN."""
 
 import json
+import os
 import platform
 import sys
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
@@ -14,7 +15,15 @@ import uvicorn
 from openalpha_cn import __version__
 from openalpha_cn.backtest.replay import ReplayCorpus
 from openalpha_cn.evidence.service import build_file_evidence, parse_serialized_evidence
-from openalpha_cn.providers.base import ProviderMetadata
+from openalpha_cn.providers.akshare import AKShareProvider
+from openalpha_cn.providers.base import (
+    DataProvider,
+    ProviderFailure,
+    ProviderMetadata,
+    ProviderRequest,
+)
+from openalpha_cn.providers.chainlin import ChainLinDataProvider
+from openalpha_cn.providers.tushare import TushareProvider
 from openalpha_cn.runtime.engine import ResearchRunRequest
 from openalpha_cn.sdk import OpenAlphaSDK
 
@@ -53,14 +62,78 @@ def version() -> None:
     typer.echo(f"OpenAlpha CN {__version__}")
 
 
+def _default_providers() -> list[DataProvider]:
+    """Return the built-in providers `doctor` reports on.
+
+    Construction never requires a credential or touches the network: each
+    provider only reads its token lazily, inside `fetch()`.
+    """
+    return [
+        TushareProvider(),
+        AKShareProvider(),
+        ChainLinDataProvider(
+            base_url="https://api.chainlin.example/v1",
+            api_key_env="CHAINLIN_API_KEY",
+            source_license="user-held ChainLin subscription",
+        ),
+    ]
+
+
+def _credential_report(provider: DataProvider) -> list[dict[str, str]]:
+    """Report presence, never the value, of each declared credential env var."""
+    return [
+        {
+            "env_var": env_var,
+            "status": "present" if os.environ.get(env_var, "").strip() else "missing",
+        }
+        for env_var in provider.metadata.credential_env_vars
+    ]
+
+
+def _capability_report(provider: DataProvider) -> dict[str, object]:
+    """Report the provider's declared licensing, rate-limit, and dataset coverage."""
+    metadata = provider.metadata
+    return {
+        "provider_id": metadata.provider_id,
+        "redistribution": metadata.redistribution,
+        "rate_limit": metadata.rate_limit,
+        "supported_datasets": list(metadata.supported_datasets),
+    }
+
+
+def _probe_report(provider: DataProvider) -> dict[str, str]:
+    """Make one minimal request per declared dataset and classify the outcome."""
+    as_of = datetime.now(UTC)
+    results: dict[str, str] = {}
+    for dataset in provider.metadata.supported_datasets:
+        try:
+            provider.fetch(ProviderRequest(dataset=dataset, as_of=as_of))
+        except ProviderFailure as failure:
+            results[dataset] = failure.category
+        else:
+            results[dataset] = "ok"
+    return results
+
+
 @app.command()
 def doctor(
     json_output: Annotated[
         bool,
         typer.Option("--json", help="Emit a machine-readable health report."),
     ] = False,
+    probe: Annotated[
+        bool,
+        typer.Option(
+            "--probe",
+            help=(
+                "Make one live request per provider dataset. Off by default; "
+                "never required in CI and never needed for the credential or "
+                "capability checks."
+            ),
+        ),
+    ] = False,
 ) -> None:
-    """Check the minimum local runtime requirements."""
+    """Check runtime requirements, provider credentials, and declared capabilities."""
     timezone_ok = datetime.now().astimezone().utcoffset() is not None
     python_ok = sys.version_info >= (3, 11)
     checks: dict[str, dict[str, object]] = {
@@ -74,9 +147,30 @@ def doctor(
             "name": str(datetime.now().astimezone().tzinfo),
         },
     }
+
+    providers: dict[str, dict[str, object]] = {}
+    warnings: list[str] = []
+    for provider in _default_providers():
+        provider_id = provider.metadata.provider_id
+        credentials = _credential_report(provider)
+        warnings.extend(
+            f"{provider_id}: credential {credential['env_var']} is missing"
+            for credential in credentials
+            if credential["status"] == "missing"
+        )
+        report: dict[str, object] = {
+            "capabilities": _capability_report(provider),
+            "credentials": credentials,
+        }
+        if probe:
+            report["probe"] = _probe_report(provider)
+        providers[provider_id] = report
+
     payload = {
         "status": "ok" if python_ok and timezone_ok else "error",
         "checks": checks,
+        "providers": providers,
+        "warnings": warnings,
     }
     if json_output:
         typer.echo(json.dumps(payload, ensure_ascii=False, sort_keys=True))
@@ -84,6 +178,23 @@ def doctor(
 
     for name, check in checks.items():
         typer.echo(f"{'PASS' if check['ok'] else 'FAIL'} {name}")
+    for provider_id, report in providers.items():
+        capabilities = report["capabilities"]
+        assert isinstance(capabilities, dict)
+        datasets = ",".join(capabilities["supported_datasets"])
+        typer.echo(f"INFO capability {provider_id} datasets={datasets}")
+        credential_reports = report["credentials"]
+        assert isinstance(credential_reports, list)
+        for credential in credential_reports:
+            if credential["status"] == "present":
+                typer.echo(f"PASS credential {provider_id} {credential['env_var']}")
+            else:
+                typer.echo(f"WARN credential {provider_id} {credential['env_var']} missing")
+        if probe:
+            probe_results = report["probe"]
+            assert isinstance(probe_results, dict)
+            for dataset, result in probe_results.items():
+                typer.echo(f"PROBE {provider_id}/{dataset} {result}")
     if payload["status"] != "ok":
         raise typer.Exit(code=1)
 

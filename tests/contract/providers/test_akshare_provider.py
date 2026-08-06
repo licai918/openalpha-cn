@@ -51,6 +51,12 @@ def test_akshare_research_adapter_is_allowlisted_and_point_in_time() -> None:
     }
 
 
+def test_akshare_metadata_declares_supported_datasets() -> None:
+    provider = AKShareProvider(client=FakeAKShare())
+
+    assert provider.metadata.supported_datasets == ("stock_zh_a_hist",)
+
+
 def test_akshare_rejects_non_allowlisted_datasets() -> None:
     provider = AKShareProvider(client=FakeAKShare())
 

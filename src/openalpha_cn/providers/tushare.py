@@ -62,6 +62,7 @@ class TushareProvider:
         source_license="Tushare Pro service terms",
         redistribution="restricted",
         credential_env_vars=("TUSHARE_TOKEN",),
+        supported_datasets=("daily",),
         caching_policy="provider-defined",
         rate_limit="Depends on the user's Tushare Pro account and points.",
         freshness="Daily records use a conservative 16:30 Asia/Shanghai availability time.",

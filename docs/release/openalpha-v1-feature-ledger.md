@@ -4,8 +4,8 @@
 
 ## 对账结论
 
-- 功能总数: 90
-- 当前真实完成: 85 (94.44%)
+- 功能总数: 92
+- 当前真实完成: 87 (94.57%)
 - `UNREVIEWED=0`
 - `UNKNOWN=0`
 - `legacy_acceptance_rows=86` (历史散文验收、尚未绑定为可执行 pytest/CI 断言)
@@ -18,7 +18,7 @@
 | `DEFERRED` | 1 |
 | `ENHANCED_REPLACEMENT` | 20 |
 | `EXCLUDED` | 4 |
-| `NATIVE_COMPLETE` | 64 |
+| `NATIVE_COMPLETE` | 66 |
 
 ## 功能明细
 
@@ -114,6 +114,8 @@
 | `OA-PRODUCT-001` | product | Structured research screening | `NATIVE_COMPLETE` | `src/openalpha_cn/product/research.py#ResearchScreener` | `tests/integration/test_research_product.py` | `legacy-prose` | `Results are deterministically sorted and retain decision IDs.` |
 | `OA-PRODUCT-002` | product | Durable watchlist | `NATIVE_COMPLETE` | `src/openalpha_cn/storage/product.py#SQLiteWatchlistStore` | `tests/integration/test_research_product.py` | `legacy-prose` | `Entries survive reopen and remove explicitly.` |
 | `OA-PRODUCT-003` | product | Immutable report center | `NATIVE_COMPLETE` | `src/openalpha_cn/product/research.py#ResearchReportFactory;src/openalpha_cn/storage/product.py#SQLiteReportStore` | `tests/integration/test_research_product.py` | `legacy-prose` | `Report IDs are content derived and equal append is idempotent.` |
+| `OA-OPS-012` | operations | Provider capability and credential declaration | `NATIVE_COMPLETE` | `src/openalpha_cn/cli.py#doctor;src/openalpha_cn/cli.py#_credential_report;src/openalpha_cn/cli.py#_capability_report;src/openalpha_cn/providers/base.py#ProviderMetadata` | `tests/unit/test_cli.py` | `pytest` | `tests/unit/test_cli.py::test_doctor_never_leaks_credential_value_in_human_or_json_output` |
+| `OA-OPS-013` | operations | Doctor live capability probe | `NATIVE_COMPLETE` | `src/openalpha_cn/cli.py#doctor;src/openalpha_cn/cli.py#_probe_report` | `tests/unit/test_cli.py` | `pytest` | `tests/unit/test_cli.py::test_doctor_probe_reports_provider_failure_category_verbatim` |
 
 ## 边界
 

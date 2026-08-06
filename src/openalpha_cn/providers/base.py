@@ -55,6 +55,7 @@ class ProviderMetadata(BaseModel):
     source_license: str = Field(min_length=1, max_length=256)
     redistribution: Literal["allowed", "restricted", "unknown"]
     credential_env_vars: tuple[str, ...]
+    supported_datasets: tuple[str, ...] = ()
     caching_policy: Literal["local-permitted", "prohibited", "provider-defined"]
     rate_limit: str = Field(min_length=1, max_length=512)
     freshness: str = Field(min_length=1, max_length=512)

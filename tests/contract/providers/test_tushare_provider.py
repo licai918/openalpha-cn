@@ -74,6 +74,12 @@ def test_tushare_missing_token_is_an_explicit_configuration_failure() -> None:
     assert captured.value.retryable is False
 
 
+def test_tushare_metadata_declares_supported_datasets() -> None:
+    provider = TushareProvider(token="secret-token", transport=FakeTransport({}))
+
+    assert provider.metadata.supported_datasets == ("daily",)
+
+
 def test_tushare_upstream_error_never_becomes_empty_success() -> None:
     provider = TushareProvider(
         token="secret-token",

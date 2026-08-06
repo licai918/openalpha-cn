@@ -66,6 +66,34 @@ def test_chainlin_contract_preserves_pit_license_and_bearer_auth(
     assert "secret" not in batch.model_dump_json()
 
 
+def test_chainlin_metadata_declares_supported_datasets() -> None:
+    provider = ChainLinDataProvider(
+        base_url="https://data.chainlin.example/v1",
+        api_key_env="CHAINLIN_API_KEY",
+        source_license="user-held ChainLin subscription",
+    )
+
+    assert provider.metadata.supported_datasets == (
+        "broken_board",
+        "capital",
+        "consecutive_board",
+        "daily",
+        "disclosure",
+        "limit_up",
+        "quote",
+        "theme",
+    )
+
+
+def test_chainlin_provider_is_importable_from_providers_package() -> None:
+    from openalpha_cn.providers import ChainLinDataProvider as ExportedProvider
+
+    assert ExportedProvider is ChainLinDataProvider
+    from openalpha_cn.providers import __all__ as providers_all
+
+    assert "ChainLinDataProvider" in providers_all
+
+
 def test_chainlin_auth_rate_limit_and_upstream_failures_are_explicit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

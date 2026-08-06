@@ -148,6 +148,24 @@ def test_file_provider_reads_all_supported_formats_point_in_time(
     assert batch.payload_digest.startswith("sha256:")
 
 
+def test_file_provider_metadata_supported_datasets_is_caller_defined(tmp_path: Path) -> None:
+    caller_metadata = ProviderMetadata(
+        provider_id="user.file",
+        display_name="User-owned file",
+        source_license="user-supplied",
+        redistribution="restricted",
+        credential_env_vars=(),
+        caching_policy="local-permitted",
+        rate_limit="not-applicable",
+        freshness="defined-by-input-file",
+        failure_semantics="Malformed or unreadable inputs raise ProviderFailure.",
+        supported_datasets=("events",),
+    )
+    provider = FileProvider(path=tmp_path / "events.json", metadata=caller_metadata)
+
+    assert provider.metadata.supported_datasets == ("events",)
+
+
 def test_file_provider_returns_explicit_no_data_result(tmp_path: Path) -> None:
     source = tmp_path / "events.json"
     write_fixture(source, "json")

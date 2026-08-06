@@ -9,11 +9,13 @@ from openalpha_cn.providers.base import (
     ProviderRecord,
     ProviderRequest,
 )
+from openalpha_cn.providers.chainlin import ChainLinDataProvider
 from openalpha_cn.providers.file import FileProvider
 from openalpha_cn.providers.tushare import TushareProvider
 
 __all__ = [
     "AKShareProvider",
+    "ChainLinDataProvider",
     "DataProvider",
     "FileProvider",
     "ProviderBatch",

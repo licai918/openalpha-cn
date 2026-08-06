@@ -117,6 +117,7 @@ class ChainLinDataProvider(DataProvider):
             source_license=source_license,
             redistribution="restricted",
             credential_env_vars=(api_key_env,),
+            supported_datasets=tuple(sorted(_DATASETS)),
             caching_policy="provider-defined",
             rate_limit=f"{max_calls_per_minute} calls/minute client-side ceiling",
             freshness="Declared by each record's available_time and revision_time.",
