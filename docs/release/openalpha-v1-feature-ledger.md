@@ -4,8 +4,8 @@
 
 ## 对账结论
 
-- 功能总数: 92
-- 当前真实完成: 87 (94.57%)
+- 功能总数: 93
+- 当前真实完成: 88 (94.62%)
 - `UNREVIEWED=0`
 - `UNKNOWN=0`
 - `legacy_acceptance_rows=86` (历史散文验收、尚未绑定为可执行 pytest/CI 断言)
@@ -18,7 +18,7 @@
 | `DEFERRED` | 1 |
 | `ENHANCED_REPLACEMENT` | 20 |
 | `EXCLUDED` | 4 |
-| `NATIVE_COMPLETE` | 66 |
+| `NATIVE_COMPLETE` | 67 |
 
 ## 功能明细
 
@@ -116,6 +116,7 @@
 | `OA-PRODUCT-003` | product | Immutable report center | `NATIVE_COMPLETE` | `src/openalpha_cn/product/research.py#ResearchReportFactory;src/openalpha_cn/storage/product.py#SQLiteReportStore` | `tests/integration/test_research_product.py` | `legacy-prose` | `Report IDs are content derived and equal append is idempotent.` |
 | `OA-OPS-012` | operations | Provider capability and credential declaration | `NATIVE_COMPLETE` | `src/openalpha_cn/cli.py#doctor;src/openalpha_cn/cli.py#_credential_report;src/openalpha_cn/cli.py#_capability_report;src/openalpha_cn/providers/base.py#ProviderMetadata` | `tests/unit/test_cli.py` | `pytest` | `tests/unit/test_cli.py::test_doctor_never_leaks_credential_value_in_human_or_json_output` |
 | `OA-OPS-013` | operations | Doctor live capability probe | `NATIVE_COMPLETE` | `src/openalpha_cn/cli.py#doctor;src/openalpha_cn/cli.py#_probe_report` | `tests/unit/test_cli.py` | `pytest` | `tests/unit/test_cli.py::test_doctor_probe_reports_provider_failure_category_verbatim` |
+| `OA-OPS-014` | operations | Layered import gate with shrink-only baseline | `NATIVE_COMPLETE` | `pyproject.toml;docs/architecture/import-layering-baseline.toml` | `tests/unit/test_import_layering.py` | `pytest` | `tests/unit/test_import_layering.py::test_domain_layer_gate_rejects_a_newly_introduced_forbidden_stdlib_import` |
 
 ## 边界
 

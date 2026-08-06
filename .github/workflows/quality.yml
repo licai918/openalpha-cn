@@ -46,6 +46,9 @@ jobs:
       - name: Type check
         run: uv run mypy src
 
+      - name: Check import layering
+        run: uv run lint-imports
+
       - name: Test with coverage
         run: uv run pytest --cov=openalpha_cn --cov-report=term-missing --cov-fail-under=80
 

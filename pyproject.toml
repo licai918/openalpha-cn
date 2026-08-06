@@ -46,6 +46,7 @@ akshare = [
 [dependency-groups]
 dev = [
   "httpx2>=2.9.0",
+  "import-linter>=2.13,<3",
   "mypy>=1.19.0,<2",
   "pytest>=9.0.0,<10",
   "pytest-cov>=7.0.0,<8",
@@ -91,3 +92,82 @@ source = ["openalpha_cn"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
+
+# ADR-0001 guardrail: "Domain and provider contracts must not import SQLite or DuckDB
+# implementation types." The 7 `ignore_imports` entries below are a hand-maintained,
+# shrink-only baseline of pre-existing violations; see
+# `docs/architecture/import-layering-baseline.toml` for the human-readable ledger (module,
+# banned import, and the P0.B issue that will close it) and
+# `tests/unit/test_import_layering.py` for the tests that pin this baseline and prove the
+# gate is live. Do not add new `ignore_imports` entries — a new violation must be fixed,
+# not exempted.
+[tool.importlinter]
+root_package = "openalpha_cn"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+id = "domain-purity"
+name = "domain imports no numeric/infra library and no sibling openalpha_cn subpackage"
+type = "forbidden"
+source_modules = ["openalpha_cn.domain"]
+forbidden_modules = [
+  "numpy",
+  "pandas",
+  "scipy",
+  "sklearn",
+  "duckdb",
+  "sqlite3",
+  "openalpha_cn.agents",
+  "openalpha_cn.api",
+  "openalpha_cn.backtest",
+  "openalpha_cn.decisions",
+  "openalpha_cn.evidence",
+  "openalpha_cn.models",
+  "openalpha_cn.product",
+  "openalpha_cn.providers",
+  "openalpha_cn.runtime",
+  "openalpha_cn.storage",
+  "openalpha_cn.tools",
+]
+
+[[tool.importlinter.contracts]]
+id = "storage-no-upward-deps"
+name = "storage does not depend upward on agents, runtime, product, or backtest"
+type = "forbidden"
+source_modules = ["openalpha_cn.storage"]
+forbidden_modules = [
+  "openalpha_cn.agents",
+  "openalpha_cn.runtime",
+  "openalpha_cn.product",
+  "openalpha_cn.backtest",
+]
+# Baseline (V2-P0B-012) — 5 entries, see docs/architecture/import-layering-baseline.toml
+ignore_imports = [
+  "openalpha_cn.storage.memory -> openalpha_cn.runtime.memory",
+  "openalpha_cn.storage.portfolio -> openalpha_cn.backtest.portfolio",
+  "openalpha_cn.storage.batch -> openalpha_cn.runtime.batch",
+  "openalpha_cn.storage.recovery -> openalpha_cn.agents.base",
+  "openalpha_cn.storage.product -> openalpha_cn.product.research",
+]
+
+[[tool.importlinter.contracts]]
+id = "providers-no-infra-imports"
+name = "providers do not import duckdb or sqlite3"
+type = "forbidden"
+source_modules = ["openalpha_cn.providers"]
+forbidden_modules = ["duckdb", "sqlite3"]
+# Baseline (V2-P0B-011) — 1 entry, see docs/architecture/import-layering-baseline.toml
+ignore_imports = [
+  "openalpha_cn.providers.file -> duckdb",
+]
+
+[[tool.importlinter.contracts]]
+id = "models-no-infra-imports"
+name = "models do not import duckdb or sqlite3"
+type = "forbidden"
+source_modules = ["openalpha_cn.models"]
+forbidden_modules = ["duckdb", "sqlite3"]
+# Baseline (V2-P0B-011) — 1 entry, see docs/architecture/import-layering-baseline.toml
+ignore_imports = [
+  "openalpha_cn.models.governance -> sqlite3",
+]
