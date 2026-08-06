@@ -90,7 +90,7 @@ class ChainLinDataProvider(DataProvider):
     def __init__(
         self,
         *,
-        base_url: str,
+        base_url: str | None,
         api_key_env: str,
         source_license: str,
         transport: ChainLinTransport | None = None,
@@ -99,11 +99,17 @@ class ChainLinDataProvider(DataProvider):
         max_calls_per_minute: int = 60,
         timeout_seconds: float = 30,
     ) -> None:
-        if not base_url.startswith(("https://", "http://127.0.0.1", "http://localhost")):
+        normalized_base_url = base_url.strip() if base_url else ""
+        if normalized_base_url and not normalized_base_url.startswith(
+            ("https://", "http://127.0.0.1", "http://localhost")
+        ):
             raise ValueError("ChainLin base_url must use HTTPS or explicit localhost HTTP")
         if max_calls_per_minute < 1:
             raise ValueError("max_calls_per_minute must be positive")
-        self.base_url = base_url.rstrip("/")
+        # Absent or blank means "not configured": never fall back to an invented
+        # placeholder domain. `fetch()` fails fast on this instead of probing it.
+        self.base_url: str | None = normalized_base_url.rstrip("/") or None
+        self.is_configured = self.base_url is not None
         self.api_key_env = api_key_env
         self.transport = transport or UrllibChainLinTransport()
         self.clock = clock
@@ -137,6 +143,13 @@ class ChainLinDataProvider(DataProvider):
                 provider_id=self.metadata.provider_id,
                 category="configuration",
                 message=f"unsupported ChainLin dataset: {request.dataset}",
+                retryable=False,
+            )
+        if self.base_url is None:
+            raise ProviderFailure(
+                provider_id=self.metadata.provider_id,
+                category="configuration",
+                message="ChainLin base_url is not configured",
                 retryable=False,
             )
         token = os.getenv(self.api_key_env, "").strip()

@@ -1,4 +1,6 @@
 import json
+import subprocess
+import sys
 from datetime import UTC, datetime
 from typing import Any
 
@@ -227,3 +229,114 @@ def test_doctor_probe_reports_provider_failure_category_verbatim(
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
     assert payload["providers"]["fake.limited"]["probe"] == {"widgets": "rate_limit"}
+
+
+_PROBE_LEAK_SCRIPT = """
+from openalpha_cn import cli
+from openalpha_cn.providers.base import ProviderMetadata
+
+
+class _LeakingProvider:
+    @property
+    def metadata(self):
+        return ProviderMetadata(
+            provider_id="fake.leaking",
+            display_name="fake.leaking",
+            source_license="test-only",
+            redistribution="unknown",
+            credential_env_vars=(),
+            supported_datasets=("widgets",),
+            caching_policy="prohibited",
+            rate_limit="n/a",
+            freshness="n/a",
+            failure_semantics="n/a",
+        )
+
+    def fetch(self, request):
+        raise ValueError("unexpected failure while calling with token=__SENTINEL__")
+
+
+cli._default_providers = lambda: [_LeakingProvider()]
+cli.app(["doctor", "--probe", "--json"], standalone_mode=True)
+"""
+
+
+def test_doctor_probe_real_cli_path_never_leaks_a_non_provider_failure_exception() -> None:
+    """A provider whose `fetch()` raises a plain exception must never leak it.
+
+    This reproduces the reviewer's exact repro: the real CLI entry point
+    (`cli.app([...], standalone_mode=True)`), not `CliRunner`, is what let an
+    uncaught exception's message escape via Python's default traceback
+    printer. Run in a subprocess so the process's real stdout/stderr -- the
+    channel that actually leaked -- can be inspected directly.
+    """
+    sentinel = "sk-scratch-leak-check-REALCLI-999888"
+    script = _PROBE_LEAK_SCRIPT.replace("__SENTINEL__", sentinel)
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert sentinel not in result.stdout
+    assert sentinel not in result.stderr
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["providers"]["fake.leaking"]["probe"] == {"widgets": "probe_error"}
+
+
+def test_doctor_probe_reports_chainlin_not_configured_without_base_url_env_var(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CHAINLIN_API_BASE_URL", raising=False)
+
+    def _forbidden_get_json(self: Any, **kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("ChainLin transport must not be invoked when base URL is unset")
+
+    monkeypatch.setattr(
+        "openalpha_cn.providers.chainlin.UrllibChainLinTransport.get_json",
+        _forbidden_get_json,
+    )
+
+    result = runner.invoke(app, ["doctor", "--json", "--probe"])
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["providers"]["chainlin.api"]["probe"] == {
+        "broken_board": "not_configured",
+        "capital": "not_configured",
+        "consecutive_board": "not_configured",
+        "daily": "not_configured",
+        "disclosure": "not_configured",
+        "limit_up": "not_configured",
+        "quote": "not_configured",
+        "theme": "not_configured",
+    }
+
+
+def test_doctor_probe_runs_chainlin_normally_when_base_url_env_var_is_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CHAINLIN_API_BASE_URL", "https://custom-chainlin-base.example/v1")
+    monkeypatch.setenv("CHAINLIN_API_KEY", "probe-only-token")
+    captured_urls: list[str] = []
+
+    def _fake_get_json(self: Any, *, url: str, **kwargs: Any) -> dict[str, Any]:
+        captured_urls.append(url)
+        return {"schema_version": "chainlin-data/v1", "records": []}
+
+    monkeypatch.setattr(
+        "openalpha_cn.providers.chainlin.UrllibChainLinTransport.get_json",
+        _fake_get_json,
+    )
+
+    result = runner.invoke(app, ["doctor", "--json", "--probe"])
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    probe = payload["providers"]["chainlin.api"]["probe"]
+    assert probe == dict.fromkeys(probe, "ok")
+    assert len(captured_urls) == 8
+    assert all(url.startswith("https://custom-chainlin-base.example/v1") for url in captured_urls)

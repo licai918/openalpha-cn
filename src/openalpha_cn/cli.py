@@ -66,13 +66,17 @@ def _default_providers() -> list[DataProvider]:
     """Return the built-in providers `doctor` reports on.
 
     Construction never requires a credential or touches the network: each
-    provider only reads its token lazily, inside `fetch()`.
+    provider only reads its token lazily, inside `fetch()`. ChainLin's base
+    URL is sourced from `CHAINLIN_API_BASE_URL`; when it is absent or empty
+    the provider is still returned, with `is_configured=False`, instead of
+    ever being pointed at an invented placeholder domain.
     """
+    chainlin_base_url = os.environ.get("CHAINLIN_API_BASE_URL", "").strip() or None
     return [
         TushareProvider(),
         AKShareProvider(),
         ChainLinDataProvider(
-            base_url="https://api.chainlin.example/v1",
+            base_url=chainlin_base_url,
             api_key_env="CHAINLIN_API_KEY",
             source_license="user-held ChainLin subscription",
         ),
@@ -101,8 +105,27 @@ def _capability_report(provider: DataProvider) -> dict[str, object]:
     }
 
 
+def _is_configured(provider: DataProvider) -> bool:
+    """Return whether `provider` declares itself ready to be probed.
+
+    Providers that need no external configuration (the common case) are
+    always configured; a provider may opt out by exposing `is_configured`.
+    """
+    return bool(getattr(provider, "is_configured", True))
+
+
 def _probe_report(provider: DataProvider) -> dict[str, str]:
-    """Make one minimal request per declared dataset and classify the outcome."""
+    """Make one minimal request per declared dataset and classify the outcome.
+
+    `ProviderFailure` reports its declared, closed-`Literal` category
+    verbatim. Anything else -- a bug, or a future or third-party provider
+    that has not adopted the `ProviderFailure` contract -- is recorded as
+    the doctor-level state `probe_error` without ever echoing the
+    exception's message or repr, so this boundary can never leak a
+    credential embedded in an unexpected error.
+    """
+    if not _is_configured(provider):
+        return dict.fromkeys(provider.metadata.supported_datasets, "not_configured")
     as_of = datetime.now(UTC)
     results: dict[str, str] = {}
     for dataset in provider.metadata.supported_datasets:
@@ -110,6 +133,8 @@ def _probe_report(provider: DataProvider) -> dict[str, str]:
             provider.fetch(ProviderRequest(dataset=dataset, as_of=as_of))
         except ProviderFailure as failure:
             results[dataset] = failure.category
+        except Exception:
+            results[dataset] = "probe_error"
         else:
             results[dataset] = "ok"
     return results
