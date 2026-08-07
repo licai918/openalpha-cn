@@ -1,5 +1,6 @@
 import hashlib
 import re
+import shlex
 import subprocess
 import sys
 import tomllib
@@ -26,12 +27,170 @@ def _workflow_job_block(workflow: str, job_name: str) -> str:
     return match.group(1)
 
 
+_RUN_LINE = re.compile(r"^(?P<indent>[ \t]*)run:[ \t]*(?P<rest>.*)$")
+_BLOCK_SCALAR = re.compile(r"^[|>][+\-0-9]*$")
+
+
+def _iter_step_run_commands(job_block: str) -> list[str]:
+    """Yield every step `run:` command in `job_block`, in step order.
+
+    Handles both single-line `run: <command>` steps and YAML block-scalar
+    steps (`run: |` / `run: >`, with the actual command on subsequent, more
+    indented lines) so converting a step to block-scalar style doesn't
+    produce a false negative for callers matching on keyword.
+    """
+    lines = job_block.splitlines()
+    commands: list[str] = []
+    index = 0
+    while index < len(lines):
+        match = _RUN_LINE.match(lines[index])
+        if match is None:
+            index += 1
+            continue
+        rest = match.group("rest").strip()
+        indent = len(match.group("indent"))
+        if _BLOCK_SCALAR.match(rest):
+            body_lines: list[str] = []
+            index += 1
+            while index < len(lines):
+                line = lines[index]
+                if line.strip() == "":
+                    index += 1
+                    continue
+                line_indent = len(line) - len(line.lstrip(" \t"))
+                if line_indent <= indent:
+                    break
+                body_lines.append(line.strip())
+                index += 1
+            commands.append(" ".join(body_lines))
+            continue
+        commands.append(rest)
+        index += 1
+    return commands
+
+
 def _step_run_command(job_block: str, keyword: str) -> str | None:
-    """Return the first step `run:` command in `job_block` containing `keyword`."""
-    for command in re.findall(r"^\s*run:\s*(.+)$", job_block, re.MULTILINE):
+    """Return the first step `run:` command in `job_block` containing `keyword`.
+
+    This only locates a *candidate* command by substring; it says nothing
+    about whether the command actually executes what it claims to. Callers
+    that need that guarantee must additionally check the returned command
+    with `_is_live_pytest_coverage_gate` / `_is_live_type_check` (or an
+    equivalent shape check) before trusting it.
+    """
+    for command in _iter_step_run_commands(job_block):
         if keyword in command:
             return command
     return None
+
+
+def _executed_program(command: str) -> str | None:
+    """Return the program a shell `run:` command actually executes.
+
+    Tokenizes with `shlex` (so a command hidden inside a quoted string
+    argument, e.g. `echo "would run: pytest ..."`, resolves to `echo`, not
+    `pytest` -- the quoted text is one token, not a sequence of executed
+    words) and strips a leading `uv run` wrapper so `uv run pytest ...`
+    resolves to `pytest`.
+    """
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return None
+    if not tokens:
+        return None
+    if tokens[0] == "uv" and len(tokens) > 1 and tokens[1] == "run":
+        tokens = tokens[2:]
+    return tokens[0] if tokens else None
+
+
+def _is_live_pytest_coverage_gate(command: str) -> bool:
+    """True iff `command` genuinely executes pytest with the coverage gate live.
+
+    Guards against two reviewer-demonstrated bypasses that keep every
+    substring a naive check looks for (`pytest`, `--cov`,
+    `--cov-fail-under=80`) while never running a single test body:
+
+    - Wrapping the real command inside `echo "..."` -- a pure no-op that
+      only prints the string; `_executed_program` resolves this to `echo`.
+    - Adding `--collect-only`, which makes pytest gather tests without
+      running them. This is worse than a no-op: pytest-cov silently
+      suppresses the `--cov-fail-under` exit code under `--collect-only`, so
+      this mutation exits 0 in real CI too, not only in a substring-based
+      test.
+    """
+    if _executed_program(command) != "pytest":
+        return False
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return False
+    return "--collect-only" not in tokens
+
+
+def _is_live_type_check(command: str) -> bool:
+    """True iff `command` genuinely executes mypy as the run command.
+
+    Same discipline as `_is_live_pytest_coverage_gate`: a step whose `run:`
+    line merely mentions `mypy` inside an `echo` string, or otherwise never
+    hands control to mypy, must not read as a live type-check step.
+    """
+    return _executed_program(command) == "mypy"
+
+
+def _try_brace_block(text: str, key: str) -> str | None:
+    """Return the contents of a `<key>: { ... }` block via balanced-brace
+    matching, or `None` if no such block is present.
+
+    Balanced-brace matching (rather than a greedy/non-greedy regex spanning
+    to the "next" brace) so extraction is correct regardless of how the
+    object literal is formatted or nested -- and so a deleted block is
+    reported as absent instead of silently matching some unrelated block.
+    """
+    marker = re.search(rf"\b{re.escape(key)}:\s*\{{", text)
+    if marker is None:
+        return None
+    start = marker.end()
+    depth = 1
+    index = start
+    while depth > 0:
+        if index >= len(text):
+            return None
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+        index += 1
+    return text[start : index - 1]
+
+
+def _vite_coverage_thresholds(vite_config: str) -> dict[str, int] | None:
+    """Return the frontend coverage gate's per-metric thresholds, or `None`.
+
+    `None` means the coverage gate is not actually live: either the
+    `coverage` block is missing entirely (bare `vitest run`, nothing
+    enforced), `enabled: true` is missing, or `thresholds` (or one of its
+    four metrics) is missing.
+    """
+    test_block = _try_brace_block(vite_config, "test")
+    if test_block is None:
+        return None
+    coverage_block = _try_brace_block(test_block, "coverage")
+    if coverage_block is None:
+        return None
+    if re.search(r"\benabled\s*:\s*true\b", coverage_block) is None:
+        return None
+    thresholds_block = _try_brace_block(coverage_block, "thresholds")
+    if thresholds_block is None:
+        return None
+
+    thresholds: dict[str, int] = {}
+    for metric in ("statements", "branches", "functions", "lines"):
+        match = re.search(rf"\b{metric}\s*:\s*(\d+)", thresholds_block)
+        if match is None:
+            return None
+        thresholds[metric] = int(match.group(1))
+    return thresholds
 
 
 def test_readme_prioritizes_chainlin_and_explains_installation() -> None:
@@ -257,8 +416,10 @@ def test_quality_workflow_python_job_has_a_type_check_step() -> None:
     workflow = (ROOT / ".github" / "workflows" / "quality.yml").read_text(encoding="utf-8")
     python_job = _workflow_job_block(workflow, "python")
 
-    assert _step_run_command(python_job, "mypy") is not None, (
-        "quality.yml's python job has no step invoking mypy"
+    command = _step_run_command(python_job, "mypy")
+    assert command is not None, "quality.yml's python job has no step invoking mypy"
+    assert _is_live_type_check(command), (
+        f"mypy step does not actually execute mypy as the run command: {command!r}"
     )
 
 
@@ -277,7 +438,10 @@ def test_quality_workflow_type_check_step_covers_scripts_as_well_as_src() -> Non
 
     command = _step_run_command(python_job, "mypy")
     assert command is not None, "quality.yml's python job has no step invoking mypy"
-    checked_paths = set(command.split())
+    assert _is_live_type_check(command), (
+        f"mypy step does not actually execute mypy as the run command: {command!r}"
+    )
+    checked_paths = set(shlex.split(command))
     assert {"src", "scripts"} <= checked_paths, (
         f"mypy step does not type-check both src and scripts: {command!r}"
     )
@@ -291,8 +455,10 @@ def test_quality_workflow_python_job_has_a_coverage_gate_step() -> None:
     workflow = (ROOT / ".github" / "workflows" / "quality.yml").read_text(encoding="utf-8")
     python_job = _workflow_job_block(workflow, "python")
 
-    assert _step_run_command(python_job, "--cov") is not None, (
-        "quality.yml's python job has no step collecting coverage (--cov)"
+    command = _step_run_command(python_job, "--cov")
+    assert command is not None, "quality.yml's python job has no step collecting coverage (--cov)"
+    assert _is_live_pytest_coverage_gate(command), (
+        f"coverage step does not actually execute pytest as the run command: {command!r}"
     )
 
 
@@ -306,6 +472,9 @@ def test_quality_workflow_coverage_gate_threshold_is_at_least_80() -> None:
 
     command = _step_run_command(python_job, "--cov-fail-under")
     assert command is not None, "quality.yml's python job has no --cov-fail-under gate"
+    assert _is_live_pytest_coverage_gate(command), (
+        f"coverage step does not actually execute pytest as the run command: {command!r}"
+    )
     match = re.search(r"--cov-fail-under[= ](\d+)", command)
     assert match is not None, f"could not parse --cov-fail-under value from {command!r}"
     assert int(match.group(1)) >= 80
@@ -327,6 +496,143 @@ def test_backend_coverage_fail_under_is_configured_in_pyproject() -> None:
     fail_under = config["tool"]["coverage"]["report"]["fail_under"]
     assert isinstance(fail_under, int)
     assert fail_under >= 80
+
+
+def test_coverage_gate_bypass_collect_only_is_rejected() -> None:
+    """Reviewer-demonstrated bypass: `--collect-only` keeps every substring a
+    naive check looks for (`pytest`, `--cov`, `--cov-fail-under=80`) while
+    pytest never executes a single test body. Worse, pytest-cov silently
+    suppresses the `--cov-fail-under` exit code under `--collect-only`, so
+    this mutation exits 0 in real CI too, not just in a substring-based test.
+    """
+    bypass = (
+        "uv run pytest --collect-only --cov=openalpha_cn "
+        "--cov-report=term-missing --cov-fail-under=80"
+    )
+    assert not _is_live_pytest_coverage_gate(bypass)
+
+
+def test_coverage_gate_bypass_echo_wrapper_is_rejected() -> None:
+    """Reviewer-demonstrated bypass: wrapping the real command in `echo`
+    keeps every required substring while being a pure no-op that never
+    invokes pytest at all.
+    """
+    bypass = (
+        'echo "would run: uv run pytest --cov=openalpha_cn '
+        '--cov-report=term-missing --cov-fail-under=80"'
+    )
+    assert not _is_live_pytest_coverage_gate(bypass)
+
+
+def test_type_check_bypass_echo_wrapper_is_rejected() -> None:
+    """Same discipline as the coverage gate: wrapping the mypy invocation in
+    `echo` must not read as a live type-check step.
+    """
+    bypass = 'echo "would run: uv run mypy src scripts"'
+    assert not _is_live_type_check(bypass)
+
+
+def test_quality_workflow_coverage_gate_step_survives_both_demonstrated_bypasses() -> None:
+    """End-to-end: substitute each demonstrated bypass into the real
+    quality.yml `python` job's coverage-gate `run:` line and confirm the
+    extraction-plus-shape-check pipeline used by the structural tests above
+    still rejects it, exactly as a reviewer mutating the real file would.
+    """
+    workflow = (ROOT / ".github" / "workflows" / "quality.yml").read_text(encoding="utf-8")
+    python_job = _workflow_job_block(workflow, "python")
+    original = _step_run_command(python_job, "--cov-fail-under")
+    assert original is not None
+
+    bypasses = (
+        "uv run pytest --collect-only --cov=openalpha_cn "
+        "--cov-report=term-missing --cov-fail-under=80",
+        'echo "would run: uv run pytest --cov=openalpha_cn '
+        '--cov-report=term-missing --cov-fail-under=80"',
+    )
+    for bypass in bypasses:
+        mutated_job = python_job.replace(f"run: {original}", f"run: {bypass}")
+        assert mutated_job != python_job, "fixture no longer matches the real run: line"
+        command = _step_run_command(mutated_job, "--cov-fail-under")
+        assert command is not None
+        assert not _is_live_pytest_coverage_gate(command)
+
+
+def test_step_run_command_tolerates_block_scalar_style() -> None:
+    """Converting a step to YAML block-scalar style (`run: |`, command on the
+    next line) must not produce a false red: the coverage-gate step must
+    resolve to the same live command whether written as `run: <cmd>` or as
+    `run: |\\n  <cmd>`.
+    """
+    inline = (
+        "  - name: Test with coverage\n"
+        "    run: uv run pytest --cov=openalpha_cn --cov-fail-under=80\n"
+    )
+    block = (
+        "  - name: Test with coverage\n"
+        "    run: |\n"
+        "      uv run pytest --cov=openalpha_cn --cov-fail-under=80\n"
+    )
+    inline_command = _step_run_command(inline, "--cov-fail-under")
+    block_command = _step_run_command(block, "--cov-fail-under")
+    assert inline_command is not None
+    assert block_command is not None
+    assert _is_live_pytest_coverage_gate(inline_command)
+    assert _is_live_pytest_coverage_gate(block_command)
+
+
+def test_step_run_command_block_scalar_style_does_not_reopen_the_bypass() -> None:
+    """Block-scalar tolerance must not let the `--collect-only` bypass
+    through just because it is written across two lines instead of one.
+    """
+    block = (
+        "  - name: Test with coverage\n"
+        "    run: |\n"
+        "      uv run pytest --collect-only --cov=openalpha_cn --cov-fail-under=80\n"
+    )
+    command = _step_run_command(block, "--cov-fail-under")
+    assert command is not None
+    assert not _is_live_pytest_coverage_gate(command)
+
+
+def test_vite_config_declares_frontend_coverage_gate_with_per_metric_thresholds() -> None:
+    """`web/vite.config.ts` must declare a live `test.coverage` gate with
+    per-metric thresholds, mirroring the backend's `fail_under` guard.
+
+    Mutation: delete the `coverage` block from `test: { ... }` (or delete
+    `enabled: true`, or delete `thresholds`) -- `pnpm test` then falls back
+    to bare `vitest run`, exits 0, prints nothing, and no test anywhere
+    notices.
+    """
+    vite_config = (ROOT / "web" / "vite.config.ts").read_text(encoding="utf-8")
+    thresholds = _vite_coverage_thresholds(vite_config)
+    assert thresholds is not None, (
+        "web/vite.config.ts has no live test.coverage gate "
+        "(missing coverage block, enabled: true, or thresholds)"
+    )
+
+    floors = {"statements": 68, "branches": 60, "functions": 64, "lines": 70}
+    for metric, floor in floors.items():
+        assert thresholds[metric] >= floor, (
+            f"{metric} threshold regressed below {floor}: {thresholds[metric]}"
+        )
+
+
+def test_vite_config_coverage_gate_bypass_deleted_coverage_block_is_rejected() -> None:
+    """Reviewer-demonstrated bypass: delete the `coverage` block entirely.
+
+    `pnpm test` then falls back to bare `vitest run` -- exits 0, prints
+    nothing, and (before this test existed) nothing anywhere noticed.
+    """
+    vite_config = (ROOT / "web" / "vite.config.ts").read_text(encoding="utf-8")
+    test_block = _try_brace_block(vite_config, "test")
+    assert test_block is not None
+    coverage_block = _try_brace_block(test_block, "coverage")
+    assert coverage_block is not None
+
+    mutated_vite_config = vite_config.replace(f"coverage: {{{coverage_block}}}", "", 1)
+    assert mutated_vite_config != vite_config, "fixture no longer contains the real coverage block"
+
+    assert _vite_coverage_thresholds(mutated_vite_config) is None
 
 
 def test_publication_gate_accepts_tracked_release_sources() -> None:
