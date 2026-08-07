@@ -8,7 +8,8 @@ SQLite backup API have no meaningful in-memory double.
 import multiprocessing
 import sqlite3
 import time
-from datetime import UTC, datetime
+from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -31,31 +32,26 @@ from openalpha_cn.storage.migrations import (
 )
 from openalpha_cn.storage.sqlite import SQLiteRunRepository
 
-NOW = datetime(2026, 8, 7, 9, 0, tzinfo=UTC)
 DIGEST = "a" * 64
 
 
-def _clock() -> datetime:
-    return NOW
-
-
-def _manifest(run_id: str = "run_v1_shape") -> RunManifest:
+def _manifest(*, now: datetime, run_id: str = "run_v1_shape") -> RunManifest:
     return RunManifest(
         run_id=run_id,
         mode="replay",
-        as_of=NOW,
+        as_of=now,
         code_commit="0123456789abcdef",
         config_digest=DIGEST,
         random_seed=7,
-        started_at=NOW,
+        started_at=now,
         status="running",
     )
 
 
-def _decision(run_id: str = "run_v1_shape") -> DecisionLedger:
+def _decision(*, now: datetime, run_id: str = "run_v1_shape") -> DecisionLedger:
     return DecisionLedger(
         run_id=run_id,
-        created_at=NOW,
+        created_at=now,
         routing_path=("risk-gate",),
         risk_decision="block",
         final_action="abstain",
@@ -63,26 +59,28 @@ def _decision(run_id: str = "run_v1_shape") -> DecisionLedger:
     )
 
 
-def _memory_entry(run_id: str, decision_id: str) -> MemoryEntry:
+def _memory_entry(run_id: str, decision_id: str, *, now: datetime) -> MemoryEntry:
     return MemoryEntry(
         run_id=run_id,
         subject="000001.SZ",
-        created_at=NOW,
+        created_at=now,
         decision_id=decision_id,
         signal_id="sig_v1_shape",
         summary="v1-shaped memory entry written before the migration system existed.",
     )
 
 
-def _build_v1_shaped_database(path: Path) -> tuple[RunManifest, DecisionLedger, MemoryEntry]:
+def _build_v1_shaped_database(
+    path: Path, *, now: datetime
+) -> tuple[RunManifest, DecisionLedger, MemoryEntry]:
     """Populate `path` using only the pre-existing stores -- exactly like a real v1 install."""
     repository = SQLiteRunRepository(path)
     memory = SQLiteResearchMemory(path)
-    run = _manifest()
+    run = _manifest(now=now)
     repository.append_run(run)
-    decision = _decision()
+    decision = _decision(now=now)
     repository.append_decision(decision)
-    entry = _memory_entry(run_id=run.run_id, decision_id=decision.decision_id)
+    entry = _memory_entry(run_id=run.run_id, decision_id=decision.decision_id, now=now)
     memory.append(entry)
     return run, decision, entry
 
@@ -102,9 +100,11 @@ def _table_names(path: Path) -> set[str]:
 # --- the core acceptance proof ----------------------------------------------------------
 
 
-def test_demo_migration_advances_version_and_preserves_v1_records(tmp_path: Path) -> None:
+def test_demo_migration_advances_version_and_preserves_v1_records(
+    tmp_path: Path, migration_now: datetime, migration_clock: Callable[[], datetime]
+) -> None:
     path = tmp_path / "state.sqlite3"
-    run, decision, entry = _build_v1_shaped_database(path)
+    run, decision, entry = _build_v1_shaped_database(path, now=migration_now)
 
     # Confirm this really is what an old v1 library looks like: no version stamp, no ledger.
     with sqlite3.connect(path) as connection:
@@ -113,7 +113,7 @@ def test_demo_migration_advances_version_and_preserves_v1_records(tmp_path: Path
     assert "schema_migrations" not in tables
     assert {"runs", "decisions", "research_memory"} <= tables
 
-    result = run_migrations(path, clock=_clock)
+    result = run_migrations(path, clock=migration_clock)
 
     assert result.from_version == 0
     assert result.to_version == DEMO_ADD_RUNS_ARCHIVED_AT_VERSION
@@ -147,12 +147,14 @@ def test_demo_migration_advances_version_and_preserves_v1_records(tmp_path: Path
     assert memory.list(subject=entry.subject) == (entry,)
 
 
-def test_running_migrations_again_is_idempotent(tmp_path: Path) -> None:
+def test_running_migrations_again_is_idempotent(
+    tmp_path: Path, migration_now: datetime, migration_clock: Callable[[], datetime]
+) -> None:
     path = tmp_path / "state.sqlite3"
-    _build_v1_shaped_database(path)
+    _build_v1_shaped_database(path, now=migration_now)
 
-    first = run_migrations(path, clock=_clock)
-    second = run_migrations(path, clock=_clock)
+    first = run_migrations(path, clock=migration_clock)
+    second = run_migrations(path, clock=migration_clock)
 
     assert first.to_version == DEMO_ADD_RUNS_ARCHIVED_AT_VERSION
     assert second.from_version == DEMO_ADD_RUNS_ARCHIVED_AT_VERSION
@@ -168,7 +170,7 @@ def test_running_migrations_again_is_idempotent(tmp_path: Path) -> None:
 
 
 def test_demo_migration_is_a_sql_level_no_op_when_the_column_already_exists(
-    tmp_path: Path,
+    tmp_path: Path, migration_now: datetime, migration_clock: Callable[[], datetime]
 ) -> None:
     """Guard the demo migration's own SQL-level idempotency.
 
@@ -178,11 +180,11 @@ def test_demo_migration_is_a_sql_level_no_op_when_the_column_already_exists(
     duplicate-column error.
     """
     path = tmp_path / "state.sqlite3"
-    _build_v1_shaped_database(path)
+    _build_v1_shaped_database(path, now=migration_now)
     with sqlite3.connect(path) as connection:
         connection.execute("ALTER TABLE runs ADD COLUMN archived_at TEXT")
 
-    result = run_migrations(path, clock=_clock)
+    result = run_migrations(path, clock=migration_clock)
 
     assert result.to_version == DEMO_ADD_RUNS_ARCHIVED_AT_VERSION
     with sqlite3.connect(path) as connection:
@@ -191,13 +193,13 @@ def test_demo_migration_is_a_sql_level_no_op_when_the_column_already_exists(
 
 
 def test_failing_migration_rolls_back_leaves_version_unmoved_and_backup_intact(
-    tmp_path: Path,
+    tmp_path: Path, migration_now: datetime, migration_clock: Callable[[], datetime]
 ) -> None:
     path = tmp_path / "state.sqlite3"
-    run, _decision_record, _entry = _build_v1_shaped_database(path)
+    run, _decision_record, _entry = _build_v1_shaped_database(path, now=migration_now)
 
     # Bring the database up to date first, exactly as a real upgrade would.
-    run_migrations(path, clock=_clock)
+    run_migrations(path, clock=migration_clock)
     before = read_status(path)
     assert before.current_version == DEMO_ADD_RUNS_ARCHIVED_AT_VERSION
 
@@ -207,7 +209,7 @@ def test_failing_migration_rolls_back_leaves_version_unmoved_and_backup_intact(
     )
 
     with pytest.raises(MigrationFailedError) as excinfo:
-        run_migrations(path, clock=_clock, migrations=doomed_migrations)
+        run_migrations(path, clock=migration_clock, migrations=doomed_migrations)
 
     error = excinfo.value
     assert error.version == 3
@@ -229,10 +231,12 @@ def test_failing_migration_rolls_back_leaves_version_unmoved_and_backup_intact(
     assert repository.get_run(run.run_id) == run
 
 
-def test_new_database_lands_on_baseline_and_defers_the_demo_migration(tmp_path: Path) -> None:
+def test_new_database_lands_on_baseline_and_defers_the_demo_migration(
+    tmp_path: Path, migration_clock: Callable[[], datetime]
+) -> None:
     path = tmp_path / "state.sqlite3"
 
-    result = run_migrations(path, clock=_clock)
+    result = run_migrations(path, clock=migration_clock)
 
     assert result.from_version == 0
     assert result.to_version == BASELINE_VERSION
@@ -243,14 +247,14 @@ def test_new_database_lands_on_baseline_and_defers_the_demo_migration(tmp_path: 
     # Once the owning store creates its table (independent of the migrator, by design),
     # the deferred migration becomes applicable on the very next run.
     SQLiteRunRepository(path)
-    caught_up = run_migrations(path, clock=_clock)
+    caught_up = run_migrations(path, clock=migration_clock)
     assert caught_up.from_version == BASELINE_VERSION
     assert caught_up.to_version == DEMO_ADD_RUNS_ARCHIVED_AT_VERSION
 
 
-def test_read_status_does_not_mutate_the_database(tmp_path: Path) -> None:
+def test_read_status_does_not_mutate_the_database(tmp_path: Path, migration_now: datetime) -> None:
     path = tmp_path / "state.sqlite3"
-    _build_v1_shaped_database(path)
+    _build_v1_shaped_database(path, now=migration_now)
 
     status_before = read_status(path)
     status_after = read_status(path)
@@ -302,7 +306,7 @@ def test_every_non_baseline_migration_defers_gracefully_on_a_fresh_empty_databas
 
 
 def test_take_backup_does_not_overwrite_an_existing_backup_at_the_same_timestamp(
-    tmp_path: Path,
+    tmp_path: Path, migration_now: datetime, migration_clock: Callable[[], datetime]
 ) -> None:
     """Two backups at the same version, taken by a frozen clock, must not collide.
 
@@ -315,10 +319,10 @@ def test_take_backup_does_not_overwrite_an_existing_backup_at_the_same_timestamp
     relying on wall-clock luck.
     """
     path = tmp_path / "state.sqlite3"
-    _build_v1_shaped_database(path)
+    _build_v1_shaped_database(path, now=migration_now)
 
-    first = _take_backup(path, current_version=0, clock=_clock)
-    second = _take_backup(path, current_version=0, clock=_clock)
+    first = _take_backup(path, current_version=0, clock=migration_clock)
+    second = _take_backup(path, current_version=0, clock=migration_clock)
 
     assert first != second
     assert first.exists()
@@ -347,20 +351,29 @@ _RACE_MIGRATIONS: tuple[Migration, ...] = (
 )
 
 
-def _race_worker(path_str: str, barrier, queue) -> None:
+def _race_worker(path_str: str, barrier, queue, now: datetime) -> None:
     """Run in a real, separate OS process (multiprocessing's `spawn` start method on this
     platform launches a fresh interpreter, not a thread) against the same database file
-    as its sibling worker."""
+    as its sibling worker.
+
+    `now` is `migration_now`'s already-*resolved* value, not the fixture itself: a spawned
+    child re-imports this module fresh and has no pytest fixture graph to draw from, so the
+    fixture callable can't cross the process boundary. A plain `datetime` pickles like any
+    other argument, so the caller passes the resolved value positionally and this worker
+    builds its own local zero-arg clock from it.
+    """
     barrier.wait()
     try:
-        result = run_migrations(Path(path_str), clock=_clock, migrations=_RACE_MIGRATIONS)
+        result = run_migrations(Path(path_str), clock=lambda: now, migrations=_RACE_MIGRATIONS)
     except MigrationFailedError as error:
         queue.put(("failed", error.version, error.name))
     else:
         queue.put(("ok", result.to_version, tuple(m.version for m in result.applied)))
 
 
-def test_concurrent_run_migrations_does_not_report_a_false_failure(tmp_path: Path) -> None:
+def test_concurrent_run_migrations_does_not_report_a_false_failure(
+    tmp_path: Path, migration_now: datetime
+) -> None:
     """Two real OS processes racing `run_migrations()` against the same fresh database.
 
     `_pending()` is computed once, from a snapshot taken before any lock is acquired, so
@@ -386,7 +399,9 @@ def test_concurrent_run_migrations_does_not_report_a_false_failure(tmp_path: Pat
     barrier = multiprocessing.Barrier(2)
     queue: multiprocessing.Queue = multiprocessing.Queue()
     processes = [
-        multiprocessing.Process(target=_race_worker, args=(str(path), barrier, queue))
+        multiprocessing.Process(
+            target=_race_worker, args=(str(path), barrier, queue, migration_now)
+        )
         for _ in range(2)
     ]
     for process in processes:

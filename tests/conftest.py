@@ -2,10 +2,13 @@
 
 Only fixtures genuinely needed from more than one top-level subtree live here. A fixture
 needed by files that all sit under one subtree belongs in that subtree's own
-`conftest.py` instead (see `tests/integration/storage/conftest.py` and
-`tests/contract/providers/conftest.py`); a helper needed by exactly one file stays
-defined in that file (see e.g. `tests/unit/tools/test_evidence_lookup.py`'s local `item`
-fixture, which itself depends on `frozen_now` below).
+`conftest.py` instead (see `tests/contract/providers/conftest.py`); a helper needed by
+exactly one file stays defined in that file (see e.g.
+`tests/unit/tools/test_evidence_lookup.py`'s local `item` fixture, which itself depends
+on `frozen_now` below). `migration_now`/`migration_clock` below are the converse case:
+originally scoped to `tests/integration/storage/conftest.py`, promoted here once
+`tests/unit/runtime/test_composition_migrations.py` -- a second top-level subtree --
+needed the identical clock too.
 
 V2-P0B-013.
 """
@@ -66,6 +69,41 @@ def plain_frozen_now() -> datetime:
     See `PLAIN_FROZEN_NOW` above for why it is intentionally distinct from `frozen_now`.
     """
     return PLAIN_FROZEN_NOW
+
+
+# --- the migration-engine clock -----------------------------------------------------------
+#
+# 2026-08-07T09:00:00Z, deliberately a *different* instant from `FROZEN_NOW` above.
+# `tests/integration/storage/test_migrations.py` (the migration engine itself),
+# `tests/integration/storage/test_versioned_reads.py` (reading pre-migration records back
+# through the versioned-read path), and `tests/unit/runtime/test_composition_migrations.py`
+# (`build_storage()` mounting the migration engine) all test schema-version/migration
+# mechanics that have nothing to do with evidence point-in-time visibility, so this stays
+# numerically distinct from `FROZEN_NOW`: keeping it a different date makes it structurally
+# impossible for a future test to accidentally rely on it lining up with an evidence
+# fixture's `available_time`.
+MIGRATION_CLOCK: datetime = datetime(2026, 8, 7, 9, 0, tzinfo=UTC)
+
+
+@pytest.fixture
+def migration_now() -> datetime:
+    """The raw frozen instant, for tests that embed it directly in a model
+    (`as_of=migration_now`, `created_at=migration_now`, ...)."""
+    return MIGRATION_CLOCK
+
+
+@pytest.fixture
+def migration_clock(migration_now: datetime) -> Callable[[], datetime]:
+    """A zero-arg `clock=` callable pinned to `migration_now`, for `run_migrations(...,
+    clock=...)` / `build_storage(..., clock=...)` call sites.
+
+    A spawned `multiprocessing.Process` re-imports its target module fresh and has no
+    fixture graph to draw from, so it cannot take this callable (or `migration_now`)
+    directly -- `test_migrations.py`'s concurrency race instead passes `migration_now`'s
+    already-*resolved* value as a plain, picklable argument and builds its own local
+    zero-arg callable inside the child process.
+    """
+    return lambda: migration_now
 
 
 # Behavioral guards for these fixtures (frozen-ness, distinctness) live in
