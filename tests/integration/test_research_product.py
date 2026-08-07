@@ -90,7 +90,7 @@ def test_screening_watchlist_and_report_center_are_durable(
     assert reports.get(report.report_id) == report
     assert reports.list(subject="000001.SZ") == (report,)
 
-    client = TestClient(create_app(runtime_dir=tmp_path / "api"))
+    client = TestClient(create_app(runtime_dir=tmp_path / "api", clock=lambda: frozen_now))
     response = client.post("/api/v1/watchlist", json=entry.model_dump(mode="json"))
     assert response.status_code == 200
     assert client.get("/api/v1/watchlist").json()[0]["subject"] == "000001.SZ"

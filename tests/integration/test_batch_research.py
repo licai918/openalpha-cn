@@ -328,6 +328,7 @@ def _serialized_payload(
 def test_single_and_batch_endpoints_accept_the_same_serialized_evidence_payload(
     tmp_path: Path,
     research_request: Callable[[str, str], ResearchRunRequest],
+    frozen_now: datetime,
 ) -> None:
     """`POST /api/v1/research/run` and `POST /api/v1/research/batches` both ultimately
     validate a `ResearchRunRequest`, so the same serialized payload -- evidence items
@@ -337,7 +338,7 @@ def test_single_and_batch_endpoints_accept_the_same_serialized_evidence_payload(
     `ResearchRunRequest` while `/research/run` used the lenient `ResearchApiRequest`,
     so the identical payload succeeded on one endpoint and failed 422 on the other
     (audit F32)."""
-    client = TestClient(create_app(runtime_dir=tmp_path))
+    client = TestClient(create_app(runtime_dir=tmp_path, clock=lambda: frozen_now))
     single_payload = _serialized_payload("serialized-payload-single", "000001.SZ", research_request)
     batch_payload = _serialized_payload(
         "serialized-payload-batch-item", "000001.SZ", research_request
@@ -360,8 +361,9 @@ def test_single_and_batch_endpoints_accept_the_same_serialized_evidence_payload(
 def test_batch_http_surface_submits_runs_and_exposes_events(
     tmp_path: Path,
     research_request: Callable[[str, str], ResearchRunRequest],
+    frozen_now: datetime,
 ) -> None:
-    client = TestClient(create_app(runtime_dir=tmp_path))
+    client = TestClient(create_app(runtime_dir=tmp_path, clock=lambda: frozen_now))
     response = client.post(
         "/api/v1/research/batches",
         json={

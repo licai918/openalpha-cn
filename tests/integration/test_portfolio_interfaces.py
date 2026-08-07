@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -13,7 +13,9 @@ from openalpha_cn.backtest.portfolio import (
 from openalpha_cn.sdk import OpenAlphaSDK
 
 
-def test_sdk_and_api_share_the_same_portfolio_execution_contract(tmp_path: Path) -> None:
+def test_sdk_and_api_share_the_same_portfolio_execution_contract(
+    tmp_path: Path, plain_frozen_now: datetime
+) -> None:
     state = PortfolioState(as_of=date(2026, 7, 23), cash=Decimal("20000.00"))
     order = PortfolioOrder(
         order_id="portfolio-interface-buy",
@@ -35,7 +37,7 @@ def test_sdk_and_api_share_the_same_portfolio_execution_contract(tmp_path: Path)
     )
     sdk = OpenAlphaSDK(runtime_dir=tmp_path / "sdk")
     sdk_result = sdk.execute_portfolio_order(state=state, order=order, market=market)
-    client = TestClient(create_app(runtime_dir=tmp_path / "api"))
+    client = TestClient(create_app(runtime_dir=tmp_path / "api", clock=lambda: plain_frozen_now))
 
     response = client.post(
         "/api/v1/portfolio/execute",

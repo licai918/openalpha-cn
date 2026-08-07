@@ -72,7 +72,7 @@ def test_cli_and_api_return_the_same_evidence_snapshot(
         clock=lambda: AS_OF,
     )
     batch = provider.fetch(ProviderRequest(dataset="events", as_of=AS_OF))
-    response = TestClient(create_app()).post(
+    response = TestClient(create_app(clock=lambda: AS_OF)).post(
         "/api/v1/evidence/build",
         json={
             "metadata": metadata.model_dump(mode="json"),
@@ -85,8 +85,12 @@ def test_cli_and_api_return_the_same_evidence_snapshot(
     assert response.json()["items"][0]["evidence_id"].startswith("ev_")
 
 
-def test_api_exposes_health_and_versioned_openapi(tmp_path: Path) -> None:
-    client = TestClient(create_app(runtime_dir=tmp_path / "runtime"))
+def test_api_exposes_health_and_versioned_openapi(
+    tmp_path: Path, plain_frozen_now: datetime
+) -> None:
+    client = TestClient(
+        create_app(runtime_dir=tmp_path / "runtime", clock=lambda: plain_frozen_now)
+    )
 
     health = client.get("/health")
     assert health.json() == {"status": "ok", "version": "1.0.0"}
@@ -97,18 +101,32 @@ def test_api_exposes_health_and_versioned_openapi(tmp_path: Path) -> None:
     assert "/api/v1/evidence/build" in schema["paths"]
 
 
-def test_api_serves_built_web_assets_without_shadowing_routes(tmp_path: Path) -> None:
+def test_api_serves_built_web_assets_without_shadowing_routes(
+    tmp_path: Path, plain_frozen_now: datetime
+) -> None:
     web_dir = tmp_path / "web"
     web_dir.mkdir()
     (web_dir / "index.html").write_text("<h1>OpenAlpha CN</h1>", encoding="utf-8")
-    client = TestClient(create_app(runtime_dir=tmp_path / "runtime", web_dir=web_dir))
+    client = TestClient(
+        create_app(
+            runtime_dir=tmp_path / "runtime", web_dir=web_dir, clock=lambda: plain_frozen_now
+        )
+    )
 
     assert client.get("/").text == "<h1>OpenAlpha CN</h1>"
     assert client.get("/health").json()["status"] == "ok"
 
 
-def test_api_rejects_declared_oversized_request_body(tmp_path: Path) -> None:
-    client = TestClient(create_app(runtime_dir=tmp_path / "runtime", max_request_bytes=32))
+def test_api_rejects_declared_oversized_request_body(
+    tmp_path: Path, plain_frozen_now: datetime
+) -> None:
+    client = TestClient(
+        create_app(
+            runtime_dir=tmp_path / "runtime",
+            max_request_bytes=32,
+            clock=lambda: plain_frozen_now,
+        )
+    )
 
     response = client.post(
         "/api/v1/evidence/build",
@@ -128,7 +146,7 @@ def test_api_persists_and_queries_built_evidence(
     write_source(source)
     provider = FileProvider(path=source, metadata=metadata, clock=lambda: AS_OF)
     batch = provider.fetch(ProviderRequest(dataset="events", as_of=AS_OF))
-    client = TestClient(create_app(runtime_dir=tmp_path / "runtime"))
+    client = TestClient(create_app(runtime_dir=tmp_path / "runtime", clock=lambda: AS_OF))
 
     built = client.post(
         "/api/v1/evidence/build",
@@ -155,7 +173,7 @@ def test_api_runs_research_from_structured_evidence(
     write_source(source)
     provider = FileProvider(path=source, metadata=metadata, clock=lambda: AS_OF)
     batch = provider.fetch(ProviderRequest(dataset="events", as_of=AS_OF))
-    client = TestClient(create_app(runtime_dir=tmp_path / "runtime"))
+    client = TestClient(create_app(runtime_dir=tmp_path / "runtime", clock=lambda: AS_OF))
     built = client.post(
         "/api/v1/evidence/build",
         json={

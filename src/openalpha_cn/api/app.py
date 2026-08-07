@@ -1,6 +1,7 @@
 """FastAPI application for OpenAlpha CN's versioned public HTTP surface."""
 
-from datetime import UTC, datetime
+from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,7 @@ from openalpha_cn.product.research import (
     ScreeningResult,
     WatchlistEntry,
 )
+from openalpha_cn.providers.base import utc_now
 from openalpha_cn.runtime.batch import BatchProgressEvent, BatchResearchService, BatchResearchTask
 from openalpha_cn.runtime.composition import build_storage
 from openalpha_cn.runtime.contracts import ResearchRunRequest, ResearchRunResult
@@ -237,6 +239,7 @@ def create_app(
     runtime_dir: Path | None = None,
     web_dir: Path | None = None,
     max_request_bytes: int | None = None,
+    clock: Callable[[], datetime] = utc_now,
 ) -> FastAPI:
     """Create an isolated application instance for serving and tests.
 
@@ -261,6 +264,16 @@ def create_app(
     (V2-P0B-007). Safe to call every time this function runs (idempotent per
     process, see `configure_logging`'s own docstring), including the module-scope
     `app = create_app()` call below.
+
+    `clock` mirrors `sdk.py`'s `OpenAlphaSDK.__init__` (`clock: Callable[[], datetime]
+    = utc_now`, `sdk.py:52`): it defaults to the same `providers/base.py#utc_now` and
+    threads through to `build_storage` and every `ResearchEngine`/`BatchResearchService`
+    this function builds, exactly the way the SDK already threads `self.clock`. Before
+    this parameter existed, each of those four call sites built its own
+    `lambda: datetime.now(UTC)`, so REST and the SDK -- given the same input -- minted
+    different `decision_id`s (a content-addressed field fed by `DecisionLedger.
+    created_at`, `domain/decision.py`) purely because they ran at different wall-clock
+    instants. Not passing `clock` reproduces that exact prior default behavior (V2-P0B-008).
     """
     config = load_config()
     configure_logging(config.log_level)
@@ -268,7 +281,7 @@ def create_app(
     request_limit = max_request_bytes if max_request_bytes is not None else config.max_request_bytes
     if request_limit < 1:
         raise ValueError("max_request_bytes must be positive")
-    storage = build_storage(runtime_dir=root, clock=lambda: datetime.now(UTC))
+    storage = build_storage(runtime_dir=root, clock=clock)
     evidence_store = storage.evidence_store
     run_repository = storage.repository
     memory = storage.memory
@@ -282,14 +295,14 @@ def create_app(
         return ResearchEngine(
             repository=run_repository,
             memory=memory,
-            clock=lambda: datetime.now(UTC),
+            clock=clock,
             recovery_store=recovery_store,
         ).run_cycle(request)
 
     batch_service = BatchResearchService(
         store=batch_store,
         runner=run_one,
-        clock=lambda: datetime.now(UTC),
+        clock=clock,
     )
     application = FastAPI(
         title="OpenAlpha CN API",
@@ -364,7 +377,7 @@ def create_app(
         engine = ResearchEngine(
             repository=run_repository,
             memory=memory,
-            clock=lambda: datetime.now(UTC),
+            clock=clock,
             recovery_store=recovery_store,
         )
         return engine.run_cycle(request)

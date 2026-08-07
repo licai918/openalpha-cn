@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -313,17 +314,17 @@ def test_json_lines_formatter_still_emits_every_allowlisted_field_todays_call_si
 
 
 def test_create_app_configures_the_package_logger_from_openalpha_log_level(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, plain_frozen_now: datetime
 ) -> None:
     monkeypatch.setenv("OPENALPHA_LOG_LEVEL", "DEBUG")
 
-    create_app(runtime_dir=tmp_path)
+    create_app(runtime_dir=tmp_path, clock=lambda: plain_frozen_now)
 
     assert logging.getLogger(PACKAGE_LOGGER_NAME).level == logging.DEBUG
 
 
 def test_create_app_never_calls_logging_basicconfig(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, plain_frozen_now: datetime
 ) -> None:
     calls: list[object] = []
 
@@ -332,6 +333,6 @@ def test_create_app_never_calls_logging_basicconfig(
 
     monkeypatch.setattr(logging, "basicConfig", _record)
 
-    create_app(runtime_dir=tmp_path)
+    create_app(runtime_dir=tmp_path, clock=lambda: plain_frozen_now)
 
     assert calls == []
