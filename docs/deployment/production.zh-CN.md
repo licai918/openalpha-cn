@@ -54,6 +54,14 @@ Invoke-RestMethod http://127.0.0.1:8000/health
 providers"下列出的模型密钥（`OPENAI_API_KEY` 等），原样透传进容器；容器内未设置时即为空
 字符串，`doctor` 据此报告缺失，不会因此报错。
 
+`Dockerfile` 的 `ENV OPENALPHA_HOST=0.0.0.0` / `OPENALPHA_PORT=8000` 现在由容器
+`CMD` 实际读取（`--host "${OPENALPHA_HOST:-0.0.0.0}" --port "${OPENALPHA_PORT:-8000}"`），
+不再被硬编码的 `--host`/`--port` 参数架空。`deploy/compose.yml` 不在 `environment:` 里
+覆盖这两个变量（容器内绑定地址必须固定为 `0.0.0.0`，Docker 的端口映射才能生效；主机侧端口
+仍然只由 `ports:` 里的 `OPENALPHA_PORT` 控制），因此这项修复只影响绕过 Compose、直接
+`docker run` 该镜像并显式设置 `-e OPENALPHA_PORT=...` 的场景——之前这样做完全无效，现在会
+真正生效。
+
 设置方式二选一：
 
 1. 在执行 `docker compose` 的 Shell 中直接导出该变量（PowerShell: `$env:TUSHARE_TOKEN = "..."`；

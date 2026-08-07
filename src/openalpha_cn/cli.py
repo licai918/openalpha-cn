@@ -14,6 +14,7 @@ import uvicorn
 
 from openalpha_cn import __version__
 from openalpha_cn.backtest.replay import ReplayCorpus
+from openalpha_cn.config import ConfigError, load_config, load_dotenv
 from openalpha_cn.evidence.service import build_file_evidence, parse_serialized_evidence
 from openalpha_cn.providers.akshare import AKShareProvider
 from openalpha_cn.providers.base import (
@@ -432,15 +433,47 @@ def migrate_run(
 
 @app.command()
 def serve(
-    host: Annotated[str, typer.Option(help="Bind address.")] = "127.0.0.1",
-    port: Annotated[int, typer.Option(help="Bind port.", min=1, max=65535)] = 8000,
+    host: Annotated[
+        str | None,
+        typer.Option(help="Bind address. Defaults to OPENALPHA_HOST, then 127.0.0.1."),
+    ] = None,
+    port: Annotated[
+        int | None,
+        typer.Option(help="Bind port. Defaults to OPENALPHA_PORT, then 8000.", min=1, max=65535),
+    ] = None,
 ) -> None:
-    """Serve the versioned REST API."""
-    uvicorn.run("openalpha_cn.api.app:app", host=host, port=port)
+    """Serve the versioned REST API.
+
+    Precedence for both `host` and `port`: this command's own `--host`/`--port`
+    flag, when given, always wins; otherwise `OPENALPHA_HOST`/`OPENALPHA_PORT`
+    (including a value merged in from `.env` by `main()`); otherwise the
+    `127.0.0.1:8000` default `OpenAlphaConfig` declares.
+    """
+    try:
+        config = load_config()
+    except ConfigError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=1) from error
+    uvicorn.run(
+        "openalpha_cn.api.app:app",
+        host=host if host is not None else config.host,
+        port=port if port is not None else config.port,
+    )
 
 
 def main() -> None:
-    """Run the command-line application."""
+    """Run the command-line application.
+
+    Loads `.env` (if present in the process's current working directory) into the
+    real process environment before dispatching to any subcommand -- so `doctor`/
+    `serve`/... see values that live only in `.env`, with an already-exported real
+    environment variable always winning over the same name in `.env`. This is the
+    *only* place in this package that does so: the Typer `app` object driven
+    directly by `CliRunner` in tests is never routed through here, so exercising
+    the CLI in tests never touches a real `.env` as a side effect. See
+    `openalpha_cn/config.py` for the full precedence/discovery contract.
+    """
+    load_dotenv()
     app()
 
 

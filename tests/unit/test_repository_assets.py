@@ -238,14 +238,15 @@ def test_readme_prioritizes_chainlin_and_explains_installation() -> None:
     assert brain_end < ready_to_use < installation < data_advantage
 
 
-def test_readme_python_source_setup_does_not_imply_env_is_auto_loaded() -> None:
-    """Finding: the Python-source setup flow told the user to copy `.env.example` to
-    `.env`, then run `doctor`/`serve` -- silently implying `.env` gets read the way
-    Docker Compose reads it. It does not: there is no in-process `.env` parser (see
-    `test_no_dotenv_dependency_or_usage_exists_yet` below, which pins that today's
-    behavior matches this claim). This asserts the corrected section states the gap
-    plainly, shows the real fix (exporting into the shell before `doctor`/`serve`),
-    and links to the provider doc that documents each variable's export step.
+def test_readme_python_source_setup_documents_automatic_dotenv_loading_and_precedence() -> None:
+    """V2-P0B-006 implements in-process `.env` loading for the CLI, which flips the
+    premise the old `test_readme_python_source_setup_does_not_imply_env_is_auto_loaded`
+    pinned: back then the Python-source flow genuinely never auto-loaded `.env`, so
+    that test asserted the README said so plainly. It now does auto-load `.env`
+    (see `openalpha_cn/config.py::load_dotenv`, invoked once by `cli.py::main`), so
+    this asserts the corrected, positive claim instead -- plus the precedence rule
+    (a real exported variable always wins over the same name in `.env`) and the
+    Docker-Compose-is-a-different-`.env`-entirely caveat a user actually needs.
     """
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
@@ -254,38 +255,75 @@ def test_readme_python_source_setup_does_not_imply_env_is_auto_loaded() -> None:
     assert setup_start < setup_end
     section = readme[setup_start:setup_end]
 
-    assert "不会" in section
+    # The corrected, positive claim -- and the old "not implemented yet" wording
+    # this replaces must not linger.
     assert "自动加载" in section or "自动读取" in section
+    assert "已列入后续计划" not in section
+
+    # Real env vars still win over `.env` -- the precedence this task exists to fix.
+    assert "优先" in section
     assert "$env:" in section or "export " in section
+
+    # Docker Compose's own `.env` auto-load is a different directory/mechanism.
+    assert "deploy/" in section
+    assert "Compose" in section or "compose" in section
+
+    # Host/port are genuinely configurable now, not the dead variables they were.
+    assert "OPENALPHA_HOST" in section
+    assert "OPENALPHA_PORT" in section
+
     assert "docs/data/providers.zh-CN.md" in section
 
-    # The copy-to-.env step must come strictly before `doctor`/`serve`, and the
-    # export step must sit between them -- otherwise the corrected instructions
-    # would still run doctor/serve before the variables they depend on exist.
+    # The copy-to-.env step must come strictly before `doctor`/`serve`.
     copy_step = section.index(".env")
-    export_step = section.index("$env:")
     doctor_step = section.index("openalpha doctor")
     serve_step = section.index("openalpha serve")
-    assert copy_step < export_step < doctor_step < serve_step
+    assert copy_step < doctor_step < serve_step
 
 
-def test_no_dotenv_dependency_or_usage_exists_yet() -> None:
-    """Pins the premise `test_readme_python_source_setup_does_not_imply_env_is_auto_loaded`
-    relies on: in-process `.env` loading is deliberately deferred (V2-P0B-006), not
-    implemented here. If a future change adds `python-dotenv` (or any `.env` parser)
-    to `src/`, this test breaks, which is the intended signal to also revisit the
-    README claim that the CLI/SDK does not auto-load `.env`.
+def test_dotenv_loading_is_a_single_deliberate_module_not_scattered_parsing() -> None:
+    """Supersedes `test_no_dotenv_dependency_or_usage_exists_yet`, which used to pin
+    the opposite premise: that no `.env` parser existed anywhere in `src/` (in-process
+    `.env` loading was deliberately deferred to V2-P0B-006). It is implemented now;
+    this pins the shape of that implementation instead of only its absence:
+
+    - `pydantic-settings` is the one new runtime dependency this task adds (recorded
+      with its rationale in ADR-0004, not merely a version bump);
+    - it is imported in exactly one module, `openalpha_cn/config.py` -- `.env`
+      parsing is not scattered across the tree the way the 9 original `os.getenv`/
+      `os.environ` call sites this task replaces were;
+    - the actual `.env` file parser is hand-written (see `config.py::_parse_dotenv_text`),
+      not a direct import of `python-dotenv` -- even though `python-dotenv` is a real,
+      transitive dependency of `pydantic-settings` and appears in `uv.lock` -- so this
+      also pins that no file in `src/` imports the `dotenv` package directly.
     """
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    assert "dotenv" not in pyproject.lower()
+    assert "pydantic-settings" in pyproject
 
     src_root = ROOT / "src"
-    offenders = [
+    pydantic_settings_importers = sorted(
         str(path.relative_to(ROOT))
         for path in src_root.rglob("*.py")
-        if "dotenv" in path.read_text(encoding="utf-8").lower()
+        if "pydantic_settings" in path.read_text(encoding="utf-8")
+    )
+    assert pydantic_settings_importers == ["src/openalpha_cn/config.py"]
+
+    dotenv_package_importers = [
+        str(path.relative_to(ROOT))
+        for path in src_root.rglob("*.py")
+        if re.search(
+            r"^\s*(import dotenv\b|from dotenv\b)",
+            path.read_text(encoding="utf-8"),
+            re.MULTILINE,
+        )
     ]
-    assert offenders == []
+    assert dotenv_package_importers == []
+
+    adr = (ROOT / "docs" / "architecture" / "ADR-0004-config-and-dotenv-loading.md").read_text(
+        encoding="utf-8"
+    )
+    assert "pydantic-settings" in adr
+    assert "python-dotenv" in adr
 
 
 def test_wechat_contact_qr_is_the_owner_provided_jpeg() -> None:

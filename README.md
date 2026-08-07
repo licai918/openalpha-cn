@@ -230,17 +230,26 @@ Copy-Item .env.example .env
 uv sync --locked --all-extras --dev
 ```
 
-`.env` 目前只被“方式一：Docker Compose”自动读取；这里的 Python 源码环境（CLI、SDK）**不会**
-自动加载 `.env`，需要先把要用到的变量导出到当前 Shell，`doctor`/`serve` 才能看到，否则
-`doctor` 会一直报凭据缺失，`serve` 也拿不到真实数据：
+编辑 `.env`，填入要用到的变量。`openalpha` 命令行（`doctor`/`serve`/`evidence`/`research`/...）
+在每次执行时都会自动从当前工作目录读取 `.env` 并加载进入进程环境——但只补齐当前 Shell 里
+还没有的变量：如果同名变量已经在 Shell 中导出（PowerShell: `$env:TUSHARE_TOKEN = "..."`；
+bash/zsh: `export TUSHARE_TOKEN=...`），Shell 里的值优先于 `.env` 里的同名值，`.env` 里的值
+又优先于内置默认值。这个自动加载只发生在 `openalpha` 命令行入口；直接以 Python 方式实例化
+`OpenAlphaSDK` 或调用 `create_app()` 不会触发它，读到的仍然只是真实进程环境变量：
 
 ```powershell
-$env:TUSHARE_TOKEN = "your-token"
 uv run openalpha doctor
 uv run openalpha serve
 ```
 
-服务默认只监听本机 `127.0.0.1:8000`。每个数据源变量的导出方式见[数据源与 Provider 边界](docs/data/providers.zh-CN.md)；完整配置、备份、恢复和升级方法见[详细部署方案](docs/deployment/production.zh-CN.md)。（内建 CLI/SDK 层面自动加载 `.env` 已列入后续计划，尚未实现。）
+`serve` 绑定地址与端口的优先级是命令行参数 `--host`/`--port` > `OPENALPHA_HOST`/
+`OPENALPHA_PORT`（含 `.env`）> 内置默认值 `127.0.0.1:8000`。每个数据源变量的用途见
+[数据源与 Provider 边界](docs/data/providers.zh-CN.md)；完整配置、备份、恢复和升级方法见
+[详细部署方案](docs/deployment/production.zh-CN.md)。
+
+> 这里的 `.env` 自动加载目录是 `openalpha` 命令的当前工作目录（通常就是仓库根目录），与
+> “方式一：Docker Compose”的 `.env` 自动加载目录 `deploy/` 不是同一个文件、也不是同一套
+> 加载机制——两者互不影响，各自维护各自的 `.env`。
 
 ## 数据优势如何体现
 

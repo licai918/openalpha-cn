@@ -44,4 +44,9 @@ VOLUME ["/data"]
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=5 \
     CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
 
-CMD ["python", "-m", "uvicorn", "openalpha_cn.api.app:app", "--host", "0.0.0.0", "--port", "8000", "--no-server-header"]
+# Shell form (not exec-form CMD) so the container's OPENALPHA_HOST/OPENALPHA_PORT
+# ENV declarations above actually take effect instead of being silently shadowed
+# by a hardcoded --host/--port -- see ADR-0004. `exec` still replaces this shell
+# as PID 1, preserving normal signal forwarding. Falls back to the same
+# 0.0.0.0:8000 the ENV lines already default to when either is unset.
+CMD ["sh", "-c", "exec python -m uvicorn openalpha_cn.api.app:app --host \"${OPENALPHA_HOST:-0.0.0.0}\" --port \"${OPENALPHA_PORT:-8000}\" --no-server-header"]

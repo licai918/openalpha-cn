@@ -1,7 +1,9 @@
 import json
+import os
 import subprocess
 import sys
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -397,3 +399,113 @@ def test_doctor_probe_supplies_the_subject_akshare_fetch_requires(
     assert payload["providers"]["akshare.research"]["probe"] == {"stock_zh_a_hist": "ok"}
     assert len(client.calls) == 1
     assert client.calls[0]["symbol"], "the probe must supply a real, non-empty subject"
+
+
+# --- V2-P0B-006: config object + in-process `.env` loading -------------------------------
+
+
+def test_serve_host_port_precedence_cli_arg_beats_env_beats_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`openalpha serve`'s bind address/port used to hardcode `127.0.0.1:8000` with no
+    env fallback at all, making `OPENALPHA_HOST`/`OPENALPHA_PORT` dead variables for
+    this command. Precedence must now be: `--host`/`--port` > `OPENALPHA_HOST`/
+    `OPENALPHA_PORT` > the same `127.0.0.1:8000` default as before.
+    """
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        cli.uvicorn, "run", lambda target, **kwargs: calls.append({"target": target, **kwargs})
+    )
+    monkeypatch.delenv("OPENALPHA_HOST", raising=False)
+    monkeypatch.delenv("OPENALPHA_PORT", raising=False)
+
+    result = runner.invoke(app, ["serve"])
+    assert result.exit_code == 0, result.stdout
+    assert calls[-1]["host"] == "127.0.0.1"
+    assert calls[-1]["port"] == 8000
+
+    monkeypatch.setenv("OPENALPHA_HOST", "0.0.0.0")
+    monkeypatch.setenv("OPENALPHA_PORT", "9100")
+    result = runner.invoke(app, ["serve"])
+    assert result.exit_code == 0, result.stdout
+    assert calls[-1]["host"] == "0.0.0.0"
+    assert calls[-1]["port"] == 9100
+
+    result = runner.invoke(app, ["serve", "--host", "192.168.1.5", "--port", "7000"])
+    assert result.exit_code == 0, result.stdout
+    assert calls[-1]["host"] == "192.168.1.5"
+    assert calls[-1]["port"] == 7000
+    assert calls[-1]["target"] == "openalpha_cn.api.app:app"
+
+
+def test_serve_rejects_a_non_numeric_openalpha_port_with_a_named_config_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli.uvicorn, "run", lambda target, **kwargs: None)
+    monkeypatch.setenv("OPENALPHA_PORT", "not-a-port")
+
+    result = runner.invoke(app, ["serve"])
+
+    assert result.exit_code != 0
+    assert "OPENALPHA_PORT" in result.output
+
+
+def test_cli_runner_invocation_never_auto_loads_dotenv_unlike_the_real_entrypoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The isolation boundary this task's hard constraint relies on: `cli.main()` (the
+    real console-script entry point registered as `openalpha` in `pyproject.toml`)
+    loads `.env`; the Typer `app` object `CliRunner` drives directly in every test in
+    this file does not. If it did, every `CliRunner`-based test here -- run from
+    whatever directory `pytest` happens to be invoked from -- could silently pick up
+    this repository's real, gitignored root `.env` and its real credentials.
+
+    Proven directly: chdir into a `tmp_path` carrying a `.env` with a recognizable
+    sentinel variable, invoke a subcommand through `app`/`CliRunner` exactly like
+    every other test in this file does, and confirm the sentinel never reaches
+    `os.environ` or the command's own output.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("TUSHARE_TOKEN", raising=False)
+    sentinel = "cli-runner-must-not-auto-load-this-89213"
+    (tmp_path / ".env").write_text(f"TUSHARE_TOKEN={sentinel}\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["doctor", "--json"])
+
+    assert result.exit_code == 0, result.stdout
+    assert "TUSHARE_TOKEN" not in os.environ
+    payload = json.loads(result.stdout)
+    tushare_credentials = payload["providers"]["tushare.pro"]["credentials"]
+    assert tushare_credentials == [{"env_var": "TUSHARE_TOKEN", "status": "missing"}]
+
+
+def test_main_entrypoint_loads_dotenv_before_dispatching_to_doctor(tmp_path: Path) -> None:
+    """The positive half of the isolation proof above: the real console-script entry
+    point (`cli.main()`, invoked the way the installed `openalpha` command invokes
+    it) *does* load a `.env` sitting in its current working directory, and a
+    credential declared only there reaches `doctor`'s report. Run in a fresh
+    subprocess (own `cwd`, own `os.environ`) so this can never contaminate -- or be
+    contaminated by -- the pytest process's own environment.
+    """
+    sentinel = "subprocess-real-entrypoint-token-55014"
+    (tmp_path / ".env").write_text(f"TUSHARE_TOKEN={sentinel}\n", encoding="utf-8")
+    script = (
+        "import sys\n"
+        'sys.argv = ["openalpha", "doctor", "--json"]\n'
+        "from openalpha_cn import cli\n"
+        "cli.main()\n"
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert sentinel not in result.stdout
+    assert sentinel not in result.stderr
+    payload = json.loads(result.stdout)
+    tushare_credentials = payload["providers"]["tushare.pro"]["credentials"]
+    assert tushare_credentials == [{"env_var": "TUSHARE_TOKEN", "status": "present"}]

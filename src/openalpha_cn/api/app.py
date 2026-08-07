@@ -1,6 +1,5 @@
 """FastAPI application for OpenAlpha CN's versioned public HTTP surface."""
 
-import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -31,6 +30,7 @@ from openalpha_cn.backtest.portfolio import (
 )
 from openalpha_cn.backtest.replay import ReplayCorpus, ReplayReport, ReplayRunner
 from openalpha_cn.backtest.validation import OutcomeObservation, OutcomeValidator
+from openalpha_cn.config import load_config
 from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.domain.validation import ValidationResult
 from openalpha_cn.evidence.service import (
@@ -237,13 +237,27 @@ def create_app(
     web_dir: Path | None = None,
     max_request_bytes: int | None = None,
 ) -> FastAPI:
-    """Create an isolated application instance for serving and tests."""
-    root = runtime_dir or Path(os.getenv("OPENALPHA_RUNTIME_DIR", "./runtime"))
-    request_limit = (
-        int(os.getenv("OPENALPHA_MAX_REQUEST_BYTES", str(8 * 1024 * 1024)))
-        if max_request_bytes is None
-        else max_request_bytes
-    )
+    """Create an isolated application instance for serving and tests.
+
+    Reads `OPENALPHA_RUNTIME_DIR`/`OPENALPHA_WEB_DIR`/`OPENALPHA_MAX_REQUEST_BYTES`
+    from the real process environment via `openalpha_cn.config.load_config()` --
+    never from a `.env` file directly (see that module's docstring). This keeps
+    `app = create_app()` below, which runs at import time, filesystem-free for
+    `.env`: importing this module can never read a developer's real `.env`,
+    regardless of the process's current working directory. A caller-supplied
+    keyword argument always wins over the environment, exactly as before.
+
+    Raises `ConfigError` -- naming the specific `OPENALPHA_*` variable, never a
+    bare traceback -- if an `OPENALPHA_*` environment variable fails validation
+    (e.g. a non-numeric `OPENALPHA_MAX_REQUEST_BYTES`). This is the fix for the
+    import-time crash `int(os.getenv("OPENALPHA_MAX_REQUEST_BYTES", ...))` used
+    to cause: `app = create_app()` below executes at module import time, so an
+    unguarded conversion error there used to surface as a bare Python traceback
+    at process startup.
+    """
+    config = load_config()
+    root = runtime_dir if runtime_dir is not None else config.runtime_dir
+    request_limit = max_request_bytes if max_request_bytes is not None else config.max_request_bytes
     if request_limit < 1:
         raise ValueError("max_request_bytes must be positive")
     storage = build_storage(runtime_dir=root, clock=lambda: datetime.now(UTC))
@@ -535,9 +549,7 @@ def create_app(
             observation=request.observation,
         )
 
-    configured_web_dir = web_dir
-    if configured_web_dir is None and os.getenv("OPENALPHA_WEB_DIR"):
-        configured_web_dir = Path(os.environ["OPENALPHA_WEB_DIR"])
+    configured_web_dir = web_dir if web_dir is not None else config.web_dir
     if configured_web_dir is not None:
         index = configured_web_dir / "index.html"
         if not index.is_file():
