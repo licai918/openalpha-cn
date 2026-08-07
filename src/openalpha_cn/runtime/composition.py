@@ -40,6 +40,7 @@ from openalpha_cn.runtime.recovery import RecoveryStore
 from openalpha_cn.runtime.repository import RunRepository
 from openalpha_cn.storage.batch import SQLiteBatchTaskStore
 from openalpha_cn.storage.memory import SQLiteResearchMemory
+from openalpha_cn.storage.migrations import run_migrations
 from openalpha_cn.storage.parquet import ParquetEvidenceStore
 from openalpha_cn.storage.portfolio import SQLitePortfolioLedger
 from openalpha_cn.storage.product import SQLiteReportStore, SQLiteWatchlistStore
@@ -62,15 +63,22 @@ class StorageContainer:
 
 
 def build_storage(*, runtime_dir: Path, clock: Callable[[], datetime]) -> StorageContainer:
-    """Assemble every storage component and recover interrupted batches once.
+    """Run pending schema migrations, then assemble every storage component once.
 
     All eight stores share one `runtime_dir`: seven at its root-level `state.sqlite3`
     (matching the pre-existing per-store convention), plus the Parquet evidence store
     under `runtime_dir / "evidence"`. Interrupted-batch recovery runs here, using the
     caller-supplied `clock`, instead of being duplicated (and, in `api/app.py`'s case,
     hardcoded) at each call site.
+
+    `run_migrations` runs first, before any store is constructed (V2-P0B-004): this is
+    the one and only mount point for `state.sqlite3`'s migration engine, so every caller
+    (`sdk.py`, `api/app.py`, and the `openalpha migrate` CLI commands going through a
+    full SDK) gets migrations applied automatically, using the same caller-supplied
+    `clock` `recover_interrupted` already uses below.
     """
     runtime_dir.mkdir(parents=True, exist_ok=True)
+    run_migrations(runtime_dir / "state.sqlite3", clock=clock)
     evidence_store: EvidenceStore = ParquetEvidenceStore(runtime_dir / "evidence")
     repository: RunRepository = SQLiteRunRepository(runtime_dir / "state.sqlite3")
     memory: ResearchMemory = SQLiteResearchMemory(runtime_dir / "state.sqlite3")

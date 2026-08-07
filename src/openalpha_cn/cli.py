@@ -26,6 +26,7 @@ from openalpha_cn.providers.chainlin import ChainLinDataProvider
 from openalpha_cn.providers.tushare import TushareProvider
 from openalpha_cn.runtime.contracts import ResearchRunRequest
 from openalpha_cn.sdk import OpenAlphaSDK
+from openalpha_cn.storage.migrations import MigrationFailedError, read_status, run_migrations
 
 app = typer.Typer(
     name="openalpha",
@@ -38,6 +39,8 @@ research_app = typer.Typer(help="Run evidence-linked multi-agent research.")
 app.add_typer(research_app, name="research")
 replay_app = typer.Typer(help="Validate frozen point-in-time replay corpora.")
 app.add_typer(replay_app, name="replay")
+migrate_app = typer.Typer(help="Inspect and apply state.sqlite3 schema migrations.")
+app.add_typer(migrate_app, name="migrate")
 
 
 class Redistribution(StrEnum):
@@ -329,6 +332,77 @@ def replay_run(
         random_seed=random_seed,
     )
     typer.echo(report.model_dump_json())
+
+
+@migrate_app.command("status")
+def migrate_status(
+    runtime_dir: Annotated[Path, typer.Option("--runtime-dir")] = Path("./runtime"),
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit a machine-readable status report."),
+    ] = False,
+) -> None:
+    """Show the current schema version and applied/pending migrations."""
+    status = read_status(runtime_dir / "state.sqlite3")
+    if json_output:
+        payload = {
+            "path": str(status.path),
+            "current_version": status.current_version,
+            "applied": [
+                {"version": item.version, "name": item.name, "applied_at": item.applied_at}
+                for item in status.applied
+            ],
+            "pending": [{"version": item.version, "name": item.name} for item in status.pending],
+        }
+        typer.echo(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        return
+    typer.echo(f"schema version: {status.current_version}")
+    for applied_item in status.applied:
+        typer.echo(
+            f"applied  {applied_item.version} {applied_item.name} at {applied_item.applied_at}"
+        )
+    for pending_item in status.pending:
+        typer.echo(f"pending  {pending_item.version} {pending_item.name}")
+
+
+@migrate_app.command("run")
+def migrate_run(
+    runtime_dir: Annotated[Path, typer.Option("--runtime-dir")] = Path("./runtime"),
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Show what would be applied without applying it."),
+    ] = False,
+) -> None:
+    """Apply pending schema migrations, backing up the database first."""
+    path = runtime_dir / "state.sqlite3"
+    if dry_run:
+        status = read_status(path)
+        if not status.pending:
+            typer.echo(f"schema version {status.current_version} is up to date; nothing to do")
+            return
+        typer.echo(
+            f"would apply {len(status.pending)} migration(s) from version {status.current_version}:"
+        )
+        for pending_item in status.pending:
+            typer.echo(f"  {pending_item.version} {pending_item.name}")
+        return
+    try:
+        result = run_migrations(path, clock=lambda: datetime.now(UTC))
+    except MigrationFailedError as error:
+        typer.echo(
+            f"migration {error.version} ({error.name}) failed and was rolled back; "
+            f"schema version unchanged; backup at {error.backup_path}",
+            err=True,
+        )
+        raise typer.Exit(code=1) from error
+    if not result.applied:
+        typer.echo(f"schema version {result.to_version} is up to date; nothing to do")
+        return
+    typer.echo(f"migrated {result.from_version} -> {result.to_version}")
+    for applied_item in result.applied:
+        typer.echo(f"  applied {applied_item.version} {applied_item.name}")
+    if result.backup_path is not None:
+        typer.echo(f"backup: {result.backup_path}")
 
 
 @app.command()
