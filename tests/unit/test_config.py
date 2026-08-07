@@ -25,6 +25,7 @@ from openalpha_cn.config import (
     discover_dotenv,
     load_config,
     load_dotenv,
+    load_log_level,
 )
 
 _ENV_EXAMPLE_PATH = Path(__file__).resolve().parents[2] / ".env.example"
@@ -196,6 +197,53 @@ def test_load_config_rejects_an_unknown_log_level_with_a_named_error(
         load_config()
 
     assert "OPENALPHA_LOG_LEVEL" in str(excinfo.value)
+
+
+# --- load_log_level: resolves OPENALPHA_LOG_LEVEL alone, independent of every other field -
+
+
+def test_load_log_level_default_is_info() -> None:
+    assert load_log_level() == "INFO"
+
+
+def test_load_log_level_reads_the_real_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENALPHA_LOG_LEVEL", "DEBUG")
+
+    assert load_log_level() == "DEBUG"
+
+
+def test_load_log_level_normalizes_a_lowercase_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENALPHA_LOG_LEVEL", "warning")
+
+    assert load_log_level() == "WARNING"
+
+
+def test_load_log_level_rejects_an_unknown_value_with_a_named_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENALPHA_LOG_LEVEL", "VERBOSE")
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_log_level()
+
+    assert "OPENALPHA_LOG_LEVEL" in str(excinfo.value)
+
+
+def test_load_log_level_ignores_an_unrelated_invalid_openalpha_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reason this function exists at all (Finding 2, `cli.py::main()`): `main()`
+    needs a validated log level before it dispatches to any subcommand, and that is
+    the *only* config value it genuinely needs at that point. `load_config()` builds
+    the whole `OpenAlphaConfig` object atomically, so an unrelated invalid field (a
+    non-numeric `OPENALPHA_MAX_REQUEST_BYTES`, here) would abort logging setup -- and
+    therefore dispatch to every command, including ones like `doctor`/`version` that
+    have nothing to do with request-body limits. `load_log_level()` must never be
+    affected by any field but its own.
+    """
+    monkeypatch.setenv("OPENALPHA_MAX_REQUEST_BYTES", "not-a-number")
+
+    assert load_log_level() == "INFO"
 
 
 # --- discover_dotenv: predictable, cwd-based, never a walk-up search ---------------------

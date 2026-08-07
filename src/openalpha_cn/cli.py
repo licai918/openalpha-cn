@@ -15,7 +15,7 @@ import uvicorn
 
 from openalpha_cn import __version__
 from openalpha_cn.backtest.replay import ReplayCorpus
-from openalpha_cn.config import ConfigError, load_config, load_dotenv
+from openalpha_cn.config import ConfigError, load_config, load_dotenv, load_log_level
 from openalpha_cn.evidence.service import build_file_evidence, parse_serialized_evidence
 from openalpha_cn.logging_setup import configure_logging
 from openalpha_cn.providers.akshare import AKShareProvider
@@ -204,9 +204,24 @@ def doctor(
         ),
     ] = False,
 ) -> None:
-    """Check runtime requirements, provider credentials, and declared capabilities."""
+    """Check runtime requirements, provider credentials, and declared capabilities.
+
+    Also validates `OPENALPHA_*` config (Finding 2 fix): `main()` only ever resolves
+    `OPENALPHA_LOG_LEVEL` before dispatch (see `load_log_level()`), specifically so an
+    unrelated invalid `OPENALPHA_*` field never aborts dispatch to `doctor` -- the one
+    command whose entire job is diagnosing exactly that kind of broken environment.
+    So `doctor` calls `load_config()` itself, here, and reports a `ConfigError` as an
+    ordinary `"config"` finding (both in `--json` and human output) instead of letting
+    it propagate and kill the process before anything can be reported.
+    """
     timezone_ok = datetime.now().astimezone().utcoffset() is not None
     python_ok = sys.version_info >= (3, 11)
+    try:
+        load_config()
+        config_error: str | None = None
+    except ConfigError as error:
+        config_error = str(error)
+    config_ok = config_error is None
     checks: dict[str, dict[str, object]] = {
         "python": {
             "ok": python_ok,
@@ -216,6 +231,10 @@ def doctor(
         "timezone": {
             "ok": timezone_ok,
             "name": str(datetime.now().astimezone().tzinfo),
+        },
+        "config": {
+            "ok": config_ok,
+            **({"error": config_error} if config_error is not None else {}),
         },
     }
 
@@ -238,7 +257,7 @@ def doctor(
         providers[provider_id] = report
 
     payload = {
-        "status": "ok" if python_ok and timezone_ok else "error",
+        "status": "ok" if python_ok and timezone_ok and config_ok else "error",
         "checks": checks,
         "providers": providers,
         "warnings": warnings,
@@ -248,7 +267,10 @@ def doctor(
         return
 
     for name, check in checks.items():
-        typer.echo(f"{'PASS' if check['ok'] else 'FAIL'} {name}")
+        line = f"{'PASS' if check['ok'] else 'FAIL'} {name}"
+        if not check["ok"] and "error" in check:
+            line += f": {check['error']}"
+        typer.echo(line)
     for provider_id, report in providers.items():
         capabilities = report["capabilities"]
         assert isinstance(capabilities, dict)
@@ -492,15 +514,22 @@ def main() -> None:
 
     Also configures structured logging (V2-P0B-007), once, before dispatching to any
     subcommand -- the other of this package's two logging entry points, alongside
-    `api/app.py::create_app()`. An invalid `OPENALPHA_*` value (not only
-    `OPENALPHA_LOG_LEVEL`) fails loudly here with a named `ConfigError`, printed to
-    stderr, rather than leaving logging silently unconfigured or a later command
-    (like `serve`, which already validates the same config independently) fail with
-    a delayed, harder-to-connect error.
+    `api/app.py::create_app()`. Resolves *only* `OPENALPHA_LOG_LEVEL` for this, via
+    `load_log_level()`, never the full `OpenAlphaConfig` -- an invalid `OPENALPHA_LOG_LEVEL`
+    itself still fails loudly here with a named `ConfigError`, printed to stderr, since a
+    scheduled job's logs being silently misconfigured is exactly the failure mode this
+    guards against. Deliberately *not* `load_config()` (Finding 2, a P0.B review fix): an
+    earlier version called `load_config()` here, which validates every `OPENALPHA_*` field
+    atomically, so an invalid field with nothing to do with logging (e.g. a non-numeric
+    `OPENALPHA_MAX_REQUEST_BYTES`) aborted dispatch to *every* command -- including
+    `doctor`, whose entire job is diagnosing exactly that kind of broken environment, and
+    `version`, which touches no config at all. Any other command that genuinely needs the
+    full config still calls `load_config()` itself and fails with the same good named error
+    at the point it actually needs it (see `serve`, and `doctor`'s own `"config"` finding).
     """
     load_dotenv()
     try:
-        configure_logging(load_config().log_level)
+        configure_logging(load_log_level())
     except ConfigError as error:
         typer.echo(str(error), err=True)
         raise SystemExit(1) from error

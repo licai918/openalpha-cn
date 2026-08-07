@@ -27,17 +27,39 @@ Two hard boundaries, mirroring `config.py`'s `.env`-loading precedent exactly:
   if a future call site broke it and passed `exc_info=True`, the formatter records
   only the exception's *type* name, never its message.
 
+- **The formatter trusts nothing it wasn't explicitly told is safe.** Call-site
+  discipline (the bullet above) is necessary but not sufficient: a reviewer proved
+  that with no whitelist, `JsonLinesFormatter` would happily dump any `extra=` field
+  a *future* call site passed -- `extra={"error": some_exception}` (full exception
+  message via `default=str`), `extra={"config": {"tushare_token": "..."}}` (a nested
+  dict serialized verbatim), or `extra={"url": "https://...?token=..."}` (a
+  plausible-looking plain string) would all have leaked, even though today's 10 call
+  sites are clean. `JsonLinesFormatter` now enforces two independent bars on every
+  `extra=` field: its *name* must be in `_ALLOWED_EXTRA_FIELDS` (an explicit,
+  call-site-by-call-site inventory -- a name-only check is required because the `url`
+  case above is a perfectly ordinary `str`, so a type-only check would have missed
+  it), and its *value* must be a plain scalar (`_SCALAR_EXTRA_TYPES` -- catches a
+  future call site that reuses an allowed name for the wrong shape of value). A field
+  that fails either bar is dropped, not stringified -- and the drop is never silent:
+  the field's name (never its value) is recorded under `_dropped_fields` in the same
+  JSON line, so a reviewer grepping logs sees evidence that something was refused
+  instead of the field just vanishing.
+
 Why a package-local logger instead of the root logger: attaching a permanent, inert
-`NullHandler` to this package's own logger at import time (see the bottom of this
-module) is the standard library-author pattern (Python's own `logging` HOWTO
-recommends it) for suppressing the "handler of last resort" -- a bare `WARNING:...`
-line Python prints straight to real stderr for any `WARNING`+ record that reaches a
-logger with *no* handler anywhere in its chain, including the root logger. Without
-this, a `logger.warning(...)` call made before either entry point has configured
-anything (e.g. `_probe_report()` invoked through the bare `Typer` `app` object, the
-way `typer.testing.CliRunner` drives it in every test in this repository) would print
-directly to stderr, bypassing whatever stream a caller -- `CliRunner`, a subprocess
-harness -- thinks it is capturing.
+`NullHandler` to this package's own logger namespace (installed from
+`openalpha_cn/__init__.py`, guaranteed to run for *any* import of this package -- see
+that module -- by importing this module for its side effect below) is the standard
+library-author pattern (Python's own `logging` HOWTO recommends it) for suppressing
+the "handler of last resort" -- a bare `WARNING:...` line Python prints straight to
+real stderr for any `WARNING`+ record that reaches a logger with *no* handler
+anywhere in its chain, including the root logger. Without this, a `logger.warning(...)`
+call made before either entry point has configured anything (e.g. `_probe_report()`
+invoked through the bare `Typer` `app` object, the way `typer.testing.CliRunner`
+drives it in every test in this repository -- or a `logger.error(...)` reached purely
+through `OpenAlphaSDK.__init__`, with neither `cli.py` nor `api/app.py` ever
+imported) would print directly to stderr, bypassing whatever stream a caller --
+`CliRunner`, a subprocess harness, or a host process embedding this package as a
+library -- thinks it is capturing.
 """
 
 from __future__ import annotations
@@ -61,6 +83,49 @@ _STANDARD_RECORD_ATTRS = frozenset(vars(logging.LogRecord("", 0, "", 0, "", (), 
     "asctime",
 }
 
+# Every `extra=` field name this package's 10 audited, clean call sites actually pass
+# today (see `logging_setup.py`'s module docstring for the full call-site inventory).
+# `JsonLinesFormatter` refuses to emit *any* other name -- a reviewer proved the old,
+# whitelist-free formatter would happily dump an exception's `str()`, a nested dict
+# carrying a raw credential, or a URL with a token in its query string, the moment a
+# future call site passed one under a plausible-looking key such as `"error"`,
+# `"config"`, or `"url"`. Adding a field here is therefore a deliberate, reviewable act
+# -- exactly the point: a call site that wants to log something new must prove the
+# field is safe by naming it here, not merely by looking reasonable at the call site.
+#   cli.py#_probe_report            -> provider_id, category, dataset
+#   runtime/batch.py#BatchResearchService
+#                                    -> batch_id, item_count, max_concurrency, retry, status
+#   storage/batch.py#SQLiteBatchTaskStore.recover_interrupted -> batch_id
+#   runtime/composition.py#build_storage -> runtime_dir, schema_version
+#   storage/migrations.py#run_migrations -> backup_path, from_version, migration_version,
+#                                            migration_name
+_ALLOWED_EXTRA_FIELDS = frozenset(
+    {
+        "provider_id",
+        "category",
+        "dataset",
+        "batch_id",
+        "item_count",
+        "max_concurrency",
+        "retry",
+        "status",
+        "runtime_dir",
+        "schema_version",
+        "backup_path",
+        "from_version",
+        "migration_version",
+        "migration_name",
+    }
+)
+
+# The only value shapes a JSON-lines log line should ever carry for an `extra=` field:
+# plain scalars that `json.dumps` renders exactly, with no `default=str` fallback
+# needed and no risk of silently unrolling an object's `__dict__`/`__str__`. Checked in
+# addition to, not instead of, the name allowlist above: a name allowlist alone would
+# wave through a *future* call site that reused an allowed key (e.g. `batch_id`) for a
+# differently-shaped value by mistake.
+_SCALAR_EXTRA_TYPES: tuple[type, ...] = (str, int, float, bool, type(None))
+
 
 class JsonLinesFormatter(logging.Formatter):
     """Render each log record as one JSON object per line.
@@ -69,7 +134,13 @@ class JsonLinesFormatter(logging.Formatter):
     gone wrong, not read live by a human -- see the task brief. Every line carries a
     UTC ISO-8601 timestamp, the level, the logger name, an `event` (the short event
     name a call site passes as its log message, e.g. `"migration_applied"`), and
-    whatever structured fields that call site passed via `extra=`.
+    whatever structured fields that call site passed via `extra=` -- restricted to
+    `_ALLOWED_EXTRA_FIELDS`, each required to hold a plain scalar (`_SCALAR_EXTRA_TYPES`).
+
+    A field that fails either bar is dropped, never stringified and never silently
+    discarded: its *name* (never its value -- the value is exactly what might be unsafe)
+    is recorded under `_dropped_fields` in the same line, so the drop leaves evidence a
+    reviewer can grep for instead of vanishing without a trace.
     """
 
     def format(self, record: logging.LogRecord) -> str:
@@ -79,9 +150,16 @@ class JsonLinesFormatter(logging.Formatter):
             "logger": record.name,
             "event": record.getMessage(),
         }
+        dropped: list[str] = []
         for key, value in record.__dict__.items():
-            if key not in _STANDARD_RECORD_ATTRS:
+            if key in _STANDARD_RECORD_ATTRS:
+                continue
+            if key in _ALLOWED_EXTRA_FIELDS and isinstance(value, _SCALAR_EXTRA_TYPES):
                 payload[key] = value
+            else:
+                dropped.append(key)
+        if dropped:
+            payload["_dropped_fields"] = sorted(dropped)
         if record.exc_info is not None:
             # Deliberately the exception's *type name only* -- never `str(exc)` (see
             # the module docstring). No call site in this package passes

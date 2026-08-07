@@ -67,10 +67,12 @@ __all__ = [
     "discover_dotenv",
     "load_config",
     "load_dotenv",
+    "load_log_level",
 ]
 
 
 _VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+_DEFAULT_LOG_LEVEL = "INFO"
 
 
 class ConfigError(RuntimeError):
@@ -100,7 +102,7 @@ class OpenAlphaConfig(BaseSettings):
     max_request_bytes: int = 8 * 1024 * 1024
     host: str = "127.0.0.1"
     port: int = 8000
-    log_level: str = "INFO"
+    log_level: str = _DEFAULT_LOG_LEVEL
 
     @field_validator("log_level", mode="before")
     @classmethod
@@ -164,6 +166,37 @@ def load_config() -> OpenAlphaConfig:
         return OpenAlphaConfig()
     except ValidationError as error:
         raise ConfigError(_format_validation_error(error)) from error
+
+
+def load_log_level() -> str:
+    """Resolve `OPENALPHA_LOG_LEVEL` alone, from the real process environment --
+    independent of every other `OPENALPHA_*` field's validity.
+
+    `cli.py::main()` needs a validated log level before it dispatches to any
+    subcommand (see `logging_setup.configure_logging()`), but that is the *only*
+    config value it genuinely needs at that point. `load_config()` builds the whole
+    `OpenAlphaConfig` object atomically -- pydantic-settings validates every field
+    together -- so calling it here would mean an unrelated invalid field (e.g. a
+    non-numeric `OPENALPHA_MAX_REQUEST_BYTES`) aborts logging setup, and therefore
+    dispatch to *every* command, including `doctor` (whose entire job is diagnosing
+    exactly this kind of broken environment) and `version` (which has no
+    relationship to config at all). This was a real regression, found by review: see
+    the P0.B task report for Finding 2.
+
+    Applies the identical validation `OpenAlphaConfig.log_level`'s field validator
+    does (case-insensitive, restricted to `_VALID_LOG_LEVELS`) and raises the same
+    named `ConfigError` naming `OPENALPHA_LOG_LEVEL` on an unknown value -- callers
+    that need the rest of the config still call `load_config()` themselves and get
+    the same error at the point they need it (see `cli.py::serve`, `doctor`).
+    """
+    raw = os.environ.get("OPENALPHA_LOG_LEVEL", _DEFAULT_LOG_LEVEL)
+    candidate = raw.strip().upper()
+    if candidate not in _VALID_LOG_LEVELS:
+        raise ConfigError(
+            "invalid OpenAlpha CN environment configuration -- "
+            f"OPENALPHA_LOG_LEVEL: must be one of {', '.join(_VALID_LOG_LEVELS)}"
+        )
+    return candidate
 
 
 def discover_dotenv() -> Path:

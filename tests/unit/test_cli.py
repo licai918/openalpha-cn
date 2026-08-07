@@ -87,6 +87,44 @@ def test_doctor_human_output_names_each_runtime_check() -> None:
     assert "PASS timezone" in result.stdout
 
 
+def test_doctor_json_reports_config_ok_when_the_environment_is_valid() -> None:
+    result = runner.invoke(app, ["doctor", "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["checks"]["config"]["ok"] is True
+
+
+def test_doctor_json_reports_invalid_openalpha_env_as_a_config_finding_not_a_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finding 2: `doctor` exists to diagnose a broken environment, so a malformed
+    `OPENALPHA_*` value must surface as one of its own findings -- in valid JSON --
+    rather than crash before it can report anything. Reproduces the reviewer's exact
+    repro (`OPENALPHA_MAX_REQUEST_BYTES=not-a-number`) directly against `doctor()`'s
+    own body via `CliRunner`, independent of whether `main()`'s eager load is fixed.
+    """
+    monkeypatch.setenv("OPENALPHA_MAX_REQUEST_BYTES", "not-a-number")
+
+    result = runner.invoke(app, ["doctor", "--json"])
+
+    payload = json.loads(result.stdout)  # must not raise json.JSONDecodeError
+    assert payload["checks"]["config"]["ok"] is False
+    assert "OPENALPHA_MAX_REQUEST_BYTES" in payload["checks"]["config"]["error"]
+    assert payload["status"] == "error"
+
+
+def test_doctor_human_output_reports_invalid_openalpha_env_as_a_config_finding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENALPHA_MAX_REQUEST_BYTES", "not-a-number")
+
+    result = runner.invoke(app, ["doctor"])
+
+    assert "FAIL config" in result.stdout
+    assert "OPENALPHA_MAX_REQUEST_BYTES" in result.stdout
+
+
 def test_doctor_json_reports_provider_capability_declarations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -576,6 +614,88 @@ def test_main_entrypoint_rejects_an_invalid_log_level_with_a_named_error(
 
     assert result.returncode != 0
     assert "OPENALPHA_LOG_LEVEL" in result.stderr
+
+
+def test_main_entrypoint_version_succeeds_despite_an_unrelated_invalid_openalpha_env(
+    tmp_path: Path,
+) -> None:
+    """Finding 2's exact regression repro: `main()` used to call `load_config()` --
+    validating *every* `OPENALPHA_*` field atomically -- before dispatch, so an
+    invalid `OPENALPHA_MAX_REQUEST_BYTES` aborted `version`, a command with no
+    relationship to config at all. `main()` now only needs a validated log level
+    before dispatch (see `load_log_level()`), so an unrelated field's validity must
+    never affect it -- unlike the test directly above, which pins that an invalid
+    `OPENALPHA_LOG_LEVEL` *itself* must still abort loudly.
+    """
+    script = (
+        'import sys\nsys.argv = ["openalpha", "version"]\n'
+        "from openalpha_cn import cli\ncli.main()\n"
+    )
+    env = {**os.environ, "OPENALPHA_MAX_REQUEST_BYTES": "not-a-number"}
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=str(tmp_path),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "OpenAlpha CN 1.0.0"
+
+
+def test_main_entrypoint_doctor_json_stays_valid_json_despite_invalid_openalpha_env(
+    tmp_path: Path,
+) -> None:
+    """Finding 2's second repro: `doctor --json` must always emit valid JSON on
+    stdout, even when an `OPENALPHA_*` value is malformed -- a monitoring script
+    parsing this output must get a structured error, never a decode error from an
+    empty stdout.
+    """
+    script = (
+        'import sys\nsys.argv = ["openalpha", "doctor", "--json"]\n'
+        "from openalpha_cn import cli\ncli.main()\n"
+    )
+    env = {**os.environ, "OPENALPHA_MAX_REQUEST_BYTES": "not-a-number"}
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=str(tmp_path),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    payload = json.loads(result.stdout)  # must not raise -- this is the core regression
+    assert payload["checks"]["config"]["ok"] is False
+    assert "OPENALPHA_MAX_REQUEST_BYTES" in payload["checks"]["config"]["error"]
+
+
+def test_main_entrypoint_doctor_human_output_is_not_empty_despite_invalid_openalpha_env(
+    tmp_path: Path,
+) -> None:
+    """Finding 2's first repro: plain `doctor` must still print its report, not exit
+    silently, when an `OPENALPHA_*` value is malformed."""
+    script = (
+        'import sys\nsys.argv = ["openalpha", "doctor"]\nfrom openalpha_cn import cli\ncli.main()\n'
+    )
+    env = {**os.environ, "OPENALPHA_MAX_REQUEST_BYTES": "not-a-number"}
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=str(tmp_path),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.stdout.strip() != ""
+    assert "FAIL config" in result.stdout
+    assert "OPENALPHA_MAX_REQUEST_BYTES" in result.stdout
 
 
 _PROVIDER_FAILURE_LOG_SCRIPT = """
