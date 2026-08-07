@@ -36,16 +36,19 @@ from openalpha_cn.domain.validation import ValidationResult
 from openalpha_cn.evidence.service import (
     EvidenceBuildRequest,
     EvidenceBuildResponse,
+    EvidenceStore,
     build_evidence,
     parse_serialized_evidence,
 )
 from openalpha_cn.product.research import (
+    ReportStore,
     ResearchReport,
     ResearchReportFactory,
     ResearchScreener,
     ScreeningCriteria,
     ScreeningResult,
     WatchlistEntry,
+    WatchlistStore,
 )
 from openalpha_cn.runtime.batch import BatchProgressEvent, BatchResearchService, BatchResearchTask
 from openalpha_cn.runtime.contracts import ResearchRunRequest, ResearchRunResult
@@ -252,14 +255,14 @@ def create_app(
     if request_limit < 1:
         raise ValueError("max_request_bytes must be positive")
     root.mkdir(parents=True, exist_ok=True)
-    evidence_store = ParquetEvidenceStore(root / "evidence")
+    evidence_store: EvidenceStore = ParquetEvidenceStore(root / "evidence")
     run_repository = SQLiteRunRepository(root / "state.sqlite3")
     memory = SQLiteResearchMemory(root / "state.sqlite3")
     recovery_store = SQLiteRecoveryStore(root / "state.sqlite3")
     batch_store = SQLiteBatchTaskStore(root / "state.sqlite3")
     portfolio_ledger = SQLitePortfolioLedger(root / "state.sqlite3")
-    watchlist_store = SQLiteWatchlistStore(root / "state.sqlite3")
-    report_store = SQLiteReportStore(root / "state.sqlite3")
+    watchlist_store: WatchlistStore = SQLiteWatchlistStore(root / "state.sqlite3")
+    report_store: ReportStore = SQLiteReportStore(root / "state.sqlite3")
     batch_store.recover_interrupted(now=datetime.now(UTC))
 
     def run_one(request: ResearchRunRequest) -> ResearchRunResult:
