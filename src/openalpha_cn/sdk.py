@@ -35,7 +35,8 @@ from openalpha_cn.product.research import (
 )
 from openalpha_cn.providers.base import ProviderMetadata, utc_now
 from openalpha_cn.runtime.batch import BatchResearchService, BatchResearchTask
-from openalpha_cn.runtime.engine import ResearchEngine, ResearchRunRequest, ResearchRunResult
+from openalpha_cn.runtime.contracts import ResearchRunRequest, ResearchRunResult
+from openalpha_cn.runtime.engine import ResearchEngine
 from openalpha_cn.runtime.memory import MemoryEntry
 from openalpha_cn.storage.batch import SQLiteBatchTaskStore
 from openalpha_cn.storage.memory import SQLiteResearchMemory

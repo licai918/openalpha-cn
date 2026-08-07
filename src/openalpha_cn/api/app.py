@@ -48,7 +48,8 @@ from openalpha_cn.product.research import (
     WatchlistEntry,
 )
 from openalpha_cn.runtime.batch import BatchProgressEvent, BatchResearchService, BatchResearchTask
-from openalpha_cn.runtime.engine import ResearchEngine, ResearchRunRequest, ResearchRunResult
+from openalpha_cn.runtime.contracts import ResearchRunRequest, ResearchRunResult
+from openalpha_cn.runtime.engine import ResearchEngine
 from openalpha_cn.runtime.memory import MemoryEntry
 from openalpha_cn.storage.batch import SQLiteBatchTaskStore
 from openalpha_cn.storage.memory import SQLiteResearchMemory

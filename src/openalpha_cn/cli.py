@@ -24,7 +24,7 @@ from openalpha_cn.providers.base import (
 )
 from openalpha_cn.providers.chainlin import ChainLinDataProvider
 from openalpha_cn.providers.tushare import TushareProvider
-from openalpha_cn.runtime.engine import ResearchRunRequest
+from openalpha_cn.runtime.contracts import ResearchRunRequest
 from openalpha_cn.sdk import OpenAlphaSDK
 
 app = typer.Typer(

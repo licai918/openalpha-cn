@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validat
 
 from openalpha_cn.domain._identity import stable_model_id
 from openalpha_cn.domain.time import ensure_aware
-from openalpha_cn.runtime.engine import ResearchRunResult
+from openalpha_cn.runtime.contracts import ResearchRunResult
 
 
 class ScreeningCriteria(BaseModel):

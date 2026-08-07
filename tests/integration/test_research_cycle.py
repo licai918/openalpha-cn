@@ -3,7 +3,8 @@ from pathlib import Path
 
 from openalpha_cn.domain.evidence import EvidenceSnapshot
 from openalpha_cn.domain.time import Timeline
-from openalpha_cn.runtime.engine import ResearchEngine, ResearchRunRequest
+from openalpha_cn.runtime.contracts import ResearchRunRequest
+from openalpha_cn.runtime.engine import ResearchEngine
 from openalpha_cn.runtime.memory import InMemoryResearchMemory
 from openalpha_cn.storage.sqlite import SQLiteRunRepository
 

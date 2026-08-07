@@ -12,6 +12,12 @@ It also proves the domain-purity rule independently of import-linter's static
 from the real directory structure at runtime, so a subpackage added after the enumeration
 was written (e.g. a future `panel/`, `factors/`, or alpha-model package) is covered
 automatically instead of silently falling outside the gate.
+
+Finally (V2-P0B-001), it asserts the dependency-direction outcome of splitting
+`runtime/contracts.py` out of `runtime/engine.py`: the pydantic-only request/result
+contracts must not pull in `ResearchEngine`'s SQLite storage dependency, and the four
+modules that only ever needed the contracts (not `ResearchEngine`) must route through
+`runtime.contracts` instead of `runtime.engine`.
 """
 
 from __future__ import annotations
@@ -205,3 +211,83 @@ def test_legal_downward_imports_from_runtime_and_backtest_into_storage_are_not_f
         limit_to_contracts=("storage-no-upward-deps",),
     )
     assert exit_code == 0
+
+
+# V2-P0B-001: `runtime/contracts.py` was split out of `runtime/engine.py` so that modules
+# wanting only `ResearchRunRequest`/`ResearchRunResult`/`RunConflictError` stop transitively
+# depending on `ResearchEngine`'s SQLite storage. These four modules only ever needed the
+# contracts (see task-8-brief.md's dependency table, measured at HEAD); `sdk.py`,
+# `backtest/replay.py`, and `api/app.py` legitimately need the full `ResearchEngine` and are
+# intentionally excluded.
+CONTRACT_ONLY_CONSUMERS = (
+    "openalpha_cn.cli",
+    "openalpha_cn.runtime.batch",
+    "openalpha_cn.product.research",
+    "openalpha_cn.backtest.validation",
+)
+
+# The two storage submodules `runtime.engine` itself imports for `ResearchEngine`. Checking
+# transitive reachability against these two specifically (rather than all of
+# `openalpha_cn.storage`) avoids false failures from unrelated, pre-existing storage
+# touchpoints outside this task's scope -- e.g. `runtime.batch` has its own TYPE_CHECKING-only
+# reference to `storage.batch` for `SQLiteBatchTaskStore`, which has nothing to do with the
+# request/result contracts.
+ENGINE_OWNED_STORAGE_MODULES = ("openalpha_cn.storage.recovery", "openalpha_cn.storage.sqlite")
+
+
+def test_runtime_contracts_module_does_not_import_runtime_engine() -> None:
+    """`runtime.contracts` must not import `runtime.engine` -- that edge is exactly the
+    coupling this split exists to remove; if it reappears, the split is pointless."""
+    graph = grimp.build_graph("openalpha_cn")
+    assert not graph.direct_import_exists(
+        importer="openalpha_cn.runtime.contracts", imported="openalpha_cn.runtime.engine"
+    )
+
+
+def test_runtime_contracts_module_does_not_transitively_depend_on_storage() -> None:
+    """`runtime.contracts` holds only pydantic request/result models; its own import
+    closure must never reach `openalpha_cn.storage` (directly or transitively)."""
+    graph = grimp.build_graph("openalpha_cn")
+    upstream = graph.find_upstream_modules("openalpha_cn.runtime.contracts")
+    storage_deps = {
+        module
+        for module in upstream
+        if module == "openalpha_cn.storage" or module.startswith("openalpha_cn.storage.")
+    }
+    assert not storage_deps, f"runtime.contracts transitively depends on storage: {storage_deps}"
+
+
+def test_contract_only_consumers_do_not_import_runtime_engine_directly() -> None:
+    """Every module that only ever needed the request/result contracts must import them
+    from `runtime.contracts`, not `runtime.engine`. This is the literal mutation-testing
+    target: reverting any one of these four modules' import line back to `runtime.engine`
+    must flip this edge back on and fail this test."""
+    graph = grimp.build_graph("openalpha_cn")
+    for module in CONTRACT_ONLY_CONSUMERS:
+        assert not graph.direct_import_exists(
+            importer=module, imported="openalpha_cn.runtime.engine"
+        ), f"{module} still imports openalpha_cn.runtime.engine directly"
+
+
+def test_contract_only_consumers_do_not_transitively_reach_engine_owned_storage_modules() -> None:
+    """`runtime.batch`, `product.research`, and `backtest.validation` had no other reason to
+    reach `storage.recovery`/`storage.sqlite` -- their only prior path was through
+    `runtime.engine`'s contract classes, so it must vanish once they import from
+    `runtime.contracts` instead.
+
+    `cli.py` is deliberately excluded from this transitive check: it separately imports
+    `backtest.replay.ReplayCorpus` for its `replay` subcommand, which legitimately needs the
+    full `ResearchEngine` (and therefore `storage.sqlite`). That dependency is real,
+    pre-existing, and out of this task's scope; `cli.py` is still covered by the direct-edge
+    test above, which is the exact edge this task changes.
+    """
+    graph = grimp.build_graph("openalpha_cn")
+    storage_targets = set(ENGINE_OWNED_STORAGE_MODULES)
+    for module in (
+        "openalpha_cn.runtime.batch",
+        "openalpha_cn.product.research",
+        "openalpha_cn.backtest.validation",
+    ):
+        upstream = graph.find_upstream_modules(module)
+        touched = upstream & storage_targets
+        assert not touched, f"{module} still transitively reaches {touched}"

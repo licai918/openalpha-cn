@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from openalpha_cn.domain.time import ensure_aware
 from openalpha_cn.domain.validation import AttributionTerm, ValidationResult
-from openalpha_cn.runtime.engine import ResearchRunResult
+from openalpha_cn.runtime.contracts import ResearchRunResult
 
 
 class OutcomeObservation(BaseModel):

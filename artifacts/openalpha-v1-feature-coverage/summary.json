@@ -8,7 +8,7 @@
     "evidence": 9,
     "interface": 8,
     "model": 4,
-    "operations": 17,
+    "operations": 18,
     "product": 3,
     "provider": 8,
     "recovery": 2,
@@ -28,13 +28,13 @@
     "DEFERRED": 1,
     "ENHANCED_REPLACEMENT": 20,
     "EXCLUDED": 4,
-    "NATIVE_COMPLETE": 71
+    "NATIVE_COMPLETE": 72
   },
   "totals": {
-    "all_features": 97,
+    "all_features": 98,
     "legacy_acceptance_rows": 86,
-    "true_completed_features": 92,
-    "true_completion_rate_pct": 94.85,
+    "true_completed_features": 93,
+    "true_completion_rate_pct": 94.9,
     "unknown": 0,
     "unreviewed": 0
   }

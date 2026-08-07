@@ -7,11 +7,8 @@ from openalpha_cn.agents.base import AgentContext, AgentResult
 from openalpha_cn.domain.evidence import EvidenceSnapshot
 from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.domain.time import Timeline
-from openalpha_cn.runtime.engine import (
-    ResearchEngine,
-    ResearchRunRequest,
-    RunConflictError,
-)
+from openalpha_cn.runtime.contracts import ResearchRunRequest, RunConflictError
+from openalpha_cn.runtime.engine import ResearchEngine
 from openalpha_cn.runtime.memory import MemoryEntry
 from openalpha_cn.storage.memory import SQLiteResearchMemory
 from openalpha_cn.storage.recovery import SQLiteRecoveryStore

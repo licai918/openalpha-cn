@@ -12,7 +12,7 @@ from openalpha_cn.product.research import (
     ScreeningCriteria,
     WatchlistEntry,
 )
-from openalpha_cn.runtime.engine import ResearchRunRequest
+from openalpha_cn.runtime.contracts import ResearchRunRequest
 from openalpha_cn.storage.product import SQLiteReportStore, SQLiteWatchlistStore
 
 NOW = datetime(2026, 7, 24, 10, 30, tzinfo=UTC)

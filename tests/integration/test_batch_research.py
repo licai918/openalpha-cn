@@ -7,7 +7,7 @@ from openalpha_cn.api.app import create_app
 from openalpha_cn.domain.evidence import EvidenceSnapshot
 from openalpha_cn.domain.time import Timeline
 from openalpha_cn.runtime.batch import BatchResearchService, BatchResearchTask, BatchTaskItem
-from openalpha_cn.runtime.engine import ResearchRunRequest
+from openalpha_cn.runtime.contracts import ResearchRunRequest
 from openalpha_cn.sdk import OpenAlphaSDK
 from openalpha_cn.storage.batch import SQLiteBatchTaskStore
 

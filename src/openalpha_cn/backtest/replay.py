@@ -10,7 +10,8 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validat
 from openalpha_cn.backtest.validation import OutcomeObservation, OutcomeValidator
 from openalpha_cn.domain.evidence import EvidenceSnapshot
 from openalpha_cn.domain.time import ensure_aware
-from openalpha_cn.runtime.engine import ResearchEngine, ResearchRunRequest
+from openalpha_cn.runtime.contracts import ResearchRunRequest
+from openalpha_cn.runtime.engine import ResearchEngine
 from openalpha_cn.runtime.memory import InMemoryResearchMemory
 from openalpha_cn.storage.sqlite import SQLiteRunRepository
 

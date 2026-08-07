@@ -4,8 +4,8 @@
 
 ## 对账结论
 
-- 功能总数: 97
-- 当前真实完成: 92 (94.85%)
+- 功能总数: 98
+- 当前真实完成: 93 (94.9%)
 - `UNREVIEWED=0`
 - `UNKNOWN=0`
 - `legacy_acceptance_rows=86` (历史散文验收、尚未绑定为可执行 pytest/CI 断言)
@@ -18,7 +18,7 @@
 | `DEFERRED` | 1 |
 | `ENHANCED_REPLACEMENT` | 20 |
 | `EXCLUDED` | 4 |
-| `NATIVE_COMPLETE` | 71 |
+| `NATIVE_COMPLETE` | 72 |
 
 ## 功能明细
 
@@ -121,6 +121,7 @@
 | `OA-OPS-016` | operations | ADR-0003: numerical stack boundary (domain-purity drift guard) | `NATIVE_COMPLETE` | `docs/architecture/ADR-0003-numerical-stack-boundary.md` | `tests/unit/test_adr_consistency.py` | `pytest` | `tests/unit/test_adr_consistency.py::test_adr_0003_domain_forbidden_import_list_matches_import_linter_domain_purity_contract` |
 | `OA-PROV-008` | provider | Tushare dataset descriptor table | `NATIVE_COMPLETE` | `src/openalpha_cn/providers/tushare.py#TushareDatasetDescriptor;src/openalpha_cn/providers/tushare.py#ClockStrategy;src/openalpha_cn/providers/tushare.py#TUSHARE_DATASETS` | `tests/contract/providers/test_tushare_dataset_descriptors.py` | `pytest` | `tests/contract/providers/test_tushare_dataset_descriptors.py::test_daily_descriptor_decode_matches_legacy_field_for_field` |
 | `OA-OPS-017` | operations | Quality gates enforced locally, not only in CI | `NATIVE_COMPLETE` | `pyproject.toml;web/vite.config.ts;.github/workflows/quality.yml` | `tests/unit/test_repository_assets.py` | `pytest` | `tests/unit/test_repository_assets.py::test_backend_coverage_fail_under_is_configured_in_pyproject` |
+| `OA-OPS-018` | operations | Runtime contracts split from engine (dependency-direction gate) | `NATIVE_COMPLETE` | `src/openalpha_cn/runtime/contracts.py;src/openalpha_cn/runtime/engine.py;src/openalpha_cn/runtime/__init__.py` | `tests/unit/test_import_layering.py;tests/unit/runtime/test_package_lazy_export.py` | `pytest` | `tests/unit/test_import_layering.py::test_contract_only_consumers_do_not_import_runtime_engine_directly` |
 
 ## 边界
 

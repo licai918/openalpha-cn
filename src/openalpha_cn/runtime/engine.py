@@ -4,66 +4,21 @@ import hashlib
 import platform
 from collections.abc import Callable, Sequence
 from datetime import datetime
-from typing import Literal, Self
-
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from typing import Literal
 
 from openalpha_cn.agents.base import AgentContext, AgentResult, ResearchAgent
 from openalpha_cn.agents.baseline import baseline_agents
 from openalpha_cn.decisions.risk import RiskGate
 from openalpha_cn.domain.decision import AgentDecision, DecisionLedger
-from openalpha_cn.domain.evidence import EvidenceSnapshot
 from openalpha_cn.domain.json_value import canonical_json_bytes
 from openalpha_cn.domain.run import ArtifactDigest, RunManifest, VersionRef
 from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.domain.time import ensure_aware
+from openalpha_cn.runtime.contracts import ResearchRunRequest, ResearchRunResult, RunConflictError
 from openalpha_cn.runtime.memory import MemoryEntry, ResearchMemory
 from openalpha_cn.runtime.router import AgentRouter
 from openalpha_cn.storage.recovery import RunRecoveryState, SQLiteRecoveryStore
 from openalpha_cn.storage.sqlite import SQLiteRunRepository
-
-
-class RunConflictError(RuntimeError):
-    """Raised when a run ID is reused with different immutable inputs."""
-
-
-class ResearchRunRequest(BaseModel):
-    """All deterministic inputs to one research cycle."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
-
-    run_id: str = Field(min_length=1, max_length=128)
-    mode: Literal["live", "replay", "backtest"]
-    subject: str = Field(min_length=1, max_length=128)
-    as_of: datetime
-    evidence: tuple[EvidenceSnapshot, ...]
-    code_commit: str = Field(min_length=7, max_length=64)
-    config_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
-    random_seed: int
-
-    @field_validator("as_of")
-    @classmethod
-    def normalize_as_of(cls, value: datetime) -> datetime:
-        return ensure_aware(value)
-
-    @model_validator(mode="after")
-    def validate_evidence(self) -> Self:
-        if any(item.subject != self.subject for item in self.evidence):
-            raise ValueError("all evidence must match the requested subject")
-        if any(not item.visible_at(self.as_of) for item in self.evidence):
-            raise ValueError("evidence is not visible at request as_of")
-        return self
-
-
-class ResearchRunResult(BaseModel):
-    """Signal, decision, manifest, and agent outputs from one cycle."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    signal: SignalFrame
-    decision: DecisionLedger
-    manifest: RunManifest
-    agent_results: tuple[AgentResult, ...]
 
 
 class ResearchEngine:

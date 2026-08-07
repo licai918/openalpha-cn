@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from openalpha_cn.runtime.engine import ResearchRunRequest, ResearchRunResult
+from openalpha_cn.runtime.contracts import ResearchRunRequest, ResearchRunResult
 
 if TYPE_CHECKING:
     from openalpha_cn.storage.batch import SQLiteBatchTaskStore

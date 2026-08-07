@@ -4,7 +4,7 @@ from pathlib import Path
 
 from openalpha_cn.agents.baseline import CapitalAgent
 from openalpha_cn.providers.base import ProviderMetadata
-from openalpha_cn.runtime.engine import ResearchRunRequest
+from openalpha_cn.runtime.contracts import ResearchRunRequest
 from openalpha_cn.sdk import OpenAlphaSDK
 
 NOW = datetime(2026, 7, 24, 10, 30, tzinfo=UTC)
