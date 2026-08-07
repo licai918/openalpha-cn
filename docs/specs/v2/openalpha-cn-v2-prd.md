@@ -65,7 +65,7 @@ Proposed 版按"可分发的开源研究平台"撰写。本版按"个人研究�
 它只由 `POST /api/v1/backtests/validate`（`api/app.py:526-539`）返回，无任何写入路径。工作台第 4 页（组合与归因看板，S79）**没有数据源**。
 
 **B6 — 可复现性声明目前部分是空的。**
-`random_seed` 被记录后从未被读取（全库唯一实际播种是 `event_study.py:71`，用的是另一个字段）；`code_commit` 从不从 git 取，真实值是字面量 `"development"`/`"web-development"`；`config_digest` 从不计算，是 `"0"*64`。三者**都是 `decision_id` 的输入** ⇒ 不同代码与不同配置产生相同决策 ID。此外 `DecisionLedger.created_at` 也在 ID 内，而 `engine.py:105` 只在 run 行已存在时复用 `started_at`，故**首次运行无法仅凭输入复现**。
+`random_seed` 被记录后从未被读取（全库唯一实际播种是 `event_study.py:71`，用的是另一个字段）；`code_commit` 从不从 git 取，真实值是字面量 `"development"`/`"web-development"`；`config_digest` 从不计算，是 `"0"*64`。**更正（2026-08 实测）**：三者中只有 `code_commit` 真正进入 `decision_id` —— `DecisionLedger` 的字段表含 `code_commit` 但**不含** `config_digest` 与 `random_seed`，后两者只存在于 `RunManifest`，而 `RunManifest` 根本没有内容寻址身份（`stable_model_id` 仅有 4 个使用者，不含它）。实测：单独改 `code_commit` → ID 变；单独改 `config_digest` 或 `random_seed` → **ID 不变**。所以「不同配置产生相同决策 ID」这一条在 `V2-P0B-009` 之后**依然成立**，需另立 issue 把这两个字段接入某个运行级身份。原判断源自技术审计未经实测，已作废。此外 `DecisionLedger.created_at` 也在 ID 内，而 `engine.py:105` 只在 run 行已存在时复用 `started_at`，故**首次运行无法仅凭输入复现**。
 
 **B7 — 结构地基有三处必须先修的债。**
 ① `storage/` 向上依赖 4 个上层包（唯一的反向依赖），已存在一个被 `TYPE_CHECKING` 掩盖的真实循环（`storage/batch.py:8` ↔ `runtime/batch.py:15-16`），任何 `storage/panel.py` 引用研究契约就立刻成环；② **两个手工同步的组装根**（`api/app.py:254-269` ≡ `sdk.py:63-113`），v2 新增 5 层意味着 10 处装配要人工保持一致；③ `runtime/engine.py` 一个文件承担契约 + 恢复 + 聚合 + 政策四份职责，而 4 个下游**只为契约**而 import 它。

@@ -72,7 +72,7 @@ P3 结束即可独立使用（Jupyter 直连面板 + 因子）
 | `V2-P0B-006` | 配置对象 + 进程内 `.env` 加载；修死变量与 host/port 三处不一致 | 技 | — | 无 dotenv/pydantic-settings；`.env.example` 12 个变量只有 3 个被读，`LOG_LEVEL`/`HOST`/`PORT` 是死的，被读的 `WEB_DIR` 未声明；`api/app.py:247` 无守卫 `int()` 会在 import 期崩 | 单元 + 集成 | S71, D26 |
 | `V2-P0B-007` | 结构化日志（`src/` 内零 logging 配置） | 技 | 006 | 调度器无日志不可运维 | 集成：断言关键事件被记录 | S70 |
 | `V2-P0B-008` | `create_app()` 时钟缝（12 个 REST 测试当前跑真实墙钟） | 测 | 002 | `api/app.py:238-243` 不接受 clock，`:262/:268/:274` 硬编码 `datetime.now(UTC)` | 集成：REST 在冻结时钟下确定性 | T3, S85 |
-| `V2-P0B-009` | 确定性补全：`code_commit` 从 git 取、`config_digest` 真实计算、`random_seed` 贯通、固定 BLAS 线程 | 技 | 006 | `random_seed` 记录后从未被读；`code_commit` 真实值是 `"development"`/`"web-development"`；`config_digest` 是 `"0"*64`；三者都是 `decision_id` 输入；`engine.py:105` 使首次运行不可仅凭输入复现 | 单元 + 集成：同输入同 ID | D11, S30, S85 |
+| `V2-P0B-009` | 确定性补全：`code_commit` 从 git 取、`config_digest` 真实计算、`random_seed` 贯通、固定 BLAS 线程 | 技 | 006 | `random_seed` 记录后从未被读；`code_commit` 真实值是 `"development"`/`"web-development"`；`config_digest` 是 `"0"*64`；**注意：只有 `code_commit` 进入 `decision_id`，另两者不进（见 §9）**；`engine.py:105` 使首次运行不可仅凭输入复现 | 单元 + 集成：同输入同 ID | D11, S30, S85 |
 | `V2-P0B-010` | `ValidationResult` 持久化（当前无任何 store 写它 ⇒ 工作台第 4 页无数据源） | 技/产 | 003,004 | 仅 `api/app.py:526-539` 返回 | 集成：写入后可按 run 查询 | S66, S79 |
 | `V2-P0B-011` | ADR 违规修复 + 三个多职责模块拆分 | 结 | 003 | `providers/file.py:10` duckdb；`models/governance.py:3` sqlite3；`evidence/service.py:17,51` 绑死 `FileProvider`；`domain/schema.py:38-41` 做 IO；`storage/parquet.py:116-122` 内联复制 canonical JSON 选项 | 由 `V2-P0A-005` 的 lint 门覆盖 | D2 |
 | `V2-P0B-012` | 解除 `storage/` 反向依赖，消除 `storage/batch`↔`runtime/batch` 循环 | 结 | 001,003 | 5 处反向 import；`runtime/batch.py:3` 是全包唯一 `from __future__ import annotations`，`:68/:97` 是唯一两处函数内 domain import | lint 门 + 导入顺序测试 | D2 |
@@ -431,3 +431,32 @@ Task 12 建多版本读取时发现并经评审实测验证：**`schema_version`
 
 P4 必须写一次**显式的身份重写迁移**：读旧行 → 升版 → 重算 ID → 同事务内更新所有引用它的行。
 这不是 Task 12 的范围（Task 12 只建机制），但没有这条记录，P4 会踩。
+
+## 9. `config_digest` 与 `random_seed` 不进入任何内容寻址身份（2026-08 实测更正）
+
+Task 17 的评审驱动真实 `run_cycle`，固定时钟与 `run_id`，逐个变量单独变更后读 `decision_id`：
+
+| 变更 | `decision_id` |
+|---|---|
+| 无变更，重复运行 | 不变 ✅ |
+| 单独改 `code_commit` | **变** ✅ |
+| 单独改 `config_digest`（`a*64` → `b*64`） | **不变** ❌ |
+| 单独改 `random_seed`（7 → 99999） | **不变** ❌ |
+
+根因：`domain/decision.py` 的 `DecisionLedger` 字段表是
+`schema_version, run_id, created_at, agent_outputs, routing_path, risk_decision, final_action,
+evidence_ids, signal_ids, code_commit, model_versions, prompt_versions` ——
+**没有 `config_digest`，没有 `random_seed`**。这两个只存在于 `RunManifest`，
+而全库 `stable_model_id` 仅有 4 个使用者（`ProviderRecord` / `ResearchReport` / `SignalFrame` /
+`DecisionLedger`），**`RunManifest` 不在其中，它没有内容寻址身份**。
+
+**后果**：PRD §1.3 B6 原本把「不同配置产生相同决策 ID」列为 `V2-P0B-009` 要解决的问题，
+但该任务的硬约束又禁止改 `domain/` 的 ID 派生 —— 所以这一条在 P0.B 之后**依然成立**。
+
+**待办（需新立 issue，建议排在 `V2-P4-001` 契约变更窗口内一并做）**：
+给 `RunManifest` 建立内容寻址身份，或把 `config_digest`/`random_seed` 纳入某个运行级 ID。
+这是破坏性契约变更，且会触发 roadmap §8 记录的身份重写迁移问题，两者应一起设计。
+
+**这条错误的来源值得记下**：最初的技术审计断言「三者都是 `decision_id` 的输入」，
+该说法未经实测就被写进 PRD、审计文档与 Task 17 的 brief，直到评审用实验推翻。
+审计 agent 的结论在被当作事实引用前需要核验。

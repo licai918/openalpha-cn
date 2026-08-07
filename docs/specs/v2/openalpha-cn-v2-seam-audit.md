@@ -206,7 +206,7 @@ Baseline: `main` @ `e5c6b90`
 | # | Finding | 证据 | 关闭 issue |
 |---|---|---|---|
 | F87 | **`random_seed` 被记录但从未被读取**。全库唯一实际播种是 `event_study.py:71`，用的是另一个字段。没有任何地方播种 `numpy.random`、`PYTHONHASHSEED`、sklearn `random_state`、lightgbm `seed`/`deterministic`/`num_threads` ⇒ v2 ML 训练的 manifest 会声称它并不具备的可复现性 | `engine.py:42`→`:136` 之后再无读取 | `V2-P0B-009` |
-| F88 | **`code_commit` 从不从 git 取**，真实值是字面量 `"development"` / `"web-development"`；而它是 `decision_id` 的输入 ⇒ 不同代码产生相同 decision id | `cli.py:131`、`:160`；`web/src/api/client.ts:58`。`src/` 内无 `git rev-parse`、无 `subprocess` | `V2-P0B-009` |
+| F88 | **`code_commit` 从不从 git 取**，真实值是字面量 `"development"` / `"web-development"`；而它是 `decision_id` 的输入 ⇒ 不同代码产生相同 decision id。**（F89 的同类主张对 `config_digest`/`random_seed` 不成立，见 PRD §1.3 B6 更正）** | `cli.py:131`、`:160`；`web/src/api/client.ts:58`。`src/` 内无 `git rev-parse`、无 `subprocess` | `V2-P0B-009` |
 | F89 | **`config_digest` 从不计算**，CLI 默认 `"0"*64`、Web `"0".repeat(64)`；同样是 `decision_id` 输入 | `cli.py:132`、`:161`；`client.ts:59` | `V2-P0B-009` |
 | F90 | `DecisionLedger.created_at` 在 `decision_id` 内，而 `engine.py:105` 只在 run 行已存在时复用 `started_at` ⇒ **首次运行无法仅凭输入复现** | `decision.py:31`；`engine.py:105`、`:188`/`:251`/`:266`/`:280` 用墙钟 | `V2-P0B-009` |
 | F91 | `engine.py:327-328` 按迭代顺序求 `sum(...)/len(...)` ⇒ 路由顺序变化改变浮点位型 → 改变 `strength` → 改变 `signal_id`；引入 BLAS 归约后这条链变成真正不确定 | `engine.py:327-328`；`router.py:23`；`validation.py:50` `abs_tol=1e-9` 同样对顺序敏感 | `V2-P0B-009`、`V2-P4-001` |
