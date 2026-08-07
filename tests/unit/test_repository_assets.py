@@ -499,6 +499,28 @@ def test_container_delivery_has_persistence_and_recovery_verification() -> None:
     assert verification.is_file()
 
 
+def test_dockerfile_pins_blas_and_openmp_thread_counts_for_deterministic_reductions() -> None:
+    """ADR-0003's determinism hazard: without pinning `OMP_NUM_THREADS`/
+    `OPENBLAS_NUM_THREADS`, BLAS/OpenMP floating-point reduction order changes with
+    thread count -- a direct reproducibility hazard for a content-addressed system. The
+    numerical stack (numpy/pandas) is not a runtime dependency yet, but the pinning
+    mechanism must exist ahead of it (V2-P0B-009) so P4 does not have to remember to add
+    it: `runtime/seeding.py#seed_everything` pins these at the Python level on every run,
+    and the container image pins them at the process-environment level from container
+    start, before any Python code (including `seed_everything`) ever runs.
+    """
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+
+    for env_var in (
+        "OMP_NUM_THREADS=1",
+        "OPENBLAS_NUM_THREADS=1",
+        "MKL_NUM_THREADS=1",
+        "VECLIB_MAXIMUM_THREADS=1",
+        "NUMEXPR_NUM_THREADS=1",
+    ):
+        assert env_var in dockerfile
+
+
 def _env_example_section_vars(env_example: str, header: str) -> list[str]:
     """Return the `NAME=` variables declared directly under a `# <header>` comment.
 

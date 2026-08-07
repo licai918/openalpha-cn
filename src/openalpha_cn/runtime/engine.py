@@ -19,6 +19,7 @@ from openalpha_cn.runtime.memory import MemoryEntry, ResearchMemory
 from openalpha_cn.runtime.recovery import RecoveryStore
 from openalpha_cn.runtime.repository import RunRepository
 from openalpha_cn.runtime.router import AgentRouter
+from openalpha_cn.runtime.seeding import seed_everything
 from openalpha_cn.storage.recovery import RunRecoveryState
 
 
@@ -46,6 +47,10 @@ class ResearchEngine:
 
     def run_cycle(self, request: ResearchRunRequest) -> ResearchRunResult:
         """Execute the same evidence-to-decision path for every run mode."""
+        # V2-P0B-009: the one call site that actually threads `random_seed` into
+        # anything. See `runtime/seeding.py`'s module docstring for what this does and
+        # does not affect today -- nothing downstream of this call reads randomness yet.
+        seed_everything(request.random_seed)
         existing_manifest = self.repository.get_run(request.run_id)
         context = AgentContext(
             run_id=request.run_id,

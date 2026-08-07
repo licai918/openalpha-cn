@@ -66,3 +66,72 @@ def test_cli_runs_research_from_serialized_evidence(tmp_path: Path, frozen_now: 
     payload = json.loads(result.stdout)
     assert payload["decision"]["final_action"] == "watch"
     assert payload["signal"]["evidence_ids"] == [evidence.evidence_id]
+
+
+def test_cli_research_run_without_explicit_flags_resolves_a_real_code_commit_and_config_digest(
+    tmp_path: Path, frozen_now: datetime
+) -> None:
+    """V2-P0B-009 acceptance: `--code-commit`/`--config-digest` used to default to the
+    literal placeholders `"development"`/`"0" * 64` (`cli.py`) when omitted. Omitting
+    both now must resolve real values instead: this repository's actual git HEAD (this
+    test runs from inside a real checkout, so `code_commit` must be a real commit,
+    possibly `-dirty`-suffixed -- never the old placeholder), and a real SHA-256 of the
+    resolved `OpenAlphaConfig` for `config_digest` -- never all zeros.
+    """
+    NOW = frozen_now
+    evidence = EvidenceSnapshot(
+        subject="000001.SZ",
+        kind="limit_up",
+        timeline=Timeline(
+            event_time=NOW,
+            available_time=NOW,
+            ingested_time=NOW,
+            revision_time=NOW,
+        ),
+        source_id="synthetic",
+        source_license="CC0-1.0",
+        redistribution="allowed",
+        summary="Synthetic limit-up.",
+        payload={
+            "schema": "a-share-evidence/v1",
+            "family": "market_event",
+            "facts": {"close": 10.5, "pct_change": 9.99, "board_count": 1},
+            "quality_flags": [],
+        },
+    )
+    input_path = tmp_path / "evidence.json"
+    input_path.write_text(
+        json.dumps({"items": [evidence.model_dump(mode="json")]}),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "research",
+            "run",
+            str(input_path),
+            "--runtime-dir",
+            str(tmp_path / "runtime"),
+            "--run-id",
+            "cli-default-provenance-run",
+            "--mode",
+            "live",
+            "--subject",
+            "000001.SZ",
+            "--as-of",
+            NOW.isoformat(),
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    manifest = payload["manifest"]
+    assert manifest["code_commit"] != "development"
+    assert manifest["code_commit"] != "unknown-not-a-git-commit"
+    hex_part = manifest["code_commit"].removesuffix("-dirty")
+    assert len(hex_part) == 40
+    assert all(char in "0123456789abcdef" for char in hex_part)
+    assert manifest["config_digest"] != "0" * 64
+    assert len(manifest["config_digest"]) == 64
+    assert all(char in "0123456789abcdef" for char in manifest["config_digest"])

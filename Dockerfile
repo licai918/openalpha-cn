@@ -21,6 +21,13 @@ RUN uv sync --locked --no-dev --no-editable
 
 FROM python:3.12-slim-bookworm@sha256:d50fb7611f86d04a3b0471b46d7557818d88983fc3136726336b2a4c657aa30b AS runtime
 
+# OMP_NUM_THREADS/OPENBLAS_NUM_THREADS/MKL_NUM_THREADS/VECLIB_MAXIMUM_THREADS/
+# NUMEXPR_NUM_THREADS=1 pin BLAS/OpenMP thread counts ahead of the numerical stack
+# (ADR-0003, V2-P0B-009): unpinned, BLAS/OpenMP floating-point reduction order changes
+# with thread count, a direct reproducibility hazard for a content-addressed system.
+# No numeric library is imported yet, so this has no observable effect today -- see
+# runtime/seeding.py -- but is set here, at container start, so it is already correct
+# before any Python code runs once P4 does introduce one.
 ENV PATH="/app/.venv/bin:${PATH}" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -28,7 +35,12 @@ ENV PATH="/app/.venv/bin:${PATH}" \
     OPENALPHA_PORT=8000 \
     OPENALPHA_RUNTIME_DIR=/data \
     OPENALPHA_WEB_DIR=/app/web-dist \
-    OPENALPHA_MAX_REQUEST_BYTES=8388608
+    OPENALPHA_MAX_REQUEST_BYTES=8388608 \
+    OMP_NUM_THREADS=1 \
+    OPENBLAS_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1 \
+    VECLIB_MAXIMUM_THREADS=1 \
+    NUMEXPR_NUM_THREADS=1
 
 WORKDIR /app
 RUN addgroup --system --gid 10001 openalpha \

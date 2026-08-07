@@ -29,6 +29,7 @@ from openalpha_cn.providers.chainlin import ChainLinDataProvider
 from openalpha_cn.providers.tushare import TushareProvider
 from openalpha_cn.runtime.composition import build_storage
 from openalpha_cn.runtime.contracts import ResearchRunRequest
+from openalpha_cn.runtime.provenance import compute_config_digest, resolve_code_commit
 from openalpha_cn.sdk import OpenAlphaSDK
 from openalpha_cn.storage.migrations import MigrationFailedError, read_status
 
@@ -324,6 +325,45 @@ def evidence_build(
     typer.echo(response.model_dump_json())
 
 
+_CODE_COMMIT_HELP = (
+    "Defaults to the real git commit this process is running from (a literal "
+    "'-dirty' suffix when the workspace has uncommitted changes), or an explicit "
+    "unknown marker outside a git workspace -- never a placeholder that merely "
+    "looks like a real commit. See runtime/provenance.py#resolve_code_commit."
+)
+_CONFIG_DIGEST_HELP = (
+    "Defaults to a SHA-256 of the resolved, non-secret OpenAlphaConfig -- never all "
+    "zeros. See runtime/provenance.py#compute_config_digest."
+)
+
+
+def _resolved_code_commit(explicit: str | None) -> str:
+    """Return `explicit` verbatim when given; otherwise resolve a real commit.
+
+    Never touches git when the caller already supplied a value -- resolution only
+    runs when `--code-commit` was genuinely omitted.
+    """
+    return explicit if explicit is not None else resolve_code_commit()
+
+
+def _resolved_config_digest(explicit: str | None) -> str:
+    """Return `explicit` verbatim when given; otherwise digest the effective config.
+
+    Mirrors `serve`'s `ConfigError` handling (see its docstring): `load_config()` is
+    only called here, lazily, when `--config-digest` was omitted and this command
+    genuinely needs the resolved config -- an unrelated invalid `OPENALPHA_*` field
+    never blocks a caller that passed `--config-digest` explicitly.
+    """
+    if explicit is not None:
+        return explicit
+    try:
+        config = load_config()
+    except ConfigError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=1) from error
+    return compute_config_digest(config)
+
+
 @research_app.command("run")
 def research_run(
     evidence_path: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
@@ -332,8 +372,12 @@ def research_run(
     mode: Annotated[RunMode, typer.Option("--mode")] = RunMode.live,
     subject: Annotated[str, typer.Option("--subject")] = "",
     as_of: Annotated[str, typer.Option("--as-of")] = "",
-    code_commit: Annotated[str, typer.Option("--code-commit")] = "development",
-    config_digest: Annotated[str, typer.Option("--config-digest")] = "0" * 64,
+    code_commit: Annotated[
+        str | None, typer.Option("--code-commit", help=_CODE_COMMIT_HELP)
+    ] = None,
+    config_digest: Annotated[
+        str | None, typer.Option("--config-digest", help=_CONFIG_DIGEST_HELP)
+    ] = None,
     random_seed: Annotated[int, typer.Option("--random-seed")] = 7,
 ) -> None:
     """Run multi-agent research from serialized EvidenceSnapshot items."""
@@ -349,8 +393,8 @@ def research_run(
             subject=subject,
             as_of=point_in_time,
             evidence=evidence,
-            code_commit=code_commit,
-            config_digest=config_digest,
+            code_commit=_resolved_code_commit(code_commit),
+            config_digest=_resolved_config_digest(config_digest),
             random_seed=random_seed,
         )
     )
@@ -361,15 +405,19 @@ def research_run(
 def replay_run(
     corpus_path: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
     runtime_dir: Annotated[Path, typer.Option("--runtime-dir")] = Path("./runtime"),
-    code_commit: Annotated[str, typer.Option("--code-commit")] = "development",
-    config_digest: Annotated[str, typer.Option("--config-digest")] = "0" * 64,
+    code_commit: Annotated[
+        str | None, typer.Option("--code-commit", help=_CODE_COMMIT_HELP)
+    ] = None,
+    config_digest: Annotated[
+        str | None, typer.Option("--config-digest", help=_CONFIG_DIGEST_HELP)
+    ] = None,
     random_seed: Annotated[int, typer.Option("--random-seed")] = 7,
 ) -> None:
     """Run and validate a frozen replay corpus."""
     report = OpenAlphaSDK(runtime_dir=runtime_dir).replay(
         corpus=ReplayCorpus.load(corpus_path),
-        code_commit=code_commit,
-        config_digest=config_digest,
+        code_commit=_resolved_code_commit(code_commit),
+        config_digest=_resolved_config_digest(config_digest),
         random_seed=random_seed,
     )
     typer.echo(report.model_dump_json())
