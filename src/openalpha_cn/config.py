@@ -41,12 +41,25 @@ placed under `deploy/` is invisible to this loader. See
 
 from __future__ import annotations
 
+import logging
 import os
-import re
 from pathlib import Path
 
+from dotenv import dotenv_values
 from pydantic import ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# `python-dotenv` logs a warning (via the stdlib `logging` module, on the
+# `dotenv.main` logger) for any line it cannot parse -- unconditionally, not
+# gated behind the `verbose` argument `dotenv_values()` takes. With no handler
+# configured, Python's logging "handler of last resort" prints that warning
+# straight to stderr. This project's own discipline is that a `.env` line, valid
+# or malformed, never produces unannounced output on a stream a caller might be
+# capturing (see the leak-check tests in `tests/unit/test_cli.py`), so this
+# module owns silencing that default once, rather than letting a transitive
+# dependency's logging configuration leak into this project's own CLI output.
+logging.getLogger("dotenv.main").addHandler(logging.NullHandler())
+logging.getLogger("dotenv.main").propagate = False
 
 __all__ = [
     "ConfigError",
@@ -146,35 +159,6 @@ def discover_dotenv() -> Path:
     return Path.cwd() / ".env"
 
 
-_DOTENV_LINE = re.compile(r"^(?P<key>[A-Za-z_][A-Za-z0-9_]*)=(?P<value>.*)$")
-
-
-def _parse_dotenv_text(text: str) -> dict[str, str]:
-    """Parse `.env`-style `KEY=VALUE` lines.
-
-    Deliberately minimal, matching exactly `.env.example`'s own format: one
-    `NAME=value` assignment per line, `#`-prefixed comment lines and blank
-    lines ignored, and one layer of matching `"`/`'` quotes stripped from the
-    value. No variable interpolation, no multi-line values, no `export`
-    prefix -- none of `.env.example`'s 14 declared variables need any of
-    that, and adding it would be untested surface this project does not use.
-    """
-    values: dict[str, str] = {}
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        match = _DOTENV_LINE.match(line)
-        if match is None:
-            continue
-        key = match.group("key")
-        value = match.group("value").strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1]
-        values[key] = value
-    return values
-
-
 def load_dotenv(env_file: Path | None = None) -> tuple[str, ...]:
     """Merge a `.env` file into `os.environ`; return the *names* of keys newly set.
 
@@ -195,12 +179,26 @@ def load_dotenv(env_file: Path | None = None) -> tuple[str, ...]:
     A missing file is a no-op, not an error: `.env` is documented as an
     optional convenience (`.env.example` -> `.env`), not a requirement --
     every variable it declares can also be exported directly.
+
+    Parsing is delegated to `python-dotenv`'s `dotenv_values()` (see
+    `docs/architecture/ADR-0004-config-and-dotenv-loading.md`'s amendment for
+    why this replaced a hand-written regex parser: the hand-written version
+    silently corrupted a value with a trailing inline comment, e.g.
+    `KEY=value # comment` -> `"value # comment"`). `interpolate=False` keeps
+    this project's original, deliberate "no variable interpolation" behavior
+    -- a credential value that happens to contain a literal `${...}` must
+    survive verbatim, not be silently rewritten.
     """
     path = env_file if env_file is not None else discover_dotenv()
     if not path.is_file():
         return ()
     newly_set: list[str] = []
-    for key, value in _parse_dotenv_text(path.read_text(encoding="utf-8")).items():
+    for key, value in dotenv_values(path, interpolate=False).items():
+        if value is None:
+            # A bare `KEY` line with no `=` at all -- python-dotenv still
+            # reports the name, with no value to merge. Skip it exactly like
+            # any other line with no key=value shape.
+            continue
         if key not in os.environ:
             os.environ[key] = value
             newly_set.append(key)

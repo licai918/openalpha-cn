@@ -287,18 +287,25 @@ def test_dotenv_loading_is_a_single_deliberate_module_not_scattered_parsing() ->
     `.env` loading was deliberately deferred to V2-P0B-006). It is implemented now;
     this pins the shape of that implementation instead of only its absence:
 
-    - `pydantic-settings` is the one new runtime dependency this task adds (recorded
-      with its rationale in ADR-0004, not merely a version bump);
-    - it is imported in exactly one module, `openalpha_cn/config.py` -- `.env`
+    - `pydantic-settings` and `python-dotenv` are both direct runtime dependencies
+      (recorded with their rationale in ADR-0004 and its amendment, not merely a
+      version bump);
+    - both are imported in exactly one module, `openalpha_cn/config.py` -- `.env`
       parsing is not scattered across the tree the way the 9 original `os.getenv`/
-      `os.environ` call sites this task replaces were;
-    - the actual `.env` file parser is hand-written (see `config.py::_parse_dotenv_text`),
-      not a direct import of `python-dotenv` -- even though `python-dotenv` is a real,
-      transitive dependency of `pydantic-settings` and appears in `uv.lock` -- so this
-      also pins that no file in `src/` imports the `dotenv` package directly.
+      `os.environ` call sites this task replaced were.
+
+    A hand-written regex parser lived here first (see ADR-0004's original
+    "Decision" section) and was replaced by a direct `python-dotenv` import once a
+    code review found it silently corrupted a value with a trailing inline comment
+    (`KEY=value # comment` -> `"value # comment"`) -- ADR-0004's amendment records
+    that switch and why. `python-dotenv` was already a mandatory transitive
+    dependency of `pydantic-settings` (confirmed in `uv.lock`) even before this, so
+    this task declares it explicitly in `pyproject.toml` rather than continuing to
+    rely on it staying present only as someone else's transitive pin.
     """
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert "pydantic-settings" in pyproject
+    assert "python-dotenv" in pyproject
 
     src_root = ROOT / "src"
     pydantic_settings_importers = sorted(
@@ -308,7 +315,7 @@ def test_dotenv_loading_is_a_single_deliberate_module_not_scattered_parsing() ->
     )
     assert pydantic_settings_importers == ["src/openalpha_cn/config.py"]
 
-    dotenv_package_importers = [
+    dotenv_package_importers = sorted(
         str(path.relative_to(ROOT))
         for path in src_root.rglob("*.py")
         if re.search(
@@ -316,14 +323,15 @@ def test_dotenv_loading_is_a_single_deliberate_module_not_scattered_parsing() ->
             path.read_text(encoding="utf-8"),
             re.MULTILINE,
         )
-    ]
-    assert dotenv_package_importers == []
+    )
+    assert dotenv_package_importers == ["src/openalpha_cn/config.py"]
 
     adr = (ROOT / "docs" / "architecture" / "ADR-0004-config-and-dotenv-loading.md").read_text(
         encoding="utf-8"
     )
     assert "pydantic-settings" in adr
     assert "python-dotenv" in adr
+    assert "Amendment" in adr
 
 
 def test_wechat_contact_qr_is_the_owner_provided_jpeg() -> None:

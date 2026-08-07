@@ -93,15 +93,15 @@ below.
 project that parses a `.env` file. It merges `KEY=VALUE` pairs into
 `os.environ`, refusing to overwrite any key already present -- so **a real,
 already-exported environment variable always wins over the same name in
-`.env`**, which in turn wins over a field's compiled-in default. The parser
-itself is a small, hand-written regex (`config.py::_parse_dotenv_text`),
-deliberately not a direct call into `python-dotenv`'s own API: `.env.example`'s
-format (one `NAME=value` per line, `#` comments, optionally quoted values, no
-interpolation, no multi-line values, no `export` prefix) needs nothing
-`python-dotenv` offers beyond that, and owning the parser keeps this project's
-only dependency-tree exposure to `python-dotenv` as an indirect, documented
-consequence of `pydantic-settings`, not a second direct import surface to keep
-in sync with upstream changes.
+`.env`**, which in turn wins over a field's compiled-in default.
+
+> **Superseded by the amendment below.** The parser was originally a small,
+> hand-written regex (`config.py::_parse_dotenv_text`), deliberately not a
+> direct call into `python-dotenv`'s own API, on the theory that
+> `.env.example`'s format needed nothing `python-dotenv` offered beyond what
+> the regex already did. That parser had two real bugs (silent inline-comment
+> corruption and silently-dropped `export`-prefixed lines) found in a later
+> review; `load_dotenv()` now delegates directly to `python-dotenv`. See "Amendment (2026-08-07)" at the end of this document for the full account.
 
 `discover_dotenv()` resolves the file to load when no explicit path is given:
 always `<cwd>/.env` -- the process's current working directory, never a
@@ -209,10 +209,96 @@ Positive:
 Negative:
 
 - Runtime dependency count goes from 7 to 8, a deliberate, recorded exception to
-  the project's usual guard on that number.
+  the project's usual guard on that number. (See the amendment below: a second,
+  later change brings this to 9.)
 - Directly instantiating `OpenAlphaSDK` (bypassing the CLI) still does not
   auto-load `.env` by design -- a library caller is expected to already manage
   its own process environment, exactly as before this task; only the `openalpha`
   command line gained this behavior. A future task that wants SDK-level
   `.env` loading must make that an explicit, opt-in constructor argument rather
   than a default, to preserve the isolation guarantee above.
+
+## Amendment (2026-08-07): adopt `python-dotenv` directly, drop the hand-written parser
+
+A follow-up review of this task found two real defects in the hand-written
+`_parse_dotenv_text` regex parser described above:
+
+- **Silent value corruption on inline comments.** `KEY=value # comment` parsed
+  to the value `"value # comment"` -- the trailing comment was never stripped.
+  For a credential, this is silent: the token simply stops authenticating with
+  no error pointing at `.env` as the cause. Reproduced directly:
+  `TUSHARE_TOKEN=realtoken123 # trailing note` merged as
+  `"realtoken123 # trailing note"`.
+- **`export `-prefixed lines were silently dropped, not "handled correctly".**
+  The regex requires the key to start at the beginning of the (stripped) line,
+  so `export OPENALPHA_HOST=10.5.5.5` matched nothing and the variable was
+  never set -- with no error, since a non-matching line was (by design)
+  treated the same as any other malformed line. This matters concretely: this
+  repository's own real root `.env` recommends `set -a; source .env; set +a`
+  for the SDK-direct workflow, and a developer who instead hand-writes
+  `export KEY=value` lines into `.env` itself (a common enough convention that
+  the file still sources correctly under plain `sh .env`) would have every
+  such variable silently vanish from `openalpha`'s in-process load, with
+  nothing in the CLI's output suggesting why.
+
+Both defects were found in a project whose parser had exactly one job and was
+deliberately kept minimal to avoid a second, unaudited `.env`-parsing surface.
+That tradeoff no longer holds up: `python-dotenv` was **already** a mandatory
+transitive dependency of `pydantic-settings` (present in `uv.lock` regardless
+of this decision), so importing it directly costs this project nothing in
+dependency-tree footprint, and it already implements the exact behavior this
+project wants for every one of these cases -- including the two above, plus
+the ones the original hand-written parser did get right (quoted values,
+`#` inside quotes, an embedded `=` in the value, CRLF line endings, duplicate
+keys with last-write-wins, blank lines, and `override=False`-equivalent
+real-env-wins precedence).
+
+**Decision: adopt `python-dotenv`'s `dotenv_values()` for parsing, removing
+`_parse_dotenv_text` entirely.** `python-dotenv` is now declared explicitly as
+a **direct** runtime dependency in `pyproject.toml`
+(`python-dotenv>=1.1,<2`) rather than left as an unstated, merely-transitive
+consequence of `pydantic-settings` -- the previous "not a second direct import
+surface to keep in sync with upstream" argument is exactly backwards once the
+alternative is a hand-written parser with two confirmed correctness bugs.
+Runtime dependency count moves from 8 to 9, a second deliberate, recorded
+exception to the project's usual guard on that number.
+
+Two integration details, both load-bearing and both covered by tests in
+`tests/unit/test_config.py`:
+
+- `dotenv_values(path, interpolate=False)` is called with interpolation
+  explicitly disabled. `python-dotenv` defaults to `interpolate=True`, which
+  would rewrite a `${OTHER_VAR}`-shaped substring inside a value by
+  substituting another variable's value (or empty, if undefined) -- exactly
+  the kind of silent value corruption this amendment exists to close, just
+  for a different trigger. This project's `.env` format has never supported
+  interpolation (see the original "Decision" section above), so this keeps
+  that behavior unchanged.
+- `python-dotenv` logs a warning (via the stdlib `logging` module, on the
+  `dotenv.main` logger) for any line it cannot parse, unconditionally --
+  independent of the `verbose` argument `dotenv_values()` takes. With no
+  handler configured, Python's logging "handler of last resort" would print
+  that warning straight to stderr. `config.py` attaches a `NullHandler` to
+  `dotenv.main` and disables propagation at import time so a malformed `.env`
+  line degrades exactly as before (silently skipped, never a crash) instead of
+  gaining new, unannounced console noise from a dependency's internal logging.
+
+Also fixed while touching this: `tests/unit/test_config.py`'s autouse
+`_isolated_environ` fixture previously cleared only the five `OPENALPHA_*`
+variable names, hardcoded in the test file. It did not clear credential
+variables such as `TUSHARE_TOKEN`, so a shell that had exported one --
+exactly what this repository's own root `.env` header comment recommends via
+`set -a; source .env; set +a` -- leaked into every test in the file, breaking
+the real-env-wins precedence assertions in three tests
+(`test_load_dotenv_tolerates_an_empty_declared_value`,
+`test_load_dotenv_return_value_never_contains_a_credential_value`,
+`test_dotenv_example_file_itself_parses_without_error`). The fixture now
+derives the full set of variable names to clear directly from
+`.env.example` -- every declared name, not only the `OPENALPHA_*` ones --
+so it can never again drift out of sync with what the config layer and its
+tests can actually observe.
+
+Nothing else in this ADR's "Decision" or "Consequences" sections changes:
+precedence (`--flag` > real env > `.env` > default), `discover_dotenv()`'s
+cwd-based resolution, and the CLI-only `load_dotenv()` call boundary are all
+unchanged and were re-verified after this amendment.

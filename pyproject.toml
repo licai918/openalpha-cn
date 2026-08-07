@@ -25,6 +25,7 @@ dependencies = [
   "fastapi>=0.135,<1",
   "pydantic>=2.12,<3",
   "pydantic-settings>=2.15,<3",
+  "python-dotenv>=1.1,<2",
   "pytz>=2025.2",
   "typer>=0.21.0,<1",
   "tzdata>=2025.2",
