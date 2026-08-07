@@ -346,6 +346,7 @@ def create_app(
     portfolio_ledger = storage.portfolio_ledger
     watchlist_store = storage.watchlist_store
     report_store = storage.report_store
+    validation_store = storage.validation_store
 
     def run_one(request: ResearchRunRequest) -> ResearchRunResult:
         return ResearchEngine(
@@ -613,7 +614,16 @@ def create_app(
 
     @application.post("/api/v1/backtests/validate")
     def validate_outcome(request: OutcomeApiRequest) -> ValidationResult:
-        """Validate an observed outcome and reconcile rule/factor/agent attribution."""
+        """Validate an observed outcome, persist it, and reconcile its attribution.
+
+        Persistence (V2-P0B-010) is the fix for this endpoint's prior behavior: it
+        computed a `ValidationResult` and returned it without ever storing it anywhere,
+        so a past decision's outcome could never be looked back up -- see
+        `storage/validation.py`'s module docstring. `validation_store.append` is
+        idempotent by `validation_id` (content-derived), so replaying the identical
+        request -- e.g. a client retry after a dropped response -- is a safe no-op, not a
+        duplicate row.
+        """
         try:
             research = _parse_research_result(request.research)
         except (KeyError, TypeError, ValueError) as error:
@@ -621,10 +631,22 @@ def create_app(
                 status_code=422,
                 detail="Research result failed integrity validation.",
             ) from error
-        return OutcomeValidator().validate(
+        result = OutcomeValidator().validate(
             research=research,
             observation=request.observation,
         )
+        validation_store.append(result)
+        return result
+
+    @application.get("/api/v1/backtests/validations/by-decision/{decision_id}")
+    def validations_by_decision(decision_id: str) -> tuple[ValidationResult, ...]:
+        """List persisted validation results for one decision, in append order."""
+        return validation_store.list_by_decision(decision_id)
+
+    @application.get("/api/v1/backtests/validations/by-signal/{signal_id}")
+    def validations_by_signal(signal_id: str) -> tuple[ValidationResult, ...]:
+        """List persisted validation results for one signal, in append order."""
+        return validation_store.list_by_signal(signal_id)
 
     configured_web_dir = web_dir if web_dir is not None else config.web_dir
     if configured_web_dir is not None:

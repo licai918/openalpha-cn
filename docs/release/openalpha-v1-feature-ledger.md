@@ -4,8 +4,8 @@
 
 ## 对账结论
 
-- 功能总数: 106
-- 当前真实完成: 101 (95.28%)
+- 功能总数: 107
+- 当前真实完成: 102 (95.33%)
 - `UNREVIEWED=0`
 - `UNKNOWN=0`
 - `legacy_acceptance_rows=86` (历史散文验收、尚未绑定为可执行 pytest/CI 断言)
@@ -18,7 +18,7 @@
 | `DEFERRED` | 1 |
 | `ENHANCED_REPLACEMENT` | 20 |
 | `EXCLUDED` | 4 |
-| `NATIVE_COMPLETE` | 80 |
+| `NATIVE_COMPLETE` | 81 |
 
 ## 功能明细
 
@@ -130,6 +130,7 @@
 | `OA-OPS-024` | operations | Typed OPENALPHA_* config object and in-process .env loading | `NATIVE_COMPLETE` | `src/openalpha_cn/config.py#OpenAlphaConfig;src/openalpha_cn/config.py#load_config;src/openalpha_cn/config.py#load_dotenv;src/openalpha_cn/config.py#discover_dotenv;src/openalpha_cn/config.py#ConfigError;src/openalpha_cn/cli.py#main;src/openalpha_cn/cli.py#serve;src/openalpha_cn/api/app.py#create_app;Dockerfile;.env.example` | `tests/unit/test_config.py;tests/unit/test_cli.py;tests/unit/test_repository_assets.py` | `pytest` | `tests/unit/test_cli.py::test_main_entrypoint_loads_dotenv_before_dispatching_to_doctor` |
 | `OA-OPS-025` | operations | Structured JSON-lines logging, library-safe by default | `NATIVE_COMPLETE` | `src/openalpha_cn/logging_setup.py#configure_logging;src/openalpha_cn/logging_setup.py#JsonLinesFormatter;src/openalpha_cn/config.py#OpenAlphaConfig;src/openalpha_cn/cli.py#main;src/openalpha_cn/cli.py#_probe_report;src/openalpha_cn/api/app.py#create_app;src/openalpha_cn/storage/migrations.py#run_migrations;src/openalpha_cn/runtime/batch.py#BatchResearchService;src/openalpha_cn/storage/batch.py#SQLiteBatchTaskStore;src/openalpha_cn/runtime/composition.py#build_storage;.env.example;src/openalpha_cn/logging_setup.py#_ALLOWED_EXTRA_FIELDS;src/openalpha_cn/__init__.py;src/openalpha_cn/config.py#load_log_level;src/openalpha_cn/cli.py#doctor` | `tests/unit/test_logging_setup.py;tests/unit/test_config.py;tests/unit/test_cli.py;tests/integration/storage/test_migrations.py;tests/integration/test_batch_research.py;tests/unit/runtime/test_composition_migrations.py;tests/conftest.py;tests/unit/test_sdk_logging_backstop.py` | `pytest` | `tests/unit/test_cli.py::test_main_entrypoint_logs_provider_probe_failure_without_leaking_the_failure_message` |
 | `OA-OPS-026` | operations | Real code-commit/config-digest provenance and a random-seed seeding mechanism | `NATIVE_COMPLETE` | `src/openalpha_cn/runtime/provenance.py#resolve_code_commit;src/openalpha_cn/runtime/provenance.py#compute_config_digest;src/openalpha_cn/runtime/provenance.py#UNKNOWN_CODE_COMMIT;src/openalpha_cn/_build_commit.py#BUILD_COMMIT;src/openalpha_cn/runtime/seeding.py#seed_everything;src/openalpha_cn/runtime/seeding.py#register_random_source;src/openalpha_cn/runtime/engine.py#run_cycle;src/openalpha_cn/cli.py#research_run;src/openalpha_cn/cli.py#replay_run;src/openalpha_cn/api/app.py#ResearchApiRequest;src/openalpha_cn/api/app.py#ReplayApiRequest` | `tests/unit/runtime/test_provenance.py;tests/unit/runtime/test_seeding.py;tests/unit/runtime/test_engine_seeding.py;tests/integration/test_cli_research.py;tests/integration/test_cli_replay.py;tests/unit/test_repository_assets.py;tests/integration/test_api_provenance_resolution.py` | `pytest` | `tests/integration/test_cli_research.py::test_cli_research_run_without_explicit_flags_resolves_a_real_code_commit_and_config_digest` |
+| `OA-DATA-007` | storage | Durable outcome-validation ledger with an SDK entry point | `NATIVE_COMPLETE` | `src/openalpha_cn/storage/validation.py#SQLiteValidationStore;src/openalpha_cn/backtest/validation.py#ValidationStore;src/openalpha_cn/storage/migrations.py#_create_validation_results_table;src/openalpha_cn/sdk.py#validate_outcome;src/openalpha_cn/api/app.py#create_app;src/openalpha_cn/runtime/composition.py#build_storage` | `tests/integration/storage/test_validation_store.py;tests/integration/storage/test_migrations.py;tests/unit/runtime/test_composition_validation.py;tests/integration/test_validation_interfaces.py` | `pytest` | `tests/integration/test_validation_interfaces.py::test_sdk_and_rest_validate_persist_and_return_the_same_result` |
 
 ## 边界
 

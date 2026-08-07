@@ -157,6 +157,65 @@ def _baseline_apply(connection: sqlite3.Connection) -> None:
     """
 
 
+def _create_validation_results_table(connection: sqlite3.Connection) -> None:
+    """Create `validation_results` (V2-P0B-010): the durable outcome-validation ledger.
+
+    Unlike `_demo_add_runs_archived_at`, this migration does not alter a table some other
+    store's constructor also creates as a side effect -- it creates a table nothing else
+    in this package creates (`storage/validation.py#SQLiteValidationStore` deliberately
+    does not, per this task's brief), so there is no pre-existing owner whose absence,
+    on a brand-new database, could block it. It is precondition-free by construction,
+    for the same reason `_baseline_apply` is: it has nothing to require. `require_table`
+    is therefore correctly unused here, and this migration is exempted (alongside
+    `BASELINE_VERSION`) from
+    `test_every_non_baseline_migration_defers_gracefully_on_a_fresh_empty_database`'s
+    loop for that exact reason -- see that test's docstring.
+
+    Ordering matters, not just precondition-freedom: this migration is registered at
+    `CREATE_VALIDATION_RESULTS_VERSION` (2), *before* `DEMO_ADD_RUNS_ARCHIVED_AT_VERSION`
+    (bumped from 2 to 3 to make room). The executor applies pending migrations in strictly
+    increasing version order and stops -- does not skip ahead -- the moment one raises
+    `MigrationNotYetApplicable` (see `run_migrations`'s docstring). Had this migration been
+    appended *after* the demo migration instead, it would sit behind the demo migration's
+    routine first-call deferral on every brand-new install (the demo migration always
+    defers there: `runs` is created by `SQLiteRunRepository`'s constructor, which
+    `build_storage()` does not invoke until after `run_migrations()` returns) and would
+    never even be attempted in that first `run_migrations()` call -- silently leaving
+    `validation_results` missing for the entire lifetime of that process, since nothing
+    else ever creates it. Ordered first, it always applies in the very same call that
+    stamps the baseline, so a fresh install can validate an outcome immediately, with no
+    second `build_storage()` call required. Two indexes are created alongside the table,
+    not added later: `decision_id` and `signal_id` are this store's only query paths
+    (`SQLiteValidationStore.list_by_decision` / `list_by_signal`), and this project already
+    has three tables that skipped an index on their query column and pay for it with a
+    full scan (`checkpoints.run_id`, `portfolio_transitions.subject`,
+    `research_reports.subject` -- Finding F69); this table does not become a fourth.
+    """
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS validation_results (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            validation_id TEXT UNIQUE NOT NULL,
+            decision_id TEXT NOT NULL,
+            signal_id TEXT NOT NULL,
+            payload TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS validation_results_decision_id_idx
+        ON validation_results(decision_id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS validation_results_signal_id_idx
+        ON validation_results(signal_id)
+        """
+    )
+
+
 def _demo_add_runs_archived_at(connection: sqlite3.Connection) -> None:
     """Demonstration migration (V2-P0B-004's acceptance proof): add `runs.archived_at`.
 
@@ -180,10 +239,16 @@ def _demo_add_runs_archived_at(connection: sqlite3.Connection) -> None:
 
 
 BASELINE_VERSION = 1
-DEMO_ADD_RUNS_ARCHIVED_AT_VERSION = 2
+CREATE_VALIDATION_RESULTS_VERSION = 2
+DEMO_ADD_RUNS_ARCHIVED_AT_VERSION = 3
 
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=BASELINE_VERSION, name="baseline", apply=_baseline_apply),
+    Migration(
+        version=CREATE_VALIDATION_RESULTS_VERSION,
+        name="create_validation_results",
+        apply=_create_validation_results_table,
+    ),
     Migration(
         version=DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
         name="demo_add_runs_archived_at",

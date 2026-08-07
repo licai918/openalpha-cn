@@ -22,6 +22,7 @@ from openalpha_cn.storage.memory import SQLiteResearchMemory
 from openalpha_cn.storage.migrations import (
     _SCHEMA_MIGRATIONS_DDL,
     BASELINE_VERSION,
+    CREATE_VALIDATION_RESULTS_VERSION,
     DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
     MIGRATIONS,
     Migration,
@@ -118,8 +119,13 @@ def test_demo_migration_advances_version_and_preserves_v1_records(
 
     assert result.from_version == 0
     assert result.to_version == DEMO_ADD_RUNS_ARCHIVED_AT_VERSION
+    # `runs` already exists (built above), so nothing defers: baseline, then
+    # create_validation_results (V2-P0B-010, ordered before the demo migration --
+    # see that migration's docstring for why), then the demo migration all apply in
+    # this single call.
     assert [m.version for m in result.applied] == [
         BASELINE_VERSION,
+        CREATE_VALIDATION_RESULTS_VERSION,
         DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
     ]
     assert result.backup_path is not None
@@ -130,6 +136,7 @@ def test_demo_migration_advances_version_and_preserves_v1_records(
     assert status.current_version == DEMO_ADD_RUNS_ARCHIVED_AT_VERSION
     assert [(m.version, m.name) for m in status.applied] == [
         (BASELINE_VERSION, "baseline"),
+        (CREATE_VALIDATION_RESULTS_VERSION, "create_validation_results"),
         (DEMO_ADD_RUNS_ARCHIVED_AT_VERSION, "demo_add_runs_archived_at"),
     ]
     assert status.pending == ()
@@ -141,6 +148,44 @@ def test_demo_migration_advances_version_and_preserves_v1_records(
 
     # The core proof: records written before the migration system existed are still
     # readable through the *existing, unmodified* stores.
+    repository = SQLiteRunRepository(path)
+    memory = SQLiteResearchMemory(path)
+    assert repository.get_run(run.run_id) == run
+    assert repository.get_decision(decision.decision_id) == decision
+    assert memory.list(subject=entry.subject) == (entry,)
+
+
+def test_upgrading_a_pre_validation_database_creates_the_table_and_keeps_old_records_readable(
+    tmp_path: Path, migration_now: datetime, migration_clock: Callable[[], datetime]
+) -> None:
+    """V2-P0B-010's explicit upgrade-path proof: a database built before this task existed
+    (no `validation_results`, no `schema_migrations` -- exactly `_build_v1_shaped_database`,
+    reused from the demo-migration proof above) gets `validation_results` -- table plus both
+    query-path indexes -- after one `run_migrations()` call, and every record written
+    through the old stores before the migration ran is still readable afterwards, unchanged.
+    """
+    path = tmp_path / "state.sqlite3"
+    run, decision, entry = _build_v1_shaped_database(path, now=migration_now)
+    assert "validation_results" not in _table_names(path)
+
+    run_migrations(path, clock=migration_clock)
+
+    tables = _table_names(path)
+    assert "validation_results" in tables
+    with sqlite3.connect(path) as connection:
+        index_names = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index' "
+                "AND tbl_name = 'validation_results'"
+            )
+        }
+    assert index_names == {
+        "sqlite_autoindex_validation_results_1",  # from the UNIQUE column constraint
+        "validation_results_decision_id_idx",
+        "validation_results_signal_id_idx",
+    }
+
     repository = SQLiteRunRepository(path)
     memory = SQLiteResearchMemory(path)
     assert repository.get_run(run.run_id) == run
@@ -166,6 +211,7 @@ def test_running_migrations_again_is_idempotent(
     status = read_status(path)
     assert [m.version for m in status.applied] == [
         BASELINE_VERSION,
+        CREATE_VALIDATION_RESULTS_VERSION,
         DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
     ]
 
@@ -204,16 +250,21 @@ def test_failing_migration_rolls_back_leaves_version_unmoved_and_backup_intact(
     before = read_status(path)
     assert before.current_version == DEMO_ADD_RUNS_ARCHIVED_AT_VERSION
 
+    # One past the real registry's own highest version, computed rather than hardcoded,
+    # so this injected migration's version can never collide with a real one as the
+    # registry grows (it did collide, silently changing this test's meaning, when
+    # V2-P0B-010 added a third real migration at what used to be this literal's value).
+    doomed_version = max(m.version for m in MIGRATIONS) + 1
     doomed_migrations = (
         *MIGRATIONS,
-        Migration(version=3, name="doomed_demo", apply=_failing_apply),
+        Migration(version=doomed_version, name="doomed_demo", apply=_failing_apply),
     )
 
     with pytest.raises(MigrationFailedError) as excinfo:
         run_migrations(path, clock=migration_clock, migrations=doomed_migrations)
 
     error = excinfo.value
-    assert error.version == 3
+    assert error.version == doomed_version
     assert error.name == "doomed_demo"
     assert error.backup_path.exists()
 
@@ -221,8 +272,9 @@ def test_failing_migration_rolls_back_leaves_version_unmoved_and_backup_intact(
     assert after.current_version == DEMO_ADD_RUNS_ARCHIVED_AT_VERSION  # unmoved
     assert [m.version for m in after.applied] == [
         BASELINE_VERSION,
+        CREATE_VALIDATION_RESULTS_VERSION,
         DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
-    ]  # no row for version 3
+    ]  # no row for doomed_version
 
     # Data is intact, and the DDL the doomed migration ran (before it raised) did not persist.
     with sqlite3.connect(path) as connection:
@@ -258,6 +310,7 @@ def test_run_migrations_logs_the_backup_path_and_each_applied_migration(
     applied_events = [r for r in caplog.records if r.message == "migration_applied"]
     assert [(r.migration_version, r.migration_name) for r in applied_events] == [  # type: ignore[attr-defined]
         (BASELINE_VERSION, "baseline"),
+        (CREATE_VALIDATION_RESULTS_VERSION, "create_validation_results"),
         (DEMO_ADD_RUNS_ARCHIVED_AT_VERSION, "demo_add_runs_archived_at"),
     ]
 
@@ -281,9 +334,12 @@ def test_run_migrations_logs_failure_without_leaking_the_underlying_exception_me
     def _leaking_apply(connection: sqlite3.Connection) -> None:
         raise RuntimeError(f"connection refused for postgres://user:{secret}@host/db")
 
+    # One past the real registry's own highest version, computed rather than hardcoded --
+    # see the identical rationale on `doomed_version` above.
+    doomed_version = max(m.version for m in MIGRATIONS) + 1
     doomed_migrations = (
         *MIGRATIONS,
-        Migration(version=3, name="doomed_leaking", apply=_leaking_apply),
+        Migration(version=doomed_version, name="doomed_leaking", apply=_leaking_apply),
     )
     caplog.set_level(logging.INFO, logger="openalpha_cn.storage.migrations")
 
@@ -294,21 +350,32 @@ def test_run_migrations_logs_failure_without_leaking_the_underlying_exception_me
     failure_events = [r for r in caplog.records if r.message == "migration_failed"]
     assert len(failure_events) == 1
     record = failure_events[0]
-    assert record.migration_version == 3  # type: ignore[attr-defined]
+    assert record.migration_version == doomed_version  # type: ignore[attr-defined]
     assert record.migration_name == "doomed_leaking"  # type: ignore[attr-defined]
     assert record.backup_path == str(excinfo.value.backup_path)  # type: ignore[attr-defined]
 
 
-def test_new_database_lands_on_baseline_and_defers_the_demo_migration(
+def test_new_database_applies_baseline_and_validation_results_then_defers_the_demo_migration(
     tmp_path: Path, migration_clock: Callable[[], datetime]
 ) -> None:
+    """A truly fresh database, migrated once: `baseline` and `create_validation_results`
+    (V2-P0B-010) both apply -- neither has a precondition -- but `demo_add_runs_archived_at`
+    still defers exactly as before, since `runs` is created by `SQLiteRunRepository`'s
+    constructor, which this single call never reaches. `create_validation_results` is
+    ordered *before* the demo migration precisely so it lands here, in the very first
+    call, instead of getting stuck behind the demo migration's routine deferral -- see
+    that migration's docstring in `storage/migrations.py`.
+    """
     path = tmp_path / "state.sqlite3"
 
     result = run_migrations(path, clock=migration_clock)
 
     assert result.from_version == 0
-    assert result.to_version == BASELINE_VERSION
-    assert [m.version for m in result.applied] == [BASELINE_VERSION]
+    assert result.to_version == CREATE_VALIDATION_RESULTS_VERSION
+    assert [m.version for m in result.applied] == [
+        BASELINE_VERSION,
+        CREATE_VALIDATION_RESULTS_VERSION,
+    ]
     status = read_status(path)
     assert [m.version for m in status.pending] == [DEMO_ADD_RUNS_ARCHIVED_AT_VERSION]
 
@@ -316,7 +383,7 @@ def test_new_database_lands_on_baseline_and_defers_the_demo_migration(
     # the deferred migration becomes applicable on the very next run.
     SQLiteRunRepository(path)
     caught_up = run_migrations(path, clock=migration_clock)
-    assert caught_up.from_version == BASELINE_VERSION
+    assert caught_up.from_version == CREATE_VALIDATION_RESULTS_VERSION
     assert caught_up.to_version == DEMO_ADD_RUNS_ARCHIVED_AT_VERSION
 
 
@@ -332,6 +399,7 @@ def test_read_status_does_not_mutate_the_database(tmp_path: Path, migration_now:
     assert status_before.applied == ()
     assert [m.version for m in status_before.pending] == [
         BASELINE_VERSION,
+        CREATE_VALIDATION_RESULTS_VERSION,
         DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
     ]
     assert "schema_migrations" not in _table_names(path)
@@ -346,6 +414,19 @@ def test_migrations_registry_is_declared_in_strictly_increasing_version_order() 
 # --- structural guard: no future migration may crash a fresh install (Finding 1c) ------
 
 
+# Migrations that are, by design, precondition-free: they create something of their own
+# rather than altering a table some other store's constructor owns, so there is nothing on
+# a genuinely empty database for them to wait for. `BASELINE_VERSION` stamps a version and
+# touches no data; `CREATE_VALIDATION_RESULTS_VERSION` (V2-P0B-010) creates its own
+# `validation_results` table (see that migration's docstring in `storage/migrations.py`
+# for why this is not merely convenient but load-bearing: ordering it before the demo
+# migration is what lets it apply within the very first `run_migrations()` call on a
+# fresh install). `test_create_validation_results_table_succeeds_on_a_genuinely_empty_database`
+# below is this exemption's positive-case proof: precondition-free does not mean untested,
+# it means the *opposite* of "defers" is the property under test.
+_PRECONDITION_FREE_VERSIONS = frozenset({BASELINE_VERSION, CREATE_VALIDATION_RESULTS_VERSION})
+
+
 def test_every_non_baseline_migration_defers_gracefully_on_a_fresh_empty_database() -> None:
     """A careless future migration must not crash every fresh install.
 
@@ -354,13 +435,13 @@ def test_every_non_baseline_migration_defers_gracefully_on_a_fresh_empty_databas
     one omission crashes `OpenAlphaSDK.__init__`/`create_app()` for every new installation,
     because `build_storage()` runs migrations before any store (and therefore any table)
     exists (see `storage/migrations.py`'s module docstring). This test is the structural
-    guard: it runs every non-baseline migration in the real, shipped `MIGRATIONS` registry
-    against a genuinely empty database and requires it to raise `MigrationNotYetApplicable`
-    (defer) rather than any other exception (crash). The baseline migration is exempt: it
-    is precondition-free by design (it stamps a version, it does not alter a store's table).
+    guard: it runs every migration in the real, shipped `MIGRATIONS` registry that is *not*
+    known to be precondition-free (`_PRECONDITION_FREE_VERSIONS` above) against a genuinely
+    empty database and requires it to raise `MigrationNotYetApplicable` (defer) rather than
+    any other exception (crash).
     """
     for migration in MIGRATIONS:
-        if migration.version == BASELINE_VERSION:
+        if migration.version in _PRECONDITION_FREE_VERSIONS:
             continue
         connection = sqlite3.connect(":memory:")
         try:
@@ -368,6 +449,28 @@ def test_every_non_baseline_migration_defers_gracefully_on_a_fresh_empty_databas
                 migration.apply(connection)
         finally:
             connection.close()
+
+
+def test_create_validation_results_table_succeeds_on_a_genuinely_empty_database() -> None:
+    """The positive-case complement of the guard above: `create_validation_results`
+    (V2-P0B-010) is exempted from "every non-baseline migration must defer on a fresh
+    database" *because* it genuinely has no precondition, not because the guard forgot
+    about it. Applying it directly against a bare `:memory:` connection -- no
+    `schema_migrations`, no `runs`, nothing -- must create both the table and its two
+    query-path indexes, with no exception raised at all.
+    """
+    connection = sqlite3.connect(":memory:")
+    try:
+        migration = next(m for m in MIGRATIONS if m.version == CREATE_VALIDATION_RESULTS_VERSION)
+
+        migration.apply(connection)
+
+        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master")}
+        assert "validation_results" in tables
+        assert "validation_results_decision_id_idx" in tables
+        assert "validation_results_signal_id_idx" in tables
+    finally:
+        connection.close()
 
 
 # --- backup filenames must never collide (Finding 4b) -----------------------------------

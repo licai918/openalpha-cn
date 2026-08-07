@@ -12,7 +12,7 @@
     "product": 3,
     "provider": 8,
     "recovery": 2,
-    "storage": 6,
+    "storage": 7,
     "temporal": 3
   },
   "generated_on": "2026-07-24",
@@ -28,13 +28,13 @@
     "DEFERRED": 1,
     "ENHANCED_REPLACEMENT": 20,
     "EXCLUDED": 4,
-    "NATIVE_COMPLETE": 80
+    "NATIVE_COMPLETE": 81
   },
   "totals": {
-    "all_features": 106,
+    "all_features": 107,
     "legacy_acceptance_rows": 86,
-    "true_completed_features": 101,
-    "true_completion_rate_pct": 95.28,
+    "true_completed_features": 102,
+    "true_completion_rate_pct": 95.33,
     "unknown": 0,
     "unreviewed": 0
   }

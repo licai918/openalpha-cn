@@ -4,7 +4,11 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from openalpha_cn.cli import app
-from openalpha_cn.storage.migrations import BASELINE_VERSION, DEMO_ADD_RUNS_ARCHIVED_AT_VERSION
+from openalpha_cn.storage.migrations import (
+    BASELINE_VERSION,
+    CREATE_VALIDATION_RESULTS_VERSION,
+    DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
+)
 
 runner = CliRunner()
 
@@ -20,6 +24,7 @@ def test_migrate_status_reports_pending_migrations_for_a_fresh_runtime_dir(tmp_p
     assert payload["applied"] == []
     assert [entry["version"] for entry in payload["pending"]] == [
         BASELINE_VERSION,
+        CREATE_VALIDATION_RESULTS_VERSION,
         DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
     ]
 
@@ -59,7 +64,10 @@ def test_migrate_run_applies_pending_migrations_and_prints_backup_path(tmp_path:
         app, ["migrate", "status", "--runtime-dir", str(runtime_dir), "--json"]
     )
     payload = json.loads(status_after.output)
-    assert payload["current_version"] == BASELINE_VERSION
+    # Both precondition-free migrations land in this first call -- baseline and
+    # create_validation_results (V2-P0B-010; ordered before the still-deferring demo
+    # migration, see storage/migrations.py) -- not just baseline.
+    assert payload["current_version"] == CREATE_VALIDATION_RESULTS_VERSION
 
 
 def test_migrate_run_converges_after_it_constructs_stores_then_reports_up_to_date(
@@ -82,9 +90,14 @@ def test_migrate_run_converges_after_it_constructs_stores_then_reports_up_to_dat
     pinned the bug: `migrate_run` branched on `not result.applied` without ever checking
     `read_status().pending`, so it could not tell "genuinely finished" apart from
     "permanently stuck" and claimed completion regardless. With 1a fixed, the second call
-    here does real work, so it must say so (`migrated 1 -> 2`), not claim "up to date" --
-    that phrase is reserved for the *third* call, once nothing is applied and nothing is
-    pending.
+    here does real work, so it must say so (`migrated <n> -> <m>`), not claim "up to date"
+    -- that phrase is reserved for the *third* call, once nothing is applied and nothing
+    is pending.
+
+    The first call now advances past baseline on its own (V2-P0B-010's
+    create_validation_results migration is precondition-free -- see
+    storage/migrations.py), so the second call's real work starts from
+    `CREATE_VALIDATION_RESULTS_VERSION`, not `BASELINE_VERSION`.
     """
     runtime_dir = tmp_path / "runtime"
     first = runner.invoke(app, ["migrate", "run", "--runtime-dir", str(runtime_dir)])
@@ -92,7 +105,10 @@ def test_migrate_run_converges_after_it_constructs_stores_then_reports_up_to_dat
 
     second = runner.invoke(app, ["migrate", "run", "--runtime-dir", str(runtime_dir)])
     assert second.exit_code == 0, second.output
-    assert f"migrated {BASELINE_VERSION} -> {DEMO_ADD_RUNS_ARCHIVED_AT_VERSION}" in second.output
+    assert (
+        f"migrated {CREATE_VALIDATION_RESULTS_VERSION} -> {DEMO_ADD_RUNS_ARCHIVED_AT_VERSION}"
+        in second.output
+    )
     assert "up to date" not in second.output
     assert "still pending" not in second.output
 

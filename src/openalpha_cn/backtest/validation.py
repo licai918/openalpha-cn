@@ -1,13 +1,39 @@
 """Outcome validation and reconciled rule/factor/agent attribution."""
 
 from datetime import datetime
-from typing import Self
+from typing import Protocol, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from openalpha_cn.domain.time import ensure_aware
 from openalpha_cn.domain.validation import AttributionTerm, ValidationResult
 from openalpha_cn.runtime.contracts import ResearchRunResult
+
+
+class ValidationStore(Protocol):
+    """Extension contract for durable outcome-validation storage.
+
+    Mirrors the `runtime.memory.ResearchMemory` precedent: the Protocol lives on the
+    consumer side (`backtest/`), not in `storage/`. `OutcomeValidator` (this module) is a
+    pure computation -- it never persists anything itself -- so unlike `RunRepository`/
+    `RecoveryStore` (consumed only by `ResearchEngine`) there is no intermediate "runner"
+    here: `sdk.py` and `api/app.py` call this Protocol's methods directly, the same
+    relationship `WatchlistStore`/`ReportStore` (`product/research.py`) have to their
+    consumers. Its method set is exactly what those two callers need: append the result
+    `OutcomeValidator.validate()` just computed, then list it back by `decision_id` or by
+    `signal_id` -- "how did this past decision turn out" is the query this whole feature
+    exists to answer (V2-P0B-010). There is no `get(validation_id)` here because neither
+    caller ever looks one up by that ID alone.
+    """
+
+    def append(self, result: ValidationResult) -> None:
+        """Append idempotently by validation ID; reject a conflicting reuse of the ID."""
+
+    def list_by_decision(self, decision_id: str) -> tuple[ValidationResult, ...]:
+        """List validation results for one decision, in append order."""
+
+    def list_by_signal(self, signal_id: str) -> tuple[ValidationResult, ...]:
+        """List validation results for one signal, in append order."""
 
 
 class OutcomeObservation(BaseModel):

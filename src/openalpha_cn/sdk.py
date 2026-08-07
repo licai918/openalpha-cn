@@ -22,8 +22,10 @@ from openalpha_cn.backtest.portfolio import (
     PortfolioTransition,
 )
 from openalpha_cn.backtest.replay import ReplayCorpus, ReplayReport, ReplayRunner
+from openalpha_cn.backtest.validation import OutcomeObservation, OutcomeValidator
 from openalpha_cn.domain.evidence import EvidenceSnapshot
 from openalpha_cn.domain.signal import SignalFrame
+from openalpha_cn.domain.validation import ValidationResult
 from openalpha_cn.evidence.service import build_file_evidence
 from openalpha_cn.product.research import (
     ResearchReport,
@@ -64,6 +66,7 @@ class OpenAlphaSDK:
         self.portfolio_ledger = storage.portfolio_ledger
         self.watchlist_store = storage.watchlist_store
         self.report_store = storage.report_store
+        self.validation_store = storage.validation_store
 
     def health(self) -> dict[str, str]:
         """Return SDK and package readiness."""
@@ -175,6 +178,35 @@ class OpenAlphaSDK:
     def list_reports(self, *, subject: str | None = None) -> tuple[ResearchReport, ...]:
         """List generated reports, optionally by subject."""
         return self.report_store.list(subject=subject)
+
+    def validate_outcome(
+        self,
+        *,
+        research: ResearchRunResult,
+        observation: OutcomeObservation,
+    ) -> ValidationResult:
+        """Validate an observed outcome, persist it, and return the reconciled result.
+
+        The SDK's own outcome-validation entry point (V2-P0B-010): before this, only
+        `POST /api/v1/backtests/validate` and the web UI could reach `OutcomeValidator`
+        (`backtest/validation.py`) -- `sdk.py` never imported `backtest.validation` at
+        all, so a programmatic caller had no way to validate an outcome without going
+        through HTTP, contradicting this module's own "complete research flow" docstring
+        (audit finding F29). Mirrors `create_report`'s shape: compute, then persist via
+        `self.validation_store`, so a result computed through the SDK is durable the same
+        way a result computed through REST is.
+        """
+        result = OutcomeValidator().validate(research=research, observation=observation)
+        self.validation_store.append(result)
+        return result
+
+    def list_validations_by_decision(self, decision_id: str) -> tuple[ValidationResult, ...]:
+        """List validation results for one decision, in append order."""
+        return self.validation_store.list_by_decision(decision_id)
+
+    def list_validations_by_signal(self, signal_id: str) -> tuple[ValidationResult, ...]:
+        """List validation results for one signal, in append order."""
+        return self.validation_store.list_by_signal(signal_id)
 
     def execute_portfolio_order(
         self,

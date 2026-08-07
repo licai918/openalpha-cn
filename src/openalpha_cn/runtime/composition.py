@@ -9,11 +9,16 @@ is now the only place either module constructs a store; both call it and hold th
 v2 adds five more storage layers (panel, factor, model, ranking, portfolio). Without a
 composition root, each one would need wiring twice, by hand, forever.
 
-Field types mirror the storage-Protocol layer Task 9 (V2-P0B-003) built: six of eight
+Field types mirror the storage-Protocol layer Task 9 (V2-P0B-003) built: seven of nine
 fields are typed against the narrowest Protocol their consumers need (`RunRepository`,
-`ResearchMemory`, `RecoveryStore`, `EvidenceStore`, `WatchlistStore`, `ReportStore`) --
-because `sdk.py`/`api/app.py` only ever call the methods those Protocols declare on
-these six, routing them through this container does not widen what a consumer can do.
+`ResearchMemory`, `RecoveryStore`, `EvidenceStore`, `WatchlistStore`, `ReportStore`,
+`ValidationStore`) -- because `sdk.py`/`api/app.py` only ever call the methods those
+Protocols declare on these seven, routing them through this container does not widen
+what a consumer can do. `ValidationStore` (`backtest/validation.py`, V2-P0B-010) follows
+the same narrowing as `WatchlistStore`/`ReportStore`: `sdk.py`/`api/app.py` call
+`append`/`list_by_decision`/`list_by_signal` on it directly (there is no engine-layer
+consumer the way `RunRepository`/`RecoveryStore` have `ResearchEngine`), so that Protocol
+declares exactly those three and nothing else `SQLiteValidationStore` happens to expose.
 `batch_store` and `portfolio_ledger` stay concrete (`SQLiteBatchTaskStore` /
 `SQLitePortfolioLedger`): `api/app.py`'s `batch_list`/`batch_events` routes call
 `.list()`/`.list_events()`, and both `sdk.py`'s `list_portfolio_transitions` and
@@ -34,6 +39,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from openalpha_cn.backtest.validation import ValidationStore
 from openalpha_cn.evidence.service import EvidenceStore
 from openalpha_cn.product.research import ReportStore, WatchlistStore
 from openalpha_cn.runtime.memory import ResearchMemory
@@ -47,13 +53,14 @@ from openalpha_cn.storage.portfolio import SQLitePortfolioLedger
 from openalpha_cn.storage.product import SQLiteReportStore, SQLiteWatchlistStore
 from openalpha_cn.storage.recovery import SQLiteRecoveryStore
 from openalpha_cn.storage.sqlite import SQLiteRunRepository
+from openalpha_cn.storage.validation import SQLiteValidationStore
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class StorageContainer:
-    """All eight storage components assembled for one shared `runtime_dir`.
+    """All nine storage components assembled for one shared `runtime_dir`.
 
     `migration_result` is the outcome of the `run_migrations()` call this function makes
     before constructing any store below -- exposed so a caller that needs to report on
@@ -70,13 +77,14 @@ class StorageContainer:
     portfolio_ledger: SQLitePortfolioLedger
     watchlist_store: WatchlistStore
     report_store: ReportStore
+    validation_store: ValidationStore
     migration_result: MigrationRunResult
 
 
 def build_storage(*, runtime_dir: Path, clock: Callable[[], datetime]) -> StorageContainer:
     """Run pending schema migrations, then assemble every storage component once.
 
-    All eight stores share one `runtime_dir`: seven at its root-level `state.sqlite3`
+    All nine stores share one `runtime_dir`: eight at its root-level `state.sqlite3`
     (matching the pre-existing per-store convention), plus the Parquet evidence store
     under `runtime_dir / "evidence"`. Interrupted-batch recovery runs here, using the
     caller-supplied `clock`, instead of being duplicated (and, in `api/app.py`'s case,
@@ -86,7 +94,14 @@ def build_storage(*, runtime_dir: Path, clock: Callable[[], datetime]) -> Storag
     the one and only mount point for `state.sqlite3`'s migration engine, so every caller
     (`sdk.py`, `api/app.py`, and the `openalpha migrate` CLI commands going through a
     full SDK) gets migrations applied automatically, using the same caller-supplied
-    `clock` `recover_interrupted` already uses below.
+    `clock` `recover_interrupted` already uses below. `validation_store` is constructed
+    after this call, the same as every other `state.sqlite3` store, but its table's
+    existence does not depend on that ordering the way `_demo_add_runs_archived_at` (an
+    `ALTER TABLE` on `runs`) does: `create_validation_results` (V2-P0B-010) is ordered
+    *before* the demo migration precisely so it always applies within this same first
+    `run_migrations()` call, on a fresh install, before any store below is constructed --
+    see that migration's docstring in `storage/migrations.py` for why this ordering is
+    load-bearing, not incidental.
     """
     runtime_dir.mkdir(parents=True, exist_ok=True)
     migration_result = run_migrations(runtime_dir / "state.sqlite3", clock=clock)
@@ -98,6 +113,7 @@ def build_storage(*, runtime_dir: Path, clock: Callable[[], datetime]) -> Storag
     portfolio_ledger = SQLitePortfolioLedger(runtime_dir / "state.sqlite3")
     watchlist_store: WatchlistStore = SQLiteWatchlistStore(runtime_dir / "state.sqlite3")
     report_store: ReportStore = SQLiteReportStore(runtime_dir / "state.sqlite3")
+    validation_store: ValidationStore = SQLiteValidationStore(runtime_dir / "state.sqlite3")
     batch_store.recover_interrupted(now=clock())
     logger.info(
         "storage_initialized",
@@ -115,5 +131,6 @@ def build_storage(*, runtime_dir: Path, clock: Callable[[], datetime]) -> Storag
         portfolio_ledger=portfolio_ledger,
         watchlist_store=watchlist_store,
         report_store=report_store,
+        validation_store=validation_store,
         migration_result=migration_result,
     )
