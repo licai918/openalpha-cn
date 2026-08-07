@@ -5,7 +5,13 @@ from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
-from openalpha_cn.runtime.batch import BatchProgressEvent, BatchResearchTask
+from openalpha_cn.domain.versioning import read_versioned
+from openalpha_cn.runtime.batch import (
+    BATCH_PROGRESS_EVENT_VERSIONS,
+    BATCH_RESEARCH_TASK_VERSIONS,
+    BatchProgressEvent,
+    BatchResearchTask,
+)
 
 
 class SQLiteBatchTaskStore:
@@ -62,7 +68,7 @@ class SQLiteBatchTaskStore:
                 "SELECT payload FROM batch_tasks WHERE batch_id = ?",
                 (batch_id,),
             ).fetchone()
-        return None if row is None else BatchResearchTask.model_validate_json(row[0])
+        return None if row is None else read_versioned(BATCH_RESEARCH_TASK_VERSIONS, row[0])
 
     def list(self) -> tuple[BatchResearchTask, ...]:
         """Return all batches in stable ID order."""
@@ -70,7 +76,7 @@ class SQLiteBatchTaskStore:
             rows = connection.execute(
                 "SELECT payload FROM batch_tasks ORDER BY batch_id"
             ).fetchall()
-        return tuple(BatchResearchTask.model_validate_json(row[0]) for row in rows)
+        return tuple(read_versioned(BATCH_RESEARCH_TASK_VERSIONS, row[0]) for row in rows)
 
     def append_event(
         self,
@@ -115,7 +121,7 @@ class SQLiteBatchTaskStore:
                 """,
                 (batch_id,),
             ).fetchall()
-        return tuple(BatchProgressEvent.model_validate_json(row[0]) for row in rows)
+        return tuple(read_versioned(BATCH_PROGRESS_EVENT_VERSIONS, row[0]) for row in rows)
 
     def recover_interrupted(self, *, now: datetime) -> tuple[str, ...]:
         """Requeue process-interrupted running items without losing terminal work."""

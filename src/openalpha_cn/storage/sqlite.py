@@ -4,8 +4,14 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 
-from openalpha_cn.domain.decision import DecisionLedger
-from openalpha_cn.domain.run import CheckpointRecord, RunManifest
+from openalpha_cn.domain.decision import DECISION_LEDGER_VERSIONS, DecisionLedger
+from openalpha_cn.domain.run import (
+    CHECKPOINT_RECORD_VERSIONS,
+    RUN_MANIFEST_VERSIONS,
+    CheckpointRecord,
+    RunManifest,
+)
+from openalpha_cn.domain.versioning import read_versioned
 
 
 class DuplicateRecordError(ValueError):
@@ -81,7 +87,7 @@ class SQLiteRunRepository:
                 "SELECT payload FROM runs WHERE run_id = ?",
                 (run_id,),
             ).fetchone()
-        return None if row is None else RunManifest.model_validate_json(row[0])
+        return None if row is None else read_versioned(RUN_MANIFEST_VERSIONS, row[0])
 
     def append_decision(self, decision: DecisionLedger) -> None:
         """Append a decision linked to an existing run."""
@@ -109,7 +115,7 @@ class SQLiteRunRepository:
                 "SELECT payload FROM decisions WHERE decision_id = ?",
                 (decision_id,),
             ).fetchone()
-        return None if row is None else DecisionLedger.model_validate_json(row[0])
+        return None if row is None else read_versioned(DECISION_LEDGER_VERSIONS, row[0])
 
     def get_decision_for_run(self, run_id: str) -> DecisionLedger | None:
         """Load the single immutable decision associated with a run."""
@@ -118,7 +124,7 @@ class SQLiteRunRepository:
                 "SELECT payload FROM decisions WHERE run_id = ?",
                 (run_id,),
             ).fetchone()
-        return None if row is None else DecisionLedger.model_validate_json(row[0])
+        return None if row is None else read_versioned(DECISION_LEDGER_VERSIONS, row[0])
 
     def append_checkpoint(self, *, run_id: str, checkpoint: CheckpointRecord) -> None:
         """Append a checkpoint to an existing run."""
@@ -143,4 +149,4 @@ class SQLiteRunRepository:
                 """,
                 (run_id,),
             ).fetchall()
-        return tuple(CheckpointRecord.model_validate_json(row[0]) for row in rows)
+        return tuple(read_versioned(CHECKPOINT_RECORD_VERSIONS, row[0]) for row in rows)

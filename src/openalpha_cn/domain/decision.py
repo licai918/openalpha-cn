@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validat
 from openalpha_cn.domain._identity import stable_model_id
 from openalpha_cn.domain.run import VersionRef
 from openalpha_cn.domain.time import ensure_aware
+from openalpha_cn.domain.versioning import ContractVersions
 
 
 class AgentDecision(BaseModel):
@@ -58,3 +59,10 @@ class DecisionLedger(BaseModel):
     def decision_id(self) -> str:
         """Return the stable content-derived decision identifier."""
         return stable_model_id(prefix="dec", model=self)
+
+
+DECISION_LEDGER_VERSIONS: ContractVersions[DecisionLedger] = ContractVersions(
+    name="decision-ledger",
+    current_version="decision-ledger/v1",
+    versions={"decision-ledger/v1": DecisionLedger},
+)

@@ -10,6 +10,7 @@ from typing import Literal, Protocol, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from openalpha_cn.domain.versioning import ContractVersions, single_version
 from openalpha_cn.runtime.contracts import ResearchRunRequest, ResearchRunResult
 
 
@@ -67,6 +68,11 @@ class BatchResearchTask(BaseModel):
         return ensure_aware(value)
 
 
+BATCH_RESEARCH_TASK_VERSIONS: ContractVersions[BatchResearchTask] = single_version(
+    "batch-research-task", BatchResearchTask
+)
+
+
 class BatchProgressEvent(BaseModel):
     """Append-only progress event for polling, SSE, or audit consumers."""
 
@@ -94,6 +100,11 @@ class BatchProgressEvent(BaseModel):
         from openalpha_cn.domain.time import ensure_aware
 
         return ensure_aware(value)
+
+
+BATCH_PROGRESS_EVENT_VERSIONS: ContractVersions[BatchProgressEvent] = single_version(
+    "batch-progress-event", BatchProgressEvent
+)
 
 
 class BatchTaskStore(Protocol):

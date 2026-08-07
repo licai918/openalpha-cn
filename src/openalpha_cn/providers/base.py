@@ -18,6 +18,7 @@ from pydantic import (
 from openalpha_cn.domain._identity import stable_model_id
 from openalpha_cn.domain.json_value import canonical_json_bytes, freeze_json, thaw_json
 from openalpha_cn.domain.time import Timeline, ensure_aware, is_visible_at
+from openalpha_cn.domain.versioning import ContractVersions
 
 ProviderFailureCategory = Literal[
     "authentication",
@@ -107,6 +108,13 @@ class ProviderRecord(BaseModel):
         return stable_model_id(prefix="rec", model=self)
 
 
+PROVIDER_RECORD_VERSIONS: ContractVersions[ProviderRecord] = ContractVersions(
+    name="provider-record",
+    current_version="provider-record/v1",
+    versions={"provider-record/v1": ProviderRecord},
+)
+
+
 class ProviderBatch(BaseModel):
     """An explicit success or no-data result for one provider request."""
 
@@ -149,6 +157,13 @@ class ProviderBatch(BaseModel):
             record.model_dump(mode="json", exclude_computed_fields=True) for record in self.records
         ]
         return f"sha256:{sha256(canonical_json_bytes(payloads)).hexdigest()}"
+
+
+PROVIDER_BATCH_VERSIONS: ContractVersions[ProviderBatch] = ContractVersions(
+    name="provider-batch",
+    current_version="provider-batch/v1",
+    versions={"provider-batch/v1": ProviderBatch},
+)
 
 
 class DataProvider(Protocol):

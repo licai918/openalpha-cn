@@ -4,8 +4,8 @@
 
 ## 对账结论
 
-- 功能总数: 102
-- 当前真实完成: 97 (95.1%)
+- 功能总数: 103
+- 当前真实完成: 98 (95.15%)
 - `UNREVIEWED=0`
 - `UNKNOWN=0`
 - `legacy_acceptance_rows=86` (历史散文验收、尚未绑定为可执行 pytest/CI 断言)
@@ -18,7 +18,7 @@
 | `DEFERRED` | 1 |
 | `ENHANCED_REPLACEMENT` | 20 |
 | `EXCLUDED` | 4 |
-| `NATIVE_COMPLETE` | 76 |
+| `NATIVE_COMPLETE` | 77 |
 
 ## 功能明细
 
@@ -126,6 +126,7 @@
 | `OA-OPS-020` | operations | Single storage composition root | `NATIVE_COMPLETE` | `src/openalpha_cn/runtime/composition.py#build_storage;src/openalpha_cn/runtime/composition.py#StorageContainer;src/openalpha_cn/sdk.py#OpenAlphaSDK;src/openalpha_cn/api/app.py#create_app;src/openalpha_cn/api/app.py#BatchSubmitRequest` | `tests/integration/test_batch_research.py;tests/integration/test_portfolio_interfaces.py;tests/unit/runtime/test_storage_protocol_doubles.py` | `pytest` | `tests/integration/test_batch_research.py::test_single_and_batch_endpoints_accept_the_same_serialized_evidence_payload` |
 | `OA-OPS-021` | operations | SQLite schema migration engine (versioned, transactional, backup-and-rollback) | `NATIVE_COMPLETE` | `src/openalpha_cn/storage/migrations.py#run_migrations;src/openalpha_cn/storage/migrations.py#read_status;src/openalpha_cn/storage/migrations.py#MIGRATIONS;src/openalpha_cn/storage/migrations.py#Migration;src/openalpha_cn/runtime/composition.py#build_storage;src/openalpha_cn/cli.py#migrate_status;src/openalpha_cn/cli.py#migrate_run` | `tests/integration/storage/test_migrations.py;tests/unit/runtime/test_composition_migrations.py;tests/integration/test_cli_migrate.py` | `pytest` | `tests/integration/storage/test_migrations.py::test_demo_migration_advances_version_and_preserves_v1_records` |
 | `OA-OPS-022` | operations | Migration engine hardening: CLI convergence, honest status reporting, race-safe execution, collision-free backups, and a fresh-install guard | `NATIVE_COMPLETE` | `src/openalpha_cn/cli.py#migrate_run;src/openalpha_cn/runtime/composition.py#build_storage;src/openalpha_cn/runtime/composition.py#StorageContainer;src/openalpha_cn/storage/migrations.py#run_migrations;src/openalpha_cn/storage/migrations.py#require_table;src/openalpha_cn/storage/migrations.py#_take_backup;scripts/verify_publication.py#BLOCKED_SUFFIXES` | `tests/integration/storage/test_migrations.py;tests/integration/test_cli_migrate.py;tests/unit/runtime/test_composition_migrations.py;tests/unit/test_repository_assets.py` | `pytest` | `tests/integration/storage/test_migrations.py::test_concurrent_run_migrations_does_not_report_a_false_failure` |
+| `OA-OPS-023` | operations | Version-dispatched contract reads: row-content schema upgrade mechanism | `NATIVE_COMPLETE` | `src/openalpha_cn/domain/versioning.py#ContractVersions;src/openalpha_cn/domain/versioning.py#read_versioned;src/openalpha_cn/domain/versioning.py#single_version;src/openalpha_cn/domain/versioning.py#UnknownSchemaVersionError;src/openalpha_cn/domain/run.py#RUN_MANIFEST_VERSIONS;src/openalpha_cn/domain/decision.py#DECISION_LEDGER_VERSIONS;src/openalpha_cn/storage/recovery.py#RUN_RECOVERY_STATE_VERSIONS;src/openalpha_cn/storage/sqlite.py#SQLiteRunRepository;src/openalpha_cn/storage/portfolio.py#SQLitePortfolioLedger;src/openalpha_cn/storage/product.py#SQLiteWatchlistStore;src/openalpha_cn/storage/batch.py#SQLiteBatchTaskStore;src/openalpha_cn/storage/memory.py#SQLiteResearchMemory` | `tests/unit/domain/test_versioning.py;tests/integration/storage/test_versioned_reads.py;tests/unit/domain/test_schema_export.py` | `pytest` | `tests/unit/domain/test_versioning.py::test_read_versioned_does_not_require_new_v2_fields_when_reading_a_v1_payload` |
 
 ## 边界
 

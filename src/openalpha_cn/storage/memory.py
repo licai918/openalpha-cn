@@ -4,7 +4,8 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 
-from openalpha_cn.runtime.memory import MemoryEntry
+from openalpha_cn.domain.versioning import read_versioned
+from openalpha_cn.runtime.memory import MEMORY_ENTRY_VERSIONS, MemoryEntry
 
 
 class SQLiteResearchMemory:
@@ -61,7 +62,7 @@ class SQLiteResearchMemory:
                 "SELECT payload FROM research_memory WHERE decision_id = ?",
                 (decision_id,),
             ).fetchone()
-        return None if row is None else MemoryEntry.model_validate_json(row[0])
+        return None if row is None else read_versioned(MEMORY_ENTRY_VERSIONS, row[0])
 
     def list(self, *, subject: str) -> tuple[MemoryEntry, ...]:
         """Return durable subject memory in append order."""
@@ -75,4 +76,4 @@ class SQLiteResearchMemory:
                 """,
                 (subject,),
             ).fetchall()
-        return tuple(MemoryEntry.model_validate_json(row[0]) for row in rows)
+        return tuple(read_versioned(MEMORY_ENTRY_VERSIONS, row[0]) for row in rows)

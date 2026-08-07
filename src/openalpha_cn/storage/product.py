@@ -4,7 +4,13 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 
-from openalpha_cn.product.research import ResearchReport, WatchlistEntry
+from openalpha_cn.domain.versioning import read_versioned
+from openalpha_cn.product.research import (
+    RESEARCH_REPORT_VERSIONS,
+    WATCHLIST_ENTRY_VERSIONS,
+    ResearchReport,
+    WatchlistEntry,
+)
 
 
 class SQLiteWatchlistStore:
@@ -41,7 +47,7 @@ class SQLiteWatchlistStore:
     def list(self) -> tuple[WatchlistEntry, ...]:
         with closing(self._connect()) as connection:
             rows = connection.execute("SELECT payload FROM watchlist ORDER BY subject").fetchall()
-        return tuple(WatchlistEntry.model_validate_json(row[0]) for row in rows)
+        return tuple(read_versioned(WATCHLIST_ENTRY_VERSIONS, row[0]) for row in rows)
 
     def remove(self, subject: str) -> bool:
         with closing(self._connect()) as connection, connection:
@@ -97,7 +103,7 @@ class SQLiteReportStore:
                 "SELECT payload FROM research_reports WHERE report_id = ?",
                 (report_id,),
             ).fetchone()
-        return None if row is None else ResearchReport.model_validate_json(row[0])
+        return None if row is None else read_versioned(RESEARCH_REPORT_VERSIONS, row[0])
 
     def list(self, *, subject: str | None = None) -> tuple[ResearchReport, ...]:
         with closing(self._connect()) as connection:
@@ -114,4 +120,4 @@ class SQLiteReportStore:
                     """,
                     (subject,),
                 ).fetchall()
-        return tuple(ResearchReport.model_validate_json(row[0]) for row in rows)
+        return tuple(read_versioned(RESEARCH_REPORT_VERSIONS, row[0]) for row in rows)

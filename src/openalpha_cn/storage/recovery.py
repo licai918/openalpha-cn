@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from openalpha_cn.agents.base import AgentResult
 from openalpha_cn.domain.time import ensure_aware
+from openalpha_cn.domain.versioning import ContractVersions, read_versioned
 
 
 class RecoveryConflictError(ValueError):
@@ -59,6 +60,13 @@ class RunRecoveryState(BaseModel):
         return self
 
 
+RUN_RECOVERY_STATE_VERSIONS: ContractVersions[RunRecoveryState] = ContractVersions(
+    name="run-recovery",
+    current_version="run-recovery/v1",
+    versions={"run-recovery/v1": RunRecoveryState},
+)
+
+
 class SQLiteRecoveryStore:
     """Persist the latest validated recovery state for each run ID."""
 
@@ -89,7 +97,7 @@ class SQLiteRecoveryStore:
                 "SELECT payload FROM run_recovery WHERE run_id = ?",
                 (run_id,),
             ).fetchone()
-        return None if row is None else RunRecoveryState.model_validate_json(row[0])
+        return None if row is None else read_versioned(RUN_RECOVERY_STATE_VERSIONS, row[0])
 
     def save(self, state: RunRecoveryState) -> None:
         """Atomically insert or advance a compatible recovery state."""

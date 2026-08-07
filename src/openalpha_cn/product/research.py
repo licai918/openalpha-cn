@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validat
 
 from openalpha_cn.domain._identity import stable_model_id
 from openalpha_cn.domain.time import ensure_aware
+from openalpha_cn.domain.versioning import ContractVersions, single_version
 from openalpha_cn.runtime.contracts import ResearchRunResult
 
 
@@ -95,6 +96,11 @@ class WatchlistEntry(BaseModel):
         return ensure_aware(value)
 
 
+WATCHLIST_ENTRY_VERSIONS: ContractVersions[WatchlistEntry] = single_version(
+    "watchlist-entry", WatchlistEntry
+)
+
+
 class WatchlistStore(Protocol):
     """Extension contract for durable watchlist storage.
 
@@ -138,6 +144,11 @@ class ResearchReport(BaseModel):
     @property
     def report_id(self) -> str:
         return stable_model_id(prefix="rpt", model=self)
+
+
+RESEARCH_REPORT_VERSIONS: ContractVersions[ResearchReport] = single_version(
+    "research-report", ResearchReport
+)
 
 
 class ReportStore(Protocol):

@@ -5,6 +5,8 @@ from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from openalpha_cn.domain.versioning import ContractVersions, single_version
+
 
 class MemoryEntry(BaseModel):
     """A compact durable-memory candidate linked to a completed decision."""
@@ -17,6 +19,9 @@ class MemoryEntry(BaseModel):
     decision_id: str = Field(min_length=1, max_length=128)
     signal_id: str = Field(min_length=1, max_length=128)
     summary: str = Field(min_length=1, max_length=2000)
+
+
+MEMORY_ENTRY_VERSIONS: ContractVersions[MemoryEntry] = single_version("memory-entry", MemoryEntry)
 
 
 class ResearchMemory(Protocol):

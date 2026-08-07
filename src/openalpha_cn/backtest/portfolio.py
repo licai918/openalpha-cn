@@ -12,6 +12,7 @@ from openalpha_cn.backtest.execution import (
     ExecutionResult,
     MarketBar,
 )
+from openalpha_cn.domain.versioning import ContractVersions, single_version
 
 _CENT = Decimal("0.01")
 
@@ -151,6 +152,11 @@ class PortfolioTransition(BaseModel):
     execution: ExecutionResult | None = None
     reason: str | None = None
     realized_pnl_delta: Decimal = Decimal("0.00")
+
+
+PORTFOLIO_TRANSITION_VERSIONS: ContractVersions[PortfolioTransition] = single_version(
+    "portfolio-transition", PortfolioTransition
+)
 
 
 class PortfolioSimulator:

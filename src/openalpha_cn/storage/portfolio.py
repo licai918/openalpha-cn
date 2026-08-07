@@ -4,7 +4,8 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 
-from openalpha_cn.backtest.portfolio import PortfolioTransition
+from openalpha_cn.backtest.portfolio import PORTFOLIO_TRANSITION_VERSIONS, PortfolioTransition
+from openalpha_cn.domain.versioning import read_versioned
 
 
 class SQLitePortfolioLedger:
@@ -59,7 +60,7 @@ class SQLitePortfolioLedger:
                 "SELECT payload FROM portfolio_transitions WHERE order_id = ?",
                 (order_id,),
             ).fetchone()
-        return None if row is None else PortfolioTransition.model_validate_json(row[0])
+        return None if row is None else read_versioned(PORTFOLIO_TRANSITION_VERSIONS, row[0])
 
     def list(self, *, subject: str | None = None) -> tuple[PortfolioTransition, ...]:
         with closing(self._connect()) as connection:
@@ -76,4 +77,4 @@ class SQLitePortfolioLedger:
                     """,
                     (subject,),
                 ).fetchall()
-        return tuple(PortfolioTransition.model_validate_json(row[0]) for row in rows)
+        return tuple(read_versioned(PORTFOLIO_TRANSITION_VERSIONS, row[0]) for row in rows)

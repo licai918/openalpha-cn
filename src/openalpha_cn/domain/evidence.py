@@ -16,6 +16,7 @@ from pydantic import (
 
 from openalpha_cn.domain.json_value import canonical_json_bytes, freeze_json, thaw_json
 from openalpha_cn.domain.time import Timeline, is_visible_at
+from openalpha_cn.domain.versioning import ContractVersions
 
 
 class EvidenceSnapshot(BaseModel):
@@ -72,3 +73,10 @@ class EvidenceSnapshot(BaseModel):
     def visible_at(self, as_of: datetime) -> bool:
         """Return whether this evidence was available at ``as_of``."""
         return is_visible_at(self.timeline, as_of)
+
+
+EVIDENCE_SNAPSHOT_VERSIONS: ContractVersions[EvidenceSnapshot] = ContractVersions(
+    name="evidence-snapshot",
+    current_version="evidence-snapshot/v1",
+    versions={"evidence-snapshot/v1": EvidenceSnapshot},
+)

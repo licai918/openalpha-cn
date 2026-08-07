@@ -1,0 +1,168 @@
+"""Version-dispatched reads for stored contract payloads (V2-P0B-005).
+
+Why this exists: eight of this package's pydantic contracts carry a literal
+`schema_version` field (e.g. `Literal["run-manifest/v1"] = "run-manifest/v1"`) combined
+with `extra="forbid"`. That combination is exactly right for catching accidental drift
+today, and exactly wrong for a row a *newer* build wrote: `Literal` rejects the unfamiliar
+value and `extra="forbid"` rejects any field the reader's version doesn't know about, so
+`Model.model_validate_json(row)` fails hard the moment either model gains a version this
+build doesn't have. Task 11 (`storage/migrations.py`) made the *table* upgradable; this
+module makes the *row* upgradable, so a later phase (`V2-P4-001`) can cut three breaking
+contract versions at once without stranding every research record written before it.
+
+Design, in one paragraph: a `ContractVersions[T]` is a plain, hand-written registry --
+mirroring `storage/migrations.py`'s `Migration` dataclass and `MIGRATIONS` tuple, not a
+versioning framework -- mapping each `schema_version` value this build still knows how to
+read to the pydantic model that validates a payload at that version, plus an `upgrades`
+map from every non-current version to a function that turns a validated old-version
+instance into a validated instance of the *next* version. `read_versioned()` is the single
+entry point every storage read call site uses in place of `Model.model_validate_json`: it
+parses the raw JSON once with the stdlib `json` module -- deliberately *not* pydantic --
+and reads `schema_version` out of the resulting plain `dict` before any model sees the
+payload. That ordering is the whole point: pydantic validation is exactly the step that
+fails on an unfamiliar version, so it cannot be the mechanism used to *detect* one. Once
+the version is known, the payload is validated against its own version's model (so a
+genuinely malformed row -- e.g. a missing required field -- still raises a normal
+pydantic `ValidationError`, distinguishable from an unrecognized version), and the
+resulting instance is walked forward through `upgrades` until it reaches
+`current_version`. A `schema_version` this build has never heard of -- the case that
+matters most, a newer build's row reaching older code -- raises `UnknownSchemaVersionError`
+naming the contract, the payload's version, and the versions this build supports, rather
+than silently misreading it or guessing.
+
+`single_version()` is a convenience for the majority of stored models that carry no
+`schema_version` field at all (e.g. `PortfolioTransition`, `MemoryEntry`): it builds a
+trivial one-entry `ContractVersions` keyed on `None` (the value `dict.get("schema_version")`
+naturally returns when the key is absent), so every stored-row read in this package --
+versioned or not -- goes through the same `read_versioned()` call. That uniformity is
+deliberate: it means adding a real `schema_version` field to one of today's unversioned
+models later is a registry edit at its own definition, not an audit of every call site
+that reads it.
+
+No v2 of any real contract is defined here -- that is Phase P4's job. This module's own
+test suite (`tests/unit/domain/test_versioning.py`) proves the upgrade-chain machinery
+end to end with a synthetic, test-only "demo-widget" contract, exactly as
+`storage/migrations.py`'s demo migration proved the table-migration engine without being
+one of the three real breaking changes it exists to enable.
+"""
+
+import json
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from typing import Generic, TypeVar, cast
+
+from pydantic import BaseModel
+
+T = TypeVar("T", bound=BaseModel)
+
+
+class UnknownSchemaVersionError(ValueError):
+    """Raised when a stored payload's `schema_version` is not in this build's registry.
+
+    This is the explicit failure the brief requires: old code encountering a row written
+    by a newer build must fail loudly, not silently misread or default it. The message
+    names the contract, the version found in the payload, and every version this build
+    knows how to read, so an operator can tell at a glance whether they need to upgrade
+    this build or investigate a corrupted row.
+    """
+
+    def __init__(
+        self,
+        *,
+        contract: str,
+        found_version: object,
+        supported_versions: tuple[str | None, ...],
+    ) -> None:
+        supported = ", ".join(repr(version) for version in supported_versions)
+        message = (
+            f"{contract}: stored schema_version {found_version!r} is not one this build "
+            f"knows how to read (supported: {supported}). This row may have been written "
+            "by a newer version of openalpha_cn than this one; refusing to silently "
+            "misread it."
+        )
+        super().__init__(message)
+        self.contract = contract
+        self.found_version = found_version
+        self.supported_versions = supported_versions
+
+
+@dataclass(frozen=True)
+class ContractVersions(Generic[T]):
+    """One contract's known-version registry plus its forward upgrade chain.
+
+    `versions` maps every `schema_version` value this build can still read (`None` for a
+    contract with no `schema_version` field, see `single_version()`) to the model that
+    validates a payload at that version. `current_version` is the key in `versions` whose
+    model is `T` -- the version `read_versioned()` always returns instances of. `upgrades`
+    must supply, for every key in `versions` other than `current_version`, a function from
+    a validated instance at that version to a validated instance of the *next* version
+    (which may itself be non-current, if the chain has more than one hop).
+
+    Construction validates that `current_version` is registered and that every
+    non-current version has an upgrade path registered -- a registry that would strand a
+    version mid-chain fails at import time, not the first time a stale row is read.
+    """
+
+    name: str
+    current_version: str | None
+    versions: Mapping[str | None, type[BaseModel]]
+    upgrades: Mapping[str | None, Callable[[BaseModel], BaseModel]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.current_version not in self.versions:
+            raise ValueError(
+                f"{self.name}: current_version {self.current_version!r} is not in versions "
+                f"{tuple(self.versions)!r}"
+            )
+        expected_upgrade_keys = set(self.versions) - {self.current_version}
+        actual_upgrade_keys = set(self.upgrades)
+        if actual_upgrade_keys != expected_upgrade_keys:
+            raise ValueError(
+                f"{self.name}: expected an upgrade registered for every non-current version "
+                f"{sorted(expected_upgrade_keys, key=str)!r}, got "
+                f"{sorted(actual_upgrade_keys, key=str)!r}"
+            )
+
+
+def single_version(name: str, model_cls: type[T]) -> ContractVersions[T]:
+    """Build a trivial one-version registry for a model with no `schema_version` field.
+
+    See the module docstring: this exists so every stored-row read in this package can
+    go through `read_versioned()`, whether or not its model participates in the real
+    `schema_version` versioning scheme yet.
+    """
+    return ContractVersions(name=name, current_version=None, versions={None: model_cls})
+
+
+def read_versioned(registry: ContractVersions[T], raw: str | bytes) -> T:
+    """Parse `raw`, dispatch on its `schema_version`, and return a current-version instance.
+
+    `schema_version` is read from the plain `dict` produced by `json.loads`, before any
+    pydantic model sees the payload -- see the module docstring for why this ordering is
+    load-bearing. A version absent from `registry.versions` raises
+    `UnknownSchemaVersionError`; a version present but malformed for its own model raises
+    that model's ordinary `pydantic.ValidationError`, left to propagate unchanged so it is
+    never confused with a version mismatch.
+    """
+    payload = json.loads(raw)
+    version = payload.get("schema_version") if isinstance(payload, dict) else None
+    model_cls = registry.versions.get(version)
+    if model_cls is None:
+        raise UnknownSchemaVersionError(
+            contract=registry.name,
+            found_version=version,
+            supported_versions=tuple(registry.versions),
+        )
+    instance: BaseModel = model_cls.model_validate(payload)
+    steps = 0
+    while version != registry.current_version:
+        if steps >= len(registry.versions):
+            raise RuntimeError(
+                f"{registry.name}: upgrade chain did not converge on {registry.current_version!r} "
+                f"starting from {version!r}"
+            )
+        upgrade = registry.upgrades[version]
+        instance = upgrade(instance)
+        version = getattr(instance, "schema_version", None)
+        steps += 1
+    return cast(T, instance)

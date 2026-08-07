@@ -6,6 +6,7 @@ from typing import Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from openalpha_cn.domain.time import ensure_aware
+from openalpha_cn.domain.versioning import ContractVersions, single_version
 
 
 class VersionRef(BaseModel):
@@ -77,3 +78,14 @@ class RunManifest(BaseModel):
         if any(item.recorded_at < self.started_at for item in self.checkpoints):
             raise ValueError("checkpoint cannot precede started_at")
         return self
+
+
+RUN_MANIFEST_VERSIONS: ContractVersions[RunManifest] = ContractVersions(
+    name="run-manifest",
+    current_version="run-manifest/v1",
+    versions={"run-manifest/v1": RunManifest},
+)
+
+CHECKPOINT_RECORD_VERSIONS: ContractVersions[CheckpointRecord] = single_version(
+    "checkpoint-record", CheckpointRecord
+)

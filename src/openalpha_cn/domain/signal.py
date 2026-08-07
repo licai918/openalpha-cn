@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validat
 
 from openalpha_cn.domain._identity import stable_model_id
 from openalpha_cn.domain.time import ensure_aware
+from openalpha_cn.domain.versioning import ContractVersions
 
 
 class SignalFrame(BaseModel):
@@ -51,3 +52,10 @@ class SignalFrame(BaseModel):
     def signal_id(self) -> str:
         """Return the stable content-derived signal identifier."""
         return stable_model_id(prefix="sig", model=self)
+
+
+SIGNAL_FRAME_VERSIONS: ContractVersions[SignalFrame] = ContractVersions(
+    name="signal-frame",
+    current_version="signal-frame/v1",
+    versions={"signal-frame/v1": SignalFrame},
+)

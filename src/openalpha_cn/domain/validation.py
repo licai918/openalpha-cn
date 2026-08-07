@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validat
 
 from openalpha_cn.domain._identity import stable_model_id
 from openalpha_cn.domain.time import ensure_aware
+from openalpha_cn.domain.versioning import ContractVersions
 
 
 class AttributionTerm(BaseModel):
@@ -62,3 +63,10 @@ class ValidationResult(BaseModel):
     def validation_id(self) -> str:
         """Return the stable content-derived validation identifier."""
         return stable_model_id(prefix="val", model=self)
+
+
+VALIDATION_RESULT_VERSIONS: ContractVersions[ValidationResult] = ContractVersions(
+    name="validation-result",
+    current_version="validation-result/v1",
+    versions={"validation-result/v1": ValidationResult},
+)
