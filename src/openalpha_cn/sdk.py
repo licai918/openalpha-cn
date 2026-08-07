@@ -24,29 +24,22 @@ from openalpha_cn.backtest.portfolio import (
 from openalpha_cn.backtest.replay import ReplayCorpus, ReplayReport, ReplayRunner
 from openalpha_cn.domain.evidence import EvidenceSnapshot
 from openalpha_cn.domain.signal import SignalFrame
-from openalpha_cn.evidence.service import EvidenceStore, build_file_evidence
+from openalpha_cn.evidence.service import build_file_evidence
 from openalpha_cn.product.research import (
-    ReportStore,
     ResearchReport,
     ResearchReportFactory,
     ResearchScreener,
     ScreeningCriteria,
     ScreeningResult,
     WatchlistEntry,
-    WatchlistStore,
 )
 from openalpha_cn.providers.base import ProviderMetadata, utc_now
 from openalpha_cn.runtime.batch import BatchResearchService, BatchResearchTask
+from openalpha_cn.runtime.composition import build_storage
 from openalpha_cn.runtime.contracts import ResearchRunRequest, ResearchRunResult
 from openalpha_cn.runtime.engine import ResearchEngine
 from openalpha_cn.runtime.memory import MemoryEntry
-from openalpha_cn.storage.batch import SQLiteBatchTaskStore
-from openalpha_cn.storage.memory import SQLiteResearchMemory
-from openalpha_cn.storage.parquet import ParquetEvidenceStore
-from openalpha_cn.storage.portfolio import SQLitePortfolioLedger
-from openalpha_cn.storage.product import SQLiteReportStore, SQLiteWatchlistStore
-from openalpha_cn.storage.recovery import RunRecoveryState, SQLiteRecoveryStore
-from openalpha_cn.storage.sqlite import SQLiteRunRepository
+from openalpha_cn.storage.recovery import RunRecoveryState
 
 
 class OpenAlphaSDK:
@@ -60,18 +53,17 @@ class OpenAlphaSDK:
         agents: Sequence[ResearchAgent] | None = None,
     ) -> None:
         self.runtime_dir = runtime_dir
-        self.runtime_dir.mkdir(parents=True, exist_ok=True)
         self.clock = clock
         self.agents = None if agents is None else tuple(agents)
-        self.evidence_store: EvidenceStore = ParquetEvidenceStore(runtime_dir / "evidence")
-        self.repository = SQLiteRunRepository(runtime_dir / "state.sqlite3")
-        self.memory = SQLiteResearchMemory(runtime_dir / "state.sqlite3")
-        self.recovery_store = SQLiteRecoveryStore(runtime_dir / "state.sqlite3")
-        self.batch_store = SQLiteBatchTaskStore(runtime_dir / "state.sqlite3")
-        self.portfolio_ledger = SQLitePortfolioLedger(runtime_dir / "state.sqlite3")
-        self.watchlist_store: WatchlistStore = SQLiteWatchlistStore(runtime_dir / "state.sqlite3")
-        self.report_store: ReportStore = SQLiteReportStore(runtime_dir / "state.sqlite3")
-        self.batch_store.recover_interrupted(now=self.clock())
+        storage = build_storage(runtime_dir=runtime_dir, clock=clock)
+        self.evidence_store = storage.evidence_store
+        self.repository = storage.repository
+        self.memory = storage.memory
+        self.recovery_store = storage.recovery_store
+        self.batch_store = storage.batch_store
+        self.portfolio_ledger = storage.portfolio_ledger
+        self.watchlist_store = storage.watchlist_store
+        self.report_store = storage.report_store
 
     def health(self) -> dict[str, str]:
         """Return SDK and package readiness."""

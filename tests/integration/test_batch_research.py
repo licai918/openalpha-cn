@@ -111,6 +111,52 @@ def test_batch_cancel_and_interrupted_recovery_are_explicit(tmp_path: Path) -> N
     assert restored.items[0].status == "queued"
 
 
+def _serialized_payload(run_id: str, subject: str) -> dict[str, object]:
+    """Build a research-run payload whose evidence carries its computed IDs.
+
+    This mirrors what a client naturally has after calling `/api/v1/evidence/build`
+    (or `/api/v1/evidence`) and feeding the response straight back in as a research
+    request: each evidence item's serialized dict includes `evidence_id` and
+    `content_hash`. Only `ResearchApiRequest`'s lenient `verify_serialized_evidence`
+    validator (`api/app.py`) knows how to accept those extra computed fields; a bare
+    `ResearchRunRequest` (`extra="forbid"` all the way down through `EvidenceSnapshot`)
+    rejects them.
+    """
+    built = request(run_id, subject)
+    payload = built.model_dump(mode="json", exclude_computed_fields=True)
+    payload["evidence"] = [item.model_dump(mode="json") for item in built.evidence]
+    return payload
+
+
+def test_single_and_batch_endpoints_accept_the_same_serialized_evidence_payload(
+    tmp_path: Path,
+) -> None:
+    """`POST /api/v1/research/run` and `POST /api/v1/research/batches` both ultimately
+    validate a `ResearchRunRequest`, so the same serialized payload -- evidence items
+    still carrying their `evidence_id`/`content_hash` computed fields, exactly as a
+    client would naturally pass through from a prior evidence response -- must be
+    accepted by both. Before the fix, `BatchSubmitRequest.requests` used a bare
+    `ResearchRunRequest` while `/research/run` used the lenient `ResearchApiRequest`,
+    so the identical payload succeeded on one endpoint and failed 422 on the other
+    (audit F32)."""
+    client = TestClient(create_app(runtime_dir=tmp_path))
+    single_payload = _serialized_payload("serialized-payload-single", "000001.SZ")
+    batch_payload = _serialized_payload("serialized-payload-batch-item", "000001.SZ")
+
+    single_response = client.post("/api/v1/research/run", json=single_payload)
+    batch_response = client.post(
+        "/api/v1/research/batches",
+        json={
+            "batch_id": "serialized-payload-batch",
+            "requests": [batch_payload],
+            "max_concurrency": 1,
+        },
+    )
+
+    assert single_response.status_code == 200, single_response.text
+    assert batch_response.status_code == 202, batch_response.text
+
+
 def test_batch_http_surface_submits_runs_and_exposes_events(tmp_path: Path) -> None:
     client = TestClient(create_app(runtime_dir=tmp_path))
     response = client.post(

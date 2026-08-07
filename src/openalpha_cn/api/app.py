@@ -36,31 +36,23 @@ from openalpha_cn.domain.validation import ValidationResult
 from openalpha_cn.evidence.service import (
     EvidenceBuildRequest,
     EvidenceBuildResponse,
-    EvidenceStore,
     build_evidence,
     parse_serialized_evidence,
 )
 from openalpha_cn.product.research import (
-    ReportStore,
     ResearchReport,
     ResearchReportFactory,
     ResearchScreener,
     ScreeningCriteria,
     ScreeningResult,
     WatchlistEntry,
-    WatchlistStore,
 )
 from openalpha_cn.runtime.batch import BatchProgressEvent, BatchResearchService, BatchResearchTask
+from openalpha_cn.runtime.composition import build_storage
 from openalpha_cn.runtime.contracts import ResearchRunRequest, ResearchRunResult
 from openalpha_cn.runtime.engine import ResearchEngine
 from openalpha_cn.runtime.memory import MemoryEntry
-from openalpha_cn.storage.batch import SQLiteBatchTaskStore
-from openalpha_cn.storage.memory import SQLiteResearchMemory
-from openalpha_cn.storage.parquet import ParquetEvidenceStore
-from openalpha_cn.storage.portfolio import SQLitePortfolioLedger
-from openalpha_cn.storage.product import SQLiteReportStore, SQLiteWatchlistStore
-from openalpha_cn.storage.recovery import RunRecoveryState, SQLiteRecoveryStore
-from openalpha_cn.storage.sqlite import SQLiteRunRepository
+from openalpha_cn.storage.recovery import RunRecoveryState
 
 
 class ReplayApiRequest(BaseModel):
@@ -112,7 +104,7 @@ class BatchSubmitRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     batch_id: str = Field(min_length=1, max_length=128)
-    requests: tuple[ResearchRunRequest, ...] = Field(min_length=1, max_length=1000)
+    requests: tuple[ResearchApiRequest, ...] = Field(min_length=1, max_length=1000)
     max_concurrency: int = Field(default=4, ge=1, le=32)
 
 
@@ -254,16 +246,15 @@ def create_app(
     )
     if request_limit < 1:
         raise ValueError("max_request_bytes must be positive")
-    root.mkdir(parents=True, exist_ok=True)
-    evidence_store: EvidenceStore = ParquetEvidenceStore(root / "evidence")
-    run_repository = SQLiteRunRepository(root / "state.sqlite3")
-    memory = SQLiteResearchMemory(root / "state.sqlite3")
-    recovery_store = SQLiteRecoveryStore(root / "state.sqlite3")
-    batch_store = SQLiteBatchTaskStore(root / "state.sqlite3")
-    portfolio_ledger = SQLitePortfolioLedger(root / "state.sqlite3")
-    watchlist_store: WatchlistStore = SQLiteWatchlistStore(root / "state.sqlite3")
-    report_store: ReportStore = SQLiteReportStore(root / "state.sqlite3")
-    batch_store.recover_interrupted(now=datetime.now(UTC))
+    storage = build_storage(runtime_dir=root, clock=lambda: datetime.now(UTC))
+    evidence_store = storage.evidence_store
+    run_repository = storage.repository
+    memory = storage.memory
+    recovery_store = storage.recovery_store
+    batch_store = storage.batch_store
+    portfolio_ledger = storage.portfolio_ledger
+    watchlist_store = storage.watchlist_store
+    report_store = storage.report_store
 
     def run_one(request: ResearchRunRequest) -> ResearchRunResult:
         return ResearchEngine(
