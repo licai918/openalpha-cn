@@ -71,8 +71,9 @@ These are warnings for whoever introduces the numerical stack, not abstract conc
    every symbol from those packages to `Any`; combined with strict's `warn_return_any`, any
    function that returns a pandas/numpy expression fails type-checking. Nearly every public
    function in the factor layer will need an explicit `float(...)` / `cast(...)` at its
-   boundary. There is already a local precedent for this pattern: `storage/parquet.py` uses
-   `cast()` at 11 call sites.
+   boundary. There is already a local precedent for this pattern: `storage/parquet.py` is
+   dense with `cast()` at the DuckDB boundary — 15 call sites as of `081b568`, all of them
+   converting `Any`-typed row values back into declared types.
 2. `sklearn` and `lightgbm` are **not** in the mypy override block. Under strict mode, the
    first `import sklearn` (or `lightgbm`) fails `mypy src` outright — introducing either one
    requires adding an override entry in the same change.
