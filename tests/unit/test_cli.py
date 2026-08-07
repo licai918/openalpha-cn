@@ -9,6 +9,7 @@ from typer.testing import CliRunner
 
 from openalpha_cn import cli
 from openalpha_cn.cli import app
+from openalpha_cn.providers.akshare import AKShareProvider
 from openalpha_cn.providers.base import (
     ProviderBatch,
     ProviderFailure,
@@ -340,3 +341,59 @@ def test_doctor_probe_runs_chainlin_normally_when_base_url_env_var_is_set(
     assert probe == dict.fromkeys(probe, "ok")
     assert len(captured_urls) == 8
     assert all(url.startswith("https://custom-chainlin-base.example/v1") for url in captured_urls)
+
+
+class _FakeAKShareFrame:
+    """Minimal `FrameLike` fixture: an empty result, just enough to reach `fetch()`."""
+
+    empty = True
+
+    def to_dict(self, *, orient: str) -> list[dict[str, Any]]:
+        assert orient == "records"
+        return []
+
+
+class _FakeAKShareClient:
+    """A fake wired through `AKShareProvider`'s documented `client=` seam.
+
+    Deliberately not the permissive `_StubProvider` used elsewhere in this file:
+    `_StubProvider.fetch` accepts whatever `ProviderRequest` it is given, so it could
+    never have caught `_probe_report` calling `AKShareProvider.fetch()` with an empty
+    `subjects` tuple. This fake sits behind the *real* `AKShareProvider.fetch()`, which
+    enforces "exactly one subject" itself, so the request that reaches
+    `stock_zh_a_hist` is only ever the one `_probe_report` actually built.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, str]] = []
+
+    def stock_zh_a_hist(self, **kwargs: str) -> _FakeAKShareFrame:
+        self.calls.append(kwargs)
+        return _FakeAKShareFrame()
+
+
+def test_doctor_probe_supplies_the_subject_akshare_fetch_requires(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: `_probe_report` used to call every provider's `fetch()` with
+    `subjects=()`. `AKShareProvider.fetch()` requires exactly one subject and raises
+    `ProviderFailure(category="configuration", ...)` before it ever imports `akshare`,
+    so `--probe` reported `configuration` for `stock_zh_a_hist` in every environment,
+    regardless of whether AKShare actually works -- confirmed against a real
+    `akshare==1.18.77` install that the probe still reported `configuration` for.
+
+    This uses the real `AKShareProvider` (via its `client=` seam), not a stub that
+    accepts any request shape, so the assertion only passes if `_probe_report` builds
+    a request the real contract accepts.
+    """
+    client = _FakeAKShareClient()
+    provider = AKShareProvider(client=client)
+    monkeypatch.setattr(cli, "_default_providers", lambda: [provider])
+
+    result = runner.invoke(app, ["doctor", "--json", "--probe"])
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["providers"]["akshare.research"]["probe"] == {"stock_zh_a_hist": "ok"}
+    assert len(client.calls) == 1
+    assert client.calls[0]["symbol"], "the probe must supply a real, non-empty subject"

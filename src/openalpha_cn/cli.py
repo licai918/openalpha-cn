@@ -114,6 +114,25 @@ def _is_configured(provider: DataProvider) -> bool:
     return bool(getattr(provider, "is_configured", True))
 
 
+def _probe_subjects(provider: DataProvider, dataset: str) -> tuple[str, ...]:
+    """Return the minimal subjects `dataset`'s `fetch()` contract requires for a probe.
+
+    Most datasets accept an empty subject tuple, so this defaults to `()`. A provider
+    whose contract requires at least one subject for a given dataset (AKShare's
+    `stock_zh_a_hist`, for example) opts in by implementing an optional
+    ``probe_subjects(dataset: str) -> tuple[str, ...]`` method -- the same
+    `getattr`-based extension pattern `_is_configured` already uses. Because the hook
+    lives on the provider, not here, adding datasets in P1 never requires touching
+    this function: each provider stays responsible for the minimal input its own
+    `fetch()` needs.
+    """
+    hook = getattr(provider, "probe_subjects", None)
+    if hook is None:
+        return ()
+    subjects = hook(dataset)
+    return tuple(str(subject) for subject in subjects)
+
+
 def _probe_report(provider: DataProvider) -> dict[str, str]:
     """Make one minimal request per declared dataset and classify the outcome.
 
@@ -130,7 +149,12 @@ def _probe_report(provider: DataProvider) -> dict[str, str]:
     results: dict[str, str] = {}
     for dataset in provider.metadata.supported_datasets:
         try:
-            provider.fetch(ProviderRequest(dataset=dataset, as_of=as_of))
+            request = ProviderRequest(
+                dataset=dataset,
+                as_of=as_of,
+                subjects=_probe_subjects(provider, dataset),
+            )
+            provider.fetch(request)
         except ProviderFailure as failure:
             results[dataset] = failure.category
         except Exception:

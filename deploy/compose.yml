@@ -15,6 +15,20 @@ services:
       OPENALPHA_RUNTIME_DIR: /data
       OPENALPHA_WEB_DIR: /app/web-dist
       OPENALPHA_MAX_REQUEST_BYTES: ${OPENALPHA_MAX_REQUEST_BYTES:-8388608}
+      # User-owned data provider credentials (see .env.example). Each uses a `:-`
+      # default so an unset host/`.env` variable still leaves `docker compose config`
+      # well-formed; Compose substitutes from the host shell environment first, then
+      # from a project `.env` file, so the same variable a user exports or puts in
+      # `.env` before `docker compose up` reaches the container either way.
+      TUSHARE_TOKEN: ${TUSHARE_TOKEN:-}
+      CHAINLIN_API_BASE_URL: ${CHAINLIN_API_BASE_URL:-}
+      CHAINLIN_API_KEY: ${CHAINLIN_API_KEY:-}
+      # Optional model providers (see .env.example)
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      QWEN_API_KEY: ${QWEN_API_KEY:-}
+      CUSTOM_MODEL_BASE_URL: ${CUSTOM_MODEL_BASE_URL:-}
+      CUSTOM_MODEL_API_KEY: ${CUSTOM_MODEL_API_KEY:-}
     volumes:
       - openalpha-runtime:/data
     tmpfs:

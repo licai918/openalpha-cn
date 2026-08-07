@@ -223,6 +223,56 @@ def test_readme_prioritizes_chainlin_and_explains_installation() -> None:
     assert brain_end < ready_to_use < installation < data_advantage
 
 
+def test_readme_python_source_setup_does_not_imply_env_is_auto_loaded() -> None:
+    """Finding: the Python-source setup flow told the user to copy `.env.example` to
+    `.env`, then run `doctor`/`serve` -- silently implying `.env` gets read the way
+    Docker Compose reads it. It does not: there is no in-process `.env` parser (see
+    `test_no_dotenv_dependency_or_usage_exists_yet` below, which pins that today's
+    behavior matches this claim). This asserts the corrected section states the gap
+    plainly, shows the real fix (exporting into the shell before `doctor`/`serve`),
+    and links to the provider doc that documents each variable's export step.
+    """
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    setup_start = readme.index("方式二")
+    setup_end = readme.index("## 数据优势如何体现")
+    assert setup_start < setup_end
+    section = readme[setup_start:setup_end]
+
+    assert "不会" in section
+    assert "自动加载" in section or "自动读取" in section
+    assert "$env:" in section or "export " in section
+    assert "docs/data/providers.zh-CN.md" in section
+
+    # The copy-to-.env step must come strictly before `doctor`/`serve`, and the
+    # export step must sit between them -- otherwise the corrected instructions
+    # would still run doctor/serve before the variables they depend on exist.
+    copy_step = section.index(".env")
+    export_step = section.index("$env:")
+    doctor_step = section.index("openalpha doctor")
+    serve_step = section.index("openalpha serve")
+    assert copy_step < export_step < doctor_step < serve_step
+
+
+def test_no_dotenv_dependency_or_usage_exists_yet() -> None:
+    """Pins the premise `test_readme_python_source_setup_does_not_imply_env_is_auto_loaded`
+    relies on: in-process `.env` loading is deliberately deferred (V2-P0B-006), not
+    implemented here. If a future change adds `python-dotenv` (or any `.env` parser)
+    to `src/`, this test breaks, which is the intended signal to also revisit the
+    README claim that the CLI/SDK does not auto-load `.env`.
+    """
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert "dotenv" not in pyproject.lower()
+
+    src_root = ROOT / "src"
+    offenders = [
+        str(path.relative_to(ROOT))
+        for path in src_root.rglob("*.py")
+        if "dotenv" in path.read_text(encoding="utf-8").lower()
+    ]
+    assert offenders == []
+
+
 def test_wechat_contact_qr_is_the_owner_provided_jpeg() -> None:
     qr_image = ROOT / "assets" / "brand" / "wechat-contact-qr.jpg"
     content = qr_image.read_bytes()
@@ -386,6 +436,57 @@ def test_container_delivery_has_persistence_and_recovery_verification() -> None:
     assert "read_only: true" in compose
     assert "no-new-privileges:true" in compose
     assert verification.is_file()
+
+
+def _env_example_section_vars(env_example: str, header: str) -> list[str]:
+    """Return the `NAME=` variables declared directly under a `# <header>` comment.
+
+    Only variables belonging to one specific `.env.example` section, not the whole
+    file, so an unrelated future addition under a different header (e.g. another
+    `OPENALPHA_*` runtime-path setting, which Compose deliberately hardcodes to a
+    container path instead of passing through) can never be swept into this check.
+    """
+    match = re.search(
+        rf"^# {re.escape(header)}\n((?:[A-Z][A-Z0-9_]*=.*\n?)+)",
+        env_example,
+        re.MULTILINE,
+    )
+    assert match is not None, f".env.example has no {header!r} section"
+    names = re.findall(r"^([A-Z][A-Z0-9_]*)=", match.group(1), re.MULTILINE)
+    assert names, f".env.example {header!r} section declares no variables"
+    return names
+
+
+def test_compose_passes_through_declared_provider_credentials() -> None:
+    """Docker Compose must forward every user-owned credential declared in
+    `.env.example` into the container environment, with a safe `:-` default so an
+    unset variable can never break `docker compose config`.
+
+    Reviewer-reproduced gap: with a real `TUSHARE_TOKEN` exported in the host shell,
+    `docker compose up -d --wait` followed by `docker compose exec openalpha python -m
+    openalpha_cn.cli doctor` reported the credential missing *inside the container*,
+    because `environment:` never referenced `TUSHARE_TOKEN` (or any other credential)
+    at all -- Compose has no implicit passthrough, so a Compose file that only ever
+    references `OPENALPHA_*` settings can never see a Provider or model-provider
+    credential set outside it, no matter how the user set it.
+
+    This is a structural check only: it confirms each declared credential variable is
+    referenced with a safe default, which is verifiable without Docker. It cannot
+    confirm a *real* credential value actually reaches a running container -- that
+    requires Docker itself, exercised only when available (see this phase's manual
+    `docker compose config` verification and `scripts/verify_compose_recovery.py`).
+    """
+    compose = (ROOT / "deploy" / "compose.yml").read_text(encoding="utf-8")
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+
+    credential_vars = _env_example_section_vars(
+        env_example, "User-owned data provider credentials"
+    ) + _env_example_section_vars(env_example, "Optional model providers")
+
+    for name in credential_vars:
+        assert f"{name}: ${{{name}:-}}" in compose, (
+            f"deploy/compose.yml does not pass {name} through with a safe default"
+        )
 
 
 def test_quality_workflow_covers_supported_platforms_and_locked_dependencies() -> None:

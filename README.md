@@ -228,11 +228,19 @@ git clone https://github.com/ss8875/openalpha-cn.git
 Set-Location openalpha-cn
 Copy-Item .env.example .env
 uv sync --locked --all-extras --dev
+```
+
+`.env` 目前只被“方式一：Docker Compose”自动读取；这里的 Python 源码环境（CLI、SDK）**不会**
+自动加载 `.env`，需要先把要用到的变量导出到当前 Shell，`doctor`/`serve` 才能看到，否则
+`doctor` 会一直报凭据缺失，`serve` 也拿不到真实数据：
+
+```powershell
+$env:TUSHARE_TOKEN = "your-token"
 uv run openalpha doctor
 uv run openalpha serve
 ```
 
-服务默认只监听本机 `127.0.0.1:8000`。数据源 Token 和模型密钥由用户写入本地 `.env`，不要提交到 Git。完整配置、备份、恢复和升级方法见[详细部署方案](docs/deployment/production.zh-CN.md)。
+服务默认只监听本机 `127.0.0.1:8000`。每个数据源变量的导出方式见[数据源与 Provider 边界](docs/data/providers.zh-CN.md)；完整配置、备份、恢复和升级方法见[详细部署方案](docs/deployment/production.zh-CN.md)。（内建 CLI/SDK 层面自动加载 `.env` 已列入后续计划，尚未实现。）
 
 ## 数据优势如何体现
 

@@ -48,8 +48,21 @@ Invoke-RestMethod http://127.0.0.1:8000/health
 | `OPENALPHA_RUNTIME_DIR` | `/data` | 容器内持久目录 |
 | `OPENALPHA_MAX_REQUEST_BYTES` | `8388608` | 声明的最大请求体 |
 | `TUSHARE_TOKEN` | 空 | 用户自带 Tushare Token |
+| `CHAINLIN_API_BASE_URL` / `CHAINLIN_API_KEY` | 空 | 链邻数据接口地址与密钥 |
 
-真实 Token 不写入 Compose 文件、Git、Issue、日志或截图。需要 Provider 时，使用本机 `.env` 或操作系统/平台密钥存储。
+`deploy/compose.yml` 会把上述 Provider 凭据变量，以及 `.env.example` 中"Optional model
+providers"下列出的模型密钥（`OPENAI_API_KEY` 等），原样透传进容器；容器内未设置时即为空
+字符串，`doctor` 据此报告缺失，不会因此报错。
+
+设置方式二选一：
+
+1. 在执行 `docker compose` 的 Shell 中直接导出该变量（PowerShell: `$env:TUSHARE_TOKEN = "..."`；
+   bash/zsh: `export TUSHARE_TOKEN=...`），再执行 `docker compose up`；
+2. 在 `deploy/` 目录下（与 `compose.yml` 同级）新建 `.env` 文件。Docker Compose 的项目目录
+   默认取自 `-f` 指定的第一个 Compose 文件所在目录，因此按“方式二：Python 源码环境”创建在
+   仓库根目录的 `.env` **不会**被这里的 `docker compose -f deploy/compose.yml` 自动读取。
+
+真实 Token 不写入 Compose 文件、Git、Issue、日志或截图，也不要提交 `deploy/.env`。
 
 ## 5. 数据持久化与恢复
 

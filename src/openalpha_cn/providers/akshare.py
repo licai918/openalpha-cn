@@ -70,6 +70,20 @@ class AKShareProvider:
         """Return AKShare research-use policy."""
         return self._metadata
 
+    def probe_subjects(self, dataset: str) -> tuple[str, ...]:
+        """Return the one subject `doctor --probe` must supply for `dataset`.
+
+        `fetch()` requires exactly one subject for `stock_zh_a_hist`; without this
+        hook, `cli._probe_report` (which defaults to `subjects=()`) would always hit
+        that check and report `configuration`, regardless of whether AKShare is
+        actually installed and reachable. `000001.SZ` (Ping An Bank) is a real,
+        continuously-listed A-share symbol used only to exercise the contract -- not a
+        recommendation.
+        """
+        if dataset != "stock_zh_a_hist":
+            return ()
+        return ("000001.SZ",)
+
     def fetch(self, request: ProviderRequest) -> ProviderBatch:
         """Fetch one allowlisted symbol/day or raise a structured failure."""
         if request.dataset != "stock_zh_a_hist":
