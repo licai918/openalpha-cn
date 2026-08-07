@@ -24,9 +24,10 @@ from openalpha_cn.providers.base import (
 )
 from openalpha_cn.providers.chainlin import ChainLinDataProvider
 from openalpha_cn.providers.tushare import TushareProvider
+from openalpha_cn.runtime.composition import build_storage
 from openalpha_cn.runtime.contracts import ResearchRunRequest
 from openalpha_cn.sdk import OpenAlphaSDK
-from openalpha_cn.storage.migrations import MigrationFailedError, read_status, run_migrations
+from openalpha_cn.storage.migrations import MigrationFailedError, read_status
 
 app = typer.Typer(
     name="openalpha",
@@ -373,7 +374,17 @@ def migrate_run(
         typer.Option("--dry-run", help="Show what would be applied without applying it."),
     ] = False,
 ) -> None:
-    """Apply pending schema migrations, backing up the database first."""
+    """Apply pending schema migrations, then construct every store once.
+
+    Goes through `build_storage()` -- the same composition root `sdk.py`/`api/app.py`
+    use -- rather than calling `run_migrations()` directly. A raw `run_migrations()` call
+    never constructs a store, so on a fresh `runtime_dir` a migration deferred only
+    because its table doesn't exist yet (e.g. the demo migration) would stay pending
+    forever, no matter how many times this command runs: nothing would ever create that
+    table. Routing through `build_storage()` constructs the stores as a side effect,
+    which creates the table, so the *next* invocation of this command (or the next real
+    SDK/API startup against the same directory) can actually apply it.
+    """
     path = runtime_dir / "state.sqlite3"
     if dry_run:
         status = read_status(path)
@@ -387,7 +398,7 @@ def migrate_run(
             typer.echo(f"  {pending_item.version} {pending_item.name}")
         return
     try:
-        result = run_migrations(path, clock=lambda: datetime.now(UTC))
+        storage = build_storage(runtime_dir=runtime_dir, clock=lambda: datetime.now(UTC))
     except MigrationFailedError as error:
         typer.echo(
             f"migration {error.version} ({error.name}) failed and was rolled back; "
@@ -395,14 +406,28 @@ def migrate_run(
             err=True,
         )
         raise typer.Exit(code=1) from error
-    if not result.applied:
+    result = storage.migration_result
+    status = read_status(path)
+    if not result.applied and not status.pending:
         typer.echo(f"schema version {result.to_version} is up to date; nothing to do")
         return
-    typer.echo(f"migrated {result.from_version} -> {result.to_version}")
-    for applied_item in result.applied:
-        typer.echo(f"  applied {applied_item.version} {applied_item.name}")
-    if result.backup_path is not None:
-        typer.echo(f"backup: {result.backup_path}")
+    if result.applied:
+        typer.echo(f"migrated {result.from_version} -> {result.to_version}")
+        for applied_item in result.applied:
+            typer.echo(f"  applied {applied_item.version} {applied_item.name}")
+        if result.backup_path is not None:
+            typer.echo(f"backup: {result.backup_path}")
+    if status.pending:
+        # Genuinely stuck, not "up to date": at least one migration's precondition
+        # (typically a table owned by a store not yet constructed against this
+        # `runtime_dir`) still isn't met. Say so instead of claiming completion.
+        typer.echo(
+            f"{len(status.pending)} migration(s) still pending at schema version "
+            f"{status.current_version} (deferred until their preconditions are met, "
+            "e.g. by normal application startup constructing the owning store):"
+        )
+        for pending_item in status.pending:
+            typer.echo(f"  {pending_item.version} {pending_item.name}")
 
 
 @app.command()

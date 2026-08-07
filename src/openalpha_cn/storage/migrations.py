@@ -35,6 +35,7 @@ speculative -- `test_new_database_lands_on_baseline_and_defers_the_demo_migratio
 `test_build_storage_catches_up_the_demo_migration_on_a_second_call` exercise exactly this path.
 """
 
+import os
 import sqlite3
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -122,6 +123,26 @@ def _table_exists(connection: sqlite3.Connection, name: str) -> bool:
     return row is not None
 
 
+def require_table(connection: sqlite3.Connection, name: str) -> None:
+    """Raise `MigrationNotYetApplicable` unless table `name` already exists.
+
+    Reusable precondition guard for any migration that alters a table owned by one of
+    this package's stores. Migrations run before any store is constructed (see module
+    docstring), so on a fresh install the owning table does not exist yet; a migration
+    that assumes otherwise and runs a bare `ALTER TABLE`/`UPDATE`/etc. against it crashes
+    every fresh install with a bare `sqlite3.OperationalError`, wrapped by the executor
+    into `MigrationFailedError` and propagated out of `build_storage()` -- i.e. it takes
+    down `OpenAlphaSDK.__init__` and `create_app()` for every new installation, not just
+    this one migration. Call this as the first line of `apply()` instead of hand-rolling
+    the same `_table_exists` check --
+    `test_every_non_baseline_migration_defers_gracefully_on_a_fresh_empty_database`
+    (tests/integration/storage/test_migrations.py) enforces that every non-baseline
+    migration in `MIGRATIONS` actually does this.
+    """
+    if not _table_exists(connection, name):
+        raise MigrationNotYetApplicable(f"{name} table does not exist yet")
+
+
 def _baseline_apply(connection: sqlite3.Connection) -> None:
     """Stamp an unversioned database at the baseline version. Touches no data.
 
@@ -143,12 +164,12 @@ def _demo_add_runs_archived_at(connection: sqlite3.Connection) -> None:
     scaffolding for this task, not one of the three breaking changes `V2-P4-001` will make.
 
     Guarded twice: if `runs` doesn't exist yet, there is nothing to alter (see module
-    docstring), so this raises `MigrationNotYetApplicable`. If `archived_at` is already
-    present (this migration has already run once, or the table was created after this
-    migration first shipped), it is a silent no-op rather than a duplicate-column error.
+    docstring), so this raises `MigrationNotYetApplicable` via `require_table`. If
+    `archived_at` is already present (this migration has already run once, or the table
+    was created after this migration first shipped), it is a silent no-op rather than a
+    duplicate-column error.
     """
-    if not _table_exists(connection, "runs"):
-        raise MigrationNotYetApplicable("runs table does not exist yet")
+    require_table(connection, "runs")
     columns = {row[1] for row in connection.execute("PRAGMA table_info(runs)")}
     if "archived_at" in columns:
         return
@@ -184,15 +205,30 @@ def _take_backup(path: Path, *, current_version: int, clock: Callable[[], dateti
     Lands in `path.parent / "backups"` -- inside the runtime directory, which is
     gitignored -- named with both the pre-migration version and a timestamp so an
     operator can identify which backup corresponds to which failed or successful run.
-    The `.bak` suffix is deliberate: `.sqlite3`/`.db` are `scripts/verify_publication.py`'s
-    publication-blocked suffixes, and while this directory is already gitignored, the
-    backup's own suffix should not be one that would trip that check if it were ever
-    copied elsewhere.
+    `.bak` is a SQLite binary dump just like `.sqlite3`/`.db`, so it is one of
+    `scripts/verify_publication.py`'s `BLOCKED_SUFFIXES`: escaping the publication scan
+    is the risk for a file like this, not a protection, and `.gitignore` alone stops
+    covering it the moment someone passes a custom `--runtime-dir` outside the ignored
+    tree. The filename is claimed with `os.O_CREAT | os.O_EXCL` (atomic at the OS level,
+    unlike an exists-then-create check) and falls back to a numeric suffix on collision,
+    so two callers backing up the same version within the same clock tick -- e.g. two
+    concurrent processes, or a frozen test clock -- never silently overwrite each other.
     """
     backups_dir = path.parent / "backups"
     backups_dir.mkdir(parents=True, exist_ok=True)
     timestamp = clock().strftime("%Y%m%dT%H%M%SZ")
-    backup_path = backups_dir / f"{path.name}.v{current_version}.{timestamp}.bak"
+    stem = f"{path.name}.v{current_version}.{timestamp}"
+    suffix = 0
+    while True:
+        candidate = stem if suffix == 0 else f"{stem}-{suffix}"
+        backup_path = backups_dir / f"{candidate}.bak"
+        try:
+            claimed_fd = os.open(backup_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            suffix += 1
+            continue
+        os.close(claimed_fd)
+        break
     source = sqlite3.connect(path)
     try:
         destination = sqlite3.connect(backup_path)
@@ -251,6 +287,18 @@ def run_migrations(
     re-raised as `MigrationFailedError` naming the pre-migration backup. A migration that
     raises `MigrationNotYetApplicable` stops the run (without error) and leaves it, and
     everything after it, pending.
+
+    Concurrency: `pending` is computed once, from a snapshot taken before any lock is
+    held, so two callers racing the same database (e.g. the API and the CLI hitting the
+    same `runtime_dir`) can both decide the same migration is pending. `BEGIN IMMEDIATE`
+    correctly serializes the two writers, but without a re-check the loser would replay
+    `migration.apply()` and then hit a primary-key collision on its own `INSERT INTO
+    schema_migrations` -- a real `sqlite3.IntegrityError` that the generic `except
+    Exception` below would report as `MigrationFailedError`, even though the database is
+    healthy and the migration is in fact already applied. Each iteration therefore
+    re-reads `PRAGMA user_version` *after* acquiring the write lock and skips migrations
+    a concurrent winner already committed while this connection was blocked waiting for
+    the lock, instead of attempting to reapply them.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path, isolation_level=None)
@@ -270,6 +318,13 @@ def run_migrations(
         applied: list[AppliedMigration] = []
         for migration in pending:
             connection.execute("BEGIN IMMEDIATE")
+            if migration.version <= _current_version(connection):
+                # A concurrent writer already applied this exact migration while this
+                # connection was blocked waiting for the write lock above -- not a
+                # fault, just a lost race. Skip it instead of replaying `apply()` and
+                # colliding with the winner's `schema_migrations` row.
+                connection.execute("ROLLBACK")
+                continue
             try:
                 migration.apply(connection)
                 applied_at = clock().isoformat()

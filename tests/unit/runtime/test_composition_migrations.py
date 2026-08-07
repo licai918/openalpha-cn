@@ -20,21 +20,32 @@ def test_build_storage_stamps_a_fresh_runtime_dir_to_baseline_without_crashing(
 ) -> None:
     runtime_dir = tmp_path / "runtime"
 
-    build_storage(runtime_dir=runtime_dir, clock=_clock)
+    storage = build_storage(runtime_dir=runtime_dir, clock=_clock)
 
     status = read_status(runtime_dir / "state.sqlite3")
     # The demo migration defers here: migrations run before SQLiteRunRepository creates
     # `runs`, so only the precondition-free baseline can apply on this first call.
     assert status.current_version == BASELINE_VERSION
     assert [m.version for m in status.pending] == [DEMO_ADD_RUNS_ARCHIVED_AT_VERSION]
+    # `migration_result` (exposed for `cli.py::migrate_run`, which needs the
+    # `from_version`/`to_version`/`applied`/`backup_path` this call already computed
+    # without re-running migrations a second time) matches `read_status()` exactly.
+    assert storage.migration_result.from_version == 0
+    assert storage.migration_result.to_version == BASELINE_VERSION
+    assert [m.version for m in storage.migration_result.applied] == [BASELINE_VERSION]
 
 
 def test_build_storage_catches_up_the_demo_migration_on_a_second_call(tmp_path: Path) -> None:
     runtime_dir = tmp_path / "runtime"
 
     build_storage(runtime_dir=runtime_dir, clock=_clock)  # creates `runs` via SQLiteRunRepository
-    build_storage(runtime_dir=runtime_dir, clock=_clock)  # `runs` now exists; demo can apply
+    second = build_storage(runtime_dir=runtime_dir, clock=_clock)  # `runs` exists; demo can apply
 
     status = read_status(runtime_dir / "state.sqlite3")
     assert status.current_version == DEMO_ADD_RUNS_ARCHIVED_AT_VERSION
     assert status.pending == ()
+    assert second.migration_result.from_version == BASELINE_VERSION
+    assert second.migration_result.to_version == DEMO_ADD_RUNS_ARCHIVED_AT_VERSION
+    assert [m.version for m in second.migration_result.applied] == [
+        DEMO_ADD_RUNS_ARCHIVED_AT_VERSION
+    ]

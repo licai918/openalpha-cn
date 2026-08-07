@@ -5,7 +5,9 @@ interaction with a *real* SQLite file -- transactional DDL, `PRAGMA user_version
 SQLite backup API have no meaningful in-memory double.
 """
 
+import multiprocessing
 import sqlite3
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -16,11 +18,14 @@ from openalpha_cn.domain.run import RunManifest
 from openalpha_cn.runtime.memory import MemoryEntry
 from openalpha_cn.storage.memory import SQLiteResearchMemory
 from openalpha_cn.storage.migrations import (
+    _SCHEMA_MIGRATIONS_DDL,
     BASELINE_VERSION,
     DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
     MIGRATIONS,
     Migration,
     MigrationFailedError,
+    MigrationNotYetApplicable,
+    _take_backup,
     read_status,
     run_migrations,
 )
@@ -264,3 +269,137 @@ def test_migrations_registry_is_declared_in_strictly_increasing_version_order() 
     versions = [m.version for m in MIGRATIONS]
     assert versions == sorted(versions)
     assert len(versions) == len(set(versions))
+
+
+# --- structural guard: no future migration may crash a fresh install (Finding 1c) ------
+
+
+def test_every_non_baseline_migration_defers_gracefully_on_a_fresh_empty_database() -> None:
+    """A careless future migration must not crash every fresh install.
+
+    The demo migration is safe only because it hand-wrote a `require_table` guard; nothing
+    forced that. Phase P4 will add several migrations at once, likely written separately --
+    one omission crashes `OpenAlphaSDK.__init__`/`create_app()` for every new installation,
+    because `build_storage()` runs migrations before any store (and therefore any table)
+    exists (see `storage/migrations.py`'s module docstring). This test is the structural
+    guard: it runs every non-baseline migration in the real, shipped `MIGRATIONS` registry
+    against a genuinely empty database and requires it to raise `MigrationNotYetApplicable`
+    (defer) rather than any other exception (crash). The baseline migration is exempt: it
+    is precondition-free by design (it stamps a version, it does not alter a store's table).
+    """
+    for migration in MIGRATIONS:
+        if migration.version == BASELINE_VERSION:
+            continue
+        connection = sqlite3.connect(":memory:")
+        try:
+            with pytest.raises(MigrationNotYetApplicable):
+                migration.apply(connection)
+        finally:
+            connection.close()
+
+
+# --- backup filenames must never collide (Finding 4b) -----------------------------------
+
+
+def test_take_backup_does_not_overwrite_an_existing_backup_at_the_same_timestamp(
+    tmp_path: Path,
+) -> None:
+    """Two backups at the same version, taken by a frozen clock, must not collide.
+
+    The filename is `{name}.v{version}.{timestamp}.bak` at second precision; previously
+    nothing checked whether the target already existed, so two failed migrations at the
+    same version within the same second silently overwrote each other's backup -- the one
+    piece of data an operator would reach for after a failure. A fixed `clock` (as used
+    throughout this test module, and as a real concurrent racer would experience -- see
+    the concurrency test below) reproduces "same second" deterministically instead of
+    relying on wall-clock luck.
+    """
+    path = tmp_path / "state.sqlite3"
+    _build_v1_shaped_database(path)
+
+    first = _take_backup(path, current_version=0, clock=_clock)
+    second = _take_backup(path, current_version=0, clock=_clock)
+
+    assert first != second
+    assert first.exists()
+    assert second.exists()
+    # Both are real, independently restorable backups -- not one half-overwritten by the
+    # other's SQLite backup-API write landing on the same path mid-copy.
+    for backup_path in (first, second):
+        with sqlite3.connect(backup_path) as connection:
+            assert connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1
+
+
+# --- concurrent callers must never see a false failure (Finding 5) ----------------------
+
+
+def _race_sleepy_apply(connection: sqlite3.Connection) -> None:
+    """Hold the write lock for a while so a concurrent racer is guaranteed to block on
+    its own `BEGIN IMMEDIATE` until this transaction commits -- reproducing the race
+    deterministically instead of depending on OS scheduling luck (the reviewer's own
+    reproduction of this bug was 1-in-5 without a forced delay)."""
+    time.sleep(0.4)
+
+
+_RACE_VERSION = 1
+_RACE_MIGRATIONS: tuple[Migration, ...] = (
+    Migration(version=_RACE_VERSION, name="race_baseline", apply=_race_sleepy_apply),
+)
+
+
+def _race_worker(path_str: str, barrier, queue) -> None:
+    """Run in a real, separate OS process (multiprocessing's `spawn` start method on this
+    platform launches a fresh interpreter, not a thread) against the same database file
+    as its sibling worker."""
+    barrier.wait()
+    try:
+        result = run_migrations(Path(path_str), clock=_clock, migrations=_RACE_MIGRATIONS)
+    except MigrationFailedError as error:
+        queue.put(("failed", error.version, error.name))
+    else:
+        queue.put(("ok", result.to_version, tuple(m.version for m in result.applied)))
+
+
+def test_concurrent_run_migrations_does_not_report_a_false_failure(tmp_path: Path) -> None:
+    """Two real OS processes racing `run_migrations()` against the same fresh database.
+
+    `_pending()` is computed once, from a snapshot taken before any lock is acquired, so
+    both processes independently decide the same migration is pending. `BEGIN IMMEDIATE`
+    correctly serializes the two writers -- but without a post-lock re-check, the loser
+    would replay `migration.apply()` and then hit a primary-key collision on its own
+    `INSERT INTO schema_migrations`, which the generic `except Exception` reports as a
+    genuine `MigrationFailedError` even though the database converged correctly and
+    nothing is actually broken. Neither worker may see that false failure.
+
+    `schema_migrations` is pre-created below (the first statement `run_migrations()`
+    itself executes is `CREATE TABLE IF NOT EXISTS schema_migrations`, which -- even
+    though it is a no-op once the table exists -- still needs a write lock to check that
+    safely). Without pre-creating it, that DDL statement becomes the dominant point of
+    contention: the loser blocks there until the winner's entire transaction (including
+    its audit-row insert) has already committed, and by the time it reads `PRAGMA
+    user_version` nothing is pending anymore -- masking the actual race this test targets,
+    which starts one step later, at `BEGIN IMMEDIATE`.
+    """
+    path = tmp_path / "state.sqlite3"
+    with sqlite3.connect(path) as setup_connection:
+        setup_connection.execute(_SCHEMA_MIGRATIONS_DDL)
+    barrier = multiprocessing.Barrier(2)
+    queue: multiprocessing.Queue = multiprocessing.Queue()
+    processes = [
+        multiprocessing.Process(target=_race_worker, args=(str(path), barrier, queue))
+        for _ in range(2)
+    ]
+    for process in processes:
+        process.start()
+    outcomes = [queue.get(timeout=15) for _ in processes]
+    for process in processes:
+        process.join(timeout=15)
+        assert not process.is_alive(), "a worker process hung"
+        assert process.exitcode == 0, f"a worker process crashed: exitcode={process.exitcode}"
+
+    for outcome in outcomes:
+        assert outcome[0] == "ok", f"a concurrent migration run reported a false failure: {outcome}"
+
+    status = read_status(path)
+    assert status.current_version == _RACE_VERSION
+    assert [m.version for m in status.applied] == [_RACE_VERSION]  # applied exactly once

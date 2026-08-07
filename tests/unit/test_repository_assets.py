@@ -1,4 +1,5 @@
 import hashlib
+import importlib.util
 import re
 import shlex
 import subprocess
@@ -6,8 +7,22 @@ import sys
 import tomllib
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from types import ModuleType
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def _load_verify_publication() -> ModuleType:
+    """Import `scripts/verify_publication.py` by path (it has no package `__init__.py`,
+    so it can't be imported as `scripts.verify_publication`)."""
+    spec = importlib.util.spec_from_file_location(
+        "verify_publication", ROOT / "scripts" / "verify_publication.py"
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _workflow_job_block(workflow: str, job_name: str) -> str:
@@ -746,6 +761,20 @@ def test_publication_gate_accepts_tracked_release_sources() -> None:
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_publication_gate_blocks_sqlite_backup_files() -> None:
+    """`storage/migrations.py` backs up `state.sqlite3` under a `.bak` suffix before every
+    migration attempt (see `_take_backup`). `.bak` is a SQLite binary dump exactly like
+    `.sqlite`/`.sqlite3`/`.db`/`.duckdb`, all of which are already blocked -- but `.bak`
+    itself was missing from `BLOCKED_SUFFIXES`, so an untracked `.bak` file that escaped
+    `.gitignore` (e.g. under a custom `--runtime-dir` outside the ignored `/runtime/` tree)
+    would publish clean. `.gitignore` path matching is not a substitute for this: it stops
+    covering the file the moment someone points `--runtime-dir` elsewhere.
+    """
+    module = _load_verify_publication()
+
+    assert ".bak" in module.BLOCKED_SUFFIXES
 
 
 def test_feature_coverage_artifacts_are_reconciled() -> None:

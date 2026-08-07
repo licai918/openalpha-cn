@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MAX_GIT_FILE_BYTES = 50 * 1024 * 1024
 BLOCKED_SUFFIXES = {
     ".appimage",
+    ".bak",
     ".db",
     ".dmg",
     ".duckdb",

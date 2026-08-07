@@ -40,7 +40,7 @@ from openalpha_cn.runtime.recovery import RecoveryStore
 from openalpha_cn.runtime.repository import RunRepository
 from openalpha_cn.storage.batch import SQLiteBatchTaskStore
 from openalpha_cn.storage.memory import SQLiteResearchMemory
-from openalpha_cn.storage.migrations import run_migrations
+from openalpha_cn.storage.migrations import MigrationRunResult, run_migrations
 from openalpha_cn.storage.parquet import ParquetEvidenceStore
 from openalpha_cn.storage.portfolio import SQLitePortfolioLedger
 from openalpha_cn.storage.product import SQLiteReportStore, SQLiteWatchlistStore
@@ -50,7 +50,14 @@ from openalpha_cn.storage.sqlite import SQLiteRunRepository
 
 @dataclass(frozen=True)
 class StorageContainer:
-    """All eight storage components assembled for one shared `runtime_dir`."""
+    """All eight storage components assembled for one shared `runtime_dir`.
+
+    `migration_result` is the outcome of the `run_migrations()` call this function makes
+    before constructing any store below -- exposed so a caller that needs to report on
+    it honestly (the `openalpha migrate run` CLI command, in particular: see
+    `cli.py::migrate_run`) doesn't have to run migrations a second time just to get the
+    `from_version`/`to_version`/`applied`/`backup_path` this construction already computed.
+    """
 
     evidence_store: EvidenceStore
     repository: RunRepository
@@ -60,6 +67,7 @@ class StorageContainer:
     portfolio_ledger: SQLitePortfolioLedger
     watchlist_store: WatchlistStore
     report_store: ReportStore
+    migration_result: MigrationRunResult
 
 
 def build_storage(*, runtime_dir: Path, clock: Callable[[], datetime]) -> StorageContainer:
@@ -78,7 +86,7 @@ def build_storage(*, runtime_dir: Path, clock: Callable[[], datetime]) -> Storag
     `clock` `recover_interrupted` already uses below.
     """
     runtime_dir.mkdir(parents=True, exist_ok=True)
-    run_migrations(runtime_dir / "state.sqlite3", clock=clock)
+    migration_result = run_migrations(runtime_dir / "state.sqlite3", clock=clock)
     evidence_store: EvidenceStore = ParquetEvidenceStore(runtime_dir / "evidence")
     repository: RunRepository = SQLiteRunRepository(runtime_dir / "state.sqlite3")
     memory: ResearchMemory = SQLiteResearchMemory(runtime_dir / "state.sqlite3")
@@ -97,4 +105,5 @@ def build_storage(*, runtime_dir: Path, clock: Callable[[], datetime]) -> Storag
         portfolio_ledger=portfolio_ledger,
         watchlist_store=watchlist_store,
         report_store=report_store,
+        migration_result=migration_result,
     )
