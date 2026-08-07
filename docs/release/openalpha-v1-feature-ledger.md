@@ -4,8 +4,8 @@
 
 ## 对账结论
 
-- 功能总数: 93
-- 当前真实完成: 88 (94.62%)
+- 功能总数: 95
+- 当前真实完成: 90 (94.74%)
 - `UNREVIEWED=0`
 - `UNKNOWN=0`
 - `legacy_acceptance_rows=86` (历史散文验收、尚未绑定为可执行 pytest/CI 断言)
@@ -18,7 +18,7 @@
 | `DEFERRED` | 1 |
 | `ENHANCED_REPLACEMENT` | 20 |
 | `EXCLUDED` | 4 |
-| `NATIVE_COMPLETE` | 67 |
+| `NATIVE_COMPLETE` | 69 |
 
 ## 功能明细
 
@@ -117,6 +117,8 @@
 | `OA-OPS-012` | operations | Provider capability and credential declaration | `NATIVE_COMPLETE` | `src/openalpha_cn/cli.py#doctor;src/openalpha_cn/cli.py#_credential_report;src/openalpha_cn/cli.py#_capability_report;src/openalpha_cn/providers/base.py#ProviderMetadata` | `tests/unit/test_cli.py` | `pytest` | `tests/unit/test_cli.py::test_doctor_never_leaks_credential_value_in_human_or_json_output` |
 | `OA-OPS-013` | operations | Doctor live capability probe | `NATIVE_COMPLETE` | `src/openalpha_cn/cli.py#doctor;src/openalpha_cn/cli.py#_probe_report` | `tests/unit/test_cli.py` | `pytest` | `tests/unit/test_cli.py::test_doctor_probe_reports_provider_failure_category_verbatim` |
 | `OA-OPS-014` | operations | Layered import gate with shrink-only baseline | `NATIVE_COMPLETE` | `pyproject.toml;docs/architecture/import-layering-baseline.toml` | `tests/unit/test_import_layering.py` | `pytest` | `tests/unit/test_import_layering.py::test_domain_purity_holds_against_every_dynamically_discovered_sibling_subpackage` |
+| `OA-OPS-015` | operations | ADR-0002: two data planes (panel vs. evidence) | `NATIVE_COMPLETE` | `docs/architecture/ADR-0002-two-data-planes.md` | `tests/unit/test_adr_consistency.py` | `pytest` | `tests/unit/test_adr_consistency.py::test_adr_0002_referenced_storage_symbols_actually_exist` |
+| `OA-OPS-016` | operations | ADR-0003: numerical stack boundary (domain-purity drift guard) | `NATIVE_COMPLETE` | `docs/architecture/ADR-0003-numerical-stack-boundary.md` | `tests/unit/test_adr_consistency.py` | `pytest` | `tests/unit/test_adr_consistency.py::test_adr_0003_domain_forbidden_import_list_matches_import_linter_domain_purity_contract` |
 
 ## 边界
 
