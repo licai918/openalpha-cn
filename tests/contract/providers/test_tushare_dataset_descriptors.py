@@ -21,16 +21,10 @@ from openalpha_cn.providers.tushare import (
 )
 
 
-class FakeTransport:
-    def __init__(self, response: dict[str, object]) -> None:
-        self.response = response
-
-    def post(self, payload: dict[str, object]) -> dict[str, object]:
-        return self.response
-
-
-def _provider(clock: datetime) -> TushareProvider:
-    return TushareProvider(token="secret-token", transport=FakeTransport({}), clock=lambda: clock)
+def _provider(clock: datetime, fake_tushare_transport) -> TushareProvider:
+    return TushareProvider(
+        token="secret-token", transport=fake_tushare_transport({}), clock=lambda: clock
+    )
 
 
 def _daily_descriptor() -> TushareDatasetDescriptor:
@@ -78,8 +72,10 @@ def test_dataset_names_derives_from_descriptor_table_and_grows_with_it() -> None
     assert _dataset_names((first, second)) == ("alpha", "beta")
 
 
-def test_provider_metadata_supported_datasets_matches_the_descriptor_table() -> None:
-    provider = TushareProvider(token="secret-token", transport=FakeTransport({}))
+def test_provider_metadata_supported_datasets_matches_the_descriptor_table(
+    fake_tushare_transport,
+) -> None:
+    provider = TushareProvider(token="secret-token", transport=fake_tushare_transport({}))
 
     assert provider.metadata.supported_datasets == _dataset_names(TUSHARE_DATASETS)
 
@@ -87,8 +83,8 @@ def test_provider_metadata_supported_datasets_matches_the_descriptor_table() -> 
 # --- daily behaves identically through the descriptor path -----------------
 
 
-def test_daily_descriptor_decode_matches_legacy_field_for_field() -> None:
-    provider = _provider(datetime(2026, 7, 24, 10, 0, tzinfo=UTC))
+def test_daily_descriptor_decode_matches_legacy_field_for_field(fake_tushare_transport) -> None:
+    provider = _provider(datetime(2026, 7, 24, 10, 0, tzinfo=UTC), fake_tushare_transport)
     response = {
         "code": 0,
         "msg": None,
@@ -122,10 +118,10 @@ def test_daily_descriptor_decode_matches_legacy_field_for_field() -> None:
     }
 
 
-def test_unsupported_dataset_still_raises_configuration_failure_with_original_message_shape() -> (
-    None
-):
-    provider = TushareProvider(token="secret-token", transport=FakeTransport({}))
+def test_unsupported_dataset_still_raises_configuration_failure_with_original_message_shape(
+    fake_tushare_transport,
+) -> None:
+    provider = TushareProvider(token="secret-token", transport=fake_tushare_transport({}))
 
     with pytest.raises(ProviderFailure) as captured:
         provider.fetch(
@@ -143,7 +139,9 @@ def test_unsupported_dataset_still_raises_configuration_failure_with_original_me
 # --- clock strategies, proven independently on synthetic data --------------
 
 
-def test_daily_close_clock_uses_1500_event_and_1630_available_in_asia_shanghai() -> None:
+def test_daily_close_clock_uses_1500_event_and_1630_available_in_asia_shanghai(
+    fake_tushare_transport,
+) -> None:
     def _params(request: ProviderRequest) -> dict[str, str]:
         return {}
 
@@ -164,7 +162,7 @@ def test_daily_close_clock_uses_1500_event_and_1630_available_in_asia_shanghai()
             "items": [["600000.SH", "20260102", 1.23]],
         },
     }
-    provider = _provider(datetime(2026, 1, 3, 1, 0, tzinfo=UTC))
+    provider = _provider(datetime(2026, 1, 3, 1, 0, tzinfo=UTC), fake_tushare_transport)
     request = ProviderRequest(dataset="daily_basic", as_of=datetime(2026, 1, 3, 1, 0, tzinfo=UTC))
 
     (record,) = provider._decode(descriptor=descriptor, response=response, request=request)
@@ -174,7 +172,9 @@ def test_daily_close_clock_uses_1500_event_and_1630_available_in_asia_shanghai()
     assert record.timeline.revision_time == record.timeline.available_time
 
 
-def test_announcement_clock_distinguishes_ann_date_from_f_ann_date() -> None:
+def test_announcement_clock_distinguishes_ann_date_from_f_ann_date(
+    fake_tushare_transport,
+) -> None:
     def _params(request: ProviderRequest) -> dict[str, str]:
         return {}
 
@@ -195,7 +195,7 @@ def test_announcement_clock_distinguishes_ann_date_from_f_ann_date() -> None:
             "items": [["000001.SZ", "20251231", "20260228", "20260315", 12.3]],
         },
     }
-    provider = _provider(datetime(2026, 4, 1, 0, 0, tzinfo=UTC))
+    provider = _provider(datetime(2026, 4, 1, 0, 0, tzinfo=UTC), fake_tushare_transport)
     request = ProviderRequest(
         dataset="fina_indicator", as_of=datetime(2026, 4, 1, 0, 0, tzinfo=UTC)
     )
@@ -208,7 +208,9 @@ def test_announcement_clock_distinguishes_ann_date_from_f_ann_date() -> None:
     assert record.timeline.revision_time != record.timeline.available_time
 
 
-def test_announcement_clock_falls_back_to_ann_date_when_no_revision() -> None:
+def test_announcement_clock_falls_back_to_ann_date_when_no_revision(
+    fake_tushare_transport,
+) -> None:
     def _params(request: ProviderRequest) -> dict[str, str]:
         return {}
 
@@ -229,7 +231,7 @@ def test_announcement_clock_falls_back_to_ann_date_when_no_revision() -> None:
             "items": [["000001.SZ", "20251231", "20260228", None, 12.3]],
         },
     }
-    provider = _provider(datetime(2026, 4, 1, 0, 0, tzinfo=UTC))
+    provider = _provider(datetime(2026, 4, 1, 0, 0, tzinfo=UTC), fake_tushare_transport)
     request = ProviderRequest(
         dataset="fina_indicator", as_of=datetime(2026, 4, 1, 0, 0, tzinfo=UTC)
     )
@@ -240,7 +242,9 @@ def test_announcement_clock_falls_back_to_ann_date_when_no_revision() -> None:
     assert record.timeline.revision_time == datetime(2026, 2, 28, 0, 0, tzinfo=_CHINA_TZ)
 
 
-def test_calendar_static_clock_sets_event_time_equal_to_available_time() -> None:
+def test_calendar_static_clock_sets_event_time_equal_to_available_time(
+    fake_tushare_transport,
+) -> None:
     def _params(request: ProviderRequest) -> dict[str, str]:
         return {}
 
@@ -261,7 +265,7 @@ def test_calendar_static_clock_sets_event_time_equal_to_available_time() -> None
             "items": [["20260724", 1]],
         },
     }
-    provider = _provider(datetime(2026, 7, 25, 0, 0, tzinfo=UTC))
+    provider = _provider(datetime(2026, 7, 25, 0, 0, tzinfo=UTC), fake_tushare_transport)
     request = ProviderRequest(dataset="trade_cal", as_of=datetime(2026, 7, 25, 0, 0, tzinfo=UTC))
 
     (record,) = provider._decode(descriptor=descriptor, response=response, request=request)

@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
 import pytest
@@ -9,10 +9,16 @@ from openalpha_cn.providers.chainlin import (
     ChainLinHttpError,
 )
 
-NOW = datetime(2026, 7, 24, 10, 30, tzinfo=UTC)
 
+class FakeChainLinTransport:
+    """Doubles ChainLin's `get_json` transport Protocol.
 
-class FakeTransport:
+    Named distinctly (not `FakeTransport`) from the `post_json`/`post` doubles elsewhere
+    in this suite -- see `tests/contract/providers/conftest.py`'s `FakeTushareTransport`
+    docstring for the full inventory. Single-file use: no other test needs a `get_json`
+    double, so this stays local rather than moving to the directory conftest.
+    """
+
     def __init__(self, response: dict[str, Any] | Exception) -> None:
         self.response = response
         self.request: dict[str, Any] | None = None
@@ -24,42 +30,50 @@ class FakeTransport:
         return self.response
 
 
-def payload() -> dict[str, Any]:
-    return {
-        "schema_version": "chainlin-data/v1",
-        "records": [
-            {
-                "subject": "000001.SZ",
-                "kind": "limit_up",
-                "event_time": NOW.isoformat(),
-                "available_time": NOW.isoformat(),
-                "revision_time": NOW.isoformat(),
-                "source_uri": "chainlin://limit-up/000001.SZ",
-                "summary": "涨停一板",
-                "payload": {"close": 10.5, "board_count": 1},
-            }
-        ],
-    }
+@pytest.fixture
+def payload(frozen_now: datetime):
+    def _make() -> dict[str, Any]:
+        return {
+            "schema_version": "chainlin-data/v1",
+            "records": [
+                {
+                    "subject": "000001.SZ",
+                    "kind": "limit_up",
+                    "event_time": frozen_now.isoformat(),
+                    "available_time": frozen_now.isoformat(),
+                    "revision_time": frozen_now.isoformat(),
+                    "source_uri": "chainlin://limit-up/000001.SZ",
+                    "summary": "涨停一板",
+                    "payload": {"close": 10.5, "board_count": 1},
+                }
+            ],
+        }
+
+    return _make
 
 
 def test_chainlin_contract_preserves_pit_license_and_bearer_auth(
     monkeypatch: pytest.MonkeyPatch,
+    payload,
+    frozen_now: datetime,
 ) -> None:
     monkeypatch.setenv("CHAINLIN_API_KEY", "secret")
-    transport = FakeTransport(payload())
+    transport = FakeChainLinTransport(payload())
     provider = ChainLinDataProvider(
         base_url="https://data.chainlin.example/v1",
         api_key_env="CHAINLIN_API_KEY",
         source_license="user-held ChainLin subscription",
         transport=transport,
-        clock=lambda: NOW,
+        clock=lambda: frozen_now,
     )
 
-    batch = provider.fetch(ProviderRequest(dataset="limit_up", as_of=NOW, subjects=("000001.SZ",)))
+    batch = provider.fetch(
+        ProviderRequest(dataset="limit_up", as_of=frozen_now, subjects=("000001.SZ",))
+    )
 
     assert batch.status == "success"
-    assert batch.records[0].timeline.available_time == NOW
-    assert batch.records[0].timeline.revision_time == NOW
+    assert batch.records[0].timeline.available_time == frozen_now
+    assert batch.records[0].timeline.revision_time == frozen_now
     assert provider.metadata.redistribution == "restricted"
     assert transport.request is not None
     assert transport.request["headers"]["Authorization"] == "Bearer secret"
@@ -96,16 +110,18 @@ def test_chainlin_provider_is_importable_from_providers_package() -> None:
 
 def test_chainlin_auth_rate_limit_and_upstream_failures_are_explicit(
     monkeypatch: pytest.MonkeyPatch,
+    payload,
+    frozen_now: datetime,
 ) -> None:
     monkeypatch.delenv("CHAINLIN_API_KEY", raising=False)
     missing = ChainLinDataProvider(
         base_url="https://data.chainlin.example/v1",
         api_key_env="CHAINLIN_API_KEY",
         source_license="restricted",
-        transport=FakeTransport(payload()),
+        transport=FakeChainLinTransport(payload()),
     )
     with pytest.raises(ProviderFailure) as captured:
-        missing.fetch(ProviderRequest(dataset="daily", as_of=NOW))
+        missing.fetch(ProviderRequest(dataset="daily", as_of=frozen_now))
     assert captured.value.category == "authentication"
 
     monkeypatch.setenv("CHAINLIN_API_KEY", "secret")
@@ -113,22 +129,22 @@ def test_chainlin_auth_rate_limit_and_upstream_failures_are_explicit(
         base_url="https://data.chainlin.example/v1",
         api_key_env="CHAINLIN_API_KEY",
         source_license="restricted",
-        transport=FakeTransport(payload()),
+        transport=FakeChainLinTransport(payload()),
         max_calls_per_minute=1,
         monotonic=lambda: 1.0,
     )
-    limited.fetch(ProviderRequest(dataset="daily", as_of=NOW))
+    limited.fetch(ProviderRequest(dataset="daily", as_of=frozen_now))
     with pytest.raises(ProviderFailure) as captured:
-        limited.fetch(ProviderRequest(dataset="daily", as_of=NOW))
+        limited.fetch(ProviderRequest(dataset="daily", as_of=frozen_now))
     assert captured.value.category == "rate_limit"
 
     upstream = ChainLinDataProvider(
         base_url="https://data.chainlin.example/v1",
         api_key_env="CHAINLIN_API_KEY",
         source_license="restricted",
-        transport=FakeTransport(ChainLinHttpError(503, "unavailable")),
+        transport=FakeChainLinTransport(ChainLinHttpError(503, "unavailable")),
     )
     with pytest.raises(ProviderFailure) as captured:
-        upstream.fetch(ProviderRequest(dataset="daily", as_of=NOW))
+        upstream.fetch(ProviderRequest(dataset="daily", as_of=frozen_now))
     assert captured.value.category == "upstream"
     assert captured.value.retryable is True

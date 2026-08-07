@@ -1,14 +1,15 @@
-from datetime import UTC, datetime
+from datetime import datetime
 
 import pytest
 from pydantic import ValidationError
 
 from openalpha_cn.domain.signal import SignalFrame
 
-AS_OF = datetime(2026, 7, 24, 10, 0, tzinfo=UTC)
 
-
-def test_signal_requires_evidence_for_a_directional_conclusion() -> None:
+def test_signal_requires_evidence_for_a_directional_conclusion(
+    plain_frozen_now: datetime,
+) -> None:
+    AS_OF = plain_frozen_now
     with pytest.raises(ValidationError, match="directional signal requires evidence"):
         SignalFrame(
             subject="000001.SZ",
@@ -21,7 +22,8 @@ def test_signal_requires_evidence_for_a_directional_conclusion() -> None:
         )
 
 
-def test_signal_requires_an_explicit_reason_when_abstaining() -> None:
+def test_signal_requires_an_explicit_reason_when_abstaining(plain_frozen_now: datetime) -> None:
+    AS_OF = plain_frozen_now
     with pytest.raises(ValidationError, match="abstention_reason is required"):
         SignalFrame(
             subject="000001.SZ",
@@ -33,7 +35,8 @@ def test_signal_requires_an_explicit_reason_when_abstaining() -> None:
         )
 
 
-def test_signal_is_immutable_versioned_and_content_addressed() -> None:
+def test_signal_is_immutable_versioned_and_content_addressed(plain_frozen_now: datetime) -> None:
+    AS_OF = plain_frozen_now
     signal = SignalFrame(
         subject="000001.SZ",
         as_of=AS_OF,
@@ -54,7 +57,10 @@ def test_signal_is_immutable_versioned_and_content_addressed() -> None:
         signal.confidence = 0.8
 
 
-def test_signal_rejects_naive_as_of_and_inconsistent_abstention() -> None:
+def test_signal_rejects_naive_as_of_and_inconsistent_abstention(
+    plain_frozen_now: datetime,
+) -> None:
+    AS_OF = plain_frozen_now
     with pytest.raises(ValidationError, match="timezone-aware"):
         SignalFrame(
             subject="000001.SZ",

@@ -1,5 +1,5 @@
 import json
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -9,10 +9,10 @@ from openalpha_cn.domain.evidence import EvidenceSnapshot
 from openalpha_cn.domain.time import Timeline
 
 runner = CliRunner()
-NOW = datetime(2026, 7, 24, 10, 30, tzinfo=UTC)
 
 
-def test_cli_runs_research_from_serialized_evidence(tmp_path: Path) -> None:
+def test_cli_runs_research_from_serialized_evidence(tmp_path: Path, frozen_now: datetime) -> None:
+    NOW = frozen_now
     evidence = EvidenceSnapshot(
         subject="000001.SZ",
         kind="limit_up",

@@ -1,32 +1,38 @@
-from datetime import UTC, datetime
+from datetime import datetime
+
+import pytest
 
 from openalpha_cn.agents.base import AgentResult
 from openalpha_cn.agents.committee import DeliberationCommittee
 from openalpha_cn.domain.signal import SignalFrame
 
-NOW = datetime(2026, 7, 24, 10, 30, tzinfo=UTC)
+
+@pytest.fixture
+def result(frozen_now: datetime):
+    def _make(agent_id: str, strength: float, confidence: float) -> AgentResult:
+        return AgentResult(
+            agent_id=agent_id,
+            signal=SignalFrame(
+                subject="000001.SZ",
+                as_of=frozen_now,
+                direction="bullish" if strength > 0 else "bearish",
+                strength=strength,
+                confidence=confidence,
+                horizon="5d",
+                evidence_ids=("ev-1",),
+            ),
+            rationale=f"{agent_id} evidence case",
+        )
+
+    return _make
 
 
-def result(agent_id: str, strength: float, confidence: float) -> AgentResult:
-    return AgentResult(
-        agent_id=agent_id,
-        signal=SignalFrame(
-            subject="000001.SZ",
-            as_of=NOW,
-            direction="bullish" if strength > 0 else "bearish",
-            strength=strength,
-            confidence=confidence,
-            horizon="5d",
-            evidence_ids=("ev-1",),
-        ),
-        rationale=f"{agent_id} evidence case",
-    )
-
-
-def test_committee_produces_bull_bear_risk_views_and_ablation_delta() -> None:
+def test_committee_produces_bull_bear_risk_views_and_ablation_delta(
+    result, frozen_now: datetime
+) -> None:
     base = SignalFrame(
         subject="000001.SZ",
-        as_of=NOW,
+        as_of=frozen_now,
         direction="bullish",
         strength=0.5,
         confidence=0.8,

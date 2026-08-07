@@ -1,5 +1,4 @@
 from datetime import UTC, datetime
-from typing import Any
 
 import pytest
 
@@ -7,18 +6,8 @@ from openalpha_cn.providers.base import ProviderFailure, ProviderRequest
 from openalpha_cn.providers.tushare import TushareProvider
 
 
-class FakeTransport:
-    def __init__(self, response: dict[str, Any]) -> None:
-        self.response = response
-        self.payload: dict[str, Any] | None = None
-
-    def post(self, payload: dict[str, Any]) -> dict[str, Any]:
-        self.payload = payload
-        return self.response
-
-
-def test_tushare_byot_maps_daily_payload_without_exposing_token() -> None:
-    transport = FakeTransport(
+def test_tushare_byot_maps_daily_payload_without_exposing_token(fake_tushare_transport) -> None:
+    transport = fake_tushare_transport(
         {
             "code": 0,
             "msg": None,
@@ -59,8 +48,8 @@ def test_tushare_byot_maps_daily_payload_without_exposing_token() -> None:
     assert "secret-token" not in repr(batch)
 
 
-def test_tushare_missing_token_is_an_explicit_configuration_failure() -> None:
-    provider = TushareProvider(token="", transport=FakeTransport({}))
+def test_tushare_missing_token_is_an_explicit_configuration_failure(fake_tushare_transport) -> None:
+    provider = TushareProvider(token="", transport=fake_tushare_transport({}))
 
     with pytest.raises(ProviderFailure) as captured:
         provider.fetch(
@@ -74,16 +63,16 @@ def test_tushare_missing_token_is_an_explicit_configuration_failure() -> None:
     assert captured.value.retryable is False
 
 
-def test_tushare_metadata_declares_supported_datasets() -> None:
-    provider = TushareProvider(token="secret-token", transport=FakeTransport({}))
+def test_tushare_metadata_declares_supported_datasets(fake_tushare_transport) -> None:
+    provider = TushareProvider(token="secret-token", transport=fake_tushare_transport({}))
 
     assert provider.metadata.supported_datasets == ("daily",)
 
 
-def test_tushare_upstream_error_never_becomes_empty_success() -> None:
+def test_tushare_upstream_error_never_becomes_empty_success(fake_tushare_transport) -> None:
     provider = TushareProvider(
         token="secret-token",
-        transport=FakeTransport({"code": -2001, "msg": "permission denied", "data": None}),
+        transport=fake_tushare_transport({"code": -2001, "msg": "permission denied", "data": None}),
     )
 
     with pytest.raises(ProviderFailure) as captured:

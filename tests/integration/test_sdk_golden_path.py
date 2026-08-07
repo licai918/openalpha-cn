@@ -1,5 +1,5 @@
 import json
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 
 from openalpha_cn.agents.baseline import CapitalAgent
@@ -7,10 +7,11 @@ from openalpha_cn.providers.base import ProviderMetadata
 from openalpha_cn.runtime.contracts import ResearchRunRequest
 from openalpha_cn.sdk import OpenAlphaSDK
 
-NOW = datetime(2026, 7, 24, 10, 30, tzinfo=UTC)
 
-
-def test_sdk_imports_evidence_runs_research_and_queries_state(tmp_path: Path) -> None:
+def test_sdk_imports_evidence_runs_research_and_queries_state(
+    tmp_path: Path, frozen_now: datetime
+) -> None:
+    NOW = frozen_now
     source = tmp_path / "events.json"
     source.write_text(
         json.dumps(

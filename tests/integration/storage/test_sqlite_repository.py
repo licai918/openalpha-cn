@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -7,41 +7,50 @@ from openalpha_cn.domain.decision import DecisionLedger
 from openalpha_cn.domain.run import CheckpointRecord, RunManifest
 from openalpha_cn.storage.sqlite import DuplicateRecordError, SQLiteRunRepository
 
-NOW = datetime(2026, 7, 24, 10, 0, tzinfo=UTC)
 DIGEST = "a" * 64
 
 
-def manifest() -> RunManifest:
-    return RunManifest(
-        run_id="run_20260724",
-        mode="replay",
-        as_of=NOW,
-        code_commit="0123456789abcdef",
-        config_digest=DIGEST,
-        random_seed=7,
-        started_at=NOW,
-        status="running",
-    )
+@pytest.fixture
+def manifest(plain_frozen_now: datetime):
+    def _make() -> RunManifest:
+        return RunManifest(
+            run_id="run_20260724",
+            mode="replay",
+            as_of=plain_frozen_now,
+            code_commit="0123456789abcdef",
+            config_digest=DIGEST,
+            random_seed=7,
+            started_at=plain_frozen_now,
+            status="running",
+        )
+
+    return _make
 
 
-def decision() -> DecisionLedger:
-    return DecisionLedger(
-        run_id="run_20260724",
-        created_at=NOW,
-        routing_path=("risk-gate",),
-        risk_decision="block",
-        final_action="abstain",
-        code_commit="0123456789abcdef",
-    )
+@pytest.fixture
+def decision(plain_frozen_now: datetime):
+    def _make() -> DecisionLedger:
+        return DecisionLedger(
+            run_id="run_20260724",
+            created_at=plain_frozen_now,
+            routing_path=("risk-gate",),
+            risk_decision="block",
+            final_action="abstain",
+            code_commit="0123456789abcdef",
+        )
+
+    return _make
 
 
-def test_repository_round_trips_runs_decisions_and_checkpoints(tmp_path: Path) -> None:
+def test_repository_round_trips_runs_decisions_and_checkpoints(
+    tmp_path: Path, manifest, decision, plain_frozen_now: datetime
+) -> None:
     repository = SQLiteRunRepository(tmp_path / "state.sqlite3")
     run = manifest()
     ledger = decision()
     checkpoint = CheckpointRecord(
         name="evidence-ready",
-        recorded_at=NOW,
+        recorded_at=plain_frozen_now,
         state_digest=DIGEST,
     )
 
@@ -54,7 +63,7 @@ def test_repository_round_trips_runs_decisions_and_checkpoints(tmp_path: Path) -
     assert repository.list_checkpoints(run_id=run.run_id) == (checkpoint,)
 
 
-def test_repository_uses_wal_and_foreign_keys(tmp_path: Path) -> None:
+def test_repository_uses_wal_and_foreign_keys(tmp_path: Path, plain_frozen_now: datetime) -> None:
     repository = SQLiteRunRepository(tmp_path / "state.sqlite3")
 
     assert repository.journal_mode() == "wal"
@@ -63,13 +72,13 @@ def test_repository_uses_wal_and_foreign_keys(tmp_path: Path) -> None:
             run_id="missing",
             checkpoint=CheckpointRecord(
                 name="invalid",
-                recorded_at=NOW,
+                recorded_at=plain_frozen_now,
                 state_digest=DIGEST,
             ),
         )
 
 
-def test_repository_is_append_only(tmp_path: Path) -> None:
+def test_repository_is_append_only(tmp_path: Path, manifest) -> None:
     repository = SQLiteRunRepository(tmp_path / "state.sqlite3")
     run = manifest()
     repository.append_run(run)

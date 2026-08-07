@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import datetime
 
 import pytest
 
@@ -10,8 +10,6 @@ from openalpha_cn.providers.base import (
     ProviderRecord,
     ProviderRequest,
 )
-
-NOW = datetime(2026, 7, 24, 10, 0, tzinfo=UTC)
 
 
 def metadata() -> ProviderMetadata:
@@ -28,30 +26,38 @@ def metadata() -> ProviderMetadata:
     )
 
 
-def record(*, kind: str, payload: dict[str, object]) -> ProviderRecord:
-    return ProviderRecord(
-        subject="000001.SZ",
-        kind=kind,
-        timeline=Timeline(
-            event_time=NOW,
-            available_time=NOW,
-            ingested_time=NOW,
-            revision_time=NOW,
-        ),
-        source_uri=f"fixture://{kind}/000001.SZ",
-        summary=f"Synthetic {kind} record.",
-        payload=payload,
-    )
+@pytest.fixture
+def record(plain_frozen_now: datetime):
+    def _make(*, kind: str, payload: dict[str, object]) -> ProviderRecord:
+        return ProviderRecord(
+            subject="000001.SZ",
+            kind=kind,
+            timeline=Timeline(
+                event_time=plain_frozen_now,
+                available_time=plain_frozen_now,
+                ingested_time=plain_frozen_now,
+                revision_time=plain_frozen_now,
+            ),
+            source_uri=f"fixture://{kind}/000001.SZ",
+            summary=f"Synthetic {kind} record.",
+            payload=payload,
+        )
+
+    return _make
 
 
-def batch(item: ProviderRecord) -> ProviderBatch:
-    return ProviderBatch(
-        provider_id="synthetic.a-share",
-        request=ProviderRequest(dataset="events", as_of=NOW),
-        fetched_at=NOW,
-        status="success",
-        records=(item,),
-    )
+@pytest.fixture
+def batch(plain_frozen_now: datetime):
+    def _make(item: ProviderRecord) -> ProviderBatch:
+        return ProviderBatch(
+            provider_id="synthetic.a-share",
+            request=ProviderRequest(dataset="events", as_of=plain_frozen_now),
+            fetched_at=plain_frozen_now,
+            status="success",
+            records=(item,),
+        )
+
+    return _make
 
 
 @pytest.mark.parametrize(
@@ -86,6 +92,8 @@ def test_builder_normalizes_all_v1_a_share_evidence_families(
     kind: str,
     payload: dict[str, object],
     family: str,
+    record,
+    batch,
 ) -> None:
     item = EvidenceBuilder().build(
         batch=batch(record(kind=kind, payload=payload)),
@@ -101,7 +109,7 @@ def test_builder_normalizes_all_v1_a_share_evidence_families(
     assert item[0].payload["facts"] == payload
 
 
-def test_builder_adds_quality_flags_without_losing_source_facts() -> None:
+def test_builder_adds_quality_flags_without_losing_source_facts(record, batch) -> None:
     source = record(
         kind="limit_up",
         payload={"close": 10.5, "pct_change": 9.99, "board_count": 1},
@@ -116,7 +124,7 @@ def test_builder_adds_quality_flags_without_losing_source_facts() -> None:
     )
 
 
-def test_builder_rejects_invalid_or_unknown_evidence_kinds() -> None:
+def test_builder_rejects_invalid_or_unknown_evidence_kinds(record, batch) -> None:
     with pytest.raises(ValueError, match="board_count"):
         EvidenceBuilder().build(
             batch=batch(record(kind="consecutive_board", payload={"board_count": 1})),

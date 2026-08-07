@@ -4,7 +4,6 @@ from pathlib import Path
 
 import pytest
 
-from openalpha_cn.backtest.execution import MarketBar
 from openalpha_cn.backtest.multi_day import (
     PortfolioBacktestRunner,
     PortfolioBacktestStep,
@@ -13,23 +12,7 @@ from openalpha_cn.backtest.portfolio import PortfolioOrder, PortfolioState
 from openalpha_cn.storage.portfolio import SQLitePortfolioLedger
 
 
-def bar(trade_date: date, close: str) -> MarketBar:
-    price = Decimal(close)
-    return MarketBar(
-        subject="000001.SZ",
-        trade_date=trade_date,
-        board="main",
-        previous_close=Decimal("10"),
-        open=price,
-        high=price,
-        low=price,
-        close=price,
-        suspended=False,
-        is_st=False,
-    )
-
-
-def test_portfolio_ledger_is_append_only_and_idempotent(tmp_path: Path) -> None:
+def test_portfolio_ledger_is_append_only_and_idempotent(tmp_path: Path, bar) -> None:
     ledger = SQLitePortfolioLedger(tmp_path / "state.sqlite3")
     initial = PortfolioState(as_of=date(2026, 7, 23), cash=Decimal("20000"))
     transition = PortfolioBacktestRunner().simulator.execute_order(
@@ -49,6 +32,7 @@ def test_portfolio_ledger_is_append_only_and_idempotent(tmp_path: Path) -> None:
 
 def test_multi_day_report_reconciles_return_turnover_capacity_and_exposure(
     tmp_path: Path,
+    bar,
 ) -> None:
     ledger = SQLitePortfolioLedger(tmp_path / "state.sqlite3")
     runner = PortfolioBacktestRunner(ledger=ledger)

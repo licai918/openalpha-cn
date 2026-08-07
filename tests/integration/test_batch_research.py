@@ -1,6 +1,8 @@
-from datetime import UTC, datetime
+from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from openalpha_cn.api.app import create_app
@@ -11,50 +13,67 @@ from openalpha_cn.runtime.contracts import ResearchRunRequest
 from openalpha_cn.sdk import OpenAlphaSDK
 from openalpha_cn.storage.batch import SQLiteBatchTaskStore
 
-NOW = datetime(2026, 7, 24, 10, 30, tzinfo=UTC)
+
+@pytest.fixture
+def research_request(frozen_now: datetime) -> Callable[[str, str], ResearchRunRequest]:
+    """Not named `request`: that is pytest's own reserved built-in fixture name. Not
+    collapsed into a suite-wide fixture either -- this varies `run_id`/`subject` and
+    always builds its own single canned evidence item, a different parameterization axis
+    from `tests/integration/test_research_cycle.py`'s `research_request(items)`, which
+    takes a pre-built evidence tuple with a fixed `run_id`. See task-13-report.md for the
+    full comparison.
+    """
+
+    def _make(run_id: str, subject: str) -> ResearchRunRequest:
+        evidence = EvidenceSnapshot(
+            subject=subject,
+            kind="limit_up",
+            timeline=Timeline(
+                event_time=frozen_now,
+                available_time=frozen_now,
+                ingested_time=frozen_now,
+                revision_time=frozen_now,
+            ),
+            source_id="batch.fixture",
+            source_uri=f"fixture://{subject}",
+            source_license="CC0-1.0",
+            redistribution="allowed",
+            summary="Batch fixture.",
+            payload={
+                "schema": "a-share-evidence/v1",
+                "family": "market_event",
+                "facts": {"close": 10.5, "pct_change": 9.99, "board_count": 1},
+                "quality_flags": [],
+            },
+        )
+        return ResearchRunRequest(
+            run_id=run_id,
+            mode="replay",
+            subject=subject,
+            as_of=frozen_now,
+            evidence=(evidence,),
+            code_commit="0123456789abcdef",
+            config_digest="b" * 64,
+            random_seed=7,
+        )
+
+    return _make
 
 
-def request(run_id: str, subject: str) -> ResearchRunRequest:
-    evidence = EvidenceSnapshot(
-        subject=subject,
-        kind="limit_up",
-        timeline=Timeline(
-            event_time=NOW,
-            available_time=NOW,
-            ingested_time=NOW,
-            revision_time=NOW,
-        ),
-        source_id="batch.fixture",
-        source_uri=f"fixture://{subject}",
-        source_license="CC0-1.0",
-        redistribution="allowed",
-        summary="Batch fixture.",
-        payload={
-            "schema": "a-share-evidence/v1",
-            "family": "market_event",
-            "facts": {"close": 10.5, "pct_change": 9.99, "board_count": 1},
-            "quality_flags": [],
-        },
-    )
-    return ResearchRunRequest(
-        run_id=run_id,
-        mode="replay",
-        subject=subject,
-        as_of=NOW,
-        evidence=(evidence,),
-        code_commit="0123456789abcdef",
-        config_digest="b" * 64,
-        random_seed=7,
-    )
-
-
-def test_batch_runs_with_bounded_workers_and_persists_progress(tmp_path: Path) -> None:
-    sdk = OpenAlphaSDK(runtime_dir=tmp_path, clock=lambda: NOW)
+def test_batch_runs_with_bounded_workers_and_persists_progress(
+    tmp_path: Path,
+    research_request: Callable[[str, str], ResearchRunRequest],
+    frozen_now: datetime,
+) -> None:
+    sdk = OpenAlphaSDK(runtime_dir=tmp_path, clock=lambda: frozen_now)
     store = SQLiteBatchTaskStore(tmp_path / "state.sqlite3")
-    service = BatchResearchService(store=store, runner=sdk.run_research, clock=lambda: NOW)
+    service = BatchResearchService(store=store, runner=sdk.run_research, clock=lambda: frozen_now)
     task = service.submit(
         batch_id="batch-1",
-        requests=(request("batch-run-1", "000001.SZ"), request("batch-run-2", "600000.SH")),
+        requests=(
+            research_request("batch-run-1", "000001.SZ"),
+            research_request("batch-run-2", "600000.SH"),
+        ),
         max_concurrency=2,
     )
 
@@ -75,17 +94,21 @@ def test_batch_runs_with_bounded_workers_and_persists_progress(tmp_path: Path) -
     ]
 
 
-def test_batch_cancel_and_interrupted_recovery_are_explicit(tmp_path: Path) -> None:
+def test_batch_cancel_and_interrupted_recovery_are_explicit(
+    tmp_path: Path,
+    research_request: Callable[[str, str], ResearchRunRequest],
+    frozen_now: datetime,
+) -> None:
     path = tmp_path / "state.sqlite3"
     store = SQLiteBatchTaskStore(path)
     service = BatchResearchService(
         store=store,
-        runner=OpenAlphaSDK(runtime_dir=tmp_path, clock=lambda: NOW).run_research,
-        clock=lambda: NOW,
+        runner=OpenAlphaSDK(runtime_dir=tmp_path, clock=lambda: frozen_now).run_research,
+        clock=lambda: frozen_now,
     )
     task = service.submit(
         batch_id="batch-cancel",
-        requests=(request("cancel-run", "000001.SZ"),),
+        requests=(research_request("cancel-run", "000001.SZ"),),
         max_concurrency=1,
     )
     cancelled = service.cancel(task.batch_id)
@@ -95,14 +118,16 @@ def test_batch_cancel_and_interrupted_recovery_are_explicit(tmp_path: Path) -> N
 
     interrupted = BatchResearchTask(
         batch_id="batch-recover",
-        items=(BatchTaskItem(request=request("recover-run", "000001.SZ"), status="running"),),
+        items=(
+            BatchTaskItem(request=research_request("recover-run", "000001.SZ"), status="running"),
+        ),
         status="running",
         max_concurrency=1,
-        created_at=NOW,
-        updated_at=NOW,
+        created_at=frozen_now,
+        updated_at=frozen_now,
     )
     store.save(interrupted)
-    recovered = SQLiteBatchTaskStore(path).recover_interrupted(now=NOW)
+    recovered = SQLiteBatchTaskStore(path).recover_interrupted(now=frozen_now)
 
     assert recovered == ("batch-recover",)
     restored = store.get("batch-recover")
@@ -111,7 +136,11 @@ def test_batch_cancel_and_interrupted_recovery_are_explicit(tmp_path: Path) -> N
     assert restored.items[0].status == "queued"
 
 
-def _serialized_payload(run_id: str, subject: str) -> dict[str, object]:
+def _serialized_payload(
+    run_id: str,
+    subject: str,
+    research_request: Callable[[str, str], ResearchRunRequest],
+) -> dict[str, object]:
     """Build a research-run payload whose evidence carries its computed IDs.
 
     This mirrors what a client naturally has after calling `/api/v1/evidence/build`
@@ -122,7 +151,7 @@ def _serialized_payload(run_id: str, subject: str) -> dict[str, object]:
     `ResearchRunRequest` (`extra="forbid"` all the way down through `EvidenceSnapshot`)
     rejects them.
     """
-    built = request(run_id, subject)
+    built = research_request(run_id, subject)
     payload = built.model_dump(mode="json", exclude_computed_fields=True)
     payload["evidence"] = [item.model_dump(mode="json") for item in built.evidence]
     return payload
@@ -130,6 +159,7 @@ def _serialized_payload(run_id: str, subject: str) -> dict[str, object]:
 
 def test_single_and_batch_endpoints_accept_the_same_serialized_evidence_payload(
     tmp_path: Path,
+    research_request: Callable[[str, str], ResearchRunRequest],
 ) -> None:
     """`POST /api/v1/research/run` and `POST /api/v1/research/batches` both ultimately
     validate a `ResearchRunRequest`, so the same serialized payload -- evidence items
@@ -140,8 +170,10 @@ def test_single_and_batch_endpoints_accept_the_same_serialized_evidence_payload(
     so the identical payload succeeded on one endpoint and failed 422 on the other
     (audit F32)."""
     client = TestClient(create_app(runtime_dir=tmp_path))
-    single_payload = _serialized_payload("serialized-payload-single", "000001.SZ")
-    batch_payload = _serialized_payload("serialized-payload-batch-item", "000001.SZ")
+    single_payload = _serialized_payload("serialized-payload-single", "000001.SZ", research_request)
+    batch_payload = _serialized_payload(
+        "serialized-payload-batch-item", "000001.SZ", research_request
+    )
 
     single_response = client.post("/api/v1/research/run", json=single_payload)
     batch_response = client.post(
@@ -157,14 +189,17 @@ def test_single_and_batch_endpoints_accept_the_same_serialized_evidence_payload(
     assert batch_response.status_code == 202, batch_response.text
 
 
-def test_batch_http_surface_submits_runs_and_exposes_events(tmp_path: Path) -> None:
+def test_batch_http_surface_submits_runs_and_exposes_events(
+    tmp_path: Path,
+    research_request: Callable[[str, str], ResearchRunRequest],
+) -> None:
     client = TestClient(create_app(runtime_dir=tmp_path))
     response = client.post(
         "/api/v1/research/batches",
         json={
             "batch_id": "batch-api",
             "requests": [
-                request("batch-api-run", "000001.SZ").model_dump(
+                research_request("batch-api-run", "000001.SZ").model_dump(
                     mode="json", exclude_computed_fields=True
                 )
             ],

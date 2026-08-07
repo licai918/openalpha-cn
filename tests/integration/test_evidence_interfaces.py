@@ -1,5 +1,5 @@
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -12,7 +12,6 @@ from openalpha_cn.providers.base import ProviderMetadata, ProviderRequest
 from openalpha_cn.providers.file import FileProvider
 
 runner = CliRunner()
-AS_OF = datetime(2026, 7, 24, 10, 30, tzinfo=UTC)
 
 
 def write_source(path: Path) -> None:
@@ -41,21 +40,10 @@ def write_source(path: Path) -> None:
     )
 
 
-def metadata() -> ProviderMetadata:
-    return ProviderMetadata(
-        provider_id="user.file",
-        display_name="User file",
-        source_license="user-supplied",
-        redistribution="restricted",
-        credential_env_vars=(),
-        caching_policy="local-permitted",
-        rate_limit="not-applicable",
-        freshness="defined-by-input",
-        failure_semantics="Invalid input is an explicit failure.",
-    )
-
-
-def test_cli_and_api_return_the_same_evidence_snapshot(tmp_path: Path) -> None:
+def test_cli_and_api_return_the_same_evidence_snapshot(
+    tmp_path: Path, metadata: ProviderMetadata, frozen_now: datetime
+) -> None:
+    AS_OF = frozen_now
     source = tmp_path / "events.json"
     write_source(source)
 
@@ -80,14 +68,14 @@ def test_cli_and_api_return_the_same_evidence_snapshot(tmp_path: Path) -> None:
 
     provider = FileProvider(
         path=source,
-        metadata=metadata(),
+        metadata=metadata,
         clock=lambda: AS_OF,
     )
     batch = provider.fetch(ProviderRequest(dataset="events", as_of=AS_OF))
     response = TestClient(create_app()).post(
         "/api/v1/evidence/build",
         json={
-            "metadata": metadata().model_dump(mode="json"),
+            "metadata": metadata.model_dump(mode="json"),
             "batch": batch.model_dump(mode="json", exclude_computed_fields=True),
         },
     )
@@ -132,17 +120,20 @@ def test_api_rejects_declared_oversized_request_body(tmp_path: Path) -> None:
     assert response.json() == {"detail": "Request body exceeds configured limit."}
 
 
-def test_api_persists_and_queries_built_evidence(tmp_path: Path) -> None:
+def test_api_persists_and_queries_built_evidence(
+    tmp_path: Path, metadata: ProviderMetadata, frozen_now: datetime
+) -> None:
+    AS_OF = frozen_now
     source = tmp_path / "events.json"
     write_source(source)
-    provider = FileProvider(path=source, metadata=metadata(), clock=lambda: AS_OF)
+    provider = FileProvider(path=source, metadata=metadata, clock=lambda: AS_OF)
     batch = provider.fetch(ProviderRequest(dataset="events", as_of=AS_OF))
     client = TestClient(create_app(runtime_dir=tmp_path / "runtime"))
 
     built = client.post(
         "/api/v1/evidence/build",
         json={
-            "metadata": metadata().model_dump(mode="json"),
+            "metadata": metadata.model_dump(mode="json"),
             "batch": batch.model_dump(mode="json", exclude_computed_fields=True),
         },
     )
@@ -156,16 +147,19 @@ def test_api_persists_and_queries_built_evidence(tmp_path: Path) -> None:
     assert queried.json() == built.json()
 
 
-def test_api_runs_research_from_structured_evidence(tmp_path: Path) -> None:
+def test_api_runs_research_from_structured_evidence(
+    tmp_path: Path, metadata: ProviderMetadata, frozen_now: datetime
+) -> None:
+    AS_OF = frozen_now
     source = tmp_path / "events.json"
     write_source(source)
-    provider = FileProvider(path=source, metadata=metadata(), clock=lambda: AS_OF)
+    provider = FileProvider(path=source, metadata=metadata, clock=lambda: AS_OF)
     batch = provider.fetch(ProviderRequest(dataset="events", as_of=AS_OF))
     client = TestClient(create_app(runtime_dir=tmp_path / "runtime"))
     built = client.post(
         "/api/v1/evidence/build",
         json={
-            "metadata": metadata().model_dump(mode="json"),
+            "metadata": metadata.model_dump(mode="json"),
             "batch": batch.model_dump(mode="json", exclude_computed_fields=True),
         },
     ).json()

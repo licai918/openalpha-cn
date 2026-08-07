@@ -1,29 +1,12 @@
 from datetime import date
 from decimal import Decimal
 
-from openalpha_cn.backtest.execution import MarketBar
 from openalpha_cn.backtest.portfolio import (
     PortfolioLimits,
     PortfolioOrder,
     PortfolioSimulator,
     PortfolioState,
 )
-
-
-def bar(*, trade_date: date, close: str = "10.00") -> MarketBar:
-    price = Decimal(close)
-    return MarketBar(
-        subject="000001.SZ",
-        trade_date=trade_date,
-        board="main",
-        previous_close=Decimal("10.00"),
-        open=price,
-        high=price,
-        low=price,
-        close=price,
-        suspended=False,
-        is_st=False,
-    )
 
 
 def state(*, cash: str = "20000.00") -> PortfolioState:
@@ -33,7 +16,7 @@ def state(*, cash: str = "20000.00") -> PortfolioState:
     )
 
 
-def test_portfolio_buy_updates_cash_lots_marks_and_equity() -> None:
+def test_portfolio_buy_updates_cash_lots_marks_and_equity(bar) -> None:
     simulator = PortfolioSimulator()
     transition = simulator.execute_order(
         state=state(),
@@ -55,7 +38,7 @@ def test_portfolio_buy_updates_cash_lots_marks_and_equity() -> None:
     assert transition.after.fees_paid == Decimal("5.01")
 
 
-def test_portfolio_enforces_t_plus_one_and_realizes_fifo_profit() -> None:
+def test_portfolio_enforces_t_plus_one_and_realizes_fifo_profit(bar) -> None:
     simulator = PortfolioSimulator()
     bought = simulator.execute_order(
         state=state(),
@@ -98,7 +81,7 @@ def test_portfolio_enforces_t_plus_one_and_realizes_fifo_profit() -> None:
     assert sold.after.fees_paid == Decimal("10.57")
 
 
-def test_portfolio_rejects_insufficient_cash_and_hard_exposure_limit() -> None:
+def test_portfolio_rejects_insufficient_cash_and_hard_exposure_limit(bar) -> None:
     simulator = PortfolioSimulator(
         limits=PortfolioLimits(
             max_position_weight=Decimal("0.25"),

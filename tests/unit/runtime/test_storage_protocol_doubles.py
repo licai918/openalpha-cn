@@ -18,12 +18,10 @@ upsert method), one of these doubles would be unable to satisfy it and this file
 to even construct `ResearchEngine`.
 """
 
-from datetime import UTC, datetime
+from datetime import datetime
 
 from openalpha_cn.domain.decision import DecisionLedger
-from openalpha_cn.domain.evidence import EvidenceSnapshot
 from openalpha_cn.domain.run import RunManifest
-from openalpha_cn.domain.time import Timeline
 from openalpha_cn.runtime.contracts import ResearchRunRequest, RunConflictError
 from openalpha_cn.runtime.engine import ResearchEngine
 from openalpha_cn.runtime.memory import InMemoryResearchMemory
@@ -31,7 +29,6 @@ from openalpha_cn.runtime.recovery import RecoveryStore
 from openalpha_cn.runtime.repository import RunRepository
 from openalpha_cn.storage.recovery import RunRecoveryState
 
-NOW = datetime(2026, 7, 24, 10, 30, tzinfo=UTC)
 DIGEST = "b" * 64
 
 
@@ -76,48 +73,22 @@ class InMemoryRecoveryStore:
         self._states[state.run_id] = state
 
 
-def _evidence(*, kind: str, facts: dict[str, object]) -> EvidenceSnapshot:
-    return EvidenceSnapshot(
-        subject="000001.SZ",
-        kind=kind,
-        timeline=Timeline(
-            event_time=NOW,
-            available_time=NOW,
-            ingested_time=NOW,
-            revision_time=NOW,
-        ),
-        source_id="synthetic.a-share",
-        source_uri=f"fixture://{kind}/000001.SZ",
-        source_license="CC0-1.0",
-        redistribution="allowed",
-        summary=f"Synthetic {kind}.",
-        payload={
-            "schema": "a-share-evidence/v1",
-            "family": {
-                "limit_up": "market_event",
-                "theme": "theme",
-                "capital": "capital",
-            }[kind],
-            "facts": facts,
-            "quality_flags": [],
-        },
-    )
-
-
-def _request(*, run_id: str, config_digest: str = DIGEST) -> ResearchRunRequest:
+def _request(
+    *, run_id: str, config_digest: str = DIGEST, evidence, frozen_now: datetime
+) -> ResearchRunRequest:
     items = (
-        _evidence(
+        evidence(
             kind="limit_up",
             facts={"close": 10.5, "pct_change": 9.99, "board_count": 1},
         ),
-        _evidence(kind="theme", facts={"theme": "机器人", "score": 0.82}),
-        _evidence(kind="capital", facts={"net_inflow": 1_200_000, "unit": "CNY"}),
+        evidence(kind="theme", facts={"theme": "机器人", "score": 0.82}),
+        evidence(kind="capital", facts={"net_inflow": 1_200_000, "unit": "CNY"}),
     )
     return ResearchRunRequest(
         run_id=run_id,
         mode="replay",
         subject="000001.SZ",
-        as_of=NOW,
+        as_of=frozen_now,
         evidence=items,
         code_commit="0123456789abcdef",
         config_digest=config_digest,
@@ -125,16 +96,20 @@ def _request(*, run_id: str, config_digest: str = DIGEST) -> ResearchRunRequest:
     )
 
 
-def _engine(*, repository: RunRepository, recovery_store: RecoveryStore) -> ResearchEngine:
+def _engine(
+    *, repository: RunRepository, recovery_store: RecoveryStore, frozen_now: datetime
+) -> ResearchEngine:
     return ResearchEngine(
         repository=repository,
         memory=InMemoryResearchMemory(),
-        clock=lambda: NOW,
+        clock=lambda: frozen_now,
         recovery_store=recovery_store,
     )
 
 
-def test_in_memory_doubles_drive_a_full_research_cycle_without_sqlite() -> None:
+def test_in_memory_doubles_drive_a_full_research_cycle_without_sqlite(
+    evidence, frozen_now: datetime
+) -> None:
     """Pure-Python doubles for `RunRepository`/`RecoveryStore` (plus the pre-existing
     `InMemoryResearchMemory`) must be sufficient, on their own, to run a full research
     cycle end to end -- evidence in, signal/decision/manifest out, all three stores
@@ -145,11 +120,13 @@ def test_in_memory_doubles_drive_a_full_research_cycle_without_sqlite() -> None:
     engine = ResearchEngine(
         repository=repository,
         memory=memory,
-        clock=lambda: NOW,
+        clock=lambda: frozen_now,
         recovery_store=recovery_store,
     )
 
-    result = engine.run_cycle(_request(run_id="run_double_20260724"))
+    result = engine.run_cycle(
+        _request(run_id="run_double_20260724", evidence=evidence, frozen_now=frozen_now)
+    )
 
     assert result.manifest.status == "succeeded"
     assert result.signal.direction == "bullish"
@@ -162,13 +139,17 @@ def test_in_memory_doubles_drive_a_full_research_cycle_without_sqlite() -> None:
     assert len(memory.list(subject="000001.SZ")) == 1
 
 
-def test_in_memory_doubles_make_a_replay_idempotent() -> None:
+def test_in_memory_doubles_make_a_replay_idempotent(evidence, frozen_now: datetime) -> None:
     """Running the identical request twice through the double-backed engine must return
     byte-for-byte the same result, exactly as the SQLite-backed
     `test_multi_agent_cycle_persists_evidence_linked_decision_idempotently` integration
     test proves for the real stores."""
-    engine = _engine(repository=InMemoryRunRepository(), recovery_store=InMemoryRecoveryStore())
-    request = _request(run_id="run_double_idempotent")
+    engine = _engine(
+        repository=InMemoryRunRepository(),
+        recovery_store=InMemoryRecoveryStore(),
+        frozen_now=frozen_now,
+    )
+    request = _request(run_id="run_double_idempotent", evidence=evidence, frozen_now=frozen_now)
 
     first = engine.run_cycle(request)
     second = engine.run_cycle(request)
@@ -176,14 +157,29 @@ def test_in_memory_doubles_make_a_replay_idempotent() -> None:
     assert first == second
 
 
-def test_in_memory_doubles_reject_a_conflicting_reuse_of_the_same_run_id() -> None:
+def test_in_memory_doubles_reject_a_conflicting_reuse_of_the_same_run_id(
+    evidence, frozen_now: datetime
+) -> None:
     """Reusing a run_id with different immutable inputs against the double-backed engine
     must raise `RunConflictError`, exactly as it does against the real SQLite stores."""
-    engine = _engine(repository=InMemoryRunRepository(), recovery_store=InMemoryRecoveryStore())
-    engine.run_cycle(_request(run_id="run_double_conflict"))
+    engine = _engine(
+        repository=InMemoryRunRepository(),
+        recovery_store=InMemoryRecoveryStore(),
+        frozen_now=frozen_now,
+    )
+    engine.run_cycle(
+        _request(run_id="run_double_conflict", evidence=evidence, frozen_now=frozen_now)
+    )
 
     try:
-        engine.run_cycle(_request(run_id="run_double_conflict", config_digest="c" * 64))
+        engine.run_cycle(
+            _request(
+                run_id="run_double_conflict",
+                config_digest="c" * 64,
+                evidence=evidence,
+                frozen_now=frozen_now,
+            )
+        )
     except RunConflictError as error:
         assert "immutable request" in str(error)
     else:

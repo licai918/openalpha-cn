@@ -1,5 +1,8 @@
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+
+import pytest
 
 from openalpha_cn.domain.evidence import EvidenceSnapshot
 from openalpha_cn.domain.time import Timeline
@@ -9,53 +12,44 @@ from openalpha_cn.runtime.memory import InMemoryResearchMemory
 from openalpha_cn.storage.recovery import SQLiteRecoveryStore
 from openalpha_cn.storage.sqlite import SQLiteRunRepository
 
-NOW = datetime(2026, 7, 24, 10, 30, tzinfo=UTC)
 DIGEST = "b" * 64
 
 
-def evidence(*, kind: str, facts: dict[str, object]) -> EvidenceSnapshot:
-    return EvidenceSnapshot(
-        subject="000001.SZ",
-        kind=kind,
-        timeline=Timeline(
-            event_time=NOW,
-            available_time=NOW,
-            ingested_time=NOW,
-            revision_time=NOW,
-        ),
-        source_id="synthetic.a-share",
-        source_uri=f"fixture://{kind}/000001.SZ",
-        source_license="CC0-1.0",
-        redistribution="allowed",
-        summary=f"Synthetic {kind}.",
-        payload={
-            "schema": "a-share-evidence/v1",
-            "family": {
-                "limit_up": "market_event",
-                "theme": "theme",
-                "capital": "capital",
-            }[kind],
-            "facts": facts,
-            "quality_flags": [],
-        },
-    )
+@pytest.fixture
+def research_request(
+    frozen_now: datetime,
+) -> Callable[[tuple[EvidenceSnapshot, ...]], ResearchRunRequest]:
+    """Builds the `ResearchRunRequest` under test from a caller-supplied evidence tuple.
 
+    Not named `request`: that is pytest's own reserved built-in fixture name. Not
+    collapsed into a suite-wide fixture either -- this takes a pre-built evidence tuple
+    with a *fixed* `run_id` (so replaying the identical request twice is idempotent by
+    construction), a different parameterization axis from
+    `tests/integration/test_batch_research.py`'s `request(run_id, subject)`, which varies
+    `run_id`/`subject` and always builds its own single canned evidence item. See
+    task-13-report.md for the full comparison.
+    """
 
-def request(items: tuple[EvidenceSnapshot, ...]) -> ResearchRunRequest:
-    return ResearchRunRequest(
-        run_id="run_golden_20260724",
-        mode="replay",
-        subject="000001.SZ",
-        as_of=NOW,
-        evidence=items,
-        code_commit="0123456789abcdef",
-        config_digest=DIGEST,
-        random_seed=7,
-    )
+    def _make(items: tuple[EvidenceSnapshot, ...]) -> ResearchRunRequest:
+        return ResearchRunRequest(
+            run_id="run_golden_20260724",
+            mode="replay",
+            subject="000001.SZ",
+            as_of=frozen_now,
+            evidence=items,
+            code_commit="0123456789abcdef",
+            config_digest=DIGEST,
+            random_seed=7,
+        )
+
+    return _make
 
 
 def test_multi_agent_cycle_persists_evidence_linked_decision_idempotently(
     tmp_path: Path,
+    evidence,
+    research_request,
+    frozen_now: datetime,
 ) -> None:
     items = (
         evidence(
@@ -71,12 +65,12 @@ def test_multi_agent_cycle_persists_evidence_linked_decision_idempotently(
     engine = ResearchEngine(
         repository=repository,
         memory=memory,
-        clock=lambda: NOW,
+        clock=lambda: frozen_now,
         recovery_store=recovery_store,
     )
 
-    first = engine.run_cycle(request(items))
-    second = engine.run_cycle(request(items))
+    first = engine.run_cycle(research_request(items))
+    second = engine.run_cycle(research_request(items))
 
     assert first == second
     assert first.signal.direction == "bullish"
@@ -94,15 +88,19 @@ def test_multi_agent_cycle_persists_evidence_linked_decision_idempotently(
     assert len(memory.list(subject="000001.SZ")) == 1
 
 
-def test_cycle_abstains_explicitly_when_evidence_is_insufficient(tmp_path: Path) -> None:
+def test_cycle_abstains_explicitly_when_evidence_is_insufficient(
+    tmp_path: Path,
+    research_request,
+    frozen_now: datetime,
+) -> None:
     engine = ResearchEngine(
         repository=SQLiteRunRepository(tmp_path / "state.sqlite3"),
         memory=InMemoryResearchMemory(),
-        clock=lambda: NOW,
+        clock=lambda: frozen_now,
         recovery_store=SQLiteRecoveryStore(tmp_path / "state.sqlite3"),
     )
 
-    result = engine.run_cycle(request(()))
+    result = engine.run_cycle(research_request(()))
 
     assert result.signal.direction == "abstain"
     assert result.signal.abstention_reason == "No supported point-in-time evidence was available."
@@ -111,14 +109,19 @@ def test_cycle_abstains_explicitly_when_evidence_is_insufficient(tmp_path: Path)
     assert result.manifest.status == "succeeded"
 
 
-def test_cycle_rejects_evidence_that_was_not_visible_at_as_of(tmp_path: Path) -> None:
+def test_cycle_rejects_evidence_that_was_not_visible_at_as_of(
+    tmp_path: Path,
+    evidence,
+    research_request,
+    frozen_now: datetime,
+) -> None:
     future = evidence(
         kind="limit_up",
         facts={"close": 10.5, "pct_change": 9.99, "board_count": 1},
     ).model_copy(
         update={
             "timeline": Timeline(
-                event_time=NOW,
+                event_time=frozen_now,
                 available_time=datetime(2026, 7, 24, 11, 0, tzinfo=UTC),
                 ingested_time=datetime(2026, 7, 24, 11, 1, tzinfo=UTC),
                 revision_time=datetime(2026, 7, 24, 11, 0, tzinfo=UTC),
@@ -128,12 +131,12 @@ def test_cycle_rejects_evidence_that_was_not_visible_at_as_of(tmp_path: Path) ->
     engine = ResearchEngine(
         repository=SQLiteRunRepository(tmp_path / "state.sqlite3"),
         memory=InMemoryResearchMemory(),
-        clock=lambda: NOW,
+        clock=lambda: frozen_now,
         recovery_store=SQLiteRecoveryStore(tmp_path / "state.sqlite3"),
     )
 
     try:
-        engine.run_cycle(request((future,)))
+        engine.run_cycle(research_request((future,)))
     except ValueError as error:
         assert "not visible" in str(error)
     else:

@@ -1,12 +1,11 @@
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from openalpha_cn.agents.base import AgentContext, AgentResult
-from openalpha_cn.domain.evidence import EvidenceSnapshot
 from openalpha_cn.domain.signal import SignalFrame
-from openalpha_cn.domain.time import Timeline
 from openalpha_cn.runtime.contracts import ResearchRunRequest, RunConflictError
 from openalpha_cn.runtime.engine import ResearchEngine
 from openalpha_cn.runtime.memory import MemoryEntry
@@ -14,32 +13,7 @@ from openalpha_cn.storage.memory import SQLiteResearchMemory
 from openalpha_cn.storage.recovery import SQLiteRecoveryStore
 from openalpha_cn.storage.sqlite import SQLiteRunRepository
 
-NOW = datetime(2026, 7, 24, 10, 30, tzinfo=UTC)
 DIGEST = "b" * 64
-
-
-def evidence(*, kind: str, facts: dict[str, object]) -> EvidenceSnapshot:
-    return EvidenceSnapshot(
-        subject="000001.SZ",
-        kind=kind,
-        timeline=Timeline(
-            event_time=NOW,
-            available_time=NOW,
-            ingested_time=NOW,
-            revision_time=NOW,
-        ),
-        source_id="synthetic.a-share",
-        source_uri=f"fixture://{kind}/000001.SZ",
-        source_license="CC0-1.0",
-        redistribution="allowed",
-        summary=f"Synthetic {kind}.",
-        payload={
-            "schema": "a-share-evidence/v1",
-            "family": "market_event",
-            "facts": facts,
-            "quality_flags": [],
-        },
-    )
 
 
 class RecoverableAgent:
@@ -71,21 +45,25 @@ class RecoverableAgent:
         )
 
 
-def research_request(*, config_digest: str = DIGEST) -> ResearchRunRequest:
-    item = evidence(
-        kind="limit_up",
-        facts={"close": 10.5, "pct_change": 9.99, "board_count": 1},
-    )
-    return ResearchRunRequest(
-        run_id="run_recovery_20260724",
-        mode="replay",
-        subject="000001.SZ",
-        as_of=NOW,
-        evidence=(item,),
-        code_commit="0123456789abcdef",
-        config_digest=config_digest,
-        random_seed=7,
-    )
+@pytest.fixture
+def research_request(evidence, frozen_now: datetime) -> Callable[..., ResearchRunRequest]:
+    def _make(*, config_digest: str = DIGEST) -> ResearchRunRequest:
+        item = evidence(
+            kind="limit_up",
+            facts={"close": 10.5, "pct_change": 9.99, "board_count": 1},
+        )
+        return ResearchRunRequest(
+            run_id="run_recovery_20260724",
+            mode="replay",
+            subject="000001.SZ",
+            as_of=frozen_now,
+            evidence=(item,),
+            code_commit="0123456789abcdef",
+            config_digest=config_digest,
+            random_seed=7,
+        )
+
+    return _make
 
 
 def test_research_memory_survives_process_restart_and_rejects_conflicts(
@@ -112,6 +90,8 @@ def test_research_memory_survives_process_restart_and_rejects_conflicts(
 
 def test_cycle_resumes_after_last_completed_agent_without_repeating_work(
     tmp_path: Path,
+    research_request,
+    frozen_now: datetime,
 ) -> None:
     path = tmp_path / "state.sqlite3"
     repository = SQLiteRunRepository(path)
@@ -121,7 +101,7 @@ def test_cycle_resumes_after_last_completed_agent_without_repeating_work(
     engine = ResearchEngine(
         repository=repository,
         memory=memory,
-        clock=lambda: NOW,
+        clock=lambda: frozen_now,
         recovery_store=SQLiteRecoveryStore(path),
         agents=(first, second),
     )
@@ -147,14 +127,18 @@ def test_cycle_resumes_after_last_completed_agent_without_repeating_work(
     assert len(memory.list(subject="000001.SZ")) == 1
 
 
-def test_recovery_isolated_by_immutable_request_and_graph_signature(tmp_path: Path) -> None:
+def test_recovery_isolated_by_immutable_request_and_graph_signature(
+    tmp_path: Path,
+    research_request,
+    frozen_now: datetime,
+) -> None:
     path = tmp_path / "state.sqlite3"
     first = RecoverableAgent("first-agent")
     second = RecoverableAgent("second-agent", fail_once=True)
     engine = ResearchEngine(
         repository=SQLiteRunRepository(path),
         memory=SQLiteResearchMemory(path),
-        clock=lambda: NOW,
+        clock=lambda: frozen_now,
         recovery_store=SQLiteRecoveryStore(path),
         agents=(first, second),
     )
@@ -167,7 +151,7 @@ def test_recovery_isolated_by_immutable_request_and_graph_signature(tmp_path: Pa
     changed_graph = ResearchEngine(
         repository=SQLiteRunRepository(path),
         memory=SQLiteResearchMemory(path),
-        clock=lambda: NOW,
+        clock=lambda: frozen_now,
         recovery_store=SQLiteRecoveryStore(path),
         agents=(first, RecoverableAgent("replacement-agent")),
     )

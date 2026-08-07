@@ -15,7 +15,7 @@ Two properties matter here, matching the brief's hard constraints:
 import json
 import sqlite3
 from contextlib import closing
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -38,79 +38,96 @@ from openalpha_cn.storage.recovery import (
 )
 from openalpha_cn.storage.sqlite import SQLiteRunRepository
 
-NOW = datetime(2026, 8, 7, 9, 0, tzinfo=UTC)
 DIGEST = "a" * 64
 
 
-def _manifest(run_id: str = "run_versioned_read") -> RunManifest:
-    return RunManifest(
-        run_id=run_id,
-        mode="replay",
-        as_of=NOW,
-        code_commit="0123456789abcdef",
-        config_digest=DIGEST,
-        provider_payload_digests=(ArtifactDigest(name="jqdata", sha256=DIGEST),),
-        model_versions=(VersionRef(component="baseline", version="1.0.0"),),
-        random_seed=7,
-        started_at=NOW,
-        finished_at=NOW,
-        status="succeeded",
-    )
+@pytest.fixture
+def _manifest(migration_now: datetime):
+    def _make(run_id: str = "run_versioned_read") -> RunManifest:
+        return RunManifest(
+            run_id=run_id,
+            mode="replay",
+            as_of=migration_now,
+            code_commit="0123456789abcdef",
+            config_digest=DIGEST,
+            provider_payload_digests=(ArtifactDigest(name="jqdata", sha256=DIGEST),),
+            model_versions=(VersionRef(component="baseline", version="1.0.0"),),
+            random_seed=7,
+            started_at=migration_now,
+            finished_at=migration_now,
+            status="succeeded",
+        )
+
+    return _make
 
 
-def _decision(run_id: str) -> DecisionLedger:
-    return DecisionLedger(
-        run_id=run_id,
-        created_at=NOW,
-        agent_outputs=(
-            AgentDecision(
-                agent_id="market-agent",
-                signal_id="sig_versioned_read",
-                recommendation="support",
-                rationale="Confirmed by price and volume.",
+@pytest.fixture
+def _decision(migration_now: datetime):
+    def _make(run_id: str) -> DecisionLedger:
+        return DecisionLedger(
+            run_id=run_id,
+            created_at=migration_now,
+            agent_outputs=(
+                AgentDecision(
+                    agent_id="market-agent",
+                    signal_id="sig_versioned_read",
+                    recommendation="support",
+                    rationale="Confirmed by price and volume.",
+                ),
             ),
-        ),
-        routing_path=("market-agent", "risk-gate"),
-        risk_decision="pass",
-        final_action="watch",
-        evidence_ids=("ev_versioned_read",),
-        signal_ids=("sig_versioned_read",),
-        code_commit="0123456789abcdef",
-    )
+            routing_path=("market-agent", "risk-gate"),
+            risk_decision="pass",
+            final_action="watch",
+            evidence_ids=("ev_versioned_read",),
+            signal_ids=("sig_versioned_read",),
+            code_commit="0123456789abcdef",
+        )
+
+    return _make
 
 
-def _signal() -> SignalFrame:
-    return SignalFrame(
-        subject="000001.SZ",
-        as_of=NOW,
-        direction="bullish",
-        strength=0.4,
-        confidence=0.6,
-        horizon="3m",
-        evidence_ids=("ev_versioned_read",),
-    )
+@pytest.fixture
+def _signal(migration_now: datetime):
+    def _make() -> SignalFrame:
+        return SignalFrame(
+            subject="000001.SZ",
+            as_of=migration_now,
+            direction="bullish",
+            strength=0.4,
+            confidence=0.6,
+            horizon="3m",
+            evidence_ids=("ev_versioned_read",),
+        )
+
+    return _make
 
 
-def _recovery_state(run_id: str) -> RunRecoveryState:
-    result = AgentResult(agent_id="market-agent", signal=_signal(), rationale="ok")
-    return RunRecoveryState(
-        run_id=run_id,
-        request_digest=DIGEST,
-        graph_signature=DIGEST,
-        agent_ids=("market-agent", "risk-gate"),
-        completed_results=(result,),
-        next_agent_index=1,
-        started_at=NOW,
-        updated_at=NOW,
-    )
+@pytest.fixture
+def _recovery_state(migration_now: datetime, _signal):
+    def _make(run_id: str) -> RunRecoveryState:
+        result = AgentResult(agent_id="market-agent", signal=_signal(), rationale="ok")
+        return RunRecoveryState(
+            run_id=run_id,
+            request_digest=DIGEST,
+            graph_signature=DIGEST,
+            agent_ids=("market-agent", "risk-gate"),
+            completed_results=(result,),
+            next_agent_index=1,
+            started_at=migration_now,
+            updated_at=migration_now,
+        )
+
+    return _make
 
 
-def test_sqlite_run_repository_reads_existing_records_field_for_field(tmp_path: Path) -> None:
+def test_sqlite_run_repository_reads_existing_records_field_for_field(
+    tmp_path: Path, _manifest, _decision, migration_now: datetime
+) -> None:
     """A database built with today's normal write paths still reads back identical."""
     repository = SQLiteRunRepository(tmp_path / "state.sqlite3")
     manifest = _manifest()
     decision = _decision(manifest.run_id)
-    checkpoint = CheckpointRecord(name="risk-gate", recorded_at=NOW, state_digest=DIGEST)
+    checkpoint = CheckpointRecord(name="risk-gate", recorded_at=migration_now, state_digest=DIGEST)
     repository.append_run(manifest)
     repository.append_decision(decision)
     repository.append_checkpoint(run_id=manifest.run_id, checkpoint=checkpoint)
@@ -126,7 +143,9 @@ def test_sqlite_run_repository_reads_existing_records_field_for_field(tmp_path: 
     assert reread_checkpoints == (checkpoint,)
 
 
-def test_sqlite_recovery_store_reads_existing_records_field_for_field(tmp_path: Path) -> None:
+def test_sqlite_recovery_store_reads_existing_records_field_for_field(
+    tmp_path: Path, _recovery_state
+) -> None:
     store = SQLiteRecoveryStore(tmp_path / "state.sqlite3")
     state = _recovery_state("run_versioned_recovery")
     store.save(state)
@@ -161,6 +180,7 @@ def test_sqlite_run_repository_get_run_fails_loudly_on_an_unknown_schema_version
 
 def test_sqlite_run_repository_get_decision_fails_loudly_on_an_unknown_schema_version(
     tmp_path: Path,
+    _manifest,
 ) -> None:
     path = tmp_path / "state.sqlite3"
     repository = SQLiteRunRepository(path)
