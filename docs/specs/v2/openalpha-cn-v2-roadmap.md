@@ -163,7 +163,7 @@ P3 结束即可独立使用（Jupyter 直连面板 + 因子）
 
 | ID | 标题 | 类型 | 依赖 | 说明 | PRD |
 |---|---|---|---|---|---|
-| `V2-P4-001` | **破坏性契约变更打包**：mode += `paper`/`daily`；attribution += `model` + 显式残差；`horizon` → 可比枚举 | 技 | P0B-004,005 | `test_schema_export.py:19` 断言 `endswith("/v1")` 按设计会失败，须同步更新；全库无 golden ID 断言，身份漂移需专门补测 | D36 |
+| `V2-P4-001` | **破坏性契约变更打包**：mode += `paper`/`daily`；attribution += `model` + 显式残差；`horizon` → 可比枚举。**需身份重写迁移，见 §8** | 技 | P0B-004,005 | `test_schema_export.py:19` 断言 `endswith("/v1")` 按设计会失败，须同步更新；全库无 golden ID 断言，身份漂移需专门补测 | D36 |
 | `V2-P4-002` | `mode` 列化 + 索引（当前埋在 `runs.payload` TEXT，列 paper 运行要全表扫 + 逐行 JSON 解析） | 技 | 001 | `storage/sqlite.py:31-33` | S5 |
 | `V2-P4-003` | mode 单一定义源（现有三处独立重复：`domain/run.py:51`、`runtime/engine.py:36`、`cli.py:42-47`；改两处漏一处会全绿通过） | 技 | 001 | 加一条断言三者一致的测试 | D36 |
 | `V2-P4-004` | 两段漏斗横截面管线（面板打分 + 硬性可交易过滤，不进 `run_cycle`） | 结 | P3 | 用实测标定 N（起点 100） | S95, D3 |
@@ -405,3 +405,29 @@ PRD 中 83 条 IN / IN-降级 story，逐条落到 issue。
 
 **待定（P1 之前必须决策）**：重复版本是"只保留最高 `update_flag`"还是"保留全部并排序"。
 这个选择会被 8 组数据集继承，不应在骨架阶段替未来拍板。
+
+## 8. 契约升版会改变内容寻址身份（2026-08 实测）
+
+Task 12 建多版本读取时发现并经评审实测验证：**`schema_version` 是真实字段而非 `computed_field`**，
+因此被 `domain/_identity.py#stable_model_id` 的 `model_dump(exclude_computed_fields=True)` 哈希进 ID。
+
+实测对照（同一实例，仅 bump `schema_version`）：
+
+| 契约 | 原 ID | 升版后 ID | 变化 |
+|---|---|---|---|
+| `SignalFrame.signal_id` | `sig_4b5bef549c176fcadd11da0e` | `sig_d62c79bcf5dc0d4f8fb303b0` | **变** |
+| `DecisionLedger.decision_id` | `dec_46314a613cc7cace244e432c` | `dec_76db84ac023d15f80caa75aa` | **变** |
+| `ValidationResult.validation_id` | `val_d153fc97d0ec4470040686b0` | `val_2d427eeed0f048ed8a5a432a` | **变** |
+| `ProviderRecord.record_id` | `rec_5855b85464c1f5bfe4926677` | `rec_b027492175506e03092880e3` | **变** |
+| `EvidenceSnapshot.evidence_id` | `ev_86a4f53ad8f906b5d01fe0c9` | 同左 | 不变 |
+
+`EvidenceSnapshot.evidence_id` 是手写派生且不含 `schema_version`，是唯一安全的反例 ——
+也是其余契约应参照的模式。
+
+**对 `V2-P4-001` 的后果**：三项变更里有两项落在 ID 承载契约上
+（attribution 改动经 `ValidationResult`、horizon 改动经 `SignalFrame`）。
+**不能靠读时透明 upcast** —— 那会静默改变已存储记录的主键，让 `decisions.decision_id`、
+`research_memory.decision_id`（UNIQUE）等引用全部失配。
+
+P4 必须写一次**显式的身份重写迁移**：读旧行 → 升版 → 重算 ID → 同事务内更新所有引用它的行。
+这不是 Task 12 的范围（Task 12 只建机制），但没有这条记录，P4 会踩。
