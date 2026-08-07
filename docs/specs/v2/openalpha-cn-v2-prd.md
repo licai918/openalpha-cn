@@ -383,7 +383,7 @@ Proposed 版按可分发开源平台撰写。个人自用场景下，下列能�
 31. **【新增】双数据平面强制分离。** 面板数据（价量、财务、日历、股票池、行业、复权）进入按 `dataset/year/` 分区的面板存储，使用**持久** DuckDB catalog；离散可引用事件继续进入 `ParquetEvidenceStore`。禁止面板数据流入证据存储。禁止在面板查询路径上做逐行 pydantic 重建与 hash 重算。
 32. **【新增】Provider 数据集以声明式描述符定义。** Tushare HTTP 为统一信封（`api_name` / `token` / `params` / `fields`），解码逻辑通用。数据集描述符声明：params 形状、标的字段、日期字段、时钟策略（`daily_close` / `announcement` / `calendar_static`）、`kind`、`source_uri` 模板。新增数据集是新增一行描述符，不是新增一个适配器。
 33. **【新增】能力探测先于摄入。** `openalpha doctor` 对每个候选数据集发一次最小请求并记录返回 `code`/`msg`/限流，产出账号实际可取接口的报告。P1 的数据集清单由该报告确定，而不是由假设的积分档位确定。
-34. **【新增】PIT 红队是独立闸门。** P2 必须通过才能进入 P3。注入未来披露、后续修正（`f_ann_date > ann_date`）、未来指数成分、未来行业变更、重叠标签，全部要求 fail-closed 或正确排除；并对 `adj_factor` 自算收益率与 `daily.pct_chg` 逐条交叉对账。
+34. **【新增】PIT 红队是独立闸门。** P2 必须通过才能进入 P3。注入未来披露、后续修正（两种形态：`f_ann_date > ann_date`，以及日期相同仅 `update_flag` 不同 —— 后者经 2026-08 实测确认是真实主流形态）、未来指数成分、未来行业变更、重叠标签，全部要求 fail-closed 或正确排除；并对 `adj_factor` 自算收益率与 `daily.pct_chg` 逐条交叉对账。
 35. **【新增】数值栈边界。** 采用 numpy + pandas。`domain/` 禁止 import 任何数值库；`DataFrame` / `ndarray` 只允许出现在 `panel/`、`factors/`、`models/` 层。ADR-0001 的合同纯度由此规则保护。
 36. **【新增】破坏性契约变更集中一次完成。** `RunManifest.mode` 增加 `paper` / `daily`；`AttributionTerm.category` 增加 `model` 并支持显式残差；`SignalFrame.horizon` 规范化为可比较枚举。三项在 P4 一次性打包升版，避免多轮迁移。
 
@@ -455,4 +455,4 @@ Proposed 版按可分发开源平台撰写。个人自用场景下，下列能�
 - 初始验收使用合成 fixture。进入 Research 或 Daily 档需要使用者配置自有合法数据并显式接受 Provider 条款。
 - **两项待定决策**（不阻塞 P0 启动，但会改变 P0 的 ADR 内容）：
   1. **是否继续维护开源分发。** 仓库为 MIT 且有公开地址与推广文档。本版默认个人研究优先，将 Demo 档位、发布扫描与完整迁移测试降级。若决定对外发布 v2，需加回这三项（约 +3–4 周），且 Demo 冻结数据集须重新设计为不含 Tushare 原始数据。
-  2. ~~**Tushare 积分档位未知。**~~ **已解决（2026-07-30 实测）**：P1 全部候选数据集 16/16 返回 `code=0`，含 `index_weight`、`index_classify`(SW2021 L1)、`index_member_all` 与四张财务表。S11/S19 **不需要降级**，行业中性化可用真实行业分类。`balancesheet` 单标的单期返回 2 行，证实 `ann_date`/`f_ann_date` 修正记录真实存在。明细见 `openalpha-cn-v2-roadmap.md` §6。`V2-P0A-004` 仍需把探测做成 `doctor` 的正式能力，因为限流与积分随账号变化且需在每次 `panel build` 前 fail-closed。
+  2. ~~**Tushare 积分档位未知。**~~ **已解决（2026-07-30 实测）**：P1 全部候选数据集 16/16 返回 `code=0`，含 `index_weight`、`index_classify`(SW2021 L1)、`index_member_all` 与四张财务表。S11/S19 **不需要降级**，行业中性化可用真实行业分类。`balancesheet` 单标的单期返回 2 行，证实修正记录真实存在 —— 但后续实测（roadmap §7）发现这两行的 `ann_date` 与 `f_ann_date` **完全相同**，只有 `update_flag` 不同。明细见 `openalpha-cn-v2-roadmap.md` §6。`V2-P0A-004` 仍需把探测做成 `doctor` 的正式能力，因为限流与积分随账号变化且需在每次 `panel build` 前 fail-closed。

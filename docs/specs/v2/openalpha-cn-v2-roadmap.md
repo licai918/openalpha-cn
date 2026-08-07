@@ -99,7 +99,7 @@ P3 结束即可独立使用（Jupyter 直连面板 + 因子）
 | `V2-P1-008` | 数据集⑤`suspend_d` + `stk_limit` | 技 | 007 | 接入现有 `AShareExecutionPolicy` | 同上 | S47, S55 |
 | `V2-P1-009` | 数据集⑥`index_weight`（沪深300/中证500/中证1000） | 技 | 005 | 实测可用（§6），无需降级 | 同上 | S11 |
 | `V2-P1-010` | 数据集⑦行业分类历史 | 技 | 005 | 中性化前提；`index_classify`+`index_member_all` 实测可用（§6） | 同上 | S11 |
-| `V2-P1-011` | 数据集⑧`fina_indicator` + 三大报表（**必须同时取 `ann_date` 与 `f_ann_date`**） | 技 | 004 | 否则修正时钟是假的 | 契约 + 修正时钟专项 | S6, S9 |
+| `V2-P1-011` | 数据集⑧`fina_indicator` + 三大报表（取 `ann_date`、`f_ann_date` **与 `update_flag`**） | 技 | 004 | **实测更正（§7）**：修正版本共享相同的 `ann_date` 与 `f_ann_date`，只靠 `update_flag` 区分。仅凭两个日期的修正时钟是假的 | 契约 + 修正时钟专项 + 重复版本消歧 | S6, S9 |
 | `V2-P1-012` | 面板体检报告（缺失/过期/重复/被修正） | 产 | 003 | — | 集成：人为注入缺陷可被报出 | S13 |
 | `V2-P1-013` | fail-closed 依赖门（失败的日度数据集显式阻塞下游） | 技 | 012 | — | 集成：断言阻塞而非空成功 | S14, D5 |
 | `V2-P1-014` | 面板 fixture **生成器** —— `.parquet`/`.duckdb`/`.sqlite3` 是发布拦截后缀，fixture 不能签入 | 测 | 013 | `scripts/verify_publication.py:14-28`；可复用 `tests/contract/providers/test_file_provider.py:93-127` 的 DuckDB→Parquet 写法 | 测试基础设施 | S85, T7 |
@@ -118,7 +118,7 @@ P3 结束即可独立使用（Jupyter 直连面板 + 因子）
 | ID | 标题 | 依赖 | 注入内容 | PRD |
 |---|---|---|---|---|
 | `V2-P2-001` | 未来披露注入 | P1 | `available_time > as_of` 的披露 | S9, S93 |
-| `V2-P2-002` | 后续修正注入（`f_ann_date > ann_date`） | P1-011 | 要求按 as-of 返回**修正前**的值 | S9, S93 |
+| `V2-P2-002` | 后续修正注入（两种形态：`f_ann_date > ann_date`，**以及日期相同仅 `update_flag` 不同**） | P1-011 | 要求按 as-of 返回修正前的值；第二种形态今天无法区分，见 §7 | S9, S93 |
 | `V2-P2-003` | 未来指数成分变更注入 | P1-009 | 要求按 as-of 解析成分 | S11, S93 |
 | `V2-P2-004` | 未来行业分类变更注入 | P1-010 | 同上 | S11, S93 |
 | `V2-P2-005` | 重叠标签检测 | P1 | 要求显式拒绝或标注 | S28, S93 |
@@ -381,3 +381,27 @@ PRD 中 83 条 IN / IN-降级 story，逐条落到 issue。
 探测方式是一次性脚本（scratchpad，未入库）。`V2-P0A-004` 仍需把它做成 `doctor` 的正式能力，因为限流与积分会随账号变化，且需要在每次 `panel build` 前 fail-closed。
 
 规模含义：全市场 5,534 只 × 约 2,440 交易日 ≈ **1.35×10⁷ 行/字段**，与 `V2-P1-001` 的分区与列裁剪要求一致；`balancesheet` 的 152 字段说明财务面板必须做列投影，不能整表读。
+
+## 7. 修正时钟实测更正（2026-08，Task 6 期间）
+
+原计划假设财务数据的修正时钟可由 `ann_date` 与 `f_ann_date` 的差异导出。**真实数据证伪了这一点。**
+
+用真实 token 探 `balancesheet`（3 只股 × 2022–2025，共 65 行）：
+
+| 观测 | 结果 |
+|---|---|
+| `f_ann_date >= ann_date` | **0 违例**，假设安全 |
+| 两个日期相等的行 | 65 行中 62 行 |
+| 同一 `(ts_code, end_date)` 的多版本 | 存在。`000001.SZ` / `end_date=20231231` 返回 **2 行**，`ann_date` 与 `f_ann_date` **均为 20240315**，仅 `update_flag` 为 0 与 1 |
+
+**后果**：仅凭两个公告日期，原始申报与其修正版产生**逐字段相等的 `Timeline`** —— `available_time` 与
+`revision_time` 都无法区分二者。下游 `ProviderBatch` 对 `(subject, kind, date)` 无唯一性约束，
+两行会共存；PIT 消费者取"当前值"时只能依赖 Tushare 的响应顺序，而那不是契约。
+`evidence/builder.py` 的 `revised_after_initial_availability` 质量标记也永不触发。
+
+**已做**：`_announcement_timeline` 的 docstring 记录了实测数字；
+`test_announcement_clock_cannot_yet_distinguish_restatement_via_update_flag` 把这个缺口钉成测试，
+消歧策略落地时该测试必须被改写而非删除。
+
+**待定（P1 之前必须决策）**：重复版本是"只保留最高 `update_flag`"还是"保留全部并排序"。
+这个选择会被 8 组数据集继承，不应在骨架阶段替未来拍板。
