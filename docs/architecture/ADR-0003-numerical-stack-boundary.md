@@ -10,7 +10,7 @@ Measured facts about the current codebase:
 1. The runtime dependency set today is exactly 7 packages: `duckdb`, `fastapi`, `pydantic`,
    `pytz`, `typer`, `tzdata`, `uvicorn`. There is no `numpy`, `pandas`, `scipy`,
    `scikit-learn`, or `polars`.
-2. `pyproject.toml:71-85`'s mypy override block already lists `numpy`/`pandas` — not because
+2. `pyproject.toml:72-86`'s mypy override block already lists `numpy`/`pandas` — not because
    they are used yet, but because `akshare` → `pandas` → `numpy` is a transitive dependency,
    and CI runs `uv sync --all-extras`. That means **the CI environment physically has both
    packages installed while the project declares neither**; the local `.venv` does not have
