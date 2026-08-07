@@ -10,7 +10,7 @@
     "model": 4,
     "operations": 16,
     "product": 3,
-    "provider": 7,
+    "provider": 8,
     "recovery": 2,
     "storage": 6,
     "temporal": 3
@@ -28,13 +28,13 @@
     "DEFERRED": 1,
     "ENHANCED_REPLACEMENT": 20,
     "EXCLUDED": 4,
-    "NATIVE_COMPLETE": 69
+    "NATIVE_COMPLETE": 70
   },
   "totals": {
-    "all_features": 95,
+    "all_features": 96,
     "legacy_acceptance_rows": 86,
-    "true_completed_features": 90,
-    "true_completion_rate_pct": 94.74,
+    "true_completed_features": 91,
+    "true_completion_rate_pct": 94.79,
     "unknown": 0,
     "unreviewed": 0
   }
