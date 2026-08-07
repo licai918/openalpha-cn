@@ -15,7 +15,8 @@ V2-P0B-013.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import logging
+from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
@@ -24,7 +25,35 @@ import pytest
 from openalpha_cn.backtest.execution import MarketBar
 from openalpha_cn.domain.evidence import EvidenceSnapshot
 from openalpha_cn.domain.time import Timeline
+from openalpha_cn.logging_setup import PACKAGE_LOGGER_NAME
 from openalpha_cn.providers.base import ProviderMetadata
+
+
+@pytest.fixture(autouse=True)
+def _reset_openalpha_logging() -> Iterator[None]:
+    """Every test starts with the `openalpha_cn` logger back at its library-safe,
+    unconfigured default: only the permanent `NullHandler` (see `logging_setup.py`),
+    level `NOTSET`.
+
+    Without this, `configure_logging()`'s intentional "configure once per process"
+    idempotency (many tests build their own `create_app()`/invoke `cli.main()`) would
+    let whichever test happens to run first in the session silently pin the real
+    `StreamHandler` and log level for every test that runs after it -- so a later test
+    asserting a specific `OPENALPHA_LOG_LEVEL` actually took effect would observe
+    stale state instead, and `uv run pytest -q`'s clean per-test output would depend
+    on test execution order rather than being a structural guarantee.
+    """
+    logger = logging.getLogger(PACKAGE_LOGGER_NAME)
+    original_handlers = list(logger.handlers)
+    original_level = logger.level
+    original_propagate = logger.propagate
+    logger.handlers = [h for h in original_handlers if isinstance(h, logging.NullHandler)]
+    logger.setLevel(logging.NOTSET)
+    yield
+    logger.handlers = original_handlers
+    logger.setLevel(original_level)
+    logger.propagate = original_propagate
+
 
 # --- the canonical point-in-time clock --------------------------------------------------
 #

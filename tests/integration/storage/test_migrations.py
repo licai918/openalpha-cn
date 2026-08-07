@@ -5,6 +5,7 @@ interaction with a *real* SQLite file -- transactional DDL, `PRAGMA user_version
 SQLite backup API have no meaningful in-memory double.
 """
 
+import logging
 import multiprocessing
 import sqlite3
 import time
@@ -229,6 +230,73 @@ def test_failing_migration_rolls_back_leaves_version_unmoved_and_backup_intact(
     assert "doomed" not in columns
     repository = SQLiteRunRepository(path)
     assert repository.get_run(run.run_id) == run
+
+
+# --- structured logging (V2-P0B-007) ------------------------------------------------------
+
+
+def test_run_migrations_logs_the_backup_path_and_each_applied_migration(
+    tmp_path: Path,
+    migration_now: datetime,
+    migration_clock: Callable[[], datetime],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Migration execution -- version advance and backup path -- is one of the four
+    call sites V2-P0B-007's brief names explicitly: "out of hours" is exactly when
+    this needs to be greppable."""
+    path = tmp_path / "state.sqlite3"
+    _build_v1_shaped_database(path, now=migration_now)
+    caplog.set_level(logging.INFO, logger="openalpha_cn.storage.migrations")
+
+    result = run_migrations(path, clock=migration_clock)
+
+    assert result.backup_path is not None
+    backup_events = [r for r in caplog.records if r.message == "migration_backup_created"]
+    assert len(backup_events) == 1
+    assert backup_events[0].backup_path == str(result.backup_path)  # type: ignore[attr-defined]
+
+    applied_events = [r for r in caplog.records if r.message == "migration_applied"]
+    assert [(r.migration_version, r.migration_name) for r in applied_events] == [  # type: ignore[attr-defined]
+        (BASELINE_VERSION, "baseline"),
+        (DEMO_ADD_RUNS_ARCHIVED_AT_VERSION, "demo_add_runs_archived_at"),
+    ]
+
+
+def test_run_migrations_logs_failure_without_leaking_the_underlying_exception_message(
+    tmp_path: Path,
+    migration_now: datetime,
+    migration_clock: Callable[[], datetime],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Sentinel-driven leak proof for the migration-failure log call: a migration's
+    `apply()` can raise *any* exception (a `sqlite3.OperationalError` today, but
+    nothing stops a future migration's precondition check from raising something
+    that embeds a connection string or credential). The `migration_failed` log
+    record must carry only `version`/`name`/`backup_path` -- never `str(error)`.
+    """
+    path = tmp_path / "state.sqlite3"
+    _build_v1_shaped_database(path, now=migration_now)
+    secret = "sk-migration-failure-log-must-not-leak-99001"
+
+    def _leaking_apply(connection: sqlite3.Connection) -> None:
+        raise RuntimeError(f"connection refused for postgres://user:{secret}@host/db")
+
+    doomed_migrations = (
+        *MIGRATIONS,
+        Migration(version=3, name="doomed_leaking", apply=_leaking_apply),
+    )
+    caplog.set_level(logging.INFO, logger="openalpha_cn.storage.migrations")
+
+    with pytest.raises(MigrationFailedError) as excinfo:
+        run_migrations(path, clock=migration_clock, migrations=doomed_migrations)
+
+    assert secret not in caplog.text
+    failure_events = [r for r in caplog.records if r.message == "migration_failed"]
+    assert len(failure_events) == 1
+    record = failure_events[0]
+    assert record.migration_version == 3  # type: ignore[attr-defined]
+    assert record.migration_name == "doomed_leaking"  # type: ignore[attr-defined]
+    assert record.backup_path == str(excinfo.value.backup_path)  # type: ignore[attr-defined]
 
 
 def test_new_database_lands_on_baseline_and_defers_the_demo_migration(

@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -134,6 +135,173 @@ def test_batch_cancel_and_interrupted_recovery_are_explicit(
     assert restored is not None
     assert restored.status == "queued"
     assert restored.items[0].status == "queued"
+
+
+# --- batch lifecycle logging (V2-P0B-007) --------------------------------------------------
+#
+# One of the four call sites the task brief names explicitly: submit / complete / cancel /
+# retry / recover. Deliberately at the batch level, not per research item -- `_run_item`'s
+# own per-item outcome is already durably recorded via `BatchTaskStore.append_event()`
+# (unrelated to the stdlib `logging` module this task wires up), and logging every item
+# would be exactly the "every agent call" hot-path noise the brief says not to add.
+
+
+def test_batch_lifecycle_logs_submit_run_and_finish_events(
+    tmp_path: Path,
+    research_request: Callable[[str, str], ResearchRunRequest],
+    frozen_now: datetime,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sdk = OpenAlphaSDK(runtime_dir=tmp_path, clock=lambda: frozen_now)
+    store = SQLiteBatchTaskStore(tmp_path / "state.sqlite3")
+    service = BatchResearchService(store=store, runner=sdk.run_research, clock=lambda: frozen_now)
+    caplog.set_level(logging.INFO, logger="openalpha_cn.runtime.batch")
+
+    task = service.submit(
+        batch_id="batch-logged",
+        requests=(research_request("batch-logged-run", "000001.SZ"),),
+        max_concurrency=1,
+    )
+    completed = service.run(task.batch_id)
+
+    assert completed.status == "succeeded"
+    submitted = [r for r in caplog.records if r.message == "batch_submitted"]
+    assert len(submitted) == 1
+    assert submitted[0].batch_id == "batch-logged"  # type: ignore[attr-defined]
+    assert submitted[0].item_count == 1  # type: ignore[attr-defined]
+
+    started = [r for r in caplog.records if r.message == "batch_run_started"]
+    assert len(started) == 1
+    assert started[0].batch_id == "batch-logged"  # type: ignore[attr-defined]
+    assert started[0].retry is False  # type: ignore[attr-defined]
+
+    finished = [r for r in caplog.records if r.message == "batch_finished"]
+    assert len(finished) == 1
+    assert finished[0].batch_id == "batch-logged"  # type: ignore[attr-defined]
+    assert finished[0].status == "succeeded"  # type: ignore[attr-defined]
+
+
+def test_batch_run_started_reports_retry_true_when_rerun_after_a_failure(
+    tmp_path: Path,
+    research_request: Callable[[str, str], ResearchRunRequest],
+    frozen_now: datetime,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    attempts: list[int] = []
+
+    def _fail_once(request: ResearchRunRequest) -> object:
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise RuntimeError("transient failure")
+        return OpenAlphaSDK(runtime_dir=tmp_path, clock=lambda: frozen_now).run_research(request)
+
+    store = SQLiteBatchTaskStore(tmp_path / "state.sqlite3")
+    service = BatchResearchService(store=store, runner=_fail_once, clock=lambda: frozen_now)
+    task = service.submit(
+        batch_id="batch-retry",
+        requests=(research_request("batch-retry-run", "000001.SZ"),),
+        max_concurrency=1,
+    )
+    first = service.run(task.batch_id)
+    assert first.status == "failed"
+
+    caplog.set_level(logging.INFO, logger="openalpha_cn.runtime.batch")
+    second = service.run(task.batch_id)
+
+    assert second.status == "succeeded"
+    started = [r for r in caplog.records if r.message == "batch_run_started"]
+    assert len(started) == 1
+    assert started[0].retry is True  # type: ignore[attr-defined]
+
+
+def test_batch_cancel_logs_a_cancel_requested_event(
+    tmp_path: Path,
+    research_request: Callable[[str, str], ResearchRunRequest],
+    frozen_now: datetime,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = SQLiteBatchTaskStore(tmp_path / "state.sqlite3")
+    service = BatchResearchService(
+        store=store,
+        runner=OpenAlphaSDK(runtime_dir=tmp_path, clock=lambda: frozen_now).run_research,
+        clock=lambda: frozen_now,
+    )
+    task = service.submit(
+        batch_id="batch-cancel-logged",
+        requests=(research_request("cancel-logged-run", "000001.SZ"),),
+        max_concurrency=1,
+    )
+    caplog.set_level(logging.INFO, logger="openalpha_cn.runtime.batch")
+
+    service.cancel(task.batch_id)
+
+    cancelled = [r for r in caplog.records if r.message == "batch_cancel_requested"]
+    assert len(cancelled) == 1
+    assert cancelled[0].batch_id == "batch-cancel-logged"  # type: ignore[attr-defined]
+
+
+def test_batch_recover_interrupted_logs_a_recovered_event_per_batch(
+    tmp_path: Path,
+    research_request: Callable[[str, str], ResearchRunRequest],
+    frozen_now: datetime,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    path = tmp_path / "state.sqlite3"
+    store = SQLiteBatchTaskStore(path)
+    interrupted = BatchResearchTask(
+        batch_id="batch-recover-logged",
+        items=(
+            BatchTaskItem(
+                request=research_request("recover-logged-run", "000001.SZ"), status="running"
+            ),
+        ),
+        status="running",
+        max_concurrency=1,
+        created_at=frozen_now,
+        updated_at=frozen_now,
+    )
+    store.save(interrupted)
+    caplog.set_level(logging.INFO, logger="openalpha_cn.storage.batch")
+
+    recovered = SQLiteBatchTaskStore(path).recover_interrupted(now=frozen_now)
+
+    assert recovered == ("batch-recover-logged",)
+    recovered_events = [r for r in caplog.records if r.message == "batch_recovered"]
+    assert len(recovered_events) == 1
+    assert recovered_events[0].batch_id == "batch-recover-logged"  # type: ignore[attr-defined]
+
+
+def test_batch_lifecycle_logs_never_leak_a_failed_items_exception_message(
+    tmp_path: Path,
+    research_request: Callable[[str, str], ResearchRunRequest],
+    frozen_now: datetime,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Sentinel-driven leak proof: a research run can fail with any exception --
+    including one whose message embeds a model provider's credential (see
+    `agents/model.py#ModelProviderFailure`). Batch-level lifecycle logs
+    (`batch_submitted`/`batch_run_started`/`batch_finished`) only ever carry
+    `batch_id`, item counts, and the aggregate status string -- never a per-item
+    exception -- so the sentinel must never reach them.
+    """
+    secret = "sk-batch-lifecycle-log-must-not-leak-55221"
+
+    def _always_fails(request: ResearchRunRequest) -> object:
+        raise RuntimeError(f"upstream rejected token={secret}")
+
+    store = SQLiteBatchTaskStore(tmp_path / "state.sqlite3")
+    service = BatchResearchService(store=store, runner=_always_fails, clock=lambda: frozen_now)
+    caplog.set_level(logging.INFO, logger="openalpha_cn")
+
+    task = service.submit(
+        batch_id="batch-leak-check",
+        requests=(research_request("leak-check-run", "000001.SZ"),),
+        max_concurrency=1,
+    )
+    completed = service.run(task.batch_id)
+
+    assert completed.status == "failed"
+    assert secret not in caplog.text
 
 
 def _serialized_payload(

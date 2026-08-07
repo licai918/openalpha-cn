@@ -39,6 +39,7 @@ from openalpha_cn.evidence.service import (
     build_evidence,
     parse_serialized_evidence,
 )
+from openalpha_cn.logging_setup import configure_logging
 from openalpha_cn.product.research import (
     ResearchReport,
     ResearchReportFactory,
@@ -254,8 +255,15 @@ def create_app(
     to cause: `app = create_app()` below executes at module import time, so an
     unguarded conversion error there used to surface as a bare Python traceback
     at process startup.
+
+    Also calls `logging_setup.configure_logging(config.log_level)` -- this function
+    is, along with `cli.py::main()`, one of this package's two logging entry points
+    (V2-P0B-007). Safe to call every time this function runs (idempotent per
+    process, see `configure_logging`'s own docstring), including the module-scope
+    `app = create_app()` call below.
     """
     config = load_config()
+    configure_logging(config.log_level)
     root = runtime_dir if runtime_dir is not None else config.runtime_dir
     request_limit = max_request_bytes if max_request_bytes is not None else config.max_request_bytes
     if request_limit < 1:

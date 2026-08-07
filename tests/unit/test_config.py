@@ -166,6 +166,38 @@ def test_load_config_error_never_includes_a_raw_pydantic_traceback_marker(
     assert "errors.pydantic.dev" not in str(excinfo.value)
 
 
+# --- OpenAlphaConfig.log_level: V2-P0B-007 structured logging -----------------------------
+
+
+def test_load_config_default_log_level_is_info() -> None:
+    assert load_config().log_level == "INFO"
+
+
+def test_load_config_reads_log_level_from_the_real_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENALPHA_LOG_LEVEL", "DEBUG")
+
+    assert load_config().log_level == "DEBUG"
+
+
+def test_load_config_normalizes_a_lowercase_log_level(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENALPHA_LOG_LEVEL", "warning")
+
+    assert load_config().log_level == "WARNING"
+
+
+def test_load_config_rejects_an_unknown_log_level_with_a_named_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENALPHA_LOG_LEVEL", "VERBOSE")
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_config()
+
+    assert "OPENALPHA_LOG_LEVEL" in str(excinfo.value)
+
+
 # --- discover_dotenv: predictable, cwd-based, never a walk-up search ---------------------
 
 

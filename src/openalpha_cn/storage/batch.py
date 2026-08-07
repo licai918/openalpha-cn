@@ -1,5 +1,6 @@
 """SQLite WAL storage for durable batch tasks and progress events."""
 
+import logging
 import sqlite3
 from contextlib import closing
 from datetime import datetime
@@ -12,6 +13,8 @@ from openalpha_cn.runtime.batch import (
     BatchProgressEvent,
     BatchResearchTask,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class SQLiteBatchTaskStore:
@@ -143,5 +146,6 @@ class SQLiteBatchTaskStore:
                 occurred_at=now,
                 detail="interrupted items requeued",
             )
+            logger.info("batch_recovered", extra={"batch_id": task.batch_id})
             recovered.append(task.batch_id)
         return tuple(recovered)

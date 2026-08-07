@@ -1,8 +1,11 @@
 """Proves `build_storage()` mounts the migration engine before constructing any store."""
 
+import logging
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
+
+import pytest
 
 from openalpha_cn.runtime.composition import build_storage
 from openalpha_cn.storage.migrations import (
@@ -50,3 +53,23 @@ def test_build_storage_catches_up_the_demo_migration_on_a_second_call(
     assert [m.version for m in second.migration_result.applied] == [
         DEMO_ADD_RUNS_ARCHIVED_AT_VERSION
     ]
+
+
+def test_build_storage_logs_runtime_dir_and_schema_version_on_startup(
+    tmp_path: Path,
+    migration_clock: Callable[[], datetime],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The fourth and last call site V2-P0B-007's brief names explicitly:
+    `build_storage()`'s own startup assembly (`runtime_dir`, schema version) -- the
+    one line that tells an operator, after the fact, which `runtime_dir` a process
+    actually started against and what schema it landed on."""
+    runtime_dir = tmp_path / "runtime"
+    caplog.set_level(logging.INFO, logger="openalpha_cn.runtime.composition")
+
+    storage = build_storage(runtime_dir=runtime_dir, clock=migration_clock)
+
+    events = [r for r in caplog.records if r.message == "storage_initialized"]
+    assert len(events) == 1
+    assert events[0].runtime_dir == str(runtime_dir)  # type: ignore[attr-defined]
+    assert events[0].schema_version == storage.migration_result.to_version  # type: ignore[attr-defined]

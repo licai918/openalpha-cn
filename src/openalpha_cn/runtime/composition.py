@@ -28,6 +28,7 @@ the other direction. Keeping these two fields concrete, honestly, is the documen
 alternative Task 9's reviewer flagged; nothing here uses `cast` or `# type: ignore`.
 """
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -46,6 +47,8 @@ from openalpha_cn.storage.portfolio import SQLitePortfolioLedger
 from openalpha_cn.storage.product import SQLiteReportStore, SQLiteWatchlistStore
 from openalpha_cn.storage.recovery import SQLiteRecoveryStore
 from openalpha_cn.storage.sqlite import SQLiteRunRepository
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -96,6 +99,13 @@ def build_storage(*, runtime_dir: Path, clock: Callable[[], datetime]) -> Storag
     watchlist_store: WatchlistStore = SQLiteWatchlistStore(runtime_dir / "state.sqlite3")
     report_store: ReportStore = SQLiteReportStore(runtime_dir / "state.sqlite3")
     batch_store.recover_interrupted(now=clock())
+    logger.info(
+        "storage_initialized",
+        extra={
+            "runtime_dir": str(runtime_dir),
+            "schema_version": migration_result.to_version,
+        },
+    )
     return StorageContainer(
         evidence_store=evidence_store,
         repository=repository,

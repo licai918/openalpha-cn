@@ -1,6 +1,7 @@
 """Command-line entry point for OpenAlpha CN."""
 
 import json
+import logging
 import os
 import platform
 import sys
@@ -16,6 +17,7 @@ from openalpha_cn import __version__
 from openalpha_cn.backtest.replay import ReplayCorpus
 from openalpha_cn.config import ConfigError, load_config, load_dotenv
 from openalpha_cn.evidence.service import build_file_evidence, parse_serialized_evidence
+from openalpha_cn.logging_setup import configure_logging
 from openalpha_cn.providers.akshare import AKShareProvider
 from openalpha_cn.providers.base import (
     DataProvider,
@@ -29,6 +31,8 @@ from openalpha_cn.runtime.composition import build_storage
 from openalpha_cn.runtime.contracts import ResearchRunRequest
 from openalpha_cn.sdk import OpenAlphaSDK
 from openalpha_cn.storage.migrations import MigrationFailedError, read_status
+
+logger = logging.getLogger(__name__)
 
 app = typer.Typer(
     name="openalpha",
@@ -162,6 +166,19 @@ def _probe_report(provider: DataProvider) -> dict[str, str]:
             provider.fetch(request)
         except ProviderFailure as failure:
             results[dataset] = failure.category
+            # Never `failure.args`/`str(failure)`: `ProviderFailure.message` (see
+            # `providers/base.py`) can carry a credential or URL query string --
+            # only the closed-`Literal` category, provider_id, and dataset name are
+            # safe to log. This is the "Provider request failure path" call site
+            # V2-P0B-007's brief names explicitly.
+            logger.warning(
+                "provider_probe_failed",
+                extra={
+                    "provider_id": failure.provider_id,
+                    "category": failure.category,
+                    "dataset": dataset,
+                },
+            )
         except Exception:
             results[dataset] = "probe_error"
         else:
@@ -472,8 +489,21 @@ def main() -> None:
     directly by `CliRunner` in tests is never routed through here, so exercising
     the CLI in tests never touches a real `.env` as a side effect. See
     `openalpha_cn/config.py` for the full precedence/discovery contract.
+
+    Also configures structured logging (V2-P0B-007), once, before dispatching to any
+    subcommand -- the other of this package's two logging entry points, alongside
+    `api/app.py::create_app()`. An invalid `OPENALPHA_*` value (not only
+    `OPENALPHA_LOG_LEVEL`) fails loudly here with a named `ConfigError`, printed to
+    stderr, rather than leaving logging silently unconfigured or a later command
+    (like `serve`, which already validates the same config independently) fail with
+    a delayed, harder-to-connect error.
     """
     load_dotenv()
+    try:
+        configure_logging(load_config().log_level)
+    except ConfigError as error:
+        typer.echo(str(error), err=True)
+        raise SystemExit(1) from error
     app()
 
 

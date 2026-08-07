@@ -70,6 +70,9 @@ __all__ = [
 ]
 
 
+_VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+
+
 class ConfigError(RuntimeError):
     """Invalid `OPENALPHA_*` environment configuration.
 
@@ -97,6 +100,25 @@ class OpenAlphaConfig(BaseSettings):
     max_request_bytes: int = 8 * 1024 * 1024
     host: str = "127.0.0.1"
     port: int = 8000
+    log_level: str = "INFO"
+
+    @field_validator("log_level", mode="before")
+    @classmethod
+    def _log_level_must_be_a_known_name(cls, value: object) -> object:
+        """Accept only the stdlib `logging` level names, case-insensitively.
+
+        Normalizes to uppercase so `logging_setup.configure_logging()` can hand the
+        result straight to `Logger.setLevel()` without re-validating it. An unknown
+        name (a typo, or a numeric level string `logging` would also accept) is
+        rejected here with a named error instead, matching every other field in this
+        class -- see `_max_request_bytes_must_be_positive`.
+        """
+        if not isinstance(value, str):
+            return value
+        candidate = value.strip().upper()
+        if candidate not in _VALID_LOG_LEVELS:
+            raise ValueError(f"must be one of {', '.join(_VALID_LOG_LEVELS)}")
+        return candidate
 
     @field_validator("web_dir", mode="before")
     @classmethod

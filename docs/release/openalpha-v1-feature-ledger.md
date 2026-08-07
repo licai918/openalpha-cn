@@ -4,8 +4,8 @@
 
 ## 对账结论
 
-- 功能总数: 104
-- 当前真实完成: 99 (95.19%)
+- 功能总数: 105
+- 当前真实完成: 100 (95.24%)
 - `UNREVIEWED=0`
 - `UNKNOWN=0`
 - `legacy_acceptance_rows=86` (历史散文验收、尚未绑定为可执行 pytest/CI 断言)
@@ -18,7 +18,7 @@
 | `DEFERRED` | 1 |
 | `ENHANCED_REPLACEMENT` | 20 |
 | `EXCLUDED` | 4 |
-| `NATIVE_COMPLETE` | 78 |
+| `NATIVE_COMPLETE` | 79 |
 
 ## 功能明细
 
@@ -128,6 +128,7 @@
 | `OA-OPS-022` | operations | Migration engine hardening: CLI convergence, honest status reporting, race-safe execution, collision-free backups, and a fresh-install guard | `NATIVE_COMPLETE` | `src/openalpha_cn/cli.py#migrate_run;src/openalpha_cn/runtime/composition.py#build_storage;src/openalpha_cn/runtime/composition.py#StorageContainer;src/openalpha_cn/storage/migrations.py#run_migrations;src/openalpha_cn/storage/migrations.py#require_table;src/openalpha_cn/storage/migrations.py#_take_backup;scripts/verify_publication.py#BLOCKED_SUFFIXES` | `tests/integration/storage/test_migrations.py;tests/integration/test_cli_migrate.py;tests/unit/runtime/test_composition_migrations.py;tests/unit/test_repository_assets.py` | `pytest` | `tests/integration/storage/test_migrations.py::test_concurrent_run_migrations_does_not_report_a_false_failure` |
 | `OA-OPS-023` | operations | Version-dispatched contract reads: row-content schema upgrade mechanism | `NATIVE_COMPLETE` | `src/openalpha_cn/domain/versioning.py#ContractVersions;src/openalpha_cn/domain/versioning.py#read_versioned;src/openalpha_cn/domain/versioning.py#single_version;src/openalpha_cn/domain/versioning.py#UnknownSchemaVersionError;src/openalpha_cn/domain/run.py#RUN_MANIFEST_VERSIONS;src/openalpha_cn/domain/decision.py#DECISION_LEDGER_VERSIONS;src/openalpha_cn/storage/recovery.py#RUN_RECOVERY_STATE_VERSIONS;src/openalpha_cn/storage/sqlite.py#SQLiteRunRepository;src/openalpha_cn/storage/portfolio.py#SQLitePortfolioLedger;src/openalpha_cn/storage/product.py#SQLiteWatchlistStore;src/openalpha_cn/storage/batch.py#SQLiteBatchTaskStore;src/openalpha_cn/storage/memory.py#SQLiteResearchMemory` | `tests/unit/domain/test_versioning.py;tests/integration/storage/test_versioned_reads.py;tests/unit/domain/test_schema_export.py` | `pytest` | `tests/unit/domain/test_versioning.py::test_read_versioned_does_not_require_new_v2_fields_when_reading_a_v1_payload` |
 | `OA-OPS-024` | operations | Typed OPENALPHA_* config object and in-process .env loading | `NATIVE_COMPLETE` | `src/openalpha_cn/config.py#OpenAlphaConfig;src/openalpha_cn/config.py#load_config;src/openalpha_cn/config.py#load_dotenv;src/openalpha_cn/config.py#discover_dotenv;src/openalpha_cn/config.py#ConfigError;src/openalpha_cn/cli.py#main;src/openalpha_cn/cli.py#serve;src/openalpha_cn/api/app.py#create_app;Dockerfile;.env.example` | `tests/unit/test_config.py;tests/unit/test_cli.py;tests/unit/test_repository_assets.py` | `pytest` | `tests/unit/test_cli.py::test_main_entrypoint_loads_dotenv_before_dispatching_to_doctor` |
+| `OA-OPS-025` | operations | Structured JSON-lines logging, library-safe by default | `NATIVE_COMPLETE` | `src/openalpha_cn/logging_setup.py#configure_logging;src/openalpha_cn/logging_setup.py#JsonLinesFormatter;src/openalpha_cn/config.py#OpenAlphaConfig;src/openalpha_cn/cli.py#main;src/openalpha_cn/cli.py#_probe_report;src/openalpha_cn/api/app.py#create_app;src/openalpha_cn/storage/migrations.py#run_migrations;src/openalpha_cn/runtime/batch.py#BatchResearchService;src/openalpha_cn/storage/batch.py#SQLiteBatchTaskStore;src/openalpha_cn/runtime/composition.py#build_storage;.env.example` | `tests/unit/test_logging_setup.py;tests/unit/test_config.py;tests/unit/test_cli.py;tests/integration/storage/test_migrations.py;tests/integration/test_batch_research.py;tests/unit/runtime/test_composition_migrations.py;tests/conftest.py` | `pytest` | `tests/unit/test_cli.py::test_main_entrypoint_logs_provider_probe_failure_without_leaking_the_failure_message` |
 
 ## 边界
 

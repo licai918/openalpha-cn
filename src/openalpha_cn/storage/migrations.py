@@ -35,12 +35,15 @@ speculative -- `test_new_database_lands_on_baseline_and_defers_the_demo_migratio
 `test_build_storage_catches_up_the_demo_migration_on_a_second_call` exercise exactly this path.
 """
 
+import logging
 import os
 import sqlite3
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 _SCHEMA_MIGRATIONS_DDL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -315,6 +318,10 @@ def run_migrations(
                 backup_path=None,
             )
         backup_path = _take_backup(path, current_version=from_version, clock=clock)
+        logger.info(
+            "migration_backup_created",
+            extra={"backup_path": str(backup_path), "from_version": from_version},
+        )
         applied: list[AppliedMigration] = []
         for migration in pending:
             connection.execute("BEGIN IMMEDIATE")
@@ -338,6 +345,19 @@ def run_migrations(
                 break
             except Exception as error:
                 connection.execute("ROLLBACK")
+                # Never `str(error)`: `migration.apply()` is arbitrary caller code (a
+                # future migration's precondition check, DDL/DML against a real
+                # database) and its exception message is not vetted the way
+                # `version`/`name`/`backup_path` are -- see the module-level logging
+                # discipline note in `logging_setup.py`.
+                logger.error(
+                    "migration_failed",
+                    extra={
+                        "migration_version": migration.version,
+                        "migration_name": migration.name,
+                        "backup_path": str(backup_path),
+                    },
+                )
                 raise MigrationFailedError(
                     f"migration {migration.version} ({migration.name}) failed and was rolled back",
                     version=migration.version,
@@ -350,6 +370,13 @@ def run_migrations(
                     AppliedMigration(
                         version=migration.version, name=migration.name, applied_at=applied_at
                     )
+                )
+                logger.info(
+                    "migration_applied",
+                    extra={
+                        "migration_version": migration.version,
+                        "migration_name": migration.name,
+                    },
                 )
         to_version = _current_version(connection)
         return MigrationRunResult(

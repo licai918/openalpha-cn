@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -232,6 +233,43 @@ def test_doctor_probe_reports_provider_failure_category_verbatim(
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
     assert payload["providers"]["fake.limited"]["probe"] == {"widgets": "rate_limit"}
+
+
+def test_probe_report_logs_provider_failure_category_and_provider_id_not_the_message(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`_probe_report`'s `ProviderFailure` branch (V2-P0B-007) is one of the four
+    call sites this task instruments. The log record must carry the closed-`Literal`
+    `category`, the `provider_id`, and the `dataset` -- never `str(failure)` (the
+    failure's own `message`), which could carry a credential or URL query string
+    (see `ProviderFailure.__init__`, which stores `message` as the exception's own
+    `args[0]`)."""
+    secret = "sk-probe-report-log-must-not-leak-11223"
+
+    def _fails_with_secret_message(request: ProviderRequest) -> ProviderBatch:
+        raise ProviderFailure(
+            provider_id="fake.limited",
+            category="rate_limit",
+            message=f"too many calls, token={secret}",
+            retryable=True,
+        )
+
+    limited_provider = _StubProvider(
+        provider_id="fake.limited",
+        supported_datasets=("widgets",),
+        on_fetch=_fails_with_secret_message,
+    )
+    caplog.set_level(logging.INFO, logger="openalpha_cn.cli")
+
+    result = cli._probe_report(limited_provider)
+
+    assert result == {"widgets": "rate_limit"}
+    assert secret not in caplog.text
+    matching = [record for record in caplog.records if record.message == "provider_probe_failed"]
+    assert len(matching) == 1
+    assert matching[0].category == "rate_limit"  # type: ignore[attr-defined]
+    assert matching[0].provider_id == "fake.limited"  # type: ignore[attr-defined]
+    assert matching[0].dataset == "widgets"  # type: ignore[attr-defined]
 
 
 _PROBE_LEAK_SCRIPT = """
@@ -509,3 +547,114 @@ def test_main_entrypoint_loads_dotenv_before_dispatching_to_doctor(tmp_path: Pat
     payload = json.loads(result.stdout)
     tushare_credentials = payload["providers"]["tushare.pro"]["credentials"]
     assert tushare_credentials == [{"env_var": "TUSHARE_TOKEN", "status": "present"}]
+
+
+def test_main_entrypoint_rejects_an_invalid_log_level_with_a_named_error(
+    tmp_path: Path,
+) -> None:
+    """`main()` -- the real console-script entry point -- configures structured
+    logging once before dispatching to any subcommand (V2-P0B-007), the same way it
+    already loads `.env`. An invalid `OPENALPHA_LOG_LEVEL` must fail loudly, naming
+    the variable, exactly like `serve`'s existing `OPENALPHA_PORT` handling
+    (`test_serve_rejects_a_non_numeric_openalpha_port_with_a_named_config_error`
+    above) -- never a bare pydantic traceback, and never a silent fallback that
+    would leave a scheduled job's logs permanently misconfigured.
+    """
+    (tmp_path / ".env").write_text("OPENALPHA_LOG_LEVEL=VERBOSE\n", encoding="utf-8")
+    script = (
+        'import sys\nsys.argv = ["openalpha", "version"]\n'
+        "from openalpha_cn import cli\ncli.main()\n"
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode != 0
+    assert "OPENALPHA_LOG_LEVEL" in result.stderr
+
+
+_PROVIDER_FAILURE_LOG_SCRIPT = """
+import sys
+sys.argv = ["openalpha", "doctor", "--probe", "--json"]
+
+from openalpha_cn import cli
+from openalpha_cn.providers.base import ProviderFailure, ProviderMetadata
+
+
+class _FailingProvider:
+    @property
+    def metadata(self):
+        return ProviderMetadata(
+            provider_id="fake.failing",
+            display_name="fake.failing",
+            source_license="test-only",
+            redistribution="unknown",
+            credential_env_vars=(),
+            supported_datasets=("widgets",),
+            caching_policy="prohibited",
+            rate_limit="n/a",
+            freshness="n/a",
+            failure_semantics="n/a",
+        )
+
+    def fetch(self, request):
+        raise ProviderFailure(
+            provider_id="fake.failing",
+            category="authentication",
+            message="token=__SENTINEL__ rejected by upstream",
+            retryable=False,
+        )
+
+
+cli._default_providers = lambda: [_FailingProvider()]
+cli.main()
+"""
+
+
+def test_main_entrypoint_logs_provider_probe_failure_without_leaking_the_failure_message(
+    tmp_path: Path,
+) -> None:
+    """The sentinel-driven leak proof through the real entry point (V2-P0B-007):
+    `cli.main()` -- not `CliRunner`, not the bare `app` object -- is the only code
+    path that actually calls `configure_logging()`, attaching a real `StreamHandler`
+    to this process's real stderr. This proves the *logged* `ProviderFailure` branch
+    (`cli.py::_probe_report`) is safe even under real, end-to-end logging
+    configuration: the resulting structured log line on stderr carries `category`/
+    `provider_id`/`dataset`, never the failure's own `message` -- even though that
+    message is exactly where the sentinel lives. Companion to
+    `test_doctor_probe_real_cli_path_never_leaks_a_non_provider_failure_exception`
+    above, which covers the *unlogged* generic-exception branch through the same
+    real entry point.
+    """
+    sentinel = "sk-scratch-leak-check-MAINLOG-224466"
+    script = _PROVIDER_FAILURE_LOG_SCRIPT.replace("__SENTINEL__", sentinel)
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert sentinel not in result.stdout
+    assert sentinel not in result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["providers"]["fake.failing"]["probe"] == {"widgets": "authentication"}
+
+    log_lines = [line for line in result.stderr.splitlines() if line.strip()]
+    assert log_lines, "expected the ProviderFailure branch to emit a structured log line"
+    records = [json.loads(line) for line in log_lines]
+    matching = [record for record in records if record.get("event") == "provider_probe_failed"]
+    assert len(matching) == 1
+    record = matching[0]
+    assert record["category"] == "authentication"
+    assert record["provider_id"] == "fake.failing"
+    assert record["dataset"] == "widgets"
+    assert sentinel not in json.dumps(record)

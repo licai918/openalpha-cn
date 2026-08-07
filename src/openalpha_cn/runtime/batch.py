@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -12,6 +13,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from openalpha_cn.domain.versioning import ContractVersions, single_version
 from openalpha_cn.runtime.contracts import ResearchRunRequest, ResearchRunResult
+
+logger = logging.getLogger(__name__)
 
 
 class BatchResultRef(BaseModel):
@@ -172,6 +175,14 @@ class BatchResearchService:
         )
         self.store.save(task)
         self.store.append_event(batch_id=batch_id, kind="submitted", occurred_at=now)
+        logger.info(
+            "batch_submitted",
+            extra={
+                "batch_id": batch_id,
+                "item_count": len(requests),
+                "max_concurrency": max_concurrency,
+            },
+        )
         return task
 
     def run(self, batch_id: str) -> BatchResearchTask:
@@ -179,8 +190,13 @@ class BatchResearchService:
         task = self._required(batch_id)
         if task.status == "cancelled":
             return task
+        # A batch previously left "failed"/"partial" being run() again is, by
+        # definition, a retry -- `run()` has no separate entry point for it (see
+        # `api/app.py`'s `batch_retry` route, which just calls this same method).
+        is_retry = task.status in {"failed", "partial"}
         self._replace(task.model_copy(update={"status": "running", "updated_at": self.clock()}))
         self.store.append_event(batch_id=batch_id, kind="started", occurred_at=self.clock())
+        logger.info("batch_run_started", extra={"batch_id": batch_id, "retry": is_retry})
         indexes = [
             index
             for index, item in enumerate(self._required(batch_id).items)
@@ -219,6 +235,7 @@ class BatchResearchService:
                 kind="cancellation_requested",
                 occurred_at=self.clock(),
             )
+            logger.info("batch_cancel_requested", extra={"batch_id": batch_id})
             return updated
 
     def _run_item(self, batch_id: str, index: int) -> None:
@@ -291,6 +308,7 @@ class BatchResearchService:
                 occurred_at=self.clock(),
                 detail=status,
             )
+            logger.info("batch_finished", extra={"batch_id": batch_id, "status": status})
             return completed
 
     def _set_item(self, task: BatchResearchTask, index: int, item: BatchTaskItem) -> None:
