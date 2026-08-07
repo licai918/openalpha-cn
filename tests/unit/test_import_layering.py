@@ -190,19 +190,41 @@ def test_domain_purity_holds_against_every_dynamically_discovered_sibling_subpac
 
 def test_legal_downward_imports_from_runtime_and_backtest_into_storage_are_not_flagged() -> None:
     """`runtime`/`backtest` depending on `storage` is a legal downward dependency, not a
-    violation."""
+    violation -- for the composition roots that still construct concrete stores, and for
+    the plain data models (`RunRecoveryState`) a Protocol's method signatures reference.
+
+    V2-P0B-003 introduced `runtime.repository.RunRepository` and
+    `runtime.recovery.RecoveryStore` Protocols and retyped `ResearchEngine.__init__`
+    against them (`runtime/engine.py:31,34`), and `backtest.multi_day.PortfolioLedger`
+    similarly (`backtest/multi_day.py:83`). That is precisely why `runtime.engine` no
+    longer has any remaining reason to import `openalpha_cn.storage.sqlite` (only the
+    `RunRepository` Protocol, satisfied structurally, is needed there now), and why
+    `backtest.multi_day` no longer imports `openalpha_cn.storage.portfolio` at all (its
+    `PortfolioLedger` Protocol only needs `PortfolioTransition`, which already lives in
+    `backtest.portfolio`). `runtime.engine -> storage.recovery` survives unchanged: engine
+    still constructs/reconstructs `RunRecoveryState` values directly, and that plain
+    pydantic model is out of this task's scope to relocate. The composition roots
+    (`backtest.replay`, and `sdk.py`/`api/app.py` elsewhere) still legitimately construct
+    concrete stores to inject into the Protocol-typed parameters -- `backtest.replay` now
+    also constructs a `SQLiteRecoveryStore` (V2-P0B-003 made `recovery_store` a required,
+    caller-injected parameter, removing `ResearchEngine`'s prior self-construction from
+    `repository.path`), so its dependency on `storage.recovery` is new and legitimate too.
+    """
     graph = grimp.build_graph("openalpha_cn")
     assert graph.direct_import_exists(
         importer="openalpha_cn.runtime.engine", imported="openalpha_cn.storage.recovery"
     )
-    assert graph.direct_import_exists(
+    assert not graph.direct_import_exists(
         importer="openalpha_cn.runtime.engine", imported="openalpha_cn.storage.sqlite"
-    )
-    assert graph.direct_import_exists(
+    ), "runtime.engine should be Protocol-typed only; it no longer needs SQLiteRunRepository"
+    assert not graph.direct_import_exists(
         importer="openalpha_cn.backtest.multi_day", imported="openalpha_cn.storage.portfolio"
-    )
+    ), "backtest.multi_day should be Protocol-typed only; it no longer needs SQLitePortfolioLedger"
     assert graph.direct_import_exists(
         importer="openalpha_cn.backtest.replay", imported="openalpha_cn.storage.sqlite"
+    )
+    assert graph.direct_import_exists(
+        importer="openalpha_cn.backtest.replay", imported="openalpha_cn.storage.recovery"
     )
 
     exit_code = lint_imports(
@@ -226,12 +248,13 @@ CONTRACT_ONLY_CONSUMERS = (
     "openalpha_cn.backtest.validation",
 )
 
-# The two storage submodules `runtime.engine` itself imports for `ResearchEngine`. Checking
-# transitive reachability against these two specifically (rather than all of
+# The storage submodules `runtime.engine`'s own dependency closure could plausibly reach.
+# Checking transitive reachability against these two specifically (rather than all of
 # `openalpha_cn.storage`) avoids false failures from unrelated, pre-existing storage
-# touchpoints outside this task's scope -- e.g. `runtime.batch` has its own TYPE_CHECKING-only
-# reference to `storage.batch` for `SQLiteBatchTaskStore`, which has nothing to do with the
-# request/result contracts.
+# touchpoints outside this task's scope. `storage.recovery` remains a real, direct
+# `runtime.engine` import (for the plain `RunRecoveryState` data model); `storage.sqlite` no
+# longer is (V2-P0B-003 retyped `repository` against the `RunRepository` Protocol), but is
+# kept here for defense in depth against a future regression back to the concrete type.
 ENGINE_OWNED_STORAGE_MODULES = ("openalpha_cn.storage.recovery", "openalpha_cn.storage.sqlite")
 
 

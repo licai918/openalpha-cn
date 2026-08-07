@@ -6,6 +6,7 @@ from openalpha_cn.domain.time import Timeline
 from openalpha_cn.runtime.contracts import ResearchRunRequest
 from openalpha_cn.runtime.engine import ResearchEngine
 from openalpha_cn.runtime.memory import InMemoryResearchMemory
+from openalpha_cn.storage.recovery import SQLiteRecoveryStore
 from openalpha_cn.storage.sqlite import SQLiteRunRepository
 
 NOW = datetime(2026, 7, 24, 10, 30, tzinfo=UTC)
@@ -66,7 +67,13 @@ def test_multi_agent_cycle_persists_evidence_linked_decision_idempotently(
     )
     repository = SQLiteRunRepository(tmp_path / "state.sqlite3")
     memory = InMemoryResearchMemory()
-    engine = ResearchEngine(repository=repository, memory=memory, clock=lambda: NOW)
+    recovery_store = SQLiteRecoveryStore(tmp_path / "state.sqlite3")
+    engine = ResearchEngine(
+        repository=repository,
+        memory=memory,
+        clock=lambda: NOW,
+        recovery_store=recovery_store,
+    )
 
     first = engine.run_cycle(request(items))
     second = engine.run_cycle(request(items))
@@ -92,6 +99,7 @@ def test_cycle_abstains_explicitly_when_evidence_is_insufficient(tmp_path: Path)
         repository=SQLiteRunRepository(tmp_path / "state.sqlite3"),
         memory=InMemoryResearchMemory(),
         clock=lambda: NOW,
+        recovery_store=SQLiteRecoveryStore(tmp_path / "state.sqlite3"),
     )
 
     result = engine.run_cycle(request(()))
@@ -121,6 +129,7 @@ def test_cycle_rejects_evidence_that_was_not_visible_at_as_of(tmp_path: Path) ->
         repository=SQLiteRunRepository(tmp_path / "state.sqlite3"),
         memory=InMemoryResearchMemory(),
         clock=lambda: NOW,
+        recovery_store=SQLiteRecoveryStore(tmp_path / "state.sqlite3"),
     )
 
     try:

@@ -13,6 +13,7 @@ from openalpha_cn.domain.time import ensure_aware
 from openalpha_cn.runtime.contracts import ResearchRunRequest
 from openalpha_cn.runtime.engine import ResearchEngine
 from openalpha_cn.runtime.memory import InMemoryResearchMemory
+from openalpha_cn.storage.recovery import SQLiteRecoveryStore
 from openalpha_cn.storage.sqlite import SQLiteRunRepository
 
 
@@ -105,6 +106,7 @@ class ReplayRunner:
     def run(self, *, corpus: ReplayCorpus, state_path: Path) -> ReplayReport:
         """Execute the corpus and return explicit failures and validation IDs."""
         repository = SQLiteRunRepository(state_path)
+        recovery_store = SQLiteRecoveryStore(state_path)
         memory = InMemoryResearchMemory()
         validator = OutcomeValidator()
         succeeded = 0
@@ -119,6 +121,7 @@ class ReplayRunner:
                     repository=repository,
                     memory=memory,
                     clock=_fixed_clock(case.as_of),
+                    recovery_store=recovery_store,
                 )
                 request = ResearchRunRequest(
                     run_id=case.run_id,

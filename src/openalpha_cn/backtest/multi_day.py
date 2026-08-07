@@ -1,7 +1,7 @@
 """Deterministic multi-day portfolio backtest and exposure attribution."""
 
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Self
+from typing import Protocol, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -13,10 +13,24 @@ from openalpha_cn.backtest.portfolio import (
     PortfolioState,
     PortfolioTransition,
 )
-from openalpha_cn.storage.portfolio import SQLitePortfolioLedger
 
 _SIX = Decimal("0.000001")
 _CENT = Decimal("0.01")
+
+
+class PortfolioLedger(Protocol):
+    """Extension contract for durable portfolio-transition storage.
+
+    Mirrors the `runtime.memory.ResearchMemory` precedent: the Protocol lives on the
+    consumer side (`backtest/`), not in `storage/`. `PortfolioBacktestRunner` is a pure
+    algorithmic module and only ever calls `append` on its optional ledger -- it never
+    reads transitions back, so `SQLitePortfolioLedger.get`/`list` (used elsewhere, by
+    `sdk.py` and `api/app.py` directly on the concrete store) are deliberately not part
+    of this Protocol.
+    """
+
+    def append(self, transition: PortfolioTransition) -> None:
+        """Append idempotently or reject conflicting reuse of an order ID."""
 
 
 class PortfolioBacktestStep(BaseModel):
@@ -80,7 +94,7 @@ class PortfolioBacktestRunner:
         self,
         *,
         limits: PortfolioLimits | None = None,
-        ledger: SQLitePortfolioLedger | None = None,
+        ledger: PortfolioLedger | None = None,
     ) -> None:
         self.simulator = PortfolioSimulator(limits=limits)
         self.ledger = ledger

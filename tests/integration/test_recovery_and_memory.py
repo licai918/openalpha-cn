@@ -122,6 +122,7 @@ def test_cycle_resumes_after_last_completed_agent_without_repeating_work(
         repository=repository,
         memory=memory,
         clock=lambda: NOW,
+        recovery_store=SQLiteRecoveryStore(path),
         agents=(first, second),
     )
 
@@ -154,6 +155,7 @@ def test_recovery_isolated_by_immutable_request_and_graph_signature(tmp_path: Pa
         repository=SQLiteRunRepository(path),
         memory=SQLiteResearchMemory(path),
         clock=lambda: NOW,
+        recovery_store=SQLiteRecoveryStore(path),
         agents=(first, second),
     )
     with pytest.raises(RuntimeError):
@@ -166,6 +168,7 @@ def test_recovery_isolated_by_immutable_request_and_graph_signature(tmp_path: Pa
         repository=SQLiteRunRepository(path),
         memory=SQLiteResearchMemory(path),
         clock=lambda: NOW,
+        recovery_store=SQLiteRecoveryStore(path),
         agents=(first, RecoverableAgent("replacement-agent")),
     )
     with pytest.raises(RunConflictError, match="graph signature"):

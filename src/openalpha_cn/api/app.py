@@ -267,6 +267,7 @@ def create_app(
             repository=run_repository,
             memory=memory,
             clock=lambda: datetime.now(UTC),
+            recovery_store=recovery_store,
         ).run_cycle(request)
 
     batch_service = BatchResearchService(
@@ -348,6 +349,7 @@ def create_app(
             repository=run_repository,
             memory=memory,
             clock=lambda: datetime.now(UTC),
+            recovery_store=recovery_store,
         )
         return engine.run_cycle(request)
 

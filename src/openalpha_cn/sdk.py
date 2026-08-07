@@ -109,6 +109,7 @@ class OpenAlphaSDK:
             repository=self.repository,
             memory=self.memory,
             clock=self.clock,
+            recovery_store=self.recovery_store,
             agents=self.agents,
         )
         return engine.run_cycle(request)

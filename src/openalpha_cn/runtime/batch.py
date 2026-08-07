@@ -6,14 +6,11 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from threading import RLock
-from typing import TYPE_CHECKING, Literal, Self
+from typing import Literal, Protocol, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from openalpha_cn.runtime.contracts import ResearchRunRequest, ResearchRunResult
-
-if TYPE_CHECKING:
-    from openalpha_cn.storage.batch import SQLiteBatchTaskStore
 
 
 class BatchResultRef(BaseModel):
@@ -99,13 +96,42 @@ class BatchProgressEvent(BaseModel):
         return ensure_aware(value)
 
 
+class BatchTaskStore(Protocol):
+    """Extension contract for durable batch-task storage consumed by BatchResearchService.
+
+    Mirrors the `runtime.memory.ResearchMemory` precedent: the Protocol lives on the
+    consumer side (`runtime/`), not in `storage/`. Its method set is exactly the three
+    methods `BatchResearchService` calls on `self.store` -- not `SQLiteBatchTaskStore`'s
+    full public surface, which also includes `list`, `list_events`, and
+    `recover_interrupted` for callers (`sdk.py`, `api/app.py`) that hold the concrete
+    store directly and never go through this service.
+    """
+
+    def get(self, batch_id: str) -> BatchResearchTask | None:
+        """Return the latest batch state."""
+
+    def save(self, task: BatchResearchTask) -> None:
+        """Insert or atomically replace the latest state of one batch."""
+
+    def append_event(
+        self,
+        *,
+        batch_id: str,
+        kind: str,
+        occurred_at: datetime,
+        run_id: str | None = None,
+        detail: str | None = None,
+    ) -> BatchProgressEvent:
+        """Append and return one monotonic progress event."""
+
+
 class BatchResearchService:
     """Execute durable batches with a bounded standard-library worker pool."""
 
     def __init__(
         self,
         *,
-        store: SQLiteBatchTaskStore,
+        store: BatchTaskStore,
         runner: Callable[[ResearchRunRequest], ResearchRunResult],
         clock: Callable[[], datetime],
     ) -> None:

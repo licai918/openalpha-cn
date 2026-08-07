@@ -4,8 +4,8 @@
 
 ## 对账结论
 
-- 功能总数: 98
-- 当前真实完成: 93 (94.9%)
+- 功能总数: 99
+- 当前真实完成: 94 (94.95%)
 - `UNREVIEWED=0`
 - `UNKNOWN=0`
 - `legacy_acceptance_rows=86` (历史散文验收、尚未绑定为可执行 pytest/CI 断言)
@@ -18,7 +18,7 @@
 | `DEFERRED` | 1 |
 | `ENHANCED_REPLACEMENT` | 20 |
 | `EXCLUDED` | 4 |
-| `NATIVE_COMPLETE` | 72 |
+| `NATIVE_COMPLETE` | 73 |
 
 ## 功能明细
 
@@ -122,6 +122,7 @@
 | `OA-PROV-008` | provider | Tushare dataset descriptor table | `NATIVE_COMPLETE` | `src/openalpha_cn/providers/tushare.py#TushareDatasetDescriptor;src/openalpha_cn/providers/tushare.py#ClockStrategy;src/openalpha_cn/providers/tushare.py#TUSHARE_DATASETS` | `tests/contract/providers/test_tushare_dataset_descriptors.py` | `pytest` | `tests/contract/providers/test_tushare_dataset_descriptors.py::test_daily_descriptor_decode_matches_legacy_field_for_field` |
 | `OA-OPS-017` | operations | Quality gates enforced locally, not only in CI | `NATIVE_COMPLETE` | `pyproject.toml;web/vite.config.ts;.github/workflows/quality.yml` | `tests/unit/test_repository_assets.py` | `pytest` | `tests/unit/test_repository_assets.py::test_backend_coverage_fail_under_is_configured_in_pyproject` |
 | `OA-OPS-018` | operations | Runtime contracts split from engine (dependency-direction gate) | `NATIVE_COMPLETE` | `src/openalpha_cn/runtime/contracts.py;src/openalpha_cn/runtime/engine.py;src/openalpha_cn/runtime/__init__.py` | `tests/unit/test_import_layering.py;tests/unit/runtime/test_package_lazy_export.py;tests/unit/runtime/test_contracts_import_isolation.py` | `pytest` | `tests/unit/runtime/test_contracts_import_isolation.py::test_importing_runtime_contracts_in_a_fresh_process_does_not_load_the_storage_layer` |
+| `OA-OPS-019` | operations | Storage Protocol layer (dependency-inversion gate) | `NATIVE_COMPLETE` | `src/openalpha_cn/runtime/repository.py#RunRepository;src/openalpha_cn/runtime/recovery.py#RecoveryStore;src/openalpha_cn/runtime/engine.py#ResearchEngine;src/openalpha_cn/runtime/batch.py#BatchTaskStore;src/openalpha_cn/backtest/multi_day.py#PortfolioLedger;src/openalpha_cn/evidence/service.py#EvidenceStore;src/openalpha_cn/product/research.py#WatchlistStore;src/openalpha_cn/product/research.py#ReportStore` | `tests/unit/runtime/test_storage_protocol_doubles.py;tests/unit/test_import_layering.py` | `pytest` | `tests/unit/runtime/test_storage_protocol_doubles.py::test_in_memory_doubles_drive_a_full_research_cycle_without_sqlite` |
 
 ## 边界
 

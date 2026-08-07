@@ -9,6 +9,7 @@ from openalpha_cn.domain.time import Timeline
 from openalpha_cn.runtime.contracts import ResearchRunRequest
 from openalpha_cn.runtime.engine import ResearchEngine
 from openalpha_cn.runtime.memory import InMemoryResearchMemory
+from openalpha_cn.storage.recovery import SQLiteRecoveryStore
 from openalpha_cn.storage.sqlite import SQLiteRunRepository
 
 NOW = datetime(2026, 7, 24, 10, 30, tzinfo=UTC)
@@ -39,6 +40,7 @@ def research_result(tmp_path: Path):
         repository=SQLiteRunRepository(tmp_path / "state.sqlite3"),
         memory=InMemoryResearchMemory(),
         clock=lambda: NOW,
+        recovery_store=SQLiteRecoveryStore(tmp_path / "state.sqlite3"),
     ).run_cycle(
         ResearchRunRequest(
             run_id="run_validation",

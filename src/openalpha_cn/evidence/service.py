@@ -3,6 +3,7 @@
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
+from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict
 
@@ -15,6 +16,29 @@ from openalpha_cn.providers.base import (
     utc_now,
 )
 from openalpha_cn.providers.file import FileProvider
+
+
+class EvidenceStore(Protocol):
+    """Extension contract for durable point-in-time evidence storage.
+
+    Mirrors the `runtime.memory.ResearchMemory` precedent: the Protocol lives beside the
+    evidence service layer (`evidence/`) that both `sdk.py` and `api/app.py` already
+    import from for building evidence, not in `storage/`. `ParquetEvidenceStore`'s full
+    public surface is exactly `append`/`query`, so this Protocol declares both -- unlike
+    the other storage Protocols in this task, there was no wider surface to narrow.
+    """
+
+    def append(self, items: tuple[EvidenceSnapshot, ...]) -> Path:
+        """Write one content-addressed batch of evidence and return its location."""
+
+    def query(
+        self,
+        *,
+        as_of: datetime,
+        subject: str | None = None,
+        kind: str | None = None,
+    ) -> tuple[EvidenceSnapshot, ...]:
+        """Return evidence available by ``as_of``, ordered deterministically."""
 
 
 class EvidenceBuildRequest(BaseModel):

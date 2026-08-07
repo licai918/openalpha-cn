@@ -1,7 +1,7 @@
 """Stock screening, watchlist records, and evidence-linked report generation."""
 
 from datetime import datetime
-from typing import Literal
+from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
 
@@ -95,6 +95,26 @@ class WatchlistEntry(BaseModel):
         return ensure_aware(value)
 
 
+class WatchlistStore(Protocol):
+    """Extension contract for durable watchlist storage.
+
+    Mirrors the `runtime.memory.ResearchMemory` precedent: the Protocol lives beside the
+    `WatchlistEntry` model it manages, in the product layer (`product/`), not in
+    `storage/`. `SQLiteWatchlistStore`'s full public surface is exactly `put`/`list`/
+    `remove`, so this Protocol declares all three -- unlike the other storage Protocols
+    in this task, there was no wider surface to narrow.
+    """
+
+    def put(self, entry: WatchlistEntry) -> None:
+        """Create or intentionally update one local watchlist entry."""
+
+    def list(self) -> tuple[WatchlistEntry, ...]:
+        """List the local observation pool."""
+
+    def remove(self, subject: str) -> bool:
+        """Remove one watchlist entry; return whether it existed."""
+
+
 class ResearchReport(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -118,6 +138,26 @@ class ResearchReport(BaseModel):
     @property
     def report_id(self) -> str:
         return stable_model_id(prefix="rpt", model=self)
+
+
+class ReportStore(Protocol):
+    """Extension contract for durable research-report storage.
+
+    Mirrors the `runtime.memory.ResearchMemory` precedent: the Protocol lives beside the
+    `ResearchReport` model it manages, in the product layer (`product/`), not in
+    `storage/`. `SQLiteReportStore`'s full public surface is exactly `append`/`get`/
+    `list`, so this Protocol declares all three -- unlike the other storage Protocols in
+    this task, there was no wider surface to narrow.
+    """
+
+    def append(self, report: ResearchReport) -> None:
+        """Append one evidence-linked report, idempotent by report ID."""
+
+    def get(self, report_id: str) -> ResearchReport | None:
+        """Load a report by its content-derived ID."""
+
+    def list(self, *, subject: str | None = None) -> tuple[ResearchReport, ...]:
+        """List generated reports, optionally filtered by subject."""
 
 
 class ResearchReportFactory:

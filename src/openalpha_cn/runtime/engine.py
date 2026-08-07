@@ -16,9 +16,10 @@ from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.domain.time import ensure_aware
 from openalpha_cn.runtime.contracts import ResearchRunRequest, ResearchRunResult, RunConflictError
 from openalpha_cn.runtime.memory import MemoryEntry, ResearchMemory
+from openalpha_cn.runtime.recovery import RecoveryStore
+from openalpha_cn.runtime.repository import RunRepository
 from openalpha_cn.runtime.router import AgentRouter
-from openalpha_cn.storage.recovery import RunRecoveryState, SQLiteRecoveryStore
-from openalpha_cn.storage.sqlite import SQLiteRunRepository
+from openalpha_cn.storage.recovery import RunRecoveryState
 
 
 class ResearchEngine:
@@ -27,13 +28,13 @@ class ResearchEngine:
     def __init__(
         self,
         *,
-        repository: SQLiteRunRepository,
+        repository: RunRepository,
         memory: ResearchMemory,
         clock: Callable[[], datetime],
+        recovery_store: RecoveryStore,
         agents: Sequence[ResearchAgent] | None = None,
         router: AgentRouter | None = None,
         risk_gate: RiskGate | None = None,
-        recovery_store: SQLiteRecoveryStore | None = None,
     ) -> None:
         self.repository = repository
         self.memory = memory
@@ -41,7 +42,7 @@ class ResearchEngine:
         self.agents = tuple(agents or baseline_agents())
         self.router = router or AgentRouter()
         self.risk_gate = risk_gate or RiskGate()
-        self.recovery_store = recovery_store or SQLiteRecoveryStore(repository.path)
+        self.recovery_store = recovery_store
 
     def run_cycle(self, request: ResearchRunRequest) -> ResearchRunResult:
         """Execute the same evidence-to-decision path for every run mode."""
