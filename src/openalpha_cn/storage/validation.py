@@ -27,6 +27,16 @@ class SQLiteValidationStore:
     result twice is a no-op, and writing a different payload under a validation_id already
     on file is an explicit `ValueError` -- the same append-only, content-addressed-identity
     contract as `SQLiteReportStore.append` / `SQLitePortfolioLedger.append`.
+
+    Precedent note: this task's original brief instructed matching `SQLiteRunRepository`'s
+    semantics instead; that precedent does not apply here and was not followed. `run_id` on
+    `SQLiteRunRepository.append_run` is caller-supplied, not content-derived, so that store
+    has no idempotent-replay path at all -- reusing a `run_id`, even for a byte-identical
+    replay, raises `DuplicateRecordError` unconditionally (`storage/sqlite.py`). This store's
+    `validation_id`, like `report_id`/`order_id`, is content-derived, so the correct precedent
+    -- the one actually implemented above -- is `SQLiteReportStore`/`SQLitePortfolioLedger`,
+    both of which compare the stored payload before rejecting a reused ID and treat a
+    byte-identical replay as a no-op rather than an error.
     """
 
     def __init__(self, path: Path) -> None:

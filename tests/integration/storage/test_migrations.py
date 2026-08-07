@@ -411,6 +411,76 @@ def test_migrations_registry_is_declared_in_strictly_increasing_version_order() 
     assert len(versions) == len(set(versions))
 
 
+# --- structural guard: no precondition-free migration may be stranded behind an --------
+# --- earlier-ordered deferral (reviewer finding on this task) --------------------------
+
+
+def _defers_in_isolation(migration: Migration) -> bool:
+    """True iff `migration.apply()` raises `MigrationNotYetApplicable` against a fresh,
+    independent, completely empty `:memory:` connection of its own.
+
+    This is the *empirical* test for "precondition-free", used instead of trusting
+    `_PRECONDITION_FREE_VERSIONS` (below) as ground truth. That set is hand-maintained --
+    a future migration added to `MIGRATIONS` without a matching update to it would silently
+    make this guard's expectation wrong in exactly the way the guard exists to catch. Probing
+    each migration directly, the same way
+    `test_every_non_baseline_migration_defers_gracefully_on_a_fresh_empty_database` and
+    `test_create_validation_results_table_succeeds_on_a_genuinely_empty_database` already do,
+    means this test's notion of "precondition-free" self-updates as the registry grows and
+    needs no second allowlist kept in sync by hand.
+    """
+    connection = sqlite3.connect(":memory:")
+    try:
+        try:
+            migration.apply(connection)
+        except MigrationNotYetApplicable:
+            return True
+        return False
+    finally:
+        connection.close()
+
+
+def test_no_precondition_free_migration_is_stranded_behind_an_earlier_deferral(
+    tmp_path: Path, migration_clock: Callable[[], datetime]
+) -> None:
+    """Structural regression test for the executor's stop-not-skip semantics (see
+    `run_migrations`'s docstring): a migration that raises `MigrationNotYetApplicable`
+    stops the whole pass -- `_pending()` filters purely on the `PRAGMA user_version`
+    watermark, not a per-migration applied set, so skipping past a deferred migration and
+    then committing a higher version number would lose it permanently rather than retry it.
+    That design choice is correct and is not what this test checks.
+
+    What it checks is the *registry's* obligation under that design: every migration that is
+    precondition-free (would succeed against a genuinely empty database, probed in isolation
+    by `_defers_in_isolation` above) must actually be applied when `run_migrations()` runs
+    once, for real, against a genuinely fresh database -- none of them may be silently
+    stranded behind an earlier-ordered migration that defers. `CREATE_VALIDATION_RESULTS_VERSION`
+    hit this exact trap during this task and was fixed by moving it before
+    `DEMO_ADD_RUNS_ARCHIVED_AT_VERSION` in version order (see that migration's docstring in
+    `storage/migrations.py`); this test turns that one-off fix into a standing invariant so
+    the next migration added to `MIGRATIONS` cannot reintroduce it un-noticed.
+    """
+    expected_precondition_free = {
+        migration.version for migration in MIGRATIONS if not _defers_in_isolation(migration)
+    }
+
+    path = tmp_path / "state.sqlite3"
+    result = run_migrations(path, clock=migration_clock)
+
+    applied_versions = {m.version for m in result.applied}
+    stranded = {
+        migration.name: migration.version
+        for migration in MIGRATIONS
+        if migration.version in expected_precondition_free
+        and migration.version not in applied_versions
+    }
+    assert not stranded, (
+        "migration(s) precondition-free on an empty database were never attempted in a "
+        "single run_migrations() call because an earlier-ordered migration deferred first "
+        f"(reorder MIGRATIONS so they precede the deferring migration): {stranded}"
+    )
+
+
 # --- structural guard: no future migration may crash a fresh install (Finding 1c) ------
 
 
