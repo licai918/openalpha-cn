@@ -9,7 +9,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from openalpha_cn import __version__
@@ -55,7 +55,53 @@ from openalpha_cn.runtime.composition import build_storage
 from openalpha_cn.runtime.contracts import ResearchRunRequest, ResearchRunResult
 from openalpha_cn.runtime.engine import ResearchEngine
 from openalpha_cn.runtime.memory import MemoryEntry
+from openalpha_cn.runtime.provenance import compute_config_digest, resolve_code_commit
 from openalpha_cn.storage.recovery import RunRecoveryState
+
+
+def _resolved_code_commit(explicit: str | None) -> str:
+    """Return `explicit` verbatim when given; otherwise resolve a real commit.
+
+    Mirrors `cli.py`'s `_resolved_code_commit`: a browser (or any other HTTP caller)
+    cannot know the server's own git commit, so this only ever fills a gap the caller
+    left open -- it never touches git when a value was genuinely supplied, which is
+    what keeps this endpoint byte-for-byte identical to `OpenAlphaSDK.run_research`
+    for the same explicit input (`test_rest_sdk_clock_parity.py`).
+    """
+    return explicit if explicit is not None else resolve_code_commit()
+
+
+def _resolved_config_digest(explicit: str | None) -> str:
+    """Return `explicit` verbatim when given; otherwise digest the effective config.
+
+    Mirrors `cli.py`'s `_resolved_config_digest`, including calling `load_config()`
+    fresh rather than reusing `create_app()`'s closed-over `config`: this is a
+    request-time resolution (the same field can be omitted by any caller at any time),
+    not a startup-time one.
+    """
+    return explicit if explicit is not None else compute_config_digest(load_config())
+
+
+def _fill_missing_provenance(data: Any) -> Any:
+    """`model_validator(mode="before")` body shared by `ResearchApiRequest` and
+    `ReplayApiRequest`: resolve `code_commit`/`config_digest` server-side when a caller
+    omits them (missing key or explicit JSON `null`), and pass an explicitly supplied
+    value straight through untouched -- including an invalid one, so
+    `ResearchRunRequest`/`ReplayApiRequest`'s own field validation (`min_length`,
+    `pattern`) reports it accurately instead of this hook silently discarding it.
+
+    This is the fix for the critical finding on task 17: `web/src/api/client.ts` used
+    to POST the fabricated literals `code_commit: "web-development"` and
+    `config_digest: "0".repeat(64)` on every request because these fields had no
+    server-side fallback -- a browser genuinely cannot know the server's own commit or
+    effective config, so only the server can honestly fill them in.
+    """
+    if not isinstance(data, dict):
+        return data
+    filled = dict(data)
+    filled["code_commit"] = _resolved_code_commit(filled.get("code_commit"))
+    filled["config_digest"] = _resolved_config_digest(filled.get("config_digest"))
+    return filled
 
 
 class ReplayApiRequest(BaseModel):
@@ -68,9 +114,19 @@ class ReplayApiRequest(BaseModel):
     config_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     random_seed: int
 
+    @model_validator(mode="before")
+    @classmethod
+    def resolve_missing_provenance(cls, data: Any) -> Any:
+        return _fill_missing_provenance(data)
+
 
 class ResearchApiRequest(ResearchRunRequest):
     """Research request that safely accepts serialized evidence output."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def resolve_missing_provenance(cls, data: Any) -> Any:
+        return _fill_missing_provenance(data)
 
     @field_validator("evidence", mode="before")
     @classmethod

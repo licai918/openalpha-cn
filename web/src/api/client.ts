@@ -46,6 +46,11 @@ export function runResearch(input: {
   asOf: string;
   evidence: Evidence[];
 }): Promise<ResearchResult> {
+  // code_commit/config_digest are intentionally omitted: a browser cannot know the
+  // server's own git commit or effective config, so the server resolves both fields
+  // itself when they are absent (see api/app.py's ResearchApiRequest). Sending a
+  // literal placeholder here used to fabricate provenance on every run started from
+  // this UI (task 17 critical finding).
   return requestJson<ResearchResult>("/api/v1/research/run", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -55,21 +60,19 @@ export function runResearch(input: {
       subject: input.subject,
       as_of: input.asOf,
       evidence: input.evidence,
-      code_commit: "web-development",
-      config_digest: "0".repeat(64),
       random_seed: 7
     })
   });
 }
 
 export function runReplay(corpus: unknown): Promise<ReplayReport> {
+  // See runResearch above: code_commit/config_digest are omitted so the server
+  // resolves them itself (api/app.py's ReplayApiRequest).
   return requestJson<ReplayReport>("/api/v1/backtests/replay", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       corpus,
-      code_commit: "web-development",
-      config_digest: "0".repeat(64),
       random_seed: 7
     })
   });
