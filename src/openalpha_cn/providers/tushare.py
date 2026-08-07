@@ -160,6 +160,21 @@ def _announcement_timeline(row: dict[str, Any], date_field: str, ingested_at: da
     ``date_field`` is unused here: announcement data always keys its PIT clocks off the
     fixed ``ann_date``/``f_ann_date`` columns that every Tushare financial-statement
     endpoint shares, regardless of which column the descriptor uses for display purposes.
+
+    Known gap (measured, not assumed): a live probe of the real Tushare ``balancesheet``
+    endpoint (3 stocks, 2022-2025, 65 rows) confirmed ``f_ann_date >= ann_date`` holds with
+    zero violations, so that ordering assumption is safe. But it also found that restatements
+    are **not distinguishable from the original filing by ``ann_date``/``f_ann_date`` alone**:
+    for ``000001.SZ``, ``end_date=20231231`` returns two rows with ``ann_date=20240315`` AND
+    ``f_ann_date=20240315`` on both, differing only in ``update_flag`` (``0`` vs ``1``); the
+    same shape recurs at ``end_date=20240331``. This function does not read ``update_flag``,
+    so those two rows produce byte-equal ``Timeline`` objects today — see
+    ``test_announcement_clock_cannot_yet_distinguish_restatement_via_update_flag`` in
+    ``tests/contract/providers/test_tushare_dataset_descriptors.py``, which pins this exact
+    gap. Deciding how to disambiguate (drop all but the highest ``update_flag``? keep and rank
+    both?) is deferred to the phase that wires real financial datasets onto this clock; when
+    that lands, this function gains ``update_flag`` handling and the pinned test above must be
+    rewritten to assert the new behavior.
     """
     ann_moment = datetime.combine(
         _parse_tushare_date(row["ann_date"]), time(0, 0), tzinfo=_CHINA_TZ

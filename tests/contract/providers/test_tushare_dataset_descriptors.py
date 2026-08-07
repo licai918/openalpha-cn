@@ -16,6 +16,7 @@ from openalpha_cn.providers.tushare import (
     ClockStrategy,
     TushareDatasetDescriptor,
     TushareProvider,
+    _announcement_timeline,
     _dataset_names,
 )
 
@@ -269,3 +270,56 @@ def test_calendar_static_clock_sets_event_time_equal_to_available_time() -> None
     assert record.timeline.event_time == datetime(2026, 7, 24, 0, 0, tzinfo=_CHINA_TZ)
     assert record.timeline.revision_time == record.timeline.available_time
     assert record.subject == "trade_cal"
+
+
+# --- known gaps: documented, not fixed --------------------------------------
+
+
+def test_announcement_clock_cannot_yet_distinguish_restatement_via_update_flag() -> None:
+    """Pins a KNOWN, UNRESOLVED gap in ``_announcement_timeline`` — do not delete this test.
+
+    A live probe of the real Tushare ``balancesheet`` endpoint (3 stocks, 2022-2025, 65 rows)
+    found that for ``000001.SZ`` at ``end_date=20231231``, Tushare returns TWO rows sharing
+    the identical ``ann_date=20240315`` AND ``f_ann_date=20240315``, differing only in
+    ``update_flag`` (``0`` for the original filing, ``1`` for the restatement). The same shape
+    recurs at ``end_date=20240331``. ``_announcement_timeline`` does not read ``update_flag``,
+    so it cannot tell these two rows apart: this test constructs that exact two-row case and
+    asserts they currently produce byte-equal ``Timeline`` objects, i.e. a restatement is
+    indistinguishable from its original filing by clock alone.
+
+    This is intentionally an assertion of *current, deficient* behavior, not a spec. When the
+    disambiguation policy for ``update_flag`` lands (a design decision deliberately deferred to
+    the phase that wires real financial datasets — see ``_announcement_timeline``'s docstring),
+    the two rows below MUST start producing different outcomes (either a different ``Timeline``
+    for the restated row, or the duplicate being dropped/ranked upstream before it ever reaches
+    this function). At that point THIS TEST MUST BE REWRITTEN TO ASSERT THE NEW BEHAVIOR, not
+    deleted — deleting it would silently re-open the exact gap this test exists to guard.
+    """
+    ingested_at = datetime(2024, 4, 1, 0, 0, tzinfo=UTC)
+    original_filing = {
+        "ts_code": "000001.SZ",
+        "end_date": "20231231",
+        "ann_date": "20240315",
+        "f_ann_date": "20240315",
+        "update_flag": "0",
+    }
+    restatement = {
+        "ts_code": "000001.SZ",
+        "end_date": "20231231",
+        "ann_date": "20240315",
+        "f_ann_date": "20240315",
+        "update_flag": "1",
+    }
+
+    original_timeline = _announcement_timeline(original_filing, "end_date", ingested_at)
+    restated_timeline = _announcement_timeline(restatement, "end_date", ingested_at)
+
+    # The gap: two rows that Tushare itself distinguishes via `update_flag` collapse to one
+    # indistinguishable Timeline. If this assertion ever fails, the gap has been closed
+    # (intentionally, by a disambiguation fix) or broken (accidentally) — either way, read the
+    # docstring above and rewrite this test to assert the new, correct behavior.
+    assert original_timeline == restated_timeline
+    assert original_timeline.event_time == restated_timeline.event_time
+    assert original_timeline.available_time == restated_timeline.available_time
+    assert original_timeline.revision_time == restated_timeline.revision_time
+    assert original_timeline.ingested_time == restated_timeline.ingested_time
