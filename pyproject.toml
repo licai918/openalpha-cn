@@ -92,6 +92,7 @@ source = ["openalpha_cn"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
+fail_under = 80
 
 # ADR-0001 guardrail: "Domain and provider contracts must not import SQLite or DuckDB
 # implementation types." The 7 `ignore_imports` entries below are a hand-maintained,

@@ -44,7 +44,7 @@ jobs:
         run: uv run ruff format --check .
 
       - name: Type check
-        run: uv run mypy src
+        run: uv run mypy src scripts
 
       - name: Check import layering
         run: uv run lint-imports

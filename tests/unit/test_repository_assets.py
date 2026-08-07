@@ -2,10 +2,36 @@ import hashlib
 import re
 import subprocess
 import sys
+import tomllib
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def _workflow_job_block(workflow: str, job_name: str) -> str:
+    """Return the body of a top-level `jobs.<job_name>` block.
+
+    This is a deliberately narrow, structural extraction (not a literal
+    substring match against the whole file) so that assertions built on top
+    of it survive unrelated edits to the workflow and only break when the
+    named job's own steps change.
+    """
+    match = re.search(
+        rf"\n  {re.escape(job_name)}:\n(.*?)(?=\n  \w[\w-]*:\n|\Z)",
+        workflow,
+        re.DOTALL,
+    )
+    assert match is not None, f"quality.yml has no top-level job named {job_name!r}"
+    return match.group(1)
+
+
+def _step_run_command(job_block: str, keyword: str) -> str | None:
+    """Return the first step `run:` command in `job_block` containing `keyword`."""
+    for command in re.findall(r"^\s*run:\s*(.+)$", job_block, re.MULTILINE):
+        if keyword in command:
+            return command
+    return None
 
 
 def test_readme_prioritizes_chainlin_and_explains_installation() -> None:
@@ -221,6 +247,86 @@ def test_quality_workflow_covers_supported_platforms_and_locked_dependencies() -
     assert "verify_compose_recovery.py" in workflow
     assert "brace-expansion: 5.0.8" in pnpm_workspace
     assert "web/pnpm-workspace.yaml" in dockerfile
+
+
+def test_quality_workflow_python_job_has_a_type_check_step() -> None:
+    """The `python` job must run mypy somewhere, however the step is worded.
+
+    Mutation: delete the "Type check" step from `.github/workflows/quality.yml`.
+    """
+    workflow = (ROOT / ".github" / "workflows" / "quality.yml").read_text(encoding="utf-8")
+    python_job = _workflow_job_block(workflow, "python")
+
+    assert _step_run_command(python_job, "mypy") is not None, (
+        "quality.yml's python job has no step invoking mypy"
+    )
+
+
+def test_quality_workflow_type_check_step_covers_scripts_as_well_as_src() -> None:
+    """The type-check step must type-check `scripts`, not just `src`.
+
+    `scripts/build_feature_coverage.py` carries real logic (AST symbol
+    resolution, acceptance_kind validation) that CI must type-check or
+    regressions there go unnoticed.
+
+    Mutation: revert the mypy step's `run:` line to `uv run mypy src`
+    (dropping `scripts`).
+    """
+    workflow = (ROOT / ".github" / "workflows" / "quality.yml").read_text(encoding="utf-8")
+    python_job = _workflow_job_block(workflow, "python")
+
+    command = _step_run_command(python_job, "mypy")
+    assert command is not None, "quality.yml's python job has no step invoking mypy"
+    checked_paths = set(command.split())
+    assert {"src", "scripts"} <= checked_paths, (
+        f"mypy step does not type-check both src and scripts: {command!r}"
+    )
+
+
+def test_quality_workflow_python_job_has_a_coverage_gate_step() -> None:
+    """The `python` job must run pytest with coverage collection enabled.
+
+    Mutation: delete the "Test with coverage" step from quality.yml.
+    """
+    workflow = (ROOT / ".github" / "workflows" / "quality.yml").read_text(encoding="utf-8")
+    python_job = _workflow_job_block(workflow, "python")
+
+    assert _step_run_command(python_job, "--cov") is not None, (
+        "quality.yml's python job has no step collecting coverage (--cov)"
+    )
+
+
+def test_quality_workflow_coverage_gate_threshold_is_at_least_80() -> None:
+    """Whatever the CI coverage gate's threshold is, it must not regress below 80.
+
+    Mutation: lower `--cov-fail-under=80` to any value under 80 in quality.yml.
+    """
+    workflow = (ROOT / ".github" / "workflows" / "quality.yml").read_text(encoding="utf-8")
+    python_job = _workflow_job_block(workflow, "python")
+
+    command = _step_run_command(python_job, "--cov-fail-under")
+    assert command is not None, "quality.yml's python job has no --cov-fail-under gate"
+    match = re.search(r"--cov-fail-under[= ](\d+)", command)
+    assert match is not None, f"could not parse --cov-fail-under value from {command!r}"
+    assert int(match.group(1)) >= 80
+
+
+def test_backend_coverage_fail_under_is_configured_in_pyproject() -> None:
+    """`pyproject.toml` must enforce the same 80% floor CI enforces, locally.
+
+    Without `[tool.coverage.report].fail_under`, running `pytest --cov`
+    locally collects coverage but never fails on a low number - only CI's
+    `--cov-fail-under=80` flag would catch a regression.
+
+    Mutation: delete `fail_under` from `[tool.coverage.report]` in
+    pyproject.toml, or set it below 80.
+    """
+    with (ROOT / "pyproject.toml").open("rb") as handle:
+        config = tomllib.load(handle)
+
+    fail_under = config["tool"]["coverage"]["report"]["fail_under"]
+    assert isinstance(fail_under, int)
+    assert fail_under >= 80
 
 
 def test_publication_gate_accepts_tracked_release_sources() -> None:
