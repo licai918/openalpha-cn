@@ -4,8 +4,8 @@
 
 ## 对账结论
 
-- 功能总数: 109
-- 当前真实完成: 104 (95.41%)
+- 功能总数: 110
+- 当前真实完成: 105 (95.45%)
 - `UNREVIEWED=0`
 - `UNKNOWN=0`
 - `legacy_acceptance_rows=86` (历史散文验收、尚未绑定为可执行 pytest/CI 断言)
@@ -18,7 +18,7 @@
 | `DEFERRED` | 1 |
 | `ENHANCED_REPLACEMENT` | 20 |
 | `EXCLUDED` | 4 |
-| `NATIVE_COMPLETE` | 83 |
+| `NATIVE_COMPLETE` | 84 |
 
 ## 功能明细
 
@@ -133,6 +133,7 @@
 | `OA-DATA-007` | storage | Durable outcome-validation ledger with an SDK entry point | `NATIVE_COMPLETE` | `src/openalpha_cn/storage/validation.py#SQLiteValidationStore;src/openalpha_cn/backtest/validation.py#ValidationStore;src/openalpha_cn/storage/migrations.py#_create_validation_results_table;src/openalpha_cn/sdk.py#validate_outcome;src/openalpha_cn/api/app.py#create_app;src/openalpha_cn/runtime/composition.py#build_storage` | `tests/integration/storage/test_validation_store.py;tests/integration/storage/test_migrations.py;tests/unit/runtime/test_composition_validation.py;tests/integration/test_validation_interfaces.py` | `pytest` | `tests/integration/test_validation_interfaces.py::test_sdk_and_rest_validate_persist_and_return_the_same_result` |
 | `OA-PANEL-001` | panel | Partitioned panel store skeleton with a persistent DuckDB catalog | `NATIVE_COMPLETE` | `src/openalpha_cn/panel/store.py#PanelStore;src/openalpha_cn/panel/store.py#ColumnSpec;src/openalpha_cn/panel/store.py#PartitionRef;src/openalpha_cn/panel/store.py#PanelStorageError` | `tests/integration/panel/test_panel_store.py;tests/integration/panel/test_panel_store_performance_budget.py;tests/unit/test_import_layering.py;tests/integration/panel/test_panel_store_hardening.py` | `pytest` | `tests/integration/panel/test_panel_store_performance_budget.py::test_query_prunes_to_the_single_requested_years_partition_file` |
 | `OA-PANEL-002` | panel | Columnar provider batch contract for the panel plane | `NATIVE_COMPLETE` | `src/openalpha_cn/domain/panel_batch.py#ColumnarPanelBatch;src/openalpha_cn/domain/panel_batch.py#TimelineColumns;src/openalpha_cn/domain/panel_batch.py#PanelColumn;src/openalpha_cn/domain/panel_batch.py#validate_panel_identifier;src/openalpha_cn/panel_ingest.py#write_panel_batch;src/openalpha_cn/providers/base.py#PanelDataProvider` | `tests/contract/panel/test_columnar_batch_parity.py;tests/unit/domain/test_panel_batch.py;tests/integration/panel/test_panel_batch_ingest.py;tests/unit/test_panel_ingest_import_isolation.py` | `pytest` | `tests/contract/panel/test_columnar_batch_parity.py::test_the_two_contracts_agree_on_a_randomised_corpus` |
+| `OA-PANEL-003` | panel | Panel data catalog and readiness contract | `NATIVE_COMPLETE` | `src/openalpha_cn/panel/catalog.py#PartitionCoverage;src/openalpha_cn/panel/catalog.py#ReadinessRequirement;src/openalpha_cn/panel/catalog.py#DatasetReadiness;src/openalpha_cn/panel/catalog.py#PanelReadOutcome;src/openalpha_cn/panel/catalog.py#evaluate_readiness;src/openalpha_cn/panel/catalog.py#READINESS_ISSUE_CODES;src/openalpha_cn/panel/store.py#PanelStore;src/openalpha_cn/panel_ingest.py#panel_coverage` | `tests/integration/panel/test_panel_catalog.py;tests/integration/panel/test_panel_readiness.py;tests/integration/panel/test_panel_coverage_ingest.py;tests/unit/panel/test_readiness_rules.py` | `pytest` | `tests/integration/panel/test_panel_readiness.py::test_blocked_and_ready_but_empty_are_two_distinguishable_returns` |
 
 ## 边界
 

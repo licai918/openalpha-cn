@@ -10,17 +10,49 @@ stocks x ~2,440 trading days). See `docs/architecture/ADR-0002-two-data-planes.m
 `docs/architecture/ADR-0003-numerical-stack-boundary.md`.
 
 No concrete dataset (prices, fundamentals, calendar, ...) is modeled here -- that starts at
-`V2-P1-004`. This package is the storage skeleton only: `PanelStore` writes/reads
-partitions generically, given caller-supplied column names and types.
+`V2-P1-004`. This package is the storage skeleton plus its data catalog: `PanelStore`
+writes/reads partitions generically, given caller-supplied column names and types, and
+records/answers the coverage and readiness contract `panel/catalog.py` defines (`V2-P1-003`,
+PRD Story S8).
 """
 
 from __future__ import annotations
 
+from openalpha_cn.panel.catalog import (
+    DEFAULT_DATE_TIMEZONE,
+    PANEL_CATALOG_SCHEMA_VERSION,
+    READINESS_ISSUE_CODES,
+    DatasetReadiness,
+    DateCoverage,
+    FieldCoverage,
+    PanelReadOutcome,
+    PartitionCoverage,
+    PartitionState,
+    ReadinessIssue,
+    ReadinessRequirement,
+    ReadinessState,
+    RevisionCoverage,
+    evaluate_readiness,
+)
 from openalpha_cn.panel.store import ColumnSpec, PanelStorageError, PanelStore, PartitionRef
 
 __all__ = [
+    "DEFAULT_DATE_TIMEZONE",
+    "PANEL_CATALOG_SCHEMA_VERSION",
+    "READINESS_ISSUE_CODES",
     "ColumnSpec",
+    "DatasetReadiness",
+    "DateCoverage",
+    "FieldCoverage",
+    "PanelReadOutcome",
     "PanelStorageError",
     "PanelStore",
+    "PartitionCoverage",
     "PartitionRef",
+    "PartitionState",
+    "ReadinessIssue",
+    "ReadinessRequirement",
+    "ReadinessState",
+    "RevisionCoverage",
+    "evaluate_readiness",
 ]
