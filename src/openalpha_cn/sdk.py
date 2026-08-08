@@ -257,9 +257,22 @@ class OpenAlphaSDK:
         config_digest: str,
         random_seed: int,
     ) -> ReplayReport:
-        """Run a frozen corpus and return deterministic validation metrics."""
+        """Run a frozen corpus and return deterministic validation metrics.
+
+        `ReplayRunner.run()` keeps its own migrated `sdk-replay.sqlite3` for run/recovery
+        state (see its docstring for why), but persists validation results into
+        `self.validation_store` -- the same store `validate_outcome()` above uses -- so a
+        result produced by replay is retrievable through `list_validations_by_decision`/
+        `list_validations_by_signal` exactly like one produced by `validate_outcome()`
+        (P0.B acceptance review, Finding 1).
+        """
         return ReplayRunner(
             code_commit=code_commit,
             config_digest=config_digest,
             random_seed=random_seed,
-        ).run(corpus=corpus, state_path=self.runtime_dir / "sdk-replay.sqlite3")
+        ).run(
+            corpus=corpus,
+            state_path=self.runtime_dir / "sdk-replay.sqlite3",
+            validation_store=self.validation_store,
+            clock=self.clock,
+        )

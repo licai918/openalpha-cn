@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
 import time
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, cast
 from urllib.error import URLError
@@ -18,6 +20,57 @@ ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_FILE = ROOT / "deploy" / "compose.yml"
 AS_OF = "2026-07-24T10:30:00+00:00"
 
+_NO_COMPOSE_CLI_MESSAGE = (
+    "Neither the Docker Compose v2 CLI plugin (`docker compose`) nor the standalone v1 "
+    "`docker-compose` binary was found on PATH. Install the Compose plugin -- see "
+    "https://docs.docker.com/compose/install/ -- or the standalone `docker-compose` "
+    "binary, then re-run this script."
+)
+
+
+def _resolve_compose_command(
+    *,
+    which: Callable[[str], str | None] | None = None,
+    probe: Callable[..., subprocess.CompletedProcess[bytes]] | None = None,
+) -> tuple[str, ...]:
+    """Return the Compose CLI invocation to use, preferring the v2 plugin.
+
+    P0.B acceptance review, Finding 2: `_compose()` used to hardcode
+    `["docker", "compose", ...]` -- the v2 CLI plugin's invocation. A host with only the
+    standalone v1 `docker-compose` binary (no v2 plugin at all, still common on older CI
+    images and some Linux package managers) has no `docker compose` subcommand, so every
+    `_compose()` call exited 1 with a bare `CalledProcessError`, even though
+    `deploy/compose.yml` itself is fine (`docker-compose -f deploy/compose.yml config
+    --quiet` succeeds) -- confirmed by the technical reviewer.
+
+    Detection: `docker compose version` is the standard way to probe for the plugin
+    without side effects; a non-zero exit or an outright failure to execute (permissions,
+    a broken install) both count as "not available" and fall through to the standalone
+    binary. This does not silently skip verification -- if neither is available, this
+    raises a `RuntimeError` naming exactly what to install, and `main()` reports it on
+    stderr and exits non-zero instead of letting a bare traceback stand in for an
+    explanation.
+
+    `which`/`probe` default to `None` rather than binding `shutil.which`/`subprocess.run`
+    directly as default values: a default bound at function-definition time is captured
+    once and does not observe a test's `monkeypatch.setattr(module.shutil, "which", ...)`
+    afterwards, since that patches the module attribute, not the already-bound default.
+    Resolving them here, at call time, is what lets a test drive `main()` end to end
+    (not just this function directly) through a patched `shutil`/`subprocess`.
+    """
+    which = shutil.which if which is None else which
+    probe = subprocess.run if probe is None else probe
+    if which("docker") is not None:
+        try:
+            result = probe(["docker", "compose", "version"], capture_output=True, check=False)
+        except OSError:
+            result = None
+        if result is not None and result.returncode == 0:
+            return ("docker", "compose")
+    if which("docker-compose") is not None:
+        return ("docker-compose",)
+    raise RuntimeError(_NO_COMPOSE_CLI_MESSAGE)
+
 
 def _free_port() -> int:
     with socket.socket() as listener:
@@ -26,6 +79,7 @@ def _free_port() -> int:
 
 
 def _compose(
+    compose_command: Sequence[str],
     project: str,
     env: dict[str, str],
     *args: str,
@@ -33,8 +87,7 @@ def _compose(
 ) -> None:
     subprocess.run(
         [
-            "docker",
-            "compose",
+            *compose_command,
             "--project-name",
             project,
             "--file",
@@ -119,17 +172,23 @@ def _evidence_payload() -> dict[str, Any]:
 
 
 def main() -> int:
+    try:
+        compose_command = _resolve_compose_command()
+    except RuntimeError as error:
+        print(str(error), file=sys.stderr)
+        return 1
+
     project = f"openalpha-recovery-{os.getpid()}"
     port = _free_port()
     env = {**os.environ, "OPENALPHA_PORT": str(port)}
     base_url = f"http://127.0.0.1:{port}"
     try:
-        _compose(project, env, "up", "--detach", "--build", "--wait")
+        _compose(compose_command, project, env, "up", "--detach", "--build", "--wait")
         _wait_for_health(base_url)
         built = _request(f"{base_url}/api/v1/evidence/build", payload=_evidence_payload())
         evidence_id = built["items"][0]["evidence_id"]
 
-        _compose(project, env, "restart", "openalpha")
+        _compose(compose_command, project, env, "restart", "openalpha")
         _wait_for_health(base_url)
         query = urlencode({"as_of": AS_OF, "subject": "000001.SZ"})
         restored = _request(f"{base_url}/api/v1/evidence?{query}")
@@ -150,6 +209,7 @@ def main() -> int:
         return 0
     finally:
         _compose(
+            compose_command,
             project,
             env,
             "down",

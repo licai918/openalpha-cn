@@ -573,13 +573,26 @@ def create_app(
 
     @application.post("/api/v1/backtests/replay")
     def replay(request: ReplayApiRequest) -> ReplayReport:
-        """Execute a supplied frozen corpus through the shared research core."""
+        """Execute a supplied frozen corpus through the shared research core.
+
+        `ReplayRunner.run()` keeps its own migrated `api-replay.sqlite3` for run/recovery
+        state, but persists validation results into `validation_store` -- the same store
+        `validate_outcome` above uses -- so a result produced by replay is retrievable
+        through `GET /api/v1/backtests/validations/by-decision/{id}` and `by-signal/{id}`
+        exactly like one produced by `POST /api/v1/backtests/validate` (P0.B acceptance
+        review, Finding 1).
+        """
         runner = ReplayRunner(
             code_commit=request.code_commit,
             config_digest=request.config_digest,
             random_seed=request.random_seed,
         )
-        return runner.run(corpus=request.corpus, state_path=root / "api-replay.sqlite3")
+        return runner.run(
+            corpus=request.corpus,
+            state_path=root / "api-replay.sqlite3",
+            validation_store=validation_store,
+            clock=clock,
+        )
 
     @application.post("/api/v1/portfolio/execute")
     def portfolio_execute(request: PortfolioApiRequest) -> PortfolioTransition:

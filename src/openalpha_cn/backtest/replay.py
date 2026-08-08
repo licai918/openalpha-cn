@@ -15,12 +15,13 @@ from pydantic import (
     model_validator,
 )
 
-from openalpha_cn.backtest.validation import OutcomeObservation, OutcomeValidator
+from openalpha_cn.backtest.validation import OutcomeObservation, OutcomeValidator, ValidationStore
 from openalpha_cn.domain.evidence import EvidenceSnapshot, LookAheadViolationError
 from openalpha_cn.domain.time import ensure_aware
 from openalpha_cn.runtime.contracts import ResearchRunRequest
 from openalpha_cn.runtime.engine import ResearchEngine
 from openalpha_cn.runtime.memory import InMemoryResearchMemory
+from openalpha_cn.storage.migrations import run_migrations
 from openalpha_cn.storage.recovery import SQLiteRecoveryStore
 from openalpha_cn.storage.sqlite import SQLiteRunRepository
 
@@ -114,8 +115,64 @@ class ReplayRunner:
         self.config_digest = config_digest
         self.random_seed = random_seed
 
-    def run(self, *, corpus: ReplayCorpus, state_path: Path) -> ReplayReport:
-        """Execute the corpus and return explicit failures and validation IDs."""
+    def run(
+        self,
+        *,
+        corpus: ReplayCorpus,
+        state_path: Path,
+        validation_store: ValidationStore,
+        clock: Callable[[], datetime],
+    ) -> ReplayReport:
+        """Execute the corpus and return explicit failures and validation IDs.
+
+        P0.B acceptance review, Finding 1: this used to construct `SQLiteRunRepository`/
+        `SQLiteRecoveryStore` directly against `state_path`, bypassing
+        `runtime/composition.py#build_storage` -- the product reviewer verified
+        `sdk-replay.sqlite3`/`api-replay.sqlite3` sat permanently at `user_version = 0`,
+        with no `schema_migrations` table and no chance of ever receiving a migration
+        such as `create_query_path_indexes` (V2-P0B-015). `run_migrations` -- the exact
+        engine `build_storage()` calls -- now runs first, before either store below is
+        constructed, exactly like every other `state.sqlite3`-shaped database in this
+        project (`storage/migrations.py`'s module docstring).
+
+        This database intentionally stays separate from the main `state.sqlite3`
+        `sdk.py`/`api/app.py` build via `build_storage()`, rather than being folded into
+        it: `SQLiteRunRepository.append_run` rejects any reused `run_id` outright (no
+        idempotent-by-content replace, unlike this store's siblings), so merging a frozen
+        corpus's `run_id`s into the live production `runs` table would risk a real user's
+        run history colliding with -- or simply being interleaved with -- synthetic replay
+        data, for no benefit `mode="replay"` on `RunManifest` doesn't already give a
+        careful reader for free. One consequence of leaving `run_migrations` unmodified
+        here (no replay-specific migration subset): `create_query_path_indexes` requires
+        `portfolio_transitions` and `research_reports`, tables a replay-only database never
+        constructs, so it stays permanently pending after the demo migration catches up --
+        the executor's ordinary stop-at-first-deferral behaviour, not a bug (see
+        `tests/unit/backtest/test_replay.py`'s migration tests).
+
+        `validation_store` is different: unlike the run/recovery ledger, a
+        `ValidationResult` is idempotent by content-derived `validation_id`
+        (`storage/validation.py#SQLiteValidationStore`), so there is no collision risk in
+        sharing it, and the whole point of persisting one is to look back at whether a past
+        judgement held up -- a question that should not care whether the judgement came
+        from a live run or from replaying a frozen corpus. The end-to-end reviewer verified
+        that before this fix, `ReplayReport.validation_ids` was computed but never written
+        anywhere at all, so nothing on the frozen corpus's 300 cases was retrievable
+        through any query interface. Every successful case's result is now appended to the
+        caller-supplied `validation_store` -- the same instance `sdk.py`'s
+        `self.validation_store` / `api/app.py`'s `validation_store` already build via
+        `build_storage()` -- so it is queryable exactly like a result produced by
+        `sdk.validate_outcome()` / `POST /api/v1/backtests/validate`
+        (`GET /api/v1/backtests/validations/by-decision/{id}` and `by-signal/{id}`,
+        `sdk.list_validations_by_decision`/`list_validations_by_signal`), with no new
+        query surface needed.
+
+        `clock` is unrelated to `case.as_of` (used per case below to freeze each research
+        run's point-in-time clock): it is the real wall-clock callable `run_migrations`
+        needs to timestamp a pre-migration backup and the `schema_migrations` audit trail,
+        mirroring the caller-supplied clock every other `build_storage()`-routed call site
+        already threads through.
+        """
+        run_migrations(state_path, clock=clock)
         repository = SQLiteRunRepository(state_path)
         recovery_store = SQLiteRecoveryStore(state_path)
         memory = InMemoryResearchMemory()
@@ -152,6 +209,7 @@ class ReplayRunner:
                     failures.append(f"{case.run_id}: nondeterministic replay")
                     continue
                 validation = validator.validate(research=first, observation=case.outcome)
+                validation_store.append(validation)
                 validation_ids.append(validation.validation_id)
                 succeeded += 1
             except (RuntimeError, ValueError) as error:
