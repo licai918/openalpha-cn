@@ -3,6 +3,7 @@
 from openalpha_cn.providers.akshare import AKShareProvider
 from openalpha_cn.providers.base import (
     DataProvider,
+    PanelDataProvider,
     ProviderBatch,
     ProviderFailure,
     ProviderMetadata,
@@ -18,6 +19,7 @@ __all__ = [
     "ChainLinDataProvider",
     "DataProvider",
     "FileProvider",
+    "PanelDataProvider",
     "ProviderBatch",
     "ProviderFailure",
     "ProviderMetadata",

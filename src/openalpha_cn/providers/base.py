@@ -17,6 +17,7 @@ from pydantic import (
 
 from openalpha_cn.domain._identity import stable_model_id
 from openalpha_cn.domain.json_value import canonical_json_bytes, freeze_json, thaw_json
+from openalpha_cn.domain.panel_batch import ColumnarPanelBatch
 from openalpha_cn.domain.time import Timeline, ensure_aware, is_visible_at
 from openalpha_cn.domain.versioning import ContractVersions
 
@@ -175,6 +176,28 @@ class DataProvider(Protocol):
 
     def fetch(self, request: ProviderRequest) -> ProviderBatch:
         """Fetch a point-in-time batch or raise ``ProviderFailure``."""
+
+
+class PanelDataProvider(Protocol):
+    """The panel-plane counterpart of ``DataProvider`` (``V2-P1-002``).
+
+    Identical in spirit to ``DataProvider`` and deliberately separate from it: a provider
+    feeding the panel plane returns a ``ColumnarPanelBatch`` instead of a ``ProviderBatch``,
+    because per-row content addressing is an evidence-plane property that panel-scale data
+    cannot afford (see ``domain/panel_batch.py``'s module docstring for the measurements and
+    ADR-0002 for the plane split). A provider may implement both protocols -- Tushare's
+    ``daily`` output belongs on the panel plane while its event-shaped output does not.
+
+    The returned batch's ``dataset`` and ``as_of`` must equal the request's; the batch
+    enforces its own point-in-time rule against its ``as_of`` either way.
+    """
+
+    @property
+    def metadata(self) -> ProviderMetadata:
+        """Return provider policy metadata."""
+
+    def fetch_panel(self, request: ProviderRequest) -> ColumnarPanelBatch:
+        """Fetch a point-in-time columnar batch or raise ``ProviderFailure``."""
 
 
 def utc_now() -> datetime:

@@ -161,8 +161,16 @@ layers ADR-0003 was written for; see this task's report for the full reasoning.
 
 No concrete dataset (prices, fundamentals, calendar, adjustment factors, ...) is modeled --
 `write_partition()` takes caller-supplied `ColumnSpec`s and raw row tuples, nothing typed to
-a business schema. No data-catalog/readiness contract (`V2-P1-003`) and no columnar batch
-contract (`V2-P1-002`). Both are separate, later tasks.
+a business schema. No data-catalog/readiness contract (`V2-P1-003`); that is a separate,
+later task.
+
+The columnar batch contract this file's original version also listed as absent has since
+landed (`V2-P1-002`), deliberately *outside* this package: the contract itself is
+`openalpha_cn.domain.panel_batch`, and the seam that turns one into `ColumnSpec`s plus a row
+block is `openalpha_cn.panel_ingest`, a neutral top-level module. This package still imports
+nothing but DuckDB and the standard library, exactly as
+`tests/unit/test_import_layering.py::test_panel_package_has_zero_direct_edges_into_any_other_openalpha_cn_subpackage`
+requires; see `panel_ingest.py`'s own docstring for why the seam lives where it does.
 
 Two further design characteristics a review flagged as worth carrying forward, not fixed by
 this task (out of scope -- recorded here so the next phase does not rediscover them from
