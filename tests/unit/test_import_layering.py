@@ -15,15 +15,30 @@ The baseline started at 7: V2-P0B-011 fixed its 2 `providers`/`models` entries
 purely to serialize/deserialize it; those contracts moved to `openalpha_cn.domain` (four of
 them) or, for the one judged not to be a domain concept
 (`BatchResearchTask`/`BatchProgressEvent` and their siblings -- durable *orchestration*
-state, not a research-domain value, and one that itself embeds
-`runtime.contracts.ResearchRunRequest`, so it cannot live in `domain` without pulling
-`runtime` into `domain` too), a new neutral top-level module,
+state, not a research-domain value), a new neutral top-level module,
 `openalpha_cn.batch_contracts`. `storage/*.py` now imports every one of these five
 contracts from below it, not above it -- the baseline is pinned at 0 and
 `storage-no-upward-deps` carries no `ignore_imports` at all.
 See `tests/unit/test_storage_contract_relocation.py` for the relocation's own proofs
 (identity preserved from every old import path, new homes carry no edge back into
 `agents`/`product`/`backtest`/`storage`).
+
+V2-P0B-012's first version of `storage-no-upward-deps` also carried
+`allow_indirect_imports = true`, added to tolerate a real two-hop chain,
+`storage.batch -> batch_contracts -> runtime.contracts`, that `batch_contracts.py` needed
+for `ResearchRunRequest`. A Critical review rejected that fix: `allow_indirect_imports`
+scopes the contract to a direct-edges-only check instead of import-linter's default full
+transitive reachability, and a probe proved the gap was real -- a neutral top-level module
+importing a behavioural `product` class, reached in turn from a module under `storage/`,
+passed the relaxed contract (`lint-imports` reported it KEPT) while `grimp`'s full
+reachability check saw the chain plainly.
+`test_storage_no_upward_deps_contract_rejects_indirect_leak_via_neutral_module`
+below reproduces that exact probe against the current configuration and proves the gate now
+rejects it. The actual fix was not to widen the contract but to remove the chain:
+`ResearchRunRequest` moved into `openalpha_cn.domain.run_request` (see that module's
+docstring), so `openalpha_cn.batch_contracts` now depends only on `openalpha_cn.domain.*`,
+`runtime/contracts.py` re-exports the class unchanged, and `storage-no-upward-deps` carries
+no `allow_indirect_imports` key -- it runs the default full-transitive-reachability check.
 
 It also proves the domain-purity rule independently of import-linter's static
 `forbidden_modules` enumeration in `pyproject.toml`: siblings of `domain` are discovered
@@ -172,6 +187,81 @@ def test_each_former_baseline_edge_is_individually_gone() -> None:
         assert not graph.direct_import_exists(importer=importer, imported=imported), (
             f"{importer} still directly imports {imported}"
         )
+
+
+_LEAKY_HELPER_PATH = ROOT / "src" / "openalpha_cn" / "leaky_helper.py"
+_LEAKY_PROBE_PATH = ROOT / "src" / "openalpha_cn" / "storage" / "_leaky_probe.py"
+
+
+def test_storage_no_upward_deps_contract_does_not_relax_to_direct_edges_only() -> None:
+    """`storage-no-upward-deps` must not declare `allow_indirect_imports = true`.
+
+    That flag (present in an earlier version of this contract) scopes import-linter's
+    `forbidden` contract type to a direct-edges-only check instead of its default full
+    transitive reachability -- see
+    `test_storage_no_upward_deps_contract_rejects_indirect_leak_via_neutral_module`
+    below for a reproduction of the exact leak that relaxation permitted.
+    """
+    config = importlinter_api.read_configuration(str(ROOT / "pyproject.toml"))
+    contract = next(
+        contract
+        for contract in config["contracts_options"]
+        if contract.get("id") == "storage-no-upward-deps"
+    )
+    assert not contract.get("allow_indirect_imports", False), (
+        "storage-no-upward-deps declares allow_indirect_imports=true, which relaxes it to a "
+        "direct-edges-only check -- see this test's docstring"
+    )
+
+
+def test_storage_no_upward_deps_contract_rejects_indirect_leak_via_neutral_module() -> None:
+    """A Critical-review finding on V2-P0B-012 proved that `allow_indirect_imports = true`
+    (once present on this contract) let any future contributor reach a behavioural
+    upper-layer class through one neutral top-level module without this gate ever noticing.
+
+    The exact probe that proved it: a top-level module (`openalpha_cn.leaky_helper`)
+    importing `product.research.ResearchScreener` -- a behavioural class, not a data
+    contract -- imported in turn by a module under `storage/`. Under the relaxed contract,
+    `lint-imports` reported `storage-no-upward-deps` KEPT (not broken) for that probe, while
+    `grimp`'s full-reachability check saw the two-hop chain plainly. This test reproduces
+    that exact probe against the current (fixed) configuration and proves the gate now
+    rejects it, then removes both probe files so the real source tree is left clean.
+    """
+    assert not _LEAKY_HELPER_PATH.exists(), "probe file must not already exist"
+    assert not _LEAKY_PROBE_PATH.exists(), "probe file must not already exist"
+    _LEAKY_HELPER_PATH.write_text(
+        '"""Temporary probe module for an import-layering leak test."""\n\n'
+        "from openalpha_cn.product.research import ResearchScreener\n\n"
+        '__all__ = ["ResearchScreener"]\n'
+    )
+    _LEAKY_PROBE_PATH.write_text(
+        '"""Temporary probe module for an import-layering leak test."""\n\n'
+        "from openalpha_cn.leaky_helper import ResearchScreener\n\n"
+        '__all__ = ["ResearchScreener"]\n'
+    )
+    try:
+        exit_code = lint_imports(
+            config_filename=str(ROOT / "pyproject.toml"),
+            no_cache=True,
+            limit_to_contracts=("storage-no-upward-deps",),
+        )
+        assert exit_code == 1, (
+            "lint-imports should reject storage/_leaky_probe.py -> leaky_helper -> "
+            "product.research.ResearchScreener as an indirect leak through "
+            "storage-no-upward-deps -- if this passes, the contract has regressed to a "
+            "direct-edges-only check"
+        )
+    finally:
+        _LEAKY_PROBE_PATH.unlink()
+        _LEAKY_HELPER_PATH.unlink()
+
+    # Confirm the gate is green again once both probe files are removed.
+    exit_code = lint_imports(
+        config_filename=str(ROOT / "pyproject.toml"),
+        no_cache=True,
+        limit_to_contracts=("storage-no-upward-deps",),
+    )
+    assert exit_code == 0
 
 
 def test_baseline_exemptions_match_import_linter_ignore_imports_configuration_exactly() -> None:

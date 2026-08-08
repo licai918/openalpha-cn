@@ -25,11 +25,14 @@ The fifth, `BatchResearchTask`/`BatchProgressEvent` (plus `BatchTaskItem`/`Batch
 which `BatchResearchTask` embeds), moved to a new top-level module,
 `openalpha_cn.batch_contracts`, instead. It is durable *batch-orchestration* state (queued/
 running/succeeded/failed/cancelled, max_concurrency, cancellation_requested) rather than a
-research-domain concept, and -- decisively -- `BatchTaskItem.request` is typed
-`runtime.contracts.ResearchRunRequest`, so it structurally cannot move into `domain`
-without pulling `openalpha_cn.runtime` into `openalpha_cn.domain` too, which would violate
-`domain-purity` for every other domain contract along with it. See
-`openalpha_cn/batch_contracts.py`'s own module docstring for the same reasoning in place.
+research-domain concept -- a semantic judgment, not a structural constraint.
+`BatchTaskItem.request` is typed `ResearchRunRequest`, which (a Critical-review follow-up
+on this task) itself now lives in `openalpha_cn.domain.run_request`: see that module's
+docstring for why moving just that one class, not the whole `runtime/contracts.py` module,
+removes `batch_contracts`'s only edge into `openalpha_cn.runtime` entirely, without
+dragging `agents.base` into `domain` the way moving `ResearchRunResult` would.
+`openalpha_cn/batch_contracts.py`'s own module docstring carries the same reasoning in
+place.
 """
 
 from __future__ import annotations
@@ -43,28 +46,24 @@ from openalpha_cn.domain.agent_result import AgentResult
 from openalpha_cn.domain.memory import MemoryEntry
 from openalpha_cn.domain.portfolio import PortfolioTransition
 from openalpha_cn.domain.report import ResearchReport
+from openalpha_cn.domain.run_request import ResearchRunRequest
 from openalpha_cn.domain.watchlist import WatchlistEntry
 from openalpha_cn.product.research import ResearchReport as ResearchReportViaProduct
 from openalpha_cn.product.research import WatchlistEntry as WatchlistEntryViaProduct
 from openalpha_cn.runtime.batch import BatchProgressEvent as BatchProgressEventViaRuntime
 from openalpha_cn.runtime.batch import BatchResearchTask as BatchResearchTaskViaRuntime
+from openalpha_cn.runtime.contracts import ResearchRunRequest as ResearchRunRequestViaRuntime
 from openalpha_cn.runtime.memory import MemoryEntry as MemoryEntryViaRuntime
 
 # Every module a relocated contract's new home is allowed to reach. `openalpha_cn.domain`
 # submodules may only reach other `domain` submodules (`domain-purity`, enforced elsewhere).
-# `openalpha_cn.batch_contracts` is the one deliberate exception: it embeds
-# `runtime.contracts.ResearchRunRequest` (see module docstring above), so `openalpha_cn.
-# runtime` is excluded from its forbidden set even though it is forbidden for the four
-# `domain` homes.
-_FORBIDDEN_FOR_DOMAIN_HOMES = (
+# `openalpha_cn.batch_contracts` now carries the identical forbidden set: since
+# `ResearchRunRequest` moved into `openalpha_cn.domain.run_request` (see module docstring
+# above), `batch_contracts.py` no longer has any edge into `openalpha_cn.runtime` at all --
+# the exception this constant used to carve out for it is gone.
+_FORBIDDEN_UPWARD_MODULES = (
     "openalpha_cn.agents",
     "openalpha_cn.runtime",
-    "openalpha_cn.product",
-    "openalpha_cn.backtest",
-    "openalpha_cn.storage",
-)
-_FORBIDDEN_FOR_BATCH_CONTRACTS = (
-    "openalpha_cn.agents",
     "openalpha_cn.product",
     "openalpha_cn.backtest",
     "openalpha_cn.storage",
@@ -91,12 +90,17 @@ def test_relocated_contracts_are_the_same_object_from_every_import_path() -> Non
     assert ResearchReport is ResearchReportViaProduct
     assert BatchResearchTask is BatchResearchTaskViaRuntime
     assert BatchProgressEvent is BatchProgressEventViaRuntime
+    assert ResearchRunRequest is ResearchRunRequestViaRuntime
 
 
 def test_domain_contract_homes_carry_no_edge_back_into_upper_layers_or_storage() -> None:
-    """The four contracts moved into `domain/` must not, themselves, transitively reach
-    back into `agents`/`runtime`/`product`/`backtest`/`storage` -- otherwise relocating them
+    """The contracts moved into `domain/` must not, themselves, transitively reach back
+    into `agents`/`runtime`/`product`/`backtest`/`storage` -- otherwise relocating them
     would just move the violation one file over instead of removing it.
+
+    `openalpha_cn.domain.run_request` is included here (a Critical-review follow-up on this
+    task): it used to live in `runtime/contracts.py`, one layer above `domain`, and moving
+    it here is exactly the kind of relocation this test exists to double-check.
     """
     graph = grimp.build_graph("openalpha_cn")
     for module in (
@@ -106,24 +110,30 @@ def test_domain_contract_homes_carry_no_edge_back_into_upper_layers_or_storage()
         "openalpha_cn.domain.portfolio",
         "openalpha_cn.domain.watchlist",
         "openalpha_cn.domain.report",
+        "openalpha_cn.domain.run_request",
     ):
         upstream = graph.find_upstream_modules(module)
-        bad = _touches_any(upstream, _FORBIDDEN_FOR_DOMAIN_HOMES)
+        bad = _touches_any(upstream, _FORBIDDEN_UPWARD_MODULES)
         assert not bad, f"{module} transitively depends on {sorted(bad)}"
 
 
 def test_batch_contracts_module_does_not_depend_on_agents_product_backtest_or_storage() -> None:
-    """`openalpha_cn.batch_contracts` legitimately depends on `runtime.contracts`
-    (`BatchTaskItem.request: ResearchRunRequest`) -- that dependency is real and intentional,
-    not the thing under test here. What must never happen is a dependency on `agents`,
-    `product`, `backtest`, or (the one that would reintroduce a cycle) `storage` itself.
+    """`openalpha_cn.batch_contracts` must have zero transitive dependency on `agents`,
+    `product`, `backtest`, `runtime`, or (the one that would reintroduce a cycle) `storage`
+    itself.
+
+    An earlier version of this test asserted the opposite of the `runtime` half of this --
+    that `"openalpha_cn.runtime.contracts" in upstream` -- on the theory that
+    `BatchTaskItem.request: ResearchRunRequest` made that edge structurally unavoidable. A
+    Critical review rejected that: the edge was avoidable by moving `ResearchRunRequest`
+    itself into `openalpha_cn.domain.run_request` rather than widening the import-linter
+    contract to tolerate it (see that module's docstring and
+    `openalpha_cn/batch_contracts.py`'s). `batch_contracts.py` now imports
+    `ResearchRunRequest` from its domain home directly, so the edge this test used to pin as
+    permanent is gone, and `openalpha_cn.runtime` belongs in the forbidden set like every
+    other upward package.
     """
     graph = grimp.build_graph("openalpha_cn")
     upstream = graph.find_upstream_modules("openalpha_cn.batch_contracts")
-    bad = _touches_any(upstream, _FORBIDDEN_FOR_BATCH_CONTRACTS)
+    bad = _touches_any(upstream, _FORBIDDEN_UPWARD_MODULES)
     assert not bad, f"openalpha_cn.batch_contracts transitively depends on {sorted(bad)}"
-    assert "openalpha_cn.runtime.contracts" in upstream, (
-        "openalpha_cn.batch_contracts should still depend on runtime.contracts for "
-        "ResearchRunRequest -- if this ever goes false, BatchTaskItem's shape changed "
-        "and this test's forbidden-set reasoning should be re-checked"
-    )

@@ -10,23 +10,35 @@ contract check is package-scoped, so this module lives at the top level instead,
 of `runtime` rather than a child of it.
 
 Why these four classes (`BatchResultRef`, `BatchTaskItem`, `BatchResearchTask`,
-`BatchProgressEvent`) did not move into `openalpha_cn.domain` the way the task's other four
-relocated contracts did: `BatchResearchTask.items: tuple[BatchTaskItem, ...]`, and
-`BatchTaskItem.request` is typed `runtime.contracts.ResearchRunRequest` -- a request/
-result contract that Task V2-P0B-001 deliberately placed one layer above `domain` (it
-carries `mode`/`code_commit`/`config_digest`/`random_seed`, execution/reproducibility
-concerns, not research-domain values). Moving `BatchResearchTask` into `domain` would
-require moving `ResearchRunRequest` there too, which would in turn force `domain` to import
-`openalpha_cn.agents` (via `ResearchRunResult.agent_results: tuple[AgentResult, ...]`) --
-directly violating `domain-purity` for every other domain contract, not just this one.
-Separately, `BatchResearchTask`'s own shape (`status`, `max_concurrency`,
+`BatchProgressEvent`) do not move into `openalpha_cn.domain` the way the task's other four
+relocated contracts did: `BatchResearchTask`'s own shape (`status`, `max_concurrency`,
 `cancellation_requested`) describes bounded-concurrency job-runner bookkeeping, not a
 research-domain concept -- it is closer in kind to `storage/recovery.py`'s
 `RunRecoveryState` (also durable orchestration state, also kept out of `domain`) than to
-`MemoryEntry` or `PortfolioTransition`.
+`MemoryEntry` or `PortfolioTransition`. That is a semantic judgment, not a structural
+constraint: `BatchTaskItem.request` is typed `ResearchRunRequest`, which itself now lives in
+`openalpha_cn.domain.run_request` (see that module's docstring), so importing it here
+creates no edge into `openalpha_cn.runtime` at all.
 
-This module therefore legitimately depends on `openalpha_cn.runtime.contracts` -- that edge
-is real, not a mistake to hide. What it must never depend on is `openalpha_cn.storage`
+An earlier version of this module imported `ResearchRunRequest` from
+`openalpha_cn.runtime.contracts` instead, and `storage-no-upward-deps` carried
+`allow_indirect_imports = true` to tolerate the resulting two-hop chain
+(`storage.batch -> batch_contracts -> runtime.contracts`). A Critical review rejected that:
+the flag weakens import-linter's default full-transitive-reachability check to a
+direct-edges-only one, and a probe proved the gap was real -- a neutral top-level module
+importing a behavioural `product` class, reached in turn from `storage/`, passed the
+relaxed contract while remaining fully reachable to `grimp`
+(`tests/unit/test_import_layering.py::test_storage_no_upward_deps_contract_rejects_indirect_leak_via_neutral_module`
+reproduces that exact probe). The reasoning that produced the relaxation had conflated
+"move the whole `runtime/contracts.py` module into `domain`" (which *would* drag
+`agents.base` in, via `ResearchRunResult.agent_results: tuple[AgentResult, ...]`, directly
+violating `domain-purity`) with "move just `ResearchRunRequest`" (which does not --
+`ResearchRunRequest` has never depended on `AgentResult`; only `ResearchRunResult`, a
+separate class that stays behind in `runtime/contracts.py`, does). Moving
+`ResearchRunRequest` alone removed the chain -- and the need for the relaxation -- entirely.
+
+This module now legitimately depends only on `openalpha_cn.domain.*` -- no edge into
+`openalpha_cn.runtime` remains at all. What it must never depend on is `openalpha_cn.storage`
 (which would reintroduce a cycle with `storage/batch.py`) or `agents`/`product`/`backtest`
 (which it never needed in the first place); see
 `tests/unit/test_storage_contract_relocation.py` and
@@ -43,9 +55,9 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from openalpha_cn.domain.run_request import ResearchRunRequest
 from openalpha_cn.domain.time import ensure_aware
 from openalpha_cn.domain.versioning import ContractVersions, single_version
-from openalpha_cn.runtime.contracts import ResearchRunRequest
 
 
 class BatchResultRef(BaseModel):

@@ -149,24 +149,27 @@ forbidden_modules = [
 # storage/portfolio.py, storage/recovery.py, and storage/product.py each imported one data
 # contract from above purely to serialize/deserialize it. Those contracts moved to
 # openalpha_cn.domain (four of them) or, for BatchResearchTask/BatchProgressEvent (durable
-# orchestration state, not a domain concept, and one that itself embeds
-# runtime.contracts.ResearchRunRequest so it cannot live in domain either), a new neutral
-# top-level module, openalpha_cn.batch_contracts — see that module's docstring. No
-# exemptions remain: every storage/*.py file has zero direct edges into agents/runtime/
-# product/backtest (tests/unit/test_import_layering.py proves this with grimp directly).
+# orchestration state, not a domain concept), a new neutral top-level module,
+# openalpha_cn.batch_contracts — see that module's docstring. No exemptions remain: every
+# storage/*.py file has zero direct edges into agents/runtime/product/backtest
+# (tests/unit/test_import_layering.py proves this with grimp directly).
 #
-# allow_indirect_imports = true (below) scopes this contract to that direct-edge property,
-# not full transitive reachability. Without it, import-linter's default "forbidden" contract
-# walks the whole graph and still reports a violation: openalpha_cn.batch_contracts
-# legitimately depends on openalpha_cn.runtime.contracts (for ResearchRunRequest, which
-# BatchTaskItem.request embeds -- a real value, not a lookalike duplicate, so this edge is
-# irreducible without either duplicating that model or moving runtime.contracts into domain,
-# which V2-P0B-001 deliberately kept one layer above domain and which this task's brief
-# explicitly scopes out). That single, well-understood, two-hop chain
-# (storage.batch -> batch_contracts -> runtime.contracts) is not the coupling this contract
-# exists to prevent -- storage/*.py itself reaching into agents/runtime/product/backtest for
-# its own serialization logic, which is what every one of the 5 fixed baseline entries was.
-allow_indirect_imports = true
+# V2-P0B-012's first version of this fix also added `allow_indirect_imports = true` here, to
+# tolerate a real two-hop chain, storage.batch -> batch_contracts -> runtime.contracts, that
+# batch_contracts.py needed for ResearchRunRequest. A Critical review rejected that:
+# allow_indirect_imports scopes this contract to a direct-edges-only check instead of
+# import-linter's default full transitive reachability, and a probe proved the gap was real
+# -- a neutral top-level module importing a behavioural product class, reached in turn from a
+# module under storage/, passed the relaxed contract (lint-imports reported it KEPT) while
+# grimp's full reachability check saw the chain plainly (see
+# tests/unit/test_import_layering.py::
+# test_storage_no_upward_deps_contract_rejects_indirect_leak_via_neutral_module,
+# which reproduces that exact probe against this contract). The fix was not to widen the
+# contract but to remove the chain: ResearchRunRequest moved into
+# openalpha_cn.domain.run_request (runtime/contracts.py re-exports it unchanged for existing
+# callers), so openalpha_cn.batch_contracts now depends only on openalpha_cn.domain.* and this
+# contract runs the default full-transitive-reachability check -- no allow_indirect_imports
+# escape hatch.
 
 [[tool.importlinter.contracts]]
 id = "providers-no-infra-imports"

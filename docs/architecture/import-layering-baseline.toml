@@ -26,10 +26,28 @@
 #   to serialize/deserialize it; every one of those contracts moved to `openalpha_cn.domain`
 #   (four of them) or, for `BatchResearchTask`/`BatchProgressEvent`, a new neutral
 #   top-level module `openalpha_cn.batch_contracts` (durable orchestration state, not a
-#   domain concept, and one that itself embeds `runtime.contracts.ResearchRunRequest` so it
-#   cannot live in `domain` either -- see that module's docstring). The pinned count
-#   dropped from 5 to 0, and `storage-no-upward-deps` no longer declares `ignore_imports`
-#   at all (not even an empty list) in `pyproject.toml`.
+#   domain concept -- see that module's docstring). The pinned count dropped from 5 to 0,
+#   and `storage-no-upward-deps` no longer declares `ignore_imports` at all (not even an
+#   empty list) in `pyproject.toml`.
+# - Critical-review follow-up on V2-P0B-012: that fix also added
+#   `allow_indirect_imports = true` to `storage-no-upward-deps` in `pyproject.toml`, to
+#   tolerate a real two-hop chain (`storage.batch -> batch_contracts -> runtime.contracts`)
+#   that `batch_contracts.py` needed for `ResearchRunRequest`. A review rejected that: the
+#   flag scopes the contract to a direct-edges-only check instead of import-linter's default
+#   full transitive reachability, and a probe proved the gap was real -- a neutral top-level
+#   module importing a behavioural `product` class, reached in turn from a module under
+#   `storage/`, passed the relaxed contract (`lint-imports` reported it KEPT) while `grimp`'s
+#   full reachability check saw the chain plainly. No baseline entry was ever added for this
+#   (the flag was a contract-level relaxation, not a per-module exemption, so it never
+#   qualified as a `[[violation]]` row here) -- noted for the historical record only. The fix
+#   moved `ResearchRunRequest` out of `runtime/contracts.py` into
+#   `openalpha_cn.domain.run_request` (`runtime/contracts.py` re-exports it unchanged, same
+#   class object), removing `batch_contracts.py`'s only edge into `openalpha_cn.runtime`
+#   entirely; `allow_indirect_imports = true` was deleted, and `storage-no-upward-deps` now
+#   runs the default full-transitive-reachability check with zero exemptions. See
+#   `tests/unit/test_import_layering.py::test_storage_no_upward_deps_contract_does_not_relax_to_direct_edges_only`
+#   and `::test_storage_no_upward_deps_contract_rejects_indirect_leak_via_neutral_module`
+#   (which reproduces the reviewer's exact probe and proves the gate now rejects it).
 #
 # The baseline is empty today: every contract in `pyproject.toml` is fully compliant with
 # no exemptions.
