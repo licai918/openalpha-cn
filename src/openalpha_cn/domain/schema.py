@@ -1,7 +1,14 @@
-"""Export checked-in JSON Schemas for the public domain contracts."""
+"""Canonical JSON Schemas for the public domain contracts.
 
-import json
-from pathlib import Path
+Pure schema generation only -- no filesystem writes, no repository-path derivation.
+`domain/` is the one package in this codebase with zero infrastructure dependencies
+(ADR-0001's guardrail, enforced by Task 4's `domain-purity` import-linter contract); a
+module that wrote files and hardcoded `Path(__file__).parents[N]` repository layout
+lived here until V2-P0B-011 moved that IO to `openalpha_cn.schema_export`, which imports
+`CONTRACT_MODELS`/`generate_schemas` from this module, not the other way around.
+"""
+
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -20,26 +27,9 @@ CONTRACT_MODELS: dict[str, type[BaseModel]] = {
 }
 
 
-def export_schemas(output_dir: Path) -> tuple[Path, ...]:
-    """Export canonical serialization schemas and return their paths."""
-    output_dir.mkdir(parents=True, exist_ok=True)
-    paths: list[Path] = []
-    for name, model in CONTRACT_MODELS.items():
-        path = output_dir / f"{name}.json"
-        schema = model.model_json_schema(mode="serialization")
-        path.write_text(
-            json.dumps(schema, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        paths.append(path)
-    return tuple(paths)
-
-
-def main() -> None:
-    """Export schemas to the repository documentation directory."""
-    repository_root = Path(__file__).parents[3]
-    export_schemas(repository_root / "docs" / "api" / "schemas")
-
-
-if __name__ == "__main__":
-    main()
+def generate_schemas() -> dict[str, dict[str, Any]]:
+    """Return each contract's canonical serialization JSON Schema, keyed by name."""
+    return {
+        name: model.model_json_schema(mode="serialization")
+        for name, model in CONTRACT_MODELS.items()
+    }

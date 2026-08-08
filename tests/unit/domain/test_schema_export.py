@@ -4,9 +4,10 @@ from pathlib import Path
 from openalpha_cn.domain.decision import DECISION_LEDGER_VERSIONS
 from openalpha_cn.domain.evidence import EVIDENCE_SNAPSHOT_VERSIONS
 from openalpha_cn.domain.run import RUN_MANIFEST_VERSIONS
-from openalpha_cn.domain.schema import CONTRACT_MODELS, export_schemas
+from openalpha_cn.domain.schema import CONTRACT_MODELS
 from openalpha_cn.domain.signal import SIGNAL_FRAME_VERSIONS
 from openalpha_cn.domain.validation import VALIDATION_RESULT_VERSIONS
+from openalpha_cn.schema_export import export_schemas
 
 SCHEMA_DIR = Path(__file__).parents[3] / "docs" / "api" / "schemas"
 

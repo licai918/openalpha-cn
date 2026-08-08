@@ -12,7 +12,7 @@ public v1 research records:
 Regenerate them after an intentional contract change:
 
 ```powershell
-uv run python -m openalpha_cn.domain.schema
+uv run python -m openalpha_cn.schema_export
 uv run pytest tests/unit/domain/test_schema_export.py
 ```
 

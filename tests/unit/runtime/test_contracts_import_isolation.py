@@ -36,30 +36,35 @@ all.
 ## Why this only checks `openalpha_cn.storage`, not bare `sqlite3`
 
 The most literal version of this guard would also assert `"sqlite3" not in sys.modules`.
-That assertion was tried first and found to fail even against the current, correct, lazy
-`runtime/__init__.py` -- `sqlite3` is *already* pulled into `sys.modules` by a fresh
-`import openalpha_cn.runtime.contracts`, through a chain that has nothing to do with
+That assertion was tried first and found to fail against the lazy `runtime/__init__.py` of
+the time -- `sqlite3` was *already* pulled into `sys.modules` by a fresh `import
+openalpha_cn.runtime.contracts`, through a chain that had nothing to do with
 `ResearchEngine`: `runtime.contracts` imports `openalpha_cn.agents.base`, which (because
 Python always fully executes a package's `__init__.py` before importing any of its
 submodules) runs `agents/__init__.py`, which imports `agents.model`, which imports
 `openalpha_cn.models.base`, which likewise runs `models/__init__.py`, which imports
-`models.openai_compatible`, which imports `models.governance` -- and `models/governance.py`
-does `import sqlite3` directly at module scope, for `ModelRegistry`'s durable usage
-accounting.
+`models.openai_compatible`, which imported `models.governance` -- and `models/governance.py`
+used to do `import sqlite3` directly at module scope, for `SQLiteModelUsageStore`'s durable
+usage accounting.
 
-That specific edge, `openalpha_cn.models.governance -> sqlite3`, is not a bug this test
-should chase: it is a pre-existing, already-tracked layering exemption (baseline entry
-`V2-P0B-011` in `docs/architecture/import-layering-baseline.toml`, mirrored as an
-`ignore_imports` line on the `models-no-infra-imports` contract in `pyproject.toml`), wholly
-unrelated to `runtime/__init__.py`'s lazy `ResearchEngine` resolution and out of this task's
-scope to fix. Asserting bare `sqlite3 not in sys.modules` here would make this test fail
-permanently regardless of whether the guard under test is eager or lazy -- it would not
-discriminate the regression it exists to catch. So, matching the precedent already set by
-`test_import_layering.py`'s `ENGINE_OWNED_STORAGE_MODULES` (which scopes its transitive
-check to `storage.recovery`/`storage.sqlite` specifically, for the same reason -- see that
-module's comments), this test checks only for `openalpha_cn.storage` and its submodules:
-exactly what an eager `from openalpha_cn.runtime.engine import ResearchEngine` at the top of
-`runtime/__init__.py` would additionally pull in.
+That specific edge, `openalpha_cn.models.governance -> sqlite3`, was a pre-existing,
+already-tracked layering exemption (baseline entry `V2-P0B-011` in
+`docs/architecture/import-layering-baseline.toml`, mirrored as an `ignore_imports` line on
+the `models-no-infra-imports` contract in `pyproject.toml`), wholly unrelated to
+`runtime/__init__.py`'s lazy `ResearchEngine` resolution and out of scope for the task that
+wrote this docstring to fix. V2-P0B-011 has since fixed it: `SQLiteModelUsageStore` moved to
+`storage/models.py`, and `models/governance.py` now declares a structural `ModelUsageStore`
+Protocol instead of importing `sqlite3` -- so a fresh `import openalpha_cn.runtime.contracts`
+no longer pulls `sqlite3` into `sys.modules` at all through this chain (or, as far as this
+project's own dependency graph is concerned, through any other). The check below is kept
+scoped to `openalpha_cn.storage` rather than widened to assert bare `sqlite3` absence,
+matching the precedent `test_import_layering.py`'s `ENGINE_OWNED_STORAGE_MODULES` already
+sets (which scopes its transitive check to `storage.recovery`/`storage.sqlite` specifically,
+for the analogous reason -- see that module's comments): `openalpha_cn.storage` is exactly
+what an eager `from openalpha_cn.runtime.engine import ResearchEngine` at the top of
+`runtime/__init__.py` would pull in, and remains the property this test exists to guard
+regardless of which unrelated third-party modules happen to ride along with any one import
+chain at any one time.
 """
 
 from __future__ import annotations

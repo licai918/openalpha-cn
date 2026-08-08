@@ -10,12 +10,12 @@ from openalpha_cn.models.governance import (
     ModelRegistry,
     ModelRetryPolicy,
     ModelUsageRecord,
-    SQLiteModelUsageStore,
 )
 from openalpha_cn.models.openai_compatible import (
     ModelTransportError,
     OpenAICompatibleProvider,
 )
+from openalpha_cn.storage.models import SQLiteModelUsageStore
 
 
 class SequenceTransport:

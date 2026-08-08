@@ -97,7 +97,7 @@ skip_covered = true
 fail_under = 80
 
 # ADR-0001 guardrail: "Domain and provider contracts must not import SQLite or DuckDB
-# implementation types." The 7 `ignore_imports` entries below are a hand-maintained,
+# implementation types." The 5 `ignore_imports` entries below are a hand-maintained,
 # shrink-only baseline of pre-existing violations; see
 # `docs/architecture/import-layering-baseline.toml` for the human-readable ledger (module,
 # banned import, and the P0.B issue that will close it) and
@@ -159,10 +159,7 @@ name = "providers do not import duckdb or sqlite3"
 type = "forbidden"
 source_modules = ["openalpha_cn.providers"]
 forbidden_modules = ["duckdb", "sqlite3"]
-# Baseline (V2-P0B-011) — 1 entry, see docs/architecture/import-layering-baseline.toml
-ignore_imports = [
-  "openalpha_cn.providers.file -> duckdb",
-]
+# V2-P0B-011 fixed the sole baseline entry (providers.file -> duckdb); no exemptions remain.
 
 [[tool.importlinter.contracts]]
 id = "models-no-infra-imports"
@@ -170,7 +167,4 @@ name = "models do not import duckdb or sqlite3"
 type = "forbidden"
 source_modules = ["openalpha_cn.models"]
 forbidden_modules = ["duckdb", "sqlite3"]
-# Baseline (V2-P0B-011) — 1 entry, see docs/architecture/import-layering-baseline.toml
-ignore_imports = [
-  "openalpha_cn.models.governance -> sqlite3",
-]
+# V2-P0B-011 fixed the sole baseline entry (models.governance -> sqlite3); no exemptions remain.

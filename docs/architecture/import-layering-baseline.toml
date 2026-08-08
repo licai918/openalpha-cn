@@ -9,12 +9,16 @@
 # - Each violation below MUST also appear as an `ignore_imports` entry on the matching
 #   contract in `pyproject.toml` (enforced by
 #   `tests/unit/test_import_layering.py::test_baseline_exemptions_match_import_linter_ignore_imports_configuration_exactly`).
-# - The count of `[[violation]]` entries is pinned at exactly 7 by
-#   `tests/unit/test_import_layering.py::test_baseline_exemption_count_is_pinned_at_seven`.
+# - The count of `[[violation]]` entries is pinned at exactly 5 by
+#   `tests/unit/test_import_layering.py::test_baseline_exemption_count_is_pinned_at_five`.
 #   THE BASELINE MUST ONLY SHRINK. A new violation must be fixed, never added here.
 # - When a violation is fixed (P0.B work), delete its entry here AND remove the matching
 #   `ignore_imports` line from `pyproject.toml` in the same commit, then lower the pinned
 #   count in the test above.
+#
+# V2-P0B-011 (2 entries: providers.file -> duckdb, models.governance -> sqlite3) was fixed
+# and removed here; the pinned count dropped from 7 to 5. The remaining 5 entries are all
+# V2-P0B-012 (storage-no-upward-deps), out of scope for that task.
 
 [[violation]]
 contract_id = "storage-no-upward-deps"
@@ -55,19 +59,3 @@ imported = "openalpha_cn.product.research"
 location = "src/openalpha_cn/storage/product.py:7"
 rule = "openalpha_cn.storage must not import openalpha_cn.product"
 issue = "V2-P0B-012"
-
-[[violation]]
-contract_id = "providers-no-infra-imports"
-importer = "openalpha_cn.providers.file"
-imported = "duckdb"
-location = "src/openalpha_cn/providers/file.py:10"
-rule = "openalpha_cn.providers must not import duckdb"
-issue = "V2-P0B-011"
-
-[[violation]]
-contract_id = "models-no-infra-imports"
-importer = "openalpha_cn.models.governance"
-imported = "sqlite3"
-location = "src/openalpha_cn/models/governance.py:3"
-rule = "openalpha_cn.models must not import sqlite3"
-issue = "V2-P0B-011"

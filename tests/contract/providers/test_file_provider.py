@@ -182,3 +182,27 @@ def test_file_provider_raises_structured_failure_for_malformed_input(
     assert captured.value.category == "invalid_response"
     assert captured.value.provider_id == "user.file"
     assert captured.value.retryable is False
+
+
+def test_file_provider_raises_structured_failure_for_malformed_parquet_input(
+    tmp_path: Path, metadata: ProviderMetadata, frozen_now: datetime
+) -> None:
+    """A corrupt `.parquet` file must still raise `ProviderFailure`, not a bare duckdb
+    error. DuckDB's own failure (`duckdb.Error` in the current implementation, or
+    whatever internal type replaces it) is provider-internal machinery -- pinning this
+    behavior at the contract-test level (rather than only relying on the malformed-JSON
+    case above, which never touches DuckDB at all) is what protects V2-P0B-011's move of
+    the DuckDB dependency out of `providers/file.py` from silently losing this failure
+    translation.
+    """
+    AS_OF = frozen_now
+    source = tmp_path / "events.parquet"
+    source.write_bytes(b"not a real parquet file")
+    provider = FileProvider(path=source, metadata=metadata)
+
+    with pytest.raises(ProviderFailure) as captured:
+        provider.fetch(ProviderRequest(dataset="events", as_of=AS_OF))
+
+    assert captured.value.category == "invalid_response"
+    assert captured.value.provider_id == "user.file"
+    assert captured.value.retryable is False

@@ -3,9 +3,13 @@
 ADR-0001 (`docs/architecture/ADR-0001-local-first-runtime.md`) declares that domain and
 provider contracts must not import SQLite or DuckDB implementation types. This module
 proves the gate that enforces it is real (rejects a freshly introduced violation), proves
-the pre-existing baseline of 7 measured violations
+the pre-existing baseline of 5 measured violations
 (`docs/architecture/import-layering-baseline.toml`) can only shrink, and proves the legal
 downward dependency of `runtime`/`backtest` on `storage` is never mis-flagged.
+
+The baseline started at 7: V2-P0B-011 fixed its 2 `providers`/`models` entries
+(`providers.file -> duckdb`, `models.governance -> sqlite3`), leaving the 5
+`storage-no-upward-deps` entries tracked as V2-P0B-012.
 
 It also proves the domain-purity rule independently of import-linter's static
 `forbidden_modules` enumeration in `pyproject.toml`: siblings of `domain` are discovered
@@ -32,7 +36,7 @@ from importlinter.cli import lint_imports
 
 ROOT = Path(__file__).resolve().parents[2]
 BASELINE_PATH = ROOT / "docs" / "architecture" / "import-layering-baseline.toml"
-PINNED_BASELINE_COUNT = 7
+PINNED_BASELINE_COUNT = 5
 ISSUE_PATTERN = re.compile(r"^V2-P0B-\d{3}$")
 
 
@@ -57,7 +61,7 @@ def _ignore_import_pairs_from_pyproject() -> set[tuple[str, str]]:
 def test_current_source_tree_satisfies_storage_providers_and_models_contracts_via_baseline() -> (
     None
 ):
-    """The real repository, with the baseline's 7 exemptions applied, is fully compliant."""
+    """The real repository, with the baseline's 5 exemptions applied, is fully compliant."""
     exit_code = lint_imports(
         config_filename=str(ROOT / "pyproject.toml"),
         no_cache=True,
@@ -65,8 +69,14 @@ def test_current_source_tree_satisfies_storage_providers_and_models_contracts_vi
     assert exit_code == 0
 
 
-def test_baseline_exemption_count_is_pinned_at_seven() -> None:
-    """The baseline is shrink-only: exactly 7 entries today, never more."""
+def test_baseline_exemption_count_is_pinned_at_five() -> None:
+    """The baseline is shrink-only: exactly 5 entries today, never more.
+
+    Shrunk from 7 to 5 by V2-P0B-011, which fixed both `providers-no-infra-imports` and
+    `models-no-infra-imports` violations (`providers.file -> duckdb`,
+    `models.governance -> sqlite3`), leaving only the 5 V2-P0B-012
+    `storage-no-upward-deps` entries.
+    """
     violations = _load_baseline()
     assert len(violations) == PINNED_BASELINE_COUNT
 

@@ -1,6 +1,6 @@
 """Shared evidence application flow used by CLI and HTTP interfaces."""
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol
@@ -10,12 +10,11 @@ from pydantic import BaseModel, ConfigDict
 from openalpha_cn.domain.evidence import EvidenceSnapshot
 from openalpha_cn.evidence.builder import EvidenceBuilder
 from openalpha_cn.providers.base import (
+    DataProvider,
     ProviderBatch,
     ProviderMetadata,
     ProviderRequest,
-    utc_now,
 )
-from openalpha_cn.providers.file import FileProvider
 
 
 class EvidenceStore(Protocol):
@@ -64,17 +63,23 @@ def build_evidence(request: EvidenceBuildRequest) -> EvidenceBuildResponse:
     return EvidenceBuildResponse(items=items)
 
 
-def build_file_evidence(
+def build_provider_evidence(
     *,
-    path: Path,
+    provider: DataProvider,
+    dataset: str,
     as_of: datetime,
-    metadata: ProviderMetadata,
-    clock: Callable[[], datetime] = utc_now,
 ) -> EvidenceBuildResponse:
-    """Read a user-owned file and build evidence through the shared service."""
-    provider = FileProvider(path=path, metadata=metadata, clock=clock)
-    batch = provider.fetch(ProviderRequest(dataset="events", as_of=as_of))
-    return build_evidence(EvidenceBuildRequest(metadata=metadata, batch=batch))
+    """Fetch one point-in-time batch through any `DataProvider` and build evidence.
+
+    Depends only on the `DataProvider` Protocol (`providers/base.py`), never on a
+    concrete provider implementation such as `FileProvider` -- callers that need a
+    specific provider (`cli.py`, `sdk.py` construct `FileProvider` for their user-owned
+    file inputs) build it themselves and inject it here. `dataset` is likewise supplied
+    by the caller instead of being hardcoded, so this function stays usable for any
+    dataset name a caller's provider actually serves.
+    """
+    batch = provider.fetch(ProviderRequest(dataset=dataset, as_of=as_of))
+    return build_evidence(EvidenceBuildRequest(metadata=provider.metadata, batch=batch))
 
 
 def parse_serialized_evidence(value: object) -> tuple[EvidenceSnapshot, ...]:

@@ -16,7 +16,7 @@ import uvicorn
 from openalpha_cn import __version__
 from openalpha_cn.backtest.replay import ReplayCorpus
 from openalpha_cn.config import ConfigError, load_config, load_dotenv, load_log_level
-from openalpha_cn.evidence.service import build_file_evidence, parse_serialized_evidence
+from openalpha_cn.evidence.service import build_provider_evidence, parse_serialized_evidence
 from openalpha_cn.logging_setup import configure_logging
 from openalpha_cn.providers.akshare import AKShareProvider
 from openalpha_cn.providers.base import (
@@ -26,6 +26,7 @@ from openalpha_cn.providers.base import (
     ProviderRequest,
 )
 from openalpha_cn.providers.chainlin import ChainLinDataProvider
+from openalpha_cn.providers.file import FileProvider
 from openalpha_cn.providers.tushare import TushareProvider
 from openalpha_cn.runtime.composition import build_storage
 from openalpha_cn.runtime.contracts import ResearchRunRequest
@@ -317,11 +318,8 @@ def evidence_build(
         freshness="defined-by-input-file",
         failure_semantics="Malformed or unreadable inputs raise ProviderFailure.",
     )
-    response = build_file_evidence(
-        path=path,
-        as_of=point_in_time,
-        metadata=metadata,
-    )
+    provider = FileProvider(path=path, metadata=metadata)
+    response = build_provider_evidence(provider=provider, dataset="events", as_of=point_in_time)
     typer.echo(response.model_dump_json())
 
 

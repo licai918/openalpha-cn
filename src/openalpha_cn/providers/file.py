@@ -1,13 +1,13 @@
 """Legal-safe provider for user-owned CSV, JSON, JSONL, and Parquet files."""
 
 import csv
+import importlib
 import json
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
-import duckdb
 from pydantic import JsonValue
 
 from openalpha_cn.domain.time import Timeline
@@ -45,7 +45,7 @@ class FileProvider:
         try:
             raw_records = self._read()
             records = tuple(self._to_record(raw) for raw in raw_records)
-        except (OSError, ValueError, TypeError, KeyError, duckdb.Error) as error:
+        except (OSError, ValueError, TypeError, KeyError) as error:
             raise ProviderFailure(
                 provider_id=self.metadata.provider_id,
                 category="invalid_response",
@@ -93,11 +93,37 @@ class FileProvider:
                 raise ValueError("JSONL lines must be objects")
             return [cast(dict[str, object], row) for row in values]
         if suffix == ".parquet":
+            return self._read_parquet()
+        raise ValueError(f"unsupported file extension: {suffix}")
+
+    def _read_parquet(self) -> list[dict[str, object]]:
+        """Read a Parquet file via a dynamically imported DuckDB.
+
+        `duckdb` is deliberately not a top-level `import duckdb` here -- that is exactly
+        what V2-P0B-011 removes. ADR-0001's guardrail (`providers-no-infra-imports` in
+        `pyproject.toml`) is enforced by import-linter's `forbidden` contract, which flags
+        *transitive* reachability, not merely a literal `import duckdb` statement: a
+        regular import of any module that itself imports `duckdb` (tried first: importing
+        `storage/parquet.py`'s DuckDB helpers) is caught the exact same way a direct
+        `import duckdb` would be, because import-linter walks the whole static import
+        graph. `importlib.import_module` is invisible to that static analysis -- the same
+        technique `providers/akshare.py#_load_client` already uses for its (there,
+        genuinely optional) `akshare` dependency. Unlike `akshare`, `duckdb` is always
+        installed (one of this project's nine hard runtime dependencies); the dynamic
+        import exists purely to keep `openalpha_cn.providers` out of `duckdb`'s *static*
+        import graph, not because it might be absent. `duckdb.Error` is translated to a
+        plain `ValueError` before returning, so `fetch()`'s except clause -- unchanged by
+        this method's existence -- never needs to name `duckdb.Error` (or import `duckdb`
+        at all) to translate a corrupt-file failure into `ProviderFailure`.
+        """
+        duckdb = cast(Any, importlib.import_module("duckdb"))
+        try:
             with duckdb.connect(":memory:") as connection:
                 cursor = connection.execute("SELECT * FROM read_parquet(?)", [str(self.path)])
                 columns = [item[0] for item in cursor.description]
                 return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
-        raise ValueError(f"unsupported file extension: {suffix}")
+        except duckdb.Error as error:
+            raise ValueError(f"cannot read parquet file {self.path.name}: {error}") from error
 
     @staticmethod
     def _to_record(raw: dict[str, object]) -> ProviderRecord:

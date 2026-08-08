@@ -26,7 +26,7 @@ from openalpha_cn.backtest.validation import OutcomeObservation, OutcomeValidato
 from openalpha_cn.domain.evidence import EvidenceSnapshot
 from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.domain.validation import ValidationResult
-from openalpha_cn.evidence.service import build_file_evidence
+from openalpha_cn.evidence.service import build_provider_evidence
 from openalpha_cn.product.research import (
     ResearchReport,
     ResearchReportFactory,
@@ -36,6 +36,7 @@ from openalpha_cn.product.research import (
     WatchlistEntry,
 )
 from openalpha_cn.providers.base import ProviderMetadata, utc_now
+from openalpha_cn.providers.file import FileProvider
 from openalpha_cn.runtime.batch import BatchResearchService, BatchResearchTask
 from openalpha_cn.runtime.composition import build_storage
 from openalpha_cn.runtime.contracts import ResearchRunRequest, ResearchRunResult
@@ -80,12 +81,8 @@ class OpenAlphaSDK:
         metadata: ProviderMetadata,
     ) -> tuple[EvidenceSnapshot, ...]:
         """Import a user-owned file, normalize evidence, and persist it."""
-        response = build_file_evidence(
-            path=path,
-            as_of=as_of,
-            metadata=metadata,
-            clock=self.clock,
-        )
+        provider = FileProvider(path=path, metadata=metadata, clock=self.clock)
+        response = build_provider_evidence(provider=provider, dataset="events", as_of=as_of)
         if response.items:
             self.evidence_store.append(response.items)
         return response.items
