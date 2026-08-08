@@ -21,7 +21,7 @@ import pytest
 from openalpha_cn.domain.panel_batch import ColumnarPanelBatch, PanelColumn, TimelineColumns
 from openalpha_cn.panel.catalog import ReadinessRequirement
 from openalpha_cn.panel.store import ColumnSpec, PanelStorageError, PanelStore
-from openalpha_cn.panel_ingest import write_panel_batch
+from openalpha_cn.panel_ingest import panel_column_specs, write_panel_batch
 
 DATASET = "prices_daily"
 SUBJECTS = ("000001.SZ", "000002.SZ")
@@ -109,7 +109,7 @@ def test_an_unwritten_year_is_reported_as_a_missing_partition(tmp_path: Path) ->
 
     readiness = store.assess_readiness(
         _requirement(
-            years=(2023, 2024), required_dates=(), required_subjects=(), required_fields=()
+            years=(2023, 2024), required_dates=None, required_subjects=None, required_fields=None
         )
     )
 
@@ -129,7 +129,7 @@ def test_deleting_a_partitions_parquet_file_is_reported(tmp_path: Path) -> None:
     partition.unlink()
 
     readiness = store.assess_readiness(
-        _requirement(required_dates=(), required_subjects=(), required_fields=())
+        _requirement(required_dates=None, required_subjects=None, required_fields=None)
     )
 
     assert readiness.state == "blocked"
@@ -189,11 +189,243 @@ def test_a_partition_written_without_a_batch_is_blocked_not_silently_accepted(
     store.write_partition(DATASET, 2024, (ColumnSpec("close", "DOUBLE"),), ((10.5,),))
 
     readiness = store.assess_readiness(
-        _requirement(required_dates=(), required_subjects=(), required_fields=())
+        _requirement(required_dates=None, required_subjects=None, required_fields=None)
     )
 
     assert readiness.state == "blocked"
     assert [issue.code for issue in readiness.issues] == ["coverage_missing"]
+
+
+# --- a coverage record must still describe what is on disk ----------------------------------
+#
+# `record_coverage()` binds a record to a partition once, at write time. `write_partition()`
+# is overwrite-per-partition -- a backfill or a correction is the reason it has those
+# semantics -- so any later write unbinds it again, and every check readiness knew how to make
+# still passed on the obsolete record. Three reproductions, all of which reported
+# `state=ready issues=[]` before `partition_content_hash` existed.
+
+
+def _overwrite_partition_without_recording_coverage(
+    store: PanelStore, *, days: tuple[date, ...], subjects: tuple[str, ...]
+) -> None:
+    """A partition rewrite that never reaches `record_coverage` -- an interrupted ingest, or
+    a caller reaching for the storage primitive directly."""
+    replacement = _batch(days=days, subjects=subjects)
+    store.write_partition(DATASET, 2024, panel_column_specs(replacement), replacement.to_rows())
+
+
+def test_a_partition_rewritten_with_fewer_rows_no_longer_passes_on_its_old_coverage(
+    tmp_path: Path,
+) -> None:
+    store = _ready_store(tmp_path)
+    before = store.read_coverage(DATASET, 2024)
+    assert before is not None and before.row_count == 6
+
+    _overwrite_partition_without_recording_coverage(
+        store, days=(TRADING_DATES[0],), subjects=(SUBJECTS[0],)
+    )
+
+    readiness = store.assess_readiness(_requirement())
+    assert readiness.state == "blocked"
+    assert readiness.issues[0].code == "coverage_stale"
+    # The stale record is dropped from the pool rather than believed, so the requirement's
+    # own checks find the shortfall too instead of being reassured by it.
+    assert [issue.code for issue in readiness.issues] == [
+        "coverage_stale",
+        "date_gap",
+        "subject_missing",
+        "field_missing",
+    ]
+    assert store.read_if_ready(_requirement(), year=2024, columns=["close"]).is_blocked
+
+
+def test_a_partition_rewritten_with_the_same_row_count_is_caught_too(tmp_path: Path) -> None:
+    """The variant a row-count cross-check cannot see, and the reason the record carries a
+    hash rather than a count. A correction that restates values -- or, as here, replaces the
+    subject universe entirely -- leaves exactly as many rows as before, so
+    `record_coverage`'s `row_count` agreement still holds while the coverage record has
+    become fiction."""
+    store = _ready_store(tmp_path)
+
+    _overwrite_partition_without_recording_coverage(
+        store, days=TRADING_DATES, subjects=("998.XX", "999.XX")
+    )
+
+    stale = store.read_coverage(DATASET, 2024)
+    assert stale is not None
+    assert stale.row_count == 6  # unchanged -- the count check has nothing to complain about
+    assert stale.subjects == SUBJECTS  # and it still names securities that are no longer there
+
+    readiness = store.assess_readiness(_requirement())
+    assert readiness.state == "blocked"
+    assert readiness.issues[0].code == "coverage_stale"
+
+
+def test_the_interrupted_rewrite_fails_closed_not_merely_the_interrupted_first_write(
+    tmp_path: Path,
+) -> None:
+    """`write_partition()` succeeded, `record_coverage()` did not. On a *first* write that
+    leaves no coverage row at all, which readiness has always blocked as `coverage_missing`.
+    On a re-write the previous row is still there and used to satisfy every check -- the
+    verdict was `ready` with no issues, describing content that had been replaced. Both
+    halves are asserted here, because only the second one was ever in doubt.
+    """
+    store = _store(tmp_path / "panel")
+    waived = _requirement(
+        required_dates=None, required_subjects=None, required_fields=None, max_staleness=None
+    )
+
+    # First write, interrupted before coverage: blocked, as it always was.
+    first = _batch()
+    store.write_partition(DATASET, 2024, panel_column_specs(first), first.to_rows())
+    assert [issue.code for issue in store.assess_readiness(waived).issues] == ["coverage_missing"]
+
+    # Now complete it, then interrupt a *re-write* the same way.
+    write_panel_batch(store, first, year=2024)
+    assert store.assess_readiness(waived).state == "ready"
+    _overwrite_partition_without_recording_coverage(
+        store, days=(TRADING_DATES[0],), subjects=(SUBJECTS[0],)
+    )
+
+    readiness = store.assess_readiness(waived)
+    assert readiness.state == "blocked"
+    assert [issue.code for issue in readiness.issues] == ["coverage_stale"]
+    assert store.read_if_ready(waived, year=2024, columns=["subject"]).is_blocked
+    # Recording coverage for the new content clears it -- the fault is a stale record, not a
+    # permanently poisoned partition.
+    write_panel_batch(store, _batch(days=(TRADING_DATES[0],), subjects=(SUBJECTS[0],)), year=2024)
+    assert store.assess_readiness(waived).state == "ready"
+
+
+# --- a partition file damaged behind the store's back ---------------------------------------
+
+
+def test_a_partition_truncated_to_zero_bytes_is_reported_rather_than_read(
+    tmp_path: Path,
+) -> None:
+    """`Path.is_file()` is true of a zero-byte file, so readiness used to report `ready` with
+    no issues and `read_if_ready()` then raised a bare `duckdb.InvalidInputException` out of a
+    method whose whole contract is "blocked or ready, nothing else"."""
+    store = _ready_store(tmp_path)
+    (store.root / DATASET / "2024" / "data.parquet").write_bytes(b"")
+
+    readiness = store.assess_readiness(
+        _requirement(required_dates=None, required_subjects=None, required_fields=None)
+    )
+
+    assert readiness.state == "blocked"
+    assert [issue.code for issue in readiness.issues] == ["partition_file_unreadable"]
+    outcome = store.read_if_ready(
+        _requirement(required_dates=None, required_subjects=None, required_fields=None),
+        year=2024,
+        columns=["close"],
+    )
+    assert outcome.is_blocked
+
+
+def test_a_partition_overwritten_with_unrelated_bytes_is_reported(tmp_path: Path) -> None:
+    store = _ready_store(tmp_path)
+    (store.root / DATASET / "2024" / "data.parquet").write_bytes(b"not a parquet file at all")
+
+    readiness = store.assess_readiness(
+        _requirement(required_dates=None, required_subjects=None, required_fields=None)
+    )
+
+    assert [issue.code for issue in readiness.issues] == ["partition_file_unreadable"]
+
+
+def test_a_scan_that_fails_after_a_ready_verdict_surfaces_as_a_panel_storage_error(
+    tmp_path: Path,
+) -> None:
+    """The residual case the eight-byte magic check cannot reach: the file *is* a valid
+    Parquet file, just not the one the catalog describes. Detecting that needs a digest of
+    the file's bytes on every gate check, which is `V2-P1-012`'s deep pass, not this one's.
+    What must not happen is a raw DuckDB exception escaping `read_if_ready()` -- the method
+    promises a verdict, so a failure it did not predict is still reported in its own
+    vocabulary."""
+    store = _ready_store(tmp_path)
+    partition = store.root / DATASET / "2024" / "data.parquet"
+    with duckdb.connect(":memory:") as swap:
+        swap.execute("COPY (SELECT 1 AS unrelated) TO ? (FORMAT PARQUET)", [str(partition)])
+
+    # Readiness still says ready: the catalog row, the coverage record and the file's own
+    # Parquet magic are all untouched by a swap performed outside the store.
+    waived = _requirement(required_dates=None, required_subjects=None, required_fields=None)
+    assert store.assess_readiness(waived).state == "ready"
+
+    with pytest.raises(PanelStorageError, match="passed readiness but could not be read"):
+        store.read_if_ready(waived, year=2024, columns=["close"])
+
+
+# --- a check that was never configured is not a check that passed ---------------------------
+
+
+def test_a_requirement_cannot_be_built_without_saying_what_it_checks() -> None:
+    """The four checks used to default to the most permissive value they had, so the easiest
+    requirement to construct was also the one that could not find anything. There is no such
+    default now: each is stated, `None` waiving it on the record."""
+    with pytest.raises(TypeError, match="required_dates"):
+        ReadinessRequirement(dataset=DATASET, as_of=AS_OF, years=(2024,))  # type: ignore[call-arg]
+
+
+def test_a_year_long_partition_holding_one_trading_day_is_not_ready_by_default(
+    tmp_path: Path,
+) -> None:
+    """The reviewer's I1 reproduction, end to end. A 2024 partition containing a single
+    trading day, assessed on 2024-12-31, reported `state=ready issues=[]` under a
+    default-constructed requirement -- 364 days stale, with a hole in every other day of the
+    year, and nothing to say about either."""
+    store = _store(tmp_path / "panel")
+    write_panel_batch(store, _batch(days=(TRADING_DATES[0],)), year=2024)
+    year_end = datetime(2024, 12, 31, tzinfo=UTC)
+
+    verdict = store.assess_readiness(_requirement(as_of=year_end, max_staleness=timedelta(days=5)))
+
+    assert verdict.state == "blocked"
+    assert [issue.code for issue in verdict.issues] == ["date_gap", "stale"]
+    assert verdict.issues[0].missing_dates == TRADING_DATES[1:]
+
+
+def test_waiving_a_check_is_recorded_and_declaring_an_empty_one_blocks(tmp_path: Path) -> None:
+    """`None` and `()` are different answers. `None` switches the check off and says so in
+    `checks_waived`, which is what lets `V2-P1-012` report "this verdict did not look at
+    dates" instead of assuming it did. `()` is a declared expectation that can never find a
+    shortfall -- the same vacuous shape `years=()` already blocked on."""
+    store = _ready_store(tmp_path)
+
+    waived = store.assess_readiness(
+        _requirement(
+            required_dates=None, required_subjects=None, required_fields=None, max_staleness=None
+        )
+    )
+    declared_empty = store.assess_readiness(_requirement(required_dates=()))
+
+    assert waived.state == "ready"
+    assert waived.checks_waived == (
+        "required_dates",
+        "required_subjects",
+        "required_fields",
+        "max_staleness",
+    )
+    assert store.assess_readiness(_requirement()).checks_waived == ()
+    assert declared_empty.state == "blocked"
+    assert [issue.code for issue in declared_empty.issues] == ["empty_requirement"]
+    assert declared_empty.issues[0].missing_items == ("required_dates",)
+
+
+def test_a_requirement_whose_container_is_none_by_accident_is_named_not_a_type_error(
+    tmp_path: Path,
+) -> None:
+    """`years=None` is not a waiver of anything -- there is no "check no years" -- so it is a
+    malformed requirement, and `_validated_requirement` exists precisely to name malformed
+    input. It used to iterate straight into it and raise `TypeError: 'NoneType' object is not
+    iterable` from the middle of the validator."""
+    store = _ready_store(tmp_path)
+
+    with pytest.raises(PanelStorageError, match="years must be a tuple"):
+        store.assess_readiness(_requirement(years=None))
+    with pytest.raises(PanelStorageError, match="required_dates must be a tuple or None"):
+        store.assess_readiness(_requirement(required_dates=[date(2024, 1, 2)]))
 
 
 # --- blocked is not empty -------------------------------------------------------------------
@@ -208,7 +440,7 @@ def test_blocked_and_ready_but_empty_are_two_distinguishable_returns(tmp_path: P
     """
     store = _ready_store(tmp_path)
     ready = _requirement()
-    blocked = _requirement(years=(2023, 2024), required_dates=(), required_fields=())
+    blocked = _requirement(years=(2023, 2024), required_dates=None, required_fields=None)
 
     empty_but_ready = store.read_if_ready(
         ready, year=2024, columns=["close"], filters={"subject": "999999.SZ"}
@@ -225,12 +457,55 @@ def test_blocked_and_ready_but_empty_are_two_distinguishable_returns(tmp_path: P
     assert not empty_but_ready.is_blocked
     assert empty_but_ready.readiness.state == "ready"
 
-    assert unready.rows is None
+    assert unready.rows_or_none is None
     assert unready.is_blocked
     assert unready.readiness.state == "blocked"
     assert [issue.code for issue in unready.readiness.issues] == ["partition_missing"]
 
     assert empty_but_ready != unready
+
+
+def test_the_one_line_mistake_that_would_re_merge_them_cannot_pass_quietly(
+    tmp_path: Path,
+) -> None:
+    """Two different *values* are only half the fix, and the missing half is what
+    `V2-P1-013` would have inherited. With `rows: tuple | None`, `bool(())` and `bool(None)`
+    are both `False`, so `if not outcome.rows:` and `outcome.rows or []` -- the ordinary way
+    people write this -- silently merge blocked with ready-and-empty while type-checking
+    clean under mypy strict. `V2-P1-013` exists because callers forget; a shape that requires
+    them to remember is not a fix.
+
+    So the plainly-named accessor is the strict one, and the two-valued shape has to be asked
+    for by name.
+    """
+    store = _ready_store(tmp_path)
+    empty_but_ready = store.read_if_ready(
+        _requirement(), year=2024, columns=["close"], filters={"subject": "999999.SZ"}
+    )
+    blocked = store.read_if_ready(
+        _requirement(years=(2023, 2024), required_dates=None, required_fields=None),
+        year=2024,
+        columns=["close"],
+    )
+
+    # The shape that used to merge them, on the ready side: still a plain falsy tuple.
+    assert not empty_but_ready.rows
+    assert (empty_but_ready.rows or ["fallback"]) == ["fallback"]
+
+    # And on the blocked side: the same two expressions now fail loudly instead.
+    with pytest.raises(PanelStorageError, match="is blocked, so it has no rows"):
+        _ = not blocked.rows
+    with pytest.raises(PanelStorageError):
+        _ = blocked.rows or []
+    with pytest.raises(PanelStorageError):
+        _ = len(blocked.rows)
+
+    # The merged shape is still reachable -- deliberately, under a name that says so.
+    assert blocked.rows_or_none is None
+    assert empty_but_ready.rows_or_none == ()
+    # And the error names the codes, so a caller that lets it propagate still learns why.
+    with pytest.raises(PanelStorageError, match="partition_missing"):
+        _ = blocked.rows
 
 
 def test_a_ready_dataset_hands_back_its_rows(tmp_path: Path) -> None:
@@ -252,12 +527,12 @@ def test_a_blocked_read_never_touches_the_partition_file(tmp_path: Path) -> None
     (store.root / DATASET / "2024" / "data.parquet").unlink()
 
     outcome = store.read_if_ready(
-        _requirement(required_dates=(), required_subjects=(), required_fields=()),
+        _requirement(required_dates=None, required_subjects=None, required_fields=None),
         year=2024,
         columns=["close"],
     )
 
-    assert outcome.rows is None
+    assert outcome.rows_or_none is None
     assert [issue.code for issue in outcome.readiness.issues] == ["partition_file_missing"]
 
 
@@ -271,7 +546,7 @@ def test_a_store_that_has_never_been_written_blocks_every_requested_year(
     requested year -- not an exception and not a vacuous "ready"."""
     readiness = _store(tmp_path / "panel").assess_readiness(
         _requirement(
-            years=(2023, 2024), required_dates=(), required_subjects=(), required_fields=()
+            years=(2023, 2024), required_dates=None, required_subjects=None, required_fields=None
         )
     )
 

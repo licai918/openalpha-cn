@@ -237,8 +237,15 @@ def test_a_revision_label_that_is_missing_for_some_row_is_refused() -> None:
 
 def test_a_reserved_clock_column_cannot_stand_in_as_the_revision_field() -> None:
     """`revision_field` names one of the caller's own columns. Pointing it at `revision_time`
-    would silently turn a per-row instant into thousands of one-row "versions"."""
-    with pytest.raises(PanelBatchError, match="revision_time"):
+    would silently turn a per-row instant into thousands of one-row "versions".
+
+    Matched on the reserved-column guard's own wording, not on `"revision_time"`. The name
+    appears in the *fallback* message too ("is not a column of this batch"), which
+    `revision_time` reaches on its own because it is a timeline column rather than a data
+    column -- so a `match="revision_time"` passed with the guard deleted entirely, and proved
+    nothing about the branch it was written for.
+    """
+    with pytest.raises(PanelBatchError, match="a revision label must be a data column"):
         panel_coverage(_batch(), year=2024, revision_field="revision_time")
 
 

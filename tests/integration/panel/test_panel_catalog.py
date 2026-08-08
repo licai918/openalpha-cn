@@ -26,9 +26,19 @@ from openalpha_cn.panel.catalog import (
     DateCoverage,
     FieldCoverage,
     PartitionCoverage,
+    ReadinessRequirement,
     RevisionCoverage,
 )
 from openalpha_cn.panel.store import ColumnSpec, PanelStorageError, PanelStore
+
+_COVERAGE_TABLES = (
+    "panel_partition_subjects",
+    "panel_partition_fields",
+    "panel_partition_dates",
+    "panel_partition_revisions",
+    "panel_partition_coverage",
+    "panel_catalog_meta",
+)
 
 FROZEN = datetime(2024, 6, 28, 11, 22, 33, tzinfo=UTC)
 AS_OF = datetime(2024, 1, 4, 12, 0, tzinfo=UTC)
@@ -83,6 +93,20 @@ def _written_store(root: Path) -> PanelStore:
     store = _store(root)
     store.write_partition(DATASET, 2024, _COLUMNS, _ROWS)
     return store
+
+
+def _requirement(**overrides: object) -> ReadinessRequirement:
+    defaults: dict[str, object] = {
+        "dataset": DATASET,
+        "as_of": AS_OF,
+        "years": (2024,),
+        "required_dates": None,
+        "required_subjects": None,
+        "required_fields": None,
+        "max_staleness": None,
+    }
+    defaults.update(overrides)
+    return ReadinessRequirement(**defaults)  # type: ignore[arg-type]
 
 
 # --- what the catalog now records -----------------------------------------------------------
@@ -230,11 +254,18 @@ def test_reading_coverage_from_a_store_with_no_catalog_file_returns_none(tmp_pat
 
 def test_coverage_for_an_unregistered_partition_is_refused(tmp_path: Path) -> None:
     """Coverage describes a partition; a coverage row with no partition behind it would make
-    the catalog claim knowledge of data that is not there."""
+    the catalog claim knowledge of data that is not there.
+
+    The record below is internally flawless -- a 2023 partition whose dates are 2023 dates --
+    so the only thing that can refuse it is the cross-check against `panel_partitions`.
+    """
     store = _written_store(tmp_path / "panel")
+    unregistered = _coverage(
+        year=2023, dates=(DateCoverage(event_date=date(2023, 12, 29), row_count=2),)
+    )
 
     with pytest.raises(PanelStorageError, match="no partition registered"):
-        store.record_coverage(_coverage(year=2023))
+        store.record_coverage(unregistered)
 
 
 def test_coverage_whose_row_count_disagrees_with_the_partition_is_refused(
@@ -332,7 +363,15 @@ def test_a_coverage_write_that_fails_part_way_leaves_the_previous_record_intact(
     """Replacing a coverage record clears four census tables before refilling them, so a
     failure between the two would leave a coverage row advertising a partition with (say) no
     subjects -- a lie that reads as data rather than as a missing record, and therefore *not*
-    fail-closed. The write is one transaction; this proves the rollback.
+    fail-closed. The write is one transaction, and this proves the transaction *boundary* is
+    there: deleting `_write_coverage`'s `BEGIN TRANSACTION` reddens 45 tests, this one
+    included.
+
+    It does not isolate the explicit `ROLLBACK` in that function's `except` clause -- deleting
+    only that line leaves this test green, because `with duckdb.connect(...)` rolls an open
+    transaction back when it closes. The `ROLLBACK` is the honest local statement of intent
+    (the rollback should not depend on which caller happens to close the connection first),
+    not something this test can distinguish.
 
     The injected fault is a census table whose column type no longer matches what the store
     writes -- what a half-finished hand migration of the catalog looks like. `CREATE TABLE IF
@@ -405,6 +444,179 @@ def test_a_catalog_stamped_by_a_newer_version_of_this_code_is_refused(tmp_path: 
         store.record_coverage(_coverage())
     with pytest.raises(PanelStorageError, match="panel-catalog/v99"):
         store.read_coverage(DATASET, 2024)
+
+
+def test_the_stamp_guards_every_method_that_opens_the_catalog_not_only_half_of_them(
+    tmp_path: Path,
+) -> None:
+    """The stamp's own error says "refusing to touch it", unconditionally. Three of the six
+    public methods used to touch it anyway. `query()` is the pointed case: it is the *only*
+    method that reads `panel_partitions.relative_path` and opens the file that column names,
+    so an unknown schema -- the one situation where that column might mean something else --
+    is exactly when it must not be trusted. It returned `[('000001.SZ', 10.0)]` from a v99
+    catalog without a word.
+    """
+    store = _written_store(tmp_path / "panel")
+    store.record_coverage(_coverage())
+    with duckdb.connect(str(store.catalog_path)) as connection:
+        connection.execute(
+            "UPDATE panel_catalog_meta SET value = 'panel-catalog/v99' WHERE key = 'schema_version'"
+        )
+
+    refusals = (
+        lambda: store.read_coverage(DATASET, 2024),
+        lambda: store.registered_years(DATASET),
+        lambda: store.query(DATASET, year=2024, columns=["ts_code"]),
+        lambda: store.profile_query(DATASET, year=2024, columns=["ts_code"]),
+        lambda: store.assess_readiness(_requirement()),
+        lambda: store.read_if_ready(_requirement(), year=2024, columns=["ts_code"]),
+    )
+    for call in refusals:
+        with pytest.raises(PanelStorageError, match="panel-catalog/v99"):
+            call()
+
+
+def test_a_v1_catalog_is_migrated_forward_rather_than_refused_or_rebuilt(
+    tmp_path: Path,
+) -> None:
+    """The `v1 -> v2` migration, on a catalog that really is v1 on disk: the stamp says v1 and
+    `panel_partition_coverage` has no `partition_content_hash` column.
+
+    Not a `DROP` and re-derive, because the catalog is not a rebuildable cache -- `provider_id`,
+    `as_of`, `fetched_at` and `batch_digest` exist nowhere else -- so the v1 row's provenance
+    has to survive the upgrade. And not readable as-is either: an existing v1 row cannot say
+    which write it was recorded against, so it blocks (`coverage_stale`) until re-recorded,
+    rather than being taken on trust.
+    """
+    root = tmp_path / "panel"
+    store = _written_store(root)
+    store.record_coverage(_coverage())
+    with duckdb.connect(str(store.catalog_path)) as connection:
+        connection.execute(
+            "ALTER TABLE panel_partition_coverage DROP COLUMN partition_content_hash"
+        )
+        connection.execute(
+            "UPDATE panel_catalog_meta SET value = 'panel-catalog/v1' WHERE key = 'schema_version'"
+        )
+
+    legacy = _store(root)
+    # Read-only paths work against v1 untouched -- they cannot ALTER anything.
+    stored = legacy.read_coverage(DATASET, 2024)
+    assert stored is not None
+    assert stored.provider_id == "tushare"  # provenance survived
+    assert stored.partition_content_hash is None  # but which write it describes is unknown
+    assert [issue.code for issue in legacy.assess_readiness(_requirement()).issues] == [
+        "coverage_stale"
+    ]
+    with duckdb.connect(str(legacy.catalog_path), read_only=True) as connection:
+        row = connection.execute(
+            "SELECT value FROM panel_catalog_meta WHERE key = 'schema_version'"
+        ).fetchone()
+    assert row is not None and row[0] == "panel-catalog/v1"
+
+    # The first write migrates it forward and re-stamps it.
+    legacy.record_coverage(_coverage())
+
+    with duckdb.connect(str(legacy.catalog_path), read_only=True) as connection:
+        row = connection.execute(
+            "SELECT value FROM panel_catalog_meta WHERE key = 'schema_version'"
+        ).fetchone()
+    assert row is not None and row[0] == PANEL_CATALOG_SCHEMA_VERSION
+    assert legacy.assess_readiness(_requirement()).state == "ready"
+
+
+def test_an_unknown_stamp_is_refused_before_any_table_is_created(tmp_path: Path) -> None:
+    """ "Refusing to touch it" was not literally true: the DDL pass ran first, so five dropped
+    tables were silently rebuilt before the refusal fired. The version check now runs ahead of
+    every `CREATE TABLE`, which it can, because a catalog with no `panel_catalog_meta` is v1
+    by definition and needs no table to say so."""
+    store = _written_store(tmp_path / "panel")
+    with duckdb.connect(str(store.catalog_path)) as connection:
+        for table in _COVERAGE_TABLES:
+            connection.execute(f"DROP TABLE {table}")
+        connection.execute(
+            "CREATE TABLE panel_catalog_meta (key VARCHAR PRIMARY KEY, value VARCHAR NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO panel_catalog_meta VALUES ('schema_version', 'panel-catalog/v99')"
+        )
+
+    with pytest.raises(PanelStorageError, match="panel-catalog/v99"):
+        store.record_coverage(_coverage())
+
+    with duckdb.connect(str(store.catalog_path), read_only=True) as connection:
+        rebuilt = connection.execute(
+            "SELECT table_name FROM information_schema.tables WHERE table_name IN "
+            "('panel_partition_coverage', 'panel_partition_subjects', 'panel_partition_fields', "
+            "'panel_partition_dates', 'panel_partition_revisions')"
+        ).fetchall()
+    assert rebuilt == [], f"refused, yet these tables were created anyway: {rebuilt}"
+
+
+# --- what `record_coverage` binds the record to ---------------------------------------------
+
+
+def test_the_stored_record_names_the_partition_write_it_describes(tmp_path: Path) -> None:
+    """`partition_content_hash` is a fact about the storing, not about the batch: whatever the
+    caller put there is replaced with the registered partition's own hash."""
+    store = _written_store(tmp_path / "panel")
+
+    stored = store.record_coverage(_coverage(partition_content_hash="sha256:whatever-i-like"))
+
+    with duckdb.connect(str(store.catalog_path), read_only=True) as connection:
+        row = connection.execute(
+            "SELECT content_hash FROM panel_partitions WHERE dataset = ? AND year = ?",
+            [DATASET, 2024],
+        ).fetchone()
+    assert row is not None
+    assert stored.partition_content_hash == row[0]
+    read_back = store.read_coverage(DATASET, 2024)
+    assert read_back is not None and read_back.partition_content_hash == row[0]
+
+
+def test_a_date_census_that_falls_outside_the_partitions_own_year_is_refused(
+    tmp_path: Path,
+) -> None:
+    """The twelfth internal-consistency rule, and the one that was missing: a batch of 2019
+    rows written with `year=2024` produced a coverage record whose every date was in 2019 and
+    whose partition key said 2024. `required_dates` naming those 2019 days against
+    `years=(2024,)` then reported `ready`, because the pooled date check pools the dates it is
+    given and never asks which year they came from."""
+    store = _written_store(tmp_path / "panel")
+    misfiled = _coverage(
+        dates=(DateCoverage(event_date=date(2019, 3, 4), row_count=2),),
+    )
+
+    with pytest.raises(PanelStorageError, match="must fall inside the partition's own year"):
+        store.record_coverage(misfiled)
+
+
+def test_a_read_back_timestamp_is_utc_rather_than_the_sessions_local_zone(
+    tmp_path: Path,
+) -> None:
+    """DuckDB hands a `TIMESTAMPTZ` back in the session's zone, so the same stored instant
+    reads as `-04:00` on one machine and `+08:00` on another. Every comparison in this module
+    is correct on either, but `V2-P1-016` serialises these onto the wire, and an offset that
+    depends on which host answered is not a wire format."""
+    store = _written_store(tmp_path / "panel")
+    store.record_coverage(_coverage())
+
+    stored = store.read_coverage(DATASET, 2024)
+
+    assert stored is not None
+    for value in (
+        stored.as_of,
+        stored.fetched_at,
+        stored.last_event_time,
+        stored.max_available_time,
+        stored.recorded_at,
+    ):
+        assert value is not None
+        assert value.tzinfo is not None
+        assert value.utcoffset() == timedelta(0), f"{value!r} is not expressed in UTC"
+    # Same instants, either way -- the normalisation is a representation choice, not a shift.
+    assert stored.last_event_time == LAST_EVENT
+    assert stored.recorded_at == FROZEN
 
 
 def test_a_catalog_written_before_the_coverage_tables_existed_still_works(

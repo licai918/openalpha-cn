@@ -120,12 +120,32 @@ meaning. `tests/integration/panel/test_panel_catalog.py::
 test_a_catalog_written_before_the_coverage_tables_existed_still_works` drops all six tables
 from a real catalog and proves exactly that.
 
-That is a property of *this* change, not a promise about the next one, so the catalog now
-stamps its own version (`panel_catalog_meta.schema_version`, `panel-catalog/v1`). A catalog
-stamped with a version this code does not know is refused rather than misread -- an older
-build opening a newer catalog fails loudly instead of silently reading a column that has
-been repurposed. A catalog carrying *no* stamp is a pre-`V2-P1-003` catalog and is treated as
-v1 by definition.
+That is a property of *that* change, not a promise about the next one, so the catalog stamps
+its own version (`panel_catalog_meta.schema_version`). A catalog stamped with a version this
+code does not know is refused rather than misread -- an older build opening a newer catalog
+fails loudly instead of silently reading a column that has been repurposed. A catalog
+carrying *no* stamp is a pre-`V2-P1-003` catalog and is treated as v1 by definition.
+
+## The `v1 -> v2` bump, and why an additive column still moved the stamp
+
+The stamp is now `panel-catalog/v2`. The only difference is one nullable column,
+`panel_partition_coverage.partition_content_hash`, so the change is as structurally additive
+as the six tables above were -- and the stamp moved anyway, because structural additivity is
+not the test the stamp applies. The test is whether an *older* build reading this catalog
+would misjudge the data, and here it plainly would: a v1 build has no notion of comparing a
+coverage record against the partition it describes, so it reports `ready` for exactly the
+stale-coverage partitions a v2 build blocks. That is a silent fail-open, which is the failure
+mode the stamp exists to catch, so a v1 build must be stopped at the door.
+
+In the other direction this build reads a v1 catalog rather than refusing it, because it
+knows precisely what a v1 catalog lacks: `_read_coverage` selects `NULL` for the missing
+column, and readiness treats an unknown `partition_content_hash` as `coverage_stale` --
+fail-closed, and cleared by one `record_coverage()` call. The forward migration itself is
+`_COVERAGE_ADDED_COLUMNS`, an `ALTER TABLE ... ADD COLUMN` applied by `_ensure_catalog_schema`
+on the write path, followed by re-stamping `v2`. It is a real migration and not a `DROP` and
+re-derive, because the catalog is not a rebuildable cache: the content-derived half of a
+coverage record could be recomputed by scanning Parquet, but `provider_id`, `as_of`,
+`fetched_at` and `batch_digest` exist nowhere on disk except here.
 
 `storage/migrations.py` does not and cannot govern any of this: it is a SQLite engine built
 on `PRAGMA user_version`, a `schema_migrations` audit table and SQLite's own backup API, and
@@ -140,11 +160,36 @@ mistaken for a `DROP` and re-derive.
 ## Coverage, readiness, and where each rule lives
 
 `record_coverage()` is a separate call from `write_partition()`, not an extra argument to it.
-Two reasons. The storage primitive takes raw rows and knows nothing about providers or
-batches, so it has nothing to say about provenance; and splitting them means the interrupted
-case (`write_partition()` succeeded, `record_coverage()` did not) leaves a partition that
-readiness reports as `coverage_missing` -- blocked. The non-atomicity fails *closed*, which
-is the direction that costs nothing.
+The storage primitive takes raw rows and knows nothing about providers or batches, so it has
+nothing to say about provenance.
+
+That split is not atomic, and the interrupted case (`write_partition()` succeeded,
+`record_coverage()` did not) needs stating precisely, because an earlier version of this
+docstring got it wrong. On a **first** write there is no coverage row at all, so readiness
+reports `coverage_missing` and blocks. On a **re-write** -- a backfill or a correction, which
+is the entire reason `write_partition()` has overwrite semantics -- the previous coverage row
+is still sitting there, and it used to satisfy every check readiness knew how to make: the
+file exists, a coverage record exists, and its dates, subjects and fields all come from that
+now-obsolete record. The verdict was `ready`, with no issues, describing a write that had
+been replaced. Claiming the non-atomicity "fails closed" was true of the first write only.
+
+What makes it fail closed in both cases is `PartitionCoverage.partition_content_hash`:
+`record_coverage()` stamps the record with the partition's `content_hash` as it stood at that
+moment, and readiness blocks (`coverage_stale`) whenever the partition's current hash differs
+or is unknown. An interrupted re-write therefore leaves a record whose stamp names the old
+content, and it blocks. A row count would not have been enough -- a correction that changes
+values without changing how many rows there are leaves the count identical and moves the hash
+-- and both values are already in hand on the same read-only connection, so the check costs
+nothing.
+
+A partition file *damaged behind the store's back* is a different fault with a different
+answer: nothing in the catalog changes, so no hash comparison can see it. Readiness checks
+Parquet's own magic at both ends of the file (`_looks_like_parquet`, eight bytes) and reports
+`partition_file_unreadable` for a truncated or overwritten one; a file replaced by a
+different but *valid* Parquet file is out of reach of any O(1) check and belongs to
+`V2-P1-012`'s deep pass. `read_if_ready()` additionally wraps its scan, so even an
+unanticipated corruption surfaces as a `PanelStorageError` rather than as a bare
+`duckdb.InvalidInputException` escaping a method that promises a verdict.
 
 Every value a `PartitionCoverage` carries is validated here, in `_validated_coverage()`, and
 nowhere else. `panel/catalog.py`'s dataclasses deliberately have no validating
@@ -318,10 +363,12 @@ import duckdb
 
 from openalpha_cn.panel.catalog import (
     PANEL_CATALOG_SCHEMA_VERSION,
+    PANEL_CATALOG_SCHEMA_VERSIONS_READABLE,
     DatasetReadiness,
     DateCoverage,
     FieldCoverage,
     PanelReadOutcome,
+    PanelStorageError,
     PartitionCoverage,
     PartitionState,
     ReadinessRequirement,
@@ -329,12 +376,17 @@ from openalpha_cn.panel.catalog import (
     evaluate_readiness,
 )
 
-
-class PanelStorageError(RuntimeError):
-    """Raised for panel-store usage errors: an empty write batch, a malformed column
-    list, a malformed column name or SQL type, a malformed `dataset` name, a malformed
-    `PartitionCoverage` or `ReadinessRequirement`, a catalog stamped with an unknown schema
-    version, or a `profile_query()` against a partition the catalog has never registered."""
+__all__ = [
+    "DUCKDB_COLUMN_TYPES",
+    "ColumnSpec",
+    # Re-exported, not redefined: `panel/catalog.py` owns it so that
+    # `PanelReadOutcome.rows` can raise it without importing this module (the dependency
+    # runs store -> catalog and must not run back). Every existing
+    # `from openalpha_cn.panel.store import PanelStorageError` keeps working.
+    "PanelStorageError",
+    "PanelStore",
+    "PartitionRef",
+]
 
 
 def _utc_now() -> datetime:
@@ -509,6 +561,7 @@ _COVERAGE_DDL: tuple[str, ...] = (
         max_available_time TIMESTAMPTZ NOT NULL,
         revised_row_count BIGINT NOT NULL,
         recorded_at TIMESTAMPTZ NOT NULL,
+        partition_content_hash VARCHAR,
         PRIMARY KEY (dataset, year)
     )
     """,
@@ -557,9 +610,35 @@ _COVERAGE_CHILD_TABLES: tuple[str, ...] = (
     "panel_partition_revisions",
 )
 
-_KNOWN_CATALOG_SCHEMA_VERSIONS: frozenset[str] = frozenset({PANEL_CATALOG_SCHEMA_VERSION})
+_COVERAGE_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("panel_partition_coverage", "partition_content_hash", "VARCHAR"),
+)
+"""The forward migration from `panel-catalog/v1` to `panel-catalog/v2`, as data.
+
+`CREATE TABLE IF NOT EXISTS` cannot add a column to a table that already exists, so a catalog
+written before `V2-P1-003`'s review fix has `panel_partition_coverage` without
+`partition_content_hash`. Each entry here is `(table, column, type)` and is applied with
+`ALTER TABLE ... ADD COLUMN` on the write path only -- the read path opens the catalog
+`read_only=True` and cannot alter anything, so it tolerates the column's absence instead
+(`_read_coverage` reads `None` for it, which readiness blocks on as `coverage_stale`).
+
+The column is nullable rather than `NOT NULL DEFAULT ''`: an existing coverage row genuinely
+does not know which partition write it was recorded against, and inventing a value would be
+the fail-open this migration exists to close. `NULL` means "unverifiable", and one
+`record_coverage()` call fills it in.
+"""
 
 _MAX_TEXT_LENGTH: int = 2048
+
+_PARQUET_MAGIC: bytes = b"PAR1"
+"""Parquet's file magic, written at both ends of every Parquet file (format spec).
+
+Checked, rather than assumed, because `Path.is_file()` is true of a zero-byte file and of a
+file whose bytes have been replaced with something else entirely -- both of which the
+readiness contract used to call `ready`, and the second of which made `read_if_ready()` raise
+a bare `duckdb.InvalidInputException` from inside a method that promises blocked-or-ready as
+its only two outcomes. Eight bytes per partition per assessment, independent of file size.
+"""
 
 
 class PanelStore:
@@ -709,6 +788,7 @@ class PanelStore:
         if not self.catalog_path.exists():
             return []
         with duckdb.connect(str(self.catalog_path), read_only=True) as connection:
+            _check_catalog_schema_version(connection)
             partition_path = self._resolve_partition_path(connection, dataset, year)
             if partition_path is None:
                 return []
@@ -753,6 +833,7 @@ class PanelStore:
         if not self.catalog_path.exists():
             raise PanelStorageError(f"no partition registered for {dataset} year={year}")
         with duckdb.connect(str(self.catalog_path), read_only=True) as connection:
+            _check_catalog_schema_version(connection)
             partition_path = self._resolve_partition_path(connection, dataset, year)
             if partition_path is None:
                 raise PanelStorageError(f"no partition registered for {dataset} year={year}")
@@ -790,9 +871,15 @@ class PanelStore:
         knowledge of data that is not there), and its row count must agree with the
         partition's (a disagreement means the coverage describes a different write).
 
+        The registered partition's `content_hash` is stored on the record as
+        `partition_content_hash`, overriding whatever the caller put there -- it is a fact
+        about this storing, not about the batch. That is what lets readiness notice later
+        that a subsequent `write_partition()` has moved the partition out from under this
+        record; see `PartitionCoverage.partition_content_hash` and the module docstring's
+        "Coverage, readiness, and where each rule lives".
+
         Deliberately a separate call from `write_partition()`; the module docstring's
-        "Coverage, readiness, and where each rule lives" explains why, and why the
-        interrupted case fails closed.
+        "Coverage, readiness, and where each rule lives" explains why.
         """
         validated = _validated_coverage(coverage)
         recorded_at = self._now()
@@ -813,8 +900,11 @@ class PanelStore:
                     f"partition's {existing.row_count} for {validated.dataset} "
                     f"year={validated.year}"
                 )
-            _write_coverage(connection, validated, recorded_at=recorded_at)
-        return replace(validated, recorded_at=recorded_at)
+            stored = replace(
+                validated, recorded_at=recorded_at, partition_content_hash=existing.content_hash
+            )
+            _write_coverage(connection, stored, recorded_at=recorded_at)
+        return stored
 
     def read_coverage(self, dataset: str, year: int) -> PartitionCoverage | None:
         """Return one partition's coverage record, or `None` if it has never been profiled.
@@ -837,6 +927,7 @@ class PanelStore:
         if not self.catalog_path.exists():
             return ()
         with duckdb.connect(str(self.catalog_path), read_only=True) as connection:
+            _check_catalog_schema_version(connection)
             if not _table_exists(connection, "panel_partitions"):
                 return ()
             rows = connection.execute(
@@ -872,15 +963,22 @@ class PanelStore:
     ) -> PanelReadOutcome:
         """Read a partition only if its dataset is ready, and say which happened.
 
-        `PanelReadOutcome.rows` is `None` when the dataset is blocked and `()` when it is
-        ready but nothing matched -- two different values for two different situations.
+        `PanelReadOutcome.rows_or_none` is `None` when the dataset is blocked and `()` when
+        it is ready but nothing matched -- two different values for two different situations.
         `query()` collapses both to `[]`, which is precisely the ambiguity `V2-P1-013`'s
-        "assert blocking, not an empty success" acceptance exists to prevent, so a caller
-        that goes through this method cannot make that mistake.
+        "assert blocking, not an empty success" acceptance exists to prevent. Reading the
+        plainly-named `rows` on a blocked outcome raises rather than answering `None`, so the
+        one-line mistake that would re-collapse them (`if not outcome.rows:`) cannot pass
+        quietly; see `PanelReadOutcome`.
 
         A blocked dataset short-circuits before any scan: nothing reads the partition file.
         `year` must be one of the years the requirement was assessed over, so a caller cannot
         vet one partition and then read another.
+
+        Blocked and ready are the only two outcomes, and that now holds for a partition whose
+        file is damaged too. The scan is wrapped: anything DuckDB raises out of it becomes a
+        `PanelStorageError` naming the partition, instead of a bare
+        `duckdb.InvalidInputException` escaping a method that promises a verdict.
         """
         if year not in requirement.years:
             raise PanelStorageError(
@@ -889,17 +987,30 @@ class PanelStore:
             )
         readiness = self.assess_readiness(requirement)
         if readiness.state == "blocked":
-            return PanelReadOutcome(readiness=readiness, rows=None)
-        rows = self.query(requirement.dataset, year=year, columns=columns, filters=filters)
-        return PanelReadOutcome(readiness=readiness, rows=tuple(rows))
+            return PanelReadOutcome(readiness=readiness, rows_or_none=None)
+        try:
+            rows = self.query(requirement.dataset, year=year, columns=columns, filters=filters)
+        except PanelStorageError:
+            raise
+        except Exception as error:
+            raise PanelStorageError(
+                f"{requirement.dataset} year={year} passed readiness but could not be read: "
+                f"{type(error).__name__}: {error}"
+            ) from error
+        return PanelReadOutcome(readiness=readiness, rows_or_none=tuple(rows))
 
     def _partition_states(self, requirement: ReadinessRequirement) -> tuple[PartitionState, ...]:
+        """What the store can see about each requested year, as evidence for the rule table.
+
+        Every fact a `PartitionState` carries is read here and handed over whole; the
+        evaluator judges, this method looks. `content_hash` in particular is read from the
+        same `panel_partitions` row that resolves the path -- it costs nothing extra, and
+        dropping it (as an earlier version did, keeping only `path.is_file()`) is what left
+        a coverage record's agreement with the partition it describes permanently unchecked.
+        """
         years = sorted(set(requirement.years))
         if not self.catalog_path.exists():
-            return tuple(
-                PartitionState(year=year, registered=False, file_present=False, coverage=None)
-                for year in years
-            )
+            return tuple(_absent_partition(year) for year in years)
         states: list[PartitionState] = []
         with duckdb.connect(str(self.catalog_path), read_only=True) as connection:
             _check_catalog_schema_version(connection)
@@ -911,17 +1022,16 @@ class PanelStore:
                     else None
                 )
                 if reference is None:
-                    states.append(
-                        PartitionState(
-                            year=year, registered=False, file_present=False, coverage=None
-                        )
-                    )
+                    states.append(_absent_partition(year))
                     continue
+                present = reference.path.is_file()
                 states.append(
                     PartitionState(
                         year=year,
                         registered=True,
-                        file_present=reference.path.is_file(),
+                        file_present=present,
+                        file_readable=present and _looks_like_parquet(reference.path),
+                        content_hash=reference.content_hash,
                         coverage=_read_coverage(connection, requirement.dataset, year),
                         path=reference.path,
                     )
@@ -932,19 +1042,31 @@ class PanelStore:
         return _require_aware(self._clock(), "clock")
 
     def _ensure_catalog_schema(self, connection: duckdb.DuckDBPyConnection) -> None:
-        """Create every catalog table if absent, then stamp (or verify) the schema version.
+        """Verify the schema version, then create/upgrade every catalog table and re-stamp.
 
-        Order matters: the tables are created first so the stamp has somewhere to live, then
-        the existing stamp is checked *before* anything is written, so a catalog from a newer
-        build is refused rather than appended to.
+        The version check runs **first**, before any DDL. An earlier version created the
+        tables first "so the stamp has somewhere to live", which meant a catalog stamped with
+        an unknown version had five dropped tables silently rebuilt before the refusal
+        fired -- the opposite of the error message's own "refusing to touch it".
+        `_check_catalog_schema_version` needs no table to exist: a catalog with no
+        `panel_catalog_meta` is v1 by definition and it returns.
+
+        The stamp is then written with `DO UPDATE`, not `DO NOTHING`, because a `v1` catalog
+        that has just been migrated forward has to *stop* being stamped `v1`.
         """
+        _check_catalog_schema_version(connection)
         connection.execute(_CATALOG_DDL)
         for statement in _COVERAGE_DDL:
             connection.execute(statement)
-        _check_catalog_schema_version(connection)
+        for table, column, column_type in _COVERAGE_ADDED_COLUMNS:
+            if not _column_exists(connection, table, column):
+                connection.execute(
+                    f"ALTER TABLE {_quote_identifier(table, role='table')} "
+                    f"ADD COLUMN {_quote_identifier(column)} {column_type}"
+                )
         connection.execute(
             "INSERT INTO panel_catalog_meta (key, value) VALUES ('schema_version', ?) "
-            "ON CONFLICT (key) DO NOTHING",
+            "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
             [PANEL_CATALOG_SCHEMA_VERSION],
         )
 
@@ -977,6 +1099,18 @@ class PanelStore:
     ) -> Path | None:
         partition = self._lookup_with_connection(connection, dataset, year)
         return None if partition is None else partition.path
+
+
+def _absent_partition(year: int) -> PartitionState:
+    """The state of a year the catalog has no row for: nothing is known, nothing is claimed."""
+    return PartitionState(
+        year=year,
+        registered=False,
+        file_present=False,
+        file_readable=False,
+        content_hash=None,
+        coverage=None,
+    )
 
 
 def _build_scan_sql(
@@ -1025,14 +1159,59 @@ def _table_exists(connection: duckdb.DuckDBPyConnection, name: str) -> bool:
     return row is not None
 
 
+def _column_exists(connection: duckdb.DuckDBPyConnection, table: str, column: str) -> bool:
+    """Whether `table.column` exists in this catalog.
+
+    The read path opens the catalog `read_only=True` and so cannot run the `v1 -> v2`
+    `ALTER TABLE`; it has to answer questions about a catalog that is still v1 on disk. This
+    is how it tells "the column is not there" from "the value is NULL" without a write.
+    """
+    row = connection.execute(
+        "SELECT 1 FROM information_schema.columns WHERE table_name = ? AND column_name = ?",
+        [table, column],
+    ).fetchone()
+    return row is not None
+
+
+def _looks_like_parquet(path: Path) -> bool:
+    """Whether `path` at least still carries Parquet's magic at both ends.
+
+    Structural sanity, not content verification: it separates "a Parquet file is there" from
+    "a file is there", which `Path.is_file()` cannot. A zero-byte file, a truncated write and
+    a file overwritten with unrelated bytes all fail it. A file replaced by a *different but
+    valid* Parquet file passes it -- catching that needs a digest of the file's bytes, which
+    would mean re-hashing the whole partition on every gate check, and belongs to
+    `V2-P1-012`'s deep health pass rather than to a fail-closed gate that has to be cheap
+    enough to run on every read.
+    """
+    try:
+        with path.open("rb") as handle:
+            if handle.read(len(_PARQUET_MAGIC)) != _PARQUET_MAGIC:
+                return False
+            handle.seek(-len(_PARQUET_MAGIC), 2)
+            return handle.read(len(_PARQUET_MAGIC)) == _PARQUET_MAGIC
+    except OSError:
+        return False
+
+
 def _check_catalog_schema_version(connection: duckdb.DuckDBPyConnection) -> None:
     """Refuse a catalog stamped with a schema version this build does not understand.
 
     A catalog with no `panel_catalog_meta` table, or with the table but no stamp, predates
-    `V2-P1-003` and is v1 by definition -- the coverage tables are purely additive, so
-    nothing about its existing rows is ambiguous. A catalog stamped with an *unknown*
-    version is a different matter: it was written by a build that knows something this one
-    does not, and reading it would mean guessing at columns that may have been repurposed.
+    `V2-P1-003` and is v1 by definition -- the coverage tables were purely additive, so
+    nothing about its existing rows is ambiguous. A `v1` stamp is likewise readable, because
+    this build knows exactly what a v1 catalog lacks and treats the gap as fail-closed rather
+    than guessing (see `PANEL_CATALOG_SCHEMA_VERSIONS_READABLE`). A catalog stamped with an
+    *unknown* version is a different matter: it was written by a build that knows something
+    this one does not, and reading it would mean guessing at columns that may have been
+    repurposed.
+
+    Called by every public method that opens the catalog, including the three read paths that
+    never look at a coverage table (`query`, `registered_years`, `profile_query`). `query()`
+    in particular is the one method that reads `panel_partitions.relative_path` and opens the
+    file it names -- the single path where a repurposed column would turn into reading the
+    wrong bytes -- so exempting it would have left the stamp guarding everything except the
+    thing most worth guarding.
     """
     if not _table_exists(connection, "panel_catalog_meta"):
         return
@@ -1042,11 +1221,11 @@ def _check_catalog_schema_version(connection: duckdb.DuckDBPyConnection) -> None
     if row is None:
         return
     version = str(row[0])
-    if version not in _KNOWN_CATALOG_SCHEMA_VERSIONS:
+    if version not in PANEL_CATALOG_SCHEMA_VERSIONS_READABLE:
         raise PanelStorageError(
             f"panel catalog is stamped {version!r}, which this build does not understand "
-            f"(known: {sorted(_KNOWN_CATALOG_SCHEMA_VERSIONS)}); refusing to touch it rather "
-            "than misread a schema written by a newer version"
+            f"(known: {sorted(PANEL_CATALOG_SCHEMA_VERSIONS_READABLE)}); refusing to touch it "
+            "rather than misread a schema written by a newer version"
         )
 
 
@@ -1075,8 +1254,8 @@ def _write_coverage(
             INSERT INTO panel_partition_coverage
                 (dataset, year, provider_id, kind, schema_version, batch_digest, as_of,
                  fetched_at, row_count, date_timezone, last_event_time, max_available_time,
-                 revised_row_count, recorded_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 revised_row_count, recorded_at, partition_content_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (dataset, year) DO UPDATE SET
                 provider_id = excluded.provider_id,
                 kind = excluded.kind,
@@ -1089,7 +1268,8 @@ def _write_coverage(
                 last_event_time = excluded.last_event_time,
                 max_available_time = excluded.max_available_time,
                 revised_row_count = excluded.revised_row_count,
-                recorded_at = excluded.recorded_at
+                recorded_at = excluded.recorded_at,
+                partition_content_hash = excluded.partition_content_hash
             """,
             [
                 *key,
@@ -1105,6 +1285,7 @@ def _write_coverage(
                 coverage.max_available_time,
                 coverage.revised_row_count,
                 recorded_at,
+                coverage.partition_content_hash,
             ],
         )
         connection.executemany(
@@ -1136,13 +1317,31 @@ def _write_coverage(
 def _read_coverage(
     connection: duckdb.DuckDBPyConnection, dataset: str, year: int
 ) -> PartitionCoverage | None:
+    """Read one coverage record back, normalising every instant to UTC.
+
+    DuckDB hands a `TIMESTAMPTZ` back in the *session's* local zone, so the same stored
+    instant reads as `2024-06-03 03:00:00-04:00` on one machine and `...+08:00` on another.
+    The instant is identical and every comparison in this module is already correct on it,
+    but `V2-P1-016`'s REST surface serialises these straight out, and a wire format whose
+    offset depends on which host answered is not a wire format. Normalised on read, once,
+    rather than at each of the consumers that must not each remember to.
+
+    Tolerates a `panel-catalog/v1` catalog, which has no `partition_content_hash` column: the
+    read path is `read_only=True` and cannot run the `ALTER TABLE` that adds it, so it reads
+    the record with that field `None` -- which readiness blocks on rather than waves through.
+    """
     if not _table_exists(connection, "panel_partition_coverage"):
         return None
+    has_partition_hash = _column_exists(
+        connection, "panel_partition_coverage", "partition_content_hash"
+    )
+    hash_projection = "partition_content_hash" if has_partition_hash else "NULL"
     key: list[object] = [dataset, year]
     row = connection.execute(
-        """
+        f"""
         SELECT provider_id, kind, schema_version, batch_digest, as_of, fetched_at, row_count,
-               date_timezone, last_event_time, max_available_time, revised_row_count, recorded_at
+               date_timezone, last_event_time, max_available_time, revised_row_count,
+               recorded_at, {hash_projection}
         FROM panel_partition_coverage WHERE dataset = ? AND year = ?
         """,
         key,
@@ -1176,14 +1375,15 @@ def _read_coverage(
         kind=str(row[1]),
         schema_version=str(row[2]),
         batch_digest=str(row[3]),
-        as_of=cast(datetime, row[4]),
-        fetched_at=cast(datetime, row[5]),
+        as_of=_as_utc(row[4]),
+        fetched_at=_as_utc(row[5]),
         row_count=int(row[6]),
         date_timezone=str(row[7]),
-        last_event_time=cast(datetime, row[8]),
-        max_available_time=cast(datetime, row[9]),
+        last_event_time=_as_utc(row[8]),
+        max_available_time=_as_utc(row[9]),
         revised_row_count=int(row[10]),
-        recorded_at=cast(datetime, row[11]),
+        recorded_at=_as_utc(row[11]),
+        partition_content_hash=None if row[12] is None else str(row[12]),
         subjects=tuple(str(entry[0]) for entry in subjects),
         fields=tuple(FieldCoverage(name=str(entry[0]), kind=str(entry[1])) for entry in fields),
         dates=tuple(
@@ -1259,6 +1459,17 @@ def _validated_coverage(coverage: PartitionCoverage) -> PartitionCoverage:
             )
     if len({day.event_date for day in coverage.dates}) != len(coverage.dates):
         raise PanelStorageError("coverage event dates must be distinct")
+    # The date census has to live inside the partition it describes. Without this, a batch of
+    # 2019 rows written with `year=2024` produced a coverage record whose dates were all in
+    # 2019 and whose partition key said 2024 -- and a `required_dates` naming those 2019 days
+    # against `years=(2024,)` then reported `ready`, because the pooled date check never asks
+    # which year the dates came from.
+    off_year = sorted({day.event_date.year for day in coverage.dates} - {coverage.year})
+    if off_year:
+        raise PanelStorageError(
+            f"coverage date census for year={coverage.year} carries dates from {off_year}; "
+            "every event date must fall inside the partition's own year"
+        )
     if sum(day.row_count for day in coverage.dates) != row_count:
         raise PanelStorageError(
             "coverage date census must account for every row: "
@@ -1290,13 +1501,24 @@ def _validated_requirement(requirement: ReadinessRequirement) -> ReadinessRequir
     `isinstance` check would admit a value that can never equal an observed `date` and would
     turn every complete partition into a permanent phantom `date_gap`. The same reasoning
     applies to `years` -- a `bool` is an `int`, and `True` would silently mean year 1.
+
+    The *containers* are checked before their elements, which an earlier version of this
+    function did not do: it iterated straight into `years`/`required_dates`/
+    `required_subjects`, so passing `None` for any of them raised a bare
+    `TypeError: 'NoneType' object is not iterable` out of the middle of a validator whose
+    entire job is to name the malformed input. Each is now required to be a `tuple` -- the
+    type the dataclass declares -- and `None` is legal for exactly the three checks that can
+    be waived, where it *means* waived rather than "forgot to pass one".
     """
     _validate_dataset(requirement.dataset)
     _require_aware(requirement.as_of, "ReadinessRequirement.as_of")
+    _require_tuple("years", requirement.years, optional=False)
+    for name in ("required_dates", "required_subjects", "required_fields"):
+        _require_tuple(name, getattr(requirement, name), optional=True)
     for year in requirement.years:
         if type(year) is not int:
             raise PanelStorageError(f"requirement years must be ints; got {year!r}")
-    for day in requirement.required_dates:
+    for day in requirement.required_dates or ():
         if type(day) is not date:
             raise PanelStorageError(
                 f"required_dates must hold plain date values, not datetimes; got {day!r}"
@@ -1305,13 +1527,22 @@ def _validated_requirement(requirement: ReadinessRequirement) -> ReadinessRequir
         ("required_subjects", requirement.required_subjects),
         ("required_fields", requirement.required_fields),
     ):
-        for value in values:
+        for value in values or ():
             _require_text(role, value)
     if requirement.max_staleness is not None and type(requirement.max_staleness) is not timedelta:
         raise PanelStorageError(
             f"max_staleness must be a timedelta or None; got {requirement.max_staleness!r}"
         )
     return requirement
+
+
+def _require_tuple(role: str, value: object, *, optional: bool) -> None:
+    """A tuple, or `None` where `None` is a meaning rather than an omission."""
+    if optional and value is None:
+        return
+    if type(value) is not tuple:
+        allowed = "a tuple or None" if optional else "a tuple"
+        raise PanelStorageError(f"{role} must be {allowed}; got {value!r}")
 
 
 def _require_text(role: str, value: object) -> None:
@@ -1327,6 +1558,12 @@ def _require_text(role: str, value: object) -> None:
         )
     if len(value) > _MAX_TEXT_LENGTH:
         raise PanelStorageError(f"{role} must be at most {_MAX_TEXT_LENGTH} characters")
+
+
+def _as_utc(value: object) -> datetime:
+    """A `TIMESTAMPTZ` DuckDB handed back, re-expressed in UTC. Same instant, fixed offset."""
+    instant = cast(datetime, value)
+    return instant.astimezone(UTC)
 
 
 def _require_aware(value: datetime, role: str) -> datetime:

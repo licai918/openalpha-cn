@@ -16,6 +16,7 @@ from datetime import UTC, date, datetime, timedelta
 
 from openalpha_cn.panel.catalog import (
     READINESS_ISSUE_CODES,
+    READINESS_WAIVABLE_CHECKS,
     DateCoverage,
     FieldCoverage,
     PartitionCoverage,
@@ -33,6 +34,15 @@ LAST_AVAILABLE = datetime(2024, 1, 4, 8, 30, tzinfo=UTC)
 AS_OF = datetime(2024, 1, 4, 12, 0, tzinfo=UTC)
 SUBJECTS = ("000001.SZ", "000002.SZ")
 FIELDS = ("close", "vol")
+CONTENT_HASH = "sha256:" + "a" * 64
+"""The partition hash a state and its coverage record agree on, unless a test says otherwise.
+
+Stated on both sides rather than defaulted, because `PartitionState.content_hash` and
+`PartitionCoverage.partition_content_hash` disagreeing is itself one of the faults under test
+(`coverage_stale`) -- a helper that quietly filled in matching values, or a dataclass field
+that defaulted to `None` on both sides, would make every other test in this file pass the
+freshness cross-check by accident rather than by construction.
+"""
 
 
 def _coverage(
@@ -45,6 +55,7 @@ def _coverage(
     max_available_time: datetime = LAST_AVAILABLE,
     revised_row_count: int = 0,
     revisions: tuple[RevisionCoverage, ...] = (),
+    partition_content_hash: str | None = CONTENT_HASH,
 ) -> PartitionCoverage:
     return PartitionCoverage(
         dataset=DATASET,
@@ -64,16 +75,25 @@ def _coverage(
         fields=tuple(FieldCoverage(name=name, kind="float") for name in fields),
         dates=tuple(DateCoverage(event_date=day, row_count=len(subjects)) for day in dates),
         revisions=revisions,
+        partition_content_hash=partition_content_hash,
     )
 
 
 def _state(
-    *, year: int = 2024, registered: bool = True, file_present: bool = True, profiled: bool = True
+    *,
+    year: int = 2024,
+    registered: bool = True,
+    file_present: bool = True,
+    file_readable: bool = True,
+    content_hash: str | None = CONTENT_HASH,
+    profiled: bool = True,
 ) -> PartitionState:
     return PartitionState(
         year=year,
         registered=registered,
         file_present=file_present,
+        file_readable=file_readable,
+        content_hash=content_hash,
         coverage=_coverage(year=year) if profiled else None,
     )
 
@@ -95,19 +115,25 @@ def _requirement(**overrides: object) -> ReadinessRequirement:
 def _bare_requirement(**overrides: object) -> ReadinessRequirement:
     """A requirement that asks only "does this year exist and can it be described".
 
-    Deliberately carries no `required_dates`/`required_subjects`/`required_fields`: those
-    are *pooled* checks, evaluated across every usable year, so a requirement carrying them
-    reports a coverage shortfall alongside the per-year fault that caused it. That cascade is
-    correct behaviour (`test_the_verdict_reports_every_issue_it_found_not_only_the_first`
-    pins it) and merely noise for the tests below, which are about the per-year state alone.
+    Deliberately waives `required_dates`/`required_subjects`/`required_fields`/
+    `max_staleness`: those are *pooled* checks, evaluated across every usable year, so a
+    requirement carrying them reports a coverage shortfall alongside the per-year fault that
+    caused it. That cascade is correct behaviour
+    (`test_the_verdict_reports_every_issue_it_found_not_only_the_first` pins it) and merely
+    noise for the tests below, which are about the per-year state alone.
+
+    `None`, not `()`: an empty tuple is a *declared* expectation that can never find a
+    shortfall, which the evaluator blocks on (`empty_requirement`). `None` says the check was
+    switched off deliberately, and the verdict records it in `checks_waived`.
     """
-    return _requirement(
-        required_dates=(),
-        required_subjects=(),
-        required_fields=(),
-        max_staleness=None,
-        **overrides,
-    )
+    waived: dict[str, object] = {
+        "required_dates": None,
+        "required_subjects": None,
+        "required_fields": None,
+        "max_staleness": None,
+    }
+    waived.update(overrides)
+    return _requirement(**waived)
 
 
 def _codes(requirement: ReadinessRequirement, states: tuple[PartitionState, ...]) -> list[str]:
@@ -162,7 +188,12 @@ def test_a_registered_but_never_profiled_partition_blocks_instead_of_passing_sil
 def test_a_date_hole_is_named_rather_than_merely_counted() -> None:
     covered = (COVERED_DATES[0], COVERED_DATES[2])
     state = PartitionState(
-        year=2024, registered=True, file_present=True, coverage=_coverage(dates=covered)
+        year=2024,
+        registered=True,
+        file_present=True,
+        file_readable=True,
+        content_hash=CONTENT_HASH,
+        coverage=_coverage(dates=covered),
     )
 
     readiness = evaluate_readiness(_requirement(), partitions=(state,))
@@ -225,6 +256,125 @@ def test_a_missing_required_subject_blocks_and_names_the_subject() -> None:
     assert verdict.issues[0].missing_items == ("600519.SH",)
 
 
+def test_a_partition_whose_file_is_present_but_not_a_parquet_file_blocks() -> None:
+    """`Path.is_file()` is true of a zero-byte file and of a file whose bytes were replaced.
+    Both used to reach `ready` with no issues, and the second made a subsequent read raise a
+    bare DuckDB exception out of `read_if_ready()`."""
+    verdict = evaluate_readiness(_bare_requirement(), partitions=(_state(file_readable=False),))
+
+    assert verdict.state == "blocked"
+    assert [issue.code for issue in verdict.issues] == ["partition_file_unreadable"]
+    assert verdict.years_present == ()
+
+
+def test_a_coverage_record_describing_a_replaced_partition_blocks_as_stale() -> None:
+    """The fail-open this rule exists for. `record_coverage` binds a record to a partition
+    once; `write_partition` is overwrite-per-partition, so the very operation the store is
+    designed for -- a backfill or a correction -- silently unbinds it again. Every other check
+    still passes on the obsolete record: the file is there, coverage is there, and its dates,
+    subjects and fields all come from it."""
+    replaced = _state(content_hash="sha256:" + "b" * 64)
+
+    verdict = evaluate_readiness(_bare_requirement(), partitions=(replaced,))
+
+    assert verdict.state == "blocked"
+    assert [issue.code for issue in verdict.issues] == ["coverage_stale"]
+    assert verdict.years_present == ()
+    assert "a" * 64 in verdict.issues[0].detail
+    assert "b" * 64 in verdict.issues[0].detail
+    # The record is dropped from the usable pool, so nothing it claims is inherited: a
+    # requirement that *does* name dates and subjects finds none of them, rather than being
+    # reassured by a description of content that is no longer there.
+    strict = evaluate_readiness(_requirement(), partitions=(replaced,))
+    assert [issue.code for issue in strict.issues] == [
+        "coverage_stale",
+        "date_gap",
+        "subject_missing",
+        "field_missing",
+    ]
+
+
+def test_a_coverage_record_that_never_recorded_a_partition_hash_blocks_too() -> None:
+    """What a `panel-catalog/v1` coverage row reads back as. Unknown is not agreement: the
+    record cannot be shown to describe what is on disk, so it blocks rather than being taken
+    on trust -- one `record_coverage()` call clears it."""
+    legacy = PartitionState(
+        year=2024,
+        registered=True,
+        file_present=True,
+        file_readable=True,
+        content_hash=CONTENT_HASH,
+        coverage=_coverage(partition_content_hash=None),
+    )
+
+    verdict = evaluate_readiness(_bare_requirement(), partitions=(legacy,))
+
+    assert verdict.state == "blocked"
+    assert [issue.code for issue in verdict.issues] == ["coverage_stale"]
+
+
+def test_a_declared_but_empty_expectation_blocks_instead_of_passing_vacuously() -> None:
+    """The same rule `no_years_requested` already enforced, reaching the checks that carry
+    Story S8's hole detection. `required_dates=()` makes the date check a set difference
+    against nothing, which can never report a gap -- so an entire year holding one trading
+    day used to be `ready` under a requirement that looked like it was checking dates."""
+    verdict = evaluate_readiness(
+        _bare_requirement(required_dates=(), required_subjects=()), partitions=(_state(),)
+    )
+
+    assert verdict.state == "blocked"
+    assert [issue.code for issue in verdict.issues] == ["empty_requirement"]
+    assert verdict.issues[0].missing_items == ("required_dates", "required_subjects")
+
+
+def test_the_year_long_partition_holding_one_trading_day_is_no_longer_vacuously_ready() -> None:
+    """The reviewer's reproduction, as a rule-table test. A partition covering a single day of
+    2024, assessed at the end of 2024, reported `ready` with no issues under a requirement
+    built entirely from field defaults. There are no such defaults now: the two checks that
+    would have caught it have to be stated, and stating them catches it."""
+    sparse = PartitionState(
+        year=2024,
+        registered=True,
+        file_present=True,
+        file_readable=True,
+        content_hash=CONTENT_HASH,
+        coverage=_coverage(dates=(date(2024, 1, 2),)),
+    )
+    year_end = datetime(2024, 12, 31, tzinfo=UTC)
+
+    verdict = evaluate_readiness(
+        _requirement(
+            as_of=year_end,
+            required_dates=COVERED_DATES,
+            max_staleness=timedelta(days=5),
+        ),
+        partitions=(sparse,),
+    )
+
+    assert verdict.state == "blocked"
+    assert [issue.code for issue in verdict.issues] == ["date_gap", "stale"]
+    assert verdict.issues[0].missing_dates == COVERED_DATES[1:]
+
+
+def test_a_waived_check_is_recorded_on_the_verdict_rather_than_silently_skipped() -> None:
+    """`None` is a legitimate answer -- not every caller has a date universe to declare -- but
+    a verdict that did not look at dates must not be indistinguishable from one that did.
+    `V2-P1-012`'s report and `V2-P1-013`'s gate read `checks_waived` to tell them apart."""
+    waived = evaluate_readiness(_bare_requirement(), partitions=(_state(),))
+    checked = evaluate_readiness(_requirement(), partitions=(_state(),))
+
+    assert waived.state == "ready"
+    assert set(waived.checks_waived) == {
+        "required_dates",
+        "required_subjects",
+        "required_fields",
+        "max_staleness",
+    }
+    assert set(waived.checks_waived) <= READINESS_WAIVABLE_CHECKS
+    assert checked.state == "ready"
+    assert checked.checks_waived == ()
+
+
 def test_a_requirement_naming_no_year_is_blocked_rather_than_vacuously_ready() -> None:
     """An empty year list has nothing to find fault with, so a naive implementation reports
     "ready" for a dataset it never looked at -- the precise shape of the empty success
@@ -245,6 +395,8 @@ def test_coverage_spanning_several_years_is_pooled_before_the_date_check() -> No
         year=2023,
         registered=True,
         file_present=True,
+        file_readable=True,
+        content_hash=CONTENT_HASH,
         coverage=_coverage(
             year=2023,
             dates=(date(2023, 12, 29),),
@@ -267,9 +419,12 @@ def test_every_issue_this_evaluator_can_emit_is_declared_in_the_closed_code_set(
     invisible to both."""
     emitted = set()
     emitted.update(_codes(_requirement(years=()), ()))
+    emitted.update(_codes(_requirement(required_dates=()), (_state(),)))
     emitted.update(_codes(_requirement(), (_state(registered=False, profiled=False),)))
     emitted.update(_codes(_requirement(), (_state(file_present=False),)))
+    emitted.update(_codes(_requirement(), (_state(file_readable=False),)))
     emitted.update(_codes(_requirement(), (_state(profiled=False),)))
+    emitted.update(_codes(_requirement(), (_state(content_hash="sha256:" + "b" * 64),)))
     emitted.update(
         _codes(
             _requirement(required_dates=(*COVERED_DATES, date(2024, 1, 5))),
