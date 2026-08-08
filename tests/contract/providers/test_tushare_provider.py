@@ -67,9 +67,20 @@ def test_tushare_metadata_declares_supported_datasets(fake_tushare_transport) ->
     provider = TushareProvider(token="secret-token", transport=fake_tushare_transport({}))
 
     # Grows by exactly one entry per row added to TUSHARE_DATASETS; `trade_cal` is
-    # V2-P1-004's. Still spelled out in full rather than derived from the table, so that
-    # adding a dataset has to be an intentional edit here too.
-    assert provider.metadata.supported_datasets == ("daily", "trade_cal")
+    # V2-P1-004's, `stock_basic` and `namechange` are V2-P1-005's. Still spelled out in full
+    # rather than derived from the table, so that adding a dataset has to be an intentional
+    # edit here too.
+    #
+    # "Supported" is not "served on both planes": `stock_basic` and `namechange` declare
+    # `serves_evidence_plane=False`, so `fetch()` refuses them by name while `fetch_panel()`
+    # serves them. They belong in this tuple because the provider does support them -- see
+    # `tests/contract/providers/test_tushare_registry_datasets.py` for both halves.
+    assert provider.metadata.supported_datasets == (
+        "daily",
+        "trade_cal",
+        "stock_basic",
+        "namechange",
+    )
 
 
 def test_tushare_upstream_error_never_becomes_empty_success(fake_tushare_transport) -> None:

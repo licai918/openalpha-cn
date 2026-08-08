@@ -197,6 +197,12 @@ from types import MappingProxyType
 from typing import Final
 from zoneinfo import ZoneInfo
 
+from openalpha_cn.domain.name_history import (
+    NAME_HISTORY_PANEL_COLUMNS,
+    NAMECHANGE_DATASET,
+    NameHistory,
+    name_histories_from_panel_rows,
+)
 from openalpha_cn.domain.panel_batch import (
     RESERVED_COLUMN_NAMES,
     SUBJECT_COLUMN_NAME,
@@ -204,6 +210,13 @@ from openalpha_cn.domain.panel_batch import (
     PanelBatchError,
     PanelColumn,
     PanelColumnKind,
+    TimelineColumns,
+)
+from openalpha_cn.domain.stock_universe import (
+    STOCK_BASIC_DATASET,
+    UNIVERSE_PANEL_COLUMNS,
+    StockUniverse,
+    stock_universe_from_panel_rows,
 )
 from openalpha_cn.domain.trading_calendar import (
     CALENDAR_PANEL_COLUMNS,
@@ -216,6 +229,7 @@ from openalpha_cn.panel.catalog import (
     DEFAULT_DATE_TIMEZONE,
     DateCoverage,
     FieldCoverage,
+    PanelStorageError,
     PartitionCoverage,
     ReadinessRequirement,
     RevisionCoverage,
@@ -347,7 +361,8 @@ def panel_partition_year(
     Refuses a batch that spans two years rather than choosing one. A straddling batch has no
     single partition, and every way of picking one -- first row, last row, most rows -- files
     part of the data under a year it does not belong to, where a later single-year re-fetch
-    then overwrites the partition and drops it. Split the batch instead.
+    then overwrites the partition and drops it. `split_panel_batch_by_year()` is the answer
+    for a batch that genuinely straddles; picking is never one.
 
     The timezone is not decoration: `event_time` is a UTC instant, and a session at 08:00
     Asia/Shanghai on 1 January is 31 December in UTC, so a UTC-derived year misfiles every
@@ -358,14 +373,84 @@ def panel_partition_year(
             f"cannot derive a partition year from a {batch.status!r} batch: "
             f"{batch.no_data_reason!r}"
         )
-    zone = _resolve_timezone(date_timezone)
-    years = {instant.astimezone(zone).year for instant in set(batch.timeline.event_time)}
+    years = _partition_years(batch, date_timezone)
     if len(years) != 1:
         raise PanelBatchError(
             f"this batch spans {sorted(years)} in {date_timezone} and has no single "
             f"{batch.dataset} partition; split it by year before writing"
         )
-    return years.pop()
+    return next(iter(years))
+
+
+def _partition_years(batch: ColumnarPanelBatch, date_timezone: str) -> set[int]:
+    zone = _resolve_timezone(date_timezone)
+    return {instant.astimezone(zone).year for instant in set(batch.timeline.event_time)}
+
+
+def split_panel_batch_by_year(
+    batch: ColumnarPanelBatch, *, date_timezone: str = DEFAULT_DATE_TIMEZONE
+) -> tuple[tuple[int, ColumnarPanelBatch], ...]:
+    """Split one batch into one batch per event year, ascending. Every row is kept exactly once.
+
+    `PanelStore.record_coverage` refuses a coverage record whose date census reaches outside
+    its own partition's year -- a rule `V2-P1-003` added after a batch of 2019 rows written
+    under `year=2024` produced a catalog that reported `ready` for dates it did not hold. That
+    rule is what makes this function necessary rather than optional: a dataset whose *request*
+    is not a period cannot be filed under one, and `stock_basic` is exactly that. One fetch
+    returns the whole registry, so its event census runs from 1990 to last week.
+
+    ## Cost
+
+    This is the one place in the ingest path that does per-row Python work, and it is stated
+    rather than hidden. `domain/panel_batch.py` exists to keep the contract's cost at
+    ~1.8 us/row for the 1.35e7-row-per-field datasets ADR-0002 sizes; this function is
+    O(row_count) with a Python-level index list and a tuple rebuild per column, and it is
+    applied only to the two registry datasets, whose whole corpora are 6,217 lifecycle rows
+    and 14,166 rename rows -- three orders of magnitude below panel scale, and fetched once
+    rather than per trading day. Do not reach for it on a price panel; split those at the
+    request instead, the way `trade_cal` and `daily` already do.
+    """
+    if batch.status != "success":
+        raise PanelBatchError(
+            f"cannot split a {batch.status!r} batch by year: {batch.no_data_reason!r}"
+        )
+    zone = _resolve_timezone(date_timezone)
+    grouped: dict[int, list[int]] = {}
+    for index, instant in enumerate(batch.timeline.event_time):
+        grouped.setdefault(instant.astimezone(zone).year, []).append(index)
+    return tuple((year, _select_rows(batch, grouped[year])) for year in sorted(grouped))
+
+
+def _select_rows(batch: ColumnarPanelBatch, indices: Sequence[int]) -> ColumnarPanelBatch:
+    """A batch holding `batch`'s rows at `indices`, in order, with everything else unchanged.
+
+    `as_of`, `fetched_at` and `source_uri` are carried across deliberately: a split does not
+    make three fetches out of one, and a sub-batch that claimed its own provenance would make
+    `PartitionCoverage.batch_digest` describe a batch no provider ever sent. The digest itself
+    does change, because the row count and the column bodies do -- which is correct: these are
+    different partitions.
+    """
+    timeline = batch.timeline
+    return ColumnarPanelBatch(
+        provider_id=batch.provider_id,
+        dataset=batch.dataset,
+        kind=batch.kind,
+        as_of=batch.as_of,
+        fetched_at=batch.fetched_at,
+        status="success",
+        subjects=tuple(batch.subjects[index] for index in indices),
+        timeline=TimelineColumns(
+            event_time=tuple(timeline.event_time[index] for index in indices),
+            available_time=tuple(timeline.available_time[index] for index in indices),
+            ingested_time=tuple(timeline.ingested_time[index] for index in indices),
+            revision_time=tuple(timeline.revision_time[index] for index in indices),
+        ),
+        columns=tuple(
+            PanelColumn(column.name, column.kind, tuple(column.values[index] for index in indices))
+            for column in batch.columns
+        ),
+        source_uri=batch.source_uri,
+    )
 
 
 def write_trading_calendar(
@@ -411,24 +496,61 @@ def write_trading_calendar(
             f"expected the {TRADING_CALENDAR_DATASET!r} dataset, got {batch.dataset!r}"
         )
     year = panel_partition_year(batch, date_timezone=date_timezone)
-    _refuse_to_drop_a_stored_exchange(store, batch, year)
+    _refuse_to_drop_stored_subjects(
+        store,
+        batch,
+        year,
+        remedy=(
+            "A partition is replaced whole and its key has no exchange dimension, so two "
+            "exchanges have to arrive in one batch or not at all"
+        ),
+    )
     return write_panel_batch(store, batch, year=year, date_timezone=date_timezone)
 
 
-def _refuse_to_drop_a_stored_exchange(
-    store: PanelStore, batch: ColumnarPanelBatch, year: int
+_SUBJECT_SAMPLE: Final[int] = 10
+"""How many subject names an overwrite refusal lists before summarising the rest.
+
+The calendar partitions hold two subjects and the registry holds 5,878, so an unbounded list
+would turn one refusal into an unreadable wall. Small sets are still printed in full, so the
+calendar's message is byte-identical to what it was before this guard was shared.
+"""
+
+
+def _subject_sample(subjects: Sequence[str]) -> str:
+    """Render a subject set for an error message, capped at `_SUBJECT_SAMPLE` names."""
+    ordered = sorted(subjects)
+    if len(ordered) <= _SUBJECT_SAMPLE:
+        return str(ordered)
+    return f"{ordered[:_SUBJECT_SAMPLE]} and {len(ordered) - _SUBJECT_SAMPLE} more"
+
+
+def _refuse_to_drop_stored_subjects(
+    store: PanelStore, batch: ColumnarPanelBatch, year: int, *, remedy: str
 ) -> None:
-    """Block an overwrite that would remove an exchange the partition already holds."""
+    """Block an overwrite that would remove a subject the partition already holds.
+
+    Shared by `write_trading_calendar` (where a dropped subject is an exchange) and
+    `write_stock_universe` (where it is a security). The failure is the same in both: a
+    partition is replaced whole, so a batch that is missing something the stored partition had
+    destroys data and reports success. The reads are already fail-closed -- a load for the
+    dropped subject blocks on `subject_missing` -- but a silent destructive write is not
+    something a downstream check should have to catch.
+
+    A partition with no coverage record is not protected: there is nothing to read the stored
+    subjects from. That is an interrupted write, which `assess_readiness()` blocks as
+    `coverage_missing`, and refusing to overwrite it would leave the store with no way back.
+    """
     existing = store.read_coverage(batch.dataset, year)
     if existing is None:
         return
     dropped = sorted(set(existing.subjects) - set(batch.subjects))
     if dropped:
         raise PanelBatchError(
-            f"{batch.dataset} year={year} already holds {sorted(existing.subjects)} and this "
-            f"batch carries {sorted(set(batch.subjects))}; writing it would drop {dropped}. "
-            "A partition is replaced whole and its key has no exchange dimension, so two "
-            "exchanges have to arrive in one batch or not at all"
+            f"{batch.dataset} year={year} already holds "
+            f"{_subject_sample(existing.subjects)} and this batch carries "
+            f"{_subject_sample(tuple(set(batch.subjects)))}; writing it would drop "
+            f"{_subject_sample(dropped)}. {remedy}"
         )
 
 
@@ -490,6 +612,287 @@ def load_trading_calendar(
             )
         rows.extend(outcome.rows)
     return trading_calendar_from_panel_rows(exchange, rows)
+
+
+def write_stock_universe(
+    store: PanelStore,
+    batch: ColumnarPanelBatch,
+    *,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> tuple[PartitionRef, ...]:
+    """Write a registry fetch into one partition per lifecycle year (`V2-P1-005`).
+
+    ## Why this writer returns several partitions and the others return one
+
+    Every other dataset here is fetched *by period*: a `trade_cal` request covers one year, so
+    one request is one partition. `stock_basic` has no date filter at all -- one request
+    returns the whole registry, listings from 1990-12-19 and terminations from 1999-07-12
+    onwards -- so its event census spans 36 years and `panel_partition_year` refuses it.
+
+    Filing the whole thing under the year it was *fetched* is the obvious alternative and is
+    not available: `PanelStore.record_coverage` refuses a coverage record whose date census
+    reaches outside its partition's own year, a rule `V2-P1-003` added after a batch of 2019
+    rows filed under `year=2024` produced a catalog that reported `ready` for dates it did not
+    hold. So the batch is split by `split_panel_batch_by_year()` and each year is written to
+    its own partition, which is also what makes the years mean something: the 2019 partition
+    is the securities that listed or died in 2019.
+
+    ## Reading a year range is the point-in-time window
+
+    Because the delisting is its own row in its own year, the set of years a caller reads *is*
+    the observation window. Years 1990..2019 give a universe in which a security that died in
+    2024 is still listed -- which is what a 2019 observer would have said -- and the same
+    partitions plus 2020..2026 give one in which it is not. Nothing downstream has to know
+    that; see `load_stock_universe`.
+
+    ## An overwrite that would drop securities is refused
+
+    A re-fetch replaces each year's partition whole. The registry only grows within a past
+    year -- a delisted security stays in the `D` set, and a live probe found the 1999
+    termination still present in 2026 -- so a batch carrying fewer securities *for a year the
+    store already holds* is a partial or filtered fetch rather than news. It raises rather
+    than overwriting; see `_refuse_to_drop_stored_subjects`.
+
+    The guard's bound is stated rather than overclaimed: it covers the **destructive** case, a
+    year this batch still writes but with fewer subjects than the stored partition had. A year
+    that vanishes from the batch *entirely* is simply not written, so its partition keeps
+    every row it had -- nothing is lost, and the store's own coverage still describes it
+    correctly. That is also why the check is not extended to "every year the store holds":
+    a batch legitimately fetched at an earlier `as_of` has no rows for later years, and
+    refusing it would block replaying a past `as_of` over a backfilled store.
+    """
+    if batch.dataset != STOCK_BASIC_DATASET:
+        raise PanelBatchError(
+            f"expected the {STOCK_BASIC_DATASET!r} dataset, got {batch.dataset!r}"
+        )
+    written: list[PartitionRef] = []
+    for year, yearly in split_panel_batch_by_year(batch, date_timezone=date_timezone):
+        _refuse_to_drop_stored_subjects(
+            store,
+            yearly,
+            year,
+            remedy=(
+                "The registry only grows within a past year, so a smaller batch is a partial "
+                "or filtered fetch rather than news; re-fetch the whole registry with "
+                "list_status='L,D'"
+            ),
+        )
+        written.append(write_panel_batch(store, yearly, year=year, date_timezone=date_timezone))
+    return tuple(written)
+
+
+def stock_universe_requirement(
+    *, years: Sequence[int], as_of: datetime, max_staleness: timedelta | None
+) -> ReadinessRequirement:
+    """What the registry must satisfy before a universe may be built from it.
+
+    Two of the four checks are waived, and both waivers land in
+    `DatasetReadiness.checks_waived` rather than being invisible:
+
+    - **`required_dates`** is waived because a listing has no schedule. There is no list of
+      days a year is *supposed* to contain lifecycle events on, so any expectation stated here
+      would be a guess, and a year with few events is ordinary (1999 has exactly one
+      termination in the whole corpus). What replaces it is structural rather than a date set:
+      `stock_universe_from_panel_rows` refuses a delisting row whose listing row is absent --
+      which is exactly what a skipped year looks like -- and `build_stock_universe` refuses a
+      duplicated `ts_code` or a lifecycle date that post-dates the snapshot.
+    - **`required_subjects`** is waived because naming the securities would be circular: the
+      universe is what the read is for.
+
+    `max_staleness` is **not** waived by default and has no default value: the caller states a
+    bound or states `None` on the record. This is one dataset where the check does real work,
+    unlike the calendar's -- a registry whose newest lifecycle event is a year old is a
+    registry that has missed a year of listings -- so leaving it to a default would be
+    choosing silence.
+    """
+    return ReadinessRequirement(
+        dataset=STOCK_BASIC_DATASET,
+        as_of=as_of,
+        years=tuple(sorted(set(years))),
+        required_dates=None,
+        required_subjects=None,
+        required_fields=UNIVERSE_PANEL_COLUMNS,
+        max_staleness=max_staleness,
+    )
+
+
+def load_stock_universe(
+    store: PanelStore,
+    *,
+    years: Sequence[int],
+    as_of: datetime,
+    max_staleness: timedelta | None,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> StockUniverse:
+    """Read stored lifecycle years back as a `StockUniverse`, or refuse to.
+
+    Fail-closed three times over. A partition that is missing, damaged, unprofiled, stale or
+    described by an out-of-date coverage record is blocked by `read_if_ready()` and reported
+    by its structured issue codes. A gap in the requested years is refused here, because a
+    skipped year is a silently *smaller* universe -- the same defect `build_trading_calendar`
+    refuses a hole in a day sequence for. And a partition that passes both and is internally
+    inconsistent -- an orphan delisting row, a duplicated security -- is refused afterwards by
+    `stock_universe_from_panel_rows`.
+
+    ## The snapshot date stops at the first year the store holds and the caller did not read
+
+    The universe's upper horizon is not `as_of` alone. A caller reading 1990..2019 at
+    `as_of=2026` against a store that also holds 2020 and 2024 answers a 2023 question by
+    reporting every security that died in those years as still listed -- a fail-open with no
+    signal. Nor is it "the end of the last year read": a fetch at `as_of=2019-06-28` may
+    legitimately produce no partition after 2016 because nothing listed or died in between,
+    and capping the horizon at 2016 would refuse questions the data answers perfectly well.
+
+    So it is `as_of`, pulled back to the day before the **first lifecycle year the store has
+    and this read skipped**. Reading everything gives `as_of`; reading a prefix gives the
+    boundary of that prefix; and a question past the result is `beyond_snapshot` rather than
+    an answer.
+
+    ## The gap rule, and the one gap it cannot see
+
+    Skipping a year inside the requested range is refused -- if the store holds a partition
+    for a year between the first and the last requested and the caller did not ask for it,
+    that is a read which would drop that year's listings and terminations and produce a
+    smaller universe that looks entirely plausible.
+
+    What this cannot see is a year that was **never ingested**, because a year with no
+    partition is indistinguishable from a year in which nothing listed and nothing died --
+    both are simply absent, and requiring a partition per calendar year would make a sparse
+    but correct history unloadable. Naming a year in `years` is how a caller asserts it should
+    exist (readiness then blocks it as `partition_missing`), and
+    `UniverseCompleteness.years_read` is what a report shows so the window is visible rather
+    than assumed. `store.registered_years(STOCK_BASIC_DATASET)` is the natural argument.
+
+    Starting the range after the first listing is not refused either, for the same reason, and
+    what catches it in practice is the orphan-delisting rule in
+    `stock_universe_from_panel_rows`: a security that listed in 1991 and died in 2020 has no
+    listing row inside 2015..2020, so that read raises rather than inventing one.
+    """
+    requested = tuple(sorted(set(years)))
+    if not requested:
+        raise PanelBatchError(
+            "load_stock_universe needs at least one lifecycle year; a read of no years would "
+            "produce an empty registry that answers 'nothing was listed' to every day"
+        )
+    registered = set(store.registered_years(STOCK_BASIC_DATASET)) - set(requested)
+    skipped = sorted(year for year in registered if requested[0] < year < requested[-1])
+    if skipped:
+        raise PanelBatchError(
+            f"the requested {STOCK_BASIC_DATASET} years {requested[0]}..{requested[-1]} skip "
+            f"{skipped}, which the store holds; a skipped year drops that year's listings and "
+            "terminations and produces a smaller universe that looks entirely plausible"
+        )
+    requirement = stock_universe_requirement(
+        years=requested, as_of=as_of, max_staleness=max_staleness
+    )
+    rows: list[tuple[object, ...]] = []
+    for year in requested:
+        outcome = store.read_if_ready(requirement, year=year, columns=UNIVERSE_PANEL_COLUMNS)
+        if outcome.is_blocked:
+            raise PanelStorageError(
+                f"the security registry cannot be read at {as_of.isoformat()}: "
+                f"{[issue.code for issue in outcome.readiness.issues]}; "
+                f"{'; '.join(issue.detail for issue in outcome.readiness.issues)}"
+            )
+        rows.extend(outcome.rows)
+    snapshot_date = as_of.astimezone(_resolve_timezone(date_timezone)).date()
+    unread_after = sorted(year for year in registered if year > requested[-1])
+    if unread_after:
+        snapshot_date = min(snapshot_date, date(unread_after[0], 1, 1) - timedelta(days=1))
+    return stock_universe_from_panel_rows(rows, snapshot_date=snapshot_date, years_read=requested)
+
+
+def write_name_history(
+    store: PanelStore,
+    batch: ColumnarPanelBatch,
+    *,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> PartitionRef:
+    """Write one announcement year of the rename corpus into the panel plane (`V2-P1-005`).
+
+    One request is one partition here, unlike the registry, because the descriptor dates a
+    `namechange` row at its `ann_date` and the request window filters on the same column. The
+    effective date rides along as a data column, which it may because it is published *in* the
+    announcement -- see `providers/tushare.py::ClockStrategy.calendar_static` for why that
+    asymmetry is what lets this dataset stay one row per record while `stock_basic` splits.
+
+    No subject guard here, unlike the registry: a `namechange` partition is a year of
+    announcements about whichever securities happened to be renamed, so a year carrying
+    different names than a previous fetch is news rather than a partial read.
+    """
+    if batch.dataset != NAMECHANGE_DATASET:
+        raise PanelBatchError(f"expected the {NAMECHANGE_DATASET!r} dataset, got {batch.dataset!r}")
+    if batch.status != "success":
+        raise PanelBatchError(
+            f"cannot write a {batch.status!r} batch to a partition: {batch.no_data_reason!r}"
+        )
+    year = panel_partition_year(batch, date_timezone=date_timezone)
+    return write_panel_batch(store, batch, year=year, date_timezone=date_timezone)
+
+
+def name_history_requirement(
+    *, years: Sequence[int], as_of: datetime, max_staleness: timedelta | None
+) -> ReadinessRequirement:
+    """What the rename corpus must satisfy before name histories may be built from it.
+
+    `required_dates` and `required_subjects` are waived for the reason
+    `stock_universe_requirement` waives them: a rename has no schedule, so there is no list of
+    days a year is *supposed* to contain, and the securities are what the read is for. A year
+    with genuinely no renames announced in it is a real and common answer -- 1991 has four
+    rows in the whole corpus -- which is exactly why an expectation stated here would be a
+    guess. `NameHistory.name_on()` refusing to answer before its first record is what catches
+    a year that was never ingested at the point where it would matter.
+    """
+    return ReadinessRequirement(
+        dataset=NAMECHANGE_DATASET,
+        as_of=as_of,
+        years=tuple(sorted(set(years))),
+        required_dates=None,
+        required_subjects=None,
+        required_fields=NAME_HISTORY_PANEL_COLUMNS,
+        max_staleness=max_staleness,
+    )
+
+
+def load_name_histories(
+    store: PanelStore,
+    *,
+    years: Sequence[int],
+    as_of: datetime,
+    max_staleness: timedelta | None,
+) -> Mapping[str, NameHistory]:
+    """Read the stored rename corpus back as one `NameHistory` per security, or refuse to.
+
+    Readiness is assessed once per requested year, matching `load_trading_calendar`'s shape.
+    A year that was never ingested blocks rather than being skipped, because a skipped year
+    would produce histories that are *shorter* and entirely plausible -- a security's name
+    would simply appear to have been stable across the gap.
+
+    What this cannot catch is a year the caller never asked for. That is the same limitation
+    `load_trading_calendar` has and it is answered the same way: `NameHistory.name_on()`
+    refuses to answer for a day before its own first record rather than extrapolating the
+    earliest name it happens to hold backwards.
+    """
+    requested = tuple(sorted(set(years)))
+    if not requested:
+        raise PanelBatchError(
+            "load_name_histories needs at least one announcement year; a read of no years "
+            "would produce an empty corpus that refuses every question"
+        )
+    requirement = name_history_requirement(
+        years=requested, as_of=as_of, max_staleness=max_staleness
+    )
+    rows: list[tuple[object, ...]] = []
+    for year in requested:
+        outcome = store.read_if_ready(requirement, year=year, columns=NAME_HISTORY_PANEL_COLUMNS)
+        if outcome.is_blocked:
+            raise PanelStorageError(
+                f"the rename corpus cannot be read at {as_of.isoformat()}: "
+                f"{[issue.code for issue in outcome.readiness.issues]}; "
+                f"{'; '.join(issue.detail for issue in outcome.readiness.issues)}"
+            )
+        rows.extend(outcome.rows)
+    return name_histories_from_panel_rows(rows)
 
 
 def panel_readiness_requirement(

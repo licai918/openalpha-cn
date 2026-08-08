@@ -12,10 +12,29 @@ makes those four things data instead of code, so adding a dataset is a new row i
 `fetch()` produces the row-wise `ProviderBatch` the evidence plane speaks. `fetch_panel()`
 produces the columnar `ColumnarPanelBatch` ADR-0002's panel plane speaks, and is available
 for exactly those datasets whose descriptor declares a `panel_columns` projection --
-`trade_cal` today. A dataset without one is refused by name rather than silently handed an
-empty batch, because "this dataset is not wired to the panel plane" and "this dataset has no
-rows" are different facts. Both methods decode the same response through the same clock
-table; only the assembly differs.
+`trade_cal`, `stock_basic` and `namechange` today. A dataset without one is refused by name
+rather than silently handed an empty batch, because "this dataset is not wired to the panel
+plane" and "this dataset has no rows" are different facts. Both methods decode the same
+response through the same clock table; only the assembly differs.
+
+## Some datasets serve only the panel plane (`V2-P1-005`)
+
+The refusal above now has a mirror image: `serves_evidence_plane=False` refuses `fetch()` for
+a dataset by name. Two rows use it, for one reason.
+
+`fetch()` is a payload-passthrough contract -- a `ProviderRecord`'s payload is the decoded
+response row verbatim, which is what makes an evidence citation re-provable -- and a record
+carries exactly one `available_time` for that whole payload. `stock_basic` and `namechange`
+both put facts that became knowable at *different* instants into one response row:
+`delist_date` sits beside `list_date` (a 2024 termination beside a 1990 listing), and
+`end_date` sits on the name that is currently in effect, naming a rename that may not have
+been announced yet. There is no single honest availability instant for such a row, so instead
+of choosing one and documenting the leak, the evidence path refuses. The panel path splits
+the row instead -- see `_stock_lifecycle_panel_rows`.
+
+This is a stronger response than the one `is_open` gets below, and deliberately so: an
+unparsed `is_open` is a type hazard whose blast radius ends at the caller, while a look-ahead
+that reaches a stored record is the failure `V2-P1-005` exists to prevent.
 
 ## `is_open` is parsed, never coerced -- on the panel path only
 
@@ -52,11 +71,26 @@ from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
+from openalpha_cn.domain.name_history import (
+    NAME_ANNOUNCEMENT_COLUMN,
+    NAME_COLUMN,
+    NAME_EFFECTIVE_COLUMN,
+    NAME_REASON_COLUMN,
+    NAMECHANGE_DATASET,
+)
 from openalpha_cn.domain.panel_batch import (
     ColumnarPanelBatch,
     PanelColumn,
     PanelColumnKind,
     TimelineColumns,
+)
+from openalpha_cn.domain.stock_universe import (
+    DELISTING_EVENT,
+    LIFECYCLE_DATE_COLUMN,
+    LIFECYCLE_EVENT_COLUMN,
+    LISTING_EVENT,
+    STOCK_BASIC_DATASET,
+    UNIVERSE_EXCHANGE_COLUMN,
 )
 from openalpha_cn.domain.time import Timeline
 from openalpha_cn.domain.trading_calendar import (
@@ -121,10 +155,10 @@ class UrllibTushareTransport:
 class ClockStrategy(StrEnum):
     """How a dataset's four PIT clocks (event/available/ingested/revision) are derived.
 
-    ``daily_close`` (the ``daily`` dataset) and ``calendar_publication`` (``trade_cal``) have
-    real production consumers. ``announcement`` and ``calendar_static`` are defined and
-    independently tested against synthetic data so P1 can wire real datasets onto them
-    without changing this shape.
+    ``daily_close`` (the ``daily`` dataset), ``calendar_publication`` (``trade_cal``) and
+    ``calendar_static`` (both of ``V2-P1-005``'s registry datasets) have real production
+    consumers. ``announcement`` is defined and independently tested against synthetic data so
+    P1 can wire real financial datasets onto it without changing this shape.
     """
 
     daily_close = "daily_close"
@@ -136,8 +170,19 @@ class ClockStrategy(StrEnum):
     calendar_static = "calendar_static"
     """Static reference data: event_time == available_time == that day's 00:00.
 
-    Still without a production consumer, and ``trade_cal`` deliberately does **not** use it --
-    see ``calendar_publication`` for why a calendar is the one dataset this rule is wrong for.
+    ``trade_cal`` deliberately does **not** use it -- see ``calendar_publication`` for why a
+    calendar is the one dataset this rule is wrong for. Both of ``V2-P1-005``'s datasets do,
+    for the same underlying reason: each of their panel rows records one thing that happened
+    on one day and became knowable that day.
+
+    - ``stock_basic``'s lifecycle rows are dated at the listing or the delisting. That is only
+      not a look-ahead because the response row is *split* first, so no row carries a fact
+      from a different instant -- see ``_stock_lifecycle_panel_rows``.
+    - ``namechange``'s rows are dated at ``ann_date``, the announcement. The date the new name
+      takes effect is published *in* that announcement, so it is knowable at the same instant
+      and rides along as an ordinary column. This is exactly the asymmetry that forces the
+      registry to split and lets the rename corpus stay one row: a rename's effective date is
+      announced with it, a security's delisting date is not announced with its listing.
     """
 
     calendar_publication = "calendar_publication"
@@ -188,14 +233,50 @@ class TushareDatasetDescriptor(BaseModel):
     subject_field: str | None = Field(default=None)
     """Column holding the subject (e.g. ``ts_code``); ``None`` for calendar-style datasets."""
     date_field: str = Field(min_length=1, max_length=128)
-    """Column holding the record's date (e.g. ``trade_date`` / ``cal_date`` / ``end_date``)."""
+    """Column that dates a row **after** ``panel_rows`` has run.
+
+    For a dataset without an expansion that is a response column (``trade_date`` /
+    ``cal_date``). For one with an expansion it may name a column the expansion synthesises
+    (``lifecycle_date``), in which case the raw response is checked against
+    ``required_response_fields`` instead -- and such a dataset is panel-only, because there is
+    no verbatim response row for ``fetch()`` to hand back under a single clock anyway.
+    """
     clock: ClockStrategy
     params_builder: Callable[[ProviderRequest], dict[str, str]]
     """Builds the Tushare ``params`` object from a ``ProviderRequest``."""
+    response_fields: str = Field(default="", max_length=2048)
+    """The ``fields`` string sent to Tushare; ``""`` asks for that endpoint's defaults.
+
+    Not decoration for ``stock_basic``: its default field set is ``ts_code, symbol, name,
+    area, industry, cnspell, market, list_date, act_name, act_ent_type`` and contains **no
+    ``delist_date``**, so a request that leaves this empty cannot see the column the whole
+    survivorship question turns on.
+    """
+    required_response_fields: tuple[str, ...] = ()
+    """Response columns that must be present; ``()`` means ``(date_field,)``.
+
+    Declared per dataset so the schema check is about what this descriptor actually reads,
+    not only about the one column that happens to date a row.
+    """
     source_uri_template: str = Field(min_length=1, max_length=2048)
     """``str.format`` template with ``{dataset}``, ``{subject}``, and ``{date}`` placeholders."""
     panel_columns: tuple[TusharePanelColumn, ...] = ()
     """Panel-plane projection, or ``()`` for a dataset ``fetch_panel()`` does not serve yet."""
+    panel_rows: Callable[[dict[str, Any]], tuple[dict[str, Any], ...]] | None = None
+    """Expands one response row into the panel rows it carries; ``None`` means one-to-one.
+
+    Exists because a response row is not always a unit of knowability. A ``stock_basic`` row
+    carries a listing and, sometimes, a delisting, and no single ``available_time`` is right
+    for both -- see ``_stock_lifecycle_panel_rows``.
+    """
+    serves_evidence_plane: bool = True
+    """Whether ``fetch()`` serves this dataset; see this module's docstring for the two that
+    do not."""
+
+    @property
+    def checked_response_fields(self) -> tuple[str, ...]:
+        """The response columns ``_response_rows`` verifies are present."""
+        return self.required_response_fields or (self.date_field,)
 
 
 def _trade_date_params(request: ProviderRequest) -> dict[str, str]:
@@ -236,6 +317,146 @@ def _trade_cal_params(request: ProviderRequest) -> dict[str, str]:
     exchange = request.subjects[0] if request.subjects else TRADING_CALENDAR_DEFAULT_EXCHANGE
     year = request.as_of.astimezone(_CHINA_TZ).year
     return {"exchange": exchange, "start_date": f"{year}0101", "end_date": f"{year}1231"}
+
+
+STOCK_BASIC_LIST_STATUS: Final[str] = "L,D"
+"""Both halves of the registry in one request, measured rather than assumed.
+
+A live probe on 2026-08-08: `list_status="L"` (and the bare request, and `list_status=""`)
+returns **5,539** rows, all listed; `list_status="D"` returns **339**, all with a
+`delist_date`; `list_status="P"` returns **0**. `"L,D"` returns **5,878** -- the union, in one
+call, with the two halves distinguishable by whether `delist_date` is populated. `"LD"` and
+`"L|D"` both return zero rows, so the comma is the separator the endpoint accepts and not a
+lucky coincidence of parsing.
+"""
+
+STOCK_BASIC_FIELDS: Final[str] = "ts_code,name,exchange,market,list_status,list_date,delist_date"
+"""What this descriptor asks for. `delist_date` is absent from the endpoint's defaults.
+
+`name` and `market` are requested but deliberately **not** projected onto the panel: they are
+attributes of the snapshot with no history and no clock (the registry calls `000005.SZ`
+`ST星源(退)` today, and stamping that onto its 1990-12-10 listing row would be a 34-year
+look-ahead). They are asked for so that a schema drift in the registry's shape is visible in
+the raw response rather than only in the three columns that survive projection.
+"""
+
+NAMECHANGE_FIELDS: Final[str] = "ts_code,name,start_date,end_date,ann_date,change_reason"
+"""The full `namechange` field set. `end_date` is requested and never stored -- it is the
+witness `domain/name_history.py` cross-checks the derived intervals against."""
+
+
+def _stock_basic_params(request: ProviderRequest) -> dict[str, str]:
+    """Ask for the listed **and** the delisted registry in one call.
+
+    Subjects are refused rather than passed through as `ts_code`. The endpoint accepts that
+    filter, and this dataset must not: a `stock_basic` partition is the universe, a filtered
+    universe is not one, and `StockUniverse.completeness()` would report a security count that
+    described the filter rather than the market. `PanelStore` replaces a partition whole, so a
+    filtered write would also silently destroy a full one.
+    """
+    if request.subjects:
+        raise ProviderFailure(
+            provider_id=_PROVIDER_ID,
+            category="configuration",
+            message=(
+                f"{STOCK_BASIC_DATASET} serves the whole registry in one partition; got "
+                f"subjects {list(request.subjects)}, and a filtered universe is not a universe"
+            ),
+            retryable=False,
+        )
+    return {"list_status": STOCK_BASIC_LIST_STATUS}
+
+
+def _namechange_params(request: ProviderRequest) -> dict[str, str]:
+    """Request one whole **announcement** year: `{start_date, end_date}`.
+
+    The window filters `ann_date`, not `start_date` -- measured: the 2012 window returns 320
+    rows whose announcement dates span 2012-01-05..2012-12-31 while their effective dates run
+    to 2014-08-08. That is the right key for this dataset, because `ann_date` is what
+    `available_time` is derived from, so one request is one partition is one availability
+    year.
+
+    The alternative whole-market pull, `offset`/`limit` paging, is **unsound** and was
+    measured to be: two pages of 10,000 returned 14,166 rows containing 380 exact duplicates
+    and 13,786 distinct ones, and among the missing was a genuine record the per-`ts_code`
+    query returns (`000001.SZ` / `S深发展A`, effective 2006-10-09). Re-assembling the corpus
+    from 37 announcement-year windows instead yields 14,166 *distinct* rows and recovers it.
+
+    The year is `as_of`'s year *in Asia/Shanghai*: 2024-12-31 17:00Z is already 2025 in
+    Shanghai, and asking UTC would fetch the wrong year for every late-evening request on the
+    last day of a year. `_trade_cal_params` takes the same care for the same reason.
+    """
+    if request.subjects:
+        raise ProviderFailure(
+            provider_id=_PROVIDER_ID,
+            category="configuration",
+            message=(
+                f"{NAMECHANGE_DATASET} serves one announcement year of the whole market per "
+                f"request; got subjects {list(request.subjects)}, and a partition holding one "
+                "name would replace the year's partition rather than add to it"
+            ),
+            retryable=False,
+        )
+    year = request.as_of.astimezone(_CHINA_TZ).year
+    return {"start_date": f"{year}0101", "end_date": f"{year}1231"}
+
+
+def _stock_lifecycle_panel_rows(row: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    """Split one registry row into its lifecycle events: a listing, and maybe a delisting.
+
+    This is the expansion `V2-P1-005` turns on, and the argument for it is a dilemma rather
+    than a preference. A panel row carries one `available_time` for everything in it. Give a
+    whole registry row the listing's instant and a 2024 termination becomes visible to a 2019
+    reader -- a look-ahead. Give it the termination's instant and the security disappears from
+    every `as_of` before it died -- survivorship bias, the exact defect this issue names. The
+    two facts therefore cannot share a row, and the point-in-time filter then does the right
+    thing at both ends without any dataset-specific rule downstream.
+
+    An absent `delist_date` is `None` or `""` depending on how the response was serialised;
+    both mean "still listed" and neither invents a delisting row.
+    """
+    ts_code = row["ts_code"]
+    exchange = row[UNIVERSE_EXCHANGE_COLUMN]
+    listing = {
+        "ts_code": ts_code,
+        UNIVERSE_EXCHANGE_COLUMN: exchange,
+        LIFECYCLE_EVENT_COLUMN: LISTING_EVENT,
+        LIFECYCLE_DATE_COLUMN: row["list_date"],
+    }
+    delisted_on = row["delist_date"]
+    if delisted_on is None or delisted_on == "":
+        return (listing,)
+    return (
+        listing,
+        {
+            "ts_code": ts_code,
+            UNIVERSE_EXCHANGE_COLUMN: exchange,
+            LIFECYCLE_EVENT_COLUMN: DELISTING_EVENT,
+            LIFECYCLE_DATE_COLUMN: delisted_on,
+        },
+    )
+
+
+def _lifecycle_event_name(value: object) -> object:
+    """Pass a lifecycle event through, refusing anything the domain contract does not know."""
+    if value not in (LISTING_EVENT, DELISTING_EVENT):
+        raise ValueError(
+            f"lifecycle_event must be {LISTING_EVENT!r} or {DELISTING_EVENT!r}, got {value!r}"
+        )
+    return value
+
+
+def _required_text(value: object) -> object:
+    """Pass a non-empty string through; refuse anything else.
+
+    A `None` in a projected string column is a legal `PanelColumn` value (panel data is
+    sparse), so nothing downstream would object to a missing exchange or a missing name --
+    it would simply become a row that groups under `None`. These columns are keys, not
+    observations, so a missing one is a malformed response.
+    """
+    if type(value) is not str or not value:
+        raise ValueError(f"expected a non-empty string, got {type(value).__name__} {value!r}")
+    return value
 
 
 _OPEN_FLAGS: Final[dict[str, bool]] = {"0": False, "1": True}
@@ -320,6 +541,88 @@ TUSHARE_DATASETS: tuple[TushareDatasetDescriptor, ...] = (
             ),
         ),
     ),
+    TushareDatasetDescriptor(
+        dataset=STOCK_BASIC_DATASET,
+        kind=STOCK_BASIC_DATASET,
+        subject_field="ts_code",
+        # Synthesised by `_stock_lifecycle_panel_rows`, not a response column: the response
+        # has two date columns and the expansion is what picks one per row.
+        date_field=LIFECYCLE_DATE_COLUMN,
+        clock=ClockStrategy.calendar_static,
+        params_builder=_stock_basic_params,
+        response_fields=STOCK_BASIC_FIELDS,
+        required_response_fields=("ts_code", "exchange", "list_date", "delist_date"),
+        source_uri_template="tushare://{dataset}/{subject}/{date}",
+        panel_rows=_stock_lifecycle_panel_rows,
+        serves_evidence_plane=False,
+        panel_columns=(
+            TusharePanelColumn(
+                name=LIFECYCLE_EVENT_COLUMN,
+                kind="string",
+                source_field=LIFECYCLE_EVENT_COLUMN,
+                parse=_lifecycle_event_name,
+            ),
+            TusharePanelColumn(
+                name=LIFECYCLE_DATE_COLUMN,
+                kind="string",
+                source_field=LIFECYCLE_DATE_COLUMN,
+                parse=_calendar_date_text,
+            ),
+            TusharePanelColumn(
+                name=UNIVERSE_EXCHANGE_COLUMN,
+                kind="string",
+                source_field=UNIVERSE_EXCHANGE_COLUMN,
+                parse=_required_text,
+            ),
+        ),
+    ),
+    TushareDatasetDescriptor(
+        dataset=NAMECHANGE_DATASET,
+        kind=NAMECHANGE_DATASET,
+        subject_field="ts_code",
+        # The announcement, not the effect. A rename's effective date is published *in* the
+        # announcement, so it is knowable at `ann_date` and rides along as a column; dating
+        # the row at `start_date` instead would put a 2012 partition's rows into 2014, which
+        # `PanelStore.record_coverage` refuses outright and rightly so -- a request window
+        # here is an *announcement* window, so one fetch would straddle three partitions and
+        # three fetches would contend for one.
+        date_field="ann_date",
+        clock=ClockStrategy.calendar_static,
+        params_builder=_namechange_params,
+        response_fields=NAMECHANGE_FIELDS,
+        required_response_fields=("ts_code", "name", "start_date", "ann_date"),
+        source_uri_template="tushare://{dataset}/{subject}/{date}",
+        serves_evidence_plane=False,
+        # `end_date` is fetched and not projected: it is derivable from the successor's
+        # `start_date` and, unlike the successor, is gated by no announcement, so storing it
+        # would put an unannounced future rename on the record currently in effect.
+        panel_columns=(
+            TusharePanelColumn(
+                name=NAME_COLUMN,
+                kind="string",
+                source_field="name",
+                parse=_required_text,
+            ),
+            TusharePanelColumn(
+                name=NAME_EFFECTIVE_COLUMN,
+                kind="string",
+                source_field="start_date",
+                parse=_calendar_date_text,
+            ),
+            TusharePanelColumn(
+                name=NAME_ANNOUNCEMENT_COLUMN,
+                kind="string",
+                source_field="ann_date",
+                parse=_calendar_date_text,
+            ),
+            TusharePanelColumn(
+                name=NAME_REASON_COLUMN,
+                kind="string",
+                source_field="change_reason",
+                parse=_required_text,
+            ),
+        ),
+    ),
 )
 
 
@@ -393,12 +696,40 @@ def _announcement_timeline(row: dict[str, Any], date_field: str, ingested_at: da
 def _calendar_static_timeline(
     row: dict[str, Any], date_field: str, ingested_at: datetime
 ) -> Timeline:
-    """Static metadata: event time and availability time are the same midnight."""
+    """Static metadata: event time and availability time are the same midnight.
+
+    ``revision_time`` equals ``available_time`` for the reason ``trade_cal``'s does: the
+    response carries no revision instant, and every alternative fabricates one. Read a
+    ``revised_row_count == 0`` on either of these datasets as "unmeasured", not "none".
+
+    ## Why ``ingested_time`` is raised rather than ``available_time`` lowered
+
+    Tushare sometimes serves a row whose own date is in the future of the fetch. One live case
+    on 2026-08-08: the ``namechange`` corpus already carried ``920165.BJ`` / 珈凯生物,
+    announced and effective 2026-08-11. ``Timeline`` forbids
+    ``available_time > ingested_time``, so such a row cannot be represented as it stands, and
+    exactly two repairs exist.
+
+    Lowering ``available_time`` to the fetch instant is what ``_calendar_publication_timeline``
+    does for ``trade_cal``, and it is right *there* because a published calendar we
+    demonstrably hold was demonstrably published. It is wrong here: a rename we hold has not
+    necessarily been announced, and lowering the instant would make an unannounced rename
+    readable -- the dangerous direction, and an invented fact.
+
+    Raising ``ingested_time`` to the availability instant overstates only the one clock no
+    point-in-time filter consults (``is_visible_at`` reads ``available_time``, and
+    ``PartitionCoverage`` summarises event, availability and revision). It is still an
+    overstatement and is named here rather than hidden: the row is dropped by the
+    point-in-time filter immediately afterwards for every request whose ``as_of`` does not run
+    ahead of its own clock, so the raised value reaches a stored partition only for a caller
+    who has arranged for it to. ``tests/contract/providers/test_tushare_registry_datasets.py``
+    pins both branches.
+    """
     moment = datetime.combine(_parse_tushare_date(row[date_field]), time(0, 0), tzinfo=_CHINA_TZ)
     return Timeline(
         event_time=moment,
         available_time=moment,
-        ingested_time=ingested_at,
+        ingested_time=max(ingested_at, moment),
         revision_time=moment,
     )
 
@@ -540,16 +871,30 @@ def _response_rows(
         raise ValueError("Tushare fields must be a string array")
     if not isinstance(items, list):
         raise ValueError("Tushare items must be an array")
-    if descriptor.date_field not in fields:
-        raise ValueError(
-            f"Tushare response for {descriptor.dataset} has no {descriptor.date_field} column"
-        )
+    for required in descriptor.checked_response_fields:
+        if required not in fields:
+            raise ValueError(f"Tushare response for {descriptor.dataset} has no {required} column")
     rows: list[dict[str, Any]] = []
     for item in items:
         if not isinstance(item, list) or len(item) != len(fields):
             raise ValueError("Tushare item does not match fields")
         rows.append(dict(zip(fields, item, strict=True)))
     return rows
+
+
+def _expand_panel_rows(
+    descriptor: TushareDatasetDescriptor, rows: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Apply the descriptor's `panel_rows` expansion, or hand the rows back unchanged.
+
+    Panel-path only. `fetch()` never runs this, because an expansion is precisely the
+    admission that the response row is not a unit of knowability, and a descriptor that
+    declares one is refused on the evidence plane for that reason.
+    """
+    if descriptor.panel_rows is None:
+        return rows
+    expand = descriptor.panel_rows
+    return [expanded for row in rows for expanded in expand(row)]
 
 
 def _panel_no_data_reason(
@@ -622,8 +967,26 @@ class TushareProvider:
         return self._metadata
 
     def fetch(self, request: ProviderRequest) -> ProviderBatch:
-        """Fetch a descriptor-table dataset or raise a structured failure."""
+        """Fetch a descriptor-table dataset or raise a structured failure.
+
+        Refuses a descriptor that declares ``serves_evidence_plane=False``. See this module's
+        docstring: an evidence record's payload is the response row verbatim under one
+        ``available_time``, and two of this table's datasets put facts with different
+        availability instants into one row.
+        """
         descriptor = self._descriptor(request)
+        if not descriptor.serves_evidence_plane:
+            raise ProviderFailure(
+                provider_id=self.metadata.provider_id,
+                category="configuration",
+                message=(
+                    f"Tushare dataset {request.dataset} puts facts that became knowable at "
+                    "different instants into one response row, so a verbatim evidence record "
+                    "has no single available_time; it is served only on the panel plane, via "
+                    "fetch_panel()"
+                ),
+                retryable=False,
+            )
         try:
             response = self._post(descriptor, request)
             records = self._decode(descriptor=descriptor, response=response, request=request)
@@ -765,7 +1128,7 @@ class TushareProvider:
                 "api_name": descriptor.dataset,
                 "token": self._token,
                 "params": descriptor.params_builder(request),
-                "fields": "",
+                "fields": descriptor.response_fields,
             }
         )
 
@@ -781,9 +1144,13 @@ class TushareProvider:
         `served` is the number of rows Tushare actually returned, before the clock filter. It
         is what separates "the exchange has not published this range" from "this was not yet
         knowable at the requested ``as_of``" -- two very different empty results the caller
-        could not otherwise tell apart.
+        could not otherwise tell apart. It counts **panel** rows, after any expansion, because
+        that is the population the filter runs over; for a one-to-one descriptor the two are
+        the same number.
         """
-        items = _response_rows(descriptor, response, self.metadata.provider_id)
+        items = _expand_panel_rows(
+            descriptor, _response_rows(descriptor, response, self.metadata.provider_id)
+        )
         ingested_at = self._clock()
         kept: list[tuple[date, dict[str, Any], Timeline]] = []
         for row in items:
