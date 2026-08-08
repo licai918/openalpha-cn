@@ -13,12 +13,25 @@ perfectly ordinary downward dependency. It is not there because `V2-P1-001` pinn
 stronger property with `grimp`:
 `tests/unit/test_import_layering.py::test_panel_package_has_zero_direct_edges_into_any_other_openalpha_cn_subpackage`
 asserts that `openalpha_cn.panel` imports *no* sibling subpackage at all -- DuckDB and the
-standard library only. Putting the seam under `panel/` would break that assertion, and the
-project's answer to a package-scoped layering rule blocking a natural home is already on
-record: `openalpha_cn/batch_contracts.py` was created as a neutral top-level sibling for
-exactly this reason (V2-P0B-012), after a Critical review rejected relaxing the rule
-instead. This module follows that precedent -- `panel/` stays self-contained, `domain/`
-stays pure, and the one module that has to know about both sits above them.
+standard library only. Putting the seam under `panel/` would break that assertion.
+
+A neutral top-level module is one answer to that, and the project has reached for it before:
+`openalpha_cn/batch_contracts.py` was created as a neutral top-level sibling in V2-P0B-012,
+after a Critical review rejected relaxing a layering rule instead. The precedent is about the
+*response* -- move the module rather than weaken the contract -- and not about the direction,
+which is not the same here and should not be read as such: `batch_contracts` sits *below* the
+packages it decouples (`storage -> batch_contracts -> domain`), whereas this module sits
+*above* the package it must not be inside (`panel_ingest -> panel`).
+
+Nor is a top-level module the only shape that satisfies the rule. The seam could instead be
+inverted with the Protocol-plus-injection pattern this codebase already uses throughout
+(`runtime/repository.py`'s `RunRepository`, `evidence/service.py`'s `EvidenceStore`, and the
+rest of `OA-OPS-019`): `panel/` would declare the narrow writer Protocol it needs, and a
+composition root would hand it an implementation. This task's reviewer built exactly that in
+a scratch worktree and reported it working. It is not what is here because the seam
+currently has exactly one consumer and one producer, and a Protocol pair plus a composition
+edge is a heavier structure than a ten-line translation table earns until `V2-P1-004` gives
+it a second caller. If that changes, the inversion is the upgrade path, not a rewrite.
 
 ## Why it is thin on purpose
 
@@ -30,23 +43,46 @@ here would hand back the throughput the contract exists to win.
 
 ## Why the type table is closed
 
-`PanelStore.write_partition` builds its `CREATE TABLE` DDL by interpolation --
-`f'"{column.name}" {column.duckdb_type}'` -- and `_build_scan_sql` builds its projection the
-same way. Neither operand is escaped beyond the surrounding double quotes, so a column name
-containing `"` closes the quote and everything after it executes as SQL, and a
-`duckdb_type` is interpolated with no quoting at all. Both shapes were reproduced directly
-against `43f3522` while writing this task (see this task's report). Nothing routed through
-this module can express either one:
+`PanelStore.write_partition` builds its `CREATE TABLE` DDL by interpolation and
+`_build_scan_sql` builds its projection and `WHERE` keys the same way. Two operands used to
+reach that SQL unprotected -- a column name inside bare double quotes, which a `"` in the
+name closes, and a `duckdb_type` with no quoting at all -- and both were reproduced as live
+injections, first against `43f3522` and again against `cb9e8f4` (see task 25's review
+report).
 
-- the DuckDB type is never caller-supplied; it comes from `PANEL_DUCKDB_TYPES`, keyed by a
-  `Literal` kind that the contract has already validated;
-- the column name has already passed `validate_panel_identifier()`, which admits only plain
-  ASCII identifiers, at `PanelColumn` construction.
+An earlier version of this section claimed that "nothing routed through this module can
+express either one", and deferred fixing `store.py` on the strength of that claim. The claim
+was false, and the review demonstrated it: `ColumnarPanelBatch.columns` is an ordinary tuple
+field, so a column object that never ran `PanelColumn.__post_init__` -- a duck-typed
+stand-in, or a subclass that overrides it away -- carried a hostile name straight through to
+the DDL, and the `ATTACH` inside that name created a file at a path of the attacker's
+choosing while `write_panel_batch()` returned normally. Two things changed as a result:
 
-That is a structural property of this path, not a fix to `PanelStore` itself -- `store.py`
-remains as `V2-P1-001` left it, and its own callers are still responsible for what they pass
-it. Closing the gap inside `store.py` is recorded as a follow-up rather than folded into this
-task.
+- `ColumnarPanelBatch._check_shape` now re-validates every caller-supplied column's name and
+  kind (and rejects anything that is not a `PanelColumn`) instead of trusting that
+  construction ran. That is what makes the property above actually hold for this path.
+- `panel/store.py` escapes every identifier it interpolates and accepts a `duckdb_type` only
+  from the closed `DUCKDB_COLUMN_TYPES` set. The gap is closed at the storage layer too, so
+  it no longer depends on any one caller's discipline.
+
+The type table here stays closed for the same reason it always was: the DuckDB type is never
+caller-supplied, it comes from `PANEL_DUCKDB_TYPES` keyed by a validated logical kind, and
+`tests/integration/panel/test_panel_store_hardening.py` pins its values as a subset of the
+store's own accepted set.
+
+## Known gaps, recorded rather than fixed here
+
+- **`content_digest` is never persisted.** `write_panel_batch()` hands `PanelStore` the
+  batch's rows and column specs; the store computes its own `content_hash` over that
+  material for idempotency, and the batch's digest -- the thing that would let a *later*
+  reader re-prove that a partition still holds what the provider sent -- is dropped on the
+  floor. Today the digest is only checkable while the batch object is still in memory. Giving
+  the catalog a column for it belongs with `V2-P1-003`'s data catalog, which is where
+  partition-level metadata is being designed.
+- **No `src/` caller yet.** Nothing in `src/openalpha_cn` calls `write_panel_batch()`; the
+  first real one arrives with `V2-P1-004`, when a dataset is actually wired up. Until then
+  this seam is exercised by tests only, which is expected for a contract that deliberately
+  landed ahead of its consumer.
 
 ## What is deliberately not decided here
 

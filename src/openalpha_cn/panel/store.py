@@ -24,12 +24,46 @@ years of history accumulate, while staying coarse enough that ~2,440 trading day
 single field fit inside one partition without generating thousands of tiny files (the
 opposite failure mode from `ParquetEvidenceStore`'s one-file-per-append).
 
+## SQL identifier and type handling
+
+Every identifier this module interpolates into SQL goes through `_quote_identifier()`, which
+doubles any embedded `"` -- DuckDB's own escape for a quoted identifier -- so the value can
+only ever be read back as a name, never as syntax. Three call sites depend on it:
+`write_partition()`'s `CREATE TABLE` column list, `_build_scan_sql()`'s `SELECT` projection,
+and `_build_scan_sql()`'s `WHERE` keys. All three previously interpolated the raw string
+inside bare double quotes, and all three were reproduced as live injections against
+`cb9e8f4` (see `V2-P1-002`'s review report): a column *type* of `DOUBLE); ATTACH '<path>' AS
+evil; CREATE TABLE evil.pwned(x INTEGER` created an attacker-named DuckDB file on disk; a
+projected column *name* carrying a statement break ran a `COPY ... TO '<path>'` that landed a
+file on disk; and a *filter key* of `ts_code" = 'nope' OR TRUE OR "ts_code` neutralised the
+`WHERE` clause so `query()` returned every row of the partition instead of the one the caller
+asked for.
+
+Escaping, rather than a plain-identifier whitelist, is the deliberate choice at this layer.
+`PanelStore` is a storage primitive with no opinion about what a panel column may be called;
+the *policy* that panel column names are plain ASCII identifiers belongs to the contract that
+produces them (`domain/panel_batch.py::validate_panel_identifier`, enforced at `PanelColumn`
+construction) and is applied one layer up. Restating that policy here would put a third copy
+of a naming rule in the tree -- `dataset` validation is already duplicated between this module
+and the contract, with a dedicated drift test holding the two copies together -- and a copy
+that drifts is worse than no copy. Escaping has no policy content to drift: it is complete for
+any identifier DuckDB itself accepts. The two inputs escaping cannot make safe are refused
+outright instead: an empty name (DuckDB: "zero-length delimited identifier") and a name
+containing a NUL byte (which truncates DuckDB's parse of the quoted identifier). Both would
+otherwise surface as a raw `duckdb.ParserException` rather than a `PanelStorageError`.
+
+A `ColumnSpec`'s `duckdb_type` is *not* an identifier and cannot be quoted, so it is
+restricted to the closed `DUCKDB_COLUMN_TYPES` set at `ColumnSpec` construction -- an
+arbitrary type string can never reach the DDL, because a `ColumnSpec` carrying one cannot be
+built in the first place.
+
 ## Dataset name validation
 
-`dataset` must be a single, plain path segment -- no `/`, no `..`, not absolute -- enforced
-by `_validate_dataset()` at the top of every public method that accepts it (`write_partition()`,
-`query()`, `profile_query()`), before anything else runs. This closes a real gap a review
-found in the first version of this module: `write_partition()` built
+`dataset` must be a single, plain path segment -- no `/`, no `..`, not absolute, and no
+leading or trailing whitespace -- enforced by `_validate_dataset()` at the top of every public
+method that accepts it (`write_partition()`, `query()`, `profile_query()`), before anything
+else runs. This closes a real gap a review found in the first version of this module:
+`write_partition()` built
 `self.root / dataset / str(year)` and `profile_query()` built its profiling temp filename
 from an f-string containing `dataset`, neither validated. A relative `dataset` containing
 `..` escaped `root` once the OS resolved the traversal; an *absolute* `dataset` made
@@ -206,8 +240,45 @@ import duckdb
 
 class PanelStorageError(RuntimeError):
     """Raised for panel-store usage errors: an empty write batch, a malformed column
-    list, a malformed `dataset` name, or a `profile_query()` against a partition the
-    catalog has never registered."""
+    list, a malformed column name or SQL type, a malformed `dataset` name, or a
+    `profile_query()` against a partition the catalog has never registered."""
+
+
+DUCKDB_COLUMN_TYPES: frozenset[str] = frozenset(
+    {"BIGINT", "BOOLEAN", "DOUBLE", "TIMESTAMPTZ", "VARCHAR"}
+)
+"""Every DuckDB SQL type a `ColumnSpec` may carry.
+
+Deliberately closed and deliberately small: a `duckdb_type` is interpolated into
+`write_partition()`'s `CREATE TABLE` DDL and, unlike a column name, has no quoted form that
+would make an arbitrary string inert (see the module docstring's "SQL identifier and type
+handling"). It holds exactly the five types this codebase writes today -- the five
+`panel_ingest.PANEL_DUCKDB_TYPES` maps its logical column kinds onto, which
+`tests/integration/panel/test_panel_store_hardening.py` pins against this set. Widening it is
+a one-line, reviewed change; accepting an unlisted string is not.
+"""
+
+
+def _quote_identifier(name: str, *, role: str = "column") -> str:
+    """Return `name` as a DuckDB quoted identifier, escaping any `"` it contains.
+
+    DuckDB's escape for a double quote inside a delimited identifier is a doubled `""`, so
+    `close" INTEGER); ATTACH ...` becomes the literal column name
+    `"close"" INTEGER); ATTACH ..."` rather than a quote-closing statement break. This is the
+    single place any identifier becomes SQL text in this module; see the module docstring for
+    why escaping rather than a whitelist is the right mechanism *at this layer*.
+
+    Two inputs escaping cannot rescue are refused here so they fail as `PanelStorageError`
+    rather than as a raw `duckdb.ParserException`: an empty name (DuckDB rejects a
+    zero-length delimited identifier) and a name containing a NUL byte (DuckDB stops parsing
+    the identifier at the NUL, so the closing quote is never seen).
+    """
+    if not name:
+        raise PanelStorageError(f"{role} name must not be empty")
+    if "\x00" in name:
+        raise PanelStorageError(f"{role} name must not contain a NUL byte; got {name!r}")
+    escaped = name.replace('"', '""')
+    return f'"{escaped}"'
 
 
 def _validate_dataset(dataset: str) -> None:
@@ -236,9 +307,21 @@ def _validate_dataset(dataset: str) -> None:
     this task's review report). A single call to this function, at the very top of every
     public method that accepts `dataset`, closes both: every value it accepts is
     guaranteed, structurally, to resolve to a child of `root` once joined.
+
+    Leading and trailing whitespace is refused too, rather than stripped. `" prices "` is a
+    legal directory name on every filesystem this runs on, so accepting it would create a
+    partition directory whose name no human types correctly and which reads as identical to
+    `prices` in every log line; stripping it instead would mean the caller's `dataset` and
+    the directory on disk are different strings, silently. `domain/panel_batch.py`'s
+    `validate_panel_dataset` refuses the same shape, for the same reason, and
+    `tests/unit/domain/test_panel_batch.py` pins the two copies together.
     """
     if not dataset:
         raise PanelStorageError("dataset must not be empty")
+    if dataset != dataset.strip():
+        raise PanelStorageError(
+            f"dataset must not have leading or trailing whitespace; got {dataset!r}"
+        )
     segment = Path(dataset)
     if segment.is_absolute() or segment.name != dataset or dataset in {".", ".."}:
         raise PanelStorageError(
@@ -252,10 +335,24 @@ class ColumnSpec:
     """One partition column's name and DuckDB SQL type (e.g. ``ColumnSpec("close",
     "DOUBLE")``). A plain dataclass, not a Pydantic model -- see the module docstring's
     "What is deliberately not here" section; nothing on this plane's write or read path
-    needs validation or content-hash caching at the per-field level."""
+    needs validation or content-hash caching at the per-field level.
+
+    `duckdb_type` is the one field that *is* validated, and it is validated here rather than
+    in `write_partition()` so that an invalid spec cannot be constructed at all: the type is
+    interpolated into `CREATE TABLE` DDL with no quoting available to it (see the module
+    docstring's "SQL identifier and type handling"). `name` is not validated -- it is escaped
+    at every SQL call site instead, for the reasons that section gives.
+    """
 
     name: str
     duckdb_type: str
+
+    def __post_init__(self) -> None:
+        if self.duckdb_type not in DUCKDB_COLUMN_TYPES:
+            raise PanelStorageError(
+                f"column {self.name!r} has an unsupported DuckDB type "
+                f"{self.duckdb_type!r}; expected one of {sorted(DUCKDB_COLUMN_TYPES)}"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -354,7 +451,9 @@ class PanelStore:
         # `FileNotFoundError`. Reproduced with 8 same-process threads before this fix; see
         # `test_write_partition_survives_concurrent_threads_writing_the_same_partition`.
         temporary = target.with_name(f"{target.name}.{uuid.uuid4().hex}.tmp")
-        column_ddl = ", ".join(f'"{column.name}" {column.duckdb_type}' for column in columns)
+        column_ddl = ", ".join(
+            f"{_quote_identifier(column.name)} {column.duckdb_type}" for column in columns
+        )
         placeholders = ", ".join("?" for _ in columns)
         with duckdb.connect(":memory:") as staging:
             staging.execute(f"CREATE TABLE staging ({column_ddl})")
@@ -522,11 +621,11 @@ def _build_scan_sql(
 ) -> tuple[str, list[object]]:
     if not columns:
         raise PanelStorageError("must request at least one column")
-    column_list = ", ".join(f'"{name}"' for name in columns)
+    column_list = ", ".join(_quote_identifier(name) for name in columns)
     parameters: list[object] = [str(partition_path)]
     where_sql = ""
     if filters:
-        clauses = [f'"{key}" = ?' for key in filters]
+        clauses = [f"{_quote_identifier(key, role='filter')} = ?" for key in filters]
         parameters.extend(filters.values())
         where_sql = " WHERE " + " AND ".join(clauses)
     return f"SELECT {column_list} FROM read_parquet(?){where_sql}", parameters

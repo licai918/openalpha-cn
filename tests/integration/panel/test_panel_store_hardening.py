@@ -1,7 +1,9 @@
-"""Hardening tests closing three review findings against `PanelStore` (task 24, follow-up
-to V2-P1-001's `6de598e`): a `dataset`-traversal write primitive, a `profile_query()` race
-that contradicted its own docstring, and a `write_partition()` write-write conflict the
-original concurrency testing never actually exercised.
+"""Hardening tests closing four review findings against `PanelStore`: a `dataset`-traversal
+write primitive, a `profile_query()` race that contradicted its own docstring, a
+`write_partition()` write-write conflict the original concurrency testing never actually
+exercised (all three from task 24, follow-up to V2-P1-001's `6de598e`), and unescaped SQL
+identifier interpolation at three call sites (task 25's review, follow-up to V2-P1-002's
+`cb9e8f4`).
 
 Kept separate from `test_panel_store.py` (correctness) and
 `test_panel_store_performance_budget.py` (the pruning/projection acceptance evidence) so
@@ -52,6 +54,32 @@ upsert (removes the `TransactionException` entirely, while leaving the expensive
 `COPY` step unlocked and concurrent). See the module docstring's "Concurrency" section for
 why cross-process writer races are a deliberately separate, still-open concern this
 in-process lock cannot address.
+
+## Finding 4 -- unescaped SQL identifiers and an open-ended column type
+
+V2-P1-002 argued that the *columnar batch* path could not express a hostile column name and
+deferred fixing `store.py` itself. Its review disproved the premise (a column object that
+never ran `PanelColumn.__post_init__` reached the store's DDL), so the store is fixed here
+too. Three sites interpolated caller strings into SQL, all three reproduced live against
+`cb9e8f4`:
+
+- `write_partition()`'s DDL, `f'"{column.name}" {column.duckdb_type}'`. The *type* carried no
+  quoting at all, so `ColumnSpec("close", "DOUBLE); ATTACH '<path>' AS evil; CREATE TABLE
+  evil.pwned(x INTEGER")` created an attacker-named DuckDB file on disk.
+- `_build_scan_sql()`'s `SELECT` projection, `f'"{name}"'`. A projected name carrying a
+  statement break ran `COPY (SELECT 42) TO '<path>'` and landed a file on disk. (DuckDB only
+  allows prepared parameters in the *last* statement of a script, so the injected statements
+  have to sit ahead of the surviving `read_parquet(?)` -- which they can.)
+- `_build_scan_sql()`'s `WHERE` keys, `f'"{key}" = ?'`. A key of
+  `ts_code" = 'nope' OR TRUE OR "ts_code` neutralised the filter: `query()` returned every
+  row of the partition instead of the single row the caller asked for.
+
+The fix is `_quote_identifier()` at all three sites plus a closed `DUCKDB_COLUMN_TYPES` set
+enforced in `ColumnSpec.__post_init__`; see `store.py`'s "SQL identifier and type handling"
+section for why escaping (not a whitelist) is the right mechanism for names at this layer.
+The tests below assert on observable side effects -- whether a file landed, and whether a
+filtered query returned rows it should not have -- rather than only on an exception type,
+because every one of these attacks *succeeded silently* before the fix.
 """
 
 from __future__ import annotations
@@ -62,7 +90,12 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from openalpha_cn.panel.store import ColumnSpec, PanelStorageError, PanelStore
+from openalpha_cn.panel.store import (
+    DUCKDB_COLUMN_TYPES,
+    ColumnSpec,
+    PanelStorageError,
+    PanelStore,
+)
 
 _COLUMNS = (
     ColumnSpec("ts_code", "VARCHAR"),
@@ -251,3 +284,134 @@ def _catalog_row_count(store: PanelStore, dataset: str) -> int:
         ).fetchone()
     assert row is not None
     return int(row[0])
+
+
+# --- Finding 4: SQL identifier interpolation ---------------------------------------------
+
+
+def test_a_hostile_duckdb_type_cannot_be_carried_by_a_column_spec_at_all(tmp_path: Path) -> None:
+    """The reviewer's DDL repro. A `duckdb_type` is not an identifier, so no amount of
+    quoting makes an arbitrary string inert -- the type has to come from a closed set, and
+    the set is enforced where a `ColumnSpec` is built rather than where it is used, so an
+    invalid spec cannot even be handed to `write_partition()`."""
+    pwned = tmp_path / "PWNED.duckdb"
+    hostile_type = f"DOUBLE); ATTACH '{pwned}' AS evil; CREATE TABLE evil.pwned(x INTEGER"
+
+    with pytest.raises(PanelStorageError, match="unsupported DuckDB type"):
+        ColumnSpec("close", hostile_type)
+
+    assert not pwned.exists()
+
+
+def test_every_type_the_ingest_seam_emits_is_in_the_stores_closed_type_set() -> None:
+    """`panel_ingest.PANEL_DUCKDB_TYPES` and `store.DUCKDB_COLUMN_TYPES` are two hand-written
+    lists that have to agree, or `write_panel_batch()` raises on a perfectly ordinary batch.
+    Same drift risk, same shape of fix, as the duplicated `dataset` rule."""
+    from openalpha_cn.panel_ingest import PANEL_DUCKDB_TYPES
+
+    assert set(PANEL_DUCKDB_TYPES.values()) <= DUCKDB_COLUMN_TYPES
+
+
+def test_a_quote_bearing_column_name_becomes_a_literal_name_at_all_three_sql_sites(
+    tmp_path: Path,
+) -> None:
+    """The positive half of the escaping claim, exercising DDL, projection and filter key
+    with the same string in one round trip: the injection payload survives as the *name* of
+    a real Parquet column, and the `ATTACH` it contains never runs.
+
+    Asserting the write *succeeds* is the point. A whitelist would have rejected this name
+    and proven nothing about escaping; escaping makes the name data, which is what a storage
+    primitive owes a caller that legitimately has an awkward column name."""
+    pwned = tmp_path / "PWNED-ddl.duckdb"
+    hostile = f"close\" DOUBLE); ATTACH '{pwned}' AS evil; CREATE TABLE evil.pwned(x INTEGER"
+    store = PanelStore(tmp_path / "panel")
+
+    store.write_partition(
+        "prices_daily",
+        2024,
+        [ColumnSpec("ts_code", "VARCHAR"), ColumnSpec(hostile, "DOUBLE")],
+        [("000001.SZ", 10.5), ("600000.SH", 22.5)],
+    )
+
+    assert not pwned.exists()
+    assert store.query("prices_daily", year=2024, columns=[hostile]) == [(10.5,), (22.5,)]
+    assert store.query("prices_daily", year=2024, columns=["ts_code"], filters={hostile: 10.5}) == [
+        ("000001.SZ",)
+    ]
+
+
+def test_a_hostile_projection_name_cannot_run_a_second_statement(tmp_path: Path) -> None:
+    """The reviewer's `SELECT`-list repro. Pre-fix this landed a real CSV file on disk while
+    `query()` returned normally; post-fix the whole payload is one (nonexistent) column
+    name, so DuckDB's binder rejects it and nothing is written."""
+    pwned = tmp_path / "PWNED-projection.csv"
+    store = PanelStore(tmp_path / "panel")
+    store.write_partition(
+        "prices_daily", 2024, [ColumnSpec("ts_code", "VARCHAR")], [("000001.SZ",)]
+    )
+    partition = store.root / "prices_daily" / "2024" / "data.parquet"
+    hostile = (
+        f"ts_code\" FROM read_parquet('{partition}'); "
+        f"COPY (SELECT 42 AS x) TO '{pwned}' (FORMAT CSV); "
+        'SELECT "ts_code'
+    )
+
+    with pytest.raises(duckdb.Error) as failure:
+        store.query("prices_daily", year=2024, columns=[hostile])
+
+    assert "Referenced column" in str(failure.value)
+    assert not pwned.exists()
+
+
+def test_a_hostile_filter_key_cannot_neutralise_the_where_clause(tmp_path: Path) -> None:
+    """The reviewer's `WHERE` repro. This one never wrote a file -- it silently returned
+    rows the caller had filtered out, which is why the assertion below compares the injected
+    query against the honest one rather than only asserting that something was raised."""
+    store = PanelStore(tmp_path / "panel")
+    store.write_partition(
+        "prices_daily",
+        2024,
+        [ColumnSpec("ts_code", "VARCHAR")],
+        [("000001.SZ",), ("600000.SH",)],
+    )
+    honest = store.query(
+        "prices_daily", year=2024, columns=["ts_code"], filters={"ts_code": "000001.SZ"}
+    )
+    assert honest == [("000001.SZ",)]
+    hostile_key = "ts_code\" = 'nope' OR TRUE OR \"ts_code"
+
+    with pytest.raises(duckdb.Error) as failure:
+        store.query(
+            "prices_daily", year=2024, columns=["ts_code"], filters={hostile_key: "000001.SZ"}
+        )
+
+    assert "Referenced column" in str(failure.value)
+
+
+@pytest.mark.parametrize("name", ["", "clo\x00se"])
+def test_an_identifier_escaping_cannot_rescue_is_refused_rather_than_handed_to_duckdb(
+    tmp_path: Path, name: str
+) -> None:
+    """An empty name and a NUL-bearing one are the two inputs `"` -doubling does not make
+    safe: DuckDB rejects a zero-length delimited identifier outright, and stops parsing a
+    quoted identifier at a NUL so the closing quote is never seen. Neither is exploitable
+    (both are parse errors), but both are refused here so callers get a `PanelStorageError`
+    naming the problem instead of a raw `duckdb.ParserException`."""
+    store = PanelStore(tmp_path / "panel")
+
+    with pytest.raises(PanelStorageError, match="column name must not"):
+        store.write_partition("prices_daily", 2024, [ColumnSpec(name, "DOUBLE")], [(1.0,)])
+
+
+def test_write_partition_rejects_a_dataset_with_surrounding_whitespace(tmp_path: Path) -> None:
+    """`" prices_daily "` is a legal directory name, so accepting it would create a
+    partition directory indistinguishable from `prices_daily` in every log line; stripping
+    it would make the caller's string and the path on disk quietly different. Refused, in
+    step with `domain/panel_batch.py::validate_panel_dataset`."""
+    root = tmp_path / "panel"
+    store = PanelStore(root)
+
+    with pytest.raises(PanelStorageError, match="leading or trailing whitespace"):
+        store.write_partition(" prices_daily ", 2024, _COLUMNS, _rows())
+
+    _assert_root_is_the_only_thing_under(tmp_path, root)

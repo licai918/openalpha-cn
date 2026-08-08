@@ -16,6 +16,7 @@ because the digest is computed over the UTC instant, never over a datetime's tex
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import get_args
@@ -177,15 +178,105 @@ def test_a_no_data_batch_is_refused_rather_than_silently_writing_nothing(tmp_pat
     assert store.query("prices_daily", year=2024, columns=["subject"]) == []
 
 
-def test_a_hostile_column_name_cannot_reach_the_stores_sql_through_a_batch() -> None:
-    """`PanelStore.write_partition` builds its DDL as `f'"{column.name}" {duckdb_type}'`, so
-    a name containing `"` escapes the quoting and executes as SQL (verified directly against
-    `43f3522`). Every column name that reaches the store through this seam has already
-    passed the contract's plain-identifier rule, so that shape cannot be constructed here."""
-    hostile = "close\" INTEGER); ATTACH '/tmp/evil.duckdb' AS evil; CREATE TABLE staging2(\"x"
+@dataclass(frozen=True)
+class _DuckTypedColumn:
+    """A column object with `PanelColumn`'s attribute surface and none of its validation.
 
-    with pytest.raises(PanelBatchError):
-        PanelColumn(hostile, "float", (1.0,))
+    Not a contrived shape: `ColumnarPanelBatch.columns` is an ordinary tuple field, and
+    everything this contract and `panel_ingest` do with a column is read `.name`, `.kind` and
+    `.values`. Any object answering those three reads used to travel straight through.
+    """
+
+    name: str
+    kind: str
+    values: tuple[object, ...]
+
+
+class _UnvalidatedPanelColumn(PanelColumn):
+    """A real `PanelColumn` subclass whose `__post_init__` never runs the contract's checks.
+
+    The reason `isinstance(column, PanelColumn)` alone is not the whole fix: a nominal type
+    check passes here, so the batch has to re-apply the name and kind rules itself.
+    """
+
+    def __post_init__(self) -> None:
+        return None
+
+
+def _batch_with(column: object) -> ColumnarPanelBatch:
+    """A minimal one-row success batch carrying exactly `column`."""
+    return ColumnarPanelBatch(
+        provider_id="tushare",
+        dataset="prices_daily",
+        kind="daily",
+        as_of=AS_OF,
+        fetched_at=AS_OF,
+        status="success",
+        subjects=("000001.SZ",),
+        timeline=TimelineColumns(
+            event_time=(AVAILABLE,),
+            available_time=(AVAILABLE,),
+            ingested_time=(INGESTED,),
+            revision_time=(INGESTED,),
+        ),
+        columns=(column,),  # type: ignore[arg-type]
+    )
+
+
+def test_a_hostile_column_name_cannot_reach_the_stores_sql_through_a_batch(
+    tmp_path: Path,
+) -> None:
+    """The property this test's name has always claimed, now actually exercised end to end.
+
+    Its previous version asserted only that `PanelColumn(hostile, ...)` raises -- it never
+    built a batch, never touched `PanelStore`, and so never tested the claim at all. That
+    mattered, because the claim was false: `_check_shape` did not re-validate the columns it
+    was handed, so a column object that skipped `PanelColumn.__post_init__` carried a hostile
+    name into `write_partition()`'s `CREATE TABLE` DDL and the `ATTACH` inside it ran.
+    Reproduced against `cb9e8f4` for both stand-ins below, each writing an attacker-named
+    DuckDB file to disk while `write_panel_batch()` returned normally.
+
+    The evidence asserted here is therefore observable, not just an exception type: the
+    attacker's chosen path must not exist, and the store must be left with no partition.
+    (`store.py` now escapes identifiers as well, so this is belt *and* braces -- but the
+    braces are what this seam promises, and they are what is tested here.)
+    """
+    pwned = tmp_path / "PWNED.duckdb"
+    hostile = (
+        f"close\" DOUBLE); ATTACH '{pwned}' AS evil; CREATE TABLE evil.pwned(x INTEGER, \"junk"
+    )
+    store = PanelStore(tmp_path / "panel")
+
+    for column in (
+        _DuckTypedColumn(hostile, "float", (10.5,)),
+        _UnvalidatedPanelColumn(hostile, "float", (10.5,)),
+    ):
+        with pytest.raises(PanelBatchError):
+            write_panel_batch(store, _batch_with(column), year=2024)
+
+        assert not pwned.exists(), f"{type(column).__name__} reached the store's SQL"
+
+    assert not (store.root / "prices_daily").exists()
+    assert store.query("prices_daily", year=2024, columns=["subject"]) == []
+
+
+def test_a_column_whose_kind_was_never_validated_cannot_reach_the_duckdb_type_table(
+    tmp_path: Path,
+) -> None:
+    """The second thing `_check_shape` re-validates. A kind is the key
+    `PANEL_DUCKDB_TYPES` looks a SQL type up by, so an unvalidated one used to surface as a
+    bare `KeyError` from inside `panel_column_specs()` -- an internal-error shape for what is
+    really a rejected input, and one that says nothing useful about which column is wrong.
+
+    Uses the subclass stand-in rather than the duck-typed one so the kind check is what
+    fires: a duck-typed object is stopped one line earlier, by the `isinstance` guard."""
+    store = PanelStore(tmp_path / "panel")
+    column = _UnvalidatedPanelColumn("close", "decimal", (10.5,))
+
+    with pytest.raises(PanelBatchError, match="unknown kind"):
+        write_panel_batch(store, _batch_with(column), year=2024)
+
+    assert not (store.root / "prices_daily").exists()
 
 
 # --- integrity across a real storage round trip --------------------------------------------

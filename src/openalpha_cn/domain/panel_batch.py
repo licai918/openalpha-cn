@@ -9,17 +9,21 @@ re-serialises every record on **each access** (it is a `computed_field`, which p
 not cache). Measured on this task's development machine at 2,000 rows x 5 float fields,
 best of five runs each:
 
-    ProviderRecord construction  12.4 ms  ->  6.18 us/row
-    ProviderBatch construction    5.2 ms  ->  2.61 us/row  (is_visible_at, once per record)
-    payload_digest, 1st access   10.0 ms  ->  4.98 us/row
-    payload_digest, 2nd access   10.0 ms  <-  identical; a computed_field is not cached
+    ProviderRecord construction  12.2 ms  ->  6.10 us/row
+    ProviderBatch construction    5.3 ms  ->  2.63 us/row  (is_visible_at, once per record)
+    payload_digest, 1st access   10.5 ms  ->  5.25 us/row
+    payload_digest, 2nd access   10.2 ms  <-  no cheaper; a computed_field is not cached
     ----------------------------------------------------
-    total                                    13.78 us/row
+    end to end                   27.9 ms  -> 13.9 us/row
 
 The same source data through `ColumnarPanelBatch` -- construction, validation, digest and
-`to_rows()` -- costs **1.79 us/row**, a 7.7x reduction. ADR-0002 fixes panel scale at 5,534
+`to_rows()` -- costs **1.80 us/row** (3.6 ms end to end: `TimelineColumns` 0.66 + batch
+including digest 1.00 + `PanelColumn`s 0.09 + `to_rows()` 0.03), a **7.8x** reduction. Every
+number here, in `tests/contract/panel/test_columnar_batch_parity.py`, and in the release
+ledger's `OA-PANEL-002` row comes from that one re-measurement; an earlier version had the
+three copies disagreeing (1.68 vs 1.79 us/row, 8.2x vs 7.7x). ADR-0002 fixes panel scale at 5,534
 listed names x ~2,440 trading days ~= 1.35e7 rows per field, so those constants work out to
-~187 s versus ~24 s of pure contract overhead per field, single-threaded, before any I/O --
+~188 s versus ~24 s of pure contract overhead per field, single-threaded, before any I/O --
 across eight dataset groups, every one of which has to be backfilled over full history. Note
 the shape of the row-wise cost: `validate_result`'s `any(...)` short-circuits on the
 *violating* case, so a clean batch is the expensive one.
@@ -60,6 +64,15 @@ What it deliberately does **not** provide: content addressing of an individual r
 corrupted batch is detectable, but the digest cannot say *which* row changed, and no row can
 be looked up by its content. That is the property the evidence plane keeps and the panel
 plane gives up, consciously, for two orders of magnitude of throughput.
+
+What it does not *yet* provide, which is a gap rather than a trade: the digest is never
+written down. `panel_ingest.write_panel_batch()` hands `PanelStore` rows and column specs,
+and the store computes its own idempotency hash over that material; nothing carries
+`content_digest` into the catalog. So a batch can be checked while it is still in memory, but
+a partition sitting on disk cannot later be re-proved against the digest the provider's batch
+carried. Persisting it belongs with `V2-P1-003`'s data catalog, where partition-level
+metadata is being designed; recorded here and in `panel_ingest.py` so it is not rediscovered
+from scratch.
 
 Two encoding details are load-bearing:
 
@@ -111,12 +124,25 @@ future `panel-batch/v2` is detectable rather than silently compatible.
 
 This module lives in `domain/` because both sides of the seam need it: `providers/` produces
 a `ColumnarPanelBatch` (see `providers/base.py`'s `PanelDataProvider`) and `panel/` consumes
-one (see `panel/ingest.py`). Placing it in either of those packages would create a
+one (through `panel_ingest.py`). Placing it in either of those packages would create a
 `panel -> providers` or `providers -> panel` edge between two peers. It imports nothing but
 the standard library and `domain/time.py`, so the `domain-purity` contract in
 `pyproject.toml` (ADR-0003) holds unchanged, and it deliberately speaks *logical* column
 kinds (`"float"`, `"timestamp"`, ...) rather than DuckDB SQL types -- the translation table
-lives in `panel/ingest.py`, on the side of the seam that already knows about DuckDB.
+lives in `panel_ingest.py`, on the side of the seam that already knows about DuckDB.
+
+## What this contract validates, and where it stops trusting itself
+
+Column names and `dataset` are validated at the boundary because both end up in a place
+where an arbitrary string is dangerous: a name is interpolated into `panel/store.py`'s SQL,
+and `dataset` becomes a directory under the store's root. `_check_shape` re-applies the name
+and kind rules to every column the caller hands over rather than assuming
+`PanelColumn.__post_init__` ran -- `columns` is an ordinary tuple field, and a duck-typed
+column object used to travel straight through it into the store's DDL (reproduced against
+`cb9e8f4`; see `_check_shape`'s own docstring and
+`tests/integration/panel/test_panel_batch_ingest.py`). The storage layer no longer depends on
+that being done correctly here either: `panel/store.py` escapes every identifier it
+interpolates and takes its SQL types from a closed set.
 """
 
 import json
@@ -144,13 +170,23 @@ SUBJECT_COLUMN_NAME: Final[str] = "subject"
 
 RESERVED_COLUMN_NAMES: Final[frozenset[str]] = frozenset((SUBJECT_COLUMN_NAME, *CLOCK_COLUMN_NAMES))
 
-# A plain, unquoted SQL identifier. `panel/store.py` interpolates column names straight into
-# its DDL (`f'"{column.name}" {column.duckdb_type}'`) and into `SELECT` lists
-# (`f'"{name}"'`), where a name containing `"` closes the quote and everything after it runs
-# as SQL -- reproduced against `43f3522` while writing this task. Restricting the contract to
-# this shape means no value routed through a `ColumnarPanelBatch` can express that; see
-# `panel/ingest.py`'s module docstring.
-_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
+MAX_IDENTIFIER_LENGTH: Final[int] = 63
+
+# A plain, unquoted SQL identifier: an ASCII letter or underscore followed by up to
+# `MAX_IDENTIFIER_LENGTH - 1` more letters, digits or underscores. The bound is interpolated
+# from the constant rather than written twice, so the advertised limit and the enforced one
+# cannot drift apart.
+# Matched with `re.fullmatch`, never `match` with a trailing `$`: `$` also matches immediately
+# *before* a final newline, so `"close\n"` satisfied the pattern under `match` and was
+# accepted as a column name (reproduced against `cb9e8f4`, written into Parquet and read back
+# again), and a 63-character name plus a newline passed the length limit the same way.
+#
+# The rule exists because `panel/store.py` puts column names into SQL text. That module now
+# escapes every identifier it interpolates, so this is no longer the only thing standing
+# between a hostile name and executed SQL -- it is the contract's own narrower statement about
+# what a panel column may be called, and `_check_shape` re-applies it to every column the
+# caller supplies rather than trusting that the object came from `PanelColumn.__post_init__`.
+_IDENTIFIER = re.compile(rf"[A-Za-z_][A-Za-z0-9_]{{0,{MAX_IDENTIFIER_LENGTH - 1}}}")
 
 # Exact types, not `isinstance`, for the four scalar kinds: `bool` is a subclass of `int` and
 # would otherwise pass as `integer` while hashing as `true` rather than `1`, and an `int` in
@@ -164,6 +200,15 @@ _EXACT_TYPES: Final[dict[str, type]] = {
     "integer": int,
     "string": str,
 }
+
+PANEL_COLUMN_KINDS: Final[frozenset[str]] = frozenset({*_EXACT_TYPES, "timestamp"})
+"""Every logical column kind this contract admits, as data rather than as a `Literal`.
+
+`PanelColumnKind` stops untyped values at type-check time; this set stops them at runtime,
+which is where a kind read out of a provider's config file arrives. `_check_shape` uses it to
+re-validate the kind of every caller-supplied column, because a kind is the key
+`panel_ingest.PANEL_DUCKDB_TYPES` looks a DuckDB SQL type up by.
+"""
 
 _EPOCH: Final[datetime] = datetime(1970, 1, 1, tzinfo=UTC)
 _MICROSECOND: Final[timedelta] = timedelta(microseconds=1)
@@ -192,6 +237,10 @@ def validate_panel_dataset(dataset: str) -> None:
     """
     if not dataset:
         raise PanelBatchError("dataset must not be empty")
+    if dataset != dataset.strip():
+        raise PanelBatchError(
+            f"dataset must not have leading or trailing whitespace; got {dataset!r}"
+        )
     segment = Path(dataset)
     if segment.is_absolute() or segment.name != dataset or dataset in {".", ".."}:
         raise PanelBatchError(
@@ -201,11 +250,17 @@ def validate_panel_dataset(dataset: str) -> None:
 
 
 def validate_panel_identifier(name: str, *, role: str = "column") -> None:
-    """Reject any identifier that is not a plain, unquoted SQL name (see `_IDENTIFIER`)."""
-    if not _IDENTIFIER.match(name):
+    """Reject any identifier that is not a plain, unquoted SQL name (see `_IDENTIFIER`).
+
+    `fullmatch`, not `match`: with `match` the pattern's trailing `$` also matched before a
+    final newline, so `"close\\n"` was accepted -- and so was a name one character over the
+    advertised 63-character limit, as long as the extra character was that newline.
+    """
+    if not _IDENTIFIER.fullmatch(name):
         raise PanelBatchError(
-            f"{role} name must match {_IDENTIFIER.pattern} (a plain identifier: ASCII "
-            f"letters, digits and underscore, not starting with a digit); got {name!r}"
+            f"{role} name must match {_IDENTIFIER.pattern} in full (a plain identifier: "
+            f"ASCII letters, digits and underscore, not starting with a digit, at most "
+            f"{MAX_IDENTIFIER_LENGTH} characters); got {name!r}"
         )
 
 
@@ -433,6 +488,24 @@ class ColumnarPanelBatch:
             raise PanelBatchError("no_data requires no_data_reason")
 
     def _check_shape(self) -> None:
+        """Check the caller's columns against the batch, re-validating each one's identity.
+
+        Name and kind are re-checked here rather than trusted from `PanelColumn`, because
+        `columns` is an ordinary tuple field and nothing about a *nominal* type stops a
+        caller from putting some other object in it. A frozen dataclass with `name`, `kind`
+        and `values` attributes satisfies every read this contract and `panel_ingest`
+        perform, so a hostile column name used to travel all the way into
+        `PanelStore.write_partition`'s DDL -- reproduced against `cb9e8f4` with a plain
+        duck-typed stand-in, which wrote an attacker-named DuckDB file to disk while
+        `write_panel_batch()` returned normally. The `isinstance` check below closes the
+        duck-typed case; the two explicit re-validations close the subclass case, where
+        `PanelColumn.__post_init__` can be overridden away.
+
+        Both checks are O(1) per column, not per row, so this costs nothing at panel scale.
+        Values are deliberately *not* re-scanned: they reach DuckDB as bound `?` parameters,
+        never as SQL text, so they are not a boundary in the sense name and kind are, and
+        re-scanning them would restore exactly the per-row cost this contract removes.
+        """
         expected = self.row_count
         if self.timeline.row_count != expected:
             raise PanelBatchError(
@@ -441,6 +514,16 @@ class ColumnarPanelBatch:
             )
         seen: set[str] = set()
         for column in self.columns:
+            if not isinstance(column, PanelColumn):
+                raise PanelBatchError(
+                    f"columns must contain PanelColumn instances; got {type(column).__name__}"
+                )
+            validate_panel_identifier(column.name)
+            if column.kind not in PANEL_COLUMN_KINDS:
+                raise PanelBatchError(
+                    f"column {column.name!r} has unknown kind {column.kind!r}; expected one "
+                    f"of {sorted(PANEL_COLUMN_KINDS)}"
+                )
             if column.name in RESERVED_COLUMN_NAMES:
                 raise PanelBatchError(
                     f"column {column.name!r} is reserved for the batch's own subject and "
@@ -503,8 +586,29 @@ class ColumnarPanelBatch:
 
 
 def _require_text(field_name: str, value: str, max_length: int) -> None:
+    """Non-empty, within `max_length`, and free of surrounding whitespace.
+
+    The row-wise contract normalises instead: every `str` field of `ProviderRecord` and
+    `ProviderBatch` is silently stripped by pydantic's `str_strip_whitespace=True`. This
+    contract refuses rather than strips, which is a deliberate divergence, not an oversight:
+
+    - `content_digest` is a promise that two batches carrying the same facts hash alike and
+      two batches carrying different facts do not. Silently rewriting a caller's `kind` from
+      `"  daily  "` to `"daily"` would make the digest a hash of something the caller never
+      handed over; refusing keeps the digest a faithful function of the input.
+    - `dataset` becomes a directory name under `PanelStore`'s root. Stripping it would leave
+      the caller's string and the path on disk quietly different; accepting it unstripped
+      would create a partition directory called `" prices "`. `panel/store.py`'s own
+      `_validate_dataset` refuses the same shape so the two copies of that rule stay in step.
+    - Nothing is lost: a caller that wants the row contract's behaviour writes `.strip()`,
+      and gets a digest over the value it actually meant.
+    """
     if not value or not value.strip():
         raise PanelBatchError(f"{field_name} must be a non-empty string")
+    if value != value.strip():
+        raise PanelBatchError(
+            f"{field_name} must not have leading or trailing whitespace; got {value!r}"
+        )
     if len(value) > max_length:
         raise PanelBatchError(f"{field_name} must be at most {max_length} characters")
 

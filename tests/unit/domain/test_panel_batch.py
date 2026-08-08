@@ -10,6 +10,7 @@ integrity digest that replaces the row-wise contract's per-record content hash.
 
 from __future__ import annotations
 
+import random
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
@@ -18,12 +19,14 @@ import pytest
 
 from openalpha_cn.domain import panel_batch as panel_batch_module
 from openalpha_cn.domain.panel_batch import (
+    MAX_IDENTIFIER_LENGTH,
     RESERVED_COLUMN_NAMES,
     ColumnarPanelBatch,
     PanelBatchError,
     PanelColumn,
     TimelineColumns,
 )
+from openalpha_cn.domain.time import Timeline
 
 AS_OF = datetime(2024, 6, 28, 12, 0, tzinfo=UTC)
 AVAILABLE = datetime(2024, 6, 28, 7, 30, tzinfo=UTC)
@@ -225,6 +228,29 @@ def test_a_column_name_that_is_not_a_plain_identifier_is_rejected(hostile: str) 
         PanelColumn(hostile, "float", (1.0,))
 
 
+@pytest.mark.parametrize("hostile", ["close\n", "close\n; DROP TABLE staging", "_close\r"])
+def test_a_column_name_with_a_trailing_line_break_is_rejected(hostile: str) -> None:
+    """`re.match` with a trailing `$` accepts a final newline: `$` matches at the end of the
+    string *and* immediately before a terminating newline. `"close\\n"` therefore passed the
+    plain-identifier rule against `cb9e8f4` and was written into a real Parquet column and
+    read back again. `re.fullmatch` is what closes it."""
+    with pytest.raises(PanelBatchError):
+        PanelColumn(hostile, "float", (1.0,))
+
+
+def test_the_identifier_length_limit_is_exactly_the_advertised_maximum() -> None:
+    """Both sides of the boundary, because the same `$`-versus-`fullmatch` bug also let a
+    64-character name through -- 63 identifier characters plus the newline `$` forgave."""
+    longest = "c" * MAX_IDENTIFIER_LENGTH
+
+    assert PanelColumn(longest, "float", (1.0,)).name == longest
+
+    with pytest.raises(PanelBatchError):
+        PanelColumn("c" * (MAX_IDENTIFIER_LENGTH + 1), "float", (1.0,))
+    with pytest.raises(PanelBatchError):
+        PanelColumn("c" * (MAX_IDENTIFIER_LENGTH - 1) + "\n", "float", (1.0,))
+
+
 @pytest.mark.parametrize("dataset", ["", "../escaped", "/abs/path", "a/b", ".", "..", "/../../x"])
 def test_a_dataset_that_is_not_a_single_plain_path_segment_is_rejected(dataset: str) -> None:
     """The same rule `panel/store.py::_validate_dataset` enforces, applied one layer
@@ -259,12 +285,104 @@ def test_the_contract_and_the_store_agree_on_every_rejected_dataset() -> None:
         )
 
 
+# --- whitespace: refused here, stripped by the row contract -------------------------------
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [("kind", "  daily  "), ("provider_id", " tushare "), ("dataset", " prices_daily ")],
+)
+def test_a_value_with_surrounding_whitespace_is_refused_rather_than_silently_stripped(
+    field_name: str, value: str
+) -> None:
+    """A deliberate divergence from the row contract, not an oversight.
+
+    `ProviderRecord`/`ProviderBatch` set pydantic's `str_strip_whitespace=True`, so every
+    `str` field there is silently normalised. This contract refuses instead, because it makes
+    two promises normalisation would quietly break: `content_digest` is supposed to be a
+    faithful function of what the caller handed over (`kind="  daily  "` and `kind="daily"`
+    hashing alike would mean the digest describes a value the caller never supplied), and
+    `dataset` becomes a directory name under `PanelStore`'s root (stripping would leave the
+    caller's string and the path on disk different; accepting would create a partition
+    directory called `" prices_daily "`). A caller who wants the row contract's behaviour
+    writes `.strip()` and gets a digest over the value it actually meant.
+    """
+    with pytest.raises(PanelBatchError, match="leading or trailing whitespace"):
+        _batch(**{field_name: value})
+
+
+def test_the_row_contract_really_does_strip_what_this_one_refuses() -> None:
+    """Pins the divergence above as a fact about both contracts rather than a claim about
+    one, so a future change to either side shows up here."""
+    from openalpha_cn.providers.base import ProviderRecord
+
+    record = ProviderRecord(
+        subject="000001.SZ",
+        kind="  daily  ",
+        timeline=Timeline(
+            event_time=AVAILABLE,
+            available_time=AVAILABLE,
+            ingested_time=INGESTED,
+            revision_time=INGESTED,
+        ),
+        summary="daily bar",
+        payload={"close": 10.5},
+    )
+
+    assert record.kind == "daily"
+    with pytest.raises(PanelBatchError):
+        _batch(kind="  daily  ")
+
+
+def test_the_contract_and_the_store_agree_that_a_padded_dataset_is_rejected() -> None:
+    """The whitespace rule is duplicated across the same seam as the path-segment rule, so
+    it gets the same drift pin: `domain/` cannot import `panel/`, so the two copies can only
+    be held together by a test."""
+    from openalpha_cn.panel.store import PanelStorageError, _validate_dataset
+
+    for dataset in (" prices_daily", "prices_daily ", "\tprices_daily", "prices_daily\n"):
+        with pytest.raises(PanelStorageError, match="leading or trailing whitespace"):
+            _validate_dataset(dataset)
+        with pytest.raises(PanelBatchError, match="leading or trailing whitespace"):
+            panel_batch_module.validate_panel_dataset(dataset)
+
+
 # --- per-column typing and clock normalisation -------------------------------------------
 
 
 def test_a_value_of_the_wrong_python_type_is_rejected_with_the_column_and_row_named() -> None:
     with pytest.raises(PanelBatchError, match="close"):
         PanelColumn("close", "float", (10.5, "22.5"))
+
+
+@pytest.mark.parametrize(
+    ("kind", "value"),
+    [
+        ("float", 1),
+        ("float", True),
+        ("integer", True),
+        ("integer", 1.0),
+        ("boolean", 1),
+        ("boolean", 0),
+        ("string", 1),
+    ],
+)
+def test_a_column_kind_admits_its_exact_python_type_and_never_a_subclass_or_a_near_miss(
+    kind: str, value: object
+) -> None:
+    """`_EXACT_TYPES` is checked with `type(v) is expected`, not `isinstance`, and the
+    difference is load-bearing for `content_digest` rather than merely pedantic:
+
+    - `bool` is a subclass of `int`, so `isinstance` would admit `True` into an `integer`
+      column, where it hashes as `true` rather than `1`. This is the one case that
+      distinguishes the two spellings -- an `isinstance` mutation survives every other row
+      of this table, and survived the whole suite before this test existed.
+    - An `int` in a `float` column hashes as `1`, not `1.0`, so two batches holding the same
+      numbers would carry different digests depending on how the caller happened to spell
+      them.
+    """
+    with pytest.raises(PanelBatchError, match="expected"):
+        PanelColumn("value", kind, (value,))  # type: ignore[arg-type]
 
 
 def test_none_is_allowed_in_a_data_column() -> None:
@@ -326,6 +444,62 @@ def test_the_per_row_timeline_ordering_invariant_is_enforced() -> None:
             ingested_time=(INGESTED, AVAILABLE - timedelta(seconds=1)),
             revision_time=(INGESTED, INGESTED),
         )
+
+
+def _row_model_verdict(clocks: dict[str, datetime]) -> str | None:
+    try:
+        Timeline(**clocks)
+    except ValueError as error:
+        return str(error)
+    return None
+
+
+def _column_model_verdict(clocks: dict[str, datetime]) -> str | None:
+    try:
+        TimelineColumns(**{name: (value,) for name, value in clocks.items()})
+    except ValueError as error:
+        return str(error)
+    return None
+
+
+def test_the_row_model_and_the_column_model_agree_on_every_single_row_verdict() -> None:
+    """The drift pin `_check_ordering` was missing.
+
+    `TimelineColumns._check_ordering` re-states `Timeline.__post_init__`'s ordering predicate
+    in transposed form so it can scan a whole column at once. Two hand-written copies of one
+    rule: whichever is edited second wins, silently. Demonstrated while reviewing `cb9e8f4`
+    by adding a fifth rule to `Timeline` (`available_time` may not precede `event_time`) --
+    the row model rejected, the column model accepted, and all 74 tests stayed green.
+
+    Same shape of fix as `test_the_contract_and_the_store_agree_on_every_rejected_dataset`
+    above: run both implementations over a randomised corpus of single rows and require an
+    identical verdict, message included. The message comparison is not decoration -- the
+    column model produces its error by handing the offending row to the real `Timeline`, and
+    this is what holds it to that instead of re-wording the rule.
+    """
+    rng = random.Random(20260808)
+    offsets = [-86_400_000_000, -1_000_000, -1000, -1, 0, 1, 1000, 1_000_000, 86_400_000_000]
+    names = ("event_time", "available_time", "ingested_time", "revision_time")
+    disagreements: list[tuple[dict[str, int], str | None, str | None]] = []
+    rejected = 0
+
+    for _ in range(400):
+        micros = {name: rng.choice(offsets) for name in names}
+        clocks = {name: AVAILABLE + timedelta(microseconds=value) for name, value in micros.items()}
+        row_verdict = _row_model_verdict(clocks)
+        column_verdict = _column_model_verdict(clocks)
+        rejected += int(row_verdict is not None)
+        if row_verdict != column_verdict:
+            disagreements.append((micros, row_verdict, column_verdict))
+
+    assert not disagreements, (
+        f"the row model and the column model disagreed on {len(disagreements)} of 400 rows; "
+        f"first three: {disagreements[:3]}"
+    )
+    assert 40 < rejected < 360, (
+        f"corpus is degenerate: {rejected}/400 rows were rejected, so agreement would be "
+        "trivially satisfiable"
+    )
 
 
 def test_row_timeline_reconstructs_the_row_wise_timeline_for_any_index() -> None:
@@ -463,9 +637,16 @@ def test_a_missing_value_and_the_literal_string_none_do_not_share_a_digest() -> 
 
 def test_the_digest_is_representation_independent_for_the_same_instant() -> None:
     """DuckDB hands `TIMESTAMPTZ` values back in the session timezone, not UTC (measured
-    against DuckDB 1.5 while writing this task). A digest computed over a datetime's *text*
-    would therefore change across a storage round trip even though no information did; this
-    one is computed over the UTC instant."""
+    against DuckDB 1.5 while writing this task), so the same instant can arrive tagged
+    differently across a storage round trip. What this test pins is the normalisation that
+    makes that survivable: every timestamp goes through `ensure_aware` before it is hashed.
+
+    It does *not* pin the choice of *integer microseconds* over `isoformat()` -- swapping
+    `_epoch_micros` for `isoformat()` leaves this test green, because both are
+    representation-independent once the value is UTC. That choice is a cost decision, not a
+    correctness one (0.095 us versus 0.443 us per value, across at least five timestamp
+    columns per batch), and it is argued in the module docstring rather than asserted here.
+    """
     shanghai = timezone(timedelta(hours=8))
     utc_batch = _batch()
     shifted = _batch(

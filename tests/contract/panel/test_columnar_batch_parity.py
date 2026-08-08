@@ -10,21 +10,33 @@ record in self.records)` rejects a batch the moment a single record was not yet 
 running both contracts over the same corpus and asserting they accept and reject the *same*
 inputs, including corpora where exactly one row out of many is a microsecond late.
 
-The cost side is asserted twice, deliberately:
+The cost side is asserted four times, deliberately, because no one of them is sufficient on
+its own -- one structural assertion per distinct cost claim, plus a wall-clock backstop:
 
-- structurally (`test_...serializations...`), by counting canonical-JSON serializations at
+- structurally, by counting canonical-JSON serializations (`test_...serializations...`) at
   two different row counts: the row-wise contract's count grows with the row count, the
   columnar contract's does not. No wall clock is involved, so this assertion cannot go flaky
-  on a loaded CI runner.
+  on a loaded CI runner. What it covers is the *digest* path only.
+- structurally, by counting `is_visible_at` calls (`test_...visibility_check...`). The
+  point-in-time path never calls `json.dumps`, so the serialization count above cannot see
+  it at all: reverting `_check_visible_at_as_of` to a per-row scan left that assertion green
+  (measured while reviewing `cb9e8f4`). This one counts the single call the batch-level
+  check is allowed to make, at two row counts.
+- structurally, by counting transposes (`test_to_rows_performs_one_transpose...`). Reverting
+  `to_rows()` to a per-row comprehension is the one regression the wall clock below still
+  cannot catch on its own -- it measures 6.7x, above the 6x threshold. A transpose count of
+  one is exact.
 - by wall clock (`test_...per_row...`), as a *relative* ratio between the two paths measured
   in the same process moments apart, never as an absolute millisecond budget. See that
-  test's docstring for the measured numbers and how its threshold was chosen.
+  test's docstring for the measured numbers, how its threshold was chosen, and -- explicitly
+  -- which regressions it does and does not catch.
 """
 
 from __future__ import annotations
 
 import json
 import random
+import sys
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -279,10 +291,110 @@ def test_row_wise_serialization_count_grows_with_row_count_and_columnar_does_not
     )
 
 
+def _columnar_visibility_check_count(row_count: int, monkeypatch: pytest.MonkeyPatch) -> int:
+    calls = {"count": 0}
+    real = panel_batch_module.is_visible_at
+
+    def _counting(timeline: Timeline, as_of: datetime) -> bool:
+        calls["count"] += 1
+        return real(timeline, as_of)
+
+    monkeypatch.setattr(panel_batch_module, "is_visible_at", _counting)
+    _columnar_batch(*_clocks(_availables(row_count, lateness=timedelta(0))), AS_OF)
+    monkeypatch.undo()
+    return calls["count"]
+
+
+def test_the_columnar_visibility_check_consults_one_row_whatever_the_batch_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The point-in-time half of the cost claim, pinned without a wall clock.
+
+    `all(t <= as_of)` is enforced as `max(t) <= as_of` plus one `is_visible_at` on the row
+    that attained the maximum, so exactly one call is made no matter how many rows the batch
+    carries -- whereas `ProviderBatch.validate_result` makes one per record.
+
+    This exists because neither of the other two cost assertions sees this path. The
+    serialization count above cannot: the visibility check never serializes anything. The
+    wall-clock ratio below barely can: reverting this check to a per-row `is_visible_at` scan
+    measured 4.29x against a 7.8x baseline while reviewing `cb9e8f4`, which passed the 4x
+    threshold that version asserted. A call count is exact, load-independent, and goes red on
+    the first extra call.
+    """
+    counts = [_columnar_visibility_check_count(count, monkeypatch) for count in (250, 1000)]
+
+    assert counts == [1, 1], (
+        f"expected exactly one visibility check per batch at both row counts, got {counts}: "
+        "the batch-level check has reverted to per-row work"
+    )
+
+
+def _columnar_transpose_count(row_count: int, monkeypatch: pytest.MonkeyPatch) -> int:
+    batch = _columnar_batch(*_clocks(_availables(row_count, lateness=timedelta(0))), AS_OF)
+    calls = {"count": 0}
+    real = zip
+
+    def _counting(*iterables: object, **kwargs: object) -> object:
+        calls["count"] += 1
+        return real(*iterables, **kwargs)  # type: ignore[call-overload]
+
+    # A module-level `zip` shadows the builtin for every function defined in that module, so
+    # this counts the transposes `to_rows()` itself performs and nothing else. The batch is
+    # built before the patch goes on, so `TimelineColumns._check_ordering`'s own `zip` calls
+    # are not in the count.
+    monkeypatch.setattr(panel_batch_module, "zip", _counting, raising=False)
+    rows = batch.to_rows()
+    monkeypatch.undo()
+
+    assert len(rows) == row_count
+    return calls["count"]
+
+
+def test_to_rows_performs_one_transpose_whatever_the_batch_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The third cost claim, pinned the same wall-clock-free way as the other two.
+
+    `to_rows()` exists to hand storage a row block without constructing anything per row: one
+    C-level `zip` over the column tuples, whatever the row count. The wall-clock ratio below
+    cannot police this on its own -- reverting `to_rows()` to a per-row Python comprehension
+    still measured 6.7x, comfortably above the 6x threshold (measured directly, by making
+    exactly that change and re-running). A count of one is not.
+
+    A per-row implementation fails this either way: a comprehension that calls no `zip` at
+    all counts 0, and one that zips per row counts `row_count`.
+    """
+    counts = [_columnar_transpose_count(count, monkeypatch) for count in (250, 1000)]
+
+    assert counts == [1, 1], (
+        f"expected exactly one transpose per to_rows() call at both row counts, got {counts}"
+    )
+
+
 # --- cost, measured (relative ratio only) --------------------------------------------------
 
 _BENCH_ROWS = 2000
-_MIN_SPEEDUP = 4.0
+_MIN_SPEEDUP = 6.0
+_MIN_SPEEDUP_UNDER_A_TRACER = 4.0
+
+
+def _min_speedup() -> float:
+    """The applicable threshold, which depends on whether a line tracer is installed.
+
+    This project's own completion gate runs the suite twice, once plain and once under
+    `pytest --cov`, and `coverage.py` installs a `sys.settrace` tracer that taxes the two
+    paths very unequally: the row-wise path is mostly C-level pydantic work the tracer barely
+    sees, while the columnar path is Python-level generator expressions the tracer charges
+    for on every element. Measured here, same machine, same commit:
+
+        untraced       7.54x - 8.18x   (48 samples)
+        under --cov    4.88x - 5.23x   (36 samples)
+
+    One constant cannot serve both -- 6x is a ~20% cushion untraced and simply unreachable
+    traced. So the regime is detected rather than guessed. `sys.gettrace()` is not None under
+    `coverage.py` (and under a debugger, which deserves the same treatment).
+    """
+    return _MIN_SPEEDUP_UNDER_A_TRACER if sys.gettrace() is not None else _MIN_SPEEDUP
 
 
 def test_the_columnar_path_costs_a_small_fraction_of_the_row_wise_path_per_row() -> None:
@@ -294,19 +406,37 @@ def test_the_columnar_path_costs_a_small_fraction_of_the_row_wise_path_per_row()
     a handicap invented here.
 
     Measured on this task's development machine at 2,000 rows x 5 float fields, best of five
-    runs each, repeated three times (spread under 3%):
+    runs each:
 
-        row-wise   13.85 us/row   (records 6.18 + batch 2.61 + payload_digest 4.98)
-        columnar    1.79 us/row   (TimelineColumns 0.66 + batch incl. digest 0.99 +
-                                   PanelColumns 0.10 + to_rows 0.03)
-        ratio       7.7x
+        row-wise   13.9 us/row   (records 6.10 + batch 2.63 + payload_digest 5.10)
+        columnar    1.80 us/row  (TimelineColumns 0.66 + batch incl. digest 1.00 +
+                                  PanelColumns 0.09 + to_rows 0.03)
+        ratio       7.8x
 
-    The threshold asserted here is 4x -- roughly half the measured advantage. Half, rather
-    than the measured 7.7x, because this is the one assertion in the suite that reads a
-    wall clock: a loaded CI runner can perturb the two paths unequally, and the ratio has
-    to survive that. It is still far above 1x, so an implementation that quietly reverted
-    to per-row work could not pass it, and the structural test above pins the O(1)-versus-
-    O(n) claim without any timing at all.
+    48 samples of this test's own measurement (best-of-three each side, as below) spanned
+    7.54x to 8.18x, so the ratio itself is stable to about +/-4% on an idle machine. Under
+    `coverage.py`'s tracer the whole scale shifts; `_min_speedup()` explains that and picks
+    the applicable threshold.
+
+    What the threshold is *for*, precisely: it is a backstop against a wholesale collapse of
+    the columnar advantage, sized to leave ~20% below the lowest ratio observed in its own
+    regime. What it is *not* is a reliable detector of an individual per-row regression --
+    measured directly, by mutating the implementation and re-running both regimes:
+
+                                                      untraced      under --cov
+        clean                                         7.5 - 8.2x    4.9 - 5.2x
+        to_rows() reverted to a per-row loop          6.7x  pass    3.9x  ~ on the line
+        PIT check reverted to per-row is_visible_at   4.3x  FAIL    3.0x  FAIL
+        both at once                                  3.9x  FAIL
+
+    An earlier version of this docstring claimed "an implementation that quietly reverted to
+    per-row work could not pass it" against a flat 4x threshold. That was untrue: both single
+    mutations cleared 4x untraced. Raising the threshold catches the point-in-time collapse
+    and nothing more; the `to_rows()` row above is why this test cannot be the primary
+    evidence for any of the three cost claims. The three structural, wall-clock-free
+    assertions above are -- the serialization count, the visibility-check count and the
+    transpose count, one per claim, each exact rather than statistical, and each verified to
+    go red under exactly the mutation it exists for.
     """
     availables = _availables(_BENCH_ROWS, lateness=timedelta(0))
     event, available, ingested, revision = _clocks(availables)
@@ -364,12 +494,13 @@ def test_the_columnar_path_costs_a_small_fraction_of_the_row_wise_path_per_row()
     row_wise_seconds = _best_of(row_wise_path)
     columnar_seconds = _best_of(columnar_path)
     speedup = row_wise_seconds / columnar_seconds
+    threshold = _min_speedup()
 
-    assert speedup >= _MIN_SPEEDUP, (
+    assert speedup >= threshold, (
         f"columnar path was only {speedup:.1f}x cheaper than row-wise "
         f"({columnar_seconds * 1e6 / _BENCH_ROWS:.2f} us/row vs "
         f"{row_wise_seconds * 1e6 / _BENCH_ROWS:.2f} us/row over {_BENCH_ROWS} rows); "
-        f"expected at least {_MIN_SPEEDUP}x"
+        f"expected at least {threshold}x"
     )
 
 
