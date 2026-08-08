@@ -5,10 +5,18 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Self
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    computed_field,
+    field_validator,
+    model_validator,
+)
 
 from openalpha_cn.backtest.validation import OutcomeObservation, OutcomeValidator
-from openalpha_cn.domain.evidence import EvidenceSnapshot
+from openalpha_cn.domain.evidence import EvidenceSnapshot, LookAheadViolationError
 from openalpha_cn.domain.time import ensure_aware
 from openalpha_cn.runtime.contracts import ResearchRunRequest
 from openalpha_cn.runtime.engine import ResearchEngine
@@ -39,7 +47,10 @@ class ReplayCase(BaseModel):
         if any(item.subject != self.subject for item in self.evidence):
             raise ValueError("replay evidence subject does not match the case")
         if any(not item.visible_at(self.as_of) for item in self.evidence):
-            raise ValueError("replay corpus contains a look-ahead violation")
+            # V2-P0B-014: typed, not a bare ValueError -- see LookAheadViolationError's
+            # docstring (domain/evidence.py). ReplayRunner.run() below catches this by
+            # type, not by matching this message's text.
+            raise LookAheadViolationError("replay corpus contains a look-ahead violation")
         return self
 
 
@@ -144,10 +155,14 @@ class ReplayRunner:
                 validation_ids.append(validation.validation_id)
                 succeeded += 1
             except (RuntimeError, ValueError) as error:
-                message = str(error)
-                if "look-ahead" in message or "not visible" in message:
+                # V2-P0B-014 / audit F46: classify by exception type, not by matching
+                # substrings against str(error). See LookAheadViolationError's docstring
+                # (domain/evidence.py) for the two silent failure modes this replaces, and
+                # _is_look_ahead_violation's docstring below for why a plain
+                # isinstance(error, LookAheadViolationError) check is not enough here.
+                if _is_look_ahead_violation(error):
                     look_ahead_violations += 1
-                failures.append(f"{case.run_id}: {type(error).__name__}: {message}")
+                failures.append(f"{case.run_id}: {type(error).__name__}: {error}")
 
         return ReplayReport(
             total_cases=len(corpus.cases),
@@ -161,3 +176,36 @@ class ReplayRunner:
 
 def _fixed_clock(value: datetime) -> Callable[[], datetime]:
     return lambda: value
+
+
+def _is_look_ahead_violation(error: Exception) -> bool:
+    """Return whether `error` is -- or wraps -- a `LookAheadViolationError`.
+
+    Both raise sites (`ResearchRunRequest.validate_evidence` in `domain/run_request.py`,
+    `ReplayCase.validate_point_in_time` above) raise inside a pydantic
+    `@model_validator(mode="after")`. Pydantic catches any `ValueError` (or subclass)
+    raised there and re-wraps it into its own `pydantic_core.ValidationError` before it
+    propagates out of `ResearchRunRequest(...)`/`engine.run_cycle(...)` -- so the exception
+    that actually reaches `ReplayRunner.run()`'s `except` clause is always the wrapper, not
+    `LookAheadViolationError` itself, and a plain `isinstance(error,
+    LookAheadViolationError)` would never be True for either real raise site (confirmed by
+    running `ResearchRunRequest` with invisible evidence and inspecting the raised
+    exception's type at V2-P0B-014 implementation time).
+
+    Pydantic does not discard the original exception object, though: for every
+    `type == "value_error"` entry, `ValidationError.errors()` carries it unchanged at
+    `entry["ctx"]["error"]`. Checking that -- instead of parsing `entry["msg"]`, which is
+    exactly the string-matching this task removes -- is what actually classifies the
+    violation, still entirely independent of wording.
+
+    Also accepts an unwrapped `LookAheadViolationError` directly, so a future call site
+    that raises it outside of a pydantic validator is classified correctly too.
+    """
+    if isinstance(error, LookAheadViolationError):
+        return True
+    if isinstance(error, ValidationError):
+        return any(
+            isinstance(item.get("ctx", {}).get("error"), LookAheadViolationError)
+            for item in error.errors()
+        )
+    return False

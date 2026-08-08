@@ -19,6 +19,33 @@ from openalpha_cn.domain.time import Timeline, is_visible_at
 from openalpha_cn.domain.versioning import ContractVersions
 
 
+class LookAheadViolationError(ValueError):
+    """Raised when evidence would not have been visible at the moment it is used.
+
+    V2-P0B-014 / audit F46. Two independent point-in-time guards check exactly this --
+    `ResearchRunRequest.validate_evidence` (`domain/run_request.py`) and
+    `ReplayCase.validate_point_in_time` (`backtest/replay.py`) -- and both raise this type
+    rather than a bare `ValueError`. Before this type existed, `ReplayRunner.run()`
+    recognised a look-ahead violation by matching the substrings "look-ahead" and "not
+    visible" against `str(error)`. That was silently fragile two ways: any routine message
+    rewrite (translation, added context, rewording) zeroed
+    `ReplayReport.look_ahead_violations` without any test noticing, since the frozen-corpus
+    test only asserts the count; and any unrelated `ValueError` that happened to contain
+    either substring was miscounted as a look-ahead violation. Classifying by
+    `isinstance`/`except` against this type instead of parsing the message removes both
+    failure modes: the wording is free to change, and nothing else can be mistaken for it.
+
+    It subclasses `ValueError` on purpose -- not `Exception` directly -- so every call site
+    that already wrote `except ValueError` (or a tuple including it) keeps catching this
+    exactly as it caught the bare `ValueError` it replaces, with no behavior change.
+
+    Lives here, next to `EvidenceSnapshot.visible_at`, rather than in a new module: both
+    raise sites are checking that exact predicate, and `domain/` -- the one package in this
+    repository with no upward dependencies -- must be able to raise it without importing
+    anything from `backtest/`.
+    """
+
+
 class EvidenceSnapshot(BaseModel):
     """One immutable evidence item with stable identity and four time clocks."""
 

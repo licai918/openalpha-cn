@@ -31,7 +31,7 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from openalpha_cn.domain.evidence import EvidenceSnapshot
+from openalpha_cn.domain.evidence import EvidenceSnapshot, LookAheadViolationError
 from openalpha_cn.domain.time import ensure_aware
 
 
@@ -59,5 +59,8 @@ class ResearchRunRequest(BaseModel):
         if any(item.subject != self.subject for item in self.evidence):
             raise ValueError("all evidence must match the requested subject")
         if any(not item.visible_at(self.as_of) for item in self.evidence):
-            raise ValueError("evidence is not visible at request as_of")
+            # V2-P0B-014: typed, not a bare ValueError -- see LookAheadViolationError's
+            # docstring (domain/evidence.py) for why the replay runner needs this to be a
+            # type it can catch instead of a message it has to parse.
+            raise LookAheadViolationError("evidence is not visible at request as_of")
         return self
