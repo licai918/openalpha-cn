@@ -65,6 +65,17 @@ what an eager `from openalpha_cn.runtime.engine import ResearchEngine` at the to
 `runtime/__init__.py` would pull in, and remains the property this test exists to guard
 regardless of which unrelated third-party modules happen to ride along with any one import
 chain at any one time.
+
+Update (V2-P0B-012): the `runtime.contracts -> agents.base` edge described above no longer
+exists at all. `runtime/contracts.py` now imports `AgentResult` from `domain.agent_result`
+directly (the identical class object `agents.base` itself re-exports), because a new
+consumer, `openalpha_cn.batch_contracts`, needs `ResearchRunRequest` from this module and
+would otherwise have transitively pulled the entire `agents`/`models` subsystem in along
+with it merely to obtain one plain data type. A fresh `import openalpha_cn.runtime.contracts`
+today does not load `openalpha_cn.agents` (or `openalpha_cn.models`) at all -- a strictly
+smaller import footprint than the one this history section describes, kept for the record
+since it explains *why* the storage-scoped check below is the right one, not a `sqlite3`
+one, independent of which upstream modules happen to be involved at any one time.
 """
 
 from __future__ import annotations

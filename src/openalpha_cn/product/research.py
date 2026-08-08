@@ -1,14 +1,26 @@
 """Stock screening, watchlist records, and evidence-linked report generation."""
 
-from datetime import datetime
 from typing import Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
+from pydantic import BaseModel, ConfigDict, Field
 
-from openalpha_cn.domain._identity import stable_model_id
-from openalpha_cn.domain.time import ensure_aware
-from openalpha_cn.domain.versioning import ContractVersions, single_version
+from openalpha_cn.domain.report import RESEARCH_REPORT_VERSIONS, ResearchReport
+from openalpha_cn.domain.watchlist import WATCHLIST_ENTRY_VERSIONS, WatchlistEntry
 from openalpha_cn.runtime.contracts import ResearchRunResult
+
+__all__ = [
+    "RESEARCH_REPORT_VERSIONS",
+    "WATCHLIST_ENTRY_VERSIONS",
+    "ReportStore",
+    "ResearchReport",
+    "ResearchReportFactory",
+    "ResearchScreener",
+    "ScreeningCriteria",
+    "ScreeningItem",
+    "ScreeningResult",
+    "WatchlistEntry",
+    "WatchlistStore",
+]
 
 
 class ScreeningCriteria(BaseModel):
@@ -81,34 +93,16 @@ class ResearchScreener:
         )
 
 
-class WatchlistEntry(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
-
-    subject: str = Field(min_length=1, max_length=128)
-    tags: tuple[str, ...] = ()
-    note: str = Field(default="", max_length=2000)
-    created_at: datetime
-    updated_at: datetime
-
-    @field_validator("created_at", "updated_at")
-    @classmethod
-    def normalize_datetimes(cls, value: datetime) -> datetime:
-        return ensure_aware(value)
-
-
-WATCHLIST_ENTRY_VERSIONS: ContractVersions[WatchlistEntry] = single_version(
-    "watchlist-entry", WatchlistEntry
-)
-
-
 class WatchlistStore(Protocol):
     """Extension contract for durable watchlist storage.
 
-    Mirrors the `runtime.memory.ResearchMemory` precedent: the Protocol lives beside the
-    `WatchlistEntry` model it manages, in the product layer (`product/`), not in
-    `storage/`. `SQLiteWatchlistStore`'s full public surface is exactly `put`/`list`/
-    `remove`, so this Protocol declares all three -- unlike the other storage Protocols
-    in this task, there was no wider surface to narrow.
+    Mirrors the `runtime.memory.ResearchMemory` precedent: the Protocol lives in the
+    product layer (`product/`), not in `storage/`. (`WatchlistEntry` itself moved to
+    `domain.watchlist` in V2-P0B-012, re-exported here unchanged -- see that module's
+    docstring -- but this Protocol, being behavior rather than a stored data shape, stayed
+    put.) `SQLiteWatchlistStore`'s full public surface is exactly `put`/`list`/`remove`, so
+    this Protocol declares all three -- unlike the other storage Protocols in this task,
+    there was no wider surface to narrow.
     """
 
     def put(self, entry: WatchlistEntry) -> None:
@@ -121,44 +115,16 @@ class WatchlistStore(Protocol):
         """Remove one watchlist entry; return whether it existed."""
 
 
-class ResearchReport(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    run_id: str
-    subject: str
-    created_at: datetime
-    title: str
-    summary: str
-    decision_id: str
-    signal_id: str
-    final_action: str
-    evidence_ids: tuple[str, ...]
-    risk_flags: tuple[str, ...]
-
-    @field_validator("created_at")
-    @classmethod
-    def normalize_created_at(cls, value: datetime) -> datetime:
-        return ensure_aware(value)
-
-    @computed_field(return_type=str)  # type: ignore[prop-decorator]
-    @property
-    def report_id(self) -> str:
-        return stable_model_id(prefix="rpt", model=self)
-
-
-RESEARCH_REPORT_VERSIONS: ContractVersions[ResearchReport] = single_version(
-    "research-report", ResearchReport
-)
-
-
 class ReportStore(Protocol):
     """Extension contract for durable research-report storage.
 
-    Mirrors the `runtime.memory.ResearchMemory` precedent: the Protocol lives beside the
-    `ResearchReport` model it manages, in the product layer (`product/`), not in
-    `storage/`. `SQLiteReportStore`'s full public surface is exactly `append`/`get`/
-    `list`, so this Protocol declares all three -- unlike the other storage Protocols in
-    this task, there was no wider surface to narrow.
+    Mirrors the `runtime.memory.ResearchMemory` precedent: the Protocol lives in the
+    product layer (`product/`), not in `storage/`. (`ResearchReport` itself moved to
+    `domain.report` in V2-P0B-012, re-exported here unchanged -- see that module's
+    docstring -- but this Protocol, being behavior rather than a stored data shape, stayed
+    put.) `SQLiteReportStore`'s full public surface is exactly `append`/`get`/`list`, so
+    this Protocol declares all three -- unlike the other storage Protocols in this task,
+    there was no wider surface to narrow.
     """
 
     def append(self, report: ResearchReport) -> None:

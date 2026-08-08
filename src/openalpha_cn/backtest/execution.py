@@ -6,6 +6,16 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from openalpha_cn.domain.execution import ExecutionResult
+
+__all__ = [
+    "AShareExecutionPolicy",
+    "CostSchedule",
+    "ExecutionRequest",
+    "ExecutionResult",
+    "MarketBar",
+]
+
 _CENT = Decimal("0.01")
 
 
@@ -53,23 +63,6 @@ class CostSchedule(BaseModel):
     minimum_commission: Decimal = Decimal("5.00")
     transfer_fee_rate: Decimal = Decimal("0.00001")
     sell_stamp_duty_rate: Decimal = Decimal("0.0005")
-
-
-class ExecutionResult(BaseModel):
-    """Filled or explicitly rejected simulated execution."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    status: Literal["filled", "rejected"]
-    side: Literal["buy", "sell"]
-    quantity: int
-    reason: str | None = None
-    filled_price: Decimal | None = None
-    notional: Decimal = Decimal("0.00")
-    commission: Decimal = Decimal("0.00")
-    transfer_fee: Decimal = Decimal("0.00")
-    stamp_duty: Decimal = Decimal("0.00")
-    total_cost: Decimal = Decimal("0.00")
 
 
 class AShareExecutionPolicy:

@@ -5,8 +5,10 @@ from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from openalpha_cn.domain.agent_result import AgentResult
 from openalpha_cn.domain.evidence import EvidenceSnapshot
-from openalpha_cn.domain.signal import SignalFrame
+
+__all__ = ["AgentContext", "AgentResult", "ResearchAgent"]
 
 
 class AgentContext(BaseModel):
@@ -18,16 +20,6 @@ class AgentContext(BaseModel):
     subject: str = Field(min_length=1, max_length=128)
     as_of: datetime
     evidence: tuple[EvidenceSnapshot, ...]
-
-
-class AgentResult(BaseModel):
-    """One agent's validated signal and rationale."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
-
-    agent_id: str = Field(min_length=1, max_length=128)
-    signal: SignalFrame
-    rationale: str = Field(min_length=1, max_length=4000)
 
 
 class ResearchAgent(Protocol):

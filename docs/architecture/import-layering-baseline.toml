@@ -9,53 +9,27 @@
 # - Each violation below MUST also appear as an `ignore_imports` entry on the matching
 #   contract in `pyproject.toml` (enforced by
 #   `tests/unit/test_import_layering.py::test_baseline_exemptions_match_import_linter_ignore_imports_configuration_exactly`).
-# - The count of `[[violation]]` entries is pinned at exactly 5 by
-#   `tests/unit/test_import_layering.py::test_baseline_exemption_count_is_pinned_at_five`.
+# - The count of `[[violation]]` entries is pinned at exactly 0 by
+#   `tests/unit/test_import_layering.py::test_baseline_exemption_count_is_pinned_at_zero`.
 #   THE BASELINE MUST ONLY SHRINK. A new violation must be fixed, never added here.
 # - When a violation is fixed (P0.B work), delete its entry here AND remove the matching
 #   `ignore_imports` line from `pyproject.toml` in the same commit, then lower the pinned
 #   count in the test above.
 #
-# V2-P0B-011 (2 entries: providers.file -> duckdb, models.governance -> sqlite3) was fixed
-# and removed here; the pinned count dropped from 7 to 5. The remaining 5 entries are all
-# V2-P0B-012 (storage-no-upward-deps), out of scope for that task.
-
-[[violation]]
-contract_id = "storage-no-upward-deps"
-importer = "openalpha_cn.storage.memory"
-imported = "openalpha_cn.runtime.memory"
-location = "src/openalpha_cn/storage/memory.py:7"
-rule = "openalpha_cn.storage must not import openalpha_cn.runtime"
-issue = "V2-P0B-012"
-
-[[violation]]
-contract_id = "storage-no-upward-deps"
-importer = "openalpha_cn.storage.portfolio"
-imported = "openalpha_cn.backtest.portfolio"
-location = "src/openalpha_cn/storage/portfolio.py:7"
-rule = "openalpha_cn.storage must not import openalpha_cn.backtest"
-issue = "V2-P0B-012"
-
-[[violation]]
-contract_id = "storage-no-upward-deps"
-importer = "openalpha_cn.storage.batch"
-imported = "openalpha_cn.runtime.batch"
-location = "src/openalpha_cn/storage/batch.py:8"
-rule = "openalpha_cn.storage must not import openalpha_cn.runtime"
-issue = "V2-P0B-012"
-
-[[violation]]
-contract_id = "storage-no-upward-deps"
-importer = "openalpha_cn.storage.recovery"
-imported = "openalpha_cn.agents.base"
-location = "src/openalpha_cn/storage/recovery.py:11"
-rule = "openalpha_cn.storage must not import openalpha_cn.agents"
-issue = "V2-P0B-012"
-
-[[violation]]
-contract_id = "storage-no-upward-deps"
-importer = "openalpha_cn.storage.product"
-imported = "openalpha_cn.product.research"
-location = "src/openalpha_cn/storage/product.py:7"
-rule = "openalpha_cn.storage must not import openalpha_cn.product"
-issue = "V2-P0B-012"
+# History:
+# - V2-P0B-011 (2 entries: providers.file -> duckdb, models.governance -> sqlite3) fixed
+#   both; the pinned count dropped from 7 to 5.
+# - V2-P0B-012 (the remaining 5 entries, all `storage-no-upward-deps`: storage.memory ->
+#   runtime.memory, storage.portfolio -> backtest.portfolio, storage.batch ->
+#   runtime.batch, storage.recovery -> agents.base, storage.product -> product.research)
+#   fixed all 5. Each was `storage/*.py` importing one data contract from above it purely
+#   to serialize/deserialize it; every one of those contracts moved to `openalpha_cn.domain`
+#   (four of them) or, for `BatchResearchTask`/`BatchProgressEvent`, a new neutral
+#   top-level module `openalpha_cn.batch_contracts` (durable orchestration state, not a
+#   domain concept, and one that itself embeds `runtime.contracts.ResearchRunRequest` so it
+#   cannot live in `domain` either -- see that module's docstring). The pinned count
+#   dropped from 5 to 0, and `storage-no-upward-deps` no longer declares `ignore_imports`
+#   at all (not even an empty list) in `pyproject.toml`.
+#
+# The baseline is empty today: every contract in `pyproject.toml` is fully compliant with
+# no exemptions.

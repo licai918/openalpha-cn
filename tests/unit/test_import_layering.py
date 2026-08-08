@@ -3,13 +3,27 @@
 ADR-0001 (`docs/architecture/ADR-0001-local-first-runtime.md`) declares that domain and
 provider contracts must not import SQLite or DuckDB implementation types. This module
 proves the gate that enforces it is real (rejects a freshly introduced violation), proves
-the pre-existing baseline of 5 measured violations
+the pre-existing baseline of measured violations
 (`docs/architecture/import-layering-baseline.toml`) can only shrink, and proves the legal
 downward dependency of `runtime`/`backtest` on `storage` is never mis-flagged.
 
 The baseline started at 7: V2-P0B-011 fixed its 2 `providers`/`models` entries
-(`providers.file -> duckdb`, `models.governance -> sqlite3`), leaving the 5
-`storage-no-upward-deps` entries tracked as V2-P0B-012.
+(`providers.file -> duckdb`, `models.governance -> sqlite3`), leaving 5
+`storage-no-upward-deps` entries tracked as V2-P0B-012. V2-P0B-012 fixed all 5: each of
+`storage/memory.py`, `storage/batch.py`, `storage/portfolio.py`, `storage/recovery.py`, and
+`storage/product.py` imported a data contract from `agents`/`runtime`/`product`/`backtest`
+purely to serialize/deserialize it; those contracts moved to `openalpha_cn.domain` (four of
+them) or, for the one judged not to be a domain concept
+(`BatchResearchTask`/`BatchProgressEvent` and their siblings -- durable *orchestration*
+state, not a research-domain value, and one that itself embeds
+`runtime.contracts.ResearchRunRequest`, so it cannot live in `domain` without pulling
+`runtime` into `domain` too), a new neutral top-level module,
+`openalpha_cn.batch_contracts`. `storage/*.py` now imports every one of these five
+contracts from below it, not above it -- the baseline is pinned at 0 and
+`storage-no-upward-deps` carries no `ignore_imports` at all.
+See `tests/unit/test_storage_contract_relocation.py` for the relocation's own proofs
+(identity preserved from every old import path, new homes carry no edge back into
+`agents`/`product`/`backtest`/`storage`).
 
 It also proves the domain-purity rule independently of import-linter's static
 `forbidden_modules` enumeration in `pyproject.toml`: siblings of `domain` are discovered
@@ -36,8 +50,21 @@ from importlinter.cli import lint_imports
 
 ROOT = Path(__file__).resolve().parents[2]
 BASELINE_PATH = ROOT / "docs" / "architecture" / "import-layering-baseline.toml"
-PINNED_BASELINE_COUNT = 5
+PINNED_BASELINE_COUNT = 0
 ISSUE_PATTERN = re.compile(r"^V2-P0B-\d{3}$")
+
+# The five upward edges the V2-P0B-012 baseline used to exempt, keyed by the storage module
+# that carried each one. Kept here (rather than only in the baseline's own git history) so
+# this test can assert, module by module, that every one of them is gone -- not just that
+# the aggregate package-level check below (`test_storage_has_zero_direct_edges_into_*`)
+# passes, which could in principle pass even if one edge moved rather than vanished.
+FORMER_BASELINE_EDGES = (
+    ("openalpha_cn.storage.memory", "openalpha_cn.runtime.memory"),
+    ("openalpha_cn.storage.batch", "openalpha_cn.runtime.batch"),
+    ("openalpha_cn.storage.portfolio", "openalpha_cn.backtest.portfolio"),
+    ("openalpha_cn.storage.recovery", "openalpha_cn.agents.base"),
+    ("openalpha_cn.storage.product", "openalpha_cn.product.research"),
+)
 
 
 def _load_baseline() -> list[dict[str, str]]:
@@ -69,27 +96,81 @@ def test_current_source_tree_satisfies_storage_providers_and_models_contracts_vi
     assert exit_code == 0
 
 
-def test_baseline_exemption_count_is_pinned_at_five() -> None:
-    """The baseline is shrink-only: exactly 5 entries today, never more.
+def test_baseline_exemption_count_is_pinned_at_zero() -> None:
+    """The baseline is shrink-only: exactly 0 entries today, never more.
 
-    Shrunk from 7 to 5 by V2-P0B-011, which fixed both `providers-no-infra-imports` and
-    `models-no-infra-imports` violations (`providers.file -> duckdb`,
-    `models.governance -> sqlite3`), leaving only the 5 V2-P0B-012
-    `storage-no-upward-deps` entries.
+    Shrunk from 7 to 5 by V2-P0B-011 (`providers-no-infra-imports` and
+    `models-no-infra-imports`), then from 5 to 0 by V2-P0B-012, which fixed every remaining
+    `storage-no-upward-deps` entry -- `storage/*.py` no longer imports anything from
+    `agents`/`runtime`/`product`/`backtest` at all. Should a future change ever need a new
+    exemption, this pin forces it to be a deliberate, reviewed edit, not a silent add.
     """
     violations = _load_baseline()
     assert len(violations) == PINNED_BASELINE_COUNT
 
 
 def test_every_baseline_exemption_declares_the_issue_that_will_close_it() -> None:
-    """Every registered exemption must name the P0.B issue that will remove it."""
+    """Every registered exemption must name the P0.B issue that will remove it.
+
+    The baseline is empty today (V2-P0B-012 closed the last 5 entries), so this loop runs
+    zero times and the test passes vacuously -- kept as defense in depth: if a baseline
+    entry is ever reintroduced, it is still required to carry a valid issue annotation.
+    """
     violations = _load_baseline()
-    assert violations, "baseline must not be empty for this assertion to be meaningful"
     for violation in violations:
         issue = violation.get("issue", "")
         assert ISSUE_PATTERN.match(issue), (
             f"{violation.get('importer')} -> {violation.get('imported')} has no valid "
             f"issue annotation (got {issue!r})"
+        )
+
+
+def test_storage_no_upward_deps_contract_has_no_ignore_imports_key() -> None:
+    """`ignore_imports` must be removed entirely from `storage-no-upward-deps`, not left as
+    an empty list. An empty list is functionally identical to no exemptions, but leaving the
+    key behind would keep inviting a future entry to be appended to "the exemptions list"
+    instead of treated as a fresh violation that must be fixed -- see the objective success
+    criterion in this task's brief.
+    """
+    config = importlinter_api.read_configuration(str(ROOT / "pyproject.toml"))
+    contract = next(
+        contract
+        for contract in config["contracts_options"]
+        if contract.get("id") == "storage-no-upward-deps"
+    )
+    assert "ignore_imports" not in contract, (
+        "storage-no-upward-deps still declares an ignore_imports key "
+        f"(value: {contract.get('ignore_imports')!r}); it must be removed entirely now that "
+        "the baseline is empty, not left as []"
+    )
+
+
+def test_storage_has_zero_direct_edges_into_agents_runtime_product_or_backtest() -> None:
+    """The package-level guarantee `storage-no-upward-deps` exists to enforce, checked
+    directly with `grimp` rather than through import-linter's own (now-unexempted)
+    evaluation -- an independent measurement of the same property.
+    """
+    graph = grimp.build_graph("openalpha_cn")
+    for forbidden in (
+        "openalpha_cn.agents",
+        "openalpha_cn.runtime",
+        "openalpha_cn.product",
+        "openalpha_cn.backtest",
+    ):
+        assert not graph.direct_import_exists(
+            importer="openalpha_cn.storage", imported=forbidden, as_packages=True
+        ), f"openalpha_cn.storage still directly imports {forbidden}"
+
+
+def test_each_former_baseline_edge_is_individually_gone() -> None:
+    """Module-by-module proof that each of the five specific edges the baseline used to
+    exempt no longer exists -- not merely that some aggregate package-level check passes,
+    which could stay green even if one edge had only moved rather than vanished.
+    """
+    graph = grimp.build_graph("openalpha_cn")
+    for importer, imported in FORMER_BASELINE_EDGES:
+        assert not graph.direct_import_exists(importer=importer, imported=imported), (
+            f"{importer} still directly imports {imported}"
         )
 
 

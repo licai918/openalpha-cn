@@ -4,13 +4,9 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 
+from openalpha_cn.domain.report import RESEARCH_REPORT_VERSIONS, ResearchReport
 from openalpha_cn.domain.versioning import read_versioned
-from openalpha_cn.product.research import (
-    RESEARCH_REPORT_VERSIONS,
-    WATCHLIST_ENTRY_VERSIONS,
-    ResearchReport,
-    WatchlistEntry,
-)
+from openalpha_cn.domain.watchlist import WATCHLIST_ENTRY_VERSIONS, WatchlistEntry
 
 
 class SQLiteWatchlistStore:

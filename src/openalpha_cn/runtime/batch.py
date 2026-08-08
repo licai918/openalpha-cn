@@ -7,107 +7,30 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from threading import RLock
-from typing import Literal, Protocol, Self
+from typing import Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-
-from openalpha_cn.domain.versioning import ContractVersions, single_version
+from openalpha_cn.batch_contracts import (
+    BATCH_PROGRESS_EVENT_VERSIONS,
+    BATCH_RESEARCH_TASK_VERSIONS,
+    BatchProgressEvent,
+    BatchResearchTask,
+    BatchResultRef,
+    BatchTaskItem,
+)
 from openalpha_cn.runtime.contracts import ResearchRunRequest, ResearchRunResult
 
 logger = logging.getLogger(__name__)
 
-
-class BatchResultRef(BaseModel):
-    """Compact immutable reference to one completed research result."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    decision_id: str
-    signal_id: str
-    final_action: Literal["watch", "avoid", "abstain"]
-
-
-class BatchTaskItem(BaseModel):
-    """One independently recoverable request inside a batch."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    request: ResearchRunRequest
-    status: Literal["queued", "running", "succeeded", "failed", "cancelled"] = "queued"
-    result: BatchResultRef | None = None
-    error_type: str | None = Field(default=None, max_length=256)
-
-    @model_validator(mode="after")
-    def validate_terminal_state(self) -> Self:
-        if self.status == "succeeded" and self.result is None:
-            raise ValueError("succeeded batch item requires result")
-        if self.status != "succeeded" and self.result is not None:
-            raise ValueError("only succeeded batch item may contain result")
-        if self.status == "failed" and self.error_type is None:
-            raise ValueError("failed batch item requires error_type")
-        if self.status != "failed" and self.error_type is not None:
-            raise ValueError("only failed batch item may contain error_type")
-        return self
-
-
-class BatchResearchTask(BaseModel):
-    """Latest durable state of a bounded research batch."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    batch_id: str = Field(min_length=1, max_length=128)
-    items: tuple[BatchTaskItem, ...] = Field(min_length=1, max_length=1000)
-    status: Literal["queued", "running", "succeeded", "partial", "failed", "cancelled"]
-    max_concurrency: int = Field(ge=1, le=32)
-    cancellation_requested: bool = False
-    created_at: datetime
-    updated_at: datetime
-
-    @field_validator("created_at", "updated_at")
-    @classmethod
-    def normalize_datetimes(cls, value: datetime) -> datetime:
-        from openalpha_cn.domain.time import ensure_aware
-
-        return ensure_aware(value)
-
-
-BATCH_RESEARCH_TASK_VERSIONS: ContractVersions[BatchResearchTask] = single_version(
-    "batch-research-task", BatchResearchTask
-)
-
-
-class BatchProgressEvent(BaseModel):
-    """Append-only progress event for polling, SSE, or audit consumers."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    sequence: int = Field(ge=1)
-    batch_id: str
-    kind: Literal[
-        "submitted",
-        "started",
-        "item_started",
-        "item_succeeded",
-        "item_failed",
-        "cancellation_requested",
-        "recovered",
-        "finished",
-    ]
-    occurred_at: datetime
-    run_id: str | None = None
-    detail: str | None = None
-
-    @field_validator("occurred_at")
-    @classmethod
-    def normalize_occurred_at(cls, value: datetime) -> datetime:
-        from openalpha_cn.domain.time import ensure_aware
-
-        return ensure_aware(value)
-
-
-BATCH_PROGRESS_EVENT_VERSIONS: ContractVersions[BatchProgressEvent] = single_version(
-    "batch-progress-event", BatchProgressEvent
-)
+__all__ = [
+    "BATCH_PROGRESS_EVENT_VERSIONS",
+    "BATCH_RESEARCH_TASK_VERSIONS",
+    "BatchProgressEvent",
+    "BatchResearchService",
+    "BatchResearchTask",
+    "BatchResultRef",
+    "BatchTaskItem",
+    "BatchTaskStore",
+]
 
 
 class BatchTaskStore(Protocol):

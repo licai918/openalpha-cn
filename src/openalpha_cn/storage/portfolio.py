@@ -4,7 +4,7 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 
-from openalpha_cn.backtest.portfolio import PORTFOLIO_TRANSITION_VERSIONS, PortfolioTransition
+from openalpha_cn.domain.portfolio import PORTFOLIO_TRANSITION_VERSIONS, PortfolioTransition
 from openalpha_cn.domain.versioning import read_versioned
 
 

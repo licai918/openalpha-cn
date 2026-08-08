@@ -6,13 +6,13 @@ from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
-from openalpha_cn.domain.versioning import read_versioned
-from openalpha_cn.runtime.batch import (
+from openalpha_cn.batch_contracts import (
     BATCH_PROGRESS_EVENT_VERSIONS,
     BATCH_RESEARCH_TASK_VERSIONS,
     BatchProgressEvent,
     BatchResearchTask,
 )
+from openalpha_cn.domain.versioning import read_versioned
 
 logger = logging.getLogger(__name__)
 

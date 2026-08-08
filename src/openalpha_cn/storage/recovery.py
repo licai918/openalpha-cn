@@ -8,7 +8,7 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from openalpha_cn.agents.base import AgentResult
+from openalpha_cn.domain.agent_result import AgentResult
 from openalpha_cn.domain.time import ensure_aware
 from openalpha_cn.domain.versioning import ContractVersions, read_versioned
 

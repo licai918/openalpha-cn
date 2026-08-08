@@ -1,27 +1,15 @@
 """Research memory contracts and deterministic in-memory implementation."""
 
-from datetime import datetime
 from typing import Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
+from openalpha_cn.domain.memory import MEMORY_ENTRY_VERSIONS, MemoryEntry
 
-from openalpha_cn.domain.versioning import ContractVersions, single_version
-
-
-class MemoryEntry(BaseModel):
-    """A compact durable-memory candidate linked to a completed decision."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
-
-    run_id: str = Field(min_length=1, max_length=128)
-    subject: str = Field(min_length=1, max_length=128)
-    created_at: datetime
-    decision_id: str = Field(min_length=1, max_length=128)
-    signal_id: str = Field(min_length=1, max_length=128)
-    summary: str = Field(min_length=1, max_length=2000)
-
-
-MEMORY_ENTRY_VERSIONS: ContractVersions[MemoryEntry] = single_version("memory-entry", MemoryEntry)
+__all__ = [
+    "MEMORY_ENTRY_VERSIONS",
+    "InMemoryResearchMemory",
+    "MemoryEntry",
+    "ResearchMemory",
+]
 
 
 class ResearchMemory(Protocol):

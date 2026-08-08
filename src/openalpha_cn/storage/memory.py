@@ -4,8 +4,8 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 
+from openalpha_cn.domain.memory import MEMORY_ENTRY_VERSIONS, MemoryEntry
 from openalpha_cn.domain.versioning import read_versioned
-from openalpha_cn.runtime.memory import MEMORY_ENTRY_VERSIONS, MemoryEntry
 
 
 class SQLiteResearchMemory:
