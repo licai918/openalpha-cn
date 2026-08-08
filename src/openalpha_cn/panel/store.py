@@ -24,6 +24,23 @@ years of history accumulate, while staying coarse enough that ~2,440 trading day
 single field fit inside one partition without generating thousands of tiny files (the
 opposite failure mode from `ParquetEvidenceStore`'s one-file-per-append).
 
+## Dataset name validation
+
+`dataset` must be a single, plain path segment -- no `/`, no `..`, not absolute -- enforced
+by `_validate_dataset()` at the top of every public method that accepts it (`write_partition()`,
+`query()`, `profile_query()`), before anything else runs. This closes a real gap a review
+found in the first version of this module: `write_partition()` built
+`self.root / dataset / str(year)` and `profile_query()` built its profiling temp filename
+from an f-string containing `dataset`, neither validated. A relative `dataset` containing
+`..` escaped `root` once the OS resolved the traversal; an *absolute* `dataset` made
+`Path(root) / dataset` discard `root` entirely (pathlib's documented behavior for joining
+an absolute path onto anything) -- both reproduced as real files written outside `root`
+before the fix. Every `dataset` currently passed anywhere in this codebase is a hardcoded
+literal, so this was not exploitable *today* -- but every future dataset group writes
+through this same primitive, and `_validate_dataset()` is what keeps that true going
+forward instead of by accident. See `_validate_dataset`'s own docstring for the exact
+rule and this task's review report for the reproduction.
+
 ## The catalog
 
 ``<root>/catalog.duckdb`` is a **persistent** DuckDB database file (never `":memory:"`),
@@ -48,23 +65,75 @@ a silent, scale-dependent gap).
 ## Concurrency
 
 DuckDB's own file-locking rule (checked against DuckDB 1.5 empirically, across real OS
-processes, before this was written) is what shapes this module's concurrency behavior:
+processes, before this was written) is what shapes this module's *cross-process*
+concurrency behavior:
 
 - A file opened `read_only=True` may be opened concurrently by any number of processes, as
   long as no process holds it open for writing.
-- A file opened for writing (the default) takes an **exclusive** lock; any other process
+- A file opened for writing (the default) takes an **exclusive** lock; any other *process*
   attempting to open it at all -- read-write or read-only -- fails immediately with
   `duckdb.IOException` (a fast, explicit error, never a hang).
 
+That rule governs concurrency *across OS processes*. This codebase's actual concurrency
+primitive -- `runtime/batch.py`'s `BatchResearchService`, built on a `ThreadPoolExecutor` --
+runs multiple worker *threads inside one process* against one shared object, a materially
+different regime a review found this module's original concurrency testing never actually
+exercised (it only ran real separate-process repros). Verified empirically for both regimes
+before writing this section:
+
+- Multiple threads in one process opening the catalog `read_only=True` concurrently do not
+  conflict with each other, same as the cross-process rule above.
+- Multiple threads in one process each opening the catalog read-write and inserting
+  concurrently *do* conflict, but not with `duckdb.IOException`: DuckDB shares one database
+  instance across same-process connections to the same file and serializes their
+  transactions with its own MVCC, so a losing thread gets
+  `duckdb.TransactionException: Catalog write-write conflict` instead -- reproduced with 4
+  threads writing 4 *different* datasets against a cold-start store, 3 of 4 failing,
+  reproducibly. (An earlier version of this section claimed `duckdb.IOException` here
+  without the same-process case ever having been tested; that claim was simply wrong for
+  the regime this codebase actually uses.)
+
 Every catalog connection this module opens is short-lived: opened, used, closed within a
 single `with` block, never held across calls (mirroring `ParquetEvidenceStore`'s own
-per-call `duckdb.connect()` pattern). `write_partition()` opens the catalog read-write only
-for the few milliseconds it takes to write one metadata row; `query()`/`profile_query()`
-open it `read_only=True`, so any number of concurrent readers can run in parallel. A writer
-racing another writer for the same process is not retried by this skeleton -- the loser's
-`duckdb.connect()` raises `duckdb.IOException` immediately, and ingestion pipelines built on
-top of this module are expected to run as a single sequential writer (this is a storage
-skeleton, not an ingestion scheduler; see this task's report for the concrete concern).
+per-call `duckdb.connect()` pattern). `query()`/`profile_query()` open it `read_only=True`,
+so any number of concurrent readers -- same-process threads or separate processes -- can run
+in parallel: verified for `query()` by
+`test_concurrent_read_only_queries_from_separate_processes_do_not_fail_each_other`, and for
+`profile_query()`, same-process, by
+`test_profile_query_survives_eight_concurrent_threads_against_the_same_partition` -- which
+required an actual fix, not just this docstring, to become true (`profile_query()`'s
+profiling-output filename used to have no per-call uniqueness, so 8 concurrent threads
+against the same partition produced 3-6 failures per run across 5 runs; it is now
+`uuid.uuid4()`-suffixed per call).
+
+`write_partition()`'s catalog upsert is guarded by an in-process `threading.Lock`
+(`self._catalog_write_lock`), so concurrent same-process writer *threads* -- the regime
+`ThreadPoolExecutor`-based callers actually create -- no longer race each other for the
+catalog: the Parquet `COPY` (the expensive part) still runs unlocked and concurrently across
+threads, and only the few-millisecond catalog upsert is serialized, eliminating the
+`TransactionException` above by construction rather than by retrying after it happens. Two
+threads writing the *same* `(dataset, year)` partition concurrently no longer crash either
+-- the pre-fix temp Parquet filename had no per-writer uniqueness, so
+`temporary.replace(target)` could raise a raw `FileNotFoundError` when one writer's rename
+stepped on another's still-in-progress temp file; the temp filename is now
+`uuid.uuid4()`-suffixed per call. The *result* of two threads racing the same partition is a
+well-defined "last write to complete wins" outcome, consistent with `write_partition()`'s
+already-stated overwrite-per-partition semantics -- this store adds no extra isolation
+beyond that, and does not need to.
+
+Cross-process writers are a different story this in-process lock cannot help with: a
+`threading.Lock` coordinates threads within one Python process, never across OS process
+boundaries. Two independent `PanelStore` instances in two OS processes racing to write still
+hit the DuckDB file-locking rule at the top of this section -- whichever process's
+`duckdb.connect(catalog_path)` (default, read-write) loses the race gets
+`duckdb.IOException` immediately, not retried. This module makes a deliberate choice not to
+solve that here: retrying blindly on `duckdb.IOException` would hide a design question
+(should concurrent multi-process writers serialize, queue, or simply not happen?) that
+belongs to whatever ingestion scheduler is eventually built on top of this storage skeleton,
+not to the skeleton itself. Multi-process ingestion that needs concurrent writers must
+serialize them itself (a single writer process, or an external lock) -- documented here as a
+known, still-open limitation, not fixed by this task; see this task's report for the
+concrete recommendation this leaves for `V2-P1-004`+.
 
 ## Write and idempotency semantics
 
@@ -94,11 +163,30 @@ No concrete dataset (prices, fundamentals, calendar, adjustment factors, ...) is
 `write_partition()` takes caller-supplied `ColumnSpec`s and raw row tuples, nothing typed to
 a business schema. No data-catalog/readiness contract (`V2-P1-003`) and no columnar batch
 contract (`V2-P1-002`). Both are separate, later tasks.
+
+Two further design characteristics a review flagged as worth carrying forward, not fixed by
+this task (out of scope -- recorded here so the next phase does not rediscover them from
+scratch):
+
+- **No range query.** `year` is a mandatory single `int` on both `query()` and
+  `profile_query()`; there is no way to ask for a span of years in one call. A multi-year
+  read needs caller-side looping over `query()`, one call per year (each still hitting
+  exactly one partition file, per "The catalog" above -- looping does not reintroduce a
+  full-history scan, it just means the caller issues N single-partition calls instead of
+  this module offering one N-partition call).
+- **No row-group pruning within a partition.** An equality filter in `filters` narrows the
+  *result set* `query()`/`profile_query()` return, but not the *scan*: DuckDB reads every
+  row group of the resolved partition file before applying the `WHERE` clause, rather than
+  using Parquet row-group statistics to skip groups the filter cannot match. Partition
+  pruning (across files, via the catalog) is a structural guarantee this module provides;
+  row-group pruning (within one file) is not.
 """
 
 from __future__ import annotations
 
 import json
+import threading
+import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from hashlib import sha256
@@ -110,7 +198,45 @@ import duckdb
 
 class PanelStorageError(RuntimeError):
     """Raised for panel-store usage errors: an empty write batch, a malformed column
-    list, or a `profile_query()` against a partition the catalog has never registered."""
+    list, a malformed `dataset` name, or a `profile_query()` against a partition the
+    catalog has never registered."""
+
+
+def _validate_dataset(dataset: str) -> None:
+    """Reject any `dataset` that is not a single, plain path segment.
+
+    `write_partition()` and `profile_query()` both join `dataset` onto `self.root` to
+    build a real filesystem path -- `write_partition()` directly (`self.root / dataset /
+    str(year)`), `profile_query()` through an f-string (`self.root /
+    f".profile-{dataset}-{year}.json"`). `query()` never builds a path from `dataset`
+    itself (it only uses the already-validated path a prior `write_partition()` call
+    stored in the catalog), but calls this too, at the same boundary, so no future change
+    to any of the three methods can reintroduce this gap by accident.
+
+    Neither `Path.joinpath` nor the `/` operator sanitizes its right-hand operand:
+
+    - A relative `dataset` containing `..` (e.g. `"../escaped"`) is accepted silently by
+      `Path` construction; the traversal is only resolved once the OS actually opens a
+      file for writing, by which point it has already escaped `root`.
+    - An *absolute* `dataset` (e.g. `"/abs/path"`) makes `Path(root) / dataset` discard
+      `root` entirely -- pathlib's documented behavior for joining an absolute path onto
+      anything -- with no error at any layer.
+
+    Both were reproduced against the pre-fix code before this check was written: a
+    relative traversal wrote a real Parquet file as a sibling of `root`, and an absolute
+    `dataset` wrote one at an arbitrary absolute path with `root` silently discarded (see
+    this task's review report). A single call to this function, at the very top of every
+    public method that accepts `dataset`, closes both: every value it accepts is
+    guaranteed, structurally, to resolve to a child of `root` once joined.
+    """
+    if not dataset:
+        raise PanelStorageError("dataset must not be empty")
+    segment = Path(dataset)
+    if segment.is_absolute() or segment.name != dataset or dataset in {".", ".."}:
+        raise PanelStorageError(
+            "dataset must be a single, plain path segment (no '/', no '..', not "
+            f"absolute); got {dataset!r}"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +296,15 @@ class PanelStore:
         # during development: three reader processes each constructing `PanelStore`
         # concurrently raised `duckdb.IOException` (lock conflict) inside `__init__`,
         # exactly the failure this comment now prevents structurally.
+        #
+        # A plain `threading.Lock`, not a duckdb connection: it costs nothing to create
+        # (no I/O, no catalog touched) and only ever guards `write_partition()`'s catalog
+        # upsert (see there) against *same-process* writer threads -- the concurrency
+        # regime `runtime/batch.py`'s `ThreadPoolExecutor` actually creates. It cannot, and
+        # is not meant to, coordinate across separate OS processes; see the module
+        # docstring's "Concurrency" section for why that remains a deliberately separate,
+        # still-open concern.
+        self._catalog_write_lock = threading.Lock()
 
     def write_partition(
         self,
@@ -181,7 +316,15 @@ class PanelStore:
         """Write (or idempotently no-op, or overwrite) one `(dataset, year)` partition.
 
         See the module docstring's "Write and idempotency semantics" section.
+
+        Raises `PanelStorageError` if `dataset` is not a single, plain path segment --
+        see `_validate_dataset` and the module docstring's "Dataset name validation"
+        section. This is a security boundary, not just an input-shape check: pre-fix, an
+        unvalidated `dataset` could write a Parquet file as a sibling of `root`
+        (`dataset="../escaped"`) or at an arbitrary absolute path with `root` silently
+        discarded (`dataset="/abs/path"`).
         """
+        _validate_dataset(dataset)
         if not columns:
             raise PanelStorageError("cannot write a partition with zero columns")
         if not rows:
@@ -196,7 +339,13 @@ class PanelStore:
         partition_dir = self.root / dataset / str(year)
         partition_dir.mkdir(parents=True, exist_ok=True)
         target = self.root / relative_path
-        temporary = target.with_suffix(".parquet.tmp")
+        # Per-writer-unique, not `target.with_suffix(".parquet.tmp")`: two writers racing
+        # to overwrite the *same* partition (same-process threads or separate processes)
+        # used to share this filename, so one writer's `temporary.replace(target)` could
+        # find the file already renamed away by the other, raising a raw
+        # `FileNotFoundError`. Reproduced with 8 same-process threads before this fix; see
+        # `test_write_partition_survives_concurrent_threads_writing_the_same_partition`.
+        temporary = target.with_name(f"{target.name}.{uuid.uuid4().hex}.tmp")
         column_ddl = ", ".join(f'"{column.name}" {column.duckdb_type}' for column in columns)
         placeholders = ", ".join("?" for _ in columns)
         with duckdb.connect(":memory:") as staging:
@@ -207,7 +356,18 @@ class PanelStore:
             )
         temporary.replace(target)
 
-        with duckdb.connect(str(self.catalog_path)) as connection:
+        # Locked for the same reason the connection itself is short-lived: DuckDB shares
+        # one database instance across same-process connections to the same file and
+        # serializes their transactions with its own MVCC, so concurrent same-process
+        # writer threads racing this block used to lose with
+        # `duckdb.TransactionException: Catalog write-write conflict` -- reproduced with 4
+        # threads writing 4 *different* datasets against a cold-start store (no catalog
+        # file yet) before this fix, 3 of 4 failing, reproducibly; see
+        # `test_write_partition_survives_four_concurrent_threads_writing_four_different_datasets`.
+        # The lock only wraps this few-millisecond upsert, not the Parquet `COPY` above --
+        # that stays unlocked and concurrent across writer threads. It cannot coordinate
+        # across separate OS processes; see the module docstring's "Concurrency" section.
+        with self._catalog_write_lock, duckdb.connect(str(self.catalog_path)) as connection:
             connection.execute(_CATALOG_DDL)
             connection.execute(
                 """
@@ -239,7 +399,16 @@ class PanelStore:
         never a directory listing) and hands DuckDB that single explicit path, so the scan
         can only ever touch this one partition -- see the module docstring's "The catalog"
         section for why this is a structural guarantee, not an optimizer hope.
+
+        Raises `PanelStorageError` if `dataset` is not a single, plain path segment (see
+        `_validate_dataset`). Unlike a merely-unwritten partition, this is a malformed
+        request, not missing data, so it raises rather than returning `[]` -- this method
+        never actually builds a filesystem path from `dataset` itself (only from a path a
+        prior, already-validated `write_partition()` call stored in the catalog), but is
+        validated at the same boundary as the two methods that do, so the guarantee holds
+        for all three without depending on write-time validation alone.
         """
+        _validate_dataset(dataset)
         if not self.catalog_path.exists():
             return []
         with duckdb.connect(str(self.catalog_path), read_only=True) as connection:
@@ -265,8 +434,25 @@ class PanelStore:
         projection without asserting on wall-clock timing.
 
         Raises `PanelStorageError` if the partition was never written (there is no scan to
-        profile), unlike `query()`'s empty-list-on-missing-partition behavior.
+        profile), unlike `query()`'s empty-list-on-missing-partition behavior. Also raises
+        `PanelStorageError` if `dataset` is not a single, plain path segment (see
+        `_validate_dataset`), checked before the catalog is even consulted -- pre-fix, once
+        a `dataset` resolved to a registered partition, the profiling temp filename below
+        was built directly from it with no sanitization, and a `dataset` like
+        `"/../../escaped2"` wrote that temp file outside `root` entirely.
+
+        Safe for any number of concurrent callers -- same-process threads or separate
+        processes -- because the profiling temp filename is unique per call
+        (`uuid.uuid4()`-suffixed), not shared across callers. An earlier version derived it
+        from only `(dataset, year)`; two concurrent callers profiling the same partition
+        would then both write to and `unlink()` the same file. Measured directly with 8
+        concurrent same-process threads calling this method against the same partition,
+        that produced 3-6 failures per run across 5 runs (`FileNotFoundError` from one
+        caller unlinking another's file, or `json.JSONDecodeError: Extra data` from two
+        callers' profiling JSON landing in the same file) -- see
+        `test_profile_query_survives_eight_concurrent_threads_against_the_same_partition`.
         """
+        _validate_dataset(dataset)
         if not self.catalog_path.exists():
             raise PanelStorageError(f"no partition registered for {dataset} year={year}")
         with duckdb.connect(str(self.catalog_path), read_only=True) as connection:
@@ -274,7 +460,7 @@ class PanelStore:
             if partition_path is None:
                 raise PanelStorageError(f"no partition registered for {dataset} year={year}")
             sql, parameters = _build_scan_sql(partition_path, columns, filters)
-            profile_path = self.root / f".profile-{dataset}-{year}.json"
+            profile_path = self.root / f".profile-{dataset}-{year}-{uuid.uuid4().hex}.json"
             connection.execute("PRAGMA enable_profiling='json'")
             connection.execute(f"PRAGMA profiling_output='{profile_path}'")
             connection.execute(sql, parameters).fetchall()
