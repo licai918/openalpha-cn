@@ -6,6 +6,7 @@ from pathlib import Path
 
 from openalpha_cn.domain.portfolio import PORTFOLIO_TRANSITION_VERSIONS, PortfolioTransition
 from openalpha_cn.domain.versioning import read_versioned
+from openalpha_cn.storage.connection import open_state_connection
 
 
 class SQLitePortfolioLedger:
@@ -28,7 +29,7 @@ class SQLitePortfolioLedger:
             )
 
     def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.path, timeout=10)
+        return open_state_connection(self.path)
 
     def append(self, transition: PortfolioTransition) -> None:
         """Append idempotently or reject conflicting reuse of an order ID."""

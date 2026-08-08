@@ -216,6 +216,52 @@ def _create_validation_results_table(connection: sqlite3.Connection) -> None:
     )
 
 
+def _create_query_path_indexes(connection: sqlite3.Connection) -> None:
+    """Add the three query-path indexes Finding F69 flagged as missing (V2-P0B-015 / task 21).
+
+    `checkpoints.run_id` (`SQLiteRunRepository.list_checkpoints`),
+    `portfolio_transitions.subject` (`SQLitePortfolioLedger.list`), and
+    `research_reports.subject` (`SQLiteReportStore.list`) are each filtered on directly,
+    with no matching index -- every call is a full table scan. `validation_results`
+    avoided exactly this at creation time (see `_create_validation_results_table` above,
+    `decision_id_idx`/`signal_id_idx`); these three tables predate the migration engine
+    (V2-P0B-004) and never got the same treatment, because their tables are created as a
+    `CREATE TABLE IF NOT EXISTS` constructor side effect, not through a migration -- see
+    the module docstring.
+
+    Unlike `_create_validation_results_table`, this migration cannot be precondition-free:
+    it *alters* three tables this package's stores each own and create as that constructor
+    side effect, so on a genuinely empty database none of them exist yet. All three
+    `require_table` guards run before any `CREATE INDEX`, so a database that happens to
+    have, say, `checkpoints` but not yet `portfolio_transitions` -- not reachable through
+    `build_storage()`, which constructs all eight `state.sqlite3` stores together right
+    after migrations run, but not ruled out for a hand-built or historical database --
+    defers the whole migration rather than indexing two of the three tables and never
+    getting a second chance at the third (`schema_migrations` has no per-index-within-a-
+    migration granularity: once this version is recorded applied, it never runs again).
+
+    Ordering: registered *after* `DEMO_ADD_RUNS_ARCHIVED_AT_VERSION`, not before it like
+    `CREATE_VALIDATION_RESULTS_VERSION`. That ordering trick only pays off for a
+    precondition-free migration racing the demo migration's routine deferral on a fresh
+    install (see that migration's docstring); this migration is not precondition-free --
+    none of `checkpoints`/`portfolio_transitions`/`research_reports` exist on a fresh
+    database either, at the point migrations run, regardless of position -- so it defers
+    on a fresh install no matter where in the registry it sits, and simple append-only
+    growth is the honest placement.
+    """
+    require_table(connection, "checkpoints")
+    require_table(connection, "portfolio_transitions")
+    require_table(connection, "research_reports")
+    connection.execute("CREATE INDEX IF NOT EXISTS checkpoints_run_id_idx ON checkpoints(run_id)")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS portfolio_transitions_subject_idx "
+        "ON portfolio_transitions(subject)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS research_reports_subject_idx ON research_reports(subject)"
+    )
+
+
 def _demo_add_runs_archived_at(connection: sqlite3.Connection) -> None:
     """Demonstration migration (V2-P0B-004's acceptance proof): add `runs.archived_at`.
 
@@ -241,6 +287,7 @@ def _demo_add_runs_archived_at(connection: sqlite3.Connection) -> None:
 BASELINE_VERSION = 1
 CREATE_VALIDATION_RESULTS_VERSION = 2
 DEMO_ADD_RUNS_ARCHIVED_AT_VERSION = 3
+CREATE_QUERY_PATH_INDEXES_VERSION = 4
 
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=BASELINE_VERSION, name="baseline", apply=_baseline_apply),
@@ -253,6 +300,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version=DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
         name="demo_add_runs_archived_at",
         apply=_demo_add_runs_archived_at,
+    ),
+    Migration(
+        version=CREATE_QUERY_PATH_INDEXES_VERSION,
+        name="create_query_path_indexes",
+        apply=_create_query_path_indexes,
     ),
 )
 

@@ -5,6 +5,7 @@ from contextlib import closing
 from pathlib import Path
 
 from openalpha_cn.models.governance import ModelUsageRecord
+from openalpha_cn.storage.connection import open_state_connection
 
 
 class SQLiteModelUsageStore:
@@ -26,7 +27,7 @@ class SQLiteModelUsageStore:
             )
 
     def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.path, timeout=10)
+        return open_state_connection(self.path)
 
     def append(self, record: ModelUsageRecord) -> None:
         payload = record.model_dump_json()

@@ -13,6 +13,7 @@ from openalpha_cn.batch_contracts import (
     BatchResearchTask,
 )
 from openalpha_cn.domain.versioning import read_versioned
+from openalpha_cn.storage.connection import open_state_connection
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,7 @@ class SQLiteBatchTaskStore:
             )
 
     def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.path, timeout=10)
+        return open_state_connection(self.path)
 
     def save(self, task: BatchResearchTask) -> None:
         """Insert or atomically replace the latest state of one batch."""

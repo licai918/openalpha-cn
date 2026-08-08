@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from openalpha_cn.domain.agent_result import AgentResult
 from openalpha_cn.domain.time import ensure_aware
 from openalpha_cn.domain.versioning import ContractVersions, read_versioned
+from openalpha_cn.storage.connection import open_state_connection
 
 
 class RecoveryConflictError(ValueError):
@@ -88,7 +89,7 @@ class SQLiteRecoveryStore:
             )
 
     def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.path, timeout=10)
+        return open_state_connection(self.path)
 
     def get(self, run_id: str) -> RunRecoveryState | None:
         """Load the latest recovery state for a run."""

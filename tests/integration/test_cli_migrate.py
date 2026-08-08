@@ -6,6 +6,7 @@ from typer.testing import CliRunner
 from openalpha_cn.cli import app
 from openalpha_cn.storage.migrations import (
     BASELINE_VERSION,
+    CREATE_QUERY_PATH_INDEXES_VERSION,
     CREATE_VALIDATION_RESULTS_VERSION,
     DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
 )
@@ -26,6 +27,7 @@ def test_migrate_status_reports_pending_migrations_for_a_fresh_runtime_dir(tmp_p
         BASELINE_VERSION,
         CREATE_VALIDATION_RESULTS_VERSION,
         DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
+        CREATE_QUERY_PATH_INDEXES_VERSION,
     ]
 
 
@@ -105,8 +107,12 @@ def test_migrate_run_converges_after_it_constructs_stores_then_reports_up_to_dat
 
     second = runner.invoke(app, ["migrate", "run", "--runtime-dir", str(runtime_dir)])
     assert second.exit_code == 0, second.output
+    # Both still-deferring migrations (demo, then create_query_path_indexes -- task 21)
+    # catch up together here: the first call's build_storage() constructed every store,
+    # so both migrations' preconditions are met by the time this second call's
+    # run_migrations() runs.
     assert (
-        f"migrated {CREATE_VALIDATION_RESULTS_VERSION} -> {DEMO_ADD_RUNS_ARCHIVED_AT_VERSION}"
+        f"migrated {CREATE_VALIDATION_RESULTS_VERSION} -> {CREATE_QUERY_PATH_INDEXES_VERSION}"
         in second.output
     )
     assert "up to date" not in second.output
@@ -116,7 +122,7 @@ def test_migrate_run_converges_after_it_constructs_stores_then_reports_up_to_dat
         app, ["migrate", "status", "--runtime-dir", str(runtime_dir), "--json"]
     )
     status_after_second = json.loads(status_result.output)
-    assert status_after_second["current_version"] == DEMO_ADD_RUNS_ARCHIVED_AT_VERSION
+    assert status_after_second["current_version"] == CREATE_QUERY_PATH_INDEXES_VERSION
     assert status_after_second["pending"] == []
 
     third = runner.invoke(app, ["migrate", "run", "--runtime-dir", str(runtime_dir)])

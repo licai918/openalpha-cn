@@ -12,6 +12,7 @@ from openalpha_cn.domain.run import (
     RunManifest,
 )
 from openalpha_cn.domain.versioning import read_versioned
+from openalpha_cn.storage.connection import open_state_connection
 
 
 class DuplicateRecordError(ValueError):
@@ -27,9 +28,7 @@ class SQLiteRunRepository:
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=10)
-        connection.execute("PRAGMA foreign_keys = ON")
-        return connection
+        return open_state_connection(self.path)
 
     def _initialize(self) -> None:
         with closing(self._connect()) as connection, connection:

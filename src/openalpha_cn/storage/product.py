@@ -7,6 +7,7 @@ from pathlib import Path
 from openalpha_cn.domain.report import RESEARCH_REPORT_VERSIONS, ResearchReport
 from openalpha_cn.domain.versioning import read_versioned
 from openalpha_cn.domain.watchlist import WATCHLIST_ENTRY_VERSIONS, WatchlistEntry
+from openalpha_cn.storage.connection import open_state_connection
 
 
 class SQLiteWatchlistStore:
@@ -16,7 +17,7 @@ class SQLiteWatchlistStore:
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.path, timeout=10)
+        return open_state_connection(self.path)
 
     def _initialize(self) -> None:
         with closing(self._connect()) as connection, connection:
@@ -72,7 +73,7 @@ class SQLiteReportStore:
             )
 
     def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.path, timeout=10)
+        return open_state_connection(self.path)
 
     def append(self, report: ResearchReport) -> None:
         payload = report.model_dump_json(exclude_computed_fields=True)

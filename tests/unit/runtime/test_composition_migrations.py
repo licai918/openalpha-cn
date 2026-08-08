@@ -10,6 +10,7 @@ import pytest
 from openalpha_cn.runtime.composition import build_storage
 from openalpha_cn.storage.migrations import (
     BASELINE_VERSION,
+    CREATE_QUERY_PATH_INDEXES_VERSION,
     CREATE_VALIDATION_RESULTS_VERSION,
     DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
     read_status,
@@ -24,15 +25,18 @@ def test_build_storage_stamps_a_fresh_runtime_dir_past_baseline_without_crashing
     storage = build_storage(runtime_dir=runtime_dir, clock=migration_clock)
 
     status = read_status(runtime_dir / "state.sqlite3")
-    # The demo migration defers here: migrations run before SQLiteRunRepository creates
-    # `runs`, so only the precondition-free migrations -- baseline, then
-    # create_validation_results (V2-P0B-010, deliberately ordered *before* the demo
-    # migration -- see its docstring in storage/migrations.py) -- can apply on this first
-    # call. This is also this task's real-usability proof: `validation_store` (constructed
-    # below, after this call) is backed by a table that already exists, with no second
-    # `build_storage()` call required.
+    # The demo migration and create_query_path_indexes (task 21) both defer here:
+    # migrations run before any store is constructed, so only the precondition-free
+    # migrations -- baseline, then create_validation_results (V2-P0B-010, deliberately
+    # ordered *before* the demo migration -- see its docstring in storage/migrations.py) --
+    # can apply on this first call. This is also this task's real-usability proof:
+    # `validation_store` (constructed below, after this call) is backed by a table that
+    # already exists, with no second `build_storage()` call required.
     assert status.current_version == CREATE_VALIDATION_RESULTS_VERSION
-    assert [m.version for m in status.pending] == [DEMO_ADD_RUNS_ARCHIVED_AT_VERSION]
+    assert [m.version for m in status.pending] == [
+        DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
+        CREATE_QUERY_PATH_INDEXES_VERSION,
+    ]
     # `migration_result` (exposed for `cli.py::migrate_run`, which needs the
     # `from_version`/`to_version`/`applied`/`backup_path` this call already computed
     # without re-running migrations a second time) matches `read_status()` exactly.
@@ -49,18 +53,20 @@ def test_build_storage_catches_up_the_demo_migration_on_a_second_call(
 ) -> None:
     runtime_dir = tmp_path / "runtime"
 
-    # creates `runs` via SQLiteRunRepository
+    # creates `runs`, `checkpoints`, `portfolio_transitions`, `research_reports`, etc. --
+    # all eight `state.sqlite3` stores -- as a side effect of this first call.
     build_storage(runtime_dir=runtime_dir, clock=migration_clock)
-    # `runs` exists; demo can apply
+    # every table either deferring migration needs now exists; both apply.
     second = build_storage(runtime_dir=runtime_dir, clock=migration_clock)
 
     status = read_status(runtime_dir / "state.sqlite3")
-    assert status.current_version == DEMO_ADD_RUNS_ARCHIVED_AT_VERSION
+    assert status.current_version == CREATE_QUERY_PATH_INDEXES_VERSION
     assert status.pending == ()
     assert second.migration_result.from_version == CREATE_VALIDATION_RESULTS_VERSION
-    assert second.migration_result.to_version == DEMO_ADD_RUNS_ARCHIVED_AT_VERSION
+    assert second.migration_result.to_version == CREATE_QUERY_PATH_INDEXES_VERSION
     assert [m.version for m in second.migration_result.applied] == [
-        DEMO_ADD_RUNS_ARCHIVED_AT_VERSION
+        DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
+        CREATE_QUERY_PATH_INDEXES_VERSION,
     ]
 
 

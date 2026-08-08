@@ -10,18 +10,22 @@ import multiprocessing
 import sqlite3
 import time
 from collections.abc import Callable
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
 from openalpha_cn.domain.decision import DecisionLedger
+from openalpha_cn.domain.portfolio import PortfolioOrder, PortfolioState, PortfolioTransition
+from openalpha_cn.domain.report import ResearchReport
 from openalpha_cn.domain.run import RunManifest
 from openalpha_cn.runtime.memory import MemoryEntry
 from openalpha_cn.storage.memory import SQLiteResearchMemory
 from openalpha_cn.storage.migrations import (
     _SCHEMA_MIGRATIONS_DDL,
     BASELINE_VERSION,
+    CREATE_QUERY_PATH_INDEXES_VERSION,
     CREATE_VALIDATION_RESULTS_VERSION,
     DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
     MIGRATIONS,
@@ -32,6 +36,8 @@ from openalpha_cn.storage.migrations import (
     read_status,
     run_migrations,
 )
+from openalpha_cn.storage.portfolio import SQLitePortfolioLedger
+from openalpha_cn.storage.product import SQLiteReportStore
 from openalpha_cn.storage.sqlite import SQLiteRunRepository
 
 DIGEST = "a" * 64
@@ -72,19 +78,65 @@ def _memory_entry(run_id: str, decision_id: str, *, now: datetime) -> MemoryEntr
     )
 
 
+def _portfolio_transition() -> PortfolioTransition:
+    before = PortfolioState(as_of=date(2026, 8, 6), cash=Decimal("10000"))
+    after = PortfolioState(as_of=date(2026, 8, 6), cash=Decimal("9000"))
+    return PortfolioTransition(
+        status="filled",
+        order=PortfolioOrder(
+            order_id="order_v1_shape", subject="000001.SZ", side="buy", quantity=100
+        ),
+        before=before,
+        after=after,
+    )
+
+
+def _research_report(*, now: datetime, decision_id: str) -> ResearchReport:
+    return ResearchReport(
+        run_id="run_v1_shape",
+        subject="000001.SZ",
+        created_at=now,
+        title="v1-shaped report",
+        summary="Report written before the migration system existed.",
+        decision_id=decision_id,
+        signal_id="sig_v1_shape",
+        final_action="abstain",
+        evidence_ids=("ev_v1_shape",),
+        risk_flags=(),
+    )
+
+
 def _build_v1_shaped_database(
     path: Path, *, now: datetime
-) -> tuple[RunManifest, DecisionLedger, MemoryEntry]:
-    """Populate `path` using only the pre-existing stores -- exactly like a real v1 install."""
+) -> tuple[RunManifest, DecisionLedger, MemoryEntry, PortfolioTransition, ResearchReport]:
+    """Populate `path` using only the pre-existing stores -- exactly like a real v1 install.
+
+    All seven stores that predate the migration engine (V2-P0B-004) run here, not just
+    `SQLiteRunRepository`/`SQLiteResearchMemory`: `SQLitePortfolioLedger` and
+    `SQLiteReportStore` are added by task 21 (`V2-P0B-015`) so `checkpoints`,
+    `portfolio_transitions`, and `research_reports` -- the three tables
+    `create_query_path_indexes` (see `storage/migrations.py`) indexes -- all genuinely
+    exist here, the same way they would in a real v1 install. Without this, that migration
+    would defer forever against this fixture (`portfolio_transitions`/`research_reports`
+    would never exist), permanently stranding it behind an unmet precondition in every test
+    that reuses this fixture -- itself indistinguishable, from inside a single
+    `run_migrations()` call, from a database that will never converge.
+    """
     repository = SQLiteRunRepository(path)
     memory = SQLiteResearchMemory(path)
+    portfolio_ledger = SQLitePortfolioLedger(path)
+    report_store = SQLiteReportStore(path)
     run = _manifest(now=now)
     repository.append_run(run)
     decision = _decision(now=now)
     repository.append_decision(decision)
     entry = _memory_entry(run_id=run.run_id, decision_id=decision.decision_id, now=now)
     memory.append(entry)
-    return run, decision, entry
+    transition = _portfolio_transition()
+    portfolio_ledger.append(transition)
+    report = _research_report(now=now, decision_id=decision.decision_id)
+    report_store.append(report)
+    return run, decision, entry, transition, report
 
 
 def _failing_apply(connection: sqlite3.Connection) -> None:
@@ -106,53 +158,77 @@ def test_demo_migration_advances_version_and_preserves_v1_records(
     tmp_path: Path, migration_now: datetime, migration_clock: Callable[[], datetime]
 ) -> None:
     path = tmp_path / "state.sqlite3"
-    run, decision, entry = _build_v1_shaped_database(path, now=migration_now)
+    run, decision, entry, transition, report = _build_v1_shaped_database(path, now=migration_now)
 
     # Confirm this really is what an old v1 library looks like: no version stamp, no ledger.
     with sqlite3.connect(path) as connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 0
     tables = _table_names(path)
     assert "schema_migrations" not in tables
-    assert {"runs", "decisions", "research_memory"} <= tables
+    assert {
+        "runs",
+        "decisions",
+        "checkpoints",
+        "research_memory",
+        "portfolio_transitions",
+        "research_reports",
+    } <= tables
 
     result = run_migrations(path, clock=migration_clock)
 
     assert result.from_version == 0
-    assert result.to_version == DEMO_ADD_RUNS_ARCHIVED_AT_VERSION
-    # `runs` already exists (built above), so nothing defers: baseline, then
-    # create_validation_results (V2-P0B-010, ordered before the demo migration --
-    # see that migration's docstring for why), then the demo migration all apply in
-    # this single call.
+    assert result.to_version == CREATE_QUERY_PATH_INDEXES_VERSION
+    # `runs`, `checkpoints`, `portfolio_transitions`, and `research_reports` all already
+    # exist (built above), so nothing defers: baseline, then create_validation_results
+    # (V2-P0B-010, ordered before the demo migration -- see that migration's docstring for
+    # why), then the demo migration, then create_query_path_indexes (task 21 -- see its
+    # docstring for why it is ordered *after* the demo migration instead) all apply in this
+    # single call.
     assert [m.version for m in result.applied] == [
         BASELINE_VERSION,
         CREATE_VALIDATION_RESULTS_VERSION,
         DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
+        CREATE_QUERY_PATH_INDEXES_VERSION,
     ]
     assert result.backup_path is not None
     assert result.backup_path.exists()
     assert result.backup_path.parent == path.parent / "backups"
 
     status = read_status(path)
-    assert status.current_version == DEMO_ADD_RUNS_ARCHIVED_AT_VERSION
+    assert status.current_version == CREATE_QUERY_PATH_INDEXES_VERSION
     assert [(m.version, m.name) for m in status.applied] == [
         (BASELINE_VERSION, "baseline"),
         (CREATE_VALIDATION_RESULTS_VERSION, "create_validation_results"),
         (DEMO_ADD_RUNS_ARCHIVED_AT_VERSION, "demo_add_runs_archived_at"),
+        (CREATE_QUERY_PATH_INDEXES_VERSION, "create_query_path_indexes"),
     ]
     assert status.pending == ()
 
-    # The real schema change actually happened.
+    # The real schema changes actually happened.
     with sqlite3.connect(path) as connection:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(runs)")}
+        index_names = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
+        }
     assert "archived_at" in columns
+    assert {
+        "checkpoints_run_id_idx",
+        "portfolio_transitions_subject_idx",
+        "research_reports_subject_idx",
+    } <= index_names
 
     # The core proof: records written before the migration system existed are still
     # readable through the *existing, unmodified* stores.
     repository = SQLiteRunRepository(path)
     memory = SQLiteResearchMemory(path)
+    portfolio_ledger = SQLitePortfolioLedger(path)
+    report_store = SQLiteReportStore(path)
     assert repository.get_run(run.run_id) == run
     assert repository.get_decision(decision.decision_id) == decision
     assert memory.list(subject=entry.subject) == (entry,)
+    assert portfolio_ledger.get(transition.order.order_id) == transition
+    assert report_store.get(report.report_id) == report
 
 
 def test_upgrading_a_pre_validation_database_creates_the_table_and_keeps_old_records_readable(
@@ -165,7 +241,7 @@ def test_upgrading_a_pre_validation_database_creates_the_table_and_keeps_old_rec
     through the old stores before the migration ran is still readable afterwards, unchanged.
     """
     path = tmp_path / "state.sqlite3"
-    run, decision, entry = _build_v1_shaped_database(path, now=migration_now)
+    run, decision, entry, transition, report = _build_v1_shaped_database(path, now=migration_now)
     assert "validation_results" not in _table_names(path)
 
     run_migrations(path, clock=migration_clock)
@@ -188,9 +264,75 @@ def test_upgrading_a_pre_validation_database_creates_the_table_and_keeps_old_rec
 
     repository = SQLiteRunRepository(path)
     memory = SQLiteResearchMemory(path)
+    portfolio_ledger = SQLitePortfolioLedger(path)
+    report_store = SQLiteReportStore(path)
     assert repository.get_run(run.run_id) == run
     assert repository.get_decision(decision.decision_id) == decision
     assert memory.list(subject=entry.subject) == (entry,)
+    assert portfolio_ledger.get(transition.order.order_id) == transition
+    assert report_store.get(report.report_id) == report
+
+
+# --- Finding F69: the three new query-path indexes must be chosen by the planner, not --
+# --- merely present (task 21 / V2-P0B-015) -----------------------------------------------
+
+
+def test_query_path_indexes_are_chosen_by_the_planner_not_a_full_scan(
+    tmp_path: Path, migration_now: datetime, migration_clock: Callable[[], datetime]
+) -> None:
+    """A present-but-unused index is indistinguishable from no index at all -- the exact
+    trap the brief warns against (`validation_results`'s indexes were verified with
+    `EXPLAIN QUERY PLAN`, not just `sqlite_master` membership). This checks the query plan
+    both *before* migrating (proving the plan really was a full `SCAN` beforehand, not just
+    asserting the improvement) and *after* (proving the planner now picks `SEARCH ... USING
+    INDEX`), for each of the three query paths Finding F69 named: `checkpoints.run_id`,
+    `portfolio_transitions.subject`, `research_reports.subject`.
+    """
+    path = tmp_path / "state.sqlite3"
+    _build_v1_shaped_database(path, now=migration_now)
+
+    queries = {
+        "checkpoints": "SELECT payload FROM checkpoints WHERE run_id = ? ORDER BY sequence",
+        "portfolio_transitions": (
+            "SELECT payload FROM portfolio_transitions WHERE subject = ? ORDER BY sequence"
+        ),
+        "research_reports": (
+            "SELECT payload FROM research_reports WHERE subject = ? ORDER BY sequence"
+        ),
+    }
+
+    with sqlite3.connect(path) as connection:
+        plans_before = {
+            table: connection.execute(f"EXPLAIN QUERY PLAN {sql}", ("anything",)).fetchall()
+            for table, sql in queries.items()
+        }
+    for table, plan in plans_before.items():
+        detail = plan[-1][3]
+        assert detail == f"SCAN {table}", (
+            f"{table}: expected a full scan before migrating, got {detail!r}"
+        )
+
+    run_migrations(path, clock=migration_clock)
+
+    with sqlite3.connect(path) as connection:
+        plans_after = {
+            table: connection.execute(f"EXPLAIN QUERY PLAN {sql}", ("anything",)).fetchall()
+            for table, sql in queries.items()
+        }
+    expected_after = {
+        "checkpoints": "SEARCH checkpoints USING INDEX checkpoints_run_id_idx (run_id=?)",
+        "portfolio_transitions": (
+            "SEARCH portfolio_transitions USING INDEX portfolio_transitions_subject_idx (subject=?)"
+        ),
+        "research_reports": (
+            "SEARCH research_reports USING INDEX research_reports_subject_idx (subject=?)"
+        ),
+    }
+    for table, plan in plans_after.items():
+        detail = plan[-1][3]
+        assert detail == expected_after[table], (
+            f"{table}: expected an index seek after migrating, got {detail!r}"
+        )
 
 
 def test_running_migrations_again_is_idempotent(
@@ -202,9 +344,9 @@ def test_running_migrations_again_is_idempotent(
     first = run_migrations(path, clock=migration_clock)
     second = run_migrations(path, clock=migration_clock)
 
-    assert first.to_version == DEMO_ADD_RUNS_ARCHIVED_AT_VERSION
-    assert second.from_version == DEMO_ADD_RUNS_ARCHIVED_AT_VERSION
-    assert second.to_version == DEMO_ADD_RUNS_ARCHIVED_AT_VERSION
+    assert first.to_version == CREATE_QUERY_PATH_INDEXES_VERSION
+    assert second.from_version == CREATE_QUERY_PATH_INDEXES_VERSION
+    assert second.to_version == CREATE_QUERY_PATH_INDEXES_VERSION
     assert second.applied == ()
     assert second.backup_path is None  # nothing pending, so no backup taken
 
@@ -213,6 +355,7 @@ def test_running_migrations_again_is_idempotent(
         BASELINE_VERSION,
         CREATE_VALIDATION_RESULTS_VERSION,
         DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
+        CREATE_QUERY_PATH_INDEXES_VERSION,
     ]
 
 
@@ -233,7 +376,7 @@ def test_demo_migration_is_a_sql_level_no_op_when_the_column_already_exists(
 
     result = run_migrations(path, clock=migration_clock)
 
-    assert result.to_version == DEMO_ADD_RUNS_ARCHIVED_AT_VERSION
+    assert result.to_version == CREATE_QUERY_PATH_INDEXES_VERSION
     with sqlite3.connect(path) as connection:
         columns = [row[1] for row in connection.execute("PRAGMA table_info(runs)")]
     assert columns.count("archived_at") == 1
@@ -243,12 +386,14 @@ def test_failing_migration_rolls_back_leaves_version_unmoved_and_backup_intact(
     tmp_path: Path, migration_now: datetime, migration_clock: Callable[[], datetime]
 ) -> None:
     path = tmp_path / "state.sqlite3"
-    run, _decision_record, _entry = _build_v1_shaped_database(path, now=migration_now)
+    run, _decision_record, _entry, _transition, _report = _build_v1_shaped_database(
+        path, now=migration_now
+    )
 
     # Bring the database up to date first, exactly as a real upgrade would.
     run_migrations(path, clock=migration_clock)
     before = read_status(path)
-    assert before.current_version == DEMO_ADD_RUNS_ARCHIVED_AT_VERSION
+    assert before.current_version == CREATE_QUERY_PATH_INDEXES_VERSION
 
     # One past the real registry's own highest version, computed rather than hardcoded,
     # so this injected migration's version can never collide with a real one as the
@@ -269,11 +414,12 @@ def test_failing_migration_rolls_back_leaves_version_unmoved_and_backup_intact(
     assert error.backup_path.exists()
 
     after = read_status(path)
-    assert after.current_version == DEMO_ADD_RUNS_ARCHIVED_AT_VERSION  # unmoved
+    assert after.current_version == CREATE_QUERY_PATH_INDEXES_VERSION  # unmoved
     assert [m.version for m in after.applied] == [
         BASELINE_VERSION,
         CREATE_VALIDATION_RESULTS_VERSION,
         DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
+        CREATE_QUERY_PATH_INDEXES_VERSION,
     ]  # no row for doomed_version
 
     # Data is intact, and the DDL the doomed migration ran (before it raised) did not persist.
@@ -312,6 +458,7 @@ def test_run_migrations_logs_the_backup_path_and_each_applied_migration(
         (BASELINE_VERSION, "baseline"),
         (CREATE_VALIDATION_RESULTS_VERSION, "create_validation_results"),
         (DEMO_ADD_RUNS_ARCHIVED_AT_VERSION, "demo_add_runs_archived_at"),
+        (CREATE_QUERY_PATH_INDEXES_VERSION, "create_query_path_indexes"),
     ]
 
 
@@ -360,11 +507,15 @@ def test_new_database_applies_baseline_and_validation_results_then_defers_the_de
 ) -> None:
     """A truly fresh database, migrated once: `baseline` and `create_validation_results`
     (V2-P0B-010) both apply -- neither has a precondition -- but `demo_add_runs_archived_at`
-    still defers exactly as before, since `runs` is created by `SQLiteRunRepository`'s
-    constructor, which this single call never reaches. `create_validation_results` is
-    ordered *before* the demo migration precisely so it lands here, in the very first
-    call, instead of getting stuck behind the demo migration's routine deferral -- see
-    that migration's docstring in `storage/migrations.py`.
+    and `create_query_path_indexes` (task 21) both still defer exactly as before, since
+    `runs`/`checkpoints`/`portfolio_transitions`/`research_reports` are each created by a
+    store's own constructor, none of which this single call ever reaches.
+    `create_validation_results` is ordered *before* the demo migration precisely so it
+    lands here, in the very first call, instead of getting stuck behind the demo
+    migration's routine deferral -- see that migration's docstring in
+    `storage/migrations.py`. `create_query_path_indexes` needs no equivalent ordering
+    trick: it is not precondition-free either way, so it defers here regardless of
+    position -- see its own docstring.
     """
     path = tmp_path / "state.sqlite3"
 
@@ -377,14 +528,31 @@ def test_new_database_applies_baseline_and_validation_results_then_defers_the_de
         CREATE_VALIDATION_RESULTS_VERSION,
     ]
     status = read_status(path)
-    assert [m.version for m in status.pending] == [DEMO_ADD_RUNS_ARCHIVED_AT_VERSION]
+    assert [m.version for m in status.pending] == [
+        DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
+        CREATE_QUERY_PATH_INDEXES_VERSION,
+    ]
 
     # Once the owning store creates its table (independent of the migrator, by design),
-    # the deferred migration becomes applicable on the very next run.
+    # the deferred migration becomes applicable on the very next run. `SQLiteRunRepository`
+    # creates `runs`/`decisions`/`checkpoints` together, so the demo migration (needs only
+    # `runs`) catches up here -- but `create_query_path_indexes` also needs
+    # `portfolio_transitions`/`research_reports`, owned by two stores this line does not
+    # construct, so it stays pending even after this catch-up.
     SQLiteRunRepository(path)
     caught_up = run_migrations(path, clock=migration_clock)
     assert caught_up.from_version == CREATE_VALIDATION_RESULTS_VERSION
     assert caught_up.to_version == DEMO_ADD_RUNS_ARCHIVED_AT_VERSION
+    still_pending = read_status(path)
+    assert [m.version for m in still_pending.pending] == [CREATE_QUERY_PATH_INDEXES_VERSION]
+
+    # Constructing the last two owning stores lets the third call finish the job.
+    SQLitePortfolioLedger(path)
+    SQLiteReportStore(path)
+    fully_caught_up = run_migrations(path, clock=migration_clock)
+    assert fully_caught_up.from_version == DEMO_ADD_RUNS_ARCHIVED_AT_VERSION
+    assert fully_caught_up.to_version == CREATE_QUERY_PATH_INDEXES_VERSION
+    assert read_status(path).pending == ()
 
 
 def test_read_status_does_not_mutate_the_database(tmp_path: Path, migration_now: datetime) -> None:
@@ -401,6 +569,7 @@ def test_read_status_does_not_mutate_the_database(tmp_path: Path, migration_now:
         BASELINE_VERSION,
         CREATE_VALIDATION_RESULTS_VERSION,
         DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
+        CREATE_QUERY_PATH_INDEXES_VERSION,
     ]
     assert "schema_migrations" not in _table_names(path)
 
