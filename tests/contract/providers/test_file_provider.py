@@ -12,6 +12,7 @@ from openalpha_cn.providers.base import (
     ProviderRequest,
 )
 from openalpha_cn.providers.file import FileProvider
+from openalpha_cn.storage.parquet import read_parquet_records
 
 
 def rows() -> list[dict[str, object]]:
@@ -123,7 +124,11 @@ def test_file_provider_reads_all_supported_formats_point_in_time(
     AS_OF = frozen_now
     source = tmp_path / f"events.{format_name}"
     write_fixture(source, format_name)
-    provider = FileProvider(path=source, metadata=metadata)
+    # Only `.parquet` ever calls into `parquet_reader`; the other three formats never
+    # touch it, so passing it unconditionally here is harmless for them and lets this one
+    # parametrized construction call cover all four formats, matching the real DuckDB-backed
+    # reader `cli.py`/`sdk.py` inject in production.
+    provider = FileProvider(path=source, metadata=metadata, parquet_reader=read_parquet_records)
 
     batch = provider.fetch(ProviderRequest(dataset="events", as_of=AS_OF, subjects=("000001.SZ",)))
 
@@ -198,7 +203,10 @@ def test_file_provider_raises_structured_failure_for_malformed_parquet_input(
     AS_OF = frozen_now
     source = tmp_path / "events.parquet"
     source.write_bytes(b"not a real parquet file")
-    provider = FileProvider(path=source, metadata=metadata)
+    # Inject the real DuckDB-backed reader (as `cli.py`/`sdk.py` do) so this exercises an
+    # actual duckdb.Error -> ValueError -> ProviderFailure translation, not merely the
+    # "no reader configured" ValueError a provider built without one would raise instead.
+    provider = FileProvider(path=source, metadata=metadata, parquet_reader=read_parquet_records)
 
     with pytest.raises(ProviderFailure) as captured:
         provider.fetch(ProviderRequest(dataset="events", as_of=AS_OF))

@@ -160,3 +160,31 @@ class ParquetEvidenceStore:
         if item.evidence_id != stored_id or item.content_hash != stored_hash:
             raise StorageIntegrityError(f"evidence integrity check failed: {stored_id}")
         return item
+
+
+def read_parquet_records(path: Path) -> list[dict[str, object]]:
+    """Read every row of a Parquet file as plain dicts, via DuckDB.
+
+    The concrete implementation behind `providers.file.ParquetReader` -- see that
+    Protocol's docstring for why `providers/file.py` cannot import this module, or
+    `duckdb`, at all (a prior attempt to have `providers/file.py` import this exact
+    function was rejected by import-linter's `forbidden` contract for
+    `providers-no-infra-imports`: `providers.file -> storage.parquet -> duckdb` is
+    flagged as transitive `duckdb` reachability, identically to a direct
+    `providers.file -> duckdb` import). Instead, `FileProvider`'s composition sites --
+    `cli.py`'s `evidence_build` command and `sdk.py`'s `OpenAlphaSDK.build_file_evidence`,
+    neither of which falls under that contract's `source_modules` -- import this function
+    directly and pass it in as `parquet_reader`.
+
+    `duckdb.Error` is translated to a plain `ValueError` here (matching the translation
+    this logic used to perform inline inside `providers/file.py`, before V2-P0B-011),
+    so callers can catch a generic, storage-agnostic failure without importing `duckdb`
+    themselves.
+    """
+    try:
+        with duckdb.connect(":memory:") as connection:
+            cursor = connection.execute("SELECT * FROM read_parquet(?)", [str(path)])
+            columns = [item[0] for item in cursor.description]
+            return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
+    except duckdb.Error as error:
+        raise ValueError(f"cannot read parquet file {path.name}: {error}") from error

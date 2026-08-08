@@ -42,6 +42,7 @@ from openalpha_cn.runtime.composition import build_storage
 from openalpha_cn.runtime.contracts import ResearchRunRequest, ResearchRunResult
 from openalpha_cn.runtime.engine import ResearchEngine
 from openalpha_cn.runtime.memory import MemoryEntry
+from openalpha_cn.storage.parquet import read_parquet_records
 from openalpha_cn.storage.recovery import RunRecoveryState
 
 
@@ -81,7 +82,12 @@ class OpenAlphaSDK:
         metadata: ProviderMetadata,
     ) -> tuple[EvidenceSnapshot, ...]:
         """Import a user-owned file, normalize evidence, and persist it."""
-        provider = FileProvider(path=path, metadata=metadata, clock=self.clock)
+        provider = FileProvider(
+            path=path,
+            metadata=metadata,
+            clock=self.clock,
+            parquet_reader=read_parquet_records,
+        )
         response = build_provider_evidence(provider=provider, dataset="events", as_of=as_of)
         if response.items:
             self.evidence_store.append(response.items)

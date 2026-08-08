@@ -33,6 +33,7 @@ from openalpha_cn.runtime.contracts import ResearchRunRequest
 from openalpha_cn.runtime.provenance import compute_config_digest, resolve_code_commit
 from openalpha_cn.sdk import OpenAlphaSDK
 from openalpha_cn.storage.migrations import MigrationFailedError, read_status
+from openalpha_cn.storage.parquet import read_parquet_records
 
 logger = logging.getLogger(__name__)
 
@@ -318,7 +319,7 @@ def evidence_build(
         freshness="defined-by-input-file",
         failure_semantics="Malformed or unreadable inputs raise ProviderFailure.",
     )
-    provider = FileProvider(path=path, metadata=metadata)
+    provider = FileProvider(path=path, metadata=metadata, parquet_reader=read_parquet_records)
     response = build_provider_evidence(provider=provider, dataset="events", as_of=point_in_time)
     typer.echo(response.model_dump_json())
 

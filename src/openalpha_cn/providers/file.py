@@ -1,12 +1,11 @@
 """Legal-safe provider for user-owned CSV, JSON, JSONL, and Parquet files."""
 
 import csv
-import importlib
 import json
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Protocol, cast
 
 from pydantic import JsonValue
 
@@ -21,6 +20,41 @@ from openalpha_cn.providers.base import (
 )
 
 
+class ParquetReader(Protocol):
+    """The Parquet-reading capability `FileProvider` needs, satisfied structurally.
+
+    Mirrors the `models.governance.ModelUsageStore` precedent (V2-P0B-011): the Protocol
+    lives beside its consumer (`FileProvider`, here in `providers/`), and the concrete
+    DuckDB-backed implementation (`storage.parquet.read_parquet_records`) is injected by
+    `FileProvider`'s composition sites (`cli.py`'s `evidence_build`, `sdk.py`'s
+    `OpenAlphaSDK.build_file_evidence`) -- neither of which the `providers-no-infra-imports`
+    import-linter contract's `source_modules` covers.
+
+    `providers/file.py` does not import `storage.parquet`, or anything else that imports
+    `duckdb`, even just for this Protocol's sake. Two earlier approaches were tried and
+    rejected for this same fix, recorded here so neither gets repeated:
+
+    1. A top-level `import duckdb` in this module -- the original ADR-0001 violation
+       (`providers.file -> duckdb`).
+    2. `providers/file.py` importing `storage.parquet` directly for the real reader. This
+       looks safe (`storage.parquet` is not `duckdb`) but import-linter's `forbidden`
+       contract walks the whole static import graph, not just direct edges:
+       `providers.file -> storage.parquet -> duckdb` is flagged identically to a direct
+       `providers.file -> duckdb` import, because `duckdb` stays transitively reachable
+       from `openalpha_cn.providers`. (A third approach, wrapping `duckdb` in
+       `importlib.import_module` to hide it from static analysis, was reverted: it made
+       the layering gate pass without removing the runtime coupling it exists to catch,
+       and it let an unwrapped `ModuleNotFoundError` escape `fetch()` on the first
+       `.parquet` read whenever `duckdb` happened to be unavailable.)
+
+    A Protocol is the only way out of both: it lets `FileProvider` depend on "a thing that
+    can read a Parquet path into rows" without depending on anything that knows how.
+    """
+
+    def __call__(self, path: Path) -> list[dict[str, object]]:
+        """Read every row of the Parquet file at `path` into plain dicts."""
+
+
 class FileProvider:
     """Read canonical point-in-time records from a user-owned local file."""
 
@@ -30,10 +64,12 @@ class FileProvider:
         path: Path,
         metadata: ProviderMetadata,
         clock: Callable[[], datetime] = utc_now,
+        parquet_reader: ParquetReader | None = None,
     ) -> None:
         self.path = path
         self._metadata = metadata
         self._clock = clock
+        self._parquet_reader = parquet_reader
 
     @property
     def metadata(self) -> ProviderMetadata:
@@ -97,33 +133,24 @@ class FileProvider:
         raise ValueError(f"unsupported file extension: {suffix}")
 
     def _read_parquet(self) -> list[dict[str, object]]:
-        """Read a Parquet file via a dynamically imported DuckDB.
+        """Read a Parquet file via the injected `parquet_reader`.
 
-        `duckdb` is deliberately not a top-level `import duckdb` here -- that is exactly
-        what V2-P0B-011 removes. ADR-0001's guardrail (`providers-no-infra-imports` in
-        `pyproject.toml`) is enforced by import-linter's `forbidden` contract, which flags
-        *transitive* reachability, not merely a literal `import duckdb` statement: a
-        regular import of any module that itself imports `duckdb` (tried first: importing
-        `storage/parquet.py`'s DuckDB helpers) is caught the exact same way a direct
-        `import duckdb` would be, because import-linter walks the whole static import
-        graph. `importlib.import_module` is invisible to that static analysis -- the same
-        technique `providers/akshare.py#_load_client` already uses for its (there,
-        genuinely optional) `akshare` dependency. Unlike `akshare`, `duckdb` is always
-        installed (one of this project's nine hard runtime dependencies); the dynamic
-        import exists purely to keep `openalpha_cn.providers` out of `duckdb`'s *static*
-        import graph, not because it might be absent. `duckdb.Error` is translated to a
-        plain `ValueError` before returning, so `fetch()`'s except clause -- unchanged by
-        this method's existence -- never needs to name `duckdb.Error` (or import `duckdb`
-        at all) to translate a corrupt-file failure into `ProviderFailure`.
+        See `ParquetReader`'s docstring for why this indirection exists in place of a
+        static or dynamic `duckdb` import. When no reader was supplied, this raises a
+        plain `ValueError` rather than attempting anything itself -- `providers/file.py`
+        has no fallback path that could reach `duckdb`. `fetch()`'s
+        `except (OSError, ValueError, TypeError, KeyError)` clause, unchanged by this
+        method's existence, catches that `ValueError` the same way it would catch a real
+        `duckdb` failure raised inside `parquet_reader`, translating either into a
+        structured `ProviderFailure` -- so a missing or misconfigured dependency never
+        surfaces as an unwrapped exception from `fetch()`.
         """
-        duckdb = cast(Any, importlib.import_module("duckdb"))
-        try:
-            with duckdb.connect(":memory:") as connection:
-                cursor = connection.execute("SELECT * FROM read_parquet(?)", [str(self.path)])
-                columns = [item[0] for item in cursor.description]
-                return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
-        except duckdb.Error as error:
-            raise ValueError(f"cannot read parquet file {self.path.name}: {error}") from error
+        if self._parquet_reader is None:
+            raise ValueError(
+                f"{self.path.name} is a Parquet file, but this FileProvider was "
+                "constructed without a parquet_reader"
+            )
+        return self._parquet_reader(self.path)
 
     @staticmethod
     def _to_record(raw: dict[str, object]) -> ProviderRecord:
