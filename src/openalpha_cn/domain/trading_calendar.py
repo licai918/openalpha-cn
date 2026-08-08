@@ -41,6 +41,25 @@ about its endpoints. A caller assembling several years from separate partitions 
 gets a refusal when one of them is missing, instead of a calendar that quietly reads that
 year as closed.
 
+## The stored availability instant has a known look-ahead
+
+`providers/tushare.py::_calendar_publication_timeline` dates a calendar row's availability at
+the start of the row's own year. That bound needs no guess about publication dates, but it is
+**not** conservative, and calling it conservative was this module's first version's mistake.
+China's holiday schedule is amended mid-year by the State Council, and `trade_cal` returns
+only the current snapshot -- no revision history, no announcement date. Every amendment
+therefore reaches this repository dated as if it had been knowable on 1 January of its own
+year.
+
+`KNOWN_CALENDAR_LOOKAHEAD` names three dates from two proven amendments, all found in the same
+published data this module is built on, and `TradingCalendar.known_lookahead()` reports the
+ones that fall
+inside a given horizon so `V2-P1-013`'s gate can see them. Neither the list nor the method is
+exhaustive: they are evidence that the defect is real and has a measurable size, not an
+enumeration of every affected date. Removing the defect needs a revision history the endpoint
+does not serve, or an availability model that can say "unknown between these two instants",
+which `Timeline`'s four fixed clocks cannot express.
+
 ## What this module deliberately does not do
 
 It has no notion of intraday sessions, half-days, or per-instrument suspension -- a day is
@@ -78,7 +97,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from enum import Enum
-from typing import Final
+from typing import Final, cast
 
 _ONE_DAY: Final[timedelta] = timedelta(days=1)
 
@@ -167,6 +186,68 @@ class CalendarHorizon:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class CalendarLookahead:
+    """One calendar date whose stored availability instant precedes the real announcement.
+
+    `claimed_available_from` is what `_calendar_publication_timeline` assigns the row (1
+    January of the row's own year); `announced_on` is when the decision was actually made
+    public. `lookahead_days` is the width of the window in which this repository answers a
+    question it had no way of answering.
+    """
+
+    calendar_date: date
+    claimed_available_from: date
+    announced_on: date
+    note: str
+
+    @property
+    def lookahead_days(self) -> int:
+        """How long the stored calendar answers ahead of the real announcement."""
+        return (self.announced_on - self.claimed_available_from).days
+
+
+KNOWN_CALENDAR_LOOKAHEAD: Final[tuple[CalendarLookahead, ...]] = (
+    CalendarLookahead(
+        calendar_date=date(2015, 9, 3),
+        claimed_available_from=date(2015, 1, 1),
+        announced_on=date(2015, 5, 13),
+        note=(
+            "Victory Day parade recess. The 2015 schedule published in late 2014 had 3 and 4 "
+            "September as ordinary sessions; the State Council General Office announced the "
+            "closure separately on 2015-05-13."
+        ),
+    ),
+    CalendarLookahead(
+        calendar_date=date(2015, 9, 4),
+        claimed_available_from=date(2015, 1, 1),
+        announced_on=date(2015, 5, 13),
+        note="The second day of the same 2015-05-13 announcement.",
+    ),
+    CalendarLookahead(
+        calendar_date=date(2020, 1, 31),
+        claimed_available_from=date(2020, 1, 1),
+        announced_on=date(2020, 1, 27),
+        note=(
+            "Spring Festival extension. The 2020 schedule published 2019-11-21 had 31 January "
+            "as an open session; the extension announced on 2020-01-26/27 closed it. This one "
+            "inverts the verdict rather than merely moving it, and the session it pushed the "
+            "reopening to -- 2020-02-03 -- is the one the market gapped down roughly 7.7% on."
+        ),
+    ),
+)
+"""Proven instances of the look-ahead described in this module's docstring.
+
+**Not an enumeration of every affected date.** Any mid-year amendment to the holiday schedule
+produces the same defect, and `trade_cal` carries nothing that would let this code find them
+all: it serves one snapshot per request and no revision history. These three are here because
+they were reproduced against the same live endpoint the rest of this contract is built on, so
+the defect is a measured fact with a size (132 days in 2015, 26 days in 2020) rather than a
+theoretical worry -- and so that a future improvement to the availability rule has a
+regression fixture to change.
+"""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class CalendarDay:
     """One published calendar date: was the exchange open, and what did it call the previous
     session.
@@ -199,6 +280,19 @@ class TradingCalendar:
     @property
     def trading_day_count(self) -> int:
         return len(self.trading_days)
+
+    def known_lookahead(self) -> tuple[CalendarLookahead, ...]:
+        """The proven look-ahead instances that fall inside this calendar's horizon.
+
+        The interface `V2-P1-013`'s dependency gate needs: a non-empty result means this
+        window contains at least one date whose availability instant this repository
+        overstates, so a point-in-time claim made over it is known to be contaminated. An
+        empty result means *no known instance*, not "clean" -- see `KNOWN_CALENDAR_LOOKAHEAD`
+        for why no code here can enumerate them all.
+        """
+        return tuple(
+            entry for entry in KNOWN_CALENDAR_LOOKAHEAD if self.horizon.covers(entry.calendar_date)
+        )
 
     def day_status(self, day: date) -> CalendarDayStatus:
         """The three-valued verdict for `day`. Never raises for a well-formed date."""
@@ -383,10 +477,17 @@ def trading_calendar_from_panel_rows(
     """Rebuild a calendar from stored panel rows shaped like `CALENDAR_PANEL_COLUMNS`.
 
     The counterpart of the provider's projection, and deliberately just as strict on the way
-    back in. `is_open` is re-checked for being an actual `bool` rather than accepted as
-    whatever the storage engine handed over: a column that came back as the string `"0"` --
-    from a schema drift, a hand-written partition, or a future storage backend that does not
-    have a boolean type -- would be truthy, and every holiday would silently become a session.
+    back in: a column that came back as the string `"0"` -- from a schema drift, a
+    hand-written partition, or a future storage backend without a boolean type -- would be
+    truthy, and every holiday would silently become a session.
+
+    That check is **not repeated here**. It is `build_trading_calendar`'s, which this function
+    ends in, and which is where `CalendarDay`'s docstring already says the rules live once. An
+    earlier version of this function duplicated it; both copies raised messages containing the
+    same phrase, so deleting either one left every test still passing and neither guard was
+    actually pinned. What this function owns is the shape of a *stored row* -- its width, and
+    the ISO text its two date columns are stored as -- which is the part
+    `build_trading_calendar` never sees.
     """
     parsed: list[CalendarDay] = []
     for index, row in enumerate(rows):
@@ -396,16 +497,13 @@ def trading_calendar_from_panel_rows(
                 f"{len(CALENDAR_PANEL_COLUMNS)} ({', '.join(CALENDAR_PANEL_COLUMNS)})"
             )
         calendar_date, is_trading, previous = row
-        if type(is_trading) is not bool:
-            raise TradingCalendarError(
-                f"row {index}: {CALENDAR_OPEN_COLUMN} must be a bool, got "
-                f"{type(is_trading).__name__} {is_trading!r}; a truthy stand-in such as the "
-                "string '0' would turn every holiday into a session"
-            )
         parsed.append(
             CalendarDay(
                 calendar_date=_parse_iso_date(calendar_date, index, CALENDAR_DATE_COLUMN),
-                is_trading=is_trading,
+                # The `cast` records that this value is *unproven* at this line, not that it
+                # is trusted: `build_trading_calendar` is what rejects anything that is not
+                # exactly a `bool`, a few lines below.
+                is_trading=cast(bool, is_trading),
                 previous_trading_date=(
                     None
                     if previous is None

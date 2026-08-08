@@ -65,14 +65,13 @@ corrupted batch is detectable, but the digest cannot say *which* row changed, an
 be looked up by its content. That is the property the evidence plane keeps and the panel
 plane gives up, consciously, for two orders of magnitude of throughput.
 
-What it does not *yet* provide, which is a gap rather than a trade: the digest is never
-written down. `panel_ingest.write_panel_batch()` hands `PanelStore` rows and column specs,
-and the store computes its own idempotency hash over that material; nothing carries
-`content_digest` into the catalog. So a batch can be checked while it is still in memory, but
-a partition sitting on disk cannot later be re-proved against the digest the provider's batch
-carried. Persisting it belongs with `V2-P1-003`'s data catalog, where partition-level
-metadata is being designed; recorded here and in `panel_ingest.py` so it is not rediscovered
-from scratch.
+The digest **is** written down, since `V2-P1-003`: `panel_ingest.write_panel_batch()` records
+it as `panel_partition_coverage.batch_digest`, so a partition sitting on disk can later be
+re-proved against the digest the provider's batch carried. It does not replace the store's own
+`content_hash`, which covers only `(dataset, year, column names and SQL types, rows)` and
+exists to make re-writing identical content a no-op; this digest additionally covers
+`provider_id`, `kind`, `as_of`, `fetched_at`, `source_uri` and `schema_version`, so a refetch
+of unchanged rows changes it. `panel_ingest.py`'s module docstring states why both are kept.
 
 Two encoding details are load-bearing:
 

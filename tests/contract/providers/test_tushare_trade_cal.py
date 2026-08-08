@@ -8,17 +8,31 @@ The two assertions this file exists for are the pair the calendar's availability
 satisfy at once: standing at `as_of=2026-08-08`, `2026-12-31` **is** knowable (the exchange
 published this year's calendar long ago and a live probe returns it) while `2027-01-04` is
 **not** (the same probe returns zero rows for all of 2027).
+
+The third thing it pins is the rule's **known defect**, in the "look-ahead" section below.
+`available_time` is the start of the calendar date's own year, and the holiday schedule is
+amended mid-year, so an amendment is dated as though it had been knowable on 1 January. The
+fixtures there are the live rows for two amendments whose real announcement dates are public
+record; they are here so that "we know this rule leaks look-ahead" is a failing test the day
+someone improves the rule, rather than a sentence in a docstring.
 """
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from collections.abc import Mapping
+from datetime import UTC, date, datetime
 from typing import Any
 
 import pytest
 
 from openalpha_cn.domain.panel_batch import ColumnarPanelBatch
-from openalpha_cn.domain.trading_calendar import TRADING_CALENDAR_DATASET
+from openalpha_cn.domain.trading_calendar import (
+    KNOWN_CALENDAR_LOOKAHEAD,
+    TRADING_CALENDAR_DATASET,
+    CalendarDay,
+    TradingCalendarError,
+    build_trading_calendar,
+)
 from openalpha_cn.providers.base import (
     PanelDataProvider,
     ProviderFailure,
@@ -48,6 +62,40 @@ _SPRING_FESTIVAL_ITEMS = [
     ["SSE", "20240210", 0, "20240208"],
     ["SSE", "20240209", 0, "20240208"],
     ["SSE", "20240208", 1, "20240207"],
+]
+
+# Real SSE rows around the 2015 Victory Day parade recess (3-4 September 2015), captured live
+# and descending exactly as returned. The 2015 schedule published in late 2014 had both as
+# ordinary sessions; the State Council General Office announced the closure on 2015-05-13.
+_PARADE_RECESS_2015 = [
+    ["SSE", "20150907", 1, "20150902"],
+    ["SSE", "20150906", 0, "20150902"],
+    ["SSE", "20150905", 0, "20150902"],
+    ["SSE", "20150904", 0, "20150902"],
+    ["SSE", "20150903", 0, "20150902"],
+    ["SSE", "20150902", 1, "20150901"],
+    ["SSE", "20150901", 1, "20150831"],
+]
+
+# Real SSE rows around the 2020 Spring Festival extension, captured live and descending. The
+# 2020 schedule published 2019-11-21 had 20200131 as an open session; the extension announced
+# on 2020-01-26/27 closed it, and pushed the reopening to 20200203.
+_SPRING_FESTIVAL_EXTENSION_2020 = [
+    ["SSE", "20200203", 1, "20200123"],
+    ["SSE", "20200202", 0, "20200123"],
+    ["SSE", "20200201", 0, "20200123"],
+    ["SSE", "20200131", 0, "20200123"],
+    ["SSE", "20200130", 0, "20200123"],
+    ["SSE", "20200129", 0, "20200123"],
+    ["SSE", "20200128", 0, "20200123"],
+    ["SSE", "20200127", 0, "20200123"],
+    ["SSE", "20200126", 0, "20200123"],
+    ["SSE", "20200125", 0, "20200123"],
+    ["SSE", "20200124", 0, "20200123"],
+    ["SSE", "20200123", 1, "20200122"],
+    ["SSE", "20200122", 1, "20200121"],
+    ["SSE", "20200121", 1, "20200120"],
+    ["SSE", "20200120", 1, "20200117"],
 ]
 
 
@@ -192,6 +240,113 @@ def test_the_calendar_clock_is_not_the_static_reference_clock() -> None:
 
     assert timeline.available_time != timeline.event_time
     assert timeline.available_time < timeline.event_time
+
+
+# --- the look-ahead this rule is known to leak -------------------------------------------
+
+
+def _column(batch: ColumnarPanelBatch, name: str) -> tuple[object, ...]:
+    (column,) = (candidate for candidate in batch.columns if candidate.name == name)
+    return column.values
+
+
+def _row_index(batch: ColumnarPanelBatch, day: str) -> int:
+    return _column(batch, "cal_date").index(day)
+
+
+def test_the_2015_parade_recess_is_answered_132_days_before_it_was_announced(
+    fake_tushare_transport,
+) -> None:
+    """`available_time` is 1 January of the row's own year, so a closure the State Council
+    announced on 2015-05-13 is served to an `as_of` in March 2015. The rows are real; the
+    announcement date is public record. This is look-ahead, it is 132 days wide, and the
+    point of the test is that it is *recorded* rather than believed to be impossible."""
+    provider = _provider(
+        datetime(2026, 8, 8, tzinfo=UTC), fake_tushare_transport, _PARADE_RECESS_2015
+    )
+
+    batch = provider.fetch_panel(_request(datetime(2015, 3, 1, tzinfo=UTC)))
+
+    for day in ("2015-09-03", "2015-09-04"):
+        index = _row_index(batch, day)
+        assert _column(batch, "is_open")[index] is False
+        assert batch.timeline.available_time[index] == datetime(2015, 1, 1, tzinfo=_CHINA_TZ)
+    parade = tuple(
+        entry
+        for entry in KNOWN_CALENDAR_LOOKAHEAD
+        if entry.calendar_date in (date(2015, 9, 3), date(2015, 9, 4))
+    )
+    assert len(parade) == 2
+    assert {entry.announced_on for entry in parade} == {date(2015, 5, 13)}
+    assert {entry.lookahead_days for entry in parade} == {132}
+
+
+def test_the_2020_spring_festival_extension_flips_a_session_26_days_before_it_happened(
+    fake_tushare_transport,
+) -> None:
+    """The worse of the two, because the verdict *inverts*: the schedule published
+    2019-11-21 had 2020-01-31 open, and the extension announced on 2020-01-27 closed it. At
+    `as_of=2020-01-20` this batch already reports it closed -- and reports 2020-02-03, the
+    session the reopening was pushed to, as the next open day."""
+    provider = _provider(
+        datetime(2026, 8, 8, tzinfo=UTC),
+        fake_tushare_transport,
+        _SPRING_FESTIVAL_EXTENSION_2020,
+    )
+
+    batch = provider.fetch_panel(_request(datetime(2020, 1, 20, 12, 0, tzinfo=UTC)))
+
+    closed = _row_index(batch, "2020-01-31")
+    assert _column(batch, "is_open")[closed] is False
+    assert batch.timeline.available_time[closed] == datetime(2020, 1, 1, tzinfo=_CHINA_TZ)
+    assert _column(batch, "is_open")[_row_index(batch, "2020-02-03")] is True
+    (entry,) = (e for e in KNOWN_CALENDAR_LOOKAHEAD if e.calendar_date == date(2020, 1, 31))
+    assert entry.announced_on == date(2020, 1, 27)
+    assert entry.lookahead_days == 26
+
+
+def test_every_registered_lookahead_still_matches_the_clock_that_produces_it() -> None:
+    """The fixture a future improvement to the availability rule has to *change*.
+
+    Each registered instance says what `_calendar_publication_timeline` claims for that date
+    and when the decision was really announced. If the rule ever learns a better bound, this
+    fails, and updating it is how the improvement gets recorded.
+    """
+    ingested_at = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
+
+    for entry in KNOWN_CALENDAR_LOOKAHEAD:
+        timeline = _calendar_publication_timeline(
+            {"cal_date": f"{entry.calendar_date:%Y%m%d}", "is_open": 0}, "cal_date", ingested_at
+        )
+
+        assert timeline.available_time == datetime(
+            entry.claimed_available_from.year,
+            entry.claimed_available_from.month,
+            entry.claimed_available_from.day,
+            tzinfo=_CHINA_TZ,
+        )
+        assert timeline.available_time.date() < entry.announced_on
+        assert entry.announced_on < entry.calendar_date
+        assert entry.lookahead_days > 0
+
+
+def test_a_calendar_that_spans_a_known_lookahead_says_so_for_the_dependency_gate() -> None:
+    """`V2-P1-013` blocks on facts, not on docstrings, so the instances are reachable from a
+    loaded calendar rather than only from this module."""
+    days = tuple(
+        CalendarDay(
+            calendar_date=date(int(cal_date[:4]), int(cal_date[4:6]), int(cal_date[6:])),
+            is_trading=bool(is_open),
+        )
+        for _, cal_date, is_open, _ in _PARADE_RECESS_2015
+    )
+
+    calendar = build_trading_calendar("SSE", days)
+
+    assert tuple(entry.calendar_date for entry in calendar.known_lookahead()) == (
+        date(2015, 9, 3),
+        date(2015, 9, 4),
+    )
 
 
 # --- fetch_panel ------------------------------------------------------------------------
@@ -399,6 +554,33 @@ def test_the_row_wise_fetch_still_works_for_the_new_dataset(fake_tushare_transpo
     assert len(result.records) == len(_SPRING_FESTIVAL_ITEMS)
     assert result.records[0].subject == "SSE"
     assert result.records[0].source_uri == "tushare://trade_cal/SSE/20240219"
+
+
+def test_the_row_wise_path_hands_back_is_open_unparsed_and_cannot_build_a_calendar(
+    fake_tushare_transport,
+) -> None:
+    """`_open_flag` runs in the panel projection, which only `fetch_panel()` applies.
+
+    `fetch()` is payload-passthrough for every dataset, so the same `is_open=2` that
+    `fetch_panel()` refuses (see above) arrives on `ProviderRecord.payload` untouched. That
+    asymmetry is deliberate -- an evidence-plane record is the upstream response, which is
+    what makes it re-provable -- and it is bounded rather than trusted: the value cannot
+    become a calendar, because `build_trading_calendar` takes only an exact `bool`.
+    """
+    items = [["SSE", "20240212", 2, "20240208"]]
+    provider = _provider(datetime(2024, 3, 1, tzinfo=UTC), fake_tushare_transport, items)
+
+    result = provider.fetch(_request(datetime(2024, 3, 1, tzinfo=UTC)))
+
+    payload = result.records[0].payload
+    assert isinstance(payload, Mapping)
+    assert payload["is_open"] == 2
+    assert type(payload["is_open"]) is int
+    with pytest.raises(TradingCalendarError):
+        build_trading_calendar(
+            "SSE",
+            (CalendarDay(calendar_date=date(2024, 2, 12), is_trading=payload["is_open"]),),  # type: ignore[arg-type]
+        )
 
 
 def test_an_already_boolean_open_flag_passes_through_unchanged(fake_tushare_transport) -> None:

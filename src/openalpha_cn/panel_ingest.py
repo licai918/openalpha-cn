@@ -156,6 +156,21 @@ on the verdict (`DatasetReadiness.checks_waived`) rather than being invisible:
   it reads as reassurance. Freshness for a calendar is the horizon
   (`TradingCalendar.horizon`), which is a different question and has its own answer.
 
+Two limitations of the stored calendar are stated here because nothing downstream can infer
+them:
+
+- **A calendar partition holds whichever exchanges its batch carried, and a second write
+  replaces rather than extends it.** The partition key is `(dataset, year)` with no exchange
+  dimension. `write_trading_calendar()` therefore refuses a batch that would drop an exchange
+  the partition already holds, rather than overwriting it and reporting success; see that
+  function for why widening the key is a different task.
+- **`revised_row_count` is always 0 for this dataset, and 0 means unmeasured.** `trade_cal`
+  carries no revision instant, so `providers/tushare.py::_calendar_publication_timeline` sets
+  `revision_time == available_time` -- the only value that fabricates nothing. Real revisions
+  do happen (`domain/trading_calendar.py::KNOWN_CALENDAR_LOOKAHEAD` names three dates), and
+  they are invisible to this census by construction. They show up as a changed partition
+  content hash on a re-fetch, not as a revised row.
+
 `panel_readiness_requirement()` is the other direction -- the one `V2-P1-003` was waiting
 for. It turns a real calendar into the `required_dates` of *another* dataset's requirement,
 so hole detection for `daily`, `adj_factor` and the rest stops being a set difference against
@@ -364,17 +379,57 @@ def write_trading_calendar(
     A thin composition of `panel_partition_year()` and `write_panel_batch()`: the calendar is
     the one dataset whose partition year is never ambiguous (a request covers exactly one
     year), so making the caller restate it would be an invitation to state it wrong.
+
+    ## One partition per year holds every exchange it was written with, and no more
+
+    `PanelStore`'s partition key is `(dataset, year)` -- there is no exchange dimension -- and
+    `write_partition()` replaces a partition whole. A partition can therefore hold SSE *and*
+    SZSE rows together (the `subject` column separates them and `load_trading_calendar()`
+    filters on it), but only if **one batch carries both**. Two calls, one per exchange, do
+    not accumulate: the second would replace the first outright, and a plain
+    `for exchange in ("SSE", "SZSE"): write_trading_calendar(...)` backfill would leave only
+    the exchange it happened to write last.
+
+    That is what this function refuses. A batch whose subjects do not cover every exchange
+    already stored in the target partition raises `PanelBatchError` instead of overwriting it.
+    The reads were already fail-closed -- a load for the dropped exchange blocks on
+    `subject_missing` rather than answering with the survivor's calendar -- but a silent write
+    that destroys data and reports success is not something a downstream check should have to
+    catch. Widening the key so two exchanges could be written independently is a change to
+    `PanelStore`'s partition identity, its catalog primary keys and therefore
+    `panel_catalog_meta.schema_version`; it belongs with whichever task first needs a second
+    exchange, not with this one. Today `_trade_cal_params` refuses more than one exchange per
+    request, so the refusal costs nothing and the limitation is stated rather than discovered.
+
+    A partition with no coverage record is not protected by this check -- there is nothing to
+    read the stored subjects from. That is an interrupted write, which `assess_readiness()`
+    already blocks as `coverage_missing`, and refusing to overwrite it would leave the store
+    with no way back.
     """
     if batch.dataset != TRADING_CALENDAR_DATASET:
         raise PanelBatchError(
             f"expected the {TRADING_CALENDAR_DATASET!r} dataset, got {batch.dataset!r}"
         )
-    return write_panel_batch(
-        store,
-        batch,
-        year=panel_partition_year(batch, date_timezone=date_timezone),
-        date_timezone=date_timezone,
-    )
+    year = panel_partition_year(batch, date_timezone=date_timezone)
+    _refuse_to_drop_a_stored_exchange(store, batch, year)
+    return write_panel_batch(store, batch, year=year, date_timezone=date_timezone)
+
+
+def _refuse_to_drop_a_stored_exchange(
+    store: PanelStore, batch: ColumnarPanelBatch, year: int
+) -> None:
+    """Block an overwrite that would remove an exchange the partition already holds."""
+    existing = store.read_coverage(batch.dataset, year)
+    if existing is None:
+        return
+    dropped = sorted(set(existing.subjects) - set(batch.subjects))
+    if dropped:
+        raise PanelBatchError(
+            f"{batch.dataset} year={year} already holds {sorted(existing.subjects)} and this "
+            f"batch carries {sorted(set(batch.subjects))}; writing it would drop {dropped}. "
+            "A partition is replaced whole and its key has no exchange dimension, so two "
+            "exchanges have to arrive in one batch or not at all"
+        )
 
 
 def trading_calendar_requirement(

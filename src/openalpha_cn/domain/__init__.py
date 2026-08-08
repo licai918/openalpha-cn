@@ -13,10 +13,12 @@ from openalpha_cn.domain.run import ArtifactDigest, CheckpointRecord, RunManifes
 from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.domain.time import Timeline, ensure_aware, is_visible_at
 from openalpha_cn.domain.trading_calendar import (
+    KNOWN_CALENDAR_LOOKAHEAD,
     CalendarDay,
     CalendarDayStatus,
     CalendarHorizon,
     CalendarHorizonError,
+    CalendarLookahead,
     TradingCalendar,
     TradingCalendarError,
     build_trading_calendar,
@@ -25,6 +27,7 @@ from openalpha_cn.domain.trading_calendar import (
 from openalpha_cn.domain.validation import AttributionTerm, ValidationResult
 
 __all__ = [
+    "KNOWN_CALENDAR_LOOKAHEAD",
     "AgentDecision",
     "ArtifactDigest",
     "AttributionTerm",
@@ -32,6 +35,7 @@ __all__ = [
     "CalendarDayStatus",
     "CalendarHorizon",
     "CalendarHorizonError",
+    "CalendarLookahead",
     "CheckpointRecord",
     "ColumnarPanelBatch",
     "DecisionLedger",

@@ -16,12 +16,13 @@ from typing import Any
 
 import pytest
 
-from openalpha_cn.domain.panel_batch import PanelBatchError
+from openalpha_cn.domain.panel_batch import SUBJECT_COLUMN_NAME, PanelBatchError
 from openalpha_cn.domain.trading_calendar import (
     CALENDAR_PANEL_COLUMNS,
     TRADING_CALENDAR_DATASET,
     CalendarDayStatus,
     TradingCalendarError,
+    trading_calendar_from_panel_rows,
 )
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_ingest import (
@@ -133,9 +134,9 @@ def _provider(years: dict[int, list[list[Any]]], clock: datetime) -> TushareProv
     )
 
 
-def _ingest(store: PanelStore, year: int, *, clock: datetime, exchange: str = "SSE") -> None:
-    provider = _provider({year: _year_items(year, exchange)}, clock)
-    batch = provider.fetch_panel(
+def _batch(year: int, *, clock: datetime, items: list[list[Any]], exchange: str = "SSE"):
+    provider = _provider({year: items}, clock)
+    return provider.fetch_panel(
         ProviderRequest(
             dataset=TRADING_CALENDAR_DATASET,
             # Mid-year: every row of the year carries the same availability instant
@@ -144,7 +145,12 @@ def _ingest(store: PanelStore, year: int, *, clock: datetime, exchange: str = "S
             subjects=(exchange,),
         )
     )
-    write_trading_calendar(store, batch)
+
+
+def _ingest(store: PanelStore, year: int, *, clock: datetime, exchange: str = "SSE") -> None:
+    write_trading_calendar(
+        store, _batch(year, clock=clock, items=_year_items(year, exchange), exchange=exchange)
+    )
 
 
 @pytest.fixture
@@ -271,10 +277,99 @@ def test_an_unknown_exchange_blocks_rather_than_returning_an_empty_calendar(
 
 
 def test_loading_no_years_at_all_is_refused(store: PanelStore) -> None:
-    with pytest.raises(TradingCalendarError):
+    """`match=` is load-bearing: without it, deleting `load_trading_calendar`'s own empty
+    check leaves the test green, because `build_trading_calendar` refuses an empty input
+    downstream with a different message. Same class of false pass as the future-year guard
+    below."""
+    with pytest.raises(TradingCalendarError, match="needs at least one year"):
         load_trading_calendar(
             store, exchange="SSE", years=(), as_of=datetime(2025, 6, 1, tzinfo=UTC)
         )
+
+
+# --- two exchanges, one partition key ----------------------------------------------------
+
+
+def test_a_second_exchange_refuses_to_overwrite_the_first_instead_of_replacing_it(
+    store: PanelStore,
+) -> None:
+    """`PanelStore`'s key is `(dataset, year)` and a partition is replaced whole, so a plain
+    `for exchange in (...)` backfill loop would leave only the exchange it wrote last. The
+    reads were already fail-closed; this makes the *write* say so."""
+    _ingest(store, 2024, clock=datetime(2025, 1, 2, tzinfo=UTC))
+    szse = _batch(
+        2024,
+        clock=datetime(2025, 1, 2, tzinfo=UTC),
+        items=_year_items(2024, "SZSE"),
+        exchange="SZSE",
+    )
+
+    with pytest.raises(PanelBatchError) as captured:
+        write_trading_calendar(store, szse)
+
+    assert "would drop ['SSE']" in str(captured.value)
+    # And the SSE calendar it would have destroyed is still there.
+    survivor = load_trading_calendar(
+        store, exchange="SSE", years=(2024,), as_of=datetime(2025, 6, 1, tzinfo=UTC)
+    )
+    assert survivor.trading_day_count == 242
+
+
+def test_both_exchanges_fit_in_one_partition_when_one_batch_carries_them(
+    store: PanelStore,
+) -> None:
+    """The escape hatch, and the test of the `subject` filter `load_trading_calendar` reads
+    with. Rows for the two exchanges share a partition; nothing but that filter separates
+    them, and without it the rebuilt calendar would see every date twice."""
+    both = _batch(
+        2024,
+        clock=datetime(2025, 1, 2, tzinfo=UTC),
+        items=_year_items(2024, "SSE") + _year_items(2024, "SZSE"),
+    )
+
+    write_trading_calendar(store, both)
+
+    unfiltered = store.query(TRADING_CALENDAR_DATASET, year=2024, columns=CALENDAR_PANEL_COLUMNS)
+    assert len(unfiltered) == 732
+    assert (
+        len(
+            store.query(
+                TRADING_CALENDAR_DATASET,
+                year=2024,
+                columns=CALENDAR_PANEL_COLUMNS,
+                filters={SUBJECT_COLUMN_NAME: "SSE"},
+            )
+        )
+        == 366
+    )
+    for exchange in ("SSE", "SZSE"):
+        calendar = load_trading_calendar(
+            store, exchange=exchange, years=(2024,), as_of=datetime(2025, 6, 1, tzinfo=UTC)
+        )
+        assert calendar.exchange == exchange
+        assert calendar.trading_day_count == 242
+    with pytest.raises(TradingCalendarError, match="appears more than once"):
+        trading_calendar_from_panel_rows("SSE", unfiltered)
+
+
+def test_rewriting_the_same_exchange_is_still_an_ordinary_refresh(store: PanelStore) -> None:
+    """The guard blocks a *narrowing* overwrite, not a repeated one; a refetch of the same
+    exchange, and a widening write that adds a second one, both go through."""
+    _ingest(store, 2024, clock=datetime(2025, 1, 2, tzinfo=UTC))
+    _ingest(store, 2024, clock=datetime(2025, 3, 4, tzinfo=UTC))
+
+    write_trading_calendar(
+        store,
+        _batch(
+            2024,
+            clock=datetime(2025, 3, 4, tzinfo=UTC),
+            items=_year_items(2024, "SSE") + _year_items(2024, "SZSE"),
+        ),
+    )
+
+    coverage = store.read_coverage(TRADING_CALENDAR_DATASET, 2024)
+    assert coverage is not None
+    assert coverage.subjects == ("SSE", "SZSE")
 
 
 def test_the_calendars_own_requirement_records_the_two_checks_it_waives(
@@ -417,12 +512,15 @@ def test_required_dates_stop_at_the_as_of_instead_of_demanding_future_sessions(
 
 
 def test_a_year_that_has_not_begun_cannot_have_required_dates(store: PanelStore) -> None:
+    """`match=` is what makes this test about the future-year guard. Without it the test
+    passes with that guard deleted: `trading_days_between(2025-01-01, 2024-06-01)` then trips
+    the `start > end` check instead and raises the same exception type."""
     _ingest(store, 2024, clock=datetime(2025, 1, 2, tzinfo=UTC))
     calendar = load_trading_calendar(
         store, exchange="SSE", years=(2024,), as_of=datetime(2025, 6, 1, tzinfo=UTC)
     )
 
-    with pytest.raises(TradingCalendarError):
+    with pytest.raises(TradingCalendarError, match="has not begun"):
         panel_readiness_requirement(
             calendar,
             "daily",

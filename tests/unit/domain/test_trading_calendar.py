@@ -17,6 +17,7 @@ from datetime import date, datetime
 import pytest
 
 from openalpha_cn.domain.trading_calendar import (
+    KNOWN_CALENDAR_LOOKAHEAD,
     CalendarDay,
     CalendarDayStatus,
     CalendarHorizonError,
@@ -73,6 +74,19 @@ NATIONAL_DAY_2024 = (
     ("20240925", 1, "20240924"),
     ("20240924", 1, "20240923"),
     ("20240923", 1, "20240920"),
+)
+
+# The 2015 Victory Day parade recess. Both closed weekdays were ordinary sessions in the 2015
+# schedule published in late 2014; the State Council General Office announced the closure on
+# 2015-05-13, which is 132 days after the availability instant this repository assigns them.
+PARADE_RECESS_2015 = (
+    ("20150907", 1, "20150902"),
+    ("20150906", 0, "20150902"),
+    ("20150905", 0, "20150902"),
+    ("20150904", 0, "20150902"),
+    ("20150903", 0, "20150902"),
+    ("20150902", 1, "20150901"),
+    ("20150901", 1, "20150831"),
 )
 
 END_OF_2026 = (
@@ -393,6 +407,43 @@ def test_the_horizon_answers_what_is_known_without_going_through_a_day_query() -
     assert calendar.horizon.covers(date(2026, 12, 31)) is True
     assert calendar.horizon.covers(date(2027, 1, 1)) is False
     assert calendar.trading_day_count == 9
+
+
+# --- the availability rule's known look-ahead ---------------------------------------------
+
+
+def test_the_known_lookahead_registry_carries_its_measured_widths() -> None:
+    """The rule in `providers/tushare.py` dates every row available on 1 January of its own
+    year. These are the dates where that is provably early, with the size of the error."""
+    widths = {
+        (entry.calendar_date, entry.announced_on): entry.lookahead_days
+        for entry in KNOWN_CALENDAR_LOOKAHEAD
+    }
+
+    assert widths == {
+        (date(2015, 9, 3), date(2015, 5, 13)): 132,
+        (date(2015, 9, 4), date(2015, 5, 13)): 132,
+        (date(2020, 1, 31), date(2020, 1, 27)): 26,
+    }
+    for entry in KNOWN_CALENDAR_LOOKAHEAD:
+        assert entry.claimed_available_from == date(entry.calendar_date.year, 1, 1)
+        assert entry.claimed_available_from < entry.announced_on < entry.calendar_date
+
+
+def test_a_calendar_reports_only_the_known_lookahead_its_horizon_actually_covers() -> None:
+    """`V2-P1-013` asks a loaded calendar, not the module. An empty answer means *no known
+    instance in this window* -- never "this window is clean"; no code here can enumerate
+    every mid-year amendment, because `trade_cal` serves no revision history."""
+    assert _calendar(SPRING_FESTIVAL_2024).known_lookahead() == ()
+    assert _calendar(END_OF_2026).known_lookahead() == ()
+
+    covering = _calendar(PARADE_RECESS_2015)
+
+    assert tuple(entry.calendar_date for entry in covering.known_lookahead()) == (
+        date(2015, 9, 3),
+        date(2015, 9, 4),
+    )
+    assert all(entry.lookahead_days == 132 for entry in covering.known_lookahead())
 
 
 # --- rebuilding from stored panel rows ----------------------------------------------------

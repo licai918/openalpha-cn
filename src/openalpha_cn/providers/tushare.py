@@ -17,12 +17,26 @@ empty batch, because "this dataset is not wired to the panel plane" and "this da
 rows" are different facts. Both methods decode the same response through the same clock
 table; only the assembly differs.
 
-## `is_open` is parsed, never coerced
+## `is_open` is parsed, never coerced -- on the panel path only
 
 Tushare returns `is_open` as an integer `0`/`1`, and the obvious `bool(value)` is wrong in a
 way that is invisible: `bool("0")` is `True`, so a schema change that turned the column into
 strings would silently report every holiday as a trading day. `_open_flag` therefore accepts
 only `0`/`1`/`"0"`/`"1"`/`bool` and raises on anything else.
+
+`_open_flag` runs in the `panel_columns` projection, which only `fetch_panel()` applies.
+`fetch()` is a payload-passthrough contract for every dataset in the table -- a
+`ProviderRecord`'s payload is the decoded response row verbatim -- so `fetch("trade_cal")`
+hands back `is_open` exactly as Tushare sent it, an `int` today and whatever a schema change
+makes it tomorrow, with no parse in front of it. That is deliberate and not closed here:
+making one
+dataset's row-wise payload selectively typed would break the property that an evidence-plane
+record is the upstream response, which is what makes it re-provable. The consequence is
+bounded rather than trusted -- no calendar can be built from that path without going through
+`domain/trading_calendar.py`, and `build_trading_calendar` refuses any `is_trading` that is
+not exactly a `bool`, so a caller who reaches for `record.payload["is_open"]` and applies
+`bool()` to it gets a wrong answer only inside their own code, never a wrong
+`TradingCalendar`. `tests/contract/providers/test_tushare_trade_cal.py` pins both halves.
 """
 
 import json
@@ -127,13 +141,14 @@ class ClockStrategy(StrEnum):
     """
 
     calendar_publication = "calendar_publication"
-    """Forward-looking reference data: the event is a future day, availability is publication.
+    """Forward-looking reference data: the event is a future day, availability is its year.
 
     Every other clock here describes data about the past, so ``available_time`` lands at or
     after ``event_time``. A calendar is the opposite: on 2026-08-08 the exchange has already
     told us that 2026-12-31 is a session, and the entire reason the dataset exists is to
     answer questions about days that have not happened. See ``_calendar_publication_timeline``
-    for the two facts the availability instant is derived from.
+    for the two instants the availability time is derived from **and for the look-ahead this
+    rule is known to leak** when the holiday schedule is amended mid-year.
     """
 
 
@@ -391,39 +406,70 @@ def _calendar_static_timeline(
 def _calendar_publication_timeline(
     row: dict[str, Any], date_field: str, ingested_at: datetime
 ) -> Timeline:
-    """The exchange calendar's clocks: a future session, knowable since publication.
+    """The exchange calendar's clocks: a future session, dated at the start of its own year.
 
     ``event_time`` is the session's own midnight in Asia/Shanghai. ``available_time`` is the
-    **earlier** of two facts, and taking a minimum rather than picking one is the whole design:
+    **earlier** of two instants:
 
     - *The start of the calendar date's own year.* Not a guess about when the exchange
-      published: by the time year Y has begun, year Y's calendar certainly exists. It is a
-      statement that cannot be wrong in the dangerous direction, which matters because the
-      alternative -- the real publication date, some November of Y-1 -- is not in the response
-      and would have to be invented.
-    - *The moment the row was observed* (``ingested_at``). Tushare publishes next year's
-      calendar during December, and a live probe on 2026-08-08 confirmed the horizon ends at
-      2026-12-31 with zero rows for 2027. When those rows do appear in December 2026, the
-      first fact alone would put ``available_time`` after ``ingested_time`` and ``Timeline``
-      would refuse the row outright -- correctly, because we demonstrably *did* have it.
+      published: by the time year Y has begun, *a* calendar for year Y exists. The real
+      publication date -- some November of Y-1 -- is not in the response and would have to be
+      invented.
+    - *The moment the row was observed* (``ingested_at``), which is what keeps ``Timeline``'s
+      ``available_time <= ingested_time`` invariant true for a row fetched before its own year
+      began. With today's ``_trade_cal_params`` this bound never actually wins: the fetched
+      year is derived from ``as_of``, so a row's ``cal_date`` year equals ``as_of``'s year,
+      and any run whose clock is at or after its own ``as_of`` has
+      ``ingested_at >= as_of >= 1 January of that year``. It is reachable only by calling this
+      function directly (as its unit tests do) or by a caller whose ``as_of`` runs ahead of
+      its clock, and it is kept because the invariant must hold for those too -- an earlier
+      version of this docstring justified it with a December-fetches-next-year scenario the
+      params builder cannot produce.
 
-    Both bounds are things this code actually knows, and the conservative choice is the
-    largest instant neither of them contradicts, which is their minimum. The two properties
-    that fall out are the ones ``V2-P1-004`` is judged on: at ``as_of=2026-08-08`` a
-    2026-12-31 session is visible (availability 2026-01-01) and a 2027-01-04 session is not
-    (availability 2027-01-01, or the December-2026 fetch instant -- either way after the
-    ``as_of``).
+    The two properties ``V2-P1-004`` is judged on fall out of the first bound: at
+    ``as_of=2026-08-08`` a 2026-12-31 session is visible (availability 2026-01-01) and a
+    2027-01-04 session is not (availability 2027-01-01, after the ``as_of``).
 
-    The cost of the first bound is real and deliberate: between the exchange's November
-    announcement and 1 January, this rule refuses to answer questions about the coming year
-    that were in fact answerable. It blocks where it could have answered, which is the
-    direction a point-in-time system is allowed to be wrong in.
+    ## Known defect: this rule leaks look-ahead, and the leak is measured
 
-    ``revision_time`` equals ``available_time``: the calendar does get revised in reality (the
-    2020 Spring Festival extension is the standing example) but the response carries no
-    revision instant at all, so claiming one would be fabrication. A revised calendar
-    therefore arrives as a changed row in a re-fetched partition, visible through the
-    partition's content hash, not through this clock.
+    The first bound is *not* conservative, and an earlier version of this docstring claimed it
+    was ("a statement that cannot be wrong in the dangerous direction"). It is wrong in that
+    direction whenever the holiday schedule is amended after its year has begun, which in
+    China is routine: ``trade_cal`` serves one snapshot with no revision history, so an
+    amendment made in May of year Y is dated here as though it had been knowable on
+    1 January of Y.
+
+    Two instances are proven against this same endpoint and carried as data in
+    ``domain/trading_calendar.py::KNOWN_CALENDAR_LOOKAHEAD``, with regression fixtures in
+    ``tests/contract/providers/test_tushare_trade_cal.py``:
+
+    - **2015-09-03 and 2015-09-04** (Victory Day parade recess, announced 2015-05-13): dated
+      available from 2015-01-01, a **132-day** look-ahead.
+    - **2020-01-31** (Spring Festival extension, announced 2020-01-27): dated available from
+      2020-01-01, a **26-day** look-ahead -- and this one *inverts* the verdict, because the
+      schedule published 2019-11-21 had 31 January as an open session. Any backtest crossing
+      2020-01-20..01-27 "knows" the market is shut through 2 February before anyone did, and
+      the session that reopening lands on is 2020-02-03.
+
+    So the cost is two-directional and the docstring must not list only one side. This rule
+    also blocks between the exchange's November announcement and 1 January, when next year's
+    calendar was in fact already published -- but that is the *smaller* of the two errors and
+    stating it alone was the misleading part. Fixing the leak needs either a revision history
+    the endpoint does not serve or an availability model that can express "unknown between
+    these two instants", which ``Timeline``'s four fixed clocks cannot; both are outside
+    ``V2-P1-004``. ``TradingCalendar.known_lookahead()`` is the interface ``V2-P1-013``'s gate
+    reads so the uncertainty is visible rather than only written down here.
+
+    ``revision_time`` equals ``available_time``, and that is **not** a claim that the cell was
+    never revised -- the three dates above are proof that some cells were. The response carries
+    no revision instant, so every alternative fabricates one: ``ingested_at`` would mark every
+    row of every partition as revised at fetch time, which is false for the ~13,000 rows that
+    never changed and would make ``PartitionCoverage.revised_row_count`` equal the row count
+    for a dataset whose real revision count is unmeasurable. Equality is the only value that
+    invents nothing; read it as "no revision instant is known", and read a calendar
+    partition's ``revised_row_count == 0`` as "unmeasured", not "none". A revised calendar
+    still shows up as a changed row in a re-fetched partition, through the partition's content
+    hash, and never through this clock.
     """
     calendar_day = _parse_tushare_date(row[date_field])
     event_time = datetime.combine(calendar_day, time(0, 0), tzinfo=_CHINA_TZ)
