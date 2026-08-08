@@ -32,9 +32,13 @@ export interface ResolvedSchema {
 
 export interface DriftMismatch {
   field: string;
-  reason: "missing_in_schema" | "kind_mismatch";
+  reason: "missing_in_schema" | "kind_mismatch" | "enum_value_mismatch";
   tsKinds: Kind[];
   schemaKinds: Kind[];
+  /** Only set for `reason: "enum_value_mismatch"`. */
+  tsValues?: string[];
+  /** Only set for `reason: "enum_value_mismatch"`. */
+  schemaValues?: string[];
 }
 
 /** Split a raw parsed schema document into its top-level properties and `$defs`. */
@@ -96,6 +100,47 @@ export function schemaFieldKind(node: JsonSchemaNode, defs: Record<string, JsonS
   }
 
   throw new Error(`schemaFieldKind: cannot classify schema node ${JSON.stringify(node)}`);
+}
+
+/**
+ * Resolve a JSON Schema property node to its fixed set of legal string values, if it
+ * has one — `enum` (filtered to string members), `const` (a single-value enum in
+ * effect), or either resolved through `$ref`/`anyOf` (e.g. a nullable enum field:
+ * `anyOf: [{enum: [...]}, {type: "null"}]`). Returns `null` for a field with no such
+ * constraint (e.g. plain `type: "string"`) — that is what makes declaring a field as
+ * plain `string` in `types.ts` (instead of mirroring it as a literal union) a legitimate
+ * opt-out of value-level tracking, the enum equivalent of the object-field subset
+ * escape hatch `findFieldDrift` already grants.
+ */
+export function schemaFieldEnumValues(
+  node: JsonSchemaNode,
+  defs: Record<string, JsonSchemaNode>,
+): string[] | null {
+  const ref = node.$ref;
+  if (typeof ref === "string") {
+    const key = ref.replace("#/$defs/", "");
+    const target = defs[key];
+    if (target === undefined || Object.keys(target).length === 0) return null;
+    return schemaFieldEnumValues(target, defs);
+  }
+
+  if (Array.isArray(node.enum)) {
+    return node.enum.filter((value): value is string => typeof value === "string");
+  }
+
+  if ("const" in node && typeof node.const === "string") {
+    return [node.const];
+  }
+
+  if (Array.isArray(node.anyOf)) {
+    for (const sub of node.anyOf as JsonSchemaNode[]) {
+      const values = schemaFieldEnumValues(sub, defs);
+      if (values !== null) return values;
+    }
+    return null;
+  }
+
+  return null;
 }
 
 /**
@@ -171,6 +216,48 @@ export function extractTypeLiteralFields(
 }
 
 /**
+ * Resolve a TypeScript type node to the fixed set of string values it declares, if it
+ * is exclusively made of string literals — a single literal (`"watch"`) or a union of
+ * them (`"watch" | "avoid" | "abstain"`), types.ts's way of mirroring a JSON Schema
+ * `enum`. Returns `null` for anything else (a plain `string` keyword, or a union that
+ * mixes in a non-string-literal member such as `T | null`) — that field is not an enum
+ * mirror, so `findFieldDrift` should not attempt a value-level comparison for it.
+ */
+export function tsFieldLiteralValues(node: ts.TypeNode): string[] | null {
+  if (ts.isLiteralTypeNode(node) && ts.isStringLiteral(node.literal)) {
+    return [node.literal.text];
+  }
+
+  if (ts.isUnionTypeNode(node)) {
+    const values: string[] = [];
+    for (const member of node.types) {
+      const memberValues = tsFieldLiteralValues(member);
+      if (memberValues === null) return null;
+      values.push(...memberValues);
+    }
+    return values;
+  }
+
+  return null;
+}
+
+/** Extract `{ fieldName: literalValues }` (see `tsFieldLiteralValues`) for every property
+ * signature of an object type literal — the enum-mirror counterpart of
+ * `extractTypeLiteralFields`, walking the same members. */
+export function extractTypeLiteralLiteralValues(
+  node: ts.TypeLiteralNode,
+  sourceFile: ts.SourceFile,
+): Record<string, string[] | null> {
+  const values: Record<string, string[] | null> = {};
+  for (const member of node.members) {
+    if (!ts.isPropertySignature(member) || member.type === undefined) continue;
+    const name = member.name.getText(sourceFile);
+    values[name] = tsFieldLiteralValues(member.type);
+  }
+  return values;
+}
+
+/**
  * The core drift check. For every field `types.ts` declares (`tsFields`), require
  * that it exists in the schema's declared properties and that every kind it
  * declares is a member of the schema's kind set for that field (a schema field
@@ -183,6 +270,7 @@ export function findFieldDrift(
   tsFields: Record<string, Set<Kind>>,
   schemaProps: Record<string, JsonSchemaNode>,
   defs: Record<string, JsonSchemaNode>,
+  tsLiteralValues: Record<string, string[] | null> = {},
 ): DriftMismatch[] {
   const mismatches: DriftMismatch[] = [];
 
@@ -199,20 +287,68 @@ export function findFieldDrift(
     }
 
     const schemaKinds = schemaFieldKind(schemaNode, defs);
-    if (schemaKinds.has("any")) continue;
+    if (!schemaKinds.has("any")) {
+      const isSubset = [...tsKinds].every((kind) => kind === "any" || schemaKinds.has(kind));
+      if (!isSubset) {
+        mismatches.push({
+          field,
+          reason: "kind_mismatch",
+          tsKinds: [...tsKinds],
+          schemaKinds: [...schemaKinds],
+        });
+        continue;
+      }
+    }
 
-    const isSubset = [...tsKinds].every((kind) => kind === "any" || schemaKinds.has(kind));
-    if (!isSubset) {
-      mismatches.push({
-        field,
-        reason: "kind_mismatch",
-        tsKinds: [...tsKinds],
-        schemaKinds: [...schemaKinds],
-      });
+    // Enum *value* drift: only checked when types.ts chose to mirror this field as a
+    // string-literal union (its declared claim that these are the only legal values) and
+    // the schema constrains the field to a fixed value set. A kind-only comparison folds
+    // every string enum to `"string"` and can never see this — a schema enum gaining,
+    // losing, or renaming a value would otherwise pass silently even though the field types.ts
+    // declared no longer means what it says.
+    const literalValues = tsLiteralValues[field];
+    if (literalValues) {
+      const schemaEnumValues = schemaFieldEnumValues(schemaNode, defs);
+      if (schemaEnumValues !== null) {
+        const tsSet = new Set(literalValues);
+        const schemaSet = new Set(schemaEnumValues);
+        const sameValues = tsSet.size === schemaSet.size && [...tsSet].every((v) => schemaSet.has(v));
+        if (!sameValues) {
+          mismatches.push({
+            field,
+            reason: "enum_value_mismatch",
+            tsKinds: [...tsKinds],
+            schemaKinds: [...schemaKinds],
+            tsValues: [...tsSet].sort(),
+            schemaValues: [...schemaSet].sort(),
+          });
+        }
+      }
     }
   }
 
   return mismatches;
+}
+
+/**
+ * List every top-level `export type <name> = ...` alias name declared in a source
+ * file, in declaration order. This is the generic-discovery half of the drift guard:
+ * it enumerates *every* mirrored type `types.ts` exports, independent of any
+ * hand-curated list of what the guard currently checks — so a new exported type
+ * always shows up here even if no test was ever written to cover it. Non-exported
+ * type aliases and other statement kinds (interfaces, consts, functions) are ignored.
+ */
+export function listExportedTypeAliasNames(sourceFile: ts.SourceFile): string[] {
+  const names: string[] = [];
+  for (const statement of sourceFile.statements) {
+    if (
+      ts.isTypeAliasDeclaration(statement) &&
+      statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)
+    ) {
+      names.push(statement.name.text);
+    }
+  }
+  return names;
 }
 
 /** Find a top-level `export type <name> = { ... };` object type alias in a source file. */

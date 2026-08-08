@@ -3,11 +3,15 @@ import ts from "typescript";
 
 import {
   extractTypeLiteralFields,
+  extractTypeLiteralLiteralValues,
   findArrayItemTypeLiteral,
   findFieldDrift,
   findNestedTypeLiteral,
   findTypeAlias,
+  listExportedTypeAliasNames,
+  schemaFieldEnumValues,
   schemaFieldKind,
+  tsFieldLiteralValues,
   type JsonSchemaNode,
 } from "./schemaDrift";
 
@@ -150,6 +154,186 @@ describe("findFieldDrift — the four mutation shapes the guard must tell apart"
     const defs = { JsonValue: {} };
     const schemaProps: Record<string, JsonSchemaNode> = { payload: { $ref: "#/$defs/JsonValue" } };
     expect(findFieldDrift(tsFields, schemaProps, defs)).toEqual([]);
+  });
+});
+
+describe("tsFieldLiteralValues — recognising a field types.ts declared as an enum mirror", () => {
+  function literalValuesOf(source: string): string[] | null {
+    const { node } = parseTypeLiteral(`type X = { v: ${source} };`, "X");
+    const member = node.members[0];
+    if (!ts.isPropertySignature(member) || member.type === undefined) {
+      throw new Error("fixture property has no type");
+    }
+    return tsFieldLiteralValues(member.type);
+  }
+
+  it("resolves a single string-literal type to its one value", () => {
+    expect(literalValuesOf('"watch"')).toEqual(["watch"]);
+  });
+
+  it("resolves a string-literal union to all of its values, in declaration order", () => {
+    expect(literalValuesOf('"watch" | "avoid" | "abstain"')).toEqual(["watch", "avoid", "abstain"]);
+  });
+
+  it("returns null for a plain string keyword (not an enum mirror)", () => {
+    expect(literalValuesOf("string")).toBeNull();
+  });
+
+  it("returns null for a union containing a non-string-literal member (e.g. `T | null`)", () => {
+    expect(literalValuesOf('"watch" | null')).toBeNull();
+  });
+});
+
+describe("schemaFieldEnumValues — resolving a JSON Schema field's fixed value set", () => {
+  it("resolves a plain `enum` array to its string values", () => {
+    expect(schemaFieldEnumValues({ enum: ["watch", "avoid", "abstain"] }, {})).toEqual([
+      "watch",
+      "avoid",
+      "abstain",
+    ]);
+  });
+
+  it("resolves a `const` string to a single-value array", () => {
+    expect(schemaFieldEnumValues({ const: "decision-ledger/v1" }, {})).toEqual(["decision-ledger/v1"]);
+  });
+
+  it("resolves a $ref into $defs recursively", () => {
+    const defs = { FinalAction: { enum: ["watch", "avoid", "abstain"] } };
+    expect(schemaFieldEnumValues({ $ref: "#/$defs/FinalAction" }, defs)).toEqual([
+      "watch",
+      "avoid",
+      "abstain",
+    ]);
+  });
+
+  it("returns null for a field with no enum/const constraint (plain `type: string`)", () => {
+    expect(schemaFieldEnumValues({ type: "string" }, {})).toBeNull();
+  });
+
+  it("resolves anyOf[enum, null] (a nullable enum field) to the enum's values", () => {
+    const node: JsonSchemaNode = { anyOf: [{ enum: ["watch", "avoid"] }, { type: "null" }] };
+    expect(schemaFieldEnumValues(node, {})).toEqual(["watch", "avoid"]);
+  });
+});
+
+describe("findFieldDrift — enum *value* drift, not just kind drift", () => {
+  it("flags a field whose schema enum gained a value the ts literal union does not declare (the 'escalate' shape)", () => {
+    const tsFields = { final_action: new Set<"string">(["string"]) };
+    const tsLiteralValues = { final_action: ["watch", "avoid", "abstain"] };
+    const schemaProps: Record<string, JsonSchemaNode> = {
+      final_action: { enum: ["watch", "avoid", "abstain", "escalate"] },
+    };
+    const drift = findFieldDrift(tsFields, schemaProps, {}, tsLiteralValues);
+    expect(drift).toEqual([
+      {
+        field: "final_action",
+        reason: "enum_value_mismatch",
+        tsKinds: ["string"],
+        schemaKinds: ["string"],
+        tsValues: ["abstain", "avoid", "watch"],
+        schemaValues: ["abstain", "avoid", "escalate", "watch"],
+      },
+    ]);
+  });
+
+  it("flags a field whose schema enum lost a value the ts literal union still declares", () => {
+    const tsFields = { final_action: new Set<"string">(["string"]) };
+    const tsLiteralValues = { final_action: ["watch", "avoid", "abstain"] };
+    const schemaProps: Record<string, JsonSchemaNode> = { final_action: { enum: ["watch", "avoid"] } };
+    const drift = findFieldDrift(tsFields, schemaProps, {}, tsLiteralValues);
+    expect(drift).toEqual([
+      {
+        field: "final_action",
+        reason: "enum_value_mismatch",
+        tsKinds: ["string"],
+        schemaKinds: ["string"],
+        tsValues: ["abstain", "avoid", "watch"],
+        schemaValues: ["avoid", "watch"],
+      },
+    ]);
+  });
+
+  it("does NOT flag when both sides declare the exact same enum value set", () => {
+    const tsFields = { final_action: new Set<"string">(["string"]) };
+    const tsLiteralValues = { final_action: ["watch", "avoid", "abstain"] };
+    const schemaProps: Record<string, JsonSchemaNode> = {
+      final_action: { enum: ["watch", "avoid", "abstain"] },
+    };
+    expect(findFieldDrift(tsFields, schemaProps, {}, tsLiteralValues)).toEqual([]);
+  });
+
+  it("does NOT run the enum-value check when types.ts declares the field as plain `string`, even though the schema has an enum", () => {
+    // This is the intentional-subset escape hatch applied to enums: declaring `kind: string`
+    // instead of a literal union is types.ts opting out of value-level tracking for that
+    // field, same as declaring a subset of a schema's object fields is opting out of the
+    // fields it never mirrors.
+    const tsFields = { kind: new Set<"string">(["string"]) };
+    const tsLiteralValues = { kind: null };
+    const schemaProps: Record<string, JsonSchemaNode> = { kind: { enum: ["a", "b", "c"] } };
+    expect(findFieldDrift(tsFields, schemaProps, {}, tsLiteralValues)).toEqual([]);
+  });
+
+  it("does NOT run the enum-value check when tsLiteralValues is omitted entirely (back-compat with the original 3-arg call)", () => {
+    const tsFields = { final_action: new Set<"string">(["string"]) };
+    const schemaProps: Record<string, JsonSchemaNode> = { final_action: { enum: ["watch", "avoid"] } };
+    expect(findFieldDrift(tsFields, schemaProps, {})).toEqual([]);
+  });
+});
+
+describe("extractTypeLiteralLiteralValues — per-field literal-value extraction for a whole object literal", () => {
+  it("extracts literal values for enum-mirror fields and null for everything else", () => {
+    const { node, sourceFile } = parseTypeLiteral(
+      'type X = { final_action: "watch" | "avoid" | "abstain"; run_id: string };',
+      "X",
+    );
+    expect(extractTypeLiteralLiteralValues(node, sourceFile)).toEqual({
+      final_action: ["watch", "avoid", "abstain"],
+      run_id: null,
+    });
+  });
+});
+
+describe("listExportedTypeAliasNames — generic discovery of every mirrored type in types.ts", () => {
+  it("lists every top-level `export type` alias name, in declaration order", () => {
+    const sourceFile = ts.createSourceFile(
+      "fixture.ts",
+      `
+      export type A = { a: string };
+      export type B = { b: number };
+      export type C = { c: boolean };
+      `,
+      ts.ScriptTarget.Latest,
+      true,
+    );
+    expect(listExportedTypeAliasNames(sourceFile)).toEqual(["A", "B", "C"]);
+  });
+
+  it("ignores a non-exported type alias", () => {
+    const sourceFile = ts.createSourceFile(
+      "fixture.ts",
+      `
+      type Internal = { x: string };
+      export type Exported = { y: string };
+      `,
+      ts.ScriptTarget.Latest,
+      true,
+    );
+    expect(listExportedTypeAliasNames(sourceFile)).toEqual(["Exported"]);
+  });
+
+  it("ignores other exported statement kinds (functions, consts, interfaces)", () => {
+    const sourceFile = ts.createSourceFile(
+      "fixture.ts",
+      `
+      export const x = 1;
+      export function f() {}
+      export interface I { z: string }
+      export type OnlyThisOne = { w: string };
+      `,
+      ts.ScriptTarget.Latest,
+      true,
+    );
+    expect(listExportedTypeAliasNames(sourceFile)).toEqual(["OnlyThisOne"]);
   });
 });
 

@@ -8,11 +8,21 @@ type DecisionPanelProps = {
   onRun: () => void;
 };
 
-const actionLabels = {
+const actionLabels: Record<string, string> = {
   watch: "观察",
   avoid: "回避",
   abstain: "弃权"
-} as const;
+};
+
+// `final_action` is typed as a closed literal union, but that is only a compile-time
+// claim about what the backend will send — see typesContractDrift.test.ts's
+// enum-value drift guard for what keeps it honest. If the contract ever adds a value
+// (or a stale frontend build is served against a newer backend) before the frontend
+// is rebuilt, this must not render blank: an unrecognised label is confusing, but a
+// silently blank verdict for a real decision is worse.
+function actionLabel(action: string): string {
+  return actionLabels[action] ?? `未知动作（${action}）`;
+}
 
 export function DecisionPanel({
   evidence,
@@ -48,7 +58,7 @@ export function DecisionPanel({
         <div className="decision-content">
           <div className="decision-verdict">
             <span>最终动作</span>
-            <strong>{actionLabels[result.decision.final_action]}</strong>
+            <strong>{actionLabel(result.decision.final_action)}</strong>
             <small>风险门：{result.decision.risk_decision}</small>
           </div>
           <dl className="metric-row">
