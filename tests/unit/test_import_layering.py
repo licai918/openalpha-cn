@@ -51,6 +51,12 @@ Finally (V2-P0B-001), it asserts the dependency-direction outcome of splitting
 contracts must not pull in `ResearchEngine`'s SQLite storage dependency, and the four
 modules that only ever needed the contracts (not `ResearchEngine`) must route through
 `runtime.contracts` instead of `runtime.engine`.
+
+V2-P1-001 added `openalpha_cn.panel` (ADR-0002's panel plane), the first sibling
+subpackage this file's dynamic `domain-purity` discovery ever actually had to cover
+automatically -- the two tests near the end of this module close the matching gap on the
+`storage-no-upward-deps` side, which (unlike `domain-purity`) is a static, finite
+enumeration that a new sibling does not automatically join.
 """
 
 from __future__ import annotations
@@ -495,3 +501,53 @@ def test_contract_only_consumers_do_not_transitively_reach_engine_owned_storage_
         upstream = graph.find_upstream_modules(module)
         touched = upstream & storage_targets
         assert not touched, f"{module} still transitively reaches {touched}"
+
+
+# V2-P1-001: `openalpha_cn.panel` (ADR-0002's panel plane, `src/openalpha_cn/panel/store.py`)
+# is a new top-level sibling package, exactly the kind
+# `test_domain_purity_holds_against_every_dynamically_discovered_sibling_subpackage` above
+# already anticipated ("a future `panel/`... is invisible [to the static enumeration] until a
+# human remembers to add an entry"). That test's dynamic, directory-driven discovery means
+# `domain -> panel` is already covered with zero edits to this file or to
+# `pyproject.toml`'s `domain-purity` contract. `storage-no-upward-deps`'s `forbidden_modules`
+# is a *static*, finite enumeration (`agents`/`runtime`/`product`/`backtest` only) that does
+# not automatically extend to a new sibling, so the two tests below close the gap directly
+# with `grimp`, matching this file's existing "check the live graph, not a hand-maintained
+# list" approach.
+
+
+def test_panel_package_has_zero_direct_edges_into_any_other_openalpha_cn_subpackage() -> None:
+    """`openalpha_cn.panel` is written to be fully self-contained (DuckDB + the standard
+    library only) -- it has no reason to import `domain`, `storage`, or any other
+    subpackage for this task's storage skeleton. Checked against every sibling discovered
+    from the real directory structure (`_sibling_subpackages_of_domain()`, which excludes
+    only `domain` itself), not a hand-copied list.
+    """
+    graph = grimp.build_graph("openalpha_cn")
+    siblings = [name for name in _sibling_subpackages_of_domain() if name != "panel"]
+    assert siblings, "expected at least one non-panel sibling subpackage to check against"
+    violations = [
+        sibling
+        for sibling in siblings
+        if graph.direct_import_exists(
+            importer="openalpha_cn.panel", imported=f"openalpha_cn.{sibling}", as_packages=True
+        )
+    ]
+    assert not violations, f"openalpha_cn.panel directly imports forbidden sibling(s): {violations}"
+
+
+def test_storage_and_domain_have_zero_direct_edges_into_the_new_panel_package() -> None:
+    """The other half of the same guarantee: `storage/` and `domain/` must never import
+    `openalpha_cn.panel` -- V2-P1-001's brief calls this out explicitly, a new sibling
+    plane must not become a new upward dependency for the packages underneath it. Proven
+    directly with `grimp` rather than added to `storage-no-upward-deps`'s
+    `forbidden_modules`, since `panel` currently has zero reason to ever be imported by
+    `storage` at all (unlike `agents`/`runtime`/`product`/`backtest`, which `storage`
+    legitimately *used* to import before V2-P0B-012's relocation) -- there is no live edge
+    this static list needs to keep permanently rejecting, only one to keep proving absent.
+    """
+    graph = grimp.build_graph("openalpha_cn")
+    for importer in ("openalpha_cn.storage", "openalpha_cn.domain"):
+        assert not graph.direct_import_exists(
+            importer=importer, imported="openalpha_cn.panel", as_packages=True
+        ), f"{importer} must not import openalpha_cn.panel"
