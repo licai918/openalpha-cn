@@ -129,6 +129,8 @@ P3 结束即可独立使用（Jupyter 直连面板 + 因子）
 
 **闸门（必过）**：001–008 全部通过，零已知严重 look-ahead 违规；该套测试进入 CI 成为 P3/P4 每次提交的回归门。
 
+> **⚠️ 前置警告（2026-08 实测，见 §10）**：不要把这个闸门建在 `ReplayReport.look_ahead_violations` 上 —— 该字段在任何真实调用路径上结构性只能为 0。P2 必须先解决信号可达性问题。
+
 **为什么是独立闸门**：数据错了，因子越多越危险。在错数据上建 20 个因子再推翻，成本远高于这 2 周。这是唯一不允许为赶进度跳过的阶段。
 
 ---
@@ -460,3 +462,37 @@ evidence_ids, signal_ids, code_commit, model_versions, prompt_versions` ——
 **这条错误的来源值得记下**：最初的技术审计断言「三者都是 `decision_id` 的输入」，
 该说法未经实测就被写进 PRD、审计文档与 Task 17 的 brief，直到评审用实验推翻。
 审计 agent 的结论在被当作事实引用前需要核验。
+
+## 10. `look_ahead_violations` 目前不是活的探测器（2026-08 实测）
+
+Task 22 把前视违规的分类从字符串匹配改成了类型化异常，这部分做对了且经变异验证。
+但评审在验收时用三层递进实验发现了一件更重要的事：
+
+| 注入方式 | 结果 |
+|---|---|
+| 直接构造 `ReplayCase`（含不可见证据） | 构造时即被 `validate_point_in_time` 拒绝 |
+| `ReplayCase.model_construct()` 绕过后传给 `ReplayCorpus(...)` | pydantic 仍重新校验嵌套模型并拒绝 |
+| **同时** `model_construct()` 绕过 `ReplayCase` 与 `ReplayCorpus` | 才进得去，计数正确递增为 1 |
+
+而真实入口 —— `cli.py` 的 `ReplayCorpus.load(path)`、REST 的 `ReplayApiRequest.corpus`、SDK 的
+replay 方法 —— **全部从原始数据构建**，必然触发 `ReplayCase` 自己的校验器。
+全库 grep 确认没有任何 `model_construct` 式的绕过路径。
+
+**后果**：
+
+1. `tests/replay/test_frozen_corpus.py` 里的 `look_ahead_violations == 0` 是**同义反复** ——
+   不论分类逻辑是否正确它都成立。这条断言目前不提供任何保护。
+2. **P2 的必过闸门不能建在这个信号上。** 九个注入 issue（`V2-P2-001` 到 `008`）
+   若指望通过这个计数器观测违规，会得到恒为 0 的结果而误以为闸门通过。
+
+**这是既有状况，不是 Task 22 引入的** —— 评审对 base commit 验证过，旧的字符串匹配版本
+同样够不到。Task 22 只改了分类方式。
+
+**P2 开工前必须先决策**（二选一，或提出第三条）：
+
+- **A**：调整点位，让前视检查不在 runner 上游被重复强制 —— 例如让 `ReplayCase` 保留证据但标记，
+  由 runner 做唯一的判定点。这会改变 `ReplayCorpus` 的语义，需要评估对冻结语料的影响。
+- **B**：接受这个信号为恒零的纵深防御，**另选一个可达信号**建闸门 ——
+  例如直接在 `ResearchEngine.run_cycle` 或面板查询层注入，那里没有上游筛选。
+
+不做这个决策就开工 P2，会得到一个永远绿、但什么都没测的闸门。
