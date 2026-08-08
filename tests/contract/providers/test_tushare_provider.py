@@ -66,7 +66,10 @@ def test_tushare_missing_token_is_an_explicit_configuration_failure(fake_tushare
 def test_tushare_metadata_declares_supported_datasets(fake_tushare_transport) -> None:
     provider = TushareProvider(token="secret-token", transport=fake_tushare_transport({}))
 
-    assert provider.metadata.supported_datasets == ("daily",)
+    # Grows by exactly one entry per row added to TUSHARE_DATASETS; `trade_cal` is
+    # V2-P1-004's. Still spelled out in full rather than derived from the table, so that
+    # adding a dataset has to be an intentional edit here too.
+    assert provider.metadata.supported_datasets == ("daily", "trade_cal")
 
 
 def test_tushare_upstream_error_never_becomes_empty_success(fake_tushare_transport) -> None:

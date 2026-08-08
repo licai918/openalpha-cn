@@ -126,43 +126,83 @@ Unlike the contract's own numbers, this one is deliberately *not* asserted anywh
 context for a reader, and a wall-clock assertion would be a flaky gate on a claim the code
 shape already carries.
 
-## Known gaps, recorded rather than fixed here
+## The trading calendar's two directions (`V2-P1-004`)
 
-- **No `src/` caller yet.** Nothing in `src/openalpha_cn` calls `write_panel_batch()`; the
-  first real one arrives with `V2-P1-004`, when a dataset is actually wired up. Until then
-  this seam is exercised by tests only, which is expected for a contract that deliberately
-  landed ahead of its consumer.
+`write_trading_calendar()` and `load_trading_calendar()` are the first real `src/` callers of
+this seam, and the calendar is the dataset that most needs both halves of it: the panel plane
+is where it is *stored*, and `domain/trading_calendar.py` is what it has to become again
+before anyone can ask it a question.
 
-## What is deliberately not decided here
+Reading goes through `PanelStore.read_if_ready()`, not `query()`, on purpose. `query()`
+answers `[]` for a partition that was never written, and an empty row set fed to
+`build_trading_calendar` would produce -- nothing, because that constructor refuses an empty
+input. Two fail-closed layers rather than one is not redundancy here: the readiness verdict
+says *which* year is missing and why, in structured codes `V2-P1-012` and `V2-P1-013` already
+branch on, while the constructor's contiguity rule catches the case readiness cannot see (a
+partition that exists, passes every check, and happens to be missing a day in the middle).
 
-`year` is a required keyword argument, never derived from the batch. It is tempting to read
-it off `event_time`, but panel `event_time` is a UTC instant while A-share partitioning is by
-*trading date* in Asia/Shanghai: a session on 2024-01-01 08:00 CST is 2023-12-31 24:00 UTC,
-so a UTC-derived year would silently misfile every early-January morning. Choosing the
-partition key needs the real trading calendar that arrives with `V2-P1-004`; until then the
-caller says which partition it means.
+`trading_calendar_requirement()` waives two of the four checks, and both waivers are recorded
+on the verdict (`DatasetReadiness.checks_waived`) rather than being invisible:
+
+- **`required_dates`** is waived because stating it would be circular -- the trading days of
+  the year are exactly what the calendar is being loaded to find out. What replaces it is
+  strictly stronger: `build_trading_calendar` demands *every natural day* between the first
+  and the last, which is a superset of any list of trading days, and reports the first
+  missing one by name.
+- **`max_staleness`** is waived because it cannot fire. Staleness is `as_of -
+  last_event_time`, and a calendar partition's newest event is the *last session of its
+  year*, which is normally in the future -- so the difference is negative and the check
+  silently passes for every input. A check that can never fail is worse than an absent one:
+  it reads as reassurance. Freshness for a calendar is the horizon
+  (`TradingCalendar.horizon`), which is a different question and has its own answer.
+
+`panel_readiness_requirement()` is the other direction -- the one `V2-P1-003` was waiting
+for. It turns a real calendar into the `required_dates` of *another* dataset's requirement,
+so hole detection for `daily`, `adj_factor` and the rest stops being a set difference against
+whatever the caller happened to declare. It clamps the required range at `as_of`, because a
+session that has not happened yet cannot be missing.
+
+## Deriving the partition year
+
+`year` remains a required keyword argument of `write_panel_batch()`. What has changed is that
+a caller no longer has to guess it: `panel_partition_year()` derives it from the batch's own
+`event_time` census in the declared timezone and **refuses a batch that spans two years**
+rather than picking one. That refusal is the point. The trap this note used to describe --
+a session on 2024-01-01 08:00 CST is 2023-12-31 24:00 UTC, so a UTC-derived year misfiles
+every early-January morning -- is avoided by resolving in `date_timezone`, the same value
+`panel_coverage()` records on the coverage row; and the second trap, a batch that genuinely
+straddles a year boundary, is answered with an error instead of a silent choice.
 """
 
 import operator
 from collections import Counter
-from collections.abc import Mapping
-from datetime import date, datetime
+from collections.abc import Mapping, Sequence
+from datetime import date, datetime, timedelta
 from types import MappingProxyType
 from typing import Final
 from zoneinfo import ZoneInfo
 
 from openalpha_cn.domain.panel_batch import (
     RESERVED_COLUMN_NAMES,
+    SUBJECT_COLUMN_NAME,
     ColumnarPanelBatch,
     PanelBatchError,
     PanelColumn,
     PanelColumnKind,
+)
+from openalpha_cn.domain.trading_calendar import (
+    CALENDAR_PANEL_COLUMNS,
+    TRADING_CALENDAR_DATASET,
+    TradingCalendar,
+    TradingCalendarError,
+    trading_calendar_from_panel_rows,
 )
 from openalpha_cn.panel.catalog import (
     DEFAULT_DATE_TIMEZONE,
     DateCoverage,
     FieldCoverage,
     PartitionCoverage,
+    ReadinessRequirement,
     RevisionCoverage,
 )
 from openalpha_cn.panel.store import ColumnSpec, PanelStore, PartitionRef
@@ -282,6 +322,170 @@ def write_panel_batch(
     )
     store.record_coverage(coverage)
     return reference
+
+
+def panel_partition_year(
+    batch: ColumnarPanelBatch, *, date_timezone: str = DEFAULT_DATE_TIMEZONE
+) -> int:
+    """The single calendar year `batch` belongs to, resolved in `date_timezone`.
+
+    Refuses a batch that spans two years rather than choosing one. A straddling batch has no
+    single partition, and every way of picking one -- first row, last row, most rows -- files
+    part of the data under a year it does not belong to, where a later single-year re-fetch
+    then overwrites the partition and drops it. Split the batch instead.
+
+    The timezone is not decoration: `event_time` is a UTC instant, and a session at 08:00
+    Asia/Shanghai on 1 January is 31 December in UTC, so a UTC-derived year misfiles every
+    early-January morning of the panel.
+    """
+    if batch.status != "success":
+        raise PanelBatchError(
+            f"cannot derive a partition year from a {batch.status!r} batch: "
+            f"{batch.no_data_reason!r}"
+        )
+    zone = _resolve_timezone(date_timezone)
+    years = {instant.astimezone(zone).year for instant in set(batch.timeline.event_time)}
+    if len(years) != 1:
+        raise PanelBatchError(
+            f"this batch spans {sorted(years)} in {date_timezone} and has no single "
+            f"{batch.dataset} partition; split it by year before writing"
+        )
+    return years.pop()
+
+
+def write_trading_calendar(
+    store: PanelStore,
+    batch: ColumnarPanelBatch,
+    *,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> PartitionRef:
+    """Write one year of exchange calendar into the panel plane (`V2-P1-004`).
+
+    A thin composition of `panel_partition_year()` and `write_panel_batch()`: the calendar is
+    the one dataset whose partition year is never ambiguous (a request covers exactly one
+    year), so making the caller restate it would be an invitation to state it wrong.
+    """
+    if batch.dataset != TRADING_CALENDAR_DATASET:
+        raise PanelBatchError(
+            f"expected the {TRADING_CALENDAR_DATASET!r} dataset, got {batch.dataset!r}"
+        )
+    return write_panel_batch(
+        store,
+        batch,
+        year=panel_partition_year(batch, date_timezone=date_timezone),
+        date_timezone=date_timezone,
+    )
+
+
+def trading_calendar_requirement(
+    *, exchange: str, years: Sequence[int], as_of: datetime
+) -> ReadinessRequirement:
+    """What the calendar dataset itself must satisfy before it may be read.
+
+    Two of the four checks are waived, deliberately and on the record; see this module's
+    docstring for why neither could do useful work here and what replaces them.
+    """
+    return ReadinessRequirement(
+        dataset=TRADING_CALENDAR_DATASET,
+        as_of=as_of,
+        years=tuple(sorted(set(years))),
+        required_dates=None,
+        required_subjects=(exchange,),
+        required_fields=CALENDAR_PANEL_COLUMNS,
+        max_staleness=None,
+    )
+
+
+def load_trading_calendar(
+    store: PanelStore, *, exchange: str, years: Sequence[int], as_of: datetime
+) -> TradingCalendar:
+    """Read the stored calendar back as a `TradingCalendar`, or refuse to.
+
+    Fail-closed twice over. A year whose partition is missing, damaged, unprofiled or
+    described by a stale coverage record is blocked by `read_if_ready()` and reported by its
+    structured issue codes; a set of years that is not contiguous -- or a partition with a
+    hole in the middle -- is refused by `build_trading_calendar` afterwards. Neither path can
+    hand back a calendar that reads the missing stretch as a holiday.
+
+    Readiness is assessed once per requested year rather than once in total. That is
+    `read_if_ready()`'s shape (it vets the dataset and reads one partition), and at the
+    handful of years a calendar load spans the repeated catalog lookup costs nothing worth
+    restructuring the contract for.
+    """
+    requested = tuple(sorted(set(years)))
+    if not requested:
+        raise TradingCalendarError(
+            "load_trading_calendar needs at least one year; a load that read nothing would "
+            "produce a calendar that answers 'beyond horizon' to every question"
+        )
+    requirement = trading_calendar_requirement(exchange=exchange, years=requested, as_of=as_of)
+    rows: list[tuple[object, ...]] = []
+    for year in requested:
+        outcome = store.read_if_ready(
+            requirement,
+            year=year,
+            columns=CALENDAR_PANEL_COLUMNS,
+            filters={SUBJECT_COLUMN_NAME: exchange},
+        )
+        if outcome.is_blocked:
+            raise TradingCalendarError(
+                f"the {exchange} calendar cannot be read at {as_of.isoformat()}: "
+                f"{[issue.code for issue in outcome.readiness.issues]}; "
+                f"{'; '.join(issue.detail for issue in outcome.readiness.issues)}"
+            )
+        rows.extend(outcome.rows)
+    return trading_calendar_from_panel_rows(exchange, rows)
+
+
+def panel_readiness_requirement(
+    calendar: TradingCalendar,
+    dataset: str,
+    *,
+    as_of: datetime,
+    years: Sequence[int],
+    required_subjects: tuple[str, ...] | None,
+    required_fields: tuple[str, ...] | None,
+    max_staleness: timedelta | None,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> ReadinessRequirement:
+    """Build another dataset's requirement with `required_dates` taken from a real calendar.
+
+    This is the seam `V2-P1-003` left open: its `required_dates` had to be caller-supplied
+    because nothing in the repository knew which days the exchange was open, so hole
+    detection was a set difference against a guess. Now it is a set difference against the
+    published calendar.
+
+    The required range for each year is clamped at `as_of`: a session that has not happened
+    cannot be missing, and requiring the rest of the current year would report a permanent,
+    entirely invented `date_gap` for a dataset that is completely up to date. Requesting a
+    year that has not begun at `as_of` is refused outright rather than answered with an empty
+    expectation, which `evaluate_readiness` would (correctly, but confusingly) block on as
+    `empty_requirement`.
+
+    Any part of a requested year that the calendar does not cover makes this raise, via
+    `trading_days_between`. That is the intended behaviour: a requirement built from a
+    calendar that only knows half the year would silently under-require the other half.
+    """
+    zone = _resolve_timezone(date_timezone)
+    today = as_of.astimezone(zone).date()
+    required: list[date] = []
+    for year in sorted(set(years)):
+        start = date(year, 1, 1)
+        if start > today:
+            raise TradingCalendarError(
+                f"year {year} has not begun at as_of {as_of.isoformat()} ({date_timezone}), so "
+                f"no {dataset} session in it can be required yet"
+            )
+        required.extend(calendar.trading_days_between(start, min(date(year, 12, 31), today)))
+    return ReadinessRequirement(
+        dataset=dataset,
+        as_of=as_of,
+        years=tuple(sorted(set(years))),
+        required_dates=tuple(required),
+        required_subjects=required_subjects,
+        required_fields=required_fields,
+        max_staleness=max_staleness,
+    )
 
 
 def _resolve_timezone(name: str) -> ZoneInfo:

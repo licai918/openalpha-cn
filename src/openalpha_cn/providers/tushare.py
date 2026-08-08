@@ -6,21 +6,51 @@ is built, which columns hold the subject and the date, how the four PIT clocks a
 derived, and the `kind`/`source_uri` used for the resulting records. `TushareDatasetDescriptor`
 makes those four things data instead of code, so adding a dataset is a new row in
 `TUSHARE_DATASETS`, not a new adapter.
+
+## Two output shapes, one descriptor table (`V2-P1-004`)
+
+`fetch()` produces the row-wise `ProviderBatch` the evidence plane speaks. `fetch_panel()`
+produces the columnar `ColumnarPanelBatch` ADR-0002's panel plane speaks, and is available
+for exactly those datasets whose descriptor declares a `panel_columns` projection --
+`trade_cal` today. A dataset without one is refused by name rather than silently handed an
+empty batch, because "this dataset is not wired to the panel plane" and "this dataset has no
+rows" are different facts. Both methods decode the same response through the same clock
+table; only the assembly differs.
+
+## `is_open` is parsed, never coerced
+
+Tushare returns `is_open` as an integer `0`/`1`, and the obvious `bool(value)` is wrong in a
+way that is invisible: `bool("0")` is `True`, so a schema change that turned the column into
+strings would silently report every holiday as a trading day. `_open_flag` therefore accepts
+only `0`/`1`/`"0"`/`"1"`/`bool` and raises on anything else.
 """
 
 import json
 import os
 import urllib.error
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import date, datetime, time
 from enum import StrEnum
-from typing import Any, Protocol, cast
+from typing import Any, Final, Protocol, cast
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
+from openalpha_cn.domain.panel_batch import (
+    ColumnarPanelBatch,
+    PanelColumn,
+    PanelColumnKind,
+    TimelineColumns,
+)
 from openalpha_cn.domain.time import Timeline
+from openalpha_cn.domain.trading_calendar import (
+    CALENDAR_DATE_COLUMN,
+    CALENDAR_OPEN_COLUMN,
+    CALENDAR_PRETRADE_COLUMN,
+    TRADING_CALENDAR_DATASET,
+)
 from openalpha_cn.providers.base import (
     ProviderBatch,
     ProviderFailure,
@@ -32,6 +62,18 @@ from openalpha_cn.providers.base import (
 )
 
 _CHINA_TZ = ZoneInfo("Asia/Shanghai")
+
+_PROVIDER_ID: Final[str] = "tushare.pro"
+
+TRADING_CALENDAR_DEFAULT_EXCHANGE: Final[str] = "SSE"
+"""What Tushare answers with when `exchange` is omitted, measured rather than assumed.
+
+A live probe found the bare request and `exchange=SSE` return byte-identical rows, that SSE
+carries 13,162 published days against SZSE's 12,966 (SZSE simply starts later), and that the
+two disagree on `is_open` for **zero** of their shared dates. They are still kept as separate
+subjects rather than merged: identical today is not the same fact as identical by
+construction, and the subject column is where a future divergence would show up.
+"""
 
 
 class TushareTransport(Protocol):
@@ -65,9 +107,10 @@ class UrllibTushareTransport:
 class ClockStrategy(StrEnum):
     """How a dataset's four PIT clocks (event/available/ingested/revision) are derived.
 
-    Only ``daily_close`` has a real production consumer today (the ``daily`` dataset).
-    ``announcement`` and ``calendar_static`` are defined and independently tested against
-    synthetic data now so P1 can wire real datasets onto them without changing this shape.
+    ``daily_close`` (the ``daily`` dataset) and ``calendar_publication`` (``trade_cal``) have
+    real production consumers. ``announcement`` and ``calendar_static`` are defined and
+    independently tested against synthetic data so P1 can wire real datasets onto them
+    without changing this shape.
     """
 
     daily_close = "daily_close"
@@ -77,7 +120,41 @@ class ClockStrategy(StrEnum):
     """Financial-statement data keyed off ``ann_date``/``f_ann_date`` (original vs. revised)."""
 
     calendar_static = "calendar_static"
-    """Static reference data: event_time == available_time == that day's 00:00."""
+    """Static reference data: event_time == available_time == that day's 00:00.
+
+    Still without a production consumer, and ``trade_cal`` deliberately does **not** use it --
+    see ``calendar_publication`` for why a calendar is the one dataset this rule is wrong for.
+    """
+
+    calendar_publication = "calendar_publication"
+    """Forward-looking reference data: the event is a future day, availability is publication.
+
+    Every other clock here describes data about the past, so ``available_time`` lands at or
+    after ``event_time``. A calendar is the opposite: on 2026-08-08 the exchange has already
+    told us that 2026-12-31 is a session, and the entire reason the dataset exists is to
+    answer questions about days that have not happened. See ``_calendar_publication_timeline``
+    for the two facts the availability instant is derived from.
+    """
+
+
+class TusharePanelColumn(BaseModel):
+    """One response field projected onto one panel-plane column (``V2-P1-004``).
+
+    ``parse`` turns Tushare's own representation into the logical ``kind``'s Python type and
+    raises ``ValueError`` for anything it does not recognise. It is a function rather than a
+    kind-keyed lookup because the interesting cases are dataset-specific: ``is_open``'s 0/1
+    flag and a ``YYYYMMDD`` date string both arrive as ``str`` or ``int`` and both need a
+    different rule.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(min_length=1, max_length=63)
+    """Panel column name; revalidated by ``PanelColumn`` at the contract boundary."""
+    kind: PanelColumnKind
+    source_field: str = Field(min_length=1, max_length=128)
+    """Response field this column is projected from."""
+    parse: Callable[[object], object]
 
 
 class TushareDatasetDescriptor(BaseModel):
@@ -102,6 +179,8 @@ class TushareDatasetDescriptor(BaseModel):
     """Builds the Tushare ``params`` object from a ``ProviderRequest``."""
     source_uri_template: str = Field(min_length=1, max_length=2048)
     """``str.format`` template with ``{dataset}``, ``{subject}``, and ``{date}`` placeholders."""
+    panel_columns: tuple[TusharePanelColumn, ...] = ()
+    """Panel-plane projection, or ``()`` for a dataset ``fetch_panel()`` does not serve yet."""
 
 
 def _trade_date_params(request: ProviderRequest) -> dict[str, str]:
@@ -113,6 +192,75 @@ def _trade_date_params(request: ProviderRequest) -> dict[str, str]:
     return parameters
 
 
+def _trade_cal_params(request: ProviderRequest) -> dict[str, str]:
+    """Request one whole calendar year: ``{exchange, start_date, end_date}``.
+
+    The year is the ``as_of``'s year *in Asia/Shanghai*, not in UTC: 2024-12-31 17:00Z is
+    already 2025-01-01 in Shanghai, and asking UTC would fetch the wrong year's calendar for
+    every late-evening request on the last day of a year. One year per request is also one
+    year per partition, which is the granularity `PanelStore` stores at.
+
+    Tushare takes a single `exchange`, so more than one subject is a malformed request rather
+    than something to silently truncate or comma-join into an unsupported filter.
+
+    Recorded limitation: `ProviderRequest` carries no date range, so `as_of` doubles as "which
+    year to fetch". Backfilling 2015..2026 therefore means one request per year, each with an
+    `as_of` inside that year. `_trade_date_params` has the same shape for the same reason, and
+    widening the request contract is a change to every provider rather than to this dataset.
+    """
+    if len(request.subjects) > 1:
+        raise ProviderFailure(
+            provider_id=_PROVIDER_ID,
+            category="configuration",
+            message=(
+                f"{TRADING_CALENDAR_DATASET} serves one exchange per request; got "
+                f"{list(request.subjects)}"
+            ),
+            retryable=False,
+        )
+    exchange = request.subjects[0] if request.subjects else TRADING_CALENDAR_DEFAULT_EXCHANGE
+    year = request.as_of.astimezone(_CHINA_TZ).year
+    return {"exchange": exchange, "start_date": f"{year}0101", "end_date": f"{year}1231"}
+
+
+_OPEN_FLAGS: Final[dict[str, bool]] = {"0": False, "1": True}
+
+
+def _open_flag(value: object) -> object:
+    """Parse Tushare's ``is_open`` into a real ``bool``. See this module's docstring."""
+    if type(value) is bool:
+        return value
+    if type(value) is int and value in (0, 1):
+        return value == 1
+    if type(value) is str and value in _OPEN_FLAGS:
+        return _OPEN_FLAGS[value]
+    raise ValueError(f"is_open must be 0 or 1, got {type(value).__name__} {value!r}")
+
+
+def _calendar_date_text(value: object) -> object:
+    """Parse a ``YYYYMMDD`` column into an ISO ``YYYY-MM-DD`` string.
+
+    Stored as text, not as a `TIMESTAMPTZ`: a calendar date is a date, and putting it through
+    an instant would re-introduce the very timezone ambiguity `panel_ingest`'s
+    `date_timezone` exists to record. The parse is not a reformat -- `_parse_tushare_date`
+    rejects anything that is not a real date, so a malformed cell fails here rather than in a
+    consumer.
+    """
+    return _parse_tushare_date(value).isoformat()
+
+
+def _optional_calendar_date_text(value: object) -> object:
+    """Same as `_calendar_date_text`, but a missing value stays missing.
+
+    `pretrade_date` was populated on every one of the 13,162 rows the live probe returned, so
+    the null branch is defence rather than an observed case -- and a `None` here is honest
+    where a fabricated date would not be.
+    """
+    if value is None or value == "":
+        return None
+    return _calendar_date_text(value)
+
+
 TUSHARE_DATASETS: tuple[TushareDatasetDescriptor, ...] = (
     TushareDatasetDescriptor(
         dataset="daily",
@@ -122,6 +270,40 @@ TUSHARE_DATASETS: tuple[TushareDatasetDescriptor, ...] = (
         clock=ClockStrategy.daily_close,
         params_builder=_trade_date_params,
         source_uri_template="tushare://{dataset}/{subject}/{date}",
+    ),
+    TushareDatasetDescriptor(
+        dataset=TRADING_CALENDAR_DATASET,
+        kind=TRADING_CALENDAR_DATASET,
+        # The response carries `exchange` on every row, so the subject is read from the data
+        # rather than defaulted to the dataset name: SSE and SZSE are genuinely two series.
+        subject_field="exchange",
+        date_field=CALENDAR_DATE_COLUMN,
+        clock=ClockStrategy.calendar_publication,
+        params_builder=_trade_cal_params,
+        source_uri_template="tushare://{dataset}/{subject}/{date}",
+        # `name` is the panel column, `source_field` is Tushare's response column. They
+        # coincide today and are still written out separately: renaming one must not silently
+        # rename the other.
+        panel_columns=(
+            TusharePanelColumn(
+                name=CALENDAR_DATE_COLUMN,
+                kind="string",
+                source_field="cal_date",
+                parse=_calendar_date_text,
+            ),
+            TusharePanelColumn(
+                name=CALENDAR_OPEN_COLUMN,
+                kind="boolean",
+                source_field="is_open",
+                parse=_open_flag,
+            ),
+            TusharePanelColumn(
+                name=CALENDAR_PRETRADE_COLUMN,
+                kind="string",
+                source_field="pretrade_date",
+                parse=_optional_calendar_date_text,
+            ),
+        ),
     ),
 )
 
@@ -206,13 +388,76 @@ def _calendar_static_timeline(
     )
 
 
+def _calendar_publication_timeline(
+    row: dict[str, Any], date_field: str, ingested_at: datetime
+) -> Timeline:
+    """The exchange calendar's clocks: a future session, knowable since publication.
+
+    ``event_time`` is the session's own midnight in Asia/Shanghai. ``available_time`` is the
+    **earlier** of two facts, and taking a minimum rather than picking one is the whole design:
+
+    - *The start of the calendar date's own year.* Not a guess about when the exchange
+      published: by the time year Y has begun, year Y's calendar certainly exists. It is a
+      statement that cannot be wrong in the dangerous direction, which matters because the
+      alternative -- the real publication date, some November of Y-1 -- is not in the response
+      and would have to be invented.
+    - *The moment the row was observed* (``ingested_at``). Tushare publishes next year's
+      calendar during December, and a live probe on 2026-08-08 confirmed the horizon ends at
+      2026-12-31 with zero rows for 2027. When those rows do appear in December 2026, the
+      first fact alone would put ``available_time`` after ``ingested_time`` and ``Timeline``
+      would refuse the row outright -- correctly, because we demonstrably *did* have it.
+
+    Both bounds are things this code actually knows, and the conservative choice is the
+    largest instant neither of them contradicts, which is their minimum. The two properties
+    that fall out are the ones ``V2-P1-004`` is judged on: at ``as_of=2026-08-08`` a
+    2026-12-31 session is visible (availability 2026-01-01) and a 2027-01-04 session is not
+    (availability 2027-01-01, or the December-2026 fetch instant -- either way after the
+    ``as_of``).
+
+    The cost of the first bound is real and deliberate: between the exchange's November
+    announcement and 1 January, this rule refuses to answer questions about the coming year
+    that were in fact answerable. It blocks where it could have answered, which is the
+    direction a point-in-time system is allowed to be wrong in.
+
+    ``revision_time`` equals ``available_time``: the calendar does get revised in reality (the
+    2020 Spring Festival extension is the standing example) but the response carries no
+    revision instant at all, so claiming one would be fabrication. A revised calendar
+    therefore arrives as a changed row in a re-fetched partition, visible through the
+    partition's content hash, not through this clock.
+    """
+    calendar_day = _parse_tushare_date(row[date_field])
+    event_time = datetime.combine(calendar_day, time(0, 0), tzinfo=_CHINA_TZ)
+    published_from = datetime.combine(date(calendar_day.year, 1, 1), time(0, 0), tzinfo=_CHINA_TZ)
+    available_time = min(published_from, ingested_at)
+    return Timeline(
+        event_time=event_time,
+        available_time=available_time,
+        ingested_time=ingested_at,
+        revision_time=available_time,
+    )
+
+
 _ClockBuilder = Callable[[dict[str, Any], str, datetime], Timeline]
 
 _CLOCK_BUILDERS: dict[ClockStrategy, _ClockBuilder] = {
     ClockStrategy.daily_close: _daily_close_timeline,
     ClockStrategy.announcement: _announcement_timeline,
     ClockStrategy.calendar_static: _calendar_static_timeline,
+    ClockStrategy.calendar_publication: _calendar_publication_timeline,
 }
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _DecodedPanelRows:
+    """One response, decoded and projected: what `fetch_panel` needs to assemble a batch."""
+
+    rows: list[dict[str, Any]]
+    subjects: tuple[str, ...]
+    timelines: list[Timeline]
+    values: tuple[tuple[object, ...], ...]
+    """Parsed column values, aligned with the descriptor's `panel_columns`, in order."""
+    served: int
+    """Rows Tushare returned before the point-in-time filter ran."""
 
 
 def _resolve_subject(descriptor: TushareDatasetDescriptor, row: dict[str, Any]) -> str:
@@ -222,11 +467,85 @@ def _resolve_subject(descriptor: TushareDatasetDescriptor, row: dict[str, Any]) 
     return str(row[descriptor.subject_field])
 
 
+def _response_rows(
+    descriptor: TushareDatasetDescriptor, response: dict[str, Any], provider_id: str
+) -> list[dict[str, Any]]:
+    """Turn one Tushare envelope into field-keyed rows, or raise.
+
+    Shared by the row-wise and the columnar decode: the envelope (`code` / `data.fields` /
+    `data.items`) is the one thing every endpoint has in common, and having two copies of its
+    validation would let the two output shapes disagree about what a malformed response is.
+    """
+    code = response.get("code")
+    if code != 0:
+        category: ProviderFailureCategory = "authentication" if code == -2001 else "upstream"
+        raise ProviderFailure(
+            provider_id=provider_id,
+            category=category,
+            message=f"Tushare rejected the request: {response.get('msg') or 'unknown error'}",
+            retryable=category == "upstream",
+        )
+    data = response.get("data")
+    if not isinstance(data, dict):
+        raise ValueError("Tushare data must be an object")
+    fields = data.get("fields")
+    items = data.get("items")
+    if not isinstance(fields, list) or not all(isinstance(field, str) for field in fields):
+        raise ValueError("Tushare fields must be a string array")
+    if not isinstance(items, list):
+        raise ValueError("Tushare items must be an array")
+    if descriptor.date_field not in fields:
+        raise ValueError(
+            f"Tushare response for {descriptor.dataset} has no {descriptor.date_field} column"
+        )
+    rows: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, list) or len(item) != len(fields):
+            raise ValueError("Tushare item does not match fields")
+        rows.append(dict(zip(fields, item, strict=True)))
+    return rows
+
+
+def _panel_no_data_reason(
+    descriptor: TushareDatasetDescriptor, request: ProviderRequest, served: int
+) -> str:
+    """Say which of the two empty results happened; see `TushareProvider.fetch_panel`."""
+    if served == 0:
+        return (
+            f"Tushare served no {descriptor.dataset} rows for the requested range: the "
+            "exchange has not published it, which is a horizon and not a closed period"
+        )
+    return (
+        f"Tushare served {served} {descriptor.dataset} row(s), none of which was yet knowable "
+        f"at as_of {request.as_of.isoformat()}: not yet knowable is not the same as absent"
+    )
+
+
+def _panel_source_uri(
+    descriptor: TushareDatasetDescriptor,
+    subjects: tuple[str, ...],
+    rows: Sequence[dict[str, Any]],
+) -> str:
+    """One provenance URI for a whole partition-shaped batch.
+
+    `ProviderRecord` carries one per row; a columnar batch has one field for all of them, so
+    the `{date}` slot holds the closed range the batch actually covers rather than a single
+    day. Rows are already ascending by the time this is called.
+    """
+    first = _parse_tushare_date(rows[0][descriptor.date_field])
+    last = _parse_tushare_date(rows[-1][descriptor.date_field])
+    unique_subjects = sorted(set(subjects))
+    subject = unique_subjects[0] if len(unique_subjects) == 1 else ",".join(unique_subjects)
+    return descriptor.source_uri_template.format(
+        dataset=descriptor.dataset, subject=subject, date=f"{first:%Y%m%d}-{last:%Y%m%d}"
+    )
+
+
 class TushareProvider:
     """Fetch Tushare records for any dataset declared in ``TUSHARE_DATASETS``."""
 
     _metadata = ProviderMetadata(
-        provider_id="tushare.pro",
+        provider_id=_PROVIDER_ID,
         display_name="Tushare Pro BYOT",
         source_license="Tushare Pro service terms",
         redistribution="restricted",
@@ -258,31 +577,9 @@ class TushareProvider:
 
     def fetch(self, request: ProviderRequest) -> ProviderBatch:
         """Fetch a descriptor-table dataset or raise a structured failure."""
-        if not self._token:
-            raise ProviderFailure(
-                provider_id=self.metadata.provider_id,
-                category="configuration",
-                message="TUSHARE_TOKEN is required.",
-                retryable=False,
-            )
-        descriptor = _TUSHARE_DATASETS_BY_NAME.get(request.dataset)
-        if descriptor is None:
-            raise ProviderFailure(
-                provider_id=self.metadata.provider_id,
-                category="configuration",
-                message=f"Unsupported Tushare dataset: {request.dataset}",
-                retryable=False,
-            )
-
-        parameters = descriptor.params_builder(request)
-        payload = {
-            "api_name": request.dataset,
-            "token": self._token,
-            "params": parameters,
-            "fields": "",
-        }
+        descriptor = self._descriptor(request)
         try:
-            response = self._transport.post(payload)
+            response = self._post(descriptor, request)
             records = self._decode(descriptor=descriptor, response=response, request=request)
         except ProviderFailure:
             raise
@@ -310,6 +607,157 @@ class TushareProvider:
             records=records,
         )
 
+    def fetch_panel(self, request: ProviderRequest) -> ColumnarPanelBatch:
+        """Fetch a panel-plane dataset as a columnar batch (``PanelDataProvider``).
+
+        Available only for descriptors that declare a ``panel_columns`` projection; anything
+        else is refused by name rather than answered with an empty batch, because "not wired
+        to the panel plane" and "no rows" are different facts and only one of them is data.
+
+        Two distinguishable no-data results come out of this method, and keeping them apart is
+        the point of ``V2-P1-004``:
+
+        - Tushare returned **no rows at all** -- the exchange has not published that range.
+          This is the horizon, and it is what stops a whole unpublished year from being read
+          as one continuous holiday.
+        - Tushare returned rows, none of which was **knowable at the request's ``as_of``**.
+          This is the point-in-time filter, the same one ``_decode`` applies row by row.
+
+        Rows are sorted ascending by the descriptor's date field before assembly. Tushare
+        returns ``trade_cal`` in descending order, and while neither the batch contract nor
+        the store cares, a partition whose row order depends on an upstream response ordering
+        is one whose content hash does too.
+        """
+        descriptor = self._descriptor(request)
+        if not descriptor.panel_columns:
+            raise ProviderFailure(
+                provider_id=self.metadata.provider_id,
+                category="configuration",
+                message=(
+                    f"Tushare dataset {request.dataset} declares no panel projection, so it "
+                    "cannot be fetched onto the panel plane"
+                ),
+                retryable=False,
+            )
+        try:
+            response = self._post(descriptor, request)
+            decoded = self._decode_panel_rows(
+                descriptor=descriptor, response=response, request=request
+            )
+        except ProviderFailure:
+            raise
+        except (OSError, ValueError, TypeError, KeyError, urllib.error.URLError) as error:
+            raise ProviderFailure(
+                provider_id=self.metadata.provider_id,
+                category="invalid_response",
+                message=f"Tushare response could not be decoded: {error}",
+                retryable=False,
+            ) from error
+
+        # Deliberately outside the `try`: everything above is *decoding*, and a failure there
+        # is an upstream fact (`invalid_response`). Everything below is the panel contract
+        # validating itself, and a failure there is this module's own bug. Wrapping the second
+        # as the first would let a descriptor that projects a string into a boolean column
+        # read as a Tushare outage.
+        fetched_at = self._clock()
+        if not decoded.rows:
+            return ColumnarPanelBatch(
+                provider_id=self.metadata.provider_id,
+                dataset=descriptor.dataset,
+                kind=descriptor.kind,
+                as_of=request.as_of,
+                fetched_at=fetched_at,
+                status="no_data",
+                no_data_reason=_panel_no_data_reason(descriptor, request, decoded.served),
+            )
+        return ColumnarPanelBatch(
+            provider_id=self.metadata.provider_id,
+            dataset=descriptor.dataset,
+            kind=descriptor.kind,
+            as_of=request.as_of,
+            fetched_at=fetched_at,
+            status="success",
+            subjects=decoded.subjects,
+            timeline=TimelineColumns(
+                event_time=tuple(line.event_time for line in decoded.timelines),
+                available_time=tuple(line.available_time for line in decoded.timelines),
+                ingested_time=tuple(line.ingested_time for line in decoded.timelines),
+                revision_time=tuple(line.revision_time for line in decoded.timelines),
+            ),
+            columns=tuple(
+                PanelColumn(spec.name, spec.kind, values)
+                for spec, values in zip(descriptor.panel_columns, decoded.values, strict=True)
+            ),
+            source_uri=_panel_source_uri(descriptor, decoded.subjects, decoded.rows),
+        )
+
+    def _descriptor(self, request: ProviderRequest) -> TushareDatasetDescriptor:
+        """Resolve the request's descriptor, refusing a missing token or unknown dataset."""
+        if not self._token:
+            raise ProviderFailure(
+                provider_id=self.metadata.provider_id,
+                category="configuration",
+                message="TUSHARE_TOKEN is required.",
+                retryable=False,
+            )
+        descriptor = _TUSHARE_DATASETS_BY_NAME.get(request.dataset)
+        if descriptor is None:
+            raise ProviderFailure(
+                provider_id=self.metadata.provider_id,
+                category="configuration",
+                message=f"Unsupported Tushare dataset: {request.dataset}",
+                retryable=False,
+            )
+        return descriptor
+
+    def _post(
+        self, descriptor: TushareDatasetDescriptor, request: ProviderRequest
+    ) -> dict[str, Any]:
+        """Build the one shared request envelope and hand it to the injected transport."""
+        return self._transport.post(
+            {
+                "api_name": descriptor.dataset,
+                "token": self._token,
+                "params": descriptor.params_builder(request),
+                "fields": "",
+            }
+        )
+
+    def _decode_panel_rows(
+        self,
+        *,
+        descriptor: TushareDatasetDescriptor,
+        response: dict[str, Any],
+        request: ProviderRequest,
+    ) -> _DecodedPanelRows:
+        """Decode, point-in-time filter, sort and project a response into column values.
+
+        `served` is the number of rows Tushare actually returned, before the clock filter. It
+        is what separates "the exchange has not published this range" from "this was not yet
+        knowable at the requested ``as_of``" -- two very different empty results the caller
+        could not otherwise tell apart.
+        """
+        items = _response_rows(descriptor, response, self.metadata.provider_id)
+        ingested_at = self._clock()
+        kept: list[tuple[date, dict[str, Any], Timeline]] = []
+        for row in items:
+            timeline = _CLOCK_BUILDERS[descriptor.clock](row, descriptor.date_field, ingested_at)
+            if timeline.available_time > request.as_of:
+                continue
+            kept.append((_parse_tushare_date(row[descriptor.date_field]), row, timeline))
+        kept.sort(key=lambda entry: entry[0])
+        rows = [row for _, row, _ in kept]
+        return _DecodedPanelRows(
+            rows=rows,
+            subjects=tuple(_resolve_subject(descriptor, row) for row in rows),
+            timelines=[line for _, _, line in kept],
+            values=tuple(
+                tuple(spec.parse(row[spec.source_field]) for row in rows)
+                for spec in descriptor.panel_columns
+            ),
+            served=len(items),
+        )
+
     def _decode(
         self,
         *,
@@ -317,31 +765,10 @@ class TushareProvider:
         response: dict[str, Any],
         request: ProviderRequest,
     ) -> tuple[ProviderRecord, ...]:
-        code = response.get("code")
-        if code != 0:
-            category: ProviderFailureCategory = "authentication" if code == -2001 else "upstream"
-            raise ProviderFailure(
-                provider_id=self.metadata.provider_id,
-                category=category,
-                message=f"Tushare rejected the request: {response.get('msg') or 'unknown error'}",
-                retryable=category == "upstream",
-            )
-        data = response.get("data")
-        if not isinstance(data, dict):
-            raise ValueError("Tushare data must be an object")
-        fields = data.get("fields")
-        items = data.get("items")
-        if not isinstance(fields, list) or not all(isinstance(field, str) for field in fields):
-            raise ValueError("Tushare fields must be a string array")
-        if not isinstance(items, list):
-            raise ValueError("Tushare items must be an array")
-
+        items = _response_rows(descriptor, response, self.metadata.provider_id)
         ingested_at = self._clock()
         records: list[ProviderRecord] = []
-        for item in items:
-            if not isinstance(item, list) or len(item) != len(fields):
-                raise ValueError("Tushare item does not match fields")
-            row = dict(zip(fields, item, strict=True))
+        for row in items:
             timeline = _CLOCK_BUILDERS[descriptor.clock](row, descriptor.date_field, ingested_at)
             if timeline.available_time > request.as_of:
                 continue

@@ -4,8 +4,8 @@
 
 ## 对账结论
 
-- 功能总数: 110
-- 当前真实完成: 105 (95.45%)
+- 功能总数: 111
+- 当前真实完成: 106 (95.5%)
 - `UNREVIEWED=0`
 - `UNKNOWN=0`
 - `legacy_acceptance_rows=86` (历史散文验收、尚未绑定为可执行 pytest/CI 断言)
@@ -18,7 +18,7 @@
 | `DEFERRED` | 1 |
 | `ENHANCED_REPLACEMENT` | 20 |
 | `EXCLUDED` | 4 |
-| `NATIVE_COMPLETE` | 84 |
+| `NATIVE_COMPLETE` | 85 |
 
 ## 功能明细
 
@@ -134,6 +134,7 @@
 | `OA-PANEL-001` | panel | Partitioned panel store skeleton with a persistent DuckDB catalog | `NATIVE_COMPLETE` | `src/openalpha_cn/panel/store.py#PanelStore;src/openalpha_cn/panel/store.py#ColumnSpec;src/openalpha_cn/panel/store.py#PartitionRef;src/openalpha_cn/panel/catalog.py#PanelStorageError` | `tests/integration/panel/test_panel_store.py;tests/integration/panel/test_panel_store_performance_budget.py;tests/unit/test_import_layering.py;tests/integration/panel/test_panel_store_hardening.py` | `pytest` | `tests/integration/panel/test_panel_store_performance_budget.py::test_query_prunes_to_the_single_requested_years_partition_file` |
 | `OA-PANEL-002` | panel | Columnar provider batch contract for the panel plane | `NATIVE_COMPLETE` | `src/openalpha_cn/domain/panel_batch.py#ColumnarPanelBatch;src/openalpha_cn/domain/panel_batch.py#TimelineColumns;src/openalpha_cn/domain/panel_batch.py#PanelColumn;src/openalpha_cn/domain/panel_batch.py#validate_panel_identifier;src/openalpha_cn/panel_ingest.py#write_panel_batch;src/openalpha_cn/providers/base.py#PanelDataProvider` | `tests/contract/panel/test_columnar_batch_parity.py;tests/unit/domain/test_panel_batch.py;tests/integration/panel/test_panel_batch_ingest.py;tests/unit/test_panel_ingest_import_isolation.py` | `pytest` | `tests/contract/panel/test_columnar_batch_parity.py::test_the_two_contracts_agree_on_a_randomised_corpus` |
 | `OA-PANEL-003` | panel | Panel data catalog and readiness contract | `NATIVE_COMPLETE` | `src/openalpha_cn/panel/catalog.py#PartitionCoverage;src/openalpha_cn/panel/catalog.py#ReadinessRequirement;src/openalpha_cn/panel/catalog.py#DatasetReadiness;src/openalpha_cn/panel/catalog.py#PanelReadOutcome;src/openalpha_cn/panel/catalog.py#evaluate_readiness;src/openalpha_cn/panel/catalog.py#READINESS_ISSUE_CODES;src/openalpha_cn/panel/store.py#PanelStore;src/openalpha_cn/panel_ingest.py#panel_coverage;src/openalpha_cn/panel/catalog.py#PanelStorageError` | `tests/integration/panel/test_panel_catalog.py;tests/integration/panel/test_panel_readiness.py;tests/integration/panel/test_panel_coverage_ingest.py;tests/unit/panel/test_readiness_rules.py` | `pytest` | `tests/integration/panel/test_panel_readiness.py::test_blocked_and_ready_but_empty_are_two_distinguishable_returns` |
+| `OA-PANEL-004` | panel | Real exchange trading calendar with a three-valued verdict | `NATIVE_COMPLETE` | `src/openalpha_cn/domain/trading_calendar.py#TradingCalendar;src/openalpha_cn/domain/trading_calendar.py#CalendarDayStatus;src/openalpha_cn/domain/trading_calendar.py#CalendarHorizon;src/openalpha_cn/domain/trading_calendar.py#CalendarHorizonError;src/openalpha_cn/domain/trading_calendar.py#build_trading_calendar;src/openalpha_cn/domain/trading_calendar.py#trading_calendar_from_panel_rows;src/openalpha_cn/providers/tushare.py#TUSHARE_DATASETS;src/openalpha_cn/providers/tushare.py#_calendar_publication_timeline;src/openalpha_cn/providers/tushare.py#TusharePanelColumn;src/openalpha_cn/panel_ingest.py#load_trading_calendar;src/openalpha_cn/panel_ingest.py#write_trading_calendar;src/openalpha_cn/panel_ingest.py#trading_calendar_requirement;src/openalpha_cn/panel_ingest.py#panel_readiness_requirement;src/openalpha_cn/panel_ingest.py#panel_partition_year` | `tests/unit/domain/test_trading_calendar.py;tests/contract/providers/test_tushare_trade_cal.py;tests/integration/panel/test_trading_calendar_ingest.py` | `pytest` | `tests/unit/domain/test_trading_calendar.py::test_a_whole_unpublished_year_is_refused_instead_of_looking_like_one_long_holiday` |
 
 ## 边界
 
