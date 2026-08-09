@@ -18,10 +18,12 @@ from openalpha_cn.domain.daily_prices import (
     PricedCrossSection,
 )
 from openalpha_cn.domain.price_limits import (
+    EXPLAINED_SESSION_HALF_WINDOW,
     KNOWN_SUSPENSION_LIMITATIONS,
     LIMIT_FREE_RATIO,
     MIN_EXPLAINED_SESSION_SHARE,
     PRICE_LIMIT_PANEL_COLUMNS,
+    SUSPENSION_CORPUS_FIRST_SESSION,
     SUSPENSION_PANEL_COLUMNS,
     PriceLimit,
     SuspensionError,
@@ -71,6 +73,50 @@ PUBLISHED_BANDS_20240628: tuple[tuple[str, float, float, float, str, bool], ...]
     ("603381.SH", 99999.999, 0.01, 29.70, "main", False),
     ("301580.SZ", 999999.999, 0.01, 79.46, "growth", False),
 )
+
+# --- inlined from stk_limit(trade_date=20240202), which served 6,741 rows. `920656.BJ` listed
+# that day and is the session's *only* row with `down_limit == 0.0`; its `up_limit` of 99999.99
+# is one of six sentinel encodings -- the Beijing board's, unchanged since 2022-02-28. The
+# `daily` row for the same session gives pre_close 19.90 (18.00 / 19.91 / 17.55 / 19.90).
+BEIJING_FIRST_SESSION_20240202: tuple[str, str, float, float] = (
+    "920656.BJ",
+    "2024-02-02",
+    99999.99,
+    0.0,
+)
+# --- inlined from stk_limit(ts_code=920680.BJ, start_date=20251201, end_date=20251231): the
+# first session of a delisting arrangement, sitting between a 12.37/6.67 band on 12-10 and a
+# 3.57/1.93 one on 12-12. `daily` gives pre_close 9.52 for 12-11.
+BEIJING_DELISTING_20251211: tuple[str, str, float, float] = (
+    "920680.BJ",
+    "2025-12-11",
+    99999.99,
+    0.0,
+)
+
+
+# --- the whole-history calibration behind MIN_EXPLAINED_SESSION_SHARE. One `daily` row count
+# and one `suspend_d` whole-day-halt count for every session of 1991-01-02..2026-08-07 (8,690
+# sessions, 36 years), pulled in windows narrow enough that no response was truncated. Each row
+# is (year, median bars, min explained share against the *year's* median, min explained share
+# against a rolling +/-20-session median). The third column is what the first cut of this
+# constant was calibrated on -- from three years -- and the fourth is what the guard computes.
+# fmt: off
+EXPLAINED_SESSION_CENSUS: tuple[tuple[int, int, float, float], ...] = (
+    (1991, 10, 0.300, 0.429), (1992, 30, 0.200, 0.462), (1993, 98, 0.347, 0.596),
+    (1994, 270, 0.607, 0.605), (1995, 296, 0.578, 0.586), (1996, 377, 0.809, 0.900),
+    (1997, 670, 0.766, 0.935), (1998, 781, 0.919, 0.959), (1999, 872, 0.937, 0.970),
+    (2000, 968, 0.947, 0.986), (2001, 1089, 0.940, 0.963), (2002, 1143, 0.951, 0.969),
+    (2003, 1206, 0.961, 0.978), (2004, 1300, 0.941, 0.975), (2005, 1320, 0.987, 0.982),
+    (2006, 1193, 0.981, 0.986), (2007, 1342, 0.958, 0.979), (2008, 1490, 0.959, 0.977),
+    (2009, 1534, 0.990, 0.995), (2010, 1796, 0.906, 0.989), (2011, 2113, 0.923, 0.989),
+    (2012, 2361, 0.955, 0.996), (2013, 2366, 0.996, 1.000), (2014, 2322, 0.978, 0.991),
+    (2015, 2359, 0.927, 0.994), (2016, 2642, 0.977, 0.996), (2017, 3066, 0.925, 0.989),
+    (2018, 3378, 0.984, 0.996), (2019, 3646, 0.980, 0.997), (2020, 3925, 0.954, 0.995),
+    (2021, 4466, 0.940, 0.996), (2022, 4845, 0.969, 0.996), (2023, 5207, 0.975, 0.999),
+    (2024, 5345, 0.997, 0.999), (2025, 5406, 0.994, 0.999), (2026, 5493, 0.993, 0.999),
+)
+# fmt: on
 
 
 def _suspension_rows(
@@ -225,6 +271,26 @@ def test_a_stored_suspension_row_of_the_wrong_width_is_refused() -> None:
         suspensions_from_panel_rows([("000040.SZ", "2024-06-28", "S")])
 
 
+def test_a_stored_blank_timing_is_refused_on_the_read_side_too() -> None:
+    """The provider refuses `""` on the way in; this is the same refusal on the way out, and it
+    is not redundant -- a partition written before that parse existed, or by any other writer,
+    reaches `suspensions_from_panel_rows` directly. Folding `""` into `None` here would turn a
+    row whose upstream *populated* the window into a whole-day halt, which is the one direction
+    that manufactures an explanation for an absent bar."""
+    with pytest.raises(SuspensionError, match="suspend_timing must be a non-empty string"):
+        suspensions_from_panel_rows([("000040.SZ", "2024-06-28", "S", "")])
+
+
+def test_the_halt_corpus_comes_back_read_only() -> None:
+    """A year of halts is shared by `_refuse_unexplained_thin_sessions` and by whatever walks a
+    backtest, so one caller replacing a session would silently edit what the others hold --
+    `name_histories_from_panel_rows`' reason, and the same `MappingProxyType`."""
+    days = suspensions_from_panel_rows(_suspension_rows(SUSPEND_D_20240628))
+
+    with pytest.raises(TypeError, match="does not support item assignment"):
+        days[SESSION] = days[SESSION]  # type: ignore[index]
+
+
 def test_the_suspension_panel_columns_are_the_positional_contract() -> None:
     assert SUSPENSION_PANEL_COLUMNS == (
         "subject",
@@ -267,8 +333,10 @@ def test_an_st_chinext_name_keeps_the_boards_twenty_percent() -> None:
 
 
 def test_the_limit_free_sentinels_are_classified_by_ratio_and_not_by_value() -> None:
-    """Four sentinel encodings have been observed and two of them were retired, so a whitelist
-    would misread the fifth. The two populations are 1.44x and 384x apart."""
+    """Six sentinel encodings have been observed across three exchanges and three of them were
+    retired, so a whitelist written from the four this repository knew first misreads two. A
+    459-session scan of 1,918,266 joined rows puts the widest real band at 1.4409x and the
+    narrowest sentinel at 115.61x, with nothing whatever in between."""
     limits = price_limits_from_panel_rows(_limit_rows())
 
     assert limits["603381.SH"].is_bounded(29.70) is False
@@ -361,6 +429,124 @@ def test_an_inverted_band_is_refused() -> None:
 def test_a_null_limit_is_refused_rather_than_compared_against_every_bar() -> None:
     with pytest.raises(SuspensionError, match="up_limit must be a finite positive float"):
         price_limits_from_panel_rows([("000001.SZ", "2024-06-28", None, 9.85)])
+
+
+# --- the Beijing board's published zero floor ------------------------------------------------
+
+
+def test_a_beijing_first_session_publishes_a_zero_lower_limit_and_is_stored() -> None:
+    """The row that made every `stk_limit` year since 2021 unstorable. `920656.BJ` on its
+    listing day carries `(99999.99, 0.0)` -- a *published* pair, not a null and not a fault --
+    and a `down_limit > 0` rule refuses the whole 6,741-row cross section, which
+    `write_price_limits` turns into a refusal of the whole 2024 partition.
+
+    It is not one row either. Every `.BJ` security's first session carries this shape, which is
+    235 distinct trading days at or after 2022-02-28 (64 in 2022, 75 in 2023, 23 in 2024, 26 in
+    2025, 47 in 2026 by `stock_basic`'s `list_date`), so the years 2022..2026 all fail."""
+    code, day, up, down = BEIJING_FIRST_SESSION_20240202
+    limits = price_limits_from_panel_rows([(code, day, up, down)])
+
+    assert limits[code].down_limit == 0.0
+    assert limits[code].up_limit == 99999.99
+    # 99999.99 / 19.90 = 5,025x: the ratio test reads the fifth encoding without ever having
+    # been told about it, which is the whole reason `is_bounded` is not a value whitelist.
+    assert limits[code].is_bounded(19.90) is False
+
+
+def test_the_delisting_arrangement_first_session_carries_the_same_shape() -> None:
+    """Not a listing-day quirk. `920680.BJ` traded inside a 12.37/6.67 band on 2025-12-10, had
+    `(99999.99, 0.0)` on the 11th -- the first session of its delisting arrangement -- and a
+    3.57/1.93 band on the 12th. So the zero floor recurs on securities that have been listed
+    for years, and a fix scoped to "first five sessions" would still lose it."""
+    code, day, up, down = BEIJING_DELISTING_20251211
+    limits = price_limits_from_panel_rows([(code, day, up, down)])
+
+    assert limits[code].down_limit == 0.0
+    assert limits[code].is_bounded(9.52) is False
+
+
+def test_a_zero_floor_bar_touches_neither_side_without_a_special_case() -> None:
+    """`920656.BJ`'s own bar that session: 18.00 / 19.91 / 17.55 / 19.90. `low <= 0.0` is false
+    for any real price, so "unbounded below" falls out of the comparison exactly as "unbounded
+    above" does."""
+    code, day, up, down = BEIJING_FIRST_SESSION_20240202
+    limits = price_limits_from_panel_rows([(code, day, up, down)])
+    touch = limit_touch(
+        _bar(code, high=19.91, low=17.55, close=19.90, day=date(2024, 2, 2)), limits[code]
+    )
+
+    assert (touch.at_up, touch.at_down) == (False, False)
+    assert (touch.one_price_up, touch.one_price_down) == (False, False)
+
+
+def test_a_negative_lower_limit_is_still_refused() -> None:
+    """The domain widened to admit zero, not to admit anything below it: a price floor under
+    zero is malformed, and beside a real `up_limit` the `down > up` check that follows would
+    wave it through."""
+    with pytest.raises(SuspensionError, match="down_limit must be a finite non-negative float"):
+        price_limits_from_panel_rows([("000001.SZ", "2024-06-28", 12.03, -0.01)])
+    with pytest.raises(SuspensionError, match="down_limit must be a finite non-negative float"):
+        price_limits_from_panel_rows([("000001.SZ", "2024-06-28", 12.03, None)])
+
+
+def test_a_zero_or_negative_upper_limit_is_refused() -> None:
+    """The *upper* side keeps the strict rule, and nothing published has ever broken it: an
+    `up_limit` of zero would bound every price out of existence, and `is_bounded` would then
+    call a real band unbounded for every previous close."""
+    with pytest.raises(SuspensionError, match="up_limit must be a finite positive float"):
+        price_limits_from_panel_rows([("000001.SZ", "2024-06-28", 0.0, 0.0)])
+    with pytest.raises(SuspensionError, match="up_limit must be a finite positive float"):
+        price_limits_from_panel_rows([("000001.SZ", "2024-06-28", -12.03, -14.0)])
+
+
+def test_all_six_sentinel_encodings_land_on_the_same_verdict() -> None:
+    """The case against a whitelist, made from the values a whitelist would have been written
+    from. Four of these six were known when `is_bounded` was written; `10000.0` (SSE, seen once,
+    2007-01-04) and `99999.99` (BSE, every listing day since 2022-02-28) were not, and a
+    whitelist of the first four reads both as real prices -- `10000.0` against a 2.96 close
+    would have become a 3,378x "band" the reader believed.
+
+    Each pair below is a real `(up_limit, pre_close)` from the scan; the last two rows are the
+    boundary the classification actually has to hold, and it holds by a factor of 80 and by 39%
+    respectively."""
+    sentinels = (
+        ("600145.SH", 10000.0, 0.01, 2.96),  # SSE, 2007-01-04
+        ("688030.SH", 100000.0, 0.01, 44.80),  # SSE, 2019-10-08
+        ("688808.SH", 99999.999, 0.01, 864.99),  # SSE, 2026-04-29 -- the narrowest measured
+        ("300879.SZ", 1000000.0, 0.01, 10.58),  # SZSE, 2020-09-01
+        ("301225.SZ", 999999.999, 0.01, 38.33),  # SZSE, 2023-06-21
+        ("920857.BJ", 99999.99, 0.0, 12.00),  # BSE, 2022-02-28 -- the board's first listing
+    )
+    for code, up, down, pre_close in sentinels:
+        limit = PriceLimit(ts_code=code, trade_date=SESSION, up_limit=up, down_limit=down)
+        assert limit.is_bounded(pre_close) is False, code
+        assert limit.up_limit / pre_close > 115.0, code
+
+    widest_real = PriceLimit(
+        ts_code="300830.SZ", trade_date=date(2020, 5, 6), up_limit=6.34, down_limit=2.82
+    )
+
+    assert widest_real.is_bounded(4.40) is True
+    assert widest_real.up_limit / 4.40 == pytest.approx(1.4409, abs=1e-4)
+
+
+def test_the_ratio_test_classifies_the_boundary_itself_as_limit_free() -> None:
+    """`LIMIT_FREE_RATIO` is a closed bound from above: an `up_limit` of exactly twice the
+    previous close is read as a sentinel, not as a real band. The choice is arbitrary in the
+    gap it sits in -- the widest real band measured is 1.4409x (`300830.SZ`, 2020-05-06) and
+    the narrowest sentinel 115.61x -- and it is pinned so that it cannot drift silently."""
+    assert (
+        PriceLimit(
+            ts_code="000001.SZ", trade_date=SESSION, up_limit=20.00, down_limit=5.00
+        ).is_bounded(10.00)
+        is False
+    )
+    assert (
+        PriceLimit(
+            ts_code="000001.SZ", trade_date=SESSION, up_limit=19.99, down_limit=5.00
+        ).is_bounded(10.00)
+        is True
+    )
 
 
 def test_the_price_limit_panel_columns_are_the_positional_contract() -> None:
@@ -459,6 +645,45 @@ def test_the_known_limitations_name_the_measured_boundaries() -> None:
         "silent_truncation_at_a_cap_this_cross_section_is_close_to",
     } <= codes
     assert all(len(entry.detail) > 120 for entry in KNOWN_SUSPENSION_LIMITATIONS)
+
+
+def test_the_explained_floor_clears_every_year_the_halt_corpus_actually_covers() -> None:
+    """The calibration this constant was re-derived from, carried as data so it can be read.
+
+    `EXPLAINED_SESSION_CENSUS` is one row per year of 1991-01-02..2026-08-07 -- 8,690 sessions,
+    one `daily` row count and one `suspend_d` whole-day-halt count each, pulled in windows
+    narrow enough that no response was truncated. The two claims the guard rests on are both
+    checkable from it:
+
+    every year `suspend_d` covers clears 0.85 against a rolling median (the worst is 2001 at
+    0.963), and the four years that a *whole-year* median would have refused -- 1994..1997,
+    where nothing is short and the market is simply growing -- are the reason the median is
+    local. The years that still fall short are exactly the ones with no halt corpus behind
+    them, which is why `SUSPENSION_CORPUS_FIRST_SESSION` exists rather than a lower floor."""
+    covered = [row for row in EXPLAINED_SESSION_CENSUS if row[0] >= 2000]
+    uncovered = [row for row in EXPLAINED_SESSION_CENSUS if row[0] < 1999]
+
+    assert len(EXPLAINED_SESSION_CENSUS) == 36
+    assert min(rolling for _, _, _, rolling in covered) > MIN_EXPLAINED_SESSION_SHARE
+    # 1994..1997 pass on a rolling median only from 1996; before that the corpus is empty.
+    assert [year for year, _, whole, _ in uncovered if whole < MIN_EXPLAINED_SESSION_SHARE] == [
+        1991,
+        1992,
+        1993,
+        1994,
+        1995,
+        1996,
+        1997,
+    ]
+    assert [year for year, _, _, rolling in uncovered if rolling < MIN_EXPLAINED_SESSION_SHARE] == [
+        1991,
+        1992,
+        1993,
+        1994,
+        1995,
+    ]
+    assert SUSPENSION_CORPUS_FIRST_SESSION.isoformat() == "1999-05-04"
+    assert EXPLAINED_SESSION_HALF_WINDOW == 20
 
 
 def test_the_explained_floor_leaves_headroom_over_the_worst_measured_year() -> None:

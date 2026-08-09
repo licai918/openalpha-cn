@@ -385,7 +385,9 @@ def _store(tmp_path: Path) -> PanelStore:
 def _seeded(tmp_path: Path, *, calendar: TradingCalendar | None = None) -> PanelStore:
     store = _store(tmp_path)
     real = calendar or _calendar()
-    write_daily_panel(store, bars=_bar_batches(), fundamentals=_valuation_batches(), calendar=real)
+    write_daily_panel(
+        store, bars=_bar_batches(), fundamentals=_valuation_batches(), calendar=real, halts=None
+    )
     write_adjustment_factors(store, _factor_batches(), calendar=real)
     return store
 
@@ -434,7 +436,9 @@ def test_a_factor_partition_with_the_ex_dividend_session_missing_makes_the_read_
     """
     store = _store(tmp_path)
     real = _calendar()
-    write_daily_panel(store, bars=_bar_batches(), fundamentals=_valuation_batches(), calendar=real)
+    write_daily_panel(
+        store, bars=_bar_batches(), fundamentals=_valuation_batches(), calendar=real, halts=None
+    )
     blind = _calendar(("20260610", "20260611", "20260615"))
     write_adjustment_factors(
         store, _factor_batches(("20260610", "20260611", "20260615")), calendar=blind
@@ -492,6 +496,7 @@ def test_a_halted_security_is_named_in_unpriced_rather_than_dropped(tmp_path: Pa
             for day in SESSIONS
         ],
         calendar=calendar,
+        halts=None,
     )
     write_adjustment_factors(store, _factor_batches(), calendar=calendar)
 
@@ -551,7 +556,11 @@ def test_the_two_datasets_are_stored_as_separate_partitions_of_the_same_sessions
 ) -> None:
     store = _seeded(tmp_path)
     bar_ref, valuation_ref = write_daily_panel(
-        store, bars=_bar_batches(), fundamentals=_valuation_batches(), calendar=_calendar()
+        store,
+        bars=_bar_batches(),
+        fundamentals=_valuation_batches(),
+        calendar=_calendar(),
+        halts=None,
     )
     assert bar_ref.row_count == valuation_ref.row_count == len(SESSIONS) * 2
 
@@ -594,6 +603,7 @@ def test_a_close_that_disagrees_between_the_two_datasets_is_refused_at_write_tim
                 for day in SESSIONS
             ],
             calendar=_calendar(),
+            halts=None,
         )
     assert store.read_coverage(DAILY_DATASET, 2026) is None
     assert store.read_coverage(DAILY_BASIC_DATASET, 2026) is None
@@ -613,6 +623,7 @@ def test_a_valuation_for_a_security_with_no_bar_is_refused_as_the_impossible_dir
             ],
             fundamentals=_valuation_batches(),
             calendar=_calendar(),
+            halts=None,
         )
 
 
@@ -632,6 +643,7 @@ def test_a_bar_with_no_valuation_is_written_because_that_is_the_measured_shape(
             for day in SESSIONS
         ],
         calendar=_calendar(),
+        halts=None,
     )
     assert bar_ref.row_count == 8
     assert valuation_ref.row_count == 4
@@ -681,6 +693,7 @@ def test_a_year_missing_a_session_the_calendar_reports_open_is_refused(tmp_path:
             bars=_bar_batches(("20260610", "20260611", "20260615")),
             fundamentals=_valuation_batches(("20260610", "20260611", "20260615")),
             calendar=_calendar(),
+            halts=None,
         )
 
 
@@ -694,6 +707,7 @@ def test_the_census_runs_on_the_valuations_too_and_names_that_dataset(tmp_path: 
             bars=_bar_batches(),
             fundamentals=_valuation_batches(("20260610", "20260611", "20260615")),
             calendar=_calendar(),
+            halts=None,
         )
     assert store.read_coverage(DAILY_DATASET, 2026) is None
 
@@ -709,6 +723,7 @@ def test_a_session_the_calendar_does_not_know_is_tolerated_rather_than_refused(
         bars=_bar_batches(),
         fundamentals=_valuation_batches(),
         calendar=_calendar(("20260610", "20260611", "20260612")),
+        halts=None,
     )
     assert reference.row_count == 8
 
@@ -723,6 +738,7 @@ def test_a_calendar_that_does_not_reach_across_the_year_refuses_rather_than_unde
             bars=_bar_batches(),
             fundamentals=_valuation_batches(),
             calendar=_calendar(last_day=date(2026, 6, 30)),
+            halts=None,
         )
 
 
@@ -739,6 +755,7 @@ def test_the_census_stops_at_the_day_before_the_fetch(tmp_path: Path) -> None:
         bars=_bar_batches(fetched_at=fetched_at),
         fundamentals=_valuation_batches(fetched_at=fetched_at),
         calendar=_calendar((*SESSIONS, "20260616")),
+        halts=None,
     )
     assert reference.row_count == 8
 
@@ -766,6 +783,7 @@ def test_a_rewrite_that_would_drop_a_security_is_refused(tmp_path: Path) -> None
                 for day in SESSIONS
             ],
             calendar=_calendar(),
+            halts=None,
         )
 
 
@@ -790,7 +808,7 @@ def test_a_rewrite_that_drops_a_security_from_the_valuations_alone_is_refused(
     ]
     fresh = _store(tmp_path / "fresh")
     _, valuation_ref = write_daily_panel(
-        fresh, bars=_bar_batches(), fundamentals=narrow, calendar=_calendar()
+        fresh, bars=_bar_batches(), fundamentals=narrow, calendar=_calendar(), halts=None
     )
     assert valuation_ref.row_count == 4  # accepted: the cross-check is blind to this direction
 
@@ -809,6 +827,7 @@ def test_a_rewrite_that_drops_a_security_from_the_valuations_alone_is_refused(
                 for day in SESSIONS
             ],
             calendar=_calendar(),
+            halts=None,
         )
     stored = store_valuations = load_daily_valuations(
         seeded, day=JUNE_12, calendar=_calendar(), as_of=AS_OF, max_staleness=None
@@ -837,6 +856,7 @@ def test_the_same_session_merged_into_a_year_twice_is_refused_rather_than_stored
             bars=_bar_batches(doubled),
             fundamentals=_valuation_batches(doubled),
             calendar=_calendar(),
+            halts=None,
         )
     assert store.read_coverage(DAILY_DATASET, 2026) is None
     assert store.read_coverage(DAILY_BASIC_DATASET, 2026) is None
@@ -869,7 +889,9 @@ def test_a_session_that_came_back_short_is_refused_even_though_the_year_looks_wh
             r"cross section \(40 rows\): \['2026-06-12'\]\. 2026-06-12 has 3 row\(s\)"
         ),
     ):
-        write_daily_panel(store, bars=bars, fundamentals=fundamentals, calendar=_calendar())
+        write_daily_panel(
+            store, bars=bars, fundamentals=fundamentals, calendar=_calendar(), halts=None
+        )
     assert store.read_coverage(DAILY_DATASET, 2026) is None
     assert store.read_coverage(DAILY_BASIC_DATASET, 2026) is None
 
@@ -882,7 +904,9 @@ def test_the_thin_session_census_runs_on_the_valuations_too(tmp_path: Path) -> N
     short_fundamentals["20260615"] = 4
     _, fundamentals = _wide_batches(short_fundamentals)
     with pytest.raises(PanelBatchError, match=r"daily_basic carries 1 session\(s\) with fewer"):
-        write_daily_panel(store, bars=bars, fundamentals=fundamentals, calendar=_calendar())
+        write_daily_panel(
+            store, bars=bars, fundamentals=fundamentals, calendar=_calendar(), halts=None
+        )
 
 
 def test_a_session_the_market_merely_thinned_on_is_written_because_2015_happened(
@@ -902,7 +926,7 @@ def test_a_session_the_market_merely_thinned_on_is_written_because_2015_happened
     sizes["20260612"] = 24  # 0.60 of the median, inside 2015's measured 0.578
     bars, fundamentals = _wide_batches(sizes)
     bar_ref, valuation_ref = write_daily_panel(
-        store, bars=bars, fundamentals=fundamentals, calendar=_calendar()
+        store, bars=bars, fundamentals=fundamentals, calendar=_calendar(), halts=None
     )
     assert bar_ref.row_count == 3 * _WIDE_MARKET + 24
     assert valuation_ref.row_count == 3 * _WIDE_MARKET + 24
@@ -939,6 +963,7 @@ def test_a_2017_year_whose_free_share_is_null_is_stored_and_read_back(tmp_path: 
             for day in SESSIONS_2017
         ],
         calendar=calendar,
+        halts=None,
     )
     assert bar_ref.row_count == 4
     assert valuation_ref.row_count == 4
@@ -976,6 +1001,7 @@ def test_a_write_that_straddles_two_years_is_refused(tmp_path: Path) -> None:
             ],
             fundamentals=_valuation_batches(),
             calendar=_calendar(),
+            halts=None,
         )
 
 
@@ -987,10 +1013,15 @@ def test_writing_the_wrong_dataset_on_either_side_is_refused(tmp_path: Path) -> 
             bars=_valuation_batches(),
             fundamentals=_valuation_batches(),
             calendar=_calendar(),
+            halts=None,
         )
     with pytest.raises(PanelBatchError, match=r"expected the 'daily_basic' dataset"):
         write_daily_panel(
-            store, bars=_bar_batches(), fundamentals=_bar_batches(), calendar=_calendar()
+            store,
+            bars=_bar_batches(),
+            fundamentals=_bar_batches(),
+            calendar=_calendar(),
+            halts=None,
         )
 
 
@@ -1036,6 +1067,7 @@ def test_a_partition_with_a_session_hole_is_blocked_on_the_read_side_too(tmp_pat
         bars=_bar_batches(("20260610", "20260611", "20260615")),
         fundamentals=_valuation_batches(("20260610", "20260611", "20260615")),
         calendar=blind,
+        halts=None,
     )
     with pytest.raises(PanelStorageError, match="date_gap"):
         load_daily_bars(store, day=JUNE_11, calendar=_calendar(), as_of=AS_OF, max_staleness=None)
@@ -1128,6 +1160,7 @@ def test_a_year_fetched_on_its_own_first_day_is_written_and_the_gap_is_named(
             _batch(DAILY_BASIC_DATASET, DAILY_BASIC_FIELDS, [valuation], "20260101", new_year)
         ],
         calendar=_calendar(("20260101", *SESSIONS)),
+        halts=None,
     )
     assert reference.row_count == 1
 
@@ -1166,6 +1199,7 @@ def test_a_null_close_on_either_side_is_refused_before_the_cross_check_can_be_sk
             bars=_bar_batches(),
             fundamentals=[blanked, *batches[1:]],
             calendar=_calendar(),
+            halts=None,
         )
 
 
@@ -1183,4 +1217,5 @@ def test_two_sides_that_belong_to_different_years_are_refused(tmp_path: Path) ->
             bars=[_batch(DAILY_DATASET, DAILY_FIELDS, december, "20251231", FETCHED_AT)],
             fundamentals=_valuation_batches(),
             calendar=_calendar(),
+            halts=None,
         )

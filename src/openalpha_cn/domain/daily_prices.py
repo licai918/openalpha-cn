@@ -410,10 +410,12 @@ KNOWN_PRICE_LIMITATIONS: Final[tuple[PriceLimitation, ...]] = (
             "panel_ingest._refuse_unexplained_thin_sessions moves the same test to write time "
             "and can sit at MIN_EXPLAINED_SESSION_SHARE (0.85) rather than 0.5, because "
             "counting whole-day halts takes 2015's worst session from 0.578 of that year's "
-            "median to 0.927. What is left: that write guard is opt-in (write_daily_panel's "
-            "halts parameter defaults to None, so a caller who omits it gets exactly this "
-            "floor), and suspend_d carries no intraday marker before 2015, so the halted/"
-            "traded split is exact only from 2015-07-08 onward. See "
+            "median to 0.927. What is left: that write guard is a decision rather than a "
+            "default (write_daily_panel's halts parameter has no default, and halts=None is an "
+            "explicit waiver that leaves exactly this floor); it does not run before "
+            "1999-05-04, because suspend_d has no rows at all before then; and suspend_d "
+            "carries no intraday marker before 2015, so the halted/traded split is exact only "
+            "from 2015-07-08 onward. See "
             "domain/price_limits.py::KNOWN_SUSPENSION_LIMITATIONS."
         ),
     ),

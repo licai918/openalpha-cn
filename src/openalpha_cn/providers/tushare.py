@@ -213,6 +213,7 @@ from openalpha_cn.domain.panel_batch import (
     TimelineColumns,
 )
 from openalpha_cn.domain.price_limits import (
+    DOWN_LIMIT_COLUMN,
     HALT_TYPE,
     PRICE_LIMIT_DATA_COLUMNS,
     PRICE_LIMIT_DATASET,
@@ -691,6 +692,35 @@ def _positive_price(value: object) -> object:
     raise ValueError(f"must be a finite positive number, got {type(value).__name__} {value!r}")
 
 
+def _lower_limit_price(value: object) -> object:
+    """Parse a published ``down_limit`` into a finite **non-negative** ``float``.
+
+    `_positive_price` cannot be reused here, and the difference is one published value: **the
+    Beijing board encodes "no lower bound" as ``down_limit`` of exactly ``0.0``**, against an
+    ``up_limit`` of ``99999.99``. It is not sparse data and it is not a fault -- it is one of
+    six limit-free encodings (see `domain/price_limits.py`), and it is systematic: every
+    ``.BJ`` security's first trading session carries it, from the board's first registration-
+    system listing on 2022-02-28 (``920857.BJ``) onward, as does the first session of a
+    delisting arrangement (``920680.BJ``, 2025-12-11, between a 12.37/6.67 band and a
+    3.57/1.93 one). Verified on the whole-market responses for 2022-02-28, 2023-01-19,
+    2024-02-02, 2025-05-13, 2026-03-09 and 2026-07-27: each carries exactly one
+    ``down_limit == 0.0`` row and it is a ``.BJ`` listing.
+
+    So refusing a zero here refuses **235 whole sessions** -- the distinct ``.BJ``
+    ``list_date`` values at or after 2022-02-28 (64 in 2022, 75 in 2023, 23 in 2024, 26 in
+    2025, 47 in 2026) -- and `panel_ingest.write_price_limits` needs every open session of a
+    year at once, so it refuses the whole partition: no `stk_limit` year since 2021 could be
+    stored at all.
+
+    A **negative** lower limit is still refused, because no price floor is below zero and the
+    band check downstream (`down > up`) would not catch a small negative against a real
+    upper bound.
+    """
+    if (type(value) is float or type(value) is int) and isfinite(value) and value >= 0:
+        return float(value)
+    raise ValueError(f"must be a finite non-negative number, got {type(value).__name__} {value!r}")
+
+
 def _named_parser(column: str, parse: Callable[[object], object]) -> Callable[[object], object]:
     """Wrap a parse so its failure names the column it was applied to.
 
@@ -843,18 +873,24 @@ def _price_limit_panel_column(name: str) -> TusharePanelColumn:
 
     `_price_panel_column`'s shape, kept separate rather than extended because the two datasets
     disagree about what a "price" column may hold. A `daily` price is a traded price; a
-    `stk_limit` price is a *bound*, and the limit-free sentinels (99999.999 / 999999.999 /
-    100000.0 / 1000000.0 against a 0.01 floor) are real published values meaning "this security
-    has no limit today". They go through `_positive_price` untouched -- normalising them to
-    `None` here would destroy the only statement that the security was unbounded, and they are
-    classified on the read side, against the previous close, by `PriceLimit.is_bounded`.
+    `stk_limit` price is a *bound*, and the limit-free sentinels -- six encodings, listed in
+    `domain/price_limits.py` -- are real published values meaning "this security has no limit
+    today". They go through untouched: normalising them to `None` here would destroy the only
+    statement that the security was unbounded, and they are classified on the read side,
+    against the previous close, by `PriceLimit.is_bounded`.
+
+    **The two sides take different parses**, which is the one place this dataset's asymmetry
+    shows up in code. An `up_limit` is strictly positive; a `down_limit` may be exactly `0.0`,
+    because that is how the Beijing board publishes "no lower bound". See `_lower_limit_price`
+    for the 235 sessions that ride on it.
     """
     if name == PRICE_DATE_COLUMN:
         return TusharePanelColumn(
             name=name, kind="string", source_field=name, parse=_calendar_date_text
         )
+    parse = _lower_limit_price if name == DOWN_LIMIT_COLUMN else _positive_price
     return TusharePanelColumn(
-        name=name, kind="float", source_field=name, parse=_named_parser(name, _positive_price)
+        name=name, kind="float", source_field=name, parse=_named_parser(name, parse)
     )
 
 

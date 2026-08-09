@@ -330,9 +330,11 @@ from openalpha_cn.domain.panel_batch import (
     TimelineColumns,
 )
 from openalpha_cn.domain.price_limits import (
+    EXPLAINED_SESSION_HALF_WINDOW,
     MIN_EXPLAINED_SESSION_SHARE,
     PRICE_LIMIT_DATASET,
     PRICE_LIMIT_PANEL_COLUMNS,
+    SUSPENSION_CORPUS_FIRST_SESSION,
     SUSPENSION_DATASET,
     SUSPENSION_PANEL_COLUMNS,
     PriceLimit,
@@ -1722,10 +1724,28 @@ def _refuse_unexplained_thin_sessions(
 
     `suspend_d` removes the reason for the low floor rather than the floor. Counting each
     session's whole-day halts alongside its bars, that same session becomes 2,801 (1,363 bars +
-    1,438 halts) against a median explained cross section of 2,796 -- it stops being thin at all
-    -- and the **binding** session of the year moves to 2015-01-09 at 0.927.
-    `MIN_EXPLAINED_SESSION_SHARE` is set from that full-year census; see its docstring in
-    `domain/price_limits.py` for the numbers and for the margin it leaves.
+    1,438 halts) against a comparable median of 2,796 -- it stops being thin at all.
+    `MIN_EXPLAINED_SESSION_SHARE` is set from a census of **every session of 1991..2026**; see
+    its docstring in `domain/price_limits.py` for that table and for the two boundaries below.
+
+    ## The comparison figure is a rolling median, and the guard has a start date
+
+    Both come out of that census and both exist because a three-year sample got them wrong.
+
+    A session is compared against the median of the 41 sessions centred on it
+    (`EXPLAINED_SESSION_HALF_WINDOW`), not against the partition's. Against the year's median,
+    1994..1997 each hold dozens of sessions under 0.85 and **none of them is short** -- 1996
+    opened at 313 bars and closed at 514 against a year median of 377, with `suspend_d` empty
+    all year. The window compares a January session against January. On a partition of 41
+    sessions or fewer it degenerates to the whole-partition median, which is what every
+    small-batch caller sees.
+
+    Sessions before `SUSPENSION_CORPUS_FIRST_SESSION` are **not judged here at all**, because
+    the halt corpus has no rows before 1999-05-04. On those sessions the explained count is the
+    bar count, so this would be a bare row-count floor at 0.85 sitting on top of one
+    deliberately set to 0.5 -- a stronger refusal justified by no extra information, and it
+    refuses true partitions of 1994 and 1995. `_refuse_thin_price_sessions` still runs on them,
+    unconditionally, as it does on every session.
 
     ## Only whole-day halts count, and a missing day counts as zero
 
@@ -1739,31 +1759,32 @@ def _refuse_unexplained_thin_sessions(
     happened, so "absent" and "no halts" are genuinely indistinguishable here, and a caller who
     supplied an incomplete suspension corpus gets a **false refusal** -- loud, and repaired by
     fetching the missing sessions -- rather than a quiet pass.
-
-    ## The residue, plainly
-
-    This runs only when `write_daily_panel` is given `halts`. It is an additional check on top
-    of `_refuse_thin_price_sessions` rather than a replacement, so a caller who passes nothing
-    is exactly where `V2-P1-007` left them; see that parameter's own paragraph in
-    `write_daily_panel` for why it could not be made mandatory in this issue.
     """
     counts = Counter(_stored_dates(_column_values(batch, PRICE_DATE_COLUMN), PRICE_DATE_COLUMN))
     explained = {
         day: rows + (len(halts[day].halted) if day in halts else 0) for day, rows in counts.items()
     }
-    typical = median(explained.values())
-    floor = typical * MIN_EXPLAINED_SESSION_SHARE
-    thin = sorted(day for day, total in explained.items() if total < floor)
+    judged = sorted(day for day in explained if day >= SUSPENSION_CORPUS_FIRST_SESSION)
+    if not judged:
+        return
+    totals = [explained[day] for day in judged]
+    local: dict[date, float] = {}
+    for position, day in enumerate(judged):
+        low = max(0, position - EXPLAINED_SESSION_HALF_WINDOW)
+        high = position + EXPLAINED_SESSION_HALF_WINDOW + 1
+        local[day] = median(totals[low:high])
+    thin = [day for day in judged if explained[day] < local[day] * MIN_EXPLAINED_SESSION_SHARE]
     if not thin:
         return
-    worst = min(thin, key=lambda day: explained[day])
+    worst = min(thin, key=lambda day: explained[day] / local[day])
     halted_on_worst = len(halts[worst].halted) if worst in halts else 0
     raise PanelBatchError(
         f"{batch.dataset} carries {len(thin)} session(s) whose bars and halts together fall "
-        f"under {MIN_EXPLAINED_SESSION_SHARE:.0%} of this partition's median explained cross "
-        f"section ({typical:.0f}): {_date_sample(thin)}. {worst.isoformat()} has "
-        f"{counts[worst]} row(s) and {halted_on_worst} whole-day halt(s), "
-        f"{explained[worst]} together. A session that arrived short and a session on which the "
+        f"under {MIN_EXPLAINED_SESSION_SHARE:.0%} of the median explained cross section of the "
+        f"{2 * EXPLAINED_SESSION_HALF_WINDOW + 1} sessions around them: {_date_sample(thin)}. "
+        f"{worst.isoformat()} has {counts[worst]} row(s) and {halted_on_worst} whole-day "
+        f"halt(s), {explained[worst]} together, against a local median of "
+        f"{local[worst]:.0f}. A session that arrived short and a session on which the "
         "market was shut look identical in the bars alone, which is why the row-count floor "
         "has to sit at half the median; with suspend_d they are distinguishable, and this one "
         "is not explained. Re-fetch that session -- and check that the suspension corpus covers "
@@ -1844,7 +1865,7 @@ def write_daily_panel(
     bars: Sequence[ColumnarPanelBatch],
     fundamentals: Sequence[ColumnarPanelBatch],
     calendar: TradingCalendar,
-    halts: Mapping[date, SuspensionDay] | None = None,
+    halts: Mapping[date, SuspensionDay] | None,
     date_timezone: str = DEFAULT_DATE_TIMEZONE,
 ) -> tuple[PartitionRef, PartitionRef]:
     """Write one year of `daily` and `daily_basic` cross sections as two partitions (`V2-P1-007`).
@@ -1884,26 +1905,27 @@ def write_daily_panel(
        leave the two partitions disagreeing about which names the year covers, and guard 4
        cannot catch that direction because a bar with no valuation is the measured, tolerated
        shape of every pre-2024 year.
-    6. `_refuse_unexplained_thin_sessions`, when `halts` is supplied, refuses a session whose
+    6. `_refuse_unexplained_thin_sessions`, when `halts` is not `None`, refuses a session whose
        missing bars are not accounted for by that day's whole-day halts. This is guard 3 with
        the reason for its low threshold removed -- see below.
 
-    ## `halts` is optional, which is a fail-open, and here is why it is one anyway (`V2-P1-008`)
+    ## `halts` is required and nullable, which makes skipping guard 6 a decision (`V2-P1-008`)
 
     Guard 3's floor sits at half the partition median because 2015-07-09 really did serve 1,363
     rows against a year median of 2,359. With `suspend_d` in hand that session is explained
-    (1,363 bars + 1,438 whole-day halts, against a median explained cross section of 2,796) and
-    a full-year census puts that year's *worst* explained share at 0.927, so guard 6 can sit at
-    `MIN_EXPLAINED_SESSION_SHARE` and catch a fetch that lost a seventh of the market -- which
-    guard 3, by construction, cannot.
+    (1,363 bars + 1,438 whole-day halts, against a comparable median of 2,796), so guard 6 can
+    sit at `MIN_EXPLAINED_SESSION_SHARE` and catch a fetch that lost a seventh of the market --
+    which guard 3, by construction, cannot.
 
-    It is not mandatory, and that is a real weakening compared with the guards above, stated
-    rather than glossed: a caller who omits it gets exactly `V2-P1-007`'s behaviour. Making it
-    required would change this function's signature for every existing caller, and this issue is
-    explicitly not allowed to rewrite the tests that pin `V2-P1-007`'s guards. The upgrade path
-    is the same one `V2-P1-015`'s `panel build` will need anyway -- it fetches all three datasets
-    for the same session in the same loop -- and at that point `halts` should lose its default.
-    Until then, guard 3 still runs unconditionally, so nothing is *worse* than before.
+    The parameter has **no default**. `halts=None` still means "run guards 1-5 only", so the
+    weaker behaviour is reachable and is exactly `V2-P1-007`'s -- but it has to be asked for.
+    A default of `None` would have made the strongest guard in this function the one a caller
+    skips by not knowing it exists, which is the failure mode `ColumnarPanelBatch.checks_waived`
+    was introduced to remove elsewhere in this module: a waiver that is recorded is a decision,
+    a waiver that is a default is an accident. The cost is one keyword at every call site and
+    nothing else -- there are no production callers yet; `V2-P1-015`'s `panel build` is the
+    first, and it fetches all three datasets for the same session in the same loop, so it will
+    pass a real corpus rather than a `None`.
 
     ## What this writer's coupling costs `V2-P1-015`
 

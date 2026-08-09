@@ -40,7 +40,17 @@ an untimed `S` there means "halted at some point", not "halted all day". That is
 `backtest/execution.py`'s `AShareExecutionPolicy` derives a band from the board and an `is_st`
 flag. Measured against the published `up_limit` on 2024-06-28, joining `stk_limit` onto
 `daily.pre_close` for all 5,338 priced names, that rule disagrees on **159** of them, in four
-independent ways:
+independent ways.
+
+A count like that only means something with its two definitions attached, because both admit a
+defensible alternative that moves it. **`is_st`** is `RiskWarning.st` / `star_st` / `pt` from
+`domain/name_history.py`'s grammar over the 14,167-row rename corpus, and *not*
+`delisting_process`: a delisting-arrangement name such as `002433.SZ` 太安退 carries the
+ordinary main-board 10% (0.30 -> 0.33), so folding it in adds two spurious disagreements and
+gives 161. **The board** comes from the code prefix with `300`/`301`/**`302`** all on ChiNext;
+reading `302132.SZ` 中航电测 as main board adds another and gives 162. Comparing `down_limit`
+as well as `up_limit` adds none -- the two sides disagree on exactly the same names. Under the
+definitions this repository actually uses, the figure is 159, and it is 131 + 25 + 2 + 1:
 
 | cause | names | what the rule does |
 |---|---:|---|
@@ -66,24 +76,51 @@ have a published 5% band. The other 25 (24 ChiNext, 1 STAR: `300013.SZ`, `300029
 so on those 25 it computes a band four times too narrow and rejects orders on bars that were
 nowhere near a limit.
 
-**A limit-free session is published as a sentinel, not as a null.** A newly listed security has
-no price limit for its first five sessions, and Tushare encodes that as an out-of-range
-`up_limit` with `down_limit=0.01`. Four sentinel values have been observed and the encoding has
-changed twice: `100000.0` (SSE, 2020 and 2022), `1000000.0` (SZSE, 2022), `99999.999` (SSE,
-2024 and 2026) and `999999.999` (SZSE, 2024 and 2026). Every occurrence probed was a security
-in session 1..5 of its listing (`688086.SH` 4th, `301120.SZ` 5th, `301707.SZ` 1st, ...) and no
-security outside that window carried one. Before the registration system the same situation was
-published as a **real** band: `300740.SZ` and `603709.SH` listed 2018-02-08 with `up_limit`
-exactly 44% and `down_limit` exactly -36% of `pre_close`.
+**A limit-free session is published as a sentinel, not as a null -- and the floor is not always
+0.01.** A security with no price limit that day gets an out-of-range `up_limit`. **Six**
+encodings have been observed, from a scan of 459 whole-market sessions -- the first trading day
+of every month from 2007-01 to 2026-08 and every `.BJ` listing day since 2022-02-28 --
+`stk_limit` joined onto `daily.pre_close`, 1,918,266 rows in all, of which 1,387 are sentinels:
+
+| `up_limit` | `down_limit` | exchange | sessions seen on | span |
+|---|---|---|---|---|
+| `10000.0`    | `0.01`    | SSE  | 1   | 2007-01-04 only (`600145.SH`) |
+| `100000.0`   | `0.01`    | SSE  | 120 | 2019-10-08 .. 2023-06-08 |
+| `99999.999`  | `0.01`    | SSE  | 111 | 2023-06-21 .. 2026-07-29 |
+| `1000000.0`  | `0.01`    | SZSE | 111 | 2020-09-01 .. 2023-06-08 |
+| `999999.999` | `0.01`    | SZSE | 121 | 2023-06-21 .. 2026-08-05 |
+| `99999.99`   | **`0.0`** | BSE  | 235 | 2022-02-28 .. 2026-08-05, unchanged |
+
+SSE and SZSE each changed encoding once, both between 2023-06-08 and 2023-06-21, and SSE has an
+older form still that a post-2019 sample does not reach.
+
+The Beijing row is the one an SSE/SZSE sample does not show at all, and it is not rare:
+**every** `.BJ` security's first trading session carries `(99999.99, 0.0)`, which is 235
+distinct trading days at or after 2022-02-28 (64 in 2022, 75 in 2023, 23 in 2024, 26 in 2025,
+47 in 2026, matching `stock_basic`'s `list_date` census exactly), and so does the first session
+of a delisting arrangement (`920680.BJ`, 2025-12-11, between a 12.37/6.67 band on the 10th and
+a 3.57/1.93 one on the 12th). Across the whole scan, **every** row with `down_limit <= 0` is a
+`.BJ` code with a sentinel `up_limit` -- 254 of them, on those 235 sessions. A `down_limit > 0`
+rule therefore refuses whole sessions -- 2024-02-02's entire 6,741-row cross section fails on
+`920656.BJ` alone -- and, since `write_price_limits` needs every open session of a year at
+once, whole years with them.
+
+On SSE and SZSE the sentinel marks sessions 1..5 of a listing (`688086.SH` 4th, `301120.SZ`
+5th, `301707.SZ` 1st, ...) and no security outside that window carried one. Before the
+registration system the same situation was published as a **real** band: `300740.SZ` and
+`603709.SH` listed 2018-02-08 with `up_limit` exactly 44% and `down_limit` exactly -36% of
+`pre_close`.
 
 `is_bounded` therefore separates the two populations by ratio rather than by a value whitelist,
-and the separation is not close: the widest **real** published band ever measured here is 1.44x
-`pre_close` and the narrowest **sentinel** is 384x (`688052.SH`, 2022-04-25). `LIMIT_FREE_RATIO`
-sits at 2.0 -- 39% above the first and a factor of 192 below the second; see that constant for
-why the two margins are deliberately not the same size. A whitelist would read a fifth sentinel
-value as a real price; the ratio test reads it as limit-free, and even a reader that ignores
-the classification entirely gets the right answer, because `high >= 99999.999` and
-`low <= 0.01` are both false on any real bar.
+and the two populations do not merely separate, they leave a **void**. Over all 1,918,266 rows
+the widest real band is 1.4409x `pre_close` (`300830.SZ`, 2020-05-06) and the narrowest
+sentinel is 115.61x (`688808.SH`, 2026-04-29, 99999.999 against an 864.99 close); **nothing at
+all lands between them**. `LIMIT_FREE_RATIO` sits at 2.0, 39% above the first and 58x below the
+second; see that constant for why the two margins are deliberately not the same size. Two of
+those six encodings were unknown when the whitelist alternative was rejected, which is the
+argument for the ratio test made concrete -- and even a reader that ignores the classification
+entirely is correct, because `high >= 10000.0` and `low <= 0.01` are both false on any real
+bar of a security that had no limit.
 
 ## Which securities `stk_limit` covers, which is not "the ones `daily` covers"
 
@@ -102,14 +139,18 @@ one population and are mostly not stocks at all:
 **not** carry. Calling the two excesses one population was measured to be wrong in both
 directions.
 
-`daily ⊆ stk_limit` is likewise a **recent** property, not a general one. It holds on
-2024-06-28, 2025-08-01 and 2026-08-07 and fails on every earlier session probed: 60 bars had no
-published limit on 2020-03-02, 56 on 2022-04-25, 44 on 2016-01-04, 23 on 2015-07-08/09. All but
-one of those are `.BJ` codes -- `stk_limit` reached the Beijing board later than `daily` did --
-and the exception is `001914.SZ`, which is missing on five separate sessions. `stk_limit` also
-has a **horizon**: 0 rows on 2005-01-04 and 2006-01-04, 1,408 on 2007-01-04, and
-`stk_limit(ts_code=000001.SZ)` returns 4,762 rows beginning 2007-01-04 against a bar history
-that starts in 1991.
+`daily ⊆ stk_limit` is likewise a **recent** property, not a general one, and "recent" is dated
+rather than gestured at. A quarterly sweep of 2013-01..2026-07 puts the changeover between
+**2022-12-26** (4 bars with no band, all `.BJ`) and **2023-01-03** (0), and every session
+sampled from 2023-01-03 onward holds while every session before 2022-12-26 fails: 8 bars had no
+published limit on 2022-11-01, 67 on 2022-01-04, 133 on 2021-10-08, 56 on 2020-01-02, 44 on
+2016-01-04, 1 on 2013-01-04. All but one of those are `.BJ` codes -- `stk_limit` reached the
+Beijing board later than `daily` did -- and the exception is `001914.SZ`, which is missing on
+every session sampled from 2013-01-04 to 2022-04-01. So the property is not a 2024 discovery:
+it has held for the whole of the panel's recent history and fails across a decade before that.
+`stk_limit` also has a **horizon**: 0 rows on 2005-01-04 and 2006-01-04, 1,408 on 2007-01-04,
+and `stk_limit(ts_code=000001.SZ)` returns 4,762 rows beginning 2007-01-04 against a bar
+history that starts in 1991.
 
 ## Layering
 
@@ -199,6 +240,42 @@ because both of the things this column decides -- whether the security traded, a
 absent bar is explained -- invert on it.
 """
 
+SUSPENSION_CORPUS_FIRST_SESSION: Final[date] = date(1999, 5, 4)
+"""The first session `suspend_d` carries a row for. Before it, the corpus is **empty**.
+
+Measured, not inferred, and by a whole-history census rather than a probe: every session of
+1991..1998 -- 2,006 of them, pulled in windows narrow enough that no response was truncated --
+returns **zero** `suspend_d` rows, and the first row in the corpus is dated 1999-05-04 (72
+sessions into that year). 1999 carries 1,263 whole-day halts over 157 of its 239 sessions, 2000
+carries 3,008 over 234 of 239, and every later year is denser still.
+
+This is what bounds `MIN_EXPLAINED_SESSION_SHARE`'s reach. On a session with no halt rows the
+"explained cross section" is just the bar count, so the explained floor degenerates into a
+second row-count floor at a much higher threshold -- a strictly stronger claim resting on
+strictly no extra information. `panel_ingest._refuse_unexplained_thin_sessions` therefore skips
+sessions before this date rather than judging them, and `MIN_SESSION_ROW_SHARE` keeps running
+underneath on every session of every year.
+"""
+
+EXPLAINED_SESSION_HALF_WINDOW: Final[int] = 20
+"""How many sessions on each side of a session its comparison median is drawn from.
+
+A **rolling** median, not the partition's. The whole-year median is what made a 0.85 floor
+unusable on early history, and the cause is not halts at all -- it is within-year listing
+growth. 1996 opened with 313 bars and closed with 514 against a year median of 377, so its
+January is 0.809 of a figure it only reaches in June, and 1997 (0.766) is the same shape. A
++/-20-session window compares a session against the market as it was that month: 1996's minimum
+rises to 0.900 and 1997's to 0.935, with no loss anywhere later.
+
+20 is a trading month either side, i.e. 41 sessions. Two properties of that width are worth
+stating. It is **wide enough** that one thin session cannot drag its own comparison figure
+down: a median over 41 values is unmoved by 20 of them, and a fetch would have to lose most of
+a month before the window followed it. And it is **narrower than any partition this guard runs
+on**, because a partition is a calendar year (~243 sessions). On a partition of 41 sessions or
+fewer the window covers everything and the rolling median *is* the whole-partition median, so
+this is exactly `V2-P1-008`'s original arithmetic on any small batch.
+"""
+
 MIN_EXPLAINED_SESSION_SHARE: Final[float] = 0.85
 """How thin one session may be **after its whole-day halts are added back**, before the write
 refuses it. See `panel_ingest._refuse_unexplained_thin_sessions` for what it guards.
@@ -212,71 +289,107 @@ a large part of the A-share market halted trading at once that week. So a fetch 
 80% of the market was invisible by construction.
 
 `suspend_d` supplies the missing term. Counting each session's whole-day halts beside its bars,
-a **full-year** census of 2015 -- one `daily` request and one `suspend_d` request for each of
-its 244 sessions -- gives:
+that session becomes 2,801 against a comparable median of 2,796 and stops being thin at all.
 
-    metric                       min        median   min/median
-    bars alone                   1,363      2,359    0.578   (2015-07-09)
-    bars + whole-day halts       2,593      2,796    0.927   (2015-01-09)
+## The calibration is the whole history, because a three-year sample got this wrong
 
-and the session that binds moves from July to January, where the "shortfall" is not a halt at
-all but the ordinary fact that the market had fewer listed names at the start of the year than
-at its median. So the constant is bounded below by what a real partition of the worst year
-reaches, exactly as `MIN_SESSION_ROW_SHARE` is, and the whole gain is that the bound moved from
-0.578 to 0.927.
+The first cut of this constant was set from full-year censuses of 2008, 2015 and 2018 -- and
+0.85 clears all three comfortably. It also **refuses seven real years**. Every session of
+1991-01-02..2026-08-07 has since been censused: one `daily` row count and one `suspend_d`
+whole-day-halt count per session, **8,690 sessions across 36 years**, pulled in windows narrow
+enough that no response was truncated (a window that came back at the cap was split and
+re-pulled until none was).
 
-2015 is the year that binds of the three censused in full:
+    year   bars med  bars min/med  explained min/med   rolling min   n < 0.85
+                                   (whole-year median)  (+/-20 sess)  (year / rolling)
+    1991         10       0.300         0.300              0.429        85 / 26
+    1992         30       0.200         0.200              0.462        86 /  6
+    1993         98       0.347         0.347              0.596        89 /  7
+    1994        270       0.607         0.607              0.605        47 /  3
+    1995        296       0.578         0.578              0.586         7 /  7
+    1996        377       0.809         0.809              0.900        39 /  0
+    1997        670       0.766         0.766              0.935        73 /  0
+    1998        781       0.919         0.919              0.959         0 /  0
+    1999..2026  872..5493 0.578..0.993  0.906..0.997       0.963..1.000  0 /  0
+      worst of those        2015          2010               2001
 
-    year   sessions   bars min/median          bars + halts min/median
-    2008   246        0.914  (05-13)           **0.959**  (02-13)
-    2015   244        0.578  (07-09)           **0.927**  (01-09)
-    2018   243        0.941  (02-08)           **0.984**  (01-03)
+Two separate facts come out of that table and both are load-bearing.
 
-2018's bar figure reproduces the one `MIN_SESSION_ROW_SHARE`'s docstring already published
-(median 3,378, min 3,177 on 02-08), which is what makes the other two checkable rather than
-merely asserted -- the same script produced all three and one of them lands on a number this
-repository had before it existed. 2008 is included precisely because it is *before* the
-intraday marker exists, so it is the year where `halted` over-counts most; it does not bind
-either.
+**The whole-year median was the wrong comparison figure.** 1994..1997 fail a 0.85 whole-year
+floor -- 47, 7, 39 and 73 sessions respectively -- and not one of those sessions is short. 1996
+served 313 bars on 01-02, 305 on 05-28 and 514 on 12-31 against a year median of 377, with
+`suspend_d` carrying **zero** rows for the whole year; the shortfall is the market growing
+inside the year. `EXPLAINED_SESSION_HALF_WINDOW` is the fix, and it is enough from 1996 on.
+
+**Before 1999 the halt corpus is empty**, so the explained share is the bar share and this
+floor would be a bare row-count floor at 0.85 where `MIN_SESSION_ROW_SHARE` deliberately sits
+at 0.5. That is what still binds 1991..1995 (0.429..0.605 on the rolling median), and it is why
+the guard does not run before `SUSPENSION_CORPUS_FIRST_SESSION` rather than why the constant is
+lower. 1991..1993 are in any case already refused by the 0.5 bar floor (0.300 / 0.200 / 0.347),
+which is a `V2-P1-007` boundary this issue does not move; 1994 and 1995 pass that floor and now
+pass this one too.
 
 ## Where 0.85 comes from, and what it leaves
 
-It is set a clear margin below the 0.927 measured minimum -- the margin is for within-year
-listing growth, which is what puts January at the bottom and which was steeper in some years
-than in 2015 -- and it catches what the 0.5 floor cannot: a session that came back with 85% of
-the market and no halts to show for it. On 2015's median that is a session missing ~420 names
-rather than ~1,180.
+Above it, the binding real session in the guard's whole range (1999-05-04 onward) is
+**2001-05-14 at 0.963**, and no session of the 6,612 in that range falls under 0.85. So the
+headroom is 11 points over the worst true partition of 27 years rather than a margin fitted to
+three. Below it, the floor catches what 0.5 cannot: a session that came back with 85% of its
+neighbours' cross section and no halts to show for it -- on a 2015-sized market a session
+missing ~420 names rather than ~1,180. The 3-of-40 fetch this guard was written for is 0.075
+and is nowhere near either.
+
+2015 is worth looking at twice in that table, because it is the year `MIN_SESSION_ROW_SHARE`'s
+0.5 exists for. Its bars alone reach 0.578; add the whole-day halts and its worst *whole-year*
+share is 0.927; compare each session against its own month and its worst is 0.994. The week a
+large part of the market halted at once stops being an outlier under all three readings once
+the halts are counted, and what is left binding the year is January.
 
 This is still a floor and not a census. A fetch that lost 5% of the market passes, and the
 fully general answer is a per-name expectation, which needs the universe rather than a row
 count -- `explain_unpriced` is where that question is asked, on the read side, where the
 registry is in hand.
 
-Three years were censused in full and they are not the whole history. Years before 2015 carry a
-second hazard on top of that: `suspend_timing` is null throughout, so `halted` *over*-counts
-there (see `KNOWN_SUSPENSION_LIMITATIONS`), which inflates the explained share and makes this
-floor **weaker** on early history rather than stricter -- 2008 is in the table above for that
-reason and does not bind, but "does not bind in 2008" is not "cannot bind in 2003". The 0.5
-row-count floor still runs underneath, unconditionally, on every year.
+One hazard survives and points the safe way. Before 2015 `suspend_timing` is null throughout,
+so `halted` *over*-counts (see `KNOWN_SUSPENSION_LIMITATIONS`), which inflates the explained
+share and makes this floor **weaker** on 1999..2014 rather than stricter. The 0.5 row-count
+floor still runs underneath, unconditionally, on every session of every year.
 """
 
 LIMIT_FREE_RATIO: Final[float] = 2.0
-"""Above this multiple of the previous close, an `up_limit` is a "no limit" sentinel.
+"""At or above this multiple of the previous close, an `up_limit` is a "no limit" sentinel.
 
-A ratio test rather than a whitelist of the four observed sentinel values, and the two
-populations it separates are 267x apart: the widest real published band measured is **1.44x**
-(`300740.SZ` and `603709.SH` on their first trading day, 2018-02-08, under the 44% rule the
-registration system replaced) and the narrowest sentinel is **384x** (`688052.SH`,
-2022-04-25).
+A ratio test rather than a whitelist of the six observed sentinel values, and the gap it sits
+in is measured from both sides on the same scan: 459 whole-market sessions -- the first trading
+day of every month from 2007-01 to 2026-08 plus every `.BJ` listing day since 2022-02-28 --
+`stk_limit` joined onto `daily.pre_close`, **1,918,266 rows**.
 
-The margins are deliberately **not** symmetric, and the asymmetry is stated rather than
-averaged over. Below, there is 39% of headroom over the widest real band ever observed here --
-enough for a band rule wider than 44% but not for an unbounded one. Above, there is a factor of
-192 to the nearest sentinel. That is the right shape, because the two errors are not
-equivalent: reading a real band as limit-free would widen a bar's band to a number no price
-reaches and let an order fill on a locked bar, while reading a sentinel as a real price is
-harmless in both consumers (no bar satisfies `high >= 99999.999`). See this module's docstring
-for the four sentinel values.
+**Below it, the widest real published band in that scan is 1.4409x** -- `300830.SZ` on
+2020-05-06, its listing day under the 44% first-day rule, published as 6.34 against a 4.40
+previous close. The next four are 1.4406, 1.4405, 1.4404, 1.4404, spread over 2015..2023, so
+the ceiling is the *rule* rather than one outlier. The threshold leaves 39% of headroom over
+it: enough for a first-day rule wider than 44%, not enough for an unbounded one.
+
+**Above it, the narrowest sentinel in that scan is 115.61x** -- `688808.SH` on 2026-04-29, an
+`up_limit` of 99999.999 against an 864.99 previous close, the highest-priced security found
+carrying one. That is 58x of margin, not the 192x an earlier reading of this constant claimed;
+the figure moves with the most expensive security that ever goes limit-free, so it is a
+measurement rather than a bound.
+
+**Between 1.4409x and 115.61x the scan contains nothing at all.** That void, not either
+margin, is what makes the classification safe: any threshold in it gives the same answer on
+every one of those 1.9 million rows, and 2.0 is chosen inside it rather than fitted to an edge.
+
+The two margins are deliberately **not** symmetric, and the asymmetry is the right shape
+because the two errors are not equivalent. Reading a real band as limit-free would widen a
+bar's band to a number no price reaches and let an order fill on a locked bar. Reading a
+sentinel as a real price is harmless in both consumers, because no bar satisfies
+`high >= 10000.0` on a security that had no limit. See this module's docstring for the six
+sentinel values and the two encoding changes among them.
+
+The comparison is `<`, so a band of exactly twice the previous close is classified as
+limit-free. Nothing published sits anywhere near that, and pinning the closed side keeps the
+choice from drifting silently.
 """
 
 
@@ -308,7 +421,24 @@ class TradingState(Enum):
     """
 
     resumed = "resumed"
-    """`R`: trading resumed that session. Expect a bar; every `R` row probed had one."""
+    """`R`: trading resumed that session. Expect a bar -- **usually**, and the exceptions are
+    named rather than assumed away.
+
+    An earlier reading of this said "every `R` row probed had a bar", which was true of the
+    eight sessions probed for it and false of the market. A quarterly sweep of 2013-01..2026-07
+    (55 whole-market sessions, `suspend_d` joined to `daily`) finds 7 sessions carrying an `R`
+    row with no bar: 2015-01-05 (11 `R`, 10 with a bar; the odd one is `830879.BJ`), 2018-07-02
+    (`835174.BJ`), 2019-04-01 (`430564.BJ`), 2020-01-02 (`830879.BJ`), 2022-10-10
+    (`430685.BJ`), 2023-04-03 (`834261.BJ`) and 2023-07-03 (`836717.BJ`). Every one is a
+    NEEQ-era `.BJ` code, which is to say a security `daily` did not carry that session at all
+    (see `KNOWN_SUSPENSION_LIMITATIONS`' coverage entry), rather than a resumption that failed
+    to trade.
+
+    The consequence is benign in both consumers and that is *why* they are shaped this way:
+    `explain_unpriced` and `_refuse_unexplained_thin_sessions` count only `halted`, so an `R`
+    with no bar lands in `unexplained` -- an unexplained absence, which is the loud direction --
+    instead of quietly excusing one.
+    """
 
     def __bool__(self) -> bool:
         raise SuspensionError(
@@ -348,32 +478,60 @@ KNOWN_SUSPENSION_LIMITATIONS: Final[tuple[SuspensionLimitation, ...]] = (
             "2005-01-04 and 2006-01-04 and 1,408 for 2007-01-04, and "
             "stk_limit(ts_code=000001.SZ) returns 4,762 rows beginning 2007-01-04 against a bar "
             "history that starts in 1991 -- so no published band exists for the first sixteen "
-            "years of the market. Separately, daily is a subset of stk_limit only on recent "
-            "sessions: 60 bars had no published limit on 2020-03-02, 56 on 2022-04-25, 44 on "
-            "2016-01-04 and 23 on 2015-07-08, and every one of those but 001914.SZ is a .BJ "
-            "code. So a historical partition legitimately carries bars with no band, and "
-            "limit_touch is asked per security rather than being derived for a whole cross "
-            "section."
+            "years of the market. Separately, daily is a subset of stk_limit only from "
+            "2023-01-03: a quarterly sweep of 2013-01..2026-07 brackets the changeover between "
+            "2022-12-26 (4 bars with no band) and 2023-01-03 (0), with 133 unbanded bars on "
+            "2021-10-08, 56 on 2020-01-02, 44 on 2016-01-04 and 1 on 2013-01-04. Every one of "
+            "those but 001914.SZ is a .BJ code. So a historical partition legitimately carries "
+            "bars with no band, and limit_touch is asked per security rather than being "
+            "derived for a whole cross section. The same coverage gap is why a suspend_d R row "
+            "can have no bar on 7 of those 55 sessions -- all NEEQ-era .BJ codes."
         ),
     ),
     SuspensionLimitation(
         code="the_limit_free_sentinel_encoding_has_changed_twice",
         detail=(
-            "A security with no price limit is published as an out-of-range up_limit with "
-            "down_limit=0.01, and the value is neither stable nor single: 100000.0 (SSE 2020, "
-            "2022), 1000000.0 (SZSE 2022), 99999.999 (SSE 2024, 2026) and 999999.999 (SZSE "
-            "2024, 2026). is_bounded therefore tests the ratio to the previous close rather "
-            "than the value, because a whitelist would misread a fifth encoding. A reader that "
-            "ignores the classification is still correct -- no real bar satisfies high >= "
-            "99999.999 or low <= 0.01 -- so this shape is fail-safe in both consumers rather "
-            "than merely disclosed."
+            "A security with no price limit is published as an out-of-range up_limit, and the "
+            "encoding is neither stable nor single. A 459-session scan finds SIX values on "
+            "three exchanges: SSE served 10000.0 on 2007-01-04, 100000.0 from 2019-10-08 and "
+            "99999.999 from 2023-06-21; SZSE served 1000000.0 from 2020-09-01 and 999999.999 "
+            "from 2023-06-21 (both exchanges changed between 2023-06-08 and 2023-06-21); and "
+            "the Beijing board has published 99999.99 unchanged since 2022-02-28. The floor "
+            "moves too -- SSE and SZSE pair the sentinel with down_limit=0.01 and BSE with "
+            "down_limit=0.0, which is why the stored domain of that column includes zero (see "
+            "providers/tushare.py::_lower_limit_price). is_bounded tests the ratio to the "
+            "previous close rather than the value: a whitelist written from the four values "
+            "this repository knew first would misread two of the six, and a seventh is a "
+            "schema change away. A reader that ignores the classification is still correct -- "
+            "no real bar satisfies high >= 10000.0 or low <= 0.01 -- so this shape is fail-safe "
+            "in both consumers rather than merely disclosed."
+        ),
+    ),
+    SuspensionLimitation(
+        code="the_halt_corpus_is_empty_before_1999_so_the_explained_floor_cannot_run_there",
+        detail=(
+            "suspend_d returns zero rows for every one of the 2,002 sessions of 1991..1998 and "
+            "its first row is dated 1999-05-04; 1999 then carries 1,263 whole-day halts over "
+            "157 of its 239 sessions and every later year is denser. So on a pre-1999 session "
+            "the explained cross section is exactly the bar count, and "
+            "panel_ingest._refuse_unexplained_thin_sessions would be a bare row-count floor at "
+            "MIN_EXPLAINED_SESSION_SHARE sitting on top of one deliberately set to 0.5. It "
+            "does not run before SUSPENSION_CORPUS_FIRST_SESSION for that reason: applied to "
+            "1994 and 1995 it refuses true partitions (a rolling-median minimum of 0.605 and "
+            "0.586, where the shortfall is the market growing inside the year rather than a "
+            "short fetch). MIN_SESSION_ROW_SHARE still runs on every session of every year, "
+            "and it independently refuses 1991..1993 (0.300 / 0.200 / 0.347), which is a "
+            "V2-P1-007 boundary this dataset does not move."
         ),
     ),
     SuspensionLimitation(
         code="the_published_band_is_not_reproducible_from_board_and_st_alone",
         detail=(
             "Measured on 2024-06-28 against all 5,338 priced names, a board-plus-is_st rule "
-            "disagrees with the published up_limit on 159 of them, for four independent "
+            "disagrees with the published up_limit on 159 of them -- with is_st taken as "
+            "RiskWarning.st/star_st/pt (a delisting-arrangement name keeps the ordinary board "
+            "band, and counting it as ST gives 161) and 302* read as ChiNext (reading it as "
+            "main board gives 162) -- for four independent "
             "reasons: the Beijing board rounds the band inward (all 249 .BJ names match "
             "floor/ceil and only 118/143 match ROUND_HALF_UP, so 131 differ by one fen); ST on "
             "ChiNext and STAR keeps the board's 20% rather than dropping to 5% (25 names, where "
@@ -512,6 +670,15 @@ class SuspensionDay:
         The one boolean this contract does offer, because it is the question a cross section
         asks and because its two false cases ("traded" and "not mentioned") mean the same thing
         to that caller.
+
+        **A warning for the consumer that does not exist yet.** Both of today's consumers use a
+        halt to *excuse* a missing bar, which is why `suspend_d`'s descriptor can decline
+        `requires_truncation_flag`: a dropped row excuses fewer absences and raises more alarms.
+        A consumer that fed this into `MarketBar.suspended` would invert that. A dropped row
+        would then make a halted security look tradeable and let an order fill on a session
+        with no market -- fail-open, in a dataset whose truncation witness is deliberately the
+        weaker one. Wiring these two together therefore needs `requires_truncation_flag` turned
+        on for `suspend_d` first, not merely a call to this method.
         """
         return ts_code in self.halted
 
@@ -734,7 +901,7 @@ def price_limits_from_panel_rows(rows: Iterable[Sequence[object]]) -> dict[str, 
                 "two fetches that were never reconciled"
             )
         up = _stored_price(up_limit, index, UP_LIMIT_COLUMN)
-        down = _stored_price(down_limit, index, DOWN_LIMIT_COLUMN)
+        down = _stored_lower_limit(down_limit, index, DOWN_LIMIT_COLUMN)
         if down > up:
             raise SuspensionError(
                 f"row {index}: {ts_code} on {trade_date.isoformat()} has a "
@@ -854,15 +1021,40 @@ def _parse_iso_date(value: object, index: int, column: str) -> date:
 
 
 def _stored_price(value: object, index: int, column: str) -> float:
-    """A finite **positive** `float`, exactly. `type(...) is float` for `_require_price`'s
-    reason.
+    """A stored `up_limit`: a finite **positive** `float`, exactly. `type(...) is float` for
+    `_require_price`'s reason.
 
-    A limit price of zero or below cannot bound anything, and a `None` here would compare
-    `False` against every bar and silently report a security as never touching its band.
+    An upper limit of zero or below would bound every price out of existence, and a `None`
+    here would compare `False` against every bar and silently report a security as never
+    touching its band. The **lower** limit is a different domain -- see `_stored_lower_limit`.
     """
     if type(value) is not float or not isfinite(value) or value <= 0.0:
         raise SuspensionError(
             f"row {index}: {column} must be a finite positive float, got "
+            f"{type(value).__name__} {value!r}"
+        )
+    return value
+
+
+def _stored_lower_limit(value: object, index: int, column: str) -> float:
+    """A stored `down_limit`: a finite **non-negative** `float`, exactly.
+
+    `_stored_price`'s rule with one value added to the domain, and that value is published
+    rather than hypothetical: the Beijing board writes "no lower bound" as `down_limit` of
+    exactly `0.0` beside an `up_limit` of `99999.99`, on every `.BJ` security's first trading
+    session since 2022-02-28 and on the first session of a delisting arrangement. Rejecting it
+    costs 235 whole sessions of `stk_limit` and, because a partition is written a year at a
+    time, every year from 2022 on. See `providers/tushare.py::_lower_limit_price`.
+
+    Zero needs no branch anywhere downstream: `limit_touch` asks `bar.low <= down_limit`,
+    which is false for every real bar, so an unbounded security correctly never touches its
+    floor, and `PriceLimit.is_bounded` classifies on the *upper* ratio, which is 5,025x on
+    that same row. A negative is still refused -- no price floor is below zero, and a small
+    negative beside a real `up_limit` would pass the `down > up` check that follows.
+    """
+    if type(value) is not float or not isfinite(value) or value < 0.0:
+        raise SuspensionError(
+            f"row {index}: {column} must be a finite non-negative float, got "
             f"{type(value).__name__} {value!r}"
         )
     return value

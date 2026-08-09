@@ -53,6 +53,13 @@ LIMIT_ITEMS: list[list[Any]] = [
     ["20240628", "920924.BJ", 9.51, 5.13],
     ["20240628", "603381.SH", 99999.999, 0.01],
 ]
+# Verbatim from stk_limit(trade_date=20240202), which served 6,741 rows. `920656.BJ` listed
+# that day; it is the session's only row with `down_limit == 0.0`, and 99999.99 is the fifth
+# sentinel encoding -- the Beijing board's, unchanged since 2022-02-28.
+BEIJING_LISTING_ITEM: list[Any] = ["20240202", "920656.BJ", 99999.99, 0.0]
+# Verbatim from stk_limit(ts_code=920680.BJ): the first session of a delisting arrangement,
+# between a 12.37/6.67 band on 12-10 and a 3.57/1.93 one on 12-12.
+BEIJING_DELISTING_ITEM: list[Any] = ["20251211", "920680.BJ", 99999.99, 0.0]
 
 
 def _descriptor(dataset: str) -> TushareDatasetDescriptor:
@@ -260,6 +267,52 @@ def test_a_null_band_is_refused_and_names_its_column(fake_tushare_transport) -> 
     provider, _ = _provider(
         fake_tushare_transport,
         _response(LIMIT_FIELDS, [["20240628", "000001.SZ", None, 9.85]], has_more=False),
+    )
+
+    with pytest.raises(ProviderFailure, match="up_limit must be a finite positive number"):
+        provider.fetch_panel(_request(PRICE_LIMIT_DATASET))
+
+
+def test_the_beijing_boards_published_zero_floor_is_decoded_rather_than_refused(
+    fake_tushare_transport,
+) -> None:
+    """`down_limit=0.0` is a published value, not a null. A `> 0` parse on this column refuses
+    the whole 2024-02-02 cross section on the strength of this one row -- and, because a
+    `stk_limit` partition is written a year at a time, refuses the year. There are 235 such
+    sessions at or after 2022-02-28 (64/75/23/26/47 across 2022..2026)."""
+    for item, day in (
+        (BEIJING_LISTING_ITEM, datetime(2024, 2, 2, 9, 0, tzinfo=UTC)),
+        (BEIJING_DELISTING_ITEM, datetime(2025, 12, 11, 9, 0, tzinfo=UTC)),
+    ):
+        provider, _ = _provider(
+            fake_tushare_transport, _response(LIMIT_FIELDS, [item], has_more=False), clock=day
+        )
+
+        batch = provider.fetch_panel(_request(PRICE_LIMIT_DATASET, day))
+        limits = price_limits_from_panel_rows(_panel_rows(batch))
+
+        assert limits[item[1]].down_limit == 0.0
+        assert limits[item[1]].up_limit == 99999.99
+
+
+def test_a_negative_lower_limit_is_still_refused_at_the_provider(fake_tushare_transport) -> None:
+    """The column's domain gained zero, not the negatives: a floor below zero is malformed and
+    the `down > up` check downstream would not see a small one beside a real upper bound."""
+    provider, _ = _provider(
+        fake_tushare_transport,
+        _response(LIMIT_FIELDS, [["20240628", "000001.SZ", 12.03, -0.01]], has_more=False),
+    )
+
+    with pytest.raises(ProviderFailure, match="down_limit must be a finite non-negative number"):
+        provider.fetch_panel(_request(PRICE_LIMIT_DATASET))
+
+
+def test_a_zero_upper_limit_is_still_refused_at_the_provider(fake_tushare_transport) -> None:
+    """The two sides take different parses and this is the asymmetry: an `up_limit` of zero
+    bounds every price out of existence and no published row has ever carried one."""
+    provider, _ = _provider(
+        fake_tushare_transport,
+        _response(LIMIT_FIELDS, [["20240628", "000001.SZ", 0.0, 0.0]], has_more=False),
     )
 
     with pytest.raises(ProviderFailure, match="up_limit must be a finite positive number"):

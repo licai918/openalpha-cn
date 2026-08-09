@@ -215,8 +215,8 @@ def _valuation_batches(days: Sequence[str] = SESSIONS) -> list[Any]:
     return [_batch(DAILY_BASIC_DATASET, DAILY_BASIC_FIELDS, VALUATIONS[day], day) for day in days]
 
 
-def _calendar(open_days: Iterable[str] = SESSIONS) -> TradingCalendar:
-    first, last = date(2024, 1, 1), date(2024, 12, 31)
+def _calendar(open_days: Iterable[str] = SESSIONS, *, year: int = 2024) -> TradingCalendar:
+    first, last = date(year, 1, 1), date(year, 12, 31)
     opens = {date(int(day[:4]), int(day[4:6]), int(day[6:])) for day in open_days}
     return build_trading_calendar(
         "SZSE",
@@ -240,7 +240,11 @@ def _seeded(tmp_path: Path) -> PanelStore:
     write_suspensions(store, _halt_batches())
     write_price_limits(store, _band_batches(), calendar=calendar)
     write_daily_panel(
-        store, bars=_bar_batches(), fundamentals=_valuation_batches(), calendar=calendar
+        store,
+        bars=_bar_batches(),
+        fundamentals=_valuation_batches(),
+        calendar=calendar,
+        halts=None,
     )
     return store
 
@@ -308,18 +312,20 @@ def _wide_rows(template: list[Any], count: int, day: str) -> list[list[Any]]:
 
 
 def _wide_price_batches(sizes: Mapping[str, int]) -> tuple[list[Any], list[Any]]:
+    days = sorted(sizes)
+    template_day = SESSIONS[0]
     bars = [
-        _batch(DAILY_DATASET, DAILY_FIELDS, _wide_rows(BARS[day][0], sizes[day], day), day)
-        for day in SESSIONS
+        _batch(DAILY_DATASET, DAILY_FIELDS, _wide_rows(BARS[template_day][0], sizes[day], day), day)
+        for day in days
     ]
     fundamentals = [
         _batch(
             DAILY_BASIC_DATASET,
             DAILY_BASIC_FIELDS,
-            _wide_rows(VALUATIONS[day][0], sizes[day], day),
+            _wide_rows(VALUATIONS[template_day][0], sizes[day], day),
             day,
         )
-        for day in SESSIONS
+        for day in days
     ]
     return bars, fundamentals
 
@@ -331,7 +337,7 @@ def _wide_halt_batches(counts: Mapping[str, int]) -> list[Any]:
     that still have bars in the short session below -- which is the shape a real halt has.
     """
     batches = []
-    for day in SESSIONS:
+    for day in sorted(counts):
         rows = [
             [f"{600000 + _WIDE_MARKET - 1 - index}.SH", day, None, "S"]
             for index in range(counts[day])
@@ -340,6 +346,17 @@ def _wide_halt_batches(counts: Mapping[str, int]) -> list[Any]:
             rows = [[f"{600000 + _WIDE_MARKET - 1}.SH", day, None, "R"]]
         batches.append(_batch(SUSPENSION_DATASET, SUSPEND_FIELDS, rows, day))
     return batches
+
+
+def _weekdays(start: date, count: int) -> tuple[str, ...]:
+    """`count` consecutive weekdays from `start`, as `YYYYMMDD` strings."""
+    days: list[str] = []
+    day = start
+    while len(days) < count:
+        if day.weekday() < 5:
+            days.append(day.strftime("%Y%m%d"))
+        day += timedelta(days=1)
+    return tuple(days)
 
 
 def test_a_session_that_came_back_three_quarters_full_is_refused_when_no_halt_explains_it(
@@ -380,20 +397,37 @@ def test_the_same_session_is_accepted_once_the_halts_account_for_it(tmp_path: Pa
     assert bar_ref.row_count == 110
 
 
-def test_omitting_the_halts_leaves_the_earlier_behaviour_exactly_as_it_was(
+def test_explicitly_waiving_the_halts_leaves_the_earlier_behaviour_exactly_as_it_was(
     tmp_path: Path,
 ) -> None:
-    """The fail-open this issue accepts, pinned rather than left implicit: the same short
-    session that guard 6 refuses is stored when `halts` is not supplied, because guard 3's floor
-    is 0.5 and 30/40 clears it."""
+    """`halts=None` is the *waiver*, and this is what it costs: the same short session that
+    guard 6 refuses is stored, because guard 3's floor is 0.5 and 30/40 clears it. Renamed from
+    `test_omitting_the_halts_...` when the parameter lost its default -- the assertion is the
+    one this test always made, and what changed is that reaching this behaviour now takes a
+    keystroke rather than a silence."""
     store = _store(tmp_path)
     bars, fundamentals = _wide_price_batches({"20240626": 40, "20240627": 40, "20240628": 30})
 
     bar_ref, _ = write_daily_panel(
-        store, bars=bars, fundamentals=fundamentals, calendar=_calendar()
+        store, bars=bars, fundamentals=fundamentals, calendar=_calendar(), halts=None
     )
 
     assert bar_ref.row_count == 110
+
+
+def test_omitting_the_halts_is_a_type_error_rather_than_a_silent_waiver(tmp_path: Path) -> None:
+    """The decision the fail-open version had no way to record. `halts` has no default, so a
+    caller who does not think about this check cannot skip it by not thinking about it -- the
+    same shape `V2-P1-004`'s `checks_waived` took. There are no production callers to break
+    (the CLI that will fetch all three datasets is `V2-P1-015`); every caller is a test, and
+    each now says `halts=None` where it means "I am not supplying a halt corpus"."""
+    store = _store(tmp_path)
+    bars, fundamentals = _wide_price_batches({"20240626": 40, "20240627": 40, "20240628": 30})
+
+    with pytest.raises(TypeError, match="missing 1 required keyword-only argument: 'halts'"):
+        write_daily_panel(  # type: ignore[call-arg]
+            store, bars=bars, fundamentals=fundamentals, calendar=_calendar()
+        )
 
 
 def test_an_intraday_halt_does_not_excuse_a_missing_bar_at_write_time(tmp_path: Path) -> None:
@@ -418,6 +452,198 @@ def test_an_intraday_halt_does_not_excuse_a_missing_bar_at_write_time(tmp_path: 
         write_daily_panel(
             store, bars=bars, fundamentals=fundamentals, calendar=_calendar(), halts=days
         )
+
+
+def test_the_explained_floor_counts_halts_into_the_median_and_not_only_into_the_session(
+    tmp_path: Path,
+) -> None:
+    """The arithmetic at the centre of guard 6, pinned on the one shape where the two readings
+    differ. Bars 20 / 40 / 33 with 20 / 0 / 0 whole-day halts: the median of the *explained*
+    cross sections is 40, so the 33-row session is 0.825 of it and is refused. Taking the
+    median of the **bar counts** instead gives 33, a floor of 28, and a partition that stores
+    clean -- a session that lost a sixth of the market, written without a word."""
+    store = _store(tmp_path)
+    sizes = {"20240626": 20, "20240627": 40, "20240628": 33}
+    bars, fundamentals = _wide_price_batches(sizes)
+    write_suspensions(store, _wide_halt_batches({"20240626": 20, "20240627": 0, "20240628": 0}))
+    days = load_suspensions(store, years=(2024,), as_of=AS_OF, max_staleness=None)
+
+    with pytest.raises(PanelBatchError, match=r"33 row\(s\) and 0 whole-day halt\(s\)"):
+        write_daily_panel(
+            store, bars=bars, fundamentals=fundamentals, calendar=_calendar(), halts=days
+        )
+
+
+# --- the calibration boundaries the whole-history census moved ------------------------------
+
+# 1996 in miniature. That year opened at 313 bars, closed at 514 and had a median of 377, so
+# its January is 0.809 of its own year -- and `suspend_d` carried zero rows all year, so no
+# halt explains a single session of it. Same ramp, 61 sessions, 39 -> 64 names.
+_GROWTH_SESSIONS: tuple[str, ...] = _weekdays(date(2024, 4, 1), 61)
+_GROWTH_SIZES: dict[str, int] = {
+    day: 39 + round(index * 25 / 60) for index, day in enumerate(_GROWTH_SESSIONS)
+}
+
+
+def test_a_year_the_market_grew_inside_is_stored_because_the_median_is_local(
+    tmp_path: Path,
+) -> None:
+    """The false refusal a three-year calibration hid. Against the **partition's** median this
+    year's first session is 0.75 and would be refused, along with dozens of its neighbours;
+    against the median of the 41 sessions around it, it is 0.907. Nothing here is short -- the
+    market simply had fewer names in April than in June, which is what 1994..1997 all look
+    like and what a whole-year median cannot tell from a lost fetch."""
+    store = _store(tmp_path)
+    bars, fundamentals = _wide_price_batches(_GROWTH_SIZES)
+    write_suspensions(store, _wide_halt_batches(dict.fromkeys(_GROWTH_SESSIONS, 0)))
+    days = load_suspensions(store, years=(2024,), as_of=AS_OF, max_staleness=None)
+    counts = sorted(_GROWTH_SIZES.values())
+    whole_year_median = counts[len(counts) // 2]
+
+    assert min(counts) / whole_year_median < 0.85  # the whole-partition median refuses it
+
+    bar_ref, _ = write_daily_panel(
+        store,
+        bars=bars,
+        fundamentals=fundamentals,
+        calendar=_calendar(_GROWTH_SESSIONS),
+        halts=days,
+    )
+
+    assert bar_ref.row_count == sum(_GROWTH_SIZES.values())
+
+
+def test_a_short_session_inside_that_growing_year_is_still_caught(tmp_path: Path) -> None:
+    """The other half: making the comparison local does not make it blind. A mid-year session
+    that comes back with 30 of the ~51 names its neighbours have clears the 0.5 row-count floor
+    -- as it has to, because 2015-07-09 really did serve 0.578 -- and this guard refuses it
+    against the median of the 41 sessions around it."""
+    store = _store(tmp_path)
+    sizes = dict(_GROWTH_SIZES)
+    sizes[_GROWTH_SESSIONS[30]] = 30
+    bars, fundamentals = _wide_price_batches(sizes)
+    write_suspensions(store, _wide_halt_batches(dict.fromkeys(_GROWTH_SESSIONS, 0)))
+    days = load_suspensions(store, years=(2024,), as_of=AS_OF, max_staleness=None)
+
+    with pytest.raises(
+        PanelBatchError, match=r"30 row\(s\) and 0 whole-day halt\(s\), 30 together"
+    ):
+        write_daily_panel(
+            store,
+            bars=bars,
+            fundamentals=fundamentals,
+            calendar=_calendar(_GROWTH_SESSIONS),
+            halts=days,
+        )
+
+
+def test_the_brief_s_three_of_forty_session_is_caught_in_the_growing_year_too(
+    tmp_path: Path,
+) -> None:
+    """The extreme case the 0.5 floor was written for, inside the partition shape that made the
+    0.85 floor local: 3 names where the neighbours have ~51. It never reaches guard 6 -- guard
+    3 refuses it first, which is the intended layering, and the point is that widening the
+    comparison window did not open a hole under it."""
+    store = _store(tmp_path)
+    sizes = dict(_GROWTH_SIZES)
+    sizes[_GROWTH_SESSIONS[30]] = 3
+    bars, fundamentals = _wide_price_batches(sizes)
+    write_suspensions(store, _wide_halt_batches(dict.fromkeys(_GROWTH_SESSIONS, 0)))
+    days = load_suspensions(store, years=(2024,), as_of=AS_OF, max_staleness=None)
+
+    with pytest.raises(PanelBatchError, match=r"2024-05-13 has 3 row\(s\)"):
+        write_daily_panel(
+            store,
+            bars=bars,
+            fundamentals=fundamentals,
+            calendar=_calendar(_GROWTH_SESSIONS),
+            halts=days,
+        )
+
+
+_PRE_CORPUS_SESSIONS: tuple[str, ...] = ("19980610", "19980611", "19980612")
+
+
+def test_a_pre_1999_partition_is_not_judged_by_a_floor_the_halt_corpus_cannot_support(
+    tmp_path: Path,
+) -> None:
+    """`suspend_d` returns zero rows for every one of the 2,002 sessions of 1991..1998, so on
+    such a session "bars plus halts" is just "bars" and this guard would be a second row-count
+    floor at 0.85 sitting on top of one deliberately set to 0.5. Applied there it refuses true
+    partitions of 1994 (rolling minimum 0.605) and 1995 (0.586). The identical 30-of-40 session
+    that guard 6 refuses in 2024 is therefore stored in 1998 -- and guard 3 still runs on it."""
+    store = _store(tmp_path)
+    sizes = dict(zip(_PRE_CORPUS_SESSIONS, (40, 40, 30), strict=True))
+    bars, fundamentals = _wide_price_batches(sizes)
+    write_suspensions(store, _wide_halt_batches(dict.fromkeys(_PRE_CORPUS_SESSIONS, 0)))
+    days = load_suspensions(store, years=(1998,), as_of=AS_OF, max_staleness=None)
+
+    bar_ref, _ = write_daily_panel(
+        store,
+        bars=bars,
+        fundamentals=fundamentals,
+        calendar=_calendar(_PRE_CORPUS_SESSIONS, year=1998),
+        halts=days,
+    )
+
+    assert bar_ref.row_count == 110
+
+
+def test_the_row_count_floor_still_runs_on_a_pre_1999_partition(tmp_path: Path) -> None:
+    """What is left guarding the years guard 6 declines: the same 0.5 floor every year gets.
+    3 of a 40-name market is refused in 1998 exactly as it is in 2026."""
+    store = _store(tmp_path)
+    sizes = dict(zip(_PRE_CORPUS_SESSIONS, (40, 40, 3), strict=True))
+    bars, fundamentals = _wide_price_batches(sizes)
+
+    with pytest.raises(PanelBatchError, match=r"daily carries 1 session\(s\) with fewer"):
+        write_daily_panel(
+            store,
+            bars=bars,
+            fundamentals=fundamentals,
+            calendar=_calendar(_PRE_CORPUS_SESSIONS, year=1998),
+            halts=None,
+        )
+
+
+# --- the band partition's own guards ---------------------------------------------------------
+
+
+def test_a_band_year_holding_a_session_that_arrived_short_is_refused(tmp_path: Path) -> None:
+    """The floor `daily` uses, running here too, and it is the *only* thin-session guard this
+    dataset gets: a halted security still has a published band -- all 26 of 2024-06-28's halts
+    are in `stk_limit` -- so `suspend_d` explains nothing about a missing one."""
+    store = _store(tmp_path)
+    wide = {
+        day: [[day, f"{600000 + index}.SH", 12.03, 9.85] for index in range(count)]
+        for day, count in (("20240626", 40), ("20240627", 40), ("20240628", 3))
+    }
+    batches = [_batch(PRICE_LIMIT_DATASET, LIMIT_FIELDS, wide[day], day) for day in sorted(wide)]
+
+    with pytest.raises(PanelBatchError, match=r"stk_limit carries 1 session\(s\) with fewer"):
+        write_price_limits(store, batches, calendar=_calendar())
+
+
+def test_a_halt_rewrite_that_drops_a_security_is_refused(tmp_path: Path) -> None:
+    """Kept where `write_name_history` deliberately omits it, and the asymmetry is real: a
+    rename corpus for a year legitimately covers different securities on a re-fetch, but a
+    security that was halted in 2024 does not stop having been halted, so losing one is a
+    partial read rather than news."""
+    store = _seeded(tmp_path)
+    narrowed = [_batch(SUSPENSION_DATASET, SUSPEND_FIELDS, HALTS[day][:1], day) for day in SESSIONS]
+
+    with pytest.raises(PanelBatchError, match="would drop"):
+        write_suspensions(store, narrowed)
+
+
+def test_reading_no_years_of_halts_is_refused_rather_than_answered(tmp_path: Path) -> None:
+    """An empty year list would return an empty mapping, which every consumer reads as
+    "nothing was ever halted" -- indistinguishable from a failed read, and the fail-open
+    direction in both of them."""
+    store = _seeded(tmp_path)
+
+    with pytest.raises(PanelBatchError, match="needs at least one year"):
+        load_suspensions(store, years=(), as_of=AS_OF, max_staleness=None)
 
 
 def test_a_band_year_missing_a_session_the_calendar_reports_open_is_refused(

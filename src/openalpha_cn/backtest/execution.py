@@ -22,11 +22,13 @@ the right granularity: `stk_limit` starts in 2007 and reached the Beijing board 
 historical session some names have a published band and others genuinely do not.
 
 The limit-free sentinels ride through this path without a special case. Tushare publishes "no
-limit today" as an `up_limit` of 99999.999 (or 100000.0 / 1000000.0 / 999999.999 -- the encoding
-has changed twice) against a `down_limit` of 0.01, and the two comparisons below are
-`low >= upper` and `high <= lower`, both of which are simply false against those numbers. A bar
-with no limit therefore fills, which is correct, and it does so through the same two lines that
-handle every other bar.
+limit today" as an out-of-range `up_limit` -- six encodings across three exchanges, listed in
+`domain/price_limits.py` -- against a `down_limit` of 0.01 on SSE and SZSE and of exactly
+**0.0** on the Beijing board. The two comparisons below are `low >= upper` and `high <= lower`,
+both of which are simply false against those numbers, `0.0` included. A bar with no limit
+therefore fills on both sides, which is correct, and it does so through the same two lines that
+handle every other bar. `down_limit` is the one price on `MarketBar` bounded by `ge=0` rather
+than `gt=0`, and that is what lets a `.BJ` listing day be represented at all.
 """
 
 from datetime import date
@@ -74,8 +76,19 @@ class MarketBar(BaseModel):
     sentinel through gives the right verdict (see this module's docstring). Build the pair with
     `published_limit_fields` rather than converting by hand.
     """
-    down_limit: Decimal | None = Field(default=None, gt=0)
-    """The exchange's published lower limit price. Supplied with `up_limit` or not at all."""
+    down_limit: Decimal | None = Field(default=None, ge=0)
+    """The exchange's published lower limit price. Supplied with `up_limit` or not at all.
+
+    `ge=0` rather than `gt=0`, unlike every other price on this model, because **zero is a
+    published value on this one column**: the Beijing board writes "no lower bound" as
+    `down_limit=0` beside an `up_limit` of 99999.99, on every `.BJ` security's first trading
+    session since 2022-02-28 and on the first session of a delisting arrangement. A `gt=0`
+    bound here would make those rows unrepresentable, so a bar that has a published band would
+    have to be built without one -- silently falling back to the derived rule this field
+    exists to replace, on exactly the board where that rule is measurably wrong. Zero still
+    needs no special case below: `high <= lower` is false for every real bar, so a security
+    with no floor can always be sold, which is correct.
+    """
 
     @model_validator(mode="after")
     def validate_prices(self) -> Self:
@@ -238,11 +251,18 @@ def _board_limit(board: Literal["main", "star", "growth", "bse"]) -> Decimal:
 def published_limit_fields(limit: PriceLimit) -> dict[str, Decimal]:
     """Turn a stored `PriceLimit` into the two `MarketBar` fields, exactly.
 
-    One place rather than at each call site, because the conversion has a trap in it:
-    `Decimal(99999.999)` is `99999.99899999999806...` -- the binary double, carried into a type
-    whose whole point is that it does not do that -- while `Decimal(str(99999.999))` is exactly
-    `99999.999`. The published band is a two-decimal price (or a sentinel published to three),
-    so the string form is the one that round-trips it.
+    One place rather than at each call site, because the conversion has a trap in it -- for the
+    caller who converts by hand. `Decimal(99999.999)` is `99999.99899999999806...`, the binary
+    double carried into a type whose whole point is that it does not do that, while
+    `Decimal(str(99999.999))` is exactly `99999.999`. `PriceLimit` holds `float`s and
+    `MarketBar` holds `Decimal`s, so *something* has to bridge them, and `Decimal(...)` is the
+    obvious thing to reach for and the wrong one.
+
+    Pydantic itself is not the hazard: handed the bare `float`, it already coerces through
+    `Decimal(str(...))`, so `MarketBar(up_limit=99999.999).up_limit == Decimal("99999.999")`.
+    This helper exists so that the *explicit* conversion -- the one a reader writes to satisfy
+    a `Decimal`-typed field -- lands on the same value, and so that the two fields are always
+    built together, which `MarketBar` requires anyway.
 
     Returns a `dict` so it can be splatted into a `MarketBar(...)` call beside the other fields,
     which is how a caller that has both a bar and a band actually builds one.

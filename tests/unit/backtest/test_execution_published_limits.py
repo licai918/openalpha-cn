@@ -159,6 +159,77 @@ def test_the_published_band_also_governs_the_sell_side() -> None:
     assert _sell(_bar(**locked, up_limit=Decimal("9.51"), down_limit=Decimal("5.13"))) == "rejected"
 
 
+def test_a_bar_that_only_touched_the_published_limit_still_fills() -> None:
+    """The distinction `domain/price_limits.py::LimitTouch` draws in its two field pairs, made
+    binding here: this policy rejects on the **one-price** shape (`low >= upper`, `high <=
+    lower`), not on the touch. A bar that traded up to its published 12.03 and back down to
+    10.10 had a counterparty on the other side all day, so the order fills; reading `high >=
+    upper` instead would reject every session that so much as reached its limit -- 26 of every
+    5,338 names on an ordinary day rather than the handful that lock."""
+    touched = _bar(
+        previous_close=Decimal("10.94"),
+        open=Decimal("11.00"),
+        high=Decimal("12.03"),
+        low=Decimal("10.10"),
+        close=Decimal("11.50"),
+        up_limit=Decimal("12.03"),
+        down_limit=Decimal("9.85"),
+    )
+    locked = _bar(
+        previous_close=Decimal("10.94"),
+        open=Decimal("12.03"),
+        high=Decimal("12.03"),
+        low=Decimal("12.03"),
+        close=Decimal("12.03"),
+        up_limit=Decimal("12.03"),
+        down_limit=Decimal("9.85"),
+    )
+
+    assert _buy(touched) == "filled"
+    assert _buy(locked) == "rejected"
+    # The sell side is the mirror image and is asymmetric in the same direction.
+    floored = _bar(
+        previous_close=Decimal("10.94"),
+        open=Decimal("10.50"),
+        high=Decimal("11.00"),
+        low=Decimal("9.85"),
+        close=Decimal("10.00"),
+        up_limit=Decimal("12.03"),
+        down_limit=Decimal("9.85"),
+    )
+    assert _sell(floored) == "filled"
+
+
+def test_a_beijing_listing_day_has_no_floor_and_both_sides_fill() -> None:
+    """`920656.BJ` on 2024-02-02: the exchange published `(99999.99, 0.0)` and the bar ran
+    18.00 / 19.91 / 17.55 / 19.90. A `down_limit` of zero is the published statement "no lower
+    bound", so `high <= 0.0` is false and the sell fills -- no limit-free branch anywhere. The
+    derived rule would put a 30% band on it and, on a listing day whose `pre_close` equals its
+    close, get the wrong answer for a different reason."""
+    listing_day = {
+        "subject": "920656.BJ",
+        "trade_date": date(2024, 2, 2),
+        "board": "bse",
+        "previous_close": Decimal("19.90"),
+        "open": Decimal("18.00"),
+        "high": Decimal("19.91"),
+        "low": Decimal("17.55"),
+        "close": Decimal("19.90"),
+    }
+    unbounded = _bar(**listing_day, up_limit=Decimal("99999.99"), down_limit=Decimal("0"))
+
+    assert unbounded.has_published_limits is True
+    assert unbounded.down_limit == Decimal("0")
+    assert _buy(unbounded) == "filled"
+    assert _sell(unbounded) == "filled"
+
+
+def test_a_negative_published_floor_is_still_refused() -> None:
+    """`ge=0`, not "any number": zero is a published encoding and everything under it is not."""
+    with pytest.raises(ValidationError, match="greater than or equal to 0"):
+        _bar(up_limit=Decimal("12.03"), down_limit=Decimal("-0.01"))
+
+
 def test_a_published_band_does_not_override_the_earlier_rejections() -> None:
     """The band is the last check, not the only one: a halt, a bad lot and T+1 still reject a
     bar that carries a perfectly ordinary published band."""
