@@ -50,6 +50,7 @@ from openalpha_cn.panel_ingest import (
     STOCK_BASIC_DATASET,
     SUSPENSION_DATASET,
     TRADING_CALENDAR_DATASET,
+    load_suspensions,
     write_adjustment_factors,
     write_daily_panel,
     write_financial_statements,
@@ -68,6 +69,7 @@ LAST_DAY = date(2026, 12, 31)
 SECURITIES = ("000001.SZ", "000002.SZ", "600000.SH")
 INDEX_CODE = "000300.SH"
 INCOME_DATASET = "income"
+CASHFLOW_DATASET = "cashflow"
 LISTED_ON = date(2026, 1, 2)
 FILING_ANNOUNCED = date(2026, 1, 5)
 REPORT_PERIOD = date(2025, 12, 31)
@@ -93,6 +95,7 @@ DATASETS = (
     PRICE_LIMIT_DATASET,
     INDEX_WEIGHT_DATASET,
     INCOME_DATASET,
+    CASHFLOW_DATASET,
 )
 
 INCOME_VALUE_COLUMNS = (
@@ -107,6 +110,21 @@ INCOME_VALUE_COLUMNS = (
     "basic_eps",
     "ebit",
 )
+
+CASHFLOW_VALUE_COLUMNS = (
+    "n_cashflow_act",
+    "n_cashflow_inv_act",
+    "n_cash_flows_fnc_act",
+    "c_fr_sale_sg",
+    "free_cashflow",
+)
+"""`cashflow`'s stored projection, which is **not** `income`'s.
+
+The second statement dataset is in the healthy fixture on purpose. With only `income` stored,
+`_ambiguity_check`'s loop never ran a second iteration, and a build that checked the first
+statement dataset and stopped passed every test in this file -- the shape of defect Task 34's
+review found six of, all from a fixture that did not carry a form the real data has.
+"""
 
 
 def _calendar_days() -> tuple[date, ...]:
@@ -271,6 +289,18 @@ _CLOSE = 10.0
 _SESSION_STEP = 0.5
 
 
+def _security_offset(code: str) -> int:
+    """A stable per-name price offset that also answers for a name outside `SECURITIES`.
+
+    The three default names keep the offsets 0, 1 and 2 they have always had, so nothing in
+    the existing fixture moves; a wider universe (see `_wide_securities`) is numbered after
+    them from its own code.
+    """
+    if code in SECURITIES:
+        return SECURITIES.index(code)
+    return len(SECURITIES) + int(code[:6])
+
+
 def _bar_price(code: str, day: date) -> float:
     """A close that moves session by session as well as name by name.
 
@@ -278,7 +308,7 @@ def _bar_price(code: str, day: date) -> float:
     equals its own `close`, so a cross-check that compared a bar against *itself* instead of
     against the previous session would agree perfectly and the fixture would prove nothing.
     """
-    return _CLOSE + SECURITIES.index(code) + _SESSION_STEP * SESSIONS.index(day)
+    return _CLOSE + _security_offset(code) + _SESSION_STEP * SESSIONS.index(day)
 
 
 def _previous_close(code: str, day: date) -> float:
@@ -442,20 +472,27 @@ def index_weight_batch(
     )
 
 
-def income_batch(
-    securities: Sequence[str] = SECURITIES,
+def _statement_batch(
+    dataset: str,
+    value_columns: Sequence[str],
+    securities: Sequence[str],
     *,
-    duplicate: Sequence[str] = (),
-    revised: Sequence[str] = (),
+    duplicate: Sequence[str],
+    revised: Sequence[str],
 ) -> ColumnarPanelBatch:
     """One filing per security, plus a second irreconcilable version for each of `duplicate`.
 
     `revised` names the securities whose row carries a `revision_time` after its
     `available_time` -- the only shape `PartitionCoverage.revised_row_count` can see.
+
+    The disagreement is carried by the projection's **first** value column, whichever dataset
+    this is, so the two statement datasets are irreconcilable in the same way through different
+    columns (`income.total_revenue`, `cashflow.n_cashflow_act`).
     """
     codes = [*securities, *duplicate]
     flags = [*("1" for _ in securities), *("0" for _ in duplicate)]
-    revenues = [
+    disagreeing, *rest = value_columns
+    values = [
         *(100.0 + index for index, _ in enumerate(securities)),
         *(999.0 for _ in duplicate),
     ]
@@ -464,23 +501,49 @@ def income_batch(
         announced + timedelta(days=1) if code in set(revised) else announced for code in codes
     ]
     return _batch(
-        INCOME_DATASET,
+        dataset,
         subjects=codes,
         columns=[
             PanelColumn("report_period", "string", tuple(REPORT_PERIOD.isoformat() for _ in codes)),
             PanelColumn("ann_date", "string", tuple(FILING_ANNOUNCED.isoformat() for _ in codes)),
             PanelColumn("f_ann_date", "string", tuple(FILING_ANNOUNCED.isoformat() for _ in codes)),
             PanelColumn("update_flag", "string", tuple(flags)),
-            PanelColumn("total_revenue", "float", tuple(revenues)),
-            *(
-                PanelColumn(name, "float", tuple(1.0 for _ in codes))
-                for name in INCOME_VALUE_COLUMNS
-                if name != "total_revenue"
-            ),
+            PanelColumn(disagreeing, "float", tuple(values)),
+            *(PanelColumn(name, "float", tuple(1.0 for _ in codes)) for name in rest),
         ],
         event_time=[announced] * len(codes),
         available_time=[announced] * len(codes),
         revision_time=revision,
+    )
+
+
+def income_batch(
+    securities: Sequence[str] = SECURITIES,
+    *,
+    duplicate: Sequence[str] = (),
+    revised: Sequence[str] = (),
+) -> ColumnarPanelBatch:
+    return _statement_batch(
+        INCOME_DATASET,
+        INCOME_VALUE_COLUMNS,
+        securities,
+        duplicate=duplicate,
+        revised=revised,
+    )
+
+
+def cashflow_batch(
+    securities: Sequence[str] = SECURITIES,
+    *,
+    duplicate: Sequence[str] = (),
+    revised: Sequence[str] = (),
+) -> ColumnarPanelBatch:
+    return _statement_batch(
+        CASHFLOW_DATASET,
+        CASHFLOW_VALUE_COLUMNS,
+        securities,
+        duplicate=duplicate,
+        revised=revised,
     )
 
 
@@ -490,41 +553,74 @@ def income_batch(
 def seed(
     tmp_path: Path,
     *,
+    securities: Sequence[str] = SECURITIES,
     bars: ColumnarPanelBatch | None = None,
     valuations: ColumnarPanelBatch | None = None,
     factors: ColumnarPanelBatch | None = None,
     income: ColumnarPanelBatch | None = None,
+    cashflow: ColumnarPanelBatch | None = None,
     halts: bool = True,
+    halted: Sequence[tuple[str, date]] = ((HALTED_SECURITY, HALTED_SESSION),),
 ) -> PanelStore:
     store = PanelStore(tmp_path / "panel")
     real = calendar()
     write_trading_calendar(store, calendar_batch())
-    write_stock_universe(store, universe_batch())
-    write_adjustment_factors(store, [factors or factor_batch()], calendar=real)
+    write_stock_universe(store, universe_batch(securities))
+    write_adjustment_factors(store, [factors or factor_batch(securities=securities)], calendar=real)
     suspensions = None
+    omitted = tuple(halted) if halts else ()
     if halts:
-        write_suspensions(store, [suspension_batch()])
+        write_suspensions(store, [suspension_batch(omitted)])
         suspensions = _loaded_halts(store, real)
     write_daily_panel(
         store,
-        bars=[bars or bar_batch(omit=((HALTED_SECURITY, HALTED_SESSION),) if halts else ())],
-        fundamentals=[
-            valuations
-            or valuation_batch(omit=((HALTED_SECURITY, HALTED_SESSION),) if halts else ())
-        ],
+        bars=[bars or bar_batch(securities=securities, omit=omitted)],
+        fundamentals=[valuations or valuation_batch(securities=securities, omit=omitted)],
         calendar=real,
         halts=suspensions,
     )
-    write_price_limits(store, [limit_batch()], calendar=real)
+    write_price_limits(store, [limit_batch(securities=securities)], calendar=real)
     write_index_weights(store, [index_weight_batch()])
-    write_financial_statements(store, [income or income_batch()])
+    write_financial_statements(store, [income or income_batch(securities)])
+    write_financial_statements(store, [cashflow or cashflow_batch(securities)])
     return store
 
 
 def _loaded_halts(store: PanelStore, real: TradingCalendar) -> Mapping[date, object]:
-    from openalpha_cn.panel_ingest import load_suspensions
-
     return load_suspensions(store, years=(YEAR,), as_of=AS_OF, max_staleness=None)
+
+
+def _wide_securities(count: int) -> tuple[str, ...]:
+    """`count` distinct codes, none of them one of `SECURITIES`.
+
+    The three-security fixture cannot express a coverage share near 0.85 -- one name of three
+    is 0.67 and two is 0.33 -- so the tests that pin the verdict on an unexplained missing bar
+    build their own universe. Numbered from 000100 so `_security_offset` gives every one of
+    them a price no default name has.
+    """
+    return tuple(f"{index:06d}.SZ" for index in range(100, 100 + count))
+
+
+def _panel_with_silently_unpriced_names(
+    tmp_path: Path, *, listed: int, unexplained: int
+) -> tuple[PanelStore, tuple[str, ...]]:
+    """A healthy panel of `listed` names, then `unexplained` of them lose their last-session
+    bar with nothing to account for it.
+
+    Exactly one further name is halted *with a `suspend_d` row*, so the covered share is
+    `(priced + halted) / listed == (listed - unexplained) / listed` and a build that forgot to
+    add the halt back reports a share one name lower. The bars are replaced through the
+    generic writer for `test_an_unpriced_security_with_no_halt_behind_it_is_reported`'s
+    reason: `write_daily_panel` refuses the shapes its own rolling-median guard can see, and
+    what this file has to pin is the band that guard cannot.
+    """
+    names = _wide_securities(listed)
+    halted = ((names[0], LAST_SESSION),)
+    store = seed(tmp_path, securities=names, halted=halted)
+    silent = names[1 : 1 + unexplained]
+    gone = (*halted, *((code, LAST_SESSION) for code in silent))
+    write_panel_batch(store, bar_batch(securities=names, omit=gone), year=YEAR)
+    return store, silent
 
 
 def report_for(store: PanelStore, **overrides: object) -> object:
@@ -1170,6 +1266,341 @@ def test_a_valuation_row_with_no_bar_behind_it_is_a_contradiction_and_is_reporte
     (finding,) = report.findings_with_code("close_disagreement")
     assert finding.items == (SECURITIES[0],)
     assert finding.dates == (LAST_SESSION,)
+
+
+# --- the verdict: which severities make a panel unclean, and which do not ----------------------
+
+
+def test_a_panel_whose_only_findings_are_notices_is_still_clean(tmp_path: Path) -> None:
+    """The property the whole `notice` severity exists for, asserted rather than described.
+
+    Revision and duplication are ordinary on this corpus -- `V2-P1-011` measured 81.7% of
+    `fina_indicator`'s keys carrying more than one row -- so a report that let them decide
+    `is_clean` would call every real financial partition sick, and its readers would stop
+    reading it. `findings` is deliberately non-empty here: "clean" is a verdict, not silence.
+    """
+    store = seed(
+        tmp_path, income=income_batch(duplicate=(SECURITIES[0],), revised=(SECURITIES[1],))
+    )
+
+    report = report_for(store)
+
+    assert report.findings != ()
+    assert {finding.code for finding in report.findings} == {
+        "ambiguous_filing",
+        "duplicate_versions",
+        "revised_rows",
+    }
+    assert {finding.severity for finding in report.findings} == {"notice"}
+    assert report.is_clean is True
+
+
+def test_two_datasets_that_contradict_each_other_make_the_panel_unclean(tmp_path: Path) -> None:
+    """The other direction of the same property, and the one a demotion would break silently.
+
+    `daily` and `daily_basic` republish the same close and here they disagree about one. If
+    that finding were a `notice` this panel would report `is_clean is True` with a
+    contradiction in it, and nothing else in this file would fail.
+    """
+    store = seed(tmp_path)
+    write_panel_batch(
+        store,
+        valuation_batch(
+            omit=((HALTED_SECURITY, HALTED_SESSION),),
+            closes={(SECURITIES[0], LAST_SESSION): 99.0},
+        ),
+        year=YEAR,
+    )
+
+    report = report_for(store)
+
+    assert [finding.code for finding in report.findings if finding.severity != "notice"] == [
+        "close_disagreement"
+    ]
+    assert report.is_clean is False
+
+
+def test_a_blocked_dataset_makes_the_panel_unclean_as_well(tmp_path: Path) -> None:
+    """The third severity, so the verdict is pinned on one finding of each kind."""
+    store = seed(tmp_path)
+    next((store.root / DAILY_DATASET / str(YEAR)).glob("*.parquet")).unlink()
+
+    report = report_for(store)
+
+    assert "blocking" in {finding.severity for finding in report.findings}
+    assert report.is_clean is False
+
+
+# --- what the report does not check, and where it says so --------------------------------------
+
+
+def test_only_the_three_price_shaped_datasets_are_asked_which_sessions_they_should_hold(
+    tmp_path: Path,
+) -> None:
+    """`cross_checks` is the falsifiable record of the *cross-dataset* half only. The
+    per-dataset half is `readiness.checks_waived`, and reading it is not optional: seven of
+    the ten datasets in this fixture waive `required_dates` structurally, so `date_gap` is
+    decidable on three of them and on no others."""
+    report = report_for(seed(tmp_path))
+
+    asked = {
+        health.dataset
+        for health in report.datasets
+        if "required_dates" not in health.readiness.checks_waived
+    }
+    waived = {health.dataset for health in report.datasets} - asked
+
+    assert asked == {DAILY_DATASET, DAILY_BASIC_DATASET, PRICE_LIMIT_DATASET}
+    assert waived == {
+        TRADING_CALENDAR_DATASET,
+        STOCK_BASIC_DATASET,
+        ADJ_FACTOR_DATASET,
+        SUSPENSION_DATASET,
+        INDEX_WEIGHT_DATASET,
+        INCOME_DATASET,
+        CASHFLOW_DATASET,
+    }
+
+
+def test_a_date_hole_in_a_dataset_that_waives_the_date_check_produces_no_finding_at_all(
+    tmp_path: Path,
+) -> None:
+    """The hole this report has, pinned as a known fact rather than left to be rediscovered.
+
+    A mid-corpus session is removed from `adj_factor`, whose last session stays current so
+    `stale` does not fire either. The report finds **nothing**, says every cross-check ran,
+    and calls the panel clean -- all of which are true statements about the questions it put.
+    The one place the omission is visible is `checks_waived`, which is why the module docstring
+    now says `cross_checks` covers the cross-dataset half and names this as the other half.
+
+    `daily` is the dataset the date-hole injection above uses, and it is one of only three the
+    check can run on; this is the same injection into one of the seven it cannot.
+    """
+    store = seed(tmp_path)
+    kept = tuple(day for day in SESSIONS if day != SESSIONS[3])
+    write_panel_batch(store, factor_batch(days=kept), year=YEAR)
+
+    report = report_for(store)
+
+    assert report.findings == ()
+    assert report.is_clean
+    assert all(check.ran for check in report.cross_checks)
+    health = report.dataset(ADJ_FACTOR_DATASET)
+    assert "required_dates" in health.readiness.checks_waived
+    assert health.readiness.state == "ready"
+
+
+# --- injection: the share of a session that bars and halts together account for ---------------
+
+
+@pytest.mark.parametrize(
+    ("listed", "unexplained", "share"),
+    [(20, 2, "90.0%"), (50, 7, "86.0%"), (20, 3, "85.0%"), (25, 4, "84.0%")],
+)
+def test_an_unexplained_missing_bar_is_a_warning_whatever_share_of_the_session_it_is(
+    tmp_path: Path, listed: int, unexplained: int, share: str
+) -> None:
+    """Three points either side of 0.85 and one well clear of it, all `warning`.
+
+    An earlier cut graded this against `price_limits.MIN_EXPLAINED_SESSION_SHARE`, which is
+    calibrated as `(bars + halts) / the +/-20-session rolling median` -- a measure of whether a
+    session is thin *relative to its neighbours*, not of how much of the day's listed market it
+    covers. Under that comparison 2 of 20 listed names vanishing without explanation graded as
+    a `notice` and the report called the panel clean. The severity no longer depends on the
+    share at all; the share is still reported, as a number rather than as a verdict.
+    """
+    store, silent = _panel_with_silently_unpriced_names(
+        tmp_path, listed=listed, unexplained=unexplained
+    )
+
+    report = report_for(store)
+
+    (finding,) = report.findings_with_code("unexplained_unpriced")
+    assert finding.items == silent
+    assert finding.count == unexplained
+    assert finding.severity == "warning"
+    assert share in finding.detail
+    assert report.is_clean is False
+
+
+def test_a_halted_name_is_added_back_before_the_covered_share_is_reported(tmp_path: Path) -> None:
+    """`explain_unpriced`'s whole reason for existing, in the one number the report prints.
+
+    Twenty listed names: one halted with a `suspend_d` row to show for it, three simply gone.
+    Seventeen of twenty are accounted for, and the halted name is one of them -- a share
+    computed from bars alone would print 80.0% and would also name the halted security among
+    the unexplained.
+    """
+    store, silent = _panel_with_silently_unpriced_names(tmp_path, listed=20, unexplained=3)
+    halted_name = _wide_securities(20)[0]
+
+    report = report_for(store)
+
+    (finding,) = report.findings_with_code("unexplained_unpriced")
+    assert "85.0%" in finding.detail
+    assert "80.0%" not in finding.detail
+    assert halted_name not in finding.items
+    assert finding.items == silent
+
+
+# --- per-dataset years, and the cross-checks that have to honour them --------------------------
+
+
+def test_each_dataset_can_be_asked_about_its_own_years(tmp_path: Path) -> None:
+    """`years_by_dataset` is a public parameter; a caller backfilling one dataset asks about
+    the years it should now hold without re-asserting them for the other nine."""
+    report = report_for(
+        seed(tmp_path), years=(YEAR,), years_by_dataset={ADJ_FACTOR_DATASET: (YEAR - 1, YEAR)}
+    )
+
+    assert report.dataset(ADJ_FACTOR_DATASET).years_requested == (YEAR - 1, YEAR)
+    assert report.dataset(DAILY_DATASET).years_requested == (YEAR,)
+    assert [finding.datasets[0] for finding in report.findings_with_code("partition_missing")] == [
+        ADJ_FACTOR_DATASET
+    ]
+
+
+def test_a_cross_check_reads_each_dataset_over_its_own_years_not_the_price_panels(
+    tmp_path: Path,
+) -> None:
+    """`suspend_d` is asked about a year it does not hold, so the halt corpus will not load and
+    the unpriced check says it did not run.
+
+    The alternative -- which is what a check taking one year tuple for four datasets does -- is
+    to read `suspend_d` through `daily`'s window and answer as though the caller had never
+    narrowed it, producing a verdict about halts that is an artefact of the report.
+    """
+    report = report_for(seed(tmp_path), years_by_dataset={SUSPENSION_DATASET: (YEAR - 1,)})
+
+    (unpriced,) = [check for check in report.cross_checks if check.name == "unpriced_explained"]
+    assert not unpriced.ran
+    assert unpriced.skipped_reason is not None
+    assert SUSPENSION_DATASET in unpriced.skipped_reason
+    assert report.findings_with_code("check_unavailable")
+
+
+def test_every_statement_dataset_is_checked_for_ambiguity_and_not_only_the_first(
+    tmp_path: Path,
+) -> None:
+    """Two statement datasets are stored and only the *second* one is ambiguous, so a check
+    that read `statement_datasets[0]` and stopped reports nothing here."""
+    store = seed(tmp_path, cashflow=cashflow_batch(duplicate=(SECURITIES[0],)))
+
+    report = report_for(store)
+
+    (finding,) = report.findings_with_code("ambiguous_filing")
+    assert finding.datasets == (CASHFLOW_DATASET,)
+    assert finding.count == 1
+    assert report.findings_with_code("duplicate_versions")[0].datasets == (CASHFLOW_DATASET,)
+
+
+def test_each_statement_dataset_is_read_over_its_own_announcement_years(tmp_path: Path) -> None:
+    """Four statement endpoints are four partition sets. Narrowing `cashflow`'s years has to
+    reach `cashflow`'s read and not `income`'s."""
+    report = report_for(seed(tmp_path), years_by_dataset={CASHFLOW_DATASET: (YEAR - 1,)})
+
+    (ambiguity,) = [check for check in report.cross_checks if check.name == "statement_ambiguity"]
+    assert not ambiguity.ran
+    assert ambiguity.skipped_reason is not None
+    assert CASHFLOW_DATASET in ambiguity.skipped_reason
+
+
+def test_the_years_a_dataset_was_asked_about_are_reported_sorted_and_deduplicated(
+    tmp_path: Path,
+) -> None:
+    """`years_requested` is what the report says it looked at, so it has to be a stable answer
+    rather than whatever order the caller's argument happened to arrive in."""
+    report = report_for(seed(tmp_path), years=(YEAR, 2019, YEAR))
+
+    assert report.dataset(DAILY_DATASET).years_requested == (2019, YEAR)
+
+
+# --- the two clocks --------------------------------------------------------------------------
+
+
+def test_a_dataset_published_in_advance_has_a_negative_event_age(tmp_path: Path) -> None:
+    """`event_age` is a signed `timedelta` on purpose. `trade_cal`'s newest event is
+    2026-12-31, eleven months *after* `as_of`, and an `abs()` or a `max(timedelta(0), ...)`
+    would turn "this schedule reaches into the future" into "this schedule is eleven months
+    behind" -- the exact reading `published_in_advance` exists to prevent."""
+    report = report_for(seed(tmp_path))
+
+    health = report.dataset(TRADING_CALENDAR_DATASET)
+    assert health.event_age is not None
+    assert health.event_age < timedelta(0)
+    assert health.event_age == AS_OF - _midnight_shanghai(LAST_DAY)
+
+
+def test_the_fetch_clock_is_the_newest_of_the_partitions_read_not_the_oldest(
+    tmp_path: Path,
+) -> None:
+    """Two `adj_factor` partitions fetched nine days apart. `fetch_age` answers "how long since
+    this dataset was last fetched", so it is measured from the newest write; the oldest would
+    report a dataset refreshed this morning as nine days old for as long as any older partition
+    remained on disk."""
+    store = seed(tmp_path)
+    earlier = (date(2025, 12, 29), date(2025, 12, 30), date(2025, 12, 31))
+    write_panel_batch(store, factor_batch(days=earlier, fetched_at=STALE_FETCHED_AT), year=YEAR - 1)
+
+    report = report_for(store, years=(YEAR - 1, YEAR))
+
+    health = report.dataset(ADJ_FACTOR_DATASET)
+    assert health.fetch_age == AS_OF - FETCHED_AT
+    assert health.fetch_age != AS_OF - STALE_FETCHED_AT
+
+
+# --- a coverage record that no longer describes its partition is not read from -----------------
+
+
+def test_a_damaged_partition_withholds_the_counts_read_off_its_coverage_record(
+    tmp_path: Path,
+) -> None:
+    """`_subject_check` already refuses to compare a subject list taken from a record that no
+    longer describes the partition; the revision counts come off the same record and are now
+    withheld on the same rule.
+
+    The catalog's own numbers stay on `DatasetHealth`, reported without a verdict -- what is
+    withheld is the *finding*, because "this partition holds two versions of some rows" is a
+    claim about the partition and cannot be made from a record already known not to describe
+    it.
+    """
+    store = seed(
+        tmp_path, income=income_batch(duplicate=(SECURITIES[0],), revised=(SECURITIES[1],))
+    )
+    next((store.root / INCOME_DATASET / str(YEAR)).glob("*.parquet")).write_bytes(b"PAR")
+
+    report = report_for(store)
+
+    assert [
+        finding.datasets for finding in report.findings_with_code("partition_file_unreadable")
+    ] == [(INCOME_DATASET,)]
+    assert report.findings_with_code("duplicate_versions") == ()
+    assert report.findings_with_code("revised_rows") == ()
+    health = report.dataset(INCOME_DATASET)
+    assert health.revised_row_count == 1
+    assert health.revision_labels == (("0", 1), ("1", 3))
+
+
+def test_a_dataset_with_a_missing_year_is_withheld_from_the_composition_check(
+    tmp_path: Path,
+) -> None:
+    """`partition_missing` invalidates a dataset's subject list for the same reason
+    `coverage_stale` does: the records that survive describe part of what was asked about, and
+    a containment computed from a partial subject set is a claim the report cannot support.
+
+    Here `adj_factor` really is short a security *and* short a year, and only the year is
+    reported -- one defect, one line, and no composition verdict drawn from an incomplete
+    census. `years_by_dataset` is what lets the missing year sit on `adj_factor` alone, so
+    `daily`'s own record is intact and the comparison would otherwise be made.
+    """
+    store = seed(tmp_path, factors=factor_batch(securities=SECURITIES[:2]))
+
+    report = report_for(store, years_by_dataset={ADJ_FACTOR_DATASET: (YEAR - 1, YEAR)})
+
+    assert [finding.datasets[0] for finding in report.findings_with_code("partition_missing")] == [
+        ADJ_FACTOR_DATASET
+    ]
+    assert report.findings_with_code("subject_set_disagreement") == ()
 
 
 def test_a_coverage_record_that_no_longer_describes_the_partition_is_not_compared(

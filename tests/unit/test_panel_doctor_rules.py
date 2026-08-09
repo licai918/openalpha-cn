@@ -30,11 +30,13 @@ from openalpha_cn.domain.trading_calendar import (
 )
 from openalpha_cn.panel.catalog import READINESS_ISSUE_CODES, DatasetReadiness, ReadinessIssue
 from openalpha_cn.panel_doctor import (
+    BLOCKS_A_READ,
     DATASET_CADENCE,
     DOCTOR_ISSUE_CODES,
     FRESHNESS_PUBLICATION_SLACK,
     HEALTH_CATEGORIES,
     HEALTH_CODE_CATEGORY,
+    HEALTH_CODE_SEVERITY,
     HEALTH_SEVERITIES,
     KNOWN_PANEL_LIMITATIONS,
     PANEL_HEALTH_CODES,
@@ -468,6 +470,72 @@ def test_the_declared_severities_are_the_three_the_report_uses() -> None:
     assert frozenset({"blocking", "warning", "notice"}) == HEALTH_SEVERITIES
 
 
+def test_the_severity_of_every_declared_code_is_pinned_code_by_code() -> None:
+    """The table, written out.
+
+    Severity is what decides `PanelHealthReport.is_clean`, so a single entry quietly demoted
+    to `notice` is the one change to this module that turns a sick panel into a clean report
+    without failing anything else. Spelling the whole mapping out here means any such change
+    is a diff against this literal rather than a line nobody is looking at -- a per-code
+    assertion scattered across the injection tests would have left `close_disagreement` in
+    particular unpinned, because no test there asks what its severity is.
+    """
+    assert dict(HEALTH_CODE_SEVERITY) == {
+        # `evaluate_readiness`'s own verdict, carried through: the dataset cannot be read.
+        "no_years_requested": "blocking",
+        "empty_requirement": "blocking",
+        "not_yet_knowable": "blocking",
+        "partition_missing": "blocking",
+        "partition_file_missing": "blocking",
+        "partition_file_unreadable": "blocking",
+        "coverage_missing": "blocking",
+        "coverage_stale": "blocking",
+        "date_gap": "blocking",
+        "subject_missing": "blocking",
+        "field_missing": "blocking",
+        "stale": "blocking",
+        # Disagreement between two datasets, and the report saying it could not look.
+        "subject_set_disagreement": "warning",
+        "close_disagreement": "warning",
+        "return_path_disagreement": "warning",
+        "unexplained_unpriced": "warning",
+        "check_unavailable": "warning",
+        # Measured facts `V2-P1-011` showed to be ordinary on this corpus.
+        "ambiguous_filing": "notice",
+        "duplicate_versions": "notice",
+        "revised_rows": "notice",
+    }
+
+
+def test_every_declared_code_has_a_severity_and_no_code_has_two() -> None:
+    """Total over the closed set, so a code added to `DOCTOR_ISSUE_CODES` or upstream to
+    `READINESS_ISSUE_CODES` fails here rather than reaching `_finding` with no verdict."""
+    assert set(HEALTH_CODE_SEVERITY) == set(PANEL_HEALTH_CODES)
+    assert set(HEALTH_CODE_SEVERITY.values()) <= HEALTH_SEVERITIES
+
+
+def test_every_readiness_code_is_blocking_because_the_evaluator_already_said_so() -> None:
+    """The doctor does not re-judge a verdict it did not make: `evaluate_readiness` emits a
+    code only for a dataset it has decided cannot be read."""
+    assert {HEALTH_CODE_SEVERITY[code] for code in READINESS_ISSUE_CODES} == {"blocking"}
+
+
+def test_only_a_notice_is_excluded_from_the_verdict() -> None:
+    """`is_clean` is "no blocking and no warning". Stated here against the constant the
+    property reads, so that widening it to include `notice` -- which would make a panel with a
+    duplicate filing look sick -- or narrowing it to `blocking` alone -- which would make a
+    panel whose cross section cannot be adjusted look healthy -- fails a test."""
+    assert frozenset({"blocking", "warning"}) == BLOCKS_A_READ
+    assert BLOCKS_A_READ < HEALTH_SEVERITIES
+    assert frozenset({"notice"}) == HEALTH_SEVERITIES - BLOCKS_A_READ
+
+
+def test_a_readiness_issue_and_a_cross_dataset_finding_do_not_share_a_severity() -> None:
+    """The three severities are not decoration: at least one code sits in each, or the field
+    is a constant `V2-P1-013` would be branching on for nothing."""
+    assert set(HEALTH_CODE_SEVERITY.values()) == HEALTH_SEVERITIES
+
+
 # --- the edges of the derivation and of the report's accessors -------------------------------
 
 
@@ -495,6 +563,23 @@ def test_a_month_the_horizon_starts_inside_still_contributes_its_own_month_end()
 
     assert policy.max_staleness == timedelta(days=32) + FRESHNESS_PUBLICATION_SLACK
     assert policy.max_staleness != timedelta(days=31) + FRESHNESS_PUBLICATION_SLACK
+
+
+def test_the_month_the_horizon_ends_on_its_last_day_is_complete_and_counts() -> None:
+    """The other edge of the same filter, which the start-of-horizon test does not reach.
+
+    A month is dropped when its last calendar day is *past* the horizon, so a horizon ending
+    exactly on 30 June leaves June complete and June's month end in the census. Asserted on a
+    calendar where June carries the widest gap -- 2026-05-29 to 2026-06-30 is 32 days against
+    April-to-May's 29 -- so a filter that dropped the final month would answer 29 here rather
+    than shrugging.
+    """
+    ends_on_a_month_end = _weekday_calendar(first=date(2026, 4, 1), last=date(2026, 6, 30))
+
+    policy = freshness_policy("index_weight", calendar=ends_on_a_month_end)
+
+    assert policy.max_staleness == timedelta(days=32) + FRESHNESS_PUBLICATION_SLACK
+    assert policy.max_staleness != timedelta(days=29) + FRESHNESS_PUBLICATION_SLACK
 
 
 def test_a_finding_names_the_dataset_it_is_primarily_about() -> None:

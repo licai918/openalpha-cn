@@ -10,7 +10,7 @@ Every one of them is *called* here and none is reimplemented. What this module a
 four things none of them could do alone:
 
 1. **One contract for all of it.** A single closed code set, a category per code and a
-   severity per finding, so `V2-P1-013`'s gate can branch and `V2-P1-016`'s REST face can
+   severity per code, so `V2-P1-013`'s gate can branch and `V2-P1-016`'s REST face can
    serialise without either of them parsing prose.
 2. **Inherent limitation separated from this fetch's defect.** The registries describe what
    the dataset *structurally cannot* answer; the findings describe what went wrong *this
@@ -22,8 +22,10 @@ four things none of them could do alone:
    both directions, and `index_weight_requirement`'s docstring already records the shape:
    "a bound under about 35 days will refuse a completely healthy panel for most of every
    month, and one over a year hides a panel that stopped updating". A bound tight enough to
-   catch a `daily` panel that stopped on Tuesday is the first of those; a bound loose enough
-   for the statement datasets is the second.
+   catch a `daily` panel that stopped a fortnight ago is the first of those; a bound loose
+   enough for the statement datasets is the second. It is a *fortnight* and not a session:
+   see the warning under `_longest_closure` for what a real exchange calendar does to this
+   bound, and `date_gap` for the check that actually finds a hole the next morning.
 
 ## Why the freshness bounds are here at all, when every `*_requirement` refuses to choose one
 
@@ -64,7 +66,7 @@ Three of the four bounds are *derived or cited* rather than picked:
   event instant is in the future at any `as_of` inside the year and an event-clock bound is
   not merely unavailable but vacuous.
 
-## Severity, and why `revised` and `duplicate` are notices
+## Severity is a property of the code, and why `revised` and `duplicate` are notices
 
 `blocking` is exactly `evaluate_readiness`'s verdict: the dataset cannot be read.
 `warning` is a real inconsistency that does not block. `notice` is information the reader
@@ -73,18 +75,42 @@ information. `V2-P1-011` measured that 81.7% of `fina_indicator`'s keys carry mo
 row and that both rows of a corrected pair share every clock; a report that called that a
 defect would fire on every healthy financial partition, which is the failure mode this whole
 module exists to avoid. The counts are reported; the verdict is not raised.
+
+Severity is `HEALTH_CODE_SEVERITY`, a total function of the code, and not a decision taken at
+each emission site. Every emission site had exactly one answer anyway, so the table loses
+nothing; what it buys is that `V2-P1-013` can decide whether a code blocks it *without running
+a report*, and that a change of verdict for any code is a one-line diff against a table a test
+pins entry by entry rather than a severity argument somewhere in a 60-line function.
+
 `PanelHealthReport.is_clean` is "no blocking and no warning", so a notice never makes a
-healthy panel look sick.
+healthy panel look sick. That is a load-bearing property in both directions and both are
+pinned: a panel carrying only `revised_rows` / `duplicate_versions` / `ambiguous_filing` is
+clean, and a panel carrying a `close_disagreement` is not.
 
-## What the report cannot check, it says it could not check
+## What the report cannot check, it says it could not check -- and where each half says it
 
-`cross_checks` records every cross-dataset check by name with `ran` and, when it did not, why.
-This is the falsifiable half of the claim "this report covers missing / stale / duplicate /
-revised": silence from a check that never ran is otherwise indistinguishable from silence
-from one that passed. A blocked or damaged dataset makes the loads underneath a cross-check
-raise, and a doctor that propagated that would be a doctor that crashes precisely on the
-panels it exists for -- so each check is wrapped, the failure becomes a `check_unavailable`
-finding, and the rest of the report is still produced.
+`cross_checks` records every **cross-dataset** check by name with `ran` and, when it did not,
+why: silence from a check that never ran is otherwise indistinguishable from silence from one
+that passed. A blocked or damaged dataset makes the loads underneath a cross-check raise, and
+a doctor that propagated that would be a doctor that crashes precisely on the panels it exists
+for -- so each check is wrapped, the failure becomes a `check_unavailable` finding, and the
+rest of the report is still produced.
+
+`cross_checks` is only that half. The **per-dataset** checks that did not run are on
+`DatasetHealth.readiness.checks_waived`, which is `panel/catalog.py`'s own contract
+(`READINESS_WAIVABLE_CHECKS`) carried through untouched, and reading it is not optional for
+anyone drawing a conclusion from an empty `findings`. It is not a rare case. Of the fifteen
+datasets `DATASET_CADENCE` declares, exactly **three** carry a `required_dates` --
+`daily`, `daily_basic` and `stk_limit`, all three derived from the supplied calendar -- and
+the other twelve waive it structurally, each for its own recorded reason (`adj_factor` stores
+a compressed step function with no per-session expectation; the statement datasets would need
+the disclosure calendar of ~5,500 issuers; and so on). **`date_gap` can therefore only ever
+fire on those three.** A mid-corpus session missing from an `adj_factor` partition whose last
+session is still current produces zero findings, `is_clean is True`, and every cross-check
+ran -- the fact that the question was not asked is on `checks_waived` and nowhere else.
+`tests/integration/panel/test_panel_doctor.py` pins that hole as a known fact rather than
+leaving it to be rediscovered, and pins the three-of-fifteen split so that a dataset silently
+losing its date requirement fails a test here.
 
 ## Why this is a top-level module and not `panel/doctor.py`
 
@@ -149,7 +175,6 @@ from openalpha_cn.domain.name_history import NAMECHANGE_DATASET
 from openalpha_cn.domain.panel_batch import PanelBatchError
 from openalpha_cn.domain.price_limits import (
     KNOWN_SUSPENSION_LIMITATIONS,
-    MIN_EXPLAINED_SESSION_SHARE,
     PRICE_LIMIT_DATASET,
     PRICE_LIMIT_PANEL_COLUMNS,
     SUSPENSION_DATASET,
@@ -225,6 +250,11 @@ an inconsistency that does not stop a read. `notice` is a measured fact the repo
 for that is not a fault; see this module's docstring for why revision and duplication are
 notices on this corpus and what would break if they were not."""
 
+BLOCKS_A_READ: Final[frozenset[str]] = frozenset({"blocking", "warning"})
+"""The severities `PanelHealthReport.is_clean` counts. Stated once, here, rather than inline
+in the property: "is a notice excluded from the verdict?" is the question the whole notice
+severity exists to answer, and it should be answerable by reading one name."""
+
 READINESS_CODE_CATEGORY: Final[Mapping[str, HealthCategory]] = MappingProxyType(
     {
         "no_years_requested": "unanswerable",
@@ -290,6 +320,37 @@ HEALTH_CODE_CATEGORY: Final[Mapping[str, HealthCategory]] = MappingProxyType(
     {**READINESS_CODE_CATEGORY, **DOCTOR_CODE_CATEGORY}
 )
 
+HEALTH_CODE_SEVERITY: Final[Mapping[str, HealthSeverity]] = MappingProxyType(
+    {
+        **{code: "blocking" for code in sorted(READINESS_ISSUE_CODES)},
+        "subject_set_disagreement": "warning",
+        "close_disagreement": "warning",
+        "return_path_disagreement": "warning",
+        "unexplained_unpriced": "warning",
+        "check_unavailable": "warning",
+        "ambiguous_filing": "notice",
+        "duplicate_versions": "notice",
+        "revised_rows": "notice",
+    }
+)
+"""What each code means for `is_clean`, as a table rather than as an argument at each site.
+
+Every readiness code is `blocking` because that is exactly what `evaluate_readiness` decided
+by emitting it -- the doctor does not re-judge a verdict it did not make, and a table entry
+that disagreed with `DatasetReadiness.state` would be a second opinion nobody asked for.
+
+The three `notice` codes are the ones `V2-P1-011` measured to be ordinary on this corpus (see
+this module's docstring). Everything the doctor itself concludes about *disagreement between
+two datasets* is a `warning`, including `unexplained_unpriced`: a listed security with no bar
+and no halt to account for it is a hole in the cross section whichever share of the session it
+represents, and the write-time guard already refuses the shapes that are gross enough to see
+without a second dataset. `check_unavailable` is a `warning` and not a `notice` because "I
+could not look" must not read as "I looked and it was fine".
+
+Pinned entry by entry in `tests/unit/test_panel_doctor_rules.py`: severity is the field
+`V2-P1-013`'s gate branches on after `code`, and a silent demotion is the one change to this
+module that would make a sick panel report `is_clean`."""
+
 
 # --- publication cadence and the freshness bounds it implies ----------------------------------
 
@@ -351,7 +412,27 @@ class FreshnessPolicy:
 
 
 def _longest_closure(calendar: TradingCalendar) -> timedelta | None:
-    """The widest gap between two consecutive open sessions, or `None` for a single session."""
+    """The widest gap between two consecutive open sessions, or `None` for a single session.
+
+    ## What this is worth on a real calendar, which is less than it sounds
+
+    The whole span of the supplied calendar is searched, so on any calendar containing a Spring
+    Festival -- i.e. any real one covering a year -- the answer is that closure and not a
+    weekend: the SSE/SZSE recess runs 11 or 12 calendar days from the last session before it to
+    the first after, which with `FRESHNESS_PUBLICATION_SLACK` puts the daily bound at **12 to 13
+    days for the whole year**. A `daily` panel that stopped updating last Tuesday is therefore
+    *not* `stale` on this report, and will not be for a fortnight.
+
+    That is the correct direction for a bound whose cost is a printed line -- a tighter one
+    would call every healthy panel stale for a week after every Chinese New Year -- but it means
+    `stale` is not the check that finds a panel that stopped. `date_gap` is, and it fires the
+    next morning; the price-shaped datasets it can fire on are `daily`, `daily_basic` and
+    `stk_limit`. `adj_factor` is the gap: it is on the daily cadence, it waives `required_dates`,
+    and so a stop of under a fortnight in it is invisible to this report from both directions.
+    A caller who needs a tighter bound than the whole-year closure states one through
+    `panel_health_report`'s `freshness_overrides`, which records that it replaced the derived
+    number; a caller who wants the bound derived from a *recent* stretch of the calendar passes
+    a calendar covering only that stretch, since this reads whatever it is given."""
     days = calendar.trading_days
     if len(days) < 2:
         return None
@@ -687,7 +768,6 @@ def _finding(
     *,
     datasets: tuple[str, ...],
     detail: str,
-    severity: HealthSeverity,
     year: int | None = None,
     count: int = 0,
     dates: tuple[date, ...] = (),
@@ -695,7 +775,8 @@ def _finding(
     related_limitations: tuple[str, ...] = (),
 ) -> HealthFinding:
     category = HEALTH_CODE_CATEGORY.get(code)
-    if category is None:  # pragma: no cover - unreachable while the code set stays closed
+    severity = HEALTH_CODE_SEVERITY.get(code)
+    if category is None or severity is None:  # pragma: no cover - the code set is closed
         raise PanelDoctorError(f"{code!r} is not one of the declared health codes")
     return HealthFinding(
         code=code,
@@ -722,7 +803,6 @@ def findings_from_readiness(readiness: DatasetReadiness) -> tuple[HealthFinding,
             issue.code,
             datasets=(issue.dataset,),
             detail=issue.detail,
-            severity="blocking",
             year=issue.year,
             count=len(issue.missing_dates) + len(issue.missing_items),
             dates=issue.missing_dates,
@@ -751,7 +831,6 @@ def subject_containment_findings(
             _finding(
                 "subject_set_disagreement",
                 datasets=(rule.subset, rule.superset),
-                severity="warning",
                 detail=(
                     f"{len(absent)} subject(s) of {rule.subset} are absent from "
                     f"{rule.superset}: {rule.detail}"
@@ -838,8 +917,9 @@ class PanelHealthReport:
 
         Notices do not count: see this module's docstring for why revision and duplication
         counts are notices, and what a healthy financial partition would look like if they
-        were not."""
-        return not any(finding.severity in ("blocking", "warning") for finding in self.findings)
+        were not. `findings` can therefore be non-empty on a clean report, and a caller that
+        wants "did the doctor say anything at all" must ask `findings`, not this."""
+        return not any(finding.severity in BLOCKS_A_READ for finding in self.findings)
 
     @property
     def blocked_datasets(self) -> tuple[str, ...]:
@@ -886,9 +966,21 @@ _INVALIDATES_COVERAGE: Final[frozenset[str]] = frozenset(
 )
 """Readiness codes after which the stored coverage record does not describe what is on disk.
 
-A dataset carrying any of these is withheld from the cross-dataset composition check: its
-subject list is either absent or provably out of date, and comparing it against a live one
-would manufacture a disagreement that is really just the stale record."""
+A dataset carrying any of these is withheld from everything read off its coverage record --
+the cross-dataset composition check, and the `revised_rows` and `duplicate_versions` counts.
+Its subject list and its label census are either absent or provably out of date, and reporting
+either would manufacture a fact that is really just the stale record. One defect, one line: the
+`coverage_stale` finding says the record no longer describes the partition, and the counts read
+off that record are not then presented as measurements of the partition.
+
+**The reach of this is exactly the store's own write path.** `coverage_stale` is decided by
+comparing the catalog's record against the partition file's identity, so a partition replaced
+through `PanelStore.write_partition` without a matching catalog write is caught, and so is a
+deleted or truncated file. A partition file swapped underneath the catalog by anything that is
+not the store -- an `mv` of one valid Parquet file over another, or a hand-edited `row_count`
+in the catalog -- is not caught here and cannot be: nothing re-reads the partition to
+corroborate the record. That is `panel/catalog.py`'s boundary rather than this module's, but a
+reader of this table has to know it is a write-path guarantee and not a filesystem one."""
 
 
 def _requirement_for(
@@ -1060,7 +1152,14 @@ def dataset_health(
     freshness: FreshnessPolicy | None = None,
     date_timezone: str = DEFAULT_DATE_TIMEZONE,
 ) -> DatasetHealth:
-    """Assess one dataset: readiness against its own requirement, plus the catalog's counts."""
+    """Assess one dataset: readiness against its own requirement, plus the catalog's counts.
+
+    `revised_row_count` and `revision_labels` are always the catalog's own numbers, reported
+    without a verdict. The two *findings* they would otherwise raise are withheld when
+    readiness says the record no longer describes the partition (`_INVALIDATES_COVERAGE`),
+    which is the same rule `_subject_check` applies to the subject list off the same record --
+    "this partition holds two versions of some rows" is a claim about the partition, and it
+    cannot be made from a record already known not to describe it."""
     policy = freshness or freshness_policy(dataset, calendar=calendar)
     requested = tuple(sorted(set(years)))
     requirement, note = _requirement_for(
@@ -1079,7 +1178,6 @@ def dataset_health(
             _finding(
                 "check_unavailable",
                 datasets=(dataset,),
-                severity="warning",
                 detail=f"{dataset}: {note}",
             )
         )
@@ -1092,13 +1190,15 @@ def dataset_health(
             labels[entry.label] = labels.get(entry.label, 0) + entry.row_count
     census = tuple(sorted(labels.items()))
     fetched = [record.fetched_at for record in records]
+    describes_the_partition = not (
+        {issue.code for issue in readiness.issues} & _INVALIDATES_COVERAGE
+    )
 
-    if revised:
+    if revised and describes_the_partition:
         findings.append(
             _finding(
                 "revised_rows",
                 datasets=(dataset,),
-                severity="notice",
                 detail=(
                     f"{revised} stored row(s) of {dataset} carry a revision_time after the "
                     "instant they became available, so an earlier read of them answered "
@@ -1107,12 +1207,11 @@ def dataset_health(
                 count=revised,
             )
         )
-    if len(census) > 1:
+    if len(census) > 1 and describes_the_partition:
         findings.append(
             _finding(
                 "duplicate_versions",
                 datasets=(dataset,),
-                severity="notice",
                 detail=(
                     f"{dataset} stores {len(census)} distinct revision labels "
                     f"({', '.join(f'{label}: {count}' for label, count in census)}), so more "
@@ -1234,7 +1333,6 @@ def _close_check(
                     _finding(
                         "close_disagreement",
                         datasets=(DAILY_DATASET, DAILY_BASIC_DATASET),
-                        severity="warning",
                         detail=(
                             f"{len(disagreements)} security(ies) on {day.isoformat()} have a "
                             "daily_basic close that daily does not corroborate; the two "
@@ -1261,20 +1359,52 @@ def _unpriced_check(
     days: Sequence[date],
     calendar: TradingCalendar,
     as_of: datetime,
-    years: Sequence[int],
+    years: Mapping[str, tuple[int, ...]],
     bounds: Mapping[str, timedelta | None],
 ) -> tuple[tuple[HealthFinding, ...], CrossCheckOutcome]:
+    """Which listed securities had no bar, and whether a halt accounts for each one.
+
+    ## Why every finding here is a `warning` and none is a `notice`
+
+    An earlier cut graded this by the share of the day's listed names that bars and halts
+    together cover, against `price_limits.MIN_EXPLAINED_SESSION_SHARE`. That constant does not
+    mean what this ratio means. It is calibrated -- over 8,690 sessions -- as
+    `(bars + halts) / the +/-20-session rolling median of the same quantity`: a measure of
+    whether *this* session is thin **relative to its neighbours**, which is why it can exceed
+    1.0 and why a market that grew inside a year does not trip it. The ratio here is
+    `(priced + halted) / names listed that day`, an absolute coverage figure bounded by 1.0.
+    Two different quantities cannot share one threshold, and reusing it graded three silently
+    unpriced names out of twenty -- 15% of a cross section, gone with nothing to account for
+    it -- as a `notice`, on a report that then called itself clean.
+
+    So the threshold is gone rather than re-derived, and the argument for having none is the
+    write-time guard's own: `panel_ingest._refuse_unexplained_thin_sessions` already refuses
+    the sessions that are thin against their neighbours. What survives that guard and still
+    has an unexplained missing bar is, by construction, a gap the relative measure could not
+    see -- a systematic one, present on the neighbours too. That is precisely the shape this
+    report exists to name, so it is a `warning` at any share, and `share` stays in the detail
+    as the reported figure rather than as a verdict.
+    """
     involved = (DAILY_DATASET, ADJ_FACTOR_DATASET, STOCK_BASIC_DATASET, SUSPENSION_DATASET)
     findings: list[HealthFinding] = []
     try:
         universe = load_stock_universe(
-            store, years=years, as_of=as_of, max_staleness=bounds.get(STOCK_BASIC_DATASET)
+            store,
+            years=years[STOCK_BASIC_DATASET],
+            as_of=as_of,
+            max_staleness=bounds.get(STOCK_BASIC_DATASET),
         )
         histories = load_adjustment_histories(
-            store, years=years, as_of=as_of, max_staleness=bounds.get(ADJ_FACTOR_DATASET)
+            store,
+            years=years[ADJ_FACTOR_DATASET],
+            as_of=as_of,
+            max_staleness=bounds.get(ADJ_FACTOR_DATASET),
         )
         halts = load_suspensions(
-            store, years=years, as_of=as_of, max_staleness=bounds.get(SUSPENSION_DATASET)
+            store,
+            years=years[SUSPENSION_DATASET],
+            as_of=as_of,
+            max_staleness=bounds.get(SUSPENSION_DATASET),
         )
         for day in days:
             bars = load_daily_bars(
@@ -1300,13 +1430,11 @@ def _unpriced_check(
                 _finding(
                     "unexplained_unpriced",
                     datasets=(DAILY_DATASET, SUSPENSION_DATASET),
-                    severity="warning" if share < MIN_EXPLAINED_SESSION_SHARE else "notice",
                     detail=(
                         f"{len(explained.unexplained)} listed security(ies) had no bar on "
                         f"{day.isoformat()} and no whole-day halt to account for it; bars and "
-                        f"halts together cover {share:.1%} of the {listed} listed "
-                        f"(the measured floor a session is judged short at is "
-                        f"{MIN_EXPLAINED_SESSION_SHARE:.0%})"
+                        f"halts together cover {share:.1%} of the {listed} name(s) listed on "
+                        "that session"
                     ),
                     count=len(explained.unexplained),
                     dates=(day,),
@@ -1330,7 +1458,7 @@ def _return_path_check(
     days: Sequence[date],
     calendar: TradingCalendar,
     as_of: datetime,
-    years: Sequence[int],
+    years: Mapping[str, tuple[int, ...]],
     bounds: Mapping[str, timedelta | None],
 ) -> tuple[tuple[HealthFinding, ...], CrossCheckOutcome]:
     """Recompute each session's return on both correct paths and report where they part.
@@ -1342,7 +1470,10 @@ def _return_path_check(
     findings: list[HealthFinding] = []
     try:
         histories = load_adjustment_histories(
-            store, years=years, as_of=as_of, max_staleness=bounds.get(ADJ_FACTOR_DATASET)
+            store,
+            years=years[ADJ_FACTOR_DATASET],
+            as_of=as_of,
+            max_staleness=bounds.get(ADJ_FACTOR_DATASET),
         )
         for day in days:
             previous_day = calendar.previous_trading_day(day)
@@ -1377,7 +1508,6 @@ def _return_path_check(
                         _finding(
                             "return_path_disagreement",
                             datasets=(DAILY_DATASET, ADJ_FACTOR_DATASET),
-                            severity="warning",
                             detail=(
                                 f"{ts_code} on {day.isoformat()}: the published return and the "
                                 f"factor-adjusted one cannot both be computed -- {error}"
@@ -1402,16 +1532,22 @@ def _ambiguity_check(
     *,
     datasets: Sequence[str],
     as_of: datetime,
-    years: Sequence[int],
+    years: Mapping[str, tuple[int, ...]],
     bounds: Mapping[str, timedelta | None],
 ) -> tuple[tuple[HealthFinding, ...], CrossCheckOutcome]:
+    """Count the filings of each statement dataset that carry more than one surviving version.
+
+    Every dataset in `datasets` is visited, and each is read over **its own** announcement
+    years. Four statement datasets are four separate endpoints with four separate partition
+    sets, and `years_by_dataset` exists precisely so a caller can ask `cashflow` about a range
+    `income` was not fetched for."""
     findings: list[HealthFinding] = []
     try:
         for dataset in datasets:
             histories = load_statement_histories(
                 store,
                 dataset=dataset,
-                years=years,
+                years=years[dataset],
                 as_of=as_of,
                 max_staleness=bounds.get(dataset),
             )
@@ -1425,7 +1561,6 @@ def _ambiguity_check(
                 _finding(
                     "ambiguous_filing",
                     datasets=(dataset,),
-                    severity="notice",
                     detail=(
                         f"{summary.ambiguous_filings} of {summary.filings} stored "
                         f"{dataset} filing(s) carry more than one surviving version, so a read "
@@ -1458,7 +1593,6 @@ def _unavailable(
     finding = _finding(
         "check_unavailable",
         datasets=datasets,
-        severity="warning",
         detail=f"the {name} cross-check could not run: {reason}",
     )
     return (finding,), CrossCheckOutcome(
@@ -1486,6 +1620,13 @@ def panel_health_report(
     `store.registered_years(...)` would make `partition_missing` unreachable by construction,
     which is the fail-open `load_stock_universe`'s docstring names for the same reason.
 
+    An override in `years_by_dataset` follows the dataset **everywhere**, including into the
+    cross-dataset checks -- `_unpriced_check` reads `suspend_d` over `suspend_d`'s years and
+    `stock_basic` over `stock_basic`'s, not over `daily`'s. The resolved mapping is built once,
+    below, and passed down; a cross-check taking a bare year tuple would silently read one
+    dataset through another's window, and the resulting "no halt explains this missing bar"
+    would be an artefact of the report rather than a fact about the panel.
+
     `cross_section_days` names the sessions the day-level cross-checks run on. They are not
     inferred, because "check every session" is a whole-corpus scan and "check the last one" is
     a guess about what the caller cares about.
@@ -1502,6 +1643,9 @@ def panel_health_report(
     requested = tuple(dict.fromkeys(datasets))
     per_dataset_years = dict(years_by_dataset or {})
     overrides = dict(freshness_overrides or {})
+    years_for: dict[str, tuple[int, ...]] = {
+        name: tuple(per_dataset_years.get(name, years)) for name in requested
+    }
 
     healths: list[DatasetHealth] = []
     for name in requested:
@@ -1517,7 +1661,7 @@ def panel_health_report(
                 store,
                 dataset=name,
                 as_of=as_of,
-                years=per_dataset_years.get(name, years),
+                years=years_for[name],
                 calendar=calendar,
                 index_codes=index_codes,
                 freshness=policy,
@@ -1535,7 +1679,6 @@ def panel_health_report(
 
     in_scope = set(requested)
     days = tuple(cross_section_days)
-    price_years = tuple(per_dataset_years.get(DAILY_DATASET, years))
 
     if days and calendar is not None and {DAILY_DATASET, DAILY_BASIC_DATASET} <= in_scope:
         findings, outcome = _close_check(
@@ -1554,7 +1697,7 @@ def panel_health_report(
             days=days,
             calendar=calendar,
             as_of=as_of,
-            years=price_years,
+            years=years_for,
             bounds=bounds,
         )
         cross_findings.extend(findings)
@@ -1566,7 +1709,7 @@ def panel_health_report(
             days=days,
             calendar=calendar,
             as_of=as_of,
-            years=price_years,
+            years=years_for,
             bounds=bounds,
         )
         cross_findings.extend(findings)
@@ -1578,7 +1721,7 @@ def panel_health_report(
             store,
             datasets=statement_datasets,
             as_of=as_of,
-            years=tuple(per_dataset_years.get(statement_datasets[0], years)),
+            years=years_for,
             bounds=bounds,
         )
         cross_findings.extend(findings)
