@@ -267,6 +267,22 @@ report an invented `date_gap` on a panel that is completely up to date. `daily_r
 clamps at `_sessions_published_through()` instead, which reads the same
 `DAILY_AVAILABILITY_TIME` the provider dates `available_time` at.
 
+## Three series in one partition (`V2-P1-009`)
+
+`write_index_weights()` is the second writer here whose partition holds several independent
+series at once, and it inherits `write_trading_calendar()`'s problem exactly: the key is
+`(dataset, year)` with no index dimension, so 沪深300, 中证500 and 中证1000 share a year and a
+per-index backfill loop would leave only the index it wrote last. `_refuse_to_drop_stored_
+subjects` is the same answer, and it works for the same reason -- the thing that would go
+missing is what the `subject` column holds.
+
+What is *not* here is a write-time census, and that is a deliberate difference from
+`write_adjustment_factors()`. That one checks its year against a calendar because compression
+is about to destroy the evidence; nothing is compressed here, so the month census survives into
+the stored rows and `domain/index_membership.py::build_index_membership` re-derives it on every
+read. `index_weight_requirement()` waives `required_dates` on the strength of that, and states
+why the substitute is stronger rather than merely equivalent.
+
 ## Deriving the partition year
 
 `year` remains a required keyword argument of `write_panel_batch()`. What has changed is that
@@ -313,6 +329,13 @@ from openalpha_cn.domain.daily_prices import (
     close_disagreements,
     daily_bars_from_panel_rows,
     daily_valuations_from_panel_rows,
+)
+from openalpha_cn.domain.index_membership import (
+    INDEX_WEIGHT_DATASET,
+    INDEX_WEIGHT_PANEL_COLUMNS,
+    IndexMembership,
+    IndexMembershipError,
+    index_memberships_from_panel_rows,
 )
 from openalpha_cn.domain.name_history import (
     NAME_HISTORY_PANEL_COLUMNS,
@@ -2431,6 +2454,166 @@ def load_price_limits(
         store, requirement, PRICE_LIMIT_PANEL_COLUMNS, day=day, calendar=calendar, as_of=as_of
     )
     return price_limits_from_panel_rows(rows)
+
+
+def write_index_weights(
+    store: PanelStore,
+    batches: Sequence[ColumnarPanelBatch],
+    *,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> PartitionRef:
+    """Write one year of index constituent weights as a partition (`V2-P1-009`).
+
+    A sequence of batches for `write_adjustment_factors`' reason and one step further out: a
+    request here is one *index* for one *calendar month*, so a full year of the three indices
+    `V2-P1-009` names is 36 fetches feeding one partition, and `PanelStore.write_partition`
+    replaces a partition whole rather than appending to it.
+
+    ## The subject guard is this dataset's `exchange` problem, and it is the same one
+
+    The partition key is `(dataset, year)` with no index dimension. A partition can therefore
+    hold 沪深300, 中证500 and 中证1000 together -- the `subject` column separates them and
+    `load_index_membership` filters on it -- but only if **one write carries all three**. A
+    plain `for index_code in INDEX_WEIGHT_INDEX_CODES: write_index_weights(...)` backfill would
+    leave the year holding whichever index it wrote last, silently and with a success return.
+    That is exactly what `V2-P1-004` hit with SSE and SZSE, and it gets the same answer:
+    `_refuse_to_drop_stored_subjects` blocks a batch whose indices do not cover the ones the
+    stored partition already has.
+
+    The guard works because the **index** is what the subject column holds. Reading the
+    constituent out of it instead would trip this check too, today, and only by coincidence --
+    these three indices are disjoint by construction, so a second index's constituents happen to
+    be a disjoint set. It would then fire on every ordinary rebalance (a June review replaces 50
+    names in 中证500) while missing an index that was genuinely dropped by a batch whose
+    constituents happened to cover it.
+
+    ## No month census here, because the read has a better one
+
+    `write_adjustment_factors` checks its year against a calendar because compression is about
+    to destroy the evidence. Nothing is compressed here: publications *are* the stored rows, so
+    the month census survives into the catalog and into every read.
+    `domain/index_membership.py::build_index_membership` refuses a gap in the month sequence
+    and a doubled month on **every** load, including of a partition this process never wrote,
+    and a partition that is short at either end narrows `covered_from`/`covered_through` so the
+    days it cannot answer are refused by name. Adding a write-time copy of a check that already
+    runs on every read would buy nothing and would need a calendar this function does not take.
+    """
+    merged = merge_panel_batches(batches)
+    if merged.dataset != INDEX_WEIGHT_DATASET:
+        raise PanelBatchError(
+            f"expected the {INDEX_WEIGHT_DATASET!r} dataset, got {merged.dataset!r}"
+        )
+    year = panel_partition_year(merged, date_timezone=date_timezone)
+    _refuse_to_drop_stored_subjects(
+        store,
+        merged,
+        year,
+        remedy=(
+            "A year's partition is replaced whole and its key has no index dimension, so every "
+            "index that year holds has to arrive in one call or not at all"
+        ),
+    )
+    return write_panel_batch(store, merged, year=year, date_timezone=date_timezone)
+
+
+def index_weight_requirement(
+    *, index_code: str, years: Sequence[int], as_of: datetime, max_staleness: timedelta | None
+) -> ReadinessRequirement:
+    """What the index-weight panel must satisfy before a membership may be read from it.
+
+    `required_dates` is **waived**, and the waiver is paid for rather than written off.
+
+    Stating it would mean naming the last open session of each month, which this function would
+    have to derive from a `TradingCalendar` it does not take -- and pointing
+    `panel_readiness_requirement` at this dataset would be actively wrong, because it requires
+    *every* open session and this one publishes on twelve of them a year. The substitute is
+    `build_index_membership`'s month rule, and it is not weaker in the way a waiver usually is:
+
+    - It runs on **every read**, including of a partition written before it existed, which is
+      the residue a write-time census cannot close.
+    - It sees a hole that straddles two partitions, because a load concatenates the years first.
+    - It needs no calendar, so it cannot inherit a calendar's own horizon.
+    - A partition short at either end is caught by the horizon instead: `covered_from` and
+      `covered_through` move with the rows actually read, and every day outside them raises
+      `IndexMembershipHorizonError` rather than being answered from the nearest publication.
+
+    `required_subjects` is **not** waived: it is the index, and it is the one thing a caller
+    always knows. That is what turns "this year holds 沪深300 but not 中证1000" into a blocked
+    read with a `subject_missing` code rather than an empty membership.
+
+    `max_staleness` has no default, for `stock_universe_requirement`'s reason: this dataset
+    publishes monthly, so a bound under about 35 days will refuse a completely healthy panel for
+    most of every month, and one over a year hides a panel that stopped updating. There is no
+    value this function could choose that would not be choosing for the caller.
+    """
+    return ReadinessRequirement(
+        dataset=INDEX_WEIGHT_DATASET,
+        as_of=as_of,
+        years=tuple(sorted(set(years))),
+        required_dates=None,
+        required_subjects=(index_code,),
+        required_fields=INDEX_WEIGHT_PANEL_COLUMNS,
+        max_staleness=max_staleness,
+    )
+
+
+def load_index_membership(
+    store: PanelStore,
+    *,
+    index_code: str,
+    years: Sequence[int],
+    as_of: datetime,
+    max_staleness: timedelta | None,
+) -> IndexMembership:
+    """Read one index's stored publications back as an `IndexMembership`, or refuse to.
+
+    Fail-closed three times over, which is `load_trading_calendar`'s shape with one more layer.
+    A year whose partition is missing, damaged, unprofiled, stale or described by an out-of-date
+    coverage record is blocked by `read_if_ready()` and reported by its structured issue codes.
+    A partition that holds the year but not this index is blocked by the same call, on
+    `subject_missing`, because the requirement names the index. And a set of rows with a month
+    missing in the middle -- or a publication whose weights do not add up, which is what a
+    response truncated mid-publication looks like -- is refused afterwards by
+    `index_memberships_from_panel_rows`.
+
+    One index per call rather than all three at once. A membership is per index by construction
+    (`build_index_membership` refuses a foreign publication), and a caller wanting the set
+    composes the calls -- which also keeps the blocked-year error naming the index it is about.
+    """
+    requested = tuple(sorted(set(years)))
+    if not requested:
+        raise IndexMembershipError(
+            f"load_index_membership needs at least one year; a read of no years would produce a "
+            f"membership for {index_code} that refuses every question, which is "
+            "indistinguishable from a failed read"
+        )
+    requirement = index_weight_requirement(
+        index_code=index_code, years=requested, as_of=as_of, max_staleness=max_staleness
+    )
+    rows: list[tuple[object, ...]] = []
+    for year in requested:
+        outcome = store.read_if_ready(
+            requirement,
+            year=year,
+            columns=INDEX_WEIGHT_PANEL_COLUMNS,
+            filters={SUBJECT_COLUMN_NAME: index_code},
+        )
+        if outcome.is_blocked:
+            raise PanelStorageError(
+                f"{index_code}'s composition cannot be read at {as_of.isoformat()}: "
+                f"{[issue.code for issue in outcome.readiness.issues]}; "
+                f"{'; '.join(issue.detail for issue in outcome.readiness.issues)}"
+            )
+        rows.extend(outcome.rows)
+    memberships = index_memberships_from_panel_rows(rows)
+    membership = memberships.get(index_code)
+    if membership is None:
+        raise IndexMembershipError(
+            f"the {sorted(requested)} partitions hold no {index_code} publication; a subject "
+            "filter that matched nothing is a read that found nothing, not an index with no "
+            "constituents"
+        )
+    return membership
 
 
 def panel_readiness_requirement(

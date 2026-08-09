@@ -31,6 +31,7 @@ from typing import Any
 import pytest
 
 from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET
+from openalpha_cn.domain.index_membership import INDEX_WEIGHT_DATASET
 from openalpha_cn.domain.panel_batch import MAX_SOURCE_URI_LENGTH, PanelBatchError
 from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET
 from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET
@@ -197,6 +198,14 @@ def test_every_descriptor_states_whether_its_response_cap_was_measured() -> None
     because one session of either fits: `stk_limit` returns exactly 7,800 rows with
     `has_more=True` for `20260701..20260807` and `suspend_d` exactly 5,000 for
     `20150601..20150831`, and `limit=8000` / `10000` / `12000` raise neither. They are the two
+    `V2-P1-009` added `index_weight` at **7,000**, measured on 2026-08-09 with a whole-year
+    window because one publication (300, 500 or 1,000 rows) fits many times over:
+    `index_weight(000852.SH, 20230101..20231231)` should hold 12,000 rows and returns exactly
+    7,000 with `has_more=True`. It is the one endpoint here where `limit` moves nothing in
+    *either* direction -- `limit=5000` also returns 7,000 -- so the ceiling is entirely the
+    server's. Its headroom is also the only one not on the market's clock: what would have to
+    grow is an index's constituent count, which its own definition fixes.
+
     largest caps here and the two furthest apart in headroom: `stk_limit`'s whole-market cross
     section was 7,733 rows on 2026-08-07 (67 spare, growing ~+500/year), `suspend_d`'s worst
     measured session 1,466.
@@ -211,6 +220,7 @@ def test_every_descriptor_states_whether_its_response_cap_was_measured() -> None
         "daily_basic": 6000,
         "suspend_d": 5000,
         "stk_limit": 7800,
+        "index_weight": 7000,
     }
 
 
@@ -230,9 +240,23 @@ def test_the_flag_is_demanded_exactly_where_it_is_the_only_witness_or_the_stakes
     the stakes are `adj_factor`'s, not `daily`'s. `suspend_d` does not, because every consumer
     uses a halt to *excuse* a missing bar, so a truncated response raises more alarms rather
     than fewer.
+
+    `V2-P1-009`'s `index_weight` is the fourth, and it is the first to demand the flag while
+    *also* having an independent second witness one layer up. The cap can split a publication
+    rather than only dropping whole ones -- the oldest date of a capped response was measured
+    carrying 100 of its 300 constituents -- and a publication missing two thirds of its members
+    is a different index rather than a short one. `domain/index_membership.py` would catch that
+    particular shape through the weight-sum tolerance, and the flag is demanded anyway because
+    the checksum cannot see a truncation that lands on a publication boundary: that one drops
+    whole months and leaves every surviving publication summing perfectly.
     """
     demanded = {entry.dataset for entry in TUSHARE_DATASETS if entry.requires_truncation_flag}
-    assert demanded == {ADJ_FACTOR_DATASET, STOCK_BASIC_DATASET, PRICE_LIMIT_DATASET}
+    assert demanded == {
+        ADJ_FACTOR_DATASET,
+        STOCK_BASIC_DATASET,
+        PRICE_LIMIT_DATASET,
+        INDEX_WEIGHT_DATASET,
+    }
 
     capless_and_unflagged = {
         entry.dataset

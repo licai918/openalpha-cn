@@ -174,7 +174,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from enum import StrEnum
 from math import isfinite
 from typing import Any, Final, Protocol, cast
@@ -197,6 +197,13 @@ from openalpha_cn.domain.daily_prices import (
     DAILY_PRICE_COLUMNS,
     PRICE_DATE_COLUMN,
     SESSION_CLOSE_TIME,
+)
+from openalpha_cn.domain.index_membership import (
+    INDEX_CONSTITUENT_COLUMN,
+    INDEX_PUBLICATION_DATE_COLUMN,
+    INDEX_WEIGHT_COLUMN,
+    INDEX_WEIGHT_DATASET,
+    TOTAL_PUBLISHED_WEIGHT,
 )
 from openalpha_cn.domain.name_history import (
     NAME_ANNOUNCEMENT_COLUMN,
@@ -554,6 +561,55 @@ def _namechange_params(request: ProviderRequest) -> dict[str, str]:
     return {"start_date": f"{year}0101", "end_date": f"{year}1231"}
 
 
+def _index_weight_params(request: ProviderRequest) -> dict[str, str]:
+    """Request one index's publication for one calendar month: `{index_code, start_date,
+    end_date}`.
+
+    Two measurements shape this, both from a live probe on 2026-08-09.
+
+    **One index per request, because the endpoint gives nothing else.**
+    `index_code="000300.SH,000905.SH"` returns **zero** rows -- not the union, and not an error.
+    Comma-joining would therefore turn a two-index request into an empty `no_data` batch that
+    reads as "the publisher has not published this month". `_trade_cal_params` refuses more than
+    one subject for the same reason; unlike that one, this descriptor has no default to fall
+    back to, because a bare `index_weight` request is not "the market" and there is nothing to
+    measure a default against. A missing subject is refused too.
+
+    **One calendar month per request, because that is exactly one publication.** The endpoint
+    publishes on the last open session of each month: 633 publications across the three indices
+    of `V2-P1-009` fall on 633 distinct months, no month inside an index's life carries none and
+    no month carries two, and all 633 are the last open SSE session of their month. So a month
+    window maps one-to-one onto a publication without the caller having to derive the month-end
+    session from a calendar first. It is also comfortably inside the 7,000-row cap: the largest
+    publication is 1,000 rows.
+
+    The month is `as_of`'s month *in Asia/Shanghai*: 2024-12-31 17:00Z is already January in
+    Shanghai, and asking UTC would fetch the wrong month for every late-evening request on a
+    month boundary. `_trade_cal_params` and `_namechange_params` take the same care.
+    """
+    if len(request.subjects) != 1:
+        raise ProviderFailure(
+            provider_id=_PROVIDER_ID,
+            category="configuration",
+            message=(
+                f"{INDEX_WEIGHT_DATASET} serves one index per request and the endpoint returns "
+                f"zero rows for a comma-joined index_code; got {list(request.subjects)}"
+            ),
+            retryable=False,
+        )
+    local_date = request.as_of.astimezone(_CHINA_TZ).date()
+    first = local_date.replace(day=1)
+    # The 28th of any month plus four days always lands in the next month; taking that month's
+    # first day back one day is the current month's last, without a table of month lengths and
+    # without a leap-year branch.
+    last = (first.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+    return {
+        "index_code": request.subjects[0],
+        "start_date": f"{first:%Y%m%d}",
+        "end_date": f"{last:%Y%m%d}",
+    }
+
+
 def _stock_lifecycle_panel_rows(row: dict[str, Any]) -> tuple[dict[str, Any], ...]:
     """Split one registry row into its lifecycle events: a listing, and maybe a delisting.
 
@@ -721,6 +777,37 @@ def _lower_limit_price(value: object) -> object:
     raise ValueError(f"must be a finite non-negative number, got {type(value).__name__} {value!r}")
 
 
+def _constituent_weight(value: object) -> object:
+    """Parse a published index weight into a real, usable `float`.
+
+    The published unit is a **percentage** -- 5.19 means 5.19% and a publication's column sums
+    to about 100 -- so the accepted range is `(0, 100]`. Four refusals, each of which would
+    otherwise be silent:
+
+    - **Zero.** 336,298 constituent rows across 633 publications carry a weight between 0.007
+      and 7.745 and not one zero, so a zero is a fault -- and the dangerous kind: it leaves the
+      security in the membership while removing it from every weighted sum, which is a
+      difference no downstream check can see.
+    - **Negative and non-finite.** Neither is a share of anything.
+    - **Over 100.** No constituent is worth more than the whole index.
+    - **`bool`.** `isinstance(True, int)` is `True`, so any check written against the numeric
+      tower admits it and it lands as a 1% weight. `type(value) is int` refuses it, which is the
+      same rule `_finite_number` applies for the same reason.
+
+    An `int` is accepted and widened, for `_adjustment_factor`'s reason: JSON has one number
+    type, so a weight of exactly 1 can arrive as `1`, and `PanelColumn` refuses an `int` in a
+    `float` column.
+    """
+    if type(value) is float or type(value) is int:
+        number = float(value)
+        if isfinite(number) and 0.0 < number <= TOTAL_PUBLISHED_WEIGHT:
+            return number
+    raise ValueError(
+        f"{INDEX_WEIGHT_COLUMN} must be a finite number in (0, {TOTAL_PUBLISHED_WEIGHT}], got "
+        f"{type(value).__name__} {value!r}"
+    )
+
+
 def _named_parser(column: str, parse: Callable[[object], object]) -> Callable[[object], object]:
     """Wrap a parse so its failure names the column it was applied to.
 
@@ -840,6 +927,29 @@ TUSHARE_SUSPEND_ROW_CAP: Final[int] = 5000
 `limit=6000` / `8000` / `10000` / `12000` do not raise it. Unlike `stk_limit` this one has room:
 one session of the whole market is 28 rows on an ordinary day and 1,466 on the worst measured
 one (2015-07-09, the week a large part of the market halted at once), or 29% of the cap.
+"""
+
+
+TUSHARE_INDEX_WEIGHT_ROW_CAP: Final[int] = 7000
+"""Rows per response for `index_weight`, measured on 2026-08-09 -- and the one `limit` ignores.
+
+`index_weight(000852.SH, start_date=20230101, end_date=20231231)` should hold 12,000 rows
+(12 monthly publications of 1,000 constituents) and returns exactly **7,000** with
+`has_more=True`. Widening the window does not change it: `20200101..20231231` returns the same
+7,000. Neither does narrowing or raising `limit` -- `limit=5000`, `8000`, `10000`, `12000` and
+`20000` all return exactly 7,000, so unlike every other row in this table this endpoint appears
+to ignore the parameter in both directions and the ceiling is entirely its own.
+
+The cap drops the **oldest** rows and can split a publication rather than only dropping whole
+ones: `index_weight(000300.SH, 20100101..20231231)` returns 7,000 rows over 24 dates whose
+oldest, 2022-01-28, carries 100 of its 300 names.
+
+**The headroom is the widest in this table and it is not on the market's clock.** One
+publication is 300, 500 or 1,000 rows, so a month window uses at most a seventh of the cap, and
+what would have to grow for that to bind is an index's *constituent count* -- set by the index's
+own definition, and unchanged for 000905.SH across all 235 of its publications and for
+000852.SH across all 142. `stk_limit`'s 67 spare rows and `daily`'s 465 are whole-market cross
+sections that grow with every listing; this one is not.
 """
 
 
@@ -1215,6 +1325,69 @@ TUSHARE_DATASETS: tuple[TushareDatasetDescriptor, ...] = (
         # witness is about to stop having any margin at all.
         requires_truncation_flag=True,
         panel_columns=tuple(_price_limit_panel_column(name) for name in PRICE_LIMIT_DATA_COLUMNS),
+    ),
+    TushareDatasetDescriptor(
+        dataset=INDEX_WEIGHT_DATASET,
+        kind=INDEX_WEIGHT_DATASET,
+        # The **index**, not the constituent. `PanelStore`'s key is `(dataset, year)` with no
+        # index dimension, so three indices sharing a year are told apart by this column alone
+        # and `panel_ingest._refuse_to_drop_stored_subjects` compares exactly it -- see
+        # `domain/index_membership.py::INDEX_WEIGHT_PANEL_COLUMNS`.
+        subject_field="index_code",
+        date_field="trade_date",
+        # The snapshot is computed from that session's close, so it cannot exist before 16:30.
+        # It is the *earliest* honest instant rather than a measured one: the response carries
+        # no announcement column, so if the publisher releases the file the next morning this is
+        # up to one session early. Stated rather than argued away in
+        # `domain/index_membership.py::KNOWN_INDEX_MEMBERSHIP_LIMITATIONS`.
+        clock=ClockStrategy.daily_close,
+        params_builder=_index_weight_params,
+        # `""` asks for the endpoint's defaults, which are exactly the four columns below --
+        # measured, not assumed. `required_response_fields` then pins every one of them.
+        response_fields="",
+        required_response_fields=(
+            "index_code",
+            INDEX_CONSTITUENT_COLUMN,
+            "trade_date",
+            INDEX_WEIGHT_COLUMN,
+        ),
+        source_uri_template="tushare://{dataset}/{subject}/{date}",
+        max_rows_per_response=TUSHARE_INDEX_WEIGHT_ROW_CAP,
+        # Demanded, which makes this the fourth descriptor to do so. `daily`'s argument -- a
+        # dropped row is an absence nothing interpolates -- does not transfer, because the cap
+        # here can truncate a publication *in the middle*: the oldest date of a capped response
+        # was measured carrying 100 of its 300 constituents. A publication missing two thirds of
+        # its members is not short, it is a different index, and every membership and weighted
+        # sum computed from it is silently wrong. That is `adj_factor`'s situation.
+        #
+        # Unlike `adj_factor`, this dataset has a second, independent witness one layer up --
+        # `domain/index_membership.py::build_index_publication` refuses a publication whose
+        # weights do not sum to 100 within the tolerance its own published precision implies,
+        # and a third of a publication misses by ~67. The flag is still demanded rather than
+        # leaned on that: the checksum catches a *split* publication and cannot see a truncation
+        # that happens to land on a publication boundary, which drops whole months and leaves
+        # every remaining publication summing perfectly.
+        requires_truncation_flag=True,
+        panel_columns=(
+            TusharePanelColumn(
+                name=INDEX_PUBLICATION_DATE_COLUMN,
+                kind="string",
+                source_field="trade_date",
+                parse=_calendar_date_text,
+            ),
+            TusharePanelColumn(
+                name=INDEX_CONSTITUENT_COLUMN,
+                kind="string",
+                source_field=INDEX_CONSTITUENT_COLUMN,
+                parse=_required_text,
+            ),
+            TusharePanelColumn(
+                name=INDEX_WEIGHT_COLUMN,
+                kind="float",
+                source_field=INDEX_WEIGHT_COLUMN,
+                parse=_constituent_weight,
+            ),
+        ),
     ),
 )
 

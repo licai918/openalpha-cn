@@ -85,6 +85,7 @@ def test_tushare_metadata_declares_supported_datasets(fake_tushare_transport) ->
         "daily_basic",
         "suspend_d",
         "stk_limit",
+        "index_weight",
     )
 
 
