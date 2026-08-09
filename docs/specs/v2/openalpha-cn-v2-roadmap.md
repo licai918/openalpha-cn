@@ -378,7 +378,7 @@ PRD 中 83 条 IN / IN-降级 story，逐条落到 issue。
 | ⑤ | `suspend_d` / `stk_limit` | 4 / 4 | 10 个交易日内 112 条停牌记录 |
 | ⑥ | `index_weight` | 4 | **沪深300 单月 300 条**，基准与股票池历史可用 |
 | ⑦ | `index_classify` / `index_member_all` | 7 / 11 | **SW2021 L1 共 31 个行业**，行业中性化可做真行业 |
-| ⑧ | `fina_indicator` / `income` / `balancesheet` / `cashflow` | 108 / 85 / 152 / 97 | **`balancesheet` 单 `ts_code` 单期返回 2 行 ⇒ 修正版本真实存在**；`V2-P1-011` 实测补充：`balancesheet`/`fina_indicator` 单响应上限 **100 行**（全表最低，`index_member_all` 3,000 的 1/30），`income`/`cashflow` 无法从外部测出上限；四个端点 `ts_code` 均为必填，逗号拼接在 `income` 上静默返回 0 行 |
+| ⑧ | `fina_indicator` / `income` / `balancesheet` / `cashflow` | 108 / 85 / 152 / 97 | **`balancesheet` 单 `ts_code` 单期返回 2 行 ⇒ 修正版本真实存在**；`V2-P1-011` 实测补充：`balancesheet`/`fina_indicator` 单响应上限 **100 行**（全表最低，`index_member_all` 3,000 的 1/30），`income`/`cashflow` 无法从外部测出上限；四个端点 `ts_code` 均为必填，逗号拼接在 `income`/`balancesheet`/`cashflow` 三个端点上**都**静默返回 0 行（2026-08-09 复测：单只 4/6/5 行 vs 拼接 0/0/0 行），只有 `fina_indicator` 例外，会返回两只股票的行（5 行 vs 9 行） |
 | + | `dividend` | 14 | 分红送转 53 条，公司行动可版本化 |
 
 探测方式是一次性脚本（scratchpad，未入库）。`V2-P0A-004` 仍需把它做成 `doctor` 的正式能力，因为限流与积分会随账号变化，且需要在每次 `panel build` 前 fail-closed。
@@ -428,8 +428,10 @@ PRD 中 83 条 IN / IN-降级 story，逐条落到 issue。
   `n_income_attr_p` 差 3.1%、`balancesheet.total_share` 差 2.5%、`fina_indicator.bps` 差 10 倍。
 - **修正时刻仍不可知**，因此 `_announcement_timeline` **刻意**让两行的四个时钟逐字节相同，
   `test_announcement_clock_cannot_yet_distinguish_restatement_via_update_flag` 从"记录缺陷"
-  变为"钉住决策"，未被改写。`PartitionCoverage.revised_row_count` 在这份数据上恒为 0，
-  `PartitionCoverage.revisions`（`update_flag` 标签普查）才是能看见它们的那一面。
+  变为"钉住决策"，未被改写。`PartitionCoverage.revised_row_count` **看不见任何一条同日修正**
+  （它数的是 `f_ann_date` 真正晚于 `ann_date` 的行：全历史下 55 / 59 / 23 / 0 行，
+  而不是恒为 0 —— 只有 `fina_indicator` 因为没有 `f_ann_date` 才恒为 0），
+  `PartitionCoverage.revisions`（`update_flag` 标签普查）才是能看见同日修正的那一面。
 
 **同批推翻的另一条**：上表的 `f_ann_date >= ann_date`「0 违例」是 65 行窗口的结论，
 全历史下 **53 只股票里有 116 行违例**（`income` 3,836 行中 49 行、`balancesheet` 4,416 行中 16 行、

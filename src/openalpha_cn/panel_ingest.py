@@ -3133,17 +3133,19 @@ def load_statement_histories(
     rows that survive are assembled by `statement_histories_from_panel_rows`, which refuses a
     row missing a projected column.
 
-    **There is deliberately no `answerable_through` bound here, and the difference from
-    `load_industry_histories` is the point.** An industry assignment is an interval whose close
-    is stored in a later year, so a read that stops short of that year reassembles an interval
-    that never ends. A filing is not an interval: it is one announcement on one day, complete in
-    its own partition. A read that skips a later year therefore loses filings it can no longer
-    answer for -- which `StatementHistory` reports honestly, by refusing days after the last one
-    it holds only through `filing_for`'s horizon error -- but it never *mis*-answers an earlier
-    day. What it does lose is the restatement: a period re-announced in a year this read skipped
-    keeps answering from the earlier announcement. That is the same answer a reader standing
-    inside the read's own window would have had, so it is a narrower corpus rather than a wrong
-    one.
+    The years asked for are compared against the years the store actually holds, and the first
+    stored year this read skipped becomes the histories' `answerable_through` bound --
+    `load_industry_histories`' rule, arrived at from the other direction. An industry read that
+    stops short of an interval's closing year answers **wrongly**, carrying a label past the
+    day the security left it. A statement read that stops short answers **narrowly**: a filing
+    is one announcement on one day, complete in its own partition, so every day inside the
+    years this read covered gets exactly the answer a reader standing on that day would have
+    had. What is lost is the restatement -- `920403.BJ` restated its 2022 annual on 2024-01-05,
+    so a read of 2018..2023 answers `filing_for(2022-12-31, 2026-08-01)` with the 2023-03-14
+    version. That is right for a day in 2023 and wrong for a day in 2026, and without the bound
+    the returned object says nothing about which day it stopped speaking for. The bound is what
+    makes the difference visible; a read covering every stored year gets none. See
+    `KNOWN_FINANCIAL_STATEMENT_LIMITATIONS.a_partial_year_read_answers_from_inside_its_window`.
     """
     requested = tuple(sorted(set(years)))
     if not requested:
@@ -3166,7 +3168,13 @@ def load_statement_histories(
                 f"{'; '.join(issue.detail for issue in outcome.readiness.issues)}"
             )
         rows.extend(outcome.rows)
-    return statement_histories_from_panel_rows(dataset=dataset, columns=columns, rows=rows)
+    skipped = sorted(set(store.registered_years(dataset)) - set(requested))
+    return statement_histories_from_panel_rows(
+        dataset=dataset,
+        columns=columns,
+        rows=rows,
+        answerable_through=(skipped[0] - 1) if skipped else None,
+    )
 
 
 def _require_statement_dataset(dataset: str) -> str:

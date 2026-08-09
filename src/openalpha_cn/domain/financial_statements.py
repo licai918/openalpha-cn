@@ -6,14 +6,18 @@ module's whole subject: **that key does not identify a row.** A live probe on 20
 every one of them to exhaustion for a 53-security sample spread across the listed universe
 (every 104th code of `stock_basic`'s 5,539, plus six long-history names), and found:
 
-| endpoint | rows | keys | keys with >1 row | of those, byte-identical | genuinely different |
+| endpoint | rows | keys | keys with >1 row | identical in **every** served field | differing |
 |---|---:|---:|---:|---:|---:|
 | `income` | 3,836 | 3,201 | 633 | 372 | 259 |
 | `balancesheet` | 4,416 | 3,170 | 1,244 | 1,166 | 76 |
 | `cashflow` | 3,567 | 2,849 | 718 | 250 | 468 |
 | `fina_indicator` | 5,941 | 3,270 | **2,671** | 2,194 | 477 |
 
-Every number in this module comes from that probe.
+The last two columns compare the **whole upstream row**, all 85 / 152 / 97 / 108 fields. That
+is not the comparison this module makes -- see "Equal means equal in the projection" below --
+and every number here is from that probe unless it names a different one, which two of them do:
+the projection gap and the `latest_filing_on` ordering were re-measured on a fresh 76-security
+sample the same day.
 
 ## The dimension these datasets cannot see
 
@@ -37,9 +41,19 @@ response distinguishes them. The two versions of `603049.SH`'s 2024 annual repor
 
 **It collapses what is provably one fact and refuses what is provably two.** Two rows of a key
 whose stored values are all equal are one fact stated twice, and `build_statement_history`
-collapses them -- that is not choosing a version, it is noticing there is only one answer. It
-removes 2,194 of `fina_indicator`'s 2,671 duplicate keys and 1,166 of `balancesheet`'s 1,244.
+collapses them -- that is not choosing a version, it is noticing there is only one answer.
 What is left disagrees, and there `ReportFiling.value_of` **raises** rather than picking.
+
+**"Equal" means equal in the projection, and the two tables here count two different things.**
+2,194 of `fina_indicator`'s 2,671 duplicate keys and 1,166 of `balancesheet`'s 1,244 carry rows
+that agree across **every** field the endpoint serves -- all 108 and all 152. The collapse does
+not read those fields: `providers/tushare.py` requests only the 10 / 7 / 5 / 11 stored columns,
+so the rule it actually applies is "equal in the projection", which is coarser and folds more.
+That is why the end-to-end table below reports 2,223 and 1,205 rather than 2,194 and 1,166: the
+gap is keys whose rows differ only outside the stored columns. Re-measured on its own, over a
+fresh 76-security sample on 2026-08-09, the gap is 133 keys across the four endpoints, and on
+`balancesheet` it is half of that endpoint's real disagreement. It is a named limitation and not
+a rounding: `KNOWN_FINANCIAL_STATEMENT_LIMITATIONS.the_merge_rule_is_agreement_in_the_projection`.
 
 **The refusal is per field, not per filing.** A `cashflow` pair that disagrees only on
 `free_cashflow` still answers `n_cashflow_act`, because on that field the two versions say the
@@ -83,19 +97,28 @@ Not modelled. The 53-security corpus above was driven through `TushareProvider.f
 `load_statement_histories`, and then every `(filing, projected column)` pair a caller could ask
 for was actually read:
 
-| dataset | stored rows | filings | collapsed | ambiguous filings | field reads | refused |
+| dataset | stored rows | filings | rows folded | ambiguous filings | field reads | refused |
 |---|---:|---:|---:|---:|---:|---:|
 | `income` | 3,836 | 3,201 | 372 | 261 (8.15%) | 32,010 | 288 (**0.90%**) |
 | `balancesheet` | 4,416 | 3,170 | 1,205 | 41 (1.29%) | 22,190 | 43 (**0.19%**) |
 | `cashflow` | 3,567 | 2,849 | 268 | 450 (15.80%) | 14,245 | 450 (**3.16%**) |
 | `fina_indicator` | 5,941 | 3,270 | 2,223 | 448 (13.70%) | 35,970 | 507 (**1.41%**) |
 
-**1,288 refusals out of 104,415 field reads, 1.23%**, and they are concentrated rather than
-spread: `ebit` is 258 of `income`'s 288, `free_cashflow` is all 450 of `cashflow`'s, `fcff` is
-441 of `fina_indicator`'s 507 and `total_share` is 34 of `balancesheet`'s 43. A factor that
-reads `revenue`, `total_assets` or `roe` loses 5, 0 and 5 reads respectively out of ~3,200
-filings each. The per-field refusal is what makes that true: refusing the whole filing instead
-would have cost 1,200 filings rather than 1,288 field reads.
+"Rows folded" is `collapsed_versions` and is the projected criterion, which is what makes it
+2,223 and 1,205 against the 2,194 and 1,166 byte-identical keys counted above.
+
+**1,288 refusals out of 104,415 field reads, 1.23%** *for this projection* -- a wider one would
+refuse more, which is the other face of the same limitation -- and they are concentrated rather
+than spread: `ebit` is 258 of `income`'s 288, `free_cashflow` is all 450 of `cashflow`'s, `fcff`
+is 441 of `fina_indicator`'s 507 and `total_share` is 34 of `balancesheet`'s 43.
+
+A factor reading one ordinary field loses very little, but **how little is a property of the
+sample and not of the dataset**: `revenue`, `total_assets` and `roe` lose 5, 0 and 5 reads in
+the 53-security corpus and 6, 18 and 33 in an independent 76-security probe on the same day
+(4,500 / 4,450 / 4,665 filings). The `0` is the one to distrust -- `total_assets` disagrees on
+18 filings as soon as the sample widens, so no projected column should be read as immune. The
+per-field refusal is what keeps any of these small: refusing the whole filing instead would
+have cost 1,200 filings rather than 1,288 field reads.
 
 The same run measured the two revision facets on the real corpus.
 `PartitionCoverage.revised_row_count` -- the clock-derived count -- reads 55 / 59 / 23 / 0
@@ -145,9 +168,9 @@ which is precisely why the same-day duplicate is the case that matters.
 
 ## Layering
 
-Pure `dataclasses`, `datetime` and `types`, plus `domain.panel_batch` for the reserved subject
-column name -- the placement `domain/industry_classification.py` and `domain/index_membership.py`
-already have, and for the same reason.
+Pure `dataclasses`, `datetime`, `math` and `types`, plus `domain.panel_batch` for the reserved
+subject column name -- the placement `domain/industry_classification.py` and
+`domain/index_membership.py` already have, and for the same reason.
 """
 
 from __future__ import annotations
@@ -155,6 +178,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
+from math import isfinite
 from types import MappingProxyType
 from typing import Final
 
@@ -365,7 +389,11 @@ KNOWN_FINANCIAL_STATEMENT_LIMITATIONS: Final[tuple[FinancialStatementLimitation,
             "than dating one later. Anything else would be inventing the instant. The "
             "consequence is that a point-in-time read cannot ask 'what did this look like "
             "before the correction' -- see V2-P2-002, which owns that question -- and that "
-            "PartitionCoverage.revised_row_count reads 0 on exactly this data, which is why "
+            "PartitionCoverage.revised_row_count counts NONE of these corrections. That count "
+            "is not zero corpus-wide (it reads 55 / 59 / 23 rows over full histories, and 0 for "
+            "fina_indicator only because it has no f_ann_date at all); what is structural is "
+            "that it can only ever see a row whose f_ann_date genuinely post-dates its "
+            "ann_date, which no same-day correction does. That is why "
             "PartitionCoverage.revisions (the update_flag label census) exists beside it."
         ),
     ),
@@ -376,12 +404,42 @@ KNOWN_FINANCIAL_STATEMENT_LIMITATIONS: Final[tuple[FinancialStatementLimitation,
             "update_flag, no f_ann_date, no report_type. Measured over a 53-security sample "
             "paged to exhaustion on 2026-08-09: 5,941 rows over 3,270 (security, period, "
             "announcement) keys, of which 2,671 (81.7%) carry more than one row. 2,194 of those "
-            "are byte-identical across all 108 fields and collapse; the remaining 477 disagree "
-            "and NOTHING in the response orders them. Every one of its 3,270 periods has "
+            "are byte-identical across all 108 fields; the collapse reads only the 11 stored "
+            "columns and so folds somewhat more than that (see "
+            "the_merge_rule_is_agreement_in_the_projection). The remaining 477 disagree inside "
+            "the projection itself and NOTHING in the response orders them. Every one of its "
+            "3,270 periods has "
             "exactly one ann_date, so the multiplicity is not a restatement with its own date "
             "either. ReportFiling.value_of raises AmbiguousReportError on the fields that "
             "disagree rather than taking the first row, because the two versions of 603049.SH's "
             "2024 annual report give bps as 22.2055 and as 2.2206."
+        ),
+    ),
+    FinancialStatementLimitation(
+        code="the_merge_rule_is_agreement_in_the_projection",
+        detail=(
+            "build_statement_history folds two rows of a key when the STORED columns agree -- "
+            "the 10 / 7 / 5 / 11 in STATEMENT_DATA_COLUMNS plus f_ann_date -- not when the "
+            "upstream rows agree. providers/tushare.py names exactly those columns in "
+            "response_fields, so the other 75 / 145 / 92 / 97 are never fetched and the "
+            "collapse cannot consult them. Rows that disagree only outside the projection "
+            "therefore become ONE version and answer without a warning. Measured by re-fetching "
+            "all response fields for a 76-security sample on 2026-08-09 (25,091 rows, 17,665 "
+            "keys, offset-paged to exhaustion): of the 5,658 keys that collapse in the "
+            "projection, 133 carry rows the endpoint served differently -- 0 on income, 60 on "
+            "balancesheet, 27 on cashflow, 46 on fina_indicator. On balancesheet that is half "
+            "of everything it really disagrees about (60 hidden against 62 visible). The "
+            "columns carrying it are real balance-sheet lines, not padding: fix_assets 45 "
+            "times, cip 25, accounts_receiv_bill / accounts_pay / oth_rcv_total / "
+            "fix_assets_total / oth_pay_total 5 each, contract_liab 4, and 000002.SZ's 2025 "
+            "annual gives undistr_porfit as None on one row and -44,418,597,816.52 on the "
+            "other; on cashflow, others 14 and depr_fa_coga_dpba 7; on fina_indicator, "
+            "assets_yoy 17, turn_days 15, eqt_yoy 14, and 000488.SZ's 2016 annual gives "
+            "dt_netprofit_yoy as 123.8579 and as -12.7401. So the measured refusal rate is a "
+            "property of THIS projection: widening STATEMENT_DATA_COLUMNS would move keys out "
+            "of the collapsed column and into the refused one, and a caller must not read "
+            "'collapsed' as 'the publisher said one thing'. It means 'the publisher said one "
+            "thing about what is stored'."
         ),
     ),
     FinancialStatementLimitation(
@@ -459,6 +517,27 @@ KNOWN_FINANCIAL_STATEMENT_LIMITATIONS: Final[tuple[FinancialStatementLimitation,
             "is measured, not hypothetical -- a 1990..2026 window sweep of 000001.SZ's "
             "fina_indicator returned 154 distinct rows against the 155 offset-paging returns, "
             "and the missing one is end_date=19891231."
+        ),
+    ),
+    FinancialStatementLimitation(
+        code="a_partial_year_read_answers_from_inside_its_window",
+        detail=(
+            "A read that names some announcement years and not others is narrower than the "
+            "corpus, not wrong inside itself: a filing is one announcement on one day and is "
+            "complete in its own partition, so every day inside the years read gets exactly "
+            "the answer a reader standing on that day would have had. What it silently loses "
+            "is a later restatement. 920403.BJ restated its 2022 annual on 2024-01-05, so a "
+            "store holding 2018..2024 that is read for 2018..2023 answers "
+            "filing_for(2022-12-31, 2026-08-01) with the 2023-03-14 version and "
+            "latest_filing_on(2026-08-01) with period 2023-09-30 -- both correct for a day in "
+            "2023 and both stale for a day in 2026. load_statement_histories therefore compares "
+            "the years it was asked for against store.registered_years and sets "
+            "StatementHistory.answerable_through to the year before the first stored partition "
+            "it skipped, after which filings_on and everything built on it refuse rather than "
+            "answer. A read covering every stored year gets no bound, and a history assembled "
+            "from ReportRow values by hand gets none either -- there is no window to compare "
+            "against. What no rule here can see is a year that was never ingested at all, which "
+            "is indistinguishable from a year in which the security announced nothing."
         ),
     ),
     FinancialStatementLimitation(
@@ -613,6 +692,27 @@ class StatementHistory:
     security: str
     dataset: str
     filings: tuple[ReportFiling, ...]
+    answerable_through: int | None = None
+    """The last announcement year this history can answer inside, or `None` for "no bound".
+
+    `SecurityIndustryHistory.answerable_through`'s counterpart, and the asymmetry between them
+    is worth stating because it is what this field is for. An industry read that stops short of
+    an interval's closing year answers **wrongly** -- it carries a label past the day the
+    security left it. A statement read that stops short of a later announcement year answers
+    **narrowly**: every day inside the years it read gets exactly the answer a reader standing
+    on that day would have had, because a filing is one announcement on one day and is complete
+    in its own partition.
+
+    Narrow is not free, though, and the cost is invisible without this field. `920403.BJ`
+    restated its 2022 annual on 2024-01-05; a read of 2018..2023 answers
+    `filing_for(2022-12-31, 2026-08-01)` with the 2023-03-14 version and
+    `latest_filing_on(2026-08-01)` with period 2023-09-30, and both are the *right* answers for
+    a day in 2023 and the wrong ones for a day in 2026 -- with nothing in the returned object
+    saying which day it stopped speaking for. So `filings_on` refuses a day past this bound
+    instead, and `load_statement_histories` sets it to the year before the first stored
+    partition it skipped. A read that covers every stored year gets no bound, correctly. See
+    `KNOWN_FINANCIAL_STATEMENT_LIMITATIONS.a_partial_year_read_answers_from_inside_its_window`.
+    """
 
     @property
     def covered_from(self) -> date:
@@ -622,17 +722,40 @@ class StatementHistory:
     def filings_on(self, day: date) -> tuple[ReportFiling, ...]:
         """Every filing announced on or before `day`, in stored order.
 
-        The plain point-in-time filter, and the thing every other reader here is built from.
+        The plain point-in-time filter, and the thing every other reader here is built from --
+        so the `answerable_through` bound is checked here once rather than in each of the three
+        readers built on it.
         """
         _require_plain_date(day, "day")
+        self._require_year_was_read(day)
         return tuple(filing for filing in self.filings if filing.announced_on <= day)
+
+    def _require_year_was_read(self, day: date) -> None:
+        """Refuse a day past the last announcement year this read can speak for."""
+        if self.answerable_through is not None and day.year > self.answerable_through:
+            raise FinancialStatementHorizonError(
+                f"{day.isoformat()} is after {self.answerable_through}, the last announcement "
+                f"year {self.security}'s {self.dataset} history can answer inside; the next "
+                "stored year was left unread, so a period restated there would still answer "
+                "from the earlier announcement this read happens to hold"
+            )
 
     def periods_on(self, day: date) -> tuple[date, ...]:
         """The distinct fiscal periods that had been announced by `day`, ascending."""
         return tuple(sorted({filing.period for filing in self.filings_on(day)}))
 
     def latest_filing_on(self, day: date) -> ReportFiling:
-        """The most recent period announced on or before `day`.
+        """The most recent **period** announced on or before `day`, not the most recent
+        announcement.
+
+        The two are not the same and the difference is measured: a security may announce an
+        earlier period after a later one, and then the newest announcement carries the older
+        report. `920403.BJ` re-announced its 2023 interim on 2024-01-05, six weeks after its
+        2023 Q3 report, so ordering by announcement would answer a reader standing on
+        2024-01-05 with a half-year report. Over a 76-security probe on 2026-08-09 the two
+        orderings disagree on 12 of `income`'s 3,796 answerable days, 11 of `balancesheet`'s
+        3,890, 11 of `cashflow`'s 3,392 and 16 of `fina_indicator`'s 3,901 -- 11, 10, 10 and 13
+        of the 76 securities have at least one such day.
 
         Ties on period -- a period announced twice on different days, which is a real
         restatement and happens on 3 of `income`'s 3,198 periods -- resolve to the later
@@ -666,7 +789,11 @@ class StatementHistory:
 
 
 def build_statement_history(
-    *, security: str, dataset: str, rows: Iterable[ReportRow]
+    *,
+    security: str,
+    dataset: str,
+    rows: Iterable[ReportRow],
+    answerable_through: int | None = None,
 ) -> StatementHistory:
     """Group `rows` into filings, collapse the redundant versions, and refuse the malformed.
 
@@ -675,10 +802,14 @@ def build_statement_history(
     `f_ann_date`** are one fact stated twice and become one version carrying both labels. Two
     that do not agree stay two, and every read of a field they disagree on raises.
 
-    Refuses an empty row set, a dataset name that is not one of the four, and a row whose
-    `values` do not carry exactly the dataset's projected columns -- the last because a filing
-    silently missing a column would answer `None` for it, which is indistinguishable from an
-    empty upstream cell.
+    Refuses an empty row set, a dataset name that is not one of the four, a row whose `values`
+    do not carry exactly the dataset's projected columns -- because a filing silently missing a
+    column would answer `None` for it, which is indistinguishable from an empty upstream cell --
+    and a `nan` or infinity, which `_require_finite_values` explains.
+
+    `answerable_through` is carried straight through to `StatementHistory` and defaults to
+    "no bound", which is the honest answer when the caller assembled the rows itself: there is
+    no window to compare against. `load_statement_histories` is where a window exists.
     """
     _require_text(security, "security")
     expected = frozenset(_require_known_dataset(dataset))
@@ -691,6 +822,7 @@ def build_statement_history(
                 f"{security} {row.period.isoformat()}: {dataset} rows must carry exactly the "
                 f"columns {sorted(expected)}, got {sorted(row.values)}"
             )
+        _require_finite_values(security, row)
         grouped.setdefault((row.announced_on, row.period), []).append(row)
     if not grouped:
         raise FinancialStatementError(f"{security}: a {dataset} history needs at least one row")
@@ -698,7 +830,12 @@ def build_statement_history(
         _collapse(security=security, announced_on=announced_on, period=period, rows=group)
         for (announced_on, period), group in sorted(grouped.items())
     )
-    return StatementHistory(security=security, dataset=dataset, filings=filings)
+    return StatementHistory(
+        security=security,
+        dataset=dataset,
+        filings=filings,
+        answerable_through=answerable_through,
+    )
 
 
 def _collapse(
@@ -745,12 +882,16 @@ def statement_histories_from_panel_rows(
     dataset: str,
     columns: Sequence[str],
     rows: Iterable[Sequence[object]],
+    answerable_through: int | None = None,
 ) -> Mapping[str, StatementHistory]:
     """Rebuild one history per security from stored panel rows.
 
     `columns` names the row tuples' fields, which must include the subject column and every
     column `statement_panel_columns(dataset)` declares. Extra columns are ignored rather than
     refused, so a partition that gained a column stays readable.
+
+    `answerable_through` is the last announcement year the read that produced `rows` covered
+    without skipping a stored one, and every history built here carries it.
     """
     required = (SUBJECT_COLUMN_NAME, *statement_panel_columns(dataset))
     index = {name: position for position, name in enumerate(columns)}
@@ -797,7 +938,10 @@ def statement_histories_from_panel_rows(
     return MappingProxyType(
         {
             security: build_statement_history(
-                security=security, dataset=dataset, rows=security_rows
+                security=security,
+                dataset=dataset,
+                rows=security_rows,
+                answerable_through=answerable_through,
             )
             for security, security_rows in sorted(collected.items())
         }
@@ -873,6 +1017,27 @@ def financial_ambiguity_report(
         ambiguous_announcements=ambiguous_announcements,
         ambiguous_field_reads=MappingProxyType(per_field),
     )
+
+
+def _require_finite_values(security: str, row: ReportRow) -> None:
+    """Refuse `nan` and the infinities before they reach the collapse.
+
+    Nothing serves one today -- `providers/tushare.py`'s `_finite_number` refuses a non-finite
+    cell at the boundary, so no ingest path can produce one -- and this is the guard that keeps
+    it that way, because both of this module's rules are built on `==` and `nan != nan`. Two
+    rows that are byte-identical apart from carrying `nan` in the same column would become two
+    versions rather than one, and `value_of` would then raise `AmbiguousReportError` on a field
+    where the publisher said the same non-answer twice. That failure is silent in the count and
+    loud in the read, which is the worst pair. (`-0.0` against `0.0` needs no guard: they
+    compare equal and collapse, which is the right answer for two spellings of zero.)
+    """
+    for column, value in row.values.items():
+        if value is not None and not isfinite(value):
+            raise FinancialStatementError(
+                f"{security} {row.period.isoformat()} column {column!r} must be a finite number "
+                f"or None, got {value!r}; two rows carrying it would never compare equal and "
+                "would be reported as a disagreement the publisher never stated"
+            )
 
 
 def _require_known_dataset(dataset: str) -> tuple[str, ...]:

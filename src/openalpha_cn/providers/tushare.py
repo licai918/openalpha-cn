@@ -661,10 +661,12 @@ def _financial_statement_params(request: ProviderRequest) -> dict[str, str]:
     it fails with `code=50101, 必填参数, ts_code` on all four endpoints -- there is no
     cross-section fetch here, unlike every other dataset in this table. Worse,
     `ts_code="000001.SZ,600000.SH"` returns **zero rows with `code=0` and `has_more=False`** on
-    `income`, which is indistinguishable from "this security has never filed"; on
-    `fina_indicator` the same request *does* return both securities' rows. So one subject per
-    request, refused rather than defaulted, exactly as `_index_weight_params` refuses a
-    comma-joined `index_code`.
+    all three of `income`, `balancesheet` and `cashflow` -- the three this builder serves --
+    which is indistinguishable from "this security has never filed"; `fina_indicator` is the
+    one endpoint where the same request *does* return both securities' rows (4 / 6 / 5 rows for
+    `000001.SZ` alone in 2024 against 0 / 0 / 0 for the pair, and 5 against 9 on
+    `fina_indicator`). So one subject per request, refused rather than defaulted, exactly as
+    `_index_weight_params` refuses a comma-joined `index_code`.
 
     **The window is what keeps a 100-row cap unreachable.** `balancesheet` and `fina_indicator`
     cap at exactly 100 rows per response (`limit=500` and `limit=5000` return the same 100 with

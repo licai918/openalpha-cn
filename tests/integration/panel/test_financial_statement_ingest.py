@@ -3,7 +3,7 @@
 The transport is doubled and every response body is real, captured live on 2026-08-09 with
 exactly the projection the descriptors request; the suite never touches the network.
 
-The five things this file is really about:
+The six things this file is really about:
 
 - **A filing is filed under its announcement year, never its period.** `001278.SZ`'s 2018
   annual indicators were announced 2022-01-06, and a 2018 partition would put them in front of
@@ -17,6 +17,9 @@ The five things this file is really about:
 - **The ambiguity survives the round trip.** What the endpoint served as two irreconcilable rows
   comes back as two versions, and reading the field they disagree on raises while every other
   field still answers.
+- **A read that skips a stored year says so.** `920403.BJ` re-announced its 2022 annual on
+  2024-01-05; a read of 2023 alone is right about 2023 and would be stale about 2026, so it
+  comes back bounded rather than quietly narrow.
 """
 
 from __future__ import annotations
@@ -495,6 +498,203 @@ PINGAN_BAR = [
 ]
 
 
+# income(920403.BJ, 20230101..20231231) and the 2024 window after it. On 2024-01-05 this
+# security re-announced both its 2022 annual and its 2023 interim, each with an `ebit` the
+# original rows did not carry -- so a read that stops at 2023 holds only the originals and
+# answers every 2023 day correctly and every later day from a filing that was superseded.
+INCOME_920403_2023 = [
+    [
+        "920403.BJ",
+        "20231114",
+        "20231114",
+        "20230930",
+        "0",
+        54528997.88,
+        54528997.88,
+        36085604.13,
+        6327212.69,
+        7260859.14,
+        -95541.23,
+        7356400.37,
+        7947696.9,
+        0.2,
+        None,
+    ],
+    [
+        "920403.BJ",
+        "20230801",
+        "20230801",
+        "20230630",
+        "0",
+        47232130.46,
+        47232130.46,
+        31366061.57,
+        10663684.75,
+        10035731.2,
+        -83129.74,
+        10118860.94,
+        10639586.33,
+        0.27,
+        None,
+    ],
+    [
+        "920403.BJ",
+        "20230801",
+        "20231124",
+        "20230630",
+        "1",
+        47232130.46,
+        47232130.46,
+        31366061.57,
+        10663684.75,
+        10035731.2,
+        -83129.74,
+        10118860.94,
+        10639586.33,
+        0.27,
+        None,
+    ],
+    [
+        "920403.BJ",
+        "20230314",
+        "20230429",
+        "20221231",
+        "0",
+        197624210.5,
+        197624210.5,
+        135710952.58,
+        40463770.97,
+        41275179.33,
+        34893.27,
+        41240286.06,
+        41338995.01,
+        1.05,
+        None,
+    ],
+]
+INCOME_920403_2024 = [
+    [
+        "920403.BJ",
+        "20241031",
+        "20241031",
+        "20240930",
+        "1",
+        51883089.46,
+        51883089.46,
+        30112324.96,
+        3132858.94,
+        11184570.87,
+        1241715.17,
+        9942855.7,
+        9540656.58,
+        0.14,
+        3621536.15,
+    ],
+    [
+        "920403.BJ",
+        "20240829",
+        "20240829",
+        "20240630",
+        "0",
+        47138942.36,
+        47138942.36,
+        34888866.93,
+        1527302.0,
+        9503485.0,
+        1041884.48,
+        8461600.52,
+        7742672.09,
+        0.12,
+        None,
+    ],
+    [
+        "920403.BJ",
+        "20240829",
+        "20240829",
+        "20240630",
+        "1",
+        47138942.36,
+        47138942.36,
+        34888866.93,
+        1527302.0,
+        9503485.0,
+        1041884.48,
+        8461600.52,
+        7742672.09,
+        0.12,
+        943805.32,
+    ],
+    [
+        "920403.BJ",
+        "20240427",
+        "20240427",
+        "20240331",
+        "1",
+        34275554.02,
+        34275554.02,
+        24434309.92,
+        4523864.65,
+        11500947.43,
+        8810.63,
+        11492136.8,
+        10180355.88,
+        0.21,
+        4591491.01,
+    ],
+    [
+        "920403.BJ",
+        "20240330",
+        "20240330",
+        "20231231",
+        "1",
+        288239764.19,
+        288239764.19,
+        199664755.63,
+        52213123.16,
+        54156636.99,
+        484510.27,
+        53672126.72,
+        53216961.54,
+        1.35,
+        52106612.88,
+    ],
+    [
+        "920403.BJ",
+        "20240105",
+        "20240105",
+        "20230630",
+        "1",
+        47232130.46,
+        47232130.46,
+        31366061.57,
+        10663684.75,
+        10035731.2,
+        -83129.74,
+        10118860.94,
+        10639586.33,
+        0.27,
+        10571562.9,
+    ],
+    [
+        "920403.BJ",
+        "20240105",
+        "20240105",
+        "20221231",
+        "1",
+        197624210.5,
+        197624210.5,
+        135710952.58,
+        40463770.97,
+        41275179.33,
+        34893.27,
+        41240286.06,
+        41338995.01,
+        1.05,
+        41082309.3,
+    ],
+]
+
+
 def _response(fields: list[str], items: list[list[Any]]) -> dict[str, Any]:
     return {
         "code": 0,
@@ -530,6 +730,8 @@ SCRIPT: dict[tuple[str, str, str], dict[str, Any]] = {
     (FINANCIAL_INDICATOR_DATASET, "001278.SZ", "20180101"): _response(
         INDICATOR_FIELDS, YIYUAN_INDICATORS_2018_PERIODS
     ),
+    (INCOME_DATASET, "920403.BJ", "20230101"): _response(INCOME_FIELDS, INCOME_920403_2023),
+    (INCOME_DATASET, "920403.BJ", "20240101"): _response(INCOME_FIELDS, INCOME_920403_2024),
     (DAILY_DATASET, "000001.SZ", "20180420"): _response(DAILY_FIELDS, PINGAN_BAR),
 }
 
@@ -644,16 +846,78 @@ def test_a_filing_announced_three_years_late_is_filed_under_the_announcement(
 
 
 # --------------------------------------------------------------------------------------
+# What a read that skips a stored year may and may not answer
+# --------------------------------------------------------------------------------------
+
+
+def test_a_read_that_skips_a_stored_year_is_bounded_rather_than_silently_narrow(
+    tmp_path,
+) -> None:
+    """`920403.BJ` re-announced its 2022 annual on 2024-01-05, with an `ebit` the 2023-03-14
+    filing did not carry. A read of 2023 alone is right about every day in 2023 and would be
+    stale about 2026 -- so it carries `answerable_through=2023` and refuses the later day
+    instead of answering from the superseded filing."""
+    store = _store(tmp_path)
+    provider = _provider()
+    write_financial_statements(store, [_fetch(provider, "920403.BJ", 2023)])
+    write_financial_statements(store, [_fetch(provider, "920403.BJ", 2024)])
+    assert store.registered_years(INCOME_DATASET) == (2023, 2024)
+
+    partial = load_statement_histories(
+        store, dataset=INCOME_DATASET, years=(2023,), as_of=AS_OF, max_staleness=None
+    )["920403.BJ"]
+
+    assert partial.answerable_through == 2023
+    assert partial.filing_for(date(2022, 12, 31), date(2023, 12, 31)).value_of("ebit") is None
+    assert partial.latest_filing_on(date(2023, 12, 31)).period == date(2023, 9, 30)
+    with pytest.raises(FinancialStatementHorizonError, match=r"2024-01-05 is after 2023"):
+        partial.filing_for(date(2022, 12, 31), date(2024, 1, 5))
+    with pytest.raises(
+        FinancialStatementHorizonError, match=r"2026-08-01 is after 2023, the last announcement"
+    ):
+        partial.filing_for(date(2022, 12, 31), date(2026, 8, 1))
+
+
+def test_a_read_that_covers_every_stored_year_gets_no_bound_and_sees_the_restatement(
+    tmp_path,
+) -> None:
+    """The same store read whole: no bound, and the 2022 annual now answers with the version
+    announced 2024-01-05. `latest_filing_on` still answers by period, so 2024-01-05 -- the day
+    the OLDEST of the three visible periods was re-announced -- reads 2024-09-30's predecessor
+    rather than the 2022 annual."""
+    store = _store(tmp_path)
+    provider = _provider()
+    write_financial_statements(store, [_fetch(provider, "920403.BJ", 2023)])
+    write_financial_statements(store, [_fetch(provider, "920403.BJ", 2024)])
+
+    whole = load_statement_histories(
+        store, dataset=INCOME_DATASET, years=(2023, 2024), as_of=AS_OF, max_staleness=None
+    )["920403.BJ"]
+
+    assert whole.answerable_through is None
+    assert whole.filing_for(date(2022, 12, 31), date(2026, 8, 1)).value_of("ebit") == 41082309.3
+    assert whole.latest_filing_on(date(2024, 1, 5)).period == date(2023, 9, 30)
+    assert whole.latest_filing_on(date(2026, 8, 1)).period == date(2024, 9, 30)
+
+
+# --------------------------------------------------------------------------------------
 # The catalog's two revision facets
 # --------------------------------------------------------------------------------------
 
 
-def test_the_update_flag_census_is_recorded_and_the_clock_derived_count_stays_zero(
+def test_the_update_flag_census_is_recorded_and_this_window_derives_no_revision_from_the_clock(
     tmp_path,
 ) -> None:
     """Both halves of `panel/catalog.py`'s revision contract on the data it was built for:
-    `revisions` sees the two labels, and `revised_row_count` reads 0 because both rows of every
-    corrected pair carry the same `ann_date` and the same `f_ann_date`."""
+    `revisions` sees the two labels, and `revised_row_count` reads 0 **on this window** because
+    both rows of every corrected pair in it carry the same `ann_date` and the same `f_ann_date`.
+
+    The name says "this window" rather than "always" because 0 is not a whole-corpus property:
+    over full histories the clock-derived count is 55 / 59 / 23 rows for `income` /
+    `balancesheet` / `cashflow` and 0 for `fina_indicator`, which has no `f_ann_date` at all --
+    see `domain/financial_statements.py`. What is structural is the *gap*: the clock sees only
+    the rows where `f_ann_date` genuinely post-dates `ann_date`, and never a same-day correction,
+    which is why `revisions` exists beside it."""
     store = _store(tmp_path)
     write_financial_statements(store, [_fetch(_provider(), "000001.SZ")])
 
