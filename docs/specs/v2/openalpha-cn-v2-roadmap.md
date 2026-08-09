@@ -100,7 +100,7 @@ P3 结束即可独立使用（Jupyter 直连面板 + 因子）
 | `V2-P1-009` | 数据集⑥`index_weight`（沪深300/中证500/中证1000） | 技 | 005 | 实测可用（§6），无需降级 | 同上 | S11 |
 | `V2-P1-010` | 数据集⑦行业分类历史 | 技 | 005 | 中性化前提；`index_classify`+`index_member_all` 实测可用（§6） | 同上 | S11 |
 | `V2-P1-011` | 数据集⑧`fina_indicator` + 三大报表（取 `ann_date`、`f_ann_date` **与 `update_flag`**） | 技 | 004 | **已落地（§7）**：修正版本共享相同的 `ann_date`；`fina_indicator` 连 `update_flag` 都没有且 81.7% 的键有多行 —— 消歧改为「合并同值 + 逐字段拒答」，修正时刻具名披露为不可知 | 契约 + 修正时钟专项 + 重复版本消歧 | S6, S9 |
-| `V2-P1-012` | 面板体检报告（缺失/过期/重复/被修正） | 产 | 003 | — | 集成：人为注入缺陷可被报出 | S13 |
+| `V2-P1-012` | 面板体检报告（缺失/过期/重复/被修正） | 产 | 003 | **已落地**：`panel_doctor.py` 聚合已有零件，不新建诊断。四类之外补两类 —— `inconsistent`（跨数据集才看得见）与 `unanswerable`（问题问不出来）。新鲜度按发布频率分四档：日频取所给日历自身的最长休市 + 1 天，月频取最宽的月末间隔，季频取 10-31→次年 4-30 的法定披露间隔（182 天），事件驱动**不设事件钟阈值**、改报 `fetch_age`。「重复/被修正」定级为 `notice` 而非 `warning`（§7 实测 `fina_indicator` 81.7% 的键多行，定成缺陷会在每个健康分区上报警） | 集成：人为注入缺陷可被报出 | S13 |
 | `V2-P1-013` | fail-closed 依赖门（失败的日度数据集显式阻塞下游） | 技 | 012 | — | 集成：断言阻塞而非空成功 | S14, D5 |
 | `V2-P1-014` | 面板 fixture **生成器** —— `.parquet`/`.duckdb`/`.sqlite3` 是发布拦截后缀，fixture 不能签入 | 测 | 013 | `scripts/verify_publication.py:14-28`；可复用 `tests/contract/providers/test_file_provider.py:93-127` 的 DuckDB→Parquet 写法 | 测试基础设施 | S85, T7 |
 | `V2-P1-015` | CLI `panel build` / `panel doctor` / `data-check` | 产 | 013 | — | 集成 CLI | S84 |

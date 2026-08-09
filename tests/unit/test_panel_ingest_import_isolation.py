@@ -1,4 +1,4 @@
-"""Layering proofs for `V2-P1-002`'s two new modules.
+"""Layering proofs for `V2-P1-002`'s two new modules, and for `V2-P1-012`'s one.
 
 `openalpha_cn.domain.panel_batch` is a *contract* both sides of the panel seam need:
 `providers/` produces one, `openalpha_cn.panel_ingest` writes one. That is why it is in
@@ -13,6 +13,12 @@ and `panel`, so its dependency set is worth pinning explicitly, exactly as
 `panel_ingest` is a top-level module rather than `panel/ingest.py` because `V2-P1-001` pinned
 `openalpha_cn.panel` as importing no sibling subpackage at all; see that module's docstring
 for the full reasoning and the `batch_contracts.py` precedent it follows.
+
+`openalpha_cn.panel_doctor` (`V2-P1-012`) is the same shape one layer further up: it reads the
+catalog through `panel`, the dataset contracts through `domain`, and the requirement builders
+and loaders through `panel_ingest`. Its dependency set is pinned below for the reason
+`panel_ingest`'s is -- a top-level module's whole justification is *which* packages it is
+allowed to join, and a justification that is not asserted is a comment.
 """
 
 from __future__ import annotations
@@ -20,6 +26,7 @@ from __future__ import annotations
 import grimp
 
 _ALLOWED_INTERNAL_DEPENDENCIES = {"openalpha_cn.domain", "openalpha_cn.panel"}
+_ALLOWED_DOCTOR_DEPENDENCIES = _ALLOWED_INTERNAL_DEPENDENCIES | {"openalpha_cn.panel_ingest"}
 
 
 def _direct_internal_dependencies(module: str) -> set[str]:
@@ -47,6 +54,37 @@ def test_panel_ingest_depends_only_on_domain_and_panel() -> None:
         "panel_ingest exists precisely to join these two packages; if it stops importing "
         f"one of them this module has lost its reason to be top-level (found {dependencies})"
     )
+
+
+def test_panel_doctor_joins_domain_panel_and_panel_ingest_and_nothing_else() -> None:
+    """The health report is allowed exactly the three it aggregates. In particular it must not
+    reach `storage`, `runtime`, `api` or `product`: a doctor that could see the evidence plane
+    or a composition root would be one whose verdict depended on how the process was wired
+    rather than on what is in the panel store."""
+    dependencies = _direct_internal_dependencies("openalpha_cn.panel_doctor")
+
+    assert dependencies == _ALLOWED_DOCTOR_DEPENDENCIES, (
+        f"openalpha_cn.panel_doctor may import exactly "
+        f"{sorted(_ALLOWED_DOCTOR_DEPENDENCIES)}, found {sorted(dependencies)}"
+    )
+
+
+def test_the_health_report_adds_no_edge_into_the_panel_package() -> None:
+    """The layering question a new top-level module has to answer: is it a pattern or an
+    evasion? An evasion leaves the guarded package's real dependency set untouched and only
+    moves it out of the metric's sight. This one cannot be that, because the edge runs
+    `panel_doctor -> panel` and never back -- `openalpha_cn.panel`'s import closure is
+    byte-for-byte what it was before this module existed, and nothing moved out of `panel/`
+    to make room for it."""
+    graph = grimp.build_graph("openalpha_cn")
+
+    for importer in ("openalpha_cn.panel", "openalpha_cn.domain", "openalpha_cn.storage"):
+        assert not graph.direct_import_exists(
+            importer=importer, imported="openalpha_cn.panel_doctor", as_packages=True
+        ), f"{importer} must not import openalpha_cn.panel_doctor"
+    assert graph.direct_import_exists(
+        importer="openalpha_cn.panel_doctor", imported="openalpha_cn.panel", as_packages=True
+    ), "sanity check: the health report is supposed to read the catalog"
 
 
 def test_the_columnar_contract_reaches_no_infrastructure_library() -> None:
