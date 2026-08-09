@@ -32,6 +32,7 @@ import pytest
 
 from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET
 from openalpha_cn.domain.panel_batch import MAX_SOURCE_URI_LENGTH, PanelBatchError
+from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET
 from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET
 from openalpha_cn.domain.trading_calendar import TRADING_CALENDAR_DATASET
 from openalpha_cn.providers.base import ProviderFailure, ProviderRequest
@@ -191,6 +192,14 @@ def test_every_descriptor_states_whether_its_response_cap_was_measured() -> None
     returned its whole 5,878-row registry with `has_more=False`, which places its cap somewhere
     above that without establishing where -- so it declares none and is guarded by the flag
     alone.
+
+    `V2-P1-008` added two rows and both are measured on 2026-08-09, with a multi-session window
+    because one session of either fits: `stk_limit` returns exactly 7,800 rows with
+    `has_more=True` for `20260701..20260807` and `suspend_d` exactly 5,000 for
+    `20150601..20150831`, and `limit=8000` / `10000` / `12000` raise neither. They are the two
+    largest caps here and the two furthest apart in headroom: `stk_limit`'s whole-market cross
+    section was 7,733 rows on 2026-08-07 (67 spare, growing ~+500/year), `suspend_d`'s worst
+    measured session 1,466.
     """
     caps = {entry.dataset: entry.max_rows_per_response for entry in TUSHARE_DATASETS}
     assert caps == {
@@ -200,6 +209,8 @@ def test_every_descriptor_states_whether_its_response_cap_was_measured() -> None
         "namechange": 10000,
         "adj_factor": 6000,
         "daily_basic": 6000,
+        "suspend_d": 5000,
+        "stk_limit": 7800,
     }
 
 
@@ -210,9 +221,18 @@ def test_the_flag_is_demanded_exactly_where_it_is_the_only_witness_or_the_stakes
     purpose rather than inherit it -- and set on `stock_basic` because that descriptor was the
     one place with **neither** witness: no measured cap and no required flag, so a response
     that simply omitted `has_more` was accepted at any row count with nothing checking it.
+
+    `V2-P1-008` is the "later task" `providers/tushare.py`'s docstring anticipated, and it
+    splits its two datasets rather than inheriting either precedent. `stk_limit` demands the
+    flag because `daily`'s argument does not transfer: a dropped bar is an absence nothing
+    interpolates, but a dropped **band** is silently replaced by `AShareExecutionPolicy`'s
+    derived one, which disagrees with the exchange on 159 of 5,338 names on 2024-06-28 -- so
+    the stakes are `adj_factor`'s, not `daily`'s. `suspend_d` does not, because every consumer
+    uses a halt to *excuse* a missing bar, so a truncated response raises more alarms rather
+    than fewer.
     """
     demanded = {entry.dataset for entry in TUSHARE_DATASETS if entry.requires_truncation_flag}
-    assert demanded == {ADJ_FACTOR_DATASET, STOCK_BASIC_DATASET}
+    assert demanded == {ADJ_FACTOR_DATASET, STOCK_BASIC_DATASET, PRICE_LIMIT_DATASET}
 
     capless_and_unflagged = {
         entry.dataset

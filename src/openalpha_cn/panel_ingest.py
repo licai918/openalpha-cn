@@ -329,6 +329,17 @@ from openalpha_cn.domain.panel_batch import (
     PanelColumnKind,
     TimelineColumns,
 )
+from openalpha_cn.domain.price_limits import (
+    MIN_EXPLAINED_SESSION_SHARE,
+    PRICE_LIMIT_DATASET,
+    PRICE_LIMIT_PANEL_COLUMNS,
+    SUSPENSION_DATASET,
+    SUSPENSION_PANEL_COLUMNS,
+    PriceLimit,
+    SuspensionDay,
+    price_limits_from_panel_rows,
+    suspensions_from_panel_rows,
+)
 from openalpha_cn.domain.stock_universe import (
     STOCK_BASIC_DATASET,
     UNIVERSE_PANEL_COLUMNS,
@@ -1697,6 +1708,69 @@ def _refuse_thin_price_sessions(batch: ColumnarPanelBatch) -> None:
     )
 
 
+def _refuse_unexplained_thin_sessions(
+    batch: ColumnarPanelBatch, halts: Mapping[date, SuspensionDay]
+) -> None:
+    """Refuse a price year whose thin sessions are **not** accounted for by halts (`V2-P1-008`).
+
+    ## What this buys over `_refuse_thin_price_sessions`
+
+    That floor sits at `MIN_SESSION_ROW_SHARE` = 0.5 of the partition's median, and it is there
+    because 2015-07-09 legitimately served 1,363 rows against that year's median of 2,359 --
+    a ratio of **0.578**. Any floor above that refuses a true partition of 2015, so "a fetch
+    that returned most of the market" was invisible by construction.
+
+    `suspend_d` removes the reason for the low floor rather than the floor. Counting each
+    session's whole-day halts alongside its bars, that same session becomes 2,801 (1,363 bars +
+    1,438 halts) against a median explained cross section of 2,796 -- it stops being thin at all
+    -- and the **binding** session of the year moves to 2015-01-09 at 0.927.
+    `MIN_EXPLAINED_SESSION_SHARE` is set from that full-year census; see its docstring in
+    `domain/price_limits.py` for the numbers and for the margin it leaves.
+
+    ## Only whole-day halts count, and a missing day counts as zero
+
+    `TradingState.interrupted` and `TradingState.resumed` both mean the security **traded**, so
+    including them would let a session with 1,300 intraday halts explain away 1,300 missing
+    bars -- the over-explanation that makes an alarm useless. `SuspensionDay.halted` is the only
+    input.
+
+    A session the mapping does not mention contributes zero halts. That is deliberate and it is
+    the safe direction: `suspend_d` legitimately serves no rows for a session on which nothing
+    happened, so "absent" and "no halts" are genuinely indistinguishable here, and a caller who
+    supplied an incomplete suspension corpus gets a **false refusal** -- loud, and repaired by
+    fetching the missing sessions -- rather than a quiet pass.
+
+    ## The residue, plainly
+
+    This runs only when `write_daily_panel` is given `halts`. It is an additional check on top
+    of `_refuse_thin_price_sessions` rather than a replacement, so a caller who passes nothing
+    is exactly where `V2-P1-007` left them; see that parameter's own paragraph in
+    `write_daily_panel` for why it could not be made mandatory in this issue.
+    """
+    counts = Counter(_stored_dates(_column_values(batch, PRICE_DATE_COLUMN), PRICE_DATE_COLUMN))
+    explained = {
+        day: rows + (len(halts[day].halted) if day in halts else 0) for day, rows in counts.items()
+    }
+    typical = median(explained.values())
+    floor = typical * MIN_EXPLAINED_SESSION_SHARE
+    thin = sorted(day for day, total in explained.items() if total < floor)
+    if not thin:
+        return
+    worst = min(thin, key=lambda day: explained[day])
+    halted_on_worst = len(halts[worst].halted) if worst in halts else 0
+    raise PanelBatchError(
+        f"{batch.dataset} carries {len(thin)} session(s) whose bars and halts together fall "
+        f"under {MIN_EXPLAINED_SESSION_SHARE:.0%} of this partition's median explained cross "
+        f"section ({typical:.0f}): {_date_sample(thin)}. {worst.isoformat()} has "
+        f"{counts[worst]} row(s) and {halted_on_worst} whole-day halt(s), "
+        f"{explained[worst]} together. A session that arrived short and a session on which the "
+        "market was shut look identical in the bars alone, which is why the row-count floor "
+        "has to sit at half the median; with suspend_d they are distinguishable, and this one "
+        "is not explained. Re-fetch that session -- and check that the suspension corpus covers "
+        "it, because a session missing from it counts as zero halts here"
+    )
+
+
 def _close_index(batch: ColumnarPanelBatch) -> dict[tuple[str, date], float]:
     """Index a price batch's `close` column by `(subject, trade_date)`, refusing duplicates.
 
@@ -1770,6 +1844,7 @@ def write_daily_panel(
     bars: Sequence[ColumnarPanelBatch],
     fundamentals: Sequence[ColumnarPanelBatch],
     calendar: TradingCalendar,
+    halts: Mapping[date, SuspensionDay] | None = None,
     date_timezone: str = DEFAULT_DATE_TIMEZONE,
 ) -> tuple[PartitionRef, PartitionRef]:
     """Write one year of `daily` and `daily_basic` cross sections as two partitions (`V2-P1-007`).
@@ -1809,6 +1884,26 @@ def write_daily_panel(
        leave the two partitions disagreeing about which names the year covers, and guard 4
        cannot catch that direction because a bar with no valuation is the measured, tolerated
        shape of every pre-2024 year.
+    6. `_refuse_unexplained_thin_sessions`, when `halts` is supplied, refuses a session whose
+       missing bars are not accounted for by that day's whole-day halts. This is guard 3 with
+       the reason for its low threshold removed -- see below.
+
+    ## `halts` is optional, which is a fail-open, and here is why it is one anyway (`V2-P1-008`)
+
+    Guard 3's floor sits at half the partition median because 2015-07-09 really did serve 1,363
+    rows against a year median of 2,359. With `suspend_d` in hand that session is explained
+    (1,363 bars + 1,438 whole-day halts, against a median explained cross section of 2,796) and
+    a full-year census puts that year's *worst* explained share at 0.927, so guard 6 can sit at
+    `MIN_EXPLAINED_SESSION_SHARE` and catch a fetch that lost a seventh of the market -- which
+    guard 3, by construction, cannot.
+
+    It is not mandatory, and that is a real weakening compared with the guards above, stated
+    rather than glossed: a caller who omits it gets exactly `V2-P1-007`'s behaviour. Making it
+    required would change this function's signature for every existing caller, and this issue is
+    explicitly not allowed to rewrite the tests that pin `V2-P1-007`'s guards. The upgrade path
+    is the same one `V2-P1-015`'s `panel build` will need anyway -- it fetches all three datasets
+    for the same session in the same loop -- and at that point `halts` should lose its default.
+    Until then, guard 3 still runs unconditionally, so nothing is *worse* than before.
 
     ## What this writer's coupling costs `V2-P1-015`
 
@@ -1851,6 +1946,9 @@ def write_daily_panel(
     _refuse_missing_price_sessions(merged_fundamentals, calendar, year, date_timezone=date_timezone)
     _refuse_thin_price_sessions(merged_bars)
     _refuse_thin_price_sessions(merged_fundamentals)
+    if halts is not None:
+        _refuse_unexplained_thin_sessions(merged_bars, halts)
+        _refuse_unexplained_thin_sessions(merged_fundamentals, halts)
     _refuse_close_disagreement(merged_bars, merged_fundamentals)
     remedy = (
         "A year's partition is replaced whole, so every session of the year has to arrive in "
@@ -2090,6 +2188,227 @@ def load_daily_valuations(
         store, requirement, DAILY_BASIC_PANEL_COLUMNS, day=day, calendar=calendar, as_of=as_of
     )
     return daily_valuations_from_panel_rows(rows)
+
+
+def write_suspensions(
+    store: PanelStore,
+    batches: Sequence[ColumnarPanelBatch],
+    *,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> PartitionRef:
+    """Write one year of `suspend_d` cross sections as a partition (`V2-P1-008`).
+
+    A sequence for `write_adjustment_factors`' reason -- one request is one session and one
+    partition is a year -- and it is the *cheap* one of this issue's two datasets: 28 rows on
+    2024-06-28 against `daily`'s 5,338, and 1,466 on 2015-07-09, the worst session measured.
+
+    ## No calendar census here, and that is not an oversight
+
+    `_refuse_missing_price_sessions` refuses a price year that lacks a session the calendar
+    reports open, because every open session has bars. This dataset is the opposite: a session
+    on which nothing was halted and nothing resumed serves **zero** rows, so an absent session
+    is the ordinary case and a census built from the calendar would refuse almost every year.
+    That is also why `_refuse_unexplained_thin_sessions` treats an absent session as zero halts
+    rather than as an error -- the two facts are indistinguishable in this dataset by
+    construction, and the choice is made where the consequence is (a false refusal of a price
+    year, which is loud) rather than here.
+
+    The subject guard *is* kept, unlike `write_name_history`'s deliberate omission of it: a
+    rename corpus for a year legitimately covers different securities on a re-fetch, but a
+    security that was halted in 2015 does not stop having been halted, so losing one on a
+    rewrite is a partial read rather than news.
+    """
+    merged = merge_panel_batches(batches)
+    if merged.dataset != SUSPENSION_DATASET:
+        raise PanelBatchError(
+            f"expected the {SUSPENSION_DATASET!r} dataset, got {merged.dataset!r}"
+        )
+    year = panel_partition_year(merged, date_timezone=date_timezone)
+    _refuse_to_drop_stored_subjects(
+        store,
+        merged,
+        year,
+        remedy=(
+            "A year's partition is replaced whole, and a security that was halted stays halted; "
+            "re-fetch every session of the year and write it in one call"
+        ),
+    )
+    return write_panel_batch(store, merged, year=year, date_timezone=date_timezone)
+
+
+def suspension_requirement(
+    *, years: Sequence[int], as_of: datetime, max_staleness: timedelta | None
+) -> ReadinessRequirement:
+    """What the halt corpus must satisfy before trading states may be built from it.
+
+    `required_dates` is waived for the reason `write_suspensions` states no census: a year has
+    no list of days it is *supposed* to contain, because a session with no halts has no rows.
+    That is the same shape `name_history_requirement` has and the opposite of
+    `daily_requirement`'s, and it is the honest one here -- an expectation that every open
+    session appears would report a permanent `date_gap` on a complete partition.
+
+    `required_subjects` is waived because the securities are what the read is for.
+
+    `max_staleness` has no default, for `daily_requirement`'s reason: a halt corpus whose newest
+    partition is a year old will answer "nothing was halted" for every session since, which is
+    the fail-open answer, and leaving that to a default would be choosing silence.
+    """
+    return ReadinessRequirement(
+        dataset=SUSPENSION_DATASET,
+        as_of=as_of,
+        years=tuple(sorted(set(years))),
+        required_dates=None,
+        required_subjects=None,
+        required_fields=SUSPENSION_PANEL_COLUMNS,
+        max_staleness=max_staleness,
+    )
+
+
+def load_suspensions(
+    store: PanelStore,
+    *,
+    years: Sequence[int],
+    as_of: datetime,
+    max_staleness: timedelta | None,
+) -> Mapping[date, SuspensionDay]:
+    """Read the stored halt corpus back as one `SuspensionDay` per session, or refuse to.
+
+    Whole years rather than one session, unlike `load_daily_bars`, because that is the unit its
+    two consumers want: `_refuse_unexplained_thin_sessions` needs every session of a partition
+    at once, and a caller walking a backtest wants the year in memory (a year of this dataset is
+    thousands of rows, not the ~1.3e6 a price year is).
+
+    A year that was never ingested blocks rather than being skipped, for
+    `load_name_histories`' reason and more sharply: a skipped year here answers "nothing was
+    halted" for every session in it, which is a plausible, silent, and completely wrong answer.
+    """
+    requested = tuple(sorted(set(years)))
+    if not requested:
+        raise PanelBatchError(
+            "load_suspensions needs at least one year; a read of no years would answer "
+            "'nothing was ever halted', which is indistinguishable from a failed read"
+        )
+    requirement = suspension_requirement(years=requested, as_of=as_of, max_staleness=max_staleness)
+    rows: list[tuple[object, ...]] = []
+    for year in requested:
+        outcome = store.read_if_ready(requirement, year=year, columns=SUSPENSION_PANEL_COLUMNS)
+        if outcome.is_blocked:
+            raise PanelStorageError(
+                f"the {SUSPENSION_DATASET} corpus cannot be read at {as_of.isoformat()}: "
+                f"{[issue.code for issue in outcome.readiness.issues]}; "
+                f"{'; '.join(issue.detail for issue in outcome.readiness.issues)}"
+            )
+        rows.extend(outcome.rows)
+    return suspensions_from_panel_rows(rows)
+
+
+def write_price_limits(
+    store: PanelStore,
+    batches: Sequence[ColumnarPanelBatch],
+    *,
+    calendar: TradingCalendar,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> PartitionRef:
+    """Write one year of `stk_limit` cross sections as a partition (`V2-P1-008`).
+
+    The price panel's guards apply here almost unchanged, because this dataset has the price
+    panel's shape: every open session publishes a band, the counts are stable within a year, and
+    a partition is stored uncompressed.
+
+    - `_refuse_missing_price_sessions`: a session with no bands is one on which every
+      `limit_touch` question is unanswerable. **This is what refuses a pre-2007 year outright**,
+      and correctly: `stk_limit` serves 0 rows for 2005-01-04 and 2006-01-04, so there is no
+      2006 partition to be had and a year that silently held a handful of days would be worse
+      than none.
+    - `_refuse_thin_price_sessions`: the same floor `daily` uses. It is the weak one here for
+      the same reason it is weak there, and it is not strengthened with `suspend_d` the way the
+      price panel's is -- a halted security still gets a published band (all 26 of 2024-06-28's
+      halts are in `stk_limit`), so a halt explains nothing about a missing band.
+    - `_refuse_to_drop_stored_subjects`: a rewrite that loses a security is a partial read.
+
+    Note what is **not** checked: that every bar has a band. It does not hold on history --
+    60 bars had no published limit on 2020-03-02, all `.BJ` -- so the join is asked per security
+    and a missing band is an absent key rather than a fault. See
+    `domain/price_limits.py::KNOWN_SUSPENSION_LIMITATIONS`.
+    """
+    merged = merge_panel_batches(batches)
+    if merged.dataset != PRICE_LIMIT_DATASET:
+        raise PanelBatchError(
+            f"expected the {PRICE_LIMIT_DATASET!r} dataset, got {merged.dataset!r}"
+        )
+    year = panel_partition_year(merged, date_timezone=date_timezone)
+    _refuse_missing_price_sessions(merged, calendar, year, date_timezone=date_timezone)
+    _refuse_thin_price_sessions(merged)
+    _refuse_to_drop_stored_subjects(
+        store,
+        merged,
+        year,
+        remedy=(
+            "A year's partition is replaced whole, so every session of the year has to arrive "
+            "in one call; a narrower cross section is a partial fetch rather than news"
+        ),
+    )
+    return write_panel_batch(store, merged, year=year, date_timezone=date_timezone)
+
+
+def price_limit_requirement(
+    calendar: TradingCalendar,
+    *,
+    years: Sequence[int],
+    as_of: datetime,
+    max_staleness: timedelta | None,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> ReadinessRequirement:
+    """What the published-band panel must satisfy before limits may be read from it.
+
+    `daily_requirement`'s shape and its waivers, because this dataset has `daily`'s shape: every
+    open session publishes bands, the partition is stored uncompressed, and so the calendar-
+    derived `required_dates` is exactly right rather than a permanent false gap.
+
+    The one thing it inherits that is worth naming: a year before 2007 cannot satisfy this,
+    because the endpoint has no rows at all before 2007-01-04. That is a horizon rather than a
+    hole, and it surfaces here as `date_gap` rather than as a silent empty read.
+    """
+    return _price_requirement(
+        PRICE_LIMIT_DATASET,
+        PRICE_LIMIT_PANEL_COLUMNS,
+        calendar,
+        years=years,
+        as_of=as_of,
+        max_staleness=max_staleness,
+        date_timezone=date_timezone,
+    )
+
+
+def load_price_limits(
+    store: PanelStore,
+    *,
+    day: date,
+    calendar: TradingCalendar,
+    as_of: datetime,
+    max_staleness: timedelta | None,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> dict[str, PriceLimit]:
+    """Read one session's published bands back as `PriceLimit`s, or refuse to.
+
+    `load_daily_bars`' twin -- one session per call, the same three fail-closed layers -- with
+    one honest asymmetry in the other direction from `load_daily_valuations`': the result holds
+    **more** securities than the bars do, and most of the surplus is not equity. `stk_limit`
+    served 6,867 rows on 2024-06-28 against `daily`'s 5,338, and the 1,529 extra are 1,418
+    funds, 85 B shares and the session's 26 halted stocks. A caller joining the two iterates the
+    bars and looks bands up, never the reverse.
+    """
+    requirement = price_limit_requirement(
+        calendar,
+        years=(day.year,),
+        as_of=as_of,
+        max_staleness=max_staleness,
+        date_timezone=date_timezone,
+    )
+    rows = _read_price_session(
+        store, requirement, PRICE_LIMIT_PANEL_COLUMNS, day=day, calendar=calendar, as_of=as_of
+    )
+    return price_limits_from_panel_rows(rows)
 
 
 def panel_readiness_requirement(

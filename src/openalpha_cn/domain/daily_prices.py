@@ -401,8 +401,20 @@ KNOWN_PRICE_LIMITATIONS: Final[tuple[PriceLimitation, ...]] = (
             "section is refused at write time, which catches a session that came back with a "
             "handful of names. It is a floor and not a census -- it is set at 0.5 because "
             "2015-07-09 legitimately served 1,363 rows against that year's median of 2,359, "
-            "so a fetch that returned most of the market is still invisible. The dataset that "
-            "settles the general case is suspend_d (V2-P1-008)."
+            "so a fetch that returned most of the market is still invisible. "
+            "V2-P1-008 landed suspend_d and answered this in two places without closing it "
+            "entirely. domain/price_limits.py::explain_unpriced splits "
+            "PricedCrossSection.unpriced into the names a whole-day halt accounts for and the "
+            "names it does not, so a short fetch becomes a population with no halt behind it "
+            "rather than an indistinguishable one. "
+            "panel_ingest._refuse_unexplained_thin_sessions moves the same test to write time "
+            "and can sit at MIN_EXPLAINED_SESSION_SHARE (0.85) rather than 0.5, because "
+            "counting whole-day halts takes 2015's worst session from 0.578 of that year's "
+            "median to 0.927. What is left: that write guard is opt-in (write_daily_panel's "
+            "halts parameter defaults to None, so a caller who omits it gets exactly this "
+            "floor), and suspend_d carries no intraday marker before 2015, so the halted/"
+            "traded split is exact only from 2015-07-08 onward. See "
+            "domain/price_limits.py::KNOWN_SUSPENSION_LIMITATIONS."
         ),
     ),
     PriceLimitation(

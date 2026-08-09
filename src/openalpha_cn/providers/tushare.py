@@ -212,6 +212,16 @@ from openalpha_cn.domain.panel_batch import (
     PanelColumnKind,
     TimelineColumns,
 )
+from openalpha_cn.domain.price_limits import (
+    HALT_TYPE,
+    PRICE_LIMIT_DATA_COLUMNS,
+    PRICE_LIMIT_DATASET,
+    RESUMPTION_TYPE,
+    SUSPENSION_DATA_COLUMNS,
+    SUSPENSION_DATASET,
+    SUSPENSION_TIMING_COLUMN,
+    SUSPENSION_TYPE_COLUMN,
+)
 from openalpha_cn.domain.stock_universe import (
     DELISTING_EVENT,
     LIFECYCLE_DATE_COLUMN,
@@ -711,6 +721,38 @@ def _optional_number(value: object) -> object:
     return _finite_number(value)
 
 
+def _suspension_type(value: object) -> object:
+    """Pass an `S`/`R` through, refusing anything else.
+
+    `_lifecycle_event_name`'s shape and its reason. The value domain was measured rather than
+    assumed, and exhaustively rather than by sampling: 537,671 rows spanning 2007-01..2026-12,
+    pulled in windows narrow enough that none was truncated, carry `S` or `R` and nothing else.
+    See `domain/price_limits.py::HALT_TYPE` for how that pull was assembled. A third value is a
+    schema change, and the two things this column decides -- whether the security traded, and
+    whether an absent bar is explained -- both invert on it, so guessing is worse than failing.
+    """
+    if value not in (HALT_TYPE, RESUMPTION_TYPE):
+        raise ValueError(
+            f"{SUSPENSION_TYPE_COLUMN} must be {HALT_TYPE!r} or {RESUMPTION_TYPE!r}, got {value!r}"
+        )
+    return value
+
+
+def _optional_required_text(value: object) -> object:
+    """A nullable text cell: `None` stays `None`, anything present must be real text.
+
+    `""` is refused rather than folded into `None`, unlike `_optional_calendar_date_text`'s
+    treatment of an empty `pretrade_date`. The two columns differ in what an empty string would
+    *mean*: a missing `pretrade_date` is simply unknown, whereas a null `suspend_timing` is the
+    load-bearing signal that a halt covered the whole session (see
+    `domain/price_limits.py::TradingState`), so a blank one would silently become a whole-day
+    halt on a row where the upstream had in fact populated the column.
+    """
+    if value is None:
+        return None
+    return _required_text(value)
+
+
 def _optional_calendar_date_text(value: object) -> object:
     """Same as `_calendar_date_text`, but a missing value stays missing.
 
@@ -744,6 +786,32 @@ TUSHARE_NAMECHANGE_ROW_CAP: Final[int] = 10000
 10,000 rows with `has_more=True`, which is also why `domain/name_history.py` assembles the
 corpus from 37 announcement-year windows instead."""
 
+TUSHARE_STK_LIMIT_ROW_CAP: Final[int] = 7800
+"""Rows per response for `stk_limit`, measured on 2026-08-09 -- and the tightest margin here.
+
+A single session fits with `has_more=False` (7,733 rows on 2026-08-07). A two-session window,
+`start_date=20260701 / end_date=20260807`, returns exactly **7,800** rows with `has_more=True`,
+and `limit=8000`, `limit=10000` and `limit=12000` all return the same 7,800. So the ceiling is
+this endpoint's own and not the request's.
+
+**The headroom is 67 rows and it is shrinking fast.** The whole-market cross section was 6,867
+on 2024-06-28, 7,216 on 2025-08-01 and 7,733 on 2026-08-07 -- +349 then +517 per year, against
+`daily`'s +41/+88/+77 on a 465-row margin. This dataset covers funds and B shares as well as
+stocks (see `domain/price_limits.py`), which is why it is both larger and faster-growing than
+the price panel. `_check_response_completeness` refuses at the cap rather than storing a short
+session, and `ProviderRequest.subjects` splits the session when it goes; this constant is a
+bound to watch, not a schedule.
+"""
+
+TUSHARE_SUSPEND_ROW_CAP: Final[int] = 5000
+"""Rows per response for `suspend_d`, measured on 2026-08-09.
+
+`start_date=20150601 / end_date=20150831` returns exactly 5,000 rows with `has_more=True`, and
+`limit=6000` / `8000` / `10000` / `12000` do not raise it. Unlike `stk_limit` this one has room:
+one session of the whole market is 28 rows on an ordinary day and 1,466 on the worst measured
+one (2015-07-09, the week a large part of the market halted at once), or 29% of the cap.
+"""
+
 
 def _price_panel_column(name: str) -> TusharePanelColumn:
     """One `daily` / `daily_basic` column, with the parse its nullability and sign demand.
@@ -767,6 +835,26 @@ def _price_panel_column(name: str) -> TusharePanelColumn:
         parse = _finite_number
     return TusharePanelColumn(
         name=name, kind="float", source_field=name, parse=_named_parser(name, parse)
+    )
+
+
+def _price_limit_panel_column(name: str) -> TusharePanelColumn:
+    """One `stk_limit` column: the session date, or a published limit price.
+
+    `_price_panel_column`'s shape, kept separate rather than extended because the two datasets
+    disagree about what a "price" column may hold. A `daily` price is a traded price; a
+    `stk_limit` price is a *bound*, and the limit-free sentinels (99999.999 / 999999.999 /
+    100000.0 / 1000000.0 against a 0.01 floor) are real published values meaning "this security
+    has no limit today". They go through `_positive_price` untouched -- normalising them to
+    `None` here would destroy the only statement that the security was unbounded, and they are
+    classified on the read side, against the previous close, by `PriceLimit.is_bounded`.
+    """
+    if name == PRICE_DATE_COLUMN:
+        return TusharePanelColumn(
+            name=name, kind="string", source_field=name, parse=_calendar_date_text
+        )
+    return TusharePanelColumn(
+        name=name, kind="float", source_field=name, parse=_named_parser(name, _positive_price)
     )
 
 
@@ -1006,6 +1094,91 @@ TUSHARE_DATASETS: tuple[TushareDatasetDescriptor, ...] = (
         # Not demanded, for the reason `daily`'s comment gives.
         requires_truncation_flag=False,
         panel_columns=tuple(_price_panel_column(name) for name in DAILY_BASIC_DATA_COLUMNS),
+    ),
+    TushareDatasetDescriptor(
+        dataset=SUSPENSION_DATASET,
+        kind=SUSPENSION_DATASET,
+        subject_field="ts_code",
+        date_field=PRICE_DATE_COLUMN,
+        # A halt is knowable once the session it covers has closed, the same instant a bar is.
+        # Dating it at that day's midnight would make tomorrow's halt readable this morning,
+        # which is precisely the day a backtest would act on it.
+        clock=ClockStrategy.daily_close,
+        # One trading day of the whole market, the builder every cross-section dataset here
+        # uses. Measured: 28 rows on 2024-06-28, 5 on 2026-08-07, and 1,466 on 2015-07-09 --
+        # the worst session in the week a large part of the market halted at once.
+        params_builder=_trade_date_params,
+        # `""` asks for the endpoint's defaults, which are exactly the four columns below --
+        # measured, not assumed. `required_response_fields` then pins every one of them.
+        response_fields="",
+        required_response_fields=("ts_code", *SUSPENSION_DATA_COLUMNS),
+        source_uri_template="tushare://{dataset}/{subject}/{date}",
+        max_rows_per_response=TUSHARE_SUSPEND_ROW_CAP,
+        # Deliberately **not** demanded, and the reason is the direction a lost row fails in.
+        # Every consumer of this dataset uses a halt to *excuse* an absent bar --
+        # `explain_unpriced` and `panel_ingest._refuse_unexplained_thin_sessions` -- so a
+        # truncated response excuses fewer absences and raises more alarms, never fewer. That
+        # is the fail-closed direction, which is what `daily` argued and `adj_factor` could
+        # not. The cap witness is kept because it is cheap and because it is what would catch
+        # a multi-session window; the residue is a response that both omits `has_more` and
+        # comes in under 5,000 rows, and it is stated rather than argued away.
+        requires_truncation_flag=False,
+        panel_columns=(
+            TusharePanelColumn(
+                name=PRICE_DATE_COLUMN,
+                kind="string",
+                source_field=PRICE_DATE_COLUMN,
+                parse=_calendar_date_text,
+            ),
+            TusharePanelColumn(
+                name=SUSPENSION_TYPE_COLUMN,
+                kind="string",
+                source_field=SUSPENSION_TYPE_COLUMN,
+                parse=_suspension_type,
+            ),
+            # Nullable on purpose: a null here is `TradingState.halted` (the whole session) and
+            # a populated window is `TradingState.interrupted` (the security traded). Storing
+            # it is what keeps those two apart -- 31 of 2015-07-08's 1,343 `S` rows carry a
+            # window and all 31 have a bar.
+            TusharePanelColumn(
+                name=SUSPENSION_TIMING_COLUMN,
+                kind="string",
+                source_field=SUSPENSION_TIMING_COLUMN,
+                parse=_optional_required_text,
+            ),
+        ),
+    ),
+    TushareDatasetDescriptor(
+        dataset=PRICE_LIMIT_DATASET,
+        kind=PRICE_LIMIT_DATASET,
+        subject_field="ts_code",
+        date_field=PRICE_DATE_COLUMN,
+        # The band for session D is computed from D-1's close and published before D opens, so
+        # dating it at D's close is one session *late* rather than early -- the conservative
+        # direction, and the same clock every other trading-day dataset here uses. A separate
+        # clock strategy would be the honest refinement and is not free: `available_time` would
+        # have to name the pre-open instant, which the response does not carry.
+        clock=ClockStrategy.daily_close,
+        # One trading day, the same builder. Measured: 6,867 rows on 2024-06-28 and 7,733 on
+        # 2026-08-07, against a 7,800-row cap -- see `TUSHARE_STK_LIMIT_ROW_CAP` for why that
+        # 67-row margin is the tightest in this table. `subjects` is the escape route.
+        params_builder=_trade_date_params,
+        response_fields="",
+        required_response_fields=("ts_code", *PRICE_LIMIT_DATA_COLUMNS),
+        source_uri_template="tushare://{dataset}/{subject}/{date}",
+        max_rows_per_response=TUSHARE_STK_LIMIT_ROW_CAP,
+        # Demanded, which makes this the third descriptor to do so and the first price one.
+        # `daily` declined it because a dropped bar is *short* and nothing downstream
+        # interpolates it. That argument does not transfer here, because this dataset does have
+        # a substitute and the substitute is known to be wrong: with no published band,
+        # `AShareExecutionPolicy` falls back to its board-plus-`is_st` rule, which disagrees
+        # with the exchange on 159 of 5,338 names on one ordinary session (see
+        # `domain/price_limits.py`). So a silently missing row here is not an absence, it is a
+        # quiet substitution of a measurably wrong number -- `adj_factor`'s situation rather
+        # than `daily`'s. The cross section also sits 67 rows under the cap, so the row-count
+        # witness is about to stop having any margin at all.
+        requires_truncation_flag=True,
+        panel_columns=tuple(_price_limit_panel_column(name) for name in PRICE_LIMIT_DATA_COLUMNS),
     ),
 )
 
