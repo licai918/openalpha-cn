@@ -11,7 +11,8 @@ The four things this file is really about:
 - **`is_new` has to be named too.** The endpoint's default is a filter: a bare request returns
   only the 5,889 currently-effective assignments and hides the 2,004 superseded ones, with no
   truncation flag and nothing else to notice it by.
-- **The cap is 3,000, the lowest in the table**, and `limit` only narrows it.
+- **The cap is 3,000** -- the lowest in the table until `V2-P1-011` measured the financial
+  statements at 100 -- and `limit` only narrows it.
 - **The clock refuses to claim pre-2021 knowability.** A closed assignment becomes two rows, one
   per end, and each is dated at the later of its own event and the day its taxonomy came into
   force.
@@ -38,6 +39,7 @@ from openalpha_cn.providers.tushare import (
     CURRENT_INDUSTRY_MEMBERSHIP,
     SUPERSEDED_INDUSTRY_MEMBERSHIP,
     TUSHARE_DATASETS,
+    TUSHARE_FINANCIAL_ROW_CAP,
     TUSHARE_INDUSTRY_MEMBER_ROW_CAP,
     TUSHARE_RESPONSE_TRUNCATION_FLAG,
     TushareProvider,
@@ -516,17 +518,26 @@ def test_a_row_not_yet_knowable_at_the_as_of_is_dropped_rather_than_stored(
 # --------------------------------------------------------------------------------------
 
 
-def test_the_membership_cap_is_three_thousand_and_is_the_lowest_in_the_table() -> None:
+def test_the_membership_cap_is_three_thousand_and_was_the_lowest_until_v2_p1_011() -> None:
     """Measured: a bare request returns exactly 3,000 rows with `has_more=True`, and
     `limit=3001`, `5000` and `10000` all return the same 3,000. `limit` is not ignored -- it
-    only narrows, `limit=100` returning 100 -- so 3,000 is the server's own ceiling."""
+    only narrows, `limit=100` returning 100 -- so 3,000 is the server's own ceiling.
+
+    This test was called `..._and_is_the_lowest_in_the_table` and asserted `min(caps) == 3000`
+    until `V2-P1-011` measured `balancesheet` and `fina_indicator` at **100**, thirty times
+    lower. The 3,000 is unchanged and still measured; the superlative was never a fact about
+    this endpoint, only about which endpoints had been measured by then, which is why it is
+    now stated as a comparison against a named constant rather than as a minimum.
+    """
     assert TUSHARE_INDUSTRY_MEMBER_ROW_CAP == 3000
     caps = [
         entry.max_rows_per_response
         for entry in TUSHARE_DATASETS
         if entry.max_rows_per_response is not None
     ]
-    assert min(caps) == TUSHARE_INDUSTRY_MEMBER_ROW_CAP
+    assert min(caps) == TUSHARE_FINANCIAL_ROW_CAP == 100
+    without_financials = [cap for cap in caps if cap != TUSHARE_FINANCIAL_ROW_CAP]
+    assert min(without_financials) == TUSHARE_INDUSTRY_MEMBER_ROW_CAP
 
 
 def test_a_membership_response_at_the_cap_is_refused(fake_tushare_transport) -> None:

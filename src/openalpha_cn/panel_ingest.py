@@ -330,6 +330,15 @@ from openalpha_cn.domain.daily_prices import (
     daily_bars_from_panel_rows,
     daily_valuations_from_panel_rows,
 )
+from openalpha_cn.domain.financial_statements import (
+    DATASETS_WITH_REVISION_LABEL,
+    FINANCIAL_STATEMENT_DATASETS,
+    REVISION_LABEL_COLUMN,
+    FinancialStatementError,
+    StatementHistory,
+    statement_histories_from_panel_rows,
+    statement_panel_columns,
+)
 from openalpha_cn.domain.index_membership import (
     INDEX_WEIGHT_DATASET,
     INDEX_WEIGHT_PANEL_COLUMNS,
@@ -2995,3 +3004,175 @@ def _revision_census(
     return tuple(
         RevisionCoverage(label=label, row_count=count) for label, count in sorted(census.items())
     )
+
+
+def write_financial_statements(
+    store: PanelStore,
+    batches: Sequence[ColumnarPanelBatch],
+    *,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> tuple[PartitionRef, ...]:
+    """Write one financial-statement dataset into one partition per **announcement** year.
+
+    The announcement, not the period. `providers/tushare.py` dates every row of these four
+    endpoints at its own `ann_date`, so `001278.SZ`'s 2018 annual report -- announced
+    2022-01-06 -- lands in the 2022 partition. Filing it under 2018 would put a row in a
+    partition every reader of 2018, 2019, 2020 and 2021 can see, which is the look-ahead this
+    dataset's whole clock exists to prevent.
+
+    ## Why a sequence of batches, and why the split runs anyway
+
+    A sequence, like `write_index_weights`: one request is one `(security, year)` window (see
+    `_financial_statement_params`), so a year of the whole market is ~5,500 fetches and
+    `PanelStore.write_partition` replaces a partition whole -- writing them one at a time would
+    leave the year holding whichever security went last.
+
+    The split runs even so, and for `fina_indicator` it is load-bearing rather than defensive.
+    That endpoint's request window filters the **report period**, not the announcement, so a
+    window for period-year *Y* returns rows announced in *Y* and in *Y+1* -- the annual report
+    of *Y* is announced the following spring. `panel_partition_year` refuses a batch that
+    straddles two years, so `split_panel_batch_by_year` places them. The three statement
+    endpoints filter `ann_date` and produce a single-year batch, and the split is then the
+    identity.
+
+    ## The revision census is switched on here, and only where a label exists
+
+    `revision_field="update_flag"` is what fills `PartitionCoverage.revisions`, the facet
+    `panel/catalog.py` built for exactly this dataset because the clock-derived
+    `revised_row_count` provably cannot see these corrections -- both rows of a corrected pair
+    carry the same `ann_date`. `fina_indicator` gets `None`, because it has no label column at
+    all; `_revision_census` refuses a field that is not a column, and passing one would trade a
+    real absence for a crash.
+
+    **The census is a count of labels, not a resolution.** It says the 2024 partition holds
+    1,204 rows labelled `0` and 1,187 labelled `1`; it does not say which of a pair is current,
+    and nothing here does. See `domain/financial_statements.py`.
+
+    ## The subject guard
+
+    The subject is the security, so `_refuse_to_drop_stored_subjects` blocks a batch that would
+    replace a year's partition with one holding fewer securities -- which is exactly what a
+    naive `for code in universe: write_financial_statements(store, [fetch(code)])` produces.
+    Every security whose window touches a year has to arrive in one call.
+    """
+    merged = merge_panel_batches(batches)
+    if merged.dataset not in FINANCIAL_STATEMENT_DATASETS:
+        raise FinancialStatementError(
+            f"expected one of the financial-statement datasets "
+            f"{list(FINANCIAL_STATEMENT_DATASETS)}, got {merged.dataset!r}"
+        )
+    revision_field = (
+        REVISION_LABEL_COLUMN if merged.dataset in DATASETS_WITH_REVISION_LABEL else None
+    )
+    by_year = split_panel_batch_by_year(merged, date_timezone=date_timezone)
+    for year, yearly in by_year:
+        _refuse_to_drop_stored_subjects(
+            store,
+            yearly,
+            year,
+            remedy=(
+                "An announcement year's partition is replaced whole and its key has no "
+                "ts_code dimension, so every security whose filings fall in that year has to "
+                "arrive in one call or not at all"
+            ),
+        )
+    return tuple(
+        write_panel_batch(
+            store,
+            yearly,
+            year=year,
+            date_timezone=date_timezone,
+            revision_field=revision_field,
+        )
+        for year, yearly in by_year
+    )
+
+
+def financial_statement_requirement(
+    *, dataset: str, years: Sequence[int], as_of: datetime, max_staleness: timedelta | None
+) -> ReadinessRequirement:
+    """What a statement panel must satisfy before filings may be read from it.
+
+    `required_dates` is waived for `industry_membership_requirement`'s reason and a sharper
+    version of it: the announcement days of a year are the disclosure calendar of ~5,500
+    issuers, and a list of the days a year is "supposed" to contain would be a guess that
+    refuses every real year. `required_subjects` is waived because the securities are what the
+    read is for.
+
+    `required_fields` is **not** waived and is the dataset's own projection, which is what makes
+    a partition written before a column was added block rather than answer `None` for it -- the
+    distinction `ReportFiling.value_of` depends on, since it reports a genuinely empty upstream
+    cell as `None`.
+
+    `max_staleness` has no default, for `stock_universe_requirement`'s reason: filings arrive in
+    four bursts a year and any bound chosen here would be chosen for the caller.
+    """
+    return ReadinessRequirement(
+        dataset=_require_statement_dataset(dataset),
+        as_of=as_of,
+        years=tuple(sorted(set(years))),
+        required_dates=None,
+        required_subjects=None,
+        required_fields=statement_panel_columns(dataset),
+        max_staleness=max_staleness,
+    )
+
+
+def load_statement_histories(
+    store: PanelStore,
+    *,
+    dataset: str,
+    years: Sequence[int],
+    as_of: datetime,
+    max_staleness: timedelta | None,
+) -> Mapping[str, StatementHistory]:
+    """Read stored announcement years back as one history per security, or refuse to.
+
+    Fail-closed in `load_industry_histories`' shape: a year whose partition is missing, damaged,
+    unprofiled or stale is blocked by `read_if_ready()` with its structured issue codes, and the
+    rows that survive are assembled by `statement_histories_from_panel_rows`, which refuses a
+    row missing a projected column.
+
+    **There is deliberately no `answerable_through` bound here, and the difference from
+    `load_industry_histories` is the point.** An industry assignment is an interval whose close
+    is stored in a later year, so a read that stops short of that year reassembles an interval
+    that never ends. A filing is not an interval: it is one announcement on one day, complete in
+    its own partition. A read that skips a later year therefore loses filings it can no longer
+    answer for -- which `StatementHistory` reports honestly, by refusing days after the last one
+    it holds only through `filing_for`'s horizon error -- but it never *mis*-answers an earlier
+    day. What it does lose is the restatement: a period re-announced in a year this read skipped
+    keeps answering from the earlier announcement. That is the same answer a reader standing
+    inside the read's own window would have had, so it is a narrower corpus rather than a wrong
+    one.
+    """
+    requested = tuple(sorted(set(years)))
+    if not requested:
+        raise FinancialStatementError(
+            f"load_statement_histories needs at least one announcement year for "
+            f"{dataset!r}; a read of no years produces a corpus that refuses every question, "
+            "which is indistinguishable from a failed read"
+        )
+    columns = (SUBJECT_COLUMN_NAME, *statement_panel_columns(dataset))
+    requirement = financial_statement_requirement(
+        dataset=dataset, years=requested, as_of=as_of, max_staleness=max_staleness
+    )
+    rows: list[tuple[object, ...]] = []
+    for year in requested:
+        outcome = store.read_if_ready(requirement, year=year, columns=columns)
+        if outcome.is_blocked:
+            raise PanelStorageError(
+                f"the {dataset} panel cannot be read at {as_of.isoformat()}: "
+                f"{[issue.code for issue in outcome.readiness.issues]}; "
+                f"{'; '.join(issue.detail for issue in outcome.readiness.issues)}"
+            )
+        rows.extend(outcome.rows)
+    return statement_histories_from_panel_rows(dataset=dataset, columns=columns, rows=rows)
+
+
+def _require_statement_dataset(dataset: str) -> str:
+    if dataset not in FINANCIAL_STATEMENT_DATASETS:
+        raise FinancialStatementError(
+            f"expected one of the financial-statement datasets "
+            f"{list(FINANCIAL_STATEMENT_DATASETS)}, got {dataset!r}"
+        )
+    return dataset

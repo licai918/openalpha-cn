@@ -123,17 +123,21 @@ def test_unsupported_dataset_still_raises_configuration_failure_with_original_me
 ) -> None:
     provider = TushareProvider(token="secret-token", transport=fake_tushare_transport({}))
 
+    # `fina_indicator` stood here until `V2-P1-011` wired it into `TUSHARE_DATASETS`, at which
+    # point this test would have asserted that a supported dataset is unsupported. `dividend` is
+    # the replacement for the same reason `fina_indicator` was chosen originally: roadmap
+    # section 6 probed it, it returned 14 columns and 53 rows, and no issue has wired it up.
     with pytest.raises(ProviderFailure) as captured:
         provider.fetch(
             ProviderRequest(
-                dataset="fina_indicator",
+                dataset="dividend",
                 as_of=datetime(2026, 7, 24, 10, 0, tzinfo=UTC),
             )
         )
 
     assert captured.value.category == "configuration"
     assert captured.value.retryable is False
-    assert str(captured.value) == "Unsupported Tushare dataset: fina_indicator"
+    assert str(captured.value) == "Unsupported Tushare dataset: dividend"
 
 
 # --- clock strategies, proven independently on synthetic data --------------
@@ -291,13 +295,24 @@ def test_announcement_clock_cannot_yet_distinguish_restatement_via_update_flag()
     asserts they currently produce byte-equal ``Timeline`` objects, i.e. a restatement is
     indistinguishable from its original filing by clock alone.
 
-    This is intentionally an assertion of *current, deficient* behavior, not a spec. When the
-    disambiguation policy for ``update_flag`` lands (a design decision deliberately deferred to
-    the phase that wires real financial datasets — see ``_announcement_timeline``'s docstring),
-    the two rows below MUST start producing different outcomes (either a different ``Timeline``
-    for the restated row, or the duplicate being dropped/ranked upstream before it ever reaches
-    this function). At that point THIS TEST MUST BE REWRITTEN TO ASSERT THE NEW BEHAVIOR, not
-    deleted — deleting it would silently re-open the exact gap this test exists to guard.
+    This was written as an assertion of *current, deficient* behavior, on the expectation that
+    the disambiguation policy would give the two rows different ``Timeline`` objects and that
+    this test would then be rewritten to assert that.
+
+    **``V2-P1-011`` looked and decided the other way, so the assertions below stand unchanged
+    and now pin a decision rather than a deficiency.** A live probe of all four financial
+    endpoints on 2026-08-09 (53 securities, each paged to exhaustion) found that both rows of a
+    corrected pair carry the same ``ann_date`` -- and the same ``f_ann_date`` on all but 5 of
+    ``income``'s 633 and 5 of ``balancesheet``'s 1,244 duplicate keys -- so no instant for the
+    correction exists anywhere in the response, and dating one row later would be inventing it.
+    ``fina_indicator`` settles it: it has no ``update_flag`` column at all and 81.7% of its keys
+    carry more than one row, so a clock-level rule could not reach the bulk of the duplication
+    even if one were invented. The disambiguation lives in ``domain/financial_statements.py``
+    instead, which keeps both versions and refuses a read of the fields they disagree on.
+
+    What would make this test fail is therefore a *regression*: a clock that manufactures a
+    difference these two rows do not carry. Read the docstrings on
+    ``domain/financial_statements.py`` and ``_announcement_timeline`` before changing it.
     """
     ingested_at = datetime(2024, 4, 1, 0, 0, tzinfo=UTC)
     original_filing = {

@@ -31,6 +31,7 @@ from typing import Any
 import pytest
 
 from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET
+from openalpha_cn.domain.financial_statements import FINANCIAL_STATEMENT_DATASETS
 from openalpha_cn.domain.index_membership import INDEX_WEIGHT_DATASET
 from openalpha_cn.domain.industry_classification import (
     INDUSTRY_MEMBERSHIP_DATASET,
@@ -225,6 +226,17 @@ def test_every_descriptor_states_whether_its_response_cap_was_measured() -> None
     behind it: the 511-row SW2021 tree returns `has_more=False`, `limit=100000` also returns
     511 with `has_more=False`, and `limit=511` returns 511 with `has_more=True`, so the flag
     turns `True` at whatever effective limit is in force and no probe can find the ceiling.
+
+    `V2-P1-011` added four rows and split them two and two, measured 2026-08-09.
+    `balancesheet` and `fina_indicator` cap at **100** -- thirty times lower than anything
+    already here -- and the probe pins it three ways: `limit=101`, `limit=500` and `limit=5000`
+    all return the same 100 rows with `has_more=True`, and asking for six columns instead of
+    152 still returns 100, so it is a row cap rather than a payload budget. `income` and
+    `cashflow` declare **none**, and not for want of trying: `income(ts_code=000001.SZ,
+    limit=5000)` returns **127** rows with `has_more=False` and `cashflow` returns 90, on three
+    different long-history securities. Their cap is therefore above 127 and out of reach, since
+    a security cannot file more reports than it has quarters -- `index_classify`'s situation,
+    reached from the opposite direction.
     """
     caps = {entry.dataset: entry.max_rows_per_response for entry in TUSHARE_DATASETS}
     assert caps == {
@@ -239,6 +251,10 @@ def test_every_descriptor_states_whether_its_response_cap_was_measured() -> None
         "index_weight": 7000,
         "index_classify": None,
         "index_member_all": 3000,
+        "income": None,
+        "balancesheet": 100,
+        "cashflow": None,
+        "fina_indicator": 100,
     }
 
 
@@ -275,6 +291,15 @@ def test_the_flag_is_demanded_exactly_where_it_is_the_only_witness_or_the_stakes
     assignments spread across many securities: what survives is a well-formed,
     non-overlapping history that is simply missing its beginning, which no downstream check
     can see. That is `adj_factor`'s situation, on the lowest cap in this table.
+
+    `V2-P1-011`'s four are the seventh through tenth, and they are the first block to demand it
+    unanimously. `income` and `cashflow` demand it because it is their **only** witness: their
+    cap is above the 127 rows a security can produce and so is unmeasurable, `index_classify`'s
+    case. `balancesheet` and `fina_indicator` have a measured cap of 100 and demand the flag as
+    well, for `adj_factor`'s reason rather than `daily`'s -- the cap drops the *oldest* rows, so
+    a truncated history is not short but silently wrong: every year-on-year growth rate the
+    projection carries (`or_yoy`, `netprofit_yoy`) is computed against a period that is no
+    longer there, and `build_statement_history` is happy with any set of filings.
     """
     demanded = {entry.dataset for entry in TUSHARE_DATASETS if entry.requires_truncation_flag}
     assert demanded == {
@@ -284,6 +309,7 @@ def test_the_flag_is_demanded_exactly_where_it_is_the_only_witness_or_the_stakes
         INDEX_WEIGHT_DATASET,
         INDUSTRY_TREE_DATASET,
         INDUSTRY_MEMBERSHIP_DATASET,
+        *FINANCIAL_STATEMENT_DATASETS,
     }
 
     capless_and_unflagged = {

@@ -99,7 +99,7 @@ P3 结束即可独立使用（Jupyter 直连面板 + 因子）
 | `V2-P1-008` | 数据集⑤`suspend_d` + `stk_limit` | 技 | 007 | 接入现有 `AShareExecutionPolicy` | 同上 | S47, S55 |
 | `V2-P1-009` | 数据集⑥`index_weight`（沪深300/中证500/中证1000） | 技 | 005 | 实测可用（§6），无需降级 | 同上 | S11 |
 | `V2-P1-010` | 数据集⑦行业分类历史 | 技 | 005 | 中性化前提；`index_classify`+`index_member_all` 实测可用（§6） | 同上 | S11 |
-| `V2-P1-011` | 数据集⑧`fina_indicator` + 三大报表（取 `ann_date`、`f_ann_date` **与 `update_flag`**） | 技 | 004 | **实测更正（§7）**：修正版本共享相同的 `ann_date` 与 `f_ann_date`，只靠 `update_flag` 区分。仅凭两个日期的修正时钟是假的 | 契约 + 修正时钟专项 + 重复版本消歧 | S6, S9 |
+| `V2-P1-011` | 数据集⑧`fina_indicator` + 三大报表（取 `ann_date`、`f_ann_date` **与 `update_flag`**） | 技 | 004 | **已落地（§7）**：修正版本共享相同的 `ann_date`；`fina_indicator` 连 `update_flag` 都没有且 81.7% 的键有多行 —— 消歧改为「合并同值 + 逐字段拒答」，修正时刻具名披露为不可知 | 契约 + 修正时钟专项 + 重复版本消歧 | S6, S9 |
 | `V2-P1-012` | 面板体检报告（缺失/过期/重复/被修正） | 产 | 003 | — | 集成：人为注入缺陷可被报出 | S13 |
 | `V2-P1-013` | fail-closed 依赖门（失败的日度数据集显式阻塞下游） | 技 | 012 | — | 集成：断言阻塞而非空成功 | S14, D5 |
 | `V2-P1-014` | 面板 fixture **生成器** —— `.parquet`/`.duckdb`/`.sqlite3` 是发布拦截后缀，fixture 不能签入 | 测 | 013 | `scripts/verify_publication.py:14-28`；可复用 `tests/contract/providers/test_file_provider.py:93-127` 的 DuckDB→Parquet 写法 | 测试基础设施 | S85, T7 |
@@ -378,7 +378,7 @@ PRD 中 83 条 IN / IN-降级 story，逐条落到 issue。
 | ⑤ | `suspend_d` / `stk_limit` | 4 / 4 | 10 个交易日内 112 条停牌记录 |
 | ⑥ | `index_weight` | 4 | **沪深300 单月 300 条**，基准与股票池历史可用 |
 | ⑦ | `index_classify` / `index_member_all` | 7 / 11 | **SW2021 L1 共 31 个行业**，行业中性化可做真行业 |
-| ⑧ | `fina_indicator` / `income` / `balancesheet` / `cashflow` | 108 / 85 / 152 / 97 | **`balancesheet` 单 `ts_code` 单期返回 2 行 ⇒ 修正版本真实存在**，`V2-P1-011`/`V2-P2-002` 的修正时钟有数据支撑 |
+| ⑧ | `fina_indicator` / `income` / `balancesheet` / `cashflow` | 108 / 85 / 152 / 97 | **`balancesheet` 单 `ts_code` 单期返回 2 行 ⇒ 修正版本真实存在**；`V2-P1-011` 实测补充：`balancesheet`/`fina_indicator` 单响应上限 **100 行**（全表最低，`index_member_all` 3,000 的 1/30），`income`/`cashflow` 无法从外部测出上限；四个端点 `ts_code` 均为必填，逗号拼接在 `income` 上静默返回 0 行 |
 | + | `dividend` | 14 | 分红送转 53 条，公司行动可版本化 |
 
 探测方式是一次性脚本（scratchpad，未入库）。`V2-P0A-004` 仍需把它做成 `doctor` 的正式能力，因为限流与积分会随账号变化，且需要在每次 `panel build` 前 fail-closed。
@@ -393,7 +393,7 @@ PRD 中 83 条 IN / IN-降级 story，逐条落到 issue。
 
 | 观测 | 结果 |
 |---|---|
-| `f_ann_date >= ann_date` | **0 违例**，假设安全 |
+| `f_ann_date >= ann_date` | ~~**0 违例**，假设安全~~ **已被 Task 34 推翻，见下** |
 | 两个日期相等的行 | 65 行中 62 行 |
 | 同一 `(ts_code, end_date)` 的多版本 | 存在。`000001.SZ` / `end_date=20231231` 返回 **2 行**，`ann_date` 与 `f_ann_date` **均为 20240315**，仅 `update_flag` 为 0 与 1 |
 
@@ -406,8 +406,36 @@ PRD 中 83 条 IN / IN-降级 story，逐条落到 issue。
 `test_announcement_clock_cannot_yet_distinguish_restatement_via_update_flag` 把这个缺口钉成测试，
 消歧策略落地时该测试必须被改写而非删除。
 
-**待定（P1 之前必须决策）**：重复版本是"只保留最高 `update_flag`"还是"保留全部并排序"。
-这个选择会被 8 组数据集继承，不应在骨架阶段替未来拍板。
+**已决策（`V2-P1-011` / Task 34，2026-08-09 全历史实测）**：**两者都不是**。
+53 只股票（`stock_basic` 5,539 只中每 104 只取 1，另加 6 只长历史）四个端点全量翻页实测：
+
+| 端点 | 行数 | `(ts_code, end_date, ann_date)` 键 | 多行键 | 其中逐字节相同 | 真正不同 |
+|---|---:|---:|---:|---:|---:|
+| `income` | 3,836 | 3,201 | 633 | 372 | 259 |
+| `balancesheet` | 4,416 | 3,170 | 1,244 | 1,166 | 76 |
+| `cashflow` | 3,567 | 2,849 | 718 | 250 | 468 |
+| `fina_indicator` | 5,941 | 3,270 | **2,671（81.7%）** | 2,194 | 477 |
+
+- **"取最高 `update_flag`" 不成立**：在真正不同的配对里，`1` 行更完整的次数是 156 / 31 / 284，
+  `0` 行更完整的是 10 / 3 / 23，打平 90 / 42 / 161；响应顺序也不是 tiebreak；
+  且 `income` 有 **3 个键的两行 `update_flag` 都是 `1`**（`600739.SH` 2024 年报，营收差 4.6%）。
+  `fina_indicator` **根本没有 `update_flag` 列**，而 81.7% 的重复都在它身上。
+- **落地方案**：`domain/financial_statements.py` 先**合并"存储值完全相同"的行**
+  （这不是选版本，是发现只有一个答案 —— 消掉 `fina_indicator` 2,671 个多行键中的 2,194 个），
+  剩下的**逐字段拒答**（`ReportFiling.value_of` 抛 `AmbiguousReportError`，
+  只对真正不一致的字段抛，其余字段照常回答）。
+  差异会打到头条数字上：`income.ebit` 正负号相反、`revenue` 差 4.6%、
+  `n_income_attr_p` 差 3.1%、`balancesheet.total_share` 差 2.5%、`fina_indicator.bps` 差 10 倍。
+- **修正时刻仍不可知**，因此 `_announcement_timeline` **刻意**让两行的四个时钟逐字节相同，
+  `test_announcement_clock_cannot_yet_distinguish_restatement_via_update_flag` 从"记录缺陷"
+  变为"钉住决策"，未被改写。`PartitionCoverage.revised_row_count` 在这份数据上恒为 0，
+  `PartitionCoverage.revisions`（`update_flag` 标签普查）才是能看见它们的那一面。
+
+**同批推翻的另一条**：上表的 `f_ann_date >= ann_date`「0 违例」是 65 行窗口的结论，
+全历史下 **53 只股票里有 116 行违例**（`income` 3,836 行中 49 行、`balancesheet` 4,416 行中 16 行、
+`cashflow` 3,567 行中 51 行），例如 `000001.SZ` `end_date=20060331` 的 `ann_date=20070426`
+而 `f_ann_date=20060426`。`Timeline` 拒绝 `revision_time < available_time`，
+因此这些真实行在改成 `max(ann_date, f_ann_date)` 之前**会直接抛异常**，数据集根本抓不下来。
 
 ## 8. 契约升版会改变内容寻址身份（2026-08 实测）
 

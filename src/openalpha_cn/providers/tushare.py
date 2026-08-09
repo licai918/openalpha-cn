@@ -201,6 +201,17 @@ from openalpha_cn.domain.daily_prices import (
     PRICE_DATE_COLUMN,
     SESSION_CLOSE_TIME,
 )
+from openalpha_cn.domain.financial_statements import (
+    ANNOUNCEMENT_DATE_COLUMN,
+    BALANCE_SHEET_DATASET,
+    DATASETS_WITH_REVISION_LABEL,
+    FINANCIAL_INDICATOR_DATASET,
+    FINANCIAL_STATEMENT_DATASETS,
+    FIRST_ANNOUNCEMENT_COLUMN,
+    REPORT_PERIOD_COLUMN,
+    REVISION_LABEL_COLUMN,
+    STATEMENT_DATA_COLUMNS,
+)
 from openalpha_cn.domain.index_membership import (
     INDEX_CONSTITUENT_COLUMN,
     INDEX_PUBLICATION_DATE_COLUMN,
@@ -322,10 +333,11 @@ class UrllibTushareTransport:
 class ClockStrategy(StrEnum):
     """How a dataset's four PIT clocks (event/available/ingested/revision) are derived.
 
-    ``daily_close`` (the ``daily`` dataset), ``calendar_publication`` (``trade_cal``) and
-    ``calendar_static`` (both of ``V2-P1-005``'s registry datasets) have real production
-    consumers. ``announcement`` is defined and independently tested against synthetic data so
-    P1 can wire real financial datasets onto it without changing this shape.
+    Every member now has real production consumers. ``announcement`` was the last one that did
+    not: it was defined and tested against synthetic data so that ``V2-P1-011`` could wire the
+    four financial-statement endpoints onto it without changing this shape, and that is what
+    happened -- the shape held, and the only change the real data forced was inside
+    ``_announcement_timeline`` itself (see its docstring for the 116 rows that raised).
     """
 
     daily_close = "daily_close"
@@ -638,6 +650,157 @@ def _index_weight_params(request: ProviderRequest) -> dict[str, str]:
         "start_date": f"{first:%Y%m%d}",
         "end_date": f"{last:%Y%m%d}",
     }
+
+
+def _financial_statement_params(request: ProviderRequest) -> dict[str, str]:
+    """Request one security's filings for one calendar year: `{ts_code, start_date, end_date}`.
+
+    Three measurements shape this, all from a live probe on 2026-08-09.
+
+    **`ts_code` is required, and a comma-joined list is worse than an error.** A request without
+    it fails with `code=50101, 必填参数, ts_code` on all four endpoints -- there is no
+    cross-section fetch here, unlike every other dataset in this table. Worse,
+    `ts_code="000001.SZ,600000.SH"` returns **zero rows with `code=0` and `has_more=False`** on
+    `income`, which is indistinguishable from "this security has never filed"; on
+    `fina_indicator` the same request *does* return both securities' rows. So one subject per
+    request, refused rather than defaulted, exactly as `_index_weight_params` refuses a
+    comma-joined `index_code`.
+
+    **The window is what keeps a 100-row cap unreachable.** `balancesheet` and `fina_indicator`
+    cap at exactly 100 rows per response (`limit=500` and `limit=5000` return the same 100 with
+    `has_more=True`), and `000001.SZ` alone has 162 `balancesheet` rows and 232
+    `fina_indicator` rows -- one security's history does not fit in one response. Over the
+    53-security sample, paged to exhaustion, the largest single (security, year) window is
+    **15 rows** for `income`, `balancesheet` and `cashflow` (`301109.SZ` 2022, `300383.SZ`
+    2014), with a p99 of 11 and a median of 4 to 6; for `fina_indicator` it is **8**, which is
+    also its structural maximum today -- four fiscal periods times the largest multiplicity the
+    probe found. So the window sits 6.7x under the tightest measured cap at its worst, and
+    `_check_response_completeness` refuses at the cap rather than storing a suffix if a future
+    year ever climbs.
+
+    `offset` does work on these endpoints and is deliberately not used, for
+    `_index_member_all_params`' reason: the descriptor's guarantee is about one response, a
+    paging loop's is about the caller.
+
+    ## Why `fina_indicator` needs its own builder
+
+    On `income`, `balancesheet` and `cashflow`, `start_date`/`end_date` filter **`ann_date`**:
+    `000001.SZ` with `20240101..20241231` returns the four filings announced in 2024, one of
+    which is the *2023* annual. On `fina_indicator` the same parameters filter **`end_date`**:
+    the same window returns the 2024 periods, including the 2024 annual announced 2025-03-15,
+    and excludes the 2023 annual announced 2024-03-15. Nothing in the request says which, so the
+    asymmetry is written down here and split into two builders -- see
+    `_financial_indicator_params` for the completeness hole a shared one leaves.
+
+    A statement window is exactly one **availability** year, so one request is one partition,
+    which is `_namechange_params`' property.
+
+    The year is `as_of`'s year *in Asia/Shanghai*: 2024-12-31 17:00Z is already 2025 in
+    Shanghai. `_trade_cal_params`, `_namechange_params` and `_index_weight_params` take the same
+    care for the same reason.
+    """
+    year = _require_one_security_year(request)
+    return {
+        "ts_code": request.subjects[0],
+        "start_date": f"{year}0101",
+        "end_date": f"{year}1231",
+    }
+
+
+def _financial_indicator_params(request: ProviderRequest) -> dict[str, str]:
+    """Request one security's filings for one **report-period** year: `{ts_code, start_date,
+    end_date}`, with the year named in `subjects` rather than taken from `as_of`.
+
+    `_financial_statement_params`' shape with one deliberate difference, and the difference
+    closes a hole rather than adding an option.
+
+    This endpoint's window filters `end_date`, the fiscal period, while `as_of` bounds
+    *availability* -- and a period's report is announced after the period ends. Deriving the
+    window from `as_of`'s year makes the two collide: the only request that returns
+    `000001.SZ`'s 2018 annual indicators (`end_date=20181231`) is the one naming period-year
+    2018, and `_decode_panel_rows` drops that row for every `as_of` inside 2018 because it was
+    announced 2019-03-07. A full backfill would silently hold three quarters of every year and
+    **no annual report at all** -- the one filing a value factor cannot do without. Widening the
+    window to `[Y-1, Y]` shortens the hole rather than closing it: `001278.SZ`'s 2018 annual was
+    announced 2022-01-06, three years and one week later.
+
+    So the period year is a **second subject**, refused rather than defaulted, exactly as
+    `_index_member_all_params` refuses to default `is_new` and `_index_classify_params` refuses
+    to default `src`. `as_of` then does only its own job. The stored subject is still the
+    security -- `subject_field` reads `ts_code` off the row -- so the extra request subject
+    never reaches a partition, which is the arrangement `index_member_all` already has.
+
+    One period year stays far inside the 100-row cap: measured over the 53-security sample
+    paged to exhaustion, the largest single (security, period-year) window is **8** rows, four
+    fiscal periods at the largest multiplicity the probe found. `_check_response_completeness`
+    refuses at the cap rather than storing a suffix if that ever climbs.
+    """
+    if len(request.subjects) != 2:
+        raise ProviderFailure(
+            provider_id=_PROVIDER_ID,
+            category="configuration",
+            message=(
+                f"{request.dataset} needs exactly two subjects, a ts_code and a four-digit "
+                "report-period year: its start_date/end_date filter end_date rather than "
+                "ann_date, so a window taken from as_of would make every annual report "
+                f"unreachable; got {list(request.subjects)}"
+            ),
+            retryable=False,
+        )
+    security, period_year = request.subjects
+    if len(period_year) != 4 or not period_year.isdigit():
+        raise ProviderFailure(
+            provider_id=_PROVIDER_ID,
+            category="configuration",
+            message=(
+                f"{request.dataset}'s second subject must be a four-digit report-period year; "
+                f"got {period_year!r}"
+            ),
+            retryable=False,
+        )
+    return {
+        "ts_code": security,
+        "start_date": f"{period_year}0101",
+        "end_date": f"{period_year}1231",
+    }
+
+
+def _require_one_security_year(request: ProviderRequest) -> int:
+    """The window year, after refusing a request that does not name exactly one security."""
+    if len(request.subjects) != 1:
+        raise ProviderFailure(
+            provider_id=_PROVIDER_ID,
+            category="configuration",
+            message=(
+                f"{request.dataset} requires exactly one ts_code per request: the endpoint "
+                "rejects a request without one and answers a comma-joined list with zero rows "
+                f"rather than an error; got {list(request.subjects)}"
+            ),
+            retryable=False,
+        )
+    return request.as_of.astimezone(_CHINA_TZ).year
+
+
+TUSHARE_FINANCIAL_ROW_CAP: Final[int] = 100
+"""Rows per response for `balancesheet` and `fina_indicator`, measured on 2026-08-09.
+
+**The lowest cap in this table by a factor of thirty**, against `index_member_all`'s 3,000.
+`balancesheet(ts_code=000001.SZ)` returns exactly 100 rows with `has_more=True`, and
+`limit=101`, `limit=500` and `limit=5000` all return the same 100; `fina_indicator` behaves
+identically. `limit` is not ignored, it only narrows. Restricting `fields` does not raise it
+either -- `balancesheet` with six requested columns and `limit=5000` still returns 100 rows --
+so it is a row cap and not a cell or payload budget.
+
+The cap drops the **oldest** rows: the capped `balancesheet` response starts at
+`end_date=20091231` while `offset=100` returns 62 more reaching back to 19891231.
+
+`income` and `cashflow` are **not** given this constant, and the reason is that they were
+measured *not* to share it: `income(ts_code=000001.SZ, limit=5000)` returns **127** rows with
+`has_more=False` and `cashflow` returns 90, and 000002.SZ and 600000.SH behave the same way. So
+their cap is above 127 and is unreachable from outside -- a security cannot file more reports
+than it has quarters -- which is `index_classify`'s situation exactly. They declare no cap and
+demand the truncation flag instead.
+"""
 
 
 CURRENT_INDUSTRY_MEMBERSHIP: Final[str] = "Y"
@@ -1366,6 +1529,128 @@ def _price_limit_panel_column(name: str) -> TusharePanelColumn:
     )
 
 
+def _statement_panel_columns(dataset: str) -> tuple[TusharePanelColumn, ...]:
+    """One financial-statement dataset's projection: the keys, then the projected values.
+
+    Built rather than written out four times because the rule is the same in all four cases and
+    only the column list differs -- `domain/financial_statements.py` owns that list, so the
+    provider cannot drift from what the reader expects to find.
+
+    Every value column is nullable, and that is data rather than laxity: `oper_cost` is `None`
+    on all 127 of `000001.SZ`'s `income` rows because a bank has no cost of sales, and
+    `total_cur_assets` / `total_cur_liab` / `money_cap` are `None` on every one of its
+    `balancesheet` rows for the same reason. Tushare's field set is the union over company
+    types (`comp_type` 1..4) and a null here means "this company type does not publish this
+    line", which is exactly what `_optional_number` preserves and what a refusal or a zero
+    would destroy.
+    """
+    columns: list[TusharePanelColumn] = [
+        TusharePanelColumn(
+            name=REPORT_PERIOD_COLUMN,
+            kind="string",
+            source_field="end_date",
+            parse=_named_parser(REPORT_PERIOD_COLUMN, _calendar_date_text),
+        ),
+        TusharePanelColumn(
+            name=ANNOUNCEMENT_DATE_COLUMN,
+            kind="string",
+            source_field=ANNOUNCEMENT_DATE_COLUMN,
+            parse=_named_parser(ANNOUNCEMENT_DATE_COLUMN, _calendar_date_text),
+        ),
+    ]
+    if dataset in DATASETS_WITH_REVISION_LABEL:
+        columns.extend(
+            (
+                TusharePanelColumn(
+                    name=FIRST_ANNOUNCEMENT_COLUMN,
+                    kind="string",
+                    source_field=FIRST_ANNOUNCEMENT_COLUMN,
+                    parse=_named_parser(FIRST_ANNOUNCEMENT_COLUMN, _optional_calendar_date_text),
+                ),
+                TusharePanelColumn(
+                    name=REVISION_LABEL_COLUMN,
+                    kind="string",
+                    source_field=REVISION_LABEL_COLUMN,
+                    parse=_named_parser(REVISION_LABEL_COLUMN, _required_text),
+                ),
+            )
+        )
+    columns.extend(
+        TusharePanelColumn(
+            name=name,
+            kind="float",
+            source_field=name,
+            parse=_named_parser(name, _optional_number),
+        )
+        for name in STATEMENT_DATA_COLUMNS[dataset]
+    )
+    return tuple(columns)
+
+
+def _statement_descriptor(dataset: str) -> TushareDatasetDescriptor:
+    """One of the four `V2-P1-011` endpoints, wired identically except where they differ.
+
+    They differ in exactly three things and each is a measurement rather than a preference:
+    which key columns exist (`fina_indicator` has neither `f_ann_date` nor `update_flag`),
+    which value columns are projected, and whether a per-response row cap was reachable.
+
+    `serves_evidence_plane` stays `True` for all four -- the first datasets since `daily` for
+    which that is uncontroversial. Unlike `stock_basic`, `namechange`, `index_member_all` and
+    `index_classify`, a statement row states facts that all became knowable at one instant, its
+    own announcement, so `fetch()` can hand back the response row verbatim under a single
+    clock and the record stays re-provable. The duplicate versions do not change that: two rows
+    with equal timelines and different payloads are two honest citations of two things the
+    publisher served, and `ProviderRecord.record_id` is content-derived so they do not collide.
+    """
+    values = STATEMENT_DATA_COLUMNS[dataset]
+    has_label = dataset in DATASETS_WITH_REVISION_LABEL
+    required = (
+        "ts_code",
+        "end_date",
+        ANNOUNCEMENT_DATE_COLUMN,
+        *((FIRST_ANNOUNCEMENT_COLUMN, REVISION_LABEL_COLUMN) if has_label else ()),
+        *values,
+    )
+    return TushareDatasetDescriptor(
+        dataset=dataset,
+        kind=dataset,
+        subject_field="ts_code",
+        # The **announcement**, not the period. This column dates the row for
+        # `_panel_source_uri`, orders `_decode_panel_rows`' output and picks the partition year,
+        # and all three want the instant the row became knowable rather than the fiscal quarter
+        # it describes -- `001278.SZ` announced its 2018 annual on 2022-01-06, three years and
+        # one week after the period it reports on.
+        date_field=ANNOUNCEMENT_DATE_COLUMN,
+        clock=ClockStrategy.announcement,
+        params_builder=(
+            _financial_indicator_params
+            if dataset == FINANCIAL_INDICATOR_DATASET
+            else _financial_statement_params
+        ),
+        # Named rather than left at `""`. The defaults are 85 / 152 / 97 / 108 columns and the
+        # projection reads 14 / 11 / 9 / 13 of them; asking for the rest costs payload on every
+        # request and hands `_check_panel_projection` a wider surface to drift on. It also makes
+        # the contract legible: this tuple is exactly what this dataset promises to store.
+        response_fields=",".join(required),
+        required_response_fields=required,
+        source_uri_template="tushare://{dataset}/{subject}/{date}",
+        panel_columns=_statement_panel_columns(dataset),
+        max_rows_per_response=(
+            TUSHARE_FINANCIAL_ROW_CAP
+            if dataset in (BALANCE_SHEET_DATASET, FINANCIAL_INDICATOR_DATASET)
+            else None
+        ),
+        # Demanded on all four, which makes them the sixth through ninth descriptors to do so.
+        # For `income` and `cashflow` the flag is the **only** witness -- their cap is above the
+        # 127 rows a security can produce and so is unmeasurable from outside, `index_classify`'s
+        # situation. For `balancesheet` and `fina_indicator` it is demanded *as well as* the cap,
+        # for `adj_factor`'s reason: the cap drops the oldest rows, and a statement history
+        # missing its early years is not short but silently wrong -- every year-on-year growth
+        # rate computed across the boundary answers from a period that is not there.
+        requires_truncation_flag=True,
+    )
+
+
 DAILY_BASIC_FIELD_NAMES: Final[tuple[str, ...]] = ("ts_code", *DAILY_BASIC_DATA_COLUMNS)
 """Every column `daily_basic`'s descriptor reads, which is every column it serves.
 
@@ -1928,6 +2213,7 @@ TUSHARE_DATASETS: tuple[TushareDatasetDescriptor, ...] = (
             ),
         ),
     ),
+    *(_statement_descriptor(dataset) for dataset in FINANCIAL_STATEMENT_DATASETS),
 )
 
 
@@ -1967,40 +2253,72 @@ def _daily_close_timeline(row: dict[str, Any], date_field: str, ingested_at: dat
 
 
 def _announcement_timeline(row: dict[str, Any], date_field: str, ingested_at: datetime) -> Timeline:
-    """``ann_date`` sets event/available time; a later ``f_ann_date`` is a revision.
+    """``ann_date`` sets event/available time; a **later** ``f_ann_date`` is a revision.
 
     ``date_field`` is unused here: announcement data always keys its PIT clocks off the
     fixed ``ann_date``/``f_ann_date`` columns that every Tushare financial-statement
     endpoint shares, regardless of which column the descriptor uses for display purposes.
 
-    Known gap (measured, not assumed): a live probe of the real Tushare ``balancesheet``
-    endpoint (3 stocks, 2022-2025, 65 rows) confirmed ``f_ann_date >= ann_date`` holds with
-    zero violations, so that ordering assumption is safe. But it also found that restatements
-    are **not distinguishable from the original filing by ``ann_date``/``f_ann_date`` alone**:
-    for ``000001.SZ``, ``end_date=20231231`` returns two rows with ``ann_date=20240315`` AND
-    ``f_ann_date=20240315`` on both, differing only in ``update_flag`` (``0`` vs ``1``); the
-    same shape recurs at ``end_date=20240331``. This function does not read ``update_flag``,
-    so those two rows produce byte-equal ``Timeline`` objects today — see
-    ``test_announcement_clock_cannot_yet_distinguish_restatement_via_update_flag`` in
-    ``tests/contract/providers/test_tushare_dataset_descriptors.py``, which pins this exact
-    gap. Deciding how to disambiguate (drop all but the highest ``update_flag``? keep and rank
-    both?) is deferred to the phase that wires real financial datasets onto this clock; when
-    that lands, this function gains ``update_flag`` handling and the pinned test above must be
-    rewritten to assert the new behavior.
+    ## ``f_ann_date`` is not always the later date (``V2-P1-011``)
+
+    Roadmap section 7 recorded ``f_ann_date >= ann_date`` with "zero violations" from a 65-row
+    window (3 securities, 2022-2025), and this function read ``revision_time`` straight off
+    ``f_ann_date`` on the strength of it. **Full histories violate it.** ``000001.SZ``'s
+    ``income`` alone carries ``end_date=20060331`` with ``ann_date=20070426`` and
+    ``f_ann_date=20060426``, and ``end_date=20051231`` with ``ann_date=20070322`` and
+    ``f_ann_date=20060401``; the same 20051231 row is in its ``balancesheet`` and its
+    ``cashflow``. ``Timeline.__post_init__`` refuses a ``revision_time`` before its
+    ``available_time``, so every one of those rows **raised** -- a real dataset could not be
+    fetched at all.
+
+    ``max`` is the fix and it is not a widening: wherever the old assumption held, ``max`` *is*
+    ``f_ann_date``, so no row that worked before changes. Where it did not hold, the two dates
+    disagree about which announcement this row belongs to and there is no basis for calling the
+    earlier one a revision of the later. See
+    ``KNOWN_FINANCIAL_STATEMENT_LIMITATIONS.the_two_announcement_dates_are_not_ordered``.
+
+    ## The correction still carries no instant, and that is now a decision (``V2-P1-011``)
+
+    ``update_flag`` marks a corrected filing and this function still does not read it, because
+    **both rows of a corrected pair carry the same ``ann_date``** -- and the same ``f_ann_date``
+    on all but 5 of ``income``'s 633 and 5 of ``balancesheet``'s 1,244 duplicate keys, measured
+    over a 53-security sample on 2026-08-09. So the instant at which the correction became
+    knowable is not in the response, and the two rows produce byte-equal ``Timeline`` objects.
+
+    That was recorded as a gap to close later. ``V2-P1-011`` looked and closed it the other way:
+    the dimension is genuinely absent, so dating one row later would be inventing the instant --
+    Task 32's error in a new dataset. The disambiguation lives in
+    ``domain/financial_statements.py`` instead, which keeps both versions and refuses a read of
+    the fields they disagree on. ``fina_indicator`` settles the question on its own: it has no
+    ``update_flag`` column at all and 81.7% of its keys carry more than one row.
+    ``test_announcement_clock_cannot_yet_distinguish_restatement_via_update_flag`` therefore
+    still passes, and now pins a decision rather than a deficiency.
+
+    ``ingested_time`` is raised to the announcement when the latter runs ahead of the fetch, for
+    ``_calendar_static_timeline``'s reason: ``Timeline`` refuses an ``ingested_time`` before its
+    ``available_time``, and the row has to be representable long enough for
+    ``_decode_panel_rows`` to drop it at ``min(as_of, ingested_at)``. Defence rather than an
+    observed case here -- a statement endpoint serves nothing it has not already announced --
+    but ``fina_indicator``'s request window is a *report period* year rather than an
+    announcement year (see ``_financial_statement_params``), so a request for the current year
+    routinely names periods whose announcement has not happened.
     """
     ann_moment = datetime.combine(
         _parse_tushare_date(row["ann_date"]), time(0, 0), tzinfo=_CHINA_TZ
     )
     f_ann_date_raw = row.get("f_ann_date")
     revision_moment = (
-        datetime.combine(_parse_tushare_date(f_ann_date_raw), time(0, 0), tzinfo=_CHINA_TZ)
+        max(
+            ann_moment,
+            datetime.combine(_parse_tushare_date(f_ann_date_raw), time(0, 0), tzinfo=_CHINA_TZ),
+        )
         if f_ann_date_raw
         else ann_moment
     )
     return Timeline(
         event_time=ann_moment,
         available_time=ann_moment,
-        ingested_time=ingested_at,
+        ingested_time=max(ingested_at, ann_moment),
         revision_time=revision_moment,
     )
 
