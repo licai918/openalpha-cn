@@ -28,35 +28,58 @@ rows entering on 2014-02-21, which is SW2014's own effective date. `index_member
 `out_date=20211210`, and both belong to `301071.SZ` 力量钻石, an ordinary single-name move. The
 revision is not merely backfilled here, it is **erased**.
 
-**How much that costs is measured, not asserted.** Cross-referencing the two endpoints over the
-7,571 SSE sessions from 1990-12-19 to 2021-12-10: of the **12,675,906** (name x session) answers
-this dataset gives in that window, **1,461,237 -- 11.5%, over 1,185 distinct securities -- place
-the security in an L1 the classification actually in force that day did not.** The largest single
-flow is 公用事业 -> 环保 (137,736 name-sessions, an industry SW2014 did not have), then 采掘 ->
-煤炭 (124,869) and 化工 -> 石油石化 (62,437). Not one of the 1,185 is ambiguous: no security has
-two SW2014 L1s in force at once.
+**How far apart the two endpoints are is measured, under a rule stated so it can be re-run.**
+Take the 7,571 SSE sessions from 1990-12-19 to 2021-12-10. `index_member_all` gives an answer for
+**12,675,906** (name x session) pairs in that window. Ask Tushare's per-index `index_member` about
+each of those pairs and count a pair only where it names **exactly one** L1 -- 2,561,228 pairs it
+is silent on and 547,817 where it names two at once are unmeasurable, not agreement. Of the
+**9,566,861** that remain, **1,038,252 disagree** -- 10.85% of the measured pairs, 8.19% of all
+the answers this dataset gives in the window, over **1,039 distinct securities**. The largest
+flows are 轻工制造 -> 纺织服饰 (37,591 name-sessions), 基础化工 -> 汽车 (27,783) and 电力设备 ->
+机械设备 (21,693).
+
+**That is a disagreement, and calling it a look-ahead measurement would overclaim.** The witness
+is backfilled too: `index_member` gives 环保 -- an L1 SW2021 created -- 149 constituent rows of
+which **100 begin before 2021-12-13**, the earliest on 1999-12-30, and the same is true of
+石油石化 (47 of 54) and 美容护理 (28 of 34). Neither endpoint here can be asked what
+classification was in force on a 2015 session. What is *structural* and needs no witness is the
+first paragraph: the labels are SW2021's, and SW2021 did not exist.
 
 So `IndustryAnswer` never hands back a bare industry code. It carries the taxonomy, the
 taxonomy's effective date, and `is_backfilled` -- computed from the day asked about, not from the
 dataset -- for the reason `IndexWeights` carries `as_published_on`: losing the caveat has to be an
 act rather than an omission. `providers/tushare.py` makes the same statement on the clock, by
-dating a row's `available_time` at the latest of its `in_date`, its `out_date` and the taxonomy's
-effective date -- so a readiness check at a pre-2021 `as_of` blocks with `not_yet_knowable`
-instead of answering. See `_taxonomy_backfill_timeline` there for what the third bound costs in
-the other direction (249,568 name-sessions, 4.02% of the SW2021 era, under-reported rather than
-leaked).
+flooring every row's `available_time` at the taxonomy's effective date -- so a readiness check at
+a pre-2021 `as_of` blocks with `not_yet_knowable` instead of answering. What that floor does
+**not** do is hold a whole interval back until it closed; see `_industry_membership_panel_rows`
+for the row split that separates the two ends, and
+`KNOWN_INDUSTRY_LIMITATIONS.a_partial_year_read_cannot_see_an_interval_close` for what the split
+costs.
 
 ## The interval is closed at both ends
 
 `out_date` is the **last day the assignment held**, not the first day it did not. Measured:
 1,955 of the 2,004 transitions have the successor's `in_date` on the very next SSE session after
-`out_date`, and every endpoint of every interval falls on an SSE session. Zero securities carry
-two assignments covering one day and every one of the 5,889 has exactly one open assignment.
+`out_date`. Zero securities carry two assignments covering one day and every one of the 5,889 has
+exactly one open assignment.
+
+**The endpoints are nearly all sessions and the exceptions are named rather than generalised
+away.** Every one of the 2,004 `out_date` values is an SSE session. 21 `in_date` values over 14
+distinct days are not: 11 of those days precede 1990-12-19, where the calendar simply does not
+reach, and three do not -- 2022-01-09 and 2022-07-17 are Sundays (3 and 4 Beijing-board rows) and
+2026-06-19 is the 端午 holiday (`301583.SZ` and `001248.SZ`). Nothing here assumes an endpoint is
+a session; `assignment_on` compares calendar days.
 
 The other 49 transitions are real coverage holes, and they are refused rather than filled:
-`000639.SZ` ST西王 is 社会服务 through 2002-08-29 and unclassified for **4,104 sessions** until
-2019-07-24, `000716.SZ` 黑芝麻 for 3,429 and `600365.SH` ST通葡 for 3,300. Carrying the older
-label across seventeen years would be an answer no row supports.
+`000639.SZ` ST西王 is 社会服务 through 2002-08-29 and unclassified for **4,103 sessions** until
+2019-07-24, `000716.SZ` 黑芝麻 for 3,428 and `600365.SH` ST通葡 for 3,299 -- sessions strictly
+between the two dates, since the security is still classified on the `out_date` itself. Carrying
+the older label across seventeen years would be an answer no row supports.
+
+**Which 49 they are is not something a calendar-free rule can say.** `is_not_calendar_adjacent`
+answers `True` for 442 of the 2,004; the 393 extra hand over on the next session across a weekend
+or a public holiday. `IndustryReclassification.is_across_a_gap` is exact only when
+`reclassifications(sessions=...)` is given the calendar, and says so.
 
 ## What the whole-market coverage actually is
 
@@ -90,7 +113,7 @@ the same placement, and the same reason, as `domain/index_membership.py`.
 
 from __future__ import annotations
 
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
@@ -257,15 +280,21 @@ KNOWN_INDUSTRY_LIMITATIONS: Final[tuple[IndustryLimitation, ...]] = (
             "into force 2021-12-13. All 31 distinct l1_code values it uses are SW2021's, the "
             "SW2014-only L1 801020.SI 采掘 appears on none of its 7,893 rows, and its earliest "
             "in_date is 1984-05-09 -- six years before the Shanghai exchange opened, with 12 "
-            "securities starting before 1990-12-19. Cross-referenced against Tushare's "
-            "per-index index_member endpoint, which does record the revision, over the 7,571 "
-            "SSE sessions from 1990-12-19 to 2021-12-10: of the 12,675,906 (name x session) "
-            "answers this dataset gives in that window, 1,461,237 -- 11.5%, over 1,185 distinct "
-            "securities -- name an L1 the classification in force that day did not. The largest "
-            "flows are 公用事业 -> 环保 (137,736 name-sessions), 采掘 -> 煤炭 (124,869) and "
-            "化工 -> 石油石化 (62,437); no security is ambiguous. IndustryAnswer.is_backfilled "
-            "reports it per answer and providers/tushare.py dates availability at the vintage's "
-            "effective date so a pre-2021 readiness check blocks rather than answering."
+            "securities starting before 1990-12-19. How far that is from the other endpoint is "
+            "measured under a stated rule, over the 7,571 SSE sessions from 1990-12-19 to "
+            "2021-12-10: index_member_all answers 12,675,906 (name x session) pairs in that "
+            "window; Tushare's per-index index_member names exactly one L1 for 9,566,861 of them "
+            "(it is silent on 2,561,228 and names two at once on 547,817, and neither of those "
+            "is counted either way); of the 9,566,861 comparable pairs, 1,038,252 disagree -- "
+            "10.85% of them, 8.19% of all the answers, over 1,039 distinct securities, the "
+            "largest flows being 轻工制造 -> 纺织服饰 (37,591), 基础化工 -> 汽车 (27,783) and "
+            "电力设备 -> 机械设备 (21,693). That is a disagreement between two endpoints and not "
+            "a measurement against the classification in force: index_member is backfilled too, "
+            "giving the SW2021-created L1 环保 149 rows of which 100 start before 2021-12-13 "
+            "(earliest 1999-12-30), 石油石化 47 of 54 and 美容护理 28 of 34. The structural "
+            "claim needs no witness. IndustryAnswer.is_backfilled reports it per answer and "
+            "providers/tushare.py floors availability at the vintage's effective date so a "
+            "pre-2021 readiness check blocks rather than answering."
         ),
     ),
     IndustryLimitation(
@@ -297,8 +326,11 @@ KNOWN_INDUSTRY_LIMITATIONS: Final[tuple[IndustryLimitation, ...]] = (
         code="a_security_can_be_unclassified_inside_its_listed_life",
         detail=(
             "49 of the corpus's 2,004 transitions leave a gap rather than handing straight over: "
-            "000639.SZ ST西王 is 社会服务 through 2002-08-29 and unclassified for 4,104 sessions "
-            "until 2019-07-24, 000716.SZ 黑芝麻 for 3,429 and 600365.SH ST通葡 for 3,300. "
+            "000639.SZ ST西王 is 社会服务 through 2002-08-29 and unclassified for 4,103 sessions "
+            "until 2019-07-24, 000716.SZ 黑芝麻 for 3,428 and 600365.SH ST通葡 for 3,299 -- "
+            "sessions strictly between the two dates, the out_date itself still being classified. "
+            "Which transitions those 49 are needs a calendar: is_not_calendar_adjacent flags 442 "
+            "of the 2,004 and the 393 extra merely cross a weekend or a holiday. "
             "SecurityIndustryHistory refuses such a day rather than carrying the older label "
             "forward. Whole-market coverage of the listed universe is 5,538 of 5,539 (99.98%) on "
             "2026-08-07, the one exception being 920038.BJ 森合高科 listed four days earlier -- "
@@ -343,6 +375,42 @@ KNOWN_INDUSTRY_LIMITATIONS: Final[tuple[IndustryLimitation, ...]] = (
             "before it takes effect and how far before is not derivable here. Neither carries a "
             "revision instant either, so revision_time equals available_time and a partition's "
             "revised_row_count of 0 reads as 'unmeasured', not 'none'."
+        ),
+    ),
+    IndustryLimitation(
+        code="a_partial_year_read_cannot_see_an_interval_close",
+        detail=(
+            "One assignment is stored as two rows -- an opening row dated at in_date and, where "
+            "the interval closed, a closing row dated at out_date -- so that neither carries a "
+            "fact from an instant the other did not have. The two land in different partitions "
+            "whenever the interval crosses a year, which is the whole point (it is what lets an "
+            "as_of in 2022 read a 1991 assignment at all) and is also the cost: a read that "
+            "names the opening year and not the closing one reassembles an interval that never "
+            "ends, and answers with an industry the security had already left. That direction is "
+            "fail-open, unlike everything else here, so it is closed by a rule rather than a "
+            "note: load_industry_histories compares the years it was asked for against the "
+            "years the store actually holds and sets SecurityIndustryHistory.answerable_through "
+            "to the year before the first stored partition it skipped, after which "
+            "assignment_on and is_classified_on refuse rather than answer. A read that "
+            "covers every stored year gets no bound, correctly. What no rule here can see "
+            "is a year that was never ingested at all: 1985 and 1987 have no partition "
+            "because nothing happened in them, which is indistinguishable from a year whose "
+            "fetch was skipped."
+        ),
+    ),
+    IndustryLimitation(
+        code="no_cross_section_before_the_taxonomy_is_readable_at_all",
+        detail=(
+            "The floor under every row's available_time is 2021-12-13, so the earliest as_of at "
+            "which any of this can be read is 2021-12-13 -- not a filter that thins a 2015 cross "
+            "section, a refusal of the whole read. Measured on the stored corpus: at as_of "
+            "2015-06-30 every partition blocks with not_yet_knowable. That is the correct answer "
+            "and it is also a hard limit on what V2-P3-004 can neutralise against; a backtest "
+            "that wants an industry for a 2015 session needs a source that published one in "
+            "2015, which this is not. What the row split buys is the SW2021 era itself: before "
+            "it, one closed interval held its own opening year past every earlier as_of, and "
+            "fed the real 7,893-row corpus 29 of the 38 requestable years blocked at as_of "
+            "2023-06-30 with the 9 that read holding 118 securities between them."
         ),
     ),
     IndustryLimitation(
@@ -601,6 +669,14 @@ class IndustryReclassification:
     effective_from: date
     previous: IndustryAssignment
     current: IndustryAssignment
+    unclassified_sessions: int | None = None
+    """Sessions on which the security carried no industry, or `None` when no calendar was given.
+
+    `SecurityIndustryHistory.reclassifications(sessions=...)` fills it by counting the sessions
+    strictly between the predecessor's `effective_through` and the successor's `effective_from`.
+    `None` is not zero and must not be read as one: it means the caller passed no calendar, which
+    is the only state in which `is_across_a_gap` falls back to a calendar-day guess.
+    """
 
     @property
     def changed_levels(self) -> tuple[str, ...]:
@@ -619,18 +695,44 @@ class IndustryReclassification:
         return tuple(changed)
 
     @property
-    def is_across_a_gap(self) -> bool:
-        """Whether the security was unclassified between the two assignments.
+    def is_not_calendar_adjacent(self) -> bool:
+        """Whether the two dates are not consecutive calendar days. **A superset of the gaps.**
 
-        `True` for 49 of the corpus's 2,004 transitions. The successor's `effective_from` is the
-        next SSE session after the predecessor's `effective_through` in the other 1,955, but this
-        module holds no calendar, so what it can say without one is the weaker and always-true
-        statement: the two dates are not consecutive calendar days.
+        Named for what it measures rather than for what a reader wants, because on the real
+        corpus the two are an order of magnitude apart. Of the 2,004 transitions this answers
+        `True` for **442**, while only **49** leave the security genuinely unclassified: the
+        other **393** hand over on the next *session* across a weekend or a holiday, and their
+        calendar deltas are exactly the market's -- 237 of three days (Friday to Monday), 48 of
+        ten (a National Day or Spring Festival week), 47 of four, 32 of five, 14 of two.
+        `('600354.SH', 2007-06-29, 2007-07-02)` and `('300268.SZ', 2011-09-30, 2011-10-10)` are
+        two of them; neither has a single unclassified session in it.
+
+        That the two counts were once claimed to be the same number was a coincidence of size,
+        not a measurement. This property is the honest calendar-free statement and it is only
+        ever a **bound**: a `False` proves there was no gap, a `True` proves nothing.
         """
         through = self.previous.effective_through
         if through is None:
             return False
         return (self.current.effective_from - through).days > 1
+
+    @property
+    def is_across_a_gap(self) -> bool:
+        """Whether the security was unclassified between the two assignments.
+
+        Exact when `reclassifications(sessions=...)` was given a calendar: `True` for exactly the
+        **49** of the corpus's 2,004 transitions that leave at least one session with no
+        assignment covering it, and `False` for the 1,955 whose successor starts on the very next
+        session -- including the 393 that cross a weekend or a holiday to get there.
+
+        **Without a calendar this falls back to `is_not_calendar_adjacent`, which is a superset**
+        (442 of 2,004) and says so. The fallback is a report rather than a gate: the rule that
+        actually refuses to answer for an unclassified day is `assignment_on`, which tests
+        coverage directly and needs no calendar to be exact.
+        """
+        if self.unclassified_sessions is not None:
+            return self.unclassified_sessions > 0
+        return self.is_not_calendar_adjacent
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -645,6 +747,21 @@ class SecurityIndustryHistory:
     assignments: tuple[IndustryAssignment, ...]
     taxonomy: str
     taxonomy_effective_from: date
+    answerable_through: int | None = None
+    """The last calendar year this history can answer for, or `None` for "no bound established".
+
+    Load-bearing for a reason specific to how the rows are stored: `providers/tushare.py` files
+    an assignment's opening and its close as two rows in two partitions, so a read that stopped
+    before the closing year reassembles an interval that never ends and would answer with an
+    industry the security had already left. `load_industry_histories` sets this to the year
+    before the first stored partition it did **not** read, and `assignment_on` refuses a later
+    day rather than answering from a stale open interval -- see
+    `KNOWN_INDUSTRY_LIMITATIONS.a_partial_year_read_cannot_see_an_interval_close`.
+
+    `None` when the read covered every stored year, and when the history was built directly from
+    `IndustryAssignment` values rather than from partitions -- the same "there is no window to
+    check" that `StockUniverse.years_read` being empty means.
+    """
 
     @property
     def covered_from(self) -> date:
@@ -661,10 +778,15 @@ class SecurityIndustryHistory:
 
         Refuses three days rather than answering: one before the first assignment, one after a
         closed final assignment, and one inside a gap. The gap case is the one that matters --
-        carrying the previous label across `000639.SZ`'s 4,104 unclassified sessions would be an
+        carrying the previous label across `000639.SZ`'s 4,103 unclassified sessions would be an
         answer no row supports and would be indistinguishable from a security that never left.
+
+        A fourth day is refused when the history was read back from partitions: one after the
+        last year that read covered. An assignment's close is stored as its own row in its own
+        year, so an unread later year cannot be told apart from an interval that is still open.
         """
         _require_plain_date(day, "day")
+        self._require_year_was_read(day)
         if day < self.covered_from:
             raise IndustryHorizonError(
                 f"{day.isoformat()} is before {self.ts_code}'s first assignment, which takes "
@@ -708,29 +830,77 @@ class SecurityIndustryHistory:
         Offered because "no industry that day" is a legitimate thing for a caller assembling a
         cross section to ask, and forcing it through an exception would make the ordinary
         3% residue of a 2015 cross section look like an error.
+
+        It still raises for a day past the last year read, and that is not the same hazard: an
+        unclassified day is a fact this read saw, while a day whose partition was never opened is
+        one it did not -- and there the `False` and the `True` are both guesses.
         """
         _require_plain_date(day, "day")
+        self._require_year_was_read(day)
         return any(entry.covers(day) for entry in self.assignments)
 
-    def reclassifications(self) -> tuple[IndustryReclassification, ...]:
+    def _require_year_was_read(self, day: date) -> None:
+        """Refuse a day past the last year this read can speak for."""
+        if self.answerable_through is not None and day.year > self.answerable_through:
+            raise IndustryHorizonError(
+                f"{day.isoformat()} is after {self.answerable_through}, the last membership year "
+                f"{self.ts_code}'s history can answer for; a stored year before it was left "
+                "unread, and an assignment's close is stored as its own row in its own year, so "
+                "an interval that ended there is indistinguishable here from one still open"
+            )
+
+    def reclassifications(
+        self, *, sessions: Sequence[date] = ()
+    ) -> tuple[IndustryReclassification, ...]:
         """Every hand-over between consecutive assignments, ascending.
 
         1,645 of the corpus's 5,889 securities have at least one and the most any has is five
         (`000007.SZ`, six assignments).
+
+        `sessions` is the exchange calendar, ascending, and it is what makes
+        `IndustryReclassification.is_across_a_gap` exact rather than a calendar-day superset --
+        442 transitions look like gaps by the calendar and only 49 are. It is a parameter rather
+        than state on this class because a calendar belongs to `domain/trading_calendar.py` and
+        this contract answers coverage questions without one; passing it buys precision on a
+        *report*, never on a refusal.
         """
+        ordered = tuple(sessions)
         return tuple(
             IndustryReclassification(
                 ts_code=self.ts_code,
                 effective_from=self.assignments[index].effective_from,
                 previous=self.assignments[index - 1],
                 current=self.assignments[index],
+                unclassified_sessions=_unclassified_sessions(
+                    ordered, self.assignments[index - 1], self.assignments[index]
+                ),
             )
             for index in range(1, len(self.assignments))
         )
 
 
+def _unclassified_sessions(
+    sessions: tuple[date, ...], previous: IndustryAssignment, current: IndustryAssignment
+) -> int | None:
+    """Sessions strictly between two assignments, or `None` when no calendar was supplied.
+
+    `None` rather than `0` for the missing calendar, and the type is the point: `0` would be
+    "measured, and there was no gap", which is the one thing an absent calendar cannot say.
+    """
+    if not sessions:
+        return None
+    through = previous.effective_through
+    if through is None:
+        return 0
+    return max(0, bisect_left(sessions, current.effective_from) - bisect_right(sessions, through))
+
+
 def build_security_industry_history(
-    ts_code: str, assignments: Iterable[IndustryAssignment], *, taxonomy: str
+    ts_code: str,
+    assignments: Iterable[IndustryAssignment],
+    *,
+    taxonomy: str,
+    answerable_through: int | None = None,
 ) -> SecurityIndustryHistory:
     """Assemble a `SecurityIndustryHistory` from assignments, in any order.
 
@@ -801,18 +971,33 @@ def build_security_industry_history(
         assignments=ordered,
         taxonomy=taxonomy,
         taxonomy_effective_from=effective_from,
+        answerable_through=answerable_through,
     )
 
 
 def industry_histories_from_panel_rows(
-    rows: Iterable[Sequence[object]], *, taxonomy: str
+    rows: Iterable[Sequence[object]], *, taxonomy: str, answerable_through: int | None = None
 ) -> Mapping[str, SecurityIndustryHistory]:
     """Rebuild one history per security from rows shaped like
     `INDUSTRY_MEMBERSHIP_PANEL_COLUMNS`.
 
     The counterpart of the provider's projection. What this function owns is the shape of a
-    *stored row* -- its width and the ISO text its two date columns are stored as -- which
-    `build_security_industry_history` never sees.
+    *stored row* -- its width, the ISO text its two date columns are stored as, and the fact that
+    one assignment is stored as **two rows** -- none of which `build_security_industry_history`
+    sees.
+
+    ## Folding the split back together
+
+    `providers/tushare.py` writes a closed assignment as an opening row (its `industry_through`
+    empty, dated at `industry_from`) and a closing row (its `industry_through` populated, dated
+    there), so that neither carries a fact from an instant the other did not have. A read that
+    covers both years gets both, and they are the same assignment: same security, same start,
+    same three codes. This folds them, preferring the closed one, because a close is later
+    knowledge than the open it supersedes.
+
+    Two rows that share a security and a start day and disagree about anything **else** are not a
+    split -- they are two sources that were never reconciled -- and are refused here rather than
+    collapsed, which is `build_security_industry_history`'s rule kept intact one layer up.
 
     `taxonomy` is a parameter rather than a stored column, and that is deliberate: the vintage is
     a property of the *request* (`index_member_all` takes no `src` -- passing one returns zero
@@ -820,10 +1005,15 @@ def industry_histories_from_panel_rows(
     inviting a partition that carries two. It is stored on the *tree* rows, where it genuinely
     varies.
 
+    `answerable_through` is the last year the read can speak for, and it is what lets
+    `assignment_on` refuse a day whose closing rows may simply not have been read. `None`
+    means no bound was established -- either the read covered every stored year or the rows
+    did not come from partitions at all.
+
     A read-only mapping rather than a `dict`, because a whole-partition read is shared and a
     caller mutating one entry would be editing what other callers hold.
     """
-    grouped: dict[str, list[IndustryAssignment]] = {}
+    grouped: dict[str, dict[date, IndustryAssignment]] = {}
     for index, row in enumerate(rows):
         if len(row) != len(INDUSTRY_MEMBERSHIP_PANEL_COLUMNS):
             raise IndustryClassificationError(
@@ -833,23 +1023,66 @@ def industry_histories_from_panel_rows(
             )
         subject, starts, ends, level_one, level_two, level_three = row
         ts_code = _require_stored_text(subject, index, SUBJECT_COLUMN_NAME)
-        grouped.setdefault(ts_code, []).append(
-            IndustryAssignment(
-                ts_code=ts_code,
-                l1_code=_require_stored_text(level_one, index, INDUSTRY_L1_COLUMN),
-                l2_code=_require_stored_text(level_two, index, INDUSTRY_L2_COLUMN),
-                l3_code=_require_stored_text(level_three, index, INDUSTRY_L3_COLUMN),
-                effective_from=_parse_iso_date(starts, index, INDUSTRY_FROM_COLUMN),
-                effective_through=(
-                    None if ends is None else _parse_iso_date(ends, index, INDUSTRY_THROUGH_COLUMN)
-                ),
-            )
+        assignment = IndustryAssignment(
+            ts_code=ts_code,
+            l1_code=_require_stored_text(level_one, index, INDUSTRY_L1_COLUMN),
+            l2_code=_require_stored_text(level_two, index, INDUSTRY_L2_COLUMN),
+            l3_code=_require_stored_text(level_three, index, INDUSTRY_L3_COLUMN),
+            effective_from=_parse_iso_date(starts, index, INDUSTRY_FROM_COLUMN),
+            effective_through=(
+                None if ends is None else _parse_iso_date(ends, index, INDUSTRY_THROUGH_COLUMN)
+            ),
+        )
+        by_start = grouped.setdefault(ts_code, {})
+        stored = by_start.get(assignment.effective_from)
+        by_start[assignment.effective_from] = (
+            assignment if stored is None else _fold_split_rows(stored, assignment, index)
         )
     return MappingProxyType(
         {
-            ts_code: build_security_industry_history(ts_code, group, taxonomy=taxonomy)
-            for ts_code, group in grouped.items()
+            ts_code: build_security_industry_history(
+                ts_code,
+                [by_start[start] for start in sorted(by_start)],
+                taxonomy=taxonomy,
+                answerable_through=answerable_through,
+            )
+            for ts_code, by_start in grouped.items()
         }
+    )
+
+
+def _fold_split_rows(
+    stored: IndustryAssignment, arriving: IndustryAssignment, index: int
+) -> IndustryAssignment:
+    """Fold an assignment's opening row and its closing row back into one, or refuse.
+
+    The two halves agree on everything but `effective_through`, and the populated one wins: the
+    close is what the opening row could not yet say. Anything else two rows can disagree about on
+    one start day is two sources.
+    """
+    if (stored.l1_code, stored.l2_code, stored.l3_code) != (
+        arriving.l1_code,
+        arriving.l2_code,
+        arriving.l3_code,
+    ):
+        raise IndustryClassificationError(
+            f"row {index}: {stored.ts_code} has two assignments starting "
+            f"{stored.effective_from.isoformat()} with different industries "
+            f"({stored.l1_code}/{stored.l2_code}/{stored.l3_code} and "
+            f"{arriving.l1_code}/{arriving.l2_code}/{arriving.l3_code}); an assignment is stored "
+            "as an opening row and a closing row that agree on everything but the end date, so "
+            "this is two sources that were never reconciled"
+        )
+    if stored.effective_through is None:
+        return arriving
+    if arriving.effective_through is None or arriving.effective_through == stored.effective_through:
+        return stored
+    raise IndustryClassificationError(
+        f"row {index}: {stored.ts_code}'s assignment starting "
+        f"{stored.effective_from.isoformat()} is closed twice, on "
+        f"{stored.effective_through.isoformat()} and "
+        f"{arriving.effective_through.isoformat()}; one assignment ends once, and picking either "
+        "date would answer a different set of days than the other"
     )
 
 

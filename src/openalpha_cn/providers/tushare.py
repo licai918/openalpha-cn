@@ -30,17 +30,20 @@ is none of those.
 ## Some datasets serve only the panel plane (`V2-P1-005`)
 
 The refusal above now has a mirror image: `serves_evidence_plane=False` refuses `fetch()` for
-a dataset by name. Two rows use it, for one reason.
+a dataset by name. Four rows use it, for one reason.
 
 `fetch()` is a payload-passthrough contract -- a `ProviderRecord`'s payload is the decoded
 response row verbatim, which is what makes an evidence citation re-provable -- and a record
-carries exactly one `available_time` for that whole payload. `stock_basic` and `namechange`
-both put facts that became knowable at *different* instants into one response row:
-`delist_date` sits beside `list_date` (a 2024 termination beside a 1990 listing), and
-`end_date` sits on the name that is currently in effect, naming a rename that may not have
-been announced yet. There is no single honest availability instant for such a row, so instead
-of choosing one and documenting the leak, the evidence path refuses. The panel path splits
-the row instead -- see `_stock_lifecycle_panel_rows`.
+carries exactly one `available_time` for that whole payload. `stock_basic`, `namechange` and
+`index_member_all` all put facts that became knowable at *different* instants into one
+response row: `delist_date` sits beside `list_date` (a 2024 termination beside a 1990
+listing), `end_date` sits on the name that is currently in effect, naming a rename that may
+not have been announced yet, and `out_date` sits beside `in_date` on an industry assignment.
+There is no single honest availability instant for such a row, so instead of choosing one and
+documenting the leak, the evidence path refuses. The panel path splits the row instead -- see
+`_stock_lifecycle_panel_rows` and `_industry_membership_panel_rows`. `index_classify` is the
+fourth and is there for the neighbouring reason: its date column is synthesised, so there is
+no verbatim response row to hand back under a single clock.
 
 This is a stronger response than the one `is_open` gets below, and deliberately so: an
 unparsed `is_open` is a type hazard whose blast radius ends at the caller, while a look-ahead
@@ -350,11 +353,12 @@ class ClockStrategy(StrEnum):
     """
 
     taxonomy_backfill = "taxonomy_backfill"
-    """A closed interval expressed in a classification published after the interval began.
+    """An interval expressed in a classification published after the interval began.
 
-    ``index_member_all``'s clock, and the one strategy here whose availability instant is not
-    read off any column of the row. See ``_taxonomy_backfill_timeline`` for the three bounds it
-    takes the latest of, and for the two look-aheads each of them closes.
+    ``index_member_all``'s clock: the row's own event, floored at the taxonomy's effective date.
+    The floor is the part no column of the row can supply. See ``_taxonomy_backfill_timeline``
+    for the look-ahead it closes and ``_industry_membership_panel_rows`` for why the row is split
+    first, exactly as ``calendar_static`` needs ``stock_basic`` split first.
     """
 
     calendar_publication = "calendar_publication"
@@ -803,14 +807,70 @@ def _published_industry_flag(value: object) -> object:
 def _optional_industry_date_text(value: object) -> object:
     """Parse `out_date` into ISO text, keeping the open interval's null as `None`.
 
-    `_optional_calendar_date_text`'s shape. The null is load-bearing rather than sparse: all
-    5,889 `is_new='Y'` rows have an empty `out_date` and all 2,004 `is_new='N'` rows have one,
-    with no exceptions either way, so a null here *is* "this assignment is still in force" and a
-    blank string coerced to a date would close an open interval on some arbitrary day.
+    `_optional_calendar_date_text`'s shape minus its blank-string branch, and the difference is
+    the point. The null is load-bearing rather than sparse: all 5,889 `is_new='Y'` rows have an
+    empty `out_date` and all 2,004 `is_new='N'` rows have one, with no exceptions either way, so
+    a null here *is* "this assignment is still in force" and a blank string coerced to a date
+    would close an open interval on some arbitrary day.
+
+    Tushare's own `""` never reaches this: `_industry_membership_panel_rows` reads `out_date`
+    before anything else does, to decide whether the row has a second half at all, and writes
+    `None` on the half that has no end. So the blank string is normalised where it is *decided
+    on* and this parser refuses one instead of quietly accepting it -- a `""` arriving here means
+    the split did not run, which is a wiring bug and not an open interval.
     """
-    if value is None or value == "":
+    if value is None:
         return None
     return _calendar_date_text(value)
+
+
+_INDUSTRY_EVENT_DATE_FIELD: Final[str] = "industry_event_date"
+"""The instant one split membership row is dated at; synthesised, never stored.
+
+Provider-private rather than a `domain` constant because it is not projected: the panel columns
+are `industry_from`/`industry_through` and this is only the descriptor's `date_field`, which
+decides the row's `event_time` and therefore its partition year. `stock_basic`'s
+`lifecycle_date` is the same idea and *is* stored, because a lifecycle row's date is its whole
+content; here the two interval ends are already columns.
+"""
+
+
+def _industry_membership_panel_rows(row: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    """Split one membership row into the events it carries: an assignment, and maybe its end.
+
+    `_stock_lifecycle_panel_rows`' argument, on the dataset that has the same shape. A response
+    row states *both* ends of one closed interval, and a panel row carries one `available_time`
+    for everything in it, so a single row is a dilemma:
+
+    - Date it at `in_date` and a 2024 termination is readable by a 2019 reader -- a look-ahead.
+    - Date it at `out_date` -- what this descriptor did until the review of `V2-P1-010` -- and
+      the whole interval is unreadable until it closes. That is fail-closed, but the cost was
+      measured wrongly and is far larger than a row-level filter suggests: the readiness gate in
+      `panel/catalog.py` compares a **partition's** `max_available_time`, so one row that closed
+      in 2024 pushed its entire `in_date` year past every earlier `as_of`. Fed the real 7,893-row
+      corpus, 29 of the 38 requestable year partitions were blocked outright at `as_of`
+      2023-06-30 and the 9 that read held 118 securities between them -- no usable cross section
+      at any historical `as_of` before 2026-07-31, which is the one thing this dataset exists to
+      supply.
+
+    So the two facts get one row each. The **opening** row carries the assignment with an empty
+    `industry_through` and is dated at `in_date`: that is what was knowable while the assignment
+    ran, and it is true then. The **closing** row carries the same assignment with its end and is
+    dated at `out_date`. `industry_histories_from_panel_rows` folds the pair back into one
+    assignment whenever both are read, so nothing downstream sees two.
+
+    **What this costs, named rather than implied.** The two rows land in different partitions
+    whenever the interval crosses a new year, so a read that names the opening year and not the
+    closing one sees an interval that never ends -- fail-open, where the un-split row was
+    fail-closed. That is why `SecurityIndustryHistory` carries `years_read` and refuses a day
+    after the last year a read covered; see
+    `KNOWN_INDUSTRY_LIMITATIONS.a_partial_year_read_cannot_see_an_interval_close`.
+    """
+    opened = {**row, "out_date": None, _INDUSTRY_EVENT_DATE_FIELD: row["in_date"]}
+    closed_on = row["out_date"]
+    if closed_on is None or closed_on == "":
+        return (opened,)
+    return (opened, {**row, _INDUSTRY_EVENT_DATE_FIELD: closed_on})
 
 
 def _stock_lifecycle_panel_rows(row: dict[str, Any]) -> tuple[dict[str, Any], ...]:
@@ -1198,35 +1258,32 @@ Split across 31 L1 codes that is a bound to watch rather than a schedule.
 def _taxonomy_backfill_timeline(
     row: dict[str, Any], date_field: str, ingested_at: datetime
 ) -> Timeline:
-    """`index_member_all`'s clock: the latest of the interval's two ends and the taxonomy's own.
+    """`index_member_all`'s clock: the split row's own event, floored at the taxonomy's birthday.
 
-    `event_time` is `in_date`'s midnight in Asia/Shanghai -- the day the assignment took effect,
-    which is the one thing the row states plainly. `available_time` is the **latest** of three
-    instants, each closing a look-ahead the others do not:
+    `event_time` is `industry_event_date`'s midnight in Asia/Shanghai -- `in_date` on the opening
+    half of a split row and `out_date` on the closing half, which is exactly why the row is split
+    (`_industry_membership_panel_rows`). `available_time` is the **later** of two instants:
 
-    - **`in_date` itself.** The floor. Within a vintage's own era this is the same bound
+    - **The row's own event.** The floor. Within a vintage's own era this is the same bound
       `stock_basic`'s lifecycle rows get and carries the same residue: the annual review is
       published before it takes effect and nothing in this endpoint says how far before.
-    - **`out_date`, when the interval is closed.** A row carries *both* ends, so it cannot have
-      been knowable before the later one. This is `stock_basic`'s dilemma -- a listing and a
-      delisting cannot share an `available_time` -- answered by **waiting** rather than by
-      splitting the row. 617 of the 7,893 rows have an `out_date` at or after 2021-12-13, so
-      without this bound each of them would make its own termination readable years early.
     - **The taxonomy's effective date**, 2021-12-13 for SW2021. This is the bound `V2-P1-010`
       exists for. Every one of the 7,893 rows is labelled with an SW2021 node and the earliest
-      `in_date` is 1984-05-09; measured against the vintage that was actually in force,
-      **1,461,237 of the 12,675,906 (name x session) answers this dataset gives before
-      2021-12-13 -- 11.5%, over 1,185 securities -- name an L1 the classification of the day did
-      not**. Dating those rows at `in_date` would present all of them as contemporaneous fact.
+      `in_date` is 1984-05-09, so dating them at `in_date` alone would present a 2021
+      classification as 1984 contemporaneous fact. See
+      `KNOWN_INDUSTRY_LIMITATIONS.every_pre_2021_answer_is_a_backfill` for how far the two
+      endpoints disagree over the window this bound covers, and for why neither of them can be
+      called the classification that was actually in force.
 
-    **The residue is the other direction and is measured rather than argued away.** Waiting for
-    an interval to close under-reports: a replay whose `as_of` falls *inside* an interval that
-    had not closed yet sees no assignment at all and reads the security as unclassified. Over
-    the 1,128 SSE sessions of the SW2021 era that is 249,568 of 6,203,397 (name x session)
-    answers, **4.02%**, across 571 securities. That is the fail-closed direction -- a missing
-    industry is visible to `industry_coverage_report` and drops the name from a neutralisation,
-    where a leaked one silently moves it into a group it had not been put in yet -- and it is
-    zero for the ordinary ingest, whose `as_of` is at or after every `out_date` in the corpus.
+    **The bound this rule no longer takes, and why.** Until the review of `V2-P1-010` a closed
+    interval was also held back to its `out_date`, on the argument that a row carrying both ends
+    cannot have been knowable before the later one. The argument was right and the mechanism was
+    wrong: the readiness gate in `panel/catalog.py` compares a **partition's**
+    `max_available_time`, so one 2024 `out_date` blocked the whole `in_date` year and, on the
+    real corpus, 29 of the 38 requestable years at `as_of` 2023-06-30 -- not a 4% row-level
+    residue but a refusal of every historical cross section. Splitting the row keeps the
+    look-ahead closed (a termination is still dated at the termination) without a closed interval
+    ever dating its own beginning.
 
     `revision_time` equals `available_time`: the endpoint serves one snapshot with no revision
     instant, and every alternative invents one. Read a partition's `revised_row_count` of 0 as
@@ -1241,14 +1298,7 @@ def _taxonomy_backfill_timeline(
     """
     effective_day = _parse_tushare_date(row[date_field])
     event_time = datetime.combine(effective_day, time(0, 0), tzinfo=_CHINA_TZ)
-    available_time = event_time
-    closed_on = row.get("out_date")
-    if closed_on:
-        available_time = max(
-            available_time,
-            datetime.combine(_parse_tushare_date(closed_on), time(0, 0), tzinfo=_CHINA_TZ),
-        )
-    available_time = max(available_time, _INDUSTRY_TAXONOMY_AVAILABLE_FROM)
+    available_time = max(event_time, _INDUSTRY_TAXONOMY_AVAILABLE_FROM)
     return Timeline(
         event_time=event_time,
         available_time=available_time,
@@ -1799,9 +1849,13 @@ TUSHARE_DATASETS: tuple[TushareDatasetDescriptor, ...] = (
         # dropped from a re-fetch. `namechange` stores its subject the same way for the same
         # reason.
         subject_field="ts_code",
-        date_field="in_date",
+        # Synthesised by `_industry_membership_panel_rows`, not a response column: a response row
+        # states both ends of one interval and they became knowable at different instants, so the
+        # row is split and each half is dated at its own end.
+        date_field=_INDUSTRY_EVENT_DATE_FIELD,
         clock=ClockStrategy.taxonomy_backfill,
         params_builder=_index_member_all_params,
+        panel_rows=_industry_membership_panel_rows,
         # `""` asks for the endpoint's defaults, which are exactly the eleven columns below --
         # measured, not assumed. Only six are pinned and only five are projected; see below for
         # the four the projection deliberately drops.
@@ -1823,6 +1877,10 @@ TUSHARE_DATASETS: tuple[TushareDatasetDescriptor, ...] = (
         # projected either: it is exactly `out_date is None` on all 7,893 rows, so it is fetched
         # as an independent witness and cross-checked in the tests, the treatment `namechange`
         # gives `end_date`.
+        #
+        # Forced rather than chosen, on top of all that: `date_field` names a column the
+        # expansion synthesises, so there is no verbatim response row for `fetch()` to hand back
+        # under a single clock -- which is the same admission the expansion itself is.
         serves_evidence_plane=False,
         max_rows_per_response=TUSHARE_INDUSTRY_MEMBER_ROW_CAP,
         # Demanded, which makes this the fifth descriptor to do so. `daily`'s argument -- a

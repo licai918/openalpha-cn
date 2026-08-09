@@ -12,8 +12,9 @@ The four things this file is really about:
   only the 5,889 currently-effective assignments and hides the 2,004 superseded ones, with no
   truncation flag and nothing else to notice it by.
 - **The cap is 3,000, the lowest in the table**, and `limit` only narrows it.
-- **The clock refuses to claim pre-2021 knowability.** A row's `available_time` is the latest of
-  its start, its end, and the day its taxonomy came into force.
+- **The clock refuses to claim pre-2021 knowability.** A closed assignment becomes two rows, one
+  per end, and each is dated at the later of its own event and the day its taxonomy came into
+  force.
 """
 
 from __future__ import annotations
@@ -350,8 +351,9 @@ def test_a_backfilled_assignment_is_available_no_earlier_than_its_taxonomy(
 ) -> None:
     """000001.SZ's assignment starts 1991-04-03 and is labelled with SW2021 nodes. SW2021 came
     into force 2021-12-13, so 1991 is the event and 2021 is the earliest honest availability --
-    the alternative dates a 2021 classification at a 1991 instant, which is the 1,461,237
-    (name x session) look-ahead this dataset's own rows cannot see."""
+    the alternative dates a 2021 classification at a 1991 instant, a relabelling this
+    dataset's own rows cannot see and that the two endpoints disagree about on 1,038,252 of
+    the 9,566,861 (name x session) pairs they can both speak to."""
     provider, _ = _provider(
         fake_tushare_transport, _response(MEMBER_FIELDS, (PING_AN_CURRENT,)), clock=AS_OF
     )
@@ -372,13 +374,11 @@ def test_a_backfilled_assignment_is_available_no_earlier_than_its_taxonomy(
 
 
 def test_a_closed_assignment_is_not_available_before_it_closed(fake_tushare_transport) -> None:
-    """A row carries both ends of its interval, so it cannot be knowable before the later one.
+    """A backfilled interval is held to its taxonomy at both ends.
 
-    This is `stock_basic`'s dilemma answered by waiting instead of splitting: dating this row at
-    `in_date` would make its 2017 termination readable in 1993. The residue is the other
-    direction and is measured -- 249,568 (name x session) of the SW2021 era's 6,203,397 (4.02%)
-    are answered as unclassified by a replay whose `as_of` falls inside an interval that had not
-    closed yet.
+    The row is split first (`_industry_membership_panel_rows`), so what this pins is the opening
+    half: its own event is 1993-10-18 and the earliest honest availability is still SW2021's
+    birthday. The closing half's own instant is the subject of the next two tests.
     """
     provider, _ = _provider(
         fake_tushare_transport, _response(MEMBER_FIELDS, (BAICHUAN_SUPERSEDED,)), clock=AS_OF
@@ -393,15 +393,22 @@ def test_a_closed_assignment_is_not_available_before_it_closed(fake_tushare_tran
     )
 
     assert batch.timeline.event_time[0] == datetime(1993, 10, 18, tzinfo=SHANGHAI)
-    # max(1993-10-18, 2017-05-25, 2021-12-13)
+    # max(1993-10-18, 2021-12-13)
     assert batch.timeline.available_time[0] == datetime(2021, 12, 13, tzinfo=SHANGHAI)
 
 
-def test_an_assignment_that_closed_after_its_taxonomy_is_dated_at_its_close(
+def test_a_closed_assignment_becomes_two_rows_dated_at_its_two_ends(
     fake_tushare_transport,
 ) -> None:
-    """617 rows have an `out_date` at or after 2021-12-13, so the third bound is not decorative:
-    for those the interval's end is the latest of the three and is what dates the row."""
+    """`_stock_lifecycle_panel_rows`' split, on the dataset with the same dilemma.
+
+    617 rows have an `out_date` at or after 2021-12-13, so the interval's end is genuinely the
+    later instant for them and dating the whole row there is what `V2-P1-010` shipped. It was
+    fail-closed and far more expensive than a row-level filter suggests: the readiness gate
+    compares a *partition's* `max_available_time`, so one 2024 close held its whole 2022
+    partition past every earlier `as_of`. Two rows, each dated at its own end, keep the
+    look-ahead shut without that.
+    """
     later = list(BAICHUAN_SUPERSEDED)
     later[MEMBER_FIELDS.index("in_date")] = "20220729"
     later[MEMBER_FIELDS.index("out_date")] = "20240729"
@@ -415,8 +422,69 @@ def test_an_assignment_that_closed_after_its_taxonomy_is_dated_at_its_close(
         )
     )
 
-    assert batch.timeline.event_time[0] == datetime(2022, 7, 29, tzinfo=SHANGHAI)
-    assert batch.timeline.available_time[0] == datetime(2024, 7, 29, tzinfo=SHANGHAI)
+    values = {column.name: column.values for column in batch.columns}
+    assert batch.subjects == ("600681.SH", "600681.SH")
+    assert values["industry_from"] == ("2022-07-29", "2022-07-29")
+    assert values["industry_through"] == (None, "2024-07-29")
+    assert batch.timeline.event_time == (
+        datetime(2022, 7, 29, tzinfo=SHANGHAI),
+        datetime(2024, 7, 29, tzinfo=SHANGHAI),
+    )
+    assert batch.timeline.available_time == (
+        datetime(2022, 7, 29, tzinfo=SHANGHAI),
+        datetime(2024, 7, 29, tzinfo=SHANGHAI),
+    )
+
+
+def test_a_termination_is_still_invisible_to_a_replay_that_predates_it(
+    fake_tushare_transport,
+) -> None:
+    """The look-ahead the split had to keep shut. Replayed at a 2023 `as_of` the 2024 close is
+    dropped by the point-in-time filter and what survives is an assignment with no end -- which
+    is what a reader in 2023 could actually say, rather than a 2024 termination handed to them a
+    year early."""
+    replay = datetime(2023, 6, 30, 12, 0, tzinfo=UTC)
+    later = list(BAICHUAN_SUPERSEDED)
+    later[MEMBER_FIELDS.index("in_date")] = "20220729"
+    later[MEMBER_FIELDS.index("out_date")] = "20240729"
+    provider, _ = _provider(
+        fake_tushare_transport, _response(MEMBER_FIELDS, (later,)), clock=replay
+    )
+
+    batch = provider.fetch_panel(
+        ProviderRequest(
+            dataset=INDUSTRY_MEMBERSHIP_DATASET,
+            as_of=replay,
+            subjects=("801720.SI", SUPERSEDED_INDUSTRY_MEMBERSHIP),
+        )
+    )
+
+    values = {column.name: column.values for column in batch.columns}
+    assert values["industry_from"] == ("2022-07-29",)
+    assert values["industry_through"] == (None,)
+
+
+def test_a_blank_out_date_is_an_open_interval_rather_than_a_date(fake_tushare_transport) -> None:
+    """`index_member_all` sends JSON `null` for a still-open assignment, but `""` is the same
+    fact in a different serialisation and the split is where that is decided: it reads `out_date`
+    to choose whether the row has a closing half at all. Treating `""` as an end date would emit
+    a closing row and then fail parsing it -- and treating it as an end date *successfully* would
+    close an open interval on some arbitrary day, which is the worse half of the same bug."""
+    blank = list(PING_AN_CURRENT)
+    blank[MEMBER_FIELDS.index("out_date")] = ""
+    provider, _ = _provider(fake_tushare_transport, _response(MEMBER_FIELDS, (blank,)), clock=AS_OF)
+
+    batch = provider.fetch_panel(
+        ProviderRequest(
+            dataset=INDUSTRY_MEMBERSHIP_DATASET,
+            as_of=AS_OF,
+            subjects=("801780.SI", CURRENT_INDUSTRY_MEMBERSHIP),
+        )
+    )
+
+    values = {column.name: column.values for column in batch.columns}
+    assert values["industry_through"] == (None,)
+    assert batch.timeline.event_time == (datetime(1991, 4, 3, tzinfo=SHANGHAI),)
 
 
 def test_a_row_not_yet_knowable_at_the_as_of_is_dropped_rather_than_stored(

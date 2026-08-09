@@ -2652,7 +2652,14 @@ def write_industry_memberships(
     *,
     date_timezone: str = DEFAULT_DATE_TIMEZONE,
 ) -> tuple[PartitionRef, ...]:
-    """Write industry assignments into one partition per `industry_from` year (`V2-P1-010`).
+    """Write industry assignments into one partition per membership-event year (`V2-P1-010`).
+
+    The event, not the assignment: `providers/tushare.py` splits a closed assignment into an
+    opening row dated at `in_date` and a closing row dated at `out_date`, so a 1993 assignment
+    that ended in 2017 puts one row in each of those two partitions. That is what lets an `as_of`
+    inside the SW2021 era read the 1993 partition at all -- see
+    `_industry_membership_panel_rows` -- and it is why a year here means "the events of that
+    year" rather than "the assignments that began in it".
 
     This writer has both of the shapes the earlier ones have separately, because this dataset
     needs both.
@@ -2666,7 +2673,7 @@ def write_industry_memberships(
     `panel_partition_year` refuses it. Filing the lot under the fetch year is not available --
     `record_coverage` refuses a census that reaches outside its partition's year -- so the merged
     batch is split by `split_panel_batch_by_year`, and the years then mean something: the 2021
-    partition is the assignments that began in 2021.
+    partition is the assignments that began in 2021 and the ones that ended there.
 
     ## The subject guard, and the two backfill loops it does and does not catch
 
@@ -2804,6 +2811,14 @@ def load_industry_histories(
     catches it is the query side: `SecurityIndustryHistory.assignment_on` refuses a day before
     its own first assignment and a day inside a gap, rather than carrying a neighbouring label
     across it. Naming the year in `years` is how a caller asserts it should exist.
+
+    The years asked for are compared against the years the store actually holds, and the first
+    stored year this read skipped becomes the histories' `answerable_through` bound. That is not
+    bookkeeping: an assignment's close is stored as its own row in its own year, so a read that
+    stops short of it reassembles an interval that never ends, and `assignment_on` would answer
+    a later day with an industry the security had already left. A read covering every stored year
+    gets no bound. See
+    `KNOWN_INDUSTRY_LIMITATIONS.a_partial_year_read_cannot_see_an_interval_close`.
     """
     requested = tuple(sorted(set(years)))
     if not requested:
@@ -2827,7 +2842,12 @@ def load_industry_histories(
                 f"{'; '.join(issue.detail for issue in outcome.readiness.issues)}"
             )
         rows.extend(outcome.rows)
-    return industry_histories_from_panel_rows(rows, taxonomy=INDUSTRY_MEMBERSHIP_TAXONOMY)
+    skipped = sorted(set(store.registered_years(INDUSTRY_MEMBERSHIP_DATASET)) - set(requested))
+    return industry_histories_from_panel_rows(
+        rows,
+        taxonomy=INDUSTRY_MEMBERSHIP_TAXONOMY,
+        answerable_through=(skipped[0] - 1) if skipped else None,
+    )
 
 
 def load_industry_trees(

@@ -2,10 +2,12 @@
 
 The transport is doubled and every response body is real, captured live on 2026-08-09.
 
-The four things this file is really about:
+The five things this file is really about:
 
-- **A membership fetch is not a period**, so it is split into one partition per `industry_from`
+- **A membership fetch is not a period**, so it is split into one partition per membership-event
   year, exactly as `stock_basic` is split by lifecycle year.
+- **An assignment's two ends are two rows.** They became knowable at different instants, so
+  filing them together held a whole `in_date` year past every `as_of` before the interval closed.
 - **A partial re-fetch is refused.** A backfill that loops over `l1_code` and calls the writer
   once per slice would leave the year holding whichever slice it wrote last.
 - **A pre-2021 read is blocked by name.** The stored `available_time` is never earlier than the
@@ -29,6 +31,7 @@ from openalpha_cn.domain.industry_classification import (
     SW2014_TAXONOMY,
     SW2021_TAXONOMY,
     IndustryClassificationError,
+    IndustryHorizonError,
 )
 from openalpha_cn.domain.panel_batch import PanelBatchError
 from openalpha_cn.panel.store import PanelStorageError, PanelStore
@@ -140,6 +143,39 @@ UTILITIES_CURRENT = [
         "Y",
     ],
 ]
+# 600423.SH *ST柳化, verbatim: 农化制品 from 2003-07-14 through 2024-07-29 and 化学原料 after.
+# Its close lands *after* SW2021's own birthday, which is the case the row split exists for --
+# 617 of the corpus's 7,893 rows are shaped like this one.
+CHEMICALS_SUPERSEDED = [
+    [
+        "801030.SI",
+        "基础化工",
+        "801038.SI",
+        "农化制品",
+        "850331.SI",
+        "氮肥",
+        "600423.SH",
+        "*ST柳化",
+        "20030714",
+        "20240729",
+        "N",
+    ],
+]
+CHEMICALS_CURRENT = [
+    [
+        "801030.SI",
+        "基础化工",
+        "801033.SI",
+        "化学原料",
+        "850324.SI",
+        "其他化学原料",
+        "600423.SH",
+        "*ST柳化",
+        "20240730",
+        None,
+        "Y",
+    ],
+]
 SW2021_SPINE = [
     ["801010.SI", "农林牧渔", "L1", "110000", "1", "0", "SW2021"],
     ["801016.SI", "种植业", "L2", "110100", "1", "110000", "SW2021"],
@@ -207,6 +243,15 @@ ALL_SLICES = (
     ("801780.SI", CURRENT_INDUSTRY_MEMBERSHIP),
     ("801720.SI", SUPERSEDED_INDUSTRY_MEMBERSHIP),
     ("801160.SI", CURRENT_INDUSTRY_MEMBERSHIP),
+)
+
+CHEMICALS_SCRIPT = {
+    (INDUSTRY_MEMBERSHIP_DATASET, "801030.SI/N"): _response(MEMBER_FIELDS, CHEMICALS_SUPERSEDED),
+    (INDUSTRY_MEMBERSHIP_DATASET, "801030.SI/Y"): _response(MEMBER_FIELDS, CHEMICALS_CURRENT),
+}
+CHEMICALS_SLICES = (
+    ("801030.SI", SUPERSEDED_INDUSTRY_MEMBERSHIP),
+    ("801030.SI", CURRENT_INDUSTRY_MEMBERSHIP),
 )
 
 
@@ -289,6 +334,78 @@ def test_a_read_before_the_taxonomy_existed_is_blocked_by_name(tmp_path) -> None
             as_of=datetime(2015, 6, 30, 12, 0, tzinfo=UTC),
             max_staleness=None,
         )
+
+
+def test_an_assignment_is_filed_under_both_of_its_ends_and_read_back_as_one(tmp_path) -> None:
+    """The row split, end to end. 600423.SH's assignment opened in 2003 and closed in 2024, so
+    the two facts are two rows in two partitions -- and a read that covers both folds them back
+    into the single closed interval `build_security_industry_history` validates."""
+    store = _store(tmp_path)
+    provider = _provider(CHEMICALS_SCRIPT)
+
+    written = write_industry_memberships(store, _membership_batches(provider, CHEMICALS_SLICES))
+
+    assert sorted(reference.year for reference in written) == [2003, 2024]
+    histories = load_industry_histories(store, years=(2003, 2024), as_of=AS_OF, max_staleness=None)
+    (assignment, successor) = histories["600423.SH"].assignments
+    assert assignment.effective_from == date(2003, 7, 14)
+    assert assignment.effective_through == date(2024, 7, 29)
+    assert successor.effective_from == date(2024, 7, 30)
+    assert histories["600423.SH"].industry_on(date(2024, 7, 29)).l2_code == "801038.SI"
+    assert histories["600423.SH"].industry_on(date(2024, 7, 30)).l2_code == "801033.SI"
+
+
+def test_an_as_of_inside_the_taxonomy_era_reads_an_assignment_that_had_not_closed_yet(
+    tmp_path,
+) -> None:
+    """What the row split is for, and the review finding it answers.
+
+    `V2-P1-010` held a closed row back to its `out_date`, which reads as a 4% row-level residue
+    and is not one: the readiness gate compares a *partition's* `max_available_time`, so
+    600423.SH's 2024 close pushed the whole 2003 partition past every earlier `as_of`. Fed the
+    real 7,893-row corpus that blocked 29 of the 38 requestable years at `as_of` 2023-06-30 and
+    left 118 securities readable in total -- no historical cross section at all. Split, the same
+    corpus reads 37 of 38 years and 5,270 securities there, and the assignment below is legible
+    in 2023 as what it then was: open.
+    """
+    store = _store(tmp_path)
+    provider = _provider(CHEMICALS_SCRIPT)
+    write_industry_memberships(store, _membership_batches(provider, CHEMICALS_SLICES))
+
+    histories = load_industry_histories(
+        store,
+        years=(2003,),
+        as_of=datetime(2023, 6, 30, 12, 0, tzinfo=UTC),
+        max_staleness=None,
+    )
+
+    (open_interval,) = histories["600423.SH"].assignments
+    assert open_interval.effective_through is None
+    assert histories["600423.SH"].industry_on(date(2023, 6, 30)).l2_code == "801038.SI"
+
+
+def test_a_read_that_skips_a_stored_year_refuses_the_days_after_it(tmp_path) -> None:
+    """The fail-open the split introduces, closed by a rule rather than a note.
+
+    Reading 2003 and not 2024 reassembles an interval with no end, and answering 2025 from it
+    would name an industry 600423.SH left in 2024. `load_industry_histories` sees that the store
+    holds a 2024 partition this read skipped and bounds the histories at 2023.
+    """
+    store = _store(tmp_path)
+    provider = _provider(CHEMICALS_SCRIPT)
+    write_industry_memberships(store, _membership_batches(provider, CHEMICALS_SLICES))
+
+    histories = load_industry_histories(store, years=(2003,), as_of=AS_OF, max_staleness=None)
+
+    assert histories["600423.SH"].answerable_through == 2023
+    with pytest.raises(IndustryHorizonError, match="is after 2023, the last membership year"):
+        histories["600423.SH"].industry_on(date(2025, 1, 2))
+    with pytest.raises(IndustryHorizonError, match="is after 2023, the last membership year"):
+        histories["600423.SH"].is_classified_on(date(2025, 1, 2))
+    # A read that covers every stored year is bounded by nothing.
+    complete = load_industry_histories(store, years=(2003, 2024), as_of=AS_OF, max_staleness=None)
+    assert complete["600423.SH"].answerable_through is None
+    assert complete["600423.SH"].is_classified_on(date(2025, 1, 2)) is True
 
 
 def test_the_stored_availability_is_never_earlier_than_the_taxonomy(tmp_path) -> None:

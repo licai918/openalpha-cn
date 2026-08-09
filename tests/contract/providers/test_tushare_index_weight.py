@@ -8,7 +8,9 @@ The three things this file is really about:
 - **One index per request, one calendar month per request.** The endpoint ignores a
   comma-joined `index_code` (it returns zero rows) and publishes exactly once a month, so a
   month window is the request shape that maps one-to-one onto a publication.
-- **The cap is 7,000 and it is this endpoint's own.** `limit` moves it in neither direction.
+- **The cap is 7,000 and it is this endpoint's own.** `limit` cannot raise it and only narrows
+  it -- `limit=4000` returns 4,000 and `limit=20000` returns 7,000 -- which is the correction
+  `TUSHARE_INDEX_WEIGHT_ROW_CAP` records and this line used to contradict.
 - **The truncation flag is demanded**, which makes `index_weight` the fourth descriptor to do
   so and the first whose second witness is a domain-level checksum rather than a row count.
 """

@@ -12,7 +12,9 @@ The four things this file is really about:
 - **An interval is closed at both ends.** `industry_through` is the last day the assignment
   held, not the first day it did not.
 - **A gap is refused, not filled.** 49 of the corpus's 2,004 transitions leave the security
-  unclassified for a while, the longest being 000639.SZ's 4,104 sessions.
+  unclassified for a while, the longest being 000639.SZ's 4,103 sessions and the shortest
+  002674.SZ's 45. Which 49 they are needs a calendar: 442 transitions are not calendar-adjacent
+  and 393 of those merely cross a weekend or a holiday.
 - **The tree and the memberships are joined by a report, never by a precondition.** 25
   membership rows name an L3 node the SW2021 tree does not carry.
 """
@@ -36,6 +38,7 @@ from openalpha_cn.domain.industry_classification import (
     IndustryNode,
     IndustryReclassification,
     IndustryTree,
+    SecurityIndustryHistory,
     build_industry_tree,
     build_security_industry_history,
     industry_coverage_report,
@@ -128,6 +131,99 @@ XIWANG = (
     ),
 )
 
+# index_member_all: 600354.SH 敦煌种业 moves 其他种植业 -> 种子 across a **weekend**. 2007-06-29
+# is a Friday and 2007-07-02 the next Monday, so the calendar delta is 3 and the session delta
+# is 1. 237 of the corpus's 2,004 transitions have exactly this shape and none of them leaves
+# the security unclassified for a single session.
+DUNHUANG = (
+    IndustryAssignment(
+        ts_code="600354.SH",
+        l1_code="801010.SI",
+        l2_code="801016.SI",
+        l3_code="850113.SI",
+        effective_from=date(2004, 1, 14),
+        effective_through=date(2007, 6, 29),
+    ),
+    IndustryAssignment(
+        ts_code="600354.SH",
+        l1_code="801010.SI",
+        l2_code="801016.SI",
+        l3_code="850111.SI",
+        effective_from=date(2007, 7, 2),
+        effective_through=None,
+    ),
+)
+
+# index_member_all: 300268.SZ 佳沃食品 moves across the 2011 National Day week -- calendar delta
+# 10, session delta 1. 48 transitions have a ten-day calendar delta and none is a gap.
+JIAWO = (
+    IndustryAssignment(
+        ts_code="300268.SZ",
+        l1_code="801010.SI",
+        l2_code="801016.SI",
+        l3_code="850112.SI",
+        effective_from=date(2011, 9, 15),
+        effective_through=date(2011, 9, 30),
+    ),
+    IndustryAssignment(
+        ts_code="300268.SZ",
+        l1_code="801010.SI",
+        l2_code="801012.SI",
+        l3_code="850154.SI",
+        effective_from=date(2011, 10, 10),
+        effective_through=None,
+    ),
+)
+
+# index_member_all: 002674.SZ 兴业科技 is the *shortest* of the 49 real coverage holes -- 45
+# sessions with no assignment at all, returning afterwards to the same three codes.
+XINGYE = (
+    IndustryAssignment(
+        ts_code="002674.SZ",
+        l1_code="801130.SI",
+        l2_code="801131.SI",
+        l3_code="851315.SI",
+        effective_from=date(2012, 1, 4),
+        effective_through=date(2012, 4, 24),
+    ),
+    IndustryAssignment(
+        ts_code="002674.SZ",
+        l1_code="801130.SI",
+        l2_code="801131.SI",
+        l3_code="851315.SI",
+        effective_from=date(2012, 7, 2),
+        effective_through=None,
+    ),
+)
+
+# trade_cal(SSE): every session in three real windows, complete over each range, so a count of
+# the sessions between any two dates inside one window is exact.
+# One session per line is 72 lines of noise for three contiguous windows, so the formatter
+# is held off across them.
+# fmt: off
+SSE_SESSIONS = tuple(
+    date.fromisoformat(day)
+    for day in (
+        # 2007-06-25 .. 2007-07-06, around 敦煌种业's Friday-to-Monday hand-over.
+        "2007-06-25", "2007-06-26", "2007-06-27", "2007-06-28", "2007-06-29", "2007-07-02",
+        "2007-07-03", "2007-07-04", "2007-07-05", "2007-07-06",
+        # 2011-09-26 .. 2011-10-14, around 佳沃食品's National Day hand-over.
+        "2011-09-26", "2011-09-27", "2011-09-28", "2011-09-29", "2011-09-30", "2011-10-10",
+        "2011-10-11", "2011-10-12", "2011-10-13", "2011-10-14",
+        # 2012-04-20 .. 2012-07-05, spanning 兴业科技's whole 45-session hole.
+        "2012-04-20", "2012-04-23", "2012-04-24", "2012-04-25", "2012-04-26", "2012-04-27",
+        "2012-05-02", "2012-05-03", "2012-05-04", "2012-05-07", "2012-05-08", "2012-05-09",
+        "2012-05-10", "2012-05-11", "2012-05-14", "2012-05-15", "2012-05-16", "2012-05-17",
+        "2012-05-18", "2012-05-21", "2012-05-22", "2012-05-23", "2012-05-24", "2012-05-25",
+        "2012-05-28", "2012-05-29", "2012-05-30", "2012-05-31", "2012-06-01", "2012-06-04",
+        "2012-06-05", "2012-06-06", "2012-06-07", "2012-06-08", "2012-06-11", "2012-06-12",
+        "2012-06-13", "2012-06-14", "2012-06-15", "2012-06-18", "2012-06-19", "2012-06-20",
+        "2012-06-21", "2012-06-25", "2012-06-26", "2012-06-27", "2012-06-28", "2012-06-29",
+        "2012-07-02", "2012-07-03", "2012-07-04", "2012-07-05",
+    )
+)
+# fmt: on
+
 
 # --------------------------------------------------------------------------------------
 # The taxonomy has a birthday
@@ -210,7 +306,7 @@ def test_a_still_open_assignment_answers_every_later_day() -> None:
 
 
 def test_a_day_inside_a_coverage_hole_is_refused_rather_than_filled_forward() -> None:
-    """000639.SZ is unclassified for 4,104 sessions between 2002-08-30 and 2019-07-23.
+    """000639.SZ is unclassified for 4,103 sessions between 2002-08-30 and 2019-07-23.
 
     Carrying 社会服务 forward across seventeen years would be an answer no row supports, and
     it would be indistinguishable from a security that never left the classification.
@@ -345,6 +441,58 @@ def test_a_reclassification_that_moves_only_the_leaf_names_only_the_leaf() -> No
     assert change.changed_levels == ("L3",)
 
 
+def test_a_weekend_hand_over_is_not_calendar_adjacent_and_is_not_a_gap() -> None:
+    """The distinction the calendar-free rule cannot make, on the shape that dominates it.
+
+    600354.SH's assignment ends on Friday 2007-06-29 and its successor starts on Monday
+    2007-07-02: three calendar days apart, one session apart, and not a single day on which the
+    security carried no industry. On the real corpus 442 of the 2,004 transitions are not
+    calendar-adjacent and only 49 are gaps -- the other 393 are this, with calendar deltas of
+    exactly the market's shape (237 of three days, 48 of ten, 47 of four, 32 of five, 14 of two).
+    """
+    history = build_security_industry_history("600354.SH", DUNHUANG, taxonomy=SW2021_TAXONOMY)
+
+    (blind,) = history.reclassifications()
+    (exact,) = history.reclassifications(sessions=SSE_SESSIONS)
+
+    assert (exact.current.effective_from - exact.previous.effective_through).days == 3
+    assert blind.is_not_calendar_adjacent is True
+    assert exact.unclassified_sessions == 0
+    assert exact.is_across_a_gap is False
+    # And without the calendar the same transition is a false positive, which is the whole
+    # reason `is_not_calendar_adjacent` is a separate, differently-named property.
+    assert blind.unclassified_sessions is None
+    assert blind.is_across_a_gap is True
+
+
+def test_a_holiday_week_hand_over_is_not_a_gap_either() -> None:
+    """Ten calendar days, one session: the 2011 National Day week. 48 transitions look like this
+    and a rule tuned to skip weekends alone would still call every one of them a gap."""
+    history = build_security_industry_history("300268.SZ", JIAWO, taxonomy=SW2021_TAXONOMY)
+
+    (change,) = history.reclassifications(sessions=SSE_SESSIONS)
+
+    assert (change.current.effective_from - change.previous.effective_through).days == 10
+    assert change.is_not_calendar_adjacent is True
+    assert change.unclassified_sessions == 0
+    assert change.is_across_a_gap is False
+
+
+def test_a_real_hole_is_counted_in_sessions_rather_than_in_days() -> None:
+    """002674.SZ is the shortest of the 49 real holes: 2012-04-24 to 2012-07-02 is 69 calendar
+    days and **45 sessions** on which no assignment covered it. The count is sessions strictly
+    between the two dates, because the security is still classified on its `out_date` -- which
+    is also why 000639.SZ's hole is 4,103 sessions and not 4,104."""
+    history = build_security_industry_history("002674.SZ", XINGYE, taxonomy=SW2021_TAXONOMY)
+
+    (change,) = history.reclassifications(sessions=SSE_SESSIONS)
+
+    assert (change.current.effective_from - change.previous.effective_through).days == 69
+    assert change.unclassified_sessions == 45
+    assert change.is_across_a_gap is True
+    assert change.changed_levels == ()
+
+
 # --------------------------------------------------------------------------------------
 # The tree
 # --------------------------------------------------------------------------------------
@@ -428,6 +576,79 @@ def test_asking_the_tree_about_a_node_it_does_not_carry_is_refused() -> None:
         tree.ancestry("850412.SI")
 
 
+def test_each_level_reports_its_own_nodes_and_the_counts_differ() -> None:
+    """`nodes_at` and `level_one_count` name a level and must count that level.
+
+    A tree with one node per level cannot tell "count the L1s" from "count the L2s" or from
+    "count everything and divide by three", so this one is a real, lopsided slice of SW2021: two
+    L1 industries, three L2s under one of them and one L2 under the other, two L3s. The vintage's
+    own shape is 31 / 134 / 346, so no two of its levels have the same size either.
+    """
+    lopsided = (
+        FARMING_L1,
+        FARMING_L2,
+        FARMING_L3,
+        IndustryNode(
+            index_code="801012.SI",
+            industry_code="110500",
+            industry_name="农产品加工",
+            level="L2",
+            parent_code="110000",
+            taxonomy=SW2021_TAXONOMY,
+            is_published=True,
+        ),
+        IndustryNode(
+            index_code="801017.SI",
+            industry_code="110700",
+            industry_name="养殖业",
+            level="L2",
+            parent_code="110000",
+            taxonomy=SW2021_TAXONOMY,
+            is_published=True,
+        ),
+        IndustryNode(
+            index_code="801780.SI",
+            industry_code="480000",
+            industry_name="银行",
+            level="L1",
+            parent_code="0",
+            taxonomy=SW2021_TAXONOMY,
+            is_published=True,
+        ),
+        IndustryNode(
+            index_code="801783.SI",
+            industry_code="480300",
+            industry_name="股份制银行Ⅱ",
+            level="L2",
+            parent_code="480000",
+            taxonomy=SW2021_TAXONOMY,
+            is_published=True,
+        ),
+        IndustryNode(
+            index_code="857831.SI",
+            industry_code="480301",
+            industry_name="股份制银行Ⅲ",
+            level="L3",
+            parent_code="480300",
+            taxonomy=SW2021_TAXONOMY,
+            is_published=True,
+        ),
+    )
+    tree = build_industry_tree(taxonomy=SW2021_TAXONOMY, nodes=lopsided)
+
+    assert [node.index_code for node in tree.nodes_at("L1")] == ["801010.SI", "801780.SI"]
+    assert [node.index_code for node in tree.nodes_at("L2")] == [
+        "801012.SI",
+        "801016.SI",
+        "801017.SI",
+        "801783.SI",
+    ]
+    assert [node.index_code for node in tree.nodes_at("L3")] == ["850111.SI", "857831.SI"]
+    assert tree.nodes_at("L4") == ()
+    assert tree.level_one_count == 2
+    assert len(tree.nodes) == 8
+
+
 # --------------------------------------------------------------------------------------
 # Stored rows
 # --------------------------------------------------------------------------------------
@@ -444,6 +665,90 @@ def test_membership_panel_rows_rebuild_one_history_per_security() -> None:
 
     assert sorted(histories) == ["000001.SZ", "000639.SZ"]
     assert histories["000639.SZ"].industry_on(date(2020, 1, 2)).l3_code == "851231.SI"
+
+
+def test_the_opening_and_closing_rows_of_one_assignment_fold_back_together() -> None:
+    """`providers/tushare.py` stores a closed assignment as two rows -- one dated at its start
+    with no end, one dated at its end with both -- so that a 2024 termination is not readable in
+    2003. A read covering both years gets both, and they are one assignment: the closed half
+    wins, because a close is later knowledge than the open it supersedes."""
+    rows = [
+        ("600423.SH", "2003-07-14", None, "801030.SI", "801038.SI", "850331.SI"),
+        ("600423.SH", "2003-07-14", "2024-07-29", "801030.SI", "801038.SI", "850331.SI"),
+        ("600423.SH", "2024-07-30", None, "801030.SI", "801033.SI", "850324.SI"),
+    ]
+
+    histories = industry_histories_from_panel_rows(rows, taxonomy=SW2021_TAXONOMY)
+
+    assignments = histories["600423.SH"].assignments
+    assert len(assignments) == 2
+    assert assignments[0].effective_through == date(2024, 7, 29)
+    assert histories["600423.SH"].industry_on(date(2024, 7, 29)).l2_code == "801038.SI"
+    assert histories["600423.SH"].industry_on(date(2024, 7, 30)).l2_code == "801033.SI"
+
+
+def test_the_closing_row_wins_whichever_order_the_years_are_read_in() -> None:
+    """`load_industry_histories` reads years ascending, so the opening row normally arrives
+    first. Nothing downstream may depend on that: a caller naming its years out of order, or a
+    store that reordered a partition, must reassemble the same interval."""
+    reversed_order = [
+        ("600423.SH", "2003-07-14", "2024-07-29", "801030.SI", "801038.SI", "850331.SI"),
+        ("600423.SH", "2003-07-14", None, "801030.SI", "801038.SI", "850331.SI"),
+    ]
+
+    histories = industry_histories_from_panel_rows(reversed_order, taxonomy=SW2021_TAXONOMY)
+
+    (assignment,) = histories["600423.SH"].assignments
+    assert assignment.effective_through == date(2024, 7, 29)
+
+
+def test_two_rows_on_one_start_day_that_disagree_about_the_industry_are_refused() -> None:
+    """The split's halves agree on everything but the end date. Two rows that do not are two
+    sources that were never reconciled, which is `build_security_industry_history`'s rule kept
+    intact one layer up rather than dissolved by the fold."""
+    conflicting = [
+        ("600423.SH", "2003-07-14", None, "801030.SI", "801038.SI", "850331.SI"),
+        ("600423.SH", "2003-07-14", "2024-07-29", "801030.SI", "801033.SI", "850324.SI"),
+    ]
+
+    with pytest.raises(IndustryClassificationError, match="with different industries"):
+        industry_histories_from_panel_rows(conflicting, taxonomy=SW2021_TAXONOMY)
+
+
+def test_one_assignment_closed_on_two_different_days_is_refused() -> None:
+    """One assignment ends once. Two closing rows disagreeing about when would answer two
+    different sets of days, and picking either is picking silently."""
+    twice_closed = [
+        ("600423.SH", "2003-07-14", "2024-07-29", "801030.SI", "801038.SI", "850331.SI"),
+        ("600423.SH", "2003-07-14", "2022-07-29", "801030.SI", "801038.SI", "850331.SI"),
+    ]
+
+    with pytest.raises(IndustryClassificationError, match="is closed twice"):
+        industry_histories_from_panel_rows(twice_closed, taxonomy=SW2021_TAXONOMY)
+
+
+def test_a_history_bounded_at_a_year_refuses_the_days_after_it() -> None:
+    """The one fail-open the row split introduces, made a refusal.
+
+    A read that stopped before the year an assignment closed in reassembles an interval with no
+    end. `answerable_through` records where the read stopped being able to see a close, and both
+    query methods refuse past it -- `is_classified_on` included, because there the `False` and
+    the `True` are both guesses rather than the ordinary "no industry that day".
+    """
+    rows = [("600423.SH", "2003-07-14", None, "801030.SI", "801038.SI", "850331.SI")]
+
+    histories = industry_histories_from_panel_rows(
+        rows, taxonomy=SW2021_TAXONOMY, answerable_through=2023
+    )
+
+    history = histories["600423.SH"]
+    assert history.answerable_through == 2023
+    assert history.industry_on(date(2023, 12, 29)).l2_code == "801038.SI"
+    assert history.is_classified_on(date(2023, 12, 29)) is True
+    with pytest.raises(IndustryHorizonError, match="is after 2023, the last membership year"):
+        history.industry_on(date(2024, 1, 2))
+    with pytest.raises(IndustryHorizonError, match="is after 2023, the last membership year"):
+        history.is_classified_on(date(2024, 1, 2))
 
 
 def test_a_membership_row_of_the_wrong_width_names_the_columns_it_wanted() -> None:
@@ -840,6 +1145,26 @@ def test_a_reclassification_out_of_an_open_assignment_is_not_across_a_gap() -> N
         current=PING_AN,
     )
 
+    assert change.is_across_a_gap is False
+
+
+def test_counting_the_sessions_out_of_an_open_assignment_answers_zero() -> None:
+    """The same unreachable state one layer up, with a calendar in hand.
+
+    `reclassifications(sessions=...)` has to give the pair a session count, and there is no
+    session strictly after "no end date". `0` is right here and `None` would be wrong: `None`
+    means "no calendar was supplied", which is not what happened.
+    """
+    history = SecurityIndustryHistory(
+        ts_code="000001.SZ",
+        assignments=(PING_AN, PING_AN),
+        taxonomy=SW2021_TAXONOMY,
+        taxonomy_effective_from=date(2021, 12, 13),
+    )
+
+    (change,) = history.reclassifications(sessions=SSE_SESSIONS)
+
+    assert change.unclassified_sessions == 0
     assert change.is_across_a_gap is False
 
 
