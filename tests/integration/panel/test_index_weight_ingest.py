@@ -664,6 +664,46 @@ def test_a_year_whose_middle_month_never_landed_is_refused_on_load(
         _membership(store)
 
 
+def test_the_read_filters_on_the_subject_so_a_neighbour_s_hole_is_not_this_index_s(
+    store: PanelStore, provider: TushareProvider
+) -> None:
+    """`load_index_membership` passes `filters={subject: index_code}`, and it is load-bearing.
+
+    A partition holds every index that year, and `index_memberships_from_panel_rows` builds a
+    membership for **every** subject in the rows it is handed -- each of which goes through the
+    month rule. So without the filter, 中证500 missing December 2009 would refuse a 沪深300 read
+    that is complete, and the error would name a month of an index the caller never asked about.
+
+    The two writes here are the shape a real backfill has: both indices in one call per year, so
+    the overwrite guard is satisfied, with 中证500 simply not published that December.
+    """
+    write_index_weights(
+        store,
+        (
+            *_batches(provider, CSI300_INDEX_CODE, "20091130", "20091231"),
+            _synthetic_batch(provider, CSI500_INDEX_CODE, "20091130", ("000001.SZ", "000002.SZ")),
+        ),
+    )
+    write_index_weights(
+        store,
+        (
+            *_batches(provider, CSI300_INDEX_CODE, "20100129"),
+            _synthetic_batch(provider, CSI500_INDEX_CODE, "20100129", ("000001.SZ", "000002.SZ")),
+        ),
+    )
+
+    with pytest.raises(IndexMembershipError, match="no publication for 2009-12"):
+        load_index_membership(
+            store,
+            index_code=CSI500_INDEX_CODE,
+            years=(2009, 2010),
+            as_of=AS_OF,
+            max_staleness=MAX_STALENESS,
+        )
+
+    assert _membership(store).covered_through == date(2010, 1, 29)
+
+
 def test_a_year_that_was_never_ingested_blocks_rather_than_narrowing_the_answer(
     store: PanelStore, provider: TushareProvider
 ) -> None:

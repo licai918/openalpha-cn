@@ -359,9 +359,14 @@ def test_the_cap_is_seven_thousand_and_a_response_at_it_is_refused(
     """Measured on 2026-08-09, and it is the endpoint's own rather than the request's.
 
     `index_weight(000852.SH, 20230101..20231231)` should hold 12,000 rows and returns exactly
-    **7,000** with `has_more=True`. `limit=5000`, `8000`, `10000`, `12000` and `20000` all
-    return the same 7,000 -- this endpoint ignores `limit` in both directions, which no other
-    row in the table does.
+    **7,000** with `has_more=True`. `limit=8000`, `10000`, `12000` and `20000` all return the
+    same 7,000, so nothing raises the ceiling.
+
+    An earlier version of this docstring said `limit` was ignored "in both directions". It is
+    not: re-measured for the task-32 review, `limit=4000` returns 4,000, `limit=5000` returns
+    5,000, `limit=6999` returns 6,999 and `'5000'` as a string returns 5,000, each with
+    `has_more=True`. `limit` narrows and never widens. `_index_weight_params` sends no `limit`
+    at all, so this corrects a stated fact rather than a behaviour.
     """
     assert TUSHARE_INDEX_WEIGHT_ROW_CAP == 7000
     as_of = datetime(2024, 7, 1, 12, 0, tzinfo=UTC)
@@ -407,13 +412,21 @@ def test_a_response_with_no_truncation_flag_is_refused(fake_tushare_transport) -
 
 
 def test_the_row_cap_is_stated_per_endpoint_and_this_one_has_room() -> None:
-    """One publication is 300, 500 or 1,000 rows against a 7,000-row cap.
+    """One publication of `INDEX_WEIGHT_INDEX_CODES` is 300, 500 or 1,000 rows against 7,000.
 
     A whole month window therefore uses at most a seventh of it, which is the widest headroom in
     the table -- `stk_limit` sits 67 rows under its 7,800 and `daily` 465 under its 6,000. The
     number that would have to change for this to bind is the constituent count, which is set by
-    the index's own definition rather than by market growth, so this cap is not on the same
-    clock as the cross-section ones.
+    the index's own definition rather than by market growth, so for these three the cap is not
+    on the same clock as the cross-section ones.
+
+    The scope of that sentence is the three indices this issue measured, not the descriptor.
+    `INDEX_WEIGHT_INDEX_CODES` is explicitly not a limit on what can be fetched, and a
+    whole-market index is a cross section like any other: measured 2026-08-09, the single month
+    `20260701..20260731` is 5,126 rows for `000985.CSI` 中证全指 and 5,175 for `000902.CSI`
+    中证流通 -- 73% of the cap, on the market's clock, and rising with every listing. The
+    `largest_publication` below is therefore the largest among the three named indices, which is
+    what makes the arithmetic true; it is not a bound on the endpoint.
     """
     descriptor = _descriptor()
     assert descriptor.max_rows_per_response == TUSHARE_INDEX_WEIGHT_ROW_CAP

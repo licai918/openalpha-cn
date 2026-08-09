@@ -2483,9 +2483,27 @@ def write_index_weights(
     The guard works because the **index** is what the subject column holds. Reading the
     constituent out of it instead would trip this check too, today, and only by coincidence --
     these three indices are disjoint by construction, so a second index's constituents happen to
-    be a disjoint set. It would then fire on every ordinary rebalance (a June review replaces 50
-    names in 中证500) while missing an index that was genuinely dropped by a batch whose
-    constituents happened to cover it.
+    be a disjoint set. It would *not* start misfiring on ordinary rebalances, which is worth
+    stating because it is the obvious objection and it is wrong:
+    `_refuse_to_drop_stored_subjects` compares a whole partition's subjects against a whole
+    batch's, and a year's batch carries every name that year published, so a June review that
+    replaces 50 names in 中证500 drops nothing from the union and the guard stays quiet either
+    way. What the constituent subject would lose is the case the guard is here for --
+    `000906.SH` 中证800 is `000300.SH` plus `000905.SH`, so a batch for it covers both of their
+    constituent sets and would replace their partition with nothing appearing to go missing.
+
+    ## What this guard does not catch: a per-*month* loop
+
+    It compares subjects, so it sees a lost index and is blind to a lost month. A
+    `for month in months: write_index_weights(store, batches_for(month))` backfill carries all
+    three indices every time, drops no subject, and replaces the year's partition with one
+    month -- silently, with a success return, exactly as the per-index loop does for an index.
+    Nothing here refuses it. What refuses it is the read: `build_index_membership`'s month rule
+    sees the hole if two or more months survive, and a partition narrowed to a single month has
+    `covered_from == covered_through`, so every day but that one is refused by name. The
+    outcome is a blocked read rather than a wrong answer, which is the same fail-closed shape
+    the waived `required_dates` relies on -- but the write is still destructive, and a caller
+    assembling a year has to hand `write_index_weights` the whole year in one call.
 
     ## No month census here, because the read has a better one
 

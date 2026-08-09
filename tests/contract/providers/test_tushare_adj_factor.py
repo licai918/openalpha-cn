@@ -201,10 +201,13 @@ def test_every_descriptor_states_whether_its_response_cap_was_measured() -> None
     `V2-P1-009` added `index_weight` at **7,000**, measured on 2026-08-09 with a whole-year
     window because one publication (300, 500 or 1,000 rows) fits many times over:
     `index_weight(000852.SH, 20230101..20231231)` should hold 12,000 rows and returns exactly
-    7,000 with `has_more=True`. It is the one endpoint here where `limit` moves nothing in
-    *either* direction -- `limit=5000` also returns 7,000 -- so the ceiling is entirely the
-    server's. Its headroom is also the only one not on the market's clock: what would have to
-    grow is an index's constituent count, which its own definition fixes.
+    7,000 with `has_more=True`, and no `limit` raises that. `limit` does *narrow* it --
+    `limit=5000` returns 5,000 -- which the first pass at this task recorded the other way
+    round and the task-32 review re-measured. For `INDEX_WEIGHT_INDEX_CODES` its headroom is
+    also the only one here not on the market's clock: what would have to grow is an index's
+    constituent count, which its own definition fixes. That does not generalise to every
+    `index_code` the descriptor accepts -- a single month of 000985.CSI 中证全指 is 5,126 rows
+    and grows with every listing.
 
     largest caps here and the two furthest apart in headroom: `stk_limit`'s whole-market cross
     section was 7,733 rows on 2026-08-07 (67 spare, growing ~+500/year), `suspend_d`'s worst

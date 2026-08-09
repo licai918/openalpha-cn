@@ -8,11 +8,16 @@ touches the network; the measurements are inlined.
 The two facts this module exists to keep apart are also the two the tests are organised around:
 
 - **Composition** is what the index publisher said the members are. It survives a forward fill
-  well, and *not* perfectly -- `test_a_forward_filled_composition_can_name_a_terminated_security`
-  pins the measured exception.
+  better than the weights do and *not* perfectly, in two unrelated ways with two tests:
+  `test_a_forward_filled_composition_can_name_a_terminated_security` pins the 38 terminations,
+  and `test_a_scheduled_review_takes_effect_before_the_publication_that_reports_it` pins the
+  much larger one -- the publisher's twice-yearly review is in force for ten sessions before
+  `index_weight` reports it, 49,900 measured (name x session) answers over the whole history.
 - **Weights** are a month-end snapshot that starts drifting the next session, and there is no
-  `weight_of(code, day)` that would let a caller forget that. The only route to a number is
-  through `weights_on(day)`, whose result carries the publication date and the age.
+  `IndexMembership.weight_of(code, day)` signature that would let a caller carry the number away
+  without the date. `weights_on(day).weight_of(code)` reaches a bare float in one line and is
+  meant to; what is refused is the callable a caller could store and read back later as a fact
+  about the day.
 """
 
 from __future__ import annotations
@@ -110,6 +115,77 @@ DECEMBER = _publication(date(2024, 12, 31), (("600519.SH", 55.0), ("600036.SH", 
 
 
 # --------------------------------------------------------------------------------------
+# The 2026 June review, as published. Real codes and real weights.
+# --------------------------------------------------------------------------------------
+
+CSI300_2026_MAY_REMOVED: tuple[tuple[str, float], ...] = (
+    # The 19 names in 000300.SH's 2026-05-29 publication that its 2026-06-30 one no longer
+    # carries, at the weights the May publication gave them.
+    ("000661.SZ", 0.09),
+    ("000786.SZ", 0.088),
+    ("000876.SZ", 0.067),
+    ("000983.SZ", 0.072),
+    ("002252.SZ", 0.106),
+    ("002459.SZ", 0.068),
+    ("002601.SZ", 0.089),
+    ("300347.SZ", 0.076),
+    ("300759.SZ", 0.097),
+    ("300782.SZ", 0.14),
+    ("300979.SZ", 0.022),
+    ("600161.SH", 0.05),
+    ("600377.SH", 0.024),
+    ("601236.SH", 0.036),
+    ("601298.SH", 0.024),
+    ("601808.SH", 0.029),
+    ("603195.SH", 0.042),
+    ("688169.SH", 0.08),
+    ("688187.SH", 0.06),
+)
+
+CSI300_2026_JUNE_ADDED: tuple[tuple[str, float], ...] = (
+    # The 19 names 000300.SH's 2026-06-30 publication carries and its 2026-05-29 one did not.
+    ("000657.SZ", 0.308),
+    ("000988.SZ", 0.656),
+    ("001280.SZ", 0.039),
+    ("002202.SZ", 0.233),
+    ("002353.SZ", 0.331),
+    ("002532.SZ", 0.123),
+    ("002558.SZ", 0.13),
+    ("002602.SZ", 0.294),
+    ("002837.SZ", 0.215),
+    ("300450.SZ", 0.158),
+    ("301165.SZ", 0.038),
+    ("301308.SZ", 0.632),
+    ("600118.SH", 0.172),
+    ("600221.SH", 0.123),
+    ("600549.SH", 0.335),
+    ("601727.SH", 0.156),
+    ("688072.SH", 0.582),
+    ("688183.SH", 0.156),
+    ("688521.SH", 0.552),
+)
+
+CSI300_2026_REVIEW_SESSIONS: tuple[date, ...] = tuple(
+    date(2026, 6, day) for day in (15, 16, 17, 18, 22, 23, 24, 25, 26, 29)
+)
+"""Every open session between the 2026 June review taking effect and being published.
+
+The review takes effect after the close of 2026-06-12, the second Friday, so 2026-06-15 is the
+first session it governs; `index_weight` does not carry it until 2026-06-30. Read off
+`index_daily(000300.SH)`: ten sessions, 2026-06-19 being the Dragon Boat holiday.
+"""
+
+CSI300_2026_MAY = _publication(date(2026, 5, 29), (("600519.SH", 3.108), *CSI300_2026_MAY_REMOVED))
+CSI300_2026_JUNE = _publication(date(2026, 6, 30), (("600519.SH", 2.62), *CSI300_2026_JUNE_ADDED))
+"""The two publications either side of the 2026 June review, reduced to what changed.
+
+Real constituent codes at their real published weights, with 600519.SH 贵州茅台 as an unchanged
+anchor. The full cross sections are 300 rows each and the sum rule is tested on its own above;
+what these two are here to pin is the *difference*, which is the whole of it.
+"""
+
+
+# --------------------------------------------------------------------------------------
 # The weight-sum tolerance
 # --------------------------------------------------------------------------------------
 
@@ -204,8 +280,11 @@ def test_a_coarser_publication_gets_the_wider_bound_its_own_precision_earns() ->
 def test_published_precision_is_read_from_the_publication_rather_than_assumed() -> None:
     """The endpoint changed precision twice, so a hard-coded decimal count would be wrong.
 
-    Three decimals in 2005..2010 and 2016..2026, two decimals through 2012..2014, with 2011 and
-    2015 straddling. Reading it per publication is also the safe direction: `max` over the cells
+    Three decimals in 2005..2010 and 2016..2026, two in 2013..2014, and 2011, 2012 and 2015 each
+    carrying publications of both kinds -- re-aggregated for the task-32 review, which found the
+    earlier wording had 2012 on the wrong side of the boundary; the two-decimal era is narrower
+    than it said and the straddling one wider. Reading it per publication is the safe direction:
+    `max` over the cells
     can only *under*-report the precision (every cell might end in a zero), and fewer decimals
     means a wider tolerance, never a narrower one.
     """
@@ -268,8 +347,13 @@ def test_a_weight_that_cannot_be_a_share_of_an_index_is_refused(bad: float) -> N
     Measured: 336,298 constituent rows carry a weight between 0.007 and 7.745 and not one zero.
     A zero would silently drop a name out of every capitalisation-weighted calculation while
     leaving it in the membership, which is the worst of both answers.
+
+    The pattern names the range rule rather than just "weight", because the sum rule's message
+    also contains that word: with `match="weight"` a widened upper bound let 100.5 through
+    `_require_weight` and be refused a step later by the total instead, with the test passing
+    either way.
     """
-    with pytest.raises(IndexMembershipError, match="weight"):
+    with pytest.raises(IndexMembershipError, match=r"must be a float in \(0, 100"):
         build_index_publication(
             index_code=CSI300_INDEX_CODE,
             published_on=date(2024, 6, 28),
@@ -320,6 +404,115 @@ def test_a_mid_month_question_is_answered_from_the_previous_publication_and_says
     assert composition.days_since_publication == 17
     assert composition.is_as_published is False
     assert composition.members == ("600000.SH", "600519.SH")
+
+
+def test_a_scheduled_review_takes_effect_before_the_publication_that_reports_it() -> None:
+    """The composition answer's largest failure, and it is silent rather than refused.
+
+    The publisher's June and December reviews take effect after the close of that month's
+    second Friday; `index_weight` does not carry the new list until the month's last session.
+    In 2026 that is the 2026-06-12 close against the 2026-06-30 publication, and the two
+    publications differ by 19 names in `000300.SH` (50 in `000905.SH`, 100 in `000852.SH`), so
+    each of the ten sessions in between is answered with 19 securities the publisher had already
+    removed and without 19 it had already added.
+
+    Nothing raises. `IndexMembershipHorizonError` is not reached -- the day is inside the read
+    -- and `days_since_publication` reports 17 days for 2026-06-15 without ever suggesting that
+    part of what it is 17 days old *about* was replaced on day 14. Over every June and December
+    review from 2013-12 to 2026-06 that is 49,900 (name x session) answers naming a removed
+    security and 49,900 omitting an added one, against the 38 terminations
+    `composition_is_also_forward_filled` counts.
+
+    What the module can say from its own rows is `undated_rebalance`: these names changed
+    somewhere inside this gap. It needs neither the publisher's schedule nor a trading calendar,
+    which is why it is the claim this module makes.
+    """
+    membership = build_index_membership(CSI300_INDEX_CODE, (CSI300_2026_MAY, CSI300_2026_JUNE))
+    removed = tuple(code for code, _ in CSI300_2026_MAY_REMOVED)
+    added = tuple(code for code, _ in CSI300_2026_JUNE_ADDED)
+    assert len(removed) == 19
+    assert len(added) == 19
+    assert len(CSI300_2026_REVIEW_SESSIONS) == 10
+
+    for session in CSI300_2026_REVIEW_SESSIONS:
+        composition = membership.constituents_on(session)
+        assert composition.as_published_on == date(2026, 5, 29)
+        assert [code for code in removed if composition.includes(code)] == list(removed)
+        assert [code for code in added if composition.includes(code)] == []
+
+        rebalance = composition.undated_rebalance
+        assert rebalance is not None
+        assert rebalance.previous_publication == date(2026, 5, 29)
+        assert rebalance.publication == date(2026, 6, 30)
+        assert rebalance.removed == removed
+        assert rebalance.added == added
+        assert rebalance.is_one_for_one is True
+        assert len(rebalance.changed) == 38
+
+    assert membership.constituents_on(date(2026, 6, 15)).days_since_publication == 17
+
+
+def test_a_publication_day_has_nothing_carried_forward_for_a_review_to_have_broken() -> None:
+    """`undated_rebalance` is about the fill, so the day the fill is empty it is `None`.
+
+    2026-05-29 is exactly right on 2026-05-29 -- the June review had not happened -- and the
+    field says so rather than naming a change that was still two weeks away. The same holds at
+    the far end for a reason worth separating: 2026-06-30 is the last publication in this read,
+    so there is no following one to diff against, and any day past it is refused by the horizon
+    rather than answered without a rebalance.
+    """
+    membership = build_index_membership(CSI300_INDEX_CODE, (CSI300_2026_MAY, CSI300_2026_JUNE))
+
+    assert membership.constituents_on(date(2026, 5, 29)).undated_rebalance is None
+    assert membership.constituents_on(date(2026, 6, 30)).undated_rebalance is None
+    assert membership.undated_rebalance_on(date(2026, 6, 16)) is not None
+
+
+def test_the_weights_answer_carries_the_same_warning_and_hands_it_to_the_composition() -> None:
+    """A name the publisher had already removed is not merely present here, it is sized.
+
+    `600161.SH` sits in the carried-forward snapshot at its May weight through every session of
+    the window, so a capitalisation-weighted sum over 2026-06-22 spends that weight on a
+    security that had left the index a week earlier. `composition()` has to carry the field or
+    the cheaper type would be the less honest one.
+    """
+    membership = build_index_membership(CSI300_INDEX_CODE, (CSI300_2026_MAY, CSI300_2026_JUNE))
+
+    weights = membership.weights_on(date(2026, 6, 22))
+    assert weights.weight_of("600161.SH") == pytest.approx(0.05)
+    assert weights.undated_rebalance is not None
+    assert weights.undated_rebalance.removed[:1] == ("000661.SZ",)
+    assert weights.composition().undated_rebalance == weights.undated_rebalance
+
+
+def test_a_gap_in_which_nothing_changed_leaves_no_undated_rebalance() -> None:
+    """464 of the 630 measured transitions changed no name, so a field that was set on every
+    mid-month day would be noise rather than a signal a gate could branch on."""
+    unchanged = _publication(date(2024, 12, 31), (("600000.SH", 40.0), ("600519.SH", 60.0)))
+    membership = build_index_membership(CSI300_INDEX_CODE, (NOVEMBER, unchanged))
+
+    assert membership.constituents_on(date(2024, 12, 16)).undated_rebalance is None
+    assert membership.rebalances() == ()
+
+
+def test_the_review_window_is_a_named_limitation_and_carries_its_measurement() -> None:
+    """The window has to be in the module's own disclosures, not only in a test.
+
+    `KNOWN_INDEX_MEMBERSHIP_LIMITATIONS` is what a caller reads to find out what this dataset
+    cannot answer, and until this issue's review it named eight boundaries with the effective
+    date in none of them.
+    """
+    detail = {entry.code: entry.detail for entry in KNOWN_INDEX_MEMBERSHIP_LIMITATIONS}
+    review = detail["scheduled_review_takes_effect_before_it_is_published"]
+
+    assert "second " in review and "Friday" in review
+    for measurement in ("19", "50", "100", "10", "49,900", "2026-06-30", "2013-12"):
+        assert measurement in review, measurement
+    assert "undated_rebalance" in review
+    assert (
+        "scheduled_review_takes_effect_before_it_is_published"
+        in (detail["composition_is_also_forward_filled"])
+    )
 
 
 def test_asking_on_a_publication_day_is_the_only_answer_that_is_not_stale() -> None:
@@ -742,3 +935,88 @@ def test_a_stored_constituent_that_is_not_text_is_refused() -> None:
 def test_a_stored_publication_date_that_is_not_text_at_all_is_refused() -> None:
     with pytest.raises(IndexMembershipError, match=r"row 0: publication_date must be an ISO date"):
         index_memberships_from_panel_rows(((CSI300_INDEX_CODE, 20241129, "600000.SH", 100.0),))
+
+
+# --------------------------------------------------------------------------------------
+# The exact type checks, and the subclasses that are the only thing they refuse
+# --------------------------------------------------------------------------------------
+
+
+class _ScaledFloat(float):
+    """A `float` subclass whose arithmetic is not `float`'s own; `numpy.float64` is one."""
+
+    def __mul__(self, other: object) -> float:  # pragma: no cover - never reached
+        return 0.0
+
+
+class _Code(str):
+    """A `str` subclass whose comparison is not `str`'s own; `numpy.str_` is one."""
+
+    def __eq__(self, other: object) -> bool:  # pragma: no cover - never reached
+        return True
+
+    def __hash__(self) -> int:  # pragma: no cover - never reached
+        return 0
+
+
+def test_a_float_subclass_weight_is_refused_because_that_is_what_the_exact_check_is_for() -> None:
+    """`type(...) is float`, not `isinstance`, and this is the only case that tells them apart.
+
+    `isinstance(True, float)` is already `False`, so `bool` does not distinguish the two
+    spellings. A **subclass** does, and it is where the danger is: this weight is about to be
+    multiplied into a price or a return, so the arithmetic that runs has to be `float`'s.
+    `domain/adjustment.py::_require_price` refuses a `_ScaledFloat` for the same reason and
+    `tests/unit/domain/test_adjustment.py` pins it; this is that test for this column.
+    """
+    with pytest.raises(IndexMembershipError, match=r"must be a float in \(0, 100"):
+        build_index_publication(
+            index_code=CSI300_INDEX_CODE,
+            published_on=date(2024, 6, 28),
+            weights=_weights((("600519.SH", _ScaledFloat(100.0)),)),
+        )
+
+
+def test_a_float_subclass_in_a_stored_row_is_refused_by_the_row_scoped_rule() -> None:
+    """Separate from the rule above because the message is: a partition read is thousands of
+    rows and `_stored_weight` is the only one that can name which."""
+    with pytest.raises(IndexMembershipError, match=r"row 0: weight must be a float"):
+        index_memberships_from_panel_rows(
+            ((CSI300_INDEX_CODE, "2024-11-29", "600000.SH", _ScaledFloat(100.0)),)
+        )
+
+
+def test_a_string_subclass_code_is_refused_wherever_a_code_is_taken() -> None:
+    """The same argument as the float one, for the columns that are keys rather than numbers.
+
+    Every code here is used as a dict key, a `sorted()` key and a set member -- `build_index_
+    publication` de-duplicates on it, `index_memberships_from_panel_rows` groups on it, and
+    `rebalances()` takes set differences of it. A subclass that overrides `__eq__` or `__hash__`
+    (`numpy.str_` is a `str` subclass) changes what "the same constituent" means in all three,
+    so the exact type is checked rather than the interface.
+    """
+    with pytest.raises(IndexMembershipError, match="index_code must be a non-empty string"):
+        build_index_publication(
+            index_code=_Code(CSI300_INDEX_CODE),
+            published_on=date(2024, 6, 28),
+            weights=_weights((("600519.SH", 100.0),)),
+        )
+    with pytest.raises(IndexMembershipError, match="con_code must be a non-empty string"):
+        build_index_publication(
+            index_code=CSI300_INDEX_CODE,
+            published_on=date(2024, 6, 28),
+            weights=_weights(((_Code("600519.SH"), 100.0),)),
+        )
+    with pytest.raises(IndexMembershipError, match="index_code must be a non-empty string"):
+        build_index_membership(_Code(CSI300_INDEX_CODE), (NOVEMBER,))
+
+
+def test_a_string_subclass_in_a_stored_row_is_refused_by_the_row_scoped_rule() -> None:
+    """`_require_stored_text` is the boundary a partition read crosses, and it names the row."""
+    with pytest.raises(IndexMembershipError, match=r"row 0: subject must be a non-empty string"):
+        index_memberships_from_panel_rows(
+            ((_Code(CSI300_INDEX_CODE), "2024-11-29", "600000.SH", 100.0),)
+        )
+    with pytest.raises(IndexMembershipError, match=r"row 0: con_code must be a non-empty string"):
+        index_memberships_from_panel_rows(
+            ((CSI300_INDEX_CODE, "2024-11-29", _Code("600000.SH"), 100.0),)
+        )

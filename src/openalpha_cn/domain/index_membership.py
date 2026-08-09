@@ -28,18 +28,29 @@ next session. Nothing in this dataset says by how much.
 The two facts a caller wants therefore have different reliability, and they are returned as
 different types so they cannot be confused:
 
-- **`constituents_on(day) -> IndexComposition`** -- who the members are. The publisher changes
-  this on a schedule, so a forward fill is usually exact. Usually, not always: see
-  `composition_is_also_forward_filled` below for the 38 measured cases where it is not.
+- **`constituents_on(day) -> IndexComposition`** -- who the members are. This survives a forward
+  fill far better than the weights do and it is **not** exact, in two unrelated ways that are
+  easy to conflate. `composition_is_also_forward_filled` counts 38 terminations landing inside
+  a fill window. `scheduled_review_takes_effect_before_it_is_published` is the larger one by
+  three orders of magnitude: the publisher's twice-yearly review takes effect *two weeks before*
+  the publication that reports it, which is **49,900** measured (name x session) answers naming
+  a security that had already been removed -- and the same 49,900 omitting one that had already
+  been added.
 - **`weights_on(day) -> IndexWeights`** -- how much each member is worth. A forward fill here is
   an **approximation whose error grows with the day of the month**, and this module makes no
   claim about its size.
 
-There is deliberately no `weight_of(con_code, day) -> float`. The only route to a number runs
-through `IndexWeights`, which carries `as_published_on` and `days_since_publication`, so
-"the weight on 2024-12-15" cannot be written in a way that hides that it is 2024-11-29's number.
+Both answers therefore carry `as_published_on`, `days_since_publication` and
+`undated_rebalance` -- the last being the names that changed at the *next* publication, which
+this dataset cannot place anywhere inside the gap.
 
-`IndexComposition` carries the same two fields, for the same reason and with a weaker warning.
+There is deliberately no `IndexMembership.weight_of(con_code, day) -> float`. That is not a
+claim that a bare float is unreachable: `weights_on(day).weight_of(code)` is one line and is
+meant to be. What is refused is the **signature** -- a callable taking a day and returning a
+number, because that is the one a caller stores in a variable, passes across a module boundary
+and reads six months later as "the weight on 2024-12-15". Routing through `IndexWeights` means
+the publication date and the age are in hand at the instant the number is taken, so losing them
+is an act rather than an omission.
 
 ## The sum tolerance is derived, not calibrated
 
@@ -54,8 +65,8 @@ most `n * 0.5 * 10**-d`, which is `published_weight_tolerance(count=n, decimals=
 correctly rounded publication cannot breach it for any `n` or `d`. Applied to all 633
 publications it refuses none, and the tightest fit is `000905.SH` on 2009-01-23 at 0.092 of its
 bound. The precision is read from the publication rather than assumed, because the endpoint
-changed it twice: three decimals in 2005..2010 and 2016..2026, two through 2012..2014, with 2011
-and 2015 straddling.
+changed it twice: three decimals in 2005..2010 and 2016..2026, two in 2013..2014, and 2011, 2012
+and 2015 carrying publications of both kinds.
 
 **That last part is not something the corpus proves is necessary, and saying otherwise would be
 the overclaim this repository keeps having to correct.** Every one of the 633 publications --
@@ -133,9 +144,16 @@ distinguishable by a stored column or the second write destroys the first -- exa
 That guard compares stored subjects against a batch's, so it only works if the subject is the
 thing that would go missing.
 
-Reading the constituent out of the subject column would *also* trip that guard today, because
-these three indices are disjoint by construction -- but only by that coincidence, and the guard
-would then fire on every legitimate rebalance instead of on a dropped index.
+Reading the constituent out of the subject column would *also* trip that guard today, and only
+by that coincidence. It would **not** start misfiring on ordinary rebalances -- the guard
+compares a whole *partition's* subject set against a whole *batch's*, and a batch for a year
+carries every name that year published, so rewriting 2023 for all three indices drops zero
+subjects under either choice. What it would stop catching is the case the guard exists for:
+`000906.SH` 中证800 is `000300.SH` plus `000905.SH`, so a batch for it covers both of their
+constituent sets, and writing it over their partition would drop two indices while the guard
+saw nothing go missing. The index is also what `index_weight_requirement` names in
+`required_subjects` and what `load_index_membership` filters on, neither of which the
+constituent could serve.
 """
 
 CSI300_INDEX_CODE: Final[str] = "000300.SH"
@@ -249,7 +267,38 @@ KNOWN_INDEX_MEMBERSHIP_LIMITATIONS: Final[tuple[IndexLimitation, ...]] = (
             "twice-a-year review suggests: 166 of the 630 measured publication-to-publication "
             "transitions changed it, the scheduled June and December reviews replacing 50 "
             "names in 000905.SH and 100 in 000852.SH, and single-name substitutions landing in "
-            "every other month of the year."
+            "every other month of the year. Those scheduled replacements are a second and much "
+            "larger problem in their own right -- they take effect before the publication that "
+            "reports them -- and they are counted separately under "
+            "scheduled_review_takes_effect_before_it_is_published; the 38 here are "
+            "terminations only."
+        ),
+    ),
+    IndexLimitation(
+        code="scheduled_review_takes_effect_before_it_is_published",
+        detail=(
+            "The twice-yearly review takes effect BEFORE the publication that reports it, and "
+            "the effect is not 38 rows, it is 49,900. The publisher's methodology puts the "
+            "June and December reviews into force after the close of that month's second "
+            "Friday; index_weight does not carry the new list until the month's last session, "
+            "so for the sessions in between constituents_on answers from a composition the "
+            "publisher had already replaced. It is not a refusal and not a wide error bar -- "
+            "no horizon is raised, nothing is flagged, and days_since_publication reports only "
+            "how old the snapshot is, never that the publisher changed it in the meantime. "
+            "Measured on the corpus rather than argued: 000300.SH's 2026-05-29 and 2026-06-30 "
+            "publications differ by 19 names, 000905.SH's by 50 and 000852.SH's by 100, and "
+            "2026-06-15..2026-06-29 -- the sessions after the 2026-06-12 second Friday and "
+            "before the 2026-06-30 publication -- is 10 of them, so every 000300.SH question "
+            "in that window names 19 securities that had gone and omits 19 that had arrived. "
+            "Over all 76 June and December reviews from 2013-12 to 2026-06 (9 to 14 sessions "
+            "each, 7 to 100 names each) that is 6,358 + 15,250 + 28,292 = 49,900 (name x "
+            "session) answers naming a removed security, and 49,900 more omitting an added "
+            "one. A lower bound: the reviews fell in January and July before 2013 and those "
+            "are not in the count. Only the effective-date rule is external to this dataset; "
+            "the response has no effective-date column and never will. What the module can "
+            "state from its own rows is which names are unsettled, and "
+            "IndexComposition.undated_rebalance states it without needing the rule or a "
+            "calendar."
         ),
     ),
     IndexLimitation(
@@ -281,7 +330,14 @@ KNOWN_INDEX_MEMBERSHIP_LIMITATIONS: Final[tuple[IndexLimitation, ...]] = (
             "990018.SH appears in eighteen 000300.SH publications from 2005-04-29 to "
             "2006-09-29, at weights from 0.681 to 1.391, and is in neither the L nor the D "
             "half of stock_basic's 5,878-row registry -- so domain/stock_universe.py refuses "
-            "it as an unknown code rather than answering about it. Separately, 600270.SH "
+            "it as an unknown code rather than answering about it. It is not a corrupt code. "
+            "namechange(990018.SH) resolves it to 上港集箱 / G上港, the entity 上港集团 "
+            "absorbed by share exchange in 2006, and stock_basic dates the surviving listing "
+            "600018.SH 上港集团 to 2006-10-26; the publications show the handover directly, "
+            "with 990018.SH in 000300.SH on 2006-09-29, out on 2006-10-31 and 600018.SH "
+            "arriving in that same transition. Tushare renumbers a pre-merger entity out of "
+            "the survivor's code and stock_basic keeps only the survivor, which is the "
+            "mechanism V2-P1-007 met in namechange. Separately, 600270.SH "
             "外运发展 is in 000905.SH's 2018-12-28 publication at weight 0.253 while its "
             "registry delist_date is 2018-12-28, which that module treats as exclusive: the "
             "index published a constituent the registry says was already gone. Those are the "
@@ -308,9 +364,10 @@ KNOWN_INDEX_MEMBERSHIP_LIMITATIONS: Final[tuple[IndexLimitation, ...]] = (
     IndexLimitation(
         code="silent_truncation_at_the_response_cap",
         detail=(
-            "The endpoint serves at most 7,000 rows per response and drops the oldest, and a "
-            "`limit` parameter does not move it in either direction (limit=5000 and "
-            "limit=20000 both return exactly 7,000 for a window that has more). Truncation "
+            "The endpoint serves at most 7,000 rows per response and drops the oldest, and no "
+            "`limit` raises that: limit=5000 returns exactly 5,000 and limit=20000 returns "
+            "7,000, so the parameter can only narrow the answer and 7,000 is the server's own "
+            "ceiling. Truncation "
             "can split a publication rather than only dropping whole ones: "
             "index_weight(000300.SH, 20100101..20231231) returns 7,000 rows over 24 dates "
             "whose oldest, 2022-01-28, carries 100 of its 300 names. "
@@ -324,9 +381,10 @@ KNOWN_INDEX_MEMBERSHIP_LIMITATIONS: Final[tuple[IndexLimitation, ...]] = (
             "The endpoint serves one snapshot per request and carries no revision instant, so "
             "a weight corrected upstream is indistinguishable from one that was always that "
             "value. revision_time equals available_time, which invents nothing; read a "
-            "partition's revised_row_count of 0 as 'unmeasured', not 'none'. The two precision "
-            "eras -- three decimals in 2005..2010 and 2016..2026, two through 2012..2014 -- "
-            "are themselves evidence that the published numbers get restated in form."
+            "partition's revised_row_count of 0 as 'unmeasured', not 'none'. The precision "
+            "eras -- three decimals in 2005..2010 and 2016..2026, two in 2013..2014, and "
+            "2011, 2012 and 2015 each carrying publications of both kinds -- are themselves "
+            "evidence that the published numbers get restated in form."
         ),
     ),
 )
@@ -450,17 +508,72 @@ def build_index_publication(
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class IndexRebalance:
+    """What changed between two consecutive publications of one index."""
+
+    index_code: str
+    previous_publication: date
+    publication: date
+    added: tuple[str, ...]
+    removed: tuple[str, ...]
+
+    @property
+    def is_one_for_one(self) -> bool:
+        """Whether every name that left was replaced.
+
+        Almost always true, and the exception is the point: `000300.SH`'s 2009-12-31 publication
+        removed two names and added none, which is how that publication came to carry 298
+        constituents.
+        """
+        return len(self.added) == len(self.removed)
+
+    @property
+    def changed(self) -> tuple[str, ...]:
+        """Every name on either side of the transition, ascending. Added and removed are
+        disjoint by construction, so this is their union and its length is their sum."""
+        return tuple(sorted((*self.added, *self.removed)))
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class IndexComposition:
     """Who an index's members were on one day, and which publication says so.
 
     Carries no weight of any kind. A caller that only needs membership therefore never holds a
     number it could mistake for a current one -- see this module's docstring.
+
+    ## `undated_rebalance`, and why a day count was not enough
+
+    `days_since_publication` says how old the snapshot is. It does not say that the publisher
+    replaced part of it in the meantime, and on the two months a year where that matters most
+    the publisher reliably has: the June and December reviews take effect after the close of
+    that month's second Friday and are not published until the month's last session, so 9 to 14
+    sessions every half-year are answered from a composition that had already been superseded
+    -- 49,900 measured (name x session) answers naming a security that had gone, and as many
+    again omitting one that had arrived. See
+    `KNOWN_INDEX_MEMBERSHIP_LIMITATIONS.scheduled_review_takes_effect_before_it_is_published`.
+
+    `undated_rebalance` is the transition out of `as_published_on`, i.e. what the *next*
+    publication in the read reports as having changed. It is `None` on a publication day (there
+    is nothing carried forward to be wrong about) and on a transition that changed nothing.
+
+    It is deliberately built from this module's own rows and nothing else. The effective-date
+    rule is the publisher's, the response has no effective-date column, and deriving the second
+    Friday's next session would need a `TradingCalendar` this module does not take -- so the
+    claim made here is the weaker one that is entirely this dataset's: *these names changed
+    somewhere inside this gap and the gap is all the resolution there is.* That is why it also
+    covers the ordinary single-name substitutions, which are on no schedule at all, and why it
+    keeps working across the pre-2013 era when the reviews fell in January and July instead.
+
+    Consequently it over-reports rather than under-reports: on 2026-06-01 it already names the
+    19 securities that would not change until 2026-06-15. A dependency gate (`V2-P1-013`) that
+    refuses on it refuses a superset of the wrong answers, which is the direction to be wrong in.
     """
 
     index_code: str
     asked_for: date
     as_published_on: date
     members: tuple[str, ...]
+    undated_rebalance: IndexRebalance | None
 
     @property
     def days_since_publication(self) -> int:
@@ -485,12 +598,17 @@ class IndexWeights:
     on a schedule, a weight starts drifting the session after it is published, so
     `days_since_publication` is the size of the window over which this answer is an
     approximation. See `KNOWN_INDEX_MEMBERSHIP_LIMITATIONS.weights_drift_between_publications`.
+
+    `undated_rebalance` carries the same fact as on `IndexComposition`, and it bites harder
+    here: a name the publisher had already removed still carries its full published weight in
+    this snapshot, so it is not merely present in a membership, it is sized.
     """
 
     index_code: str
     asked_for: date
     as_published_on: date
     weights: tuple[ConstituentWeight, ...]
+    undated_rebalance: IndexRebalance | None
 
     @property
     def days_since_publication(self) -> int:
@@ -525,34 +643,18 @@ class IndexWeights:
         )
 
     def composition(self) -> IndexComposition:
-        """The same answer with the weights dropped -- the free direction of the split."""
+        """The same answer with the weights dropped -- the free direction of the split.
+
+        `undated_rebalance` travels with it. Dropping it here would make the cheaper type the
+        less honest one, which is the opposite of what the split is for.
+        """
         return IndexComposition(
             index_code=self.index_code,
             asked_for=self.asked_for,
             as_published_on=self.as_published_on,
             members=tuple(entry.con_code for entry in self.weights),
+            undated_rebalance=self.undated_rebalance,
         )
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class IndexRebalance:
-    """What changed between two consecutive publications of one index."""
-
-    index_code: str
-    previous_publication: date
-    publication: date
-    added: tuple[str, ...]
-    removed: tuple[str, ...]
-
-    @property
-    def is_one_for_one(self) -> bool:
-        """Whether every name that left was replaced.
-
-        Almost always true, and the exception is the point: `000300.SH`'s 2009-12-31 publication
-        removed two names and added none, which is how that publication came to carry 298
-        constituents.
-        """
-        return len(self.added) == len(self.removed)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -640,7 +742,26 @@ class IndexMembership:
             asked_for=day,
             as_published_on=publication.published_on,
             members=publication.constituents,
+            undated_rebalance=self.undated_rebalance_on(day),
         )
+
+    def undated_rebalance_on(self, day: date) -> IndexRebalance | None:
+        """What changed between the publication answering for `day` and the one after it.
+
+        `None` when `day` is itself a publication day -- nothing is being carried forward, so
+        there is nothing for a change to have invalidated -- and `None` when the following
+        publication changed no names. Otherwise the following publication is always in the read:
+        a `day` past `covered_through` was already refused by `publication_in_effect_on`, and
+        every other day has a publication after it by construction.
+
+        The names it reports changed *somewhere* between the two publications. This dataset
+        cannot say where, which is exactly the point; see `IndexComposition`.
+        """
+        publication = self.publication_in_effect_on(day)
+        if day == publication.published_on:
+            return None
+        following = self.publications[bisect_right(self.publication_dates, day)]
+        return _rebalance_between(self.index_code, publication, following)
 
     def weights_on(self, day: date) -> IndexWeights:
         """The published weights in effect on `day`, with the publication that says so.
@@ -656,6 +777,7 @@ class IndexMembership:
             asked_for=day,
             as_published_on=publication.published_on,
             weights=publication.weights,
+            undated_rebalance=self.undated_rebalance_on(day),
         )
 
     def rebalances(self) -> tuple[IndexRebalance, ...]:
@@ -664,25 +786,33 @@ class IndexMembership:
         464 of the 630 measured transitions changed nothing, so returning all of them would bury
         the ones that did.
         """
-        changes: list[IndexRebalance] = []
-        for index in range(1, len(self.publications)):
-            previous = self.publications[index - 1]
-            current = self.publications[index]
-            before = set(previous.constituents)
-            after = set(current.constituents)
-            added = tuple(sorted(after - before))
-            removed = tuple(sorted(before - after))
-            if added or removed:
-                changes.append(
-                    IndexRebalance(
-                        index_code=self.index_code,
-                        previous_publication=previous.published_on,
-                        publication=current.published_on,
-                        added=added,
-                        removed=removed,
-                    )
-                )
-        return tuple(changes)
+        changes = (
+            _rebalance_between(
+                self.index_code, self.publications[index - 1], self.publications[index]
+            )
+            for index in range(1, len(self.publications))
+        )
+        return tuple(change for change in changes if change is not None)
+
+
+def _rebalance_between(
+    index_code: str, previous: IndexPublication, current: IndexPublication
+) -> IndexRebalance | None:
+    """The membership difference between two consecutive publications, or `None` if there is
+    none. Shared so that `rebalances()` and `undated_rebalance_on()` cannot drift apart."""
+    before = set(previous.constituents)
+    after = set(current.constituents)
+    added = tuple(sorted(after - before))
+    removed = tuple(sorted(before - after))
+    if not added and not removed:
+        return None
+    return IndexRebalance(
+        index_code=index_code,
+        previous_publication=previous.published_on,
+        publication=current.published_on,
+        added=added,
+        removed=removed,
+    )
 
 
 def build_index_membership(

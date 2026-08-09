@@ -931,25 +931,38 @@ one (2015-07-09, the week a large part of the market halted at once), or 29% of 
 
 
 TUSHARE_INDEX_WEIGHT_ROW_CAP: Final[int] = 7000
-"""Rows per response for `index_weight`, measured on 2026-08-09 -- and the one `limit` ignores.
+"""Rows per response for `index_weight`, measured on 2026-08-09. No `limit` raises it.
 
 `index_weight(000852.SH, start_date=20230101, end_date=20231231)` should hold 12,000 rows
 (12 monthly publications of 1,000 constituents) and returns exactly **7,000** with
 `has_more=True`. Widening the window does not change it: `20200101..20231231` returns the same
-7,000. Neither does narrowing or raising `limit` -- `limit=5000`, `8000`, `10000`, `12000` and
-`20000` all return exactly 7,000, so unlike every other row in this table this endpoint appears
-to ignore the parameter in both directions and the ceiling is entirely its own.
+7,000. Neither does raising `limit`: `8000`, `10000`, `12000` and `20000` all return 7,000.
+
+`limit` is not ignored, it only narrows -- re-measured for the task-32 review because the first
+pass got this wrong: on that same window `limit=4000` returns 4,000, `limit=5000` returns
+5,000, `limit=6999` returns 6,999, and the string `'5000'` returns 5,000, every one of them
+with `has_more=True`. So 7,000 is the server's own ceiling rather than a default this provider
+could argue up. Nothing here sends `limit` (see `_index_weight_params`), so the correction
+changes no behaviour -- it changes a stated measurement that was false.
 
 The cap drops the **oldest** rows and can split a publication rather than only dropping whole
 ones: `index_weight(000300.SH, 20100101..20231231)` returns 7,000 rows over 24 dates whose
 oldest, 2022-01-28, carries 100 of its 300 names.
 
-**The headroom is the widest in this table and it is not on the market's clock.** One
-publication is 300, 500 or 1,000 rows, so a month window uses at most a seventh of the cap, and
-what would have to grow for that to bind is an index's *constituent count* -- set by the index's
-own definition, and unchanged for 000905.SH across all 235 of its publications and for
-000852.SH across all 142. `stk_limit`'s 67 spare rows and `daily`'s 465 are whole-market cross
-sections that grow with every listing; this one is not.
+**For the three indices in `INDEX_WEIGHT_INDEX_CODES` the headroom is the widest in this table
+and it is not on the market's clock.** One publication is 300, 500 or 1,000 rows, so a month
+window uses at most a seventh of the cap, and what would have to grow for that to bind is an
+index's *constituent count* -- set by the index's own definition, and unchanged for 000905.SH
+across all 235 of its publications and for 000852.SH across all 142. `stk_limit`'s 67 spare
+rows and `daily`'s 465 are whole-market cross sections that grow with every listing; those
+three are not.
+
+That is a statement about those three indices and **not** about the descriptor, which takes
+whatever `index_code` a caller passes. A whole-market index is a whole-market cross section and
+is squarely on the market's clock: measured on the same day, one month window
+(`20260701..20260731`) returns 5,126 rows for `000985.CSI` 中证全指 and 5,175 for `000902.CSI`
+中证流通 -- 73% of the cap for a single publication, growing with every listing -- against 2,000
+for `932000.CSI` and 800 for `000906.SH`. The flag is the guard that survives either way.
 """
 
 
