@@ -32,6 +32,10 @@ import pytest
 
 from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET
 from openalpha_cn.domain.index_membership import INDEX_WEIGHT_DATASET
+from openalpha_cn.domain.industry_classification import (
+    INDUSTRY_MEMBERSHIP_DATASET,
+    INDUSTRY_TREE_DATASET,
+)
 from openalpha_cn.domain.panel_batch import MAX_SOURCE_URI_LENGTH, PanelBatchError
 from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET
 from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET
@@ -212,6 +216,15 @@ def test_every_descriptor_states_whether_its_response_cap_was_measured() -> None
     largest caps here and the two furthest apart in headroom: `stk_limit`'s whole-market cross
     section was 7,733 rows on 2026-08-07 (67 spare, growing ~+500/year), `suspend_d`'s worst
     measured session 1,466.
+
+    `V2-P1-010` added the two extremes of this column at once, both measured 2026-08-09.
+    `index_member_all` caps at **3,000**, the lowest here: a bare request returns exactly
+    3,000 with `has_more=True` and `limit=3001` / `5000` / `10000` return the same 3,000,
+    while `limit=100` returns 100 -- so `limit` narrows only, as `index_weight`'s does.
+    `index_classify` declares **none**, for `stock_basic`'s reason and with the same probe
+    behind it: the 511-row SW2021 tree returns `has_more=False`, `limit=100000` also returns
+    511 with `has_more=False`, and `limit=511` returns 511 with `has_more=True`, so the flag
+    turns `True` at whatever effective limit is in force and no probe can find the ceiling.
     """
     caps = {entry.dataset: entry.max_rows_per_response for entry in TUSHARE_DATASETS}
     assert caps == {
@@ -224,6 +237,8 @@ def test_every_descriptor_states_whether_its_response_cap_was_measured() -> None
         "suspend_d": 5000,
         "stk_limit": 7800,
         "index_weight": 7000,
+        "index_classify": None,
+        "index_member_all": 3000,
     }
 
 
@@ -252,6 +267,14 @@ def test_the_flag_is_demanded_exactly_where_it_is_the_only_witness_or_the_stakes
     particular shape through the weight-sum tolerance, and the flag is demanded anyway because
     the checksum cannot see a truncation that lands on a publication boundary: that one drops
     whole months and leaves every surviving publication summing perfectly.
+
+    `V2-P1-010`'s two are the fifth and sixth. `index_classify` is `stock_basic`'s case
+    exactly -- its cap is unmeasurable from outside, so the flag is its only witness.
+    `index_member_all` has a measured cap and demands the flag as well, because the cap
+    drops the *oldest* rows and the oldest rows of an `l1_code` slice are whole early
+    assignments spread across many securities: what survives is a well-formed,
+    non-overlapping history that is simply missing its beginning, which no downstream check
+    can see. That is `adj_factor`'s situation, on the lowest cap in this table.
     """
     demanded = {entry.dataset for entry in TUSHARE_DATASETS if entry.requires_truncation_flag}
     assert demanded == {
@@ -259,6 +282,8 @@ def test_the_flag_is_demanded_exactly_where_it_is_the_only_witness_or_the_stakes
         STOCK_BASIC_DATASET,
         PRICE_LIMIT_DATASET,
         INDEX_WEIGHT_DATASET,
+        INDUSTRY_TREE_DATASET,
+        INDUSTRY_MEMBERSHIP_DATASET,
     }
 
     capless_and_unflagged = {

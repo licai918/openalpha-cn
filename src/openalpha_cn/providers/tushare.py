@@ -205,6 +205,24 @@ from openalpha_cn.domain.index_membership import (
     INDEX_WEIGHT_DATASET,
     TOTAL_PUBLISHED_WEIGHT,
 )
+from openalpha_cn.domain.industry_classification import (
+    INDUSTRY_CODE_COLUMN,
+    INDUSTRY_FROM_COLUMN,
+    INDUSTRY_L1_COLUMN,
+    INDUSTRY_L2_COLUMN,
+    INDUSTRY_L3_COLUMN,
+    INDUSTRY_LEVEL_COLUMN,
+    INDUSTRY_MEMBERSHIP_DATASET,
+    INDUSTRY_MEMBERSHIP_TAXONOMY,
+    INDUSTRY_NAME_COLUMN,
+    INDUSTRY_PARENT_COLUMN,
+    INDUSTRY_PUBLISHED_COLUMN,
+    INDUSTRY_TAXONOMY_COLUMN,
+    INDUSTRY_TAXONOMY_DATE_COLUMN,
+    INDUSTRY_TAXONOMY_EFFECTIVE_FROM,
+    INDUSTRY_THROUGH_COLUMN,
+    INDUSTRY_TREE_DATASET,
+)
 from openalpha_cn.domain.name_history import (
     NAME_ANNOUNCEMENT_COLUMN,
     NAME_COLUMN,
@@ -329,6 +347,14 @@ class ClockStrategy(StrEnum):
       and rides along as an ordinary column. This is exactly the asymmetry that forces the
       registry to split and lets the rename corpus stay one row: a rename's effective date is
       announced with it, a security's delisting date is not announced with its listing.
+    """
+
+    taxonomy_backfill = "taxonomy_backfill"
+    """A closed interval expressed in a classification published after the interval began.
+
+    ``index_member_all``'s clock, and the one strategy here whose availability instant is not
+    read off any column of the row. See ``_taxonomy_backfill_timeline`` for the three bounds it
+    takes the latest of, and for the two look-aheads each of them closes.
     """
 
     calendar_publication = "calendar_publication"
@@ -608,6 +634,183 @@ def _index_weight_params(request: ProviderRequest) -> dict[str, str]:
         "start_date": f"{first:%Y%m%d}",
         "end_date": f"{last:%Y%m%d}",
     }
+
+
+CURRENT_INDUSTRY_MEMBERSHIP: Final[str] = "Y"
+SUPERSEDED_INDUSTRY_MEMBERSHIP: Final[str] = "N"
+"""The two values `index_member_all`'s `is_new` filter accepts, and the reason it is not
+optional.
+
+Measured on 2026-08-09. The endpoint's **default is a filter, not the absence of one**: a bare
+request returns 3,000 rows with `has_more=True` and `offset=3000` returns the remaining 2,889,
+and all 5,889 of them are `is_new='Y'` with an empty `out_date` -- one row per security, and
+exactly the 5,889 the 31 `l1_code` slices add up to. The 2,004 superseded assignments are
+reachable only by asking for `is_new='N'` explicitly, and there is no request that returns both:
+`is_new=''` behaves like the bare request, `is_new='Y,N'` and `is_new='A'` return zero rows, and
+`src` is ignored (`src='SW2021'` and `src='SW2014'` both return zero).
+
+So a fetch that leaves the parameter out stores a *current snapshot* that is indistinguishable
+from a complete history -- no truncation flag, no short count, one tidy row per security. That is
+why `_index_member_all_params` refuses to default it.
+"""
+
+_INDUSTRY_MEMBERSHIP_STATES: Final[tuple[str, ...]] = (
+    CURRENT_INDUSTRY_MEMBERSHIP,
+    SUPERSEDED_INDUSTRY_MEMBERSHIP,
+)
+
+
+def _index_classify_params(request: ProviderRequest) -> dict[str, str]:
+    """Request one taxonomy vintage's whole tree: `{src}`.
+
+    **The vintage is refused rather than defaulted**, which is the one thing this builder is
+    really for. Measured: the bare request, `src=''` and any `level` without a `src` all answer
+    **SW2014** (359 rows: 28 L1 / 104 L2 / 227 L3), while every `index_member_all` row is
+    labelled with SW2021 nodes. A default would therefore build one vintage's tree beside the
+    other's memberships, and the only symptom would be membership rows whose `l1_code` the tree
+    does not carry -- which this dataset already produces for 25 rows for an unrelated reason,
+    so the symptom is not even distinctive.
+
+    `level` is deliberately **not** sent: `src` alone returns all three levels in one response
+    (511 rows for SW2021, `has_more=False`), and the parent chain is only checkable when the
+    whole tree is in hand.
+
+    A vintage with no measured effective date is refused too. `src='SW'`, `'CI'` and `'SW2014L1'`
+    return zero rows rather than an error, so an unrecognised value would otherwise become an
+    empty partition reading as "this taxonomy has no industries"; and a vintage whose birthday is
+    unmeasured has no honest `available_time` in the first place -- see
+    `domain/industry_classification.py::INDUSTRY_TAXONOMY_EFFECTIVE_FROM`.
+    """
+    if len(request.subjects) != 1:
+        raise ProviderFailure(
+            provider_id=_PROVIDER_ID,
+            category="configuration",
+            message=(
+                f"{INDUSTRY_TREE_DATASET} serves one taxonomy vintage per request and every "
+                f"request names its taxonomy vintage; got {list(request.subjects)}. The "
+                "endpoint's own default is SW2014 while every index_member_all row is SW2021, "
+                "so an unstated vintage silently builds the wrong tree"
+            ),
+            retryable=False,
+        )
+    taxonomy = request.subjects[0]
+    if taxonomy not in INDUSTRY_TAXONOMY_EFFECTIVE_FROM:
+        raise ProviderFailure(
+            provider_id=_PROVIDER_ID,
+            category="configuration",
+            message=(
+                f"{INDUSTRY_TREE_DATASET} vintage {taxonomy!r} has no measured effective date "
+                f"(known: {sorted(INDUSTRY_TAXONOMY_EFFECTIVE_FROM)}); an unrecognised src "
+                "returns zero rows rather than an error, and a vintage with no birthday has no "
+                "honest availability instant"
+            ),
+            retryable=False,
+        )
+    return {"src": taxonomy}
+
+
+def _index_member_all_params(request: ProviderRequest) -> dict[str, str]:
+    """Request one L1 slice of one membership state: `{l1_code, is_new}`.
+
+    Two subjects, in that order, and both are mandatory.
+
+    **The `l1_code` slice** is what keeps a request under the 3,000-row cap -- the lowest in this
+    table. The whole corpus is 7,893 rows and the largest slice is `801890.SI` 机械设备 at 625
+    current plus 229 superseded, so 31 codes x 2 states is 62 requests with an order of magnitude
+    of headroom each. `offset` paging is available and sound here (the two default pages are
+    3,000 + 2,889 = 5,889 rows with no overlap, exactly what the 31 slices add up to) and is
+    still not used: `ProviderRequest` carries no offset, and a paging scheme is a request shape
+    whose completeness depends on the caller looping correctly rather than on one response's own
+    flag.
+
+    **The `is_new` state** is the refusal this dataset exists for; see
+    `CURRENT_INDUSTRY_MEMBERSHIP`. Leaving it out does not widen the answer, it silently narrows
+    it to the current snapshot.
+    """
+    if len(request.subjects) != 2:
+        raise ProviderFailure(
+            provider_id=_PROVIDER_ID,
+            category="configuration",
+            message=(
+                f"{INDUSTRY_MEMBERSHIP_DATASET} serves one l1_code slice of one membership state "
+                f"per request and needs both, as (l1_code, is_new); got "
+                f"{list(request.subjects)}. Omitting the state does not widen the answer -- the "
+                "endpoint's default hides the 2,004 superseded assignments and returns only the "
+                "5,889 current ones, with no flag and no short count to notice it by"
+            ),
+            retryable=False,
+        )
+    level_one, state = request.subjects
+    if state not in _INDUSTRY_MEMBERSHIP_STATES:
+        raise ProviderFailure(
+            provider_id=_PROVIDER_ID,
+            category="configuration",
+            message=(
+                f"{INDUSTRY_MEMBERSHIP_DATASET}'s membership state must be "
+                f"{CURRENT_INDUSTRY_MEMBERSHIP!r} or {SUPERSEDED_INDUSTRY_MEMBERSHIP!r}; got "
+                f"{state!r}, and the endpoint answers an unrecognised value with zero rows "
+                "rather than an error"
+            ),
+            retryable=False,
+        )
+    return {"l1_code": level_one, "is_new": state}
+
+
+def _industry_tree_panel_rows(row: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    """Give a tree row the one date it has: the day its own taxonomy came into force.
+
+    `index_classify` carries **no date column of any kind** -- the response is
+    `index_code / industry_name / level / industry_code / is_pub / parent_code / src` and nothing
+    else -- so a descriptor needs a synthesised one, the way `stock_basic` needs
+    `lifecycle_date`. The vintage's effective date is the honest choice and not a placeholder: a
+    tree node's whole content is a statement of the classification it belongs to, and that
+    statement came into being when the classification did.
+
+    The value is written in Tushare's own `YYYYMMDD` shape so that everything downstream --
+    `_parse_tushare_date`, the partition year, `_calendar_date_text` -- reads it through the same
+    parse as a real response column.
+    """
+    taxonomy = row["src"]
+    effective_from = INDUSTRY_TAXONOMY_EFFECTIVE_FROM.get(taxonomy)
+    if effective_from is None:
+        raise ValueError(
+            f"{INDUSTRY_TREE_DATASET} returned a {taxonomy!r} node and that vintage has no "
+            f"measured effective date (known: {sorted(INDUSTRY_TAXONOMY_EFFECTIVE_FROM)})"
+        )
+    return ({**row, INDUSTRY_TAXONOMY_DATE_COLUMN: f"{effective_from:%Y%m%d}"},)
+
+
+def _published_industry_flag(value: object) -> object:
+    """Parse `is_pub` into a real `bool`, keeping a genuine null as `None`.
+
+    `_open_flag`'s rule and `_open_flag`'s reason -- `bool("0")` is `True`, so any coercion turns
+    a schema change into a wrong answer about which industries carry a published index. The null
+    branch is not defence: **all 227 SW2014 L3 rows carry `None`**, while SW2021's carry `'1'` or
+    `'0'` (10 of its 134 L2 nodes and 87 of its 346 L3 nodes are `'0'`). Folding that null into
+    `False` would assert that SW2014 publishes no third-level index at all.
+    """
+    if value is None or value == "":
+        return None
+    if type(value) is bool:
+        return value
+    if type(value) is int and value in (0, 1):
+        return value == 1
+    if type(value) is str and value in _OPEN_FLAGS:
+        return _OPEN_FLAGS[value]
+    raise ValueError(f"must be 0, 1 or absent, got {type(value).__name__} {value!r}")
+
+
+def _optional_industry_date_text(value: object) -> object:
+    """Parse `out_date` into ISO text, keeping the open interval's null as `None`.
+
+    `_optional_calendar_date_text`'s shape. The null is load-bearing rather than sparse: all
+    5,889 `is_new='Y'` rows have an empty `out_date` and all 2,004 `is_new='N'` rows have one,
+    with no exceptions either way, so a null here *is* "this assignment is still in force" and a
+    blank string coerced to a date would close an open interval on some arbitrary day.
+    """
+    if value is None or value == "":
+        return None
+    return _calendar_date_text(value)
 
 
 def _stock_lifecycle_panel_rows(row: dict[str, Any]) -> tuple[dict[str, Any], ...]:
@@ -964,6 +1167,102 @@ is squarely on the market's clock: measured on the same day, one month window
 中证流通 -- 73% of the cap for a single publication, growing with every listing -- against 2,000
 for `932000.CSI` and 800 for `000906.SH`. The flag is the guard that survives either way.
 """
+
+
+TUSHARE_INDUSTRY_MEMBER_ROW_CAP: Final[int] = 3000
+"""Rows per response for `index_member_all`, measured on 2026-08-09 -- **the lowest cap here**.
+
+A bare request returns exactly 3,000 rows with `has_more=True`, and `limit=3001`, `limit=5000`
+and `limit=10000` all return the same 3,000. `limit` is not ignored, it only narrows:
+`limit=100` returns 100 rows, also with `has_more=True`. So 3,000 is the server's own ceiling
+and not a default this provider could argue up -- the same shape `index_weight`'s 7,000 has, and
+lower than every other endpoint in this table (`suspend_d` 5,000, `daily`/`adj_factor`/
+`daily_basic` 6,000, `index_weight` 7,000, `stk_limit` 7,800, `namechange` 10,000).
+
+`offset` **does** work on this endpoint, unlike the pagination `namechange` was measured to
+break on: `offset=3000` returns the remaining 2,889 rows with `has_more=False` and `offset=5000`
+returns 889, and 3,000 + 2,889 = 5,889 is exactly what the 31 `l1_code` slices add up to, with
+5,889 distinct `ts_code` and no duplicate. It is still not used -- see
+`_index_member_all_params` -- because the descriptor's guarantee is about one response and a
+paging loop's is about the caller.
+
+**The headroom is wide and is not on the market's clock in the same way `stk_limit`'s is.** The
+largest current slice is 801890.SI 机械设备 at 625 rows and the largest superseded one is the
+same L1 at 229. What grows is the *superseded* half, and it grows in steps rather than
+continuously: it stood at 439 rows at the end of 2015, 801 at the end of 2020 and 2,004 today,
+with 587 of those added by the 2021 taxonomy revision alone and 265 by the 2022 annual review.
+Split across 31 L1 codes that is a bound to watch rather than a schedule.
+"""
+
+
+def _taxonomy_backfill_timeline(
+    row: dict[str, Any], date_field: str, ingested_at: datetime
+) -> Timeline:
+    """`index_member_all`'s clock: the latest of the interval's two ends and the taxonomy's own.
+
+    `event_time` is `in_date`'s midnight in Asia/Shanghai -- the day the assignment took effect,
+    which is the one thing the row states plainly. `available_time` is the **latest** of three
+    instants, each closing a look-ahead the others do not:
+
+    - **`in_date` itself.** The floor. Within a vintage's own era this is the same bound
+      `stock_basic`'s lifecycle rows get and carries the same residue: the annual review is
+      published before it takes effect and nothing in this endpoint says how far before.
+    - **`out_date`, when the interval is closed.** A row carries *both* ends, so it cannot have
+      been knowable before the later one. This is `stock_basic`'s dilemma -- a listing and a
+      delisting cannot share an `available_time` -- answered by **waiting** rather than by
+      splitting the row. 617 of the 7,893 rows have an `out_date` at or after 2021-12-13, so
+      without this bound each of them would make its own termination readable years early.
+    - **The taxonomy's effective date**, 2021-12-13 for SW2021. This is the bound `V2-P1-010`
+      exists for. Every one of the 7,893 rows is labelled with an SW2021 node and the earliest
+      `in_date` is 1984-05-09; measured against the vintage that was actually in force,
+      **1,461,237 of the 12,675,906 (name x session) answers this dataset gives before
+      2021-12-13 -- 11.5%, over 1,185 securities -- name an L1 the classification of the day did
+      not**. Dating those rows at `in_date` would present all of them as contemporaneous fact.
+
+    **The residue is the other direction and is measured rather than argued away.** Waiting for
+    an interval to close under-reports: a replay whose `as_of` falls *inside* an interval that
+    had not closed yet sees no assignment at all and reads the security as unclassified. Over
+    the 1,128 SSE sessions of the SW2021 era that is 249,568 of 6,203,397 (name x session)
+    answers, **4.02%**, across 571 securities. That is the fail-closed direction -- a missing
+    industry is visible to `industry_coverage_report` and drops the name from a neutralisation,
+    where a leaked one silently moves it into a group it had not been put in yet -- and it is
+    zero for the ordinary ingest, whose `as_of` is at or after every `out_date` in the corpus.
+
+    `revision_time` equals `available_time`: the endpoint serves one snapshot with no revision
+    instant, and every alternative invents one. Read a partition's `revised_row_count` of 0 as
+    "unmeasured", not "none".
+
+    `ingested_time` is raised to `available_time` when the latter runs ahead of the fetch, for
+    `_calendar_static_timeline`'s reason and with the same bound on the consequence: the raise
+    exists only so the row can be represented long enough for `_decode_panel_rows` to drop it at
+    `min(as_of, ingested_at)`. The corpus's newest `out_date` is 2026-06-30 and its newest
+    `in_date` 2026-07-31, both behind the probe, so this is defence rather than an observed case
+    -- but a vintage published after a fetch would produce exactly it.
+    """
+    effective_day = _parse_tushare_date(row[date_field])
+    event_time = datetime.combine(effective_day, time(0, 0), tzinfo=_CHINA_TZ)
+    available_time = event_time
+    closed_on = row.get("out_date")
+    if closed_on:
+        available_time = max(
+            available_time,
+            datetime.combine(_parse_tushare_date(closed_on), time(0, 0), tzinfo=_CHINA_TZ),
+        )
+    available_time = max(available_time, _INDUSTRY_TAXONOMY_AVAILABLE_FROM)
+    return Timeline(
+        event_time=event_time,
+        available_time=available_time,
+        ingested_time=max(ingested_at, available_time),
+        revision_time=available_time,
+    )
+
+
+_INDUSTRY_TAXONOMY_AVAILABLE_FROM: Final[datetime] = datetime.combine(
+    INDUSTRY_TAXONOMY_EFFECTIVE_FROM[INDUSTRY_MEMBERSHIP_TAXONOMY], time(0, 0), tzinfo=_CHINA_TZ
+)
+"""The instant SW2021 came into force, which is the floor under every membership row's
+availability. One vintage rather than a per-row lookup because `index_member_all` takes no `src`
+-- passing one returns zero rows -- so the whole corpus is SW2021 by construction."""
 
 
 def _price_panel_column(name: str) -> TusharePanelColumn:
@@ -1402,6 +1701,175 @@ TUSHARE_DATASETS: tuple[TushareDatasetDescriptor, ...] = (
             ),
         ),
     ),
+    TushareDatasetDescriptor(
+        dataset=INDUSTRY_TREE_DATASET,
+        kind=INDUSTRY_TREE_DATASET,
+        # The industry node. A membership row's `l1_code`/`l2_code`/`l3_code` join against this
+        # column, so it is what a reader filters on and what `_refuse_to_drop_stored_subjects`
+        # compares when a vintage's tree is re-fetched.
+        subject_field="index_code",
+        # Synthesised by `_industry_tree_panel_rows`, not a response column: this endpoint
+        # carries no date at all, and a node's one honest instant is its vintage's own.
+        date_field=INDUSTRY_TAXONOMY_DATE_COLUMN,
+        # Every node of a vintage came into force on one day and was knowable that day, which is
+        # exactly what this clock says. Unlike `stock_basic`'s use of it, no split is needed
+        # first: a tree row states one fact.
+        clock=ClockStrategy.calendar_static,
+        params_builder=_index_classify_params,
+        # `""` asks for the endpoint's defaults, which are exactly the seven columns below --
+        # measured, not assumed. `required_response_fields` then pins every one of them,
+        # including `src`, which the expansion reads to date the row.
+        response_fields="",
+        required_response_fields=(
+            "index_code",
+            "industry_name",
+            INDUSTRY_LEVEL_COLUMN,
+            INDUSTRY_CODE_COLUMN,
+            "is_pub",
+            INDUSTRY_PARENT_COLUMN,
+            "src",
+        ),
+        source_uri_template="tushare://{dataset}/{subject}/{date}",
+        panel_rows=_industry_tree_panel_rows,
+        # Forced rather than chosen: `date_field` names a column the expansion synthesises, so
+        # there is no verbatim response row for `fetch()` to hand back under a single clock.
+        serves_evidence_plane=False,
+        # No measured cap, and the cap is **unmeasurable from outside** -- `stock_basic`'s
+        # situation, reproduced exactly. The 511-row SW2021 tree comes back with
+        # `has_more=False`, `limit=100000` also returns 511 with `has_more=False`, and
+        # `limit=511` returns 511 with `has_more=True`: the flag turns `True` at whatever
+        # effective limit is in force, so no probe can push past the real ceiling to find it.
+        # All that is established is that it is above 511. Declaring a number would be
+        # load-bearing in both directions, so the flag below is this descriptor's only witness
+        # and `requires_truncation_flag` is what makes it a check rather than an option.
+        max_rows_per_response=None,
+        requires_truncation_flag=True,
+        panel_columns=(
+            TusharePanelColumn(
+                name=INDUSTRY_CODE_COLUMN,
+                kind="string",
+                source_field=INDUSTRY_CODE_COLUMN,
+                parse=_required_text,
+            ),
+            TusharePanelColumn(
+                name=INDUSTRY_NAME_COLUMN,
+                kind="string",
+                source_field=INDUSTRY_NAME_COLUMN,
+                parse=_required_text,
+            ),
+            TusharePanelColumn(
+                name=INDUSTRY_LEVEL_COLUMN,
+                kind="string",
+                source_field=INDUSTRY_LEVEL_COLUMN,
+                parse=_required_text,
+            ),
+            TusharePanelColumn(
+                name=INDUSTRY_PARENT_COLUMN,
+                kind="string",
+                source_field=INDUSTRY_PARENT_COLUMN,
+                parse=_required_text,
+            ),
+            # Nullable on purpose, and the null is data: all 227 SW2014 L3 rows carry it.
+            TusharePanelColumn(
+                name=INDUSTRY_PUBLISHED_COLUMN,
+                kind="boolean",
+                source_field="is_pub",
+                parse=_named_parser(INDUSTRY_PUBLISHED_COLUMN, _published_industry_flag),
+            ),
+            TusharePanelColumn(
+                name=INDUSTRY_TAXONOMY_COLUMN,
+                kind="string",
+                source_field="src",
+                parse=_required_text,
+            ),
+            TusharePanelColumn(
+                name=INDUSTRY_TAXONOMY_DATE_COLUMN,
+                kind="string",
+                source_field=INDUSTRY_TAXONOMY_DATE_COLUMN,
+                parse=_calendar_date_text,
+            ),
+        ),
+    ),
+    TushareDatasetDescriptor(
+        dataset=INDUSTRY_MEMBERSHIP_DATASET,
+        kind=INDUSTRY_MEMBERSHIP_DATASET,
+        # The **security**, not the industry: a reader asks "what was this one's industry on day
+        # D", so the security is what `load_industry_classification` groups by and what
+        # `_refuse_to_drop_stored_subjects` must see go missing when an `l1_code` slice is
+        # dropped from a re-fetch. `namechange` stores its subject the same way for the same
+        # reason.
+        subject_field="ts_code",
+        date_field="in_date",
+        clock=ClockStrategy.taxonomy_backfill,
+        params_builder=_index_member_all_params,
+        # `""` asks for the endpoint's defaults, which are exactly the eleven columns below --
+        # measured, not assumed. Only six are pinned and only five are projected; see below for
+        # the four the projection deliberately drops.
+        response_fields="",
+        required_response_fields=(
+            "ts_code",
+            INDUSTRY_L1_COLUMN,
+            INDUSTRY_L2_COLUMN,
+            INDUSTRY_L3_COLUMN,
+            "in_date",
+            "out_date",
+        ),
+        source_uri_template="tushare://{dataset}/{subject}/{date}",
+        # `l1_name`, `l2_name`, `l3_name` and `name` are fetched and never projected. The three
+        # industry names belong to the *tree* and would be a second, drifting copy of it -- 25
+        # rows carry `特钢Ⅲ` for a node the SW2021 tree does not carry at all -- and the security
+        # name is the current registry's, which `stock_basic` refuses to project because
+        # stamping today's `ST星源(退)` onto a 1990 row is a 34-year look-ahead. `is_new` is not
+        # projected either: it is exactly `out_date is None` on all 7,893 rows, so it is fetched
+        # as an independent witness and cross-checked in the tests, the treatment `namechange`
+        # gives `end_date`.
+        serves_evidence_plane=False,
+        max_rows_per_response=TUSHARE_INDUSTRY_MEMBER_ROW_CAP,
+        # Demanded, which makes this the fifth descriptor to do so. `daily`'s argument -- a
+        # dropped row is an absence nothing interpolates -- does not transfer. The cap drops the
+        # *oldest* rows, and the oldest rows of an `l1_code` slice are the assignments that
+        # opened first, so a truncated slice does not shorten one security's history: it removes
+        # whole early assignments across many securities at once. What is left then looks
+        # complete -- `build_security_industry_history` is happy with any non-overlapping set --
+        # and every question about the missing years is answered either by a horizon error or,
+        # where a later assignment survives, by an industry the security was not in yet. That is
+        # `adj_factor`'s situation rather than `daily`'s, and this cap is the lowest here.
+        requires_truncation_flag=True,
+        panel_columns=(
+            TusharePanelColumn(
+                name=INDUSTRY_FROM_COLUMN,
+                kind="string",
+                source_field="in_date",
+                parse=_calendar_date_text,
+            ),
+            # Nullable on purpose: a null here is "this assignment is still in force", which is
+            # true of exactly the 5,889 `is_new='Y'` rows and of none of the 2,004 others.
+            TusharePanelColumn(
+                name=INDUSTRY_THROUGH_COLUMN,
+                kind="string",
+                source_field="out_date",
+                parse=_optional_industry_date_text,
+            ),
+            TusharePanelColumn(
+                name=INDUSTRY_L1_COLUMN,
+                kind="string",
+                source_field=INDUSTRY_L1_COLUMN,
+                parse=_required_text,
+            ),
+            TusharePanelColumn(
+                name=INDUSTRY_L2_COLUMN,
+                kind="string",
+                source_field=INDUSTRY_L2_COLUMN,
+                parse=_required_text,
+            ),
+            TusharePanelColumn(
+                name=INDUSTRY_L3_COLUMN,
+                kind="string",
+                source_field=INDUSTRY_L3_COLUMN,
+                parse=_required_text,
+            ),
+        ),
+    ),
 )
 
 
@@ -1614,6 +2082,7 @@ _CLOCK_BUILDERS: dict[ClockStrategy, _ClockBuilder] = {
     ClockStrategy.announcement: _announcement_timeline,
     ClockStrategy.calendar_static: _calendar_static_timeline,
     ClockStrategy.calendar_publication: _calendar_publication_timeline,
+    ClockStrategy.taxonomy_backfill: _taxonomy_backfill_timeline,
 }
 
 

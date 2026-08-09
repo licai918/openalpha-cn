@@ -337,6 +337,18 @@ from openalpha_cn.domain.index_membership import (
     IndexMembershipError,
     index_memberships_from_panel_rows,
 )
+from openalpha_cn.domain.industry_classification import (
+    INDUSTRY_MEMBERSHIP_DATASET,
+    INDUSTRY_MEMBERSHIP_PANEL_COLUMNS,
+    INDUSTRY_MEMBERSHIP_TAXONOMY,
+    INDUSTRY_TREE_DATASET,
+    INDUSTRY_TREE_PANEL_COLUMNS,
+    IndustryClassificationError,
+    IndustryTree,
+    SecurityIndustryHistory,
+    industry_histories_from_panel_rows,
+    industry_trees_from_panel_rows,
+)
 from openalpha_cn.domain.name_history import (
     NAME_HISTORY_PANEL_COLUMNS,
     NAMECHANGE_DATASET,
@@ -2632,6 +2644,226 @@ def load_index_membership(
             "constituents"
         )
     return membership
+
+
+def write_industry_memberships(
+    store: PanelStore,
+    batches: Sequence[ColumnarPanelBatch],
+    *,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> tuple[PartitionRef, ...]:
+    """Write industry assignments into one partition per `industry_from` year (`V2-P1-010`).
+
+    This writer has both of the shapes the earlier ones have separately, because this dataset
+    needs both.
+
+    **A sequence of batches**, like `write_index_weights`: one request is one `l1_code` slice of
+    one membership state, so the whole corpus is 62 fetches (31 L1 codes x `is_new` in `Y`/`N`)
+    and `PanelStore.write_partition` replaces a partition whole.
+
+    **One partition per year**, like `write_stock_universe`: `index_member_all` has no date
+    filter at all, so a single fetch's assignments start anywhere from 1984 to last month and
+    `panel_partition_year` refuses it. Filing the lot under the fetch year is not available --
+    `record_coverage` refuses a census that reaches outside its partition's year -- so the merged
+    batch is split by `split_panel_batch_by_year`, and the years then mean something: the 2021
+    partition is the assignments that began in 2021.
+
+    ## The subject guard, and the two backfill loops it does and does not catch
+
+    The subject is the **security**, so `_refuse_to_drop_stored_subjects` blocks a batch that
+    would replace a year's partition with one holding fewer securities. That is exactly what a
+    per-`l1_code` loop produces: `for code in codes: write_industry_memberships(store, [fetch(
+    code)])` writes 1991 with the banks' securities, then replaces it with the utilities', and
+    returns success both times.
+
+    What it cannot see is a loop over the **membership state**: fetching every `l1_code` with
+    `is_new='Y'` and writing that carries the full security set for the current assignments, and
+    a later `is_new='N'` pass carries a *different* set (1,645 securities rather than 5,889), so
+    the second write is refused -- but the first one, on its own, is a complete-looking corpus
+    with every security in it and no history at all. Nothing here can distinguish that from a
+    market in which nobody has ever been reclassified. What catches it is the request contract
+    instead: `providers/tushare.py` refuses a membership request that does not name its state,
+    so the current-only fetch has to be written out deliberately rather than fallen into.
+    """
+    merged = merge_panel_batches(batches)
+    if merged.dataset != INDUSTRY_MEMBERSHIP_DATASET:
+        raise IndustryClassificationError(
+            f"expected the {INDUSTRY_MEMBERSHIP_DATASET!r} dataset, got {merged.dataset!r}"
+        )
+    by_year = split_panel_batch_by_year(merged, date_timezone=date_timezone)
+    for year, yearly in by_year:
+        _refuse_to_drop_stored_subjects(
+            store,
+            yearly,
+            year,
+            remedy=(
+                "A year's partition is replaced whole and its key has no l1_code dimension, so "
+                "every slice that year touches has to arrive in one call or not at all"
+            ),
+        )
+    return tuple(
+        write_panel_batch(store, yearly, year=year, date_timezone=date_timezone)
+        for year, yearly in by_year
+    )
+
+
+def write_industry_tree(
+    store: PanelStore,
+    batch: ColumnarPanelBatch,
+    *,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> PartitionRef:
+    """Write one taxonomy vintage's whole tree into the panel plane (`V2-P1-010`).
+
+    One request is one partition, and the partition year is the vintage's own effective year --
+    2014 for SW2014 and 2021 for SW2021 -- because `providers/tushare.py` dates every node of a
+    vintage at that day. So the two vintages never contend for a partition and no subject guard
+    is needed: a year holds exactly one tree, and re-fetching it replaces that tree with itself.
+
+    That is also why this writer takes one batch where `write_industry_memberships` takes many.
+    Two vintages written in one call would straddle two years and be refused by
+    `panel_partition_year`, correctly: they are two classifications, not two halves of one.
+    """
+    if batch.dataset != INDUSTRY_TREE_DATASET:
+        raise IndustryClassificationError(
+            f"expected the {INDUSTRY_TREE_DATASET!r} dataset, got {batch.dataset!r}"
+        )
+    year = panel_partition_year(batch, date_timezone=date_timezone)
+    return write_panel_batch(store, batch, year=year, date_timezone=date_timezone)
+
+
+def industry_membership_requirement(
+    *, years: Sequence[int], as_of: datetime, max_staleness: timedelta | None
+) -> ReadinessRequirement:
+    """What the industry panel must satisfy before assignments may be read from it.
+
+    `required_dates` and `required_subjects` are waived for the reason
+    `stock_universe_requirement` waives them: a reclassification has no schedule, so a list of
+    days a year is *supposed* to contain would be a guess -- 2016 carries 4 of the corpus's 2,004
+    transitions and 2021 carries 587 -- and the securities are what the read is for.
+
+    What is **not** waived, and what does the work this dataset needs, is the availability check
+    already inside `evaluate_readiness`: every stored row's `available_time` is at or after the
+    taxonomy's effective date, so a requirement whose `as_of` predates 2021-12-13 blocks with
+    `not_yet_knowable` rather than answering a 2015 question in a 2021 classification. That is
+    not a rule stated here; it is what the honest clock makes the generic rule say.
+
+    `max_staleness` has no default, for `stock_universe_requirement`'s reason: assignments change
+    in bursts around the annual review, so any bound this function chose would be choosing for
+    the caller.
+    """
+    return ReadinessRequirement(
+        dataset=INDUSTRY_MEMBERSHIP_DATASET,
+        as_of=as_of,
+        years=tuple(sorted(set(years))),
+        required_dates=None,
+        required_subjects=None,
+        required_fields=INDUSTRY_MEMBERSHIP_PANEL_COLUMNS,
+        max_staleness=max_staleness,
+    )
+
+
+def industry_tree_requirement(
+    *, years: Sequence[int], as_of: datetime, max_staleness: timedelta | None
+) -> ReadinessRequirement:
+    """What the industry tree must satisfy before it may be read back.
+
+    `required_dates` is waived because a vintage's whole tree is dated at one day, so the only
+    honest date set would be that one day -- which `years` already names. `required_subjects` is
+    waived because the nodes are what the read is for.
+    """
+    return ReadinessRequirement(
+        dataset=INDUSTRY_TREE_DATASET,
+        as_of=as_of,
+        years=tuple(sorted(set(years))),
+        required_dates=None,
+        required_subjects=None,
+        required_fields=INDUSTRY_TREE_PANEL_COLUMNS,
+        max_staleness=max_staleness,
+    )
+
+
+def load_industry_histories(
+    store: PanelStore,
+    *,
+    years: Sequence[int],
+    as_of: datetime,
+    max_staleness: timedelta | None,
+) -> Mapping[str, SecurityIndustryHistory]:
+    """Read stored assignment years back as one history per security, or refuse to.
+
+    Fail-closed three times over, which is `load_name_histories`' shape with one more layer. A
+    year whose partition is missing, damaged, unprofiled or stale is blocked by `read_if_ready()`
+    and reported by its structured issue codes. A read whose `as_of` predates the taxonomy is
+    blocked by the same call, on `not_yet_knowable`, because the honest clock put every row's
+    availability at or after 2021-12-13. And a set of rows that overlaps, or gives a security two
+    open assignments, is refused afterwards by `industry_histories_from_panel_rows`.
+
+    A year that was never ingested cannot be seen from here -- it is indistinguishable from a
+    year in which nobody was reclassified, and 2016 really does carry only four transitions. What
+    catches it is the query side: `SecurityIndustryHistory.assignment_on` refuses a day before
+    its own first assignment and a day inside a gap, rather than carrying a neighbouring label
+    across it. Naming the year in `years` is how a caller asserts it should exist.
+    """
+    requested = tuple(sorted(set(years)))
+    if not requested:
+        raise IndustryClassificationError(
+            "load_industry_histories needs at least one assignment year; a read of no years "
+            "would produce a corpus that refuses every question, which is indistinguishable "
+            "from a failed read"
+        )
+    requirement = industry_membership_requirement(
+        years=requested, as_of=as_of, max_staleness=max_staleness
+    )
+    rows: list[tuple[object, ...]] = []
+    for year in requested:
+        outcome = store.read_if_ready(
+            requirement, year=year, columns=INDUSTRY_MEMBERSHIP_PANEL_COLUMNS
+        )
+        if outcome.is_blocked:
+            raise PanelStorageError(
+                f"the industry classification cannot be read at {as_of.isoformat()}: "
+                f"{[issue.code for issue in outcome.readiness.issues]}; "
+                f"{'; '.join(issue.detail for issue in outcome.readiness.issues)}"
+            )
+        rows.extend(outcome.rows)
+    return industry_histories_from_panel_rows(rows, taxonomy=INDUSTRY_MEMBERSHIP_TAXONOMY)
+
+
+def load_industry_trees(
+    store: PanelStore,
+    *,
+    years: Sequence[int],
+    as_of: datetime,
+    max_staleness: timedelta | None,
+) -> Mapping[str, IndustryTree]:
+    """Read stored tree partitions back as one `IndustryTree` per vintage, or refuse to.
+
+    Keyed by taxonomy rather than by year, because the year is an artefact of how a vintage is
+    filed and the vintage is what a caller asks about. The parent-chain rule runs on every load,
+    inside `build_industry_tree`, so a partition that lost part of a vintage is refused here
+    rather than surfacing later as a leaf whose L1 cannot be resolved.
+    """
+    requested = tuple(sorted(set(years)))
+    if not requested:
+        raise IndustryClassificationError(
+            "load_industry_trees needs at least one vintage year; a read of no years would "
+            "produce no tree at all, which is indistinguishable from a failed read"
+        )
+    requirement = industry_tree_requirement(
+        years=requested, as_of=as_of, max_staleness=max_staleness
+    )
+    rows: list[tuple[object, ...]] = []
+    for year in requested:
+        outcome = store.read_if_ready(requirement, year=year, columns=INDUSTRY_TREE_PANEL_COLUMNS)
+        if outcome.is_blocked:
+            raise PanelStorageError(
+                f"the industry tree cannot be read at {as_of.isoformat()}: "
+                f"{[issue.code for issue in outcome.readiness.issues]}; "
+                f"{'; '.join(issue.detail for issue in outcome.readiness.issues)}"
+            )
+        rows.extend(outcome.rows)
+    return industry_trees_from_panel_rows(rows)
 
 
 def panel_readiness_requirement(
