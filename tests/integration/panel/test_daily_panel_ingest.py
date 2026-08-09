@@ -29,7 +29,7 @@ date census survives.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -177,6 +177,49 @@ VALUATIONS: dict[str, list[list[Any]]] = {
 # fmt: on
 
 
+# Two real 2017 sessions, both carrying a null `free_share` -- the shape that made 2017 and
+# 2018 unstorable. `300290.SZ` has one on 74 consecutive sessions from 2017-09-20 through
+# 2018-01-16, and 7 of 2017-10-09's 3,180 valuation rows have one. `600637.SH` is a second
+# name with the same hole on the same sessions.
+# fmt: off
+SPARSE_BARS_2017: dict[str, list[list[Any]]] = {
+    "20171009": [
+        ["300290.SZ", "20171009", 11.41, 11.51, 11.24, 11.31, 11.38, -0.07, -0.62,
+         51316.6, 58264.782],
+        ["600637.SH", "20171009", 20.44, 20.53, 20.35, 20.38, 20.29, 0.09, 0.44,
+         59734.36, 122173.68],
+    ],
+    "20171010": [
+        ["300290.SZ", "20171010", 11.33, 12.28, 11.3, 12.1, 11.31, 0.79, 6.99,
+         148291.47, 176366.432],
+        ["600637.SH", "20171010", 20.38, 20.83, 20.38, 20.81, 20.38, 0.43, 2.11,
+         94144.81, 194441.862],
+    ],
+}
+SPARSE_VALUATIONS_2017: dict[str, list[list[Any]]] = {
+    "20171009": [
+        ["300290.SZ", "20171009", 11.31, 3.949, 3.9468, 0.59, 112.2115, 103.744, 5.1388,
+         7.233, 7.9402, 0.3095, 0.1857, 32142.9652, 12994.6866, None, 363536.9364,
+         146969.9054],
+        ["600637.SH", "20171009", 20.38, 0.3729, 0.35, 1.26, 18.3498, 18.7005, 2.0073,
+         2.7687, 2.6469, 1.1221, 1.6683, 264173.5216, 160184.7117, None, 5383856.3702,
+         3264564.4244],
+    ],
+    "20171010": [
+        ["300290.SZ", "20171010", 12.1, 11.4117, 11.4053, 2.14, 120.0494, 110.9905, 5.4977,
+         7.7382, 8.4949, 0.2893, 0.1736, 32142.9652, 12994.6866, None, 388929.8789,
+         157235.7079],
+        ["600637.SH", "20171010", 20.81, 0.5877, 0.5517, 2.1, 18.737, 19.0951, 2.0497,
+         2.8271, 2.7028, 1.0989, 1.6338, 264173.5216, 160184.7117, None, 5497450.9845,
+         3333443.8505],
+    ],
+}
+# fmt: on
+
+SESSIONS_2017: tuple[str, ...] = ("20171009", "20171010")
+FETCHED_AT_2017 = datetime(2017, 10, 11, 12, 0, tzinfo=UTC)
+AS_OF_2017 = datetime(2017, 10, 11, 12, 0, tzinfo=UTC)
+
 FACTORS: dict[str, list[list[Any]]] = {
     "20260610": [[PING_AN, "20260610", 134.5794], [MAOTAI, "20260610", 8.4464]],
     "20260611": [[PING_AN, "20260611", 134.5794], [MAOTAI, "20260611", 8.4464]],
@@ -270,6 +313,56 @@ def _calendar(
             for offset in range(span)
         ],
     )
+
+
+def _calendar_2017() -> TradingCalendar:
+    """A real `TradingCalendar` over 2017 whose only open sessions are `SESSIONS_2017`."""
+    first, last = date(2017, 1, 1), date(2017, 12, 31)
+    opens = {date(int(day[:4]), int(day[4:6]), int(day[6:])) for day in SESSIONS_2017}
+    return build_trading_calendar(
+        "SZSE",
+        [
+            CalendarDay(
+                calendar_date=first + timedelta(days=offset),
+                is_trading=first + timedelta(days=offset) in opens,
+            )
+            for offset in range((last - first).days + 1)
+        ],
+    )
+
+
+# A synthetic **breadth** fixture, and the only manufactured data in this file. The prices are
+# `000001.SZ`'s real ones; what is fabricated is the *number of securities*, because a cross
+# section has to be wide enough for "this session came back short" to be distinguishable from
+# "these securities were halted", and the real two-name fixture above cannot be.
+_WIDE_MARKET = 40
+
+
+def _wide_code(index: int) -> str:
+    return f"{600000 + index}.SH"
+
+
+def _wide_rows(template: list[Any], count: int) -> list[list[Any]]:
+    return [[_wide_code(index), *template[1:]] for index in range(count)]
+
+
+def _wide_batches(sizes: Mapping[str, int]):
+    """One `daily` and one `daily_basic` batch per session, each `sizes[day]` securities wide."""
+    bars = [
+        _batch(DAILY_DATASET, DAILY_FIELDS, _wide_rows(BARS[day][0], sizes[day]), day, FETCHED_AT)
+        for day in SESSIONS
+    ]
+    fundamentals = [
+        _batch(
+            DAILY_BASIC_DATASET,
+            DAILY_BASIC_FIELDS,
+            _wide_rows(VALUATIONS[day][0], sizes[day]),
+            day,
+            FETCHED_AT,
+        )
+        for day in SESSIONS
+    ]
+    return bars, fundamentals
 
 
 def _universe(codes: tuple[str, ...] = (PING_AN, MAOTAI)):
@@ -674,6 +767,199 @@ def test_a_rewrite_that_would_drop_a_security_is_refused(tmp_path: Path) -> None
             ],
             calendar=_calendar(),
         )
+
+
+def test_a_rewrite_that_drops_a_security_from_the_valuations_alone_is_refused(
+    tmp_path: Path,
+) -> None:
+    """The half of that guard the close cross-check provably cannot stand in for.
+
+    `_refuse_close_disagreement` tolerates a bar with no valuation by design -- that is the
+    measured shape of every pre-2024 year, where `daily_basic` omits the Beijing board -- so a
+    `daily_basic` rewrite that silently loses a security is exactly the direction it waves
+    through. The first half of this test shows it waving: the same narrow fundamentals write
+    cleanly onto an empty store. The second half is the guard that stops it from replacing a
+    partition that already had the name.
+    """
+    thin_valuations = {
+        day: [row for row in VALUATIONS[day] if row[0] == PING_AN] for day in SESSIONS
+    }
+    narrow = [
+        _batch(DAILY_BASIC_DATASET, DAILY_BASIC_FIELDS, thin_valuations[day], day, FETCHED_AT)
+        for day in SESSIONS
+    ]
+    fresh = _store(tmp_path / "fresh")
+    _, valuation_ref = write_daily_panel(
+        fresh, bars=_bar_batches(), fundamentals=narrow, calendar=_calendar()
+    )
+    assert valuation_ref.row_count == 4  # accepted: the cross-check is blind to this direction
+
+    seeded = _seeded(tmp_path / "seeded")
+    with pytest.raises(
+        PanelBatchError,
+        match=r"daily_basic year=2026 already holds .*writing it would drop \['600519\.SH'\]",
+    ):
+        write_daily_panel(
+            seeded,
+            bars=_bar_batches(),
+            fundamentals=[
+                _batch(
+                    DAILY_BASIC_DATASET, DAILY_BASIC_FIELDS, thin_valuations[day], day, FETCHED_AT
+                )
+                for day in SESSIONS
+            ],
+            calendar=_calendar(),
+        )
+    stored = store_valuations = load_daily_valuations(
+        seeded, day=JUNE_12, calendar=_calendar(), as_of=AS_OF, max_staleness=None
+    )
+    assert sorted(stored) == [PING_AN, MAOTAI]
+    assert store_valuations[MAOTAI].total_mv == 161499291.9856
+
+
+def test_the_same_session_merged_into_a_year_twice_is_refused_rather_than_stored(
+    tmp_path: Path,
+) -> None:
+    """A caller assembles a year from ~244 per-session batches; passing one of them twice is a
+    loop bug, not an exotic input.
+
+    Stored, it is worse than a wrong number: the year holds more rows than sessions, the write
+    reports success, and every later read of that session fails in `daily_bars_from_panel_rows`
+    with "appears twice" -- fail-closed, but unrepairable except by rewriting the year. The
+    `close` cross-check could never catch it either, because its index is keyed by
+    `(subject, session)` and a duplicate collapses into one entry.
+    """
+    store = _store(tmp_path)
+    doubled = (*SESSIONS, "20260612")
+    with pytest.raises(PanelBatchError, match=r"daily carries 000001\.SZ twice on 2026-06-12"):
+        write_daily_panel(
+            store,
+            bars=_bar_batches(doubled),
+            fundamentals=_valuation_batches(doubled),
+            calendar=_calendar(),
+        )
+    assert store.read_coverage(DAILY_DATASET, 2026) is None
+    assert store.read_coverage(DAILY_BASIC_DATASET, 2026) is None
+
+
+# --- the thin-session census ------------------------------------------------------------------
+
+
+def test_a_session_that_came_back_short_is_refused_even_though_the_year_looks_whole(
+    tmp_path: Path,
+) -> None:
+    """The failure the *date* census is blind to, and the reason a row-count floor was added.
+
+    One of four sessions returns 3 of 40 securities. Every other guard passes: the date census
+    carries the session, the year's subject set is complete because the other three sessions
+    supply all 40 names, and `_refuse_to_drop_stored_subjects` compares year subject sets and
+    sees nothing. Left alone the partition stores 123 rows where 160 belong, `assess_readiness`
+    reports ready with no issues, `load_daily_bars` on that day returns 3 bars with no error,
+    and `priced_cross_section` reports 92.5% of the listed market as `unpriced` -- which is
+    indistinguishable from a day on which 37 names were halted.
+    """
+    store = _store(tmp_path)
+    sizes = dict.fromkeys(SESSIONS, _WIDE_MARKET)
+    sizes["20260612"] = 3
+    bars, fundamentals = _wide_batches(sizes)
+    with pytest.raises(
+        PanelBatchError,
+        match=(
+            r"daily carries 1 session\(s\) with fewer than 50% of this partition's median "
+            r"cross section \(40 rows\): \['2026-06-12'\]\. 2026-06-12 has 3 row\(s\)"
+        ),
+    ):
+        write_daily_panel(store, bars=bars, fundamentals=fundamentals, calendar=_calendar())
+    assert store.read_coverage(DAILY_DATASET, 2026) is None
+    assert store.read_coverage(DAILY_BASIC_DATASET, 2026) is None
+
+
+def test_the_thin_session_census_runs_on_the_valuations_too(tmp_path: Path) -> None:
+    """Both datasets, like the date census -- and it names which one is short."""
+    store = _store(tmp_path)
+    bars, _ = _wide_batches(dict.fromkeys(SESSIONS, _WIDE_MARKET))
+    short_fundamentals = dict.fromkeys(SESSIONS, _WIDE_MARKET)
+    short_fundamentals["20260615"] = 4
+    _, fundamentals = _wide_batches(short_fundamentals)
+    with pytest.raises(PanelBatchError, match=r"daily_basic carries 1 session\(s\) with fewer"):
+        write_daily_panel(store, bars=bars, fundamentals=fundamentals, calendar=_calendar())
+
+
+def test_a_session_the_market_merely_thinned_on_is_written_because_2015_happened(
+    tmp_path: Path,
+) -> None:
+    """The residue, stated as an accepted write rather than only in prose.
+
+    The floor is a share of the partition's own median because the market grew from 1,022 names
+    in 2001 to 5,535 in 2026, and it is set *below* the worst real session because July 2015
+    was real: on 2015-07-09 `daily` served 1,363 rows against that year's median of 2,359, a
+    ratio of 0.578, when more than a third of the market was suspended at once. A check that
+    refused that would refuse a true partition. So a session at 60% of its siblings is stored,
+    and `suspend_d` (`V2-P1-008`) remains what settles a thin session from a halted one.
+    """
+    store = _store(tmp_path)
+    sizes = dict.fromkeys(SESSIONS, _WIDE_MARKET)
+    sizes["20260612"] = 24  # 0.60 of the median, inside 2015's measured 0.578
+    bars, fundamentals = _wide_batches(sizes)
+    bar_ref, valuation_ref = write_daily_panel(
+        store, bars=bars, fundamentals=fundamentals, calendar=_calendar()
+    )
+    assert bar_ref.row_count == 3 * _WIDE_MARKET + 24
+    assert valuation_ref.row_count == 3 * _WIDE_MARKET + 24
+
+
+# --- the year the first nullability sample could not store -------------------------------------
+
+
+def test_a_2017_year_whose_free_share_is_null_is_stored_and_read_back(tmp_path: Path) -> None:
+    """The regression `DAILY_BASIC_NULLABLE_COLUMNS` was widened for, end to end.
+
+    `300290.SZ` and `600637.SH` have a null `free_share` on both real 2017 sessions here.
+    Refusing that null failed the whole cross section at the provider, so the session could not
+    be built, the year was then missing a session the calendar reports open, and
+    `write_daily_panel` refused **both** partitions -- 2017 and 2018 were unstorable outright.
+    The six columns that stay non-nullable are read back as real numbers on the same rows.
+    """
+    store = _store(tmp_path)
+    calendar = _calendar_2017()
+    bar_ref, valuation_ref = write_daily_panel(
+        store,
+        bars=[
+            _batch(DAILY_DATASET, DAILY_FIELDS, SPARSE_BARS_2017[day], day, FETCHED_AT_2017)
+            for day in SESSIONS_2017
+        ],
+        fundamentals=[
+            _batch(
+                DAILY_BASIC_DATASET,
+                DAILY_BASIC_FIELDS,
+                SPARSE_VALUATIONS_2017[day],
+                day,
+                FETCHED_AT_2017,
+            )
+            for day in SESSIONS_2017
+        ],
+        calendar=calendar,
+    )
+    assert bar_ref.row_count == 4
+    assert valuation_ref.row_count == 4
+
+    valuations = load_daily_valuations(
+        store, day=date(2017, 10, 9), calendar=calendar, as_of=AS_OF_2017, max_staleness=None
+    )
+    assert sorted(valuations) == ["300290.SZ", "600637.SH"]
+    assert valuations["300290.SZ"].free_share is None
+    assert valuations["300290.SZ"].total_mv == 363536.9364
+    assert valuations["300290.SZ"].circ_mv == 146969.9054
+    assert valuations["300290.SZ"].total_share == 32142.9652
+    assert valuations["300290.SZ"].float_share == 12994.6866
+    assert valuations["300290.SZ"].turnover_rate == 3.949
+    assert valuations["600637.SH"].free_share is None
+
+    bars = load_daily_bars(
+        store, day=date(2017, 10, 9), calendar=calendar, as_of=AS_OF_2017, max_staleness=None
+    )
+    assert bars["300290.SZ"].close == 11.31
+    assert close_disagreements(close_index(bars), close_index(valuations)) == ()
 
 
 def test_a_write_that_straddles_two_years_is_refused(tmp_path: Path) -> None:

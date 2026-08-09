@@ -248,6 +248,16 @@ Both censuses take the same two bounds (the year's own start; the day before the
 16:30 publication does not manufacture an intraday false alarm) and both refuse only the
 *missing* direction.
 
+### And a *present* session can still be wrong
+
+Neither census answers "did this session arrive whole". A year assembled from ~244 per-session
+fetches, one of which returned a handful of names, stores a partition that passes every other
+guard and then reports most of the market as unpriced on that day.
+`_refuse_thin_price_sessions()` takes the extreme end of that with no extra I/O -- the row
+counts are already in the same date column -- by refusing a session under
+`MIN_SESSION_ROW_SHARE` of its partition's median cross section. It is a floor and not a
+census, and the share is set from measured full-year data rather than chosen; see that constant.
+
 ### Why `panel_readiness_requirement()` is not reused for these two
 
 It clamps the required range at `as_of`'s calendar *date*, which is right for a dataset whose
@@ -273,6 +283,7 @@ import operator
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timedelta
+from statistics import median
 from types import MappingProxyType
 from typing import Final, cast
 from zoneinfo import ZoneInfo
@@ -294,6 +305,7 @@ from openalpha_cn.domain.daily_prices import (
     DAILY_BASIC_PANEL_COLUMNS,
     DAILY_DATASET,
     DAILY_PANEL_COLUMNS,
+    MIN_SESSION_ROW_SHARE,
     PRICE_DATE_COLUMN,
     DailyBar,
     DailyValuation,
@@ -1632,12 +1644,76 @@ def _refuse_missing_price_sessions(
         )
 
 
+def _refuse_thin_price_sessions(batch: ColumnarPanelBatch) -> None:
+    """Refuse a price year holding a session whose cross section is a fraction of its siblings.
+
+    ## The hole `_refuse_missing_price_sessions` leaves
+
+    That census answers "is this session present at all". It cannot answer "did this session
+    arrive whole", and the difference is not theoretical. A year assembled from 244 per-session
+    fetches where **one** of them returned 3 of the market's 40 names stores a partition that
+    passes every other guard: the date census carries the session, the year's subject set is
+    complete because the other 243 sessions supply every code, `assess_readiness` reports
+    `is_ready=True` with no issues, and `load_daily_bars` on that day returns 3 bars with no
+    error and no warning. `priced_cross_section` then reports 3 priced and 37 unpriced -- which
+    is honest, and is also exactly what a session with 37 halted names looks like.
+    `_refuse_to_drop_stored_subjects` does not see it either, on a first write or a rewrite,
+    because it compares *year* subject sets and this year's is whole.
+
+    ## Why a row-count floor, and why it is this shape
+
+    The per-session row counts are already in hand -- the same date column the census reads --
+    so this costs no request and no extra pass over the store. The comparison is against the
+    **median session of the same partition** rather than an absolute number, because the market
+    grew from 1,022 names in 2001 to 5,535 in 2026 and any constant would be wrong at one end.
+
+    `MIN_SESSION_ROW_SHARE` is set from measurement, not from taste; see its docstring in
+    `domain/daily_prices.py` for the full-year censuses that fix it and for the residue, which
+    is real: a fetch that returned *most* of the market is still invisible here, and `suspend_d`
+    (`V2-P1-008`) remains what settles a thin session from a halted one.
+
+    A partition holding a single session cannot fire this check -- its own count is the median
+    -- and that is stated rather than defended: there is nothing in the batch to compare it to.
+    There is no empty-batch branch for the same kind of reason: `ColumnarPanelBatch` refuses a
+    batch with no rows and `merge_panel_batches` refuses an empty sequence of them, so `counts`
+    always has at least one session and a guard here would be unreachable code.
+    """
+    counts = Counter(_stored_dates(_column_values(batch, PRICE_DATE_COLUMN), PRICE_DATE_COLUMN))
+    typical = median(counts.values())
+    floor = typical * MIN_SESSION_ROW_SHARE
+    thin = sorted(day for day, rows in counts.items() if rows < floor)
+    if not thin:
+        return
+    worst = min(thin, key=lambda day: counts[day])
+    raise PanelBatchError(
+        f"{batch.dataset} carries {len(thin)} session(s) with fewer than "
+        f"{MIN_SESSION_ROW_SHARE:.0%} of this partition's median cross section "
+        f"({typical:.0f} rows): {_date_sample(thin)}. {worst.isoformat()} has "
+        f"{counts[worst]} row(s). A session that arrived short is stored as a well-formed "
+        "partition -- the date census carries it, the year's subject set is complete from the "
+        "other sessions, and readiness reports ready -- so every cross section on that day "
+        "silently reports most of the market as unpriced. Re-fetch that session and write the "
+        "year in one call"
+    )
+
+
 def _close_index(batch: ColumnarPanelBatch) -> dict[tuple[str, date], float]:
-    """Index a price batch's `close` column by `(subject, trade_date)`.
+    """Index a price batch's `close` column by `(subject, trade_date)`, refusing duplicates.
 
     Built from the columns directly rather than by constructing a `DailyBar` per row: a year of
     the whole market is ~1.3e6 rows, and this runs once per ingested year. Two C-level column
     reads and one `zip` is the same cost model `panel_coverage` states for its own census.
+
+    **A repeated `(subject, session)` is refused rather than collapsed**, and that is not
+    housekeeping. This index is what `_refuse_close_disagreement` compares, so a `dict` that
+    silently kept the last of two rows would make the cross-check blind to duplication by
+    construction -- and duplication is a real shape here, because a caller assembles a year
+    from ~244 per-session batches and passing one of them twice is a loop bug rather than an
+    exotic input. Left alone it stores a year with more rows than sessions, the write reports
+    success, and every subsequent read of that session fails in `daily_bars_from_panel_rows`
+    with "appears twice": a partition that is fail-closed on read and unreadable for good,
+    since the only remedy is to rewrite the year. Refusing at the boundary keeps the store
+    unchanged instead.
     """
     dates = _stored_dates(_column_values(batch, PRICE_DATE_COLUMN), PRICE_DATE_COLUMN)
     closes = _column_values(batch, CLOSE_COLUMN)
@@ -1648,6 +1724,13 @@ def _close_index(batch: ColumnarPanelBatch) -> dict[tuple[str, date], float]:
                 f"{batch.dataset} {subject} on {day.isoformat()} has a "
                 f"{'null' if close is None else type(close).__name__} close; the two price "
                 "datasets cross-check each other on this column, so it cannot be missing"
+            )
+        if (subject, day) in index:
+            raise PanelBatchError(
+                f"{batch.dataset} carries {subject} twice on {day.isoformat()}; a session has "
+                "one row per security, so this is one session's fetch merged into the year "
+                "more than once. Stored, it would answer every later read of that session "
+                "with 'appears twice' and could only be repaired by rewriting the year"
             )
         index[(subject, day)] = close
     return index
@@ -1707,16 +1790,34 @@ def write_daily_panel(
     dataset, `PanelStore.write_partition` replaces a partition whole and has no append, and
     writing the fetches one at a time would leave each year holding only its last session.
 
-    ## Four guards, and every one of them runs before anything is written
+    ## Five guards, and every one of them runs before anything is written
 
     1. `panel_partition_year` refuses a set of batches that straddles two years rather than
        picking one, on each side independently, and the two sides must agree on the year.
     2. `_refuse_missing_price_sessions` refuses a year that is missing a session the calendar
        reports open -- on **both** datasets, so a whole `daily` year cannot be stored beside a
        holed `daily_basic` one.
-    3. `_refuse_close_disagreement` refuses two years that contradict each other.
-    4. `_refuse_to_drop_stored_subjects` refuses a rewrite that would remove a security the
+    3. `_refuse_thin_price_sessions` refuses a year holding a session that arrived short, which
+       is the failure guard 2 is blind to: a present-but-partial cross section passes every
+       other check and then reports most of the market as unpriced on that day.
+    4. `_refuse_close_disagreement` refuses two years that contradict each other -- and refuses
+       a year that merged one session's fetch in twice, which would otherwise make the
+       cross-check blind to itself and leave the session unreadable (see `_close_index`).
+    5. `_refuse_to_drop_stored_subjects` refuses a rewrite that would remove a security the
        stored partition already had -- the same guard the registry and the factor series use.
+       It runs on **both** datasets: a `daily_basic` rewrite that dropped a security would
+       leave the two partitions disagreeing about which names the year covers, and guard 4
+       cannot catch that direction because a bar with no valuation is the measured, tolerated
+       shape of every pre-2024 year.
+
+    ## What this writer's coupling costs `V2-P1-015`
+
+    There is no supported way to write one of these partitions without the other. So a repair
+    to either side is a re-fetch of ~244 sessions on **both**, and `V2-P1-015`'s `panel build`
+    cannot offer a `--dataset daily` that means anything: the smallest honest unit of work here
+    is the pair. That is the intended trade -- the two datasets are fetched for the same session
+    by the same loop anyway -- but it is a constraint on that issue's CLI surface rather than
+    an implementation detail of this one, so it is named here.
 
     Vetting everything first is `write_stock_universe`'s shape and is here for its reason: a
     guard that trips after the first partition has been replaced leaves a store whose two price
@@ -1748,6 +1849,8 @@ def write_daily_panel(
         )
     _refuse_missing_price_sessions(merged_bars, calendar, year, date_timezone=date_timezone)
     _refuse_missing_price_sessions(merged_fundamentals, calendar, year, date_timezone=date_timezone)
+    _refuse_thin_price_sessions(merged_bars)
+    _refuse_thin_price_sessions(merged_fundamentals)
     _refuse_close_disagreement(merged_bars, merged_fundamentals)
     remedy = (
         "A year's partition is replaced whole, so every session of the year has to arrive in "

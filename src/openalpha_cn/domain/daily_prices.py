@@ -24,23 +24,72 @@ disagreement: the exact restated previous close is 11.30 * 134.5794 / 139.008 = 
 `pre_close` is published to two decimals.
 
 `session_returns` computes all three and **refuses** when the two correct ones disagree by more
-than one published tick of `pre_close`. That is the cross-validation `V2-P1-007` owes
+than the published precision of the rows they were computed from (`pre_close_tolerance`, below).
+That is the cross-validation `V2-P1-007` owes
 `V2-P1-006`: it exercises `daily` and `adj_factor` against each other on live data, so a
 mis-wired factor history, an off-by-one previous session, or a naive close-to-close is caught
 where it happens instead of showing up as a plausible number in a backtest.
 
-### Why the tolerance is stated in `pre_close` space and not in return space
+### Why the tolerance is stated in `pre_close` space, and why it is not a constant
 
 An absolute tolerance on the *return* is wrong by construction: the same half-fen of rounding
 on `pre_close` is 4.6e-4 of relative error on an 11-yuan stock and 3.3e-3 on a 1.50-yuan one, so
 one number cannot serve both ends of the market. Comparing the two *implied previous closes*
-instead makes the tolerance dimensionally exact -- it is the publication precision of the two
-inputs, not a fudge factor. `MAX_PRE_CLOSE_DISAGREEMENT` is one tick (0.01), because
-`pre_close` carries two decimals and `adj_factor` four. Measured across 16,246 real
-(previous session, session) pairs on three sessions (2024-06-27/28, 2025-06-30/07-01,
-2026-06-11/12), the largest disagreement was **0.0081** (`920002.BJ`) and the second largest
-0.0059 (`688111.SH`); on the same pairs the naive path was wrong by up to **118.30**
-(`300394.SZ`). The two populations are three orders of magnitude apart.
+instead lets the tolerance be built out of the publication precision of the inputs rather than
+chosen. There are **two** such inputs, and the first version of this module carried only one of
+them:
+
+- `pre_close` is published to two decimals, so its own half-tick is 0.005 and a full tick 0.01.
+  That term does not scale with anything.
+- `adj_factor` is published to **four** decimals, and it enters through
+  `implied = prev_close * f_prev / f`. A tick there is worth `implied * 1e-4 / f` of price, so
+  **it scales with the price**. On a 450-yuan stock with `f ~ 1` a single tick in the last
+  published digit of either factor moves the implied previous close by about 0.045 -- four and a
+  half times a flat 0.01 tolerance, with nothing wrong anywhere.
+
+So the tolerance is `MAX_PRE_CLOSE_DISAGREEMENT + implied * ADJ_FACTOR_PUBLICATION_TICK *
+(1/f_prev + 1/f)`; see `pre_close_tolerance`.
+
+The flat 0.01 was calibrated on three session pairs (2024-06-27/28, 2025-06-30/07-01,
+2026-06-11/12) whose worst residue was 0.0081, and the adjacent pairs it did not sample break
+it outright. Measured over the seven pairs 2024-06-21..28, 2025-06-30/07-01 and 2026-06-11/12
+(37,602 rows with a bar on both days and a factor on both days):
+
+    20240621->24   5342 pairs    0 over 0.01   worst 0.0039
+    20240624->25   5338          201           worst 0.1770    <- 3.8% of the market
+    20240625->26   5338          214           worst 0.1759
+    20240626->27   5338            0           worst 0.0012
+    20240627->28   5336            0           worst 0.0059    <- one of the three sampled
+    20250630->0701 5402            0           worst 0.0081    <- one of the three sampled
+    20260611->12   5508            0           worst 0.0030    <- one of the three sampled
+
+103 of the 105 worst rows had **no corporate action at all** (`pre_close` equals the previous
+close to the fen); what moved was the fourth published digit of the factor, by 3 to 8 units, on
+a stock priced between 90 and 1,500 yuan. `600519.SH` on 2024-06-26 is the plain case: `f` goes
+8.0205 -> 8.02 on an ordinary session and a 1,486.65-yuan close turns that into 0.0927.
+
+### What the wider tolerance costs, measured
+
+The point of the guard is to catch a factor series that is missing a step. Restricting to the
+475 rows of those seven pairs that carry a real corporate action (`|prev_close - pre_close| >
+0.005`) and deleting the step from each -- carrying `f_prev` across the ex-rights day, which is
+exactly what a factor partition with a session hole answers:
+
+    tolerance                 refused on honest rows      missing step detected
+    flat 0.01                 415 / 37,602 = 1.10%        468 / 475 = 98.53%
+    0.01 + implied*1e-4*(...) 105 / 37,602 = 0.28%        462 / 475 = 97.26%
+
+The false-refusal rate falls by a factor of four for 1.3 points of detection. The 105 that
+still refuse are the factor-restatement rows above: they are a real disagreement between the
+two datasets about a session, so refusing them is the fail-closed answer even though the
+resulting *return* difference is ~4e-4. On the same 37,602 rows the naive close-to-close path
+is wrong by up to **118.30** (`300394.SZ`), three orders of magnitude away from either
+population, which is what makes the separation robust to the exact constant.
+
+The `1/f` terms are bounded in practice because Tushare's `adj_factor` is a cumulative series
+normalised so its earliest session is 1.0: across the 75,204 factor cells of those seven pairs
+the minimum is exactly 1.0 and the maximum 10,055.6401, so the tolerance never exceeds
+`0.01 + 2e-4 * implied`. It is not bounded by contract, and a factor below 1.0 would widen it.
 
 ## The join with `adj_factor`, and the 49 names that separate them
 
@@ -95,10 +144,16 @@ PRE_CLOSE_COLUMN: Final[str] = "pre_close"
 DAILY_PRICE_COLUMNS: Final[tuple[str, ...]] = ("open", "high", "low", "close", "pre_close")
 """The five columns that must be a finite positive `float` in every stored row.
 
-Not a guess about the feed's shape: five sessions spanning 2023-01-03 to 2026-08-07 (24,188
-bars) carried no null and no non-positive value in any of them. A null price is therefore a
-fault rather than a sparse cell, and letting one through would surface as a `TypeError` inside
-a return several layers from the row that caused it.
+Not a guess about the feed's shape, and the sample says which history it covers: **nineteen**
+sessions spanning 2001-01-02 to 2026-08-07 (58,055 bars, the oldest three from before the
+`daily_basic` endpoint has usable share counts at all) carried no null and no non-positive
+value in any of the five. A null price is therefore a fault rather than a sparse cell, and
+letting one through would surface as a `TypeError` inside a return several layers from the row
+that caused it.
+
+The width of that window is deliberate and is the correction this constant's neighbour
+`DAILY_BASIC_NULLABLE_COLUMNS` had to make: a nullability claim sampled only on recent sessions
+is a claim about recent sessions, and this panel is built to hold a decade.
 """
 
 DAILY_DATA_COLUMNS: Final[tuple[str, ...]] = (
@@ -152,19 +207,58 @@ DAILY_BASIC_PANEL_COLUMNS: Final[tuple[str, ...]] = (
 )
 
 DAILY_BASIC_NULLABLE_COLUMNS: Final[frozenset[str]] = frozenset(
-    {"volume_ratio", "pe", "pe_ttm", "pb", "ps", "ps_ttm", "dv_ratio", "dv_ttm"}
+    {
+        "volume_ratio",
+        "pe",
+        "pe_ttm",
+        "pb",
+        "ps",
+        "ps_ttm",
+        "dv_ratio",
+        "dv_ttm",
+        "turnover_rate_f",
+        "free_share",
+    }
 )
-"""Valuation columns whose absence is data rather than a fault, measured on 2024-06-28.
+"""Valuation columns whose absence is data rather than a fault, and how that was measured.
 
-Of 5,338 rows: `pe` null on 1,102, `pe_ttm` on 1,214, `dv_ttm` on 1,840, `dv_ratio` on 354,
-`pb` on 29, `ps`/`ps_ttm` on 3, `volume_ratio` on 2. A loss-making company has no P/E and a
-non-payer has no yield; refusing those would refuse a fifth of the market.
+## The eight ratios: measured on 2024-06-28 (5,338 rows)
 
-The complement is the claim that carries risk, so it is bounded by measurement rather than by
-reasoning: `close`, `turnover_rate`, `turnover_rate_f`, `total_share`, `float_share`,
-`free_share`, `total_mv` and `circ_mv` were populated on **every** row of five sessions probed
-across 2023..2026. A null in one of those is refused, which is the fail-closed direction --
-`total_mv` is a neutralisation input, and a null one silently drops a name from a regression.
+`pe` null on 1,102, `pe_ttm` on 1,214, `dv_ttm` on 1,840, `dv_ratio` on 354, `pb` on 29,
+`ps`/`ps_ttm` on 3, `volume_ratio` on 2. A loss-making company has no P/E and a non-payer has
+no yield; refusing those would refuse a fifth of the market.
+
+## `free_share` and `turnover_rate_f`: measured across 2001..2026, and this is a correction
+
+The first version of this set was drawn from five sessions between 2023-01-03 and 2026-08-07
+and put these two in the *complement* -- refused when null. That sample does not reach the
+history the panel is built for, and eighteen sessions spanning 2001-01-02 to 2026-08-07 show
+where it breaks. Null counts, `free_share` first:
+
+    20010102  1,022 rows   8 / 8      20161010  2,704   0 / 0
+    20030102  1,187        3 / 3      20170103  2,832   1 / 0
+    20050104  1,344        4 / 4      20171009  3,180   7 / 0
+    20080102  1,371        4 / 2      20171204  3,232   4 / 0
+    20100104  1,632        2 / 0      20180102  3,252   1 / 0
+    20120104  2,228        0 / 0      20200302..20260807 (7 sessions)  0 / 0
+
+It is not a boundary effect either: `300290.SZ` has a null `free_share` on **74 consecutive
+trading days**, 2017-09-20 through 2018-01-16. Refusing a null here does not refuse one row --
+`fetch_panel` fails the whole cross section, so the session cannot be built, the year is then
+missing a session the calendar reports open, and `write_daily_panel` refuses the year on both
+datasets. Two whole years inside the ten-year window this panel exists for (2017 and 2018)
+were unstorable.
+
+## The complement, and the scope of that claim
+
+`close`, `turnover_rate`, `total_share`, `float_share`, `total_mv` and `circ_mv` were populated
+on **every** row of all eighteen sessions above -- 51,708 rows spanning 2001..2026. That is
+what is measured; it is not a proof about every session the endpoint serves. A null in one of
+them is refused because the fail-closed direction is the right one for these six specifically:
+`total_mv` and `circ_mv` are P3 neutralisation inputs and a null one silently drops a name from
+a regression, `close` is the cross-check against `daily`, and `total_share`/`float_share` are
+what those caps are computed from. `free_share` and `turnover_rate_f` are neither: nothing in
+P3 or P4 reads them today, so the cost of a null is a null cell rather than a dropped name.
 """
 
 SESSION_CLOSE_TIME: Final[time] = time(15, 0)
@@ -182,12 +276,54 @@ stop requiring the newest session. A comment saying "these must agree" is not a 
 these two constants.
 """
 
-MAX_PRE_CLOSE_DISAGREEMENT: Final[float] = 0.01
-"""How far the two correct return paths may disagree, expressed as implied `pre_close`.
+MIN_SESSION_ROW_SHARE: Final[float] = 0.5
+"""How thin one session's cross section may be relative to its partition's median, before the
+write refuses it. See `panel_ingest._refuse_thin_price_sessions` for what it guards.
 
-One published tick. See this module's docstring for why the tolerance lives in price space
-rather than return space, and for the measured separation between the real residue (0.0081)
-and a wrongly wired path (up to 118.30).
+## Why a share of the partition's own median, and not a count
+
+The market was 1,022 names on 2001-01-02 and 5,535 on 2026-08-07, so any absolute floor is
+wrong at one end of the history. The per-session row counts are already in hand when the date
+census runs, so this costs no request.
+
+## Why the share is this low, which is the uncomfortable part
+
+It is set below the thinnest real session found rather than at a level that would be
+satisfying. Full-year censuses of the live endpoint, one request per session:
+
+    2015   244 sessions   min 1,363 (07-09)   median 2,359   min/median 0.578
+    2018   243 sessions   min 3,177 (02-08)   median 3,378   min/median 0.940
+    2024   242 sessions   min 5,301 (04-30)   median 5,345   min/median 0.992
+
+2015 is not an outlier to be argued away: 2015-07-09 sits in the week when a large part of the
+A-share market suspended trading at once, and 1,363 rows were served against a year median of
+2,359 -- 07-10 served 1,425 and 07-08 1,489. A floor at 0.9 would refuse a true partition of
+that year, which is the failure this repository has already made twice by calibrating a bound on
+a window that excluded the counterexample.
+
+## What that leaves uncovered, plainly
+
+A fetch that returned *most* of the market is invisible here. What is caught is the shape that
+actually occurred in review -- a session that came back with a handful of names while its
+siblings carried the market -- and the fully general answer is still `suspend_d` (`V2-P1-008`),
+which is what distinguishes a halted security from an absent row. This is a floor, not a census.
+"""
+
+MAX_PRE_CLOSE_DISAGREEMENT: Final[float] = 0.01
+"""The `pre_close` term of the tolerance: one published tick of a two-decimal price.
+
+The whole tolerance is `pre_close_tolerance`, of which this is the part that does not scale.
+"""
+
+ADJ_FACTOR_PUBLICATION_TICK: Final[float] = 1e-4
+"""The `adj_factor` term of the tolerance: one published tick of a four-decimal factor.
+
+Carried into price space by `pre_close_tolerance`, because a tick of `f` is worth
+`implied * 1e-4 / f` yuan of implied previous close and therefore grows with the price. One
+full tick rather than the 5e-5 half-tick that pure round-to-nearest would give: the observed
+residue is not only rounding but the upstream restating the fourth digit, and a factor of two
+here costs 1.3 points of missing-step detection while removing three quarters of the false
+refusals. Both numbers are measured in this module's docstring.
 """
 
 
@@ -252,15 +388,21 @@ KNOWN_PRICE_LIMITATIONS: Final[tuple[PriceLimitation, ...]] = (
     PriceLimitation(
         code="a_partial_cross_section_is_invisible_without_suspend_d",
         detail=(
-            "A session whose fetch returned only some of the market stores a real, "
-            "well-formed, complete-looking partition: every row parses, the date census "
-            "carries that session, and readiness reports ready. Nothing in daily distinguishes "
-            "'this security was halted' from 'this fetch was short', because both are simply "
-            "an absent row. priced_cross_section surfaces the population as "
+            "Nothing in daily distinguishes 'this security was halted' from 'this fetch was "
+            "short', because both are simply an absent row. A session whose fetch returned "
+            "only some of the market otherwise stores a real, well-formed, complete-looking "
+            "partition: every row parses, the date census carries that session, the year's "
+            "subject set is complete because its other sessions supply every code, and "
+            "readiness reports ready. priced_cross_section surfaces the population as "
             "PricedCrossSection.unpriced instead of hiding it, and the count is checkable "
-            "against a known figure (26 halted names on 2024-06-28), but the dataset that "
-            "settles it is suspend_d (V2-P1-008). The write-time session census in "
-            "panel_ingest catches a missing *session*; it cannot catch a thin one."
+            "against a known figure (26 halted names on 2024-06-28). "
+            "panel_ingest._refuse_thin_price_sessions now takes the extreme end of this: a "
+            "session holding under MIN_SESSION_ROW_SHARE of its partition's median cross "
+            "section is refused at write time, which catches a session that came back with a "
+            "handful of names. It is a floor and not a census -- it is set at 0.5 because "
+            "2015-07-09 legitimately served 1,363 rows against that year's median of 2,359, "
+            "so a fetch that returned most of the market is still invisible. The dataset that "
+            "settles the general case is suspend_d (V2-P1-008)."
         ),
     ),
     PriceLimitation(
@@ -321,15 +463,17 @@ class DailyBar:
 class DailyValuation:
     """One security's share counts, market caps, turnover and valuation ratios on one session.
 
-    The eight ratio fields are `None` when the upstream published none; see
-    `DAILY_BASIC_NULLABLE_COLUMNS` for which and why.
+    Ten of the seventeen fields are `None` when the upstream published none -- the eight ratios
+    plus `free_share` and `turnover_rate_f`, which are sparse before 2019. See
+    `DAILY_BASIC_NULLABLE_COLUMNS` for which, for the sessions that were measured, and for why
+    the other six are refused instead.
     """
 
     ts_code: str
     trade_date: date
     close: float
     turnover_rate: float
-    turnover_rate_f: float
+    turnover_rate_f: float | None
     volume_ratio: float | None
     pe: float | None
     pe_ttm: float | None
@@ -340,7 +484,7 @@ class DailyValuation:
     dv_ttm: float | None
     total_share: float
     float_share: float
-    free_share: float
+    free_share: float | None
     total_mv: float
     circ_mv: float
 
@@ -367,11 +511,30 @@ class SessionReturns:
     published_pre_close: float
     implied_pre_close: float
     """`prev_close * f_prev / f`: what `pre_close` must be if the factor series is right."""
+    factor: float
+    """`adj_factor` on `day`. Carried so `tolerance` can be recomputed from the record."""
+    previous_factor: float
+    """`adj_factor` on `previous_day`."""
 
     @property
     def disagreement(self) -> float:
-        """How far the two correct paths are apart, in yuan of implied `pre_close`."""
+        """How far the two correct paths are apart, in yuan of implied `pre_close`.
+
+        Unsigned, and both signs occur on real mis-wirings rather than only one. A factor
+        series whose step is **missing** on an ex-rights day implies a previous close that is
+        too *high* (`+0.36` on `000001.SZ`'s 2026-06-12); the same off-by-one series carrying
+        that step one session **late** implies one that is too *low* on the following session
+        (`-0.358` on 2026-06-15). Dropping the `abs()` would keep the first and wave the second
+        through, so both directions are exercised in `tests/unit/domain/test_daily_prices.py`.
+        """
         return abs(self.implied_pre_close - self.published_pre_close)
+
+    @property
+    def tolerance(self) -> float:
+        """The disagreement this pair of rows is allowed to carry; see `pre_close_tolerance`."""
+        return pre_close_tolerance(
+            self.implied_pre_close, factor=self.factor, previous_factor=self.previous_factor
+        )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -535,7 +698,9 @@ def session_returns(
     """The three return paths for one session, with the two correct ones cross-checked.
 
     Raises `PriceDataError` when the published `pre_close` and the one implied by the factor
-    series differ by more than `MAX_PRE_CLOSE_DISAGREEMENT`. That refusal is the point of this
+    series differ by more than `pre_close_tolerance` allows for the two rows' own publication
+    precision -- one tick of `pre_close` plus one tick of each `adj_factor`, the second of which
+    scales with the price. That refusal is the point of this
     function: `daily` and `adj_factor` are two independent statements about the same corporate
     action, and a caller who has wired the wrong factor history, the wrong previous session, or
     a naive close-to-close gets an error rather than a number that is wrong by 3.3 percentage
@@ -571,17 +736,43 @@ def session_returns(
         unadjusted=bar.close / previous_close - 1,
         published_pre_close=bar.pre_close,
         implied_pre_close=implied_pre_close,
+        factor=factor,
+        previous_factor=previous_factor,
     )
-    if returns.disagreement > MAX_PRE_CLOSE_DISAGREEMENT:
+    if returns.disagreement > returns.tolerance:
         raise PriceDataError(
             f"{bar.ts_code} on {bar.trade_date.isoformat()}: the implied pre_close from "
             f"{previous_day.isoformat()}'s close and the adjustment factors is "
             f"{implied_pre_close!r}, and daily published {bar.pre_close!r} -- a gap of "
-            f"{returns.disagreement!r}, past the {MAX_PRE_CLOSE_DISAGREEMENT} tolerance that "
-            "the two decimals of pre_close and the four of adj_factor allow. The two datasets "
-            "disagree about that session's corporate action, so neither return can be trusted"
+            f"{returns.disagreement!r}, past the {returns.tolerance!r} that one tick of "
+            f"pre_close ({MAX_PRE_CLOSE_DISAGREEMENT}) plus one tick of each adj_factor "
+            f"({ADJ_FACTOR_PUBLICATION_TICK}, carried into price space at this price and "
+            "these factors) allows. The two datasets disagree about that session's corporate "
+            "action, so neither return can be trusted"
         )
     return returns
+
+
+def pre_close_tolerance(
+    implied_pre_close: float, *, factor: float, previous_factor: float
+) -> float:
+    """How far the two implied previous closes may differ before that is a disagreement.
+
+    Two terms, one per published input, both carried into yuan of `pre_close`:
+
+    - `MAX_PRE_CLOSE_DISAGREEMENT` (0.01), one tick of a two-decimal price. Flat.
+    - `implied * ADJ_FACTOR_PUBLICATION_TICK * (1/f_prev + 1/f)`, one tick of each four-decimal
+      factor. `implied = prev_close * f_prev / f`, so a perturbation of either factor moves it
+      by `implied * delta / f_i` -- **linear in the price**, which is the term the flat 0.01
+      was missing and the reason a 450-yuan stock broke it on an ordinary session.
+
+    Exposed as a function rather than folded into `session_returns` so a caller can ask what a
+    given pair of rows was allowed, and so the measured rejection and detection rates in this
+    module's docstring are checkable against the same arithmetic the guard runs.
+    """
+    return MAX_PRE_CLOSE_DISAGREEMENT + implied_pre_close * ADJ_FACTOR_PUBLICATION_TICK * (
+        1.0 / previous_factor + 1.0 / factor
+    )
 
 
 def priced_cross_section(

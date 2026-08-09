@@ -318,6 +318,87 @@ def test_a_null_in_a_valuation_column_that_is_never_null_upstream_is_refused(
         provider.fetch_panel(ProviderRequest(dataset=DAILY_BASIC_DATASET, as_of=AFTER_CLOSE_06_12))
 
 
+def test_the_two_share_columns_that_are_sparse_before_2019_are_stored_as_nulls(
+    fake_tushare_transport,
+) -> None:
+    """A real row: `300290.SZ` on 2018-01-02, whose `free_share` is null -- as it is on 74
+    consecutive sessions from 2017-09-20 through 2018-01-16.
+
+    This is the row that made 2017 and 2018 unstorable. `free_share` and `turnover_rate_f` were
+    in the refused half because the nullability sample ran only from 2023-01-03, and a refusal
+    here fails the whole 3,252-row cross section rather than one cell: the session cannot be
+    built, the year is then missing a session the calendar reports open, and `write_daily_panel`
+    refuses the year on both datasets. Null counts on the eighteen sessions probed from
+    2001-01-02 are in `domain/daily_prices.py::DAILY_BASIC_NULLABLE_COLUMNS`.
+    """
+    row: list[Any] = [
+        "300290.SZ", "20180102", 8.71, 4.9386, 4.9358, 2.25, 86.4158, 108.6244, 3.9847, 5.5703,
+        6.3894, 0.2411, 0.2411, 32142.9652, 12994.6866, None, 279965.2269, 113183.7203,
+    ]  # fmt: skip
+    provider, _ = _provider(
+        fake_tushare_transport,
+        _response(DAILY_BASIC_FIELDS, [row]),
+        clock=datetime(2018, 1, 2, 12, 0, tzinfo=UTC),
+    )
+    batch = provider.fetch_panel(
+        ProviderRequest(dataset=DAILY_BASIC_DATASET, as_of=datetime(2018, 1, 2, 12, 0, tzinfo=UTC))
+    )
+    values = {column.name: column.values[0] for column in batch.columns}
+    assert values["free_share"] is None
+    assert values["turnover_rate_f"] == 4.9358
+    assert values["total_mv"] == 279965.2269
+    assert values["float_share"] == 12994.6866
+
+    # 2005-01-04 has four rows with a null `turnover_rate_f` as well.
+    row[DAILY_BASIC_FIELDS.index("turnover_rate_f")] = None
+    provider, _ = _provider(
+        fake_tushare_transport,
+        _response(DAILY_BASIC_FIELDS, [row]),
+        clock=datetime(2018, 1, 2, 12, 0, tzinfo=UTC),
+    )
+    batch = provider.fetch_panel(
+        ProviderRequest(dataset=DAILY_BASIC_DATASET, as_of=datetime(2018, 1, 2, 12, 0, tzinfo=UTC))
+    )
+    assert {column.name: column.values[0] for column in batch.columns}["turnover_rate_f"] is None
+
+
+@pytest.mark.parametrize("field", ["pct_chg", "vol", "amount"])
+def test_a_boolean_in_a_daily_column_is_refused_rather_than_widened_to_one(
+    fake_tushare_transport, field: str
+) -> None:
+    """`_finite_number` is `type(v) is float or type(v) is int`, and `type(True)` is `bool`.
+
+    The same property is pinned for `close` through the positive-price parse, but `close` is
+    one of 26 columns that reach `_finite_number` and `_optional_number` between the two
+    datasets -- so a numeric-tower `isinstance(v, (int, float))` there would put a 1.0 into
+    `total_mv`, `vol` or `amount` with every existing test still green.
+    """
+    row = list(BAR_06_12)
+    row[DAILY_FIELDS.index(field)] = True
+    provider, _ = _provider(
+        fake_tushare_transport, _response(DAILY_FIELDS, [row]), clock=AFTER_CLOSE_06_12
+    )
+    with pytest.raises(ProviderFailure, match=f"{field} must be a finite number, got bool"):
+        provider.fetch_panel(ProviderRequest(dataset=DAILY_DATASET, as_of=AFTER_CLOSE_06_12))
+
+
+@pytest.mark.parametrize(
+    "field", ["total_mv", "circ_mv", "turnover_rate", "total_share", "float_share", "pe"]
+)
+def test_a_boolean_in_a_valuation_column_is_refused_rather_than_widened_to_one(
+    fake_tushare_transport, field: str
+) -> None:
+    """The same rule on the other dataset, including one of the nullable columns -- a null is
+    data there and a `bool` still is not."""
+    row = list(VALUATION_06_12)
+    row[DAILY_BASIC_FIELDS.index(field)] = True
+    provider, _ = _provider(
+        fake_tushare_transport, _response(DAILY_BASIC_FIELDS, [row]), clock=AFTER_CLOSE_06_12
+    )
+    with pytest.raises(ProviderFailure, match=f"{field} must be a finite number, got bool"):
+        provider.fetch_panel(ProviderRequest(dataset=DAILY_BASIC_DATASET, as_of=AFTER_CLOSE_06_12))
+
+
 @pytest.mark.parametrize("value", [None, 0.0, -1.0, True, "11.24", float("inf")])
 def test_a_price_that_cannot_be_a_price_is_refused_at_the_boundary(
     fake_tushare_transport, value: Any

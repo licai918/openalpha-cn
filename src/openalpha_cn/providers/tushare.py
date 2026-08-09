@@ -133,6 +133,28 @@ downstream interpolates it. The residue is stated rather than argued away: a res
 omits `has_more` and comes in under 6,000 rows is accepted, and
 `tests/contract/providers/test_tushare_daily.py` pins both halves of that.
 
+Two things about that decision are worth writing down rather than leaving to be rediscovered.
+
+**It is not a free choice.** Setting the flag to `True` breaks two unrelated tests --
+`test_the_flag_is_demanded_exactly_where_it_is_the_only_witness_or_the_stakes_are_highest` and
+`test_tushare_byot_maps_daily_payload_without_exposing_token` -- so the enumerative assertion in
+the first of those admits exactly one answer. The reasoning above stands on its own (the
+cross-section path measures `has_more == (len(rows) == min(limit, cap))`, so any truncation at
+any cap sets it, and reaching the residue needs an API schema change), but an assertion that
+allows only one value is not independent evidence for that value. A later task that has a real
+reason to demand the flag on a price dataset should change the test rather than read its
+redness as a verdict.
+
+**The headroom is not a schedule.** The cross section was 5,535 rows on 2026-08-07 against the
+6,000 cap: 465 spare. Year-end counts measured on the live endpoint are 3,581 (2018), 3,796,
+4,201, 4,738, 5,063, 5,329, 5,370, 5,458 -- so the last three years added +41, +88 and +77 and
+2020..2022 added +405, +537 and +325. Extrapolating the recent rate gives five to eleven years
+and extrapolating the earlier one gives about one, and nothing in the data says which regime the
+next listing cycle is in. So this is a bound to *monitor*, not a date: when a cross section
+approaches the cap the escape route is already in the descriptor (`subjects` splits one session
+into several requests), and `_check_response_completeness` refuses at the cap rather than
+storing a short session in the meantime.
+
 ## The panel projection is a schema contract of its own (`V2-P1-007`)
 
 `_check_panel_projection` refuses a response whose rows lack a column the descriptor projects.

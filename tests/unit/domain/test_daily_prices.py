@@ -32,6 +32,7 @@ from openalpha_cn.domain.adjustment import (
     build_adjustment_history,
 )
 from openalpha_cn.domain.daily_prices import (
+    ADJ_FACTOR_PUBLICATION_TICK,
     DAILY_BASIC_DATASET,
     DAILY_BASIC_NULLABLE_COLUMNS,
     DAILY_BASIC_PANEL_COLUMNS,
@@ -41,10 +42,12 @@ from openalpha_cn.domain.daily_prices import (
     MAX_PRE_CLOSE_DISAGREEMENT,
     DailyBar,
     PriceDataError,
+    SessionReturns,
     close_disagreements,
     close_index,
     daily_bars_from_panel_rows,
     daily_valuations_from_panel_rows,
+    pre_close_tolerance,
     priced_cross_section,
     session_returns,
 )
@@ -105,8 +108,38 @@ VALUATIONS: tuple[tuple[Any, ...], ...] = (
 )
 # fmt: on
 
+# `600519.SH` across 2024-06-24/25, a real session with **no corporate action at all**:
+# `pre_close` (1476.55) equals the previous close to the fen. What moved is the fourth published
+# digit of the adjustment factor, 8.0204 -> 8.0205, and on a 1,476.55-yuan stock that is 0.0184
+# of implied previous close -- which the flat 0.01 tolerance refused. 201 of 5,338 securities
+# were refused on this pair and 214 on the next, 199 of them with no corporate action.
+# fmt: off
+MAOTAI_BAR_2024_06_25: tuple[Any, ...] = (
+    MAOTAI, "2024-06-25", 1477.0, 1502.99, 1477.0, 1486.65, 1476.55, 0.684, 42097.95,
+    6273919.386,
+)
+# fmt: on
+MAOTAI_CLOSE_2024_06_24 = 1476.55
+MAOTAI_FACTORS_2024: tuple[tuple[str, float], ...] = (
+    ("2024-06-24", 8.0204),
+    ("2024-06-25", 8.0205),
+)
+
+# Two real rows the first version of this module refused outright, which is what made 2017 and
+# 2018 unstorable. `300290.SZ` has a null `free_share` on 74 consecutive sessions from
+# 2017-09-20 through 2018-01-16; `600527.SH` on 2005-01-04 has a null `turnover_rate_f` too.
+# fmt: off
+SPARSE_VALUATIONS: tuple[tuple[Any, ...], ...] = (
+    ("300290.SZ", "2018-01-02", 8.71, 4.9386, 4.9358, 2.25, 86.4158, 108.6244, 3.9847, 5.5703,
+     6.3894, 0.2411, 0.2411, 32142.9652, 12994.6866, None, 279965.2269, 113183.7203),
+    ("600527.SH", "2005-01-04", 8.15, 0.3157, None, 1.02, 31.4697, 30.1151, 2.4165, 2.6886,
+     2.6157, 2.6176, 2.6176, 8000.0, 3000.0, None, 65200.0, 24450.0),
+)
+# fmt: on
+
 JUNE_12 = date(2026, 6, 12)
 JUNE_11 = date(2026, 6, 11)
+JUNE_15 = date(2026, 6, 15)
 
 PUBLISHED_RETURN_2026_06_12 = 0.02742230347349195
 ADJUSTED_RETURN_2026_06_12 = 0.027422506154573423
@@ -210,17 +243,39 @@ def test_the_two_datasets_declare_the_columns_their_readers_positionally_unpack(
 
 def test_the_valuation_columns_that_are_allowed_to_be_null_are_the_measured_ones() -> None:
     """A null `pe` is ordinary -- 1,102 of the 5,338 names on 2024-06-28 had no positive
-    earnings -- while a null `total_mv` never occurred on any of the five sessions probed.
-    The distinction is stated so a reader knows which absences are data and which are faults.
+    earnings -- while a null `total_mv` never occurred on any session probed. The distinction
+    is stated so a reader knows which absences are data and which are faults.
+
+    `free_share` and `turnover_rate_f` are in the nullable half **because the sample was
+    widened**, and that is the correction this assertion carries: measured on five sessions
+    between 2023-01-03 and 2026-08-07 they are never null, and measured on eighteen sessions
+    from 2001-01-02 they are null on ten of them -- 7 names on 2017-10-09, 4 on 2005-01-04, and
+    `300290.SZ` for 74 consecutive sessions from 2017-09-20. See
+    `test_a_null_free_share_is_data_because_the_history_says_so` for what refusing them cost.
     """
     assert (
-        frozenset({"volume_ratio", "pe", "pe_ttm", "pb", "ps", "ps_ttm", "dv_ratio", "dv_ttm"})
+        frozenset(
+            {
+                "volume_ratio",
+                "pe",
+                "pe_ttm",
+                "pb",
+                "ps",
+                "ps_ttm",
+                "dv_ratio",
+                "dv_ttm",
+                "turnover_rate_f",
+                "free_share",
+            }
+        )
         == DAILY_BASIC_NULLABLE_COLUMNS
     )
     assert "close" not in DAILY_BASIC_NULLABLE_COLUMNS
     assert "total_mv" not in DAILY_BASIC_NULLABLE_COLUMNS
     assert "circ_mv" not in DAILY_BASIC_NULLABLE_COLUMNS
     assert "turnover_rate" not in DAILY_BASIC_NULLABLE_COLUMNS
+    assert "total_share" not in DAILY_BASIC_NULLABLE_COLUMNS
+    assert "float_share" not in DAILY_BASIC_NULLABLE_COLUMNS
 
 
 # --- reading stored rows back ----------------------------------------------------------
@@ -293,6 +348,39 @@ def test_a_null_in_a_valuation_column_that_is_never_null_upstream_is_refused() -
     holed[DAILY_BASIC_PANEL_COLUMNS.index("total_mv")] = None
     with pytest.raises(PriceDataError, match="total_mv"):
         daily_valuations_from_panel_rows([tuple(holed)])
+
+
+def test_a_null_free_share_is_data_because_the_history_says_so() -> None:
+    """Two real rows, and the reason the nullable set had to be widened.
+
+    Refusing a null here does not refuse one cell: the provider fails the whole cross section,
+    so 2018-01-02 cannot be built at all, the 2018 year is then missing a session the calendar
+    reports open, and `write_daily_panel` refuses the year on *both* datasets. 2017 and 2018 --
+    inside the ten-year window this panel exists for -- were unstorable, and so were 2001, 2003,
+    2005, 2008 and 2010.
+    """
+    valuations = daily_valuations_from_panel_rows([SPARSE_VALUATIONS[0]])
+    row = valuations["300290.SZ"]
+    assert row.trade_date == date(2018, 1, 2)
+    assert row.free_share is None
+    assert row.turnover_rate_f == 4.9358
+    # The six that stay refused are all present on the same row, which is why they stay refused.
+    assert row.total_mv == 279965.2269
+    assert row.circ_mv == 113183.7203
+    assert row.total_share == 32142.9652
+    assert row.float_share == 12994.6866
+    assert row.turnover_rate == 4.9386
+    assert row.close == 8.71
+
+
+def test_a_null_turnover_rate_f_is_data_too_and_the_sample_that_missed_it_was_recent() -> None:
+    """`turnover_rate_f` is null on 4 of 2005-01-04's 1,344 rows and on none of the five
+    sessions between 2023-01-03 and 2026-08-07 that the first version of this set was drawn
+    from. Same defect, same fix, different column."""
+    row = daily_valuations_from_panel_rows([SPARSE_VALUATIONS[1]])["600527.SH"]
+    assert row.turnover_rate_f is None
+    assert row.free_share is None
+    assert row.total_mv == 65200.0
 
 
 # --- the return contract ---------------------------------------------------------------
@@ -371,6 +459,120 @@ def test_the_two_paths_disagreeing_beyond_one_published_tick_is_refused() -> Non
 
 def test_the_disagreement_tolerance_is_one_published_tick() -> None:
     assert MAX_PRE_CLOSE_DISAGREEMENT == 0.01
+
+
+def _maotai_2024_history():
+    return build_adjustment_history(
+        MAOTAI,
+        [
+            FactorObservation(ts_code=MAOTAI, observed_on=date.fromisoformat(day), factor=factor)
+            for day, factor in MAOTAI_FACTORS_2024
+        ],
+    )
+
+
+def test_a_fifteen_hundred_yuan_stock_on_an_ordinary_day_is_not_a_disagreement() -> None:
+    """The reason the flat 0.01 could not be the whole tolerance, on the real rows that broke it.
+
+    `600519.SH` on 2024-06-25 had no corporate action: `pre_close` is 1476.55 and the previous
+    close is 1476.55. `adj_factor` moved by **one unit of its fourth published decimal**,
+    8.0204 -> 8.0205, which on a 1,476.55-yuan stock is 0.0184 of implied previous close. A flat
+    one-fen tolerance refuses that, and it refused 201 of 5,338 securities on the 06-24/25 pair
+    and 214 on 06-25/26 -- while the three pairs the constant was calibrated on happened to be
+    clean. The two returns here differ by 1.2e-5.
+    """
+    bar = daily_bars_from_panel_rows([MAOTAI_BAR_2024_06_25])[MAOTAI]
+    returns = session_returns(
+        bar,
+        previous_close=MAOTAI_CLOSE_2024_06_24,
+        previous_day=date(2024, 6, 24),
+        factors=_maotai_2024_history(),
+    )
+
+    # The flat tolerance would have refused this row; the one that carries adj_factor's
+    # precision into price space does not.
+    assert returns.disagreement > MAX_PRE_CLOSE_DISAGREEMENT
+    assert returns.disagreement == pytest.approx(0.018410, abs=5e-6)
+    assert returns.tolerance == pytest.approx(0.046821, abs=5e-6)
+    assert abs(returns.published - returns.adjusted) < 1e-4
+
+
+def test_the_tolerance_carries_both_publication_precisions_into_price_space() -> None:
+    """`pre_close` has two decimals and does not scale; `adj_factor` has four and does.
+
+    A tick of `f` shifts `implied = prev_close * f_prev / f` by `implied * 1e-4 / f`, so the
+    factor term is linear in the price and inversely proportional to the factor. That is what
+    the flat constant was missing, and it is why a 450-yuan stock breached it on a session with
+    nothing wrong.
+    """
+    assert ADJ_FACTOR_PUBLICATION_TICK == 1e-4
+    # At f = 1 the two factor ticks are worth 2e-4 of the price each way.
+    assert pre_close_tolerance(100.0, factor=1.0, previous_factor=1.0) == pytest.approx(0.03)
+    assert pre_close_tolerance(1000.0, factor=1.0, previous_factor=1.0) == pytest.approx(0.21)
+    # Ten times the price is ten times the factor term, and the flat term does not move.
+    assert pre_close_tolerance(10.0, factor=1.0, previous_factor=1.0) == pytest.approx(0.012)
+    # A larger factor divides the same tick into a smaller slice of price.
+    assert pre_close_tolerance(100.0, factor=100.0, previous_factor=100.0) == pytest.approx(0.0102)
+    # A one-fen price is still allowed its one published tick and essentially nothing more.
+    assert pre_close_tolerance(0.01, factor=1.0, previous_factor=1.0) == pytest.approx(0.010002)
+
+
+def test_the_disagreement_is_unsigned_because_both_directions_are_real_failures() -> None:
+    """The same off-by-one factor wiring breaches in **both** directions on consecutive days.
+
+    Take `000001.SZ`'s real 2026-06-12 ex-dividend step (134.5794 -> 139.008) and record it one
+    session late:
+
+    - On 06-12 the step is *missing*, so the implied previous close is the unadjusted 11.30
+      against a published 10.94 -- **+0.36**.
+    - On 06-15 the step is *spurious*, so the implied previous close is 10.88 against a
+      published 11.24 -- **-0.358**.
+
+    Every signed gap the rest of this file exercises is positive, so a `disagreement` that
+    dropped its `abs()` would still refuse the first and would wave the second straight
+    through. Both are asserted here, on the value object and end to end.
+    """
+    common = {
+        "ts_code": PING_AN,
+        "published": 0.0,
+        "adjusted": 0.0,
+        "unadjusted": 0.0,
+    }
+    missing_step = SessionReturns(
+        day=JUNE_12,
+        previous_day=JUNE_11,
+        published_pre_close=10.94,
+        implied_pre_close=11.30,
+        factor=134.5794,
+        previous_factor=134.5794,
+        **common,
+    )
+    spurious_step = SessionReturns(
+        day=JUNE_15,
+        previous_day=JUNE_12,
+        published_pre_close=11.24,
+        implied_pre_close=10.8819,
+        factor=139.008,
+        previous_factor=134.5794,
+        **common,
+    )
+
+    assert missing_step.implied_pre_close - missing_step.published_pre_close > 0
+    assert spurious_step.implied_pre_close - spurious_step.published_pre_close < 0
+    assert missing_step.disagreement > missing_step.tolerance
+    assert spurious_step.disagreement > spurious_step.tolerance
+
+    late = build_adjustment_history(
+        PING_AN,
+        [
+            FactorObservation(ts_code=PING_AN, observed_on=JUNE_11, factor=134.5794),
+            FactorObservation(ts_code=PING_AN, observed_on=JUNE_12, factor=134.5794),
+            FactorObservation(ts_code=PING_AN, observed_on=JUNE_15, factor=139.008),
+        ],
+    )
+    bar = daily_bars_from_panel_rows(_bar_rows(day="2026-06-15"))[PING_AN]
+    with pytest.raises(PriceDataError, match=r"a gap of 0\.35"):
+        session_returns(bar, previous_close=11.24, previous_day=JUNE_12, factors=late)
 
 
 def test_a_previous_day_that_is_not_before_the_bar_is_refused() -> None:
@@ -618,6 +820,77 @@ def test_a_previous_close_that_cannot_be_a_price_is_refused(previous_close: Any)
             previous_day=JUNE_11,
             factors=_factor_history(PING_AN),
         )
+
+
+class _Yuan(float):
+    """A `float` subclass, the thing `type(...) is float` refuses and `isinstance` does not."""
+
+
+class _Code(str):
+    """A `str` subclass, likewise."""
+
+
+def test_a_float_subclass_is_refused_where_a_plain_float_is_demanded() -> None:
+    """The exact-type discipline this module states, exercised rather than only described.
+
+    `_require_price`'s docstring says "what only the exact check refuses is a `float`
+    *subclass*", and every value the rest of this file passes is a plain `float` -- so
+    replacing `type(x) is float` with `isinstance(x, float)` changed nothing and the claim was
+    load-bearing but untested. A subclass is refused because the value is about to be
+    multiplied by a factor and divided into a return, and a subclass can override `__mul__`,
+    `__truediv__` and `__eq__`; the arithmetic that runs has to be `float`'s.
+
+    Both entry points are covered: `previous_close` (`_require_price`) and a stored numeric
+    cell (`_stored_number`), which reaches every non-price column of both datasets.
+    """
+    bar = daily_bars_from_panel_rows(_bar_rows(day="2026-06-12"))[PING_AN]
+    assert isinstance(_Yuan(11.3), float)
+    with pytest.raises(PriceDataError, match=r"previous_close must be a finite positive float"):
+        session_returns(
+            bar,
+            previous_close=_Yuan(11.3),
+            previous_day=JUNE_11,
+            factors=_factor_history(PING_AN),
+        )
+
+    row = list(_bar_rows(day="2026-06-12")[0])
+    row[DAILY_PANEL_COLUMNS.index("pct_chg")] = _Yuan(2.7422)
+    with pytest.raises(PriceDataError, match="pct_chg must be a finite float, got _Yuan"):
+        daily_bars_from_panel_rows([tuple(row)])
+
+    valuation = list(VALUATIONS[0])
+    valuation[DAILY_BASIC_PANEL_COLUMNS.index("total_mv")] = _Yuan(21812252.0568)
+    with pytest.raises(PriceDataError, match="total_mv must be a finite float, got _Yuan"):
+        daily_valuations_from_panel_rows([tuple(valuation)])
+
+
+def test_a_str_subclass_is_refused_where_a_plain_subject_code_is_demanded() -> None:
+    """`_require_stored_text`'s half of the same discipline. A `str` subclass can override
+    `__eq__` and `__hash__`, and the subject is used as a dict key that a cross section is
+    joined on -- two codes that hash alike would silently collapse into one bar."""
+    assert isinstance(_Code(PING_AN), str)
+    row = list(_bar_rows(day="2026-06-12")[0])
+    row[0] = _Code(PING_AN)
+    with pytest.raises(PriceDataError, match=r"subject must be a non-empty string.*_Code"):
+        daily_bars_from_panel_rows([tuple(row)])
+
+
+def test_the_reported_disagreements_are_ascending_because_the_contract_says_so() -> None:
+    """`close_disagreements` documents "ascending", and a caller that reports the first finding
+    -- which `panel_ingest._refuse_close_disagreement` does -- names a different security
+    depending on the order. Without this, dropping the `sorted()` changes nothing observable."""
+    bars: dict[tuple[str, date], float] = {}
+    valuations = {
+        (MAOTAI, JUNE_12): 1291.91,
+        (PING_AN, JUNE_15): 11.06,
+        (PING_AN, JUNE_12): 11.24,
+    }
+    findings = close_disagreements(bars, valuations)
+    assert [(entry.ts_code, entry.trade_date) for entry in findings] == [
+        (PING_AN, JUNE_12),
+        (PING_AN, JUNE_15),
+        (MAOTAI, JUNE_12),
+    ]
 
 
 def test_a_datetime_where_a_date_belongs_is_refused_on_both_entry_points() -> None:
