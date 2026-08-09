@@ -212,6 +212,51 @@ in March -- sits inside `covered_from`/`covered_through` once two years are read
 is answered from the last step before it. `_refuse_missing_factor_sessions` carries the
 measured wrong answer.
 
+## Two datasets, one writer (`V2-P1-007`)
+
+`write_daily_panel()` is the first writer here that takes **two** datasets, and the reason is
+that they are not independent. `daily_basic` republishes `close`, so the two fetches one
+session already needs cross-check each other for free -- and a check that is optional is a
+check that gets skipped. Taking both makes agreement a precondition of storage: there is no
+supported way to write one of these partitions without the other having agreed with it.
+
+`write_daily_panel()` shares `write_adjustment_factors()`' sequence-of-batches shape, for the
+same arithmetic (one request is one session of the market, one partition is a year, so a year
+is ~244 fetches per dataset and `PanelStore.write_partition` has no append), and
+`write_stock_universe()`'s vet-everything-then-write shape, for the same reason (a guard that
+trips after the first partition has been replaced leaves the store in exactly the state the
+guard exists to prevent).
+
+### The session census here is not the factor series' census
+
+`_refuse_missing_price_sessions()` is `_refuse_missing_factor_sessions()`' homomorph and the
+two share their arithmetic through `_session_census()`, but they are load-bearing in different
+ways and the difference is the design, not an accident:
+
+- **The factor census pays for a waiver.** `adjustment_requirement()` waives `required_dates`
+  because compression destroys the census, so the write-time check is the *only* one, and its
+  residue -- a partition written before the check existed is never re-examined -- cannot be
+  closed from the read side.
+- **The price census does not.** A price partition is stored uncompressed, so its date census
+  survives into the catalog and `daily_requirement()` states the same expectation, derived from
+  the same calendar, on **every read**. A partition this process never wrote is still checked.
+- **What a hole costs differs.** A missing factor session is answered by `bisect` from an older
+  step -- a wrong number. A missing price session is answered by nothing: the cross section is
+  empty and `daily_bars_from_panel_rows` has nothing to interpolate from.
+
+Both censuses take the same two bounds (the year's own start; the day before the fetch, so the
+16:30 publication does not manufacture an intraday false alarm) and both refuse only the
+*missing* direction.
+
+### Why `panel_readiness_requirement()` is not reused for these two
+
+It clamps the required range at `as_of`'s calendar *date*, which is right for a dataset whose
+rows are dated at midnight and one session too generous for one that publishes at 16:30:
+at 10:00 on a session, `panel_readiness_requirement` would require that session's bars and
+report an invented `date_gap` on a panel that is completely up to date. `daily_requirement()`
+clamps at `_sessions_published_through()` instead, which reads the same
+`DAILY_AVAILABILITY_TIME` the provider dates `available_time` at.
+
 ## Deriving the partition year
 
 `year` remains a required keyword argument of `write_panel_batch()`. What has changed is that
@@ -241,6 +286,21 @@ from openalpha_cn.domain.adjustment import (
     FactorObservation,
     adjustment_histories_from_panel_rows,
     load_bearing_observations,
+)
+from openalpha_cn.domain.daily_prices import (
+    CLOSE_COLUMN,
+    DAILY_AVAILABILITY_TIME,
+    DAILY_BASIC_DATASET,
+    DAILY_BASIC_PANEL_COLUMNS,
+    DAILY_DATASET,
+    DAILY_PANEL_COLUMNS,
+    PRICE_DATE_COLUMN,
+    DailyBar,
+    DailyValuation,
+    PriceDataError,
+    close_disagreements,
+    daily_bars_from_panel_rows,
+    daily_valuations_from_panel_rows,
 )
 from openalpha_cn.domain.name_history import (
     NAME_HISTORY_PANEL_COLUMNS,
@@ -1192,29 +1252,36 @@ def _require_adjustment_batch(batch: ColumnarPanelBatch) -> None:
         raise PanelBatchError(f"expected the {ADJ_FACTOR_DATASET!r} dataset, got {batch.dataset!r}")
 
 
-def _adjustment_dates(values: tuple[object, ...]) -> tuple[date, ...]:
-    """Parse a `factor_date` column, naming a null or malformed entry rather than tripping.
+def _stored_dates(values: tuple[object, ...], column: str) -> tuple[date, ...]:
+    """Parse an ISO date column, naming a null or malformed entry rather than tripping.
 
     The symmetric half of `compress_adjustment_batch`'s null-factor guard. `str(None)` is
     `'None'`, so without this the null case reached `date.fromisoformat` and came back out as
     a bare `ValueError: Invalid isoformat string: 'None'` -- not a `PanelBatchError`, and so
     not caught by a caller who is catching the guard standing right next to it.
+
+    Parameterised by column name so the price datasets' `trade_date` and the factor series'
+    `factor_date` share one implementation; the wording stays the same for both because the
+    complaint is the same one.
     """
     parsed: list[date] = []
     for index, value in enumerate(values):
         if not isinstance(value, str):
             raise PanelBatchError(
-                f"{ADJUSTMENT_DATE_COLUMN} row {index} is "
+                f"{column} row {index} is "
                 f"{'null' if value is None else f'a {type(value).__name__}'}; a step function "
                 "has no value on a session it cannot name"
             )
         try:
             parsed.append(date.fromisoformat(value))
         except ValueError as error:
-            raise PanelBatchError(
-                f"{ADJUSTMENT_DATE_COLUMN} row {index} is not an ISO date: {value!r}"
-            ) from error
+            raise PanelBatchError(f"{column} row {index} is not an ISO date: {value!r}") from error
     return tuple(parsed)
+
+
+def _adjustment_dates(values: tuple[object, ...]) -> tuple[date, ...]:
+    """`_stored_dates` for the factor series' own date column."""
+    return _stored_dates(values, ADJUSTMENT_DATE_COLUMN)
 
 
 def _column_values(batch: ColumnarPanelBatch, name: str) -> tuple[object, ...]:
@@ -1282,19 +1349,14 @@ def _refuse_missing_factor_sessions(
     guard: a calendar that stops in June cannot testify about December.
     """
     _require_adjustment_batch(batch)
-    zone = _resolve_timezone(date_timezone)
-    opens_on = date(year, 1, 1)
-    closes_on = min(
-        date(year, 12, 31), batch.fetched_at.astimezone(zone).date() - timedelta(days=1)
+    census = _session_census(
+        batch, calendar, year, date_column=ADJUSTMENT_DATE_COLUMN, date_timezone=date_timezone
     )
-    if closes_on < opens_on:
+    if census is None:
         # The batch was fetched on 1 January of its own year, so no session in it had closed
         # before the fetch and there is nothing the calendar can require.
         return
-    observed = set(_adjustment_dates(_column_values(batch, ADJUSTMENT_DATE_COLUMN)))
-    missing = [
-        day for day in calendar.trading_days_between(opens_on, closes_on) if day not in observed
-    ]
+    missing, opens_on, closes_on = census
     if missing:
         raise PanelBatchError(
             f"{ADJ_FACTOR_DATASET} year={year} is missing {len(missing)} session(s) the "
@@ -1305,6 +1367,55 @@ def _refuse_missing_factor_sessions(
             "answered from the last step before it, which is the unadjusted number wearing an "
             "adjusted one's name. Fetch the missing sessions and write the year in one call"
         )
+
+
+def _session_census(
+    batch: ColumnarPanelBatch,
+    calendar: TradingCalendar,
+    year: int,
+    *,
+    date_column: str,
+    date_timezone: str,
+) -> tuple[list[date], date, date] | None:
+    """Which sessions the calendar reports open in `year` that `batch` does not carry.
+
+    The arithmetic behind both write-time censuses -- `adj_factor`'s and the price panel's --
+    extracted so the two cannot drift apart on the part that is easy to get wrong. The two
+    callers keep their own refusal messages, because *why* a missing session matters differs:
+    a factor hole answers later days from an older step, a price hole leaves a session with no
+    bars for the whole market.
+
+    Returns `None` when there is nothing the calendar can require: the batch was fetched on 1
+    January of its own year, so no session of it had closed before the fetch.
+
+    The **lower** bound is the year's own start, not the batch's first row -- a partition that
+    begins in March is exactly the failure this exists for, and clamping at its own first row
+    would define the hole out of existence. The **upper** bound is the day before the fetch, in
+    `date_timezone`: a session publishes at 16:30 local (`DAILY_AVAILABILITY_TIME`), so a fetch
+    earlier that same day cannot hold it and requiring it would be a false alarm on every
+    intraday run.
+
+    Only the *missing* direction is computed. A session the batch carries that the calendar
+    calls closed is left alone, because that is a real and harmless shape -- `000001.SZ` has
+    factor rows on 64 dates in 1991 that are outside the SZSE calendar entirely -- and an extra
+    observation can add information while it cannot remove any.
+
+    Raises `CalendarHorizonError` (through `trading_days_between`) when the calendar does not
+    reach across the year. That is the honest answer rather than a gap in the guard: a calendar
+    that stops in June cannot testify about December.
+    """
+    zone = _resolve_timezone(date_timezone)
+    opens_on = date(year, 1, 1)
+    closes_on = min(
+        date(year, 12, 31), batch.fetched_at.astimezone(zone).date() - timedelta(days=1)
+    )
+    if closes_on < opens_on:
+        return None
+    observed = set(_stored_dates(_column_values(batch, date_column), date_column))
+    missing = [
+        day for day in calendar.trading_days_between(opens_on, closes_on) if day not in observed
+    ]
+    return missing, opens_on, closes_on
 
 
 def _date_sample(days: Sequence[date]) -> str:
@@ -1474,6 +1585,408 @@ def load_adjustment_histories(
             )
         rows.extend(outcome.rows)
     return adjustment_histories_from_panel_rows(rows)
+
+
+def _refuse_missing_price_sessions(
+    batch: ColumnarPanelBatch,
+    calendar: TradingCalendar,
+    year: int,
+    *,
+    date_timezone: str,
+) -> None:
+    """Refuse a price year that is missing a session the calendar reports open.
+
+    `_refuse_missing_factor_sessions`' homomorph, and the three differences from it are the
+    point rather than incidental.
+
+    **It is not paying for a waiver.** `adjustment_requirement` waives `required_dates`,
+    because compression leaves the factor partition holding only load-bearing sessions -- so
+    that census is the *replacement* for a read-side check, and its own residue is that a
+    partition written before it existed is never re-examined. A price partition is stored
+    uncompressed, so its date census survives into the catalog and `daily_requirement` states
+    the same expectation on the read side, from the same calendar, on every read.
+
+    **It runs on two datasets before either is written.** `daily` and `daily_basic` are two
+    partitions of one set of sessions, and a `daily` year that is whole must not be stored
+    beside a `daily_basic` year that is not.
+
+    **What is missing costs something different.** A factor hole is answered by `bisect` from
+    the previous step -- a wrong number. A price hole is answered by nothing: the session
+    simply has no bars, and every cross section on it is empty. That is why the read side can
+    carry this one and could not carry the factor one.
+    """
+    census = _session_census(
+        batch, calendar, year, date_column=PRICE_DATE_COLUMN, date_timezone=date_timezone
+    )
+    if census is None:
+        return
+    missing, opens_on, closes_on = census
+    if missing:
+        raise PanelBatchError(
+            f"{batch.dataset} year={year} is missing {len(missing)} session(s) the "
+            f"{calendar.exchange} calendar reports open between {opens_on.isoformat()} and "
+            f"{closes_on.isoformat()}: {_date_sample(missing)}. A session with no rows is a "
+            "session on which every cross section is empty and every return that spans it is "
+            "computed from the wrong pair of closes. Fetch the missing sessions and write the "
+            "year in one call"
+        )
+
+
+def _close_index(batch: ColumnarPanelBatch) -> dict[tuple[str, date], float]:
+    """Index a price batch's `close` column by `(subject, trade_date)`.
+
+    Built from the columns directly rather than by constructing a `DailyBar` per row: a year of
+    the whole market is ~1.3e6 rows, and this runs once per ingested year. Two C-level column
+    reads and one `zip` is the same cost model `panel_coverage` states for its own census.
+    """
+    dates = _stored_dates(_column_values(batch, PRICE_DATE_COLUMN), PRICE_DATE_COLUMN)
+    closes = _column_values(batch, CLOSE_COLUMN)
+    index: dict[tuple[str, date], float] = {}
+    for subject, day, close in zip(batch.subjects, dates, closes, strict=True):
+        if type(close) is not float:
+            raise PanelBatchError(
+                f"{batch.dataset} {subject} on {day.isoformat()} has a "
+                f"{'null' if close is None else type(close).__name__} close; the two price "
+                "datasets cross-check each other on this column, so it cannot be missing"
+            )
+        index[(subject, day)] = close
+    return index
+
+
+def _refuse_close_disagreement(bars: ColumnarPanelBatch, fundamentals: ColumnarPanelBatch) -> None:
+    """Refuse a pair of price years whose `close` columns contradict each other.
+
+    `daily_basic` republishes `close`, so the two fetches one session already needs cross-check
+    each other with no extra request -- measured across five sessions from 2023-01-03 to
+    2026-08-07, zero disagreements in 24,188 shared rows. Making it a **write** guard rather
+    than a report is what stops a partition that contradicts its sibling from existing at all.
+
+    Direction is asymmetric and measured; see `domain/daily_prices.py::close_disagreements`.
+    """
+    findings = close_disagreements(_close_index(bars), _close_index(fundamentals))
+    if not findings:
+        return
+    first = findings[0]
+    detail = (
+        f"has a {DAILY_BASIC_DATASET} row and no {DAILY_DATASET} bar"
+        if first.bar_close is None
+        else f"closed at {first.bar_close!r} in {DAILY_DATASET} and "
+        f"{first.valuation_close!r} in {DAILY_BASIC_DATASET}"
+    )
+    raise PanelBatchError(
+        f"{len(findings)} row(s) disagree between {DAILY_DATASET} and {DAILY_BASIC_DATASET}; "
+        f"{first.ts_code} on {first.trade_date.isoformat()} {detail}. The two endpoints publish "
+        "the same close for the same session, so a difference is a partial or mismatched fetch "
+        "rather than news, and storing it would leave two partitions that answer differently"
+    )
+
+
+def write_daily_panel(
+    store: PanelStore,
+    *,
+    bars: Sequence[ColumnarPanelBatch],
+    fundamentals: Sequence[ColumnarPanelBatch],
+    calendar: TradingCalendar,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> tuple[PartitionRef, PartitionRef]:
+    """Write one year of `daily` and `daily_basic` cross sections as two partitions (`V2-P1-007`).
+
+    ## Why one writer takes both datasets
+
+    They are not independent. `daily_basic` republishes `close`, which makes the two fetches a
+    session already needs into a cross-check of each other -- and a check that is optional is a
+    check that gets skipped. Taking both here makes it a precondition of storage instead: there
+    is no supported way to write one of these partitions without the other having agreed with
+    it. The cost is that a caller cannot ingest `daily` alone, and that is the intended
+    trade: the two datasets are fetched for the same session by the same loop anyway.
+
+    ## Sequences, for `write_adjustment_factors`' reason
+
+    A request is one trading day of the whole market (~5,400 rows against a measured 6,000-row
+    cap) and a partition is a calendar year (~1.3e6 rows). So a year is ~244 fetches per
+    dataset, `PanelStore.write_partition` replaces a partition whole and has no append, and
+    writing the fetches one at a time would leave each year holding only its last session.
+
+    ## Four guards, and every one of them runs before anything is written
+
+    1. `panel_partition_year` refuses a set of batches that straddles two years rather than
+       picking one, on each side independently, and the two sides must agree on the year.
+    2. `_refuse_missing_price_sessions` refuses a year that is missing a session the calendar
+       reports open -- on **both** datasets, so a whole `daily` year cannot be stored beside a
+       holed `daily_basic` one.
+    3. `_refuse_close_disagreement` refuses two years that contradict each other.
+    4. `_refuse_to_drop_stored_subjects` refuses a rewrite that would remove a security the
+       stored partition already had -- the same guard the registry and the factor series use.
+
+    Vetting everything first is `write_stock_universe`'s shape and is here for its reason: a
+    guard that trips after the first partition has been replaced leaves a store whose two price
+    datasets disagree about which sessions exist, which is precisely the state guard 3 exists to
+    prevent. It is not full atomicity -- `PanelStore` has no multi-partition transaction, so an
+    interruption or a full disk between the two writes can still leave one written and the other
+    not. What is bought is that the failure modes this module can *predict* never fire mid-write,
+    and the operator's remedy (re-run the year) always applies to an unchanged store. The
+    residual half-written case is visible: the second dataset's partition is absent, which
+    `assess_readiness` reports as `partition_missing` rather than trusting.
+    """
+    merged_bars = merge_panel_batches(bars)
+    merged_fundamentals = merge_panel_batches(fundamentals)
+    if merged_bars.dataset != DAILY_DATASET:
+        raise PanelBatchError(
+            f"expected the {DAILY_DATASET!r} dataset, got {merged_bars.dataset!r}"
+        )
+    if merged_fundamentals.dataset != DAILY_BASIC_DATASET:
+        raise PanelBatchError(
+            f"expected the {DAILY_BASIC_DATASET!r} dataset, got {merged_fundamentals.dataset!r}"
+        )
+    year = panel_partition_year(merged_bars, date_timezone=date_timezone)
+    fundamentals_year = panel_partition_year(merged_fundamentals, date_timezone=date_timezone)
+    if fundamentals_year != year:
+        raise PanelBatchError(
+            f"the {DAILY_DATASET} batches are year {year} and the {DAILY_BASIC_DATASET} ones "
+            f"are year {fundamentals_year}; the two partitions of one set of sessions have to "
+            "be written together or they will disagree about which sessions exist"
+        )
+    _refuse_missing_price_sessions(merged_bars, calendar, year, date_timezone=date_timezone)
+    _refuse_missing_price_sessions(merged_fundamentals, calendar, year, date_timezone=date_timezone)
+    _refuse_close_disagreement(merged_bars, merged_fundamentals)
+    remedy = (
+        "A year's partition is replaced whole, so every session of the year has to arrive in "
+        "one call; a narrower cross section is a partial fetch rather than news"
+    )
+    for merged in (merged_bars, merged_fundamentals):
+        _refuse_to_drop_stored_subjects(store, merged, year, remedy=remedy)
+    return (
+        write_panel_batch(store, merged_bars, year=year, date_timezone=date_timezone),
+        write_panel_batch(store, merged_fundamentals, year=year, date_timezone=date_timezone),
+    )
+
+
+def _sessions_published_through(as_of: datetime, zone: ZoneInfo) -> date:
+    """The newest calendar day whose session had published at `as_of`.
+
+    A session's data becomes knowable at `DAILY_AVAILABILITY_TIME` (16:30 Asia/Shanghai) --
+    the same constant `providers/tushare.py::_daily_close_timeline` dates `available_time` at,
+    imported rather than restated so the two cannot drift. Before that instant the current day
+    has not published, so requiring it would report an invented `date_gap` on every intraday
+    read; after it, omitting it would stop requiring the newest session.
+
+    This is why `panel_readiness_requirement` is not reused for the price datasets: it clamps
+    the required range at `as_of`'s calendar *date*, which is right for a dataset whose rows are
+    dated at midnight and one session too generous for one whose rows publish in the afternoon.
+    """
+    local = as_of.astimezone(zone)
+    if local.time() >= DAILY_AVAILABILITY_TIME:
+        return local.date()
+    return local.date() - timedelta(days=1)
+
+
+def _price_requirement(
+    dataset: str,
+    fields: tuple[str, ...],
+    calendar: TradingCalendar,
+    *,
+    years: Sequence[int],
+    as_of: datetime,
+    max_staleness: timedelta | None,
+    date_timezone: str,
+) -> ReadinessRequirement:
+    zone = _resolve_timezone(date_timezone)
+    published_through = _sessions_published_through(as_of, zone)
+    required: list[date] = []
+    for year in sorted(set(years)):
+        start = date(year, 1, 1)
+        if start > published_through:
+            raise TradingCalendarError(
+                f"year {year} has not begun at as_of {as_of.isoformat()} ({date_timezone}), so "
+                f"no {dataset} session in it can be required yet"
+            )
+        required.extend(
+            calendar.trading_days_between(start, min(date(year, 12, 31), published_through))
+        )
+    return ReadinessRequirement(
+        dataset=dataset,
+        as_of=as_of,
+        years=tuple(sorted(set(years))),
+        required_dates=tuple(required),
+        required_subjects=None,
+        required_fields=fields,
+        max_staleness=max_staleness,
+    )
+
+
+def daily_requirement(
+    calendar: TradingCalendar,
+    *,
+    years: Sequence[int],
+    as_of: datetime,
+    max_staleness: timedelta | None,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> ReadinessRequirement:
+    """What the price panel must satisfy before bars may be read from it.
+
+    **`required_dates` is not waived**, and that is the substantive difference from
+    `adjustment_requirement`. A factor partition is compressed to its load-bearing sessions, so
+    a calendar-derived expectation would report a permanent `date_gap` on a partition that is
+    complete by construction; a price partition is stored uncompressed, so the expectation is
+    exactly right and every read re-checks it -- including a read of a partition written before
+    the write-time census existed, which is the residue `adjustment_requirement` has to name and
+    this one does not.
+
+    Requiring the calendar as an argument rather than defaulting it to `None` is deliberate:
+    an optional date check is one that is off by default, and hole detection is the whole
+    reason `V2-P1-004` was sequenced before this issue.
+
+    **`required_subjects` is waived** because naming the securities would be circular -- the
+    cross section is what the read is for. `priced_cross_section` is where a listed security
+    with no bar becomes visible, because that is where the universe is known.
+
+    **`max_staleness` is not waived by default and has no default value**: the caller states a
+    bound or states `None` on the record. A price panel whose newest session is a month old has
+    missed a month of the market, so leaving it to a default would be choosing silence.
+
+    Raises `TradingCalendarError` for a year that has not begun at `as_of`, and (through
+    `trading_days_between`) for any requested year the calendar does not cover -- a requirement
+    built from a calendar that knows half the year would silently under-require the other half.
+    """
+    return _price_requirement(
+        DAILY_DATASET,
+        DAILY_PANEL_COLUMNS,
+        calendar,
+        years=years,
+        as_of=as_of,
+        max_staleness=max_staleness,
+        date_timezone=date_timezone,
+    )
+
+
+def daily_basic_requirement(
+    calendar: TradingCalendar,
+    *,
+    years: Sequence[int],
+    as_of: datetime,
+    max_staleness: timedelta | None,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> ReadinessRequirement:
+    """What the valuation panel must satisfy before market caps may be read from it.
+
+    The same shape and the same waivers as `daily_requirement`: the two datasets cover the same
+    sessions by construction, and `write_daily_panel` refuses to store them otherwise.
+    """
+    return _price_requirement(
+        DAILY_BASIC_DATASET,
+        DAILY_BASIC_PANEL_COLUMNS,
+        calendar,
+        years=years,
+        as_of=as_of,
+        max_staleness=max_staleness,
+        date_timezone=date_timezone,
+    )
+
+
+def _read_price_session(
+    store: PanelStore,
+    requirement: ReadinessRequirement,
+    columns: tuple[str, ...],
+    *,
+    day: date,
+    calendar: TradingCalendar,
+    as_of: datetime,
+) -> tuple[tuple[object, ...], ...]:
+    """One session's rows from the year partition, or a refusal.
+
+    A day the exchange was shut is refused **before** the partition is touched, rather than
+    answered with an empty cross section: a closed session has no bars, and `{}` is what a
+    caller would also get from a partition that was never written. `calendar.is_trading_day`
+    raises beyond its own horizon, so a day the calendar cannot speak for is not answered
+    either.
+    """
+    if not calendar.is_trading_day(day):
+        raise PriceDataError(
+            f"{day.isoformat()} is not an open session on the {calendar.exchange} calendar, so "
+            f"there are no {requirement.dataset} rows to read for it"
+        )
+    outcome = store.read_if_ready(
+        requirement,
+        year=day.year,
+        columns=columns,
+        filters={PRICE_DATE_COLUMN: day.isoformat()},
+    )
+    if outcome.is_blocked:
+        raise PanelStorageError(
+            f"{requirement.dataset} cannot be read at {as_of.isoformat()}: "
+            f"{[issue.code for issue in outcome.readiness.issues]}; "
+            f"{'; '.join(issue.detail for issue in outcome.readiness.issues)}"
+        )
+    return outcome.rows
+
+
+def load_daily_bars(
+    store: PanelStore,
+    *,
+    day: date,
+    calendar: TradingCalendar,
+    as_of: datetime,
+    max_staleness: timedelta | None,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> dict[str, DailyBar]:
+    """Read one session's bars back as `DailyBar`s, or refuse to.
+
+    Fail-closed three times over. A partition that is missing, damaged, unprofiled, stale, or
+    missing a session the calendar reports open is blocked by `read_if_ready()` and reported by
+    its structured issue codes. A day the exchange was shut is refused before any read. And a
+    partition that passes both and carries a malformed row -- a null close, two bars for one
+    security, two sessions in one filter -- is refused afterwards by
+    `daily_bars_from_panel_rows`.
+
+    One session per call, because that is the unit every downstream question is asked in: a
+    cross section joins against one day's factors and one day's registry membership. Readiness
+    is assessed once per call, which matches `load_trading_calendar`'s shape; a caller walking a
+    year re-evaluates the catalog 244 times, and on catalog metadata rather than Parquet that is
+    milliseconds. Making it one assessment plus N reads is a change to `read_if_ready`'s
+    contract, shared with every other dataset, and belongs with whichever task first has a load
+    that hurts.
+    """
+    requirement = daily_requirement(
+        calendar,
+        years=(day.year,),
+        as_of=as_of,
+        max_staleness=max_staleness,
+        date_timezone=date_timezone,
+    )
+    rows = _read_price_session(
+        store, requirement, DAILY_PANEL_COLUMNS, day=day, calendar=calendar, as_of=as_of
+    )
+    return daily_bars_from_panel_rows(rows)
+
+
+def load_daily_valuations(
+    store: PanelStore,
+    *,
+    day: date,
+    calendar: TradingCalendar,
+    as_of: datetime,
+    max_staleness: timedelta | None,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> dict[str, DailyValuation]:
+    """Read one session's market caps, turnover and valuation ratios back, or refuse to.
+
+    `load_daily_bars`' twin, with one honest asymmetry: the result may hold **fewer** securities
+    than the bars do, and that is data rather than a fault. `daily_basic` omits Beijing-board
+    names on historical sessions -- 60 of 3,843 on 2020-03-02, all `.BJ` -- so a caller joining
+    the two must expect a `total_mv` to be absent for a security that traded. The reverse never
+    happened on any session probed and is refused at write time.
+    """
+    requirement = daily_basic_requirement(
+        calendar,
+        years=(day.year,),
+        as_of=as_of,
+        max_staleness=max_staleness,
+        date_timezone=date_timezone,
+    )
+    rows = _read_price_session(
+        store, requirement, DAILY_BASIC_PANEL_COLUMNS, day=day, calendar=calendar, as_of=as_of
+    )
+    return daily_valuations_from_panel_rows(rows)
 
 
 def panel_readiness_requirement(

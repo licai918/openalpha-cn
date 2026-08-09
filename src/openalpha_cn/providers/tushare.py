@@ -11,11 +11,21 @@ makes those four things data instead of code, so adding a dataset is a new row i
 
 `fetch()` produces the row-wise `ProviderBatch` the evidence plane speaks. `fetch_panel()`
 produces the columnar `ColumnarPanelBatch` ADR-0002's panel plane speaks, and is available
-for exactly those datasets whose descriptor declares a `panel_columns` projection --
-`trade_cal`, `stock_basic` and `namechange` today. A dataset without one is refused by name
-rather than silently handed an empty batch, because "this dataset is not wired to the panel
-plane" and "this dataset has no rows" are different facts. Both methods decode the same
-response through the same clock table; only the assembly differs.
+for exactly those datasets whose descriptor declares a `panel_columns` projection -- which,
+since `V2-P1-007`, is every row of the table. A dataset without one is refused by name rather
+than silently handed an empty batch, because "this dataset is not wired to the panel plane" and
+"this dataset has no rows" are different facts. Both methods decode the same response through
+the same clock table; only the assembly differs.
+
+`daily` is the one dataset that is served on **both** planes and stored on only one, and that
+is deliberate. Unlike `stock_basic` and `namechange` below, a daily bar has a single honest
+`available_time`, so `fetch()` can hand back the response row verbatim and the record stays
+re-provable. What moves the dataset onto the panel plane is scale -- ADR-0002 sizes the price
+panel at ~1.35e7 rows per field, and an evidence record costs a pydantic rebuild and three
+SHA-256 digests each -- and scale is a reason to add a second output shape, not to make the
+first one refuse. `evidence/builder.py` still declines `kind="daily"`, and correctly: an
+`EvidenceSnapshot` is a normalised citation (a limit-up, a disclosure, a theme) and a price bar
+is none of those.
 
 ## Some datasets serve only the panel plane (`V2-P1-005`)
 
@@ -108,6 +118,32 @@ expectation would be wrong in the direction that manufactures false alarms. The 
 still earns its place one layer up, where the direction can be chosen:
 `panel_ingest.write_adjustment_factors` refuses a *partition* that is missing a session the
 calendar reports open, and tolerates one that carries extra days.
+
+### `daily` and `daily_basic` take the cap and decline the flag (`V2-P1-007`)
+
+`requires_truncation_flag` was stated per descriptor precisely so this issue would have to
+decide it rather than inherit it, and the decision is **no**, with a reason rather than a
+shrug. The flag governs only the case where `has_more` is *absent*; a flag that is present is
+checked for every dataset, and both price endpoints carry a measured 6,000-row cap (a bare
+`daily(ts_code=000001.SZ)` and a bare `daily_basic(ts_code=000001.SZ)` each return exactly
+6,000 rows with `has_more=True`). `adj_factor` demands the flag as well because a truncated
+factor series is silently *wrong* -- the step function answers the missing decade from an older
+level -- while a truncated `daily` response is *short*: the bar is simply absent and nothing
+downstream interpolates it. The residue is stated rather than argued away: a response that both
+omits `has_more` and comes in under 6,000 rows is accepted, and
+`tests/contract/providers/test_tushare_daily.py` pins both halves of that.
+
+## The panel projection is a schema contract of its own (`V2-P1-007`)
+
+`_check_panel_projection` refuses a response whose rows lack a column the descriptor projects.
+It exists because the two planes have genuinely different schema contracts and one field cannot
+carry both: `required_response_fields` is the *evidence* plane's, and `daily`'s has to stay at
+its default `(trade_date,)` because `fetch()` is a payload-passthrough whose oldest caller
+drives it with a four-column response. The panel path reads nine columns for `daily` and
+seventeen for `daily_basic`, and without this check a drifted response surfaced as
+`Tushare response could not be decoded: 'pre_close'` -- a bare `KeyError` reason for a named
+schema change. The check runs against the **expanded** rows rather than the response's own
+`fields`, because `stock_basic` projects two columns its response does not carry.
 """
 
 import json
@@ -128,6 +164,17 @@ from openalpha_cn.domain.adjustment import (
     ADJ_FACTOR_DATASET,
     ADJUSTMENT_DATE_COLUMN,
     ADJUSTMENT_FACTOR_COLUMN,
+)
+from openalpha_cn.domain.daily_prices import (
+    DAILY_AVAILABILITY_TIME,
+    DAILY_BASIC_DATA_COLUMNS,
+    DAILY_BASIC_DATASET,
+    DAILY_BASIC_NULLABLE_COLUMNS,
+    DAILY_DATA_COLUMNS,
+    DAILY_DATASET,
+    DAILY_PRICE_COLUMNS,
+    PRICE_DATE_COLUMN,
+    SESSION_CLOSE_TIME,
 )
 from openalpha_cn.domain.name_history import (
     NAME_ANNOUNCEMENT_COLUMN,
@@ -584,6 +631,64 @@ def _adjustment_factor(value: object) -> object:
     )
 
 
+def _finite_number(value: object) -> object:
+    """Parse a numeric cell that may legitimately be zero or negative into a ``float``.
+
+    `pct_chg` is negative on roughly half the market every session, and `vol`/`amount` are
+    counts rather than prices, so this is the parse for everything `_positive_price` is too
+    strict for. An ``int`` is widened for the reason `_adjustment_factor` widens one -- JSON has
+    one number type and ``PanelColumn`` refuses an ``int`` in a ``float`` column -- and
+    ``type(value) is int`` refuses ``bool`` along the way, because ``type(True)`` is ``bool``.
+    """
+    if (type(value) is float or type(value) is int) and isfinite(value):
+        return float(value)
+    raise ValueError(f"must be a finite number, got {type(value).__name__} {value!r}")
+
+
+def _positive_price(value: object) -> object:
+    """Parse a price cell into a finite **positive** ``float``.
+
+    Five real sessions spanning 2023-01-03..2026-08-07 (24,188 bars) carried no null and no
+    non-positive value in ``open``/``high``/``low``/``close``/``pre_close``, so a zero or a
+    ``None`` there is a fault rather than sparse data -- and ``pre_close`` divides into every
+    published return, so a zero would surface as a ``ZeroDivisionError`` several layers from
+    the row that caused it.
+    """
+    if (type(value) is float or type(value) is int) and isfinite(value) and value > 0:
+        return float(value)
+    raise ValueError(f"must be a finite positive number, got {type(value).__name__} {value!r}")
+
+
+def _named_parser(column: str, parse: Callable[[object], object]) -> Callable[[object], object]:
+    """Wrap a parse so its failure names the column it was applied to.
+
+    The price and valuation projections run the same two or three rules over 26 columns
+    between them, and a bare "must be a finite number" leaves a reader of a 5,338-row cross
+    section with no way to tell which one. Naming the column at the point of failure is what
+    `_adjustment_factor` gets for free by having exactly one.
+    """
+
+    def _parse(value: object) -> object:
+        try:
+            return parse(value)
+        except ValueError as error:
+            raise ValueError(f"{column} {error}") from error
+
+    return _parse
+
+
+def _optional_number(value: object) -> object:
+    """Same as `_finite_number`, but a missing value stays missing.
+
+    For the eight `daily_basic` ratios that are genuinely absent for part of the market: 1,102
+    of 2024-06-28's 5,338 names had no `pe`, 1,840 no `dv_ttm`. See
+    `domain/daily_prices.py::DAILY_BASIC_NULLABLE_COLUMNS`.
+    """
+    if value is None:
+        return None
+    return _finite_number(value)
+
+
 def _optional_calendar_date_text(value: object) -> object:
     """Same as `_calendar_date_text`, but a missing value stays missing.
 
@@ -617,19 +722,72 @@ TUSHARE_NAMECHANGE_ROW_CAP: Final[int] = 10000
 10,000 rows with `has_more=True`, which is also why `domain/name_history.py` assembles the
 corpus from 37 announcement-year windows instead."""
 
+
+def _price_panel_column(name: str) -> TusharePanelColumn:
+    """One `daily` / `daily_basic` column, with the parse its nullability and sign demand.
+
+    Built rather than written out 26 times: the three rules (`trade_date` is a date, a price is
+    positive, a ratio may be absent) are decided by the column's name and stating them per
+    column would be 26 opportunities to state one of them wrongly. The column name is also the
+    response field name for both datasets -- unlike `adj_factor`, which renames `trade_date` to
+    `factor_date` because two datasets storing a column of that name would mean two different
+    things by it. Here they mean the same thing.
+    """
+    if name == PRICE_DATE_COLUMN:
+        return TusharePanelColumn(
+            name=name, kind="string", source_field=name, parse=_calendar_date_text
+        )
+    if name in DAILY_PRICE_COLUMNS:
+        parse = _positive_price
+    elif name in DAILY_BASIC_NULLABLE_COLUMNS:
+        parse = _optional_number
+    else:
+        parse = _finite_number
+    return TusharePanelColumn(
+        name=name, kind="float", source_field=name, parse=_named_parser(name, parse)
+    )
+
+
+DAILY_BASIC_FIELD_NAMES: Final[tuple[str, ...]] = ("ts_code", *DAILY_BASIC_DATA_COLUMNS)
+"""Every column `daily_basic`'s descriptor reads, which is every column it serves.
+
+Pinned as `required_response_fields` because -- unlike `daily`, whose evidence-plane contract
+predates this issue and is driven in tests by a four-column response -- nothing has ever
+fetched this dataset with a narrower shape, so the schema check can be the full one.
+"""
+
 TUSHARE_DATASETS: tuple[TushareDatasetDescriptor, ...] = (
     TushareDatasetDescriptor(
-        dataset="daily",
-        kind="daily",
+        dataset=DAILY_DATASET,
+        kind=DAILY_DATASET,
         subject_field="ts_code",
-        date_field="trade_date",
+        date_field=PRICE_DATE_COLUMN,
         clock=ClockStrategy.daily_close,
+        # One trading day of the whole market, the same builder `adj_factor` uses, and for the
+        # same arithmetic: 5,338 rows on 2024-06-28 and 5,535 on 2026-08-07 against a
+        # 6,000-row cap, while one security's own history is 6,000-and-truncated. `subjects`
+        # is the escape route when the market outgrows the cap -- it splits the session
+        # instead of losing rows.
         params_builder=_trade_date_params,
         source_uri_template="tushare://{dataset}/{subject}/{date}",
-        # Measured, and carried now rather than with `V2-P1-007`: the cap is a property of
-        # the endpoint, not of the task that first stores its rows, and a 6,000-row `daily`
-        # response is already reachable through `fetch()` today.
+        # Measured, and carried since `V2-P1-006`: the cap is a property of the endpoint, not
+        # of the task that first stores its rows.
         max_rows_per_response=TUSHARE_PRICE_ROW_CAP,
+        # Deliberately *not* demanded, unlike `adj_factor`'s. This flag governs only the case
+        # where `has_more` is **absent** -- a flag that is present is checked for every
+        # dataset -- and the two datasets differ in what a dropped row costs. A truncated
+        # factor series is silently *wrong*: the step function answers the missing days from an
+        # older level. A truncated price series is *short*: the bar is simply absent and
+        # nothing interpolates it. The residue is stated rather than claimed away, and pinned
+        # in `tests/contract/providers/test_tushare_daily.py`: a response that both omits the
+        # flag and comes in under 6,000 rows is accepted.
+        requires_truncation_flag=False,
+        # `required_response_fields` stays at its default `(trade_date,)` and cannot be
+        # widened here: `fetch()` is a payload-passthrough contract whose oldest test drives
+        # this dataset with a four-column response, so the evidence path has to stay tolerant
+        # of a narrow one. The panel path is checked instead, against the columns it actually
+        # projects -- see `_check_panel_projection`.
+        panel_columns=tuple(_price_panel_column(name) for name in DAILY_DATA_COLUMNS),
     ),
     TushareDatasetDescriptor(
         dataset=TRADING_CALENDAR_DATASET,
@@ -804,6 +962,29 @@ TUSHARE_DATASETS: tuple[TushareDatasetDescriptor, ...] = (
             ),
         ),
     ),
+    TushareDatasetDescriptor(
+        dataset=DAILY_BASIC_DATASET,
+        kind=DAILY_BASIC_DATASET,
+        subject_field="ts_code",
+        date_field=PRICE_DATE_COLUMN,
+        clock=ClockStrategy.daily_close,
+        # The same cross-section builder `daily` and `adj_factor` use: measured at 5,338 rows
+        # on 2024-06-28 and 5,535 on 2026-08-07, and the two price datasets are fetched for the
+        # same session so that their `close` columns cross-check each other for free.
+        params_builder=_trade_date_params,
+        # `""` asks for the endpoint's defaults, which are exactly the 18 columns below --
+        # measured, not assumed. `required_response_fields` then pins every one of them, which
+        # `daily` cannot do; see that descriptor.
+        response_fields="",
+        required_response_fields=DAILY_BASIC_FIELD_NAMES,
+        source_uri_template="tushare://{dataset}/{subject}/{date}",
+        # Measured on 2026-08-08: a bare `daily_basic(ts_code=000001.SZ)` returns exactly
+        # 6,000 rows with `has_more=True`, the same ceiling `daily` and `adj_factor` hit.
+        max_rows_per_response=TUSHARE_PRICE_ROW_CAP,
+        # Not demanded, for the reason `daily`'s comment gives.
+        requires_truncation_flag=False,
+        panel_columns=tuple(_price_panel_column(name) for name in DAILY_BASIC_DATA_COLUMNS),
+    ),
 )
 
 
@@ -823,10 +1004,17 @@ def _parse_tushare_date(value: object) -> date:
 
 
 def _daily_close_timeline(row: dict[str, Any], date_field: str, ingested_at: datetime) -> Timeline:
-    """15:00 close / 16:30 availability, both Asia/Shanghai, for trading-day datasets."""
+    """15:00 close / 16:30 availability, both Asia/Shanghai, for trading-day datasets.
+
+    The two instants come from `domain/daily_prices.py` rather than being literals here,
+    because `panel_ingest.daily_requirement` derives *which sessions a partition must hold*
+    from the same 16:30. Two independent literals would let those drift, and the drift is
+    silent in both directions: a later provider time makes every intraday read demand a session
+    the write could not have held, an earlier one stops requiring the newest session.
+    """
     trading_day = _parse_tushare_date(row[date_field])
-    event_time = datetime.combine(trading_day, time(15, 0), tzinfo=_CHINA_TZ)
-    available_time = datetime.combine(trading_day, time(16, 30), tzinfo=_CHINA_TZ)
+    event_time = datetime.combine(trading_day, SESSION_CLOSE_TIME, tzinfo=_CHINA_TZ)
+    available_time = datetime.combine(trading_day, DAILY_AVAILABILITY_TIME, tzinfo=_CHINA_TZ)
     return Timeline(
         event_time=event_time,
         available_time=available_time,
@@ -1152,6 +1340,40 @@ def _expand_panel_rows(
     return [expanded for row in rows for expanded in expand(row)]
 
 
+def _check_panel_projection(
+    descriptor: TushareDatasetDescriptor, rows: list[dict[str, Any]], provider_id: str
+) -> None:
+    """Refuse a response whose rows are missing a column this descriptor projects.
+
+    `_response_rows` checks `checked_response_fields`, which is the *evidence* plane's schema
+    contract and is deliberately narrow for `daily` -- `fetch()` is a payload-passthrough whose
+    oldest caller drives it with four columns. The panel projection reads nine, and without
+    this a drifted response surfaced as `Tushare response could not be decoded: 'pre_close'`, a
+    bare `KeyError` reason for what is a named schema change.
+
+    Run against the **expanded** rows rather than the response's `fields`, because a descriptor
+    with a `panel_rows` expansion projects columns the response does not carry:
+    `stock_basic`'s `lifecycle_event` and `lifecycle_date` are synthesised by
+    `_stock_lifecycle_panel_rows`. One row is enough -- every row of one response is built from
+    the same `fields` list, and an expansion produces the same keys for every branch.
+    """
+    if not rows:
+        return
+    present = rows[0].keys()
+    for spec in descriptor.panel_columns:
+        if spec.source_field not in present:
+            raise ProviderFailure(
+                provider_id=provider_id,
+                category="upstream",
+                message=(
+                    f"the panel projection for {descriptor.dataset} needs a "
+                    f"{spec.source_field!r} column and the response carries "
+                    f"{sorted(present)}"
+                ),
+                retryable=False,
+            )
+
+
 def _panel_no_data_reason(
     descriptor: TushareDatasetDescriptor, request: ProviderRequest, served: int
 ) -> str:
@@ -1458,6 +1680,7 @@ class TushareProvider:
         items = _expand_panel_rows(
             descriptor, _response_rows(descriptor, response, self.metadata.provider_id)
         )
+        _check_panel_projection(descriptor, items, self.metadata.provider_id)
         ingested_at = self._clock()
         knowable_by = min(request.as_of, ingested_at)
         kept: list[tuple[date, dict[str, Any], Timeline]] = []

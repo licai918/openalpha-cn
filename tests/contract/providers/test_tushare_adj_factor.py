@@ -185,11 +185,12 @@ def test_the_truncation_failure_is_not_retryable_and_is_categorised_upstream(
 def test_every_descriptor_states_whether_its_response_cap_was_measured() -> None:
     """The cap is per endpoint, not global, and guessing one is worse than declaring none.
 
-    Measured on 2026-08-08: `adj_factor` and `daily` cap at 6,000; `namechange` at 10,000;
-    `trade_cal` returned all 13,162 published SSE rows in one response with `has_more=False`,
-    so applying 6,000 to it would refuse a complete answer. `stock_basic` returned its whole
-    5,878-row registry with `has_more=False`, which places its cap somewhere above that
-    without establishing where -- so it declares none and is guarded by the flag alone.
+    Measured on 2026-08-08: `adj_factor`, `daily` and `daily_basic` cap at 6,000; `namechange`
+    at 10,000; `trade_cal` returned all 13,162 published SSE rows in one response with
+    `has_more=False`, so applying 6,000 to it would refuse a complete answer. `stock_basic`
+    returned its whole 5,878-row registry with `has_more=False`, which places its cap somewhere
+    above that without establishing where -- so it declares none and is guarded by the flag
+    alone.
     """
     caps = {entry.dataset: entry.max_rows_per_response for entry in TUSHARE_DATASETS}
     assert caps == {
@@ -198,6 +199,7 @@ def test_every_descriptor_states_whether_its_response_cap_was_measured() -> None
         "stock_basic": None,
         "namechange": 10000,
         "adj_factor": 6000,
+        "daily_basic": 6000,
     }
 
 

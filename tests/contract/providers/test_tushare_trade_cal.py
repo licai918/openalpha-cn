@@ -40,8 +40,10 @@ from openalpha_cn.providers.base import (
 )
 from openalpha_cn.providers.tushare import (
     _CHINA_TZ,
+    _TUSHARE_DATASETS_BY_NAME,
     TUSHARE_DATASETS,
     ClockStrategy,
+    TushareDatasetDescriptor,
     TushareProvider,
     _calendar_publication_timeline,
 )
@@ -490,13 +492,30 @@ def test_rows_filtered_out_by_the_clock_report_a_different_no_data_reason(
 
 
 def test_a_dataset_with_no_panel_projection_is_refused_by_fetch_panel(
-    fake_tushare_transport,
+    fake_tushare_transport, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The stand-in was `adj_factor` until `V2-P1-006` gave it a projection, then `daily` until
+    `V2-P1-007` gave it one. Every row of `TUSHARE_DATASETS` now declares one, so the subject
+    has to be a descriptor this test builds: the refusal is a property of
+    `TushareDatasetDescriptor`, whose `panel_columns` defaults to `()`, and the next dataset
+    added is exactly when it has to still hold.
+    """
+    projectionless = TushareDatasetDescriptor(
+        dataset="probe_only",
+        kind="probe_only",
+        subject_field="ts_code",
+        date_field="trade_date",
+        clock=ClockStrategy.daily_close,
+        params_builder=lambda request: {},
+        source_uri_template="tushare://{dataset}/{subject}/{date}",
+    )
+    assert projectionless.panel_columns == ()
+    monkeypatch.setitem(_TUSHARE_DATASETS_BY_NAME, "probe_only", projectionless)
     provider = _provider(datetime(2026, 8, 8, tzinfo=UTC), fake_tushare_transport, [])
 
     with pytest.raises(ProviderFailure) as captured:
         provider.fetch_panel(
-            ProviderRequest(dataset="daily", as_of=datetime(2026, 8, 8, tzinfo=UTC))
+            ProviderRequest(dataset="probe_only", as_of=datetime(2026, 8, 8, tzinfo=UTC))
         )
 
     assert captured.value.category == "configuration"
