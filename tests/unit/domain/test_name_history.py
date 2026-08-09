@@ -12,17 +12,20 @@ contract with one clock has to pick, and either pick is wrong somewhere: keying 
 renames the security seven months early, keying on `start_date` alone makes the announcement
 invisible to a point-in-time reader who did in fact have it.
 
-The third thing pinned here is the **ST prefix grammar**. "Is it ST" is "what was it called
-that day", and the obvious `name.startswith(("ST", "*ST"))` is wrong on real history: the
-2005-2007 share-reform era prefixed a `G` (reform done) or `S` (reform pending) *in front of*
-the ST marker. Across the full 14,166-row corpus the strict rule marks 2,827 records and the
-naive one marks 2,592 -- **235 records** where a genuinely special-treated name reads as
-ordinary. The naive rule has zero false positives, which is exactly why nobody notices.
+The third thing pinned here is the **ST prefix grammar**, and it is wrong on real history in
+two independent ways. The 2005-2007 share-reform era prefixed a `G` (reform done) or `S`
+(reform pending) *in front of* the ST marker: across the full 14,166-row corpus the naive
+`name.startswith(("ST", "*ST"))` marks 2,592 rows and the reform-aware rule 2,827 -- **235
+rows** where a genuinely special-treated name reads as ordinary. And pre-2020 ChiNext wore
+退市风险警示 as a **bare `*`** with no `ST` behind it, which is two more rows (`*欣泰`,
+`*金亚`; strict rule 2,829) and is what `CHINEXT_RISK_WARNING` and `GOLDEN_ARMOUR` exist for.
+The naive rule has zero false positives in either direction, which is exactly why nobody
+notices.
 """
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from itertools import pairwise
 
 import pytest
@@ -76,6 +79,46 @@ MARKER_ROWS = (
     ("688555.SH", "退市泽达", "20230608", None, "20230601", "退市整理期"),
     ("990018.SH", "G上港", "20050822", "20061008", "20050817", "其他"),
 )
+
+# The two securities whose 退市风险警示 was worn as a bare `*`, complete histories. Before
+# 2020 创业板 ran no ST regime, so the warning had no `ST` behind it -- and these four names
+# are the corpus's only ones that begin with `*` and are not `*ST`. A grammar that tested the
+# literal `*ST` answered `RiskWarning.none` for both windows.
+CHINEXT_RISK_WARNING = (
+    ("300372.SZ", "欣泰退", "20170717", None, "20170623", "退市整理期"),
+    ("300372.SZ", "欣泰电气", "20160823", "20170716", "20160819", "撤销高风险警示"),
+    ("300372.SZ", "*欣泰", "20160712", "20160822", "20160708", "高风险警示"),
+    ("300372.SZ", "欣泰电气", "20140127", "20160711", "20140127", "其他"),
+)
+
+GOLDEN_ARMOUR = (
+    ("300028.SZ", "金亚退", "20200618", None, "20200617", "退市整理期"),
+    ("300028.SZ", "金亚科技", "20180808", "20200617", "20180808", "撤销高风险警示"),
+    ("300028.SZ", "*金亚", "20180627", "20180807", "20180626", "高风险警示"),
+    ("300028.SZ", "金亚科技", "20091030", "20180626", "20091030", "其他"),
+)
+
+IMPOSING_REASONS = frozenset(
+    {
+        "ST",
+        "*ST",
+        "从ST变为*ST",
+        "撤消*ST并实行ST",
+        "叠加ST",
+        "叠加*ST",
+        "PT",
+        "高风险警示",
+    }
+)
+"""The `change_reason` values that *impose* special treatment, out of the corpus's fifteen.
+
+Eight of them, and the eighth is the one this set used to be missing. `高风险警示` is
+ChiNext's pre-2020 spelling of 退市风险警示, it occurs on exactly two rows, and both of those
+rows carry a bare-`*` name -- so a witness scan that omitted the reason could never reach the
+two names the grammar got wrong. The five revoking reasons (`撤销ST`, `撤销*ST`, `撤销PT`,
+`撤销高风险警示`, `撤销叠加*ST`) are deliberately **not** here: they land on ordinary names,
+which is the point of a revocation.
+"""
 
 
 def _iso(value: str) -> date:
@@ -219,7 +262,7 @@ def test_the_change_reason_column_is_an_independent_witness_that_never_disagrees
     found zero rows where a reason imposing special treatment lands on a name the grammar
     calls ordinary. The reason cannot replace the name -- a `撤销PT` transition lands on
     `ST吉轻工`, still marked -- which is why the state is read from the name."""
-    imposing = {"ST", "*ST", "从ST变为*ST", "撤消*ST并实行ST", "叠加ST", "叠加*ST", "PT"}
+    imposing = IMPOSING_REASONS
     rows = (*CENTURY_STAR, *GOLDEN_FIELD, *MARKER_ROWS)
     checked = 0
     for _code, name, _start, _end, _ann, reason in rows:
@@ -229,6 +272,69 @@ def test_the_change_reason_column_is_an_independent_witness_that_never_disagrees
     # A structural count, so a fixture edit that stops exercising the witness fails here
     # rather than passing vacuously.
     assert checked == 9
+
+
+def test_the_pre_2020_chinext_warning_is_a_bare_star_and_reads_as_the_same_state() -> None:
+    """创业板 had no ST regime before 2020: 退市风险警示 was a bare `*` prefix with nothing
+    behind it. Testing the literal `*ST` answered `RiskWarning.none` for `*欣泰` and `*金亚`,
+    the only two names in all 14,166 corpus rows that start with `*` and are not `*ST`. It is
+    the same warning the main board spells `*ST`, so it is the same member rather than a sixth
+    one -- an ST filter that merged them would have been right, and one keyed on the string
+    would not."""
+    assert risk_warning_of("*欣泰") is RiskWarning.star_st
+    assert risk_warning_of("*金亚") is RiskWarning.star_st
+    # The revocation lands on an ordinary name, which is exactly why the state is read from
+    # the name and not from the reason.
+    assert risk_warning_of("欣泰电气") is RiskWarning.none
+    assert risk_warning_of("金亚科技") is RiskWarning.none
+    # Widening the test to the marker does not widen it to anything else.
+    assert risk_warning_of("*") is RiskWarning.star_st
+    assert risk_warning_of("平安银行") is RiskWarning.none
+    assert risk_warning_of("S深发展A") is RiskWarning.none
+
+
+def test_the_witness_scan_reaches_the_chinext_rows_it_used_to_step_over() -> None:
+    """The same cross-check `test_the_change_reason_column_is_...` runs, over the two rows
+    whose reason the `imposing` set omitted. Both are `高风险警示`, and with that reason absent
+    the scan could not reach either of the names the grammar answered `none` for -- an
+    assertion that was true because it never met a counterexample."""
+    rows = (*CHINEXT_RISK_WARNING, *GOLDEN_ARMOUR)
+    checked = 0
+    for _code, name, _start, _end, _ann, reason in rows:
+        if reason in IMPOSING_REASONS:
+            assert risk_warning_of(name) is not RiskWarning.none, (name, reason)
+            checked += 1
+    assert checked == 2
+    assert "高风险警示" in IMPOSING_REASONS
+    # And the revoking half is not in the set, because it lands on ordinary names.
+    revoked = [row for row in rows if row[5] == "撤销高风险警示"]
+    assert len(revoked) == 2
+    for row in revoked:
+        assert row[5] not in IMPOSING_REASONS
+        assert risk_warning_of(row[1]) is RiskWarning.none
+
+
+@pytest.mark.parametrize(
+    ("rows", "warned", "cleared"),
+    [
+        (CHINEXT_RISK_WARNING, (date(2016, 7, 12), date(2016, 8, 22)), date(2016, 8, 23)),
+        (GOLDEN_ARMOUR, (date(2018, 6, 27), date(2018, 8, 7)), date(2018, 8, 8)),
+    ],
+)
+def test_the_bare_star_window_is_answered_by_date_not_only_by_name(
+    rows: tuple, warned: tuple[date, date], cleared: date
+) -> None:
+    """The module's headline contract -- subject plus day -> is it under special treatment --
+    over the two real windows it used to get wrong. Both securities were terminated afterwards
+    (`欣泰退` 2017-08-28, `金亚退` 2020-08-03), so these are the windows an ST filter most
+    needed."""
+    history = _history(rows)
+    for day in warned:
+        assert history.risk_warning_on(day) is RiskWarning.star_st, day
+    assert history.risk_warning_on(cleared) is RiskWarning.none
+    assert history.risk_warning_on(warned[0] - timedelta(days=1)) is RiskWarning.none
+    # ... and the delisting-period name that follows is still classified, not swept to `none`.
+    assert history.risk_warning_on(date(2026, 1, 1)) is RiskWarning.delisting_process
 
 
 def test_a_risk_warning_is_not_a_truth_value() -> None:

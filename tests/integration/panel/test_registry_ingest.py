@@ -29,10 +29,15 @@ from openalpha_cn.domain.stock_universe import (
     STOCK_BASIC_DATASET,
     ListingStatus,
     StockUniverseError,
+    UniverseHorizonError,
     build_stock_universe,
     listed_universe_by_trading_day,
 )
-from openalpha_cn.domain.trading_calendar import CalendarDay, build_trading_calendar
+from openalpha_cn.domain.trading_calendar import (
+    TRADING_CALENDAR_DATASET,
+    CalendarDay,
+    build_trading_calendar,
+)
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_ingest import (
     load_name_histories,
@@ -42,7 +47,9 @@ from openalpha_cn.panel_ingest import (
     split_panel_batch_by_year,
     stock_universe_requirement,
     write_name_history,
+    write_panel_batch,
     write_stock_universe,
+    write_trading_calendar,
 )
 from openalpha_cn.providers.base import ProviderRequest
 from openalpha_cn.providers.tushare import TushareProvider
@@ -144,6 +151,35 @@ def _namechange_batch(as_of: datetime, items: list[list[Any]]):
         clock=lambda: FETCHED_AT,
     )
     return provider.fetch_panel(ProviderRequest(dataset=NAMECHANGE_DATASET, as_of=as_of))
+
+
+# Two real 2024 SSE/SZSE sessions, enough to make one calendar partition per exchange. The
+# calendar is here only because the overwrite guard is shared with it -- see the refusal
+# tests at the bottom of this file.
+CALENDAR_FIELDS = ["exchange", "cal_date", "is_open", "pretrade_date"]
+
+
+def _calendar_batch(exchange: str):
+    provider = TushareProvider(
+        token="secret-token",
+        transport=_Transport(
+            _response(
+                CALENDAR_FIELDS,
+                [
+                    [exchange, "20240104", 1, "20240103"],
+                    [exchange, "20240103", 1, "20240102"],
+                ],
+            )
+        ),
+        clock=lambda: FETCHED_AT,
+    )
+    return provider.fetch_panel(
+        ProviderRequest(
+            dataset=TRADING_CALENDAR_DATASET,
+            as_of=datetime(2024, 6, 1, 12, 0, tzinfo=UTC),
+            subjects=(exchange,),
+        )
+    )
 
 
 def _store(tmp_path: Path) -> PanelStore:
@@ -403,6 +439,58 @@ def test_every_row_of_a_split_batch_lands_in_exactly_one_partition(tmp_path: Pat
     assert rebuilt == original
 
 
+def test_a_split_carries_all_four_clocks_across_row_by_row(tmp_path: Path) -> None:
+    """The split rebuilds every column, the four clock columns included, and nothing else in
+    the suite reads a clock off a split part. Swapping `ingested_time` for `event_time` inside
+    `_select_rows` left the whole suite green, which meant the timeline columns were being
+    carried on trust rather than on a check.
+
+    The clocks are pinned by value, not just for internal consistency: `stock_basic` dates a
+    lifecycle row at its own event's Shanghai midnight, so `event_time == available_time ==
+    revision_time` and differ per row, while `ingested_time` is the one fetch instant on every
+    row of every partition. A swap in either direction breaks one of those two shapes.
+    """
+    batch = _registry_batch(FETCHED_AT)
+    original = {
+        subject_event: clocks
+        for subject_event, clocks in zip(
+            zip(
+                batch.subjects,
+                next(c.values for c in batch.columns if c.name == "lifecycle_event"),
+                strict=True,
+            ),
+            zip(
+                batch.timeline.event_time,
+                batch.timeline.available_time,
+                batch.timeline.ingested_time,
+                batch.timeline.revision_time,
+                strict=True,
+            ),
+            strict=True,
+        )
+    }
+    assert len(original) == batch.row_count
+
+    seen = 0
+    for _year, yearly in split_panel_batch_by_year(batch):
+        events = next(c.values for c in yearly.columns if c.name == "lifecycle_event")
+        for index, key in enumerate(zip(yearly.subjects, events, strict=True)):
+            assert (
+                yearly.timeline.event_time[index],
+                yearly.timeline.available_time[index],
+                yearly.timeline.ingested_time[index],
+                yearly.timeline.revision_time[index],
+            ) == original[key], key
+            seen += 1
+        assert set(yearly.timeline.ingested_time) == {FETCHED_AT}
+        assert yearly.timeline.event_time == yearly.timeline.available_time
+        assert yearly.timeline.event_time == yearly.timeline.revision_time
+    assert seen == batch.row_count
+    # Every row's own event instant is distinct from the fetch instant, so a column that
+    # substituted one for the other could not pass the comparison above by coincidence.
+    assert FETCHED_AT not in set(batch.timeline.event_time)
+
+
 def test_the_namechange_partition_is_keyed_on_the_announcement_year(tmp_path: Path) -> None:
     """`000001.SZ`'s 2012 rename was announced 2012-01-20 and took effect 2012-08-02, and the
     2007 one was announced 2007-06-14 and took effect 2007-06-20. Both land in their
@@ -506,10 +594,70 @@ def test_the_calendars_exchange_guard_still_words_its_refusal_the_same_way(
     tmp_path: Path,
 ) -> None:
     """The overwrite guard is shared between the calendar and the registry now; this pins
-    that generalising it did not change what the calendar's refusal says."""
-    from openalpha_cn.panel_ingest import _refuse_to_drop_stored_subjects
+    that generalising it did not change what the calendar's refusal says.
 
-    assert callable(_refuse_to_drop_stored_subjects)
+    It pins the **whole** message, remedy included. The earlier version of this test asserted
+    `callable(_refuse_to_drop_stored_subjects)`, which is true of any function and was true of
+    the guard before, during and after the generalisation -- replacing the calendar's entire
+    remedy sentence with `"MUTATED REMEDY TEXT"` left the full suite green. The remedy is the
+    only part of the message the shared guard does not compute, so it is the only part a
+    caller can get wrong, and it is exactly what was unpinned.
+    """
+    store = _store(tmp_path)
+    write_trading_calendar(store, _calendar_batch("SSE"))
+
+    with pytest.raises(PanelBatchError) as captured:
+        write_trading_calendar(store, _calendar_batch("SZSE"))
+
+    assert str(captured.value) == (
+        "trade_cal year=2024 already holds ['SSE'] and this batch carries ['SZSE']; writing "
+        "it would drop ['SSE']. A partition is replaced whole and its key has no exchange "
+        "dimension, so two exchanges have to arrive in one batch or not at all"
+    )
+    # The SSE calendar it would have destroyed is still there.
+    assert store.read_coverage(TRADING_CALENDAR_DATASET, 2024) is not None
+
+
+def test_the_registry_guard_words_its_own_remedy_and_not_the_calendars(tmp_path: Path) -> None:
+    """The other caller of the same guard, pinned the same way. The shared half is identical
+    byte for byte; the remedy is not, and it is the half that tells an operator what to do."""
+    store = _seed_registry(tmp_path)
+    fewer = [row for row in REGISTRY_ITEMS if row[0] != "000005.SZ"]
+
+    with pytest.raises(PanelBatchError) as captured:
+        write_stock_universe(store, _registry_batch(FETCHED_AT, fewer))
+
+    assert str(captured.value) == (
+        "stock_basic year=1990 already holds ['000004.SZ', '000005.SZ'] and this batch "
+        "carries ['000004.SZ']; writing it would drop ['000005.SZ']. The registry only grows "
+        "within a past year, so a smaller batch is a partial or filtered fetch rather than "
+        "news; re-fetch the whole registry with list_status='L,D'"
+    )
+
+
+def test_a_refused_registry_write_leaves_the_store_exactly_as_it_found_it(
+    tmp_path: Path,
+) -> None:
+    """The guard vets every year before any year is written.
+
+    Interleaving them made the refusal itself destructive: this batch drops `689009.SH` from
+    2020 *and* introduces a security whose lifecycle year (2018) the store has no partition
+    for, so a vet-then-write-per-year loop creates the 2018 partition and only then refuses --
+    leaving a store whose lifecycle years have a hole in them, which is precisely the state
+    `load_stock_universe` cannot distinguish from a quiet year.
+    """
+    store = _seed_registry(tmp_path)
+    before = store.registered_years(STOCK_BASIC_DATASET)
+    assert 2018 not in before
+
+    mutated = [row for row in REGISTRY_ITEMS if row[0] != "689009.SH"]
+    mutated.append(["300750.SZ", "宁德时代", "SZSE", "创业板", "L", "20180611", None])
+
+    with pytest.raises(PanelBatchError, match=r"would drop \['689009.SH'\]"):
+        write_stock_universe(store, _registry_batch(FETCHED_AT, mutated))
+
+    assert store.registered_years(STOCK_BASIC_DATASET) == before
+    assert store.read_coverage(STOCK_BASIC_DATASET, 2018) is None
 
 
 def test_writing_the_wrong_dataset_into_the_registry_writer_is_refused(
@@ -613,6 +761,117 @@ def test_a_partial_read_of_the_registry_is_refused_rather_than_silently_smaller(
     trimmed = [row for row in rows if row[:2] != ("000018.SZ", "listing")]
     with pytest.raises(StockUniverseError, match="has a delisting row and no listing row"):
         stock_universe_from_panel_rows(trimmed, snapshot_date=date(2026, 8, 8))
+
+
+# --- a lifecycle year that was never ingested ----------------------------------------------
+
+
+def _seed_registry_without(tmp_path: Path, omitted: int) -> PanelStore:
+    """Seed every lifecycle year except one, the way an interrupted backfill leaves a store."""
+    store = _store(tmp_path)
+    for year, yearly in split_panel_batch_by_year(_registry_batch(FETCHED_AT)):
+        if year == omitted:
+            continue
+        write_panel_batch(store, yearly, year=year)
+    return store
+
+
+def test_a_lifecycle_year_that_was_never_ingested_reports_the_dead_as_still_listed(
+    tmp_path: Path,
+) -> None:
+    """The fail-open this read has by default, reproduced rather than argued about.
+
+    A year with no partition is indistinguishable from a year in which nothing listed and
+    nothing died, so a read of `registered_years()` -- the natural argument, and the one the
+    docstring recommends -- asks for exactly what the store happens to hold and can never
+    notice that 2024 is absent. The result is not a smaller universe, which would at least be
+    conservative: it is `000005.SZ`, terminated 2024-04-26, reported as listed today. On the
+    real registry 2024 carries 52 terminations.
+    """
+    store = _seed_registry_without(tmp_path, 2024)
+    registered = store.registered_years(STOCK_BASIC_DATASET)
+    assert 2024 not in registered
+
+    universe = load_stock_universe(store, years=registered, as_of=FETCHED_AT, max_staleness=None)
+
+    assert universe.completeness().snapshot_date == date(2026, 8, 8)
+    assert universe.status_on("000005.SZ", date(2024, 6, 1)) is ListingStatus.listed
+    assert universe.is_listed("000005.SZ", date(2026, 8, 7)) is True
+    assert "000005.SZ" in universe.listed_on(date(2026, 8, 7))
+
+
+def test_a_coverage_demand_turns_that_silence_into_a_refusal(tmp_path: Path) -> None:
+    """`require_years_through` is how a caller says which window its question needs. The same
+    store, the same years, one extra argument -- and the read refuses instead of answering."""
+    store = _seed_registry_without(tmp_path, 2024)
+    registered = store.registered_years(STOCK_BASIC_DATASET)
+
+    with pytest.raises(PanelBatchError, match="does not read") as captured:
+        load_stock_universe(
+            store,
+            years=registered,
+            as_of=FETCHED_AT,
+            max_staleness=None,
+            require_years_through=2026,
+        )
+
+    assert "every lifecycle year from 1990 through 2026" in str(captured.value)
+    assert "still listed with nothing to signal it" in str(captured.value)
+
+
+def test_a_coverage_demand_names_the_years_the_read_stops_short_of(tmp_path: Path) -> None:
+    """A demand small enough to print in full, so the message itself is pinned. 2019 and 2020
+    are not quiet years in this fixture -- 688001.SH lists in one and 000018.SZ dies in the
+    other -- which is what makes stopping at 2016 a hole rather than a shorter history."""
+    store = _seed_registry(tmp_path)
+
+    with pytest.raises(PanelBatchError) as captured:
+        load_stock_universe(
+            store,
+            years=(2014, 2015, 2016),
+            as_of=FETCHED_AT,
+            max_staleness=None,
+            require_years_through=2020,
+        )
+
+    assert "from 2014 through 2020" in str(captured.value)
+    assert "does not read [2017, 2018, 2019, 2020]" in str(captured.value)
+
+
+def test_a_satisfied_coverage_demand_is_invisible(tmp_path: Path) -> None:
+    """The demand is a precondition, not a filter: when it holds, the universe is the one the
+    same read produces without it."""
+    store = _seed_registry(tmp_path)
+    plain = load_stock_universe(store, years=(2016,), as_of=FETCHED_AT, max_staleness=None)
+    demanded = load_stock_universe(
+        store,
+        years=(2016,),
+        as_of=FETCHED_AT,
+        max_staleness=None,
+        require_years_through=2016,
+    )
+
+    assert demanded == plain
+    assert demanded.listed_on(date(2016, 12, 31)) == ("601127.SH",)
+
+
+def test_a_day_before_the_first_year_read_is_refused_rather_than_answered_empty(
+    tmp_path: Path,
+) -> None:
+    """The other half of the same fail-open, on the query side.
+
+    A universe read from 2016 onwards holds no security that listed earlier, so `listed_on` for
+    a 2015 day would answer `()` -- the same value an honest empty market gives. It is a short
+    read, not an empty market, and `years_read` is what lets the difference be seen. A universe
+    built straight from `SecurityLifecycle` values has no window to check and keeps the empty
+    answer.
+    """
+    store = _seed_registry(tmp_path)
+    universe = load_stock_universe(store, years=(2016,), as_of=FETCHED_AT, max_staleness=None)
+
+    with pytest.raises(UniverseHorizonError, match="the first lifecycle year this universe"):
+        universe.listed_on(date(2015, 12, 31))
+    assert universe.listed_on(date(2016, 6, 15)) == ("601127.SH",)
 
 
 # --- error-message shape -------------------------------------------------------------------

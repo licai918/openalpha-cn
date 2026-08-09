@@ -525,6 +525,18 @@ def _subject_sample(subjects: Sequence[str]) -> str:
     return f"{ordered[:_SUBJECT_SAMPLE]} and {len(ordered) - _SUBJECT_SAMPLE} more"
 
 
+def _year_sample(years: Sequence[int]) -> str:
+    """Render a year set for an error message, capped the same way `_subject_sample` is.
+
+    A full-range coverage demand against a sparsely ingested store can name three decades of
+    missing years, and a refusal nobody reads is a refusal that does not work.
+    """
+    ordered = sorted(years)
+    if len(ordered) <= _SUBJECT_SAMPLE:
+        return str(ordered)
+    return f"{ordered[:_SUBJECT_SAMPLE]} and {len(ordered) - _SUBJECT_SAMPLE} more"
+
+
 def _refuse_to_drop_stored_subjects(
     store: PanelStore, batch: ColumnarPanelBatch, year: int, *, remedy: str
 ) -> None:
@@ -660,13 +672,38 @@ def write_stock_universe(
     correctly. That is also why the check is not extended to "every year the store holds":
     a batch legitimately fetched at an earlier `as_of` has no rows for later years, and
     refusing it would block replaying a past `as_of` over a backfilled store.
+
+    ## Every year is vetted before any year is written
+
+    The guard runs over the whole split first, and only then does anything reach the store.
+    Interleaving them -- vet 1990, write 1990, vet 1991, ... -- was the earlier shape, and it
+    made the refusal itself destructive: a batch that trips the guard on its 30th year would
+    already have replaced 29 partitions, leaving a store whose lifecycle years stop in the
+    middle. That is precisely the state `load_stock_universe` cannot see (a year that was never
+    written is indistinguishable from a year in which nothing happened), so a guard that
+    produced it was manufacturing the fail-open it exists to prevent. The same reasoning covers
+    an interruption or a full disk between two years; those can still happen, and
+    `require_years_through` on the read side is what turns the result into a refusal rather
+    than a smaller universe.
+
+    Two passes is not full atomicity -- `PanelStore` has no multi-partition transaction, and
+    giving it one is a change to its write contract rather than to this function. What it does
+    buy is that the one failure mode this module *can* predict never fires mid-write, and the
+    operator's remedy (re-fetch the whole registry) is always applied to an unchanged store.
+
+    An upstream correction to a `list_date` is the case that legitimately trips the guard: the
+    security moves out of its old lifecycle year, so that year's batch is one subject short and
+    the whole write is refused. That is the right direction -- a silent move would delete a
+    listing row -- and the escape route is to drop the affected partition and re-write, not a
+    flag on this function. A `force` argument here would be a switch that turns the guard off
+    exactly when it has something to say.
     """
     if batch.dataset != STOCK_BASIC_DATASET:
         raise PanelBatchError(
             f"expected the {STOCK_BASIC_DATASET!r} dataset, got {batch.dataset!r}"
         )
-    written: list[PartitionRef] = []
-    for year, yearly in split_panel_batch_by_year(batch, date_timezone=date_timezone):
+    by_year = split_panel_batch_by_year(batch, date_timezone=date_timezone)
+    for year, yearly in by_year:
         _refuse_to_drop_stored_subjects(
             store,
             yearly,
@@ -677,8 +714,10 @@ def write_stock_universe(
                 "list_status='L,D'"
             ),
         )
-        written.append(write_panel_batch(store, yearly, year=year, date_timezone=date_timezone))
-    return tuple(written)
+    return tuple(
+        write_panel_batch(store, yearly, year=year, date_timezone=date_timezone)
+        for year, yearly in by_year
+    )
 
 
 def stock_universe_requirement(
@@ -722,6 +761,7 @@ def load_stock_universe(
     years: Sequence[int],
     as_of: datetime,
     max_staleness: timedelta | None,
+    require_years_through: int | None = None,
     date_timezone: str = DEFAULT_DATE_TIMEZONE,
 ) -> StockUniverse:
     """Read stored lifecycle years back as a `StockUniverse`, or refuse to.
@@ -755,18 +795,49 @@ def load_stock_universe(
     that is a read which would drop that year's listings and terminations and produce a
     smaller universe that looks entirely plausible.
 
-    What this cannot see is a year that was **never ingested**, because a year with no
-    partition is indistinguishable from a year in which nothing listed and nothing died --
-    both are simply absent, and requiring a partition per calendar year would make a sparse
-    but correct history unloadable. Naming a year in `years` is how a caller asserts it should
-    exist (readiness then blocks it as `partition_missing`), and
+    What this cannot see *by itself* is a year that was **never ingested**, because a year with
+    no partition is indistinguishable from a year in which nothing listed and nothing died --
+    both are simply absent, and requiring a partition per calendar year unconditionally would
+    make a sparse but correct history unloadable. Naming a year in `years` is how a caller
+    asserts it should exist (readiness then blocks it as `partition_missing`), and
     `UniverseCompleteness.years_read` is what a report shows so the window is visible rather
-    than assumed. `store.registered_years(STOCK_BASIC_DATASET)` is the natural argument.
+    than assumed. `store.registered_years(STOCK_BASIC_DATASET)` is the natural argument -- and
+    it is also the trap, because passing it makes the request exactly equal to whatever the
+    store happens to hold, so a missing year can never be noticed.
+
+    `require_years_through` is the switch that turns that fail-open into a refusal. Give it the
+    last year the universe must cover and the read demands a *contiguous* window from
+    `years[0]` through that year: a caller that reads `registered_years()` and gets
+    `(1990, 1991, 1992, 2020)` while asking for coverage through 2026 is refused here rather
+    than being handed a universe in which every security that died in 2024 is still listed. It
+    is opt-in because only the caller knows which window its question needs, and the demand is
+    a real one on this dataset rather than a theoretical one: a live probe of the full registry
+    on 2026-08-08 found lifecycle events in **every** year from 1990 to 2026 -- 6,217 rows over
+    37 years, the thinnest being 2013's eight -- so a gap in a full-range read is a gap in the
+    ingest, not a quiet year. On a store whose ingest is complete the contiguous demand costs
+    nothing; on one whose ingest is not, it is the difference between a refusal and a
+    reconstruction that reports the dead as listed.
 
     Starting the range after the first listing is not refused either, for the same reason, and
     what catches it in practice is the orphan-delisting rule in
     `stock_universe_from_panel_rows`: a security that listed in 1991 and died in 2020 has no
-    listing row inside 2015..2020, so that read raises rather than inventing one.
+    listing row inside 2015..2020, so that read raises rather than inventing one. What the
+    orphan rule does not catch -- a security that listed before the window and never died -- is
+    caught on the query side instead: `StockUniverse.listed_on` refuses a day earlier than the
+    first year read, because a read that never saw those partitions cannot answer "nobody was
+    listed" for them.
+
+    ## Cost, stated rather than discovered
+
+    Readiness is assessed once per requested year, because `read_if_ready()` vets the dataset
+    and reads one partition. `PanelStore.assess_readiness` evaluates the whole requirement each
+    time, so a full-history read re-evaluates all 37 years' catalog rows 37 times. That is the
+    same shape `load_trading_calendar` has, where it is invisible because a calendar load spans
+    a handful of years; here it is 37, and on the fixtures and the real catalog it is still
+    catalog metadata rather than Parquet, so it is milliseconds and not the reason a load is
+    slow. Making it one assessment plus N reads is a change to `read_if_ready`'s contract --
+    `V2-P1-003`'s readiness surface, shared with every other dataset -- and belongs with
+    whichever task first has a load that hurts, not with this one.
     """
     requested = tuple(sorted(set(years)))
     if not requested:
@@ -774,6 +845,19 @@ def load_stock_universe(
             "load_stock_universe needs at least one lifecycle year; a read of no years would "
             "produce an empty registry that answers 'nothing was listed' to every day"
         )
+    if require_years_through is not None:
+        read = set(requested)
+        absent = [
+            year for year in range(requested[0], require_years_through + 1) if year not in read
+        ]
+        if absent:
+            raise PanelBatchError(
+                f"this read of {STOCK_BASIC_DATASET} was asked to cover every lifecycle year "
+                f"from {requested[0]} through {require_years_through} and does not read "
+                f"{_year_sample(absent)}; a lifecycle year that is never read is a year whose "
+                "terminations are missing, and the universe reports those securities as still "
+                "listed with nothing to signal it"
+            )
     registered = set(store.registered_years(STOCK_BASIC_DATASET)) - set(requested)
     skipped = sorted(year for year in registered if requested[0] < year < requested[-1])
     if skipped:

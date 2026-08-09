@@ -323,6 +323,57 @@ def test_the_ingest_clock_is_raised_rather_than_the_availability_clock_lowered()
     )
 
 
+@pytest.mark.parametrize(
+    "as_of",
+    [
+        datetime(2026, 12, 31, 12, 0, tzinfo=UTC),
+        datetime(2099, 1, 1, 12, 0, tzinfo=UTC),
+    ],
+)
+def test_a_raised_ingest_clock_never_survives_the_filter_however_late_the_as_of_is(
+    as_of: datetime, fake_tushare_transport
+) -> None:
+    """The raise above exists only so the row can be represented long enough to be discarded.
+
+    `ProviderRequest` accepts any `as_of`, including one past the fetch instant, and dating a
+    batch at the end of the calendar year is a shape this repository's own fixtures use
+    (`tests/integration/panel/test_registry_ingest.py::_seed_namechange`). Filtering on
+    `as_of` alone let the 2026-08-11 announcement through on both of these, carrying an
+    `ingested_time` two days after the clock that fetched it. The bound is
+    `min(as_of, ingested_at)`, so it is dropped instead -- and dropping is the honest answer,
+    because by its own clock the row was not knowable when the fetch ran.
+    """
+    fetch_clock = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
+    provider, _ = _provider(
+        fetch_clock, fake_tushare_transport, _response(NAMECHANGE_FIELDS, [FUTURE_ANNOUNCEMENT])
+    )
+    batch = provider.fetch_panel(ProviderRequest(dataset=NAMECHANGE_DATASET, as_of=as_of))
+
+    assert batch.status == "no_data"
+    assert batch.no_data_reason is not None
+    assert "none of which was yet knowable" in batch.no_data_reason
+    assert "or at the instant of the fetch" in batch.no_data_reason
+
+
+def test_a_late_as_of_still_keeps_every_row_that_was_knowable_when_the_fetch_ran(
+    fake_tushare_transport,
+) -> None:
+    """The other side of the same bound: the drop is `available_time > ingested_at`, not
+    "the `as_of` is in the future", so an ordinary batch fetched with a year-end `as_of`
+    keeps every row and stores the real fetch instant on all of them."""
+    fetch_clock = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
+    as_of = datetime(2026, 12, 31, 12, 0, tzinfo=UTC)
+    provider, _ = _provider(
+        fetch_clock, fake_tushare_transport, _response(NAMECHANGE_FIELDS, PING_AN_ITEMS)
+    )
+    batch = provider.fetch_panel(ProviderRequest(dataset=NAMECHANGE_DATASET, as_of=as_of))
+
+    assert batch.status == "success"
+    assert len(batch.subjects) == len(PING_AN_ITEMS)
+    assert set(batch.timeline.ingested_time) == {fetch_clock}
+    assert max(batch.timeline.available_time) <= fetch_clock
+
+
 # --- neither dataset is served on the evidence plane --------------------------------------
 
 

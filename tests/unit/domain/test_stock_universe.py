@@ -15,12 +15,18 @@ with real rows.
 
 The second property is the **delisting boundary**, and it is measured rather than assumed:
 `delist_date` is the first day the security is *gone*, not its last session. Tushare's own
-`daily` endpoint was checked for seven delisted names spanning 2014-2026 (`000018.SZ`
-delisted 2020-01-07, `000038.SZ` 2023-07-12, `600087.SH` 2014-06-05, `920305.BJ` 2026-07-30,
-`002898.SZ` 2026-07-17, `000004.SZ` 2026-07-14, `002808.SZ` 2026-07-14) and in every case the
-last bar is the previous session and **zero** bars fall on or after `delist_date`. So
-membership is `listed_on <= day < delisted_on`, and a contract that used `<=` would put a
+`daily` endpoint was checked against a random sample of 40 of the 339 delisted securities plus
+15 named cases picked to break it (absorption mergers, code migrations, the PT era, the
+share-reform B-share codes), and **zero** bars fall on or after `delist_date` in any of them.
+So membership is `listed_on <= day < delisted_on`, and a contract that used `<=` would put a
 security in the pool on a day it demonstrably did not trade.
+
+What that does *not* establish -- and what an earlier version of this docstring asserted from a
+sample of seven post-2014 退市整理期 cases -- is that the last bar is the *previous session*.
+In the random 40 only 13 are; `600286.SH` stopped trading 260 sessions before its termination,
+`000024.SZ` (in the fixture below, delisted 2015-12-30) 15 sessions before, and `T600018.SH`
+has no daily bars at all. The gap is a suspension, which this dataset does not model; only the
+exclusive bound is claimed here, and only the exclusive bound is what the contract needs.
 """
 
 from __future__ import annotations
@@ -174,6 +180,25 @@ def test_a_day_before_the_first_listing_is_answered_rather_than_refused() -> Non
     universe = _universe()
     assert universe.listed_on(date(1985, 1, 1)) == ()
     assert universe.status_on("000001.SZ", date(1985, 1, 1)) is ListingStatus.not_yet_listed
+
+
+def test_the_same_day_is_refused_once_the_universe_knows_which_years_it_read() -> None:
+    """The empty answer above is only honest when nothing was missed, and `years_read` is what
+    tells the two apart. A universe assembled from the 2000-onwards partitions holds no
+    security that listed in 1999, so `()` for a 1999 day is a short read wearing the shape of
+    an empty market. Built directly from lifecycles there is no window and the answer stands
+    -- which is the test directly above this one."""
+    windowed = build_stock_universe(
+        snapshot_date=date(2026, 8, 8),
+        securities=_universe().securities,
+        years_read=(2000, 2001),
+    )
+
+    assert windowed.completeness().years_read == (2000, 2001)
+    with pytest.raises(UniverseHorizonError, match="the first lifecycle year this universe"):
+        windowed.listed_on(date(1999, 12, 31))
+    # The upper bound is untouched, and the day the window opens is answered.
+    assert windowed.listed_on(date(2000, 1, 1)) == _universe().listed_on(date(2000, 1, 1))
 
 
 def test_an_unknown_ts_code_is_refused_rather_than_reported_as_not_yet_listed() -> None:

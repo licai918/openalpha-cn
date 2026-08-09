@@ -718,12 +718,19 @@ def _calendar_static_timeline(
 
     Raising ``ingested_time`` to the availability instant overstates only the one clock no
     point-in-time filter consults (``is_visible_at`` reads ``available_time``, and
-    ``PartitionCoverage`` summarises event, availability and revision). It is still an
-    overstatement and is named here rather than hidden: the row is dropped by the
-    point-in-time filter immediately afterwards for every request whose ``as_of`` does not run
-    ahead of its own clock, so the raised value reaches a stored partition only for a caller
-    who has arranged for it to. ``tests/contract/providers/test_tushare_registry_datasets.py``
-    pins both branches.
+    ``PartitionCoverage`` summarises event, availability and revision). That is why the repair
+    is on this side. It is still an overstatement, so it is not allowed to survive: the raise
+    exists **only so the row can be represented long enough to be discarded**.
+    ``TushareProvider._decode_panel_rows`` bounds its point-in-time filter at
+    ``min(as_of, ingested_at)``, so any row whose availability runs past the fetch instant is
+    dropped there, and the raised clock never reaches a stored partition -- not for an
+    ``as_of`` in the future, not for one a caller set to the end of the current year, not at
+    all. An earlier version of this docstring said the raised value "reaches a stored
+    partition only for a caller who has arranged for it to", which described a filter bounded
+    at ``as_of`` alone; ``ProviderRequest`` accepts any ``as_of``, and dating the fetch at the
+    end of the calendar year is a shape this repository's own fixtures use.
+    ``tests/contract/providers/test_tushare_registry_datasets.py`` pins both branches, and
+    ``tests/integration/panel/test_registry_ingest.py`` pins the drop.
     """
     moment = datetime.combine(_parse_tushare_date(row[date_field]), time(0, 0), tzinfo=_CHINA_TZ)
     return Timeline(
@@ -908,7 +915,8 @@ def _panel_no_data_reason(
         )
     return (
         f"Tushare served {served} {descriptor.dataset} row(s), none of which was yet knowable "
-        f"at as_of {request.as_of.isoformat()}: not yet knowable is not the same as absent"
+        f"at as_of {request.as_of.isoformat()} or at the instant of the fetch: not yet "
+        "knowable is not the same as absent"
     )
 
 
@@ -1147,15 +1155,34 @@ class TushareProvider:
         could not otherwise tell apart. It counts **panel** rows, after any expansion, because
         that is the population the filter runs over; for a one-to-one descriptor the two are
         the same number.
+
+        ## The filter is bounded at the fetch instant as well as at ``as_of``
+
+        ``ProviderRequest`` accepts any ``as_of``, including one in the future, and a batch
+        dated at the end of the current calendar year is a shape this repository's own
+        fixtures use. Filtering on ``as_of`` alone therefore lets through a row that was not
+        knowable when the fetch *ran* -- Tushare does serve those, e.g. a ``namechange``
+        record announced 2026-08-11 that is already in the corpus on 2026-08-08 -- and
+        ``_calendar_static_timeline`` can only represent such a row by raising its
+        ``ingested_time`` above the instant this process actually observed it.
+
+        So the bound is the **earlier** of the two instants, and the second half is exactly
+        the same statement as the first: a row is kept only if it was knowable both by the
+        requested ``as_of`` and by the moment this fetch happened. Nothing honest is lost --
+        the dropped row was, by its own clock, not yet knowable -- and neither clock has to
+        overstate to make it fit. A response whose rows are all dropped this way is
+        ``no_data`` with ``served`` non-zero, which already says "served but not yet
+        knowable".
         """
         items = _expand_panel_rows(
             descriptor, _response_rows(descriptor, response, self.metadata.provider_id)
         )
         ingested_at = self._clock()
+        knowable_by = min(request.as_of, ingested_at)
         kept: list[tuple[date, dict[str, Any], Timeline]] = []
         for row in items:
             timeline = _CLOCK_BUILDERS[descriptor.clock](row, descriptor.date_field, ingested_at)
-            if timeline.available_time > request.as_of:
+            if timeline.available_time > knowable_by:
                 continue
             kept.append((_parse_tushare_date(row[descriptor.date_field]), row, timeline))
         kept.sort(key=lambda entry: entry[0])

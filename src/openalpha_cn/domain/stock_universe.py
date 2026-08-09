@@ -21,16 +21,36 @@ That stability is the whole reason this module exists, and it is bounded rather 
 ## `delist_date` is exclusive, and that is measured rather than assumed
 
 `delist_date` is the first day the security is **gone**, not its last session. Tushare's own
-`daily` endpoint was checked against seven delisted names spanning 2014-2026 -- `600087.SH`
-(2014-06-05), `000018.SZ` (2020-01-07), `000038.SZ` (2023-07-12), `000004.SZ` and `002808.SZ`
-(both 2026-07-14), `002898.SZ` (2026-07-17), `920305.BJ` (2026-07-30) -- and in every case the
-last bar is the previous session and **zero** bars fall on or after `delist_date`. Membership
-is therefore `listed_on <= day < delisted_on`. The other reading is not a rounding error: it
-would put a security in the pool on a day it demonstrably did not trade, which is the shape of
-a backtest that fills an order at a price that never existed.
+`daily` endpoint was checked against a random sample of 40 of the 339 delisted securities,
+plus 15 named cases chosen to break it -- absorption mergers (`000024.SZ`), code migrations
+(`T600018.SH`), the PT era (`000003.SZ`), the share-reform B-share codes (`600286.SH`,
+`600205.SH`) and ordinary post-2014 terminations -- and **zero** bars fall on or after
+`delist_date` in any of them. Membership is therefore `listed_on <= day < delisted_on`. The
+other reading is not a rounding error: it would put a security in the pool on a day it
+demonstrably did not trade, which is the shape of a backtest that fills an order at a price
+that never existed.
+
+An earlier version of this paragraph claimed something stronger and false: that the last bar
+is the *previous session*. It was drawn from seven names that had all traded through their
+退市整理期 after 2014, which is a biased sample. In the random 40 only **13** have their last
+bar on the previous session; 27 do not, and the gap is routinely months:
+
+    600286.SH S*ST国瓷  delist 2007-05-31  last bar 2006-04-28   260 sessions
+    000405.SZ ST鑫光    delist 2004-03-19  last bar 2003-04-25   213 sessions
+    600677.SH *ST航通   delist 2021-03-18  last bar 2020-04-29   213 sessions
+    000024.SZ 招商地产  delist 2015-12-30  last bar 2015-12-07    15 sessions
+    T600018.SH 上港集箱 delist 2006-10-20  no daily bars at all
+
+Only the exclusive bound is load-bearing here, and only the exclusive bound is claimed. What
+fills the gap between the last session and the termination is a suspension, which this dataset
+does not model -- see `KNOWN_UNIVERSE_LIMITATIONS`'s `suspension_invisible`, which is the same
+fact from the other side.
 
 `list_date` is inclusive by the same measurement: `688001.SH`, `601127.SH`, `689009.SH` and
-`600087.SH` each have their first daily bar on their own `list_date`.
+`600087.SH` each have their first daily bar on their own `list_date`. That check is narrower
+than it looks -- `daily` serves at most 6,000 rows per code, so for a long-lived security the
+earliest bars are truncated and the first bar it returns is not the security's first ever.
+These four are each short enough to be complete.
 
 ## The snapshot horizon, and the one thing this contract refuses to guess
 
@@ -41,10 +61,16 @@ today's membership for a future day would under-report and never say so. This is
 way: `ListingStatus` raises on `bool()` for every member, and `is_listed()` raises rather than
 answering `False`.
 
-The horizon is deliberately **one-sided**. A day before the earliest listing is answered, not
-refused, because the answer -- nothing was listed -- is true and knowable. Refusing it would
-make an honest empty universe indistinguishable from an unreadable one, which is the mistake
-the upper bound exists to avoid.
+The lower bound is narrower, and it turns on whether the reconstruction knows its own window.
+A day before the earliest listing is answered, not refused, because the answer -- nothing was
+listed -- is true and knowable, and refusing it would make an honest empty universe
+indistinguishable from an unreadable one. But that is only true when the read reached back
+that far. A universe assembled from partitions carries `years_read`, and a day before the
+first of those years is a day whose listings this read never saw: the honest empty answer and
+the truncated one are then the same value, so `listed_on()` refuses it. Built directly from
+`SecurityLifecycle` values there is no window to check and the empty answer stands. `status_on`
+needs no such rule -- a security whose listing row was outside the window has no entry at all,
+and `security()` already refuses an unknown code rather than answering about it.
 
 ## What `available_time` claims, and what it does not
 
@@ -361,13 +387,21 @@ class StockUniverse:
     def listed_on(self, day: date, *, exchange: str | None = None) -> tuple[str, ...]:
         """Every `ts_code` listed on `day`, ascending; optionally one exchange only.
 
-        Raises `UniverseHorizonError` for a day after the snapshot. A day before the earliest
-        listing returns `()`, which is the true answer and not a horizon -- see this module's
-        docstring for why the bound is one-sided.
+        Raises `UniverseHorizonError` for a day after the snapshot, and for a day before the
+        first year this universe was read from when it knows which years those were. A day
+        before the earliest listing in a universe with no `years_read` returns `()`, which is
+        then the true answer and not a horizon -- see this module's docstring.
         """
         _require_plain_date(day, "day")
         if day > self.snapshot_date:
             raise self._beyond_snapshot(day.isoformat())
+        if self.years_read and day.year < self.years_read[0]:
+            raise UniverseHorizonError(
+                f"{day.isoformat()} is before {self.years_read[0]}, the first lifecycle year "
+                "this universe was read from; the securities that listed earlier are not in "
+                "it, so an empty membership for that day would be a short read reported as an "
+                "empty market"
+            )
         return tuple(
             entry.ts_code
             for entry in self.securities

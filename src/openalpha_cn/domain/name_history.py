@@ -25,8 +25,12 @@ is announced, which is what `announced_by()` already does.
 
 ## `end_date` is a witness, and is deliberately not stored
 
-`namechange`'s `end_date` is `None` on the record currently in effect -- 5,891 of the corpus's
-rows -- and that is a real fact, not a missing value. It is still not written to the panel,
+`namechange`'s `end_date` is `None` on the record currently in effect -- 5,882 of the corpus's
+rows -- and that is a real fact, not a missing value. (An earlier draft of this line said
+5,891. That number came from the single paginated pull this module elsewhere declares unsound:
+its 14,166 raw rows contained 380 exact duplicates, and 5,891 counts some records twice.
+Deduplicated it is 5,766 of 13,786; over the 37 announcement-year windows this module actually
+uses -- 14,166 mutually distinct rows -- it is 5,882.) It is still not written to the panel,
 because it is *derivable from the successor's `start_date`* and, unlike the successor, it is
 not gated by any announcement: the record in effect today carries the start of a rename that
 may not have been announced yet, so storing it would put tomorrow's news on today's row. The
@@ -42,24 +46,52 @@ security `PT金田A(退)`. That is not reconciled here. This module knows nothin
 delisting; `domain/stock_universe.py` is the other half of the answer, and composing them is
 the caller's job rather than a hidden coupling.
 
-## The special-treatment grammar, and the mistake it exists to prevent
+## The special-treatment grammar, and the two mistakes it exists to prevent
 
 "Is it ST" is "what was it called that day", and the obvious `name.startswith(("ST", "*ST"))`
-is wrong on real history. The 2005-2007 share-reform era put a `G` (reform complete) or `S`
-(reform pending) marker **in front of** the ST marker, producing `GST星源`, `SST华新`,
-`G*ST国农`, `S*ST兰宝`. Across the full corpus the strict rule marks 2,827 records and the
-naive one 2,592: **235 records** where a genuinely special-treated name reads as ordinary. The
-naive rule has zero false positives, which is precisely why the gap survives review.
+is wrong on real history in two independent ways.
 
-The reverse mistake is just as available: `S深发展A` and `G上港` carry the same reform markers
-with no ST behind them, so stripping a leading `S`/`G` unconditionally would mark 1,210
-ordinary names. The rule therefore strips the marker only when `ST` or `*ST` follows it.
+The first is the share reform. 2005-2007 put a `G` (reform complete) or `S` (reform pending)
+marker **in front of** the ST marker, producing `GST星源`, `SST华新`, `G*ST国农`, `S*ST兰宝`.
+The naive rule marks 2,592 of the corpus's rows; adding the reform-aware strip takes it to
+2,827, so **235 rows** carry a genuinely special-treated name that the naive rule reads as
+ordinary. The naive rule has zero false positives, which is precisely why the gap survives
+review.
+
+The second is ChiNext, and it survived this module's own review. Before 2020 创业板 ran no ST
+regime at all: 退市风险警示 was worn as a **bare `*` prefix** with nothing behind it. Exactly
+two rows in the corpus are in that form, and they are the only rows out of 14,166 whose name
+begins with `*` and is not `*ST`:
+
+    ('300372.SZ', '*欣泰', start=20160712, end=20160822, ann=20160708, '高风险警示')
+    ('300028.SZ', '*金亚', start=20180627, end=20180807, ann=20180626, '高风险警示')
+
+each closed by its own `撤销高风险警示` row (`欣泰电气` 20160823, `金亚科技` 20180808). Both
+securities were terminated afterwards (`欣泰退` 2017-08-28, `金亚退` 2020-08-03), so the two
+windows this grammar used to answer `RiskWarning.none` for were the two windows a downstream
+ST filter most needed to see. The test is therefore on the marker `*`, not on the literal
+`*ST`, which takes the strict rule to 2,829 rows.
+
+The reverse mistake is just as available, and the number that used to sit here described a
+different rule than the sentence around it. `S深发展A` and `G上港` carry the same reform
+markers with no ST behind them, so a rule that read a leading `S`/`G` as a warning marker in
+its own right would mismark the **1,210** rows whose name starts with `S`/`G` and has no `ST`
+behind it. The narrower error -- strip the letter unconditionally, *then* look for `ST` --
+costs something else: it marks 1,708 rows with zero false positives but silently *loses*
+`ST天龙`, which becomes `T天龙`. The rule avoids both by stripping the marker only when `ST`
+or `*ST` follows it.
 
 `change_reason` is not used to derive the state, and that is deliberate. It labels a
-*transition*, and a transition can land on another marked state -- a `撤销PT` record for
-`000546.SZ` produces the name `ST吉轻工`, still special-treated. Nine such rows exist. It is
-kept as the independent witness instead: across the corpus, zero rows have a reason that
-imposes special treatment sitting on a name this grammar calls ordinary.
+*transition*, and a transition can land on another marked state -- 16 rows carry `撤销PT` and
+**8** of them produce a name that is still special-treated (`ST吉轻工`, `ST振新`, `ST琼华侨`,
+`ST东海A`, `ST闽闽东`, `ST永久`, `ST凯地`, `ST红光`). It is kept as the independent witness
+instead, and the witness is what found the ChiNext gap above. What that cross-check now says
+is bounded rather than absolute: across **this** 14,166-row corpus and **its** fifteen distinct
+reason values, the eight that impose special treatment -- `ST`, `*ST`, `PT`, `高风险警示`,
+`从ST变为*ST`, `撤消*ST并实行ST`, `叠加ST`, `叠加*ST` -- land on zero names this grammar calls
+ordinary. That is a statement about a corpus, re-checkable against a re-pull, not a property
+of the grammar: a sixteenth reason value, or a warning form neither `ST` nor `*` encodes,
+would read as ordinary here and the witness is what would say so.
 
 Delisting-period naming is classified rather than swept into `none`. 153 rows carry
 `change_reason="退市整理期"`; 92 of their names end in `退` and the other 61 begin with `退市`,
@@ -114,6 +146,8 @@ NAME_HISTORY_PANEL_COLUMNS: Final[tuple[str, ...]] = (
 """What a reader asks `PanelStore.query` for, and the positional contract of the rows back."""
 
 _REFORM_MARKERS: Final[tuple[str, ...]] = ("S", "G")
+_RISK_WARNING_MARKER: Final[str] = "*"
+"""The 退市风险警示 marker. `*ST` on the main board, a bare `*` on pre-2020 ChiNext."""
 _DELISTING_SUFFIX: Final[str] = "退"
 _DELISTING_PREFIX: Final[str] = "退市"
 
@@ -143,6 +177,15 @@ class RiskWarning(Enum):
     none = "none"
     st = "st"
     star_st = "star_st"
+    """退市风险警示 -- the delisting-risk warning, however the board spells it.
+
+    Named after the main board's `*ST` marker, but it is the *state* that is the member, not
+    the string: ChiNext wore the same warning as a bare `*` prefix before 2020 (`*欣泰`,
+    `*金亚`) and lands here too. Adding a sixth member for that form would assert the two are
+    different warnings, which they are not -- an ST filter wants them merged, and every
+    downstream `is RiskWarning.star_st` would have had to grow a second arm to stay correct.
+    """
+
     pt = "pt"
     delisting_process = "delisting_process"
 
@@ -158,8 +201,8 @@ def risk_warning_of(name: str) -> RiskWarning:
     """The risk-warning state a security name encodes. See this module's docstring.
 
     Order matters and is measured: the delisting-period forms are tested first, and no row in
-    the 14,166-row corpus carries both a delisting marker and an ST prefix, so the precedence
-    is unobservable in real data rather than a judgement about which wins.
+    the 14,166-row corpus carries both a delisting marker and an ST/`*`/PT prefix, so the
+    precedence is unobservable in real data rather than a judgement about which wins.
     """
     if type(name) is not str or not name:
         raise NameHistoryError(f"a security name must be a non-empty string; got {name!r}")
@@ -167,11 +210,14 @@ def risk_warning_of(name: str) -> RiskWarning:
         return RiskWarning.delisting_process
     core = name
     # Strip a share-reform marker only when an ST marker follows it: `S深发展A` and `G上港`
-    # carry the same prefix with an ordinary name behind it, and stripping unconditionally
-    # would mark 1,210 ordinary names across the corpus.
+    # carry the same prefix with an ordinary name behind it, and reading a bare leading
+    # `S`/`G` as a marker would mismark 1,210 rows across the corpus.
     if core[:1] in _REFORM_MARKERS and (core[1:3] == "ST" or core[1:4] == "*ST"):
         core = core[1:]
-    if core.startswith("*ST"):
+    # The marker is `*`, not the literal `*ST`: pre-2020 ChiNext wore 退市风险警示 as a bare
+    # `*` prefix (`*欣泰`, `*金亚`), and those are the corpus's only `*`-prefixed non-`*ST`
+    # names. Testing `*ST` here answered `none` for both of them.
+    if core.startswith(_RISK_WARNING_MARKER):
         return RiskWarning.star_st
     if core.startswith("ST"):
         return RiskWarning.st
