@@ -171,6 +171,20 @@ RESERVED_COLUMN_NAMES: Final[frozenset[str]] = frozenset((SUBJECT_COLUMN_NAME, *
 
 MAX_IDENTIFIER_LENGTH: Final[int] = 63
 
+MAX_SOURCE_URI_LENGTH: Final[int] = 2048
+"""The longest `source_uri` a `ColumnarPanelBatch` will carry.
+
+Named, exported and asserted against rather than written as a literal inside
+`__post_init__`, because a *producer* has to stay under it: `providers/tushare.py` summarises
+a whole-market batch's subject list precisely so the URI it builds fits here, and its
+`MAX_PANEL_SOURCE_URI_LENGTH` is required to *be* this constant by
+`tests/contract/providers/test_tushare_adj_factor.py::
+test_the_producer_side_uri_bound_is_the_contracts_own_constant`. When the two were separate
+literals and drifted apart, every fetch of 202 or so subjects built a URI this contract
+refused -- outside the producer's decode `try`, so the fetch died with a contract error
+instead of a provider failure, and no test noticed.
+"""
+
 # A plain, unquoted SQL identifier: an ASCII letter or underscore followed by up to
 # `MAX_IDENTIFIER_LENGTH - 1` more letters, digits or underscores. The bound is interpolated
 # from the constant rather than written twice, so the advertised limit and the enforced one
@@ -431,8 +445,8 @@ class ColumnarPanelBatch:
         validate_panel_dataset(self.dataset)
         _require_text("provider_id", self.provider_id, 128)
         _require_text("kind", self.kind, 64)
-        if self.source_uri is not None and len(self.source_uri) > 2048:
-            raise PanelBatchError("source_uri must be at most 2048 characters")
+        if self.source_uri is not None and len(self.source_uri) > MAX_SOURCE_URI_LENGTH:
+            raise PanelBatchError(f"source_uri must be at most {MAX_SOURCE_URI_LENGTH} characters")
         object.__setattr__(self, "as_of", ensure_aware(self.as_of))
         object.__setattr__(self, "fetched_at", ensure_aware(self.fetched_at))
         object.__setattr__(self, "subjects", _validated_subjects(self.subjects))

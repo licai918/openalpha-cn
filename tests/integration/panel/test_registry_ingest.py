@@ -52,7 +52,10 @@ from openalpha_cn.panel_ingest import (
     write_trading_calendar,
 )
 from openalpha_cn.providers.base import ProviderRequest
-from openalpha_cn.providers.tushare import TushareProvider
+from openalpha_cn.providers.tushare import (
+    TUSHARE_RESPONSE_TRUNCATION_FLAG,
+    TushareProvider,
+)
 
 FETCHED_AT = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
 
@@ -122,7 +125,18 @@ NAMECHANGE_BY_YEAR: dict[int, list[list[Any]]] = {
 
 
 def _response(fields: list[str], items: list[list[Any]]) -> dict[str, Any]:
-    return {"code": 0, "msg": None, "data": {"fields": list(fields), "items": items}}
+    """A complete response. `has_more=False` is what a live one actually carries, and
+    `stock_basic` now requires it to be present -- it has no measured row cap, so the flag is
+    that endpoint's only witness that nothing was withheld."""
+    return {
+        "code": 0,
+        "msg": None,
+        "data": {
+            "fields": list(fields),
+            "items": items,
+            TUSHARE_RESPONSE_TRUNCATION_FLAG: False,
+        },
+    }
 
 
 class _Transport:

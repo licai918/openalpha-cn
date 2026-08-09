@@ -17,11 +17,19 @@ rows) blows straight through -- and the year's partition is the *merged, compres
 `test_the_partition_stores_steps_and_still_answers_every_day` proves the compression is
 lossless over the window it covers, and `test_a_flat_year_stores_exactly_its_two_anchors`
 proves the anchors are what make a single year self-sufficient.
+
+**The session-census one.** Compression is what destroys the evidence that the year is whole,
+so the year is checked against a real `TradingCalendar` in the last moment that evidence
+exists -- before compression, inside `write_adjustment_factors`. The section at the bottom of
+this file first *reproduces the wrong answer* a partition with a session hole gives (an
+unadjusted return wearing an adjusted one's name, from rows that pass every readiness check)
+and then shows the three shapes that produce it being refused at write time.
 """
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from collections.abc import Iterable
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -33,8 +41,15 @@ from openalpha_cn.domain.adjustment import (
     AdjustmentError,
     AdjustmentHorizonError,
     PriceAdjustment,
+    adjustment_histories_from_panel_rows,
 )
 from openalpha_cn.domain.panel_batch import PanelBatchError
+from openalpha_cn.domain.trading_calendar import (
+    CalendarDay,
+    CalendarHorizonError,
+    TradingCalendar,
+    build_trading_calendar,
+)
 from openalpha_cn.panel.catalog import PanelStorageError
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_ingest import (
@@ -105,7 +120,7 @@ def _response(items: list[list[Any]]) -> dict[str, Any]:
     }
 
 
-def _session_batch(day: str, ping_an: float, maotai: float):
+def _session_batch(day: str, ping_an: float, maotai: float, *, fetched_at: datetime = FETCHED_AT):
     """One trading day's cross section, exactly as `fetch_panel` produces it."""
     as_of = datetime(
         int(day[:4]), int(day[4:6]), int(day[6:]), 12, 0, tzinfo=UTC
@@ -113,28 +128,70 @@ def _session_batch(day: str, ping_an: float, maotai: float):
     provider = TushareProvider(
         token="secret-token",
         transport=_Transport(_response([[PING_AN, day, ping_an], [MAOTAI, day, maotai]])),
-        clock=lambda: FETCHED_AT,
+        clock=lambda: fetched_at,
     )
     return provider.fetch_panel(ProviderRequest(dataset=ADJ_FACTOR_DATASET, as_of=as_of))
 
 
-def _year_batches(sessions: tuple[tuple[str, float, float], ...]):
-    return [_session_batch(day, ping_an, maotai) for day, ping_an, maotai in sessions]
+def _year_batches(
+    sessions: tuple[tuple[str, float, float], ...], *, fetched_at: datetime = FETCHED_AT
+):
+    return [
+        _session_batch(day, ping_an, maotai, fetched_at=fetched_at)
+        for day, ping_an, maotai in sessions
+    ]
 
 
 def _store(tmp_path: Path) -> PanelStore:
     return PanelStore(tmp_path / "panel")
 
 
-def _seeded(tmp_path: Path, *years) -> PanelStore:
+def _seeded(tmp_path: Path, *years, calendar: TradingCalendar | None = None) -> PanelStore:
     store = _store(tmp_path)
     for sessions in years:
-        write_adjustment_factors(store, _year_batches(sessions))
+        write_adjustment_factors(store, _year_batches(sessions), calendar=calendar or _calendar())
     return store
 
 
 def _as_date(day: str) -> date:
     return date(int(day[:4]), int(day[4:6]), int(day[6:]))
+
+
+# Every session any fixture above carries. The test calendar declares exactly these open and
+# every other day of 2023..2026 closed, so "the sessions this year holds" and "the sessions
+# the exchange held" coincide for the complete fixtures and diverge the moment one is dropped.
+FIXTURE_SESSIONS: tuple[str, ...] = tuple(
+    day for group in (SESSIONS_2023, SESSIONS_2024, SESSIONS_2026) for day, _, _ in group
+)
+
+CALENDAR_FIRST_DAY = date(2023, 1, 1)
+CALENDAR_LAST_DAY = date(2026, 12, 31)
+
+
+def _calendar(
+    open_days: Iterable[str] = FIXTURE_SESSIONS,
+    *,
+    exchange: str = "SZSE",
+    last_day: date = CALENDAR_LAST_DAY,
+) -> TradingCalendar:
+    """A real `TradingCalendar` over 2023..2026 whose open sessions are exactly `open_days`.
+
+    Contiguous natural days, because `build_trading_calendar` refuses a gap -- a missing row
+    is not a closed session. Everything not named is published as closed, which is what makes
+    "the batch is missing a session" a statement the calendar can actually make.
+    """
+    opens = {_as_date(day) for day in open_days}
+    span = (last_day - CALENDAR_FIRST_DAY).days + 1
+    return build_trading_calendar(
+        exchange,
+        [
+            CalendarDay(
+                calendar_date=CALENDAR_FIRST_DAY + timedelta(days=offset),
+                is_trading=CALENDAR_FIRST_DAY + timedelta(days=offset) in opens,
+            )
+            for offset in range(span)
+        ],
+    )
 
 
 # --- the returns acceptance -----------------------------------------------------------
@@ -378,7 +435,14 @@ def test_merging_two_providers_or_two_kinds_is_refused() -> None:
     would file rows under provenance that never produced them."""
     (one,) = _year_batches((SESSIONS_2024[0],))
     other = _session_batch(*SESSIONS_2024[1])
-    for field_name, value in (("provider_id", "akshare"), ("kind", "prices")):
+    for field_name, value in (
+        ("provider_id", "akshare"),
+        ("kind", "prices"),
+        # The third field the merge actually compares, and the one the parametrisation used
+        # to leave out: a batch written under another schema version has a different digest
+        # basis, and concatenating the two would file both under whichever came first.
+        ("schema_version", "panel-batch/v2"),
+    ):
         disguised = type(other)(
             **{
                 **{
@@ -491,6 +555,66 @@ def test_compressing_a_null_factor_is_refused(tmp_path: Path) -> None:
         compress_adjustment_batch(holed)
 
 
+def test_compressing_a_null_factor_date_is_refused_by_name_too(tmp_path: Path) -> None:
+    """The symmetric half. `str(None)` is `'None'`, so without a named guard this reached
+    `date.fromisoformat` and came back out as a bare
+    `ValueError: Invalid isoformat string: 'None'` -- not a `PanelBatchError`, and so not
+    caught by a caller catching the guard standing right beside it."""
+    (one,) = _year_batches((SESSIONS_2024[0],))
+    factor_date, adj_factor = one.columns
+    holed = type(one)(
+        provider_id=one.provider_id,
+        dataset=one.dataset,
+        kind=one.kind,
+        as_of=one.as_of,
+        fetched_at=one.fetched_at,
+        status="success",
+        subjects=one.subjects,
+        timeline=one.timeline,
+        columns=(
+            type(factor_date)(factor_date.name, factor_date.kind, (None, "2024-06-24")),
+            adj_factor,
+        ),
+    )
+    with pytest.raises(PanelBatchError, match="factor_date row 0 is null"):
+        compress_adjustment_batch(holed)
+
+
+def test_a_factor_date_that_is_not_an_iso_date_is_refused_by_name(tmp_path: Path) -> None:
+    (one,) = _year_batches((SESSIONS_2024[0],))
+    factor_date, adj_factor = one.columns
+    mangled = type(one)(
+        provider_id=one.provider_id,
+        dataset=one.dataset,
+        kind=one.kind,
+        as_of=one.as_of,
+        fetched_at=one.fetched_at,
+        status="success",
+        subjects=one.subjects,
+        timeline=one.timeline,
+        columns=(
+            type(factor_date)(factor_date.name, factor_date.kind, ("24 June", "2024-06-24")),
+            adj_factor,
+        ),
+    )
+    with pytest.raises(PanelBatchError, match="factor_date row 0 is not an ISO date"):
+        compress_adjustment_batch(mangled)
+
+
+def test_compression_is_independent_of_the_order_the_sessions_arrived_in() -> None:
+    """Tushare serves `adj_factor` in *descending* `trade_date` order, so a caller who fetches
+    a year and merges the responses in the order they came back hands this function a
+    descending batch -- the most likely real shape, not a contrived one. The `sorted(...)`
+    inside `compress_adjustment_batch` is what makes the stored partition, and therefore its
+    content hash, identical either way."""
+    ascending = compress_adjustment_batch(merge_panel_batches(_year_batches(SESSIONS_2024)))
+    descending = compress_adjustment_batch(
+        merge_panel_batches(_year_batches(tuple(reversed(SESSIONS_2024))))
+    )
+    assert descending.to_rows() == ascending.to_rows()
+    assert descending.content_digest == ascending.content_digest
+
+
 def test_the_same_session_merged_twice_is_refused_rather_than_double_counted() -> None:
     """The ordinary operator mistake: a retry that appends the day's batch again. A step
     function with two entries for one session has no value on it."""
@@ -523,7 +647,7 @@ def test_writing_a_different_dataset_is_refused(tmp_path: Path) -> None:
         columns=one.columns,
     )
     with pytest.raises(PanelBatchError, match="expected the 'adj_factor' dataset"):
-        write_adjustment_factors(store, [disguised])
+        write_adjustment_factors(store, [disguised], calendar=_calendar())
 
 
 def test_a_write_that_straddles_two_years_is_refused(tmp_path: Path) -> None:
@@ -531,7 +655,9 @@ def test_a_write_that_straddles_two_years_is_refused(tmp_path: Path) -> None:
     stops December's sessions from being filed under the following January's partition."""
     store = _store(tmp_path)
     with pytest.raises(PanelBatchError, match=r"spans \[2023, 2024\]"):
-        write_adjustment_factors(store, _year_batches(SESSIONS_2023 + SESSIONS_2024))
+        write_adjustment_factors(
+            store, _year_batches(SESSIONS_2023 + SESSIONS_2024), calendar=_calendar()
+        )
 
 
 def test_a_rewrite_that_would_drop_a_security_is_refused(tmp_path: Path) -> None:
@@ -552,10 +678,136 @@ def test_a_rewrite_that_would_drop_a_security_is_refused(tmp_path: Path) -> None
         for day, ping_an, _ in SESSIONS_2024
     ]
     with pytest.raises(PanelBatchError, match="writing it would drop"):
-        write_adjustment_factors(store, narrower)
+        write_adjustment_factors(store, narrower, calendar=_calendar())
 
 
 def test_rewriting_the_same_year_with_the_same_rows_is_accepted(tmp_path: Path) -> None:
     store = _seeded(tmp_path, SESSIONS_2024)
-    reference = write_adjustment_factors(store, _year_batches(SESSIONS_2024))
+    reference = write_adjustment_factors(store, _year_batches(SESSIONS_2024), calendar=_calendar())
     assert reference.row_count == 8
+
+
+# --- the session census (the C1 guard) -------------------------------------------------
+
+
+def test_a_partition_with_a_session_hole_answers_the_unadjusted_number_and_is_now_refused(
+    tmp_path: Path,
+) -> None:
+    """The failure the census exists for, in both halves: first the wrong answer, then the
+    refusal.
+
+    Half one reconstructs, by hand, exactly the rows a 2024 partition assembled from 06-26
+    onward would hold beside a complete 2023 one. Nothing is broken about them -- they parse,
+    they are ascending, every value is a real observation, and a store holding them reports
+    `ready=True` with no issues. `2024-06-24` nonetheless falls strictly inside
+    `[covered_from, covered_through]`, so `factor_on` does not raise; it walks back to the
+    2023 anchor and answers 116.713 where the truth is 125.0496. The return computed from
+    that pair is the *unadjusted* one.
+
+    Half two writes the same year through `write_adjustment_factors` and it never lands. Note
+    which sessions it names: 06-24 and 06-25 are the *year's first two*, so this is also
+    trigger shape one -- a year that starts after the year did. Measured on the real series,
+    `000001.SZ`'s 2020 factor steps on 2020-01-02, so a 2020 partition backfilled from March
+    and read beside a complete 2019 answers 36 January and February sessions with 2019's
+    factor. The expectation's lower bound is the year's own start, not the batch's first row,
+    precisely so a partition cannot define its own hole out of existence.
+    """
+    holed = adjustment_histories_from_panel_rows(
+        [
+            (PING_AN, "2023-12-27", 116.713),
+            (PING_AN, "2023-12-29", 116.713),
+            (PING_AN, "2024-06-26", 125.049),
+            (PING_AN, "2024-06-28", 125.049),
+        ]
+    )[PING_AN]
+    missing_session = date(2024, 6, 24)
+    assert holed.covered_from < missing_session < holed.covered_through
+    assert holed.factor_on(missing_session) == 116.713  # the truth is 125.0496
+
+    store = _seeded(tmp_path, SESSIONS_2023)
+    with pytest.raises(
+        PanelBatchError,
+        match=(
+            r"adj_factor year=2024 is missing 2 session\(s\) the SZSE calendar reports open "
+            r"between 2024-01-01 and 2024-12-31: \['2024-06-24', '2024-06-25'\]"
+        ),
+    ):
+        write_adjustment_factors(store, _year_batches(SESSIONS_2024[2:]), calendar=_calendar())
+
+
+def test_a_single_dropped_session_in_the_middle_is_refused(tmp_path: Path) -> None:
+    """Trigger shape two: one cross-section fetch failed and the year was written anyway. One
+    day, inside the window, answered from the previous step with nothing raising."""
+    store = _store(tmp_path)
+    sessions = SESSIONS_2024[:2] + SESSIONS_2024[3:]
+    with pytest.raises(PanelBatchError, match=r"missing 1 session\(s\).*: \['2024-06-26'\]"):
+        write_adjustment_factors(store, _year_batches(sessions), calendar=_calendar())
+
+
+def test_a_year_that_stops_before_the_year_did_is_refused(tmp_path: Path) -> None:
+    """The trailing half of the same failure, and the reason the upper bound is the fetch
+    rather than the batch's own last row: a 2024 partition ending in June, written beside a
+    2026 one, leaves every session after it answered by the June factor."""
+    store = _store(tmp_path)
+    with pytest.raises(
+        PanelBatchError, match=r"missing 2 session\(s\).*: \['2024-06-27', '2024-06-28'\]"
+    ):
+        write_adjustment_factors(store, _year_batches(SESSIONS_2024[:3]), calendar=_calendar())
+
+
+def test_a_year_of_missing_sessions_names_a_sample_rather_than_every_date(
+    tmp_path: Path,
+) -> None:
+    """A real backfill hole is hundreds of sessions wide, and a refusal nobody reads is a
+    refusal that does not work -- the same cap `_subject_sample` applies, for the same reason.
+    """
+    store = _store(tmp_path)
+    extra = tuple(f"202406{day:02d}" for day in range(3, 21))  # 18 more open sessions
+    calendar = _calendar((*FIXTURE_SESSIONS, *extra))
+    with pytest.raises(
+        PanelBatchError,
+        match=r"missing 18 session\(s\).*'2024-06-12'\] and 8 more",
+    ):
+        write_adjustment_factors(store, _year_batches(SESSIONS_2024), calendar=calendar)
+
+
+def test_a_session_the_calendar_does_not_know_is_tolerated_rather_than_refused(
+    tmp_path: Path,
+) -> None:
+    """Direction, on the real counterexample's shape. `000001.SZ` carries factor rows on 64
+    dates in 1991 that the SZSE calendar does not list at all, every one an SSE session, so an
+    equality check would refuse a genuine partition. An extra observation can only add
+    information; a missing one changes an answer. Only the missing direction is refused."""
+    store = _store(tmp_path)
+    calendar = _calendar([day for day in FIXTURE_SESSIONS if day != "20240627"])
+    reference = write_adjustment_factors(store, _year_batches(SESSIONS_2024), calendar=calendar)
+    assert reference.row_count == 8
+
+
+def test_a_calendar_that_does_not_reach_across_the_year_refuses_rather_than_under_checking(
+    tmp_path: Path,
+) -> None:
+    """A calendar that stops in June cannot testify about December, and the honest answer is
+    a horizon error rather than a check that quietly shrinks to what it happens to know."""
+    store = _store(tmp_path)
+    short = _calendar(last_day=date(2024, 6, 30))
+    with pytest.raises(CalendarHorizonError, match=r"2024-01-01\.\.2024-12-31 leaves it"):
+        write_adjustment_factors(store, _year_batches(SESSIONS_2024), calendar=short)
+
+
+def test_a_year_fetched_on_its_own_first_day_is_written_and_the_gap_is_named(
+    tmp_path: Path,
+) -> None:
+    """The one residue, exercised rather than only described. The upper bound is the day
+    before the fetch, so a batch fetched on 1 January of its own year has nothing the calendar
+    can require -- no session of that year had closed when it ran. It is written, and
+    `adjustment_requirement`'s docstring names this as unchecked rather than checked."""
+    store = _store(tmp_path)
+    new_year = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)  # 20:00 Asia/Shanghai
+    batches = _year_batches((("20260101", 134.5794, 8.5),), fetched_at=new_year)
+    reference = write_adjustment_factors(
+        store,
+        batches,
+        calendar=_calendar(),
+    )
+    assert reference.row_count == 2

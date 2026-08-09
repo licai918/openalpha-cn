@@ -86,17 +86,28 @@ rather than one:
 not.
 
 `requires_truncation_flag` turns an *absent* `has_more` into a failure rather than a skipped
-check. It is on `adj_factor` alone today, and stating it per descriptor is what forces
+check. Two descriptors set it, for two different reasons. `adj_factor` has a measured cap and
+demands the flag *as well*, because a factor series missing its first decade is silently wrong
+rather than short. `stock_basic` sets it because the flag is its **only** witness: its cap is
+not merely unmeasured but unmeasurable from outside (see that descriptor's comment), so
+without this it had *neither* guard -- a `stock_basic` response omitting `has_more` was
+accepted at 300 rows with nothing consulted at all. Stating it per descriptor is what forces
 `V2-P1-007`/`008` to decide it rather than inherit it.
 
-**Where this misses.** The guard judges one response in isolation and cannot see a cap that
-the endpoint applies *below* its measured value, nor one that changes. It also cannot see the
-case where both witnesses are wrong together -- a server that truncates while reporting
-`has_more=False` at a row count under the declared cap. What it does close is the entire
-measured failure mode, at both the flag and the count. A calendar-derived expected row count
-would be a third witness and is deliberately not used: `000001.SZ` has factor rows on 64 dates
-in 1991 that the stored SZSE calendar marks closed, so the expectation would be wrong in the
-direction that manufactures false alarms.
+**Where this misses.** The guard judges one response in isolation, so the residue is a server
+that truncates while reporting `has_more=False` at a row count under the declared cap. It is
+*not* an endpoint that lowers its cap: raising `limit` above the measured value (6,001 /
+8,000 / 10,000) still returns exactly 6,000 rows with `has_more=True`, which shows the server
+computes the flag as `len(rows) == min(limit, cap)` -- so any truncation at any cap reports
+`True`, and the flag witness covers a moved cap on its own.
+
+A calendar-derived expected row count would be a third witness and is deliberately not used
+*here*: `000001.SZ` has factor rows on 64 dates in 1991 that are not in the stored SZSE
+calendar at all -- its series begins 1991-07-03 and the factor begins 1991-04-03 -- so the
+expectation would be wrong in the direction that manufactures false alarms. The calendar
+still earns its place one layer up, where the direction can be chosen:
+`panel_ingest.write_adjustment_factors` refuses a *partition* that is missing a session the
+calendar reports open, and tolerates one that carries extra days.
 """
 
 import json
@@ -126,6 +137,7 @@ from openalpha_cn.domain.name_history import (
     NAMECHANGE_DATASET,
 )
 from openalpha_cn.domain.panel_batch import (
+    MAX_SOURCE_URI_LENGTH,
     ColumnarPanelBatch,
     PanelColumn,
     PanelColumnKind,
@@ -671,13 +683,20 @@ TUSHARE_DATASETS: tuple[TushareDatasetDescriptor, ...] = (
         source_uri_template="tushare://{dataset}/{subject}/{date}",
         panel_rows=_stock_lifecycle_panel_rows,
         serves_evidence_plane=False,
-        # No measured cap: the whole `L,D` registry -- 5,878 rows on 2026-08-08 -- comes back
-        # in one response with `has_more=False`, which places this endpoint's cap somewhere
-        # above 5,878 without establishing where. Declaring 6,000 here would be a guess, and
-        # the guess is load-bearing: too low refuses a complete registry, too high passes a
-        # truncated one. The flag witness guards it in the meantime, and the margin is thin
-        # enough to be worth watching -- 122 rows.
+        # No measured cap, and the cap is genuinely **unmeasurable from outside**: the whole
+        # `L,D` registry -- 5,878 rows on 2026-08-08 -- comes back with `has_more=False`, and
+        # so does `limit=100000`, while `limit=5878` reports `has_more=True`. The flag turns
+        # `True` at whatever effective limit is in force, so no probe can push past the real
+        # ceiling to find it. All that is established is that it is **above 5,878**; how far
+        # above is unknown, and "6,000 minus 5,878 = 122 rows of margin" would be exactly the
+        # guess this comment declines to make -- the true headroom could be 122 or, if this
+        # endpoint shares `namechange`'s 10,000, 4,122. Declaring a number is load-bearing in
+        # both directions: too low refuses a complete registry, too high passes a truncated
+        # one. So the flag is this descriptor's *only* witness, and
+        # `requires_truncation_flag` below is what makes it an actual check rather than an
+        # optional one.
         max_rows_per_response=None,
+        requires_truncation_flag=True,
         panel_columns=(
             TusharePanelColumn(
                 name=LIFECYCLE_EVENT_COLUMN,
@@ -1149,10 +1168,17 @@ def _panel_no_data_reason(
     )
 
 
-MAX_PANEL_SOURCE_URI_LENGTH: Final[int] = 2048
-"""`ColumnarPanelBatch`'s own limit on `source_uri`, restated here so this module can stay
-under it rather than trip over it. The two must agree; if the contract's limit moves, this
-constant is what a reviewer greps for."""
+MAX_PANEL_SOURCE_URI_LENGTH: Final[int] = MAX_SOURCE_URI_LENGTH
+"""`ColumnarPanelBatch`'s own limit on `source_uri`, so this module stays under it rather
+than trips over it.
+
+Bound to `domain.panel_batch.MAX_SOURCE_URI_LENGTH` rather than restated as a literal, and
+the equality is additionally asserted by `tests/contract/providers/test_tushare_adj_factor.py
+::test_the_producer_side_uri_bound_is_the_contracts_own_constant`. A comment saying "the two
+must agree" is not a check: while this was a separate `2048`, moving it to 3,000 left the
+whole suite green and quietly restored the original bug for every fetch of ~202 to ~300
+subjects, whose joined URI lands between the two values and is refused by the contract
+*outside* `fetch_panel`'s decode `try`."""
 
 
 def _panel_source_uri(

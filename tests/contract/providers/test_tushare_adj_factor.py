@@ -31,9 +31,12 @@ from typing import Any
 import pytest
 
 from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET
-from openalpha_cn.domain.panel_batch import PanelBatchError
+from openalpha_cn.domain.panel_batch import MAX_SOURCE_URI_LENGTH, PanelBatchError
+from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET
+from openalpha_cn.domain.trading_calendar import TRADING_CALENDAR_DATASET
 from openalpha_cn.providers.base import ProviderFailure, ProviderRequest
 from openalpha_cn.providers.tushare import (
+    MAX_PANEL_SOURCE_URI_LENGTH,
     TUSHARE_DATASETS,
     TUSHARE_RESPONSE_TRUNCATION_FLAG,
     TushareProvider,
@@ -198,11 +201,59 @@ def test_every_descriptor_states_whether_its_response_cap_was_measured() -> None
     }
 
 
-def test_only_adj_factor_demands_the_flag_be_present_today() -> None:
+def test_the_flag_is_demanded_exactly_where_it_is_the_only_witness_or_the_stakes_are_highest(
+    fake_tushare_transport,
+) -> None:
     """Stated as data so that wiring `daily` (`V2-P1-007`) has to make this choice on
-    purpose rather than inherit it."""
+    purpose rather than inherit it -- and set on `stock_basic` because that descriptor was the
+    one place with **neither** witness: no measured cap and no required flag, so a response
+    that simply omitted `has_more` was accepted at any row count with nothing checking it.
+    """
     demanded = {entry.dataset for entry in TUSHARE_DATASETS if entry.requires_truncation_flag}
-    assert demanded == {ADJ_FACTOR_DATASET}
+    assert demanded == {ADJ_FACTOR_DATASET, STOCK_BASIC_DATASET}
+
+    capless_and_unflagged = {
+        entry.dataset
+        for entry in TUSHARE_DATASETS
+        if entry.max_rows_per_response is None and not entry.requires_truncation_flag
+    }
+    assert capless_and_unflagged == {TRADING_CALENDAR_DATASET}, (
+        "trade_cal is the deliberate exception: it served all 13,162 published SSE rows in "
+        "one response, so a cap would be a guess -- but its whole-period request means a "
+        "truncated calendar is caught by build_trading_calendar's gap rule instead"
+    )
+
+
+def test_a_registry_response_with_no_truncation_flag_is_now_refused(
+    fake_tushare_transport,
+) -> None:
+    """The hole the flag closes, in the shape it was measured in: `stock_basic` + a missing
+    `has_more` used to be `ACCEPTED rows=300` with no guard consulted at all."""
+    as_of = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
+    items = [[f"{600000 + index}.SH", "SSE", "19910403", None] for index in range(300)]
+    response = {
+        "code": 0,
+        "msg": "",
+        "data": {"fields": ["ts_code", "exchange", "list_date", "delist_date"], "items": items},
+    }
+    provider, _ = _provider(fake_tushare_transport, response, clock=as_of)
+    with pytest.raises(ProviderFailure, match="carries no has_more flag"):
+        provider.fetch_panel(ProviderRequest(dataset=STOCK_BASIC_DATASET, as_of=as_of))
+
+
+def test_the_registry_cap_is_declared_unmeasured_rather_than_guessed_at_122_rows() -> None:
+    """The margin is *not* 6,000 - 5,878. Measured on 2026-08-08:
+
+        stock_basic(L,D)                 -> n=5878  has_more=false
+        stock_basic(L,D, limit=5878)     -> n=5878  has_more=TRUE
+        stock_basic(L,D, limit=100000)   -> n=5878  has_more=false
+
+    The flag turns `True` at whatever effective limit is in force, so no probe can push past
+    the real ceiling to find it. All that is established is "above 5,878"; naming 122 rows of
+    headroom would be exactly the guess `max_rows_per_response=None` declines to make, and if
+    this endpoint shares `namechange`'s 10,000 the true figure is 4,122.
+    """
+    assert _descriptor(STOCK_BASIC_DATASET).max_rows_per_response is None
 
 
 # --- the request ----------------------------------------------------------------------
@@ -363,6 +414,46 @@ def test_a_whole_market_batch_summarises_its_subjects_instead_of_overflowing_the
     provider, _ = _provider(fake_tushare_transport, _response(items), clock=as_of)
     batch = provider.fetch_panel(_request(as_of))
     assert batch.source_uri == "tushare://adj_factor/400-subjects/20240628-20240628"
+
+
+def test_the_producer_side_uri_bound_is_the_contracts_own_constant() -> None:
+    """The one thing holding the fix together, asserted instead of commented.
+
+    `_panel_source_uri` summarises a subject list precisely so the URI it hands back fits
+    inside what `ColumnarPanelBatch` will accept -- and the contract refuses an over-long
+    `source_uri` *outside* `fetch_panel`'s decode `try`, so a mismatch is not a provider
+    failure but a contract error that kills the whole fetch. While these were two independent
+    `2048` literals, raising the producer's to 3,000 left the entire suite green and restored
+    the original bug for every fetch whose joined URI lands between the two numbers.
+    """
+    assert MAX_PANEL_SOURCE_URI_LENGTH == MAX_SOURCE_URI_LENGTH
+    assert MAX_SOURCE_URI_LENGTH == 2048
+
+
+@pytest.mark.parametrize(
+    ("subjects", "expected_length", "summarised"),
+    [(200, 2038, False), (201, MAX_SOURCE_URI_LENGTH, False), (202, 51, True)],
+)
+def test_the_uri_switches_to_a_summary_exactly_at_the_contracts_limit(
+    fake_tushare_transport, subjects: int, expected_length: int, summarised: bool
+) -> None:
+    """Both sides of the switch and the boundary itself, in one parametrisation.
+
+    Nine-character codes over a 39-character frame make the joined URI `10n + 38`, so 201
+    subjects land on exactly 2,048 and 202 land one row past it. The window is what makes the
+    two constants' agreement load-bearing rather than theoretical: the whole band from 2,048
+    up to the 400-subject test's 4,038 is reachable by an ordinary fetch, and every value in
+    it is refused by the contract and accepted by a drifted producer.
+    """
+    as_of = datetime(2024, 6, 28, 9, 0, tzinfo=UTC)
+    items = [[f"{600000 + index}.SH", "20240628", 1.5] for index in range(subjects)]
+    provider, _ = _provider(fake_tushare_transport, _response(items), clock=as_of)
+    batch = provider.fetch_panel(_request(as_of))
+
+    assert batch.source_uri is not None
+    assert len(batch.source_uri) == expected_length
+    assert len(batch.source_uri) <= MAX_SOURCE_URI_LENGTH
+    assert (f"/{subjects}-subjects/" in batch.source_uri) is summarised
 
 
 def test_a_two_subject_batch_still_names_both(fake_tushare_transport) -> None:

@@ -34,10 +34,14 @@ error.
 
 ## Why the storage is piecewise constant, and what the anchors are for
 
-The factor is a step function that moves only on ex-rights/ex-dividend days.
-`000001.SZ`'s 8,627 rows carry **43** distinct steps -- a 201x compression -- and the whole
-market's daily form would be ~4.8e7 rows for a series with roughly one move per security per
-year. So the panel stores the steps.
+The factor is a step function that moves only on ex-rights/ex-dividend days. `000001.SZ`'s
+8,627 rows take **43 distinct values** and therefore move at **42 change points**, so the
+compressed window is **44 rows** -- the opening anchor, the 42 changes, and the closing
+anchor -- a **196x** reduction. (Three numbers, not one: the distinct-value count, the
+change-point count and the stored-row count differ by one at each step, and quoting the first
+as if it were the third overstates the compression.) The whole market's daily form would be
+~4.8e7 rows for a series with roughly one move per security per year. So the panel stores the
+steps.
 
 `load_bearing_observations` is the rule, and it keeps **three** kinds of row, not one:
 
@@ -75,10 +79,15 @@ a caller discover it by tripping over it.
 `KNOWN_ADJUSTMENT_LIMITATIONS` carries the boundaries, each with a number behind it. The one
 worth repeating here is that **the series is not monotone**, contrary to the obvious reading
 of "cumulative": eight of `000001.SZ`'s own rows step down, and across the whole market
-between 2023-12-29 and 2024-06-28 **28 of 5,351** securities' factors fell -- five of them
-substantially, `600069.SH` by 89.7% in one day (6.415 -> 0.6604 on 2024-06-17). A
-monotonicity assertion would be a universal claim the data falsifies, so this module does not
-make one.
+between 2023-12-29 and 2024-06-28 **28 of 5,351** securities' factors fell. A monotonicity
+assertion would be a universal claim the data falsifies, so this module does not make one.
+
+The five of those 28 that fell by more than 0.1% are a *different* boundary and are named
+separately as `delisted_securities_carry_unstable_factors`. They are not market movements at
+all: every one is a delisted SH main-board name whose factor rows continue for years after
+its last bar and oscillate between two constants. Filing `600069.SH`'s -89.7% under
+"the factor really can fall" would read as a fact about corporate actions, and it is a fact
+about the upstream feed.
 
 ## Layering
 
@@ -201,9 +210,33 @@ KNOWN_ADJUSTMENT_LIMITATIONS: Final[tuple[AdjustmentLimitation, ...]] = (
             "6.4% (2.608 -> 2.463 on 1991-11-11), three are four-to-three-decimal rounding "
             "worth 0.0002% (125.0496 -> 125.0493 on 2024-06-25). Market-wide, 28 of the "
             "5,351 securities present on both 2023-12-29 and 2024-06-28 have a lower factor "
-            "on the later date, and five of those fell by more than 0.1% -- 600069.SH by "
-            "89.7% in one day (6.415 -> 0.6604 on 2024-06-17). Any code that assumes a "
-            "non-decreasing series is wrong on real data."
+            "on the later date. Any code that assumes a non-decreasing series is wrong on "
+            "real data. The five of those 28 that fell by more than 0.1% are not covered by "
+            "this entry: they are upstream defects rather than movements, and are named by "
+            "delisted_securities_carry_unstable_factors."
+        ),
+    ),
+    AdjustmentLimitation(
+        code="delisted_securities_carry_unstable_factors",
+        detail=(
+            "A delisted security keeps producing factor rows for years after its last bar, "
+            "and those rows are not a series. 600069.SH (退银鸽(退), listed 1997-04-30, "
+            "delist_date 2020-08-27) has 5,421 daily bars ending 2020-08-20 at 0.28 yuan, "
+            "and adj_factor rows running to 2025-04-28 -- which since 2020-01-01 change 17 "
+            "times, oscillating between two levels (6.415 -> 0.6604 on 2022-06-24, back to "
+            "6.415 on 2022-09-06, ... , 6.415 -> 0.6604 on 2024-06-17), over four distinct "
+            "values 0.6603/0.6604/6.4148/6.415. A cumulative factor cannot return to a level "
+            "it left, so these are upstream defects and not corporate actions. 600978.SH "
+            "(delisted 2021-03-22, last bar 2021-02-22, factor rows to 2025-08-14) has the "
+            "same shape -- 17 changes since 2020-01-01 over 0.8016/5.041/5.0417 -- and all "
+            "five securities whose factor fell by more than 0.1% market-wide between "
+            "2023-12-29 and 2024-06-28 (600069, 600978, 600247, 600677, 600485) are delisted "
+            "SH main-board names. **Any adjusted return spanning a delisting date is "
+            "therefore untrustworthy.** adjustment_factors_on never asks for one -- its "
+            "cross section comes from universe.listed_on(day), which a delisted name is not "
+            "in -- but nothing stops a caller reading a stored history directly. Distinct "
+            "from suspension_is_invisible, which says a factor row is no evidence of a "
+            "session; this one says the row's *value* is bad."
         ),
     ),
     AdjustmentLimitation(
@@ -234,11 +267,16 @@ KNOWN_ADJUSTMENT_LIMITATIONS: Final[tuple[AdjustmentLimitation, ...]] = (
         code="dates_are_not_the_stored_trading_calendar",
         detail=(
             "The dates the factor series carries are not exactly the ones trade_cal reports. "
-            "000001.SZ has adj_factor rows on 64 dates in 1991 that the SZSE calendar marks "
-            "closed -- every one of them a date the SSE calendar marks open. So an expected "
-            "row count derived from the stored calendar is not a sound completeness check "
-            "for this dataset, and none is used: completeness is judged from the response "
-            "itself."
+            "000001.SZ has adj_factor rows on 64 dates in 1991 that are not in the SZSE "
+            "calendar **at all** -- trade_cal's SZSE series begins 1991-07-03 while the "
+            "factor begins 1991-04-03, so those days are beyond the horizon rather than "
+            "marked closed, which is the stronger version of the same objection. Every one "
+            "of them is a date the SSE calendar marks open. So an expected row count derived "
+            "from the stored calendar is not a sound *response*-completeness check for this "
+            "dataset, and none is used: a response is judged from itself. The calendar is "
+            "used one step later and in the safe direction only -- "
+            "panel_ingest.write_adjustment_factors refuses a partition that is *missing* a "
+            "session the calendar reports open, and tolerates one it carries in addition."
         ),
     ),
     AdjustmentLimitation(
@@ -553,11 +591,18 @@ def _require_stored_text(value: object, index: int, column: str) -> str:
 def _require_price(value: float, role: str) -> None:
     """Reject anything that is not exactly a finite positive `float`.
 
-    `type(...) is float`, not `isinstance`: `bool` is a subclass of `int`, so an `isinstance`
-    check written against a numeric tower would let `True` through as the factor 1.0 and make
-    every adjusted price equal to its raw one -- the failure this whole module exists to
-    prevent, arriving silently. Zero and the negatives are refused because they cannot scale a
-    price, and the forward convention divides by one.
+    `type(...) is float`, not `isinstance`, and the reason is **`float` subclasses**, not
+    `bool`. `isinstance(True, float)` is already `False`, so both spellings refuse `True` and
+    `1` alike; what only `type(...) is float` refuses is a subclass -- `numpy.float64` is one,
+    and so is any wrapper that overrides `__mul__` or `__truediv__`. A factor is about to be
+    multiplied into a price, so the arithmetic that runs must be `float`'s own.
+
+    (The provider-side `type(...) is float or type(...) is int` in `providers/tushare.py::
+    _adjustment_factor` is the check that genuinely turns on `bool`: it accepts `int`, and
+    `isinstance(True, int)` *is* `True`.)
+
+    Zero and the negatives are refused because they cannot scale a price, and the forward
+    convention divides by one.
     """
     if type(value) is not float or not isfinite(value) or value <= 0.0:
         raise AdjustmentError(

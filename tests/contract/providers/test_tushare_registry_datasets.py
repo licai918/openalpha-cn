@@ -34,6 +34,7 @@ from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET
 from openalpha_cn.providers.base import ProviderFailure, ProviderRequest
 from openalpha_cn.providers.tushare import (
     TUSHARE_DATASETS,
+    TUSHARE_RESPONSE_TRUNCATION_FLAG,
     TushareProvider,
     _calendar_static_timeline,
 )
@@ -74,7 +75,18 @@ FUTURE_ANNOUNCEMENT: list[Any] = ["920165.BJ", "珈凯生物", "20260811", None,
 
 
 def _response(fields: list[str], items: list[list[Any]]) -> dict[str, Any]:
-    return {"code": 0, "msg": None, "data": {"fields": list(fields), "items": items}}
+    """A complete response. `has_more=False` is what a live one actually carries, and
+    `stock_basic` now requires it to be present -- it has no measured row cap, so the flag is
+    that endpoint's only witness that nothing was withheld."""
+    return {
+        "code": 0,
+        "msg": None,
+        "data": {
+            "fields": list(fields),
+            "items": items,
+            TUSHARE_RESPONSE_TRUNCATION_FLAG: False,
+        },
+    }
 
 
 FETCHED_AT = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)

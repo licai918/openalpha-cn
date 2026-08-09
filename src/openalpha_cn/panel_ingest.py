@@ -199,8 +199,18 @@ smaller than the price panel it exists to correct. The visible consequence is on
 side: `adjustment_requirement()` **waives** `required_dates`, because a compressed partition
 holds rows only on load-bearing sessions and a calendar-derived expectation would report a
 permanent `date_gap` for a partition that is complete by construction. So
-`panel_readiness_requirement()` must not be pointed at this dataset; what replaces the check
-is the window anchors that bound every answer.
+`panel_readiness_requirement()` must not be pointed at this dataset.
+
+**The waiver is paid for at write time instead of being written off.** Compression is what
+destroys the session census, so the census is checked in the last moment it exists:
+`write_adjustment_factors()` takes a `TradingCalendar` and refuses a merged batch that is
+missing any session the calendar reports open in that year. Missing only -- extra days are
+tolerated, because the one thing a calendar can do wrongly here is manufacture a false alarm.
+The window anchors are *not* the replacement, which an earlier version of this note claimed:
+they bound one partition's ends, and a hole inside a partition -- or a partition that starts
+in March -- sits inside `covered_from`/`covered_through` once two years are read together and
+is answered from the last step before it. `_refuse_missing_factor_sessions` carries the
+measured wrong answer.
 
 ## Deriving the partition year
 
@@ -1114,11 +1124,13 @@ def compress_adjustment_batch(batch: ColumnarPanelBatch) -> ColumnarPanelBatch:
     `domain/adjustment.py::load_bearing_observations` for why all three kinds are load-bearing
     and what the last one is protecting.
 
-    Measured on the real series: `000001.SZ`'s 8,627-row history holds 43 steps, a 201x
-    reduction, and the whole market's daily form would be ~4.8e7 rows for a series that moves
-    about once per security per year. Storing the days instead is a defensible choice and is
-    not the one taken; storing the *steps without the closing anchor* is not defensible, and
-    is the mistake this function's last line exists to avoid.
+    Measured on the real series: `000001.SZ`'s 8,627-row history takes 43 distinct values and
+    therefore moves at 42 change points, which with both anchors is **44 stored rows** -- a
+    **196x** reduction, not the 201x that quoting the distinct-value count as though it were
+    the row count produces. The whole market's daily form would be ~4.8e7 rows for a series
+    that moves about once per security per year. Storing the days instead is a defensible
+    choice and is not the one taken; storing the *steps without the closing anchor* is not
+    defensible, and is the mistake this function's last line exists to avoid.
 
     Idempotent: compressing an already-compressed batch is a no-op, because a kept row is
     either an endpoint (still an endpoint) or a change (still a change).
@@ -1126,17 +1138,20 @@ def compress_adjustment_batch(batch: ColumnarPanelBatch) -> ColumnarPanelBatch:
     Row order in the result is `(subject, factor_date)` ascending, which makes the partition's
     content hash independent of the order the day batches happened to be merged in.
 
-    Two shapes are refused rather than compressed, and both are ordinary operator mistakes
-    rather than hypotheticals. A **null factor** is a legal value of a `float` panel column
-    (panel data is sparse) and is meaningless here -- it would compare unequal to nothing, ride
-    through as an unchanged row, and only fail on the way back out, leaving a partition that
-    passes readiness and explodes at parse. And a **repeated session** for one security --
-    what merging the same day's batch twice produces -- is refused by
+    Three shapes are refused rather than compressed, and all three are ordinary operator
+    mistakes rather than hypotheticals. A **null factor** is a legal value of a `float` panel
+    column (panel data is sparse) and is meaningless here -- it would compare unequal to
+    nothing, ride through as an unchanged row, and only fail on the way back out, leaving a
+    partition that passes readiness and explodes at parse. A **null or unparseable
+    `factor_date`** is refused by the same named error for the same reason, rather than
+    reaching `date.fromisoformat` and surfacing as a bare
+    `ValueError: Invalid isoformat string: 'None'` -- a guard that is not of a piece with the
+    one beside it is a guard a caller cannot catch uniformly. And a **repeated session** for
+    one security -- what merging the same day's batch twice produces -- is refused by
     `load_bearing_observations`' ascending rule, because a step function with two entries for
     one day has no defined value on it.
     """
-    if batch.dataset != ADJ_FACTOR_DATASET:
-        raise PanelBatchError(f"expected the {ADJ_FACTOR_DATASET!r} dataset, got {batch.dataset!r}")
+    _require_adjustment_batch(batch)
     if batch.status != "success":
         raise PanelBatchError(f"cannot compress a {batch.status!r} batch: {batch.no_data_reason!r}")
     dates = _column_values(batch, ADJUSTMENT_DATE_COLUMN)
@@ -1147,16 +1162,17 @@ def compress_adjustment_batch(batch: ColumnarPanelBatch) -> ColumnarPanelBatch:
             "observation is ordinary in a panel column and impossible in a step function -- "
             "there is no price it could scale"
         )
+    parsed = _adjustment_dates(dates)
     by_subject: dict[str, list[int]] = {}
     for index, subject in enumerate(batch.subjects):
         by_subject.setdefault(subject, []).append(index)
     kept: list[int] = []
     for subject in sorted(by_subject):
-        indices = sorted(by_subject[subject], key=lambda index: str(dates[index]))
+        indices = sorted(by_subject[subject], key=lambda index: parsed[index])
         observations = [
             FactorObservation(
                 ts_code=subject,
-                observed_on=date.fromisoformat(str(dates[index])),
+                observed_on=parsed[index],
                 factor=cast(float, factors[index]),
             )
             for index in indices
@@ -1168,6 +1184,37 @@ def compress_adjustment_batch(batch: ColumnarPanelBatch) -> ColumnarPanelBatch:
             if entry.observed_on in wanted
         )
     return _select_rows(batch, kept)
+
+
+def _require_adjustment_batch(batch: ColumnarPanelBatch) -> None:
+    """One copy of "this is the factor dataset", called by both things that walk its columns."""
+    if batch.dataset != ADJ_FACTOR_DATASET:
+        raise PanelBatchError(f"expected the {ADJ_FACTOR_DATASET!r} dataset, got {batch.dataset!r}")
+
+
+def _adjustment_dates(values: tuple[object, ...]) -> tuple[date, ...]:
+    """Parse a `factor_date` column, naming a null or malformed entry rather than tripping.
+
+    The symmetric half of `compress_adjustment_batch`'s null-factor guard. `str(None)` is
+    `'None'`, so without this the null case reached `date.fromisoformat` and came back out as
+    a bare `ValueError: Invalid isoformat string: 'None'` -- not a `PanelBatchError`, and so
+    not caught by a caller who is catching the guard standing right next to it.
+    """
+    parsed: list[date] = []
+    for index, value in enumerate(values):
+        if not isinstance(value, str):
+            raise PanelBatchError(
+                f"{ADJUSTMENT_DATE_COLUMN} row {index} is "
+                f"{'null' if value is None else f'a {type(value).__name__}'}; a step function "
+                "has no value on a session it cannot name"
+            )
+        try:
+            parsed.append(date.fromisoformat(value))
+        except ValueError as error:
+            raise PanelBatchError(
+                f"{ADJUSTMENT_DATE_COLUMN} row {index} is not an ISO date: {value!r}"
+            ) from error
+    return tuple(parsed)
 
 
 def _column_values(batch: ColumnarPanelBatch, name: str) -> tuple[object, ...]:
@@ -1182,10 +1229,97 @@ def _column_values(batch: ColumnarPanelBatch, name: str) -> tuple[object, ...]:
     )
 
 
+def _refuse_missing_factor_sessions(
+    batch: ColumnarPanelBatch,
+    calendar: TradingCalendar,
+    year: int,
+    *,
+    date_timezone: str,
+) -> None:
+    """Refuse a pre-compression batch that is missing a session the calendar reports open.
+
+    ## Why this exists at all
+
+    `adjustment_requirement()` waives `required_dates`, so nothing on the *read* side counts
+    this dataset's sessions. The compressed partition still carries each security's first and
+    last observation, and it is tempting to call those anchors an equivalent guarantee. They
+    are not, and the difference is not academic. `AdjustmentHistory.factor_on` refuses a day
+    outside `[covered_from, covered_through]` -- but those bounds are computed over whatever
+    rows a read *concatenated*, so a hole strictly inside them is answered by `bisect` from
+    the last step before it, with no error anywhere. Measured on the real series: a 2026
+    partition assembled from 06-15 onward, read beside earlier years, answers
+    `factor_on(2026-06-12)` with 134.5794 instead of 139.008 and turns that day's return from
+    +2.742251% into -0.530973% -- the unadjusted number, sign and all, from a partition that
+    reports `ready=True` with no issues.
+
+    ## Direction, and why it is not equality
+
+    Only the **missing** direction is refused. A session the batch carries that the calendar
+    calls closed is left alone, because that is a real and harmless shape: `000001.SZ` has
+    factor rows on 64 dates in 1991 that are outside the SZSE calendar entirely (its series
+    starts 1991-07-03, the factor starts 1991-04-03), every one of them an SSE session. An
+    equality check would refuse that partition; requiring only coverage tolerates the extra
+    observations, which can add information and cannot remove any. This is the same asymmetry
+    that kept a calendar-derived row count out of the provider's truncation guard -- there the
+    calendar could only manufacture false alarms, here it is used in the one direction where
+    it cannot.
+
+    ## The two bounds
+
+    The lower bound is the year's own start, not the batch's first row -- a partition that
+    begins in March is exactly the failure mode this function exists for, and clamping the
+    expectation at its own first row would define the hole out of existence.
+
+    The upper bound is the day before the fetch, in `date_timezone`. A backfill of a past year
+    therefore has to cover that whole year (its `fetched_at` is long after it), while the
+    running year is required only through the last session that had certainly closed when the
+    fetch ran. The one-session slack is deliberate: `ClockStrategy.daily_close` publishes a
+    session at 16:30 local, so a fetch earlier on that same day cannot hold it and requiring
+    it would be a false alarm on every intraday run.
+
+    Raises `CalendarHorizonError` (through `trading_days_between`) when the calendar does not
+    reach across the year being written. That is the honest answer rather than a gap in the
+    guard: a calendar that stops in June cannot testify about December.
+    """
+    _require_adjustment_batch(batch)
+    zone = _resolve_timezone(date_timezone)
+    opens_on = date(year, 1, 1)
+    closes_on = min(
+        date(year, 12, 31), batch.fetched_at.astimezone(zone).date() - timedelta(days=1)
+    )
+    if closes_on < opens_on:
+        # The batch was fetched on 1 January of its own year, so no session in it had closed
+        # before the fetch and there is nothing the calendar can require.
+        return
+    observed = set(_adjustment_dates(_column_values(batch, ADJUSTMENT_DATE_COLUMN)))
+    missing = [
+        day for day in calendar.trading_days_between(opens_on, closes_on) if day not in observed
+    ]
+    if missing:
+        raise PanelBatchError(
+            f"{ADJ_FACTOR_DATASET} year={year} is missing {len(missing)} session(s) the "
+            f"{calendar.exchange} calendar reports open between {opens_on.isoformat()} and "
+            f"{closes_on.isoformat()}: {_date_sample(missing)}. The partition stores steps, "
+            "so a missing session is not a shorter answer -- once this year is read beside "
+            "another, every day in the hole falls inside covered_from/covered_through and is "
+            "answered from the last step before it, which is the unadjusted number wearing an "
+            "adjusted one's name. Fetch the missing sessions and write the year in one call"
+        )
+
+
+def _date_sample(days: Sequence[date]) -> str:
+    """Render a date set for an error message, capped the way `_subject_sample` is."""
+    ordered = [day.isoformat() for day in sorted(days)]
+    if len(ordered) <= _SUBJECT_SAMPLE:
+        return str(ordered)
+    return f"{ordered[:_SUBJECT_SAMPLE]} and {len(ordered) - _SUBJECT_SAMPLE} more"
+
+
 def write_adjustment_factors(
     store: PanelStore,
     batches: Sequence[ColumnarPanelBatch],
     *,
+    calendar: TradingCalendar,
     date_timezone: str = DEFAULT_DATE_TIMEZONE,
 ) -> PartitionRef:
     """Merge one year of factor cross sections, compress them, and write the partition.
@@ -1197,16 +1331,28 @@ def write_adjustment_factors(
     one batch before the store sees them -- `PanelStore.write_partition` replaces a partition
     whole, so writing them one at a time would leave the year holding only its last session.
 
-    `panel_partition_year` then refuses a set of batches that straddles two years rather than
-    picking one, and `_refuse_to_drop_stored_subjects` refuses a rewrite that would remove a
-    security the stored partition already had -- the same guard the registry uses, for the
-    same reason.
+    Three guards, in order, and the middle one is the reason `calendar` is a required argument
+    rather than a convenience:
+
+    1. `panel_partition_year` refuses a set of batches that straddles two years rather than
+       picking one.
+    2. `_refuse_missing_factor_sessions` refuses a year that is missing a session the calendar
+       reports open -- **before** compression, which is the only moment the raw session census
+       still exists. See that function for the measured wrong answer it prevents.
+    3. `_refuse_to_drop_stored_subjects` refuses a rewrite that would remove a security the
+       stored partition already had -- the same guard the registry uses, for the same reason.
+
+    Guards 2 and 3 are the two halves of the same failure and neither substitutes for the
+    other: a missing *security* makes the answer shorter, a missing *session* makes it wrong.
     """
-    # The dataset check is `compress_adjustment_batch`'s and is not repeated here: a second
-    # copy of a rule is a copy that can drift, and `merge_panel_batches` has already made every
-    # input agree on one dataset by this point.
-    compressed = compress_adjustment_batch(merge_panel_batches(batches))
-    year = panel_partition_year(compressed, date_timezone=date_timezone)
+    # The dataset check belongs to `_require_adjustment_batch` and is called by both the
+    # session census and `compress_adjustment_batch`; `merge_panel_batches` has already made
+    # every input agree on one dataset by this point.
+    merged = merge_panel_batches(batches)
+    _require_adjustment_batch(merged)
+    year = panel_partition_year(merged, date_timezone=date_timezone)
+    _refuse_missing_factor_sessions(merged, calendar, year, date_timezone=date_timezone)
+    compressed = compress_adjustment_batch(merged)
     _refuse_to_drop_stored_subjects(
         store,
         compressed,
@@ -1230,13 +1376,26 @@ def adjustment_requirement(
     - **`required_dates`** is waived because the partition is a *compressed* step function.
       Its date census holds only the load-bearing sessions -- eight rows for two securities
       across a real trading week -- so a calendar-derived expectation would report a
-      permanent `date_gap` on a partition that is complete by construction. This is the one
-      place the storage decision is visible from outside, and what replaces the check is
-      structural rather than a date set: every partition carries each security's factor on
-      the first and last session of the window it was assembled from, so
-      `AdjustmentHistory.covered_from` / `covered_through` bound every answer and a day
-      inside them is answered from a real observation. `panel_readiness_requirement` must
-      therefore **not** be pointed at this dataset.
+      permanent `date_gap` on a partition that is complete by construction.
+      `panel_readiness_requirement` must therefore **not** be pointed at this dataset.
+
+      **What replaces it is a check at write time, not a property of the stored rows.**
+      `write_adjustment_factors` requires a `TradingCalendar` and refuses a partition that is
+      missing any session the calendar reports open, while the raw census still exists. An
+      earlier version of this docstring claimed the window anchors were the replacement --
+      that every day inside `covered_from`/`covered_through` is "answered from a real
+      observation". The clause is true and the safety it implies is not: the anchors bound
+      one partition's *ends*, and a read that concatenates years is bounded only by the
+      outermost pair, so a hole inside a partition (or a partition that starts in March) sits
+      inside those bounds and is answered by `bisect` from the previous step, with nothing
+      raising. That is measured, not hypothetical -- see `_refuse_missing_factor_sessions`
+      for the real security, day and pair of numbers.
+
+      Two residues remain named rather than papered over. A year written from a batch fetched
+      on 1 January of that same year is not checked (nothing in it had closed before the
+      fetch). And this is a write-time gate: a partition written before the gate existed is
+      not re-examined on read, because the compressed rows no longer carry the census that
+      would settle it.
     - **`required_subjects`** is waived because naming the securities would be circular: the
       cross section is what the read is for. `adjustment_factors_on` is where a listed
       security with no factor becomes a refusal, because that is where the universe is known.

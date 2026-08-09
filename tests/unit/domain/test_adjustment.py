@@ -81,8 +81,12 @@ PING_AN_CHANGE_POINTS: tuple[tuple[str, float], ...] = (
 )
 """Every point at which `000001.SZ`'s factor moved, over its whole 8,627-row history.
 
-43 rows out of 8,627 -- a **201x** compression, and the measurement the piecewise-constant
-storage decision rests on. The series runs from 1.0 on the listing day (1991-04-03) to
+Three numbers, one apart from each other, and only the third is the compression ratio's
+denominator: the series takes **43 distinct values** (the 43 rows below), so it moves at
+**42 change points**, and the stored window is **44 rows** -- these 43 plus the closing
+anchor 2026-08-07, whose value repeats 2026-06-12's. 8,627 / 44 is a **196x** reduction.
+Quoting the 43 as if it were the stored row count gives 201x, which is the shape of error
+this fixture is here to prevent. The series runs from 1.0 on the listing day (1991-04-03) to
 139.008 on 2026-08-07.
 """
 
@@ -428,6 +432,32 @@ def test_an_integer_factor_is_refused_because_bool_is_an_integer() -> None:
             )
 
 
+def test_a_float_subclass_is_refused_because_that_is_what_the_exact_type_check_is_for() -> None:
+    """The check is `type(...) is float`, and this is the case that distinguishes it.
+
+    `isinstance(True, float)` is already `False`, so `bool` does not tell the two spellings
+    apart -- rewriting the guard as `isinstance` changes nothing for `True` or `1`. What only
+    the exact type refuses is a **subclass**, and a subclass is where the danger actually is:
+    the factor is about to be multiplied into a price, so the arithmetic that runs must be
+    `float`'s own and not an override. `numpy.float64` is such a subclass, which makes this
+    reachable rather than theoretical.
+    """
+
+    class _ScaledFloat(float):
+        def __mul__(self, other: object) -> float:  # pragma: no cover - never reached
+            return 0.0
+
+    with pytest.raises(AdjustmentError, match="must be a finite positive float"):
+        build_adjustment_history(
+            PING_AN,
+            [
+                FactorObservation(
+                    ts_code=PING_AN, observed_on=date(2024, 1, 2), factor=_ScaledFloat(125.049)
+                )
+            ],
+        )
+
+
 def test_the_history_is_sorted_ascending_whatever_order_it_arrives_in() -> None:
     history = build_adjustment_history(
         PING_AN,
@@ -463,12 +493,66 @@ def test_the_factor_is_not_monotone_and_this_contract_does_not_pretend_it_is() -
     assert (date(2024, 6, 25), 125.0496, 125.0493) in decreases
 
 
+def test_the_compression_ratio_counts_stored_rows_and_not_distinct_values() -> None:
+    """Three numbers one apart, and the docstrings quote the third.
+
+    43 distinct values, 42 change points, 44 stored rows -- because the window's closing
+    observation (2026-08-07, 139.008) repeats 2026-06-12's value and is kept anyway, which is
+    the whole point of `load_bearing_observations`' third rule. 8,627 / 43 is 201x and 8,627 /
+    44 is 196x; the second is the reduction the partition actually achieves.
+    """
+    whole_history = _observations((*PING_AN_CHANGE_POINTS, ("20260807", 139.008)))
+    history = _history()
+
+    assert len({entry.factor for entry in history.observations}) == 43
+    assert len(history.change_points()) == 42
+    stored = load_bearing_observations(whole_history)
+    assert len(stored) == 44
+    assert stored[-1].observed_on == date(2026, 8, 7)
+    assert round(8627 / len(stored)) == 196
+
+
 def test_the_known_limitations_are_named_rather_than_argued_away() -> None:
+    """Set **equality**, not three memberships.
+
+    The previous version checked that three of the five codes were present, which left the
+    other two outside the sample it drew its verdict from -- so deleting either of them, or
+    adding a sixth entry, changed nothing. That is the same shape as this repository's Task 28
+    Critical: a universal claim whose test set excludes the counterexamples. An exact set is
+    the only form in which "these are the boundaries, and only these" is a checkable claim.
+    """
     codes = {entry.code for entry in KNOWN_ADJUSTMENT_LIMITATIONS}
-    assert "factor_is_not_monotone" in codes
-    assert "silent_truncation_at_the_response_cap" in codes
-    assert "no_revision_history" in codes
-    assert all(entry.detail.strip() for entry in KNOWN_ADJUSTMENT_LIMITATIONS)
+    assert codes == {
+        "factor_is_not_monotone",
+        "delisted_securities_carry_unstable_factors",
+        "silent_truncation_at_the_response_cap",
+        "no_revision_history",
+        "dates_are_not_the_stored_trading_calendar",
+        "suspension_is_invisible",
+    }
+    assert len(KNOWN_ADJUSTMENT_LIMITATIONS) == len(codes), "a code is declared twice"
+
+
+def test_the_delisted_instability_is_filed_as_a_data_defect_not_as_a_market_move() -> None:
+    """`600069.SH`'s -89.7% is not a corporate action, and the split matters because the entry
+    a reader finds it under is the entry that tells them what it means.
+
+    Measured: its last daily bar is 2020-08-20 and its `delist_date` 2020-08-27, yet the
+    factor series runs to 2025-04-28 and *alternates* between two constants 17 times after
+    2020 (6.415 -> 0.6604 on 2022-06-24, back on 2022-09-06, ... , 6.415 -> 0.6604 on
+    2024-06-17 -- the step that produced the -89.7%). A cumulative factor cannot return to a
+    level it left, so this is upstream breakage. Listing it beside 1991-93's genuine -6.4%
+    told the reader the factor really can fall by 90% in a day.
+    """
+    by_code = {entry.code: entry.detail for entry in KNOWN_ADJUSTMENT_LIMITATIONS}
+    assert "600069.SH" not in by_code["factor_is_not_monotone"]
+    delisted = by_code["delisted_securities_carry_unstable_factors"]
+    assert "600069.SH" in delisted
+    assert "2020-08-27" in delisted  # the delisting the factor rows outlive
+    assert "2025-04-28" in delisted  # and how long they outlive it by
+    # suspension_is_invisible covers "a factor row is no evidence of a session"; it does not
+    # cover "the values in those rows are bad", which is why a second entry exists.
+    assert "600069.SH" not in by_code["suspension_is_invisible"]
 
 
 # --- stored rows ----------------------------------------------------------------------
