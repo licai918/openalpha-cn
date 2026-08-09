@@ -63,7 +63,7 @@ which `Timeline`'s four fixed clocks cannot express.
 ## What this module deliberately does not do
 
 It has no notion of intraday sessions, half-days, or per-instrument suspension -- a day is
-open or it is not. Suspension is `suspend_d` (`V2-P1-009`), which is per-name and belongs on
+open or it is not. Suspension is `suspend_d` (`V2-P1-008`), which is per-name and belongs on
 the panel plane as its own dataset, not as a modifier of the exchange calendar.
 
 It also does not read `pretrade_date`, Tushare's own previous-trading-day column, as the

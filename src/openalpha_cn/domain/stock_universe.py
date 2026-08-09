@@ -251,7 +251,7 @@ KNOWN_UNIVERSE_LIMITATIONS: Final[tuple[UniverseLimitation, ...]] = (
         detail=(
             "A listed security that was halted all year is `listed` here. This dataset knows "
             "only about the two ends of a listing; per-name suspension is `suspend_d` "
-            "(V2-P1-009), which belongs on the panel plane as its own dataset."
+            "(V2-P1-008), which belongs on the panel plane as its own dataset."
         ),
     ),
     UniverseLimitation(
