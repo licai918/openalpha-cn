@@ -56,6 +56,47 @@ bounded rather than trusted -- no calendar can be built from that path without g
 not exactly a `bool`, so a caller who reaches for `record.payload["is_open"]` and applies
 `bool()` to it gets a wrong answer only inside their own code, never a wrong
 `TradingCalendar`. `tests/contract/providers/test_tushare_trade_cal.py` pins both halves.
+
+## A truncated response is refused, never stored (`V2-P1-006`)
+
+Every endpoint here serves at most some number of rows per response and **drops the oldest
+ones** past that, with no error code. Measured on 2026-08-08: a bare
+`adj_factor(ts_code=000001.SZ)` returns 6,000 rows beginning 2001-11-14, while that security's
+real history is 8,627 rows beginning 1991-04-03 -- a whole decade of adjustment factors gone,
+and every return computed across the boundary silently wrong.
+
+`_check_response_completeness` is the guard, and it is deliberately two independent witnesses
+rather than one:
+
+- **`data.has_more`**, which every live response carries. It is *not* a genuine "more exists"
+  flag: the window `20011114..20260808` holds exactly 6,000 rows and nothing older, and still
+  reports `True`, while the same window minus one row reports `False`. So it is the server's
+  own `len(rows) == limit` heuristic, which makes it over-report and never under-report --
+  the fail-closed direction. Only the literal boolean `False` is read as complete, because
+  `"False"` and `"0"` are truthy while `0` and `""` are falsy and neither truthiness is a fact
+  about the data. That is the same rule, for the same reason, that `_open_flag` applies to
+  `is_open`.
+- **`max_rows_per_response`**, a row count measured per descriptor against the live endpoint.
+  Per descriptor because the caps genuinely differ: `adj_factor` and `daily` cap at 6,000,
+  `namechange` at 10,000, and `trade_cal` returned all 13,162 published SSE rows in one
+  response with `has_more=False`. A single global constant would refuse that complete calendar
+  while passing a truncated `namechange`. `None` means "not measured", not "no cap".
+
+`data.count` is **not** a third witness: it reads `0` on every response measured, truncated or
+not.
+
+`requires_truncation_flag` turns an *absent* `has_more` into a failure rather than a skipped
+check. It is on `adj_factor` alone today, and stating it per descriptor is what forces
+`V2-P1-007`/`008` to decide it rather than inherit it.
+
+**Where this misses.** The guard judges one response in isolation and cannot see a cap that
+the endpoint applies *below* its measured value, nor one that changes. It also cannot see the
+case where both witnesses are wrong together -- a server that truncates while reporting
+`has_more=False` at a row count under the declared cap. What it does close is the entire
+measured failure mode, at both the flag and the count. A calendar-derived expected row count
+would be a third witness and is deliberately not used: `000001.SZ` has factor rows on 64 dates
+in 1991 that the stored SZSE calendar marks closed, so the expectation would be wrong in the
+direction that manufactures false alarms.
 """
 
 import json
@@ -66,11 +107,17 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from enum import StrEnum
+from math import isfinite
 from typing import Any, Final, Protocol, cast
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
+from openalpha_cn.domain.adjustment import (
+    ADJ_FACTOR_DATASET,
+    ADJUSTMENT_DATE_COLUMN,
+    ADJUSTMENT_FACTOR_COLUMN,
+)
 from openalpha_cn.domain.name_history import (
     NAME_ANNOUNCEMENT_COLUMN,
     NAME_COLUMN,
@@ -272,6 +319,20 @@ class TushareDatasetDescriptor(BaseModel):
     serves_evidence_plane: bool = True
     """Whether ``fetch()`` serves this dataset; see this module's docstring for the two that
     do not."""
+    max_rows_per_response: int | None = Field(default=None, ge=1)
+    """The row cap this endpoint was **measured** to apply, or ``None`` for "not measured".
+
+    Not a global constant, because the caps differ per endpoint -- see this module's
+    docstring. ``None`` deliberately does not mean "no cap": it means nobody has established
+    one, and the ``has_more`` witness is the only guard such a dataset has.
+    """
+    requires_truncation_flag: bool = False
+    """Whether a response that omits ``has_more`` entirely is refused.
+
+    Separate from ``max_rows_per_response`` because the two witnesses fail independently, and
+    a descriptor should be able to demand the stronger one without also having to claim a
+    measured cap (or the other way round).
+    """
 
     @property
     def checked_response_fields(self) -> tuple[str, ...]:
@@ -485,6 +546,32 @@ def _calendar_date_text(value: object) -> object:
     return _parse_tushare_date(value).isoformat()
 
 
+def _adjustment_factor(value: object) -> object:
+    """Parse Tushare's ``adj_factor`` into a real, usable ``float``.
+
+    Three refusals, each of which would otherwise be silent:
+
+    - **``bool``.** ``True`` is an ``int``, so any check written against the numeric tower
+      admits it, and it would then scale every price by 1.0 -- an unadjusted series wearing an
+      adjusted series' name, which is the exact failure this dataset exists to prevent.
+    - **Zero, the negatives, and the non-finites.** None of them can scale a price, and the
+      forward convention divides by one.
+    - **Strings.** ``"1.0"`` would land in a ``float`` column and be rejected downstream by
+      ``PanelColumn`` anyway; failing here names the column and the value.
+
+    An ``int`` is accepted and widened, because JSON has one number type: the listing-day
+    factor of exactly 1 can arrive as ``1`` rather than ``1.0``, and ``PanelColumn`` refuses an
+    ``int`` in a ``float`` column (``bool`` is filtered out first, above).
+    """
+    if type(value) is float or type(value) is int:
+        number = float(value)
+        if isfinite(number) and number > 0.0:
+            return number
+    raise ValueError(
+        f"adj_factor must be a finite positive number, got {type(value).__name__} {value!r}"
+    )
+
+
 def _optional_calendar_date_text(value: object) -> object:
     """Same as `_calendar_date_text`, but a missing value stays missing.
 
@@ -497,6 +584,27 @@ def _optional_calendar_date_text(value: object) -> object:
     return _calendar_date_text(value)
 
 
+TUSHARE_RESPONSE_TRUNCATION_FLAG: Final[str] = "has_more"
+"""The response field that says the endpoint had more rows than it served.
+
+Named as a constant because three places read it: the guard, the tests that build responses
+without it, and `V2-P1-007`/`008` when they wire the next capped dataset.
+"""
+
+TUSHARE_PRICE_ROW_CAP: Final[int] = 6000
+"""Rows per response for `adj_factor` and `daily`, measured against the live endpoints.
+
+`adj_factor(ts_code=000001.SZ)` and `daily(ts_code=000001.SZ)` each return exactly 6,000 rows
+with `has_more=True`, and `limit=8000` / `limit=10000` do not raise it. The cap drops the
+*oldest* rows: `adj_factor`'s capped response starts 2001-11-14 against a true history
+starting 1991-04-03.
+"""
+
+TUSHARE_NAMECHANGE_ROW_CAP: Final[int] = 10000
+"""Rows per response for `namechange`, measured: the whole-corpus window returns exactly
+10,000 rows with `has_more=True`, which is also why `domain/name_history.py` assembles the
+corpus from 37 announcement-year windows instead."""
+
 TUSHARE_DATASETS: tuple[TushareDatasetDescriptor, ...] = (
     TushareDatasetDescriptor(
         dataset="daily",
@@ -506,6 +614,10 @@ TUSHARE_DATASETS: tuple[TushareDatasetDescriptor, ...] = (
         clock=ClockStrategy.daily_close,
         params_builder=_trade_date_params,
         source_uri_template="tushare://{dataset}/{subject}/{date}",
+        # Measured, and carried now rather than with `V2-P1-007`: the cap is a property of
+        # the endpoint, not of the task that first stores its rows, and a 6,000-row `daily`
+        # response is already reachable through `fetch()` today.
+        max_rows_per_response=TUSHARE_PRICE_ROW_CAP,
     ),
     TushareDatasetDescriptor(
         dataset=TRADING_CALENDAR_DATASET,
@@ -517,6 +629,10 @@ TUSHARE_DATASETS: tuple[TushareDatasetDescriptor, ...] = (
         clock=ClockStrategy.calendar_publication,
         params_builder=_trade_cal_params,
         source_uri_template="tushare://{dataset}/{subject}/{date}",
+        # No measured cap, and 6,000 would be actively wrong here: the whole published SSE
+        # calendar -- 13,162 rows -- comes back in one response with `has_more=False`. This
+        # is the descriptor that proves the cap has to be per endpoint.
+        max_rows_per_response=None,
         # `name` is the panel column, `source_field` is Tushare's response column. They
         # coincide today and are still written out separately: renaming one must not silently
         # rename the other.
@@ -555,6 +671,13 @@ TUSHARE_DATASETS: tuple[TushareDatasetDescriptor, ...] = (
         source_uri_template="tushare://{dataset}/{subject}/{date}",
         panel_rows=_stock_lifecycle_panel_rows,
         serves_evidence_plane=False,
+        # No measured cap: the whole `L,D` registry -- 5,878 rows on 2026-08-08 -- comes back
+        # in one response with `has_more=False`, which places this endpoint's cap somewhere
+        # above 5,878 without establishing where. Declaring 6,000 here would be a guess, and
+        # the guess is load-bearing: too low refuses a complete registry, too high passes a
+        # truncated one. The flag witness guards it in the meantime, and the margin is thin
+        # enough to be worth watching -- 122 rows.
+        max_rows_per_response=None,
         panel_columns=(
             TusharePanelColumn(
                 name=LIFECYCLE_EVENT_COLUMN,
@@ -593,6 +716,7 @@ TUSHARE_DATASETS: tuple[TushareDatasetDescriptor, ...] = (
         required_response_fields=("ts_code", "name", "start_date", "ann_date"),
         source_uri_template="tushare://{dataset}/{subject}/{date}",
         serves_evidence_plane=False,
+        max_rows_per_response=TUSHARE_NAMECHANGE_ROW_CAP,
         # `end_date` is fetched and not projected: it is derivable from the successor's
         # `start_date` and, unlike the successor, is gated by no announcement, so storing it
         # would put an unannounced future rename on the record currently in effect.
@@ -620,6 +744,44 @@ TUSHARE_DATASETS: tuple[TushareDatasetDescriptor, ...] = (
                 kind="string",
                 source_field="change_reason",
                 parse=_required_text,
+            ),
+        ),
+    ),
+    TushareDatasetDescriptor(
+        dataset=ADJ_FACTOR_DATASET,
+        kind=ADJ_FACTOR_DATASET,
+        subject_field="ts_code",
+        date_field="trade_date",
+        # The factor for session D is knowable once D has closed. Dating it at D's midnight
+        # instead would be a look-ahead of one session on every ex-dividend date, which is
+        # precisely the day the number matters.
+        clock=ClockStrategy.daily_close,
+        # One trading day of the whole market, the same builder `daily` uses. Measured:
+        # 5,387 rows on 2024-06-28 and 5,553 on 2026-08-07, against a 6,000-row cap -- so a
+        # cross section fits and one security's whole history (8,627 rows) does not. When the
+        # market outgrows the cap this refuses rather than truncating, and `subjects` is the
+        # escape route: it splits the day instead of losing the oldest codes.
+        params_builder=_trade_date_params,
+        # `""` asks for the endpoint's defaults, which are exactly the three columns below --
+        # measured, not assumed. Naming them in `fields` instead would hide a schema drift
+        # that added a fourth; `required_response_fields` pins what this descriptor reads.
+        response_fields="",
+        required_response_fields=("ts_code", "trade_date", ADJUSTMENT_FACTOR_COLUMN),
+        source_uri_template="tushare://{dataset}/{subject}/{date}",
+        max_rows_per_response=TUSHARE_PRICE_ROW_CAP,
+        requires_truncation_flag=True,
+        panel_columns=(
+            TusharePanelColumn(
+                name=ADJUSTMENT_DATE_COLUMN,
+                kind="string",
+                source_field="trade_date",
+                parse=_calendar_date_text,
+            ),
+            TusharePanelColumn(
+                name=ADJUSTMENT_FACTOR_COLUMN,
+                kind="float",
+                source_field=ADJUSTMENT_FACTOR_COLUMN,
+                parse=_adjustment_factor,
             ),
         ),
     ),
@@ -851,6 +1013,72 @@ def _resolve_subject(descriptor: TushareDatasetDescriptor, row: dict[str, Any]) 
     return str(row[descriptor.subject_field])
 
 
+_TRUNCATION_FLAG_ABSENT: Final[object] = object()
+
+
+def _check_response_completeness(
+    descriptor: TushareDatasetDescriptor,
+    data: dict[str, Any],
+    items: list[Any],
+    provider_id: str,
+) -> None:
+    """Refuse a response that may have had rows withheld. See this module's docstring.
+
+    Runs before the schema check and before any row is decoded, on both output paths, because
+    a truncated response is well formed: it decodes cleanly, validates cleanly, stores
+    cleanly, and is missing a decade of data. There is nothing later in the pipeline that
+    could notice.
+
+    ``retryable=False`` on every branch: the same request returns the same truncated answer,
+    so a retry loop would spin. The remedy is a narrower window (or `subjects`), which is a
+    different request.
+    """
+    flag = data.get(TUSHARE_RESPONSE_TRUNCATION_FLAG, _TRUNCATION_FLAG_ABSENT)
+    if flag is _TRUNCATION_FLAG_ABSENT:
+        if descriptor.requires_truncation_flag:
+            raise ProviderFailure(
+                provider_id=provider_id,
+                category="upstream",
+                message=(
+                    f"Tushare's {descriptor.dataset} response carries no "
+                    f"{TUSHARE_RESPONSE_TRUNCATION_FLAG} flag; every live response for this "
+                    "dataset does, so this one cannot be shown to be complete and a "
+                    "truncated factor series is silently wrong rather than short"
+                ),
+                retryable=False,
+            )
+    elif flag is not False:
+        # `is not False`, not `if flag:`. `"False"` and `"0"` are truthy and `0` and `""` are
+        # falsy, so either coercion turns a schema change into a wrong answer rather than an
+        # error -- the same trap `_open_flag` exists for.
+        raise ProviderFailure(
+            provider_id=provider_id,
+            category="upstream",
+            message=(
+                f"Tushare's {descriptor.dataset} response reports that it has more rows to "
+                f"give ({TUSHARE_RESPONSE_TRUNCATION_FLAG}={flag!r}); it serves at most one "
+                "page and drops the oldest rows, so this answer is a suffix of the truth. "
+                f"{TUSHARE_RESPONSE_TRUNCATION_FLAG} must be exactly the boolean False for a "
+                "response to count as complete. Narrow the request window or split it by "
+                "subject"
+            ),
+            retryable=False,
+        )
+    cap = descriptor.max_rows_per_response
+    if cap is not None and len(items) >= cap:
+        raise ProviderFailure(
+            provider_id=provider_id,
+            category="upstream",
+            message=(
+                f"Tushare served {len(items)} {descriptor.dataset} row(s), which is its "
+                f"measured per-response cap of {cap}; a response at the cap cannot be "
+                "distinguished from one the cap truncated, and the rows it drops are the "
+                "oldest. Narrow the request window or split it by subject"
+            ),
+            retryable=False,
+        )
+
+
 def _response_rows(
     descriptor: TushareDatasetDescriptor, response: dict[str, Any], provider_id: str
 ) -> list[dict[str, Any]]:
@@ -878,6 +1106,7 @@ def _response_rows(
         raise ValueError("Tushare fields must be a string array")
     if not isinstance(items, list):
         raise ValueError("Tushare items must be an array")
+    _check_response_completeness(descriptor, data, items, provider_id)
     for required in descriptor.checked_response_fields:
         if required not in fields:
             raise ValueError(f"Tushare response for {descriptor.dataset} has no {required} column")
@@ -920,6 +1149,12 @@ def _panel_no_data_reason(
     )
 
 
+MAX_PANEL_SOURCE_URI_LENGTH: Final[int] = 2048
+"""`ColumnarPanelBatch`'s own limit on `source_uri`, restated here so this module can stay
+under it rather than trip over it. The two must agree; if the contract's limit moves, this
+constant is what a reviewer greps for."""
+
+
 def _panel_source_uri(
     descriptor: TushareDatasetDescriptor,
     subjects: tuple[str, ...],
@@ -930,13 +1165,33 @@ def _panel_source_uri(
     `ProviderRecord` carries one per row; a columnar batch has one field for all of them, so
     the `{date}` slot holds the closed range the batch actually covers rather than a single
     day. Rows are already ascending by the time this is called.
+
+    ## Why the subject list is summarised past a point
+
+    Joining every subject is right for a two-exchange calendar partition and impossible for a
+    market-wide one. A `stock_basic` fetch carries 5,878 subjects and an `adj_factor` cross
+    section 5,387, which join into ~60,000 characters -- and `ColumnarPanelBatch` refuses a
+    `source_uri` over 2,048, *outside* `fetch_panel`'s decode `try`, so the whole fetch died
+    with a contract error and no whole-market panel fetch could complete at all (reproduced
+    against `2b06c4c` with 400 synthetic registry rows).
+
+    So the join is kept while it fits and replaced by `"{n}-subjects"` when it does not. The
+    count is not a substitute for the set and is not offered as one: the exact subjects live
+    in the partition's own `subject` column and are covered by `ColumnarPanelBatch.
+    content_digest`, which is what a later reader re-proves the partition against.
     """
     first = _parse_tushare_date(rows[0][descriptor.date_field])
     last = _parse_tushare_date(rows[-1][descriptor.date_field])
     unique_subjects = sorted(set(subjects))
+    span = f"{first:%Y%m%d}-{last:%Y%m%d}"
     subject = unique_subjects[0] if len(unique_subjects) == 1 else ",".join(unique_subjects)
+    uri = descriptor.source_uri_template.format(
+        dataset=descriptor.dataset, subject=subject, date=span
+    )
+    if len(uri) <= MAX_PANEL_SOURCE_URI_LENGTH:
+        return uri
     return descriptor.source_uri_template.format(
-        dataset=descriptor.dataset, subject=subject, date=f"{first:%Y%m%d}-{last:%Y%m%d}"
+        dataset=descriptor.dataset, subject=f"{len(unique_subjects)}-subjects", date=span
     )
 
 

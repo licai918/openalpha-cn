@@ -504,14 +504,18 @@ def test_a_dataset_with_no_panel_projection_is_refused_by_fetch_panel(
 
 
 def test_an_unsupported_dataset_is_refused_by_fetch_panel(fake_tushare_transport) -> None:
+    # The stand-in used to be `adj_factor`, which `V2-P1-006` then made a real dataset. A
+    # name no Tushare endpoint can ever have is what this test actually needs.
     provider = _provider(datetime(2026, 8, 8, tzinfo=UTC), fake_tushare_transport, [])
 
     with pytest.raises(ProviderFailure) as captured:
         provider.fetch_panel(
-            ProviderRequest(dataset="adj_factor", as_of=datetime(2026, 8, 8, tzinfo=UTC))
+            ProviderRequest(
+                dataset="not_a_tushare_endpoint", as_of=datetime(2026, 8, 8, tzinfo=UTC)
+            )
         )
 
-    assert str(captured.value) == "Unsupported Tushare dataset: adj_factor"
+    assert str(captured.value) == "Unsupported Tushare dataset: not_a_tushare_endpoint"
 
 
 def test_fetch_panel_without_a_token_fails_before_any_transport_call(

@@ -177,6 +177,31 @@ so hole detection for `daily`, `adj_factor` and the rest stops being a set diffe
 whatever the caller happened to declare. It clamps the required range at `as_of`, because a
 session that has not happened yet cannot be missing.
 
+## Many fetches, one partition (`V2-P1-006`)
+
+`write_adjustment_factors()` is the first writer here that takes a *sequence* of batches, and
+the reason is arithmetic rather than taste. Every other dataset on this seam is fetched by a
+period that matches its partition -- one `trade_cal` request is one year -- while an
+`adj_factor` request is one trading day of the whole market (~5,400 rows against a measured
+6,000-row response cap) and its partition is a calendar year (~1.3e6 rows). A year is
+therefore ~244 fetches, `PanelStore.write_partition` replaces a partition whole and has no
+append, and writing the fetches one at a time would leave the year holding only its last
+session.
+
+`merge_panel_batches()` is that primitive, and it is the exact inverse of
+`split_panel_batch_by_year()` -- one dataset needed the split because its request is wider
+than a partition, the other needs the merge because its request is narrower.
+`V2-P1-007`'s `daily` has `adj_factor`'s shape and will use the same pair.
+
+`compress_adjustment_batch()` then applies `domain/adjustment.py`'s piecewise-constant rule
+before anything is written, which is why the factor partition is two orders of magnitude
+smaller than the price panel it exists to correct. The visible consequence is on the read
+side: `adjustment_requirement()` **waives** `required_dates`, because a compressed partition
+holds rows only on load-bearing sessions and a calendar-derived expectation would report a
+permanent `date_gap` for a partition that is complete by construction. So
+`panel_readiness_requirement()` must not be pointed at this dataset; what replaces the check
+is the window anchors that bound every answer.
+
 ## Deriving the partition year
 
 `year` remains a required keyword argument of `write_panel_batch()`. What has changed is that
@@ -194,9 +219,19 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timedelta
 from types import MappingProxyType
-from typing import Final
+from typing import Final, cast
 from zoneinfo import ZoneInfo
 
+from openalpha_cn.domain.adjustment import (
+    ADJ_FACTOR_DATASET,
+    ADJUSTMENT_DATE_COLUMN,
+    ADJUSTMENT_FACTOR_COLUMN,
+    ADJUSTMENT_PANEL_COLUMNS,
+    AdjustmentHistory,
+    FactorObservation,
+    adjustment_histories_from_panel_rows,
+    load_bearing_observations,
+)
 from openalpha_cn.domain.name_history import (
     NAME_HISTORY_PANEL_COLUMNS,
     NAMECHANGE_DATASET,
@@ -977,6 +1012,309 @@ def load_name_histories(
             )
         rows.extend(outcome.rows)
     return name_histories_from_panel_rows(rows)
+
+
+def merge_panel_batches(batches: Sequence[ColumnarPanelBatch]) -> ColumnarPanelBatch:
+    """Concatenate several batches of one dataset into one. The inverse of
+    `split_panel_batch_by_year`.
+
+    ## Why the panel plane needs this at all
+
+    A partition is a `(dataset, year)` pair and `PanelStore.write_partition` replaces it
+    whole -- there is no append. A dataset whose *request* is narrower than a year therefore
+    cannot be ingested one request at a time: every write after the first would destroy the
+    partition it was meant to extend. `trade_cal` escapes this because one request is one
+    year; `adj_factor` cannot, because one whole-market year is ~1.3e6 rows against a
+    6,000-row response cap, so a year is 244 cross sections and they have to become one batch
+    before anything reaches the store. `V2-P1-007`'s `daily` has the identical shape.
+
+    Rows are kept in the order the batches are given, and every one of them survives -- this
+    function does no filtering, so a caller can check `sum(row_count)` against the result.
+    `as_of` and `fetched_at` become the **latest** of the inputs': the merged batch was
+    knowable no earlier than its newest row, and `ColumnarPanelBatch` re-checks that itself.
+
+    `source_uri` becomes `None` unless every input agrees on one. That is a real loss and is
+    not dressed up: the per-fetch URIs are not recoverable from the merge. What survives is
+    stronger for the question a partition is actually asked -- every row still carries its own
+    subject and date columns, and `PartitionCoverage.batch_digest` still re-proves the whole
+    partition against the batch that produced it.
+
+    Refuses a `no_data` batch, an empty input, and any disagreement about provider, dataset,
+    kind, schema version or column shape. None of those is repairable: a merged batch with two
+    datasets in it has no partition to go to, and a column set that differs between inputs has
+    no aligned row block.
+    """
+    entries = tuple(batches)
+    if not entries:
+        raise PanelBatchError(
+            "merge_panel_batches needs at least one batch; an empty merge would produce a "
+            "batch with no rows, which the contract refuses anyway and which would be "
+            "indistinguishable from a fetch that returned nothing"
+        )
+    for index, batch in enumerate(entries):
+        if batch.status != "success":
+            raise PanelBatchError(
+                f"cannot merge a {batch.status!r} batch (index {index}): "
+                f"{batch.no_data_reason!r}; an explicit no-data result is something to record, "
+                "not rows to concatenate"
+            )
+    first = entries[0]
+    shape = tuple((column.name, column.kind) for column in first.columns)
+    for index, batch in enumerate(entries[1:], start=1):
+        if batch.dataset != first.dataset:
+            raise PanelBatchError(
+                f"every batch must carry the same dataset; index 0 is {first.dataset!r} and "
+                f"index {index} is {batch.dataset!r}"
+            )
+        for field_name in ("provider_id", "kind", "schema_version"):
+            if getattr(batch, field_name) != getattr(first, field_name):
+                raise PanelBatchError(
+                    f"every batch must carry the same {field_name}; index 0 is "
+                    f"{getattr(first, field_name)!r} and index {index} is "
+                    f"{getattr(batch, field_name)!r}"
+                )
+        if tuple((column.name, column.kind) for column in batch.columns) != shape:
+            raise PanelBatchError(
+                f"every batch must carry the same columns in the same order; index 0 is "
+                f"{list(shape)} and index {index} is "
+                f"{[(column.name, column.kind) for column in batch.columns]}"
+            )
+    source_uris = {batch.source_uri for batch in entries}
+    return ColumnarPanelBatch(
+        provider_id=first.provider_id,
+        dataset=first.dataset,
+        kind=first.kind,
+        as_of=max(batch.as_of for batch in entries),
+        fetched_at=max(batch.fetched_at for batch in entries),
+        status="success",
+        subjects=tuple(subject for batch in entries for subject in batch.subjects),
+        timeline=TimelineColumns(
+            **{
+                name: tuple(value for batch in entries for value in getattr(batch.timeline, name))
+                for name in ("event_time", "available_time", "ingested_time", "revision_time")
+            }
+        ),
+        columns=tuple(
+            PanelColumn(
+                name,
+                kind,
+                tuple(value for batch in entries for value in batch.columns[position].values),
+            )
+            for position, (name, kind) in enumerate(shape)
+        ),
+        source_uri=source_uris.pop() if len(source_uris) == 1 else None,
+    )
+
+
+def compress_adjustment_batch(batch: ColumnarPanelBatch) -> ColumnarPanelBatch:
+    """Reduce a factor batch to the rows its step function cannot be rebuilt without.
+
+    Per security: the window's first observation, every observation whose factor differs from
+    its predecessor, and the window's last observation -- see
+    `domain/adjustment.py::load_bearing_observations` for why all three kinds are load-bearing
+    and what the last one is protecting.
+
+    Measured on the real series: `000001.SZ`'s 8,627-row history holds 43 steps, a 201x
+    reduction, and the whole market's daily form would be ~4.8e7 rows for a series that moves
+    about once per security per year. Storing the days instead is a defensible choice and is
+    not the one taken; storing the *steps without the closing anchor* is not defensible, and
+    is the mistake this function's last line exists to avoid.
+
+    Idempotent: compressing an already-compressed batch is a no-op, because a kept row is
+    either an endpoint (still an endpoint) or a change (still a change).
+
+    Row order in the result is `(subject, factor_date)` ascending, which makes the partition's
+    content hash independent of the order the day batches happened to be merged in.
+
+    Two shapes are refused rather than compressed, and both are ordinary operator mistakes
+    rather than hypotheticals. A **null factor** is a legal value of a `float` panel column
+    (panel data is sparse) and is meaningless here -- it would compare unequal to nothing, ride
+    through as an unchanged row, and only fail on the way back out, leaving a partition that
+    passes readiness and explodes at parse. And a **repeated session** for one security --
+    what merging the same day's batch twice produces -- is refused by
+    `load_bearing_observations`' ascending rule, because a step function with two entries for
+    one day has no defined value on it.
+    """
+    if batch.dataset != ADJ_FACTOR_DATASET:
+        raise PanelBatchError(f"expected the {ADJ_FACTOR_DATASET!r} dataset, got {batch.dataset!r}")
+    if batch.status != "success":
+        raise PanelBatchError(f"cannot compress a {batch.status!r} batch: {batch.no_data_reason!r}")
+    dates = _column_values(batch, ADJUSTMENT_DATE_COLUMN)
+    factors = _column_values(batch, ADJUSTMENT_FACTOR_COLUMN)
+    if None in factors:
+        raise PanelBatchError(
+            f"{ADJUSTMENT_FACTOR_COLUMN} row {factors.index(None)} is null; a missing "
+            "observation is ordinary in a panel column and impossible in a step function -- "
+            "there is no price it could scale"
+        )
+    by_subject: dict[str, list[int]] = {}
+    for index, subject in enumerate(batch.subjects):
+        by_subject.setdefault(subject, []).append(index)
+    kept: list[int] = []
+    for subject in sorted(by_subject):
+        indices = sorted(by_subject[subject], key=lambda index: str(dates[index]))
+        observations = [
+            FactorObservation(
+                ts_code=subject,
+                observed_on=date.fromisoformat(str(dates[index])),
+                factor=cast(float, factors[index]),
+            )
+            for index in indices
+        ]
+        wanted = {entry.observed_on for entry in load_bearing_observations(observations)}
+        kept.extend(
+            index
+            for entry, index in zip(observations, indices, strict=True)
+            if entry.observed_on in wanted
+        )
+    return _select_rows(batch, kept)
+
+
+def _column_values(batch: ColumnarPanelBatch, name: str) -> tuple[object, ...]:
+    """One of `batch`'s own data columns by name, or a `PanelBatchError` naming what is
+    there. `batch.columns` is caller-supplied, so the column may simply be absent."""
+    for column in batch.columns:
+        if column.name == name:
+            return column.values
+    raise PanelBatchError(
+        f"this {batch.dataset} batch has no {name!r} column; available: "
+        f"{sorted(column.name for column in batch.columns)}"
+    )
+
+
+def write_adjustment_factors(
+    store: PanelStore,
+    batches: Sequence[ColumnarPanelBatch],
+    *,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> PartitionRef:
+    """Merge one year of factor cross sections, compress them, and write the partition.
+
+    Takes a *sequence* of batches where every other writer here takes one, and the reason is
+    the arithmetic rather than a preference: an `adj_factor` request is one trading day of the
+    whole market (~5,400 rows against a 6,000-row cap), a partition is a calendar year, and
+    one whole-market year is ~1.3e6 rows. So a year is ~244 fetches, and they have to become
+    one batch before the store sees them -- `PanelStore.write_partition` replaces a partition
+    whole, so writing them one at a time would leave the year holding only its last session.
+
+    `panel_partition_year` then refuses a set of batches that straddles two years rather than
+    picking one, and `_refuse_to_drop_stored_subjects` refuses a rewrite that would remove a
+    security the stored partition already had -- the same guard the registry uses, for the
+    same reason.
+    """
+    # The dataset check is `compress_adjustment_batch`'s and is not repeated here: a second
+    # copy of a rule is a copy that can drift, and `merge_panel_batches` has already made every
+    # input agree on one dataset by this point.
+    compressed = compress_adjustment_batch(merge_panel_batches(batches))
+    year = panel_partition_year(compressed, date_timezone=date_timezone)
+    _refuse_to_drop_stored_subjects(
+        store,
+        compressed,
+        year,
+        remedy=(
+            "A year's partition is replaced whole, so every session of the year has to arrive "
+            "in one call; a narrower cross section is a partial fetch rather than news"
+        ),
+    )
+    return write_panel_batch(store, compressed, year=year, date_timezone=date_timezone)
+
+
+def adjustment_requirement(
+    *, years: Sequence[int], as_of: datetime, max_staleness: timedelta | None
+) -> ReadinessRequirement:
+    """What the factor series must satisfy before histories may be built from it.
+
+    Two of the four checks are waived, and both waivers land in
+    `DatasetReadiness.checks_waived` rather than being invisible:
+
+    - **`required_dates`** is waived because the partition is a *compressed* step function.
+      Its date census holds only the load-bearing sessions -- eight rows for two securities
+      across a real trading week -- so a calendar-derived expectation would report a
+      permanent `date_gap` on a partition that is complete by construction. This is the one
+      place the storage decision is visible from outside, and what replaces the check is
+      structural rather than a date set: every partition carries each security's factor on
+      the first and last session of the window it was assembled from, so
+      `AdjustmentHistory.covered_from` / `covered_through` bound every answer and a day
+      inside them is answered from a real observation. `panel_readiness_requirement` must
+      therefore **not** be pointed at this dataset.
+    - **`required_subjects`** is waived because naming the securities would be circular: the
+      cross section is what the read is for. `adjustment_factors_on` is where a listed
+      security with no factor becomes a refusal, because that is where the universe is known.
+
+    `max_staleness` is **not** waived by default and has no default value: the caller states a
+    bound or states `None` on the record. A factor series whose newest session is a month old
+    has missed a month of corporate actions, so leaving it to a default would be choosing
+    silence.
+    """
+    return ReadinessRequirement(
+        dataset=ADJ_FACTOR_DATASET,
+        as_of=as_of,
+        years=tuple(sorted(set(years))),
+        required_dates=None,
+        required_subjects=None,
+        required_fields=ADJUSTMENT_PANEL_COLUMNS,
+        max_staleness=max_staleness,
+    )
+
+
+def load_adjustment_histories(
+    store: PanelStore,
+    *,
+    years: Sequence[int],
+    as_of: datetime,
+    max_staleness: timedelta | None,
+) -> Mapping[str, AdjustmentHistory]:
+    """Read stored factor years back as one `AdjustmentHistory` per security, or refuse to.
+
+    Fail-closed three times over. A partition that is missing, damaged, unprofiled, stale or
+    described by an out-of-date coverage record is blocked by `read_if_ready()` and reported
+    by its structured issue codes. A **gap in the requested years** is refused here. And a
+    partition that passes both and is internally inconsistent -- two different factors on one
+    session, a factor that cannot scale a price -- is refused afterwards by
+    `adjustment_histories_from_panel_rows`.
+
+    ## Why the gap rule is stricter here than it is for the registry
+
+    `load_stock_universe` refuses a requested range that skips a year *the store holds*, and
+    tolerates one it does not, because a lifecycle year with no partition is genuinely
+    indistinguishable from a year in which nothing listed and nothing died. A factor year is
+    not like that. The history is a step function read by `bisect`, so a missing year in the
+    middle is not a smaller answer -- it is a **wrong** one: 2023's closing anchor would answer
+    every 2024 and 2025 day, asserting that no corporate action happened in two years nobody
+    looked at. So the requested years must be a contiguous run, whatever the store happens to
+    hold, and a year inside that run with no partition then blocks as `partition_missing`.
+
+    What this still cannot see is a year outside the requested range -- the same limitation
+    `load_trading_calendar` has, and answered the same way: `AdjustmentHistory.factor_on`
+    refuses a day outside `[covered_from, covered_through]` rather than extrapolating, so the
+    window a read actually saw is the window it will answer for.
+    """
+    requested = tuple(sorted(set(years)))
+    if not requested:
+        raise PanelBatchError(
+            "load_adjustment_histories needs at least one factor year; a read of no years "
+            "would produce an empty corpus that refuses every question"
+        )
+    absent = [year for year in range(requested[0], requested[-1] + 1) if year not in set(requested)]
+    if absent:
+        raise PanelBatchError(
+            f"the requested {ADJ_FACTOR_DATASET} years {requested[0]}..{requested[-1]} skip "
+            f"{_year_sample(absent)}; a factor history is a step function, so a skipped year "
+            "is not a shorter answer but a wrong one -- the last factor before the gap would "
+            "answer every day inside it"
+        )
+    requirement = adjustment_requirement(years=requested, as_of=as_of, max_staleness=max_staleness)
+    rows: list[tuple[object, ...]] = []
+    for year in requested:
+        outcome = store.read_if_ready(requirement, year=year, columns=ADJUSTMENT_PANEL_COLUMNS)
+        if outcome.is_blocked:
+            raise PanelStorageError(
+                f"the adjustment factor series cannot be read at {as_of.isoformat()}: "
+                f"{[issue.code for issue in outcome.readiness.issues]}; "
+                f"{'; '.join(issue.detail for issue in outcome.readiness.issues)}"
+            )
+        rows.extend(outcome.rows)
+    return adjustment_histories_from_panel_rows(rows)
 
 
 def panel_readiness_requirement(
