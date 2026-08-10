@@ -4,8 +4,8 @@
 
 ## 对账结论
 
-- 功能总数: 121
-- 当前真实完成: 116 (95.87%)
+- 功能总数: 122
+- 当前真实完成: 117 (95.9%)
 - `UNREVIEWED=0`
 - `UNKNOWN=0`
 - `legacy_acceptance_rows=86` (历史散文验收、尚未绑定为可执行 pytest/CI 断言)
@@ -18,7 +18,7 @@
 | `DEFERRED` | 1 |
 | `ENHANCED_REPLACEMENT` | 20 |
 | `EXCLUDED` | 4 |
-| `NATIVE_COMPLETE` | 95 |
+| `NATIVE_COMPLETE` | 96 |
 
 ## 功能明细
 
@@ -145,6 +145,7 @@
 | `OA-PANEL-012` | panel | Panel health report that separates this fetch's defects from the datasets' inherent limits | `NATIVE_COMPLETE` | `src/openalpha_cn/panel_doctor.py#PANEL_HEALTH_CODES;src/openalpha_cn/panel_doctor.py#HEALTH_CODE_CATEGORY;src/openalpha_cn/panel_doctor.py#DOCTOR_ISSUE_CODES;src/openalpha_cn/panel_doctor.py#HEALTH_CATEGORIES;src/openalpha_cn/panel_doctor.py#HEALTH_SEVERITIES;src/openalpha_cn/panel_doctor.py#HEALTH_CODE_SEVERITY;src/openalpha_cn/panel_doctor.py#BLOCKS_A_READ;src/openalpha_cn/panel_doctor.py#DATASET_CADENCE;src/openalpha_cn/panel_doctor.py#QUARTERLY_DISCLOSURE_BOUND;src/openalpha_cn/panel_doctor.py#FRESHNESS_PUBLICATION_SLACK;src/openalpha_cn/panel_doctor.py#KNOWN_PANEL_LIMITATIONS;src/openalpha_cn/panel_doctor.py#SUBJECT_CONTAINMENTS;src/openalpha_cn/panel_doctor.py#FreshnessPolicy;src/openalpha_cn/panel_doctor.py#KnownLimitation;src/openalpha_cn/panel_doctor.py#SubjectContainment;src/openalpha_cn/panel_doctor.py#HealthFinding;src/openalpha_cn/panel_doctor.py#CrossCheckOutcome;src/openalpha_cn/panel_doctor.py#DatasetHealth;src/openalpha_cn/panel_doctor.py#PanelHealthReport;src/openalpha_cn/panel_doctor.py#PanelDoctorError;src/openalpha_cn/panel_doctor.py#freshness_policy;src/openalpha_cn/panel_doctor.py#known_limitations;src/openalpha_cn/panel_doctor.py#findings_from_readiness;src/openalpha_cn/panel_doctor.py#subject_containment_findings;src/openalpha_cn/panel_doctor.py#dataset_health;src/openalpha_cn/panel_doctor.py#panel_health_report` | `tests/unit/test_panel_doctor_rules.py;tests/integration/panel/test_panel_doctor.py;tests/unit/test_panel_ingest_import_isolation.py` | `pytest` | `tests/integration/panel/test_panel_doctor.py::test_a_healthy_panel_produces_a_report_with_nothing_to_report` |
 | `OA-PANEL-013` | panel | Fail-closed dependency gate that refuses instead of answering empty | `NATIVE_COMPLETE` | `src/openalpha_cn/panel_gate.py#GATE_CODE_BLOCKS;src/openalpha_cn/panel_gate.py#GATE_BLOCKING_SEVERITIES;src/openalpha_cn/panel_gate.py#GATE_REFUSAL_CODES;src/openalpha_cn/panel_gate.py#GATE_CODE_CATEGORY;src/openalpha_cn/panel_gate.py#GATE_CODE_CATEGORIES;src/openalpha_cn/panel_gate.py#GATE_BLOCK_CODES;src/openalpha_cn/panel_gate.py#UNVERIFIED_DAILY_COVERAGE;src/openalpha_cn/panel_gate.py#SESSION_SCOPED_CROSS_CHECKS;src/openalpha_cn/panel_gate.py#DependencyRequest;src/openalpha_cn/panel_gate.py#GateBlock;src/openalpha_cn/panel_gate.py#ClearedDataset;src/openalpha_cn/panel_gate.py#DependencyClearance;src/openalpha_cn/panel_gate.py#PanelGateError;src/openalpha_cn/panel_gate.py#blocks_from_report;src/openalpha_cn/panel_gate.py#cleared_datasets;src/openalpha_cn/panel_gate.py#require_datasets` | `tests/unit/test_panel_gate_rules.py;tests/integration/panel/test_panel_gate.py;tests/unit/test_panel_ingest_import_isolation.py` | `pytest` | `tests/integration/panel/test_panel_gate.py::test_a_missing_factor_session_blocks_instead_of_answering_minus_zero_point_53_percent` |
 | `OA-PANEL-014` | panel | Panel fixture generator driven by a measured shape table | `NATIVE_COMPLETE` | `tests/panel_fixtures.py#PANEL_SHAPES;tests/panel_fixtures.py#PanelShape;tests/panel_fixtures.py#GeneratedPanel;tests/panel_fixtures.py#generate_panel;tests/panel_fixtures.py#write_generated_panel;tests/panel_fixtures.py#STORED_DATASETS` | `tests/unit/test_panel_fixtures.py;tests/integration/panel/test_panel_shape_coverage.py` | `pytest` | `tests/unit/test_panel_fixtures.py::test_no_detector_answers_from_the_request_instead_of_from_the_artifact` |
+| `OA-PANEL-015` | panel | CLI face for building, examining and gating the panel plane | `NATIVE_COMPLETE` | `src/openalpha_cn/cli.py#PanelExit;src/openalpha_cn/cli.py#CLICK_USAGE_EXIT_CODE;src/openalpha_cn/cli.py#PANEL_BUILD_TARGETS;src/openalpha_cn/cli.py#PANEL_BUILD_COUPLED_DATASETS;src/openalpha_cn/cli.py#panel_build;src/openalpha_cn/cli.py#panel_doctor_command;src/openalpha_cn/cli.py#data_check;src/openalpha_cn/cli.py#health_report_payload;src/openalpha_cn/cli.py#clearance_payload` | `tests/integration/test_cli_panel.py;tests/unit/test_cli_panel_rules.py` | `pytest` | `tests/integration/test_cli_panel.py::test_data_check_blocks_with_a_non_zero_exit_when_no_session_corroborates_the_factors` |
 
 ## 边界
 

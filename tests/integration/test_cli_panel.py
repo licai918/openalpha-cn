@@ -1,0 +1,847 @@
+"""`panel build` / `panel doctor` / `data-check` driven end to end through `CliRunner`.
+
+`V2-P1-015`. Every test here invokes the real Typer app -- no test calls a command's body as a
+plain function. The roadmap's acceptance for this issue is "integration: CLI", and the lesson
+the twelve prior Criticals share is that a command's *claim* and its *behaviour* diverge exactly
+where nobody drove the command itself: an exit code is not observable from inside the function
+that raises it, and a `typer.Exit` swallowed by a bare `except Exception` is invisible to a unit
+test of the same body.
+
+Nothing here touches the network. `panel build` goes through the real `TushareProvider` with a
+scripted `TushareTransport` injected at `cli._panel_transport`, so the provider's own decoding,
+point-in-time filtering and projection all run -- the seam is the HTTP call and nothing above
+it. The panels the two read-side commands examine come from `tests/panel_fixtures.py`, whose
+`write_generated_panel` drives the real `panel_ingest` writers.
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Mapping, Sequence
+from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+import pytest
+from panel_fixtures import AS_OF, YEAR, generate_panel, write_generated_panel
+from typer.testing import CliRunner
+
+from openalpha_cn import cli
+from openalpha_cn.cli import CLICK_USAGE_EXIT_CODE, PanelExit, app
+from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET
+from openalpha_cn.domain.daily_prices import DAILY_BASIC_DATASET, DAILY_DATASET
+from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET, SUSPENSION_DATASET
+from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET
+from openalpha_cn.domain.trading_calendar import TRADING_CALENDAR_DATASET
+from openalpha_cn.panel.store import PanelStore
+
+runner = CliRunner()
+
+SECRET_TOKEN = "sk-panel-build-token-must-not-leak-40311"
+"""Deliberately distinct from `tests/unit/test_cli.py`'s, so a leak assertion here cannot pass
+because some other test happened to scrub that one."""
+
+# --- the built panel's frame ------------------------------------------------------------------
+#
+# Three sessions and two securities, and both counts are the smallest that let every write-time
+# guard in `write_daily_panel` actually run: the session census needs the calendar to report
+# more than one open day inside the window, and `_refuse_close_disagreement` needs two rows to
+# disagree about.
+
+BUILD_YEAR: int = 2026
+BUILD_SESSIONS: tuple[date, ...] = (date(2026, 1, 5), date(2026, 1, 6), date(2026, 1, 7))
+BUILD_CLOCK: datetime = datetime(2026, 1, 8, 4, 0, tzinfo=UTC)
+"""12:00 Asia/Shanghai on Thursday 2026-01-08.
+
+`_session_census` bounds what a partition must hold at `fetched_at`'s local date minus one day,
+so this clock makes 2026-01-07 the last session `panel build` has to fetch and the last one the
+writers require. Frozen rather than real: with `datetime.now()` the set of sessions this test
+demands would change every day it is run.
+"""
+BUILD_SECURITIES: tuple[str, ...] = ("000001.SZ", "600000.SH")
+BUILD_EXCHANGE: str = "SSE"
+BUILD_CLOSES: Mapping[str, float] = {"000001.SZ": 10.0, "600000.SH": 20.0}
+HALT_SESSION: date = date(2026, 1, 6)
+HALT_SECURITY: str = "000001.SZ"
+
+CALENDAR_FIELDS = ["exchange", "cal_date", "is_open", "pretrade_date"]
+REGISTRY_FIELDS = [
+    "ts_code",
+    "name",
+    "exchange",
+    "market",
+    "list_status",
+    "list_date",
+    "delist_date",
+]
+FACTOR_FIELDS = ["ts_code", "trade_date", "adj_factor"]
+BAR_FIELDS = [
+    "ts_code",
+    "trade_date",
+    "open",
+    "high",
+    "low",
+    "close",
+    "pre_close",
+    "pct_chg",
+    "vol",
+    "amount",
+]
+VALUATION_EXTRA_FIELDS = [
+    "turnover_rate",
+    "turnover_rate_f",
+    "volume_ratio",
+    "pe",
+    "pe_ttm",
+    "pb",
+    "ps",
+    "ps_ttm",
+    "dv_ratio",
+    "dv_ttm",
+    "total_share",
+    "float_share",
+    "free_share",
+    "total_mv",
+    "circ_mv",
+]
+VALUATION_FIELDS = ["ts_code", "trade_date", "close", *VALUATION_EXTRA_FIELDS]
+HALT_FIELDS = ["ts_code", "trade_date", "suspend_type", "suspend_timing"]
+LIMIT_FIELDS = ["ts_code", "trade_date", "up_limit", "down_limit"]
+
+
+def _compact(day: date) -> str:
+    return day.strftime("%Y%m%d")
+
+
+def _response(
+    fields: Sequence[str], items: Sequence[Sequence[Any]], *, has_more: bool = False
+) -> dict[str, Any]:
+    return {
+        "code": 0,
+        "msg": "",
+        "data": {
+            "fields": list(fields),
+            "items": [list(item) for item in items],
+            "has_more": has_more,
+        },
+    }
+
+
+def _calendar_items(exchange: str) -> list[list[Any]]:
+    items: list[list[Any]] = []
+    previous: str | None = None
+    day = date(BUILD_YEAR, 1, 1)
+    while day <= date(BUILD_YEAR, 12, 31):
+        is_open = day in BUILD_SESSIONS
+        items.append([exchange, _compact(day), 1 if is_open else 0, previous])
+        if is_open:
+            previous = _compact(day)
+        day += timedelta(days=1)
+    return items
+
+
+def _session_of(params: Mapping[str, str]) -> date:
+    return datetime.strptime(params["trade_date"], "%Y%m%d").date()
+
+
+class ScriptedTushareTransport:
+    """A `TushareTransport` that answers from this module's frame and records every payload.
+
+    Records the payloads so the credential test can assert on what the CLI *sent* as well as on
+    what it printed: a token that never reaches the transport and a token that is never echoed
+    are two different claims, and only the second one is visible in `result.output`.
+    """
+
+    def __init__(self, *, closes: Mapping[str, Mapping[date, float]] | None = None) -> None:
+        self.payloads: list[dict[str, Any]] = []
+        self._closes = dict(closes or {})
+
+    def close_of(self, dataset: str, code: str, day: date) -> float:
+        override = self._closes.get(dataset, {})
+        if isinstance(override, Mapping) and (code, day) in override:  # type: ignore[comparison-overlap]
+            return float(override[(code, day)])  # type: ignore[index]
+        return BUILD_CLOSES[code]
+
+    def post(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.payloads.append(payload)
+        api_name = str(payload["api_name"])
+        params: Mapping[str, str] = payload["params"]
+        if api_name == TRADING_CALENDAR_DATASET:
+            return _response(CALENDAR_FIELDS, _calendar_items(params["exchange"]))
+        if api_name == STOCK_BASIC_DATASET:
+            return _response(
+                REGISTRY_FIELDS,
+                [
+                    [code, code, BUILD_EXCHANGE, "主板", "L", "20260102", None]
+                    for code in BUILD_SECURITIES
+                ],
+            )
+        day = _session_of(params)
+        if api_name == ADJ_FACTOR_DATASET:
+            return _response(
+                FACTOR_FIELDS, [[code, _compact(day), 1.0] for code in BUILD_SECURITIES]
+            )
+        if api_name == DAILY_DATASET:
+            return _response(
+                BAR_FIELDS,
+                [
+                    [
+                        code,
+                        _compact(day),
+                        *([self.close_of(DAILY_DATASET, code, day)] * 5),
+                        0.0,
+                        1000.0,
+                        10000.0,
+                    ]
+                    for code in BUILD_SECURITIES
+                ],
+            )
+        if api_name == DAILY_BASIC_DATASET:
+            return _response(
+                VALUATION_FIELDS,
+                [
+                    [
+                        code,
+                        _compact(day),
+                        self.close_of(DAILY_BASIC_DATASET, code, day),
+                        *([1.0] * len(VALUATION_EXTRA_FIELDS)),
+                    ]
+                    for code in BUILD_SECURITIES
+                ],
+            )
+        if api_name == SUSPENSION_DATASET:
+            if day != HALT_SESSION:
+                return _response(HALT_FIELDS, [])
+            return _response(HALT_FIELDS, [[HALT_SECURITY, _compact(day), "R", None]])
+        if api_name == PRICE_LIMIT_DATASET:
+            return _response(
+                LIMIT_FIELDS,
+                [
+                    [
+                        code,
+                        _compact(day),
+                        BUILD_CLOSES[code] * 1.1,
+                        BUILD_CLOSES[code] * 0.9,
+                    ]
+                    for code in BUILD_SECURITIES
+                ],
+            )
+        raise AssertionError(f"the CLI asked for an unscripted dataset: {api_name}")
+
+
+class RefusingTushareTransport:
+    """A transport whose response carries a token-bearing error message.
+
+    Tushare reports a bad credential as `code == -2001` and puts the reason in `msg`, which
+    `TushareProvider` carries verbatim onto the `ProviderFailure` it raises. This double
+    therefore reproduces the one path where a credential can reach the CLI inside an exception
+    rather than inside a config value -- exactly what `_probe_report`'s existing comment says
+    must never be echoed.
+    """
+
+    def __init__(self, token_bearing_message: str) -> None:
+        self.message = token_bearing_message
+
+    def post(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return {"code": -2001, "msg": self.message, "data": None}
+
+
+@pytest.fixture
+def scripted_build(monkeypatch: pytest.MonkeyPatch) -> ScriptedTushareTransport:
+    """Freeze `panel build`'s clock and point its transport at this module's frame."""
+    transport = ScriptedTushareTransport()
+    monkeypatch.setenv("TUSHARE_TOKEN", SECRET_TOKEN)
+    monkeypatch.setattr(cli, "_panel_transport", lambda: transport)
+    monkeypatch.setattr(cli, "_panel_clock", lambda: BUILD_CLOCK)
+    return transport
+
+
+def build(runtime_dir: Path, *targets: str, extra: Sequence[str] = ()) -> Any:
+    arguments = ["panel", "build", "--runtime-dir", str(runtime_dir), "--year", str(BUILD_YEAR)]
+    for target in targets:
+        arguments.extend(["--dataset", target])
+    arguments.extend(extra)
+    return runner.invoke(app, arguments)
+
+
+EVERY_BUILD_TARGET: tuple[str, ...] = (
+    "trade_cal",
+    "stock_basic",
+    "adj_factor",
+    "price",
+    "stk_limit",
+)
+
+
+# --- panel build ------------------------------------------------------------------------------
+
+
+def test_panel_build_writes_every_target_through_the_real_writers(
+    tmp_path: Path, scripted_build: ScriptedTushareTransport
+) -> None:
+    """The load-bearing one: if a complete, well-formed fetch could not be stored, every
+    refusal test below would pass for the wrong reason."""
+    result = build(tmp_path, *EVERY_BUILD_TARGET, extra=["--json"])
+
+    assert result.exit_code == PanelExit.ok
+    payload = json.loads(result.stdout)
+    written = {entry["dataset"]: entry["row_count"] for entry in payload["partitions"]}
+    assert written == {
+        TRADING_CALENDAR_DATASET: 365,
+        STOCK_BASIC_DATASET: len(BUILD_SECURITIES),
+        # Compressed, not dropped: `write_adjustment_factors` stores a step function, so a
+        # flat series over three sessions keeps the two rows that bound it per security.
+        ADJ_FACTOR_DATASET: 2 * len(BUILD_SECURITIES),
+        SUSPENSION_DATASET: 1,
+        DAILY_DATASET: len(BUILD_SESSIONS) * len(BUILD_SECURITIES),
+        DAILY_BASIC_DATASET: len(BUILD_SESSIONS) * len(BUILD_SECURITIES),
+        PRICE_LIMIT_DATASET: len(BUILD_SESSIONS) * len(BUILD_SECURITIES),
+    }
+    assert payload["sessions"] == {
+        "first": "2026-01-05",
+        "last": "2026-01-07",
+        "count": len(BUILD_SESSIONS),
+    }
+    assert payload["halts"] == "corroborated"
+
+
+def test_panel_build_fetches_only_the_sessions_the_write_time_census_will_require(
+    tmp_path: Path, scripted_build: ScriptedTushareTransport
+) -> None:
+    """The loop bound is not a guess. `_session_census` requires every session the calendar
+    reports open between 1 January and `fetched_at`'s local date minus one, so a build that
+    fetched fewer would be refused by its own writer and one that fetched more would be asking
+    for sessions that had not published."""
+    assert build(tmp_path, *EVERY_BUILD_TARGET).exit_code == PanelExit.ok
+
+    requested = [
+        _session_of(entry["params"])
+        for entry in scripted_build.payloads
+        if entry["api_name"] == DAILY_DATASET
+    ]
+    assert requested == list(BUILD_SESSIONS)
+
+
+def test_panel_build_runs_the_targets_in_dependency_order_and_not_in_flag_order(
+    tmp_path: Path, scripted_build: ScriptedTushareTransport
+) -> None:
+    """`PANEL_BUILD_TARGETS` is iterated in its own declared order, not in the order the flags
+    arrived: `write_adjustment_factors` and `write_daily_panel` both read the calendar out of
+    the store, so a fresh store needs `trade_cal` written first whatever the caller typed."""
+    result = build(tmp_path, *reversed(EVERY_BUILD_TARGET), extra=["--json"])
+
+    assert result.exit_code == PanelExit.ok
+    assert [entry["dataset"] for entry in json.loads(result.stdout)["partitions"]] == [
+        TRADING_CALENDAR_DATASET,
+        STOCK_BASIC_DATASET,
+        ADJ_FACTOR_DATASET,
+        SUSPENSION_DATASET,
+        DAILY_DATASET,
+        DAILY_BASIC_DATASET,
+        PRICE_LIMIT_DATASET,
+    ]
+    assert scripted_build.payloads[0]["api_name"] == TRADING_CALENDAR_DATASET
+
+
+def test_panel_build_refuses_a_bare_daily_because_the_price_writer_couples_the_pair(
+    tmp_path: Path, scripted_build: ScriptedTushareTransport
+) -> None:
+    """`write_daily_panel` takes both datasets and there is no supported way to write one
+    without the other, so `--dataset daily` cannot mean anything. It is refused by name, with
+    the coupling as the reason, rather than being accepted and quietly building the pair."""
+    result = build(tmp_path, "daily")
+
+    assert result.exit_code == PanelExit.bad_request
+    assert "price" in result.output
+    assert "daily_basic" in result.output
+    assert not (tmp_path / "panel").exists()
+
+
+def test_panel_build_refuses_an_unknown_target_by_naming_the_closed_table(
+    tmp_path: Path, scripted_build: ScriptedTushareTransport
+) -> None:
+    result = build(tmp_path, "income")
+
+    assert result.exit_code == PanelExit.bad_request
+    for target in EVERY_BUILD_TARGET:
+        assert target in result.output
+
+
+def test_a_write_time_guard_refusal_is_reported_and_leaves_no_partition_behind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`daily_basic` republishes `close`, and `_refuse_close_disagreement` refuses two years
+    that contradict each other. The CLI must surface that refusal, and -- because every guard
+    in `write_daily_panel` runs before either partition is written -- must leave the store with
+    no `daily` partition at all rather than half a price panel."""
+    transport = ScriptedTushareTransport(
+        closes={DAILY_BASIC_DATASET: {(BUILD_SECURITIES[0], BUILD_SESSIONS[1]): 11.5}}
+    )
+    monkeypatch.setenv("TUSHARE_TOKEN", SECRET_TOKEN)
+    monkeypatch.setattr(cli, "_panel_transport", lambda: transport)
+    monkeypatch.setattr(cli, "_panel_clock", lambda: BUILD_CLOCK)
+
+    assert build(tmp_path, "trade_cal", "stock_basic").exit_code == PanelExit.ok
+    result = build(tmp_path, "price")
+
+    assert result.exit_code == PanelExit.unhealthy
+    assert "close" in result.output
+    store = PanelStore(tmp_path / "panel")
+    assert store.registered_years(DAILY_DATASET) == ()
+    assert store.registered_years(DAILY_BASIC_DATASET) == ()
+
+
+def test_panel_build_reports_a_provider_failure_without_echoing_its_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_probe_report`'s rule, at the second boundary that can reach a credential: only the
+    closed-`Literal` category, the provider id and the dataset name are safe to print, because
+    `ProviderFailure.message` can carry the token or the URL query string it was sent in."""
+    leaking = f"Tushare rejected token={SECRET_TOKEN} for api daily"
+    monkeypatch.setenv("TUSHARE_TOKEN", SECRET_TOKEN)
+    monkeypatch.setattr(cli, "_panel_transport", lambda: RefusingTushareTransport(leaking))
+    monkeypatch.setattr(cli, "_panel_clock", lambda: BUILD_CLOCK)
+
+    result = build(tmp_path, "trade_cal")
+
+    assert result.exit_code == PanelExit.provider_failure
+    assert SECRET_TOKEN not in result.output
+    assert "authentication" in result.output
+    assert TRADING_CALENDAR_DATASET in result.output
+
+
+def test_panel_build_never_prints_the_token_on_the_path_that_succeeds(
+    tmp_path: Path, scripted_build: ScriptedTushareTransport
+) -> None:
+    """Both halves. The CLI never reads `TUSHARE_TOKEN` itself -- `TushareProvider` does -- so
+    the token must reach the transport (or nothing would be authenticated) and must appear
+    nowhere in the CLI's own output, in either rendering."""
+    human = build(tmp_path, *EVERY_BUILD_TARGET)
+    machine = build(tmp_path, *EVERY_BUILD_TARGET, extra=["--json"])
+
+    assert human.exit_code == PanelExit.ok
+    assert machine.exit_code == PanelExit.ok
+    assert SECRET_TOKEN not in human.output
+    assert SECRET_TOKEN not in machine.output
+    assert {entry["token"] for entry in scripted_build.payloads} == {SECRET_TOKEN}
+
+
+def test_panel_build_refuses_a_price_year_with_no_halts_unless_the_waiver_is_asked_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`write_daily_panel(halts=...)` has no default because a waiver that is a default is an
+    accident. The CLI keeps that property: a year whose halt corpus is empty stops the build and
+    names the flag, instead of quietly passing `None` and skipping the strongest guard."""
+
+    class _NoHalts(ScriptedTushareTransport):
+        def post(self, payload: dict[str, Any]) -> dict[str, Any]:
+            if payload["api_name"] == SUSPENSION_DATASET:
+                self.payloads.append(payload)
+                return _response(HALT_FIELDS, [])
+            return super().post(payload)
+
+    monkeypatch.setenv("TUSHARE_TOKEN", SECRET_TOKEN)
+    monkeypatch.setattr(cli, "_panel_transport", lambda: _NoHalts())
+    monkeypatch.setattr(cli, "_panel_clock", lambda: BUILD_CLOCK)
+
+    assert build(tmp_path, "trade_cal", "stock_basic").exit_code == PanelExit.ok
+    refused = build(tmp_path, "price")
+    waived = build(tmp_path, "price", extra=["--no-halts", "--json"])
+
+    assert refused.exit_code == PanelExit.unhealthy
+    assert "--no-halts" in refused.output
+    assert waived.exit_code == PanelExit.ok
+    assert json.loads(waived.stdout)["halts"] == "waived"
+
+
+def test_panel_build_refuses_a_calendar_dependent_target_before_the_calendar_exists(
+    tmp_path: Path, scripted_build: ScriptedTushareTransport
+) -> None:
+    """`write_adjustment_factors` and `write_daily_panel` both refuse a year missing a session
+    the calendar reports open, so the calendar has to be in the store before either runs. The
+    remedy this command names has to be its own -- `panel build` has no `--no-calendar`, because
+    the writers it drives take a `TradingCalendar` and there is nothing to run without one."""
+    result = build(tmp_path, "adj_factor")
+
+    assert result.exit_code == PanelExit.unhealthy
+    assert "--dataset trade_cal" in result.output
+    assert "--no-calendar" not in result.output
+    assert scripted_build.payloads == []
+
+
+def test_panel_build_refuses_a_year_whose_first_session_has_not_published(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The loop bound is `min(31 December, the fetch's local date - 1)`. Below 1 January there
+    is no session to fetch at all, and a build that proceeded would hand its writers an empty
+    batch list -- a plumbing error standing in for a plain fact about the clock."""
+    monkeypatch.setenv("TUSHARE_TOKEN", SECRET_TOKEN)
+    monkeypatch.setattr(cli, "_panel_transport", ScriptedTushareTransport)
+    monkeypatch.setattr(cli, "_panel_clock", lambda: datetime(2026, 1, 1, 4, 0, tzinfo=UTC))
+
+    assert build(tmp_path, "trade_cal").exit_code == PanelExit.ok
+    result = build(tmp_path, "adj_factor")
+
+    assert result.exit_code == PanelExit.bad_request
+    assert "nothing to build yet" in result.output
+
+
+# --- the panels the read side is pointed at ----------------------------------------------------
+
+FIXTURE_DATASETS: tuple[str, ...] = (
+    TRADING_CALENDAR_DATASET,
+    STOCK_BASIC_DATASET,
+    ADJ_FACTOR_DATASET,
+    DAILY_DATASET,
+    DAILY_BASIC_DATASET,
+    SUSPENSION_DATASET,
+)
+"""The six datasets `panel_health_report` needs in scope for all three of its session-scoped
+cross-checks to run; `panel_gate.SESSION_SCOPED_CROSS_CHECKS` is specified against them."""
+
+FIXTURE_SESSION: date = generate_panel().sessions[-1]
+"""The newest session the generated panel carries, read off the generator rather than restated.
+
+`AS_OF` sits before 16:30 on the following day, so this session has published and the price
+datasets' read-side requirement covers it. Taking it from `generate_panel()` means a change to
+the generator's window moves this with it instead of leaving a hard-coded date that agrees with
+the frame only until someone edits it.
+"""
+
+
+def seed_fixture_panel(runtime_dir: Path, *shapes: str) -> PanelStore:
+    """A `tests/panel_fixtures.py` panel written into the directory the CLI reads."""
+    store = PanelStore(runtime_dir / "panel")
+    write_generated_panel(store, generate_panel(shapes=shapes))
+    return store
+
+
+def read_side(
+    command: Sequence[str],
+    runtime_dir: Path,
+    *,
+    datasets: Sequence[str] = FIXTURE_DATASETS,
+    sessions: Sequence[date] = (FIXTURE_SESSION,),
+    extra: Sequence[str] = (),
+) -> Any:
+    arguments = [
+        *command,
+        "--runtime-dir",
+        str(runtime_dir),
+        "--year",
+        str(YEAR),
+        "--as-of",
+        AS_OF.isoformat(),
+        "--exchange",
+        "SZSE",
+    ]
+    for name in datasets:
+        arguments.extend(["--dataset", name])
+    for day in sessions:
+        arguments.extend(["--session", day.isoformat()])
+    arguments.extend(extra)
+    return runner.invoke(app, arguments)
+
+
+# --- panel doctor ------------------------------------------------------------------------------
+
+
+def test_panel_doctor_reports_a_clean_fixture_panel_and_exits_zero(tmp_path: Path) -> None:
+    seed_fixture_panel(tmp_path)
+
+    result = read_side(["panel", "doctor"], tmp_path, extra=["--json"])
+
+    assert result.exit_code == PanelExit.ok
+    payload = json.loads(result.stdout)
+    assert payload["is_clean"] is True
+    assert payload["counts_by_severity"] == {"blocking": 0, "warning": 0, "notice": 0}
+    assert [entry["dataset"] for entry in payload["datasets"]] == list(FIXTURE_DATASETS)
+    assert {check["name"] for check in payload["cross_checks"] if check["ran"]} >= {
+        "close_agreement",
+        "unpriced_explained",
+        "return_paths",
+    }
+
+
+def test_panel_doctor_keeps_the_existing_top_level_doctor_untouched(tmp_path: Path) -> None:
+    """`doctor` is the provider-credential check and `panel doctor` is the panel's health
+    report. Two different commands, and the second must not have shadowed the first."""
+    provider_doctor = runner.invoke(app, ["doctor", "--json"])
+
+    assert provider_doctor.exit_code == 0
+    payload = json.loads(provider_doctor.stdout)
+    assert set(payload) == {"status", "checks", "providers", "warnings"}
+    assert "tushare.pro" in payload["providers"]
+
+
+def test_a_notice_only_panel_stays_clean_and_exits_zero(tmp_path: Path) -> None:
+    """The measurement is the argument. `ambiguous_filing` fires on 8.15% / 1.29% / 15.80% /
+    13.70% of the four statement endpoints' real filings, so a `panel doctor` that returned
+    non-zero on a notice would fail on every honest financial panel and be `|| true`-d away.
+    The finding still has to be *reported*: a clean exit code is not silence."""
+    seed_fixture_panel(tmp_path, "financials.same_day_duplicate_versions")
+
+    result = read_side(
+        ["panel", "doctor"], tmp_path, datasets=("income",), sessions=(), extra=["--json"]
+    )
+
+    assert result.exit_code == PanelExit.ok
+    payload = json.loads(result.stdout)
+    assert payload["is_clean"] is True
+    assert payload["counts_by_severity"]["blocking"] == 0
+    assert payload["counts_by_severity"]["warning"] == 0
+    assert payload["counts_by_severity"]["notice"] > 0
+    assert {finding["code"] for finding in payload["findings"]} <= {
+        "ambiguous_filing",
+        "duplicate_versions",
+        "revised_rows",
+    }
+
+
+def test_panel_doctor_exits_non_zero_on_a_blocking_finding(tmp_path: Path) -> None:
+    seed_fixture_panel(tmp_path)
+
+    result = read_side(
+        ["panel", "doctor"], tmp_path, extra=["--year", str(YEAR - 1), "--no-calendar", "--json"]
+    )
+
+    assert result.exit_code == PanelExit.unhealthy
+    payload = json.loads(result.stdout)
+    assert payload["is_clean"] is False
+    assert "partition_missing" in {finding["code"] for finding in payload["findings"]}
+
+
+def test_panel_doctor_human_output_names_every_dataset_and_its_verdict(tmp_path: Path) -> None:
+    seed_fixture_panel(tmp_path)
+
+    result = read_side(["panel", "doctor"], tmp_path)
+
+    assert result.exit_code == PanelExit.ok
+    for name in FIXTURE_DATASETS:
+        assert f"READY {name}" in result.stdout
+
+
+def test_panel_doctor_human_output_omits_the_limitation_line_for_a_dataset_with_none(
+    tmp_path: Path,
+) -> None:
+    """`namechange` is the only one of the fifteen declared datasets whose module registers no
+    structural limitation, so the count line has to be absent rather than reading
+    "INFO 0 known limitation(s)" -- and the branch that decides has to be reachable."""
+    seed_fixture_panel(tmp_path)
+
+    result = read_side(["panel", "doctor"], tmp_path, datasets=("namechange",), sessions=())
+
+    assert result.exit_code == PanelExit.unhealthy
+    assert "known limitation" not in result.stdout
+    assert "BLOCKED namechange" in result.stdout
+
+
+def test_panel_doctor_refuses_a_dataset_with_no_declared_cadence_as_a_bad_request(
+    tmp_path: Path,
+) -> None:
+    """`panel_health_report` raises `PanelDoctorError` for a dataset it has no cadence for.
+    That is a fault of the *request*, not of the panel, and the two must not share an exit
+    code -- one is fixed by editing the command line, the other by re-fetching data."""
+    seed_fixture_panel(tmp_path)
+
+    result = read_side(["panel", "doctor"], tmp_path, datasets=("not_a_dataset",), sessions=())
+
+    assert result.exit_code == PanelExit.bad_request
+    assert "not_a_dataset" in result.output
+
+
+# --- data-check --------------------------------------------------------------------------------
+
+
+def test_data_check_clears_a_healthy_panel_and_states_the_width_of_the_permission(
+    tmp_path: Path,
+) -> None:
+    """A clearance is not a list of names. `cleared` hands back `ClearedDataset` records, and
+    the CLI has to carry the years, the corroborated sessions and the caveats with each one --
+    a bare name reads as a whole year, which is the shape `V2-P1-013`'s review found Task 29's
+    wrong number reachable through."""
+    seed_fixture_panel(tmp_path)
+
+    result = read_side(["data-check"], tmp_path, extra=["--json"])
+
+    assert result.exit_code == PanelExit.ok
+    payload = json.loads(result.stdout)
+    assert payload["is_blocked"] is False
+    assert payload["blocks"] == []
+    cleared = {entry["dataset"]: entry for entry in payload["cleared"]}
+    assert set(cleared) == set(FIXTURE_DATASETS)
+    assert cleared[ADJ_FACTOR_DATASET]["years"] == [YEAR]
+    assert cleared[ADJ_FACTOR_DATASET]["corroborated_sessions"] == [FIXTURE_SESSION.isoformat()]
+    assert cleared[ADJ_FACTOR_DATASET]["caveats"] == ["unverified_daily_coverage"]
+    assert cleared[DAILY_DATASET]["caveats"] == []
+
+
+def test_data_check_blocks_with_a_non_zero_exit_when_no_session_corroborates_the_factors(
+    tmp_path: Path,
+) -> None:
+    """The fail-closed gate's whole point, on the command line. `adj_factor` publishes daily
+    and its requirement waives `required_dates`, so with no session named nothing in the report
+    can see a hole in it -- and a command that ran the gate, was refused, and still exited 0
+    would be no gate at all in CI."""
+    seed_fixture_panel(tmp_path)
+
+    result = read_side(["data-check"], tmp_path, sessions=(), extra=["--json"])
+
+    assert result.exit_code == PanelExit.unhealthy
+    payload = json.loads(result.stdout)
+    assert payload["is_blocked"] is True
+    assert payload["cleared"] is None
+    assert [block["code"] for block in payload["blocks"]] == ["unverified_daily_coverage"]
+    assert payload["blocked_datasets"] == [ADJ_FACTOR_DATASET]
+
+
+def test_the_doctor_and_the_gate_disagree_on_the_same_panel_and_both_are_right(
+    tmp_path: Path,
+) -> None:
+    """`panel doctor` answers "is this panel sick"; `data-check` answers "may *this request*
+    read it". The gate's own refusal, `unverified_daily_coverage`, is not a health code, so a
+    panel with nothing wrong with it can still refuse a request that named no session. Pinned
+    together because the temptation is to make one command's exit code the other's."""
+    seed_fixture_panel(tmp_path)
+
+    doctor = read_side(["panel", "doctor"], tmp_path, sessions=(), extra=["--json"])
+    gate = read_side(["data-check"], tmp_path, sessions=(), extra=["--json"])
+
+    assert doctor.exit_code == PanelExit.ok
+    assert json.loads(doctor.stdout)["is_clean"] is True
+    assert gate.exit_code == PanelExit.unhealthy
+    assert json.loads(gate.stdout)["is_blocked"] is True
+
+
+def test_data_check_carries_the_notices_on_a_clearance_it_granted(tmp_path: Path) -> None:
+    seed_fixture_panel(tmp_path, "financials.same_day_duplicate_versions")
+
+    result = read_side(
+        ["data-check"], tmp_path, datasets=("income",), sessions=(), extra=["--json"]
+    )
+
+    human = read_side(["data-check"], tmp_path, datasets=("income",), sessions=())
+
+    assert result.exit_code == PanelExit.ok
+    payload = json.loads(result.stdout)
+    assert payload["is_blocked"] is False
+    assert [entry["dataset"] for entry in payload["cleared"]] == ["income"]
+    assert {notice["code"] for notice in payload["notices"]}
+    assert all(notice["severity"] == "notice" for notice in payload["notices"])
+    assert human.exit_code == PanelExit.ok
+    assert "CLEARED income" in human.stdout
+    for code in {notice["code"] for notice in payload["notices"]}:
+        assert f"NOTICE income {code}" in human.stdout
+
+
+def test_data_check_human_output_names_each_block_and_its_code(tmp_path: Path) -> None:
+    seed_fixture_panel(tmp_path)
+
+    result = read_side(["data-check"], tmp_path, sessions=())
+
+    assert result.exit_code == PanelExit.unhealthy
+    assert f"BLOCKED {ADJ_FACTOR_DATASET} unverified_daily_coverage" in result.stdout
+
+
+def test_data_check_refuses_a_gate_usage_error_as_a_bad_request(tmp_path: Path) -> None:
+    """`require_datasets` raises `PanelGateError` for a request naming no dataset. Typer's own
+    required-option check catches that one first, so the reachable instance is the other: an
+    `as-of` that is not an instant at all."""
+    seed_fixture_panel(tmp_path)
+
+    result = read_side(["data-check"], tmp_path, extra=["--as-of", "the-day-before-yesterday"])
+
+    assert result.exit_code == PanelExit.bad_request
+    assert "--as-of" in result.output
+
+
+def test_a_naive_as_of_is_refused_rather_than_localised(tmp_path: Path) -> None:
+    """A point-in-time question answered in a guessed timezone is wrong by up to a session --
+    `panel_gate`'s own `date_timezone` exclusion records one store where `Asia/Shanghai` reports
+    `date_gap` and `is_clean=False` while `UTC` reports no code at all. So an offset-less
+    instant is a bad request, not an invitation to pick a zone."""
+    seed_fixture_panel(tmp_path)
+
+    result = read_side(["data-check"], tmp_path, extra=["--as-of", "2026-01-17T04:00:00"])
+
+    assert result.exit_code == PanelExit.bad_request
+    assert "offset" in result.output
+
+
+def test_an_unparseable_session_is_refused_before_anything_is_read(tmp_path: Path) -> None:
+    seed_fixture_panel(tmp_path)
+
+    result = read_side(
+        ["panel", "doctor"], tmp_path, sessions=(), extra=["--session", "13/01/2026"]
+    )
+
+    assert result.exit_code == PanelExit.bad_request
+    assert "--session" in result.output
+
+
+def test_a_missing_calendar_stops_the_read_side_and_names_both_ways_out(tmp_path: Path) -> None:
+    """`--as-of` is deliberately omitted: its default is the wall clock, and this is the one
+    path that exercises that default end to end."""
+    result = runner.invoke(
+        app,
+        [
+            "data-check",
+            "--runtime-dir",
+            str(tmp_path),
+            "--year",
+            str(YEAR),
+            "--dataset",
+            DAILY_DATASET,
+        ],
+    )
+
+    assert result.exit_code == PanelExit.unhealthy
+    assert "--dataset trade_cal" in result.output
+    assert "--no-calendar" in result.output
+
+
+# --- the exit-code table -----------------------------------------------------------------------
+
+
+def test_every_situation_maps_to_the_exit_code_the_table_declares(
+    tmp_path: Path, scripted_build: ScriptedTushareTransport
+) -> None:
+    """One table, asserted whole. Each row is a situation actually produced by invoking the
+    real app, so this fails both when a code changes and when a situation stops producing the
+    code it is supposed to -- which a per-test assertion cannot show, because the interesting
+    property is that the four codes stay *distinct* from each other and from click's own 2."""
+    panel_dir = tmp_path / "read"
+    panel_dir.mkdir()
+    seed_fixture_panel(panel_dir)
+
+    observed = {
+        "build.written": build(tmp_path / "built", *EVERY_BUILD_TARGET).exit_code,
+        "build.coupled_dataset": build(tmp_path / "built", "daily").exit_code,
+        "build.unknown_target": build(tmp_path / "built", "income").exit_code,
+        "doctor.clean": read_side(["panel", "doctor"], panel_dir).exit_code,
+        "doctor.blocking": read_side(
+            ["panel", "doctor"], panel_dir, extra=["--year", str(YEAR - 1), "--no-calendar"]
+        ).exit_code,
+        "doctor.unknown_dataset": read_side(
+            ["panel", "doctor"], panel_dir, datasets=("nope",), sessions=()
+        ).exit_code,
+        "data-check.cleared": read_side(["data-check"], panel_dir).exit_code,
+        "data-check.blocked": read_side(["data-check"], panel_dir, sessions=()).exit_code,
+        "data-check.bad_as_of": read_side(
+            ["data-check"], panel_dir, extra=["--as-of", "not-an-instant"]
+        ).exit_code,
+        "click.unknown_flag": runner.invoke(app, ["data-check", "--nonsense"]).exit_code,
+    }
+
+    assert observed == {
+        "build.written": PanelExit.ok,
+        "build.coupled_dataset": PanelExit.bad_request,
+        "build.unknown_target": PanelExit.bad_request,
+        "doctor.clean": PanelExit.ok,
+        "doctor.blocking": PanelExit.unhealthy,
+        "doctor.unknown_dataset": PanelExit.bad_request,
+        "data-check.cleared": PanelExit.ok,
+        "data-check.blocked": PanelExit.unhealthy,
+        "data-check.bad_as_of": PanelExit.bad_request,
+        "click.unknown_flag": CLICK_USAGE_EXIT_CODE,
+    }
