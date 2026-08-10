@@ -20,7 +20,9 @@ without a working detector fails here rather than being waved through.
 
 from __future__ import annotations
 
+import re
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from panel_fixtures import (
@@ -83,6 +85,40 @@ def test_every_shape_names_at_least_one_dataset_and_cites_where_it_was_measured(
         )
         for shape_id, shape in PANEL_SHAPES.items()
     } == {shape_id: (True, True, True, True) for shape_id in EXPECTED_SHAPE_IDS}
+
+
+SOURCE_ROOT = Path(__file__).resolve().parents[2] / "src" / "openalpha_cn"
+"""`src/openalpha_cn/`, reached from this file rather than from the working directory."""
+
+_CITED_MODULE = re.compile(r"\b(?:domain|panel|panel_ingest|providers)/[a-z_]+\.py\b")
+
+
+def _cited_modules(measurement: str) -> tuple[str, ...]:
+    """Every `subpackage/module.py` the sentence points a reader at, in order, deduplicated."""
+    return tuple(dict.fromkeys(_CITED_MODULE.findall(measurement)))
+
+
+def test_every_measurement_cites_a_module_that_is_really_there() -> None:
+    """The test above accepts any sentence containing the substring `domain/`, which a citation
+    of a module that does not exist satisfies exactly as well as a real one -- and that is not
+    hypothetical: `industry.coverage_hole` shipped citing a number
+    (`002674.SZ`'s 45-session hole) that lives in `artifacts/`'s ledger and in
+    `tests/unit/domain/test_industry_classification.py`, not in the module named beside it.
+    Resolving the path is the cheap half of the check that would have caught it.
+
+    What this still does **not** verify is that the *number* is in the file it names; that
+    remains a reviewer's job, and the citation format exists to make it a short one."""
+    assert {
+        shape_id: (
+            bool(_cited_modules(shape.measurement)),
+            tuple(
+                cited
+                for cited in _cited_modules(shape.measurement)
+                if not (SOURCE_ROOT / cited).is_file()
+            ),
+        )
+        for shape_id, shape in PANEL_SHAPES.items()
+    } == {shape_id: (True, ()) for shape_id in EXPECTED_SHAPE_IDS}
 
 
 def test_asking_for_a_shape_produces_a_panel_that_actually_carries_it() -> None:
@@ -164,6 +200,44 @@ def test_the_generator_reports_the_sessions_it_actually_left_open() -> None:
     assert set(shapeless.sessions) - set(closed.sessions) == {
         day for day in shapeless.sessions if day.isoformat() in {"2026-01-08", "2026-01-09"}
     }
+
+
+WIDEST_MEASURED_REAL_BAND: float = 1.4409
+"""`300830.SZ` on its 2020-05-06 listing day: the widest `up_limit / pre_close` that is a real
+band, over the 1,918,266-row scan in `domain/price_limits.py`."""
+
+NARROWEST_MEASURED_SENTINEL: float = 115.61
+"""`688808.SH` on 2026-04-29: 99999.999 against an 864.99 close, the narrowest ratio in the
+same scan that is a sentinel. Nothing at all lands between the two."""
+
+
+def test_the_generated_limit_free_band_is_one_the_exchange_actually_publishes() -> None:
+    """`is_bounded` is a ratio test against `LIMIT_FREE_RATIO`'s 2.0, so the detector alone is
+    satisfied by any wide-enough band -- 200.0 against a ten-yuan close is 20x and passes it
+    while sitting squarely in the empty region between 1.4409x and 115.61x, a value the feed
+    has never served. "A band the domain rule classifies as limit-free" and "the shape the data
+    has" are therefore not the same statement, and this pins the second one: the generated pair
+    is `(99999.999, 0.01)`, what SSE has published since 2023-06-21."""
+    panel = generate_panel(shapes=("price_limits.limit_free_sentinel",))
+    bands = {
+        (str(subject), str(day)): (float(up), float(down))  # type: ignore[arg-type]
+        for subject, day, up, down in panel.rows_of(
+            "stk_limit", "trade_date", "up_limit", "down_limit"
+        )
+    }
+    closes = {
+        (str(subject), str(day)): float(close)  # type: ignore[arg-type]
+        for subject, day, close in panel.rows_of("daily", "trade_date", "close")
+    }
+    key = (panel.securities[0], panel.sessions[0].isoformat())
+
+    assert bands[key] == (99999.999, 0.01)
+    assert bands[key][0] / closes[key] > NARROWEST_MEASURED_SENTINEL
+    assert [
+        band
+        for other, band in bands.items()
+        if other in closes and band[0] / closes[other] > WIDEST_MEASURED_REAL_BAND
+    ] == [bands[key]]
 
 
 def _shapeless_with_column(dataset: str, column: PanelColumn) -> GeneratedPanel:

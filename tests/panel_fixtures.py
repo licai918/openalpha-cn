@@ -61,6 +61,15 @@ would move a large number of live assertions, and the assertions are the thing u
 protection. What this module owes them is the proof, in
 `tests/integration/panel/test_panel_shape_coverage.py`, that a panel built only from shapes
 kills the same mutants their hand-written fixtures kill.
+
+Being under `tests/` does not put it outside the type gate. `[tool.mypy]` names
+`packages = ["openalpha_cn"]`, so `mypy tests/` is not implied by it -- but this one file is
+checked explicitly: the completion command is `uv run mypy src scripts tests/panel_fixtures.py`
+and it passes under the same `strict` settings `src/` answers to, `warn_unused_ignores`
+included. That is what makes the eight `# type: ignore[arg-type]`s below evidence rather than
+decoration: each marks a real narrowing from `PanelColumn`'s `object` values, and an
+unnecessary one would fail the gate. The rest of `tests/` is deliberately not pulled in --
+this module is a generator many tests depend on, which is a different thing from a test.
 """
 
 from __future__ import annotations
@@ -202,6 +211,15 @@ SESSION_STEP: Final[float] = 0.5
 Far more than one tick on purpose: `pre_close_tolerance` allows a tick of `pre_close` plus a
 tick of each `adj_factor`, so a one-tick drift would sit inside the tolerance and a check that
 read the wrong session's close would still agree.
+
+**The magnitude is asserted, not left to this sentence.** `_has_moving_closes` only asks
+whether the closes differ at all, so nothing in the shape table distinguishes a step of 0.5
+from a step of 0.005 -- and at 0.005 the gap-6 mutant (the return path taking the bar's own
+close as its previous) lands back inside the tolerance and survives.
+`test_panel_shape_coverage.py::test_a_session_return_is_computed_against_the_previous_session_and_not_against_itself`
+therefore requires the generated step to exceed `pre_close_tolerance` at the panel's widest
+close, and to be at least the 0.06 the shape's own `measurement` records for
+2026-06-11 -> 2026-06-12. Shrinking this constant fails there.
 """
 
 INCOME_COLUMNS: Final[tuple[str, ...]] = STATEMENT_DATA_COLUMNS[INCOME_DATASET]
@@ -607,9 +625,12 @@ _SHAPES: Final[tuple[PanelShape, ...]] = (
         datasets=(TRADING_CALENDAR_DATASET,),
         summary="consecutive sessions more than a weekend apart",
         measurement=(
-            "of the 393 industry hand-overs that cross a closure and still leave no session "
-            "uncovered, 48 span ten calendar days and 32 span five "
-            "(domain/industry_classification.py)"
+            "the 2015 Victory Day parade closed Thursday 2015-09-03 and Friday 2015-09-04, so "
+            "2015-09-07's pretrade_date is 2015-09-02 -- five calendar days, which is the "
+            "recess this shape builds. Two closed weekdays in a row is ordinary rather than "
+            "exotic: 605 of the 13,162 published SSE calendar rows are closed weekdays and "
+            "zero weekends are open (live probe 2026-08-10, domain/trading_calendar.py, whose "
+            "KNOWN_CALENDAR_LOOKAHEAD names both of those two days)"
         ),
         detect=_has_multi_session_recess,
     ),
@@ -757,10 +778,15 @@ _SHAPES: Final[tuple[PanelShape, ...]] = (
         datasets=(INCOME_DATASET,),
         summary="a key with three rows whose first two agree on a column a third moves",
         measurement=(
-            "derived from income's own census: 3,836 rows under 3,201 keys is 635 excess rows "
-            "spread over 633 keys with more than one row, so at least one key carries three "
-            "(balancesheet's 4,416 / 3,170 / 1,244 gives the same two-row excess). "
-            "domain/financial_statements.py"
+            "002514.SZ's 2022 annual report, announced 2023-03-15, is served as three rows "
+            "under one (period, announcement) key with update_flag 0/1/1, and its "
+            "total_revenue reads 684026684.14, 684026684.14, 667399250.52 -- the first two "
+            "agreeing and the third moving, on nine of the ten stored columns at once. "
+            "000981.SZ's 2025 interim announced 2025-08-28 has the same shape "
+            "(n_income 202494549.62, 202494549.62, 198527426.34; basic_eps 0.0219, 0.0219, "
+            "0.0215) and so does 002682.SZ's 2025 annual announced 2026-04-24. 4 of the "
+            "15,801 keys a 277-security probe returned carry three raw rows "
+            "(live probe 2026-08-10, domain/financial_statements.py)"
         ),
         detect=_has_three_versions_of_one_key,
     ),
@@ -806,9 +832,10 @@ _SHAPES: Final[tuple[PanelShape, ...]] = (
         datasets=(INDUSTRY_MEMBERSHIP_DATASET, TRADING_CALENDAR_DATASET),
         summary="a reclassification that leaves the security unclassified for whole sessions",
         measurement=(
-            "49 of the 2,004 transitions leave at least one session uncovered; the shortest is "
-            "002674.SZ at 45 sessions over 69 calendar days and the longest 000639.SZ at 4,103 "
-            "(domain/industry_classification.py)"
+            "49 of the 2,004 transitions leave a gap rather than handing straight over: "
+            "000639.SZ ST西王 is 社会服务 through 2002-08-29 and unclassified for 4,103 "
+            "sessions until 2019-07-24, 000716.SZ 黑芝麻 for 3,428 and 600365.SH ST通葡 for "
+            "3,299 (domain/industry_classification.py)"
         ),
         detect=_has_industry_coverage_hole,
     ),
@@ -1175,6 +1202,17 @@ def _suspension_batch(
 
 SENTINEL_UP_LIMIT: Final[float] = 99999.999
 SENTINEL_DOWN_LIMIT: Final[float] = 0.01
+"""The pair, and it is one of the six encodings actually published rather than merely a band
+the ratio test rejects.
+
+`_has_limit_free_sentinel` asks `PriceLimit.is_bounded`, which is a ratio test, so it would
+answer `True` for any band wide enough -- 200.0 against a ten-yuan close is 20x and passes it,
+while falling in the hole between the widest real band (1.4409x pre_close) and the narrowest
+sentinel (115.61x) and so being a value the feed never serves. That is the difference between
+"a fixture the domain rule accepts" and "the shape the data has", so
+`test_panel_fixtures.py::test_the_generated_limit_free_band_is_one_the_exchange_actually_publishes`
+pins the pair to (99999.999, 0.01) -- what SSE has published since 2023-06-21.
+"""
 
 
 def _limit_batch(

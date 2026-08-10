@@ -50,6 +50,7 @@ from panel_fixtures import (
     write_generated_panel,
 )
 
+from openalpha_cn.domain.daily_prices import pre_close_tolerance
 from openalpha_cn.domain.financial_statements import (
     AmbiguousReportError,
     build_statement_history,
@@ -63,6 +64,7 @@ from openalpha_cn.panel_doctor import PanelHealthReport, panel_health_report
 
 HEALTHY_SHAPES = (
     "calendar.mid_window_weekday_closure",
+    "calendar.multi_session_recess",
     "universe.delisted_security",
     "adjustment.step_down",
     "daily.close_moves_between_sessions",
@@ -73,13 +75,24 @@ HEALTHY_SHAPES = (
     "price_limits.limit_free_sentinel",
     "index.published_weights_do_not_sum_to_exactly_one_hundred",
     "financials.second_statement_dataset",
+    "financials.earlier_period_announced_later",
 )
-"""Every shape that is a form of *sound* data rather than an injected defect.
+"""Every shape that is a form of *sound* data rather than an injected defect: thirteen of the
+nineteen, and the six left out are left out for two stated reasons rather than by omission.
 
-The three statement-ambiguity shapes are left out on purpose: `ambiguous_filing` is a real
-`notice`, so a panel carrying them is still clean but no longer finding-free, and the point of
-the healthy case is that a shape-rich panel produces **nothing at all** to report. The two
-industry shapes carry no stored dataset here (see `panel_fixtures.STORED_DATASETS`).
+- `financials.same_day_duplicate_versions` and `financials.three_versions_of_one_key` produce a
+  real `ambiguous_filing` **notice**, so a panel carrying them is still clean but no longer
+  finding-free -- and the point of the healthy case is that a shape-rich panel produces
+  **nothing at all** to report. `financials.earlier_period_announced_later` is *not* one of
+  them: an older period re-announced later is ordinary filing behaviour and the doctor has
+  nothing to say about it, so it belongs here.
+- The two industry shapes and the two `name_history` shapes carry no stored dataset at all:
+  `index_member_all` and `namechange` are handed back as domain carriers rather than as panel
+  batches (see `panel_fixtures.STORED_DATASETS`), so there is nothing for the doctor to read.
+
+`calendar.multi_session_recess` is in for the same reason `mid_window_weekday_closure` is: a
+closed weekday the calendar agrees is closed is sound data, and the session census that would
+otherwise refuse the short partition reads the same calendar.
 """
 
 
@@ -278,13 +291,24 @@ def test_a_bar_with_no_valuation_behind_it_is_the_ordinary_direction_and_is_not_
 
 # --- gap 6: a bar's own close is not its previous close --------------------------------------
 
+MEASURED_SESSION_MOVE = 0.06
+"""000001.SZ closed 11.30 on 2026-06-11 and 11.24 on 2026-06-12 -- the move
+`daily.close_moves_between_sessions`' own `measurement` cites, in yuan."""
+
 
 def test_a_session_return_is_computed_against_the_previous_session_and_not_against_itself(
     tmp_path: Path,
 ) -> None:
     """With a close that never moves, `pre_close` equals the bar's own close on every session
     and a check that compared a bar against itself agreed perfectly. Half a yuan a session is
-    far more than `pre_close_tolerance` allows, so the substitution now lands outside it."""
+    far more than `pre_close_tolerance` allows, so the substitution now lands outside it.
+
+    **The size of the step is asserted, not asserted-about.** `_has_moving_closes` only asks
+    whether the closes differ at all, so the shape table cannot tell 0.5 from 0.005 -- and at
+    0.005 this mutant is back inside the tolerance and survives with every shape assertion
+    still green. The step is therefore required to clear the tolerance at the panel's widest
+    close, and to be at least the 0.06 this shape's own `measurement` records for 000001.SZ's
+    11.30 -> 11.24."""
     panel = generate_panel(shapes=("daily.close_moves_between_sessions",))
 
     store, datasets = _stored(tmp_path, panel)
@@ -296,7 +320,11 @@ def test_a_session_return_is_computed_against_the_previous_session_and_not_again
     }
     first, second = panel.sessions[0], panel.sessions[1]
     code = panel.securities[0]
+    step = float(closes[(code, second.isoformat())]) - float(closes[(code, first.isoformat())])  # type: ignore[arg-type]
+    widest = max(float(close) for close in closes.values())  # type: ignore[arg-type]
     assert closes[(code, first.isoformat())] != closes[(code, second.isoformat())]
+    assert step > pre_close_tolerance(widest, factor=1.0, previous_factor=1.0)
+    assert step >= MEASURED_SESSION_MOVE
     assert report.findings_with_code("return_path_disagreement") == ()
     (check,) = [outcome for outcome in report.cross_checks if outcome.name == "return_paths"]
     assert check.ran

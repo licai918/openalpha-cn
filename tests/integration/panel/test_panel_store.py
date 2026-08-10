@@ -195,14 +195,28 @@ def _writer_worker(root_str: str, queue: Queue[tuple[str, str]]) -> None:
     queue.put(("writer", "ok"))
 
 
+_RENDEZVOUS_TIMEOUT_SECONDS = 60.0
+"""How long a reader waits for its siblings at the barrier before giving up.
+
+`Barrier.wait()` with no timeout is unbounded, and a sibling that dies on the way to it (a
+spawn failure, an import error, an OOM kill) leaves the survivors parked there forever. The
+parent's own `queue.get(timeout=...)` does not save it: `multiprocessing`'s exit handler joins
+every non-daemon child **without a timeout**, so the failing assertion is followed by a
+`pytest` process that never returns -- observed once as a run still resident after 36 hours,
+holding no repository file and burning no CPU. A `BrokenBarrierError` here becomes an ordinary
+`fail:` outcome, which the assertions below already report by name. Generous rather than tight
+because this is a deadlock bound, not a performance budget.
+"""
+
+
 def _reader_worker(
     root_str: str,
     barrier: Barrier,
     queue: Queue[tuple[str, str]],
     tag: str,
 ) -> None:
-    barrier.wait()
     try:
+        barrier.wait(timeout=_RENDEZVOUS_TIMEOUT_SECONDS)
         store = PanelStore(Path(root_str))
         rows = store.query("prices_daily", year=2024, columns=["ts_code"])
         queue.put((tag, f"ok:{len(rows)}"))
@@ -254,11 +268,20 @@ def test_concurrent_read_only_queries_from_separate_processes_do_not_fail_each_o
     ]
     for process in readers:
         process.start()
-    outcomes = [queue.get(timeout=15) for _ in readers]
-    for process in readers:
-        process.join(timeout=15)
-        assert not process.is_alive(), "a reader process hung"
-        assert process.exitcode == 0, f"a reader process crashed: exitcode={process.exitcode}"
+    try:
+        outcomes = [queue.get(timeout=15) for _ in readers]
+        for process in readers:
+            process.join(timeout=15)
+            assert not process.is_alive(), "a reader process hung"
+            assert process.exitcode == 0, f"a reader process crashed: exitcode={process.exitcode}"
 
-    for outcome in outcomes:
-        assert outcome[1] == "ok:2", f"a concurrent reader failed: {outcome}"
+        for outcome in outcomes:
+            assert outcome[1] == "ok:2", f"a concurrent reader failed: {outcome}"
+    finally:
+        # Every exit from the block above -- a failed assertion, a `queue.Empty` -- has to leave
+        # no live child behind, or `multiprocessing`'s untimed exit-time join turns a red test
+        # into a wedged interpreter. See `_RENDEZVOUS_TIMEOUT_SECONDS`.
+        for process in readers:
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
