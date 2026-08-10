@@ -1,0 +1,446 @@
+"""One rendering of the panel plane's three read-side answers, for all three faces (`V2-P1-016`).
+
+`V2-P1-012` produces a `PanelHealthReport`, `V2-P1-013` a `DependencyClearance`, and
+`panel/catalog.py` a `DatasetReadiness` per dataset. Three faces now hand those to callers --
+`V2-P1-015`'s `openalpha panel doctor` / `data-check`, this issue's `GET /api/v1/panel/*`, and
+`OpenAlphaSDK.panel_health` / `panel_clearance` / `panel_readiness` -- and every one of them
+has to resolve the same request against the same store and render the same answer.
+
+## Why the rendering is a module and not three functions in three places
+
+`cli.py` wrote the first two of these serialisers and said why they were standalone functions:
+"two renderings of one report that disagree about which fields exist is how a caller comes to
+believe a severity is absent when it was merely dropped". That was a promise about this issue,
+and keeping it means the CLI, the HTTP app and the SDK import one definition rather than three
+that agree today. `counts_by_severity` is the concrete case: it is total over
+`HEALTH_SEVERITIES` rather than built from the findings that happen to be present, so a
+severity with no findings reads `0` instead of being missing -- and a second copy of this
+function that built the mapping from the findings would make "no blocking findings" and "the
+blocking key was never emitted" the same observation on one face and not the other.
+
+## What is deliberately *not* here
+
+HTTP status codes and exit codes. `cli.py` owns `PanelExit` and `api/app.py` owns
+`PANEL_HTTP_STATUS`, because "what this channel does about a refusal" is a property of the
+channel: a CI job has an exit code and three remedies, an HTTP client has a status class and a
+body. What is shared is the *answer*; what is not is the envelope.
+
+## Reading a clearance without consuming it
+
+`clearance_payload` reads `cleared_or_none` and never `cleared`, `bool(...)`, `len(...)` or
+iteration. `DependencyClearance` raises for those three **even when it cleared** -- Task 36's
+deliberate choice, because an accessor that answered on a healthy panel and raised on a sick
+one would pass every test written against the first and fail only in production. Every caveat
+on this payload is read off the `ClearedDataset` records this function already walks, rather
+than through `DependencyClearance.caveat_codes()`, which goes through `cleared` and therefore
+raises on a blocked clearance -- the one shape a refusal payload is always built from.
+
+## Two errors, because a refusal and a malformed question are not the same fact
+
+`PanelRequestError` is "this question cannot be put at all": a naive `as_of`, a request naming
+no dataset. `PanelUnreadableError` is "the panel cannot answer it as asked": the exchange
+calendar this request wants to be judged against is not in the store. The CLI already
+separates these (`bad_request` versus `unhealthy`) and the reason is that no amount of
+re-fetching fixes the first. Neither is raised for a *sick* panel -- that is a report with
+findings on it, or a clearance with blocks on it, because a caller has to be able to read the
+reasons rather than a traceback.
+
+## Why this is a top-level module
+
+`tests/unit/test_import_layering.py` pins `openalpha_cn.panel` as importing no sibling
+subpackage at all, and this module must reach `panel_doctor`, `panel_gate`, `panel_ingest`
+(for `load_trading_calendar`), `panel` and `domain`. `panel_ingest.py`, `panel_doctor.py` and
+`panel_gate.py` are the precedents and the reasoning is theirs: the seam sits *above* the
+package it must not be inside, the edges run one way only, and `openalpha_cn.panel`'s real
+import closure is unchanged by this module's existence. It is the widest of the four because
+it is the last one -- a face joins everything the plane produces -- and its dependency set is
+pinned in `tests/unit/test_panel_ingest_import_isolation.py` for that reason.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from typing import Final
+
+from openalpha_cn.domain.trading_calendar import TradingCalendar, TradingCalendarError
+from openalpha_cn.panel.catalog import (
+    DEFAULT_DATE_TIMEZONE,
+    DatasetReadiness,
+    PanelStorageError,
+    ReadinessIssue,
+)
+from openalpha_cn.panel.store import PanelStore
+from openalpha_cn.panel_doctor import (
+    HEALTH_CATEGORIES,
+    HEALTH_SEVERITIES,
+    HealthFinding,
+    PanelHealthReport,
+    dataset_health,
+)
+from openalpha_cn.panel_gate import DependencyClearance, DependencyRequest
+from openalpha_cn.panel_ingest import load_trading_calendar
+
+
+class PanelViewError(RuntimeError):
+    """Base for the two faults a panel face can report before any verdict exists."""
+
+
+class PanelRequestError(PanelViewError):
+    """The question cannot be put at all, whatever is in the store.
+
+    A naive `as_of`, or a request naming no dataset. Distinct from `PanelUnreadableError`
+    because the remedy is to edit the request, not to fetch anything.
+    """
+
+
+class PanelUnreadableError(PanelViewError):
+    """The panel cannot answer the question as asked: the calendar it names is not stored.
+
+    Not a finding, because there is no report to put one on -- the calendar is what the report
+    would have been derived against.
+    """
+
+
+PANEL_SUBDIRECTORY: Final[str] = "panel"
+"""Where the panel plane lives inside a runtime directory, stated once for all three faces.
+
+`runtime_dir/panel`, beside `runtime_dir/state.sqlite3`, so one `--runtime-dir` /
+`OPENALPHA_RUNTIME_DIR` / `OpenAlphaSDK(runtime_dir=...)` names one panel. Three faces
+disagreeing about where the store is would make every equivalence between them a coincidence.
+"""
+
+NO_CALENDAR_REMEDY: Final[str] = (
+    "Build it first (`openalpha panel build --dataset trade_cal --year <year>`), or state on "
+    "the record that this run has no calendar (`--no-calendar` on the command line, "
+    "`calendar=false` over HTTP, `with_calendar=False` in the SDK)"
+)
+"""The two ways out of a missing calendar, spelled for each face.
+
+Named rather than inlined because the message is the only thing a caller who gets this
+refusal has to act on, and the flag is spelled differently on each of the three faces.
+"""
+
+
+def panel_store(runtime_dir: Path) -> PanelStore:
+    """The panel plane inside `runtime_dir`."""
+    return PanelStore(runtime_dir / PANEL_SUBDIRECTORY)
+
+
+def stored_calendar(
+    store: PanelStore, *, exchange: str, years: Sequence[int], as_of: datetime
+) -> TradingCalendar:
+    """The stored exchange calendar, or a refusal naming both ways out.
+
+    `load_trading_calendar` is fail-closed twice over -- a missing, damaged or stale partition
+    is blocked by `read_if_ready`, and a non-contiguous set of years is refused afterwards --
+    so neither failure can hand back a calendar that reads the missing stretch as a holiday.
+    Both arrive here as a refusal rather than as a report about a panel nobody could read.
+    """
+    try:
+        return load_trading_calendar(store, exchange=exchange, years=years, as_of=as_of)
+    except (TradingCalendarError, PanelStorageError) as error:
+        raise PanelUnreadableError(
+            f"the {exchange} calendar could not be read out of {store.root}: {error}. "
+            f"{NO_CALENDAR_REMEDY}"
+        ) from error
+
+
+def panel_request(
+    store: PanelStore,
+    *,
+    datasets: Sequence[str],
+    years: Sequence[int],
+    sessions: Sequence[date],
+    index_codes: Sequence[str],
+    as_of: datetime,
+    exchange: str,
+    with_calendar: bool,
+) -> DependencyRequest:
+    """Resolve one face's parameters into the stated request all three of them ask.
+
+    `with_calendar` has no default here and none on any face that calls it, which is
+    `DependencyRequest`'s own rule: every field that decides how hard the panel is examined is
+    mandatory, because the most permissive request must not also be the easiest one to build.
+    `calendar=None` switches off every session-scoped cross-check, after which the gate refuses
+    a daily-cadence dataset nothing corroborated -- that is a decision, not a default.
+
+    Refuses an empty dataset list here rather than letting it through to a report:
+    `require_datasets` has this guard and `panel_health_report` does not, so a health request
+    naming nothing would come back `is_clean=True` over zero datasets, which is the empty
+    success this whole plane exists to make unavailable.
+
+    Refuses a naive `as_of` by name. `PanelStore` enforces awareness too, but from inside a
+    rule table whose job is to name a malformed *partition*; a caller who sent a bare
+    `2026-01-17T04:00:00` should be told about that field.
+    """
+    if as_of.tzinfo is None or as_of.utcoffset() is None:
+        raise PanelRequestError(
+            f"as_of must be a timezone-aware datetime; got {as_of.isoformat()!r}. A naive "
+            "instant has no point in time to be judged at"
+        )
+    requested = tuple(dict.fromkeys(datasets))
+    if not requested:
+        raise PanelRequestError(
+            "this request named no dataset at all; a check that inspected nothing must not "
+            "report a verdict"
+        )
+    resolved_years = tuple(dict.fromkeys(years))
+    calendar = (
+        stored_calendar(store, exchange=exchange, years=resolved_years, as_of=as_of)
+        if with_calendar
+        else None
+    )
+    return DependencyRequest(
+        datasets=requested,
+        as_of=as_of,
+        years=resolved_years,
+        sessions=tuple(dict.fromkeys(sessions)),
+        calendar=calendar,
+        index_codes=tuple(dict.fromkeys(index_codes)),
+    )
+
+
+def dataset_readiness(
+    store: PanelStore, request: DependencyRequest
+) -> tuple[DatasetReadiness, ...]:
+    """Each named dataset's own readiness verdict, in request order.
+
+    The narrowest of the three answers and the only one that runs no cross-dataset check at
+    all: `DatasetReadiness` is decided from one dataset's catalog records against the
+    requirement its own reader puts, so `DependencyRequest.sessions` is deliberately unused
+    here. A caller who needs a session-scoped verdict is asking the health report's question,
+    and a caller who needs permission to read is asking the gate's.
+
+    Routed through `panel_doctor.dataset_health` rather than through `evaluate_readiness`
+    directly, because `_requirement_for` is what makes the report ask each dataset the same
+    question its own loader asks -- including the fallback that waives `required_dates` when no
+    calendar reaches a requested year, which is exactly the case a face has to be able to
+    report rather than drop.
+    """
+    return tuple(
+        dataset_health(
+            store,
+            dataset=name,
+            as_of=request.as_of,
+            years=request.years,
+            calendar=request.calendar,
+            index_codes=request.index_codes,
+            date_timezone=DEFAULT_DATE_TIMEZONE,
+        ).readiness
+        for name in request.datasets
+    )
+
+
+# --- serialisation ------------------------------------------------------------------------------
+
+
+def _seconds(span: timedelta | None) -> float | None:
+    return None if span is None else span.total_seconds()
+
+
+def _instant(value: datetime | None) -> str | None:
+    return None if value is None else value.isoformat()
+
+
+def _day(value: date | None) -> str | None:
+    return None if value is None else value.isoformat()
+
+
+def _issue_payload(issue: ReadinessIssue) -> dict[str, object]:
+    return {
+        "code": issue.code,
+        "dataset": issue.dataset,
+        "detail": issue.detail,
+        "year": issue.year,
+        "missing_dates": [day.isoformat() for day in issue.missing_dates],
+        "missing_items": list(issue.missing_items),
+    }
+
+
+def _finding_payload(finding: HealthFinding) -> dict[str, object]:
+    return {
+        "code": finding.code,
+        "category": finding.category,
+        "severity": finding.severity,
+        "dataset": finding.dataset,
+        "datasets": list(finding.datasets),
+        "detail": finding.detail,
+        "year": finding.year,
+        "count": finding.count,
+        "dates": [day.isoformat() for day in finding.dates],
+        "items": list(finding.items),
+        "related_limitations": list(finding.related_limitations),
+    }
+
+
+def readiness_payload(entries: Sequence[DatasetReadiness]) -> dict[str, object]:
+    """Per-dataset readiness as JSON-ready data, losing nothing the verdict carries.
+
+    Refuses an empty sequence. `all_ready` over no dataset is vacuously `True`, and a face that
+    answered `{"all_ready": true, "datasets": []}` would be the empty success in its purest
+    form -- `panel_request` already refuses the request that produces it, and this refuses the
+    rendering, because the two guards protect different callers.
+
+    `checks_waived` is carried per dataset and is not decoration: the empty tuple is the
+    *stronger* claim ("every check ran"), and a caller drawing a conclusion from `state ==
+    "ready"` has to be able to see which questions were never put.
+    """
+    if not entries:
+        raise PanelRequestError(
+            "a readiness report over no dataset at all is not a verdict; every dataset "
+            "assessed must appear"
+        )
+    return {
+        "as_of": entries[0].as_of.isoformat(),
+        "all_ready": all(entry.is_ready for entry in entries),
+        "blocked_datasets": [entry.dataset for entry in entries if not entry.is_ready],
+        "datasets": [
+            {
+                "dataset": entry.dataset,
+                "state": entry.state,
+                "is_ready": entry.is_ready,
+                "years_present": list(entry.years_present),
+                "row_count": entry.row_count,
+                "subject_count": entry.subject_count,
+                "last_event_time": _instant(entry.last_event_time),
+                "last_event_date": _day(entry.last_event_date),
+                "checks_waived": list(entry.checks_waived),
+                "issues": [_issue_payload(issue) for issue in entry.issues],
+            }
+            for entry in entries
+        ],
+    }
+
+
+def health_report_payload(report: PanelHealthReport) -> dict[str, object]:
+    """A `PanelHealthReport` as JSON-ready data, losing nothing the report carries.
+
+    `counts_by_severity` is total over `panel_doctor.HEALTH_SEVERITIES` rather than built from
+    the findings that happen to be present: a severity with no findings must read `0`, not be
+    missing, or "no blocking findings" and "the blocking key was never emitted" become the same
+    observation for a consumer.
+
+    `limitations` stays a sibling of `findings` here as it is on the report itself. A
+    structural boundary of a dataset and a defect of this fetch are different kinds of fact
+    with different remedies, and a payload that merged them would teach its readers to skim
+    both.
+    """
+    counts = dict.fromkeys(sorted(HEALTH_SEVERITIES), 0)
+    for finding in report.findings:
+        counts[finding.severity] += 1
+    return {
+        "as_of": report.as_of.isoformat(),
+        "is_clean": report.is_clean,
+        "counts_by_severity": counts,
+        "blocked_datasets": list(report.blocked_datasets),
+        "datasets": [
+            {
+                "dataset": health.dataset,
+                "is_ready": health.is_ready,
+                "state": health.readiness.state,
+                "years_requested": list(health.years_requested),
+                "years_present": list(health.readiness.years_present),
+                "row_count": health.readiness.row_count,
+                "subject_count": health.readiness.subject_count,
+                "checks_waived": list(health.readiness.checks_waived),
+                "cadence": health.freshness.cadence,
+                "max_staleness_seconds": _seconds(health.freshness.max_staleness),
+                "freshness_basis": health.freshness.basis,
+                "event_age_seconds": _seconds(health.event_age),
+                "fetch_age_seconds": _seconds(health.fetch_age),
+                "revised_row_count": health.revised_row_count,
+                "revision_labels": [[label, count] for label, count in health.revision_labels],
+                "codes": [finding.code for finding in health.findings],
+            }
+            for health in report.datasets
+        ],
+        "findings": [_finding_payload(finding) for finding in report.findings],
+        "cross_checks": [
+            {
+                "name": check.name,
+                "datasets": list(check.datasets),
+                "ran": check.ran,
+                "skipped_reason": check.skipped_reason,
+                "finding_count": check.finding_count,
+            }
+            for check in report.cross_checks
+        ],
+        "limitations": [
+            {
+                "code": limitation.code,
+                "datasets": list(limitation.datasets),
+                "detail": limitation.detail,
+                "dates": [day.isoformat() for day in limitation.dates],
+            }
+            for limitation in report.limitations
+        ],
+    }
+
+
+def clearance_payload(clearance: DependencyClearance) -> dict[str, object]:
+    """A `DependencyClearance` as JSON-ready data.
+
+    Reads `cleared_or_none` and never `cleared`, `bool(...)`, `len(...)` or iteration.
+    `DependencyClearance` raises for all three of those **even when it cleared** -- Task 36's
+    deliberate choice, because an accessor that answered on a healthy panel and raised on a
+    sick one would pass every test written against the first and fail only in production. The
+    merged shape has a name that says what it is, and this is the one place in this repository
+    that wants it.
+
+    `cleared` entries carry their own width -- the years the year-scoped checks covered, the
+    sessions a cross-check actually opened, and the caveats still open outside them -- because
+    a bare dataset name is exactly as wide as its reader assumes, and that assumption is how
+    `V2-P1-013`'s review found Task 29's wrong number reachable through a *cleared* gate.
+
+    `blocks_by_category` is total over `panel_doctor.HEALTH_CATEGORIES` and is grouped off
+    `GateBlock.category`, which the gate resolved through `GATE_CODE_CATEGORIES` -- the union
+    of the health table with the gate's own. Grouping through `HEALTH_CODE_CATEGORY` instead
+    would raise a `KeyError` on `unverified_daily_coverage`, which is not a health code at all
+    because it is not a fault of the panel; a grouped view that swallowed the unmapped code
+    would drop the only block on a refusal the gate exists to issue.
+    """
+    cleared = clearance.cleared_or_none
+    return {
+        "as_of": clearance.request.as_of.isoformat(),
+        "is_blocked": clearance.is_blocked,
+        "blocked_datasets": list(clearance.blocked_datasets),
+        "blocks": [
+            {
+                "code": block.code,
+                "category": block.category,
+                "severity": block.severity,
+                "dataset": block.dataset,
+                "datasets": list(block.datasets),
+                "detail": block.detail,
+                "year": block.year,
+            }
+            for block in clearance.blocks
+        ],
+        "blocks_by_category": {
+            category: [block.code for block in clearance.blocks if block.category == category]
+            for category in sorted(HEALTH_CATEGORIES)
+        },
+        "cleared": (
+            None
+            if cleared is None
+            else [
+                {
+                    "dataset": entry.dataset,
+                    "years": list(entry.years),
+                    "corroborated_sessions": [
+                        day.isoformat() for day in entry.corroborated_sessions
+                    ],
+                    "caveats": list(entry.caveats),
+                }
+                for entry in cleared
+            ]
+        ),
+        "notices": [_finding_payload(notice) for notice in clearance.notices],
+        "unverified_checks": [
+            {"dataset": name, "checks": list(checks)}
+            for name, checks in clearance.unverified_checks
+        ],
+        "report": health_report_payload(clearance.report),
+    }

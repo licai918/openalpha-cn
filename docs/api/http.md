@@ -53,6 +53,41 @@ filesystem path. Local file access remains a CLI responsibility.
   Bootstrap confidence interval.
 - `POST /api/v1/backtests/validate` accepts a previously returned research result and a future outcome observation, verifies content-derived IDs, and returns reconciled attribution.
 
+## Panel readiness, health, and the dependency gate
+
+Three read-side endpoints over the point-in-time panel plane at `runtime_dir/panel`,
+paired one-for-one with `OpenAlphaSDK.panel_readiness` / `panel_health` /
+`panel_clearance` and asserted equivalent to them
+(`tests/integration/test_panel_interfaces.py`). All three take the same query
+parameters: repeated `dataset` and `year` (both required — nothing is inferred),
+required `as_of` (ISO-8601, **timezone-aware**), required `exchange`, required
+`calendar` (`true`/`false`), plus repeated optional `session` and `index_code`.
+`/panel/readiness` takes no `session`.
+
+- `GET /api/v1/panel/readiness` returns each named dataset's own readiness verdict —
+  `state`, `issues`, and `checks_waived`, which says which questions were never put.
+- `GET /api/v1/panel/health` returns the whole health report: per-dataset readiness and
+  freshness, the cross-dataset checks with a record of which of them actually ran, and
+  the datasets' inherent limitations kept separate from this fetch's defects. Distinct
+  from `GET /health`, which is the dependency-free liveness probe.
+- `GET /api/v1/panel/gate` runs the fail-closed dependency gate.
+
+Status codes are a four-entry table (`api/app.py#PANEL_HTTP_STATUS`):
+
+| Situation | Code |
+|---|---|
+| the endpoint answered | `200` |
+| the gate refused this request | `409` |
+| the exchange calendar this request names is not stored | `409` |
+| the request cannot be put at all (unknown dataset, no dataset, naive `as_of`) | `422` |
+
+`/panel/readiness` and `/panel/health` always answer `200` when the request could be
+put — they are reports and grant nothing, so the verdict is `all_ready` / `is_clean` in
+the body. Only `/panel/gate`'s `200` is a permission, which is why a refusal there is
+`409` and never `200`. A `409` still carries the full body: every block with its code,
+category, severity and detail, the notices, the unverified checks, and the health report
+the verdict rests on. A `notice` never produces a non-2xx response.
+
 The portfolio endpoint is intentionally stateless: callers submit the immutable
 `PortfolioState`, `PortfolioOrder`, `MarketBar`, and optional `PortfolioLimits`,
 then persist the returned `PortfolioTransition` in their own workflow. It is a

@@ -26,6 +26,17 @@ and the catalog's timezone default) and `domain` (for `TradingCalendar`) -- and,
 `panel_ingest`. That absence is worth pinning: a gate that built its own `ReadinessRequirement`
 could ask a dataset a different question from the one its own reader asks, and the two verdicts
 would drift.
+
+`openalpha_cn.panel_view` (`V2-P1-016`) is the fourth and the widest, and the width is the
+point rather than a slip: it is the shared face the CLI, the HTTP app and the SDK render their
+answers through, so it joins all four of the others. What matters for this file is the
+direction. The edges run `panel_view -> {panel_gate, panel_doctor, panel_ingest, panel,
+domain}` and never back, so none of the three modules above gains a dependency by its
+existence, and `openalpha_cn.panel`'s import closure is again unchanged. The absence worth
+pinning here is the other one: `panel_view` must not reach `storage`, `runtime`, `providers`,
+`api` or `product`. A rendering that could see a composition root or a credential would make
+the answer depend on how the process was wired, and would put a provider token one exception
+message away from a response body.
 """
 
 from __future__ import annotations
@@ -35,6 +46,10 @@ import grimp
 _ALLOWED_INTERNAL_DEPENDENCIES = {"openalpha_cn.domain", "openalpha_cn.panel"}
 _ALLOWED_DOCTOR_DEPENDENCIES = _ALLOWED_INTERNAL_DEPENDENCIES | {"openalpha_cn.panel_ingest"}
 _ALLOWED_GATE_DEPENDENCIES = _ALLOWED_INTERNAL_DEPENDENCIES | {"openalpha_cn.panel_doctor"}
+_ALLOWED_VIEW_DEPENDENCIES = _ALLOWED_DOCTOR_DEPENDENCIES | {
+    "openalpha_cn.panel_doctor",
+    "openalpha_cn.panel_gate",
+}
 
 
 def _direct_internal_dependencies(module: str) -> set[str]:
@@ -132,6 +147,48 @@ def test_the_dependency_gate_adds_no_edge_into_the_panel_package_either() -> Non
     assert graph.direct_import_exists(
         importer="openalpha_cn.panel_gate", imported="openalpha_cn.panel_doctor", as_packages=True
     ), "sanity check: the gate is supposed to consume the health report"
+
+
+def test_the_shared_face_joins_the_panel_plane_and_reaches_nothing_above_it() -> None:
+    """`panel_view` may import all four panel-plane modules and nothing else.
+
+    The four are its reason to exist -- one rendering for three faces has to be able to see
+    everything the plane produces. What it must not see is `storage`, `runtime`, `providers`,
+    `api` or `product`: a rendering that could reach a composition root would make its answer
+    depend on how the process was wired rather than on what is in the panel store, and one that
+    could reach `providers` would put a credential inside the module that builds response
+    bodies.
+    """
+    dependencies = _direct_internal_dependencies("openalpha_cn.panel_view")
+
+    assert dependencies == _ALLOWED_VIEW_DEPENDENCIES, (
+        f"openalpha_cn.panel_view may import exactly {sorted(_ALLOWED_VIEW_DEPENDENCIES)}, "
+        f"found {sorted(dependencies)}"
+    )
+
+
+def test_the_shared_face_adds_no_edge_into_anything_it_renders() -> None:
+    """The pattern-or-evasion question, asked a third time and not inherited. An evasion leaves
+    the guarded package's real dependency set untouched and only moves it out of the metric's
+    sight; here every edge runs into `panel_view` from the three faces above it and out of it
+    into the plane below, never back."""
+    graph = grimp.build_graph("openalpha_cn")
+
+    for importer in (
+        "openalpha_cn.panel",
+        "openalpha_cn.domain",
+        "openalpha_cn.storage",
+        "openalpha_cn.panel_ingest",
+        "openalpha_cn.panel_doctor",
+        "openalpha_cn.panel_gate",
+    ):
+        assert not graph.direct_import_exists(
+            importer=importer, imported="openalpha_cn.panel_view", as_packages=True
+        ), f"{importer} must not import openalpha_cn.panel_view"
+    for face in ("openalpha_cn.cli", "openalpha_cn.api", "openalpha_cn.sdk"):
+        assert graph.direct_import_exists(
+            importer=face, imported="openalpha_cn.panel_view", as_packages=True
+        ), f"sanity check: {face} is supposed to render through the shared face"
 
 
 def test_the_columnar_contract_reaches_no_infrastructure_library() -> None:

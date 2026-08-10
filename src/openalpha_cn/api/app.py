@@ -1,11 +1,12 @@
 """FastAPI application for OpenAlpha CN's versioned public HTTP surface."""
 
-from collections.abc import Callable
-from datetime import datetime
+from collections.abc import Callable, Mapping, Sequence
+from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from types import MappingProxyType
+from typing import Annotated, Any, Final
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -41,6 +42,19 @@ from openalpha_cn.evidence.service import (
     parse_serialized_evidence,
 )
 from openalpha_cn.logging_setup import configure_logging
+from openalpha_cn.panel.store import PanelStore
+from openalpha_cn.panel_doctor import PanelDoctorError, panel_health_report
+from openalpha_cn.panel_gate import DependencyRequest, PanelGateError, require_datasets
+from openalpha_cn.panel_view import (
+    PanelRequestError,
+    PanelUnreadableError,
+    clearance_payload,
+    dataset_readiness,
+    health_report_payload,
+    panel_request,
+    panel_store,
+    readiness_payload,
+)
 from openalpha_cn.product.research import (
     ResearchReport,
     ResearchReportFactory,
@@ -288,6 +302,118 @@ def _parse_research_result(payload: dict[str, Any]) -> ResearchRunResult:
     if claimed_decision_id != result.decision.decision_id:
         raise ValueError("research decision_id does not match its content")
     return result
+
+
+PANEL_HTTP_STATUS: Final[Mapping[str, int]] = MappingProxyType(
+    {
+        "answered": 200,
+        "blocked": 409,
+        "panel_unreadable": 409,
+        "bad_request": 422,
+    }
+)
+"""What the three `GET /api/v1/panel/*` endpoints do about each situation, as one table.
+
+`cli.py`'s `PanelExit` is the sibling of this and the reasoning is shared: a caller has
+different remedies available and only the envelope to pick between them, so collapsing them
+into "2xx and non-2xx" makes a refused read indistinguishable from a mistyped request.
+
+- **`answered` (200)** -- this endpoint answered. For `/panel/health` and `/panel/readiness`
+  that is *all* it says: those two are reports, and a report that found a `blocking` finding
+  has succeeded at its job. The verdict is in the body, first-class and unmissable
+  (`is_clean`, `counts_by_severity` total over all three severities, `all_ready`, `state`),
+  because there is no permission in a report for a status code to grant. For `/panel/gate`,
+  `200` says something stronger -- "you may read" -- which is why it is not what a refusal
+  wears.
+- **`blocked` (409)** -- the gate ran and refused. A conflict with the current state of the
+  panel, which is exactly what RFC 9110 reserves `409` for, and the body still carries every
+  block, notice and unverified check: a caller told `409` and nothing else cannot act on it.
+  An endpoint that ran the gate, was refused and still answered `200` would be no gate at all,
+  which is the "empty success" `V2-P1-013` exists to make unavailable, reappearing one layer
+  up.
+- **`panel_unreadable` (409)** -- the same class of fact one step earlier: the exchange
+  calendar this request asked to be judged against is not in the store, so no verdict exists
+  to report. `409` rather than `404`, because nothing about the *endpoint* is missing.
+- **`bad_request` (422)** -- the request cannot be put at all: a dataset with no declared
+  publication cadence (`PanelDoctorError`), a request naming no dataset (`PanelGateError`,
+  `PanelRequestError`), a naive `as_of`. Distinct from `409` for `PanelExit`'s reason -- no
+  amount of re-fetching fixes it -- and `422` because that is already this app's code for a
+  well-formed request it cannot accept (`POST /api/v1/screen`, `/reports`, `/backtests/
+  validate`).
+
+**A `notice` never reaches the non-2xx half, and the argument is measurement.** `V2-P1-011`
+drove a real 53-security corpus end to end: `ambiguous_filing` fires on 8.15% of `income`'s
+filings, 1.29% of `balancesheet`'s, 15.80% of `cashflow`'s and 13.70% of `fina_indicator`'s.
+A face that refused those would refuse every honest financial panel, be worked around in the
+first client that met it, and protect nothing. The notices ride on the clearance instead, so
+a cleared caller still sees them.
+"""
+
+
+def _panel_bad_request(error: Exception) -> HTTPException:
+    """A request the panel plane cannot put, as this app's own code for that."""
+    return HTTPException(status_code=PANEL_HTTP_STATUS["bad_request"], detail=str(error))
+
+
+def _panel_query(
+    runtime_dir: Path,
+    *,
+    dataset: Sequence[str],
+    year: Sequence[int],
+    session: Sequence[date],
+    index_code: Sequence[str],
+    as_of: datetime,
+    exchange: str,
+    calendar: bool,
+) -> tuple[PanelStore, DependencyRequest]:
+    """Resolve one panel request, mapping the two pre-verdict faults onto the table above.
+
+    Shared by all three endpoints so they cannot come to ask three different questions of one
+    store -- which is what makes `test_panel_interfaces.py`'s "the health endpoint and the gate
+    disagree and both are right" a statement about the two *verdicts* rather than about two
+    requests that differed.
+    """
+    store = panel_store(runtime_dir)
+    try:
+        request = panel_request(
+            store,
+            datasets=dataset,
+            years=year,
+            sessions=session,
+            index_codes=index_code,
+            as_of=as_of,
+            exchange=exchange,
+            with_calendar=calendar,
+        )
+    except PanelRequestError as error:
+        raise _panel_bad_request(error) from error
+    except PanelUnreadableError as error:
+        raise HTTPException(
+            status_code=PANEL_HTTP_STATUS["panel_unreadable"], detail=str(error)
+        ) from error
+    return store, request
+
+
+_PANEL_DATASET_QUERY = Query(
+    description=(
+        "A dataset to assess, repeatable. Nothing is inferred: this is the caller's own "
+        "statement of what should be there."
+    )
+)
+_PANEL_YEAR_QUERY = Query(
+    description=(
+        "A partition year to assess, repeatable. Deliberately the caller's assertion of what "
+        "should be present rather than a reading of what is -- passing the stored years would "
+        "make partition_missing unreachable by construction."
+    )
+)
+_PANEL_SESSION_QUERY = Query(
+    description=(
+        "An ISO-8601 session the day-level cross-checks run on, repeatable. Not inferred: "
+        "'check every session' is a whole-corpus scan and 'check the last one' is a guess."
+    )
+)
+_PANEL_INDEX_QUERY = Query(description="An index code index_weight is assessed against.")
 
 
 def create_app(
@@ -660,6 +786,142 @@ def create_app(
     def validations_by_signal(signal_id: str) -> tuple[ValidationResult, ...]:
         """List persisted validation results for one signal, in append order."""
         return validation_store.list_by_signal(signal_id)
+
+    @application.get("/api/v1/panel/readiness")
+    def panel_readiness(
+        dataset: Annotated[list[str], _PANEL_DATASET_QUERY],
+        year: Annotated[list[int], _PANEL_YEAR_QUERY],
+        as_of: datetime,
+        exchange: str,
+        calendar: bool,
+        index_code: Annotated[list[str] | None, _PANEL_INDEX_QUERY] = None,
+    ) -> JSONResponse:
+        """Report each named dataset's own readiness verdict at a stated `as_of`.
+
+        The narrowest of the three panel faces: one dataset's catalog records against the
+        requirement its own reader puts, with no cross-dataset check and no session -- which is
+        why this endpoint takes no `session`. `state` is `ready` or `blocked` per dataset and
+        `all_ready` is the whole-request answer; `checks_waived` says which questions were never
+        put, because an empty `issues` list means nothing without it.
+
+        Always `200` when the request could be put at all: this is a report, and a report that
+        found a blocked dataset has succeeded. Permission to read is `/api/v1/panel/gate`'s
+        answer, and only that endpoint's `200` claims it.
+        """
+        store, request = _panel_query(
+            root,
+            dataset=dataset,
+            year=year,
+            session=(),
+            index_code=index_code or (),
+            as_of=as_of,
+            exchange=exchange,
+            calendar=calendar,
+        )
+        try:
+            entries = dataset_readiness(store, request)
+        except PanelDoctorError as error:
+            raise _panel_bad_request(error) from error
+        return JSONResponse(
+            status_code=PANEL_HTTP_STATUS["answered"],
+            content=readiness_payload(entries),
+        )
+
+    @application.get("/api/v1/panel/health")
+    def panel_health(
+        dataset: Annotated[list[str], _PANEL_DATASET_QUERY],
+        year: Annotated[list[int], _PANEL_YEAR_QUERY],
+        as_of: datetime,
+        exchange: str,
+        calendar: bool,
+        session: Annotated[list[date] | None, _PANEL_SESSION_QUERY] = None,
+        index_code: Annotated[list[str] | None, _PANEL_INDEX_QUERY] = None,
+    ) -> JSONResponse:
+        """Report what is wrong with the stored panel at a stated `as_of`.
+
+        The HTTP twin of `openalpha panel doctor`, and distinct from `GET /health`, which is
+        this service's dependency-free liveness probe. Per-dataset readiness and freshness, the
+        cross-dataset checks with a record of which of them actually ran, and the datasets' own
+        structural limitations kept separate from this fetch's defects.
+
+        Always `200` when the request could be put: `is_clean` and a `counts_by_severity` total
+        over all three severities are in the body. This endpoint grants nothing, so its status
+        code claims nothing -- see `PANEL_HTTP_STATUS`.
+        """
+        store, request = _panel_query(
+            root,
+            dataset=dataset,
+            year=year,
+            session=session or (),
+            index_code=index_code or (),
+            as_of=as_of,
+            exchange=exchange,
+            calendar=calendar,
+        )
+        try:
+            report = panel_health_report(
+                store,
+                as_of=request.as_of,
+                datasets=request.datasets,
+                years=request.years,
+                calendar=request.calendar,
+                index_codes=request.index_codes,
+                cross_section_days=request.sessions,
+            )
+        except PanelDoctorError as error:
+            raise _panel_bad_request(error) from error
+        return JSONResponse(
+            status_code=PANEL_HTTP_STATUS["answered"],
+            content=health_report_payload(report),
+        )
+
+    @application.get("/api/v1/panel/gate")
+    def panel_gate(
+        dataset: Annotated[list[str], _PANEL_DATASET_QUERY],
+        year: Annotated[list[int], _PANEL_YEAR_QUERY],
+        as_of: datetime,
+        exchange: str,
+        calendar: bool,
+        session: Annotated[list[date] | None, _PANEL_SESSION_QUERY] = None,
+        index_code: Annotated[list[str] | None, _PANEL_INDEX_QUERY] = None,
+    ) -> JSONResponse:
+        """Run the fail-closed dependency gate and answer `409` when it refuses.
+
+        The status code is the deliverable. A refused request that still answered `200` would
+        be the empty success `V2-P1-013` exists to make unavailable, one layer up: a client
+        that checks the status and then reads `cleared` would proceed on a panel the gate would
+        not clear.
+
+        The refusal has a body. Every block carries its code, category, severity, both sides of
+        a cross-dataset finding and its detail; the notices and the unverified checks ride
+        along; and the whole health report the verdict rests on is nested under `report`.
+
+        A clearance is a verdict rather than a collection, and this endpoint treats it as one:
+        it asks `is_blocked` and the serialiser reads `cleared_or_none`, never `bool()`,
+        `len()` or iteration, all three of which raise here **even when the request cleared**.
+        """
+        store, request = _panel_query(
+            root,
+            dataset=dataset,
+            year=year,
+            session=session or (),
+            index_code=index_code or (),
+            as_of=as_of,
+            exchange=exchange,
+            calendar=calendar,
+        )
+        try:
+            clearance = require_datasets(store, request)
+        except (PanelGateError, PanelDoctorError) as error:
+            raise _panel_bad_request(error) from error
+        return JSONResponse(
+            status_code=(
+                PANEL_HTTP_STATUS["blocked"]
+                if clearance.is_blocked
+                else PANEL_HTTP_STATUS["answered"]
+            ),
+            content=clearance_payload(clearance),
+        )
 
     configured_web_dir = web_dir if web_dir is not None else config.web_dir
     if configured_web_dir is not None:

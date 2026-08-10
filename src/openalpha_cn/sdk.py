@@ -1,7 +1,7 @@
 """Local-first Python SDK for OpenAlpha CN's complete research flow."""
 
 from collections.abc import Callable, Sequence
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from openalpha_cn import __version__
@@ -27,6 +27,10 @@ from openalpha_cn.domain.evidence import EvidenceSnapshot
 from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.domain.validation import ValidationResult
 from openalpha_cn.evidence.service import build_provider_evidence
+from openalpha_cn.panel.catalog import DatasetReadiness
+from openalpha_cn.panel_doctor import PanelHealthReport, panel_health_report
+from openalpha_cn.panel_gate import DependencyClearance, require_datasets
+from openalpha_cn.panel_view import dataset_readiness, panel_request, panel_store
 from openalpha_cn.product.research import (
     ResearchReport,
     ResearchReportFactory,
@@ -210,6 +214,134 @@ class OpenAlphaSDK:
     def list_validations_by_signal(self, signal_id: str) -> tuple[ValidationResult, ...]:
         """List validation results for one signal, in append order."""
         return self.validation_store.list_by_signal(signal_id)
+
+    # --- the panel plane (V2-P1-016) ----------------------------------------------------------
+    #
+    # Three methods paired one-for-one with `GET /api/v1/panel/readiness`, `/health` and
+    # `/gate`, and asserted against them in `tests/integration/test_panel_interfaces.py`. Each
+    # resolves its parameters through `panel_view.panel_request`, so the two faces cannot come
+    # to ask two different questions of one store.
+    #
+    # They hand back the objects rather than a rendering of them -- that is what an in-process
+    # API is for. `PanelHealthReport.findings_with_code`, `DependencyClearance.blocks_for`,
+    # `.unverified` and `.cleared_for` all raise for a code or a dataset the request never
+    # named, which is a guarantee JSON cannot carry.
+    #
+    # `exchange` and `with_calendar` have no defaults, matching `DependencyRequest`'s own rule:
+    # every field that decides how hard the panel is examined is mandatory, because the most
+    # permissive request must not also be the easiest one to build.
+
+    def panel_readiness(
+        self,
+        *,
+        datasets: Sequence[str],
+        years: Sequence[int],
+        as_of: datetime,
+        exchange: str,
+        with_calendar: bool,
+        index_codes: Sequence[str] = (),
+    ) -> tuple[DatasetReadiness, ...]:
+        """Each named dataset's own readiness verdict, in request order.
+
+        No session and no cross-dataset check: this is one dataset's catalog records against
+        the requirement its own reader puts. `DatasetReadiness.checks_waived` is the field to
+        read beside an empty `issues`, because the empty tuple there is the *stronger* claim.
+        """
+        store = panel_store(self.runtime_dir)
+        return dataset_readiness(
+            store,
+            panel_request(
+                store,
+                datasets=datasets,
+                years=years,
+                sessions=(),
+                index_codes=index_codes,
+                as_of=as_of,
+                exchange=exchange,
+                with_calendar=with_calendar,
+            ),
+        )
+
+    def panel_health(
+        self,
+        *,
+        datasets: Sequence[str],
+        years: Sequence[int],
+        sessions: Sequence[date],
+        as_of: datetime,
+        exchange: str,
+        with_calendar: bool,
+        index_codes: Sequence[str] = (),
+    ) -> PanelHealthReport:
+        """What is wrong with the stored panel at `as_of`, as a structured report.
+
+        Answers "is this panel sick", which is a different question from `panel_clearance`'s
+        "may this request read it" -- the two may disagree about one panel and both be right,
+        because the gate has a refusal (`unverified_daily_coverage`) that is not a fault of the
+        panel at all.
+
+        `sessions` names the sessions the day-level cross-checks run on and is not inferred:
+        "check every session" is a whole-corpus scan and "check the last one" is a guess about
+        what the caller cares about.
+        """
+        store = panel_store(self.runtime_dir)
+        request = panel_request(
+            store,
+            datasets=datasets,
+            years=years,
+            sessions=sessions,
+            index_codes=index_codes,
+            as_of=as_of,
+            exchange=exchange,
+            with_calendar=with_calendar,
+        )
+        return panel_health_report(
+            store,
+            as_of=request.as_of,
+            datasets=request.datasets,
+            years=request.years,
+            calendar=request.calendar,
+            index_codes=request.index_codes,
+            cross_section_days=request.sessions,
+        )
+
+    def panel_clearance(
+        self,
+        *,
+        datasets: Sequence[str],
+        years: Sequence[int],
+        sessions: Sequence[date],
+        as_of: datetime,
+        exchange: str,
+        with_calendar: bool,
+        index_codes: Sequence[str] = (),
+    ) -> DependencyClearance:
+        """Whether this request may read the stored panel, and everything the answer rests on.
+
+        The returned `DependencyClearance` is a verdict, not a collection: `bool()`, `len()`
+        and iteration all raise on it **even when it cleared**, which is deliberate -- an
+        accessor that answered on a healthy panel and raised on a sick one would pass every
+        test written against the first and fail only in production. Ask `is_blocked`, read
+        `cleared` (which raises when blocked), or name the merged shape `cleared_or_none`.
+
+        `cleared` hands back `ClearedDataset` records rather than bare names, because the width
+        of the permission is part of it: the years the year-scoped checks covered, the sessions
+        a cross-check actually opened, and the caveats still open outside them.
+        """
+        store = panel_store(self.runtime_dir)
+        return require_datasets(
+            store,
+            panel_request(
+                store,
+                datasets=datasets,
+                years=years,
+                sessions=sessions,
+                index_codes=index_codes,
+                as_of=as_of,
+                exchange=exchange,
+                with_calendar=with_calendar,
+            ),
+        )
 
     def execute_portfolio_order(
         self,

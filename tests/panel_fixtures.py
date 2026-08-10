@@ -1570,11 +1570,23 @@ contract that already has one.
 """
 
 
-def write_generated_panel(store: PanelStore, panel: GeneratedPanel) -> tuple[str, ...]:
+def write_generated_panel(
+    store: PanelStore, panel: GeneratedPanel, *, halts: bool = True
+) -> tuple[str, ...]:
     """Drive `panel` through the real `panel_ingest` writers; return the datasets stored.
 
     Every write-time guard runs, which is the point: a shape that produced a panel the real
     writers refuse would be a shape no test could use, and this is where that shows up.
+
+    `halts=False` passes `write_daily_panel(halts=None)`, which switches off
+    `_refuse_unexplained_thin_sessions` -- the strongest guard that writer has, and the one
+    `panel build --no-halts` waives. It exists here so a test can assert what that waiver
+    leaves behind, which is **nothing**: `halts` feeds that guard alone, so both builds store
+    identical partitions and identical catalog records, and no read-side face can tell them
+    apart (`tests/integration/test_panel_interfaces.py::
+    test_a_panel_built_with_the_halt_guard_waived_is_indistinguishable_from_one_that_was_not`).
+    Deliberately keyword-only with the guard on by default: a waiver that is a default is an
+    accident, which is `write_daily_panel`'s own argument for having no default at all.
     """
     calendar = panel.calendar()
     write_trading_calendar(store, panel.batch(TRADING_CALENDAR_DATASET))
@@ -1586,7 +1598,11 @@ def write_generated_panel(store: PanelStore, panel: GeneratedPanel) -> tuple[str
         bars=[panel.batch(DAILY_DATASET)],
         fundamentals=[panel.batch(DAILY_BASIC_DATASET)],
         calendar=calendar,
-        halts=load_suspensions(store, years=(YEAR,), as_of=AS_OF, max_staleness=None),
+        halts=(
+            load_suspensions(store, years=(YEAR,), as_of=AS_OF, max_staleness=None)
+            if halts
+            else None
+        ),
     )
     write_price_limits(store, [panel.batch(PRICE_LIMIT_DATASET)], calendar=calendar)
     write_index_weights(store, [panel.batch(INDEX_WEIGHT_DATASET)])

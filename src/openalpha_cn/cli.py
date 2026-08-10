@@ -40,8 +40,6 @@ from openalpha_cn.logging_setup import configure_logging
 from openalpha_cn.panel.catalog import DEFAULT_DATE_TIMEZONE, PanelStorageError
 from openalpha_cn.panel.store import PanelStore, PartitionRef
 from openalpha_cn.panel_doctor import (
-    HEALTH_SEVERITIES,
-    HealthFinding,
     PanelDoctorError,
     PanelHealthReport,
     panel_health_report,
@@ -61,6 +59,11 @@ from openalpha_cn.panel_ingest import (
     write_stock_universe,
     write_suspensions,
     write_trading_calendar,
+)
+from openalpha_cn.panel_view import (
+    clearance_payload,
+    health_report_payload,
+    panel_store,
 )
 from openalpha_cn.providers.akshare import AKShareProvider
 from openalpha_cn.providers.base import (
@@ -812,8 +815,12 @@ def _panel_store(runtime_dir: Path) -> PanelStore:
 
     `runtime_dir/panel`, beside `runtime_dir/state.sqlite3`, so one `--runtime-dir` names one
     installation's whole state exactly as it already does for `migrate` and `research run`.
+
+    Delegates to `panel_view.panel_store` rather than restating the subdirectory: `V2-P1-016`'s
+    HTTP app and SDK read the same store from the same `runtime_dir`, and three faces
+    disagreeing about where it lives would make every equivalence between them a coincidence.
     """
-    return PanelStore(runtime_dir / "panel")
+    return panel_store(runtime_dir)
 
 
 def _panel_transport() -> TushareTransport:
@@ -987,147 +994,13 @@ def _panel_request(
     )
 
 
-# --- serialisation ----------------------------------------------------------------------------
-
-
-def _seconds(span: timedelta | None) -> float | None:
-    return None if span is None else span.total_seconds()
-
-
-def _finding_payload(finding: HealthFinding) -> dict[str, object]:
-    return {
-        "code": finding.code,
-        "category": finding.category,
-        "severity": finding.severity,
-        "dataset": finding.dataset,
-        "datasets": list(finding.datasets),
-        "detail": finding.detail,
-        "year": finding.year,
-        "count": finding.count,
-        "dates": [day.isoformat() for day in finding.dates],
-        "items": list(finding.items),
-        "related_limitations": list(finding.related_limitations),
-    }
-
-
-def health_report_payload(report: PanelHealthReport) -> dict[str, object]:
-    """A `PanelHealthReport` as JSON-ready data, losing nothing the report carries.
-
-    Written as one function rather than inline in the command because `V2-P1-016`'s REST and SDK
-    faces serialise the same object, and two renderings of one report that disagree about which
-    fields exist is how a caller comes to believe a severity is absent when it was merely
-    dropped.
-
-    `counts_by_severity` is total over `panel_doctor.HEALTH_SEVERITIES` rather than built from
-    the findings that happen to be present: a severity with no findings must read `0`, not be
-    missing, or "no blocking findings" and "the blocking key was never emitted" become the same
-    observation for a consumer.
-    """
-    counts = dict.fromkeys(sorted(HEALTH_SEVERITIES), 0)
-    for finding in report.findings:
-        counts[finding.severity] += 1
-    return {
-        "as_of": report.as_of.isoformat(),
-        "is_clean": report.is_clean,
-        "counts_by_severity": counts,
-        "blocked_datasets": list(report.blocked_datasets),
-        "datasets": [
-            {
-                "dataset": health.dataset,
-                "is_ready": health.is_ready,
-                "state": health.readiness.state,
-                "years_requested": list(health.years_requested),
-                "years_present": list(health.readiness.years_present),
-                "row_count": health.readiness.row_count,
-                "subject_count": health.readiness.subject_count,
-                "checks_waived": list(health.readiness.checks_waived),
-                "cadence": health.freshness.cadence,
-                "max_staleness_seconds": _seconds(health.freshness.max_staleness),
-                "freshness_basis": health.freshness.basis,
-                "event_age_seconds": _seconds(health.event_age),
-                "fetch_age_seconds": _seconds(health.fetch_age),
-                "revised_row_count": health.revised_row_count,
-                "revision_labels": [[label, count] for label, count in health.revision_labels],
-                "codes": [finding.code for finding in health.findings],
-            }
-            for health in report.datasets
-        ],
-        "findings": [_finding_payload(finding) for finding in report.findings],
-        "cross_checks": [
-            {
-                "name": check.name,
-                "datasets": list(check.datasets),
-                "ran": check.ran,
-                "skipped_reason": check.skipped_reason,
-                "finding_count": check.finding_count,
-            }
-            for check in report.cross_checks
-        ],
-        "limitations": [
-            {
-                "code": limitation.code,
-                "datasets": list(limitation.datasets),
-                "detail": limitation.detail,
-                "dates": [day.isoformat() for day in limitation.dates],
-            }
-            for limitation in report.limitations
-        ],
-    }
-
-
-def clearance_payload(clearance: DependencyClearance) -> dict[str, object]:
-    """A `DependencyClearance` as JSON-ready data.
-
-    Reads `cleared_or_none` and never `cleared`, `bool(...)`, `len(...)` or iteration.
-    `DependencyClearance` raises for all three of those **even when it cleared** -- Task 36's
-    deliberate choice, because an accessor that answered on a healthy panel and raised on a sick
-    one would pass every test written against the first and fail only in production. The merged
-    shape has a name that says what it is, and this is the one place in the CLI that wants it.
-
-    `cleared` entries carry their own width -- the years the year-scoped checks covered, the
-    sessions a cross-check actually opened, and the caveats still open outside them -- because a
-    bare dataset name is exactly as wide as its reader assumes, and that assumption is how
-    `V2-P1-013`'s review found Task 29's wrong number reachable through a *cleared* gate.
-    """
-    cleared = clearance.cleared_or_none
-    return {
-        "as_of": clearance.request.as_of.isoformat(),
-        "is_blocked": clearance.is_blocked,
-        "blocked_datasets": list(clearance.blocked_datasets),
-        "blocks": [
-            {
-                "code": block.code,
-                "category": block.category,
-                "severity": block.severity,
-                "dataset": block.dataset,
-                "datasets": list(block.datasets),
-                "detail": block.detail,
-                "year": block.year,
-            }
-            for block in clearance.blocks
-        ],
-        "cleared": (
-            None
-            if cleared is None
-            else [
-                {
-                    "dataset": entry.dataset,
-                    "years": list(entry.years),
-                    "corroborated_sessions": [
-                        day.isoformat() for day in entry.corroborated_sessions
-                    ],
-                    "caveats": list(entry.caveats),
-                }
-                for entry in cleared
-            ]
-        ),
-        "notices": [_finding_payload(notice) for notice in clearance.notices],
-        "unverified_checks": [
-            {"dataset": name, "checks": list(checks)}
-            for name, checks in clearance.unverified_checks
-        ],
-        "report": health_report_payload(clearance.report),
-    }
+# --- human-readable output --------------------------------------------------------------
+#
+# The structural renderings these two commands' `--json` emits live in
+# `openalpha_cn/panel_view.py`, shared verbatim with `V2-P1-016`'s HTTP app and SDK. They
+# were written as standalone functions here for exactly that reason: two renderings of one
+# report that disagree about which fields exist is how a caller comes to believe a severity
+# is absent when it was merely dropped.
 
 
 def _echo_report(report: PanelHealthReport) -> None:
