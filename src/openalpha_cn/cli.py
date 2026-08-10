@@ -5,7 +5,8 @@ import logging
 import os
 import platform
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 from enum import IntEnum, StrEnum
 from pathlib import Path
@@ -633,6 +634,13 @@ class PanelExit(IntEnum):
       Distinct from `unhealthy` because no amount of re-fetching fixes it.
     - `provider_failure` -- the fetch never happened: authentication, quota, transport or a
       response that would not decode. Distinct again, because the panel may be perfect.
+    - `internal_error` -- **the command itself broke.** Nothing was judged: an exception no
+      branch here anticipated reached the top of the command, or a build target this module's
+      own closed table accepted turned out to have no branch that builds it. Distinct from
+      `unhealthy` for the reason that matters most in this table: without it, a CLI that
+      crashed exited 1 through Typer's default handler and was indistinguishable from a panel
+      that failed its check, so a scheduled job would report "the data is bad" for a defect in
+      this file. The remedy is a bug report, not a re-fetch.
 
     **2 is deliberately absent.** Click raises its own `UsageError` with exit code 2 for a
     misspelled flag or a missing required option, and that is not a code this module can take
@@ -673,6 +681,7 @@ class PanelExit(IntEnum):
     unhealthy = 1
     bad_request = 3
     provider_failure = 4
+    internal_error = 5
 
 
 CLICK_USAGE_EXIT_CODE: Final[int] = 2
@@ -707,10 +716,22 @@ A target is a unit of work a `panel_ingest` writer accepts, which is not always 
 `price` is the case that forces the distinction: `write_daily_panel` takes `daily` and
 `daily_basic` together -- there is no supported way to write one partition without the other
 having agreed with it -- and its `halts` argument has no default, so the halt corpus for the
-same sessions has to be fetched and stored before the pair that consumes it. That is why the
-smallest honest unit here is three datasets and why `--dataset daily` cannot mean anything (see
-`PANEL_BUILD_COUPLED_DATASETS`), which `panel_ingest.write_daily_panel`'s own docstring names as
-a constraint on this command's surface rather than an implementation detail of that one.
+same sessions has to be fetched and stored before the pair that consumes it. That is why
+`--dataset daily` cannot mean anything (see `PANEL_BUILD_COUPLED_DATASETS`), which
+`panel_ingest.write_daily_panel`'s own docstring names as a constraint on this command's surface
+rather than an implementation detail of that one.
+
+**`suspend_d`'s place inside `price` is this issue's scope choice, not a constraint from below,
+and the earlier wording here overstated it.** The coupling `write_daily_panel` imposes is on
+`daily` and `daily_basic` only; `write_suspensions(store, batches)` takes no calendar, needs no
+partner and refuses nothing about being written alone. What is true is narrower: `price` needs a
+stored halt corpus *for the same year*, so this target fetches it in the same pass rather than
+requiring two invocations. The cost of folding it in is real and is recorded rather than hidden
+-- a caller who only wants to backfill one year of halts (~28 rows on a measured session) has to
+re-fetch that year's `daily` and `daily_basic` too (~5,338 rows per session across ~244
+sessions). A standalone `suspend_d` target is therefore a sound addition, deliberately left to
+`V2-P1-016` rather than taken here, because adding it changes this table and the closed-table
+test that pins it.
 
 The order this table declares is the order `_build_panel` runs its targets in, and it is a
 dependency order rather than an alphabetical one: `adj_factor`, `price` and `stk_limit` all read
@@ -740,8 +761,19 @@ PANEL_BUILD_COUPLED_DATASETS: Final[Mapping[str, str]] = MappingProxyType(
 
 Stated separately from `PANEL_BUILD_TARGETS` so the refusal can carry the *reason*. Click would
 otherwise reject `--dataset daily` as an unknown choice, which reads as "this repository does
-not have a daily panel" -- the opposite of the truth. `V2-P1-007`'s coupling is the reason and
-the message says so.
+not have a daily panel" -- the opposite of the truth. `V2-P1-007`'s coupling is the reason for
+`daily` and `daily_basic`; `suspend_d` is here because *this command* fetches it inside `price`,
+which is a scope decision -- see `PANEL_BUILD_TARGETS`.
+"""
+
+_LIFECYCLE_YEAR_TARGETS: Final[frozenset[str]] = frozenset({STOCK_BASIC_DATASET})
+"""Targets whose partitions are not the `--year` that was asked for, and why that is legitimate.
+
+Exactly one. `stock_basic` has no date filter, so one request is the whole registry and
+`write_stock_universe` splits it into one partition per *lifecycle* year -- a security listed in
+1991 goes to 1991 whatever `--year` said. Every other target writes the year it was asked for,
+which is what `_audit_written_partitions` checks; this set is the exemption, stated once so a
+future target cannot acquire the exemption by accident.
 """
 
 _EMPTY_SESSION_IS_ORDINARY: Final[frozenset[str]] = frozenset({SUSPENSION_DATASET})
@@ -811,6 +843,39 @@ def _panel_fail(code: PanelExit, message: str) -> typer.Exit:
     """
     typer.echo(message, err=True)
     return typer.Exit(code=int(code))
+
+
+@contextmanager
+def _panel_command(name: str) -> Iterator[None]:
+    """Wrap one panel command so a defect in it can never be read as a verdict about the panel.
+
+    Without this, anything the command did not anticipate -- a `NotADirectoryError` from a
+    `--runtime-dir` that names a file, an `AttributeError` in a rendering -- reaches Typer's own
+    handler, which prints a traceback and exits **1**. That is `PanelExit.unhealthy`, so "the CLI
+    crashed" and "the panel failed its check" arrive at a CI job as the same number. This turns
+    the first into `PanelExit.internal_error`, which no data can produce.
+
+    The exception's own message is deliberately withheld, `_fetch_panel`'s rule at this module's
+    third credential boundary and for a stronger reason: an *unanticipated* exception can carry
+    anything the frame it escaped was holding, and a traceback with locals carries the frames
+    too. Only the type and the command name are printed. `typer.Exit` and `typer.Abort` are
+    re-raised untouched -- both subclass `RuntimeError`, so a bare `except Exception` here would
+    otherwise swallow every deliberate exit this module raises and turn `--json` on a blocked
+    gate into a crash report.
+    """
+    try:
+        yield
+    except (typer.Exit, typer.Abort):
+        raise
+    except Exception as error:
+        raise _panel_fail(
+            PanelExit.internal_error,
+            f"`{name}` did not finish: it raised an unhandled {type(error).__name__}. This is a "
+            "defect in the command, not a verdict about the panel -- nothing was checked and "
+            "nothing here should be read as a health result. The exception's own message is "
+            "withheld because an unanticipated failure can carry whatever the frame it escaped "
+            "was holding, including the credential",
+        ) from error
 
 
 def _panel_as_of(value: str) -> datetime:
@@ -1239,12 +1304,13 @@ def _build_price_panel(
     store: PanelStore,
     provider: TushareProvider,
     *,
+    written: list[PartitionRef],
     sessions: Sequence[date],
     calendar: TradingCalendar,
     year: int,
     now: datetime,
     halts: bool,
-) -> tuple[list[PartitionRef], str]:
+) -> str:
     """Fetch the three price datasets session by session, then write them in dependency order.
 
     One loop over the sessions rather than three, which is what `write_daily_panel`'s docstring
@@ -1252,9 +1318,13 @@ def _build_price_panel(
     explains, so the strongest guard in that writer -- the one that refuses a session whose
     missing bars nothing accounts for -- is given a real corpus rather than the `None` that
     switches it off.
+
+    Appends into the caller's `written` list rather than returning one of its own, because the
+    `suspend_d` partition is stored *before* `write_daily_panel` is even called: a refusal from
+    that writer leaves a real partition behind, and a list that only exists on the success path
+    cannot say so. See `_stored_so_far`.
     """
     collected = _session_batches(provider, PANEL_BUILD_TARGETS["price"], sessions)
-    written: list[PartitionRef] = []
     halt_batches = collected[SUSPENSION_DATASET]
     if halt_batches:
         written.append(write_suspensions(store, halt_batches))
@@ -1278,26 +1348,36 @@ def _build_price_panel(
             halts=corpus,
         )
     )
-    return written, "corroborated" if corpus is not None else "waived"
+    return "corroborated" if corpus is not None else "waived"
 
 
 def _build_panel(
     store: PanelStore,
     provider: TushareProvider,
     *,
+    written: dict[str, list[PartitionRef]],
     targets: frozenset[str],
     year: int,
     exchange: str,
     halts: bool,
     now: datetime,
-) -> tuple[tuple[PartitionRef, ...], tuple[date, ...], str]:
-    written: list[PartitionRef] = []
+) -> tuple[tuple[date, ...], str]:
+    """Run every requested target in `PANEL_BUILD_TARGETS`' declared order.
+
+    `written` is the caller's, keyed by target and filled as each partition lands, for two
+    reasons that a returned value cannot serve. A build is a sequence of whole-partition writes
+    with no transaction around them, so when a later target is refused the earlier ones are
+    already on disk and the command has to be able to *name* them (`_stored_so_far`). And a
+    target that this function accepted but wrote nothing for is only visible as an absent key
+    (`_audit_written_partitions`) -- the failure a sixth entry in `PANEL_BUILD_TARGETS` with no
+    branch below produces, which would otherwise be an exit 0 with an empty `partitions` list.
+    """
     sessions: tuple[date, ...] = ()
     calendar: TradingCalendar | None = None
     halt_state = "not-applicable"
 
     if TRADING_CALENDAR_DATASET in targets:
-        written.append(
+        written.setdefault(TRADING_CALENDAR_DATASET, []).append(
             write_trading_calendar(
                 store,
                 _fetch_panel(
@@ -1311,8 +1391,9 @@ def _build_panel(
     if STOCK_BASIC_DATASET in targets:
         # `--year` does not scope this one and cannot: `stock_basic` has no date filter, so one
         # request is the whole registry and `write_stock_universe` splits it into one partition
-        # per lifecycle year. Recorded in the command's help rather than papered over.
-        written.extend(
+        # per lifecycle year. Recorded in the command's help, in `_LIFECYCLE_YEAR_TARGETS` (which
+        # exempts it from the partition-year audit) rather than papered over.
+        written.setdefault(STOCK_BASIC_DATASET, []).extend(
             write_stock_universe(store, _fetch_panel(provider, STOCK_BASIC_DATASET, as_of=now))
         )
     if targets & _NEEDS_STORED_CALENDAR:
@@ -1326,7 +1407,7 @@ def _build_panel(
         sessions = _build_sessions(calendar, year, now)
     if ADJ_FACTOR_DATASET in targets:
         assert calendar is not None  # guaranteed by `_NEEDS_STORED_CALENDAR` above
-        written.append(
+        written.setdefault(ADJ_FACTOR_DATASET, []).append(
             write_adjustment_factors(
                 store,
                 _session_batches(provider, (ADJ_FACTOR_DATASET,), sessions)[ADJ_FACTOR_DATASET],
@@ -1335,34 +1416,117 @@ def _build_panel(
         )
     if "price" in targets:
         assert calendar is not None  # guaranteed by `_NEEDS_STORED_CALENDAR` above
-        price_refs, halt_state = _build_price_panel(
+        halt_state = _build_price_panel(
             store,
             provider,
+            written=written.setdefault("price", []),
             sessions=sessions,
             calendar=calendar,
             year=year,
             now=now,
             halts=halts,
         )
-        written.extend(price_refs)
     if PRICE_LIMIT_DATASET in targets:
         assert calendar is not None  # guaranteed by `_NEEDS_STORED_CALENDAR` above
-        written.append(
+        written.setdefault(PRICE_LIMIT_DATASET, []).append(
             write_price_limits(
                 store,
                 _session_batches(provider, (PRICE_LIMIT_DATASET,), sessions)[PRICE_LIMIT_DATASET],
                 calendar=calendar,
             )
         )
-    return tuple(written), sessions, halt_state
+    return sessions, halt_state
+
+
+def _stored_so_far(written: Mapping[str, Sequence[PartitionRef]]) -> str:
+    """What is on disk at the moment a build was refused, as a sentence a reader can act on.
+
+    An earlier version of `panel_build` said "nothing partial was stored" here, and that was
+    false whenever more than one partition was in flight. `_build_panel` writes whole partitions
+    one after another with no transaction around them, so `panel build --dataset trade_cal
+    --dataset price` that is refused by `write_daily_panel` leaves `trade_cal` **and**
+    `suspend_d` in the store. Only the writer that raised is all-or-nothing; the build is not,
+    and a caller deciding whether to re-run or to clear the runtime directory needs the
+    difference.
+    """
+    refs = [ref for group in written.values() for ref in group]
+    if not refs:
+        return "No partition had been written when this build stopped."
+    listed = ", ".join(f"{ref.dataset}:{ref.year}({ref.row_count} rows)" for ref in refs)
+    return (
+        f"{len(refs)} partition(s) were written before this build stopped and are still "
+        f"stored: {listed}. A build is a sequence of whole-partition writes with no transaction "
+        "around them, so an earlier target's partition survives a later target's refusal."
+    )
+
+
+def _audit_written_partitions(
+    written: Mapping[str, Sequence[PartitionRef]], *, targets: frozenset[str], year: int
+) -> None:
+    """Refuse a build that answered `ok` without having built what it was asked for.
+
+    Two failures, both of which reach a caller as an exit 0 with a `partitions` list that does
+    not say what it looks like it says, and neither of which any writer below can see -- the
+    writers are told what to store, not what was requested.
+
+    1. **A requested target wrote no partition at all.** This is what a sixth entry in
+       `PANEL_BUILD_TARGETS` with no matching branch in `_build_panel` produces: `_build_targets`
+       accepts the name because the table has it, every `if` misses, and the command reports
+       `exit 0` with `"partitions": []` -- the empty success this whole issue exists to make
+       unavailable, at the one layer where nothing downstream can catch it. It is
+       `internal_error` rather than `unhealthy` because no data produced it: the table and the
+       branches are both this module's, and they have come apart.
+
+    2. **A partition landed in a year other than the one asked for.** A partition's year comes
+       from `panel_partition_year`, which reads the *rows' own dates*; `--year` only bounds the
+       sessions that were fetched and the corpus that is read back. So a `suspend_d` fetch that
+       serves rows dated last year is stored as last year's partition while
+       `_build_price_panel` reads `load_suspensions(years=(year,))` -- the corpus a *previous*
+       run left behind -- and the build reports `halts: corroborated` about a year it did not
+       corroborate, plus a partition nobody asked for. `load_suspensions` cannot catch it: this
+       command passes `max_staleness=None`, which is necessary and not a shortcut, because
+       `suspend_d`'s freshness is measured in *event* time and the most recent halt event can
+       legitimately be days before `as_of` -- but waiving it means a five-year-old corpus and
+       this year's are the same observation to that call. The year is the check that survives.
+
+       `stock_basic` is exempt and only `stock_basic` (`_LIFECYCLE_YEAR_TARGETS`): its
+       partitions are lifecycle years by construction.
+    """
+    silent = sorted(name for name in targets if not written.get(name))
+    if silent:
+        raise _panel_fail(
+            PanelExit.internal_error,
+            f"{silent} is in PANEL_BUILD_TARGETS but produced no partition, so this build "
+            "reported success without building it. That is a defect in this command -- a "
+            "target the table accepts and no branch builds -- not a fact about the panel. "
+            f"{_stored_so_far(written)}",
+        )
+    misfiled = [
+        f"{ref.dataset}:{ref.year}"
+        for name, group in written.items()
+        if name not in _LIFECYCLE_YEAR_TARGETS
+        for ref in group
+        if ref.year != year
+    ]
+    if misfiled:
+        raise _panel_fail(
+            PanelExit.unhealthy,
+            f"--year {year} was asked for and {misfiled} was written: a partition's year comes "
+            "from the dates in the rows the provider served, not from this flag, so the fetch "
+            "returned another year's data. Anything this build read back for --year "
+            f"{year} came from an earlier run rather than from this fetch, and any halt corpus "
+            "it reported as corroborated was not corroborated by it. "
+            f"{_stored_so_far(written)}",
+        )
 
 
 _BUILD_DATASET_HELP = (
-    "A build target, repeatable. One target is one unit of work a panel_ingest writer accepts, "
-    "which is not always one dataset: 'price' is daily + daily_basic + suspend_d, because "
-    "write_daily_panel takes the pair together and its halts argument has no default. "
-    "'stock_basic' ignores --year: the registry has no date filter and is split into one "
-    "partition per lifecycle year."
+    "A build target, repeatable. The five this command builds, in the order it runs them: "
+    f"{', '.join(PANEL_BUILD_TARGETS)}. Anything else is refused by name. One target is one "
+    "unit of work a panel_ingest writer accepts, which is not always one dataset: 'price' is "
+    "daily + daily_basic + suspend_d, because write_daily_panel takes the pair together and its "
+    "halts argument has no default. 'stock_basic' ignores --year: the registry has no date "
+    "filter and is split into one partition per lifecycle year."
 )
 
 
@@ -1402,52 +1566,69 @@ def panel_build(
     itself, inside its own constructor, so the token exists in this process only inside the
     provider and the request envelope it posts -- and a `ProviderFailure`'s message, which can
     carry it, is never printed or logged (see `_fetch_panel`).
-    """
-    targets = _build_targets(dataset)
-    store = _panel_store(runtime_dir)
-    provider = TushareProvider(transport=_panel_transport(), clock=_panel_clock)
-    now = _panel_clock()
-    try:
-        written, sessions, halt_state = _build_panel(
-            store,
-            provider,
-            targets=targets,
-            year=year,
-            exchange=exchange,
-            halts=halts,
-            now=now,
-        )
-    except _PANEL_WRITE_REFUSALS as error:
-        raise _panel_fail(
-            PanelExit.unhealthy,
-            f"the panel refused this build and nothing partial was stored: {error}",
-        ) from error
 
-    payload = {
-        "year": year,
-        "exchange": exchange,
-        "targets": sorted(targets),
-        "halts": halt_state,
-        "sessions": {
-            "first": sessions[0].isoformat() if sessions else None,
-            "last": sessions[-1].isoformat() if sessions else None,
-            "count": len(sessions),
-        },
-        "partitions": [
-            {"dataset": ref.dataset, "year": ref.year, "row_count": ref.row_count}
-            for ref in written
-        ],
-    }
-    if json_output:
-        typer.echo(json.dumps(payload, ensure_ascii=False, sort_keys=True))
-        return
-    if sessions:
-        typer.echo(
-            f"SESSIONS {len(sessions)} from {sessions[0].isoformat()} to {sessions[-1].isoformat()}"
-        )
-    for ref in written:
-        typer.echo(f"WROTE {ref.dataset} year={ref.year} rows={ref.row_count}")
-    typer.echo(f"HALTS {halt_state}")
+    A refusal partway through names the partitions already on disk rather than claiming none
+    are: the writers are each all-or-nothing, the build across them is not.
+    """
+    with _panel_command("panel build"):
+        targets = _build_targets(dataset)
+        store = _panel_store(runtime_dir)
+        provider = TushareProvider(transport=_panel_transport(), clock=_panel_clock)
+        now = _panel_clock()
+        written: dict[str, list[PartitionRef]] = {}
+        try:
+            sessions, halt_state = _build_panel(
+                store,
+                provider,
+                written=written,
+                targets=targets,
+                year=year,
+                exchange=exchange,
+                halts=halts,
+                now=now,
+            )
+        except _PANEL_WRITE_REFUSALS as error:
+            raise _panel_fail(
+                PanelExit.unhealthy,
+                f"the panel refused this build: {error}. {_stored_so_far(written)}",
+            ) from error
+        except Exception:
+            # Everything else that can stop a build midway: a provider failure or a stated
+            # refusal raised as `typer.Exit` from inside the loop, or something unanticipated
+            # that `_panel_command` will turn into `internal_error`. None of them can know how
+            # far the build got, and by then partitions are on disk. Re-raised untouched --
+            # this clause adds the one fact the raiser did not have, and decides nothing.
+            typer.echo(_stored_so_far(written), err=True)
+            raise
+        _audit_written_partitions(written, targets=targets, year=year)
+
+        stored = [ref for group in written.values() for ref in group]
+        payload = {
+            "year": year,
+            "exchange": exchange,
+            "targets": sorted(targets),
+            "halts": halt_state,
+            "sessions": {
+                "first": sessions[0].isoformat() if sessions else None,
+                "last": sessions[-1].isoformat() if sessions else None,
+                "count": len(sessions),
+            },
+            "partitions": [
+                {"dataset": ref.dataset, "year": ref.year, "row_count": ref.row_count}
+                for ref in stored
+            ],
+        }
+        if json_output:
+            typer.echo(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+            return
+        if sessions:
+            typer.echo(
+                f"SESSIONS {len(sessions)} from {sessions[0].isoformat()} to "
+                f"{sessions[-1].isoformat()}"
+            )
+        for ref in stored:
+            typer.echo(f"WROTE {ref.dataset} year={ref.year} rows={ref.row_count}")
+        typer.echo(f"HALTS {halt_state}")
 
 
 # --- panel doctor and data-check ---------------------------------------------------------------
@@ -1496,35 +1677,38 @@ def panel_doctor_command(
     Exits non-zero exactly when the report is not `is_clean` -- one or more `blocking` or
     `warning` findings. A `notice` never does; see `PanelExit` for the measurement behind that.
     """
-    store, request = _panel_request(
-        runtime_dir=runtime_dir,
-        dataset=dataset,
-        year=year,
-        session=session,
-        index_code=index_code,
-        exchange=exchange,
-        as_of=as_of,
-        with_calendar=calendar,
-    )
-    try:
-        report = panel_health_report(
-            store,
-            as_of=request.as_of,
-            datasets=request.datasets,
-            years=request.years,
-            calendar=request.calendar,
-            index_codes=request.index_codes,
-            cross_section_days=request.sessions,
+    with _panel_command("panel doctor"):
+        store, request = _panel_request(
+            runtime_dir=runtime_dir,
+            dataset=dataset,
+            year=year,
+            session=session,
+            index_code=index_code,
+            exchange=exchange,
+            as_of=as_of,
+            with_calendar=calendar,
         )
-    except PanelDoctorError as error:
-        raise _panel_fail(PanelExit.bad_request, str(error)) from error
+        try:
+            report = panel_health_report(
+                store,
+                as_of=request.as_of,
+                datasets=request.datasets,
+                years=request.years,
+                calendar=request.calendar,
+                index_codes=request.index_codes,
+                cross_section_days=request.sessions,
+            )
+        except PanelDoctorError as error:
+            raise _panel_fail(PanelExit.bad_request, str(error)) from error
 
-    if json_output:
-        typer.echo(json.dumps(health_report_payload(report), ensure_ascii=False, sort_keys=True))
-    else:
-        _echo_report(report)
-    if not report.is_clean:
-        raise typer.Exit(code=int(PanelExit.unhealthy))
+        if json_output:
+            typer.echo(
+                json.dumps(health_report_payload(report), ensure_ascii=False, sort_keys=True)
+            )
+        else:
+            _echo_report(report)
+        if not report.is_clean:
+            raise typer.Exit(code=int(PanelExit.unhealthy))
 
 
 @app.command("data-check")
@@ -1553,27 +1737,28 @@ def data_check(
     asks `is_blocked` and reads `cleared_or_none`, never `bool()`, `len()` or iteration, all
     three of which raise here **even when the request cleared**.
     """
-    store, request = _panel_request(
-        runtime_dir=runtime_dir,
-        dataset=dataset,
-        year=year,
-        session=session,
-        index_code=index_code,
-        exchange=exchange,
-        as_of=as_of,
-        with_calendar=calendar,
-    )
-    try:
-        clearance = require_datasets(store, request)
-    except (PanelGateError, PanelDoctorError) as error:
-        raise _panel_fail(PanelExit.bad_request, str(error)) from error
+    with _panel_command("data-check"):
+        store, request = _panel_request(
+            runtime_dir=runtime_dir,
+            dataset=dataset,
+            year=year,
+            session=session,
+            index_code=index_code,
+            exchange=exchange,
+            as_of=as_of,
+            with_calendar=calendar,
+        )
+        try:
+            clearance = require_datasets(store, request)
+        except (PanelGateError, PanelDoctorError) as error:
+            raise _panel_fail(PanelExit.bad_request, str(error)) from error
 
-    if json_output:
-        typer.echo(json.dumps(clearance_payload(clearance), ensure_ascii=False, sort_keys=True))
-    else:
-        _echo_clearance(clearance)
-    if clearance.is_blocked:
-        raise typer.Exit(code=int(PanelExit.unhealthy))
+        if json_output:
+            typer.echo(json.dumps(clearance_payload(clearance), ensure_ascii=False, sort_keys=True))
+        else:
+            _echo_clearance(clearance)
+        if clearance.is_blocked:
+            raise typer.Exit(code=int(PanelExit.unhealthy))
 
 
 def main() -> None:

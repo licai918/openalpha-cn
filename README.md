@@ -268,6 +268,61 @@ OpenAlpha CN 不把“多接几个行情 API”当作数据优势。优势落在
 
 详见[数据接口与合规边界](docs/api/data-interface.zh-CN.md)。
 
+## 面板数据平面的三个命令
+
+面板数据平面（trade_cal / stock_basic / adj_factor / daily / daily_basic / suspend_d /
+stk_limit ...）有三个命令：`openalpha panel build` 抓取并写入，`openalpha panel doctor`
+体检已存数据，`openalpha data-check` 跑读取前的 fail-closed 依赖门。
+
+**退出码就是交付物。** 三个命令共用同一张退出码表，各码对应的补救动作不同，所以不合并：
+
+| 退出码 | 含义 | 补救 |
+|---|---|---|
+| `0` | 命令答完了，答案是「没有问题」 | — |
+| `1` | **面板**有问题：依赖门拒绝、体检发现 `blocking`/`warning`、写时守卫拒收 | 重新抓取 |
+| `2` | 由 click 保留（拼错选项、缺必填项），本模块永不使用 | 改命令行 |
+| `3` | **请求**根本立不住：数据集无声明周期、`--as-of` 无法解析、构建目标不在闭表内 | 改命令行 |
+| `4` | 抓取压根没发生：认证、配额、传输、响应无法解码 | 修凭证 |
+| `5` | **命令本身崩了**，什么都没判定 | 提缺陷单 |
+
+`5` 与 `1` 分开是刻意的：没有它，CLI 自身的异常会走 Typer 默认处理并以 `1` 退出，
+「CLI 崩了」和「面板体检不过」在 CI 里就是同一个数字。
+
+`panel doctor` 只在报告 `is_clean` 为假时非零退出 —— 即出现 `blocking` 或 `warning`。
+`notice` 永不非零：`ambiguous_filing` 在真实财报上命中 8.15%/1.29%/15.80%/13.70% 的申报，
+让 notice 非零等于让每次诚实体检都失败，然后这个命令会在第一条流水线里被 `|| true` 掉。
+
+```bash
+# 构建：五个目标，按依赖序执行，与 --dataset 出现顺序无关
+uv run openalpha panel build --dataset trade_cal --dataset price --year 2026
+
+# 体检：--json 输出与 REST/SDK 面序列化同一个 PanelHealthReport
+uv run openalpha panel doctor --dataset daily --year 2026 --session 2026-01-16 --json
+
+# 依赖门：阻塞时以 1 退出，这是它在 CI 里的全部意义
+uv run openalpha data-check --dataset daily --dataset adj_factor --year 2026 \
+  --session 2026-01-16
+```
+
+几点必须知道的语义：
+
+- `panel build` 的目标是**工作单元**而不总是单个数据集。`price` = `daily` + `daily_basic`
+  + `suspend_d` 一次会话循环取完，因为 `write_daily_panel` 必须同时收到前两者，且它的
+  `halts` 参数没有默认值。所以 `--dataset daily` 会**按名字被拒**并告知原因，而不是被
+  click 当作未知选项拒掉（后者读起来像「本仓库没有 daily 面板」，与事实相反）。
+- 未提供的目标（`namechange`、`index_weight`、两个行业数据集、四个财报接口）同样**按名字
+  被拒**，而不是给一个空的成功。
+- `--no-halts` 是一次**记录在案的弃检**，不是默认值：它让 `write_daily_panel` 拿到
+  `halts=None`，从而关掉「缺失的行情没有任何东西解释」这条守卫。
+- `panel doctor` 与顶层 `openalpha doctor` 是两个命令：后者探的是 **provider 凭证与能力**，
+  前者读的是**面板本身**。
+- 分区年份由**数据行自身的日期**决定，`--year` 只界定抓取范围；两者不一致时 `panel build`
+  会拒绝并点名（`stock_basic` 例外，它按上市生命周期年拆分）。
+- 构建是一串「整分区写入」，之间没有事务。中途被拒时命令会**列出已经落盘的分区**，而不是
+  声称什么都没写。
+- 凭证不经过 CLI：`TushareProvider` 在自己的构造函数里解析 `TUSHARE_TOKEN`，
+  `ProviderFailure` 的原始消息（可能带着 token 或整条 query string）永不打印、永不入日志。
+
 ## 核心独特优势
 
 OpenAlpha CN 整合 TradingAgents 和 AI Hedge Fund 的优势，接入 A 股数据源，更适合 A 股涨停量化分析。OpenAlpha CN 的竞争重点不是复制更多“投资大师人格”，而是：

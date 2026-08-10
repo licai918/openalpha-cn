@@ -20,10 +20,11 @@ import json
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import pytest
-from panel_fixtures import AS_OF, YEAR, generate_panel, write_generated_panel
+from panel_fixtures import AS_OF, EXCHANGE, YEAR, generate_panel, write_generated_panel
 from typer.testing import CliRunner
 
 from openalpha_cn import cli
@@ -227,6 +228,62 @@ class ScriptedTushareTransport:
                 ],
             )
         raise AssertionError(f"the CLI asked for an unscripted dataset: {api_name}")
+
+
+class YearAwareCalendarTransport(ScriptedTushareTransport):
+    """A `trade_cal` that answers for whatever year the *request* named.
+
+    `ScriptedTushareTransport` answers `BUILD_YEAR` whatever it is asked, which is what most of
+    this module wants and is exactly what makes "did `--year` reach the fetch, or did the clock?"
+    unobservable: both produce a 2026 partition. This one honours `start_date`, so the two
+    answers differ.
+    """
+
+    def post(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if str(payload["api_name"]) != TRADING_CALENDAR_DATASET:
+            return super().post(payload)
+        self.payloads.append(payload)
+        params: Mapping[str, str] = payload["params"]
+        year = int(str(params["start_date"])[:4])
+        items: list[list[Any]] = []
+        previous: str | None = None
+        day = date(year, 1, 1)
+        while day <= date(year, 12, 31):
+            is_open = day.weekday() < 5
+            items.append([params["exchange"], _compact(day), 1 if is_open else 0, previous])
+            if is_open:
+                previous = _compact(day)
+            day += timedelta(days=1)
+        return _response(CALENDAR_FIELDS, items)
+
+
+class StaleHaltTransport(ScriptedTushareTransport):
+    """A `suspend_d` whose rows are dated in the year *before* the one being built.
+
+    Not a contrived shape: the endpoint is asked for one session and answers with whatever rows
+    it has, and a partition's year comes from the rows' own dates rather than from `--year`.
+    """
+
+    def post(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if str(payload["api_name"]) != SUSPENSION_DATASET:
+            return super().post(payload)
+        self.payloads.append(payload)
+        if _session_of(payload["params"]) != HALT_SESSION:
+            return _response(HALT_FIELDS, [])
+        stale = date(BUILD_YEAR - 1, 12, 31)
+        return _response(HALT_FIELDS, [[HALT_SECURITY, _compact(stale), "R", None]])
+
+
+class EmptyLimitSessionTransport(ScriptedTushareTransport):
+    """A `stk_limit` that serves no rows for one session the calendar reports open."""
+
+    def post(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if str(payload["api_name"]) != PRICE_LIMIT_DATASET:
+            return super().post(payload)
+        if _session_of(payload["params"]) == BUILD_SESSIONS[1]:
+            self.payloads.append(payload)
+            return _response(LIMIT_FIELDS, [])
+        return super().post(payload)
 
 
 class RefusingTushareTransport:
@@ -486,6 +543,239 @@ def test_panel_build_refuses_a_year_whose_first_session_has_not_published(
     assert "nothing to build yet" in result.output
 
 
+def test_a_target_the_table_names_and_no_branch_builds_cannot_exit_zero(
+    tmp_path: Path, scripted_build: ScriptedTushareTransport, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exact shape this whole issue exists to make unavailable, one layer further in.
+
+    `_build_targets` accepts any key `PANEL_BUILD_TARGETS` holds, and `_build_panel` dispatches
+    on an `if` chain. Add a sixth entry -- which is what a future issue wiring `namechange` will
+    do first -- and forget the branch, and the command fetches nothing, writes nothing, and
+    reports `exit 0` with `"partitions": []`: an empty success in the one place a CI job has
+    only the exit code to read.
+
+    Neither of this module's two existing table tests can see it.
+    `test_panel_build_runs_the_targets_in_dependency_order_and_not_in_flag_order` asserts the
+    order of the five known targets' writes, and
+    `test_the_build_targets_are_a_closed_table_in_dependency_order` compares the table against a
+    literal that whoever adds the sixth entry updates in the same edit -- correctly, because
+    that is what that test is for. So the check has to be in the command: every requested target
+    produced at least one partition, or it did not build what it was asked for.
+
+    `internal_error` rather than `unhealthy`: the table and the branches are both this module's
+    own, and a caller re-fetching data would be chasing a defect in this file.
+    """
+    monkeypatch.setattr(
+        cli,
+        "PANEL_BUILD_TARGETS",
+        MappingProxyType({**cli.PANEL_BUILD_TARGETS, "namechange": ("namechange",)}),
+    )
+
+    result = build(tmp_path, "namechange", extra=["--json"])
+
+    assert result.exit_code == PanelExit.internal_error
+    assert "namechange" in result.stderr
+    assert "PANEL_BUILD_TARGETS" in result.stderr
+    assert scripted_build.payloads == []
+
+
+def test_a_refusal_names_the_partitions_it_had_already_stored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A build is a sequence of whole-partition writes with no transaction around them.
+
+    `write_daily_panel` is all-or-nothing and `_refuse_close_disagreement` stops it before
+    either of its partitions is written -- but `write_suspensions` ran first and its partition
+    is on disk, and `--dataset trade_cal` in the same invocation would have left that one too.
+    An earlier version of this message said "nothing partial was stored", which was true of the
+    writer that raised and false of the build. The message now states the partitions it can see,
+    because a caller deciding whether to re-run or to clear the runtime directory needs the
+    difference.
+    """
+    transport = ScriptedTushareTransport(
+        closes={DAILY_BASIC_DATASET: {(BUILD_SECURITIES[0], BUILD_SESSIONS[1]): 11.5}}
+    )
+    monkeypatch.setenv("TUSHARE_TOKEN", SECRET_TOKEN)
+    monkeypatch.setattr(cli, "_panel_transport", lambda: transport)
+    monkeypatch.setattr(cli, "_panel_clock", lambda: BUILD_CLOCK)
+
+    result = build(tmp_path, "trade_cal", "stock_basic", "price")
+
+    assert result.exit_code == PanelExit.unhealthy
+    assert "nothing partial was stored" not in result.output
+    assert "written before this build stopped and are still stored" in result.stderr
+    for stored in (TRADING_CALENDAR_DATASET, STOCK_BASIC_DATASET, SUSPENSION_DATASET):
+        assert f"{stored}:{BUILD_YEAR}" in result.stderr
+    # And the claim is checkable against the store rather than only against the sentence.
+    store = PanelStore(tmp_path / "panel")
+    assert store.registered_years(SUSPENSION_DATASET) == (BUILD_YEAR,)
+    assert store.registered_years(TRADING_CALENDAR_DATASET) == (BUILD_YEAR,)
+    assert store.registered_years(DAILY_DATASET) == ()
+
+
+def test_a_partition_filed_under_a_year_nobody_asked_for_stops_the_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A partition's year comes from the rows, `--year` only bounds what is fetched and read.
+
+    `write_suspensions` files by `panel_partition_year`, which reads the dates in the rows the
+    provider served; `_build_price_panel` then reads the corpus back with
+    `load_suspensions(years=(year,))`. When the fetch serves last year's rows those two are not
+    the same year, and nothing below can notice: the write succeeds into 2025, the read finds
+    the 2026 partition an *earlier* run left behind, and the build reports
+    `halts: corroborated` about a corpus this fetch did not contribute a row to -- plus a 2025
+    partition the caller never asked for.
+
+    `max_staleness=None` cannot be the check that catches it, and is not a shortcut:
+    `suspend_d`'s freshness is measured in event time, and the most recent halt event can
+    legitimately be days older than `as_of`, so any finite bound refuses honest corpora. Waiving
+    it is what makes "this year's corpus" and "a five-year-old one" the same observation to that
+    call. The partition year is the check that survives.
+    """
+    monkeypatch.setenv("TUSHARE_TOKEN", SECRET_TOKEN)
+    monkeypatch.setattr(cli, "_panel_clock", lambda: BUILD_CLOCK)
+    monkeypatch.setattr(cli, "_panel_transport", ScriptedTushareTransport)
+    assert build(tmp_path, "trade_cal", "stock_basic", "price").exit_code == PanelExit.ok
+
+    monkeypatch.setattr(cli, "_panel_transport", StaleHaltTransport)
+    result = build(tmp_path, "price", extra=["--json"])
+
+    assert result.exit_code == PanelExit.unhealthy
+    assert f"--year {BUILD_YEAR} was asked for" in result.stderr
+    assert f"{SUSPENSION_DATASET}:{BUILD_YEAR - 1}" in result.stderr
+    assert PanelStore(tmp_path / "panel").registered_years(SUSPENSION_DATASET) == (
+        BUILD_YEAR - 1,
+        BUILD_YEAR,
+    )
+
+
+def test_panel_build_asks_the_year_it_was_given_rather_than_the_year_of_its_clock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_year_as_of(year)`, not `_panel_clock()`, is what `trade_cal` is asked at.
+
+    `_trade_cal_params` derives the fetched year from `as_of`'s Asia/Shanghai year, so the two
+    differ for every `--year` that is not the clock's. Unobservable against
+    `ScriptedTushareTransport`, which answers `BUILD_YEAR` whatever it is asked -- so this one
+    honours `start_date`, and then both directions are visible: the request names the year that
+    was asked for, and the partition that comes back is filed under it.
+    """
+    transport = YearAwareCalendarTransport()
+    monkeypatch.setenv("TUSHARE_TOKEN", SECRET_TOKEN)
+    monkeypatch.setattr(cli, "_panel_transport", lambda: transport)
+    monkeypatch.setattr(cli, "_panel_clock", lambda: BUILD_CLOCK)
+
+    result = runner.invoke(
+        app,
+        [
+            "panel",
+            "build",
+            "--runtime-dir",
+            str(tmp_path),
+            "--year",
+            str(BUILD_YEAR - 1),
+            "--dataset",
+            "trade_cal",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == PanelExit.ok
+    assert transport.payloads[0]["params"]["start_date"] == f"{BUILD_YEAR - 1}0101"
+    assert [entry["year"] for entry in json.loads(result.stdout)["partitions"]] == [BUILD_YEAR - 1]
+
+
+def test_an_empty_session_is_ordinary_only_for_the_halt_corpus(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_EMPTY_SESSION_IS_ORDINARY` holds exactly `suspend_d`, and the tolerance must not widen.
+
+    A session on which nothing was halted serves zero `suspend_d` rows, so an absent session and
+    an empty one are indistinguishable there by construction. Every other dataset publishes on
+    every open session, so its `no_data` batch is handed to the writer *unchanged* and refused
+    by `merge_panel_batches` -- "the guard that knows what a missing session costs is the one
+    that should say so".
+
+    Widening the skip to every dataset keeps the exit code, which is why this asserts the
+    refusal and not just the code: the empty session would be silently dropped and the calendar
+    census downstream would refuse the year for a different, later reason, having lost the fact
+    that the provider explicitly said "no data" for a day it publishes on.
+    """
+    monkeypatch.setenv("TUSHARE_TOKEN", SECRET_TOKEN)
+    monkeypatch.setattr(cli, "_panel_clock", lambda: BUILD_CLOCK)
+    monkeypatch.setattr(cli, "_panel_transport", ScriptedTushareTransport)
+    assert build(tmp_path, "trade_cal", "stock_basic").exit_code == PanelExit.ok
+
+    monkeypatch.setattr(cli, "_panel_transport", EmptyLimitSessionTransport)
+    result = build(tmp_path, "stk_limit")
+
+    assert result.exit_code == PanelExit.unhealthy
+    assert "cannot merge a 'no_data' batch" in result.output
+    assert PanelStore(tmp_path / "panel").registered_years(PRICE_LIMIT_DATASET) == ()
+
+
+def test_a_refusal_leaves_stdout_parseable_and_says_why_on_stderr(
+    tmp_path: Path, scripted_build: ScriptedTushareTransport
+) -> None:
+    """`_panel_fail` writes to stderr, and that is load-bearing rather than a convention.
+
+    `--json` promises a machine-readable stdout. A refusal printed there would put a prose
+    sentence in front of the JSON a caller is piping into a parser, on exactly the runs where it
+    most wants a structured answer -- so a consumer would have to strip prose before parsing,
+    which means guessing where it ends. Asserted here because the argument lives in a docstring
+    and nothing pinned it.
+    """
+    result = build(tmp_path, "income", extra=["--json"])
+
+    assert result.exit_code == PanelExit.bad_request
+    assert result.stdout == ""
+    assert "income" in result.stderr
+
+
+def test_a_command_that_breaks_is_not_reported_as_an_unhealthy_panel(tmp_path: Path) -> None:
+    """A defect in the CLI and a panel that failed its check must not be the same exit code.
+
+    Reachable, not hypothetical: `--runtime-dir` naming a regular file raises
+    `NotADirectoryError` out of `PanelStore`, which no branch here anticipates. Without
+    `_panel_command` that reached Typer's own handler, which printed a traceback and exited 1 --
+    `PanelExit.unhealthy`, i.e. "the panel is at fault, re-fetch it" -- for a situation in which
+    nothing was checked at all. The message names the exception's *type* and not its message,
+    for `_fetch_panel`'s reason: an unanticipated failure carries whatever the frame it escaped
+    was holding.
+    """
+    not_a_directory = tmp_path / "runtime"
+    not_a_directory.write_text("", encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "data-check",
+            "--runtime-dir",
+            str(not_a_directory),
+            "--year",
+            str(YEAR),
+            "--dataset",
+            DAILY_DATASET,
+        ],
+    )
+
+    assert result.exit_code == PanelExit.internal_error
+    assert result.exit_code != PanelExit.unhealthy
+    assert "NotADirectoryError" in result.stderr
+    assert "Traceback" not in result.output
+
+
+def test_the_build_help_names_every_target_it_will_accept(tmp_path: Path) -> None:
+    """The design is "refuse by name", so the names have to be discoverable without triggering a
+    refusal to read them. They were in the error message and not in `--help`."""
+    result = runner.invoke(app, ["panel", "build", "--help"])
+    rendered = " ".join(result.stdout.split())
+
+    assert result.exit_code == 0
+    for target in EVERY_BUILD_TARGET:
+        assert target in rendered
+
+
 # --- the panels the read side is pointed at ----------------------------------------------------
 
 FIXTURE_DATASETS: tuple[str, ...] = (
@@ -533,7 +823,10 @@ def read_side(
         "--as-of",
         AS_OF.isoformat(),
         "--exchange",
-        "SZSE",
+        # Read off the generator with `YEAR`, `AS_OF` and `FIXTURE_SESSION` rather than restated:
+        # every other coordinate of this frame comes from `panel_fixtures`, and a literal here
+        # would agree with the panel the fixture writes only until someone edits the generator.
+        EXCHANGE,
     ]
     for name in datasets:
         arguments.extend(["--dataset", name])
@@ -734,6 +1027,32 @@ def test_data_check_carries_the_notices_on_a_clearance_it_granted(tmp_path: Path
         assert f"NOTICE income {code}" in human.stdout
 
 
+def test_data_check_human_output_carries_the_caveats_that_bound_a_clearance(
+    tmp_path: Path,
+) -> None:
+    """The width of a permission has to survive the rendering a human actually reads.
+
+    `adj_factor` clears here with `unverified_daily_coverage` still open outside the one session
+    a cross-check corroborated -- a cleared dataset that is *not* cleared for the whole year. The
+    JSON carries that, and only the JSON was asserted; a human line that dropped it to `-` would
+    pass every test in this module while telling the reader the one thing a bare name always
+    tells them, which is that the year is covered. That assumption is precisely how
+    `V2-P1-013`'s review found Task 29's wrong number reachable through a *cleared* gate, so the
+    human rendering is where it matters most.
+    """
+    seed_fixture_panel(tmp_path)
+
+    result = read_side(["data-check"], tmp_path)
+
+    assert result.exit_code == PanelExit.ok
+    assert (
+        f"CLEARED {ADJ_FACTOR_DATASET} years={YEAR} "
+        f"corroborated_sessions={FIXTURE_SESSION.isoformat()} "
+        "caveats=unverified_daily_coverage"
+    ) in result.stdout
+    assert f"CLEARED {DAILY_DATASET} years={YEAR} " in result.stdout
+
+
 def test_data_check_human_output_names_each_block_and_its_code(tmp_path: Path) -> None:
     seed_fixture_panel(tmp_path)
 
@@ -813,6 +1132,8 @@ def test_every_situation_maps_to_the_exit_code_the_table_declares(
     panel_dir = tmp_path / "read"
     panel_dir.mkdir()
     seed_fixture_panel(panel_dir)
+    not_a_directory = tmp_path / "not-a-directory"
+    not_a_directory.write_text("", encoding="utf-8")
 
     observed = {
         "build.written": build(tmp_path / "built", *EVERY_BUILD_TARGET).exit_code,
@@ -830,6 +1151,25 @@ def test_every_situation_maps_to_the_exit_code_the_table_declares(
         "data-check.bad_as_of": read_side(
             ["data-check"], panel_dir, extra=["--as-of", "not-an-instant"]
         ).exit_code,
+        # The `except (PanelGateError, PanelDoctorError)` around `require_datasets`. Added by
+        # this issue's review: the only test that named that branch reached the `--as-of` guard
+        # in `_panel_as_of` instead and said so in its own docstring, so the branch was reachable,
+        # correct and unasserted -- collapsing it into `unhealthy` changed no test.
+        "data-check.unknown_dataset": read_side(
+            ["data-check"], panel_dir, datasets=("nope",), sessions=()
+        ).exit_code,
+        "data-check.runtime_dir_is_a_file": runner.invoke(
+            app,
+            [
+                "data-check",
+                "--runtime-dir",
+                str(not_a_directory),
+                "--year",
+                str(YEAR),
+                "--dataset",
+                DAILY_DATASET,
+            ],
+        ).exit_code,
         "click.unknown_flag": runner.invoke(app, ["data-check", "--nonsense"]).exit_code,
     }
 
@@ -843,5 +1183,7 @@ def test_every_situation_maps_to_the_exit_code_the_table_declares(
         "data-check.cleared": PanelExit.ok,
         "data-check.blocked": PanelExit.unhealthy,
         "data-check.bad_as_of": PanelExit.bad_request,
+        "data-check.unknown_dataset": PanelExit.bad_request,
+        "data-check.runtime_dir_is_a_file": PanelExit.internal_error,
         "click.unknown_flag": CLICK_USAGE_EXIT_CODE,
     }

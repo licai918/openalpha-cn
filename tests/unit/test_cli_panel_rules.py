@@ -14,6 +14,8 @@ from datetime import UTC, datetime
 import pytest
 
 from openalpha_cn.cli import (
+    _EMPTY_SESSION_IS_ORDINARY,
+    _LIFECYCLE_YEAR_TARGETS,
     CLICK_USAGE_EXIT_CODE,
     PANEL_BUILD_COUPLED_DATASETS,
     PANEL_BUILD_TARGETS,
@@ -30,15 +32,22 @@ from openalpha_cn.panel_gate import DependencyClearance, DependencyRequest, Pane
 NOW = datetime(2026, 1, 17, 4, 0, tzinfo=UTC)
 
 
-def test_the_exit_code_table_is_four_distinct_codes_and_none_of_them_is_clicks() -> None:
+def test_the_exit_code_table_is_five_distinct_codes_and_none_of_them_is_clicks() -> None:
     """Click raises its own `UsageError` with exit code 2 for a misspelled flag or a missing
     required option. A panel command that also used 2 would make "you typed the command wrong"
-    and "the panel refused you" the same observation in CI."""
+    and "the panel refused you" the same observation in CI.
+
+    `internal_error` is the fifth and was added by this issue's review: without it, an
+    exception no branch anticipated reached Typer's own handler and exited **1**, which is
+    `unhealthy` -- so "the CLI crashed" and "the panel failed its check" arrived at a CI job as
+    the same number, and the one situation where nothing at all was checked looked exactly like
+    the one where something was and it failed."""
     assert {member.name: int(member) for member in PanelExit} == {
         "ok": 0,
         "unhealthy": 1,
         "bad_request": 3,
         "provider_failure": 4,
+        "internal_error": 5,
     }
     assert CLICK_USAGE_EXIT_CODE == 2
     assert CLICK_USAGE_EXIT_CODE not in {int(member) for member in PanelExit}
@@ -63,6 +72,29 @@ def test_the_build_targets_are_a_closed_table_in_dependency_order() -> None:
         "price",
         "stk_limit",
     ]
+
+
+def test_only_the_halt_corpus_treats_an_empty_session_as_ordinary() -> None:
+    """The tolerance is a closed set of exactly one, and it must not widen by accident.
+
+    `write_suspensions` gives the measurement: a session on which nothing was halted and nothing
+    resumed serves zero rows, so an absent session and an empty one are indistinguishable in
+    that dataset by construction. Every other dataset here publishes on every open session, so
+    dropping its empty batch would discard the provider's explicit "no data" for a day it
+    publishes on, and the writer that knows what a missing session costs would never see it."""
+    assert set(_EMPTY_SESSION_IS_ORDINARY) == {SUSPENSION_DATASET}
+    assert set(PANEL_BUILD_TARGETS["price"]) > _EMPTY_SESSION_IS_ORDINARY
+
+
+def test_the_lifecycle_year_exemption_is_stock_basic_and_nothing_else() -> None:
+    """`_audit_written_partitions` requires every partition a build writes to carry the `--year`
+    it was asked for, because a partition's year comes from the rows and `--year` only bounds
+    what is fetched. `stock_basic` genuinely cannot satisfy that -- the registry has no date
+    filter and `write_stock_universe` splits one request into one partition per *lifecycle*
+    year -- so it is exempt, and the exemption is a closed set rather than a condition a future
+    target could drift into."""
+    assert set(_LIFECYCLE_YEAR_TARGETS) == {STOCK_BASIC_DATASET}
+    assert set(PANEL_BUILD_TARGETS) > _LIFECYCLE_YEAR_TARGETS
 
 
 def test_every_dataset_the_price_target_couples_is_refused_on_its_own() -> None:
