@@ -31,6 +31,7 @@ from openalpha_cn.domain.price_limits import (
     TradingState,
     build_suspension_day,
     explain_unpriced,
+    halt_spans_the_close,
     limit_touch,
     price_limits_from_panel_rows,
     suspensions_from_panel_rows,
@@ -173,6 +174,75 @@ def test_an_s_row_carrying_an_intraday_window_is_not_a_whole_day_halt() -> None:
     assert day.traded == frozenset({"000048.SZ"})
     # The set form the loop-shaped callers use; the tuple form stays sorted and deterministic.
     assert day.halted_codes == frozenset({"000029.SZ"})
+
+
+def test_the_timing_column_survives_the_partition_and_is_reachable_by_code() -> None:
+    """`TradingState` answers "did it trade"; the column itself answers "when did it not", and
+    only the second can say whether the close was an auction price. Before `V2-P1-017`'s review
+    the window was consumed by `SuspensionRecord.state` and then dropped.
+    """
+    days = suspensions_from_panel_rows(_suspension_rows(SUSPEND_D_20150708))
+    day = days[date(2015, 7, 8)]
+
+    assert day.timings == (("000048.SZ", "13:00-15:00"),)
+    assert day.timing_of("000048.SZ") == "13:00-15:00"
+    assert day.timing_of("000029.SZ") is None
+    assert day.timing_of("600519.SH") is None
+
+
+@pytest.mark.parametrize(
+    ("timing", "spans"),
+    [
+        ("13:00-15:00", True),
+        ("14:52-14:57", True),
+        ("13:36-13:46,14:53-14:57", True),
+        ("09:30-13:00", False),
+        ("09:30-10:00", False),
+        ("09:30-10:01", False),
+        ("09:36-10:06", False),
+        ("09:55-10:05", False),
+        ("09:43-09:53", False),
+        ("09:31-09:41,09:43-09:53", False),
+        ("11:21-13:01", False),
+        ("09:30", True),
+        ("09:30-25:00", True),
+        ("上午", True),
+    ],
+)
+def test_a_halt_window_is_read_as_spanning_the_close_from_its_right_endpoints(
+    timing: str, spans: bool
+) -> None:
+    """The first eleven are every distinct `suspend_timing` value served across a quarterly
+    sweep of 2013-01..2026-10 plus the sessions this module already probes. The last three are
+    not served shapes and are here for the unparseable arm: a window with no separator, one
+    whose right endpoint is not a clock time, and a string that is not a window at all.
+
+    `14:57` is where the closing call auction opens, so a window reaching it leaves `daily`'s
+    close as an earlier print. The boundary is closed and an unreadable endpoint counts as
+    spanning: reading either as "resumed in time" is the fail-open direction for a contract
+    whose two prices are closes.
+    """
+    assert halt_spans_the_close(timing) is spans
+
+
+def test_two_disagreeing_halt_windows_for_one_security_are_refused() -> None:
+    """The corpus spells a two-window halt inside a single row ('13:36-13:46,14:53-14:57'), so
+    two rows carrying different windows are two sources nobody reconciled -- the same finding
+    as two rows carrying different states, and refused the same way. A byte-identical duplicate
+    still collapses.
+    """
+    morning = SuspensionRecord(
+        ts_code="000048.SZ", trade_date=SESSION, suspend_type="S", timing="09:30-10:00"
+    )
+    afternoon = SuspensionRecord(
+        ts_code="000048.SZ", trade_date=SESSION, suspend_type="S", timing="13:00-15:00"
+    )
+
+    assert build_suspension_day(SESSION, [morning, morning]).timings == (
+        ("000048.SZ", "09:30-10:00"),
+    )
+    with pytest.raises(SuspensionError, match="is halted '09:30-10:00' and '13:00-15:00'"):
+        build_suspension_day(SESSION, [morning, afternoon])
 
 
 def test_the_three_states_have_no_truth_value() -> None:

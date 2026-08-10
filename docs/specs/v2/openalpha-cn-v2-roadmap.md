@@ -475,6 +475,18 @@ canonical JSON，所以 `5d`/`10d`/`3m` 三个本仓在用的字面量逐字节�
 唯一对外可见的变化是 `docs/api/schemas/signal-frame-v1.json` 现在发布了这条 pattern。
 本节的结论对 attribution 经 `ValidationResult` 的那一项仍然成立。
 
+这条更正带两个附注（Task 40 审查补记）：
+
+- **收窄的是一个已发布的 v1 schema，且没有 bump 版本。** ID 一个没动，本仓也从未写过
+  文法外的取值，但同一个 `signal-frame/v1` 之下，**昨天合法的 `horizon: "whenever"`
+  今天经 `read_versioned` 会抛**。对本仓的存量为零风险；对任何在本仓之外按 v1 写过
+  `signal-frame` 的存量不是。修法只有两条 —— 迁移那些行，或 bump 到
+  `signal-frame/v2`（后者会重写 `signal_id`，就是本节说的那种迁移）。记在这里，
+  是因为「收窄不动 ID」成立并不等于「收窄没有对外后果」。
+- **若日后把 `horizon` 从 `str` 换成结构化类型**（例如直接存 `ResearchHorizon` 或
+  `{"count": 5, "unit": "d"}`），canonical JSON 会变，这一项就**重新回到**
+  P4 的身份重写清单。上面的「不进入」只对「仍是同一个 `str`，只是定义域更窄」成立。
+
 ## 9. `config_digest` 与 `random_seed` 不进入任何内容寻址身份（2026-08 实测更正）
 
 Task 17 的评审驱动真实 `run_cycle`，固定时钟与 `run_id`，逐个变量单独变更后读 `decision_id`：

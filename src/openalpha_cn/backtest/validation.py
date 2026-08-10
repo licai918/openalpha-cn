@@ -149,6 +149,14 @@ class OutcomeValidator:
         other quantity -- what the security did over the window, whatever the decision was --
         and the two are deliberately not merged: a factor is fitted against the security's
         forward return, and a decision is scored against the position it actually took.
+
+        One consequence reads as a contradiction and is not one. When the observation came from
+        `observation_from_label`, `LABEL_PROVENANCE_NOTE`'s text quotes the security's move, and
+        that note travels onto the stored `ValidationResult` whatever the action was -- so an
+        `"avoid"` or `"abstain"` result carries `realized_return=0.0` beside a note saying the
+        name did +2.74%. Both are right, about different questions. Stripping the note for those
+        two actions would remove the only record of which of the three return paths the two
+        prices came from, which is the one thing the note exists for.
         """
         realized_return = 0.0
         if research.decision.final_action == "watch":

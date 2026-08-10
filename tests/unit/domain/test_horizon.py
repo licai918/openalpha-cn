@@ -17,6 +17,7 @@ from pydantic import ValidationError
 
 from openalpha_cn.domain.horizon import (
     HORIZON_PATTERN,
+    MAX_HORIZON_COUNT,
     HorizonError,
     HorizonUnit,
     ResearchHorizon,
@@ -94,6 +95,41 @@ def test_a_calendar_horizon_refuses_to_invent_a_sessions_per_unit_constant(text:
 
     with pytest.raises(HorizonError, match="is not a whole number of trading sessions"):
         _ = horizon.sessions
+
+
+@pytest.mark.parametrize("count", [0, -3, 1000, 1.0, True, "5"])
+def test_the_direct_constructor_refuses_a_count_the_grammar_would_never_produce(
+    count: object,
+) -> None:
+    """`parse_horizon` is not the only way in, and the second way used to be unguarded.
+
+    A bare `ResearchHorizon(count=0, unit=trading_days)` built a window collapsed onto a single
+    session and failed several frames later inside `domain/adjustment.py` as an
+    `AdjustmentError`; `count=-3` failed inside `domain/trading_calendar.py` as a
+    `TradingCalendarError`. Both fail-closed and both answered for a malformed horizon in a
+    sibling module's vocabulary, which is the wrong exception for a caller to have to catch.
+    """
+    with pytest.raises(HorizonError, match="is not a horizon count"):
+        ResearchHorizon(count=count, unit=HorizonUnit.trading_days)  # type: ignore[arg-type]
+
+
+def test_the_direct_constructor_refuses_a_unit_that_is_not_one_of_the_four() -> None:
+    with pytest.raises(HorizonError, match="is not a HorizonUnit"):
+        ResearchHorizon(count=5, unit="d")  # type: ignore[arg-type]
+
+
+def test_the_direct_constructor_and_the_grammar_admit_the_same_counts() -> None:
+    """`MAX_HORIZON_COUNT` and `HORIZON_PATTERN`'s three digits are two statements of one bound,
+    so the boundary is walked through both rather than asserted against either alone.
+    """
+    assert parse_horizon(f"{MAX_HORIZON_COUNT}d").count == MAX_HORIZON_COUNT
+    assert ResearchHorizon(count=MAX_HORIZON_COUNT, unit=HorizonUnit.trading_days).sessions == (
+        MAX_HORIZON_COUNT
+    )
+    with pytest.raises(HorizonError, match="is not a research horizon"):
+        parse_horizon(f"{MAX_HORIZON_COUNT + 1}d")
+    with pytest.raises(HorizonError, match="is not a horizon count"):
+        ResearchHorizon(count=MAX_HORIZON_COUNT + 1, unit=HorizonUnit.trading_days)
 
 
 def test_the_unit_letters_are_exactly_the_ones_the_pattern_admits() -> None:

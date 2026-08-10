@@ -24,8 +24,16 @@ the exit `shift` produced is comparing two different traversals of the same cale
 session's own cross section becomes knowable at `DAILY_AVAILABILITY_TIME` (16:30 Asia/Shanghai,
 `domain/daily_prices.py`), which is after its close, so a signal dated on session D was formed
 from information that is complete only once D can no longer be traded. Entering on D+1 is
-therefore exact for a post-close signal and one session conservative for a pre-open one; it is
-never early. See `KNOWN_LABEL_LIMITATIONS`.
+therefore exact for a post-close signal and one session conservative for a pre-open one. See
+`KNOWN_LABEL_LIMITATIONS`.
+
+That last sentence is only true of the *exchange's* session date, and `zone` is what turns an
+instant into one. A zone far enough west dates the same instant a day earlier, and then the
+entry is a session whose close has **already happened**: `America/Los_Angeles` on standard time
+reads a 15:30 Asia/Shanghai signal on 2026-01-15 as the 14th, enters on the 15th, and prices
+the entry at a close fixed thirty minutes *before* the signal existed. `build_label_window`
+refuses such a zone rather than documenting it -- see `MINIMUM_LABEL_ZONE_OFFSET`, which
+carries the derivation of the bound.
 
 ## The return, and why two of them are computed
 
@@ -62,7 +70,13 @@ already defines, carried into return space (`tol_t / pre_close_t`) and compounde
 chain. It is **reported and not enforced**, because `session_returns` has already enforced every
 term of it: once each session passed, their product cannot exceed the product of their bounds.
 What it is for is the reader who wants to see the residue -- 2.0e-7 against 9.2e-4 on the
-measured pair -- rather than being told it is small.
+measured pair -- rather than being told it is small. And it is worth being told how loose it
+gets: the bound compounds one `pre_close_tolerance / pre_close` term per session, and that term
+is dominated by a flat `MAX_PRE_CLOSE_DISAGREEMENT` of one 0.01 tick, so it is large exactly
+where the price is small. A 10-yuan `pre_close` on unit factors is allowed 0.0012 a session and
+**7.46% over 60 of them** -- wider than most things a 60-session return could be. It bounds the
+*published precision* of a chain, not the correctness of the return, and past a few dozen
+sessions `disagreement <= tolerance` stops constraining anything.
 
 ## Tradability: three states, four flags, and one band that may not exist
 
@@ -70,9 +84,18 @@ A window can be well formed and still not carry a label, and every reason is nam
 folded into a `None`:
 
 - **A whole-day halt** (`TradingState.halted`, an untimed `S`) on any session of the window.
-  The other two states traded -- all 31 of 2015-07-08's timed `S` rows had a bar, and so did
-  every `R` row probed across eight sessions -- so they do not refuse. Counting them would drop
-  most of a market on a heavy day for no reason.
+  The other two states traded -- all 31 of 2015-07-08's timed `S` rows had a bar, and an `R`
+  row's exceptions are seven `.BJ` codes across a 55-session quarterly sweep, every one of them
+  a security `daily` did not carry at all that session (`TradingState.resumed`) -- so neither
+  refuses for having no market. Counting them would drop most of a market on a heavy day for no
+  reason.
+- **A timed halt that was still running at the close** (`halt_spans_the_close`) on the entry or
+  the exit. "The security traded" is not "the security could have been bought or sold at the
+  close", and the label's two prices are closes. 39 of the 59 timed `S` rows served across 68
+  whole-market sessions run through the closing call auction, `13:00-15:00` being the common
+  spelling; on 2015-07-08, 30 of the 31 do, and 10 of those 30 are not caught by the limit rule
+  below. This is `REFUSAL_LOCKED_AT_LIMIT`'s own argument -- there was no counterparty at that
+  session's price -- applied to the other way a session can have no counterparty at 15:00.
 - **A session with no counterparty** (一字板) on the entry or the exit. `LimitTouch` separates
   `at_up` (the bar reached its band) from `one_price_up` (the *whole* session traded there), and
   only the second refuses: a bar that touched its limit and also traded away from it filled.
@@ -89,6 +112,18 @@ folded into a `None`:
   between 6.415 and 0.6604 for years after its last bar, so an adjusted return spanning a
   delisting date is untrustworthy by measurement rather than by caution.
 
+## Every input has to be able to say what it does not cover
+
+Four of the five market inputs already refuse a question outside their own read: `bars` and
+`limits` are keyed per session and an absent key is a refusal, `universe` carries
+`snapshot_date`, `factors` carries `covered_from`/`covered_through`, and `calendar` raises past
+its horizon. A bare `Mapping[date, SuspensionDay]` cannot: 5,312 of 2024-06-28's 5,338 priced
+names have no halt row at all, so an absent session genuinely is the ordinary case -- and is
+therefore indistinguishable from a partition nobody read. `load_suspensions` reads **by year**
+while a 5d or 10d window straddles New Year by construction, so that is not a hypothetical.
+`HaltCorpus` is the same mapping plus the span it was read over, and a window reaching outside
+that span raises `LabelError` instead of being labelled as though nothing had happened.
+
 ## Layering
 
 Pure `datetime`/`dataclasses` plus six sibling `domain` modules. No provider, no store, no
@@ -102,7 +137,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, tzinfo
+from datetime import date, datetime, timedelta, tzinfo
 from typing import Final
 
 from openalpha_cn.domain.adjustment import AdjustmentHistory
@@ -114,10 +149,12 @@ from openalpha_cn.domain.daily_prices import (
 )
 from openalpha_cn.domain.horizon import ResearchHorizon
 from openalpha_cn.domain.price_limits import (
+    CLOSING_CALL_AUCTION_START,
     LimitTouch,
     PriceLimit,
     SuspensionDay,
     TradingState,
+    halt_spans_the_close,
     limit_touch,
 )
 from openalpha_cn.domain.stock_universe import ListingStatus, StockUniverse
@@ -125,6 +162,7 @@ from openalpha_cn.domain.time import ensure_aware
 from openalpha_cn.domain.trading_calendar import TradingCalendar
 
 REFUSAL_HALTED_SESSION: Final[str] = "halted_session"
+REFUSAL_HALTED_INTO_THE_CLOSE: Final[str] = "halted_into_the_close"
 REFUSAL_MISSING_BAR: Final[str] = "missing_bar"
 REFUSAL_LOCKED_AT_LIMIT: Final[str] = "locked_at_limit"
 REFUSAL_UNPUBLISHED_BAND: Final[str] = "unpublished_band"
@@ -135,6 +173,7 @@ REFUSAL_BEYOND_REGISTRY_SNAPSHOT: Final[str] = "beyond_registry_snapshot"
 LABEL_REFUSAL_CODES: Final[tuple[str, ...]] = (
     REFUSAL_BEYOND_REGISTRY_SNAPSHOT,
     REFUSAL_DELISTED,
+    REFUSAL_HALTED_INTO_THE_CLOSE,
     REFUSAL_HALTED_SESSION,
     REFUSAL_LOCKED_AT_LIMIT,
     REFUSAL_MISSING_BAR,
@@ -146,8 +185,36 @@ LABEL_REFUSAL_CODES: Final[tuple[str, ...]] = (
 Stated as a tuple for `panel_gate.GATE_CODE_BLOCKS`' reason: a verdict per entry over a closed
 set is a diff against a literal when it changes, where the same facts spread across per-branch
 strings are a set of independent judgements nobody can total up.
-`tests/unit/domain/test_labels.py` drives each one and compares the union against this tuple, so
-a code added with no way to reach it fails there rather than sitting as an untested branch.
+`tests/unit/domain/test_labels.py` reconciles this **in both directions**, which one-way
+closure would not: it drives every entry from a real window and compares the union against this
+tuple, *and* it scans this module for every `REFUSAL_*` constant and compares that set against
+the tuple too. A one-way test passes when a code is declared, reachable and simply left out of
+the tuple -- the "table and implementation drift apart" hole `V2-P1-015`'s review named.
+"""
+
+MINIMUM_LABEL_ZONE_OFFSET: Final[timedelta] = timedelta(hours=-7)
+"""The furthest west a `build_label_window` timezone may sit before it can date a look-ahead.
+
+The exchange closes at `SESSION_CLOSE_TIME` (15:00, +08:00) and the entry is the first session
+strictly after the prediction day, so the label reads a price it could not have known exactly
+when both of these hold for a signal at Asia/Shanghai hour `t` on Shanghai date `D`:
+
+- `zone` dates the instant `D - 1`, which happens iff `t - 8 + o < 0`, i.e. `t < 8 - o`, where
+  `o` is the zone's UTC offset in hours **at that instant**;
+- the entry is then `D` (or later), and `D`'s close is at or before the signal, which needs
+  `t >= 15`.
+
+Both hold for some `t` iff `15 < 8 - o`, i.e. iff `o < -7h`. So this bound is exactly the
+boundary and not a margin: at `-7h` the interval `[15, 8 - o)` is empty. `America/Los_Angeles`
+on standard time (`-8h`) is inside the forbidden region and a 15:30 signal there enters a
+session whose close was fixed thirty minutes earlier; the same zone on daylight time (`-7h`) is
+not, which is why the check reads the offset **at the signal's instant** rather than off a
+table of zone names.
+
+The bound is one-sided on purpose. A zone east of the exchange dates the same instant *later*
+and so enters *later*, which is the direction `KNOWN_LABEL_LIMITATIONS`'
+`a_pre_open_signal_is_entered_one_session_late` already names; it costs a session of horizon
+and cannot read a price from the future.
 """
 
 
@@ -180,7 +247,8 @@ KNOWN_LABEL_LIMITATIONS: Final[tuple[LabelLimitation, ...]] = (
             "so a signal dated after that on session D is entered on D+1, which is exact. A "
             "signal dated at 09:00 on D was formed from data through D-1 and could in reality "
             "have been traded on D itself; this contract still enters it on D+1. The error is "
-            "one-directional -- one session late, never early -- and closing it needs the "
+            "one-directional -- one session late, never early, which MINIMUM_LABEL_ZONE_OFFSET "
+            "is what enforces rather than what assumes -- and closing it needs the "
             "signal to carry which session's data it read, which SignalFrame does not have a "
             "field for. domain/price_limits.py's "
             "both_datasets_are_dated_one_session_late_rather_than_at_the_open is the same "
@@ -253,9 +321,38 @@ KNOWN_LABEL_LIMITATIONS: Final[tuple[LabelLimitation, ...]] = (
             "adjusted return spanning a delisting date is untrustworthy'. The label refuses "
             "the window rather than reporting the number the last tradeable session would "
             "give, which means a delisting return is absent from the supervised signal "
-            "entirely. That is a survivorship hole in the labels, stated rather than closed: "
-            "closing it needs a terminal-value convention (the last close? zero? the "
+            "entirely. The size of the hole, measured against the live registry on 2026-08-10: "
+            "stock_basic serves 5,539 listed securities against 339 delisted and 0 pending, "
+            "229 of the 339 terminated in 2020 or later and 52 of them in 2024 alone. At a 5d "
+            "horizon each terminated name loses roughly six prediction days, so about 2,034 "
+            "(security x prediction day) pairs across the whole history -- but the number that "
+            "matters is the other one: 100% of the 339 terminal windows are absent, and they "
+            "are the ones a survivorship-aware model most needs. The hole is also smaller than "
+            "it reads, because the collapse during the delisting arrangement period runs "
+            "*before* delist_date and those sessions are labelled normally. Stated rather than "
+            "closed: closing it needs a terminal-value convention (the last close? zero? the "
             "arrangement-board close?) that nothing in this repository has measured."
+        ),
+    ),
+    LabelLimitation(
+        code="a_timed_halt_that_ended_before_the_close_is_assumed_tradeable_at_it",
+        detail=(
+            "REFUSAL_HALTED_INTO_THE_CLOSE reads suspend_timing's right endpoints and refuses "
+            "the entry or the exit when one of them reaches CLOSING_CALL_AUCTION_START. What "
+            "it cannot see is the reverse case: a security halted 09:30-13:00 is assumed to "
+            "have been tradeable at 15:00 because it traded again in the afternoon, which the "
+            "column supports and its liquidity may not. It is also inert on the early history "
+            "for intraday_halts_are_unmarked_before_2015's reason -- a null suspend_timing "
+            "reads as a whole-day halt, which refuses anyway, so the pre-2015 direction is "
+            "over-refusal rather than under-refusal. And a window ending exactly at 14:57 is "
+            "refused although the security may have joined that auction; the corpus carries "
+            "two such rows (2020-02-03's '13:36-13:46,14:53-14:57' and 2022-04-25's "
+            "'14:52-14:57') and suspend_timing does not say which way they went. The shape "
+            "this closes is not rare: 39 of the 59 timed S rows served across 68 whole-market "
+            "sessions run through the close, and on 2015-07-08 30 of the 31 do -- of which 20 "
+            "were already refused as one-price sessions and 10 were being labelled at a 13:00 "
+            "print. Only the two ends are tested, for "
+            "only_the_two_ends_are_tested_for_tradability's reason."
         ),
     ),
 )
@@ -263,6 +360,13 @@ KNOWN_LABEL_LIMITATIONS: Final[tuple[LabelLimitation, ...]] = (
 
 **Not an enumeration of every way a label could be wrong.** These are the ones that follow from
 the boundaries the datasets underneath this contract have already measured.
+
+**No runtime exit, deliberately.** `panel_doctor.known_limitations(datasets)` keys its answers
+by dataset name and a label is not a dataset -- there is no partition to hang these on and no
+`--check` that could read them. So unlike `KNOWN_SUSPENSION_LIMITATIONS` these are read by
+people, and the only thing that mechanically holds them to the code is
+`tests/unit/domain/test_labels.py`. Wiring them into a report needs a consumer that reports on
+*contracts* rather than on stored datasets, which this repository does not have yet.
 """
 
 
@@ -276,6 +380,70 @@ class LabelRefusal:
     code: str
     day: date
     detail: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class HaltCorpus:
+    """`suspend_d` as it was read, together with the span that read covered.
+
+    The mapping alone is fail-open and it is the only one of `label_outcome`'s five market
+    inputs that was: an absent session means "no halt row", which is the ordinary case (5,312
+    of 2024-06-28's 5,338 priced names), and is therefore identical to "this year was never
+    loaded". `covered_from`/`covered_through` are the same pair `AdjustmentHistory` carries, and
+    for the same reason -- see this module's docstring.
+
+    A plain carrier: `require_coverage` is the rule and `label_outcome` is what calls it.
+    """
+
+    days: Mapping[date, SuspensionDay]
+    covered_from: date
+    covered_through: date
+
+    def require_coverage(self, sessions: tuple[date, ...]) -> None:
+        """Raise `LabelError` unless every one of `sessions` is inside the read.
+
+        Raises rather than refusing, because this is not a fact about the market: nothing is
+        known about those sessions, and a `LabelRefusal` would say the opposite of that.
+        """
+        outside = [day for day in sessions if not self.covered_from <= day <= self.covered_through]
+        if outside:
+            raise LabelError(
+                f"the halt corpus was read over {self.covered_from.isoformat()}.."
+                f"{self.covered_through.isoformat()} and this window needs "
+                f"{', '.join(day.isoformat() for day in outside)}; a session outside the read "
+                "carries no rows for the same reason an untroubled one does, so labelling it "
+                "would report 'nothing happened' about a partition nobody opened"
+            )
+
+    def state_on(self, day: date, ts_code: str) -> TradingState | None:
+        """This security's state on `day`, or `None` when no row mentions it."""
+        session = self.days.get(day)
+        return None if session is None else session.state_of(ts_code)
+
+    def timing_on(self, day: date, ts_code: str) -> str | None:
+        """This security's `suspend_timing` window on `day`, or `None`."""
+        session = self.days.get(day)
+        return None if session is None else session.timing_of(ts_code)
+
+
+def halt_corpus_for_years(
+    days: Mapping[date, SuspensionDay], *, years: tuple[int, ...]
+) -> HaltCorpus:
+    """A `HaltCorpus` over whole calendar years, which is how `load_suspensions` reads them.
+
+    `panel_ingest.load_suspensions(store, years=...)` is year-keyed, so the span it covers is
+    exactly `min(years)-01-01 .. max(years)-12-31`. Stated here rather than at each call site
+    because a window straddling New Year is the ordinary case for a 5d or 10d horizon and
+    every caller would otherwise have to derive the same two dates.
+    """
+    if not years:
+        raise LabelError(
+            "a halt corpus needs at least one year; a read of no years covers no session and "
+            "would refuse every window rather than describing one"
+        )
+    return HaltCorpus(
+        days=days, covered_from=date(min(years), 1, 1), covered_through=date(max(years), 12, 31)
+    )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -308,6 +476,14 @@ class LabelWindow:
         two `datetime`s, and pinning them to the session close in the zone the window was dated
         in keeps a stored validation result readable as "close to close" rather than as two
         arbitrary timestamps.
+
+        The zone is the window's own, which is the exchange's when the caller passed the
+        exchange's -- `MINIMUM_LABEL_ZONE_OFFSET` bounds how far west it may be, not which one
+        it is. A window dated in UTC therefore stamps 15:00 UTC here, three hours after the
+        real close; the pair is still ordered, still `session_count` sessions apart and still
+        the right two dates, but a reader who wants the wall-clock instant of a Shanghai close
+        has to have passed a Shanghai-offset zone. `panel/catalog.py`'s `DEFAULT_DATE_TIMEZONE`
+        is the value this repository actually passes.
         """
         if day not in self.sessions:
             raise LabelError(
@@ -356,10 +532,19 @@ class WindowReturn:
         """The gap this window's own rows allow, compounded from the per-session bounds.
 
         Each session's `SessionReturns.tolerance` is a number of yuan of `pre_close`; dividing
-        by that session's published `pre_close` puts it in return space, and the chain's bound
-        is the product. Reported rather than enforced: `session_returns` has already refused
-        any session whose own term was exceeded, so this product cannot be exceeded once the
-        window was built at all. See this module's docstring.
+        by that session's **published** `pre_close` puts it in return space, and the chain's
+        bound is the product. Published rather than implied on purpose: `published` is the
+        denominator of the `published` return this bound is a bound on, so the two are one
+        scale, while `implied_pre_close` is the factor path's reconstruction of it and is
+        exactly the quantity the tolerance exists to allow to differ. The two agree to 2e-7 on
+        the measured pair, which is why the choice needs a test that separates them rather than
+        a fixture where either would pass -- `tests/unit/domain/test_labels.py` builds a pair
+        that disagrees by 10% and asserts the published one.
+
+        Reported rather than enforced: `session_returns` has already refused any session whose
+        own term was exceeded, so this product cannot be exceeded once the window was built at
+        all. See this module's docstring, including how loose the product gets over a long
+        window.
         """
         bound = 1.0
         for entry in self.per_session:
@@ -415,6 +600,15 @@ class OutcomeLabel:
         return self.window_return.adjusted
 
 
+def _utc_hours(offset: timedelta | None) -> str:
+    """A UTC offset as a signed number of hours, for `build_label_window`'s refusal.
+
+    `timedelta(hours=-8)` renders as `-1 day, 16:00:00`, which is correct and unreadable in a
+    message whose whole subject is how far west a zone sits.
+    """
+    return "an unknown number of" if offset is None else f"{offset.total_seconds() / 3600.0:+g}"
+
+
 def build_label_window(
     *,
     as_of: datetime,
@@ -425,16 +619,37 @@ def build_label_window(
     """Turn a signal's instant and horizon into the sessions its outcome is measured over.
 
     `zone` has no default on purpose. An instant is not a session date until a timezone says
-    so, and 23:00 UTC on the 11th is the 12th in Asia/Shanghai -- so a UTC-dated label enters
-    one session early on every signal produced after 16:00 local. This repository already
-    records its answer once, as `panel/catalog.py`'s `DEFAULT_DATE_TIMEZONE`; a second default
-    here would be a second place for it to drift.
+    so, and this repository already records its answer once, as `panel/catalog.py`'s
+    `DEFAULT_DATE_TIMEZONE`; a second default here would be a second place for it to drift.
+
+    **Which way a wrong zone goes.** Dating in UTC is *not* a look-ahead, and an earlier
+    reading of this that said it was had the direction backwards: 16:00 Asia/Shanghai is 08:00
+    UTC the same day, so the two agree on every instant from 08:00 UTC onward and can differ
+    only between 00:00 and 08:00 Shanghai -- the pre-open hours, where UTC dates the signal a
+    day *earlier* and the entry is therefore an earlier session whose close is still in the
+    future. `2026-06-11T23:00Z` is 2026-06-12 in Asia/Shanghai and enters on Monday the 15th;
+    in UTC it is the 11th and enters on Friday the 12th, whose close had not happened yet.
+    Tighter, not early.
+
+    Early is what a zone *west* of the exchange does, and that is refused rather than
+    documented: `MINIMUM_LABEL_ZONE_OFFSET` carries the derivation, and the offset is read at
+    `as_of` so a zone is judged on the offset it actually had that day.
 
     Propagates `CalendarHorizonError` when the entry or the exit would fall outside the
     published calendar, and `HorizonError` when the horizon is not countable in sessions.
     Neither is repaired: a window that cannot be built is not a window that is empty.
     """
-    prediction_day = ensure_aware(as_of).astimezone(zone).date()
+    instant = ensure_aware(as_of).astimezone(zone)
+    offset = instant.utcoffset()
+    if offset is None or offset < MINIMUM_LABEL_ZONE_OFFSET:
+        raise LabelError(
+            f"{zone} is {_utc_hours(offset)}h from UTC at {instant.isoformat()}, west of the "
+            f"{_utc_hours(MINIMUM_LABEL_ZONE_OFFSET)}h a label window allows; a zone that far "
+            "west dates an afternoon Asia/Shanghai signal on the previous day, so the entry is "
+            "a session whose 15:00 close has already been published and the label would be "
+            "priced from a number that existed before the signal did"
+        )
+    prediction_day = instant.date()
     entry_day = calendar.next_trading_day(prediction_day)
     exit_day = calendar.shift(entry_day, horizon.sessions)
     return LabelWindow(
@@ -529,24 +744,26 @@ def label_outcome(
     bars: Mapping[date, DailyBar],
     factors: AdjustmentHistory,
     limits: Mapping[date, PriceLimit],
-    halts: Mapping[date, SuspensionDay],
+    halts: HaltCorpus,
     universe: StockUniverse,
 ) -> OutcomeLabel:
     """Label one security over one window, or name every reason it cannot be labelled.
 
-    `halts` is keyed only by the sessions that carry `suspend_d` rows, which is the shape
-    `suspensions_from_panel_rows` returns and the shape the data has -- 5,312 of 2024-06-28's
-    5,338 priced names have no row at all -- so a session absent from it means nothing happened,
-    not that the halt corpus was never read.
+    `halts` is a `HaltCorpus` rather than the bare mapping `suspensions_from_panel_rows`
+    returns, and it raises `LabelError` before anything else when the window reaches outside
+    the span that corpus was read over. Inside it, a session with no row means nothing happened
+    -- 5,312 of 2024-06-28's 5,338 priced names have none -- which is a claim only a corpus
+    that knows what it covers is entitled to make.
 
     `limits` is keyed by session for this one security; an absent entry means the exchange
     published no band, which is a real shape before 2023 and refuses rather than being read as
-    "not at a limit". None of the four mappings has a default: a waiver that is a default is an
+    "not at a limit". None of the inputs has a default: a waiver that is a default is an
     accident, which is `panel_ingest.write_daily_panel(halts=...)`'s own argument.
 
     Every refusal is collected rather than short-circuited, so a caller sees all of what is
     wrong with a window instead of the first thing to be checked.
     """
+    halts.require_coverage(window.sessions)
     refusals: list[LabelRefusal] = [
         refusal
         for day in window.sessions
@@ -558,6 +775,26 @@ def label_outcome(
     for day in (window.entry_day, window.exit_day):
         bar = bars.get(day)
         limit = limits.get(day)
+        timing = halts.timing_on(day, ts_code)
+        if (
+            halts.state_on(day, ts_code) is TradingState.interrupted
+            and timing is not None
+            and halt_spans_the_close(timing)
+        ):
+            refusals.append(
+                LabelRefusal(
+                    code=REFUSAL_HALTED_INTO_THE_CLOSE,
+                    day=day,
+                    detail=(
+                        f"{ts_code}'s halt on {day.isoformat()} ran {timing} and was still "
+                        f"open at {CLOSING_CALL_AUCTION_START.isoformat('minutes')}, so that "
+                        "session's close is an earlier print rather than an auction price and "
+                        "the position this label assumes could not have been opened or closed "
+                        "at it. The security did trade that day, which is why it is not "
+                        f"{REFUSAL_HALTED_SESSION}"
+                    ),
+                )
+            )
         if limit is None:
             refusals.append(
                 LabelRefusal(
@@ -623,7 +860,7 @@ def _session_refusals(
     *,
     ts_code: str,
     bars: Mapping[date, DailyBar],
-    halts: Mapping[date, SuspensionDay],
+    halts: HaltCorpus,
     universe: StockUniverse,
 ) -> tuple[LabelRefusal, ...]:
     """Everything wrong with one session of a window, from the registry, the halts and the
@@ -647,16 +884,16 @@ def _session_refusals(
                 ),
             )
         )
-    suspensions = halts.get(day)
-    if suspensions is not None and suspensions.state_of(ts_code) is TradingState.halted:
+    if halts.state_on(day, ts_code) is TradingState.halted:
         found.append(
             LabelRefusal(
                 code=REFUSAL_HALTED_SESSION,
                 day=day,
                 detail=(
                     f"{ts_code} was halted for the whole of {day.isoformat()} (an untimed S "
-                    "row), so that session has no price. A timed S and an R both traded and "
-                    "neither refuses"
+                    "row), so that session has no price. A timed S and an R both traded; "
+                    "whether a timed one could be traded at the close is "
+                    f"{REFUSAL_HALTED_INTO_THE_CLOSE}'s question, and only on the two ends"
                 ),
             )
         )

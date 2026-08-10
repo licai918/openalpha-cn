@@ -18,38 +18,43 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
 
+from openalpha_cn.domain import labels as labels_module
 from openalpha_cn.domain.adjustment import (
     AdjustmentHistory,
     FactorObservation,
     build_adjustment_history,
 )
-from openalpha_cn.domain.daily_prices import DailyBar, PriceDataError
+from openalpha_cn.domain.daily_prices import DailyBar, PriceDataError, SessionReturns
 from openalpha_cn.domain.horizon import HorizonError, parse_horizon
 from openalpha_cn.domain.labels import (
     KNOWN_LABEL_LIMITATIONS,
     LABEL_REFUSAL_CODES,
+    MINIMUM_LABEL_ZONE_OFFSET,
     REFUSAL_BEYOND_REGISTRY_SNAPSHOT,
     REFUSAL_DELISTED,
+    REFUSAL_HALTED_INTO_THE_CLOSE,
     REFUSAL_HALTED_SESSION,
     REFUSAL_LOCKED_AT_LIMIT,
     REFUSAL_MISSING_BAR,
     REFUSAL_NOT_YET_LISTED,
     REFUSAL_UNPUBLISHED_BAND,
+    HaltCorpus,
     LabelError,
     LabelWindow,
     OutcomeLabel,
+    WindowReturn,
     build_label_window,
+    halt_corpus_for_years,
     label_outcome,
     window_return,
 )
 from openalpha_cn.domain.price_limits import (
     PriceLimit,
-    SuspensionDay,
     SuspensionRecord,
     build_suspension_day,
 )
@@ -68,6 +73,7 @@ from openalpha_cn.domain.trading_calendar import (
 CODE = "000001.SZ"
 EXCHANGE = "SZSE"
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+YEAR = 2026
 
 FIRST_DAY = date(2026, 6, 1)
 LAST_DAY = date(2026, 6, 30)
@@ -187,17 +193,27 @@ def _locked(days: Sequence[date], day: date, price: float, *, side: str) -> dict
     return limits
 
 
-def _halt(day: date, *, suspend_type: str, timing: str | None) -> dict[date, SuspensionDay]:
-    return {
-        day: build_suspension_day(
-            day,
-            [
-                SuspensionRecord(
-                    ts_code=CODE, trade_date=day, suspend_type=suspend_type, timing=timing
-                )
-            ],
-        )
-    }
+def _halt(day: date, *, suspend_type: str, timing: str | None) -> HaltCorpus:
+    return halt_corpus_for_years(
+        {
+            day: build_suspension_day(
+                day,
+                [
+                    SuspensionRecord(
+                        ts_code=CODE, trade_date=day, suspend_type=suspend_type, timing=timing
+                    )
+                ],
+            )
+        },
+        years=(YEAR,),
+    )
+
+
+def _no_halts() -> HaltCorpus:
+    """A corpus that was read for 2026 and found nothing, which is not the same value as one
+    that was never read -- see
+    `test_a_window_reaching_outside_the_halt_read_raises_rather_than_labelling`."""
+    return halt_corpus_for_years({}, years=(YEAR,))
 
 
 def _window(horizon: str = "1d", *, closed: Sequence[date] = ()) -> LabelWindow:
@@ -228,7 +244,7 @@ def _label(
     bars: Mapping[date, DailyBar] | None = None,
     factors: AdjustmentHistory | None = None,
     limits: Mapping[date, PriceLimit] | None = None,
-    halts: Mapping[date, SuspensionDay] | None = None,
+    halts: HaltCorpus | None = None,
     universe: StockUniverse | None = None,
 ) -> OutcomeLabel:
     window = _window()
@@ -238,7 +254,7 @@ def _label(
         bars=_bars(ENTRY, EXIT) if bars is None else bars,
         factors=_factors(ENTRY, EXIT) if factors is None else factors,
         limits=_band(window.sessions) if limits is None else limits,
-        halts={} if halts is None else halts,
+        halts=_no_halts() if halts is None else halts,
         universe=_universe() if universe is None else universe,
     )
 
@@ -262,9 +278,9 @@ def test_the_entry_session_is_the_first_one_after_the_prediction_day() -> None:
 def test_the_prediction_day_is_the_exchange_date_of_the_signals_own_instant() -> None:
     """08:30 UTC on the 11th is 16:30 Asia/Shanghai the same day; 23:00 UTC is already the 12th.
 
-    A contract that dated the signal in UTC would read the second of those as the 11th and
-    enter one session early -- a look-ahead of exactly one session on every signal produced
-    after 16:00 local time.
+    So which zone dates the instant decides which sessions the label is measured over. Which
+    *direction* a UTC-dated one would go is the next test's subject, and it is not the one an
+    earlier reading of this file claimed.
     """
     horizon = parse_horizon("1d")
     calendar = _calendar()
@@ -284,6 +300,92 @@ def test_the_prediction_day_is_the_exchange_date_of_the_signals_own_instant() ->
 
     assert (after_close.prediction_day, after_close.entry_day) == (ENTRY, EXIT)
     assert (late_evening.prediction_day, late_evening.entry_day) == (EXIT, AFTER)
+
+
+def test_the_zone_argument_and_not_a_hard_coded_shanghai_decides_the_window() -> None:
+    """One instant, two legal zones, two different windows -- and the UTC one is *not* early.
+
+    This is the test the `zone` parameter did not have. Every other fixture in this file passes
+    `Asia/Shanghai`, so an implementation that ignored the argument and hard-coded
+    `ZoneInfo("Asia/Shanghai")` answered every one of them correctly. Here it cannot: 23:00 UTC
+    on the 11th is already the 12th in Shanghai, so Shanghai enters on Monday the 15th while
+    UTC enters on Friday the 12th.
+
+    And the second half is the correction. 16:00 Asia/Shanghai is 08:00 UTC the *same* day, so
+    the two datings agree on everything from 08:00 UTC onward and can differ only in the
+    pre-open hours -- where UTC is the *earlier* date and therefore the *earlier*, still
+    unfixed, entry close. `2026-06-12T07:00+08:00` is the exit session's own close, and the UTC
+    entry is that very session: in the future at the moment the signal was formed, not the
+    past. A UTC-dated label is tighter than a Shanghai-dated one, never early.
+    """
+    instant = datetime(2026, 6, 11, 23, 0, tzinfo=UTC)
+    horizon = parse_horizon("1d")
+    calendar = _calendar()
+
+    in_shanghai = build_label_window(
+        as_of=instant, zone=SHANGHAI, horizon=horizon, calendar=calendar
+    )
+    in_utc = build_label_window(as_of=instant, zone=UTC, horizon=horizon, calendar=calendar)
+
+    assert (in_shanghai.prediction_day, in_shanghai.entry_day) == (EXIT, AFTER)
+    assert (in_utc.prediction_day, in_utc.entry_day) == (ENTRY, EXIT)
+    assert in_utc.zone is UTC
+    assert datetime.combine(in_utc.entry_day, time(15, 0), tzinfo=SHANGHAI) > instant
+
+
+def test_a_zone_far_enough_west_to_date_a_look_ahead_is_refused() -> None:
+    """The counterexample to "never early", made unreachable.
+
+    A 15:30 Asia/Shanghai signal on 2026-01-15 -- after the close, which is this design's own
+    target case -- is 2026-01-14T23:30-08:00 in Los Angeles. Dated there the prediction day is
+    the 14th, the entry is the 15th, and the entry price is the 15th's 15:00 close: fixed
+    thirty minutes *before* the signal existed. A whole session of look-ahead, silently.
+    """
+    signal = datetime(2026, 1, 15, 15, 30, tzinfo=SHANGHAI)
+    january = build_trading_calendar(
+        EXCHANGE,
+        [
+            CalendarDay(
+                calendar_date=date(2026, 1, day), is_trading=date(2026, 1, day).weekday() < 5
+            )
+            for day in range(1, 32)
+        ],
+    )
+
+    with pytest.raises(LabelError, match=r"is -8h from UTC .* west of the -7h"):
+        build_label_window(
+            as_of=signal,
+            zone=ZoneInfo("America/Los_Angeles"),
+            horizon=parse_horizon("1d"),
+            calendar=january,
+        )
+
+
+def test_the_zone_is_judged_on_the_offset_it_had_at_that_instant_not_on_its_name() -> None:
+    """`America/Los_Angeles` is -8h in January and -7h in July, and only the first can date a
+    look-ahead: the derivation in `MINIMUM_LABEL_ZONE_OFFSET` makes the boundary exactly -7h,
+    at which the interval of look-ahead hours is empty. A guard keyed on the zone's name, or on
+    a fixed offset table, would refuse both.
+    """
+    july = build_trading_calendar(
+        EXCHANGE,
+        [
+            CalendarDay(
+                calendar_date=date(2026, 7, day), is_trading=date(2026, 7, day).weekday() < 5
+            )
+            for day in range(1, 32)
+        ],
+    )
+    los_angeles = ZoneInfo("America/Los_Angeles")
+    signal = datetime(2026, 7, 15, 15, 30, tzinfo=SHANGHAI)
+
+    window = build_label_window(
+        as_of=signal, zone=los_angeles, horizon=parse_horizon("1d"), calendar=july
+    )
+
+    assert signal.astimezone(los_angeles).utcoffset() == MINIMUM_LABEL_ZONE_OFFSET
+    assert window.prediction_day == date(2026, 7, 15)
+    assert datetime.combine(window.entry_day, time(15, 0), tzinfo=SHANGHAI) > signal
 
 
 def test_a_prediction_made_on_a_closed_day_still_enters_on_the_next_session() -> None:
@@ -555,7 +657,7 @@ def test_a_lock_on_a_session_between_the_two_ends_does_not_refuse() -> None:
         bars=_bars(ENTRY, EXIT, AFTER),
         factors=_factors(ENTRY, EXIT, AFTER),
         limits=_locked(window.sessions, EXIT, EXIT_CLOSE, side="up"),
-        halts={},
+        halts=_no_halts(),
         universe=_universe(),
     )
 
@@ -577,16 +679,102 @@ def test_a_whole_day_halt_refuses_and_names_both_the_halt_and_the_absent_bar() -
     assert _codes(label) == [(REFUSAL_HALTED_SESSION, EXIT), (REFUSAL_MISSING_BAR, EXIT)]
 
 
-def test_an_intraday_halt_traded_and_is_labelled() -> None:
-    """31 of 2015-07-08's 1,343 `S` rows carried a timing window and all 31 had a bar."""
-    label = _label(halts=_halt(EXIT, suspend_type="S", timing="13:00-15:00"))
+def test_an_intraday_halt_that_ended_before_the_close_traded_and_is_labelled() -> None:
+    """31 of 2015-07-08's 1,343 `S` rows carried a timing window and all 31 had a bar.
+
+    A morning halt is the case where "the security traded" and "the close is an auction price"
+    are both true, so nothing refuses.
+    """
+    label = _label(halts=_halt(EXIT, suspend_type="S", timing="09:30-13:00"))
 
     assert label.is_labelled
     assert label.realized_return == ADJUSTED_RETURN
 
 
+def test_an_intraday_halt_running_into_the_close_refuses_that_end_and_this_is_the_limitation() -> (
+    None
+):
+    """`13:00-15:00` -- halted from the lunch break to the bell -- is the common shape, and the
+    session's `close` is then the last print before 13:00 rather than a price anything could
+    have been filled at.
+
+    This file previously asserted the opposite of this (`test_an_intraday_halt_traded_and_is_
+    labelled`, on this very timing string): the row *had* traded, so `TradingState.interrupted`
+    was right and the label went out anyway. That is `REFUSAL_LOCKED_AT_LIMIT`'s own argument
+    -- "there was no counterparty ... could not have been opened or closed at that session's
+    price" -- left unenforced on the other side. 39 of the 59 timed `S` rows served across 68
+    whole-market sessions run through the close; on 2015-07-08, 30 of the 31 do, of which 20
+    were already one-price sessions and 10 were being labelled at a 13:00 print.
+    """
+    label = _label(halts=_halt(EXIT, suspend_type="S", timing="13:00-15:00"))
+
+    assert _codes(label) == [(REFUSAL_HALTED_INTO_THE_CLOSE, EXIT)]
+    assert label.window_return is None
+    assert "was still open at 14:57" in label.refusals[0].detail
+
+
+@pytest.mark.parametrize(
+    ("timing", "refused"),
+    [
+        ("13:00-15:00", True),
+        ("14:52-14:57", True),
+        ("13:36-13:46,14:53-14:57", True),
+        ("09:30-11:30,13:00-15:00", True),
+        ("halted all afternoon", True),
+        ("09:30-13:00", False),
+        ("09:30-10:00", False),
+        ("09:31-09:41,09:43-09:53", False),
+        ("11:21-13:01", False),
+    ],
+)
+def test_each_measured_timing_shape_is_read_the_way_its_right_endpoint_reads(
+    timing: str, refused: bool
+) -> None:
+    """All but `09:30-11:30,13:00-15:00` and the unparseable one were served by `suspend_d` on
+    a real session between 2013 and 2026.
+
+    The boundary is `14:57`, when the closing call auction opens: `14:52-14:57` refuses because
+    `suspend_timing` does not say whether that security joined the auction and reading it as
+    "resumed in time" is the fail-open direction, while `11:21-13:01` does not because the
+    afternoon ran normally after it. An unparseable window refuses for the same reason as the
+    boundary one -- an unknown right endpoint is not an early one.
+    """
+    label = _label(halts=_halt(ENTRY, suspend_type="S", timing=timing))
+
+    assert (_codes(label) == [(REFUSAL_HALTED_INTO_THE_CLOSE, ENTRY)]) is refused
+    assert label.is_labelled is not refused
+
+
+def test_a_close_spanning_halt_between_the_two_ends_is_held_through() -> None:
+    """`only_the_two_ends_are_tested_for_tradability`, applied to this refusal too: a position
+    opened at the entry close and closed at the exit close is not traded in between, and the
+    published chain still telescopes because the next session's `pre_close` is that stale close.
+    """
+    window = _window("2d")
+
+    label = label_outcome(
+        window,
+        ts_code=CODE,
+        bars=_bars(ENTRY, EXIT, AFTER),
+        factors=_factors(ENTRY, EXIT, AFTER),
+        limits=_band(window.sessions),
+        halts=_halt(EXIT, suspend_type="S", timing="13:00-15:00"),
+        universe=_universe(),
+    )
+
+    assert label.is_labelled
+    assert label.realized_return == pytest.approx(0.05118850718661849, abs=1e-15)
+
+
 def test_a_resumption_traded_and_is_labelled() -> None:
-    """An `R` row is a resumption, not a halt; every one probed on eight sessions had a bar."""
+    """An `R` row is a resumption, not a halt, and it carries no window to test against the
+    close either.
+
+    Not "every `R` row has a bar": `TradingState.resumed` withdrew that reading -- a quarterly
+    sweep found seven sessions carrying an `R` with no bar, every one a NEEQ-era `.BJ` code
+    `daily` did not serve at all. Such a row lands in `REFUSAL_MISSING_BAR` here, which is the
+    loud direction, rather than being excused.
+    """
     label = _label(halts=_halt(EXIT, suspend_type="R", timing=None))
 
     assert label.is_labelled
@@ -601,10 +789,69 @@ def test_an_absent_bar_with_no_halt_behind_it_is_reported_as_exactly_that() -> N
 
 def test_a_session_the_halt_corpus_says_nothing_about_is_treated_as_having_traded() -> None:
     """`suspensions_from_panel_rows` keys only the sessions that carry rows, and 5,312 of
-    2024-06-28's 5,338 priced names have no row at all, so an absent session is the ordinary
-    case rather than an unread one.
+    2024-06-28's 5,338 priced names have no row at all, so an absent session **inside the read**
+    is the ordinary case rather than an unread one.
     """
     assert _label(halts=_halt(date(2026, 6, 8), suspend_type="S", timing=None)).is_labelled
+
+
+def test_a_window_reaching_outside_the_halt_read_raises_rather_than_labelling() -> None:
+    """The one input that used to be fail-open. `bars` and `limits` refuse a session they have
+    no key for, `universe` carries `snapshot_date`, `factors` carries `covered_from`/
+    `covered_through` and `calendar` raises past its horizon -- but an absent halt session means
+    "nothing happened", so a corpus that was never read is indistinguishable from a quiet one.
+
+    `load_suspensions` reads **by year** while a 5d or 10d window straddles New Year by
+    construction, which is how a caller reaches this without doing anything unusual.
+    """
+    window = _window()
+
+    with pytest.raises(LabelError, match=r"read over 2025-01-01\.\.2025-12-31 and this window"):
+        label_outcome(
+            window,
+            ts_code=CODE,
+            bars=_bars(ENTRY, EXIT),
+            factors=_factors(ENTRY, EXIT),
+            limits=_band(window.sessions),
+            halts=halt_corpus_for_years({}, years=(2025,)),
+            universe=_universe(),
+        )
+
+
+def test_the_same_bars_label_or_not_depending_only_on_which_year_of_halts_was_read() -> None:
+    """The failure the coverage span closes, shown as the pair it used to be.
+
+    One corpus was read for 2026 and found an untimed halt on the exit; the other was read for
+    2025 and knows nothing about June 2026. Before `HaltCorpus`, the second answered "labelled"
+    -- the same bars, the same limits, the same registry, and a number instead of a refusal,
+    decided entirely by whether the caller happened to load that partition.
+    """
+    read_2026 = _label(bars=_bars(ENTRY), halts=_halt(EXIT, suspend_type="S", timing=None))
+
+    assert _codes(read_2026) == [(REFUSAL_HALTED_SESSION, EXIT), (REFUSAL_MISSING_BAR, EXIT)]
+    with pytest.raises(LabelError, match="a partition nobody opened"):
+        label_outcome(
+            _window(),
+            ts_code=CODE,
+            bars=_bars(ENTRY),
+            factors=_factors(ENTRY, EXIT),
+            limits=_band(_window().sessions),
+            halts=halt_corpus_for_years({}, years=(2025,)),
+            universe=_universe(),
+        )
+
+
+def test_a_halt_corpus_over_no_years_is_refused_at_construction() -> None:
+    with pytest.raises(LabelError, match="a halt corpus needs at least one year"):
+        halt_corpus_for_years({}, years=())
+
+
+def test_a_corpus_read_across_a_year_boundary_covers_both_sides_of_it() -> None:
+    """The shape the year-keyed reader produces when a caller does load both partitions."""
+    corpus = halt_corpus_for_years({}, years=(2025, 2026))
+
+    assert (corpus.covered_from, corpus.covered_through) == (date(2025, 1, 1), date(2026, 12, 31))
+    corpus.require_coverage((date(2025, 12, 31), date(2026, 1, 5)))
 
 
 # --- boundary: the registry ------------------------------------------------------------------
@@ -664,6 +911,7 @@ def test_every_declared_refusal_code_is_reachable_from_a_real_window() -> None:
         for label in (
             _label(bars=_bars(ENTRY)),
             _label(bars=_bars(ENTRY), halts=_halt(EXIT, suspend_type="S", timing=None)),
+            _label(halts=_halt(EXIT, suspend_type="S", timing="13:00-15:00")),
             _label(limits=_locked(window.sessions, ENTRY, ENTRY_CLOSE, side="up")),
             _label(limits=unpublished),
             _label(bars=_bars(ENTRY), universe=_universe(delisted_on=EXIT)),
@@ -674,6 +922,112 @@ def test_every_declared_refusal_code_is_reachable_from_a_real_window() -> None:
     }
 
     assert produced == set(LABEL_REFUSAL_CODES)
+
+
+def test_the_refusal_table_reconciles_against_the_modules_own_constants_in_both_directions() -> (
+    None
+):
+    """The half the reachability test above cannot see, and the hole `V2-P1-015`'s review named.
+
+    That test compares *produced* codes against the tuple, so a `REFUSAL_*` constant declared,
+    raised from `label_outcome` and simply left out of `LABEL_REFUSAL_CODES` passes it as long
+    as no fixture happens to drive the new branch -- the table and the implementation drift
+    apart and every assertion stays green. Scanning the module for the constants themselves
+    closes it from the other side, and the two together mean the tuple is neither short nor
+    long.
+    """
+    declared = {
+        value
+        for name, value in vars(labels_module).items()
+        if name.startswith("REFUSAL_") and isinstance(value, str)
+    }
+
+    assert declared == set(LABEL_REFUSAL_CODES)
+    assert len(LABEL_REFUSAL_CODES) == len(declared) == 8
+    assert list(LABEL_REFUSAL_CODES) == sorted(LABEL_REFUSAL_CODES)
+
+
+def test_the_tolerance_is_scaled_by_the_published_pre_close_and_not_the_implied_one() -> None:
+    """The two agree to 2e-7 on the measured pair, so every fixture in this file passes either
+    way. This one separates them by 10% and names which denominator the bound is stated in:
+    `published` is the denominator of the `published` return the bound is a bound on, while
+    `implied` is the factor path's reconstruction of it and is exactly what the tolerance
+    exists to let differ.
+    """
+    session = SessionReturns(
+        ts_code=CODE,
+        day=EXIT,
+        previous_day=ENTRY,
+        published=0.0,
+        adjusted=0.0,
+        unadjusted=0.0,
+        published_pre_close=10.0,
+        implied_pre_close=11.0,
+        factor=1.0,
+        previous_factor=1.0,
+    )
+    computed = WindowReturn(
+        ts_code=CODE,
+        entry_day=ENTRY,
+        exit_day=EXIT,
+        published=0.0,
+        adjusted=0.0,
+        unadjusted=0.0,
+        entry_adjusted_close=10.0,
+        exit_adjusted_close=10.0,
+        per_session=(session,),
+    )
+
+    assert session.tolerance == pytest.approx(0.0122, abs=1e-12)
+    assert computed.tolerance == pytest.approx(session.tolerance / 10.0, rel=1e-12)
+    assert computed.tolerance != pytest.approx(session.tolerance / 11.0, rel=1e-9)
+
+
+def test_the_reported_bound_inflates_to_uselessness_over_a_long_window() -> None:
+    """Stated because `disagreement <= tolerance` reads like a guarantee and stops being one.
+
+    The per-session term is dominated by `MAX_PRE_CLOSE_DISAGREEMENT`, a flat 0.01 yuan, so it
+    is largest exactly where the price is smallest. A 10-yuan `pre_close` on unit factors is
+    allowed 0.0012 a session, and sixty of those compound to 7.46% -- wider than most things a
+    sixty-session return could be.
+    """
+    session = SessionReturns(
+        ts_code=CODE,
+        day=EXIT,
+        previous_day=ENTRY,
+        published=0.0,
+        adjusted=0.0,
+        unadjusted=0.0,
+        published_pre_close=10.0,
+        implied_pre_close=10.0,
+        factor=1.0,
+        previous_factor=1.0,
+    )
+    one = WindowReturn(
+        ts_code=CODE,
+        entry_day=ENTRY,
+        exit_day=EXIT,
+        published=0.0,
+        adjusted=0.0,
+        unadjusted=0.0,
+        entry_adjusted_close=10.0,
+        exit_adjusted_close=10.0,
+        per_session=(session,),
+    )
+    sixty = WindowReturn(
+        ts_code=CODE,
+        entry_day=ENTRY,
+        exit_day=EXIT,
+        published=0.0,
+        adjusted=0.0,
+        unadjusted=0.0,
+        entry_adjusted_close=10.0,
+        exit_adjusted_close=10.0,
+        per_session=(session,) * 60,
+    )
+
+    assert one.tolerance == pytest.approx(0.0012, abs=1e-12)
+    assert sixty.tolerance == pytest.approx(0.0746, abs=5e-5)
 
 
 def test_the_declared_limitations_are_distinct_and_each_carries_a_reason() -> None:

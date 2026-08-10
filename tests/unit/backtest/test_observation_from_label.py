@@ -14,6 +14,7 @@ These tests pin that identity rather than the resemblance -- `==`, not `approx`.
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -21,20 +22,29 @@ import pytest
 from openalpha_cn.backtest.validation import (
     LABEL_PROVENANCE_NOTE,
     OutcomeObservation,
+    OutcomeValidator,
     observation_from_label,
 )
 from openalpha_cn.domain.adjustment import FactorObservation, build_adjustment_history
 from openalpha_cn.domain.daily_prices import DailyBar
+from openalpha_cn.domain.evidence import EvidenceSnapshot
 from openalpha_cn.domain.horizon import parse_horizon
 from openalpha_cn.domain.labels import (
     LabelError,
     OutcomeLabel,
     build_label_window,
+    halt_corpus_for_years,
     label_outcome,
 )
 from openalpha_cn.domain.price_limits import PriceLimit
 from openalpha_cn.domain.stock_universe import SecurityLifecycle, StockUniverse
+from openalpha_cn.domain.time import Timeline
 from openalpha_cn.domain.trading_calendar import CalendarDay, build_trading_calendar
+from openalpha_cn.runtime.contracts import ResearchRunRequest, ResearchRunResult
+from openalpha_cn.runtime.engine import ResearchEngine
+from openalpha_cn.runtime.memory import InMemoryResearchMemory
+from openalpha_cn.storage.recovery import SQLiteRecoveryStore
+from openalpha_cn.storage.sqlite import SQLiteRunRepository
 
 CODE = "000001.SZ"
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -91,13 +101,54 @@ def _label(*, halted: bool = False) -> OutcomeLabel:
             day: PriceLimit(ts_code=CODE, trade_date=day, up_limit=1000.0, down_limit=0.01)
             for day in window.sessions
         },
-        halts={},
+        halts=halt_corpus_for_years({}, years=(2026,)),
         universe=StockUniverse(
             snapshot_date=date(2026, 6, 30),
             securities=(
                 SecurityLifecycle(ts_code=CODE, exchange="SZSE", listed_on=date(1991, 4, 3)),
             ),
         ),
+    )
+
+
+def _research(tmp_path: Path, now: datetime) -> ResearchRunResult:
+    """A real `run_cycle` result, so the validator below is the real one.
+
+    Rebuilt here rather than imported from `tests/unit/backtest/test_validation.py`, whose
+    `research_result` fixture is local to that file. The `limit_up` evidence is what makes the
+    decision come out `"watch"`, which is the branch that computes a realized return at all.
+    """
+    evidence = EvidenceSnapshot(
+        subject=CODE,
+        kind="limit_up",
+        timeline=Timeline(event_time=now, available_time=now, ingested_time=now, revision_time=now),
+        source_id="synthetic",
+        source_license="CC0-1.0",
+        redistribution="allowed",
+        summary="Synthetic limit-up.",
+        payload={
+            "schema": "a-share-evidence/v1",
+            "family": "market_event",
+            "facts": {"close": 10.0, "pct_change": 10.0, "board_count": 1},
+            "quality_flags": [],
+        },
+    )
+    return ResearchEngine(
+        repository=SQLiteRunRepository(tmp_path / "state.sqlite3"),
+        memory=InMemoryResearchMemory(),
+        clock=lambda: now,
+        recovery_store=SQLiteRecoveryStore(tmp_path / "state.sqlite3"),
+    ).run_cycle(
+        ResearchRunRequest(
+            run_id="run_label_bridge",
+            mode="backtest",
+            subject=CODE,
+            as_of=now,
+            evidence=(evidence,),
+            code_commit="0123456789abcdef",
+            config_digest="c" * 64,
+            random_seed=7,
+        )
     )
 
 
@@ -109,6 +160,58 @@ def test_the_validators_own_arithmetic_reproduces_the_label_exactly() -> None:
 
     assert observation.end_price / observation.start_price - 1 == ADJUSTED_RETURN
     assert observation.end_price / observation.start_price - 1 != pytest.approx(UNADJUSTED_RETURN)
+
+
+def test_running_the_real_validator_on_this_observation_returns_the_labels_own_number(
+    tmp_path: Path, frozen_now: datetime
+) -> None:
+    """The identity above, asserted through `OutcomeValidator.validate` rather than beside it.
+
+    The test before this one restates the validator's expression instead of calling it, so a
+    validator that dropped the `- 1`, or squared the ratio, or read the prices in the other
+    order would leave it green. This one runs the real method on the real observation and
+    compares its `realized_return` against `OutcomeLabel.realized_return` -- the two numbers
+    the whole bridge exists to make equal -- and against the stored `ValidationResult`'s own
+    reconciliation of the attribution.
+    """
+    label = _label()
+    result = OutcomeValidator().validate(
+        research=_research(tmp_path, frozen_now),
+        observation=observation_from_label(label, benchmark_return=0.01, transaction_cost=0.002),
+    )
+
+    assert result.realized_return == label.realized_return == ADJUSTED_RETURN
+    assert result.net_active_return == pytest.approx(ADJUSTED_RETURN - 0.012, abs=1e-15)
+    assert sum(item.contribution for item in result.attribution) == pytest.approx(
+        result.net_active_return
+    )
+    assert result.observation_start == datetime(2026, 6, 11, 7, 0, tzinfo=UTC)
+
+
+def test_a_decision_that_took_no_position_reports_zero_beside_a_note_describing_a_move(
+    tmp_path: Path, frozen_now: datetime
+) -> None:
+    """Recorded because it reads as a contradiction and is not one.
+
+    `OutcomeValidator.validate` computes a realized return only for `"watch"`: `"avoid"` and
+    `"abstain"` took no position, so nothing was realized and `0.0` is the position's return.
+    The provenance note travels from the label regardless and still describes the security
+    moving +2.74%, so a stored `ValidationResult` can carry `realized_return=0.0` next to a
+    note quoting a non-zero number. Both are right and they answer different questions -- what
+    the decision earned, and what the security did -- which is why `V2-P1-017` deliberately did
+    not merge them.
+    """
+    research = _research(tmp_path, frozen_now)
+    observation = observation_from_label(_label(), benchmark_return=0.0, transaction_cost=0.0)
+    abstained = research.model_copy(
+        update={"decision": research.decision.model_copy(update={"final_action": "abstain"})}
+    )
+
+    result = OutcomeValidator().validate(research=abstained, observation=observation)
+
+    assert research.decision.final_action == "watch"
+    assert result.realized_return == 0.0
+    assert "0.027422506154573423" in result.data_quality_notes[0]
 
 
 def test_the_two_prices_are_the_backward_adjusted_closes_and_not_the_raw_ones() -> None:

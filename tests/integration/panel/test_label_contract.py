@@ -42,11 +42,14 @@ from openalpha_cn.domain.daily_prices import DailyBar
 from openalpha_cn.domain.horizon import parse_horizon
 from openalpha_cn.domain.labels import (
     REFUSAL_DELISTED,
+    REFUSAL_HALTED_INTO_THE_CLOSE,
     REFUSAL_HALTED_SESSION,
     REFUSAL_MISSING_BAR,
     REFUSAL_UNPUBLISHED_BAND,
+    LabelError,
     OutcomeLabel,
     build_label_window,
+    halt_corpus_for_years,
     label_outcome,
 )
 from openalpha_cn.domain.price_limits import PriceLimit, TradingState
@@ -117,7 +120,9 @@ def _labelled(
         bars=bars,
         factors=histories[code] if factors is None else factors,
         limits=limits,
-        halts=load_suspensions(store, years=(YEAR,), as_of=AS_OF, max_staleness=None),
+        halts=halt_corpus_for_years(
+            load_suspensions(store, years=(YEAR,), as_of=AS_OF, max_staleness=None), years=(YEAR,)
+        ),
         universe=load_stock_universe(store, years=(YEAR,), as_of=AS_OF, max_staleness=None),
     )
     return panel, label
@@ -188,6 +193,30 @@ def test_the_timed_interruption_inside_that_window_traded_and_did_not_refuse(
     assert halts[interrupted_on].state_of("000001.SZ") is TradingState.interrupted
     assert interrupted_on in label.window.sessions
     assert label.is_labelled
+    # It is labelled because the halt falls strictly between the two ends, not because a timed
+    # halt is always harmless: the generator writes `13:00-15:00`, which is the shape the next
+    # test refuses when the window's exit lands on it.
+    assert interrupted_on not in (label.window.entry_day, label.window.exit_day)
+    assert halts[interrupted_on].timing_of("000001.SZ") == "13:00-15:00"
+
+
+def test_the_same_interruption_refuses_once_the_window_exits_on_it(tmp_path: Path) -> None:
+    """`13:00-15:00` is what the generator writes and what 30 of 2015-07-08's 31 timed rows
+    carry: halted from the lunch break to the bell, so the session's `close` is the last print
+    before 13:00 and a position could not have been closed at it.
+
+    The two-session window from the same prediction day exits on that session instead of
+    holding through it, and the same stored rows then produce a refusal rather than a number.
+    """
+    panel, label = _labelled(
+        tmp_path, code="000001.SZ", prediction_day=BEFORE_THE_WINDOW, horizon="2d"
+    )
+
+    assert label.window.exit_day == panel.sessions[2]
+    assert [(item.code, item.day) for item in label.refusals] == [
+        (REFUSAL_HALTED_INTO_THE_CLOSE, panel.sessions[2])
+    ]
+    assert label.window_return is None
 
 
 def test_a_whole_day_halt_read_back_from_the_store_refuses_and_names_the_absent_bar(
@@ -245,6 +274,42 @@ def test_a_security_the_registry_terminated_cannot_be_labelled_over_the_window(
         REFUSAL_UNPUBLISHED_BAND,
     }
     assert len(label.refusals) == 6
+
+
+def test_a_corpus_read_for_the_wrong_year_raises_instead_of_reporting_a_quiet_market(
+    tmp_path: Path,
+) -> None:
+    """`load_suspensions` is year-keyed and the same rows that carry the panel's one untimed
+    halt say nothing at all when the caller asks for the year before.
+
+    Read as a bare mapping that is indistinguishable from "no halts in this window", which is
+    how `601318.SH`'s refused window would have come back labelled. The span the read covered
+    travels with it, so it raises.
+    """
+    panel = generate_panel(shapes=SHAPES)
+    store = PanelStore(tmp_path / "panel")
+    write_generated_panel(store, panel)
+    calendar = load_trading_calendar(store, exchange=EXCHANGE, years=(YEAR,), as_of=AS_OF)
+    window = build_label_window(
+        as_of=datetime(2026, 1, 6, 8, 30, tzinfo=UTC),
+        zone=SHANGHAI,
+        horizon=parse_horizon("2d"),
+        calendar=calendar,
+    )
+    rows = load_suspensions(store, years=(YEAR,), as_of=AS_OF, max_staleness=None)
+
+    with pytest.raises(LabelError, match="a partition nobody opened"):
+        label_outcome(
+            window,
+            ts_code="601318.SH",
+            bars={},
+            factors=load_adjustment_histories(
+                store, years=(YEAR,), as_of=AS_OF, max_staleness=None
+            )["601318.SH"],
+            limits={},
+            halts=halt_corpus_for_years(rows, years=(YEAR - 1,)),
+            universe=load_stock_universe(store, years=(YEAR,), as_of=AS_OF, max_staleness=None),
+        )
 
 
 def test_the_window_steps_over_a_weekday_the_stored_calendar_reports_closed(

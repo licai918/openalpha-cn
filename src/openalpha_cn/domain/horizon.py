@@ -86,6 +86,15 @@ class HorizonUnit(Enum):
     """Calendar spans. Legal on a signal, not convertible into a session count."""
 
 
+MAX_HORIZON_COUNT: Final[int] = 999
+"""The largest count `HORIZON_PATTERN`'s three digits admit, as a number rather than a regex.
+
+`ResearchHorizon.__post_init__` needs the bound arithmetically and the field needs it as a
+pattern, so the two are stated once each and
+`tests/unit/domain/test_horizon.py::test_the_direct_constructor_and_the_grammar_admit_the_same_counts`
+walks the boundary through both to keep them from drifting apart.
+"""
+
 HORIZON_PATTERN: Final[str] = (
     r"^[1-9][0-9]{0,2}[" + "".join(unit.value for unit in HorizonUnit) + r"]$"
 )
@@ -104,12 +113,32 @@ _HORIZON = re.compile(HORIZON_PATTERN)
 class ResearchHorizon:
     """A parsed research horizon: how many of which unit.
 
-    A plain carrier with no validation of its own, following `CalendarDay`'s precedent -- the
-    rules live once, in `parse_horizon`.
+    **Not a plain carrier**, unlike most of the dataclasses in `domain/`, because this one has
+    a second constructor that is not `parse_horizon`: a caller can write
+    `ResearchHorizon(count=..., unit=...)` directly and skip the grammar entirely. Every value
+    the grammar admits satisfies these checks, so `parse_horizon` is unaffected; what they
+    close is the direct path. Left open, `count=0` built a window collapsed onto a single
+    session and failed several frames later inside `domain/adjustment.py` with an
+    `AdjustmentError`, and `count=-3` failed inside `domain/trading_calendar.py` with a
+    `TradingCalendarError` -- both fail-closed, but both answering for a malformed horizon in a
+    sibling module's vocabulary, which is the wrong module's error to catch.
     """
 
     count: int
     unit: HorizonUnit
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.unit, HorizonUnit):
+            raise HorizonError(
+                f"{self.unit!r} is not a HorizonUnit; the four units are "
+                f"{[unit.value for unit in HorizonUnit]}"
+            )
+        if type(self.count) is not int or not 1 <= self.count <= MAX_HORIZON_COUNT:
+            raise HorizonError(
+                f"{self.count!r} is not a horizon count; the grammar admits 1..."
+                f"{MAX_HORIZON_COUNT} ({HORIZON_PATTERN}), and a count of zero is not a "
+                "window while a negative one runs backwards from the entry session"
+            )
 
     @property
     def text(self) -> str:

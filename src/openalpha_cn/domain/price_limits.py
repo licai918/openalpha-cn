@@ -164,7 +164,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, time
 from enum import Enum
 from math import isfinite
 from types import MappingProxyType
@@ -222,6 +222,14 @@ PRICE_LIMIT_PANEL_COLUMNS: Final[tuple[str, ...]] = (
     SUBJECT_COLUMN_NAME,
     *PRICE_LIMIT_DATA_COLUMNS,
 )
+
+CLOSING_CALL_AUCTION_START: Final[time] = time(14, 57)
+"""When the closing call auction opens, written the way `suspend_timing` writes a clock time.
+
+`daily.close` is that auction's price on both exchanges, so a halt still running at this
+instant means the published close is an earlier print that no order could have been filled at.
+`halt_spans_the_close` is the question; `domain/labels.py` is the consumer that acts on it.
+"""
 
 HALT_TYPE: Final[str] = "S"
 RESUMPTION_TYPE: Final[str] = "R"
@@ -418,6 +426,12 @@ class TradingState(Enum):
 
     31 of 2015-07-08's 1,343 `S` rows were this shape and all 31 had a bar. Counting them as
     halted is how a cross-section reader over-explains a thin session.
+
+    **A bar is not a fill at the close.** 39 of the 59 timed rows served across 68 whole-market
+    sessions were still halted when the closing call auction opened -- 30 of that 2015-07-08
+    set among them -- so their `daily.close` is the last print before the halt began.
+    `halt_spans_the_close` is that question, and it is the window rather than the state that
+    answers it.
     """
 
     resumed = "resumed"
@@ -617,6 +631,44 @@ class SuspensionRecord:
         return TradingState.interrupted
 
 
+def halt_spans_the_close(timing: str) -> bool:
+    """Whether a timed `S` row's halt was still running at the closing call auction.
+
+    `suspend_timing` is one or more comma-separated `HH:MM-HH:MM` halt windows -- the spans the
+    security did **not** trade in -- and the answer is `True` when any of them runs to
+    `CLOSING_CALL_AUCTION_START` or beyond.
+
+    **The shape this exists for is the common one.** A sweep of 68 whole-market sessions (the
+    first open session of each quarter from 2013-01-04 to 2026-10-08, plus the sessions this
+    module probed for the three-state split) served 59 timed `S` rows, and **39 of them run
+    through the close**. The single most common spelling is `13:00-15:00`: halted from the
+    lunch break to the bell, so `daily.close` is the last print before 13:00. On 2015-07-08
+    alone, **30 of the 31** timed rows are that shape, and all 31 have a bar -- which is why
+    `TradingState.interrupted` is right that they traded and why "traded" is not the same
+    question as "could have been bought or sold at the close".
+
+    A window ending exactly at 14:57 counts as spanning it. Whether such a security actually
+    took part in that session's auction is not something `suspend_timing` says, and reading the
+    boundary as "resumed in time" is the fail-open direction for anything that prices at the
+    close. The two measured rows at that boundary are 2020-02-03's `13:36-13:46,14:53-14:57`
+    and 2022-04-25's `14:52-14:57`.
+
+    An unparseable window is also `True`, for the same reason: a right endpoint this cannot
+    read is a right endpoint that is unknown.
+    """
+    for window in timing.split(","):
+        ends = window.split("-")
+        if len(ends) != 2:
+            return True
+        try:
+            finish = time.fromisoformat(ends[1].strip())
+        except ValueError:
+            return True
+        if finish >= CLOSING_CALL_AUCTION_START:
+            return True
+    return False
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SuspensionDay:
     """One session's halts, partitioned by the three states a `suspend_d` row can carry.
@@ -630,6 +682,14 @@ class SuspensionDay:
     halted: tuple[str, ...]
     interrupted: tuple[str, ...]
     resumed: tuple[str, ...]
+    timings: tuple[tuple[str, str], ...]
+    """`(ts_code, suspend_timing)` for every `interrupted` name, sorted by code.
+
+    The column itself rather than the verdict derived from it, because "the security traded"
+    and "the security could have been traded at the close" are different questions and only the
+    first is answerable from `TradingState`. Pairs rather than a mapping so the value stays
+    hashable and deterministic like the three tuples beside it; `timing_of` is the lookup.
+    """
 
     @property
     def traded(self) -> frozenset[str]:
@@ -662,6 +722,18 @@ class SuspensionDay:
             return TradingState.interrupted
         if ts_code in self.resumed:
             return TradingState.resumed
+        return None
+
+    def timing_of(self, ts_code: str) -> str | None:
+        """This security's `suspend_timing` window, or `None` when it has no timed halt.
+
+        `None` for all three of "not mentioned", "resumed" and "halted for the whole session",
+        because none of those carries a window: a caller asking this question has already
+        established that the row is `TradingState.interrupted`.
+        """
+        for code, timing in self.timings:
+            if code == ts_code:
+                return timing
         return None
 
     def is_halted(self, ts_code: str) -> bool:
@@ -775,14 +847,16 @@ class LimitTouch:
 def build_suspension_day(day: date, records: Iterable[SuspensionRecord]) -> SuspensionDay:
     """Assemble one session's `SuspensionDay` from its rows, in any order.
 
-    Refuses, rather than repairs, four things: a record for another session, an unknown
+    Refuses, rather than repairs, five things: a record for another session, an unknown
     `suspend_type`, a blank `suspend_timing` (which would read as an untimed halt while
-    carrying a column the upstream populated), and one security appearing twice in states that
-    disagree. Byte-identical duplicates collapse, following `build_name_history`: a duplicate
-    carries no fact the original does not.
+    carrying a column the upstream populated), one security appearing twice in states that
+    disagree, and one security appearing twice with two different halt windows. Byte-identical
+    duplicates collapse, following `build_name_history`: a duplicate carries no fact the
+    original does not, and one live `namechange` pull returned 380 of them.
     """
     _require_plain_date(day, "day")
     states: dict[str, TradingState] = {}
+    timings: dict[str, str] = {}
     for record in records:
         _require_text(record.ts_code, "ts_code")
         _require_plain_date(record.trade_date, "trade_date")
@@ -816,11 +890,22 @@ def build_suspension_day(day: date, records: Iterable[SuspensionRecord]) -> Susp
                 "two sources that were never reconciled"
             )
         states[record.ts_code] = state
+        if state is TradingState.interrupted and timing is not None:
+            recorded = timings.get(record.ts_code)
+            if recorded is not None and recorded != timing:
+                raise SuspensionError(
+                    f"{record.ts_code} is halted {recorded!r} and {timing!r} on "
+                    f"{day.isoformat()}; one row carries every window a session has (the "
+                    "corpus spells a two-window halt '13:36-13:46,14:53-14:57'), so two "
+                    "disagreeing windows are two sources that were never reconciled"
+                )
+            timings[record.ts_code] = timing
     return SuspensionDay(
         day=day,
         halted=tuple(sorted(c for c, s in states.items() if s is TradingState.halted)),
         interrupted=tuple(sorted(c for c, s in states.items() if s is TradingState.interrupted)),
         resumed=tuple(sorted(c for c, s in states.items() if s is TradingState.resumed)),
+        timings=tuple(sorted(timings.items())),
     )
 
 
