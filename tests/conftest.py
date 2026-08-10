@@ -16,11 +16,13 @@ V2-P0B-013.
 from __future__ import annotations
 
 import logging
+import socket
 from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
+from offline_guard import GUARDED_SOCKET_FAMILIES, REFUSAL_MESSAGE, OfflineSuiteViolation
 
 from openalpha_cn.backtest.execution import MarketBar
 from openalpha_cn.domain.evidence import EvidenceSnapshot
@@ -260,3 +262,76 @@ def bar() -> Callable[..., MarketBar]:
         )
 
     return _make
+
+
+# --- the offline guarantee ----------------------------------------------------------------
+#
+# "The test suite does not touch the network" was a convention until `tests/e2e/` landed: every
+# provider test injected a transport, and nothing checked that they all did. A convention is
+# exactly what a new test file is written without knowing about, and the cost of getting it
+# wrong is not a red build -- it is a *green* one that depended on an endpoint being up, on a
+# token being present, and on today's market data looking like yesterday's.
+#
+# The fixture below turns it into a property of the run. Its limits, stated rather than
+# implied:
+#
+#   - It refuses `connect`/`connect_ex` on `AF_INET`/`AF_INET6` sockets **in this process**. A
+#     child process (`subprocess`, `multiprocessing`) gets a fresh interpreter and is not
+#     guarded; `tests/unit/test_repository_assets.py` shells out to `git` and
+#     `tests/integration/storage/test_migrations.py` spawns a writer, and neither is a network
+#     call. `tests/e2e/` reaches Tushare exactly this way, through the real `openalpha` binary.
+#   - It does not block name resolution. `getaddrinfo` alone transfers nothing, and refusing it
+#     would break `socket.getaddrinfo("localhost", ...)`-style calls inside the standard
+#     library that never go on to connect.
+#   - `AF_UNIX` and every other family are left alone: a local socket is not the network, and
+#     refusing one would be a guess about what a future test needs rather than a rule about
+#     what this one forbids.
+#
+# `tests/unit/test_offline_suite.py` proves the guard is live rather than merely installed.
+
+
+@pytest.fixture(autouse=True)
+def _refuse_outbound_connections(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Make an outbound TCP connection raise for the duration of every unmarked test.
+
+    Restored by hand rather than through `monkeypatch` because `socket.socket` inherits
+    `connect` from the C `_socket.socket` and does not define one of its own:
+    `monkeypatch.undo` would put the inherited function back as an attribute *on the Python
+    subclass*, which is a different object graph from the one the test started with. Deleting
+    the shadow is the only restoration that leaves the class exactly as it was found.
+    """
+    if request.node.get_closest_marker("e2e") is not None:
+        yield
+        return
+
+    original_connect = socket.socket.connect
+    original_connect_ex = socket.socket.connect_ex
+    had_own_connect = "connect" in vars(socket.socket)
+    had_own_connect_ex = "connect_ex" in vars(socket.socket)
+
+    def _refuse(name: str, wrapped: Callable[..., object]) -> Callable[..., object]:
+        def _guard(self: socket.socket, address: object, *args: object, **kwargs: object):
+            if self.family in GUARDED_SOCKET_FAMILIES:
+                raise OfflineSuiteViolation(
+                    f"socket.{name}({address!r}) from a test that is not marked `e2e`. "
+                    f"{REFUSAL_MESSAGE}"
+                )
+            return wrapped(self, address, *args, **kwargs)
+
+        return _guard
+
+    socket.socket.connect = _refuse("connect", original_connect)  # type: ignore[method-assign]
+    socket.socket.connect_ex = _refuse(  # type: ignore[method-assign]
+        "connect_ex", original_connect_ex
+    )
+    try:
+        yield
+    finally:
+        if had_own_connect:
+            socket.socket.connect = original_connect  # type: ignore[method-assign]
+        else:
+            del socket.socket.connect
+        if had_own_connect_ex:
+            socket.socket.connect_ex = original_connect_ex  # type: ignore[method-assign]
+        else:
+            del socket.socket.connect_ex

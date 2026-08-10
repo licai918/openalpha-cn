@@ -56,8 +56,19 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-addopts = "-ra --strict-config --strict-markers"
+# `-m "not e2e"` is what keeps `uv run pytest` -- the command CI runs -- offline now that
+# `tests/e2e/` exists. Those modules are still collected (an import error in one is still a
+# red build) and every test in them is deselected. A command-line `-m` overrides this one,
+# because pytest keeps the last `-m` it is given, so `uv run pytest -m e2e tests/e2e` is the
+# way in; `OPENALPHA_E2E=1` is then a second switch the marker alone cannot flip, and
+# `tests/conftest.py::_refuse_outbound_connections` is the third and only measured one.
+# See `tests/e2e/conftest.py` for the whole arrangement and `tests/unit/test_offline_suite.py`
+# for the tests that pin it.
+addopts = "-ra --strict-config --strict-markers -m \"not e2e\""
 testpaths = ["tests"]
+markers = [
+  "e2e: reaches the real Tushare endpoint with a real token. Deselected by default.",
+]
 
 [tool.ruff]
 line-length = 100
