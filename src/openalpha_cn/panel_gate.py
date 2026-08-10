@@ -23,6 +23,10 @@ So this module's job is not "add an if". It is to make the empty success **unava
 3. **A clearance is all or nothing.** A request naming five datasets of which three are sound
    is refused, because a partial clearance is the empty success itself: the downstream reads
    what it was given and produces a result missing the rest.
+4. **A clearance carries its own width.** `cleared` hands back `ClearedDataset` records rather
+   than bare names, because for one dataset shape the evidence is session-local and a bare
+   name reads as a whole year. See "the width of a clearance is part of it" below; this is
+   the correction the `V2-P1-013` review forced.
 
 ## What blocks, and the one argument that settles `warning`
 
@@ -81,17 +85,54 @@ The resolution is that neither horn is the question. What matters is whether *an
 request's scope* asked the question the waiver dropped. Exactly one dataset is both on the
 `daily` cadence -- the only cadence with a per-session expectation at all -- and waives
 `required_dates`: `adj_factor`. (`panel_doctor`'s own docstring names it as the gap; the
-fifteen-dataset measurement is pinned in `tests/integration/panel/test_panel_gate.py`.) For
-such a dataset the gate asks whether a **session-scoped cross-check actually ran over it**:
-`close_agreement`, `unpriced_explained` or `return_paths`, the three `panel_doctor` checks that
-open a session rather than comparing catalog records. If one did, the hole that would have
-mattered is reachable and the dataset clears; if none did, the gate refuses with
+fifteen-dataset measurement is pinned by
+`test_exactly_one_declared_dataset_is_daily_and_waives_its_date_check`.) For such a dataset the
+gate asks whether a **session-scoped cross-check actually ran over it**: `close_agreement`,
+`unpriced_explained` or `return_paths`, the three `panel_doctor` checks that open a session
+rather than comparing catalog records. If none did, the gate refuses with
 `unverified_daily_coverage` rather than clearing on registration, files, fields and freshness
 -- which is the precise set of checks the Task 29 panel passed while carrying its hole.
 
 The residue is named rather than hidden: a hole in `adj_factor` on a session the factor did
 **not** step across changes no answer -- `factor_on` carries the previous step forward, which
 is what a step function means -- and the gate clears it. Both directions are pinned.
+
+## The width of a clearance is part of it
+
+An earlier cut of this module said that once a session-scoped cross-check had run, "the hole
+that would have mattered is reachable and the dataset clears". **That sentence was false and
+the review proved it on this repository's own fixture.** The three session-scoped checks run
+on `cross_section_days`, which is `DependencyRequest.sessions` and nothing else, while
+`cleared` handed back a bare `('adj_factor', ...)` granted over `request.years`. With the
+`adj_factor` row for the ex-rights session removed, naming that session (or the one after it)
+blocks with `return_path_disagreement`, and naming **any later session** clears -- ten sessions
+in the fixture, so `2026-01-15` and `2026-01-16` both cleared with `is_clean=True` and
+`notices=[]`, after which `adjusted_return` over `2026-01-12..2026-01-13` answered
+`-0.530973%` against a true `+2.742251%`. That is Task 29's Critical, reproduced through the
+supported writers, on a request the gate had cleared. `close_disagreement` and
+`unexplained_unpriced` have the same shape: both block when the defective session is named and
+both cleared when a different one was.
+
+The read side cannot do better than this, and pretending otherwise is the defect.
+`panel_ingest`'s own write-time census refuses a session dropped for *every* security and
+accepts one dropped for a single security, and it records that this residue "cannot be closed
+from the read side". Nor can the gate widen the corroboration by itself: bounding the sessions
+a year implies needs `panel_ingest._sessions_published_through`, and this module is pinned to
+importing `domain`, `panel` and `panel_doctor` only. Blocking every request whose years reach
+past its named sessions was rejected for the reason the notices were: it refuses the ordinary
+narrow request -- one session out of two hundred and forty-four -- and a gate that refuses
+everything gets switched off.
+
+So the gate states its width instead of overstating it. `cleared` returns `ClearedDataset`
+records: the dataset, the years the year-scoped checks covered, the sessions a session-scoped
+cross-check actually opened, and the caveats that remain open outside those sessions.
+`ClearedDataset.corroborates` answers "did a cross-dataset check open that session for that
+dataset", and a dataset in the `adj_factor` shape carries `unverified_daily_coverage` as a
+caveat on the clearance -- so the code the gate used to fall silent about is now on the
+artifact the caller must hold to read anything at all, rather than being resolved by a check
+that only looked at one day. The sessions are recorded for **every** dataset the three checks
+touch, not only for `adj_factor`, because the `close_disagreement` and the
+`unexplained_unpriced` the review seeded on an unnamed session cleared for the same reason.
 
 ## Why this is a top-level module and not `panel/gate.py`
 
@@ -119,7 +160,10 @@ from openalpha_cn.domain.trading_calendar import TradingCalendar
 from openalpha_cn.panel.catalog import DEFAULT_DATE_TIMEZONE
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_doctor import (
+    HEALTH_CODE_CATEGORY,
     PANEL_HEALTH_CODES,
+    DatasetHealth,
+    HealthCategory,
     HealthFinding,
     HealthSeverity,
     PanelHealthReport,
@@ -160,6 +204,19 @@ dataset is not strong enough to act on. See this module's docstring for the meas
 GATE_REFUSAL_CODES: Final[frozenset[str]] = frozenset({UNVERIFIED_DAILY_COVERAGE})
 """Every code this gate issues that is not a `panel_doctor` finding. Closed, and disjoint from
 `PANEL_HEALTH_CODES`, so `blocks_with_code` answers one question rather than two."""
+
+GATE_CODE_CATEGORY: Final[Mapping[str, HealthCategory]] = MappingProxyType(
+    {UNVERIFIED_DAILY_COVERAGE: "unanswerable"}
+)
+"""The report heading each of this gate's own codes files under.
+
+`HEALTH_CODE_CATEGORY` is total over `PANEL_HEALTH_CODES` and says nothing about a code the
+gate invented, so a facet that groups by category -- `V2-P1-016`'s REST surface is the first
+-- would have had to special-case this one or drop it. `unanswerable` is the heading
+`panel_doctor` already gives to "a question that could not be put at all", which is exactly
+what a waived date check nothing corroborated is; filing it under `missing` would tell a
+reader that rows are absent when the truth is that nobody looked.
+"""
 
 GATE_CODE_BLOCKS: Final[Mapping[str, bool]] = MappingProxyType(
     {
@@ -203,7 +260,19 @@ entry, not a line inside a function nobody re-reads.
 """
 
 GATE_BLOCK_CODES: Final[frozenset[str]] = PANEL_HEALTH_CODES | GATE_REFUSAL_CODES
-"""Every code a `GateBlock` may carry: the twenty health codes plus the gate's own refusals."""
+"""Every code a `GateBlock` or a `ClearedDataset` caveat may carry: the twenty health codes
+plus the gate's own refusals. One closed set for both, because `unverified_daily_coverage` is
+the same question at two strengths -- a refusal when nothing corroborated the dataset at all,
+a caveat when something did but only over the sessions the request named."""
+
+GATE_CODE_CATEGORIES: Final[Mapping[str, HealthCategory]] = MappingProxyType(
+    {**HEALTH_CODE_CATEGORY, **GATE_CODE_CATEGORY}
+)
+"""The heading for every code in `GATE_BLOCK_CODES`, health codes and gate codes alike.
+
+Total over that set and asserted so in `tests/unit/test_panel_gate_rules.py`: a caller
+grouping blocks by category must not have to know which half a code came from, and a code with
+no heading would drop out of a grouped view rather than failing a test."""
 
 SESSION_SCOPED_CROSS_CHECKS: Final[frozenset[str]] = frozenset(
     {"close_agreement", "unpriced_explained", "return_paths"}
@@ -234,14 +303,26 @@ class DependencyRequest:
     `panel_health_report`'s reason: "check every session" is a whole-corpus scan and "check the
     last one" is a guess about what the caller cares about. The gate's promise is scoped to
     these sessions and to `years`; a caller that clears one session and then reads a hundred
-    has been promised nothing about the other ninety-nine.
+    has been promised nothing about the other ninety-nine, and since the `V2-P1-013` review
+    the clearance *says so* -- see `ClearedDataset`.
+
+    A key in `years_by_dataset` or `freshness_overrides` naming a dataset outside `datasets`
+    raises rather than being dropped. `panel_health_report` resolves both mappings against the
+    datasets it was given, so such a key changes nothing at all, and a caller who misspells one
+    while narrowing a backfill window would otherwise be told the panel is fine by a gate that
+    silently used the wide window.
 
     `panel_health_report`'s `date_timezone` is deliberately **not** exposed here. Every partition
     records the timezone its dates were derived in (`PartitionCoverage.date_timezone`) and the
     whole panel plane writes `DEFAULT_DATE_TIMEZONE`; a gate-level override would let a request
     judge a partition against a session boundary the partition was not written to, which is the
-    one-day disagreement `panel/catalog.py` records that field to prevent. A caller with a
-    genuine second convention has `panel_health_report` itself.
+    one-day disagreement `panel/catalog.py` records that field to prevent. That is not a
+    theoretical hazard and the exclusion is not a tidy-up: on one store at
+    `as_of = 2026-01-16 09:00 UTC`, `Asia/Shanghai` reports `date_gap` and `is_clean=False`
+    while `UTC` reports no code at all and `is_clean=True`, because the two zones disagree
+    about whether the day's session had published. The measurement is pinned in
+    `tests/integration/panel/test_panel_gate.py`. A caller with a genuine second convention has
+    `panel_health_report` itself.
     """
 
     datasets: tuple[str, ...]
@@ -261,15 +342,71 @@ class GateBlock:
     `finding` is the `panel_doctor` finding the block came from, carried whole so a caller told
     "blocked: date_gap" does not have to re-run the report to learn which dates. It is `None`
     for the gate's own refusals, which are not findings about the panel.
+
+    `dataset` is the name the finding is *filed* under -- `HealthFinding.datasets[0]`, the
+    subset or the disagreeing side of a pair -- and it is a label, not the answer to "is this
+    dataset implicated". `datasets` is that answer, and `blocks_for` and `blocked_datasets`
+    both read it: a `close_disagreement` is raised by `daily_basic` publishing a close `daily`
+    does not corroborate, and a caller polling `blocks_for('daily_basic')` used to be told
+    `()`, which is the confusion those two accessors exist to refuse.
     """
 
     code: str
     dataset: str
     datasets: tuple[str, ...]
+    category: HealthCategory
     severity: HealthSeverity
     detail: str
     year: int | None = None
     finding: HealthFinding | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ClearedDataset:
+    """One dataset this request may read, and how far the permission actually reaches.
+
+    `cleared` used to be a tuple of names, and a name is exactly as wide as its reader assumes.
+    For every dataset but one that is harmless: the verdict rests on registration, files,
+    fields, freshness and a calendar-derived date census, all of which are stated over `years`.
+    For a dataset in the `adj_factor` shape -- `daily` cadence, `required_dates` waived -- the
+    only evidence that its sessions are all there is a cross-check that opened the sessions in
+    `DependencyRequest.sessions`, and nothing else. Handing that back as `'adj_factor'` is how
+    the review found Task 29's wrong number reachable through a *cleared* gate.
+
+    So the record carries the two scopes separately rather than folding them into one verdict:
+
+    - `years` -- what the year-scoped checks covered, per dataset (`years_by_dataset` follows
+      the dataset here as it does everywhere else).
+    - `corroborated_sessions` -- the sessions a session-scoped cross-check actually opened over
+      this dataset. **Not only for the `adj_factor` shape**: all three checks run on
+      `cross_section_days` and nothing else, so `daily`, `daily_basic`, `suspend_d` and
+      `stock_basic` are equally unexamined outside it, and the review demonstrated that too --
+      a `close_disagreement` and an `unexplained_unpriced` seeded on `2026-01-15` both cleared
+      a request that named `2026-01-13`. `()` means no session-scoped check read this dataset
+      at all.
+    - `caveats` -- the gate codes still open *outside* those sessions. Non-empty only for the
+      `adj_factor` shape, where it holds `unverified_daily_coverage`: the same code the gate
+      refuses with when nothing corroborated the dataset at all, carried here at the lower
+      strength "something did, over these sessions only". It rides on the permission it
+      qualifies rather than in a list beside it, because the two are the same fact.
+
+    `corroborates` is deliberately a statement of fact rather than a verdict. `False` does not
+    mean the session is broken; it means no cross-dataset check looked at it -- and for a
+    dataset carrying `unverified_daily_coverage` that is the whole difference between a verdict
+    and a guess. Folding it together with the year-scoped evidence into one `covers(session)`
+    was tried and dropped: for `daily` the year census *does* reach the session and the
+    cross-checks do not, so a single boolean would have to pick one of two true answers.
+    """
+
+    dataset: str
+    years: tuple[int, ...]
+    corroborated_sessions: tuple[date, ...] = ()
+    caveats: tuple[str, ...] = ()
+
+    def corroborates(self, session: date) -> bool:
+        """Whether a session-scoped cross-check in this report opened `session` for this
+        dataset."""
+        return session in self.corroborated_sessions
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -295,7 +432,8 @@ class DependencyClearance:
     not defects -- and are present on a cleared clearance too, because "cleared" is a verdict
     rather than silence. `unverified_checks` is the other half of the same honesty:
     `DatasetReadiness.checks_waived` per dataset, so a caller drawing a conclusion from an
-    empty `blocks` can see which questions were never put.
+    empty `blocks` can see which questions were never put. `cleared` is the third: it hands
+    back `ClearedDataset` records, so the width of the permission travels with it.
     """
 
     request: DependencyRequest
@@ -303,15 +441,15 @@ class DependencyClearance:
     blocks: tuple[GateBlock, ...]
     notices: tuple[HealthFinding, ...]
     unverified_checks: tuple[tuple[str, tuple[str, ...]], ...]
-    cleared_or_none: tuple[str, ...] | None
+    cleared_or_none: tuple[ClearedDataset, ...] | None
 
     @property
     def is_blocked(self) -> bool:
         return self.cleared_or_none is None
 
     @property
-    def cleared(self) -> tuple[str, ...]:
-        """The datasets this request may read, or `PanelGateError` if it was refused."""
+    def cleared(self) -> tuple[ClearedDataset, ...]:
+        """What this request may read and how widely, or `PanelGateError` if it was refused."""
         if self.cleared_or_none is None:
             raise PanelGateError(
                 f"this request is blocked by {sorted({block.code for block in self.blocks})}: "
@@ -320,17 +458,43 @@ class DependencyClearance:
             )
         return self.cleared_or_none
 
+    def cleared_for(self, dataset: str) -> ClearedDataset:
+        """The permission granted for `dataset`, with its scope; raises when blocked.
+
+        Raises for a dataset the request never named, `unverified`'s rule: a caller handed a
+        default-shaped record for a name the gate never considered would read it as a
+        permission.
+        """
+        self._require_requested(dataset)
+        for entry in self.cleared:
+            if entry.dataset == dataset:
+                return entry
+        raise PanelGateError(
+            f"{dataset!r} was named by this request but the clearance carries no record for it"
+        )
+
     @property
     def blocked_datasets(self) -> tuple[str, ...]:
-        """Every dataset carrying at least one block, in the order the blocks were raised."""
+        """Every dataset carrying at least one block, in the order the blocks were raised.
+
+        Read off `GateBlock.datasets`, so **both** sides of a cross-dataset block are named.
+        `close_disagreement` is filed under `daily` and is raised by a `daily_basic` close
+        `daily` does not corroborate; naming only the first side made this property's own
+        promise false for the second one.
+        """
         seen: list[str] = []
         for block in self.blocks:
-            if block.dataset not in seen:
-                seen.append(block.dataset)
+            for name in block.datasets:
+                if name not in seen:
+                    seen.append(name)
         return tuple(seen)
 
     def blocking_codes(self) -> frozenset[str]:
         return frozenset(block.code for block in self.blocks)
+
+    def caveat_codes(self) -> frozenset[str]:
+        """Every caveat riding on this clearance; raises when it was refused."""
+        return frozenset(code for entry in self.cleared for code in entry.caveats)
 
     def blocks_with_code(self, code: str) -> tuple[GateBlock, ...]:
         """Every block carrying `code`; raises for a code this gate cannot issue.
@@ -338,16 +502,29 @@ class DependencyClearance:
         `PanelHealthReport.findings_with_code`'s rule: a caller that asks about
         `parition_missing` and receives `()` reads the panel as healthy.
         """
-        if code not in GATE_BLOCK_CODES:
-            raise PanelGateError(
-                f"{code!r} is not one of the codes this gate can issue {sorted(GATE_BLOCK_CODES)}"
-            )
+        self._require_issuable(code)
         return tuple(block for block in self.blocks if block.code == code)
 
+    def cleared_with_caveat(self, code: str) -> tuple[ClearedDataset, ...]:
+        """Every cleared dataset carrying `code` as a caveat; raises for an unissuable code.
+
+        The same rule as `blocks_with_code`, and it matters more here: this accessor is how a
+        caller asks "was anything cleared only narrowly", and a typo answering `()` reads as
+        "no, everything was cleared outright".
+        """
+        self._require_issuable(code)
+        return tuple(entry for entry in self.cleared if code in entry.caveats)
+
     def blocks_for(self, dataset: str) -> tuple[GateBlock, ...]:
-        """Every block against `dataset`; raises for a dataset the request never named."""
+        """Every block `dataset` is named in; raises for a dataset the request never named.
+
+        Matched against `GateBlock.datasets` rather than `GateBlock.dataset`, for
+        `blocked_datasets`'s reason: the `adj_factor` that is short of a security a
+        `subject_set_disagreement` is about answered `()` here, which is "nothing wrong with
+        that dataset" told to a caller polling dataset by dataset.
+        """
         self._require_requested(dataset)
-        return tuple(block for block in self.blocks if block.dataset == dataset)
+        return tuple(block for block in self.blocks if dataset in block.datasets)
 
     def unverified(self, dataset: str) -> tuple[str, ...]:
         """The checks that did not run for `dataset`; raises for one the request never named.
@@ -368,6 +545,12 @@ class DependencyClearance:
             raise PanelGateError(
                 f"{dataset!r} was not one of the datasets this request named "
                 f"({list(self.request.datasets)})"
+            )
+
+    def _require_issuable(self, code: str) -> None:
+        if code not in GATE_BLOCK_CODES:
+            raise PanelGateError(
+                f"{code!r} is not one of the codes this gate can issue {sorted(GATE_BLOCK_CODES)}"
             )
 
     def __bool__(self) -> bool:
@@ -401,6 +584,7 @@ def blocks_from_report(report: PanelHealthReport) -> tuple[GateBlock, ...]:
             code=finding.code,
             dataset=finding.dataset,
             datasets=finding.datasets,
+            category=finding.category,
             severity=finding.severity,
             detail=finding.detail,
             year=finding.year,
@@ -413,23 +597,75 @@ def blocks_from_report(report: PanelHealthReport) -> tuple[GateBlock, ...]:
     return tuple(blocks)
 
 
-def _uncorroborated_daily_coverage(report: PanelHealthReport) -> tuple[GateBlock, ...]:
-    """Datasets whose per-session completeness this report neither required nor read.
+def cleared_datasets(
+    report: PanelHealthReport, sessions: Sequence[date]
+) -> tuple[ClearedDataset, ...]:
+    """What `report`'s datasets may be read over, given the sessions the request named.
 
-    See this module's docstring for why the answer is neither "a waiver always blocks" nor "a
-    waiver never does".
+    Pure, and separate from `blocks_from_report` because it answers a different question: that
+    one asks what is wrong, this one asks how wide the permission is where nothing is. Only
+    meaningful when `blocks_from_report` is empty -- `require_datasets` calls it only then --
+    but total over the report's datasets so that the width of every one of them is stated
+    rather than only the interesting one's.
     """
+    read_by = _session_scoped_reads(report)
+    named = tuple(dict.fromkeys(sessions))
+    return tuple(
+        _cleared_dataset(health, named=named, was_read=health.dataset in read_by)
+        for health in report.datasets
+    )
+
+
+def _cleared_dataset(
+    health: DatasetHealth, *, named: tuple[date, ...], was_read: bool
+) -> ClearedDataset:
+    return ClearedDataset(
+        dataset=health.dataset,
+        years=health.years_requested,
+        corroborated_sessions=named if was_read else (),
+        caveats=(UNVERIFIED_DAILY_COVERAGE,) if _needs_session_corroboration(health) else (),
+    )
+
+
+def _needs_session_corroboration(health: DatasetHealth) -> bool:
+    """Whether this dataset's sessions are attested by nothing but a session-scoped check.
+
+    The `adj_factor` shape: a per-session expectation (only the `daily` cadence has one) that
+    the requirement waived. Stated once and read twice -- by the refusal below and by the
+    caveat `cleared_datasets` attaches -- because the two have to agree about which datasets
+    they are talking about or the gate would refuse one set and qualify another.
+    """
+    return (
+        health.freshness.cadence == "daily" and "required_dates" in health.readiness.checks_waived
+    )
+
+
+def _session_scoped_reads(report: PanelHealthReport) -> dict[str, set[str]]:
+    """Which session-scoped cross-checks actually opened a session of each dataset."""
     read_by: dict[str, set[str]] = {}
     for check in report.cross_checks:
         if not check.ran or check.name not in SESSION_SCOPED_CROSS_CHECKS:
             continue
         for dataset in check.datasets:
             read_by.setdefault(dataset, set()).add(check.name)
+    return read_by
+
+
+def _uncorroborated_daily_coverage(report: PanelHealthReport) -> tuple[GateBlock, ...]:
+    """Datasets whose per-session completeness this report neither required nor read.
+
+    See this module's docstring for why the answer is neither "a waiver always blocks" nor "a
+    waiver never does" -- and, under "the width of a clearance is part of it", why a dataset
+    that *was* read still leaves `unverified_daily_coverage` open outside the sessions the
+    request named, as a caveat on the clearance rather than as silence.
+    """
+    read_by = _session_scoped_reads(report)
     return tuple(
         GateBlock(
             code=UNVERIFIED_DAILY_COVERAGE,
             dataset=health.dataset,
             datasets=(health.dataset,),
+            category=GATE_CODE_CATEGORY[UNVERIFIED_DAILY_COVERAGE],
             severity="blocking",
             detail=(
                 f"{health.dataset} publishes on the {health.freshness.cadence} cadence and its "
@@ -443,9 +679,7 @@ def _uncorroborated_daily_coverage(report: PanelHealthReport) -> tuple[GateBlock
             finding=None,
         )
         for health in report.datasets
-        if health.freshness.cadence == "daily"
-        and "required_dates" in health.readiness.checks_waived
-        and health.dataset not in read_by
+        if _needs_session_corroboration(health) and health.dataset not in read_by
     )
 
 
@@ -457,16 +691,20 @@ def require_datasets(store: PanelStore, request: DependencyRequest) -> Dependenc
     then applies `GATE_CODE_BLOCKS` and the corroboration rule.
 
     Raises `PanelGateError` for a request naming no dataset (`no_years_requested`'s rule one
-    layer up: a gate that inspected nothing must not answer "cleared"), and propagates
-    `PanelDoctorError` for a dataset with no declared publication cadence rather than laundering
-    it into a block, which would read as a defect of the panel rather than of the request.
+    layer up: a gate that inspected nothing must not answer "cleared") and for a per-dataset
+    override keyed on a dataset the request never named, which `panel_health_report` would
+    otherwise drop without a word. Propagates `PanelDoctorError` for a dataset with no declared
+    publication cadence rather than laundering it into a block, which would read as a defect of
+    the panel rather than of the request.
     """
-    if not request.datasets:
-        requested = tuple(dict.fromkeys(request.datasets))
+    requested = tuple(dict.fromkeys(request.datasets))
+    if not requested:
         raise PanelGateError(
-            f"this gate was asked about no dataset at all ({list(requested)}); a check that "
-            "inspected nothing must not report a clearance"
+            "this gate was asked about no dataset at all; a check that inspected nothing must "
+            "not report a clearance"
         )
+    _require_overrides_in_scope("years_by_dataset", request.years_by_dataset, requested)
+    _require_overrides_in_scope("freshness_overrides", request.freshness_overrides, requested)
     report = panel_health_report(
         store,
         as_of=request.as_of,
@@ -492,5 +730,25 @@ def require_datasets(store: PanelStore, request: DependencyRequest) -> Dependenc
         blocks=blocks,
         notices=notices,
         unverified_checks=unverified,
-        cleared_or_none=None if blocks else tuple(dict.fromkeys(request.datasets)),
+        cleared_or_none=None if blocks else cleared_datasets(report, request.sessions),
     )
+
+
+def _require_overrides_in_scope(
+    name: str, overrides: Mapping[str, object] | None, requested: tuple[str, ...]
+) -> None:
+    """Refuse a per-dataset override keyed on a dataset this request never named.
+
+    `panel_health_report` resolves both mappings against the datasets it was handed, so such a
+    key is not merely unused -- it is *dropped*, and the dataset it was meant for is assessed
+    over the request's default years or its derived freshness bound with nothing said. A caller
+    narrowing a backfill window that way would be told the panel is fine on the strength of the
+    window it was trying to replace.
+    """
+    stray = tuple(key for key in (overrides or {}) if key not in set(requested))
+    if stray:
+        raise PanelGateError(
+            f"{name} names {list(stray)}, which this request did not ask about "
+            f"({list(requested)}); such a key is dropped rather than applied, so the dataset "
+            "it was meant for would be judged on the request's defaults instead"
+        )

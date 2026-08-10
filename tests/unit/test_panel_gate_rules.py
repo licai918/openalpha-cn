@@ -33,25 +33,29 @@ from openalpha_cn.panel_gate import (
     GATE_BLOCK_CODES,
     GATE_BLOCKING_SEVERITIES,
     GATE_CODE_BLOCKS,
+    GATE_CODE_CATEGORIES,
+    GATE_CODE_CATEGORY,
     GATE_REFUSAL_CODES,
     SESSION_SCOPED_CROSS_CHECKS,
     UNVERIFIED_DAILY_COVERAGE,
+    ClearedDataset,
     DependencyClearance,
     DependencyRequest,
     GateBlock,
     PanelGateError,
     blocks_from_report,
+    cleared_datasets,
 )
 
 AS_OF = datetime(2026, 1, 17, 4, 0, tzinfo=UTC)
 
 
-def _finding(code: str, *, dataset: str = "daily") -> HealthFinding:
+def _finding(code: str, *, dataset: str = "daily", also: str | None = None) -> HealthFinding:
     return HealthFinding(
         code=code,
         category=HEALTH_CODE_CATEGORY[code],
         severity=HEALTH_CODE_SEVERITY[code],
-        datasets=(dataset,),
+        datasets=(dataset,) if also is None else (dataset, also),
         detail=f"{code} on {dataset}",
     )
 
@@ -118,14 +122,19 @@ def _request(*names: str) -> DependencyRequest:
     )
 
 
-def _block(code: str, *, dataset: str = "daily") -> GateBlock:
+def _block(code: str, *, dataset: str = "daily", also: str | None = None) -> GateBlock:
     return GateBlock(
         code=code,
         dataset=dataset,
-        datasets=(dataset,),
+        datasets=(dataset,) if also is None else (dataset, also),
+        category=GATE_CODE_CATEGORIES[code],
         severity="blocking",
         detail=f"{code} on {dataset}",
     )
+
+
+def _cleared(*names: str) -> tuple[ClearedDataset, ...]:
+    return tuple(ClearedDataset(dataset=name, years=(2026,)) for name in names)
 
 
 def _clearance(
@@ -138,7 +147,7 @@ def _clearance(
         blocks=blocks,
         notices=(),
         unverified_checks=(),
-        cleared_or_none=None if blocks else ask.datasets,
+        cleared_or_none=None if blocks else _cleared(*ask.datasets),
     )
 
 
@@ -246,6 +255,18 @@ def test_the_gate_s_own_refusals_are_a_closed_set_disjoint_from_the_health_codes
     assert frozenset(GATE_CODE_BLOCKS) | GATE_REFUSAL_CODES == GATE_BLOCK_CODES
 
 
+def test_every_code_this_gate_can_issue_files_under_one_of_the_report_s_headings() -> None:
+    """`HEALTH_CODE_CATEGORY` is total over the twenty health codes and silent about the one
+    the gate invented, so a facet grouping blocks by category -- `V2-P1-016`'s REST surface --
+    would have had to special-case `unverified_daily_coverage` or drop it. It is filed under
+    `unanswerable`, the heading `panel_doctor` already gives to a question that could not be
+    put, rather than under `missing`, which would say rows are absent when the truth is that
+    nobody looked."""
+    assert dict(GATE_CODE_CATEGORY) == {UNVERIFIED_DAILY_COVERAGE: "unanswerable"}
+    assert set(GATE_CODE_CATEGORIES) == set(GATE_BLOCK_CODES)
+    assert GATE_CODE_CATEGORIES["date_gap"] == HEALTH_CODE_CATEGORY["date_gap"]
+
+
 def test_the_session_scoped_cross_checks_are_named_rather_than_inferred() -> None:
     """The three `panel_doctor` checks that read a named session. `subject_containment` and
     `statement_ambiguity` are deliberately absent: neither opens a session, so neither can
@@ -262,10 +283,14 @@ def test_the_session_scoped_cross_checks_are_named_rather_than_inferred() -> Non
 def test_every_blocking_code_produces_a_block_and_every_notice_produces_none() -> None:
     """One report carrying one finding of all twenty codes, driven through the selector.
 
-    A per-code injection into a real store cannot reach every code -- `empty_requirement` in
-    particular is unreachable through `panel_health_report`, whose requirement builders never
-    state an empty expectation -- so the totality of the table is proved here and the
-    injections prove that the codes which matter do reach it.
+    The totality of the table is proved here because a per-code injection into a real store is
+    a slow way to prove twenty entries; the injections prove separately that the codes reach it
+    from a store. An earlier version of this docstring claimed `empty_requirement` was
+    unreachable through `panel_health_report` "because the requirement builders never state an
+    empty expectation". That is false and the review measured it: a price requirement built
+    inside a year that has begun but published no session yet states `required_dates=()`, which
+    is declared-but-empty. It happens on the real calendar every January and is pinned by
+    `test_a_year_that_has_begun_but_published_no_session_blocks_with_an_empty_requirement`.
     """
     report = _report(cross=tuple(_finding(code) for code in sorted(PANEL_HEALTH_CODES)))
 
@@ -275,6 +300,15 @@ def test_every_blocking_code_produces_a_block_and_every_notice_produces_none() -
         code for code, blocks_it in GATE_CODE_BLOCKS.items() if blocks_it
     }
     assert len(blocks) == 17
+    assert {block.category for block in blocks} == {
+        "missing",
+        "stale",
+        "inconsistent",
+        "unanswerable",
+    }
+    assert {block.code: block.category for block in blocks} == {
+        block.code: GATE_CODE_CATEGORIES[block.code] for block in blocks
+    }
 
 
 def test_a_block_carries_the_finding_it_came_from_rather_than_only_its_code() -> None:
@@ -314,6 +348,7 @@ def test_a_daily_dataset_whose_sessions_were_never_required_is_refused_if_nothin
     assert block.code == UNVERIFIED_DAILY_COVERAGE
     assert block.dataset == "adj_factor"
     assert block.severity == "blocking"
+    assert block.category == "unanswerable"
     assert "required_dates" in block.detail
 
 
@@ -415,6 +450,125 @@ def test_a_daily_dataset_that_was_asked_for_its_sessions_needs_no_corroboration(
     assert blocks_from_report(report) == ()
 
 
+# --- the width of a clearance -------------------------------------------------------------------
+
+
+def _corroborated() -> PanelHealthReport:
+    return _report(
+        datasets=(
+            _health("daily", waived=("required_subjects",)),
+            _health("adj_factor", waived=("required_dates",)),
+            _health("income", cadence="quarterly"),
+        ),
+        checks=(
+            CrossCheckOutcome(
+                name="return_paths", datasets=("daily", "adj_factor"), ran=True, finding_count=0
+            ),
+        ),
+    )
+
+
+def test_a_dataset_corroborated_only_by_a_session_check_records_which_sessions_those_were() -> None:
+    """The `V2-P1-013` review's Critical, as a rule rather than as an injection.
+
+    The three session-scoped cross-checks run on `cross_section_days` and nothing else, so
+    `return_paths` having run says something about the sessions the request named and nothing
+    at all about the rest of the year. `cleared` used to hand back the bare name `adj_factor`
+    granted over `years`, and a downstream that read it that way got Task 29's `-0.530973%`
+    out of a *cleared* gate. The record now carries the sessions the evidence reaches and the
+    code that is still open outside them -- and it carries the sessions for `daily` too, which
+    the same three checks are equally silent about outside them.
+    """
+    named = (date(2026, 1, 15),)
+
+    prices, factors, income = cleared_datasets(_corroborated(), named)
+
+    assert factors == ClearedDataset(
+        dataset="adj_factor",
+        years=(2026,),
+        corroborated_sessions=named,
+        caveats=(UNVERIFIED_DAILY_COVERAGE,),
+    )
+    assert prices == ClearedDataset(dataset="daily", years=(2026,), corroborated_sessions=named)
+    assert income == ClearedDataset(dataset="income", years=(2026,))
+
+
+def test_the_record_says_which_sessions_were_opened_rather_than_judging_the_others() -> None:
+    """`corroborates` is a fact, not a verdict: `False` means no cross-dataset check looked at
+    that session, which is why it is not folded into the year-scoped evidence. For `daily` the
+    year census *does* reach 2026-01-13 while the cross-checks do not, so one boolean would
+    have had to pick one of two true answers."""
+    prices, factors, income = cleared_datasets(_corroborated(), (date(2026, 1, 15),))
+
+    assert factors.corroborates(date(2026, 1, 15)) is True
+    assert factors.corroborates(date(2026, 1, 13)) is False
+    assert prices.corroborates(date(2026, 1, 15)) is True
+    assert prices.corroborates(date(2026, 1, 13)) is False
+    assert income.corroborates(date(2026, 1, 15)) is False
+    assert income.years == (2026,)
+
+
+def test_a_dataset_nothing_read_carries_the_caveat_with_no_session_behind_it() -> None:
+    """The same rule at its other end. `require_datasets` never reaches this state -- a dataset
+    in this shape that nothing read is a *block* -- but `cleared_datasets` is public and total,
+    and answering `corroborated_sessions=(2026-01-15,)` for a dataset no check opened would be
+    the manufactured fact this whole module is about."""
+    report = _report(datasets=(_health("adj_factor", waived=("required_dates",)),))
+
+    (factors,) = cleared_datasets(report, (date(2026, 1, 15),))
+
+    assert factors.corroborated_sessions == ()
+    assert factors.caveats == (UNVERIFIED_DAILY_COVERAGE,)
+    assert factors.corroborates(date(2026, 1, 15)) is False
+
+
+def test_the_caveat_is_pollable_by_code_and_a_code_the_gate_cannot_issue_raises() -> None:
+    """`blocks_with_code`'s rule applied to the other half of the verdict, and it matters more
+    here: this is how a caller asks "was anything cleared only narrowly", and a typo answering
+    `()` reads as "no, everything was cleared outright"."""
+    request = _request("daily", "adj_factor", "income")
+    clearance = DependencyClearance(
+        request=request,
+        report=_corroborated(),
+        blocks=(),
+        notices=(),
+        unverified_checks=(),
+        cleared_or_none=cleared_datasets(_corroborated(), (date(2026, 1, 15),)),
+    )
+
+    assert clearance.caveat_codes() == frozenset({UNVERIFIED_DAILY_COVERAGE})
+    assert [
+        entry.dataset for entry in clearance.cleared_with_caveat(UNVERIFIED_DAILY_COVERAGE)
+    ] == ["adj_factor"]
+    assert clearance.cleared_with_caveat("date_gap") == ()
+    with pytest.raises(PanelGateError, match=r"'unverified_daily_covrage' is not one of the codes"):
+        clearance.cleared_with_caveat("unverified_daily_covrage")
+
+
+def test_the_permission_for_a_dataset_the_request_never_named_raises_rather_than_defaulting() -> (
+    None
+):
+    """`unverified`'s rule: a caller handed a default-shaped record for a name the gate never
+    considered would read it as a permission. The second half is the guard for a clearance
+    whose records do not cover its own request, which `require_datasets` cannot produce but a
+    hand-built one can."""
+    request = _request("adj_factor", "income")
+    clearance = DependencyClearance(
+        request=request,
+        report=_corroborated(),
+        blocks=(),
+        notices=(),
+        unverified_checks=(),
+        cleared_or_none=_cleared("adj_factor"),
+    )
+
+    assert clearance.cleared_for("adj_factor").dataset == "adj_factor"
+    with pytest.raises(PanelGateError, match=r"'daily' was not one of the datasets"):
+        clearance.cleared_for("daily")
+    with pytest.raises(PanelGateError, match=r"'income' was named by this request but"):
+        clearance.cleared_for("income")
+
+
 # --- the clearance as a value ------------------------------------------------------------------
 
 
@@ -432,8 +586,8 @@ def test_the_merged_shape_is_reachable_only_under_a_name_that_says_what_it_is() 
 
     assert blocked.cleared_or_none is None
     assert blocked.is_blocked is True
-    assert cleared.cleared_or_none == ("daily",)
-    assert cleared.cleared == ("daily",)
+    assert cleared.cleared_or_none == _cleared("daily")
+    assert cleared.cleared == _cleared("daily")
     assert cleared.is_blocked is False
 
 
@@ -509,7 +663,7 @@ def test_the_unverified_checks_a_clearance_carries_are_readable_per_dataset() ->
         blocks=(),
         notices=(),
         unverified_checks=(("adj_factor", ("required_dates", "required_subjects")),),
-        cleared_or_none=("adj_factor",),
+        cleared_or_none=_cleared("adj_factor"),
     )
 
     assert cleared.unverified("adj_factor") == ("required_dates", "required_subjects")
@@ -529,11 +683,40 @@ def test_a_dataset_that_waived_nothing_answers_an_empty_tuple_and_means_it() -> 
         blocks=(),
         notices=(),
         unverified_checks=(("adj_factor", ("required_dates",)),),
-        cleared_or_none=request.datasets,
+        cleared_or_none=_cleared(*request.datasets),
     )
 
     assert cleared.unverified("daily") == ()
     assert cleared.unverified("adj_factor") == ("required_dates",)
+
+
+def test_both_datasets_of_a_cross_dataset_block_answer_rather_than_only_the_first() -> None:
+    """`GateBlock.dataset` is `HealthFinding.datasets[0]` -- a filing label, not the answer to
+    "is this dataset implicated". Matching on it made both accessors lie about the second half
+    of every cross-dataset block: the `daily_basic` that published the close `daily` does not
+    corroborate answered `blocks_for('daily_basic') == ()`, which is "nothing wrong there" told
+    to a caller polling dataset by dataset -- the precise confusion these two exist to refuse.
+    """
+    request = _request("daily", "daily_basic")
+    clearance = _clearance(
+        request=request, blocks=(_block("close_disagreement", dataset="daily", also="daily_basic"),)
+    )
+
+    assert clearance.blocked_datasets == ("daily", "daily_basic")
+    assert len(clearance.blocks_for("daily")) == 1
+    assert len(clearance.blocks_for("daily_basic")) == 1
+
+
+def test_a_dataset_named_by_no_block_still_answers_an_empty_tuple_and_means_it() -> None:
+    """The other direction, so that widening the match cannot be mutated into "every dataset is
+    blocked"."""
+    request = _request("daily", "daily_basic", "income")
+    clearance = _clearance(
+        request=request, blocks=(_block("close_disagreement", dataset="daily", also="daily_basic"),)
+    )
+
+    assert clearance.blocks_for("income") == ()
+    assert "income" not in clearance.blocked_datasets
 
 
 def test_the_blocking_codes_of_a_clearance_are_a_set_the_caller_can_branch_on() -> None:

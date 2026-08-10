@@ -40,10 +40,11 @@ from openalpha_cn.domain.trading_calendar import (
     build_trading_calendar,
 )
 from openalpha_cn.panel.store import ColumnSpec, PanelStorageError, PanelStore
-from openalpha_cn.panel_doctor import PanelDoctorError
+from openalpha_cn.panel_doctor import DATASET_CADENCE, PanelDoctorError, panel_health_report
 from openalpha_cn.panel_gate import (
     SESSION_SCOPED_CROSS_CHECKS,
     UNVERIFIED_DAILY_COVERAGE,
+    DependencyClearance,
     DependencyRequest,
     PanelGateError,
     require_datasets,
@@ -584,6 +585,16 @@ def _factor_history(store: PanelStore) -> AdjustmentHistory:
     return load_adjustment_histories(store, years=(YEAR,), as_of=AS_OF, max_staleness=None)[PING_AN]
 
 
+def _cleared_names(clearance: DependencyClearance) -> tuple[str, ...]:
+    """The dataset names off a clearance, for the assertions that are only about *which*.
+
+    Spelled out at each call site rather than offered by the gate as an accessor: an accessor
+    that answered "which datasets" without the scope would be the bare tuple `cleared` used to
+    be, and the review found Task 29's wrong number reachable through exactly that shape.
+    """
+    return tuple(entry.dataset for entry in clearance.cleared)
+
+
 # --- the clean case, and the empty answer that is not a refusal -------------------------------
 
 
@@ -597,7 +608,7 @@ def test_a_healthy_panel_clears_the_gate_and_the_downstream_read_returns_real_ro
     clearance = require_datasets(store, request_for())
 
     assert clearance.blocks == ()
-    assert clearance.cleared == DATASETS
+    assert _cleared_names(clearance) == DATASETS
     assert clearance.is_blocked is False
     bars = load_daily_bars(
         store,
@@ -804,7 +815,210 @@ def test_naming_the_price_panel_and_a_session_clears_the_same_two_datasets(
         request_for(datasets=(DAILY_DATASET, ADJ_FACTOR_DATASET), sessions=(EX_RIGHTS_SESSION,)),
     )
 
-    assert clearance.cleared == (DAILY_DATASET, ADJ_FACTOR_DATASET)
+    assert _cleared_names(clearance) == (DAILY_DATASET, ADJ_FACTOR_DATASET)
+
+
+def test_exactly_one_declared_dataset_is_daily_and_waives_its_date_check(tmp_path: Path) -> None:
+    """The measurement the corroboration rule is built on, driven end to end rather than read
+    off the requirement builders' docstrings.
+
+    The rule is scoped to "daily cadence **and** `required_dates` waived" on the strength of
+    that set having exactly one member today. Nothing was stopping it from acquiring a second:
+    a new upstream dataset in the same shape would either be blocked forever, because none of
+    the three cross-checks names it and so nothing can ever corroborate it, or -- worse -- be
+    corroborated by accident, because `unpriced_explained` lists `stock_basic` and `suspend_d`
+    among its datasets while checking neither one's session census. Both outcomes were silent;
+    this assertion is what makes the second dataset arrive as a red test.
+    """
+    report = panel_health_report(
+        seed(tmp_path),
+        as_of=AS_OF,
+        datasets=tuple(DATASET_CADENCE),
+        years=(YEAR,),
+        calendar=calendar(),
+        index_codes=(INDEX_CODE,),
+    )
+
+    waiving = {
+        health.dataset
+        for health in report.datasets
+        if "required_dates" in health.readiness.checks_waived
+    }
+
+    assert len(report.datasets) == 15
+    assert len(waiving) == 12
+    assert {
+        health.dataset
+        for health in report.datasets
+        if health.freshness.cadence == "daily"
+        and "required_dates" in health.readiness.checks_waived
+    } == {ADJ_FACTOR_DATASET}
+
+
+# --- the width of the clearance: what a cleared gate does *not* say ------------------------------
+
+
+def test_a_session_after_the_factor_hole_clears_and_the_clearance_says_how_narrowly(
+    tmp_path: Path,
+) -> None:
+    """The `V2-P1-013` review's Critical, reproduced and then made visible.
+
+    The same hole as the Task 29 test above -- `000001.SZ`'s `adj_factor` row for the ex-rights
+    session, written through `write_adjustment_factors` with the calendar, which accepts one
+    security's missing row on a session the others still carry. Naming the ex-rights session
+    blocks. Naming `2026-01-15`, two sessions later, **clears**, with `report.is_clean` and no
+    notice, because `return_paths` recomputes the sessions it is given and nothing else.
+
+    That much is unavoidable from the read side: `panel_ingest` records that this residue
+    "cannot be closed from the read side", and the gate's own import set puts the session
+    census out of reach. What was avoidable is `cleared` handing back a bare `'adj_factor'`
+    granted over 2026, which reads as a whole year. It now carries the one session that was
+    corroborated, the code still open outside it, and a `corroborates` that answers `False` for
+    the two sessions the wrong number is computed across.
+    """
+    store = seed(tmp_path, factors=factor_batch(omit=((PING_AN, EX_RIGHTS_SESSION),)))
+    unnamed = SESSIONS[8]
+
+    clearance = require_datasets(store, request_for(sessions=(unnamed,)))
+    factors = clearance.cleared_for(ADJ_FACTOR_DATASET)
+
+    assert clearance.is_blocked is False
+    assert factors.corroborated_sessions == (unnamed,)
+    assert factors.caveats == (UNVERIFIED_DAILY_COVERAGE,)
+    assert factors.years == (YEAR,)
+    assert factors.corroborates(unnamed) is True
+    assert factors.corroborates(PRE_EX_SESSION) is False
+    assert factors.corroborates(EX_RIGHTS_SESSION) is False
+    assert clearance.caveat_codes() == frozenset({UNVERIFIED_DAILY_COVERAGE})
+    assert [
+        entry.dataset for entry in clearance.cleared_with_caveat(UNVERIFIED_DAILY_COVERAGE)
+    ] == [ADJ_FACTOR_DATASET]
+
+    ungated = _factor_history(store).adjusted_return(
+        start=PRE_EX_SESSION, end=EX_RIGHTS_SESSION, start_price=11.30, end_price=11.24
+    )
+    assert round(ungated * 100, 6) == -0.530973
+
+
+def test_naming_the_session_after_the_hole_still_blocks_and_the_window_is_two_sessions_wide(
+    tmp_path: Path,
+) -> None:
+    """The pair, and the measurement of how narrow the escape window is. The hole is at index
+    6; `return_paths` compares each named session against its predecessor, so naming 6 or 7
+    blocks and every later session clears. Pinned so that a change to the rule shows up as a
+    change to *which* sessions block rather than as prose about coverage."""
+    store = seed(tmp_path, factors=factor_batch(omit=((PING_AN, EX_RIGHTS_SESSION),)))
+
+    verdicts = {
+        index: require_datasets(store, request_for(sessions=(SESSIONS[index],))).is_blocked
+        for index in (5, 6, 7, 8, 9)
+    }
+
+    assert verdicts == {5: False, 6: True, 7: True, 8: False, 9: False}
+
+
+def test_a_close_disagreement_on_an_unnamed_session_clears_and_the_record_says_it_was_unread(
+    tmp_path: Path,
+) -> None:
+    """The review's "not only `adj_factor`" case. All three session-scoped checks run on
+    `cross_section_days`, so a `daily_basic` close `daily` contradicts on `2026-01-15` is
+    invisible to a request that named `2026-01-13` -- and `daily`'s own date census, which
+    *does* cover the year, says nothing about it. The record separates the two: the year for
+    the census, the corroborated sessions for the cross-check."""
+    store = seed(tmp_path)
+    unnamed = SESSIONS[8]
+    write_panel_batch(
+        store,
+        valuation_batch(
+            omit=((HALTED_SECURITY, HALTED_SESSION),), closes={(PING_AN, unnamed): 99.0}
+        ),
+        year=YEAR,
+    )
+
+    cleared = require_datasets(store, request_for(sessions=(EX_RIGHTS_SESSION,)))
+    refused = require_datasets(store, request_for(sessions=(unnamed,)))
+    prices = cleared.cleared_for(DAILY_BASIC_DATASET)
+
+    assert cleared.is_blocked is False
+    assert prices.years == (YEAR,)
+    assert prices.corroborated_sessions == (EX_RIGHTS_SESSION,)
+    assert prices.corroborates(unnamed) is False
+    assert refused.blocking_codes() == frozenset({"close_disagreement"})
+
+
+def test_an_unexplained_unpriced_name_on_an_unnamed_session_clears_the_same_way(
+    tmp_path: Path,
+) -> None:
+    """The third of the same shape: `000002.SZ` loses its bar on `2026-01-15` with no halt to
+    account for it, and a request naming `2026-01-13` clears. `suspend_d` is one of the
+    datasets `unpriced_explained` reads, so its record carries the sessions too."""
+    store = seed(tmp_path)
+    unnamed = SESSIONS[8]
+    gone = ((HALTED_SECURITY, HALTED_SESSION), (VANKE, unnamed))
+    write_panel_batch(store, bar_batch(omit=gone), year=YEAR)
+    write_panel_batch(store, valuation_batch(omit=gone), year=YEAR)
+
+    cleared = require_datasets(store, request_for(sessions=(EX_RIGHTS_SESSION,)))
+    refused = require_datasets(store, request_for(sessions=(unnamed,)))
+
+    assert cleared.is_blocked is False
+    assert cleared.cleared_for(SUSPENSION_DATASET).corroborated_sessions == (EX_RIGHTS_SESSION,)
+    assert cleared.cleared_for(SUSPENSION_DATASET).corroborates(unnamed) is False
+    assert refused.blocking_codes() == frozenset({"unexplained_unpriced"})
+
+
+def test_a_dataset_no_session_scoped_check_reads_records_no_session_at_all(
+    tmp_path: Path,
+) -> None:
+    """The other direction, so that "every dataset carries the named sessions" cannot pass for
+    this rule. `income` is read by `statement_ambiguity`, which opens no session, so its record
+    carries the years and an empty session tuple -- and `corroborates` answers `False` for the
+    very session the request named, because no cross-dataset check looked at `income` on it."""
+    clearance = require_datasets(seed(tmp_path), request_for())
+
+    statements = clearance.cleared_for(INCOME_DATASET)
+
+    assert statements.years == (YEAR,)
+    assert statements.corroborated_sessions == ()
+    assert statements.caveats == ()
+    assert statements.corroborates(EX_RIGHTS_SESSION) is False
+
+
+def test_both_sides_of_a_cross_dataset_block_are_reachable_from_the_clearance(
+    tmp_path: Path,
+) -> None:
+    """`GateBlock.dataset` is the name the finding is *filed* under, and a caller polling
+    dataset by dataset was told `()` for the other side.
+
+    Two real injections, each with the block filed under `daily`: a `close_disagreement` whose
+    wrong close is `daily_basic`'s, and a `subject_set_disagreement` whose short subject list is
+    `adj_factor`'s. Both used to answer "nothing wrong there" for the dataset that actually
+    carried the defect.
+    """
+    store = seed(tmp_path)
+    write_panel_batch(
+        store,
+        valuation_batch(
+            omit=((HALTED_SECURITY, HALTED_SESSION),), closes={(PING_AN, EX_RIGHTS_SESSION): 99.0}
+        ),
+        year=YEAR,
+    )
+
+    disagreement = require_datasets(store, request_for())
+    containment = require_datasets(
+        seed(tmp_path / "second", factors=factor_batch(securities=SECURITIES[:2])), request_for()
+    )
+
+    assert disagreement.blocked_datasets == (DAILY_DATASET, DAILY_BASIC_DATASET)
+    assert [block.code for block in disagreement.blocks_for(DAILY_BASIC_DATASET)] == [
+        "close_disagreement"
+    ]
+    assert ADJ_FACTOR_DATASET in containment.blocked_datasets
+    assert {block.code for block in containment.blocks_for(ADJ_FACTOR_DATASET)} == {
+        "subject_set_disagreement",
+        "check_unavailable",
+    }
+    assert containment.blocks_for(INCOME_DATASET) == ()
 
 
 # --- injections that must block, each paired with the downstream that must not succeed ---------
@@ -1062,7 +1276,7 @@ def test_a_panel_whose_only_findings_are_notices_still_clears(tmp_path: Path) ->
     clearance = require_datasets(store, request_for())
 
     assert clearance.is_blocked is False
-    assert clearance.cleared == DATASETS
+    assert _cleared_names(clearance) == DATASETS
     assert {notice.code for notice in clearance.notices} == {
         "ambiguous_filing",
         "duplicate_versions",
@@ -1163,6 +1377,86 @@ def test_the_ways_people_actually_write_this_all_raise_on_a_real_blocked_clearan
     with pytest.raises(PanelGateError, match=r"blocked by"):
         _ = clearance.cleared
     assert clearance.cleared_or_none is None
+
+
+def test_a_year_that_has_begun_but_published_no_session_blocks_with_an_empty_requirement(
+    tmp_path: Path,
+) -> None:
+    """`empty_requirement` reached through `panel_health_report`, which an earlier note here
+    called impossible.
+
+    It is not: at 17:00 Asia/Shanghai on 2 January 2026 the year has begun and neither of its
+    first two days was a session, so `_price_requirement` states `required_dates=()` -- a
+    declared-but-empty expectation, which `evaluate_readiness` blocks on because an empty set
+    difference is empty and would otherwise report `ready` for a partition holding nothing.
+    This happens on the real calendar every January, and the gate must refuse rather than
+    clearing a dataset whose date check was configured to look at no day at all.
+    """
+    store = seed(tmp_path)
+
+    clearance = require_datasets(
+        store,
+        request_for(
+            datasets=(DAILY_DATASET,), as_of=datetime(2026, 1, 2, 9, 0, tzinfo=UTC), sessions=()
+        ),
+    )
+
+    assert "empty_requirement" in clearance.blocking_codes()
+    assert [block.dataset for block in clearance.blocks_with_code("empty_requirement")] == [
+        DAILY_DATASET
+    ]
+    with pytest.raises(PanelGateError, match=r"blocked by \[.*'empty_requirement'"):
+        _ = clearance.cleared
+
+
+def test_the_date_timezone_this_gate_pins_changes_the_verdict_rather_than_nothing(
+    tmp_path: Path,
+) -> None:
+    """Why `date_timezone` is fixed at `DEFAULT_DATE_TIMEZONE` instead of being a request field.
+
+    Not because no input can tell the difference -- one store, one `as_of`, two zones, two
+    different verdicts. At 17:00 Asia/Shanghai on 2026-01-16 that session has published and its
+    absence is a `date_gap`; read as UTC the same instant is 09:00, before the 16:30
+    availability time, so the session is not required and the report is clean. Exposing the
+    knob would let a request judge a partition against a session boundary the partition was
+    never written to, which is the one-day disagreement `PartitionCoverage.date_timezone`
+    exists to record.
+    """
+    store = seed(tmp_path)
+    write_panel_batch(
+        store,
+        bar_batch(days=SESSIONS[:-1], omit=((HALTED_SECURITY, HALTED_SESSION),)),
+        year=YEAR,
+    )
+    argument: dict[str, object] = {
+        "as_of": datetime(2026, 1, 16, 9, 0, tzinfo=UTC),
+        "datasets": (DAILY_DATASET,),
+        "years": (YEAR,),
+        "calendar": calendar(),
+    }
+
+    shanghai = panel_health_report(store, date_timezone="Asia/Shanghai", **argument)  # type: ignore[arg-type]
+    utc = panel_health_report(store, date_timezone="UTC", **argument)  # type: ignore[arg-type]
+
+    assert sorted(shanghai.codes()) == ["date_gap"]
+    assert shanghai.is_clean is False
+    assert utc.codes() == frozenset()
+    assert utc.is_clean is True
+
+
+def test_a_per_dataset_override_naming_a_dataset_outside_the_request_is_a_usage_error(
+    tmp_path: Path,
+) -> None:
+    """Both mappings are resolved against the datasets the report was handed, so a key outside
+    them is dropped rather than applied. A caller narrowing `fina_indicator`'s backfill window
+    while asking about the price panel got no feedback at all and a verdict built on the
+    request's defaults."""
+    store = seed(tmp_path)
+
+    with pytest.raises(PanelGateError, match=r"years_by_dataset names \['fina_indicator'\]"):
+        require_datasets(store, request_for(years_by_dataset={"fina_indicator": (1999,)}))
+    with pytest.raises(PanelGateError, match=r"freshness_overrides names \['namechange'\]"):
+        require_datasets(store, request_for(freshness_overrides={"namechange": None}))
 
 
 def test_a_gate_asked_about_no_dataset_at_all_is_a_usage_error(tmp_path: Path) -> None:
