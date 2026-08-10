@@ -5,13 +5,14 @@ import logging
 import os
 import platform
 import sys
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence, Set
 from contextlib import contextmanager
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from enum import IntEnum, StrEnum
 from pathlib import Path
+from time import monotonic
 from types import MappingProxyType
-from typing import Annotated, Final
+from typing import Annotated, Final, cast
 from zoneinfo import ZoneInfo
 
 import typer
@@ -77,6 +78,7 @@ from openalpha_cn.panel_view import (
 from openalpha_cn.providers.akshare import AKShareProvider
 from openalpha_cn.providers.base import (
     DataProvider,
+    PanelDataProvider,
     ProviderFailure,
     ProviderMetadata,
     ProviderRequest,
@@ -220,6 +222,71 @@ def _probe_subjects(provider: DataProvider, dataset: str) -> tuple[str, ...]:
     return tuple(str(subject) for subject in subjects)
 
 
+def _probe_plane(provider: DataProvider, dataset: str) -> str:
+    """Which of a provider's fetch methods one minimal request for `dataset` should go to.
+
+    `_probe_subjects`' sibling, the same `getattr` seam, and it exists for the defect that
+    seam was one half of. `_probe_report` called `fetch()` for every declared dataset, and
+    four of Tushare's fifteen declare `serves_evidence_plane=False` -- a verbatim evidence
+    record has no single `available_time` for them -- so `fetch()` refused all four with
+    `configuration` **before any transport call**, in the same microsecond, in every
+    environment. The probe was reporting "this account cannot fetch `stock_basic`" about an
+    endpoint that returns 6,217 rows on the plane it is actually served on.
+
+    A provider opts in by exposing `probe_plane(dataset) -> "evidence" | "panel"`; anything
+    else, and any unrecognised answer, stays on the evidence plane, which is the only method
+    `DataProvider` guarantees.
+    """
+    hook = getattr(provider, "probe_plane", None)
+    if hook is None:
+        return "evidence"
+    return "panel" if hook(dataset) == "panel" else "evidence"
+
+
+def _probe_once(provider: DataProvider, request: ProviderRequest) -> None:
+    """Send one minimal request on whichever plane `_probe_plane` named."""
+    if _probe_plane(provider, request.dataset) == "panel":
+        panel_provider = cast(PanelDataProvider, provider)
+        panel_provider.fetch_panel(request)
+        return
+    provider.fetch(request)
+
+
+PROBE_FAILURE_STATES: Final[frozenset[str]] = frozenset({"authentication"})
+"""The probe outcomes that make `doctor --probe` exit non-zero, as a closed set.
+
+**One member**, and the reasoning behind that number is the whole of this decision.
+
+`authentication` is a credential this provider *had* and the endpoint *rejected*. It is the
+one probe outcome that is both about this side of the connection and unambiguous, and until
+`V2-P1-018` it could not be produced at all: `providers/tushare.py::TUSHARE_CREDENTIAL_CODE`
+records the measurement -- a wrong token answers `code=40101`, and the only code mapped to
+`authentication` was `-2001`, which nothing here has ever observed. So the single most common
+real failure was reported as `upstream`, advertised as retryable, and exited 0.
+
+Four outcomes are deliberately *not* here, and three of them are the ones a naive "anything
+that is not ok" rule would have swept in:
+
+- `configuration`. R12's brief draws this line itself: "this dataset needs a parameter" must
+  not count as a failure. After `_probe_subjects` and `_probe_plane` that reading is no longer
+  reachable through this path, but the other one is -- an **absent** `TUSHARE_TOKEN` is
+  `configuration` too, and a default install with no Tushare account is a normal state, already
+  reported as `WARN credential ... missing` by the check next to this one. Failing the command
+  for it would make `--probe` non-zero on almost every machine, which is how a check becomes a
+  `|| true`.
+- `rate_limit` is a fact about the next sixty seconds, and the provider already waits and
+  retries within one (`providers/tushare.py::TUSHARE_RATE_LIMIT_DELAY`).
+- `upstream` is the endpoint's own verdict about one interface. That is the **content** of the
+  report Implementation Decision 33 asks for -- "which interfaces can this account actually
+  reach" -- not a reason to refuse to publish it.
+- `not_configured` is a provider that declined to be probed at all (ChainLin without a base
+  URL), which is again the default install.
+
+`probe_error` sits closest to the line and stays out by the same argument as `upstream`: it is
+per-dataset, and the *report* is what carries it.
+"""
+
+
 def _probe_report(provider: DataProvider) -> dict[str, str]:
     """Make one minimal request per declared dataset and classify the outcome.
 
@@ -229,6 +296,12 @@ def _probe_report(provider: DataProvider) -> dict[str, str]:
     the doctor-level state `probe_error` without ever echoing the
     exception's message or repr, so this boundary can never leak a
     credential embedded in an unexpected error.
+
+    "One minimal request" is now a fact rather than a description: the subjects come from
+    `_probe_subjects` and the plane from `_probe_plane`, both of which the provider answers, so
+    every declared dataset reaches the network. Before those two hooks, nine of Tushare's
+    fifteen never did -- see `PROBE_FAILURE_STATES` and `_probe_plane` for the two causes and
+    the measurement that separated them.
     """
     if not _is_configured(provider):
         return dict.fromkeys(provider.metadata.supported_datasets, "not_configured")
@@ -241,7 +314,7 @@ def _probe_report(provider: DataProvider) -> dict[str, str]:
                 as_of=as_of,
                 subjects=_probe_subjects(provider, dataset),
             )
-            provider.fetch(request)
+            _probe_once(provider, request)
         except ProviderFailure as failure:
             results[dataset] = failure.category
             # Never `failure.args`/`str(failure)`: `ProviderFailure.message` (see
@@ -318,6 +391,7 @@ def doctor(
 
     providers: dict[str, dict[str, object]] = {}
     warnings: list[str] = []
+    probe_failures: list[str] = []
     for provider in _default_providers():
         provider_id = provider.metadata.provider_id
         credentials = _credential_report(provider)
@@ -331,18 +405,37 @@ def doctor(
             "credentials": credentials,
         }
         if probe:
-            report["probe"] = _probe_report(provider)
+            outcomes = _probe_report(provider)
+            report["probe"] = outcomes
+            probe_failures.extend(
+                f"{provider_id}/{dataset}: {result}"
+                for dataset, result in outcomes.items()
+                if result in PROBE_FAILURE_STATES
+            )
         providers[provider_id] = report
 
+    environment_ok = python_ok and timezone_ok and config_ok
     payload = {
-        "status": "ok" if python_ok and timezone_ok and config_ok else "error",
+        "status": "ok" if environment_ok and not probe_failures else "error",
         "checks": checks,
         "providers": providers,
         "warnings": warnings,
+        # Always present with `--probe`, and empty is the interesting value: a caller reading
+        # this to decide whether a scheduled build can run needs "the probe ran and found
+        # nothing" to be distinguishable from "the probe did not run", which an absent key is
+        # not. Without `--probe` the key is absent, because no probe happened.
+        **({"probe_failures": probe_failures} if probe else {}),
     }
     if json_output:
         typer.echo(json.dumps(payload, ensure_ascii=False, sort_keys=True))
-        return
+        # Falls through to the exit check rather than returning, and that is a fix rather than
+        # a tidy-up. `doctor --json` used to `return` here, so **the one rendering a CI job
+        # parses always exited 0** -- a malformed `OPENALPHA_*` value, a rejected credential, a
+        # probe that could not reach an endpoint, all reported faithfully in the payload and all
+        # indistinguishable from a clean run to `set -e`. `panel doctor` and `data-check` both
+        # print their JSON and then raise; this is the same rule, and `PanelExit`'s docstring
+        # already says why an exit code that cannot say "no" is not a check.
+        raise typer.Exit(code=0 if payload["status"] == "ok" else 1)
 
     for name, check in checks.items():
         line = f"{'PASS' if check['ok'] else 'FAIL'} {name}"
@@ -365,7 +458,8 @@ def doctor(
             probe_results = report["probe"]
             assert isinstance(probe_results, dict)
             for dataset, result in probe_results.items():
-                typer.echo(f"PROBE {provider_id}/{dataset} {result}")
+                state = "FAIL" if result in PROBE_FAILURE_STATES else "PROBE"
+                typer.echo(f"{state} {provider_id}/{dataset} {result}")
     if payload["status"] != "ok":
         raise typer.Exit(code=1)
 
@@ -834,6 +928,23 @@ _NEEDS_STORED_CALENDAR: Final[frozenset[str]] = frozenset(
 already. `write_adjustment_factors` and `write_daily_panel` both refuse a year missing a session
 the calendar reports open, and that census is the whole reason those writers require it."""
 
+SESSION_SCOPED_DATASETS: Final[tuple[str, ...]] = (
+    ADJ_FACTOR_DATASET,
+    DAILY_DATASET,
+    DAILY_BASIC_DATASET,
+    PRICE_LIMIT_DATASET,
+)
+"""The datasets that must reach the **same last session** for a year to be assessable at all.
+
+Four of the seven this command writes, and the other three are excluded for reasons rather than
+by omission. `trade_cal` is a whole year including days that have not happened; `stock_basic` is
+keyed by lifecycle year; and `suspend_d` legitimately holds nothing for a session on which
+nothing was halted, so its last covered date is a fact about the market rather than about this
+build's horizon (`_EMPTY_SESSION_IS_ORDINARY` says the same thing one layer down). Each of these
+four publishes on every open session, so its last covered date **is** the horizon its build ran
+to. See `_refuse_split_horizon`.
+"""
+
 
 def _panel_store(runtime_dir: Path) -> PanelStore:
     """The panel plane inside a runtime directory.
@@ -1159,6 +1270,128 @@ def _build_sessions(calendar: TradingCalendar, year: int, now: datetime) -> tupl
     return calendar.trading_days_between(opens_on, closes_on)
 
 
+def _stored_horizon(store: PanelStore, dataset: str, year: int) -> date | None:
+    """The last session `dataset`'s stored partition for `year` covers, or `None`.
+
+    `None` for both "no partition" and "a partition with no coverage census", because neither
+    can say what horizon the build that wrote it ran to, and `_refuse_split_horizon` may only
+    refuse on evidence.
+    """
+    if year not in store.registered_years(dataset):
+        return None
+    coverage = store.read_coverage(dataset, year)
+    if coverage is None or not coverage.dates:
+        return None
+    return max(entry.event_date for entry in coverage.dates)
+
+
+def _refuse_split_horizon(
+    store: PanelStore, *, sessions: Sequence[date], year: int, exchange: str, rewritten: Set[str]
+) -> None:
+    """Refuse a build whose horizon disagrees with a session-scoped partition already stored.
+
+    ## The panel this stops from existing
+
+    `panel build` reads its clock once per **invocation**, and the five targets are five
+    invocations. A build that starts at 23:34 and finishes at 00:39 Asia/Shanghai therefore
+    runs some of its targets against `today - 1` and the rest against `tomorrow - 1`, and the
+    panel that lands cannot be assessed clean at **any** `as_of`. Measured by
+    `tests/e2e/test_panel_chain_online.py` on this suite's own first build:
+
+        daily / daily_basic / adj_factor   144 sessions, last 2026-08-07
+        stk_limit                          145 sessions, last 2026-08-10
+
+    Before `stk_limit`'s newest row is knowable, `panel doctor` reports `stk_limit
+    not_yet_knowable`; at or after it, the calendar requires 2026-08-10 of the price panel,
+    which does not have it, and the report is `daily date_gap`. Both refusals are correct and
+    there is no third instant. The only remedy once it has happened is re-fetching the lagging
+    targets, which cost 386s and 2,374s on that run.
+
+    ## Why a refusal here rather than a warning, and why it is not a rule about time
+
+    This runs **before the first session is fetched** -- after the calendar load, which is what
+    `sessions` needs, and before any of the work. So the cost of being wrong is one command that
+    has to be re-run with a flag, against forty-five minutes of fetching that has to be thrown
+    away. It also does not reason about clocks at all: it compares the last session *this build
+    would reach* against the last session a sibling partition *already covers*, both derived
+    from the same stored calendar, so it catches a split horizon whatever produced it -- a clock
+    that rolled over, a `--as-of` typo, a partial re-fetch a week later.
+
+    ## Why `rewritten` is subtracted, and why that is the whole difference between a guard and
+    ## a wall
+
+    A disagreement is not always an accident: extending a stored year by a day is a legitimate
+    thing to want. `PanelStore` replaces a partition **whole** -- there is no append -- so
+    "extend the panel" means "rebuild every session-scoped partition of the year", and a rule
+    that compared this build's horizon against every stored partition would refuse the very
+    command that does it correctly. What matters is not whether the store disagrees *now* but
+    whether it will still disagree when this build finishes, so the comparison is against the
+    partitions this invocation is **not** going to replace.
+
+    That makes the two remedies real rather than rhetorical, and they are the two the message
+    offers: name every session-scoped target in one invocation, which reads one clock and moves
+    them together, or pin `--as-of` at the stored horizon. Doing it one target at a time without
+    pinning is the case that stays refused, and it is the case that produced the defect.
+
+    The second remedy is only offered when it exists. A store written *before* this guard can
+    already hold siblings that disagree with each other -- that is the panel the e2e suite
+    measured -- and there is then no instant that agrees with all of them, so naming one would
+    be a remedy that fails on the next run. `_pinning_remedy` says which case this is.
+    """
+    if not sessions:
+        return
+    reached = sessions[-1]
+    stored = {
+        dataset: horizon
+        for dataset in SESSION_SCOPED_DATASETS
+        if dataset not in rewritten
+        and (horizon := _stored_horizon(store, dataset, year)) is not None
+        and horizon != reached
+    }
+    if not stored:
+        return
+    listed = ", ".join(
+        f"{dataset} stops at {horizon.isoformat()}" for dataset, horizon in sorted(stored.items())
+    )
+    raise _panel_fail(
+        PanelExit.unhealthy,
+        f"this build would reach {reached.isoformat()} and the {exchange} panel for {year} "
+        f"already holds partitions that do not: {listed}. A panel whose session-scoped datasets "
+        "stop on different days cannot be assessed clean at any as_of -- earlier than the "
+        "newest partition's last row and the doctor reports not_yet_knowable, at or after it "
+        "and it reports a date_gap in the older ones -- so this is refused before anything is "
+        "fetched rather than after. Either build the session-scoped targets together in one "
+        "invocation, which moves the horizon atomically because a partition is replaced whole, "
+        f"{_pinning_remedy(stored)}",
+    )
+
+
+def _pinning_remedy(stored: Mapping[str, date]) -> str:
+    """The `--as-of` that would make this build agree with `stored`, or why there is none.
+
+    A remedy printed in a refusal is a promise, so it is only made when it can be kept. When
+    every stored sibling stops on the same session there is an instant that reproduces it --
+    any instant on the day after, because `_build_sessions` bounds at the local date minus one
+    -- and midday is named to keep it clear of both the 16:30 publication and either midnight.
+
+    When they *disagree with each other*, no instant agrees with all of them, and offering the
+    oldest one's would produce a build the next sibling refuses. That state cannot be created
+    by a build this guard has seen, but it can be inherited: it is exactly the panel the e2e
+    suite measured before `--as-of` existed. So the message says so instead.
+    """
+    horizons = set(stored.values())
+    if len(horizons) > 1:
+        return (
+            "or -- since those partitions do not agree with each other either, so no single "
+            "--as-of reproduces all of them -- rebuild every one of "
+            f"{sorted(SESSION_SCOPED_DATASETS)} in one invocation"
+        )
+    pinned = datetime.combine(
+        horizons.pop() + timedelta(days=1), time(12, 0), tzinfo=PANEL_DATE_ZONE
+    )
+    return f"or pin this build to the stored horizon with --as-of {pinned.isoformat()}"
+
+
 def _fetch_panel(
     provider: TushareProvider,
     dataset: str,
@@ -1194,6 +1427,36 @@ def _fetch_panel(
         ) from failure
 
 
+PANEL_PROGRESS_EVERY: Final[int] = 10
+"""How many sessions one `panel build` progress line covers.
+
+Ten, against a year-to-date build of ~145 sessions, so a target reports about fifteen times --
+often enough that a stalled fetch is visible within a minute or two, rarely enough that the
+lines are not themselves the output. The measured builds this was chosen against: `adj_factor`
+386--444s, `price` ~1,000--2,374s, `stk_limit` ~330s, whole build ~30--50 minutes, during which
+this command printed **nothing at all** and a caller could not tell a live fetch from a wedged
+one without `lsof`.
+"""
+
+
+def _echo_progress(datasets: Sequence[str], done: int, total: int, started: float) -> None:
+    """One progress line on stderr: what, how far, how long, and how much longer.
+
+    stderr rather than stdout, for `_panel_fail`'s reason at the other end of the same command:
+    `--json` has to stay parseable on stdout, and a progress line interleaved into it would make
+    every scripted caller's `json.loads` fail. The remaining estimate is linear in sessions
+    fetched, which is the right model here -- every session is the same whole-market request --
+    and it is labelled `eta` rather than presented as a promise.
+    """
+    elapsed = monotonic() - started
+    rate = elapsed / done if done else 0.0
+    typer.echo(
+        f"FETCHING {'+'.join(datasets)} {done}/{total} sessions "
+        f"elapsed={elapsed:.0f}s eta={rate * (total - done):.0f}s",
+        err=True,
+    )
+
+
 def _session_batches(
     provider: TushareProvider, datasets: Sequence[str], sessions: Sequence[date]
 ) -> dict[str, list[ColumnarPanelBatch]]:
@@ -1204,14 +1467,21 @@ def _session_batches(
     session's halts be fetched beside the bars they explain -- is the same code path a
     single-dataset target uses. A second copy of this loop for the price panel would leave the
     `_EMPTY_SESSION_IS_ORDINARY` branch dead in one of the two.
+
+    Reports progress every `PANEL_PROGRESS_EVERY` sessions and once at the end. This is the one
+    loop in the command that takes minutes rather than seconds, so it is the only one that
+    needs to say anything while it runs.
     """
     collected: dict[str, list[ColumnarPanelBatch]] = {name: [] for name in datasets}
-    for day in sessions:
+    started = monotonic()
+    for index, day in enumerate(sessions, start=1):
         for name in datasets:
             batch = _fetch_panel(provider, name, as_of=_session_as_of(day))
             if batch.status == "no_data" and name in _EMPTY_SESSION_IS_ORDINARY:
                 continue
             collected[name].append(batch)
+        if index % PANEL_PROGRESS_EVERY == 0 or index == len(sessions):
+            _echo_progress(datasets, index, len(sessions), started)
     return collected
 
 
@@ -1314,6 +1584,15 @@ def _build_panel(
     if targets & _NEEDS_STORED_CALENDAR:
         calendar = _stored_calendar(store, exchange=exchange, years=(year,), as_of=now)
         sessions = _build_sessions(calendar, year, now)
+        _refuse_split_horizon(
+            store,
+            sessions=sessions,
+            year=year,
+            exchange=exchange,
+            # What this invocation will replace, resolved through the target table rather than
+            # from the flags: `--dataset price` names one target and rewrites three datasets.
+            rewritten={name for target in targets for name in PANEL_BUILD_TARGETS[target]},
+        )
     if ADJ_FACTOR_DATASET in targets:
         assert calendar is not None  # guaranteed by `_NEEDS_STORED_CALENDAR` above
         written.setdefault(ADJ_FACTOR_DATASET, []).append(
@@ -1429,6 +1708,15 @@ def _audit_written_partitions(
         )
 
 
+_BUILD_AS_OF_HELP = (
+    "ISO-8601 instant this build's session horizon is derived from; defaults to the wall "
+    "clock. The session loop runs to this instant's Asia/Shanghai date minus one day, so "
+    "passing the same value to every target of one panel is what makes them stop on the same "
+    "session -- see `_refuse_split_horizon`, which refuses the build rather than letting them "
+    "diverge. Every run reports the instant it used, as `as_of` in --json and as the AS-OF "
+    "line otherwise, so a later re-fetch of one target can be pinned to it."
+)
+
 _BUILD_DATASET_HELP = (
     "A build target, repeatable. The five this command builds, in the order it runs them: "
     f"{', '.join(PANEL_BUILD_TARGETS)}. Anything else is refused by name. One target is one "
@@ -1458,6 +1746,7 @@ def panel_build(
             ),
         ),
     ] = True,
+    as_of: Annotated[str, typer.Option("--as-of", help=_BUILD_AS_OF_HELP)] = "",
     json_output: Annotated[
         bool, typer.Option("--json", help="Emit a machine-readable build report.")
     ] = False,
@@ -1478,12 +1767,37 @@ def panel_build(
 
     A refusal partway through names the partitions already on disk rather than claiming none
     are: the writers are each all-or-nothing, the build across them is not.
+
+    **One clock per invocation, and `--as-of` is how a caller keeps it across several.** The
+    session loop is bounded at the horizon this instant implies, and the five targets are five
+    invocations, so a build that crosses local midnight otherwise lands a panel that no `as_of`
+    can assess cleanly. The default stays the wall clock -- pinning is the deliberate act, not
+    the ordinary one -- and `_refuse_split_horizon` is what stops the default from being a trap:
+    a build whose horizon disagrees with a partition already stored is refused before it fetches
+    anything, with the exact `--as-of` that would resolve it.
     """
     with _panel_command("panel build"):
         targets = _build_targets(dataset)
         store = _panel_store(runtime_dir)
-        provider = TushareProvider(transport=_panel_transport(), clock=_panel_clock)
-        now = _panel_clock()
+        now = _panel_as_of(as_of)
+        # **One instant for the whole invocation, and the provider gets it too.** The clock this
+        # command bounds its session loop with (`_build_sessions`) and the clock the writers run
+        # their session census against (`panel_ingest._session_census`, which reads
+        # `batch.fetched_at`) are the same rule applied at two layers, and they were being given
+        # two different readings of `datetime.now()`. Within one invocation that is the
+        # cross-midnight defect in miniature: a `price` build that starts at 23:34 fetches the
+        # sessions up to yesterday and then, if it finishes after 00:39, hands the writer batches
+        # stamped with today -- so the census requires a session the loop was never asked for and
+        # refuses the partition the build correctly assembled. Passing the same resolved instant
+        # to both closes that, and it is what makes `--as-of` mean anything at all: pinning the
+        # loop while the census still moved would only relocate the disagreement.
+        #
+        # The cost is stated rather than hidden: `fetched_at` becomes the instant the build
+        # *started* rather than the instant each request returned, understating it by up to the
+        # build's duration (~45 minutes on a whole year). That is immaterial to every consumer of
+        # the field -- the census, whose bound is a whole day, and provenance -- and the value is
+        # reported as `as_of` in this command's own output rather than being left to be inferred.
+        provider = TushareProvider(transport=_panel_transport(), clock=lambda: now)
         written: dict[str, list[PartitionRef]] = {}
         try:
             sessions, halt_state = _build_panel(
@@ -1517,6 +1831,11 @@ def panel_build(
             "exchange": exchange,
             "targets": sorted(targets),
             "halts": halt_state,
+            # The instant this build's horizon came from, reported whether it was passed or
+            # defaulted. It is what a later `--dataset`-at-a-time re-fetch of this same panel
+            # has to be pinned to, and a value a caller can only get by being told: `sessions`
+            # below names the last session, not the instant that bounded the loop.
+            "as_of": now.isoformat(),
             "sessions": {
                 "first": sessions[0].isoformat() if sessions else None,
                 "last": sessions[-1].isoformat() if sessions else None,
@@ -1530,6 +1849,7 @@ def panel_build(
         if json_output:
             typer.echo(json.dumps(payload, ensure_ascii=False, sort_keys=True))
             return
+        typer.echo(f"AS-OF {now.isoformat()}")
         if sessions:
             typer.echo(
                 f"SESSIONS {len(sessions)} from {sessions[0].isoformat()} to "

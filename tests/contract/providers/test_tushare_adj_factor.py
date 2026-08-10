@@ -503,22 +503,44 @@ def test_availability_is_the_sessions_close_not_its_midnight(fake_tushare_transp
     assert "not yet knowable is not the same as absent" in batch.no_data_reason
 
 
-def test_a_fetch_that_runs_before_the_session_closes_fails_closed(fake_tushare_transport) -> None:
-    """A pre-existing property of `ClockStrategy.daily_close`, pinned here because
-    `adj_factor` is the second dataset on it.
+def test_a_fetch_that_runs_before_the_session_closes_drops_the_row_it_cannot_know(
+    fake_tushare_transport,
+) -> None:
+    """A property of `ClockStrategy.daily_close`, pinned here because `adj_factor` is the
+    second dataset on it -- **and changed in `V2-P1-018` because live measurement disproved
+    the premise it used to rest on.**
 
+    This test previously asserted that such a fetch *raises*, on the argument that
     `_daily_close_timeline` does not raise `ingested_time` the way `_calendar_static_timeline`
-    does, so a row whose 16:30 availability is later than the instant of the fetch cannot be
-    represented at all and the fetch raises. That is the safe direction -- the alternative is
-    a stored factor dated as knowable before it was published -- and in practice the endpoint
-    serves no rows for a session that has not closed.
+    does, that the alternative would be "a stored factor dated as knowable before it was
+    published", and that "in practice the endpoint serves no rows for a session that has not
+    closed". The last clause is false: `suspend_d(trade_date=20260811)` served two rows at
+    05:29 Asia/Shanghai on 2026-08-11 -- a halt announced for the next session -- so
+    `openalpha doctor --probe` reported `invalid_response` for a working endpoint every
+    morning, with the reason "Tushare response could not be decoded", about a response that
+    decoded perfectly.
+
+    The middle clause is false too, and that is what this test now asserts. Raising
+    `ingested_time` does **not** store an unknowable row: `_decode_panel_rows` bounds its
+    point-in-time filter at `min(as_of, ingested_at)`, so the row is represented only long
+    enough to be discarded, exactly as `_calendar_static_timeline` has documented since
+    `V2-P1-005`. The safe direction is kept and is asserted directly -- nothing whose
+    availability runs past the fetch instant reaches the batch -- rather than being inferred
+    from an exception.
     """
     morning = datetime(2024, 6, 28, 1, 0, tzinfo=UTC)
     provider, _ = _provider(
-        fake_tushare_transport, _response([[PING_AN, "20240628", 125.049]]), clock=morning
+        fake_tushare_transport,
+        _response([[PING_AN, "20240627", 124.0], [PING_AN, "20240628", 125.049]]),
+        clock=morning,
     )
-    with pytest.raises(ProviderFailure, match="ingested_time cannot precede available_time"):
-        provider.fetch_panel(_request(morning))
+
+    batch = provider.fetch_panel(_request(morning))
+
+    assert batch.status == "success"
+    assert batch.subjects == (PING_AN,)
+    assert max(batch.timeline.available_time) <= morning
+    assert 125.049 not in batch.columns[0].values
 
 
 # --- provenance for a whole-market batch ----------------------------------------------

@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import shutil
 from collections.abc import Callable, Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -63,7 +64,14 @@ def built_panel(tmp_path_factory: pytest.TempPathFactory) -> BuiltPanel:
         )
 
     runtime_dir = tmp_path_factory.mktemp("e2e-runtime")
-    year = build_year(workspace, runtime_dir)
+    # One instant for the whole build, read here and passed to every `panel build` as `--as-of`.
+    # The five targets are five invocations spanning tens of minutes, and each would otherwise
+    # bound its own session loop at its own clock -- which is how this suite's first run produced
+    # a panel whose datasets stopped on different days. `_refuse_split_horizon` would now refuse
+    # such a build outright; pinning it is the other half of that fix and the half that lets the
+    # build succeed rather than merely fail loudly.
+    as_of = datetime.now(UTC)
+    year = build_year(workspace, runtime_dir, as_of)
     reports: dict[str, Any] = {}
     waiver: CLIResult | None = None
     for target in BUILD_TARGETS:
@@ -77,16 +85,21 @@ def built_panel(tmp_path_factory: pytest.TempPathFactory) -> BuiltPanel:
             # `test_the_price_build_completes_with_the_halt_guard_it_defaults_to`). Falling
             # back to `--no-halts` is what lets the other twenty tests examine a panel at all,
             # and `halt_waiver` is what stops that fallback from being a silent pass.
-            attempt = attempt_build(workspace, runtime_dir, target=target, year=year)
+            attempt = attempt_build(workspace, runtime_dir, target=target, year=year, as_of=as_of)
             if attempt.exit_code == 0:
                 reports[target] = attempt.payload()
                 continue
             waiver = attempt
             reports[target] = run_build(
-                workspace, runtime_dir, target=target, year=year, extra=("--no-halts",)
+                workspace,
+                runtime_dir,
+                target=target,
+                year=year,
+                as_of=as_of,
+                extra=("--no-halts",),
             )
             continue
-        reports[target] = run_build(workspace, runtime_dir, target=target, year=year)
+        reports[target] = run_build(workspace, runtime_dir, target=target, year=year, as_of=as_of)
     require_the_report_matches_what_landed(panel_store(runtime_dir), reports, year=year)
     return BuiltPanel(
         runtime_dir=runtime_dir,

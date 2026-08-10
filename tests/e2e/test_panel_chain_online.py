@@ -219,9 +219,17 @@ def test_every_session_scoped_dataset_reaches_the_same_last_session(
         BLOCKING daily date_gap: 1 required date(s) are absent from daily, starting at
         2026-08-10
 
-    Both refusals are correct; there is no third option, and `panel build` has no `--as-of` to
-    pin the bound with. The only remedy is to re-fetch the lagging targets, which cost 386s for
-    `adj_factor` and 2,374s for `price` to bring this panel back to one horizon.
+    Both refusals are correct; there is no third option, and the only remedy once it has
+    happened is to re-fetch the lagging targets, which cost 386s for `adj_factor` and 2,374s
+    for `price` to bring this panel back to one horizon.
+
+    **Closed by `V2-P1-018`, in two halves, and this assertion is unchanged by either.**
+    `panel build` now takes `--as-of`, and `conftest.py` reads one instant per fixture and
+    passes it to all five invocations, so the horizon is a property of the build rather than of
+    what time it started. And `cli._refuse_split_horizon` refuses a build whose horizon
+    disagrees with a session-scoped partition it is not going to replace -- before the first
+    session is fetched -- so the panel this test describes can no longer be produced by
+    accident at all. `tests/integration/test_cli_panel_horizon.py` drives both offline.
     """
     horizons = {
         dataset: last_covered_session(built_panel.store, dataset=dataset, year=built_panel.year)

@@ -750,6 +750,15 @@ def test_main_entrypoint_logs_provider_probe_failure_without_leaking_the_failure
     `test_doctor_probe_real_cli_path_never_leaks_a_non_provider_failure_exception`
     above, which covers the *unlogged* generic-exception branch through the same
     real entry point.
+
+    **The expected return code changed from 0 to 1 in `V2-P1-018`, and that is the
+    fix rather than a concession to it.** This provider's probe raises
+    `authentication` -- a credential the endpoint rejected, the one outcome in
+    `cli.PROBE_FAILURE_STATES` -- and `doctor --json` used to `return` before its own
+    exit check, so the rendering a scheduled job parses reported that failure in the
+    payload and exited 0 anyway. Everything this test was written to prove is
+    unchanged and still asserted below: the sentinel reaches neither stream, and the
+    structured log line carries the category rather than the message.
     """
     sentinel = "sk-scratch-leak-check-MAINLOG-224466"
     script = _PROVIDER_FAILURE_LOG_SCRIPT.replace("__SENTINEL__", sentinel)
@@ -762,7 +771,7 @@ def test_main_entrypoint_logs_provider_probe_failure_without_leaking_the_failure
         timeout=30,
     )
 
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 1, result.stderr
     assert sentinel not in result.stdout
     assert sentinel not in result.stderr
     payload = json.loads(result.stdout)
@@ -778,3 +787,153 @@ def test_main_entrypoint_logs_provider_probe_failure_without_leaking_the_failure
     assert record["provider_id"] == "fake.failing"
     assert record["dataset"] == "widgets"
     assert sentinel not in json.dumps(record)
+
+
+# --- V2-P1-018 R12: the probe reaches every declared dataset ----------------------------------
+
+
+class _RecordingTushareTransport:
+    """Answers any Tushare request with a well-formed, empty response, and records it.
+
+    `fields` is taken from the descriptor's own `checked_response_fields` so the schema check
+    passes for every dataset without this double having to know fifteen response shapes, and
+    `has_more=False` satisfies the descriptors that demand the flag. Empty `items` is enough:
+    `fetch()` answers `no_data` and `fetch_panel()` answers `no_data`, and the probe records
+    both as `ok` -- an accepted request is the whole question it is asking.
+    """
+
+    def __init__(self) -> None:
+        self.datasets: list[str] = []
+
+    def post(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from openalpha_cn.providers.tushare import TUSHARE_DATASETS
+
+        name = str(payload["api_name"])
+        self.datasets.append(name)
+        (descriptor,) = (entry for entry in TUSHARE_DATASETS if entry.dataset == name)
+        return {
+            "code": 0,
+            "msg": "",
+            "data": {
+                "fields": list(descriptor.checked_response_fields),
+                "items": [],
+                "has_more": False,
+            },
+        }
+
+
+def test_doctor_probe_sends_one_request_for_every_declared_tushare_dataset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R12's measurement, inverted into an assertion.
+
+    The product review timed the probe's own log and found `index_weight`..`fina_indicator`
+    -- seven datasets -- landing within **one microsecond** of each other
+    (14:59:46.509232 -> .509394): no network round trip happened for any of them. Nine of the
+    fifteen sent nothing at all, for two different reasons that the report rendered as the same
+    word, `configuration`:
+
+    - four (`stock_basic`, `namechange`, `index_classify`, `index_member_all`) declare
+      `serves_evidence_plane=False`, so `fetch()` refuses them by design -- and the probe only
+      ever called `fetch()`. `stock_basic` returns 6,217 rows on the plane it is actually
+      served on;
+    - five (`index_weight` and the four financial-statement endpoints) were handed the empty
+      subject tuple their own `params_builder` refuses.
+
+    So this asserts the count and the *set*, by equality against the declared datasets rather
+    than by a threshold: a probe that reached fourteen of fifteen is the same defect one dataset
+    smaller, and it is the one nobody would notice.
+    """
+    from openalpha_cn.providers.tushare import TUSHARE_DATASETS, TushareProvider
+
+    transport = _RecordingTushareTransport()
+    provider = TushareProvider(token=SECRET_TOKEN, transport=transport)
+    monkeypatch.setattr(cli, "_default_providers", lambda: [provider])
+
+    result = runner.invoke(app, ["doctor", "--json", "--probe"])
+
+    assert result.exit_code == 0, result.stdout
+    declared = [entry.dataset for entry in TUSHARE_DATASETS]
+    assert transport.datasets == declared
+    payload = json.loads(result.stdout)
+    assert payload["providers"]["tushare.pro"]["probe"] == dict.fromkeys(declared, "ok")
+    assert payload["probe_failures"] == []
+
+
+def test_doctor_probe_exits_non_zero_when_the_credential_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exit code is the deliverable, and it could not previously say no.
+
+    Two independent reasons it could not, both closed here. `doctor --json` returned before its
+    own exit check, so the machine-readable rendering always exited 0; and a rejected Tushare
+    token answers `code=40101`, which the provider classified `upstream` because the only code
+    mapped to `authentication` was one nothing has ever observed.
+    """
+    from openalpha_cn.providers.tushare import TushareProvider
+
+    class _RejectingTransport:
+        def post(self, payload: dict[str, Any]) -> dict[str, Any]:
+            return {"code": 40101, "msg": "the token is not right", "data": None}
+
+    provider = TushareProvider(
+        token=SECRET_TOKEN, transport=_RejectingTransport(), sleep=lambda _: None
+    )
+    monkeypatch.setattr(cli, "_default_providers", lambda: [provider])
+
+    result = runner.invoke(app, ["doctor", "--json", "--probe"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert set(payload["providers"]["tushare.pro"]["probe"].values()) == {"authentication"}
+    assert len(payload["probe_failures"]) == 15
+    assert payload["status"] == "error"
+
+
+def test_doctor_probe_does_not_fail_the_command_for_an_endpoints_own_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half of the rule, and the half that keeps the exit code usable.
+
+    "This account cannot reach this interface" is the *content* of the report Implementation
+    Decision 33 asks for, not a reason to refuse to publish it -- so an `upstream` refusal is
+    reported per dataset and the command still exits 0. Without this half, one withdrawn
+    endpoint would fail every scheduled `doctor --probe` on every machine.
+    """
+    from openalpha_cn.providers.tushare import TushareProvider
+
+    class _RefusingTransport:
+        def post(self, payload: dict[str, Any]) -> dict[str, Any]:
+            return {"code": 40001, "msg": "no permission for this interface", "data": None}
+
+    provider = TushareProvider(
+        token=SECRET_TOKEN, transport=_RefusingTransport(), attempts=1, sleep=lambda _: None
+    )
+    monkeypatch.setattr(cli, "_default_providers", lambda: [provider])
+
+    result = runner.invoke(app, ["doctor", "--json", "--probe"])
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert set(payload["providers"]["tushare.pro"]["probe"].values()) == {"upstream"}
+    assert payload["probe_failures"] == []
+
+
+def test_doctor_json_exits_non_zero_when_the_report_it_printed_is_not_clean(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The early `return` this issue removed, pinned so it cannot come back.
+
+    `doctor --json` printed a payload with `"status": "error"` and exited 0, which is the exact
+    shape of the empty success this repository keeps booking: a check whose verdict is in the
+    body and whose exit code always says yes. The config path is used rather than the probe
+    path so that the two causes are pinned separately.
+    """
+    monkeypatch.setenv("OPENALPHA_MAX_REQUEST_BYTES", "not-a-number")
+
+    result = runner.invoke(app, ["doctor", "--json"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "error"
+    assert payload["checks"]["config"]["ok"] is False

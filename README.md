@@ -242,6 +242,13 @@ uv run openalpha doctor
 uv run openalpha serve
 ```
 
+`openalpha doctor --probe` 会对**每一个**已声明的数据集发一次最小请求，并按数据集记录结果
+（Tushare 现为 15/15；面板专供的四个走 `fetch_panel`，需要 `index_code`/`ts_code`/报告期年
+的五个由 provider 自己给出最小主体）。凭证被端点拒绝（`authentication`）时命令**非零退出**，
+`--json` 也一样——它不再在打印完 payload 之后直接返回；而「这个接口这个账号取不到」
+（`upstream`）和「限流」（`rate_limit`）按数据集如实上报且**不**影响退出码，因为那正是这份
+报告要交付的内容本身。
+
 `serve` 绑定地址与端口的优先级是命令行参数 `--host`/`--port` > `OPENALPHA_HOST`/
 `OPENALPHA_PORT`（含 `.env`）> 内置默认值 `127.0.0.1:8000`。每个数据源变量的用途见
 [数据源与 Provider 边界](docs/data/providers.zh-CN.md)；完整配置、备份、恢复和升级方法见
@@ -320,6 +327,21 @@ uv run openalpha data-check --dataset daily --dataset adj_factor --year 2026 \
   会拒绝并点名（`stock_basic` 例外，它按上市生命周期年拆分）。
 - 构建是一串「整分区写入」，之间没有事务。中途被拒时命令会**列出已经落盘的分区**，而不是
   声称什么都没写。
+- **一次 `panel build` 只读一次时钟，`--as-of` 把这个时钟钉在多次调用之间。** 会话循环的
+  上界是该时刻的 Asia/Shanghai 日期减一天，而五个目标是五次调用；跨过本地零点的构建会让
+  一部分目标停在昨天、另一部分停在今天，产出的面板在**任何** `as_of` 都体检不干净
+  （早于最新分区的最后一行 → `not_yet_knowable`，不早于它 → 旧分区 `date_gap`）。
+  每次构建都会把用到的时刻打印出来（`--json` 里的 `as_of`，人类输出里的 `AS-OF` 行），
+  之后单独重取某一个目标时把它传回来即可；而 `_refuse_split_horizon` 会在**取第一个会话
+  之前**拒绝一个会造成这种分裂的构建，并给出能修好它的那个 `--as-of`。要把面板整体往前推
+  一天，就在**一次调用里**同时点名所有会话级目标（分区是整体替换，没有追加）。
+- 会话循环每 10 个交易日往 **stderr** 打一行进度（`FETCHING <目标> 40/145 sessions
+  elapsed=89s eta=233s`）；stdout 留给 `--json`，所以脚本调用不受影响。
+- `stk_limit` 的横截面离它 7,800 行的每响应上限只剩 66 行（2026-08-10 实测 7,734 行，
+  +2.231 行/交易日 ≈ 29.6 个交易日）。撞上后单次请求仍然**拒收**而不是存半截，但
+  descriptor 声明了实测的 `page_size=4000`，provider 会用 `limit`/`offset` 分页重取同一个
+  请求——分页顺序与整页响应逐元素一致，所以分区的 `content_digest` 与 store 的
+  `content_hash` 都不变。
 - 凭证不经过 CLI：`TushareProvider` 在自己的构造函数里解析 `TUSHARE_TOKEN`，
   `ProviderFailure` 的原始消息（可能带着 token 或整条 query string）永不打印、永不入日志。
 

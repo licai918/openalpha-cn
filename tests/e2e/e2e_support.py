@@ -310,21 +310,21 @@ def require_opt_in() -> None:
         )
 
 
-def build_year(workspace: Path, runtime_dir: Path) -> int:
+def build_year(workspace: Path, runtime_dir: Path, as_of: datetime) -> int:
     """Which year to build, and the `trade_cal` partition for it, already stored.
 
     The current year unless too little of it has published to carry a label window, in which
     case the previous one -- a run on 3 January would otherwise build a panel with four
     sessions in it and every window would fall off the end of the stored range.
     """
-    for year in (_now().astimezone(PANEL_ZONE).year, _now().astimezone(PANEL_ZONE).year - 1):
-        run_build(workspace, runtime_dir, target="trade_cal", year=year)
+    for year in (as_of.astimezone(PANEL_ZONE).year, as_of.astimezone(PANEL_ZONE).year - 1):
+        run_build(workspace, runtime_dir, target="trade_cal", year=year, as_of=as_of)
         calendar = load_trading_calendar(
-            panel_store(runtime_dir), exchange=EXCHANGE, years=(year,), as_of=_now()
+            panel_store(runtime_dir), exchange=EXCHANGE, years=(year,), as_of=as_of
         )
         published = calendar.trading_days_between(
             date(year, 1, 1),
-            min(date(year, 12, 31), _now().astimezone(PANEL_ZONE).date() - timedelta(days=1)),
+            min(date(year, 12, 31), as_of.astimezone(PANEL_ZONE).date() - timedelta(days=1)),
         )
         if len(published) >= MINIMUM_SESSIONS:
             return year
@@ -334,9 +334,24 @@ def build_year(workspace: Path, runtime_dir: Path) -> int:
 
 
 def attempt_build(
-    workspace: Path, runtime_dir: Path, *, target: str, year: int, extra: Sequence[str] = ()
+    workspace: Path,
+    runtime_dir: Path,
+    *,
+    target: str,
+    year: int,
+    as_of: datetime,
+    extra: Sequence[str] = (),
 ) -> CLIResult:
-    """Run one `panel build` and hand back the whole result, refusal included."""
+    """Run one `panel build` and hand back the whole result, refusal included.
+
+    `--as-of` is passed on every call and comes from **one** instant read once per fixture, not
+    from each invocation's own clock. That is what `V2-P1-018`'s R6 added it for, and this
+    suite is the reason: a build is five invocations over half an hour, `cli._build_sessions`
+    bounds each one at its own clock's Asia/Shanghai date minus a day, and this suite's very
+    first run crossed local midnight and produced a panel that no `as_of` could assess cleanly
+    (see `test_every_session_scoped_dataset_reaches_the_same_last_session`). Pinning it here is
+    what makes that test a statement about the *build* rather than about what time it started.
+    """
     return run_cli(
         "panel",
         "build",
@@ -348,6 +363,8 @@ def attempt_build(
         str(runtime_dir),
         "--exchange",
         EXCHANGE,
+        "--as-of",
+        as_of.isoformat(),
         "--json",
         *extra,
         cwd=workspace,
@@ -355,10 +372,18 @@ def attempt_build(
 
 
 def run_build(
-    workspace: Path, runtime_dir: Path, *, target: str, year: int, extra: Sequence[str] = ()
+    workspace: Path,
+    runtime_dir: Path,
+    *,
+    target: str,
+    year: int,
+    as_of: datetime,
+    extra: Sequence[str] = (),
 ) -> Any:
     """Run one `panel build` and refuse to continue unless it wrote something."""
-    result = attempt_build(workspace, runtime_dir, target=target, year=year, extra=extra)
+    result = attempt_build(
+        workspace, runtime_dir, target=target, year=year, as_of=as_of, extra=extra
+    )
     if result.exit_code != 0:
         raise E2EEnvironmentError(
             f"`panel build --dataset {target} --year {year}` exited {result.exit_code}. "

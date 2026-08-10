@@ -3,8 +3,10 @@
 Every response body here is a verbatim slice of a real one, recorded on 2026-08-09 against the
 live endpoints, and nothing in this file touches the network. The two datasets are tested
 together because the interesting decisions are the ones where they *differ*: they take opposite
-answers on `requires_truncation_flag`, their caps are 5,000 and 7,800, and one of them has 67
-rows of headroom while the other has thousands.
+answers on `requires_truncation_flag`, their caps are 5,000 and 7,800, one of them has 66 rows
+of headroom (about thirty sessions -- see `TUSHARE_STK_LIMIT_ROW_CAP`) while the other has
+thousands, and only the first declares a `page_size` to page past its cap with.
+`tests/contract/providers/test_tushare_paging_and_retry.py` is where that fallback is driven.
 """
 
 from __future__ import annotations
@@ -170,10 +172,14 @@ def test_a_response_at_either_cap_is_refused(fake_tushare_transport) -> None:
 def test_a_whole_market_band_cross_section_still_fits_under_the_cap(
     fake_tushare_transport,
 ) -> None:
-    """7,733 rows on 2026-08-07 against 7,800: 67 spare, after +349 and +517 in the two previous
-    years. This asserts the margin exists today rather than that it will keep existing -- when
-    it goes, `_check_response_completeness` refuses instead of storing a short session, and the
-    escape route is `ProviderRequest.subjects`."""
+    """7,733 rows on 2026-08-07 against 7,800: 67 spare then, 66 on 2026-08-10, and +2.231 per
+    session over the thirteen session steps between them -- 29.6 sessions. This asserts the
+    margin exists today rather than that it will keep existing; when it goes,
+    `_check_response_completeness` still refuses instead of storing a short session, and that
+    refusal is what triggers the descriptor's measured `page_size` fallback (`V2-P1-018`).
+    `ProviderRequest.subjects` is **not** the escape route and this docstring used to say it
+    was: no face of this repository passes it, and the registry cannot enumerate this
+    endpoint's subjects anyway (5,878 codes against 7,733)."""
     bands = [["20240628", f"{600000 + index}.SH", 12.03, 9.85] for index in range(7733)]
     provider, _ = _provider(fake_tushare_transport, _response(LIMIT_FIELDS, bands, has_more=False))
 

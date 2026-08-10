@@ -121,6 +121,42 @@ that truncates while reporting `has_more=False` at a row count under the declare
 computes the flag as `len(rows) == min(limit, cap)` -- so any truncation at any cap reports
 `True`, and the flag witness covers a moved cap on its own.
 
+### Refusing is only half a design: `page_size` is the way out (`V2-P1-018`)
+
+A guard that refuses a whole-market cross section the moment it reaches the cap turns a
+growing market into a scheduled outage, and `stk_limit`'s margin is 66 rows -- about thirty
+sessions (see `TUSHARE_STK_LIMIT_ROW_CAP`). So a descriptor may declare a **measured**
+`page_size`, and `TushareProvider._request_rows` then re-runs the same request as `limit` /
+`offset` pages when, and only when, the one-shot response is refused as truncated.
+
+Reactive rather than preventive, and the trigger is the refusal itself rather than a
+prediction: until the cap actually binds, a paged descriptor sends exactly the request it
+sends today, at exactly today's cost. `_check_response_completeness` stays the trigger, which
+is what keeps the escape hatch from being reachable by any route that has not first *proved*
+the response was short.
+
+Three measurements on 2026-08-10 are what make this sound for `stk_limit`, and the
+descriptor invariant below is what stops it from being assumed for anything else:
+
+- `offset` works and the pages do not overlap. `limit=4000 offset=0`, `offset=4000` and
+  `offset=8000` over a two-session window return 4,000 + 4,000 + 4,000 rows with **zero**
+  shared rows between any pair.
+- The paging is **order preserving**, not merely set-preserving. On 2026-08-07's cross
+  section, `limit=4000 offset=0` followed by `limit=4000 offset=4000` yields a 7,733-element
+  sequence that is element-for-element identical to the un-paged 7,733-row response. That is
+  the property that makes a paged fetch produce the same `ColumnarPanelBatch.content_digest`
+  and the same `panel/store.py::_content_hash` as a one-shot fetch of the same rows would --
+  it is the same rows in the same order, so nothing downstream can tell the two apart.
+- The last page is the witness. `limit=4000 offset=4000` returns 3,733 rows with
+  `has_more=False`; the loop stops on that flag rather than on a row count, so it terminates
+  on the server's own statement of completeness and not on an assumption about the total.
+
+`offset` paging is **not** universally sound on this API and the counter-example is already
+in this file: `_namechange_params` records that two 10,000-row pages of `namechange` return
+14,166 rows containing 380 exact duplicates and *miss* a record the per-`ts_code` query
+returns. So `_paged_rows` refuses a page set containing a duplicated row rather than
+trusting the endpoint, and `page_size` is opt-in per descriptor behind a measurement.
+
 A calendar-derived expected row count would be a third witness and is deliberately not used
 *here*: `000001.SZ` has factor rows on 64 dates in 1991 that are not in the stored SZSE
 calendar at all -- its series begins 1991-07-03 and the factor begins 1991-04-03 -- so the
@@ -161,9 +197,40 @@ redness as a verdict.
 2020..2022 added +405, +537 and +325. Extrapolating the recent rate gives five to eleven years
 and extrapolating the earlier one gives about one, and nothing in the data says which regime the
 next listing cycle is in. So this is a bound to *monitor*, not a date: when a cross section
-approaches the cap the escape route is already in the descriptor (`subjects` splits one session
-into several requests), and `_check_response_completeness` refuses at the cap rather than
-storing a short session in the meantime.
+approaches the cap the escape route is `page_size` (see above), which `stk_limit` declares and
+these two do not yet need, and `_check_response_completeness` refuses at the cap rather than
+storing a short session in the meantime. Both endpoints do carry `has_more` on the
+cross-section path (measured 2026-08-10: `daily`, `daily_basic`, `adj_factor` and `suspend_d`
+all answer a `trade_date` request with the flag present and `False`), so declaring `page_size`
+for them later is a two-line change rather than a new measurement campaign.
+
+## Failure semantics: what a rejection means, and what is retried (`V2-P1-018`)
+
+Three things were wrong at once and each one hid the next.
+
+**A wrong credential was not an authentication failure.** Every non-zero Tushare `code` except
+`-2001` -- a value nothing in this repository has ever observed -- was classified `upstream`
+with `retryable=True`. Measured on 2026-08-10: a deliberately wrong token answers `code=40101`
+over HTTP 200. So the most common real failure was named as an upstream fault and advertised as
+worth trying again. `_rejection_semantics` now maps it, and `TUSHARE_CREDENTIAL_CODE` records
+the measurement and the one collision it accepts.
+
+**`rate_limit` was a declared category with no producer.** Tushare answers a per-interface
+frequency breach with `code=40203`, also over HTTP 200, also inside the body -- 100 of 600
+concurrent `income` requests on 2026-08-10, at a documented 500-per-minute quota. Classifying
+it was not enough on its own: the code check used to run one frame *above* the transport call,
+outside any retry, so `_check_response_code` is called from `TushareProvider._post` as well.
+
+**`ProviderFailure.retryable` had no consumer anywhere in the repository.** A transient socket
+error 27 seconds into a 45-minute `panel build` voided the whole build -- and did so as
+`invalid_response`/`retryable=False`, because a bare `URLError` escaping the transport was
+caught by `fetch`/`fetch_panel`'s decode clause, which is right for a malformed body and wrong
+for a reset connection. `_post` now translates a transport exception into `upstream`/retryable
+where it happens and retries a bounded number of times with jittered exponential backoff, and a
+`rate_limit` waits for the quota's own window instead. See `TUSHARE_TRANSPORT_ATTEMPTS`.
+
+What is deliberately **not** retried: `TushareResponseTruncated` (the same request returns the
+same short answer -- its remedy is `page_size`), `authentication`, and `configuration`.
 
 ## The panel projection is a schema contract of its own (`V2-P1-007`)
 
@@ -179,7 +246,9 @@ schema change. The check runs against the **expanded** rows rather than the resp
 """
 
 import json
+import logging
 import os
+import random
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Sequence
@@ -187,10 +256,11 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from enum import StrEnum
 from math import isfinite
-from typing import Any, Final, Protocol, cast
+from time import sleep as _sleep
+from typing import Any, Final, Literal, Protocol, Self, cast
 from zoneinfo import ZoneInfo
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 from openalpha_cn.domain.adjustment import (
     ADJ_FACTOR_DATASET,
@@ -294,9 +364,33 @@ from openalpha_cn.providers.base import (
     utc_now,
 )
 
+logger = logging.getLogger(__name__)
+
 _CHINA_TZ = ZoneInfo("Asia/Shanghai")
 
 _PROVIDER_ID: Final[str] = "tushare.pro"
+
+
+class TushareResponseTruncated(ProviderFailure):
+    """A response this endpoint may have withheld rows from -- the trigger for `page_size`.
+
+    A `ProviderFailure` in every respect a caller can observe (same category, same
+    `retryable=False`, same message), so nothing outside this module has to learn a new type to
+    keep working. It exists so that `TushareProvider._request_rows` can tell *this* refusal --
+    "the response was short, and a narrower request would fix it" -- from the other two
+    `_check_response_completeness` raises, which no amount of re-requesting repairs:
+
+    - an **absent** `has_more` is a schema change, and paging past it would be paging with no
+      termination witness at all;
+    - a non-zero `code` is the endpoint declining the request.
+
+    Raised on both truncation branches (`has_more` not exactly `False`, and a row count at the
+    measured cap) because both say the same thing about the same response, and a descriptor
+    with a measured `page_size` should be able to page past either one. `stk_limit`'s
+    whole-market cross section reaches the flag branch first: at exactly 7,800 rows the server
+    sets `has_more=True`, which is checked before the row count.
+    """
+
 
 TRADING_CALENDAR_DEFAULT_EXCHANGE: Final[str] = "SSE"
 """What Tushare answers with when `exchange` is omitted, measured rather than assumed.
@@ -306,6 +400,47 @@ carries 13,162 published days against SZSE's 12,966 (SZSE simply starts later), 
 two disagree on `is_open` for **zero** of their shared dates. They are still kept as separate
 subjects rather than merged: identical today is not the same fact as identical by
 construction, and the subject column is where a future divergence would show up.
+"""
+
+
+PROBE_SECURITY: Final[str] = "000001.SZ"
+PROBE_INDEX_CODE: Final[str] = "000300.SH"
+PROBE_INDUSTRY_L1_CODE: Final[str] = "801890.SI"
+"""The three subjects `TushareProvider.probe_subjects` builds its minimal requests from.
+
+Named constants rather than literals inside the hook because each is a *measured* value, not
+an example: `000001.SZ` is the security the four financial-statement builders were calibrated
+against (see `_financial_statement_params`), `000300.SH` is one of `V2-P1-009`'s three indices
+and its monthly publication is 300 rows against a 7,000-row cap, and `801890.SI` 机械设备 is
+the `index_member_all` slice this module already records as the largest (625 current rows
+against a 3,000-row cap) -- so a probe that fits in that one fits in all thirty-one.
+"""
+
+TUSHARE_TRANSPORT_ATTEMPTS: Final[int] = 4
+"""How many times one Tushare request is sent before its failure becomes the caller's.
+
+Four, not "until it works": a `panel build` is ~720 whole-market requests and an unbounded
+retry turns a real outage into a job that never ends and never reports. Four attempts with the
+backoff below spend at most ~14s of waiting on one request, against a measured 1.1--2.6s per
+successful one, so a transient blip costs seconds and a genuine outage still fails inside a
+minute per request.
+"""
+
+TUSHARE_RETRY_BASE_DELAY: Final[float] = 1.0
+TUSHARE_RETRY_MAX_DELAY: Final[float] = 8.0
+"""The exponential backoff's first delay and its ceiling, in seconds.
+
+Written here rather than pulled from a library on purpose -- this repository locks nine runtime
+dependencies and `tenacity`/`backoff` would be a tenth for twenty lines of arithmetic.
+"""
+
+TUSHARE_RATE_LIMIT_DELAY: Final[float] = 20.0
+"""What a `rate_limit` waits instead of the exponential delay, in seconds.
+
+Tushare's own refusal names the window it is measuring: `频率超限(500次/分钟)` -- 500 per
+*minute* (measured 2026-08-10; see `TUSHARE_RATE_LIMIT_CODE`). Backing off 1, 2 and 4 seconds
+against a sixty-second window spends the whole retry budget inside the window that is refusing,
+so the three retries a quota breach gets are spaced to cover most of one.
 """
 
 
@@ -481,6 +616,49 @@ class TushareDatasetDescriptor(BaseModel):
     a descriptor should be able to demand the stronger one without also having to claim a
     measured cap (or the other way round).
     """
+    page_size: int | None = Field(default=None, ge=1)
+    """The ``limit`` this descriptor's **fallback** pages with, or ``None`` for no paging.
+
+    ``None`` is not "paging is unavailable on this endpoint"; it is "nobody has measured that
+    it is sound here", and the difference matters because it is measurably *unsound* on at
+    least one of them -- see ``_namechange_params`` for the 380 duplicated and one missing row
+    that two pages of ``namechange`` produce. Declaring a value is a claim backed by a live
+    probe, in the shape this module's docstring records for ``stk_limit``.
+
+    The two invariants below are enforced rather than documented, because both of them are the
+    difference between an escape hatch and a way past the guard.
+    """
+
+    @model_validator(mode="after")
+    def _paging_needs_both_witnesses(self) -> Self:
+        """A paged descriptor must be able to tell a last page from a truncated one.
+
+        1. ``page_size`` demands ``requires_truncation_flag``. The loop stops when a page
+           reports ``has_more=False``; on a descriptor that tolerates an absent flag, a
+           response that simply omitted it would end the loop as though it were the last page,
+           and a paged fetch that stops early is exactly the silent truncation the whole guard
+           exists to refuse -- reintroduced by the mechanism meant to prevent it.
+        2. ``page_size`` must be strictly under ``max_rows_per_response``. A page at the
+           measured cap cannot be distinguished from one the cap truncated, so the per-page
+           check in ``_check_response_completeness`` has to stay reachable *and* has to stay
+           unreachable in the ordinary case: with a smaller ``limit``, a page that comes back
+           at the cap means the server ignored ``limit``, which is a fact worth refusing on.
+        """
+        if self.page_size is None:
+            return self
+        if not self.requires_truncation_flag:
+            raise ValueError(
+                f"{self.dataset} declares page_size={self.page_size} and does not demand "
+                "has_more; the paging loop stops on that flag, so a response omitting it would "
+                "end the loop as a last page and store a prefix of the truth"
+            )
+        if self.max_rows_per_response is None or self.page_size >= self.max_rows_per_response:
+            raise ValueError(
+                f"{self.dataset} declares page_size={self.page_size} against "
+                f"max_rows_per_response={self.max_rows_per_response}; a page at or above the "
+                "measured cap cannot be told apart from one the cap truncated"
+            )
+        return self
 
     @property
     def checked_response_fields(self) -> tuple[str, ...]:
@@ -1346,13 +1524,27 @@ A single session fits with `has_more=False` (7,733 rows on 2026-08-07). A two-se
 and `limit=8000`, `limit=10000` and `limit=12000` all return the same 7,800. So the ceiling is
 this endpoint's own and not the request's.
 
-**The headroom is 67 rows and it is shrinking fast.** The whole-market cross section was 6,867
-on 2024-06-28, 7,216 on 2025-08-01 and 7,733 on 2026-08-07 -- +349 then +517 per year, against
-`daily`'s +41/+88/+77 on a 465-row margin. This dataset covers funds and B shares as well as
-stocks (see `domain/price_limits.py`), which is why it is both larger and faster-growing than
-the price panel. `_check_response_completeness` refuses at the cap rather than storing a short
-session, and `ProviderRequest.subjects` splits the session when it goes; this constant is a
-bound to watch, not a schedule.
+**The headroom is 66 rows and that is about thirty sessions, not "inside a year".** The
+whole-market cross section was 6,867 on 2024-06-28, 7,216 on 2025-08-01 and 7,734 on
+2026-08-10 -- +349 then +518 per year, against `daily`'s +41/+88/+77 on a 465-row margin. The
+annual figure is the wrong resolution for a margin this thin, so it was re-measured session by
+session: 7,705 / 7,706 / 7,707 / 7,709 / 7,710 / 7,712 / 7,715 / 7,716 / 7,721 / 7,723 / 7,725
+/ 7,727 / 7,733 / 7,734 over 2026-07-22..2026-08-10, i.e. **+2.231 rows per session**, so
+66 / 2.231 = **29.6 sessions**. This dataset covers funds and B shares as well as stocks (see
+`domain/price_limits.py`), which is why it is both larger and faster-growing than the price
+panel.
+
+`_check_response_completeness` refuses at the cap rather than storing a short session, and
+this descriptor's `page_size` is what turns that refusal from a permanent outage into two
+requests instead of one -- see this module's docstring for the paging measurements. Neither
+`ProviderRequest.subjects` nor a narrower window is the escape route here, and an earlier
+version of this paragraph said `subjects` was: no face of this repository exposes it
+(`cli._session_batches` calls `_fetch_panel` without it), and it could not be made to work
+anyway, because the registry cannot enumerate this endpoint's subjects -- measured on
+2026-08-07, `stock_basic(list_status="L,D")` carries 5,878 codes against this cross section's
+7,733, of which **2,194 are absent from the registry** (`158006.SZ`, `159001.SZ`, ... -- the
+funds). Sharding by the stored universe would have silently dropped every one of them, which
+is precisely the fail-open the cap guard exists to refuse.
 """
 
 TUSHARE_SUSPEND_ROW_CAP: Final[int] = 5000
@@ -1981,9 +2173,9 @@ TUSHARE_DATASETS: tuple[TushareDatasetDescriptor, ...] = (
         # clock strategy would be the honest refinement and is not free: `available_time` would
         # have to name the pre-open instant, which the response does not carry.
         clock=ClockStrategy.daily_close,
-        # One trading day, the same builder. Measured: 6,867 rows on 2024-06-28 and 7,733 on
-        # 2026-08-07, against a 7,800-row cap -- see `TUSHARE_STK_LIMIT_ROW_CAP` for why that
-        # 67-row margin is the tightest in this table. `subjects` is the escape route.
+        # One trading day, the same builder. Measured: 6,867 rows on 2024-06-28 and 7,734 on
+        # 2026-08-10, against a 7,800-row cap -- see `TUSHARE_STK_LIMIT_ROW_CAP` for why that
+        # 66-row margin is the tightest in this table and why it is about thirty sessions wide.
         params_builder=_trade_date_params,
         response_fields="",
         required_response_fields=("ts_code", *PRICE_LIMIT_DATA_COLUMNS),
@@ -1997,9 +2189,20 @@ TUSHARE_DATASETS: tuple[TushareDatasetDescriptor, ...] = (
         # with the exchange on 159 of 5,338 names on one ordinary session (see
         # `domain/price_limits.py`). So a silently missing row here is not an absence, it is a
         # quiet substitution of a measurably wrong number -- `adj_factor`'s situation rather
-        # than `daily`'s. The cross section also sits 67 rows under the cap, so the row-count
+        # than `daily`'s. The cross section also sits 66 rows under the cap, so the row-count
         # witness is about to stop having any margin at all.
         requires_truncation_flag=True,
+        # **The only descriptor in this table that declares one, and the reason is arithmetic
+        # rather than caution.** At +2.231 rows per session (measured over the thirteen session
+        # steps 2026-07-22..2026-08-10: 7,705 -> 7,734) the 66 spare rows are 29.6 sessions --
+        # about six weeks -- after which every `panel build --dataset stk_limit` for the current
+        # year refuses permanently, correctly, and with no way out that any face of this
+        # repository exposes. 4,000 is measured rather than picked: `limit=4000 offset=0` and
+        # `limit=4000 offset=4000` return 4,000 + 3,733 rows whose concatenation is
+        # element-for-element identical to the un-paged 7,733-row response, with `has_more`
+        # True then False. Two pages today, and the loop bound admits sixteen times the current
+        # market before it refuses.
+        page_size=4000,
         panel_columns=tuple(_price_limit_panel_column(name) for name in PRICE_LIMIT_DATA_COLUMNS),
     ),
     TushareDatasetDescriptor(
@@ -2269,6 +2472,28 @@ def _daily_close_timeline(row: dict[str, Any], date_field: str, ingested_at: dat
     from the same 16:30. Two independent literals would let those drift, and the drift is
     silent in both directions: a later provider time makes every intraday read demand a session
     the write could not have held, an earlier one stops requiring the newest session.
+
+    ## `ingested_time` is raised, for `_calendar_static_timeline`'s reason and its measurement
+
+    A trading-day endpoint can serve a row for a session whose 16:30 has not arrived.
+    `suspend_d` is the one that does: a halt announced for the next session is already in the
+    corpus, and `suspend_d(trade_date=20260811)` returned two such rows at 05:29 Asia/Shanghai
+    on 2026-08-11. `Timeline` forbids `available_time > ingested_time`, so with a bare
+    `ingested_at` that row could not be *represented at all* -- and the failure landed one frame
+    up as `ProviderFailure(category="invalid_response", "Tushare response could not be decoded:
+    ingested_time cannot precede available_time")`, a decode error about a response that decoded
+    perfectly. Found by `V2-P1-018`'s R12 work: `openalpha doctor --probe` reported
+    `invalid_response` for `suspend_d` every morning before 16:30, which is precisely the false
+    picture that report exists to stop giving.
+
+    The repair is the one `_calendar_static_timeline` already documents, so see that docstring
+    for the full argument. In short: lowering `available_time` would invent a publication, while
+    raising `ingested_time` overstates the one clock no point-in-time filter reads
+    (`is_visible_at` reads `available_time`), and the raise exists **only so the row can be
+    represented long enough to be discarded** -- `_decode_panel_rows` bounds its filter at
+    `min(as_of, ingested_at)`, so a row whose availability runs past the fetch instant never
+    reaches a partition. `panel build` cannot reach this branch at all: `_build_sessions` stops
+    a day before its own clock, so every session it asks for published before it ran.
     """
     trading_day = _parse_tushare_date(row[date_field])
     event_time = datetime.combine(trading_day, SESSION_CLOSE_TIME, tzinfo=_CHINA_TZ)
@@ -2276,7 +2501,7 @@ def _daily_close_timeline(row: dict[str, Any], date_field: str, ingested_at: dat
     return Timeline(
         event_time=event_time,
         available_time=available_time,
-        ingested_time=ingested_at,
+        ingested_time=max(ingested_at, available_time),
         revision_time=available_time,
     )
 
@@ -2528,8 +2753,10 @@ def _check_response_completeness(
     could notice.
 
     ``retryable=False`` on every branch: the same request returns the same truncated answer,
-    so a retry loop would spin. The remedy is a narrower window (or `subjects`), which is a
-    different request.
+    so a retry loop would spin. The remedy is a narrower window (or `subjects`, or the
+    `page_size` fallback), which is a different request -- and `TushareResponseTruncated`,
+    raised by the two truncation branches, is how `TushareProvider._request_rows` knows which
+    of these three refusals a narrower request could repair.
     """
     flag = data.get(TUSHARE_RESPONSE_TRUNCATION_FLAG, _TRUNCATION_FLAG_ABSENT)
     if flag is _TRUNCATION_FLAG_ABSENT:
@@ -2549,7 +2776,7 @@ def _check_response_completeness(
         # `is not False`, not `if flag:`. `"False"` and `"0"` are truthy and `0` and `""` are
         # falsy, so either coercion turns a schema change into a wrong answer rather than an
         # error -- the same trap `_open_flag` exists for.
-        raise ProviderFailure(
+        raise TushareResponseTruncated(
             provider_id=provider_id,
             category="upstream",
             message=(
@@ -2557,24 +2784,239 @@ def _check_response_completeness(
                 f"give ({TUSHARE_RESPONSE_TRUNCATION_FLAG}={flag!r}); it serves at most one "
                 "page and drops the oldest rows, so this answer is a suffix of the truth. "
                 f"{TUSHARE_RESPONSE_TRUNCATION_FLAG} must be exactly the boolean False for a "
-                "response to count as complete. Narrow the request window or split it by "
-                "subject"
+                "response to count as complete. Narrow the request window, split it by "
+                "subject, or give this descriptor a measured page_size"
             ),
             retryable=False,
         )
+    _check_row_cap(descriptor, items, provider_id)
+
+
+def _check_row_cap(
+    descriptor: TushareDatasetDescriptor, items: Sequence[Any], provider_id: str
+) -> None:
+    """Refuse a response, or a page, whose row count reached the measured cap.
+
+    Its own function because it is the one witness that means the same thing on both paths.
+    The `has_more` witness does not: `True` refuses a one-shot response and continues a paging
+    loop, which is the whole difference between them.
+    """
     cap = descriptor.max_rows_per_response
     if cap is not None and len(items) >= cap:
-        raise ProviderFailure(
+        raise TushareResponseTruncated(
             provider_id=provider_id,
             category="upstream",
             message=(
                 f"Tushare served {len(items)} {descriptor.dataset} row(s), which is its "
                 f"measured per-response cap of {cap}; a response at the cap cannot be "
                 "distinguished from one the cap truncated, and the rows it drops are the "
-                "oldest. Narrow the request window or split it by subject"
+                "oldest. Narrow the request window, split it by subject, or give this "
+                "descriptor a measured page_size"
             ),
             retryable=False,
         )
+
+
+TUSHARE_PAGE_LIMIT_PARAM: Final[str] = "limit"
+TUSHARE_PAGE_OFFSET_PARAM: Final[str] = "offset"
+"""The two request parameters the `page_size` fallback adds, named once.
+
+Both are measured to be honoured and to *narrow only*: on `stk_limit`, `limit=4000` returns
+4,000 rows and `limit=8000`/`10000`/`12000` all return the endpoint's own 7,800 (see
+`TUSHARE_STK_LIMIT_ROW_CAP`), so a page can never be widened past the cap by asking.
+"""
+
+MAX_TUSHARE_PAGES: Final[int] = 32
+"""How many pages one `page_size` fallback may fetch before refusing.
+
+Not a tuning knob and not a rate-limit budget: it is the bound that stops a server which
+answers `has_more=True` forever from turning one session's fetch into an unbounded loop. At
+`stk_limit`'s 4,000-row pages this admits a 128,000-row cross section against today's 7,734 --
+sixteen times the current market -- so reaching it means the endpoint's paging contract
+changed, which is a thing to refuse rather than to keep asking about.
+"""
+
+
+def _paged_params(params: dict[str, str], *, limit: int, offset: int) -> dict[str, str]:
+    """One page's request parameters: the descriptor's own, plus `limit` and `offset`.
+
+    Refuses a builder that already sets either one rather than overwriting it. No builder in
+    this table does today, and the failure if one ever did would be silent and severe: the
+    fallback would page a request whose own window was already offset, so the two offsets
+    would compose and the "pages concatenate into the whole response" property -- the property
+    the digests rest on -- would be false without anything raising.
+    """
+    for reserved in (TUSHARE_PAGE_LIMIT_PARAM, TUSHARE_PAGE_OFFSET_PARAM):
+        if reserved in params:
+            raise ProviderFailure(
+                provider_id=_PROVIDER_ID,
+                category="configuration",
+                message=(
+                    f"this descriptor's params_builder already sets {reserved!r}, so the "
+                    "page_size fallback cannot page it without composing two offsets"
+                ),
+                retryable=False,
+            )
+    return {
+        **params,
+        TUSHARE_PAGE_LIMIT_PARAM: str(limit),
+        TUSHARE_PAGE_OFFSET_PARAM: str(offset),
+    }
+
+
+def _refuse_overlapping_pages(
+    descriptor: TushareDatasetDescriptor, pages: Sequence[Sequence[dict[str, Any]]]
+) -> None:
+    """Refuse a page set in which any two pages served the same row.
+
+    The check `namechange` would have failed: two 10,000-row pages of that endpoint return
+    14,166 rows of which 380 are exact duplicates, and -- because the duplication comes with a
+    matching omission -- a record the per-`ts_code` query returns is missing from the union.
+    Duplicates are the observable half of that failure, and they are observable *here*, before
+    a single row reaches a partition.
+
+    Compared as whole rows rather than by a key, because a descriptor's key is not knowable at
+    this layer: `date_field` may name a column the `panel_rows` expansion has not synthesised
+    yet, and `subject_field` is `None` for the calendar-shaped datasets. A whole-row comparison
+    is the conservative one anyway -- two identical rows from one paged fetch mean the pages
+    are not a partition of the answer, whatever the key would have been.
+    """
+    seen: set[tuple[tuple[str, str], ...]] = set()
+    for index, page in enumerate(pages):
+        for row in page:
+            key = tuple(sorted((name, repr(value)) for name, value in row.items()))
+            if key in seen:
+                raise ProviderFailure(
+                    provider_id=_PROVIDER_ID,
+                    category="upstream",
+                    message=(
+                        f"paging {descriptor.dataset} served the same row twice by page "
+                        f"{index}; overlapping pages are not a partition of the answer, and on "
+                        "this API a duplicated row has been measured to come with a missing "
+                        "one (see _namechange_params). Withdraw this descriptor's page_size"
+                    ),
+                    retryable=False,
+                )
+            seen.add(key)
+
+
+TUSHARE_RATE_LIMIT_CODE: Final[int] = 40203
+"""The `code` Tushare answers a per-interface frequency breach with, measured 2026-08-10.
+
+600 concurrent `income` requests over 16.4s returned 500 rows-bearing responses and **100**
+of `code=40203` with a `msg` naming the interface and the window it measures -- 访问接口
+(income) 频率超限 (500次/分钟) -- over HTTP 200, not an HTTP 429;
+`fina_indicator` answered identically at the same threshold. This is the whole reason
+`ProviderFailure`'s `rate_limit` category existed and had never once been produced -- every
+non-zero code except `-2001` was classified `upstream`, so the one failure that a wait
+actually repairs was indistinguishable from the ones it does not.
+"""
+
+TUSHARE_CREDENTIAL_CODE: Final[int] = 40101
+"""The `code` Tushare answers a bad or absent token with, measured 2026-08-10.
+
+A deliberately wrong token returns `code=40101` with the message 您的token不对 and an empty one
+您上传Token, both over HTTP 200. Before this was measured the only code mapped
+to `authentication` was `-2001`, which nothing in this repository has ever observed, so **a
+wrong credential surfaced as `upstream` with `retryable=True`** -- reported by `doctor
+--probe` as an upstream fault and retried by anything that honours the flag.
+
+The same code also answers an unrecognised `api_name` (请指定正确的接口名). That is not a
+collision worth resolving by matching on the message text: every `api_name` in this table was
+measured against the live endpoint, so the only way to reach it is Tushare withdrawing an
+endpoint -- and `doctor --probe` reports per dataset, where "every dataset says
+authentication" (the token) and "one does" (the endpoint) are already different pictures.
+"""
+
+
+def _rejection_semantics(code: object) -> tuple[ProviderFailureCategory, bool]:
+    """Classify a non-zero Tushare `code` into a category and a `retryable` flag.
+
+    `retryable` is a claim about whether *the same request, sent again, could succeed*, and
+    until this function existed it was `True` for every rejection except one code nothing had
+    ever seen. Three answers, each measured:
+
+    - `40203` -- the account exceeded this interface's per-minute frequency. `rate_limit`, and
+      retryable: the quota window rolls.
+    - `40101` -- the token is wrong, absent, or the endpoint name is not one Tushare serves.
+      `authentication`, and **not** retryable: resending a rejected credential produces the
+      same rejection, and a client that keeps trying turns a typo into a hammering loop.
+    - `-2001` -- kept from the original mapping and never observed here. Left in place because
+      removing an authentication mapping on the grounds that this account never triggered it
+      would be reasoning from absence.
+
+    Anything else stays `upstream`/retryable, which is the honest default for a code this
+    module has not measured: an unknown rejection may or may not be transient, and the
+    fail-safe direction for a *bounded* retry is to try again rather than to give up on a
+    blip. The bound is what makes that safe -- see `TushareProvider._post`.
+    """
+    if code == TUSHARE_RATE_LIMIT_CODE:
+        return "rate_limit", True
+    if code in {TUSHARE_CREDENTIAL_CODE, -2001}:
+        return "authentication", False
+    return "upstream", True
+
+
+def _check_response_code(response: dict[str, Any], provider_id: str) -> None:
+    """Raise the classified `ProviderFailure` for a non-zero Tushare `code`.
+
+    Called from **two** places on purpose, and the first of them is what makes `rate_limit`
+    mean anything. Tushare answers a quota breach with HTTP 200 and `code=40203` in the body,
+    so a refusal that a wait would repair arrives through the transport as an ordinary
+    response; checking the code only at decode time -- which is where it used to happen --
+    puts it outside `TushareProvider._post`'s retry loop, and no amount of classifying it
+    `rate_limit` would have caused anything to wait. So `_post` calls this before it returns,
+    and `_decode_envelope` calls it again for the callers that hand it a response directly.
+    The second call is a no-op on the first's path; the shared function is what keeps the two
+    from drifting into different verdicts about the same code.
+    """
+    code = response.get("code")
+    if code == 0:
+        return
+    category, retryable = _rejection_semantics(code)
+    raise ProviderFailure(
+        provider_id=provider_id,
+        category=category,
+        message=f"Tushare rejected the request: {response.get('msg') or 'unknown error'}",
+        retryable=retryable,
+    )
+
+
+def _decode_envelope(
+    response: dict[str, Any], provider_id: str
+) -> tuple[dict[str, Any], list[str], list[Any]]:
+    """`(data, fields, items)` out of one Tushare envelope, or raise. No completeness verdict.
+
+    Split out of `_response_rows` so the one-shot path and the `page_size` path validate the
+    envelope with the same code and disagree about nothing except what `has_more=True` means
+    to them -- a refusal to the first, the loop's continue condition to the second.
+    """
+    _check_response_code(response, provider_id)
+    data = response.get("data")
+    if not isinstance(data, dict):
+        raise ValueError("Tushare data must be an object")
+    fields = data.get("fields")
+    items = data.get("items")
+    if not isinstance(fields, list) or not all(isinstance(field, str) for field in fields):
+        raise ValueError("Tushare fields must be a string array")
+    if not isinstance(items, list):
+        raise ValueError("Tushare items must be an array")
+    return data, fields, items
+
+
+def _zip_rows(
+    descriptor: TushareDatasetDescriptor, fields: Sequence[str], items: Sequence[Any]
+) -> list[dict[str, Any]]:
+    """Field-keyed rows, after checking that the columns this descriptor reads are present."""
+    for required in descriptor.checked_response_fields:
+        if required not in fields:
+            raise ValueError(f"Tushare response for {descriptor.dataset} has no {required} column")
+    rows: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, list) or len(item) != len(fields):
+            raise ValueError("Tushare item does not match fields")
+        rows.append(dict(zip(fields, item, strict=True)))
+    return rows
 
 
 def _response_rows(
@@ -2586,34 +3028,67 @@ def _response_rows(
     `data.items`) is the one thing every endpoint has in common, and having two copies of its
     validation would let the two output shapes disagree about what a malformed response is.
     """
-    code = response.get("code")
-    if code != 0:
-        category: ProviderFailureCategory = "authentication" if code == -2001 else "upstream"
+    data, fields, items = _decode_envelope(response, provider_id)
+    _check_response_completeness(descriptor, data, items, provider_id)
+    return _zip_rows(descriptor, fields, items)
+
+
+def _page_rows(
+    descriptor: TushareDatasetDescriptor, response: dict[str, Any], provider_id: str
+) -> tuple[list[dict[str, Any]], bool]:
+    """One `limit`/`offset` page's rows, and whether the endpoint says more remain.
+
+    `_response_rows`' completeness rules, with exactly one changed: `has_more=True` is what a
+    page that is not the last one looks like, so it is returned rather than raised. Every other
+    witness is *stricter* here than on the one-shot path, because a paging loop can lose rows
+    in ways a single response cannot. Checked in this order, and the order is the point:
+
+    1. **the measured cap**, `_check_row_cap`, exactly as the one-shot path applies it. It is
+       first because it is the one witness that means the same thing on both paths, so a page
+       that reached the endpoint's own ceiling is refused with the same sentence a single
+       response would have been, rather than with a message about a `limit` that is only
+       *incidentally* also violated.
+    2. **the flag must be present and a real `bool`.** A missing or string-shaped `has_more`
+       would end the loop as though it were the last page, which is silent truncation
+       reintroduced by the mechanism meant to prevent it. (The descriptor invariant already
+       demands `requires_truncation_flag`; this is the same rule at the point of use, so a page
+       is judged by what it carries rather than by what the table promises.)
+    3. **the page must not exceed the `limit` it asked for.** `limit` was measured to narrow
+       only, so a longer page means the endpoint stopped honouring it and the offsets this loop
+       computes no longer line up with the rows it is being served. With
+       `page_size < max_rows_per_response` this is unreachable unless (1) already fired -- it
+       is the residue between the two, e.g. a 5,000-row page of a 4,000-row request against a
+       7,800-row cap.
+    """
+    data, fields, items = _decode_envelope(response, provider_id)
+    page_size = descriptor.page_size
+    assert page_size is not None  # only ever called for a descriptor that declares one
+    _check_row_cap(descriptor, items, provider_id)
+    flag = data.get(TUSHARE_RESPONSE_TRUNCATION_FLAG, _TRUNCATION_FLAG_ABSENT)
+    if not isinstance(flag, bool):
         raise ProviderFailure(
             provider_id=provider_id,
-            category=category,
-            message=f"Tushare rejected the request: {response.get('msg') or 'unknown error'}",
-            retryable=category == "upstream",
+            category="upstream",
+            message=(
+                f"a {descriptor.dataset} page carries {TUSHARE_RESPONSE_TRUNCATION_FLAG}="
+                f"{'<absent>' if flag is _TRUNCATION_FLAG_ABSENT else repr(flag)}; the paging "
+                "loop stops on that flag being exactly False, so anything else would end it on "
+                "a page that is not the last one"
+            ),
+            retryable=False,
         )
-    data = response.get("data")
-    if not isinstance(data, dict):
-        raise ValueError("Tushare data must be an object")
-    fields = data.get("fields")
-    items = data.get("items")
-    if not isinstance(fields, list) or not all(isinstance(field, str) for field in fields):
-        raise ValueError("Tushare fields must be a string array")
-    if not isinstance(items, list):
-        raise ValueError("Tushare items must be an array")
-    _check_response_completeness(descriptor, data, items, provider_id)
-    for required in descriptor.checked_response_fields:
-        if required not in fields:
-            raise ValueError(f"Tushare response for {descriptor.dataset} has no {required} column")
-    rows: list[dict[str, Any]] = []
-    for item in items:
-        if not isinstance(item, list) or len(item) != len(fields):
-            raise ValueError("Tushare item does not match fields")
-        rows.append(dict(zip(fields, item, strict=True)))
-    return rows
+    if len(items) > page_size:
+        raise ProviderFailure(
+            provider_id=provider_id,
+            category="upstream",
+            message=(
+                f"a {descriptor.dataset} page asked for {page_size} rows and was served "
+                f"{len(items)}; limit was measured to narrow only, so this endpoint is no "
+                "longer honouring the parameter the offsets are computed against"
+            ),
+            retryable=False,
+        )
+    return _zip_rows(descriptor, fields, items), flag
 
 
 def _expand_panel_rows(
@@ -2758,15 +3233,84 @@ class TushareProvider:
         token: str | None = None,
         transport: TushareTransport | None = None,
         clock: Callable[[], datetime] = utc_now,
+        attempts: int = TUSHARE_TRANSPORT_ATTEMPTS,
+        sleep: Callable[[float], None] = _sleep,
+        jitter: Callable[[], float] = random.random,
     ) -> None:
+        if attempts < 1:
+            raise ValueError("a provider that makes fewer than one attempt cannot fetch anything")
         self._token = token if token is not None else os.getenv("TUSHARE_TOKEN", "")
         self._transport = transport or UrllibTushareTransport()
         self._clock = clock
+        self._attempts = attempts
+        self._sleep = sleep
+        self._jitter = jitter
+        """`sleep` and `jitter` are injected for the same reason `clock` is: a bounded backoff
+        that a test cannot fast-forward is a bounded backoff no test will cover. Nothing in
+        this repository passes them outside the retry tests, and the defaults are the real
+        ones."""
 
     @property
     def metadata(self) -> ProviderMetadata:
         """Return Tushare licensing and credential policy."""
         return self._metadata
+
+    def probe_subjects(self, dataset: str) -> tuple[str, ...]:
+        """The minimal subjects one live probe of `dataset` needs, or `()`.
+
+        `cli._probe_report`'s optional hook, the same `getattr`-based seam `AKShareProvider`
+        already implements, and the reason this one exists is `V2-P1-018`'s R12: nine of this
+        table's fifteen datasets answered `openalpha doctor --probe` **without sending a single
+        request**, seven of them within one microsecond of each other. Five of those nine were
+        refused by their own `params_builder` for want of a subject, and the resulting
+        `configuration` was indistinguishable from the `configuration` a missing
+        `TUSHARE_TOKEN` produces -- so the report said the same word for "this dataset needs an
+        `index_code`" and "your credential is absent", and exited 0 either way.
+
+        Every value below is a request measured to succeed on 2026-08-10, and each is the
+        *smallest* one its builder accepts rather than a representative workload:
+        `index_weight` one index-month (300 rows), the three statements and `fina_indicator`
+        one security-year (4--6 rows), `index_classify` one taxonomy vintage (31 L1 rows) and
+        `index_member_all` one `l1_code` slice of one membership state. A probe is asking "can
+        this account reach this endpoint at all", so the cheapest well-formed request is the
+        right one.
+
+        The period year for `fina_indicator` is derived from the clock rather than pinned:
+        `_financial_indicator_params` refuses anything but a four-digit year, and a literal
+        would have to be revisited every January for no gain -- a probe cares that the request
+        was *accepted*, and `no_data` is an accepted request.
+        """
+        if dataset == INDEX_WEIGHT_DATASET:
+            return (PROBE_INDEX_CODE,)
+        if dataset == INDUSTRY_TREE_DATASET:
+            return (INDUSTRY_MEMBERSHIP_TAXONOMY,)
+        if dataset == INDUSTRY_MEMBERSHIP_DATASET:
+            return (PROBE_INDUSTRY_L1_CODE, CURRENT_INDUSTRY_MEMBERSHIP)
+        if dataset == FINANCIAL_INDICATOR_DATASET:
+            return (PROBE_SECURITY, str(self._clock().astimezone(_CHINA_TZ).year - 1))
+        if dataset in FINANCIAL_STATEMENT_DATASETS:
+            return (PROBE_SECURITY,)
+        return ()
+
+    def probe_plane(self, dataset: str) -> Literal["evidence", "panel"]:
+        """Which of this provider's two fetch methods one live probe of `dataset` should call.
+
+        The other half of R12, and the larger half: four of the nine never-probed datasets --
+        `stock_basic`, `namechange`, `index_classify`, `index_member_all` -- declare
+        `serves_evidence_plane=False`, so `fetch()` refuses them *by design*, before any
+        transport call, with the `configuration` category. No subject would have helped; the
+        probe was simply asking the wrong method. The evidence that this is a probe defect
+        rather than a capability limit is direct: `stock_basic` on the panel plane returns
+        6,217 rows for the same account the probe reported as unable to fetch it.
+
+        Reading `serves_evidence_plane` rather than listing the four names, so a future
+        panel-only descriptor is probed on the right plane the day it is added instead of
+        joining a list nobody updates.
+        """
+        descriptor = _TUSHARE_DATASETS_BY_NAME.get(dataset)
+        if descriptor is not None and not descriptor.serves_evidence_plane:
+            return "panel"
+        return "evidence"
 
     def fetch(self, request: ProviderRequest) -> ProviderBatch:
         """Fetch a descriptor-table dataset or raise a structured failure.
@@ -2790,8 +3334,11 @@ class TushareProvider:
                 retryable=False,
             )
         try:
-            response = self._post(descriptor, request)
-            records = self._decode(descriptor=descriptor, response=response, request=request)
+            records = self._decode_rows(
+                descriptor=descriptor,
+                items=self._request_rows(descriptor, request),
+                request=request,
+            )
         except ProviderFailure:
             raise
         except (OSError, ValueError, TypeError, KeyError, urllib.error.URLError) as error:
@@ -2851,9 +3398,10 @@ class TushareProvider:
                 retryable=False,
             )
         try:
-            response = self._post(descriptor, request)
             decoded = self._decode_panel_rows(
-                descriptor=descriptor, response=response, request=request
+                descriptor=descriptor,
+                items=self._request_rows(descriptor, request),
+                request=request,
             )
         except ProviderFailure:
             raise
@@ -2922,26 +3470,214 @@ class TushareProvider:
         return descriptor
 
     def _post(
-        self, descriptor: TushareDatasetDescriptor, request: ProviderRequest
+        self,
+        descriptor: TushareDatasetDescriptor,
+        request: ProviderRequest,
+        *,
+        params: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        """Build the one shared request envelope and hand it to the injected transport."""
-        return self._transport.post(
-            {
-                "api_name": descriptor.dataset,
-                "token": self._token,
-                "params": descriptor.params_builder(request),
-                "fields": descriptor.response_fields,
-            }
+        """Build the one shared request envelope, POST it, and retry a *retryable* failure.
+
+        ## Why the retry lives here and not in the transport
+
+        `TushareTransport` is a `Protocol` with one method and no vocabulary for "this failure
+        could go the other way next time"; the classification is `_rejection_semantics`', which
+        needs the decoded envelope. Putting the loop above the transport also means every
+        injected transport in this repository's tests -- and any a user writes -- gets the
+        same policy for free rather than having to re-implement it.
+
+        ## What is retried, and what is not
+
+        Only a `ProviderFailure` whose own `retryable` flag is `True`. That flag existed on
+        this contract from the start and, until this loop, **had no consumer anywhere in the
+        repository**: a transient socket error 27 seconds into a 45-minute build voided the
+        whole build, and did so under the category `invalid_response` with `retryable=False`,
+        because a bare `URLError` escaping the transport was caught by `fetch`/`fetch_panel`'s
+        decode clause. So two things change together and neither is enough alone -- a transport
+        exception is now translated into `upstream`/retryable at the point it happens, and the
+        flag now decides something.
+
+        `TushareResponseTruncated` is *not* retryable and this loop does not touch it: the same
+        request returns the same short answer. Its remedy is `page_size`, one layer up in
+        `_request_rows`.
+
+        ## The backoff
+
+        `TUSHARE_RETRY_BASE_DELAY * 2**attempt`, times a uniform random factor in `[0.5, 1.5)`,
+        capped at `TUSHARE_RETRY_MAX_DELAY`; a `rate_limit` waits `TUSHARE_RATE_LIMIT_DELAY`
+        instead, because Tushare's own message names a *per-minute* quota and backing off for
+        two seconds against a sixty-second window is a way of spending the retry budget without
+        waiting for anything. Jitter matters even for one process: a build is a tight loop of
+        identical requests, so an unjittered backoff re-synchronises every retry onto the same
+        instants as the failures that caused them.
+        """
+        envelope = {
+            "api_name": descriptor.dataset,
+            "token": self._token,
+            "params": descriptor.params_builder(request) if params is None else params,
+            "fields": descriptor.response_fields,
+        }
+        for attempt in range(self._attempts):
+            try:
+                response = self._transport.post(dict(envelope))
+                # Inside the `try`, and that placement is the fix rather than a detail: Tushare
+                # answers a quota breach with HTTP 200 and `code=40203` in the body, so the one
+                # refusal a wait repairs arrives as a perfectly ordinary response. Judging the
+                # code only at decode time -- one call frame above this loop, which is where it
+                # used to happen -- meant `rate_limit` could be classified correctly and still
+                # never cause anything to wait.
+                _check_response_code(response, self.metadata.provider_id)
+                return response
+            except ProviderFailure as failure:
+                if not failure.retryable or attempt == self._attempts - 1:
+                    raise
+                self._wait_before_retry(descriptor, failure, attempt)
+            except (OSError, urllib.error.URLError, TimeoutError) as error:
+                # The translation half. A DNS failure, a reset connection or a read timeout is
+                # a statement about the network between here and Tushare, not about the
+                # response -- which is what `invalid_response` claimed it was, with
+                # `retryable=False`, for as long as this clause did not exist.
+                translated = ProviderFailure(
+                    provider_id=self.metadata.provider_id,
+                    category="upstream",
+                    message=f"Tushare transport failed: {type(error).__name__}",
+                    retryable=True,
+                )
+                if attempt == self._attempts - 1:
+                    raise translated from error
+                self._wait_before_retry(descriptor, translated, attempt)
+        raise AssertionError("unreachable: the loop above either returns or raises")
+
+    def _wait_before_retry(
+        self, descriptor: TushareDatasetDescriptor, failure: ProviderFailure, attempt: int
+    ) -> None:
+        """Sleep for this attempt's backoff, and log the category without the message.
+
+        The message is withheld for `cli._fetch_panel`'s reason and it is the same boundary:
+        `ProviderFailure.message` can carry the token or the URL query string it was sent in,
+        so only the closed-`Literal` category, the dataset and the attempt number are safe.
+        """
+        if failure.category == "rate_limit":
+            delay = TUSHARE_RATE_LIMIT_DELAY
+        else:
+            delay = min(TUSHARE_RETRY_BASE_DELAY * float(2**attempt), TUSHARE_RETRY_MAX_DELAY) * (
+                0.5 + self._jitter()
+            )
+        logger.warning(
+            "tushare_request_retried",
+            extra={
+                "provider_id": self.metadata.provider_id,
+                "category": failure.category,
+                "dataset": descriptor.dataset,
+                "attempt": attempt + 1,
+                "attempts": self._attempts,
+                "delay_seconds": round(delay, 3),
+            },
+        )
+        self._sleep(delay)
+
+    def _request_rows(
+        self, descriptor: TushareDatasetDescriptor, request: ProviderRequest
+    ) -> list[dict[str, Any]]:
+        """Every response row for one request: one POST, or the `page_size` fallback.
+
+        The whole escape hatch, in the one place both planes go through. A descriptor with no
+        `page_size` behaves exactly as before -- one POST, one completeness verdict -- and a
+        descriptor with one behaves exactly as before *until the cap actually binds*, at which
+        point the refusal that used to end the build becomes the trigger for re-running the
+        same request as pages.
+
+        Reactive rather than preventive, and the argument is cost against evidence. Preventive
+        paging would double `stk_limit`'s request count on every build (145 sessions x 2 pages
+        against 145 one-shot requests, ~330s to ~660s wall clock) from the day it was turned on
+        until the day it was needed, in exchange for nothing that is true earlier. Reactive
+        paging pays only when the endpoint has *proved*, in this response, that the one-shot
+        request no longer fits -- and because the trigger is `TushareResponseTruncated` rather
+        than a row-count prediction, there is no threshold to tune and no way to reach the
+        fallback without the guard having fired first.
+        """
+        try:
+            return _response_rows(
+                descriptor, self._post(descriptor, request), self.metadata.provider_id
+            )
+        except TushareResponseTruncated:
+            if descriptor.page_size is None:
+                raise
+        return self._paged_rows(descriptor, request)
+
+    def _paged_rows(
+        self, descriptor: TushareDatasetDescriptor, request: ProviderRequest
+    ) -> list[dict[str, Any]]:
+        """Re-run one request as `limit`/`offset` pages and concatenate what comes back.
+
+        Three fail-closed conditions, none of which is a row-count expectation:
+
+        - every page is judged by `_page_rows` (flag present and boolean, no page longer than
+          the `limit` it asked for, no page at the measured cap);
+        - the pages must not overlap (`_refuse_overlapping_pages`) -- the check `namechange`'s
+          measured paging failure would have tripped;
+        - the loop must end because a page said `has_more=False`, within `MAX_TUSHARE_PAGES`.
+          Running out of pages is a refusal, not a result: a truncated answer assembled from
+          pages is the same silent short read as a truncated single response.
+
+        The concatenation is in offset order, which is the order the endpoint serves in.
+        Measured on `stk_limit`'s 2026-08-07 cross section: pages at `offset=0` and
+        `offset=4000` concatenate into a 7,733-element sequence **element-for-element
+        identical** to the un-paged 7,733-row response. That is what makes this fallback
+        invisible to `ColumnarPanelBatch.content_digest` and to `panel/store.py::_content_hash`
+        -- same rows, same order, so the same bytes are hashed either way; the only header
+        field a paged fetch moves is `fetched_at`, which any two fetches differ on.
+        """
+        page_size = descriptor.page_size
+        assert page_size is not None  # `_request_rows` only reaches here when one is declared
+        base = descriptor.params_builder(request)
+        pages: list[list[dict[str, Any]]] = []
+        for index in range(MAX_TUSHARE_PAGES):
+            response = self._post(
+                descriptor,
+                request,
+                params=_paged_params(base, limit=page_size, offset=index * page_size),
+            )
+            rows, has_more = _page_rows(descriptor, response, self.metadata.provider_id)
+            pages.append(rows)
+            if not has_more:
+                _refuse_overlapping_pages(descriptor, pages)
+                collected = [row for page in pages for row in page]
+                logger.info(
+                    "tushare_paged_fetch",
+                    extra={
+                        "provider_id": self.metadata.provider_id,
+                        "dataset": descriptor.dataset,
+                        "pages": len(pages),
+                        "page_size": page_size,
+                        "rows": len(collected),
+                    },
+                )
+                return collected
+        raise ProviderFailure(
+            provider_id=self.metadata.provider_id,
+            category="upstream",
+            message=(
+                f"paging {descriptor.dataset} reached {MAX_TUSHARE_PAGES} pages of {page_size} "
+                "rows and the endpoint still reports more to give; an answer assembled from a "
+                "bounded number of pages that never ended is the same short read a truncated "
+                "single response would have been"
+            ),
+            retryable=False,
         )
 
     def _decode_panel_rows(
         self,
         *,
         descriptor: TushareDatasetDescriptor,
-        response: dict[str, Any],
+        items: list[dict[str, Any]],
         request: ProviderRequest,
     ) -> _DecodedPanelRows:
-        """Decode, point-in-time filter, sort and project a response into column values.
+        """Point-in-time filter, sort and project already-decoded response rows.
+
+        Takes rows rather than an envelope because `_request_rows` may have assembled them
+        from several responses (see `_paged_rows`); everything below this line is about the
+        rows themselves and has never cared how many POSTs produced them.
 
         `served` is the number of rows Tushare actually returned, before the clock filter. It
         is what separates "the exchange has not published this range" from "this was not yet
@@ -2968,14 +3704,12 @@ class TushareProvider:
         ``no_data`` with ``served`` non-zero, which already says "served but not yet
         knowable".
         """
-        items = _expand_panel_rows(
-            descriptor, _response_rows(descriptor, response, self.metadata.provider_id)
-        )
-        _check_panel_projection(descriptor, items, self.metadata.provider_id)
+        expanded = _expand_panel_rows(descriptor, items)
+        _check_panel_projection(descriptor, expanded, self.metadata.provider_id)
         ingested_at = self._clock()
         knowable_by = min(request.as_of, ingested_at)
         kept: list[tuple[date, dict[str, Any], Timeline]] = []
-        for row in items:
+        for row in expanded:
             timeline = _CLOCK_BUILDERS[descriptor.clock](row, descriptor.date_field, ingested_at)
             if timeline.available_time > knowable_by:
                 continue
@@ -2990,7 +3724,7 @@ class TushareProvider:
                 tuple(spec.parse(row[spec.source_field]) for row in rows)
                 for spec in descriptor.panel_columns
             ),
-            served=len(items),
+            served=len(expanded),
         )
 
     def _decode(
@@ -3000,7 +3734,30 @@ class TushareProvider:
         response: dict[str, Any],
         request: ProviderRequest,
     ) -> tuple[ProviderRecord, ...]:
-        items = _response_rows(descriptor, response, self.metadata.provider_id)
+        """One envelope's evidence records: the single-response form of `_decode_rows`.
+
+        `fetch()` cannot use it, because `_request_rows` may have assembled its rows from
+        several envelopes (see `_paged_rows`), and a merged envelope re-checked by
+        `_check_response_completeness` would be refused for holding more rows than one response
+        may -- which is the whole point of having paged. It stays because one response in and
+        one record out is the unit `tests/contract/providers/test_tushare_dataset_descriptors.py`
+        exercises the descriptor table at, and folding the envelope decode into that suite
+        would give each of its five cases a copy of this function's precondition.
+        """
+        return self._decode_rows(
+            descriptor=descriptor,
+            items=_response_rows(descriptor, response, self.metadata.provider_id),
+            request=request,
+        )
+
+    def _decode_rows(
+        self,
+        *,
+        descriptor: TushareDatasetDescriptor,
+        items: list[dict[str, Any]],
+        request: ProviderRequest,
+    ) -> tuple[ProviderRecord, ...]:
+        """Point-in-time filter already-decoded response rows into evidence records."""
         ingested_at = self._clock()
         records: list[ProviderRecord] = []
         for row in items:
