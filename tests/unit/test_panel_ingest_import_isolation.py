@@ -19,6 +19,13 @@ catalog through `panel`, the dataset contracts through `domain`, and the require
 and loaders through `panel_ingest`. Its dependency set is pinned below for the reason
 `panel_ingest`'s is -- a top-level module's whole justification is *which* packages it is
 allowed to join, and a justification that is not asserted is a comment.
+
+`openalpha_cn.panel_gate` (`V2-P1-013`) is the third and the narrowest: it consumes the health
+report and adds no reader of its own, so it reaches `panel_doctor`, `panel` (for `PanelStore`
+and the catalog's timezone default) and `domain` (for `TradingCalendar`) -- and, notably, *not*
+`panel_ingest`. That absence is worth pinning: a gate that built its own `ReadinessRequirement`
+could ask a dataset a different question from the one its own reader asks, and the two verdicts
+would drift.
 """
 
 from __future__ import annotations
@@ -27,6 +34,7 @@ import grimp
 
 _ALLOWED_INTERNAL_DEPENDENCIES = {"openalpha_cn.domain", "openalpha_cn.panel"}
 _ALLOWED_DOCTOR_DEPENDENCIES = _ALLOWED_INTERNAL_DEPENDENCIES | {"openalpha_cn.panel_ingest"}
+_ALLOWED_GATE_DEPENDENCIES = _ALLOWED_INTERNAL_DEPENDENCIES | {"openalpha_cn.panel_doctor"}
 
 
 def _direct_internal_dependencies(module: str) -> set[str]:
@@ -85,6 +93,45 @@ def test_the_health_report_adds_no_edge_into_the_panel_package() -> None:
     assert graph.direct_import_exists(
         importer="openalpha_cn.panel_doctor", imported="openalpha_cn.panel", as_packages=True
     ), "sanity check: the health report is supposed to read the catalog"
+
+
+def test_the_dependency_gate_consumes_the_report_and_builds_no_requirement_of_its_own() -> None:
+    """`panel_gate` may join exactly three, and `panel_ingest` is deliberately not among them.
+
+    The gate's whole contract is that it decides on `panel_doctor`'s evidence: the report asks
+    each dataset the question its own reader asks (`_requirement_for` reuses `panel_ingest`'s
+    builders), and a gate with a direct edge to those builders could put a different question
+    and reach a verdict the loader disagrees with.
+    """
+    dependencies = _direct_internal_dependencies("openalpha_cn.panel_gate")
+
+    assert dependencies == _ALLOWED_GATE_DEPENDENCIES, (
+        f"openalpha_cn.panel_gate may import exactly {sorted(_ALLOWED_GATE_DEPENDENCIES)}, "
+        f"found {sorted(dependencies)}"
+    )
+
+
+def test_the_dependency_gate_adds_no_edge_into_the_panel_package_either() -> None:
+    """The same pattern-or-evasion question `panel_doctor` had to answer, asked again because
+    the answer is not inherited: a neutral top-level module is an evasion when the guarded
+    package's real dependency set is untouched and only moves out of the metric's sight. Here
+    the edges run `panel_gate -> panel_doctor -> panel` and never back, so `openalpha_cn.panel`'s
+    import closure is what it was before this module existed."""
+    graph = grimp.build_graph("openalpha_cn")
+
+    for importer in (
+        "openalpha_cn.panel",
+        "openalpha_cn.domain",
+        "openalpha_cn.storage",
+        "openalpha_cn.panel_ingest",
+        "openalpha_cn.panel_doctor",
+    ):
+        assert not graph.direct_import_exists(
+            importer=importer, imported="openalpha_cn.panel_gate", as_packages=True
+        ), f"{importer} must not import openalpha_cn.panel_gate"
+    assert graph.direct_import_exists(
+        importer="openalpha_cn.panel_gate", imported="openalpha_cn.panel_doctor", as_packages=True
+    ), "sanity check: the gate is supposed to consume the health report"
 
 
 def test_the_columnar_contract_reaches_no_infrastructure_library() -> None:
