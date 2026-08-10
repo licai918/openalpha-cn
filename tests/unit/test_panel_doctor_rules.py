@@ -494,12 +494,14 @@ def test_the_severity_of_every_declared_code_is_pinned_code_by_code() -> None:
         "subject_missing": "blocking",
         "field_missing": "blocking",
         "stale": "blocking",
-        # Disagreement between two datasets, and the report saying it could not look.
+        # Disagreement between two datasets, the report saying it could not look, and one
+        # dataset whose stored rows its own reader refuses.
         "subject_set_disagreement": "warning",
         "close_disagreement": "warning",
         "return_path_disagreement": "warning",
         "unexplained_unpriced": "warning",
         "check_unavailable": "warning",
+        "domain_rebuild_refused": "warning",
         # Measured facts `V2-P1-011` showed to be ordinary on this corpus.
         "ambiguous_filing": "notice",
         "duplicate_versions": "notice",

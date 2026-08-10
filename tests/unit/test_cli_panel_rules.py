@@ -16,17 +16,33 @@ import pytest
 from openalpha_cn.cli import (
     _EMPTY_SESSION_IS_ORDINARY,
     _LIFECYCLE_YEAR_TARGETS,
+    _PANEL_WRITE_REFUSALS,
     CLICK_USAGE_EXIT_CODE,
     PANEL_BUILD_COUPLED_DATASETS,
     PANEL_BUILD_TARGETS,
     PanelExit,
 )
-from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET
-from openalpha_cn.domain.daily_prices import DAILY_BASIC_DATASET, DAILY_DATASET
-from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET, SUSPENSION_DATASET
-from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET
-from openalpha_cn.domain.trading_calendar import TRADING_CALENDAR_DATASET
-from openalpha_cn.panel_doctor import PanelHealthReport
+from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET, AdjustmentError
+from openalpha_cn.domain.daily_prices import (
+    DAILY_BASIC_DATASET,
+    DAILY_DATASET,
+    PriceDataError,
+)
+from openalpha_cn.domain.financial_statements import FinancialStatementError
+from openalpha_cn.domain.index_membership import IndexMembershipError
+from openalpha_cn.domain.panel_batch import PanelBatchError
+from openalpha_cn.domain.price_limits import (
+    PRICE_LIMIT_DATASET,
+    SUSPENSION_DATASET,
+    SuspensionError,
+)
+from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET, StockUniverseError
+from openalpha_cn.domain.trading_calendar import (
+    TRADING_CALENDAR_DATASET,
+    TradingCalendarError,
+)
+from openalpha_cn.panel.catalog import PanelStorageError
+from openalpha_cn.panel_doctor import _LOAD_FAILURES, PanelHealthReport
 from openalpha_cn.panel_gate import DependencyClearance, DependencyRequest, PanelGateError
 
 NOW = datetime(2026, 1, 17, 4, 0, tzinfo=UTC)
@@ -145,3 +161,36 @@ def test_a_cleared_clearance_still_refuses_to_be_used_as_a_collection(consume: o
     assert clearance.is_blocked is False
     with pytest.raises(PanelGateError, match="a clearance is a verdict, not a collection"):
         consume(clearance)  # type: ignore[operator]
+
+
+def test_the_write_refusals_and_the_doctors_load_failures_are_one_set() -> None:
+    """The two modules must agree about which exceptions are facts about stored data.
+
+    `panel_doctor._LOAD_FAILURES` is the doctor's answer -- the domain errors a cross-check
+    catches so it can report that it did not run rather than take the report down -- and
+    `cli._PANEL_WRITE_REFUSALS` is the same question asked by `panel build`, which maps them to
+    `PanelExit.unhealthy` and prints the message. They drifted: the doctor named all nine, the
+    CLI named four, and the five it omitted included `SuspensionError`. So a live 2026 build
+    that fetched for 22 minutes and then hit a real contradiction in `suspend_d` exited 5 --
+    `internal_error`, "a defect in the command, not a verdict about the panel" -- with the
+    exception's message withheld on the grounds that an unanticipated failure might carry a
+    credential. That refusal names one ticker and one session.
+
+    Asserted as sets rather than as sequences because neither module's order is load-bearing --
+    both are `except` tuples -- and asserted whole rather than by membership so that a tenth
+    domain error added to one list fails here instead of being caught in one place and crashing
+    in the other.
+    """
+    assert set(_PANEL_WRITE_REFUSALS) == set(_LOAD_FAILURES)
+    assert len(_PANEL_WRITE_REFUSALS) == len(set(_PANEL_WRITE_REFUSALS))
+    assert set(_PANEL_WRITE_REFUSALS) == {
+        PanelStorageError,
+        PanelBatchError,
+        PriceDataError,
+        AdjustmentError,
+        SuspensionError,
+        StockUniverseError,
+        IndexMembershipError,
+        FinancialStatementError,
+        TradingCalendarError,
+    }

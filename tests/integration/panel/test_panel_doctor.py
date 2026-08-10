@@ -36,6 +36,7 @@ from openalpha_cn.domain.trading_calendar import (
 )
 from openalpha_cn.panel.store import ColumnSpec, PanelStore
 from openalpha_cn.panel_doctor import (
+    REBUILDABLE_DATASETS,
     FreshnessPolicy,
     PanelDoctorError,
     dataset_health,
@@ -918,6 +919,148 @@ def test_an_unpriced_security_a_halt_explains_is_not_reported(tmp_path: Path) ->
     report = report_for(seed(tmp_path), cross_section_days=(HALTED_SESSION,))
 
     assert report.findings_with_code("unexplained_unpriced") == ()
+
+
+# --- injection: a partition readiness clears and its own reader refuses -------------------------
+
+
+def _contradictory_suspension_batch() -> ColumnarPanelBatch:
+    """One security carrying an untimed `S` and a timed `S` on one session.
+
+    The shape `build_suspension_day` refuses, written straight through the generic writer so
+    that it reaches disk exactly as it did before `write_suspensions` learned to rebuild --
+    which is the state this check exists to find on installations that already have one.
+    """
+    return _batch(
+        SUSPENSION_DATASET,
+        subjects=[HALTED_SECURITY, HALTED_SECURITY],
+        columns=[
+            PanelColumn(
+                "trade_date", "string", (HALTED_SESSION.isoformat(), HALTED_SESSION.isoformat())
+            ),
+            PanelColumn("suspend_type", "string", ("S", "S")),
+            PanelColumn("suspend_timing", "string", (None, "09:30-09:40")),
+        ],
+        event_time=[_close_time(HALTED_SESSION), _close_time(HALTED_SESSION)],
+        available_time=[_published_time(HALTED_SESSION), _published_time(HALTED_SESSION)],
+    )
+
+
+def test_a_partition_every_readiness_dimension_clears_but_the_reader_refuses_is_reported(
+    tmp_path: Path,
+) -> None:
+    """The gap `V2-P1-013`'s own promise fell through, one layer up.
+
+    Readiness is a census of the catalog -- files, subjects, fields, dates, freshness -- and
+    none of those dimensions can see two stored rows contradicting each other. Measured on a
+    real 2026 `suspend_d` partition: `panel doctor` said `READY ... rows=2293`, `data-check`
+    said `CLEARED`, both exited 0, and `load_suspensions` on that same partition at that same
+    `as_of` raised. So the dataset is still `ready` here -- that is the point -- and the
+    finding comes from the rebuild instead.
+    """
+    store = seed(tmp_path)
+    write_panel_batch(store, _contradictory_suspension_batch(), year=YEAR)
+
+    report = report_for(store)
+
+    (finding,) = report.findings_with_code("domain_rebuild_refused")
+    assert finding.datasets == (SUSPENSION_DATASET,)
+    assert finding.severity == "warning"
+    assert finding.category == "inconsistent"
+    assert "SuspensionError" in finding.detail
+    assert not report.is_clean
+    readiness = {health.dataset: health.readiness.state for health in report.datasets}
+    assert readiness[SUSPENSION_DATASET] == "ready"
+
+
+def test_the_strongest_cross_check_failing_to_load_is_a_warning_and_not_a_notice(
+    tmp_path: Path,
+) -> None:
+    """`unpriced_explained` is the check that can see a hole nothing else can, so its silence
+    must never read as a pass.
+
+    `_unavailable` catches the load failure and downgrades the check to a `check_unavailable`
+    finding. If that code were a `notice` the report would still call itself clean -- by
+    design, since `BLOCKS_A_READ` excludes notices so that an honest report is not permanently
+    red -- and the strongest check in the file would have failed silently. It is a `warning`,
+    and this pins that end to end rather than only in the severity table: the check reports
+    `ran=False` with its reason, the finding is a `warning`, and the report is not clean.
+
+    Distinct from `ambiguous_filing`, which is a `notice` for the opposite reason: that one is
+    a measured, ordinary property of the corpus. This one is "I did not look".
+    """
+    store = seed(tmp_path)
+    write_panel_batch(store, _contradictory_suspension_batch(), year=YEAR)
+
+    report = report_for(store)
+
+    (check,) = [c for c in report.cross_checks if c.name == "unpriced_explained"]
+    assert not check.ran
+    assert check.skipped_reason is not None
+    assert "SuspensionError" in check.skipped_reason
+    unavailable = [
+        finding
+        for finding in report.findings_with_code("check_unavailable")
+        if SUSPENSION_DATASET in finding.datasets
+    ]
+    assert [finding.severity for finding in unavailable] == ["warning"]
+    assert not report.is_clean
+
+
+def test_the_rebuild_check_runs_and_finds_nothing_on_a_healthy_panel(tmp_path: Path) -> None:
+    """The other half, and the one that keeps the check honest: it must be capable of silence.
+
+    Named separately from `test_a_healthy_panel_produces_a_report_with_nothing_to_report`
+    because that test would still pass if this check never ran at all -- `ran` is the
+    assertion.
+    """
+    report = report_for(seed(tmp_path))
+
+    (check,) = [c for c in report.cross_checks if c.name == "domain_rebuild"]
+    assert check.ran
+    assert check.finding_count == 0
+    assert SUSPENSION_DATASET in check.datasets
+
+
+def test_the_registry_is_not_rebuilt_because_its_partitions_are_lifecycle_years(
+    tmp_path: Path,
+) -> None:
+    """The check must not invent a finding out of the caller's choice of `--year`.
+
+    `stock_basic` is `cli._LIFECYCLE_YEAR_TARGETS`' sole member: a security listed in 2009 and
+    delisted in 2026 has its listing row in the 2009 partition and its delisting row in the
+    2026 one, and `build_stock_universe` correctly refuses a delisting with no listing as a
+    partial read. Rebuilding it over the requested years alone therefore reports a defect on a
+    sound registry -- measured on a real panel at `--year 2026`, 21 securities, `000004.SZ`
+    first, and `panel doctor --dataset stock_basic --year 2026` exited 1 on it.
+
+    Pinned as an exclusion rather than left to the table's shape, because adding the loader back
+    would look like an obvious completion of an obviously incomplete mapping.
+    """
+    assert STOCK_BASIC_DATASET not in REBUILDABLE_DATASETS
+
+    report = report_for(seed(tmp_path), datasets=(STOCK_BASIC_DATASET,), cross_section_days=())
+
+    (check,) = [c for c in report.cross_checks if c.name == "domain_rebuild"]
+    assert check.datasets == ()
+    assert report.findings_with_code("domain_rebuild_refused") == ()
+
+
+def test_the_rebuild_check_skips_a_dataset_readiness_has_already_faulted(tmp_path: Path) -> None:
+    """A dataset readiness already refused is not rebuilt, so one defect produces one finding.
+
+    Without this, a missing partition would be reported twice in two vocabularies --
+    `partition_missing` and then `domain_rebuild_refused` -- and the second would attach a
+    "these rows contradict each other" code to rows that are simply not there.
+    """
+    store = seed(tmp_path, halts=False)
+
+    report = report_for(store)
+
+    assert report.findings_with_code("domain_rebuild_refused") == ()
+    (check,) = [c for c in report.cross_checks if c.name == "domain_rebuild"]
+    assert SUSPENSION_DATASET not in check.datasets
+    assert {finding.code for finding in report.findings} & {"partition_missing"}
 
 
 # --- injection: the two return paths disagreeing --------------------------------------------------

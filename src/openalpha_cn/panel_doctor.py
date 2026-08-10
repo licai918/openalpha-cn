@@ -214,6 +214,9 @@ from openalpha_cn.panel_ingest import (
     load_adjustment_histories,
     load_daily_bars,
     load_daily_valuations,
+    load_industry_histories,
+    load_industry_trees,
+    load_name_histories,
     load_statement_histories,
     load_stock_universe,
     load_suspensions,
@@ -288,6 +291,7 @@ DOCTOR_ISSUE_CODES: Final[frozenset[str]] = frozenset(
         "duplicate_versions",
         "revised_rows",
         "check_unavailable",
+        "domain_rebuild_refused",
     }
 )
 """The codes this module adds -- one per gap the eight dataset issues left open.
@@ -298,7 +302,14 @@ catalog. `ambiguous_filing` and `duplicate_versions` are the two facets of *dupl
 had no code at all before this issue -- one counted from loaded filings, one read straight off
 the catalog's label census so that it still answers when the filings will not load.
 `revised_rows` is *revised*. `check_unavailable` is the report saying what it could not look
-at."""
+at.
+
+`domain_rebuild_refused` is the one dimension readiness has no way to see. Readiness is
+assessed from the catalog's own census -- files, subjects, fields, dates, freshness -- and a
+row-level contradiction is invisible to every one of those. So a `suspend_d` partition serving
+one security both an `R` row and an `S` row for one session was `READY` here and `CLEARED` by
+`V2-P1-013`'s gate while `load_suspensions` on that same partition, at that same `as_of`,
+raised. See `_rebuild_check`."""
 
 DOCTOR_CODE_CATEGORY: Final[Mapping[str, HealthCategory]] = MappingProxyType(
     {
@@ -310,6 +321,7 @@ DOCTOR_CODE_CATEGORY: Final[Mapping[str, HealthCategory]] = MappingProxyType(
         "duplicate_versions": "duplicate",
         "revised_rows": "revised",
         "check_unavailable": "unanswerable",
+        "domain_rebuild_refused": "inconsistent",
     }
 )
 
@@ -328,6 +340,7 @@ HEALTH_CODE_SEVERITY: Final[Mapping[str, HealthSeverity]] = MappingProxyType(
         "return_path_disagreement": "warning",
         "unexplained_unpriced": "warning",
         "check_unavailable": "warning",
+        "domain_rebuild_refused": "warning",
         "ambiguous_filing": "notice",
         "duplicate_versions": "notice",
         "revised_rows": "notice",
@@ -345,7 +358,10 @@ two datasets* is a `warning`, including `unexplained_unpriced`: a listed securit
 and no halt to account for it is a hole in the cross section whichever share of the session it
 represents, and the write-time guard already refuses the shapes that are gross enough to see
 without a second dataset. `check_unavailable` is a `warning` and not a `notice` because "I
-could not look" must not read as "I looked and it was fine".
+could not look" must not read as "I looked and it was fine". `domain_rebuild_refused` is a
+`warning` for the sharper version of that: the read this report exists to authorise is the
+read that raised, and `GATE_BLOCKING_SEVERITIES` counts `warning`, so this is the severity at
+which the gate stops clearing a partition its own reader will not return.
 
 Pinned entry by entry in `tests/unit/test_panel_doctor_rules.py`: severity is the field
 `V2-P1-013`'s gate branches on after `code`, and a silent demotion is the one change to this
@@ -1586,6 +1602,133 @@ def _ambiguity_check(
     )
 
 
+class _YearScopedLoader(Protocol):
+    def __call__(
+        self,
+        store: PanelStore,
+        *,
+        years: Sequence[int],
+        as_of: datetime,
+        max_staleness: timedelta | None,
+    ) -> object: ...
+
+
+REBUILDABLE_DATASETS: Final[Mapping[str, _YearScopedLoader]] = MappingProxyType(
+    {
+        NAMECHANGE_DATASET: load_name_histories,
+        ADJ_FACTOR_DATASET: load_adjustment_histories,
+        SUSPENSION_DATASET: load_suspensions,
+        INDUSTRY_MEMBERSHIP_DATASET: load_industry_histories,
+        INDUSTRY_TREE_DATASET: load_industry_trees,
+    }
+)
+"""The datasets `_rebuild_check` can rebuild, and the loader that rebuilds each.
+
+**The year-scoped loaders whose reconstruction is defined on whatever years the caller named.**
+Every entry has the same signature -- `(store, *, years, as_of, max_staleness)` -- and, more to
+the point, every entry's builder assembles from the rows it is handed: a halt day is grouped
+from that day's rows, a factor series and a rename corpus from the records present. None of
+them refuses because a record it wants sits in a year the request did not ask for. That is the
+property this check needs, because it must not manufacture a finding out of the caller's choice
+of `--year`.
+
+**`stock_basic` is deliberately absent, and it is the reason this table is a table.** Its
+partitions are *lifecycle* years -- `cli._LIFECYCLE_YEAR_TARGETS`' sole member -- so a security
+listed in 2009 and delisted in 2026 has its listing row in the 2009 partition and its delisting
+row in the 2026 one. `build_stock_universe` refuses a delisting with no listing, correctly, as
+a partial read. So `panel doctor --dataset stock_basic --year 2026` would have reported
+`domain_rebuild_refused` on a perfectly sound registry: measured on a real panel, 21 securities,
+`000004.SZ` first. That is the check being wrong about the panel rather than the panel being
+wrong, which is the one failure mode a fail-closed report cannot afford. `load_stock_universe`
+already states that it wants the store's whole lifecycle range; a rebuild check that supplied
+less would be asking a question the caller did not.
+
+The day-scoped loaders (`load_daily_bars`, `load_daily_valuations`, `load_price_limits`) are
+absent for a different reason: they cannot run without naming a session, `--session` is already
+how a caller names one, and `_close_check`, `_unpriced_check` and `_return_path_check` exercise
+all three on the sessions named. `load_index_membership` is absent for the same reason with
+`--index-code` in place of `--session`, and `load_statement_histories` takes a `dataset`
+argument and is exercised by `_ambiguity_check`."""
+
+
+def _rebuild_check(
+    store: PanelStore,
+    *,
+    healths: Sequence[DatasetHealth],
+    as_of: datetime,
+    years: Mapping[str, tuple[int, ...]],
+    bounds: Mapping[str, timedelta | None],
+) -> tuple[tuple[HealthFinding, ...], CrossCheckOutcome]:
+    """Rebuild every ready partition into its domain type, and report the ones that refuse.
+
+    ## The dimension readiness cannot have
+
+    `evaluate_readiness` reads the catalog: which files exist, which subjects and fields and
+    dates they cover, how stale they are. Not one of those can see two rows that contradict
+    each other, so a partition can satisfy every readiness dimension and still be unreadable.
+    That is not hypothetical -- it is `V2-P1-013`'s own promise ("a failed dataset explicitly
+    blocks downstream") failing one layer up, measured on a real 2026 `suspend_d` partition
+    that `panel doctor` called `READY` (2,293 rows) and `data-check` `CLEARED`, and that
+    `load_suspensions` refused. `data-check`'s whole deliverable is its exit code: a caller who
+    ran it, was cleared, and then read had done everything the design asks and still crashed.
+
+    ## Only datasets readiness already called ready
+
+    A dataset readiness has already faulted is skipped, not rebuilt. Its loader would raise for
+    the reason readiness just reported, and a second finding saying the same thing in a
+    different vocabulary would double-count a single defect -- and, worse, would attach the
+    *rebuild* code to a partition that is merely absent. So this check answers exactly one
+    question, the one nothing else asks: **of the partitions we are about to call readable, do
+    they read?**
+
+    ## The two failure modes are kept apart
+
+    A domain reconstruction that refuses (`SuspensionError` and its eight siblings) is a
+    verdict about the rows -- `domain_rebuild_refused`, a `warning`. A `PanelStorageError` is
+    the store declining to serve them at all, which after a ready verdict means something moved
+    under the report between the census and the read; the check did not get to run, so that is
+    `check_unavailable`. Distinguishing them matters because only the first is a statement
+    about the data, and `check_unavailable` already means "I could not look".
+    """
+    subjects = tuple(
+        health.dataset
+        for health in healths
+        if health.dataset in REBUILDABLE_DATASETS and health.is_ready
+    )
+    findings: list[HealthFinding] = []
+    for dataset in subjects:
+        try:
+            REBUILDABLE_DATASETS[dataset](
+                store,
+                years=years[dataset],
+                as_of=as_of,
+                max_staleness=bounds.get(dataset),
+            )
+        except PanelStorageError as error:
+            return _unavailable("domain_rebuild", subjects, error)
+        except _LOAD_FAILURES as error:
+            findings.append(
+                _finding(
+                    "domain_rebuild_refused",
+                    datasets=(dataset,),
+                    detail=(
+                        f"{dataset} passed every readiness dimension and then refused to "
+                        f"rebuild: {type(error).__name__}: {error}. The catalog census cannot "
+                        "see a contradiction between two rows, so this partition would have "
+                        "been cleared for a read that raises"
+                    ),
+                    count=1,
+                    items=(dataset,),
+                )
+            )
+    return tuple(findings), CrossCheckOutcome(
+        name="domain_rebuild",
+        datasets=subjects,
+        ran=True,
+        finding_count=len(findings),
+    )
+
+
 def _unavailable(
     name: str, datasets: tuple[str, ...], error: Exception
 ) -> tuple[tuple[HealthFinding, ...], CrossCheckOutcome]:
@@ -1674,6 +1817,12 @@ def panel_health_report(
     checks: list[CrossCheckOutcome] = []
 
     findings, outcome = _subject_check(store, healths)
+    cross_findings.extend(findings)
+    checks.append(outcome)
+
+    findings, outcome = _rebuild_check(
+        store, healths=healths, as_of=as_of, years=years_for, bounds=bounds
+    )
     cross_findings.extend(findings)
     checks.append(outcome)
 

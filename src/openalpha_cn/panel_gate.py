@@ -47,6 +47,14 @@ clear that panel and let `-0.530973%` through, which is the exact defect this is
 prevent. `check_unavailable` carries the same weight from the other direction: "I could not
 look" must never be read as "I looked and it was fine".
 
+**`domain_rebuild_refused` is this gate's own promise, checked.** Readiness is a census of the
+catalog -- files, subjects, fields, dates, freshness -- and none of those dimensions can see two
+stored rows that contradict each other. A real 2026 `suspend_d` partition was `READY` at 2,293
+rows and `CLEARED` here while `load_suspensions` on it raised, so a caller who ran the gate, was
+cleared, and then read had done everything this design asks of it and still crashed. That is the
+same fail-open shape as a blocking-only gate, one dimension over, and it blocks for the same
+reason.
+
 **Notices must not block, and the measurement is why.** `V2-P1-011` measured 81.7% of
 `fina_indicator`'s keys carrying more than one row, and, on a real 53-security corpus driven
 end to end, `ambiguous_filing` fires on 8.15% of `income`'s filings, 1.29% of
@@ -233,15 +241,18 @@ GATE_CODE_BLOCKS: Final[Mapping[str, bool]] = MappingProxyType(
         "subject_missing": True,
         "field_missing": True,
         "stale": True,
-        # Two datasets saying things that cannot both be true, and the report saying it could
-        # not look. `return_path_disagreement` is the only code in this whole set that can see
-        # a missing factor step, and `check_unavailable` is the difference between "I looked"
-        # and "I could not"; see this module's docstring.
+        # Two datasets saying things that cannot both be true, the report saying it could not
+        # look, and one dataset contradicting itself. `return_path_disagreement` is the only
+        # code in this whole set that can see a missing factor step, `check_unavailable` is the
+        # difference between "I looked" and "I could not", and `domain_rebuild_refused` is the
+        # one that answers for *this* gate's own promise: it fires exactly when readiness said
+        # a partition may be read and its reader then refused it. See this module's docstring.
         "subject_set_disagreement": True,
         "close_disagreement": True,
         "return_path_disagreement": True,
         "unexplained_unpriced": True,
         "check_unavailable": True,
+        "domain_rebuild_refused": True,
         # Measured to be ordinary on this corpus, and each already refused where it is
         # decidable rather than at the granularity of a whole dataset.
         "ambiguous_filing": False,

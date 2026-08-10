@@ -227,9 +227,9 @@ def test_a_halt_window_is_read_as_spanning_the_close_from_its_right_endpoints(
 
 def test_two_disagreeing_halt_windows_for_one_security_are_refused() -> None:
     """The corpus spells a two-window halt inside a single row ('13:36-13:46,14:53-14:57'), so
-    two rows carrying different windows are two sources nobody reconciled -- the same finding
-    as two rows carrying different states, and refused the same way. A byte-identical duplicate
-    still collapses.
+    one row already carries every window a session has and two rows carrying different ones
+    disagree about the same question -- the shape `_reconcile_states` refuses for two `S`
+    states, and refused the same way. A byte-identical duplicate still collapses.
     """
     morning = SuspensionRecord(
         ts_code="000048.SZ", trade_date=SESSION, suspend_type="S", timing="09:30-10:00"
@@ -287,8 +287,53 @@ def test_a_blank_timing_is_refused_rather_than_read_as_a_whole_day_halt() -> Non
         )
 
 
-def test_two_disagreeing_states_for_one_security_are_refused() -> None:
-    with pytest.raises(SuspensionError, match="is both halted and resumed"):
+@pytest.mark.parametrize("order", [(0, 1), (1, 0)])
+@pytest.mark.parametrize(
+    ("timing", "state"),
+    [(None, TradingState.halted), ("09:30-09:40", TradingState.interrupted)],
+    ids=["untimed", "timed"],
+)
+def test_an_r_row_beside_an_s_row_resolves_to_the_s_rows_own_state(
+    order: tuple[int, int], timing: str | None, state: TradingState
+) -> None:
+    """One session serving a security both an `R` and an `S` is a real shape, not a broken
+    fetch, and the `S` is the row that decides.
+
+    Inlined from `suspend_d(start_date=20260101, end_date=20261231)`: `603056.SH` on 2026-01-12
+    carries `R`/null and `S`/null, and `600421.SH` on 2026-06-01 carries `R`/null and
+    `S`/'9:30-9:40'. This used to raise "is both halted and resumed ... two sources that were
+    never reconciled", and the attribution is what a census disproved -- one request, one
+    session, both rows. Every session of 2015..2026 (334,362 rows, no response truncated) holds
+    73 `(security, session)` pairs with two rows and **all 73 are one `R` and one `S`**; on the
+    47 whose security `daily` carries that year, the `S` row's own timing predicts the bar 45
+    times. See `KNOWN_SUSPENSION_LIMITATIONS`'
+    `a_resumption_and_a_halt_can_share_one_session` for the two misses.
+
+    Both orders, because `build_suspension_day` folds a session's rows as they arrive and a
+    partition whose meaning depended on fetch order would be no contract at all.
+    """
+    rows = [
+        SuspensionRecord(ts_code="000040.SZ", trade_date=SESSION, suspend_type="S", timing=timing),
+        SuspensionRecord(ts_code="000040.SZ", trade_date=SESSION, suspend_type="R", timing=None),
+    ]
+
+    day = build_suspension_day(SESSION, [rows[order[0]], rows[order[1]]])
+
+    assert day.state_of("000040.SZ") is state
+    assert day.resumed == ()
+    assert day.timing_of("000040.SZ") == timing
+
+
+def test_an_untimed_and_a_timed_halt_for_one_security_are_still_refused() -> None:
+    """The one multi-row shape with no finer row to prefer, and the census never served it.
+
+    `_reconcile_states` lets `resumed` yield because an `S` row answers a strictly finer
+    question than an `R` does. Two `S` rows, one untimed and one timed, answer the *same*
+    question and disagree -- "the whole session" against "these ten minutes" -- so there is
+    nothing to prefer and it stays a refusal. None of the 73 multi-row pairs of 2015..2026 is
+    this shape.
+    """
+    with pytest.raises(SuspensionError, match="is both halted and interrupted"):
         build_suspension_day(
             SESSION,
             [
@@ -296,7 +341,10 @@ def test_two_disagreeing_states_for_one_security_are_refused() -> None:
                     ts_code="000040.SZ", trade_date=SESSION, suspend_type="S", timing=None
                 ),
                 SuspensionRecord(
-                    ts_code="000040.SZ", trade_date=SESSION, suspend_type="R", timing=None
+                    ts_code="000040.SZ",
+                    trade_date=SESSION,
+                    suspend_type="S",
+                    timing="09:30-09:40",
                 ),
             ],
         )
@@ -715,6 +763,30 @@ def test_the_known_limitations_name_the_measured_boundaries() -> None:
         "silent_truncation_at_a_cap_this_cross_section_is_close_to",
     } <= codes
     assert all(len(entry.detail) > 120 for entry in KNOWN_SUSPENSION_LIMITATIONS)
+
+
+def test_the_r_plus_s_shape_is_disclosed_with_the_census_that_measured_it() -> None:
+    """A reconciliation that is not disclosed is a silent repair.
+
+    `_reconcile_states` decides something the raw rows do not say outright -- that an `S` row
+    beside an `R` is the one to believe -- and it is right on 45 of the 47 pairs `daily` can
+    speak to. The other two are a boundary of what this dataset answers, so they belong in the
+    table beside the seven boundaries that were already there rather than in a commit message.
+    Pinned separately from the subset assertion above so that renaming this entry out of the
+    table fails a test instead of quietly withdrawing the disclosure.
+    """
+    entry = next(
+        item
+        for item in KNOWN_SUSPENSION_LIMITATIONS
+        if item.code == "a_resumption_and_a_halt_can_share_one_session"
+    )
+
+    # The census the reconciliation rests on, and both named misses.
+    assert "334,362" in entry.detail
+    assert "73" in entry.detail
+    assert "45" in entry.detail
+    assert "603003.SH" in entry.detail
+    assert "688766.SH" in entry.detail
 
 
 def test_the_explained_floor_clears_every_year_the_halt_corpus_actually_covers() -> None:

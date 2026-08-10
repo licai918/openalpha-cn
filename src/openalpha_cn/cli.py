@@ -20,16 +20,22 @@ import uvicorn
 from openalpha_cn import __version__
 from openalpha_cn.backtest.replay import ReplayCorpus
 from openalpha_cn.config import ConfigError, load_config, load_dotenv, load_log_level
-from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET
+from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET, AdjustmentError
 from openalpha_cn.domain.daily_prices import (
     DAILY_AVAILABILITY_TIME,
     DAILY_BASIC_DATASET,
     DAILY_DATASET,
     PriceDataError,
 )
+from openalpha_cn.domain.financial_statements import FinancialStatementError
+from openalpha_cn.domain.index_membership import IndexMembershipError
 from openalpha_cn.domain.panel_batch import ColumnarPanelBatch, PanelBatchError
-from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET, SUSPENSION_DATASET
-from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET
+from openalpha_cn.domain.price_limits import (
+    PRICE_LIMIT_DATASET,
+    SUSPENSION_DATASET,
+    SuspensionError,
+)
+from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET, StockUniverseError
 from openalpha_cn.domain.trading_calendar import (
     TRADING_CALENDAR_DATASET,
     TradingCalendar,
@@ -793,16 +799,32 @@ guard that knows what a missing session costs is the one that should say so.
 """
 
 _PANEL_WRITE_REFUSALS: Final[tuple[type[Exception], ...]] = (
-    PanelBatchError,
     PanelStorageError,
-    TradingCalendarError,
+    PanelBatchError,
     PriceDataError,
+    AdjustmentError,
+    SuspensionError,
+    StockUniverseError,
+    IndexMembershipError,
+    FinancialStatementError,
+    TradingCalendarError,
 )
 """The write-time and read-back refusals `panel build` reports rather than crashes on.
 
 Every one of them is a statement about the *data*, so they map to `PanelExit.unhealthy`. None of
 them can carry a credential: the writers never see the token, and the batch's own `source_uri`
 is `tushare://{dataset}/{subject}/{date}`.
+
+**Equal, as a set, to `panel_doctor._LOAD_FAILURES`, and pinned that way by
+`tests/unit/test_cli_panel_rules.py`.** That module already answers the question this one is
+asking -- "which exceptions are facts about stored data rather than defects in the code that
+read it" -- and the two lists were allowed to drift apart. The doctor named all nine; this named
+four, so a `SuspensionError` out of `load_suspensions` in the middle of `panel build --dataset
+price` was classified `PanelExit.internal_error`: exit 5, "a defect in the command, not a
+verdict about the panel", with the exception's own message withheld on the grounds that an
+unanticipated failure might carry a credential. That refusal names one ticker and one session.
+Two modules disagreeing about what counts as a data fact is the drift the equality test exists
+to stop; if a tenth domain error is added, both lists must learn it together.
 """
 
 _NEEDS_STORED_CALENDAR: Final[frozenset[str]] = frozenset(

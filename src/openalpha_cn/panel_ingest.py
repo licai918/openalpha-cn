@@ -379,6 +379,7 @@ from openalpha_cn.domain.price_limits import (
     PRICE_LIMIT_DATASET,
     PRICE_LIMIT_PANEL_COLUMNS,
     SUSPENSION_CORPUS_FIRST_SESSION,
+    SUSPENSION_DATA_COLUMNS,
     SUSPENSION_DATASET,
     SUSPENSION_PANEL_COLUMNS,
     PriceLimit,
@@ -2256,6 +2257,24 @@ def load_daily_valuations(
     return daily_valuations_from_panel_rows(rows)
 
 
+def _refuse_unrebuildable_suspensions(batch: ColumnarPanelBatch) -> None:
+    """Refuse a `suspend_d` batch the reader's own reconstruction would refuse.
+
+    Reads the batch in exactly the shape a stored partition is read in --
+    `SUSPENSION_PANEL_COLUMNS`, subject first -- and hands it to
+    `suspensions_from_panel_rows`. Same function, same order, so "the writer accepted it" and
+    "the reader can return it" stop being two different questions.
+
+    A `no_data` batch has no rows and no columns to project; there is nothing to rebuild and
+    `suspensions_from_panel_rows` of nothing is an empty mapping, so it short-circuits rather
+    than asking `_column_values` for a column a no-data batch is forbidden to carry.
+    """
+    if batch.status != "success":
+        return
+    columns = [_column_values(batch, name) for name in SUSPENSION_DATA_COLUMNS]
+    suspensions_from_panel_rows(zip(batch.subjects, *columns, strict=True))
+
+
 def write_suspensions(
     store: PanelStore,
     batches: Sequence[ColumnarPanelBatch],
@@ -2283,12 +2302,28 @@ def write_suspensions(
     rename corpus for a year legitimately covers different securities on a re-fetch, but a
     security that was halted in 2015 does not stop having been halted, so losing one on a
     rewrite is a partial read rather than news.
+
+    ## The partition is rebuilt into its domain type before it is stored
+
+    `_refuse_unrebuildable_suspensions` runs `suspensions_from_panel_rows` -- the very function
+    `load_suspensions` will run -- over the merged rows and refuses the write if it raises. That
+    is not belt-and-braces over the guards above it. Until `V2-P1-013`'s follow-up this writer
+    merged, checked the year and the subject set, and stored; nothing on the way in ever built
+    a `SuspensionDay`, so a partition whose rows contradict that contract landed on disk, was
+    registered with a row count, and was reported `READY` by `panel doctor` and `CLEARED` by
+    `data-check` -- while every read of it raised. A store that accepts what it cannot return
+    is worse than one that refuses at either end, because the failure then surfaces in whatever
+    reads it next rather than in the command that caused it.
+
+    The cost is one pass over a year of rows, and this is the cheap dataset: 2,293 rows for the
+    2026 year to date against `daily`'s ~1.3 million.
     """
     merged = merge_panel_batches(batches)
     if merged.dataset != SUSPENSION_DATASET:
         raise PanelBatchError(
             f"expected the {SUSPENSION_DATASET!r} dataset, got {merged.dataset!r}"
         )
+    _refuse_unrebuildable_suspensions(merged)
     year = panel_partition_year(merged, date_timezone=date_timezone)
     _refuse_to_drop_stored_subjects(
         store,

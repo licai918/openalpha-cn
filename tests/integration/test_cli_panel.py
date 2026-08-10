@@ -511,6 +511,60 @@ def test_panel_build_refuses_a_price_year_with_no_halts_unless_the_waiver_is_ask
     assert json.loads(waived.stdout)["halts"] == "waived"
 
 
+def test_a_halt_corpus_the_domain_refuses_exits_unhealthy_with_its_message_visible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `SuspensionError` is a verdict about the data, so it must not be `internal_error`.
+
+    Measured on a real build before this was fixed: `panel build --dataset price --year 2026`
+    fetched for 22m46s, hit `SuspensionError` out of `load_suspensions`, and exited **5** --
+
+        `panel build` did not finish: it raised an unhandled SuspensionError. This is a defect
+        in the command, not a verdict about the panel ... The exception's own message is
+        withheld
+
+    -- because `SuspensionError` was not in `cli._PANEL_WRITE_REFUSALS` while
+    `panel_doctor._LOAD_FAILURES` had listed it all along. Three things were wrong at once: the
+    exit code told a scheduled job to file a bug about the command rather than to look at the
+    data; the diagnosis was suppressed on the grounds that an unanticipated failure might carry
+    a credential, when this one carries a ticker and a session; and two modules disagreed about
+    what counts as a data fact. `test_the_write_refusals_and_the_doctors_load_failures_are_one
+    _set` pins the last of those; this pins what the caller sees.
+
+    The transport serves one security an untimed `S` and a timed `S` on the same session --
+    the one multi-row shape `build_suspension_day` still refuses, and the one the live corpus
+    has never served, so no real fetch is being simulated as broken here.
+    """
+
+    class _ContradictoryHalts(ScriptedTushareTransport):
+        def post(self, payload: dict[str, Any]) -> dict[str, Any]:
+            if str(payload["api_name"]) != SUSPENSION_DATASET:
+                return super().post(payload)
+            self.payloads.append(payload)
+            day = _compact(_session_of(payload["params"]))
+            return _response(
+                HALT_FIELDS,
+                [
+                    [HALT_SECURITY, day, "S", None],
+                    [HALT_SECURITY, day, "S", "09:30-09:40"],
+                ],
+            )
+
+    monkeypatch.setenv("TUSHARE_TOKEN", SECRET_TOKEN)
+    monkeypatch.setattr(cli, "_panel_transport", lambda: _ContradictoryHalts())
+    monkeypatch.setattr(cli, "_panel_clock", lambda: BUILD_CLOCK)
+
+    assert build(tmp_path, "trade_cal", "stock_basic").exit_code == PanelExit.ok
+    result = build(tmp_path, "price")
+
+    assert result.exit_code == PanelExit.unhealthy
+    assert result.exit_code != PanelExit.internal_error
+    assert "is both halted and interrupted" in result.output
+    assert HALT_SECURITY in result.output
+    assert "defect in the command" not in result.output
+    assert SECRET_TOKEN not in result.output
+
+
 def test_panel_build_refuses_a_calendar_dependent_target_before_the_calendar_exists(
     tmp_path: Path, scripted_build: ScriptedTushareTransport
 ) -> None:

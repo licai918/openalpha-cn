@@ -47,6 +47,7 @@ from openalpha_cn.domain.panel_batch import PanelBatchError
 from openalpha_cn.domain.price_limits import (
     PRICE_LIMIT_DATASET,
     SUSPENSION_DATASET,
+    SuspensionError,
     TradingState,
     explain_unpriced,
     limit_touch,
@@ -634,6 +635,63 @@ def test_a_halt_rewrite_that_drops_a_security_is_refused(tmp_path: Path) -> None
 
     with pytest.raises(PanelBatchError, match="would drop"):
         write_suspensions(store, narrowed)
+
+
+def test_a_halt_year_the_reader_would_refuse_is_refused_at_write_time(tmp_path: Path) -> None:
+    """The writer and the reader of one dataset must agree about what a valid partition is.
+
+    Before this guard, `write_suspensions` merged, checked the year and the subject set, and
+    stored -- it never built a `SuspensionDay`. So the 2026 rows below landed on disk, were
+    registered with a row count, and were reported `READY` by `panel doctor` and `CLEARED` by
+    `data-check`, while every `load_suspensions` of that partition raised. A store that accepts
+    what it cannot return moves the failure to whatever reads it next.
+
+    The offending pair is verbatim: `suspend_d(start_date=20260101, end_date=20261231)` serves
+    `002731.SZ` an untimed `S` and an `R` on 2026-07-06, and it is a real upstream shape rather
+    than a corrupt fetch -- which is why `build_suspension_day` now reconciles it. The shape
+    that still refuses is the one the corpus has never served: an untimed `S` and a timed `S`
+    for one security on one session, disagreeing about how much of it the security traded.
+    """
+    store = _store(tmp_path)
+    contradiction = [
+        ["002731.SZ", "20240628", None, "S"],
+        ["002731.SZ", "20240628", "09:30-09:40", "S"],
+    ]
+    batches = [_batch(SUSPENSION_DATASET, SUSPEND_FIELDS, contradiction, "20240628")]
+
+    with pytest.raises(SuspensionError, match="is both halted and interrupted"):
+        write_suspensions(store, batches)
+
+    assert store.registered_years(SUSPENSION_DATASET) == ()
+
+
+def test_the_reconciled_shape_is_stored_and_reads_back_as_the_s_rows_state(
+    tmp_path: Path,
+) -> None:
+    """The other half: the `R`-plus-`S` pair the writer used to accept and the reader refused
+    now survives the round trip, and lands on the state its `S` row carries.
+
+    Verbatim from `suspend_d(start_date=20260101, end_date=20261231)`: `002731.SZ` carries
+    `R`/null and `S`/null on 2026-07-06 and has no bar that session; `600421.SH` carries
+    `R`/null and `S`/'9:30-9:40' on 2026-06-01 and does have one. Dated onto this file's own
+    session so the fixture calendar covers it.
+    """
+    store = _store(tmp_path)
+    rows = [
+        ["002731.SZ", "20240628", None, "R"],
+        ["002731.SZ", "20240628", None, "S"],
+        ["600421.SH", "20240628", None, "R"],
+        ["600421.SH", "20240628", "9:30-9:40", "S"],
+    ]
+
+    write_suspensions(store, [_batch(SUSPENSION_DATASET, SUSPEND_FIELDS, rows, "20240628")])
+    days = load_suspensions(store, years=(2024,), as_of=AS_OF, max_staleness=None)
+
+    day = days[JUNE_28]
+    assert day.halted == ("002731.SZ",)
+    assert day.interrupted == ("600421.SH",)
+    assert day.resumed == ()
+    assert day.timing_of("600421.SH") == "9:30-9:40"
 
 
 def test_reading_no_years_of_halts_is_refused_rather_than_answered(tmp_path: Path) -> None:

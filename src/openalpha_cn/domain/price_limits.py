@@ -24,6 +24,17 @@ So the three states are `TradingState.halted` (an untimed `S`: expect **no** bar
 `TradingState.interrupted` (a timed `S`: expect a bar) and `TradingState.resumed` (`R`: expect
 a bar), and only the first is what a cross-section reader means by "suspended".
 
+### A session can carry both an `R` and an `S` for one security, and the `S` decides
+
+The two are not alternatives. An `R` says trading resumed; an `S` on that same session says how
+much of it the security traded, and the second is the finer statement -- so `_reconcile_states`
+prefers it and lets `suspend_timing` choose between `halted` and `interrupted` exactly as it
+does when no `R` stands beside it. A census of every session of 2015..2026 (334,362 rows) finds
+73 `(security, session)` pairs with two rows, **all 73 of them one `R` and one `S`**, and on the
+47 whose security `daily` carries that year the `S` row's timing predicts the bar 45 times. See
+`KNOWN_SUSPENSION_LIMITATIONS`' `a_resumption_and_a_halt_can_share_one_session` for the two
+misses and for why both fall the safe way.
+
 ### The scope of that split, stated rather than implied
 
 "An untimed `S` has no bar" is measured on the eight sessions from **2015-07-08 onward** listed
@@ -452,6 +463,11 @@ class TradingState(Enum):
     `explain_unpriced` and `_refuse_unexplained_thin_sessions` count only `halted`, so an `R`
     with no bar lands in `unexplained` -- an unexplained absence, which is the loud direction --
     instead of quietly excusing one.
+
+    **A security is only `resumed` when the session's rows say nothing more specific.** An `S`
+    row on the same session is the finer statement and wins; see `_reconcile_states`. That is
+    not a loss of information, because `resumed` and `interrupted` agree on the one thing this
+    enum is asked -- the security traded -- and the `S` row additionally carries the window.
     """
 
     def __bool__(self) -> bool:
@@ -483,6 +499,35 @@ KNOWN_SUSPENSION_LIMITATIONS: Final[tuple[SuspensionLimitation, ...]] = (
             "the safe one for a cross section (a name is called halted when it traded, so it "
             "shows up as an unexplained *surplus* rather than a hidden absence) and the wrong "
             "one for a halt census."
+        ),
+    ),
+    SuspensionLimitation(
+        code="a_resumption_and_a_halt_can_share_one_session",
+        detail=(
+            "One security can carry both an R row and an S row on one session, and the shape is "
+            "systematic rather than a fetch accident: every session of 2015..2026 was censused "
+            "in windows narrow enough that no response truncated -- 334,362 rows, 334,289 "
+            "distinct (security, session) pairs -- and 73 of those pairs carry two rows. All 73 "
+            "are exactly one R and one S; none carries three, and no pair anywhere in the census "
+            "carries two S rows. They cluster on resumption days and on the recent years: 1 in "
+            "2015, 1 in 2018, none in 2016/2017/2019/2020, then 11, 13, 13, 8, 9 and 17 in "
+            "2021..2026. build_suspension_day used to refuse this as 'two sources that were "
+            "never reconciled', which the census disproves -- it is one suspend_d request for "
+            "one session. _reconcile_states now prefers the S row and lets its suspend_timing "
+            "decide, which is the ordinary rule rather than a new one, and the bars agree: 26 of "
+            "the 73 are .BJ codes daily carries nowhere in that year (the coverage gap this "
+            "table's stk_limit entry already names, so they say nothing about the state), and on "
+            "the 47 daily does carry, the S row's own timing predicts the bar 45 times. The two "
+            "misses are both in the safe direction and are named: 603003.SH on 2025-06-10 has an "
+            "untimed S and traded, so it is called halted when it was not -- which inflates "
+            "_refuse_unexplained_thin_sessions' explained count by one name and makes labels.py "
+            "refuse a session it could have labelled; and 688766.SH on 2025-11-26 carries the "
+            "zero-width window '09:30-09:30' and did not trade, so it is called interrupted and "
+            "lands in explain_unpriced's unexplained residue, which is the loud direction. That "
+            "second shape is not about R at all -- 688005.SH carries a lone '09:30-09:30' on "
+            "2026-01-16 with no R beside it and no bar -- so a zero-width window is a spelling "
+            "of a whole-day halt that the timed/untimed split reads as intraday, independently "
+            "of this entry."
         ),
     ),
     SuspensionLimitation(
@@ -844,15 +889,59 @@ class LimitTouch:
     one_price_down: bool
 
 
+def _reconcile_states(
+    ts_code: str, day: date, first: TradingState, second: TradingState
+) -> TradingState:
+    """The one state a security held on `day`, given two rows that derive different ones.
+
+    **`resumed` yields to whichever `S` state stands beside it, and that is not a tie-break --
+    it is the ordinary rule applied to the row that answers the question.** A session's `R` row
+    says trading resumed; an `S` row on that same session says how much of it the security
+    traded, which is strictly the finer statement, and `suspend_timing` already decides between
+    `halted` and `interrupted` when no `R` is present. Nothing is discarded that the three
+    states could have carried: `resumed` and `interrupted` both mean "the security traded", so
+    the pair `(R, timed S)` loses no fact by resolving to `interrupted` and gains the window.
+
+    `halted` against `interrupted` is a different shape and stays a refusal. Two `S` rows for
+    one security, one untimed and one timed, disagree about the same question with nothing
+    finer to appeal to -- and the corpus has never served it (see
+    `KNOWN_SUSPENSION_LIMITATIONS`' `a_resumption_and_a_halt_can_share_one_session`, which
+    censuses every multi-row pair of 2015..2026 and finds all 73 of them `R`-plus-`S`).
+
+    Commutative by construction, because `build_suspension_day` folds a session's rows in
+    whatever order they arrive and a state that depended on that order would make a partition's
+    meaning depend on how it was fetched.
+    """
+    if first is second:
+        return first
+    if first is TradingState.resumed:
+        return second
+    if second is TradingState.resumed:
+        return first
+    raise SuspensionError(
+        f"{ts_code} is both {first.name} and {second.name} on {day.isoformat()}; one untimed "
+        "S row says the whole session and a timed one says part of it, and unlike an R beside "
+        "an S there is no finer row to prefer -- the same response carries both and nothing in "
+        "the corpus decides between them"
+    )
+
+
 def build_suspension_day(day: date, records: Iterable[SuspensionRecord]) -> SuspensionDay:
     """Assemble one session's `SuspensionDay` from its rows, in any order.
 
-    Refuses, rather than repairs, five things: a record for another session, an unknown
+    Refuses, rather than repairs, four things: a record for another session, an unknown
     `suspend_type`, a blank `suspend_timing` (which would read as an untimed halt while
-    carrying a column the upstream populated), one security appearing twice in states that
-    disagree, and one security appearing twice with two different halt windows. Byte-identical
-    duplicates collapse, following `build_name_history`: a duplicate carries no fact the
-    original does not, and one live `namechange` pull returned 380 of them.
+    carrying a column the upstream populated), and one security appearing twice with two
+    different halt windows. Byte-identical duplicates collapse, following `build_name_history`:
+    a duplicate carries no fact the original does not, and one live `namechange` pull returned
+    380 of them.
+
+    A fifth shape used to be refused and is now **reconciled**: a security carrying both an `R`
+    row and an `S` row for one session. That refusal named "two sources that were never
+    reconciled", and a census of the live endpoint disproved the attribution -- one
+    `suspend_d` request for one session serves both rows, 73 times over 2015..2026.
+    `_reconcile_states` states the rule and `KNOWN_SUSPENSION_LIMITATIONS`'
+    `a_resumption_and_a_halt_can_share_one_session` carries the measurement.
     """
     _require_plain_date(day, "day")
     states: dict[str, TradingState] = {}
@@ -883,13 +972,9 @@ def build_suspension_day(day: date, records: Iterable[SuspensionRecord]) -> Susp
             )
         state = record.state
         existing = states.get(record.ts_code)
-        if existing is not None and existing is not state:
-            raise SuspensionError(
-                f"{record.ts_code} is both {existing.name} and {state.name} on "
-                f"{day.isoformat()}; a security has one trading state per session, so this is "
-                "two sources that were never reconciled"
-            )
-        states[record.ts_code] = state
+        states[record.ts_code] = (
+            state if existing is None else _reconcile_states(record.ts_code, day, existing, state)
+        )
         if state is TradingState.interrupted and timing is not None:
             recorded = timings.get(record.ts_code)
             if recorded is not None and recorded != timing:

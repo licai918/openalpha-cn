@@ -4,8 +4,8 @@
 
 ## 对账结论
 
-- 功能总数: 125
-- 当前真实完成: 120 (96.0%)
+- 功能总数: 126
+- 当前真实完成: 121 (96.03%)
 - `UNREVIEWED=0`
 - `UNKNOWN=0`
 - `legacy_acceptance_rows=86` (历史散文验收、尚未绑定为可执行 pytest/CI 断言)
@@ -18,7 +18,7 @@
 | `DEFERRED` | 1 |
 | `ENHANCED_REPLACEMENT` | 20 |
 | `EXCLUDED` | 4 |
-| `NATIVE_COMPLETE` | 99 |
+| `NATIVE_COMPLETE` | 100 |
 
 ## 功能明细
 
@@ -149,6 +149,7 @@
 | `OA-PANEL-016` | panel | Data-readiness REST and SDK face with one rendering behind both | `NATIVE_COMPLETE` | `src/openalpha_cn/panel_view.py#panel_store;src/openalpha_cn/panel_view.py#stored_calendar;src/openalpha_cn/panel_view.py#panel_request;src/openalpha_cn/panel_view.py#dataset_readiness;src/openalpha_cn/panel_view.py#readiness_payload;src/openalpha_cn/panel_view.py#health_report_payload;src/openalpha_cn/panel_view.py#clearance_payload;src/openalpha_cn/panel_view.py#PanelRequestError;src/openalpha_cn/panel_view.py#PanelUnreadableError;src/openalpha_cn/api/app.py#PANEL_HTTP_STATUS;src/openalpha_cn/api/app.py#_panel_query;src/openalpha_cn/sdk.py#panel_readiness;src/openalpha_cn/sdk.py#panel_health;src/openalpha_cn/sdk.py#panel_clearance;src/openalpha_cn/panel_view.py#PanelViewError;src/openalpha_cn/api/app.py#_panel_refusal;src/openalpha_cn/cli.py#_panel_request` | `tests/integration/test_panel_interfaces.py;tests/unit/test_panel_view.py;tests/unit/test_panel_ingest_import_isolation.py` | `pytest` | `tests/integration/test_panel_interfaces.py::test_sdk_and_rest_refuse_the_same_request_and_the_refusal_is_not_a_success` |
 | `OA-PANEL-017` | panel | Fail-closed write ordering, both schema stamps gated, and a witness for every dataset | `NATIVE_COMPLETE` | `src/openalpha_cn/panel/store.py#PanelStore;src/openalpha_cn/panel/store.py#_reusable_partition;src/openalpha_cn/panel/store.py#_parquet_row_count;src/openalpha_cn/panel/store.py#_check_batch_schema_version;src/openalpha_cn/panel/store.py#_check_catalog_schema_version;src/openalpha_cn/panel/catalog.py#PANEL_BATCH_SCHEMA_VERSIONS_READABLE;src/openalpha_cn/panel/catalog.py#evaluate_readiness;src/openalpha_cn/providers/tushare.py#TUSHARE_DATASETS` | `tests/integration/panel/test_panel_store_hardening.py;tests/integration/panel/test_panel_catalog.py;tests/unit/panel/test_readiness_rules.py;tests/unit/domain/test_panel_batch.py;tests/contract/providers/test_tushare_trade_cal.py;tests/unit/test_import_layering.py` | `pytest` | `tests/integration/panel/test_panel_store_hardening.py::test_a_failing_catalog_upsert_leaves_the_partition_and_the_verdict_consistent` |
 | `OA-BT-012` | backtest | Strongly typed label contract from prediction day to tradability | `NATIVE_COMPLETE` | `src/openalpha_cn/domain/horizon.py#HORIZON_PATTERN;src/openalpha_cn/domain/horizon.py#HorizonUnit;src/openalpha_cn/domain/horizon.py#ResearchHorizon;src/openalpha_cn/domain/horizon.py#parse_horizon;src/openalpha_cn/domain/labels.py#LabelWindow;src/openalpha_cn/domain/labels.py#WindowReturn;src/openalpha_cn/domain/labels.py#OutcomeLabel;src/openalpha_cn/domain/labels.py#LabelRefusal;src/openalpha_cn/domain/labels.py#LABEL_REFUSAL_CODES;src/openalpha_cn/domain/labels.py#MINIMUM_LABEL_ZONE_OFFSET;src/openalpha_cn/domain/labels.py#HaltCorpus;src/openalpha_cn/domain/labels.py#halt_corpus_for_years;src/openalpha_cn/domain/price_limits.py#halt_spans_the_close;src/openalpha_cn/domain/price_limits.py#CLOSING_CALL_AUCTION_START;src/openalpha_cn/domain/labels.py#KNOWN_LABEL_LIMITATIONS;src/openalpha_cn/domain/labels.py#build_label_window;src/openalpha_cn/domain/labels.py#window_return;src/openalpha_cn/domain/labels.py#label_outcome;src/openalpha_cn/backtest/validation.py#observation_from_label;src/openalpha_cn/domain/signal.py#SignalFrame` | `tests/unit/domain/test_labels.py;tests/unit/domain/test_horizon.py;tests/unit/backtest/test_observation_from_label.py;tests/integration/panel/test_label_contract.py` | `pytest` | `tests/unit/domain/test_labels.py::test_the_label_return_is_right_across_an_ex_rights_day_where_the_naive_path_flips_sign` |
+| `OA-PANEL-018` | panel | Halt reconciliation, write-time rebuildability, and one definition of a data fact | `NATIVE_COMPLETE` | `src/openalpha_cn/domain/price_limits.py#_reconcile_states;src/openalpha_cn/domain/price_limits.py#build_suspension_day;src/openalpha_cn/domain/price_limits.py#KNOWN_SUSPENSION_LIMITATIONS;src/openalpha_cn/panel_ingest.py#_refuse_unrebuildable_suspensions;src/openalpha_cn/panel_ingest.py#write_suspensions;src/openalpha_cn/panel_doctor.py#_rebuild_check;src/openalpha_cn/panel_doctor.py#REBUILDABLE_DATASETS;src/openalpha_cn/panel_gate.py#GATE_CODE_BLOCKS;src/openalpha_cn/cli.py#_PANEL_WRITE_REFUSALS` | `tests/unit/domain/test_price_limits.py;tests/integration/panel/test_suspension_and_limit_ingest.py;tests/integration/panel/test_panel_doctor.py;tests/integration/test_cli_panel.py;tests/unit/test_cli_panel_rules.py;tests/unit/test_panel_doctor_rules.py;tests/unit/test_panel_gate_rules.py` | `pytest` | `tests/integration/panel/test_panel_doctor.py::test_a_partition_every_readiness_dimension_clears_but_the_reader_refuses_is_reported` |
 
 ## 边界
 

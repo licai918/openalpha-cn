@@ -177,15 +177,17 @@ def test_the_gate_s_verdict_on_every_health_code_is_written_out() -> None:
         "subject_missing": True,
         "field_missing": True,
         "stale": True,
-        # Two datasets contradicting each other, and the report saying it could not look.
-        # `return_path_disagreement` is the one thing standing between a caller and Task 29's
-        # -0.530973%, and `check_unavailable` is "I could not look", which must never be read
-        # as "I looked and it was fine".
+        # Two datasets contradicting each other, the report saying it could not look, and one
+        # dataset contradicting itself. `return_path_disagreement` is the one thing standing
+        # between a caller and Task 29's -0.530973%, `check_unavailable` is "I could not look",
+        # which must never be read as "I looked and it was fine", and `domain_rebuild_refused`
+        # is this gate clearing a partition whose own reader raises.
         "subject_set_disagreement": True,
         "close_disagreement": True,
         "return_path_disagreement": True,
         "unexplained_unpriced": True,
         "check_unavailable": True,
+        "domain_rebuild_refused": True,
         # Measured to be ordinary on this corpus, and each already refused where it is
         # decidable: a read of a disagreeing statement field is refused by
         # `financial_ambiguity_report`, not here.
@@ -221,9 +223,10 @@ def test_the_gate_blocks_exactly_what_the_health_report_refuses_to_call_clean() 
 def test_a_warning_blocks_this_gate_and_a_notice_does_not() -> None:
     """The brief's question, answered as three sets rather than as prose.
 
-    All five `warning` codes block. Every one of them is a statement two datasets make that
-    cannot both be true, or the report saying it could not look -- and a gate that let those
-    through would clear precisely the panels Tasks 29 and 30 were about.
+    All six `warning` codes block. Every one of them is a statement two datasets make that
+    cannot both be true, the report saying it could not look, or a partition its own reader
+    refuses -- and a gate that let those through would clear precisely the panels Tasks 29 and
+    30 were about, and the 2026 `suspend_d` partition the P1 acceptance found.
     """
     blocked_by_severity = {
         severity: {
@@ -241,6 +244,7 @@ def test_a_warning_blocks_this_gate_and_a_notice_does_not() -> None:
         "return_path_disagreement",
         "unexplained_unpriced",
         "check_unavailable",
+        "domain_rebuild_refused",
     }
     assert blocked_by_severity["notice"] == set()
 
@@ -299,7 +303,7 @@ def test_every_blocking_code_produces_a_block_and_every_notice_produces_none() -
     assert {block.code for block in blocks} == {
         code for code, blocks_it in GATE_CODE_BLOCKS.items() if blocks_it
     }
-    assert len(blocks) == 17
+    assert len(blocks) == 18
     assert {block.category for block in blocks} == {
         "missing",
         "stale",
