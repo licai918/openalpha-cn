@@ -61,8 +61,11 @@ from openalpha_cn.panel_ingest import (
     write_trading_calendar,
 )
 from openalpha_cn.panel_view import (
+    PanelRequestError,
+    PanelUnreadableError,
     clearance_payload,
     health_report_payload,
+    panel_request,
     panel_store,
 )
 from openalpha_cn.providers.akshare import AKShareProvider
@@ -927,27 +930,32 @@ def _panel_sessions(values: Sequence[str]) -> tuple[date, ...]:
 _CALENDAR_BUILD_REMEDY: Final[str] = (
     "Build it first: `openalpha panel build --dataset trade_cal --year <year>`"
 )
-_CALENDAR_READ_REMEDY: Final[str] = (
-    "Build it first (`openalpha panel build --dataset trade_cal --year <year>`), or state on "
-    "the record that this run has no calendar with --no-calendar"
-)
+"""`panel build`'s own way out of a missing calendar, which is only one way.
+
+Deliberately not `panel_view.NO_CALENDAR_REMEDY`: that one offers "state on the record that
+this run has no calendar", and `panel build` has no `--no-calendar` -- the writers it drives
+take a `TradingCalendar` and refuse without one -- so offering it here would name an option
+this command does not have. The read side has both ways out and uses the shared text.
+"""
 
 
 def _stored_calendar(
-    store: PanelStore, *, exchange: str, years: Sequence[int], as_of: datetime, remedy: str
+    store: PanelStore, *, exchange: str, years: Sequence[int], as_of: datetime
 ) -> TradingCalendar:
-    """The stored exchange calendar, or an exit that says which of the two commands to run.
+    """The stored exchange calendar for a *build*, or an exit naming the command to run first.
 
-    `remedy` differs by caller and is not decoration: `panel build` has no `--no-calendar` --
-    the writers it drives take a `TradingCalendar` and refuse without one -- so offering that
-    flag there would name an option the command does not have.
+    `panel build`'s own, and the read side's is `panel_view.stored_calendar`. The two differ in
+    the one thing that is not shareable -- which remedies exist on this channel -- and in
+    nothing else, which is why this one is a build-time helper rather than a second general
+    loader: `_panel_request` below goes through the shared resolver.
     """
     try:
         return load_trading_calendar(store, exchange=exchange, years=years, as_of=as_of)
     except (TradingCalendarError, PanelStorageError) as error:
         raise _panel_fail(
             PanelExit.unhealthy,
-            f"the {exchange} calendar could not be read out of {store.root}: {error}. {remedy}",
+            f"the {exchange} calendar could not be read out of {store.root}: {error}. "
+            f"{_CALENDAR_BUILD_REMEDY}",
         ) from error
 
 
@@ -969,29 +977,41 @@ def _panel_request(
     `sessions=()` and `calendar=None` are legitimate answers and are recorded here as answers
     rather than arriving as defaults nobody chose -- which is why `--no-calendar` exists at all
     instead of the calendar being loaded opportunistically and silently skipped when absent.
+
+    What is left here is exactly the part that is this channel's: parsing option *strings* into
+    the values a request is made of, and turning the shared resolver's two faults into exit
+    codes. The resolution itself -- the de-duplication, the calendar load, the refusals for a
+    naive `as_of`, an empty dataset list and a malformed exchange -- is
+    `panel_view.panel_request`, the same call `GET /api/v1/panel/*` and `OpenAlphaSDK` make.
+    A near-copy of it here was the drift `panel_view.py` exists to prevent, on the request side
+    instead of the rendering side: three faces that render one report identically but resolve
+    the request three ways still answer three different questions.
+
+    The two faults map onto the rows `PanelExit` already has for them, by the names
+    `panel_view.py` gives them. `PanelRequestError` is `bad_request` -- no re-fetch fixes a
+    naive `as_of`. `PanelUnreadableError` is `unhealthy`, which is the code the hand-written
+    loader this replaced already used, and right for `panel doctor`'s reason: the request was
+    well formed and the panel could not answer it.
     """
     instant = _panel_as_of(as_of)
-    years = tuple(dict.fromkeys(year))
+    sessions = _panel_sessions(session or ())
     store = _panel_store(runtime_dir)
-    calendar = (
-        _stored_calendar(
+    try:
+        request = panel_request(
             store,
-            exchange=exchange,
-            years=years,
+            datasets=dataset,
+            years=year,
+            sessions=sessions,
+            index_codes=index_code or (),
             as_of=instant,
-            remedy=_CALENDAR_READ_REMEDY,
+            exchange=exchange,
+            with_calendar=with_calendar,
         )
-        if with_calendar
-        else None
-    )
-    return store, DependencyRequest(
-        datasets=tuple(dict.fromkeys(dataset)),
-        as_of=instant,
-        years=years,
-        sessions=_panel_sessions(session or ()),
-        calendar=calendar,
-        index_codes=tuple(dict.fromkeys(index_code or ())),
-    )
+    except PanelRequestError as error:
+        raise _panel_fail(PanelExit.bad_request, str(error)) from error
+    except PanelUnreadableError as error:
+        raise _panel_fail(PanelExit.unhealthy, str(error)) from error
+    return store, request
 
 
 # --- human-readable output --------------------------------------------------------------
@@ -1270,13 +1290,7 @@ def _build_panel(
             write_stock_universe(store, _fetch_panel(provider, STOCK_BASIC_DATASET, as_of=now))
         )
     if targets & _NEEDS_STORED_CALENDAR:
-        calendar = _stored_calendar(
-            store,
-            exchange=exchange,
-            years=(year,),
-            as_of=now,
-            remedy=_CALENDAR_BUILD_REMEDY,
-        )
+        calendar = _stored_calendar(store, exchange=exchange, years=(year,), as_of=now)
         sessions = _build_sessions(calendar, year, now)
     if ADJ_FACTOR_DATASET in targets:
         assert calendar is not None  # guaranteed by `_NEEDS_STORED_CALENDAR` above

@@ -31,7 +31,11 @@ from openalpha_cn.panel_gate import (
     GateBlock,
 )
 from openalpha_cn.panel_view import (
+    PANEL_STORE_PLACEHOLDER,
     PanelRequestError,
+    PanelUnreadableError,
+    PanelViewError,
+    _without_store_path,
     clearance_payload,
     health_report_payload,
     panel_request,
@@ -238,15 +242,132 @@ def test_the_http_status_table_keeps_a_refusal_out_of_the_success_class() -> Non
     """The table, entry by entry. `blocked` must not be 2xx -- an endpoint that ran the gate,
     was refused and still answered `200` would be no gate at all -- and it must not be the same
     code as `bad_request`, because "the panel is not in a state you may read" and "your request
-    cannot be put at all" have different remedies."""
+    cannot be put at all" have different remedies.
+
+    `internal_error` is the row this issue's review found missing: the table called itself
+    "each situation, as one table" while `cli.PanelExit` had `internal_error` and argued
+    specifically for why it must exist, so a reader of this table concluded that every non-2xx
+    a panel endpoint can produce says something about the panel or the request. It does not --
+    `500` says the endpoint broke -- and the row is asserted live in
+    `tests/integration/test_panel_interfaces.py::
+    test_a_catalog_that_is_not_a_database_is_the_endpoint_breaking_and_not_a_verdict`.
+    """
     assert PANEL_HTTP_STATUS == {
         "answered": 200,
         "blocked": 409,
         "panel_unreadable": 409,
         "bad_request": 422,
+        "internal_error": 500,
     }
     assert not 200 <= PANEL_HTTP_STATUS["blocked"] < 300
     assert PANEL_HTTP_STATUS["blocked"] != PANEL_HTTP_STATUS["bad_request"]
+    assert PANEL_HTTP_STATUS["internal_error"] not in {
+        code for name, code in PANEL_HTTP_STATUS.items() if name != "internal_error"
+    }
+
+
+def _view_error_subclasses() -> list[type[PanelViewError]]:
+    """Every `PanelViewError` there is, discovered from the live class tree."""
+    found: list[type[PanelViewError]] = []
+    pending = [PanelViewError]
+    while pending:
+        current = pending.pop()
+        found.append(current)
+        pending.extend(current.__subclasses__())
+    return sorted(found, key=lambda error: error.__name__)
+
+
+def test_every_fault_the_shared_face_can_raise_has_a_row_in_the_status_table() -> None:
+    """`api/app.py` envelopes a `PanelViewError` by looking `error.reason` up in
+    `PANEL_HTTP_STATUS`, which is what keeps the two `409` bodies discriminable by that same
+    name. A fault added to `panel_view.py` without a row would be a `KeyError` inside the
+    exception handler -- a `500` for what is really a `422`.
+
+    Discovered from `__subclasses__()` rather than from a list written here, for the reason
+    `test_import_layering.py` gives for discovering sibling subpackages from the directory
+    tree: a hand-maintained enumeration is exactly what a later addition does not update.
+    """
+    subclasses = _view_error_subclasses()
+
+    assert {error.__name__ for error in subclasses} >= {
+        "PanelViewError",
+        "PanelRequestError",
+        "PanelUnreadableError",
+    }
+    unmapped = sorted(
+        error.__name__
+        for error in subclasses
+        if error is not PanelViewError and error.reason not in PANEL_HTTP_STATUS
+    )
+    assert not unmapped, f"no PANEL_HTTP_STATUS row for {unmapped}"
+    assert PanelRequestError.reason == "bad_request"
+    assert PanelUnreadableError.reason == "panel_unreadable"
+    # And the two are distinct, so the discriminator actually discriminates.
+    assert PanelRequestError.reason != PanelUnreadableError.reason
+
+
+def test_a_refusal_states_the_store_to_its_own_process_and_not_to_a_caller() -> None:
+    """The two messages a `PanelViewError` carries and why they differ. `str(error)` is for the
+    process that owns the store -- the CLI prints it, the SDK raises it in-process -- and names
+    the store; `disclosable` crosses a network and does not.
+
+    Asserted on a hand-built error rather than only end to end, because the property is a rule
+    about the class: an error constructed with no `disclosable` must fall back to its own
+    message rather than to an empty string, or a refusal added later arrives over HTTP with no
+    reason on it at all.
+    """
+    both = PanelUnreadableError("names /tmp/somewhere", disclosable="names nothing")
+    one = PanelRequestError("as_of must be a timezone-aware datetime")
+
+    assert str(both) == "names /tmp/somewhere"
+    assert both.disclosable == "names nothing"
+    assert str(one) == one.disclosable == "as_of must be a timezone-aware datetime"
+
+
+def test_the_store_location_is_taken_back_out_of_a_cause_that_interpolated_it(
+    tmp_path: Path,
+) -> None:
+    """`_without_store_path` has to remove *both* spellings of the store's location, and the
+    resolved one first. On macOS every `/var/folders/...` temporary directory resolves to
+    `/private/var/folders/...`; a cause raised inside `panel/store.py` can carry either, and
+    removing the shorter first would leave `/private` behind in front of the placeholder.
+    """
+    root = panel_store(tmp_path).root
+    resolved = root.resolve()
+
+    cleaned = _without_store_path(
+        f"registered but missing: {resolved}/daily/2026/data.parquet and {root}/catalog.duckdb",
+        root,
+    )
+
+    assert str(root) not in cleaned
+    assert str(resolved) not in cleaned
+    assert cleaned == (
+        f"registered but missing: {PANEL_STORE_PLACEHOLDER}/daily/2026/data.parquet "
+        f"and {PANEL_STORE_PLACEHOLDER}/catalog.duckdb"
+    )
+
+
+@pytest.mark.parametrize("exchange", ["", " ", "SZSE ", " SZSE"])
+def test_an_exchange_name_no_store_could_hold_is_refused_whatever_the_calendar_flag(
+    tmp_path: Path, exchange: str
+) -> None:
+    """`build_trading_calendar` refuses an empty or whitespace-padded exchange, so a request
+    naming one can never be satisfied by any store. Refused here on both settings of
+    `with_calendar`, because with the calendar switched off nothing downstream reads `exchange`
+    at all and the name would otherwise be accepted without ever being looked at."""
+    for with_calendar in (True, False):
+        with pytest.raises(PanelRequestError, match="exchange must be a non-empty name"):
+            panel_request(
+                panel_store(tmp_path),
+                datasets=("daily",),
+                years=(2026,),
+                sessions=(),
+                index_codes=(),
+                as_of=AS_OF,
+                exchange=exchange,
+                with_calendar=with_calendar,
+            )
 
 
 def test_building_the_app_does_not_create_a_panel_directory(tmp_path: Path) -> None:

@@ -25,6 +25,12 @@ HTTP status codes and exit codes. `cli.py` owns `PanelExit` and `api/app.py` own
 channel: a CI job has an exit code and three remedies, an HTTP client has a status class and a
 body. What is shared is the *answer*; what is not is the envelope.
 
+`PanelViewError.reason` is not an exception to that. It is the fault's *name*, not its
+envelope -- both channels already had a row named `bad_request`, and naming the fault the same
+thing is what lets each of them look its own envelope up rather than re-deriving the taxonomy
+from `isinstance` checks that drift. A channel with no row for a name gets a `KeyError` at its
+own boundary, which is the failure mode worth having.
+
 ## Reading a clearance without consuming it
 
 `clearance_payload` reads `cleared_or_none` and never `cleared`, `bool(...)`, `len(...)` or
@@ -38,12 +44,17 @@ raises on a blocked clearance -- the one shape a refusal payload is always built
 ## Two errors, because a refusal and a malformed question are not the same fact
 
 `PanelRequestError` is "this question cannot be put at all": a naive `as_of`, a request naming
-no dataset. `PanelUnreadableError` is "the panel cannot answer it as asked": the exchange
-calendar this request wants to be judged against is not in the store. The CLI already
-separates these (`bad_request` versus `unhealthy`) and the reason is that no amount of
-re-fetching fixes the first. Neither is raised for a *sick* panel -- that is a report with
-findings on it, or a clearance with blocks on it, because a caller has to be able to read the
-reasons rather than a traceback.
+no dataset, an exchange name no store could hold. `PanelUnreadableError` is "the panel cannot
+answer it as asked": the exchange calendar this request wants to be judged against is not in
+the store. The CLI already separates these (`bad_request` versus `unhealthy`) and the reason
+is that no amount of re-fetching fixes the first. Neither is raised for a *sick* panel -- that
+is a report with findings on it, or a clearance with blocks on it, because a caller has to be
+able to read the reasons rather than a traceback.
+
+Each carries a `disclosable` message beside `str(error)`, because one of the three faces is a
+network boundary and the other two are not: the CLI and the SDK are inside the process that
+owns the store, so a message naming it tells them nothing they did not configure, while a
+response body hands that path to whoever could reach the port.
 
 ## Why this is a top-level module
 
@@ -62,7 +73,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Final
+from typing import ClassVar, Final
 
 from openalpha_cn.domain.trading_calendar import TradingCalendar, TradingCalendarError
 from openalpha_cn.panel.catalog import (
@@ -84,15 +95,41 @@ from openalpha_cn.panel_ingest import load_trading_calendar
 
 
 class PanelViewError(RuntimeError):
-    """Base for the two faults a panel face can report before any verdict exists."""
+    """Base for the two faults a panel face can report before any verdict exists.
+
+    Carries two things every channel needs and neither can derive from the exception type
+    without restating this module's taxonomy:
+
+    - **`reason`** -- the fault's own name, in the vocabulary both channels are already keyed
+      on (`cli.PanelExit.bad_request`, `api.app.PANEL_HTTP_STATUS["bad_request"]`). A channel
+      looks the envelope up by this name instead of re-classifying by `isinstance`, so a fault
+      added here without a row in a channel's table is a `KeyError` at that channel's boundary
+      rather than a silently mis-enveloped refusal.
+    - **`disclosable`** -- the message that may cross a process boundary. It differs from
+      `str(error)` for one reason: an in-process caller (the SDK, the CLI) is already inside
+      the process that owns the store, so naming the store's location tells it nothing it did
+      not supply, while an HTTP response body hands that location to whoever asked. Nothing
+      built here puts a filesystem path in `disclosable` -- `_without_store_path` takes the
+      store's own location back out of a cause that interpolated it -- and
+      `tests/integration/test_panel_interfaces.py` drives the shapes that could.
+    """
+
+    reason: ClassVar[str] = "panel_view_error"
+
+    def __init__(self, message: str, *, disclosable: str | None = None) -> None:
+        super().__init__(message)
+        self.disclosable: str = message if disclosable is None else disclosable
 
 
 class PanelRequestError(PanelViewError):
     """The question cannot be put at all, whatever is in the store.
 
-    A naive `as_of`, or a request naming no dataset. Distinct from `PanelUnreadableError`
-    because the remedy is to edit the request, not to fetch anything.
+    A naive `as_of`, a request naming no dataset, an exchange name the store could never hold.
+    Distinct from `PanelUnreadableError` because the remedy is to edit the request, not to
+    fetch anything.
     """
+
+    reason: ClassVar[str] = "bad_request"
 
 
 class PanelUnreadableError(PanelViewError):
@@ -101,6 +138,8 @@ class PanelUnreadableError(PanelViewError):
     Not a finding, because there is no report to put one on -- the calendar is what the report
     would have been derived against.
     """
+
+    reason: ClassVar[str] = "panel_unreadable"
 
 
 PANEL_SUBDIRECTORY: Final[str] = "panel"
@@ -123,9 +162,31 @@ refusal has to act on, and the flag is spelled differently on each of the three 
 """
 
 
+PANEL_STORE_PLACEHOLDER: Final[str] = "this service's panel store"
+"""What `disclosable` says where a local message says the store's absolute path.
+
+The store's location is configuration of the process that holds it, not an answer about the
+panel, and the two callers that can read the local message (`cli.py`, the SDK) are inside that
+process already.
+"""
+
+
 def panel_store(runtime_dir: Path) -> PanelStore:
     """The panel plane inside `runtime_dir`."""
     return PanelStore(runtime_dir / PANEL_SUBDIRECTORY)
+
+
+def _without_store_path(message: str, root: Path) -> str:
+    """`message` with the store's own location replaced by a name for it.
+
+    Both spellings, longest first: `Path.resolve()` differs from the configured path wherever
+    a component is a symlink (every macOS `/var/...` temporary directory, for one), and a cause
+    raised from inside `panel/store.py` can carry either. Replacing the shorter first would
+    leave the longer one's prefix behind.
+    """
+    for path in sorted({str(root), str(root.resolve())}, key=len, reverse=True):
+        message = message.replace(path, PANEL_STORE_PLACEHOLDER)
+    return message
 
 
 def stored_calendar(
@@ -137,13 +198,23 @@ def stored_calendar(
     is blocked by `read_if_ready`, and a non-contiguous set of years is refused afterwards --
     so neither failure can hand back a calendar that reads the missing stretch as a holiday.
     Both arrive here as a refusal rather than as a report about a panel nobody could read.
+
+    The local message names the store; `disclosable` does not. The cause is carried into both,
+    because "which of `partition_missing` / `subject_missing` / `field_missing` stood in the
+    way" is the actionable half of this refusal -- but it is run through
+    `_without_store_path` first, since a `PanelStorageError` about a registered partition whose
+    Parquet file is gone interpolates that file's path into its own detail.
     """
     try:
         return load_trading_calendar(store, exchange=exchange, years=years, as_of=as_of)
     except (TradingCalendarError, PanelStorageError) as error:
         raise PanelUnreadableError(
             f"the {exchange} calendar could not be read out of {store.root}: {error}. "
-            f"{NO_CALENDAR_REMEDY}"
+            f"{NO_CALENDAR_REMEDY}",
+            disclosable=(
+                f"the {exchange} calendar could not be read out of {PANEL_STORE_PLACEHOLDER}: "
+                f"{_without_store_path(str(error), store.root)}. {NO_CALENDAR_REMEDY}"
+            ),
         ) from error
 
 
@@ -174,7 +245,30 @@ def panel_request(
     Refuses a naive `as_of` by name. `PanelStore` enforces awareness too, but from inside a
     rule table whose job is to name a malformed *partition*; a caller who sent a bare
     `2026-01-17T04:00:00` should be told about that field.
+
+    ## `exchange` when `with_calendar` is false
+
+    `exchange` is mandatory on every face, and when `with_calendar=False` it reaches nothing:
+    no calendar is loaded, so no verdict below can differ by it. Two well-formed but different
+    exchange names then produce byte-identical answers, which is pinned rather than left to be
+    discovered (`tests/integration/test_panel_interfaces.py::
+    test_the_exchange_is_inert_when_the_caller_states_this_run_has_no_calendar`).
+
+    That is a fact about `calendar=false`, not a licence to accept anything: the *well-formed*
+    rule is applied here unconditionally, and it is `build_trading_calendar`'s own -- a
+    non-empty name with no surrounding whitespace, because that is the only name the store can
+    ever hold. What this cannot do is tell a typo apart from a real exchange the store has
+    never held, because with the calendar switched off there is nothing to compare against; a
+    caller who wants a misspelling caught has asked for `calendar=true`, and gets
+    `PanelUnreadableError` naming the exchange.
     """
+    if type(exchange) is not str or not exchange or exchange != exchange.strip():
+        raise PanelRequestError(
+            f"exchange must be a non-empty name with no surrounding whitespace; got "
+            f"{exchange!r}. This is `domain.trading_calendar.build_trading_calendar`'s own "
+            "rule on the name it stores, applied whatever `with_calendar` says, so a name no "
+            "store could hold is refused rather than silently reaching nothing"
+        )
     if as_of.tzinfo is None or as_of.utcoffset() is None:
         raise PanelRequestError(
             f"as_of must be a timezone-aware datetime; got {as_of.isoformat()!r}. A naive "

@@ -37,33 +37,97 @@ pinning here is the other one: `panel_view` must not reach `storage`, `runtime`,
 `api` or `product`. A rendering that could see a composition root or a credential would make
 the answer depend on how the process was wired, and would put a provider token one exception
 message away from a response body.
+
+## Four hand-named modules is where an enumeration stops being safe
+
+Each of the four tests above names one module, which was fine for one and is not fine for
+four: `panel_*` is now an established pattern, `pyproject.toml`'s four `lint-imports`
+contracts do not mention `panel*` at all, and the architecture baseline covers `storage`,
+`providers` and `models` -- so a *fifth* one could import `storage` or `providers` and nothing
+in this repository would go red. `V2-P1-016`'s review found that gap. The last two tests in
+this file close it the way `test_import_layering.py` closed the same gap for `domain`'s
+sibling packages: discover the modules from the real directory structure, require each to
+have a row in `PANEL_MODULE_DEPENDENCIES`, and check the live graph rather than a list
+somebody has to remember to update.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import grimp
+
+ROOT = Path(__file__).resolve().parents[2]
 
 _ALLOWED_INTERNAL_DEPENDENCIES = {"openalpha_cn.domain", "openalpha_cn.panel"}
 _ALLOWED_DOCTOR_DEPENDENCIES = _ALLOWED_INTERNAL_DEPENDENCIES | {"openalpha_cn.panel_ingest"}
 _ALLOWED_GATE_DEPENDENCIES = _ALLOWED_INTERNAL_DEPENDENCIES | {"openalpha_cn.panel_doctor"}
-_ALLOWED_VIEW_DEPENDENCIES = _ALLOWED_DOCTOR_DEPENDENCIES | {
+_ALLOWED_VIEW_DEPENDENCIES = _ALLOWED_INTERNAL_DEPENDENCIES | {
+    "openalpha_cn.panel_ingest",
     "openalpha_cn.panel_doctor",
     "openalpha_cn.panel_gate",
 }
+"""Stated in full rather than derived from `_ALLOWED_DOCTOR_DEPENDENCIES`.
+
+The two sets share three entries today and that is a coincidence of the current design, not a
+relationship: `panel_doctor` may reach `panel_ingest` because it reuses its requirement
+builders, and `panel_view` may because it loads a calendar. Deriving one from the other means
+a later issue that widened the doctor's allowlist would widen this module's too, silently and
+without anyone having argued for it -- and this is the module that must reach the *fewest*
+things it does not render, since it is the one the HTTP app imports.
+"""
+
+PANEL_MODULE_DEPENDENCIES: dict[str, set[str]] = {
+    "openalpha_cn.panel_ingest": _ALLOWED_INTERNAL_DEPENDENCIES,
+    "openalpha_cn.panel_doctor": _ALLOWED_DOCTOR_DEPENDENCIES,
+    "openalpha_cn.panel_gate": _ALLOWED_GATE_DEPENDENCIES,
+    "openalpha_cn.panel_view": _ALLOWED_VIEW_DEPENDENCIES,
+}
+"""Every top-level `panel_*` module and the sibling packages it may join.
+
+The four of them are 6,000-odd lines that sit *outside* `openalpha_cn/panel/` precisely so the
+package can keep its zero-sibling-edge guarantee, which makes "which packages may this one
+join" the whole justification for each of them being top-level at all. None of
+`pyproject.toml`'s four `lint-imports` contracts mentions `panel*`, so this table and the tests
+below are the only thing standing there.
+
+`test_every_top_level_panel_module_is_in_this_table_and_stays_inside_its_row` keeps it from
+being the hand-maintained enumeration it looks like: the modules are discovered from the
+directory, so a fifth one arrives red rather than unguarded.
+"""
 
 
-def _direct_internal_dependencies(module: str) -> set[str]:
-    graph = grimp.build_graph("openalpha_cn")
+def _build_graph() -> grimp.ImportGraph:
+    return grimp.build_graph("openalpha_cn")
+
+
+def _direct_internal_dependencies(module: str, graph: grimp.ImportGraph | None = None) -> set[str]:
+    built = _build_graph() if graph is None else graph
     siblings = {
         name
-        for name in graph.modules
+        for name in built.modules
         if name.count(".") == 1 and name.startswith("openalpha_cn.") and name != module
     }
     return {
         sibling
         for sibling in siblings
-        if graph.direct_import_exists(importer=module, imported=sibling, as_packages=True)
+        if built.direct_import_exists(importer=module, imported=sibling, as_packages=True)
     }
+
+
+def _top_level_panel_modules() -> list[str]:
+    """`src/openalpha_cn/panel_*.py`, discovered from the real directory structure.
+
+    `test_import_layering.py`'s `_sibling_subpackages_of_domain()` for modules instead of
+    packages, and for its reason: an enumeration written by hand is exactly the thing a later
+    addition does not update, and the guarantee these modules carry is one every one of them
+    has to carry individually.
+    """
+    return sorted(
+        f"openalpha_cn.{path.stem}"
+        for path in (ROOT / "src" / "openalpha_cn").glob("panel_*.py")
+        if not path.stem.startswith("__")
+    )
 
 
 def test_panel_ingest_depends_only_on_domain_and_panel() -> None:
@@ -189,6 +253,77 @@ def test_the_shared_face_adds_no_edge_into_anything_it_renders() -> None:
         assert graph.direct_import_exists(
             importer=face, imported="openalpha_cn.panel_view", as_packages=True
         ), f"sanity check: {face} is supposed to render through the shared face"
+
+
+def test_every_top_level_panel_module_is_in_this_table_and_stays_inside_its_row() -> None:
+    """The gap this issue's review found: the four `panel_*` modules' layering is guarded
+    entirely by the four tests above, each of which names one module by hand. A **fifth**
+    top-level `panel_*.py` -- the obvious next step, since this is now an established pattern
+    with four instances -- could import `storage`, `runtime`, `providers` or `api` and no gate
+    in this repository would go red. `pyproject.toml`'s four `lint-imports` contracts do not
+    mention `panel*` at all, and the architecture baseline is about `storage`/`providers`/
+    `models`.
+
+    So the modules are discovered from the directory and each is required to have a row here,
+    which is `test_import_layering.py`'s own approach ("check the live graph, not a
+    hand-maintained list") applied to the thing that grew four instances since that file was
+    written. The row is then asserted as an equality, not a subset: a module that stops
+    importing one of the packages it exists to join has lost its reason to be top-level, which
+    is the argument `test_panel_ingest_depends_only_on_domain_and_panel` already makes for the
+    first of them.
+
+    One graph, built once and shared: `grimp.build_graph` walks the whole package, and this
+    test asks four questions of it.
+    """
+    discovered = _top_level_panel_modules()
+
+    assert len(discovered) >= 4, f"expected the four known panel_* modules, found {discovered}"
+    undeclared = sorted(set(discovered) - set(PANEL_MODULE_DEPENDENCIES))
+    assert not undeclared, (
+        f"{undeclared} is a top-level panel module with no row in "
+        "PANEL_MODULE_DEPENDENCIES. Every one of these sits outside openalpha_cn/panel/ so "
+        "that package can keep its zero-sibling-edge guarantee, which makes the set of "
+        "packages it may join its entire justification for existing -- add the row, and "
+        "argue for it in the module's own docstring"
+    )
+    vanished = sorted(set(PANEL_MODULE_DEPENDENCIES) - set(discovered))
+    assert not vanished, f"PANEL_MODULE_DEPENDENCIES names {vanished}, which no longer exists"
+
+    graph = _build_graph()
+    observed = {module: _direct_internal_dependencies(module, graph) for module in discovered}
+
+    assert observed == {module: PANEL_MODULE_DEPENDENCIES[module] for module in discovered}
+
+
+def test_no_top_level_panel_module_reaches_a_composition_root_or_a_credential() -> None:
+    """The other half, stated once for all of them rather than four times.
+
+    Whatever a `panel_*` module joins below, none of them may reach `providers` (a credential
+    inside the module that builds response bodies), `storage`/`runtime` (a verdict that
+    depended on how the process was wired rather than on what is in the store), or `api`/
+    `product`/`agents`/`backtest` (an inversion of the direction the whole plane runs in).
+    Discovered the same way, so the fifth module is covered by this too.
+    """
+    forbidden = {
+        "openalpha_cn.providers",
+        "openalpha_cn.storage",
+        "openalpha_cn.runtime",
+        "openalpha_cn.api",
+        "openalpha_cn.product",
+        "openalpha_cn.agents",
+        "openalpha_cn.backtest",
+        "openalpha_cn.decisions",
+        "openalpha_cn.evidence",
+        "openalpha_cn.models",
+    }
+    graph = _build_graph()
+
+    leaked = {
+        module: sorted(_direct_internal_dependencies(module, graph) & forbidden)
+        for module in _top_level_panel_modules()
+    }
+
+    assert leaked == {module: [] for module in leaked}
 
 
 def test_the_columnar_contract_reaches_no_infrastructure_library() -> None:

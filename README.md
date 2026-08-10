@@ -437,7 +437,16 @@ Bull/Bear 与三视角风险委员会，把完整研究结果送入筛选或不�
 | A 股组合账本 | `POST /api/v1/portfolio/execute` |
 | 多日组合 / 事件研究 | `POST /api/v1/backtests/portfolio` / `POST /api/v1/backtests/event-study` |
 | 结果与归因 | `POST /api/v1/backtests/validate` |
+| 已落库的验证结果 | `GET /api/v1/backtests/validations/by-decision/{decision_id}` / `by-signal/{signal_id}` |
+| 面板就绪 / 体检 / 依赖门 | `GET /api/v1/panel/readiness` / `GET /api/v1/panel/health` / `GET /api/v1/panel/gate` |
 | OpenAPI | `GET /docs` / `GET /openapi.json` |
+
+面板三个端点与 `OpenAlphaSDK.panel_readiness` / `panel_health` / `panel_clearance`
+一一对应且被断言等价。只有 `/panel/gate` 的 `200` 是一种许可，被门拒绝时返回 `409`；
+`/panel/readiness` 与 `/panel/health` 是报告，面板有病也返回 `200`，结论在响应体的
+`all_ready` / `is_clean` / `counts_by_severity` 里——**`panel doctor` 的退出码 1 在
+HTTP 上没有对应的状态码**。`409` 有两种互不兼容的响应体，用 `detail.reason` 区分。
+细节见 [`docs/api/http.md`](docs/api/http.md)。
 
 默认只绑定 `127.0.0.1`。如果要跨机器开放，必须在前置网关配置 HTTPS、认证、访问控制和限流。
 

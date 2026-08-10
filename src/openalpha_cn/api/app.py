@@ -46,8 +46,7 @@ from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_doctor import PanelDoctorError, panel_health_report
 from openalpha_cn.panel_gate import DependencyRequest, PanelGateError, require_datasets
 from openalpha_cn.panel_view import (
-    PanelRequestError,
-    PanelUnreadableError,
+    PanelViewError,
     clearance_payload,
     dataset_readiness,
     health_report_payload,
@@ -310,6 +309,7 @@ PANEL_HTTP_STATUS: Final[Mapping[str, int]] = MappingProxyType(
         "blocked": 409,
         "panel_unreadable": 409,
         "bad_request": 422,
+        "internal_error": 500,
     }
 )
 """What the three `GET /api/v1/panel/*` endpoints do about each situation, as one table.
@@ -317,6 +317,18 @@ PANEL_HTTP_STATUS: Final[Mapping[str, int]] = MappingProxyType(
 `cli.py`'s `PanelExit` is the sibling of this and the reasoning is shared: a caller has
 different remedies available and only the envelope to pick between them, so collapsing them
 into "2xx and non-2xx" makes a refused read indistinguishable from a mistyped request.
+
+**The two tables are siblings, not twins, and exactly one row does not correspond.** `panel
+doctor` exits `PanelExit.unhealthy` (1) when the report is not `is_clean`; `GET
+/api/v1/panel/health` answers `200` for that same panel, and so does `/panel/readiness` for a
+blocked dataset. There is no HTTP status code anywhere in this table that means what `panel
+doctor`'s exit 1 means. A monitor built by reading a status code alone will therefore never
+fire on a sick panel -- and the endpoint being called `/panel/health` in an app that also
+serves `GET /health`, a real liveness probe, makes that the easy mistake to make rather than
+an exotic one. The HTTP equivalents of `panel doctor`'s exit 1 are, in the body,
+`is_clean == false` / `all_ready == false` / a non-zero `counts_by_severity`, or, as a status
+code, `409` from `/api/v1/panel/gate` -- which is a *different question* (see the
+`answered`/`blocked` rows below) and will also refuse some healthy panels.
 
 - **`answered` (200)** -- this endpoint answered. For `/panel/health` and `/panel/readiness`
   that is *all* it says: those two are reports, and a report that found a `blocking` finding
@@ -336,10 +348,38 @@ into "2xx and non-2xx" makes a refused read indistinguishable from a mistyped re
   to report. `409` rather than `404`, because nothing about the *endpoint* is missing.
 - **`bad_request` (422)** -- the request cannot be put at all: a dataset with no declared
   publication cadence (`PanelDoctorError`), a request naming no dataset (`PanelGateError`,
-  `PanelRequestError`), a naive `as_of`. Distinct from `409` for `PanelExit`'s reason -- no
-  amount of re-fetching fixes it -- and `422` because that is already this app's code for a
-  well-formed request it cannot accept (`POST /api/v1/screen`, `/reports`, `/backtests/
-  validate`).
+  `PanelRequestError`), a naive `as_of`, an exchange name no store could hold. Distinct from
+  `409` for `PanelExit`'s reason -- no amount of re-fetching fixes it -- and `422` because
+  that is already this app's code for a well-formed request it cannot accept (`POST
+  /api/v1/screen`, `/reports`, `/backtests/validate`).
+- **`internal_error` (500)** -- **the endpoint itself broke.** Nothing was judged: a fault no
+  branch here anticipated, such as a catalog file that is not a DuckDB database at all.
+  Written down for the reason `PanelExit.internal_error` is: without it a reader of this table
+  would conclude that every non-2xx a panel endpoint can produce means something about the
+  panel or about the request, and treat a `500` as one of the two. It is not raised anywhere
+  in this module -- Starlette's own handler produces it -- so the row records a code that is
+  already spoken for, exactly as `cli.CLICK_USAGE_EXIT_CODE` does one channel over.
+
+## `409` carries two body schemas, and they are told apart by one key
+
+`blocked` and `panel_unreadable` share a status code deliberately (both are "the panel's state
+stands in the way") but **not** a body, and a client that switched on the code alone and read
+`json()["blocks"]` would work on the first and raise `KeyError` on the second:
+
+- a **verdict** body is the flat `panel_view.clearance_payload` -- `is_blocked`, `blocks`,
+  `cleared`, `report`, ... -- and never has a `detail` key;
+- a **refusal** body is `{"detail": {"reason": ..., "message": ...}}`, where `reason` is the
+  row of this table it was enveloped by (`panel_unreadable`, `bad_request`). The two bodies
+  share no key at all, and `detail.reason` is the discriminator to switch on.
+
+A third shape exists and is not this module's: FastAPI's own parameter validation answers
+`422` with `detail` as a *list* of error objects, for a missing `dataset` or an unparseable
+`year`. `isinstance(body["detail"], dict)` separates that from a panel refusal.
+`docs/api/http.md` states all three.
+
+`message` is the fault's `disclosable` text and not `str(error)`: the store's filesystem
+location is configuration of this process, and a refusal that echoed it would answer a
+question about the deployment to anyone who could reach the port.
 
 **A `notice` never reaches the non-2xx half, and the argument is measurement.** `V2-P1-011`
 drove a real 53-security corpus end to end: `ambiguous_filing` fires on 8.15% of `income`'s
@@ -350,9 +390,42 @@ a cleared caller still sees them.
 """
 
 
+def _panel_detail(reason: str, message: str) -> dict[str, str]:
+    """The body every panel refusal carries, whatever its status code.
+
+    An object rather than a bare string, because `409` carries two incompatible schemas and
+    `reason` is what tells them apart -- see `PANEL_HTTP_STATUS`. A verdict body never has a
+    `detail` key, so the presence of this object *is* "no verdict was reached".
+    """
+    return {"reason": reason, "message": message}
+
+
 def _panel_bad_request(error: Exception) -> HTTPException:
-    """A request the panel plane cannot put, as this app's own code for that."""
-    return HTTPException(status_code=PANEL_HTTP_STATUS["bad_request"], detail=str(error))
+    """A request the panel plane cannot put, as this app's own code for that.
+
+    For the two the panel plane raises without a `reason` of their own -- `PanelDoctorError`
+    and `PanelGateError`, which predate this face and are not `PanelViewError`s. Their
+    messages name a dataset or an override, never a path.
+    """
+    return HTTPException(
+        status_code=PANEL_HTTP_STATUS["bad_request"],
+        detail=_panel_detail("bad_request", str(error)),
+    )
+
+
+def _panel_refusal(error: PanelViewError) -> HTTPException:
+    """One `PanelViewError`, enveloped by the row of `PANEL_HTTP_STATUS` it names.
+
+    Looked up by `error.reason` rather than switched on by exception type: a fault added to
+    `panel_view.py` with no row here raises `KeyError` at this boundary -- a `500` that says
+    the table is incomplete -- instead of being quietly enveloped as whichever branch an
+    `isinstance` chain happened to end on. `tests/unit/test_panel_view.py` asserts every
+    subclass's `reason` is a key of the table, so that `KeyError` is unreachable in practice.
+    """
+    return HTTPException(
+        status_code=PANEL_HTTP_STATUS[error.reason],
+        detail=_panel_detail(error.reason, error.disclosable),
+    )
 
 
 def _panel_query(
@@ -385,12 +458,8 @@ def _panel_query(
             exchange=exchange,
             with_calendar=calendar,
         )
-    except PanelRequestError as error:
-        raise _panel_bad_request(error) from error
-    except PanelUnreadableError as error:
-        raise HTTPException(
-            status_code=PANEL_HTTP_STATUS["panel_unreadable"], detail=str(error)
-        ) from error
+    except PanelViewError as error:
+        raise _panel_refusal(error) from error
     return store, request
 
 
@@ -803,6 +872,17 @@ def create_app(
         why this endpoint takes no `session`. `state` is `ready` or `blocked` per dataset and
         `all_ready` is the whole-request answer; `checks_waived` says which questions were never
         put, because an empty `issues` list means nothing without it.
+
+        **A `session` sent here is discarded, not honoured and not refused.** It is not a
+        declared parameter of this endpoint, and an undeclared query parameter is dropped by
+        FastAPI before this function runs; there is nothing here that could see it in order to
+        object. So a caller who copies a `/panel/health` query onto this path gets an answer to
+        a narrower question than the one they typed, with nothing in the response saying so.
+        `tests/integration/test_panel_interfaces.py::
+        test_a_session_sent_to_the_readiness_endpoint_is_dropped_rather_than_honoured` pins
+        that the answer is byte-identical with and without it, so the drop is a stated property
+        of this face rather than a discovery. A caller who needs the session-scoped verdict is
+        asking `/panel/health`'s question and should send it there.
 
         Always `200` when the request could be put at all: this is a report, and a report that
         found a blocked dataset has succeeded. Permission to read is `/api/v1/panel/gate`'s
