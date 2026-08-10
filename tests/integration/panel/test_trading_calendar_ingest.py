@@ -124,7 +124,15 @@ class _ScriptedTransport:
         return {
             "code": 0,
             "msg": None,
-            "data": {"fields": list(_FIELDS), "items": self.years.get(year, [])},
+            # `has_more` is part of the shape, not decoration: every live `trade_cal` response
+            # carries it (measured 2026-08-10), and since the P1 stage review the descriptor
+            # demands it -- `trade_cal` had been the one dataset in the table with no
+            # truncation witness at all. `False` is what a complete response says.
+            "data": {
+                "fields": list(_FIELDS),
+                "items": self.years.get(year, []),
+                "has_more": False,
+            },
         }
 
 

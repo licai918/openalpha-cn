@@ -73,13 +73,24 @@ but "can this be used". Four properties are load-bearing for the issues that dep
   declared-but-empty tuple blocks with `empty_requirement`. This closes the shape where a
   default-constructed requirement reported `ready` for a year holding one trading day,
   because an empty set difference is empty and an absent staleness bound cannot be exceeded.
-- **A coverage record must still describe what is on disk.** `record_coverage` binds a record
-  to a partition at write time; `write_partition` is overwrite-per-partition, so any later
-  backfill or correction unbinds it again. `PartitionCoverage.partition_content_hash` carries
-  the partition hash the record was written against, and a partition whose current hash
-  differs -- or is unknown -- blocks with `coverage_stale`. Row counts alone cannot see this:
-  a correction that changes values without changing how many rows there are moves the hash
-  and leaves the count identical.
+- **A coverage record must still describe the write the catalog says is there.**
+  `record_coverage` binds a record to a partition at write time; `write_partition` is
+  overwrite-per-partition, so any later backfill or correction unbinds it again.
+  `PartitionCoverage.partition_content_hash` carries the `panel_partitions.content_hash` the
+  record was written against, and a partition whose *catalog* hash now differs -- or is
+  unknown -- blocks with `coverage_stale`. Row counts alone cannot see this: a correction that
+  changes values without changing how many rows there are moves the hash and leaves the count
+  identical.
+
+  Both sides of that comparison are catalog rows, and this bullet used to say "what is on
+  disk", which is a stronger claim than the check makes. `PartitionState.content_hash` is read
+  from `panel_partitions`, never recomputed from the Parquet file -- recomputing it would mean
+  re-serialising every row of the partition on every gate check. So the rule detects a
+  partition re-written *through the store*; it does not detect a file changed behind the
+  store's back, which is `partition_file_unreadable`'s (structural, eight-byte) job and, for a
+  swap to a different-but-valid Parquet file, `V2-P1-012`'s. Keeping those two catalog rows in
+  agreement with the file is the write path's responsibility, and `panel/store.py`'s "The
+  catalog upsert commits before the rename" is how it discharges it.
 - **It is relative to `as_of`, never to the wall clock.** Staleness is
   `as_of - last_event_time`, and a partition whose newest `available_time` post-dates `as_of`
   is refused outright (`not_yet_knowable`) rather than leaking hindsight into a point-in-time
@@ -98,6 +109,37 @@ Issues are reported as structured codes from the closed `READINESS_ISSUE_CODES` 
 prose, because `V2-P1-012`'s report groups by them and `V2-P1-013`'s gate branches on them.
 Every issue found is reported, not just the first: a doctor run that surfaced one fault per
 invocation would be a game of whack-a-mole.
+
+### Disclosure: `not_yet_knowable` is judged per *partition*, and a partition is a year
+
+The point-in-time check compares one number per partition -- `max_available_time`, the newest
+instant at which any row in it became knowable -- against `as_of`, and blocks the whole
+partition if that number is later. It does not filter rows. The consequence, which is a real
+constraint on everything built above this plane and is written here because nothing else in
+the tree said it:
+
+**A partition is unreadable at every `as_of` earlier than its own newest availability
+instant, and for a full year of data that instant is in December.** A complete 2015 partition
+is therefore `blocked` for every `as_of` in 2015 and readable only from 2016-01-01 onward. The
+bound is `max_available_time`, not the calendar year as such -- a partition holding only
+January is readable from February -- but `panel_ingest`'s session census refuses a partition
+missing any session the calendar reports open, so the partitions this plane actually produces
+are whole years and the practical rule is the one stated. That is not a data problem -- the
+same partition is `ready` one instant later -- it is the granularity of the judgement.
+
+For the phases that consume this: **P3**'s factor computation cannot evaluate a factor at a
+mid-year `as_of` through `read_if_ready`, and **P4**'s walk-forward cannot step an `as_of`
+through a year while reading that year's partition, because every step inside the year is
+`blocked`.
+
+The design is deliberate and fail-closed: `evaluate_readiness` is pure over catalog metadata
+and has no access to rows, so a row-level answer would mean promising something about rows it
+never filtered. Splitting this into a partition-level gate plus a row-level `available_time`
+filter is the obvious alternative, it changes what `read_if_ready` *promises* rather than only
+what it refuses, and it is explicitly left to P2 rather than smuggled in here.
+`tests/unit/panel/test_readiness_rules.py::
+test_not_yet_knowable_is_partition_level_so_an_as_of_inside_a_year_reads_nothing` pins the
+behaviour and carries the same disclosure next to the assertions.
 
 ## What is deliberately not here
 
@@ -160,6 +202,38 @@ A `v1` catalog is readable because this build knows precisely what it lacks: the
 `record_coverage()` call, which also migrates the catalog forward and re-stamps it `v2`. A
 stamp outside this set was written by a build that knows something this one does not, and is
 refused rather than guessed at.
+"""
+
+PANEL_BATCH_SCHEMA_VERSIONS_READABLE: Final[frozenset[str]] = frozenset({"panel-batch/v1"})
+"""Every `PartitionCoverage.schema_version` stamp this build knows how to interpret.
+
+The *second* stamp in this system, and until the P1 review it was the one with no door.
+`PANEL_CATALOG_SCHEMA_VERSION` above describes this module's own DuckDB tables;
+`PartitionCoverage.schema_version` describes the **provider batch contract** that produced the
+record -- `domain/panel_batch.py`'s `PANEL_BATCH_SCHEMA_VERSION`. Those version independently:
+a build that changes only the batch contract leaves the catalog schema at `panel-catalog/v2`,
+so `_check_catalog_schema_version` waves the file through and every coverage row inside it is
+read as if it were v1.
+
+`domain/panel_batch.py` claimed this was already handled -- "the `schema_version` field is
+still carried and hashed, so a future `panel-batch/v2` is detectable rather than silently
+compatible" -- and it was not. Carrying a value is not checking it:
+`PanelStore._validated_coverage` only required non-empty text, so a coverage row written with
+`schema_version="panel-batch/v99"` produced `assess_readiness` -> `ready`, `issues == []`,
+measured against `676cba3`. A stamp with a gate and a stamp without one are not the same
+mechanism, and two docstrings claimed both had one.
+
+The gate is a refusal (`PanelStorageError`) rather than a readiness issue code, for the reason
+`_check_catalog_schema_version` is: an unknown stamp means this build cannot say what the
+record's fields *mean*, and a verdict computed from fields whose meaning is unknown is worse
+than no verdict. It is enforced on both sides in `panel/store.py` -- `_validated_coverage`
+refuses to write one, `_read_coverage` refuses to interpret one another build wrote.
+
+Duplicated here rather than imported, because `openalpha_cn.panel` imports no sibling
+subpackage (see `panel/store.py::_utc_now` for the same tradeoff, and
+`tests/unit/domain/test_panel_batch.py::
+test_the_batch_contract_and_the_panel_catalog_agree_on_the_readable_batch_stamps` for the
+drift pin that keeps the two copies honest).
 """
 
 DEFAULT_DATE_TIMEZONE: Final[str] = "Asia/Shanghai"

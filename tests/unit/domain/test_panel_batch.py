@@ -347,6 +347,36 @@ def test_the_contract_and_the_store_agree_that_a_padded_dataset_is_rejected() ->
             panel_batch_module.validate_panel_dataset(dataset)
 
 
+def test_the_batch_contract_and_the_panel_catalog_agree_on_the_readable_batch_stamps() -> None:
+    """The third copy across this seam, and the one that only started existing when the stamp
+    got a gate.
+
+    `PANEL_BATCH_SCHEMA_VERSION` is what this contract *writes*;
+    `panel/catalog.py::PANEL_BATCH_SCHEMA_VERSIONS_READABLE` is what `PanelStore` will accept
+    into (and out of) a coverage record. `panel/` imports no sibling subpackage, so the second
+    cannot import the first and the two are duplicated -- with the standing hazard that a
+    `panel-batch/v2` bump here would make every fresh coverage record unreadable by the store
+    that just wrote it. This test is what turns that into a failing test rather than a
+    production refusal.
+
+    The store must know the version this contract emits, and must know nothing this contract
+    cannot emit -- a stamp in the readable set that no build ever writes is an unclosed door,
+    which is the exact shape of the hole the P1 review found (`panel-batch/v99` accepted, and
+    `assess_readiness` reporting `ready` with `issues == []`).
+    """
+    from openalpha_cn.panel.catalog import PANEL_BATCH_SCHEMA_VERSIONS_READABLE
+
+    assert panel_batch_module.PANEL_BATCH_SCHEMA_VERSION in PANEL_BATCH_SCHEMA_VERSIONS_READABLE
+    # Every readable stamp is one some build of this contract could have written, i.e. one
+    # this contract's own `schema_version` field would accept.
+    written = ColumnarPanelBatch.__dataclass_fields__["schema_version"].type
+    for stamp in PANEL_BATCH_SCHEMA_VERSIONS_READABLE:
+        assert stamp in str(written), (
+            f"{stamp!r} is readable by the panel catalog but no ColumnarPanelBatch can carry "
+            "it; the readable set must not be wider than the contract"
+        )
+
+
 # --- per-column typing and clock normalisation -------------------------------------------
 
 

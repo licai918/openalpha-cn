@@ -61,6 +61,7 @@ enumeration that a new sibling does not automatically join.
 
 from __future__ import annotations
 
+import logging
 import re
 import tomllib
 from pathlib import Path
@@ -70,6 +71,7 @@ from importlinter import api as importlinter_api
 from importlinter.cli import lint_imports
 
 ROOT = Path(__file__).resolve().parents[2]
+THIS_FILE = Path(__file__)
 BASELINE_PATH = ROOT / "docs" / "architecture" / "import-layering-baseline.toml"
 PINNED_BASELINE_COUNT = 0
 ISSUE_PATTERN = re.compile(r"^V2-P0B-\d{3}$")
@@ -86,6 +88,55 @@ FORMER_BASELINE_EDGES = (
     ("openalpha_cn.storage.recovery", "openalpha_cn.agents.base"),
     ("openalpha_cn.storage.product", "openalpha_cn.product.research"),
 )
+
+
+def _lint_imports(**kwargs: object) -> int:
+    """`importlinter.cli.lint_imports`, with the logging state it silently wrecks put back.
+
+    `lint_imports` calls `importlinter.cli._configure_logging`, which calls
+    `logging.config.dictConfig` with a config naming only `importlinter`, `grimp` and
+    `_rustgrimp`. `dictConfig` defaults to `disable_existing_loggers=True`, and that default
+    sets `.disabled = True` on **every** logger that already exists and is not named in (or a
+    child of) the config -- including `openalpha_cn.storage.migrations`, which
+    `tests/integration/storage/test_migrations.py` imports at collection time, long before any
+    test in this module runs.
+
+    A disabled logger emits nothing, so `caplog` captures nothing, so
+    `test_run_migrations_logs_the_backup_path_and_each_applied_migration` and
+    `test_run_migrations_logs_failure_without_leaking_the_underlying_exception_message` --
+    V2-P0B-007's "the structured log is greppable" acceptance -- both failed on
+    `assert 0 == 1`, deterministically, in 0.9 seconds:
+
+        pytest tests/unit/test_import_layering.py tests/integration/storage/test_migrations.py
+        -> 2 failed, 33 passed
+        pytest tests/integration/storage/test_migrations.py tests/unit/test_import_layering.py
+        -> 35 passed
+
+    CI was green only because pytest's default collection order happens to put
+    `tests/integration` before `tests/unit`; pytest-randomly, xdist, a directory rename or
+    simply naming the two paths explicitly would have flipped it. Neither the root logger nor
+    any parent's level, propagate flag or handler list changes -- which is why the first probe
+    for this missed it -- and `logging.disable` is untouched too. The mutated state is the
+    per-logger `disabled` attribute, and nothing in `logging` restores it.
+
+    Every call in this module goes through here, and
+    `test_no_test_in_this_module_calls_lint_imports_without_restoring_logging` keeps it that
+    way; `test_running_the_import_linter_leaves_an_existing_logger_enabled` proves the restore
+    is real rather than a comment.
+    """
+    manager = logging.Logger.manager
+    before = {
+        name: existing.disabled
+        for name, existing in manager.loggerDict.items()
+        if isinstance(existing, logging.Logger)
+    }
+    try:
+        return lint_imports(**kwargs)  # type: ignore[arg-type]
+    finally:
+        for name, disabled in before.items():
+            restored = manager.loggerDict.get(name)
+            if isinstance(restored, logging.Logger):
+                restored.disabled = disabled
 
 
 def _load_baseline() -> list[dict[str, str]]:
@@ -110,7 +161,7 @@ def test_current_source_tree_satisfies_storage_providers_and_models_contracts_vi
     None
 ):
     """The real repository, with the baseline's 5 exemptions applied, is fully compliant."""
-    exit_code = lint_imports(
+    exit_code = _lint_imports(
         config_filename=str(ROOT / "pyproject.toml"),
         no_cache=True,
     )
@@ -246,7 +297,7 @@ def test_storage_no_upward_deps_contract_rejects_indirect_leak_via_neutral_modul
         '__all__ = ["ResearchScreener"]\n'
     )
     try:
-        exit_code = lint_imports(
+        exit_code = _lint_imports(
             config_filename=str(ROOT / "pyproject.toml"),
             no_cache=True,
             limit_to_contracts=("storage-no-upward-deps",),
@@ -262,7 +313,7 @@ def test_storage_no_upward_deps_contract_rejects_indirect_leak_via_neutral_modul
         _LEAKY_HELPER_PATH.unlink()
 
     # Confirm the gate is green again once both probe files are removed.
-    exit_code = lint_imports(
+    exit_code = _lint_imports(
         config_filename=str(ROOT / "pyproject.toml"),
         no_cache=True,
         limit_to_contracts=("storage-no-upward-deps",),
@@ -285,7 +336,7 @@ def test_domain_layer_gate_rejects_a_newly_introduced_forbidden_stdlib_import() 
     assert not probe_path.exists(), "probe file must not already exist in the real source tree"
     probe_path.write_text('"""Temporary probe module for a layering test."""\n\nimport sqlite3\n')
     try:
-        exit_code = lint_imports(
+        exit_code = _lint_imports(
             config_filename=str(ROOT / "pyproject.toml"),
             no_cache=True,
             limit_to_contracts=("domain-purity",),
@@ -295,7 +346,7 @@ def test_domain_layer_gate_rejects_a_newly_introduced_forbidden_stdlib_import() 
         probe_path.unlink()
 
     # Confirm the gate is green again once the probe is removed.
-    exit_code = lint_imports(
+    exit_code = _lint_imports(
         config_filename=str(ROOT / "pyproject.toml"),
         no_cache=True,
         limit_to_contracts=("domain-purity",),
@@ -313,7 +364,7 @@ def test_domain_layer_gate_rejects_a_newly_introduced_cross_subpackage_import() 
         '__all__ = ["ProviderMetadata"]\n'
     )
     try:
-        exit_code = lint_imports(
+        exit_code = _lint_imports(
             config_filename=str(ROOT / "pyproject.toml"),
             no_cache=True,
             limit_to_contracts=("domain-purity",),
@@ -322,7 +373,7 @@ def test_domain_layer_gate_rejects_a_newly_introduced_cross_subpackage_import() 
     finally:
         probe_path.unlink()
 
-    exit_code = lint_imports(
+    exit_code = _lint_imports(
         config_filename=str(ROOT / "pyproject.toml"),
         no_cache=True,
         limit_to_contracts=("domain-purity",),
@@ -414,7 +465,7 @@ def test_legal_downward_imports_from_runtime_and_backtest_into_storage_are_not_f
         importer="openalpha_cn.backtest.replay", imported="openalpha_cn.storage.recovery"
     )
 
-    exit_code = lint_imports(
+    exit_code = _lint_imports(
         config_filename=str(ROOT / "pyproject.toml"),
         no_cache=True,
         limit_to_contracts=("storage-no-upward-deps",),
@@ -551,3 +602,67 @@ def test_storage_and_domain_have_zero_direct_edges_into_the_new_panel_package() 
         assert not graph.direct_import_exists(
             importer=importer, imported="openalpha_cn.panel", as_packages=True
         ), f"{importer} must not import openalpha_cn.panel"
+
+
+# --- the logging state `lint_imports` wrecks, and the guard that puts it back (P1 review) ---
+#
+# `importlinter.cli.lint_imports` reconfigures logging as a side effect, and its
+# `dictConfig` call disables every pre-existing logger in the process. That made this
+# module's tests silently break `tests/integration/storage/test_migrations.py`'s two
+# `caplog` acceptances whenever pytest ran this file first. `_lint_imports` above is the
+# containment; the two tests below are what keeps the containment honest.
+
+
+def test_running_the_import_linter_leaves_an_existing_logger_enabled() -> None:
+    """The pollution itself, reproduced and then shown closed.
+
+    `openalpha_cn.storage.migrations` is the logger that actually got disabled -- it exists
+    by the time this runs because pytest imports every test module during collection, and
+    `tests/integration/storage/test_migrations.py` creates it at import time. Asserted here
+    against a bare `lint_imports` first, so this test fails if `dictConfig`'s
+    `disable_existing_loggers` default ever stops being the cause, and then against
+    `_lint_imports`, which is the fix.
+    """
+    logger = logging.getLogger("openalpha_cn.storage.migrations")
+    assert not logger.disabled, "precondition: the logger under test starts enabled"
+
+    try:
+        lint_imports(
+            config_filename=str(ROOT / "pyproject.toml"),
+            no_cache=True,
+            limit_to_contracts=("domain-purity",),
+        )
+        assert logger.disabled, (
+            "the raw importlinter CLI is expected to disable existing loggers via "
+            "dictConfig(disable_existing_loggers=True); if it no longer does, _lint_imports "
+            "can be simplified -- but check the new mechanism before deleting it"
+        )
+    finally:
+        logger.disabled = False
+
+    exit_code = _lint_imports(
+        config_filename=str(ROOT / "pyproject.toml"),
+        no_cache=True,
+        limit_to_contracts=("domain-purity",),
+    )
+
+    assert exit_code == 0
+    assert not logger.disabled
+
+
+def test_no_test_in_this_module_calls_lint_imports_without_restoring_logging() -> None:
+    """One bare `lint_imports(` added later would reintroduce the order dependence for the
+    whole suite, and it would show up as two unrelated tests failing in another directory --
+    the least findable failure shape there is. So the rule is checked on this file's own
+    source: the only call to the raw CLI is the one inside `_lint_imports`, plus the single
+    deliberate one in the test above that proves the pollution is still real.
+    """
+    source = THIS_FILE.read_text(encoding="utf-8")
+    # A backtick before the name means this file is *talking about* the call, not making it.
+    bare_calls = re.findall(r"(?<![_`])lint_imports\(", source)
+
+    assert len(bare_calls) == 2, (
+        f"expected exactly 2 bare `lint_imports(` calls (one inside _lint_imports, one in "
+        f"test_running_the_import_linter_leaves_an_existing_logger_enabled); found "
+        f"{len(bare_calls)}. Every other call site must go through `_lint_imports`"
+    )

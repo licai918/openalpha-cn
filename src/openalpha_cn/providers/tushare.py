@@ -99,13 +99,20 @@ rather than one:
 not.
 
 `requires_truncation_flag` turns an *absent* `has_more` into a failure rather than a skipped
-check. Two descriptors set it, for two different reasons. `adj_factor` has a measured cap and
-demands the flag *as well*, because a factor series missing its first decade is silently wrong
-rather than short. `stock_basic` sets it because the flag is its **only** witness: its cap is
-not merely unmeasured but unmeasurable from outside (see that descriptor's comment), so
-without this it had *neither* guard -- a `stock_basic` response omitting `has_more` was
-accepted at 300 rows with nothing consulted at all. Stating it per descriptor is what forces
-`V2-P1-007`/`008` to decide it rather than inherit it.
+check. It began with two descriptors set for two different reasons, and every issue since has
+had to decide it rather than inherit it -- the running tally lives in
+`tests/contract/providers/test_tushare_adj_factor.py::
+test_the_flag_is_demanded_exactly_where_it_is_the_only_witness_or_the_stakes_are_highest`,
+which asserts the demanding set by equality so a new descriptor cannot join or skip it
+silently. The two original reasons are still the only two there are. `adj_factor` has a
+measured cap and demands the flag *as well*, because a factor series missing its first decade
+is silently wrong rather than short. `stock_basic` sets it because the flag is its **only**
+witness: its cap is not merely unmeasured but unmeasurable from outside (see that descriptor's
+comment), so without this it had *neither* guard -- a `stock_basic` response omitting
+`has_more` was accepted at 300 rows with nothing consulted at all. `trade_cal` was the last
+descriptor to join, on `stock_basic`'s reason, and it is the one this paragraph was quietly
+wrong about for longest: it declared no cap and no flag on a compensating argument that
+measurement disproved (see its own comment in the table).
 
 **Where this misses.** The guard judges one response in isolation, so the residue is a server
 that truncates while reporting `has_more=False` at a row count under the declared cap. It is
@@ -1705,9 +1712,29 @@ TUSHARE_DATASETS: tuple[TushareDatasetDescriptor, ...] = (
         params_builder=_trade_cal_params,
         source_uri_template="tushare://{dataset}/{subject}/{date}",
         # No measured cap, and 6,000 would be actively wrong here: the whole published SSE
-        # calendar -- 13,162 rows -- comes back in one response with `has_more=False`. This
-        # is the descriptor that proves the cap has to be per endpoint.
+        # calendar -- 13,162 rows on 2026-08-08, 13,527 on 2026-08-10 -- comes back in one
+        # response with `has_more=False`. This is the descriptor that proves the cap has to be
+        # per endpoint, and its cap is not merely unmeasured but unmeasurable from outside:
+        # the exchange cannot publish more sessions than it has days.
         max_rows_per_response=None,
+        # Which leaves the flag as this dataset's *only* witness -- `stock_basic`'s and
+        # `index_classify`'s situation exactly. It was `False` until the P1 review, on a
+        # compensating argument that measurement disproved on both of its clauses: the
+        # argument said `trade_cal`'s request is whole-period so a truncated calendar would
+        # be caught by `build_trading_calendar`'s gap rule, and `_trade_cal_params` builds a
+        # *single-year* window (`start_date=Y0101 / end_date=Y1231`) while Tushare's cap drops
+        # the *oldest* rows, so a truncated response is a contiguous suffix and a gap rule
+        # sees nothing (dropping 2024-01..03 leaves `build_trading_calendar` accepting 197
+        # sessions in place of 262). Unreachable today -- a single year is at most 366 rows --
+        # but that made `trade_cal` the one dataset in this table with neither witness *and*
+        # no compensating control, guarding the single source of truth every date-completeness
+        # check on the panel plane (`required_dates`, `_session_census`, `date_gap`) is
+        # measured against. The flag costs nothing: probed live on 2026-08-10, the one-year
+        # request returned 366 rows with `has_more=False`, the whole-calendar request 13,527
+        # rows with `has_more=False`, and the same request under `limit=200` returned 200 rows
+        # with `has_more=True` -- so the flag is present on every response and does flip when
+        # this endpoint truncates.
+        requires_truncation_flag=True,
         # `name` is the panel column, `source_field` is Tushare's response column. They
         # coincide today and are still written out separately: renaming one must not silently
         # rename the other.

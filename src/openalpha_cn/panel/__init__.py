@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from openalpha_cn.panel.catalog import (
     DEFAULT_DATE_TIMEZONE,
+    PANEL_BATCH_SCHEMA_VERSIONS_READABLE,
     PANEL_CATALOG_SCHEMA_VERSION,
     PANEL_CATALOG_SCHEMA_VERSIONS_READABLE,
     READINESS_ISSUE_CODES,
@@ -40,6 +41,7 @@ from openalpha_cn.panel.store import ColumnSpec, PanelStorageError, PanelStore, 
 
 __all__ = [
     "DEFAULT_DATE_TIMEZONE",
+    "PANEL_BATCH_SCHEMA_VERSIONS_READABLE",
     "PANEL_CATALOG_SCHEMA_VERSION",
     "PANEL_CATALOG_SCHEMA_VERSIONS_READABLE",
     "READINESS_ISSUE_CODES",

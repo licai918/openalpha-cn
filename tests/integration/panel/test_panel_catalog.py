@@ -449,20 +449,43 @@ def test_a_catalog_stamped_by_a_newer_version_of_this_code_is_refused(tmp_path: 
 def test_the_stamp_guards_every_method_that_opens_the_catalog_not_only_half_of_them(
     tmp_path: Path,
 ) -> None:
-    """The stamp's own error says "refusing to touch it", unconditionally. Three of the six
-    public methods used to touch it anyway. `query()` is the pointed case: it is the *only*
-    method that reads `panel_partitions.relative_path` and opens the file that column names,
-    so an unknown schema -- the one situation where that column might mean something else --
-    is exactly when it must not be trusted. It returned `[('000001.SZ', 10.0)]` from a v99
-    catalog without a word.
+    """The stamp's own error says "refusing to touch it". Three of the seven public entry
+    points used to touch it anyway; the P1 review found a fourth. `query()` is the pointed
+    read case: it is the *only* method that reads `panel_partitions.relative_path` and opens
+    the file that column names, so an unknown schema -- the one situation where that column
+    might mean something else -- is exactly when it must not be trusted. It returned
+    `[('000001.SZ', 10.0)]` from a v99 catalog without a word.
+
+    The fourth was `write_partition()`, and it is the reason the word "unconditionally" is no
+    longer in this docstring: the claim was not true when it was written. `write_partition()`
+    probes the catalog for idempotency through `_lookup`, which opened it `read_only=True` and
+    asked no version question, so against `676cba3` a v99 catalog produced
+
+        write_partition (idempotent)     : SILENTLY SUCCEEDED -> 2 rows
+        write_partition (non-idempotent) : raised PanelStorageError
+        parquet on disk: before=[('A', 1.0), ('B', 2.0)] after=[('A', 99.0), ('B', 98.0), ...]
+
+    -- the idempotent branch reporting success against a catalog it must not read, and the
+    non-idempotent branch *replacing the partition file* before the refusal fired from
+    `_ensure_catalog_schema`, several steps too late. `_lookup` checks the stamp now, which
+    puts the refusal ahead of the Parquet `COPY`, so both branches refuse and nothing on disk
+    moves. The two `write_partition` entries below are both of those branches, and the
+    before/after byte comparison is what proves the second one.
     """
     store = _written_store(tmp_path / "panel")
     store.record_coverage(_coverage())
+    target = store.root / DATASET / "2024" / "data.parquet"
+    before = target.read_bytes()
     with duckdb.connect(str(store.catalog_path)) as connection:
         connection.execute(
             "UPDATE panel_catalog_meta SET value = 'panel-catalog/v99' WHERE key = 'schema_version'"
         )
 
+    other_rows: tuple[tuple[object, ...], ...] = (
+        ("000001.SZ", "2024-01-02", 99.5),
+        ("000002.SZ", "2024-01-02", 88.5),
+        ("000003.SZ", "2024-01-02", 77.5),
+    )
     refusals = (
         lambda: store.read_coverage(DATASET, 2024),
         lambda: store.registered_years(DATASET),
@@ -470,10 +493,18 @@ def test_the_stamp_guards_every_method_that_opens_the_catalog_not_only_half_of_t
         lambda: store.profile_query(DATASET, year=2024, columns=["ts_code"]),
         lambda: store.assess_readiness(_requirement()),
         lambda: store.read_if_ready(_requirement(), year=2024, columns=["ts_code"]),
+        lambda: store.record_coverage(_coverage()),
+        # Both `write_partition` branches: byte-identical content (the idempotent path, which
+        # used to return success) and different content (which used to overwrite first).
+        lambda: store.write_partition(DATASET, 2024, _COLUMNS, _ROWS),
+        lambda: store.write_partition(DATASET, 2024, _COLUMNS, other_rows),
     )
     for call in refusals:
         with pytest.raises(PanelStorageError, match="panel-catalog/v99"):
             call()
+
+    assert target.read_bytes() == before, "a refused write must not have touched the partition"
+    assert not list(target.parent.glob("*.tmp")), "a refused write must not leave a staged temp"
 
 
 def test_a_v1_catalog_is_migrated_forward_rather_than_refused_or_rebuilt(
@@ -728,3 +759,57 @@ def test_the_default_clock_is_the_real_utc_wall_clock(tmp_path: Path) -> None:
 
     assert row is not None
     assert before - timedelta(seconds=1) <= row[0] <= after + timedelta(seconds=1)
+
+
+# --- the *second* stamp: `panel-batch`, which had no door until the P1 review ---------------
+
+
+def test_a_coverage_record_stamped_with_an_unknown_batch_contract_is_refused_on_write(
+    tmp_path: Path,
+) -> None:
+    """`domain/panel_batch.py` claimed "a future `panel-batch/v2` is detectable rather than
+    silently compatible" because `schema_version` is carried and hashed. It was not.
+
+    Measured against `676cba3`: `record_coverage` accepted a record stamped
+    `panel-batch/v99` -- `_validated_coverage` asked only that it be non-empty text -- and
+    `assess_readiness` then returned `ready` with `issues == []`. Two version stamps exist in
+    this system, `panel-catalog` and `panel-batch`; two docstrings said both were gated; one
+    was.
+
+    Refused rather than reported as a readiness issue, for the reason the catalog stamp is:
+    the stamp says what the record's other columns *mean*, so a verdict computed from them
+    would be a guess dressed as an answer.
+    """
+    store = _written_store(tmp_path / "panel")
+
+    with pytest.raises(PanelStorageError, match="panel-batch/v99"):
+        store.record_coverage(_coverage(schema_version="panel-batch/v99"))
+
+    assert store.read_coverage(DATASET, 2024) is None
+
+
+def test_a_coverage_row_another_build_stamped_with_an_unknown_contract_is_refused_on_read(
+    tmp_path: Path,
+) -> None:
+    """The half the write-side check cannot cover, and the one the claim was really about: a
+    *newer* build wrote the row. The two stamps version independently -- a change to the batch
+    contract alone leaves the catalog schema at `panel-catalog/v2` -- so
+    `_check_catalog_schema_version` passes the file and every row inside it would be read as
+    v1. This is the exact reproduction the review ran, with the row inserted through DuckDB
+    rather than through `record_coverage`.
+    """
+    store = _written_store(tmp_path / "panel")
+    store.record_coverage(_coverage())
+    with duckdb.connect(str(store.catalog_path)) as connection:
+        connection.execute("UPDATE panel_partition_coverage SET schema_version = 'panel-batch/v99'")
+
+    # The catalog's own stamp is untouched and still readable, which is the whole point.
+    assert store.registered_years(DATASET) == (2024,)
+
+    for call in (
+        lambda: store.read_coverage(DATASET, 2024),
+        lambda: store.assess_readiness(_requirement()),
+        lambda: store.read_if_ready(_requirement(), year=2024, columns=["ts_code"]),
+    ):
+        with pytest.raises(PanelStorageError, match="panel-batch/v99"):
+            call()

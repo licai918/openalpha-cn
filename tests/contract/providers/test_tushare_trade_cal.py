@@ -102,7 +102,22 @@ _SPRING_FESTIVAL_EXTENSION_2020 = [
 
 
 def _response(items: list[list[Any]]) -> dict[str, Any]:
-    return {"code": 0, "msg": None, "data": {"fields": list(_FIELDS), "items": items}}
+    """A complete `trade_cal` response, `has_more` included.
+
+    The flag was absent from these fakes until the P1 stage review, which is why the
+    descriptor could carry `requires_truncation_flag=False` without anything noticing that
+    `trade_cal` was the one dataset in the table with no truncation witness at all. Every live
+    response carries it -- probed on 2026-08-10: 366 rows / `has_more=False` for a one-year
+    window, 13,527 rows / `has_more=False` for the whole published SSE calendar, and 200 rows
+    / `has_more=True` for the same request under `limit=200`. The fake says `False` because
+    that is what a complete response says; `test_a_trade_cal_response_without_the_truncation
+    _flag_is_refused` is the one that leaves it out on purpose.
+    """
+    return {
+        "code": 0,
+        "msg": None,
+        "data": {"fields": list(_FIELDS), "items": items, "has_more": False},
+    }
 
 
 def _provider(clock: datetime, fake_tushare_transport, items: list[list[Any]]) -> TushareProvider:
@@ -626,7 +641,7 @@ def test_a_response_without_the_descriptors_date_column_is_refused(
     response = {
         "code": 0,
         "msg": None,
-        "data": {"fields": ["exchange", "is_open"], "items": [["SSE", 1]]},
+        "data": {"fields": ["exchange", "is_open"], "items": [["SSE", 1]], "has_more": False},
     }
     provider = TushareProvider(
         token="secret-token",
@@ -639,3 +654,90 @@ def test_a_response_without_the_descriptors_date_column_is_refused(
 
     assert captured.value.category == "invalid_response"
     assert "cal_date" in str(captured.value)
+
+
+# --- the truncation witness this dataset did not have (P1 stage review) --------------------
+
+
+def test_a_trade_cal_response_without_the_truncation_flag_is_refused(
+    fake_tushare_transport,
+) -> None:
+    """`trade_cal` was the last descriptor in the table carrying neither witness: no measured
+    cap (its real cap is unmeasurable -- an exchange cannot publish more sessions than it has
+    days) and, until the P1 stage review, no demand for `has_more`. A response omitting the
+    flag was accepted at any row count with nothing consulted at all, on the single dataset
+    every date-completeness check on the panel plane is measured against.
+    """
+    response = {
+        "code": 0,
+        "msg": None,
+        "data": {"fields": list(_FIELDS), "items": _SPRING_FESTIVAL_EXTENSION_2020},
+    }
+    provider = TushareProvider(
+        token="secret-token",
+        transport=fake_tushare_transport(response),
+        clock=lambda: datetime(2020, 6, 1, tzinfo=UTC),
+    )
+
+    with pytest.raises(ProviderFailure, match="carries no has_more flag"):
+        provider.fetch_panel(_request(datetime(2020, 6, 1, tzinfo=UTC)))
+
+
+def test_a_trade_cal_response_that_admits_it_is_truncated_is_refused(
+    fake_tushare_transport,
+) -> None:
+    """The flag is a real witness for this endpoint, not a formality. Probed live on
+    2026-08-10: `trade_cal(exchange=SSE)` returns 13,527 rows with `has_more=False`, and the
+    identical request under `limit=200` returns 200 rows with `has_more=True`. So the server
+    computes it as `len(rows) == min(limit, cap)` here exactly as it does for the capped
+    endpoints, and any truncation of this dataset at any cap does set it.
+    """
+    response = {
+        "code": 0,
+        "msg": None,
+        "data": {
+            "fields": list(_FIELDS),
+            "items": _SPRING_FESTIVAL_EXTENSION_2020,
+            "has_more": True,
+        },
+    }
+    provider = TushareProvider(
+        token="secret-token",
+        transport=fake_tushare_transport(response),
+        clock=lambda: datetime(2020, 6, 1, tzinfo=UTC),
+    )
+
+    with pytest.raises(ProviderFailure, match="has more rows to give"):
+        provider.fetch_panel(_request(datetime(2020, 6, 1, tzinfo=UTC)))
+
+
+def test_the_calendars_gap_rule_cannot_see_a_truncation_because_it_drops_the_oldest_rows() -> None:
+    """The measurement that disproved the compensating argument, as a test.
+
+    `tests/contract/providers/test_tushare_adj_factor.py` justified `trade_cal` having no
+    witness by saying a truncated calendar would be caught by `build_trading_calendar`'s gap
+    rule instead. It would not. Tushare's cap drops the **oldest** rows, so what survives is
+    the *newest* N -- a contiguous suffix with no gap anywhere inside it, which is precisely
+    the one shape a gap rule cannot see. `_SPRING_FESTIVAL_EXTENSION_2020` is 15 real,
+    consecutive SSE rows; as the remains of a request for 2020 they are missing
+    2020-01-01..2020-01-19 entirely off the front, and `build_trading_calendar` accepts them
+    without a word.
+
+    The horizon it reports is the give-away: the calendar happily describes itself as
+    beginning on 2020-01-20, so every later consumer -- `required_dates`, `_session_census`,
+    `date_gap` -- measures completeness against a truth source that silently starts three
+    weeks late. That is why the fix is a witness at the provider boundary and not a rule here.
+    """
+    days = tuple(
+        CalendarDay(
+            calendar_date=date(int(row[1][:4]), int(row[1][4:6]), int(row[1][6:])),
+            is_trading=bool(row[2]),
+        )
+        for row in reversed(_SPRING_FESTIVAL_EXTENSION_2020)
+    )
+
+    calendar = build_trading_calendar("SSE", days)
+
+    assert calendar.horizon.first_date == date(2020, 1, 20)
+    assert calendar.horizon.last_date == date(2020, 2, 3)
+    assert len(calendar.trading_days) == 5

@@ -174,13 +174,23 @@ now-obsolete record. The verdict was `ready`, with no issues, describing a write
 been replaced. Claiming the non-atomicity "fails closed" was true of the first write only.
 
 What makes it fail closed in both cases is `PartitionCoverage.partition_content_hash`:
-`record_coverage()` stamps the record with the partition's `content_hash` as it stood at that
-moment, and readiness blocks (`coverage_stale`) whenever the partition's current hash differs
-or is unknown. An interrupted re-write therefore leaves a record whose stamp names the old
-content, and it blocks. A row count would not have been enough -- a correction that changes
-values without changing how many rows there are leaves the count identical and moves the hash
--- and both values are already in hand on the same read-only connection, so the check costs
-nothing.
+`record_coverage()` stamps the record with the `panel_partitions.content_hash` as it stood at
+that moment, and readiness blocks (`coverage_stale`) whenever the *catalog's current*
+`panel_partitions.content_hash` differs from it or is unknown. An interrupted re-write
+therefore leaves a record whose stamp names the old content, and it blocks. A row count would
+not have been enough -- a correction that changes values without changing how many rows there
+are leaves the count identical and moves the hash -- and both values are already in hand on
+the same read-only connection, so the check costs nothing.
+
+Say what that compares, exactly, because an earlier version of this section did not and was
+read as promising more: **both sides are catalog rows.** `_partition_states` reads
+`content_hash` from `panel_partitions`, not from the Parquet file, so this check proves that
+the partition has not been re-written *through this store* since the record was made. It is
+not, and was never, a check that the file's bytes match. Two stale catalog rows agree with
+each other perfectly -- which is exactly how the pre-fix write ordering (see "The catalog
+upsert commits before the rename") produced a `ready` verdict over a Parquet file neither row
+described. The ordering is what keeps the two rows honest; this hash is what makes their
+disagreement visible when it happens.
 
 A partition file *damaged behind the store's back* is a different fault with a different
 answer: nothing in the catalog changes, so no hash comparison can see it. Readiness checks
@@ -262,10 +272,16 @@ against the same partition produced 3-6 failures per run across 5 runs; it is no
 (`self._catalog_write_lock`), so concurrent same-process writer *threads* -- the regime
 `ThreadPoolExecutor`-based callers actually create -- no longer race each other for the
 catalog: the Parquet `COPY` (the expensive part) still runs unlocked and concurrently across
-threads, and only the few-millisecond catalog upsert is serialized, eliminating the
-`TransactionException` above by construction rather than by retrying after it happens. Two
-threads writing the *same* `(dataset, year)` partition concurrently no longer crash either
--- the pre-fix temp Parquet filename had no per-writer uniqueness, so
+threads, and only the few-millisecond catalog upsert *and the one `rename(2)` that follows
+it* are serialized, eliminating the `TransactionException` above by construction rather than
+by retrying after it happens. The rename is inside the lock rather than before it because the
+two facts have to land in the same order for every writer: with the rename outside, two
+threads could commit A then B and rename B then A, leaving the catalog naming A while the
+disk holds B -- a disagreement no reader could see, since readiness reads both facts from the
+catalog. Serialised, the last thread to take the lock is the last to commit *and* the last to
+rename, which is exactly the "last write to complete wins" outcome this method already
+promises. Two threads writing the *same* `(dataset, year)` partition concurrently no longer
+crash either -- the pre-fix temp Parquet filename had no per-writer uniqueness, so
 `temporary.replace(target)` could raise a raw `FileNotFoundError` when one writer's rename
 stepped on another's still-in-progress temp file; the temp filename is now
 `uuid.uuid4()`-suffixed per call. The *result* of two threads racing the same partition is a
@@ -297,6 +313,55 @@ content-hash-scoped, the same shape as `ParquetEvidenceStore.append`'s
 `if target.exists(): return target` short circuit: writing byte-identical content for a
 partition that already has it is a true no-op (no Parquet rewrite, no catalog row churn);
 writing different content for an existing partition replaces it, atomically.
+
+The no-op branch additionally requires the file on disk to agree with the catalog row it is
+about to trust: present, still carrying Parquet's magic, and holding the row count the
+catalog claims (a footer read, 0.3 ms on a 2,000,000-row partition -- see
+`_parquet_row_count`). That is a consequence of the write ordering below: a catalog row can
+now outlive the rename it describes, and a retry matching only on the hash would answer
+"already written" to a partition that is missing, truncated or still holding the previous
+write -- cementing a transient gap instead of repairing it.
+
+## The catalog upsert commits before the rename
+
+A partition write touches two independent systems -- a Parquet file on the filesystem and a
+row in a DuckDB database -- and nothing in this codebase can put them in one transaction. So
+the question is not whether there is a window, it is which way the window fails. The order is
+now: `COPY` the rows to a per-writer temp file (unlocked, the expensive part), take
+`_catalog_write_lock`, upsert `panel_partitions` and let that connection close, and only then
+`temporary.replace(target)`.
+
+The previous order was the other one, and it was measured to fail open. Making
+`catalog.duckdb` read-only -- which stands in for a read-only mount, a full disk, a
+kill between the two steps, and the cross-process writer race this module deliberately does
+not solve -- produced exactly this against `676cba3`:
+
+    write raises IOException
+    readiness  : ready, issues == []
+    coverage   : row_count == 2
+    query      : three rows, the new content
+
+The Parquet had already been swapped, the catalog and the coverage record had not, and the
+two stale catalog facts agreed with each other. Readiness compares them to each other, so it
+saw nothing wrong and cleared a partition whose contents it could not describe.
+
+Reversed, the same fault is a clean no-op: the catalog connection fails before anything is
+renamed, the temp file is removed in a `finally`, and the store still holds -- and still
+correctly describes -- the previous write. The residual window is now one `rename(2)` between
+a committed catalog row and the file it names, and it fails *closed* in both of its shapes:
+on a first write the catalog advertises a partition with no file (`partition_file_missing`),
+and on a re-write the catalog's `content_hash` names the new write while the coverage record
+still names the old one, which is `coverage_stale`. Neither reports `ready`.
+
+What this ordering deliberately does **not** do is verify the bytes on disk.
+`_partition_states` reads `content_hash` from the catalog row, never by re-reading the
+partition; recomputing `_content_hash` would mean re-serialising every row of a ~1.35e7-row
+partition on every gate check, which is not a cost a fail-closed gate that runs on every read
+can carry. So the guarantee is precisely stated: this store keeps its own two records honest
+with each other, and a partition file changed *behind* the store's back is still out of reach
+here -- the same boundary `_looks_like_parquet` draws, and the same deep pass (`V2-P1-012`) it
+defers to. The one disk-derived fact anywhere in this module is `_parquet_row_count`, and it
+runs on the write path only, where a single footer read is affordable.
 
 ## Numerical-stack boundary (ADR-0003)
 
@@ -362,6 +427,7 @@ from zoneinfo import ZoneInfo
 import duckdb
 
 from openalpha_cn.panel.catalog import (
+    PANEL_BATCH_SCHEMA_VERSIONS_READABLE,
     PANEL_CATALOG_SCHEMA_VERSION,
     PANEL_CATALOG_SCHEMA_VERSIONS_READABLE,
     DatasetReadiness,
@@ -670,8 +736,9 @@ class PanelStore:
         #
         # A plain `threading.Lock`, not a duckdb connection: it costs nothing to create
         # (no I/O, no catalog touched) and only ever guards `write_partition()`'s catalog
-        # upsert (see there) against *same-process* writer threads -- the concurrency
-        # regime `runtime/batch.py`'s `ThreadPoolExecutor` actually creates. It cannot, and
+        # upsert and the `rename(2)` that now follows it (see there), plus
+        # `record_coverage()`'s upsert, against *same-process* writer threads -- the
+        # concurrency regime `runtime/batch.py`'s `ThreadPoolExecutor` creates. It cannot, and
         # is not meant to, coordinate across separate OS processes; see the module
         # docstring's "Concurrency" section for why that remains a deliberately separate,
         # still-open concern.
@@ -694,6 +761,11 @@ class PanelStore:
         unvalidated `dataset` could write a Parquet file as a sibling of `root`
         (`dataset="../escaped"`) or at an arbitrary absolute path with `root` silently
         discarded (`dataset="/abs/path"`).
+
+        Also raises `PanelStorageError` for a catalog stamped with a version this build does
+        not understand, *before* the Parquet file is built -- see `_reusable_partition`, and
+        the module docstring's "The catalog upsert commits before the rename" for the
+        ordering this method now guarantees and the one failure window it does not close.
         """
         _validate_dataset(dataset)
         if not columns:
@@ -705,8 +777,8 @@ class PanelStore:
         written_at = self._now()
 
         content_hash = _content_hash(dataset, year, columns, rows)
-        existing = self._lookup(dataset, year)
-        if existing is not None and existing.content_hash == content_hash:
+        existing = self._reusable_partition(dataset, year, content_hash)
+        if existing is not None:
             return existing
 
         relative_path = Path(dataset) / str(year) / "data.parquet"
@@ -730,7 +802,6 @@ class PanelStore:
             staging.execute(
                 "COPY staging TO ? (FORMAT PARQUET, COMPRESSION ZSTD)", [str(temporary)]
             )
-        temporary.replace(target)
 
         # Locked for the same reason the connection itself is short-lived: DuckDB shares
         # one database instance across same-process connections to the same file and
@@ -740,24 +811,37 @@ class PanelStore:
         # threads writing 4 *different* datasets against a cold-start store (no catalog
         # file yet) before this fix, 3 of 4 failing, reproducibly; see
         # `test_write_partition_survives_four_concurrent_threads_writing_four_different_datasets`.
-        # The lock only wraps this few-millisecond upsert, not the Parquet `COPY` above --
-        # that stays unlocked and concurrent across writer threads. It cannot coordinate
-        # across separate OS processes; see the module docstring's "Concurrency" section.
-        with self._catalog_write_lock, duckdb.connect(str(self.catalog_path)) as connection:
-            self._ensure_catalog_schema(connection)
-            connection.execute(
-                """
-                INSERT INTO panel_partitions
-                    (dataset, year, relative_path, row_count, content_hash, written_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT (dataset, year) DO UPDATE SET
-                    relative_path = excluded.relative_path,
-                    row_count = excluded.row_count,
-                    content_hash = excluded.content_hash,
-                    written_at = excluded.written_at
-                """,
-                [dataset, year, str(relative_path), len(rows), content_hash, written_at],
-            )
+        # The lock wraps the catalog upsert *and* the rename, not the Parquet `COPY` above --
+        # that stays unlocked and concurrent across writer threads. Holding the rename inside
+        # the lock is what keeps the two facts in the same order for every same-process
+        # writer: without it, two threads could commit A then B and rename B then A, leaving
+        # the catalog naming A while the disk holds B. It cannot coordinate across separate
+        # OS processes; see the module docstring's "Concurrency" section.
+        with self._catalog_write_lock:
+            try:
+                with duckdb.connect(str(self.catalog_path)) as connection:
+                    self._ensure_catalog_schema(connection)
+                    connection.execute(
+                        """
+                        INSERT INTO panel_partitions
+                            (dataset, year, relative_path, row_count, content_hash, written_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        ON CONFLICT (dataset, year) DO UPDATE SET
+                            relative_path = excluded.relative_path,
+                            row_count = excluded.row_count,
+                            content_hash = excluded.content_hash,
+                            written_at = excluded.written_at
+                        """,
+                        [dataset, year, str(relative_path), len(rows), content_hash, written_at],
+                    )
+                # Last, and only once the catalog has committed. See the module docstring's
+                # "The catalog upsert commits before the rename".
+                temporary.replace(target)
+            finally:
+                # A no-op after a successful `replace`, which consumed the temp file. It
+                # matters when the catalog upsert raised: the staged Parquet would otherwise
+                # be left behind as an orphan `data.parquet.<uuid>.tmp` beside the partition.
+                temporary.unlink(missing_ok=True)
         return PartitionRef(dataset, year, target, len(rows), content_hash)
 
     def query(
@@ -1070,16 +1154,55 @@ class PanelStore:
             [PANEL_CATALOG_SCHEMA_VERSION],
         )
 
-    def _lookup(self, dataset: str, year: int) -> PartitionRef | None:
-        """Used only by `write_partition()`'s idempotency check, ahead of that method's
-        own read-write catalog transaction -- so this must tolerate the catalog not
-        existing yet (the very first `write_partition()` call on a fresh store) without
-        attempting a `read_only=True` connect to a nonexistent file, which DuckDB rejects.
+    def _reusable_partition(
+        self, dataset: str, year: int, content_hash: str
+    ) -> PartitionRef | None:
+        """The partition `write_partition()` may hand back unwritten, or `None` to go ahead.
+
+        Used only there, ahead of that method's own read-write catalog transaction -- so it
+        must tolerate the catalog not existing yet (the very first `write_partition()` call on
+        a fresh store) without attempting a `read_only=True` connect to a nonexistent file,
+        which DuckDB rejects.
+
+        Three things happen on the one read-only connection, and the first and third are what
+        the P1 review added:
+
+        1. **The schema stamp is checked.** This was the *seventh* path into the catalog and
+           the last one `_check_catalog_schema_version` did not guard, which made
+           `write_partition()` the one public method a `panel-catalog/v99` catalog could not
+           stop: against `676cba3` the idempotent branch returned the existing `PartitionRef`
+           and reported success without a word, and the non-idempotent branch got as far as
+           replacing the partition's Parquet file -- 2 rows became 3 on disk -- before
+           `_ensure_catalog_schema` finally raised. Checking here puts the refusal ahead of
+           the `COPY`, so an unreadable catalog costs nothing and changes nothing.
+        2. **The catalog row is read**, and its `content_hash` compared. A different hash is
+           a real write; there is nothing to reuse.
+        3. **The file is reconciled against that row**: it must be there, still carry
+           Parquet's magic at both ends, and hold the number of rows the catalog says it
+           holds. The row count comes from the Parquet footer -- DuckDB answers `count(*)`
+           over `read_parquet` from metadata rather than by scanning, measured at 0.3 ms on a
+           2,000,000-row, 4 MB partition -- and it is the only fact anywhere in this module
+           read from the *file* rather than from the catalog.
+
+        Step 3 exists because of the write ordering (see the module docstring's "The catalog
+        upsert commits before the rename"): a catalog row can now outlive the rename it
+        describes. Without it, a retry of the interrupted write would match on `content_hash`,
+        return here, and report success over a partition still holding the previous content --
+        turning a transient, fail-closed gap into a permanent one while looking like an
+        idempotent no-op. With it, the retry is the write it was meant to be.
         """
         if not self.catalog_path.exists():
             return None
         with duckdb.connect(str(self.catalog_path), read_only=True) as connection:
-            return self._lookup_with_connection(connection, dataset, year)
+            _check_catalog_schema_version(connection)
+            existing = self._lookup_with_connection(connection, dataset, year)
+            if existing is None or existing.content_hash != content_hash:
+                return None
+            if not existing.path.is_file() or not _looks_like_parquet(existing.path):
+                return None
+            if _parquet_row_count(connection, existing.path) != existing.row_count:
+                return None
+        return existing
 
     def _lookup_with_connection(
         self, connection: duckdb.DuckDBPyConnection, dataset: str, year: int
@@ -1173,6 +1296,26 @@ def _column_exists(connection: duckdb.DuckDBPyConnection, table: str, column: st
     return row is not None
 
 
+def _parquet_row_count(connection: duckdb.DuckDBPyConnection, path: Path) -> int | None:
+    """How many rows the Parquet file at `path` says it holds, or `None` if it cannot say.
+
+    Read from the file's footer, not by scanning it: DuckDB answers `count(*)` over
+    `read_parquet` from Parquet metadata, measured at 0.3 ms against a 2,000,000-row, 4 MB
+    partition -- the same order as the eight bytes `_looks_like_parquet` reads, and
+    independent of partition size. It runs on the already-open read-only catalog connection
+    (DuckDB reads an external Parquet file happily from one) rather than opening a second
+    database, and only on `write_partition()`'s no-op path.
+
+    `None` rather than an exception for an unreadable file, because the one caller's question
+    is "can this write be skipped", and every answer other than a confident yes is no.
+    """
+    try:
+        row = connection.execute("SELECT count(*) FROM read_parquet(?)", [str(path)]).fetchone()
+    except duckdb.Error:
+        return None
+    return None if row is None else int(cast(int, row[0]))
+
+
 def _looks_like_parquet(path: Path) -> bool:
     """Whether `path` at least still carries Parquet's magic at both ends.
 
@@ -1206,12 +1349,26 @@ def _check_catalog_schema_version(connection: duckdb.DuckDBPyConnection) -> None
     this one does not, and reading it would mean guessing at columns that may have been
     repurposed.
 
-    Called by every public method that opens the catalog, including the three read paths that
-    never look at a coverage table (`query`, `registered_years`, `profile_query`). `query()`
-    in particular is the one method that reads `panel_partitions.relative_path` and opens the
-    file it names -- the single path where a repurposed column would turn into reading the
-    wrong bytes -- so exempting it would have left the stamp guarding everything except the
-    thing most worth guarding.
+    Every place this module opens the catalog calls this, and the list is worth writing out
+    because an earlier version of this docstring claimed the same thing while one path did
+    not. There are seven, in three groups:
+
+    - the four read paths, each on its own `read_only=True` connection: `query`,
+      `profile_query`, `read_coverage`, `registered_years`. `query()` is the pointed one --
+      it is the only method that reads `panel_partitions.relative_path` and then opens the
+      file that column names, so exempting it would have left the stamp guarding everything
+      except the thing most worth guarding;
+    - `_partition_states`, the read path behind `assess_readiness` and `read_if_ready`;
+    - the two write paths, through `_ensure_catalog_schema` (`write_partition`'s catalog
+      upsert and `record_coverage`), plus `_reusable_partition`, `write_partition`'s
+      read-only idempotency probe.
+
+    That last one is the entry this docstring used to be wrong about. It opened the
+    catalog `read_only=True` and asked no version question at all, so `write_partition()`
+    against a `panel-catalog/v99` catalog either returned success from the idempotent branch
+    or replaced the partition's Parquet file before `_ensure_catalog_schema` raised -- both
+    reproduced against `676cba3`, and both are why the refusal below now happens before any
+    file is touched rather than after.
     """
     if not _table_exists(connection, "panel_catalog_meta"):
         return
@@ -1226,6 +1383,35 @@ def _check_catalog_schema_version(connection: duckdb.DuckDBPyConnection) -> None
             f"panel catalog is stamped {version!r}, which this build does not understand "
             f"(known: {sorted(PANEL_CATALOG_SCHEMA_VERSIONS_READABLE)}); refusing to touch it "
             "rather than misread a schema written by a newer version"
+        )
+
+
+def _check_batch_schema_version(version: str) -> None:
+    """Refuse a coverage record stamped with a batch contract this build cannot interpret.
+
+    The panel *catalog* stamp (`_check_catalog_schema_version`) and this one guard two
+    different things and version independently: that one describes the DuckDB tables this
+    module owns, this one describes `domain/panel_batch.py`'s contract -- what a coverage
+    record's subjects, fields, date census and, crucially, `max_available_time` *mean*. A
+    build that changes only the batch contract leaves the catalog schema alone, so the catalog
+    stamp passes and every row inside is read as if nothing had changed.
+
+    `domain/panel_batch.py` said a future `panel-batch/v2` was "detectable rather than silently
+    compatible" because the value is carried and hashed. Carrying is not checking: pre-fix
+    `_validated_coverage` asked only that `schema_version` be non-empty text, and a coverage
+    row stamped `panel-batch/v99` produced `assess_readiness` -> `ready` with `issues == []`,
+    measured against `676cba3`. Two stamps, two docstrings claiming a gate, one gate.
+
+    Applied on both sides: here (so this build cannot write an unknown stamp) and in
+    `_read_coverage` (so it cannot interpret one written elsewhere). A refusal, not a readiness
+    issue, for the reason the catalog stamp is one -- a verdict computed from fields whose
+    meaning is unknown is worse than no verdict.
+    """
+    if version not in PANEL_BATCH_SCHEMA_VERSIONS_READABLE:
+        raise PanelStorageError(
+            f"coverage schema_version is {version!r}, which this build does not understand "
+            f"(known: {sorted(PANEL_BATCH_SCHEMA_VERSIONS_READABLE)}); refusing it rather than "
+            "reading a batch contract written by a newer version as though it were this one"
         )
 
 
@@ -1348,6 +1534,10 @@ def _read_coverage(
     ).fetchone()
     if row is None:
         return None
+    # Before anything else is read off this row: a stamp naming a batch contract this build
+    # does not know makes every remaining column's *meaning* a guess. See
+    # `_check_batch_schema_version`.
+    _check_batch_schema_version(str(row[2]))
     subjects = connection.execute(
         "SELECT subject FROM panel_partition_subjects WHERE dataset = ? AND year = ? "
         "ORDER BY subject",
@@ -1417,6 +1607,7 @@ def _validated_coverage(coverage: PartitionCoverage) -> PartitionCoverage:
         raise PanelStorageError(f"coverage year must be an int; got {coverage.year!r}")
     for name in ("provider_id", "kind", "schema_version", "batch_digest"):
         _require_text(f"coverage {name}", getattr(coverage, name))
+    _check_batch_schema_version(coverage.schema_version)
     _require_timezone_name(coverage.date_timezone)
     for name in ("as_of", "fetched_at", "last_event_time", "max_available_time"):
         _require_aware(getattr(coverage, name), f"coverage {name}")

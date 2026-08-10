@@ -549,3 +549,35 @@ replay 方法 —— **全部从原始数据构建**，必然触发 `ReplayCase`
   例如直接在 `ResearchEngine.run_cycle` 或面板查询层注入，那里没有上游筛选。
 
 不做这个决策就开工 P2，会得到一个永远绿、但什么都没测的闸门。
+
+## 11. `not_yet_knowable` 是分区级判定，一个分区是一整年（P1 阶段验收实测）
+
+第 10 节的方案 B 说「另选一个可达信号建闸门」，而面板平面上最现成的那个信号是
+`evaluate_readiness` 的 `not_yet_knowable`：它确实可达（REST 上实测触发过），确实 fail-closed，
+也确实由 `as_of` 而非墙钟决定。P2 若采用它，必须先知道它的**判定粒度**。
+
+`catalog.py` 拿一个分区的 `max_available_time`（该分区里最晚变为可知的那一刻）跟 `as_of` 比，
+晚于 `as_of` 就**整块拒绝**。它不过滤行。后果：
+
+**任何早于分区自身 `max_available_time` 的 `as_of` 都读不出该分区；而一整年的数据，
+那一刻在 12 月。** 完整的 2015 年分区因此在 2015 年内的每一个 `as_of` 上都是 `blocked`，
+最早 2016-01-01 才读得出。界限是 `max_available_time` 本身而不是日历年 ——
+只装了 1 月的分区从 2 月起就可读 —— 但 `panel_ingest` 的 session census 会拒绝任何缺了
+日历所报开市日的分区，所以这个平面真正产出的分区就是整年的，实际规则就是上面这条。
+这不是数据问题 —— 同一个分区在下一刻就是 `ready` —— 而是判定的粒度。
+
+对下游的硬约束：
+
+- **P3 因子层**：无法通过 `read_if_ready` 在年中 `as_of` 上算因子；任何 2024-06-30 的因子
+  只能由已经收口的年份分区拼出来。
+- **P4 walk-forward**：无法让 `as_of` 在一年之内逐步推进并同时读该年分区，年内的每一步都 `blocked`。
+
+**这是刻意的 fail-closed 设计，且有测试背书**（`tests/unit/panel/test_readiness_rules.py::
+test_not_yet_knowable_is_partition_level_so_an_as_of_inside_a_year_reads_nothing`）：
+`evaluate_readiness` 是纯函数，只看目录元数据，够不到行，所以给行级答案等于对没筛过的行作出承诺。
+但**产品后果此前没有在任何地方披露过**，这里补上。
+
+**P2 的第一个决策**（不在 P1 做）：是否把它拆成「分区级闸门 + 行级 `available_time` 过滤」。
+这会改变 `read_if_ready` **承诺**什么，而不只是它拒绝什么 —— 因此是一次接口决策，
+不是一次实现改动。在做出这个决策之前，把 `not_yet_knowable` 当作 P2 闸门信号是可以的，
+但闸门的 `as_of` 必须取在分区年份之外，否则拒绝的原因是粒度而不是被注入的违规。

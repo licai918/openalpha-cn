@@ -116,8 +116,18 @@ written to be O(row_count) with C-level primitives (`all()`, `max()`, `tuple.ind
 Consequently this contract is not registered in `domain/versioning.py`'s `ContractVersions`
 registry the way `ProviderBatch` is: that registry dispatches *stored JSON rows* back to a
 pydantic model, and a panel batch is never stored as JSON -- it is stored as Parquet, whose
-schema is the partition's own. The `schema_version` field is still carried and hashed, so a
-future `panel-batch/v2` is detectable rather than silently compatible.
+schema is the partition's own.
+
+`schema_version` is carried on the batch, hashed into `content_digest`, refused by
+`merge_panel_batches` when two batches disagree on it, and copied onto the coverage record
+`panel_ingest.panel_coverage` builds. What makes a future `panel-batch/v2` **detectable** is
+none of those: it is `panel/catalog.py`'s `PANEL_BATCH_SCHEMA_VERSIONS_READABLE`, checked by
+`panel/store.py::_check_batch_schema_version` on the way into the catalog and on the way back
+out. This paragraph used to claim that carrying and hashing the value was itself the
+detection, which the P1 review disproved directly: a coverage record stamped
+`panel-batch/v99` was accepted by `record_coverage` and `assess_readiness` returned `ready`
+with `issues == []`. A value that is stored but never compared against a known set is
+provenance, not a version gate.
 
 ## Layering
 

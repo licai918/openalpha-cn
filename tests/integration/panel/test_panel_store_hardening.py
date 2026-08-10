@@ -1,9 +1,10 @@
-"""Hardening tests closing four review findings against `PanelStore`: a `dataset`-traversal
+"""Hardening tests closing five review findings against `PanelStore`: a `dataset`-traversal
 write primitive, a `profile_query()` race that contradicted its own docstring, a
 `write_partition()` write-write conflict the original concurrency testing never actually
-exercised (all three from task 24, follow-up to V2-P1-001's `6de598e`), and unescaped SQL
+exercised (all three from task 24, follow-up to V2-P1-001's `6de598e`), unescaped SQL
 identifier interpolation at three call sites (task 25's review, follow-up to V2-P1-002's
-`cb9e8f4`).
+`cb9e8f4`), and a non-atomic write window that reported `ready` over a partition neither
+catalog row described (the P1 stage review, follow-up to `676cba3`).
 
 Kept separate from `test_panel_store.py` (correctness) and
 `test_panel_store_performance_budget.py` (the pruning/projection acceptance evidence) so
@@ -80,16 +81,34 @@ section for why escaping (not a whitelist) is the right mechanism for names at t
 The tests below assert on observable side effects -- whether a file landed, and whether a
 filtered query returned rows it should not have -- rather than only on an exception type,
 because every one of these attacks *succeeded silently* before the fix.
+
+## Finding 5 -- the write window failed open
+
+`write_partition()` renamed the new Parquet into place and *then* upserted the catalog, with
+nothing joining the two. Interrupting the second step (measured with an unwritable catalog)
+left the new bytes on disk, the old row in `panel_partitions`, and the old coverage record
+next to it -- and readiness compares those two catalog rows to each other, so two equally
+stale facts agreed and the verdict was `ready` with `issues == []` over a partition neither of
+them described. The order is now COPY -> upsert -> rename, which turns that interruption into
+a clean no-op and turns the one remaining window (a `rename(2)` after a committed row) into a
+disagreement readiness can see. The section below the SQL tests has the measurements.
 """
 
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import duckdb
 import pytest
 
+from openalpha_cn.panel.catalog import (
+    DateCoverage,
+    FieldCoverage,
+    PartitionCoverage,
+    ReadinessRequirement,
+)
 from openalpha_cn.panel.store import (
     DUCKDB_COLUMN_TYPES,
     ColumnSpec,
@@ -103,12 +122,59 @@ _COLUMNS = (
     ColumnSpec("close", "DOUBLE"),
 )
 
+_DATASET = "prices_daily"
+_FROZEN = datetime(2024, 6, 28, 11, 22, 33, tzinfo=UTC)
+_AS_OF = datetime(2024, 1, 4, 12, 0, tzinfo=UTC)
+
 
 def _rows(*, closes: tuple[float, float] = (10.5, 22.5)) -> tuple[tuple[object, ...], ...]:
     return (
         ("000001.SZ", "2024-01-02", closes[0]),
         ("000002.SZ", "2024-01-02", closes[1]),
     )
+
+
+def _three_rows() -> tuple[tuple[object, ...], ...]:
+    """Different content *and* a different row count, so a catalog/disk disagreement is
+    visible in both the content hash and the Parquet footer."""
+    return (*_rows(closes=(99.5, 88.5)), ("000003.SZ", "2024-01-02", 77.5))
+
+
+def _frozen_clock() -> datetime:
+    return _FROZEN
+
+
+def _coverage(*, row_count: int = 2) -> PartitionCoverage:
+    """A coverage record for the partition `_rows()` (or, at `row_count=3`, `_three_rows()`)
+    writes."""
+    return PartitionCoverage(
+        dataset=_DATASET,
+        year=2024,
+        provider_id="tushare",
+        kind="daily",
+        schema_version="panel-batch/v1",
+        batch_digest="sha256:" + "1" * 64,
+        as_of=_AS_OF,
+        fetched_at=_AS_OF,
+        row_count=row_count,
+        date_timezone="Asia/Shanghai",
+        last_event_time=datetime(2024, 1, 2, 7, 0, tzinfo=UTC),
+        max_available_time=datetime(2024, 1, 2, 8, 30, tzinfo=UTC),
+        revised_row_count=0,
+        subjects=("000001.SZ", "000002.SZ"),
+        fields=(FieldCoverage(name="close", kind="float"),),
+        dates=(DateCoverage(event_date=date(2024, 1, 2), row_count=row_count),),
+    )
+
+
+def _refuse_rename(self: Path, target: object) -> Path:
+    """Stand-in for the one syscall between a committed catalog row and the file it names.
+
+    That window cannot be closed from inside this process -- a rename and a DuckDB commit are
+    two systems -- so it is simulated rather than raced for: the tests that use this are about
+    which *direction* the window fails in, and a real race would test the scheduler.
+    """
+    raise OSError("rename interrupted")
 
 
 def _assert_root_is_the_only_thing_under(tmp_path: Path, root: Path) -> None:
@@ -415,3 +481,241 @@ def test_write_partition_rejects_a_dataset_with_surrounding_whitespace(tmp_path:
         store.write_partition(" prices_daily ", 2024, _COLUMNS, _rows())
 
     _assert_root_is_the_only_thing_under(tmp_path, root)
+
+
+# --- Finding 5 (P1 review): the write ordering and its residual window ---------------------
+#
+# `write_partition()` touches two systems that share no transaction: a Parquet file and a
+# DuckDB row. The question was never whether there is a window, only which way it fails.
+# Pre-fix the order was rename-then-upsert, and it failed *open* -- measured by making
+# `catalog.duckdb` read-only, which stands in for a read-only mount, a full disk, a kill
+# between the two steps, and the cross-process writer race this module deliberately does not
+# solve:
+#
+#     write raises IOException
+#     readiness  : ready, issues == []
+#     coverage   : row_count == 2
+#     query      : three rows -- the new content
+#
+# The Parquet had been swapped and neither catalog row had; readiness compares those two rows
+# to each other, so two equally stale facts agreed and cleared the partition. The order is now
+# COPY -> upsert -> rename, and these tests pin what that buys and what it does not.
+
+
+def _fail_catalog_writes(
+    monkeypatch: pytest.MonkeyPatch, store: PanelStore, error: BaseException
+) -> None:
+    """Make every read-*write* connect to this store's catalog raise, reads untouched.
+
+    A monkeypatch rather than `chmod`, because the reproduction has to be the same on every
+    platform and under every uid -- a read-only mode bit does not stop a process running as
+    root, so the chmod version of this test would pass vacuously in half the environments
+    that matter.
+    """
+    real_connect = duckdb.connect
+
+    def connect(database: object = ":memory:", *args: object, **kwargs: object) -> object:
+        if str(database) == str(store.catalog_path) and not kwargs.get("read_only", False):
+            raise error
+        return real_connect(database, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(duckdb, "connect", connect)
+
+
+def _requirement() -> ReadinessRequirement:
+    return ReadinessRequirement(
+        dataset=_DATASET,
+        as_of=_AS_OF,
+        years=(2024,),
+        required_dates=None,
+        required_subjects=None,
+        required_fields=None,
+        max_staleness=None,
+    )
+
+
+def _readiness(store: PanelStore) -> tuple[str, list[str]]:
+    verdict = store.assess_readiness(_requirement())
+    return verdict.state, [issue.code for issue in verdict.issues]
+
+
+def test_a_failing_catalog_upsert_leaves_the_partition_and_the_verdict_consistent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Critical, in the shape it was measured in. With the catalog unwritable, the whole
+    write must be a no-op: the store keeps the previous content *and* keeps describing it
+    correctly, rather than serving new bytes under an old description.
+
+    `ready` is the right answer here and was the wrong one before. It is the same word for a
+    different fact: the catalog, the coverage record and the file all still describe the
+    two-row write that really is on disk.
+    """
+    root = tmp_path / "panel"
+    store = PanelStore(root, clock=_frozen_clock)
+    store.write_partition(_DATASET, 2024, _COLUMNS, _rows())
+    store.record_coverage(_coverage())
+
+    _fail_catalog_writes(monkeypatch, store, duckdb.IOException("catalog is read-only"))
+    with pytest.raises(duckdb.IOException):
+        store.write_partition(_DATASET, 2024, _COLUMNS, _three_rows())
+    monkeypatch.undo()
+
+    assert _readiness(store) == ("ready", [])
+    stored = store.read_coverage(_DATASET, 2024)
+    assert stored is not None and stored.row_count == 2
+    assert store.query(_DATASET, year=2024, columns=["ts_code", "close"]) == [
+        ("000001.SZ", 10.5),
+        ("000002.SZ", 22.5),
+    ]
+    assert not list((root / _DATASET / "2024").glob("*.tmp")), (
+        "the staged Parquet must not be left behind when the catalog upsert fails"
+    )
+
+
+def test_a_first_write_interrupted_at_the_rename_blocks_instead_of_reporting_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The residual window, shape one. The catalog row commits and the rename does not, so
+    the catalog advertises a partition with no file -- `partition_file_missing`, which is
+    exactly the fault code that state deserves and which blocks."""
+    root = tmp_path / "panel"
+    store = PanelStore(root, clock=_frozen_clock)
+
+    monkeypatch.setattr(Path, "replace", _refuse_rename)
+    with pytest.raises(OSError, match="rename interrupted"):
+        store.write_partition(_DATASET, 2024, _COLUMNS, _rows())
+    monkeypatch.undo()
+
+    assert store.registered_years(_DATASET) == (2024,)
+    assert not (root / _DATASET / "2024" / "data.parquet").exists()
+    assert _readiness(store) == ("blocked", ["partition_file_missing"])
+
+
+def test_a_rewrite_interrupted_at_the_rename_blocks_as_coverage_stale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The residual window, shape two -- and the direction the whole reorder exists for.
+
+    The catalog's `panel_partitions.content_hash` now names the new write while the coverage
+    record still names the old one, so the two facts readiness compares *disagree* and it
+    blocks. Under the pre-fix order the same interruption left both of them naming the old
+    write while the file held the new one: two stale facts in perfect agreement, and `ready`.
+    """
+    root = tmp_path / "panel"
+    store = PanelStore(root, clock=_frozen_clock)
+    store.write_partition(_DATASET, 2024, _COLUMNS, _rows())
+    store.record_coverage(_coverage())
+
+    monkeypatch.setattr(Path, "replace", _refuse_rename)
+    with pytest.raises(OSError, match="rename interrupted"):
+        store.write_partition(_DATASET, 2024, _COLUMNS, _three_rows())
+    monkeypatch.undo()
+
+    assert _readiness(store) == ("blocked", ["coverage_stale"])
+
+
+def test_retrying_the_interrupted_write_rewrites_rather_than_reporting_a_no_op(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The hazard the reorder introduces, and the check that closes it.
+
+    After the interruption above, the catalog row already carries the *new* content hash. A
+    retry of the same write therefore matches on the hash alone -- so an idempotency check
+    built only on the hash would return "already written", turning a transient, blocked window
+    into a permanent one while reporting success. `_reusable_partition` reconciles the
+    catalog's row count against the Parquet footer, which disagrees, so the retry is the write
+    it was meant to be.
+    """
+    root = tmp_path / "panel"
+    store = PanelStore(root, clock=_frozen_clock)
+    store.write_partition(_DATASET, 2024, _COLUMNS, _rows())
+    store.record_coverage(_coverage())
+
+    monkeypatch.setattr(Path, "replace", _refuse_rename)
+    with pytest.raises(OSError, match="rename interrupted"):
+        store.write_partition(_DATASET, 2024, _COLUMNS, _three_rows())
+    monkeypatch.undo()
+
+    # Precondition for the hazard: the catalog already believes the new write happened.
+    assert store.query(_DATASET, year=2024, columns=["ts_code"]) == [
+        ("000001.SZ",),
+        ("000002.SZ",),
+    ]
+
+    reference = store.write_partition(_DATASET, 2024, _COLUMNS, _three_rows())
+
+    assert reference.row_count == 3
+    assert store.query(_DATASET, year=2024, columns=["ts_code"]) == [
+        ("000001.SZ",),
+        ("000002.SZ",),
+        ("000003.SZ",),
+    ]
+
+
+def test_a_byte_identical_rewrite_is_still_a_true_no_op(tmp_path: Path) -> None:
+    """The other side of the check above: when the catalog row and the file do agree, nothing
+    is rewritten. Measured on the file's own mtime and size rather than on the return value,
+    because the return value would look identical either way."""
+    root = tmp_path / "panel"
+    store = PanelStore(root, clock=_frozen_clock)
+    store.write_partition(_DATASET, 2024, _COLUMNS, _rows())
+    target = root / _DATASET / "2024" / "data.parquet"
+    before = target.stat()
+
+    reference = store.write_partition(_DATASET, 2024, _COLUMNS, _rows())
+    after = target.stat()
+
+    assert reference.row_count == 2
+    assert (after.st_mtime_ns, after.st_size) == (before.st_mtime_ns, before.st_size)
+
+
+def test_a_partition_file_truncated_behind_the_stores_back_is_rewritten_not_waved_through(
+    tmp_path: Path,
+) -> None:
+    """The footer reconciliation earns its keep here too: a partition whose file has been
+    truncated to half its rows no longer satisfies the no-op branch, so re-writing the same
+    content repairs it instead of answering "already written"."""
+    root = tmp_path / "panel"
+    store = PanelStore(root, clock=_frozen_clock)
+    store.write_partition(_DATASET, 2024, _COLUMNS, _three_rows())
+    target = root / _DATASET / "2024" / "data.parquet"
+    with duckdb.connect(":memory:") as connection:
+        connection.execute(
+            "COPY (SELECT * FROM read_parquet(?) LIMIT 1) TO ? (FORMAT PARQUET)",
+            [str(target), str(target)],
+        )
+    assert len(store.query(_DATASET, year=2024, columns=["ts_code"])) == 1
+
+    store.write_partition(_DATASET, 2024, _COLUMNS, _three_rows())
+
+    assert len(store.query(_DATASET, year=2024, columns=["ts_code"])) == 3
+
+
+def test_a_file_that_only_looks_like_parquet_is_rewritten_rather_than_trusted(
+    tmp_path: Path,
+) -> None:
+    """The gap between the store's two on-disk checks, and why the write path reads the row
+    count rather than inferring it.
+
+    `_looks_like_parquet` reads eight bytes, so a file that begins and ends with `PAR1` and
+    holds nothing usable in between passes it -- readiness still says `ready`, because every
+    fact it has agrees. DuckDB cannot answer how many rows that file holds, and
+    `_parquet_row_count` reports that as `None` rather than raising: not a confident yes, so
+    the no-op branch declines and the write repairs the partition instead of reporting success
+    over bytes nothing can read.
+    """
+    root = tmp_path / "panel"
+    store = PanelStore(root, clock=_frozen_clock)
+    store.write_partition(_DATASET, 2024, _COLUMNS, _three_rows())
+    store.record_coverage(_coverage(row_count=3))
+    target = root / _DATASET / "2024" / "data.parquet"
+    target.write_bytes(b"PAR1" + b"\x00" * 64 + b"PAR1")
+
+    # The eight-byte check is satisfied, so the gate clears it -- that is the gap.
+    assert _readiness(store) == ("ready", [])
+    with pytest.raises(PanelStorageError, match="passed readiness but could not be read"):
+        store.read_if_ready(_requirement(), year=2024, columns=["ts_code"])
+
+    store.write_partition(_DATASET, 2024, _COLUMNS, _three_rows())
+
+    assert len(store.query(_DATASET, year=2024, columns=["ts_code"])) == 3

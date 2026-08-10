@@ -300,6 +300,29 @@ def test_the_flag_is_demanded_exactly_where_it_is_the_only_witness_or_the_stakes
     a truncated history is not short but silently wrong: every year-on-year growth rate the
     projection carries (`or_yoy`, `netprofit_yoy`) is computed against a period that is no
     longer there, and `build_statement_history` is happy with any set of filings.
+
+    `trade_cal` is the eleventh, added by the P1 stage review, and it is `stock_basic`'s and
+    `index_classify`'s case: its cap is unmeasurable from outside (the exchange cannot publish
+    more sessions than it has days), so the flag is the only witness available. It was the
+    last `False` in this table, and the compensating argument that justified it -- carried in
+    this test's own failure message until now -- was disproved on both of its clauses:
+
+    - it said `trade_cal`'s request is "whole-period". `_trade_cal_params` builds a
+      **single-year** window (`start_date=Y0101 / end_date=Y1231`); the 13,162-row observation
+      came from a differently shaped request.
+    - it said a truncated calendar would be caught by `build_trading_calendar`'s gap rule.
+      Tushare's cap drops the **oldest** rows, so a truncated response is a contiguous
+      *suffix* and there is no gap to see: dropping 2024-01..03 leaves `build_trading_calendar`
+      accepting the response and returning 197 sessions where the year has 262.
+
+    Neither correction makes this reachable today -- one year is at most 366 rows, far under
+    any cap in this table -- but it made `trade_cal` the only dataset here with neither witness
+    *and* no compensating control, guarding the single source of truth that every
+    date-completeness check on the panel plane (`required_dates`, `_session_census`,
+    `date_gap`) is measured against. Two assertions below changed to add it, deliberately, for
+    the reason `providers/tushare.py`'s own docstring gives about the `daily` decision: a later
+    task with a real reason to demand the flag "should change the test rather than read its
+    redness as a verdict".
     """
     demanded = {entry.dataset for entry in TUSHARE_DATASETS if entry.requires_truncation_flag}
     assert demanded == {
@@ -309,6 +332,7 @@ def test_the_flag_is_demanded_exactly_where_it_is_the_only_witness_or_the_stakes
         INDEX_WEIGHT_DATASET,
         INDUSTRY_TREE_DATASET,
         INDUSTRY_MEMBERSHIP_DATASET,
+        TRADING_CALENDAR_DATASET,
         *FINANCIAL_STATEMENT_DATASETS,
     }
 
@@ -317,10 +341,9 @@ def test_the_flag_is_demanded_exactly_where_it_is_the_only_witness_or_the_stakes
         for entry in TUSHARE_DATASETS
         if entry.max_rows_per_response is None and not entry.requires_truncation_flag
     }
-    assert capless_and_unflagged == {TRADING_CALENDAR_DATASET}, (
-        "trade_cal is the deliberate exception: it served all 13,162 published SSE rows in "
-        "one response, so a cap would be a guess -- but its whole-period request means a "
-        "truncated calendar is caught by build_trading_calendar's gap rule instead"
+    assert capless_and_unflagged == set(), (
+        "every dataset must carry at least one truncation witness -- a measured cap, the "
+        f"has_more flag, or both. Unwitnessed: {sorted(capless_and_unflagged)}"
     )
 
 

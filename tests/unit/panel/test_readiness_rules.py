@@ -238,6 +238,122 @@ def test_a_partition_holding_information_newer_than_as_of_blocks_the_read() -> N
     assert [issue.code for issue in verdict.issues] == ["not_yet_knowable"]
 
 
+def test_not_yet_knowable_is_decided_by_the_latest_year_and_not_by_the_earliest() -> None:
+    """The pooled clock check is a `max` over every usable year, and the whole point of the
+    `max` is the shape this test builds: a multi-year request in which only the *newest* year
+    holds information that post-dates `as_of`.
+
+    A single-coverage test cannot tell `max` from `min` -- they are identical on one element
+    -- and until this test existed, that was the only shape `not_yet_knowable` was ever
+    asserted in. Changing `catalog.py`'s `max((coverage.max_available_time ...))` to `min(...)`
+    therefore survived the entire 1976-test suite while turning a real fail-closed refusal
+    into a fail-open `ready`: the 2020 partition's availability is comfortably historical, so
+    the `min` is satisfied and the 2026 partition's five months of hindsight are waved
+    through. This is the signal roadmap section 10's plan B builds P2's gate on, so a mutant
+    that survives here is a mutant that silently unbuilds that gate.
+    """
+    as_of = datetime(2026, 3, 1, tzinfo=UTC)
+    historical = PartitionState(
+        year=2020,
+        registered=True,
+        file_present=True,
+        file_readable=True,
+        content_hash=CONTENT_HASH,
+        coverage=_coverage(
+            year=2020,
+            dates=(date(2020, 1, 2),),
+            last_event_time=datetime(2020, 1, 2, 7, 0, tzinfo=UTC),
+            max_available_time=datetime(2020, 1, 2, 8, 30, tzinfo=UTC),
+        ),
+    )
+    with_hindsight = PartitionState(
+        year=2026,
+        registered=True,
+        file_present=True,
+        file_readable=True,
+        content_hash=CONTENT_HASH,
+        coverage=_coverage(
+            year=2026,
+            dates=(date(2026, 8, 3),),
+            last_event_time=datetime(2026, 8, 3, 7, 0, tzinfo=UTC),
+            max_available_time=datetime(2026, 8, 3, 8, 30, tzinfo=UTC),
+        ),
+    )
+    requirement = _bare_requirement(as_of=as_of, years=(2020, 2026))
+
+    verdict = evaluate_readiness(requirement, partitions=(historical, with_hindsight))
+
+    assert verdict.state == "blocked"
+    assert [issue.code for issue in verdict.issues] == ["not_yet_knowable"]
+    # The detail must name the *late* instant, not the early one: a `min` that happened to
+    # block for some other reason would still report 2020 here.
+    assert "2026-08-03T08:30:00+00:00" in verdict.issues[0].detail
+
+    # The same two partitions, asked at an `as_of` past both, are ready -- so the block above
+    # is the clock check firing, not the multi-year shape being rejected on principle.
+    later = _bare_requirement(as_of=datetime(2026, 9, 1, tzinfo=UTC), years=(2020, 2026))
+    assert evaluate_readiness(later, partitions=(historical, with_hindsight)).state == "ready"
+
+
+def test_not_yet_knowable_is_partition_level_so_an_as_of_inside_a_year_reads_nothing() -> None:
+    """**Disclosed consequence, not a defect.** `not_yet_knowable` compares one number per
+    partition (`max_available_time`) against `as_of`, and `panel_ingest`'s session census
+    refuses a partition missing any session the calendar reports open -- so the partitions this
+    plane produces are whole calendar years and that number is in December. A 2024 partition is
+    therefore refused for *every* `as_of` inside 2024, including one in December that
+    legitimately could see almost all of it. The earliest `as_of` at which a full-year
+    partition can be read through `assess_readiness`/`read_if_ready` is after its own last
+    availability instant, in practice the following January.
+
+    This is deliberate and it is the fail-closed direction: the alternative, a row-level
+    filter, means the readiness verdict would have to promise something about rows it has not
+    filtered, and `evaluate_readiness` is a pure function over catalog metadata with no access
+    to rows at all.
+
+    It is disclosed here because it is a hard constraint on the phases that consume this
+    plane, and nothing else in the tree says so:
+
+    - **P3 factor computation** cannot compute an in-sample factor at a mid-year `as_of`
+      through the supported read path. Any factor evaluated at, say, 2024-06-30 has to be
+      built from partitions whose years are already closed.
+    - **P4 walk-forward** cannot step an `as_of` through a year and read that same year's
+      partition at each step; a walk-forward inside one year sees `blocked` at every step.
+
+    Splitting the judgement into a partition-level gate plus a row-level `available_time`
+    filter is the obvious alternative and is explicitly **not** done here -- it is P2's first
+    design decision, and it changes what `read_if_ready` promises, not just what it refuses.
+    """
+    as_of = datetime(2024, 6, 30, 12, 0, tzinfo=UTC)
+    whole_year = PartitionState(
+        year=2024,
+        registered=True,
+        file_present=True,
+        file_readable=True,
+        content_hash=CONTENT_HASH,
+        coverage=_coverage(
+            year=2024,
+            dates=(date(2024, 1, 2), date(2024, 12, 30)),
+            last_event_time=datetime(2024, 12, 30, 7, 0, tzinfo=UTC),
+            max_available_time=datetime(2024, 12, 30, 8, 30, tzinfo=UTC),
+        ),
+    )
+
+    midyear = evaluate_readiness(
+        _bare_requirement(as_of=as_of, years=(2024,)), partitions=(whole_year,)
+    )
+
+    assert midyear.state == "blocked"
+    assert [issue.code for issue in midyear.issues] == ["not_yet_knowable"]
+
+    # Not "the data is wrong" -- the very same partition is ready once `as_of` clears its
+    # newest availability instant. The refusal is about the granularity of the judgement.
+    after = evaluate_readiness(
+        _bare_requirement(as_of=datetime(2025, 1, 1, tzinfo=UTC), years=(2024,)),
+        partitions=(whole_year,),
+    )
+    assert after.state == "ready"
+
+
 def test_a_missing_required_field_blocks_and_names_the_field() -> None:
     requirement = _requirement(required_fields=("close", "vol", "amount"))
 
