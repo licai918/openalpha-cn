@@ -6,6 +6,7 @@ from typing import Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
 from openalpha_cn.domain._identity import stable_model_id
+from openalpha_cn.domain.horizon import HORIZON_PATTERN
 from openalpha_cn.domain.time import ensure_aware
 from openalpha_cn.domain.versioning import ContractVersions
 
@@ -21,7 +22,16 @@ class SignalFrame(BaseModel):
     direction: Literal["bullish", "bearish", "neutral", "abstain"]
     strength: float = Field(ge=-1, le=1)
     confidence: float = Field(ge=0, le=1)
-    horizon: str = Field(min_length=1, max_length=64)
+    horizon: str = Field(pattern=HORIZON_PATTERN)
+    """How far ahead this conclusion reaches, as `<count><unit>` -- see `domain/horizon.py`.
+
+    Constrained rather than normalised, and it stays a `str` on purpose. `signal_id` hashes the
+    canonical JSON of these fields, so replacing the type or rewriting an accepted value would
+    move the identity of every stored signal; restricting the *domain* moves none, because
+    every value that was already well formed serialises to the bytes it always did. The
+    previous `min_length=1, max_length=64` admitted `'whenever'`, which nothing downstream
+    could turn into a return window -- which is the gap `V2-P1-017` closes.
+    """
     evidence_ids: tuple[str, ...] = ()
     confirmation_conditions: tuple[str, ...] = ()
     invalidation_conditions: tuple[str, ...] = ()

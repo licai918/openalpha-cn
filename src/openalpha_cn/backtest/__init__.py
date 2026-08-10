@@ -15,7 +15,11 @@ from openalpha_cn.backtest.portfolio import (
     PortfolioTransition,
 )
 from openalpha_cn.backtest.replay import ReplayCorpus, ReplayReport, ReplayRunner
-from openalpha_cn.backtest.validation import OutcomeObservation, OutcomeValidator
+from openalpha_cn.backtest.validation import (
+    OutcomeObservation,
+    OutcomeValidator,
+    observation_from_label,
+)
 
 __all__ = [
     "AShareExecutionPolicy",
@@ -33,4 +37,5 @@ __all__ = [
     "ReplayCorpus",
     "ReplayReport",
     "ReplayRunner",
+    "observation_from_label",
 ]

@@ -4,8 +4,8 @@
 
 ## 对账结论
 
-- 功能总数: 123
-- 当前真实完成: 118 (95.93%)
+- 功能总数: 124
+- 当前真实完成: 119 (95.97%)
 - `UNREVIEWED=0`
 - `UNKNOWN=0`
 - `legacy_acceptance_rows=86` (历史散文验收、尚未绑定为可执行 pytest/CI 断言)
@@ -18,7 +18,7 @@
 | `DEFERRED` | 1 |
 | `ENHANCED_REPLACEMENT` | 20 |
 | `EXCLUDED` | 4 |
-| `NATIVE_COMPLETE` | 97 |
+| `NATIVE_COMPLETE` | 98 |
 
 ## 功能明细
 
@@ -147,6 +147,7 @@
 | `OA-PANEL-014` | panel | Panel fixture generator driven by a measured shape table | `NATIVE_COMPLETE` | `tests/panel_fixtures.py#PANEL_SHAPES;tests/panel_fixtures.py#PanelShape;tests/panel_fixtures.py#GeneratedPanel;tests/panel_fixtures.py#generate_panel;tests/panel_fixtures.py#write_generated_panel;tests/panel_fixtures.py#STORED_DATASETS` | `tests/unit/test_panel_fixtures.py;tests/integration/panel/test_panel_shape_coverage.py` | `pytest` | `tests/unit/test_panel_fixtures.py::test_no_detector_answers_from_the_request_instead_of_from_the_artifact` |
 | `OA-PANEL-015` | panel | CLI face for building, examining and gating the panel plane | `NATIVE_COMPLETE` | `src/openalpha_cn/cli.py#PanelExit;src/openalpha_cn/cli.py#CLICK_USAGE_EXIT_CODE;src/openalpha_cn/cli.py#PANEL_BUILD_TARGETS;src/openalpha_cn/cli.py#PANEL_BUILD_COUPLED_DATASETS;src/openalpha_cn/cli.py#panel_build;src/openalpha_cn/cli.py#panel_doctor_command;src/openalpha_cn/cli.py#data_check;src/openalpha_cn/panel_view.py#health_report_payload;src/openalpha_cn/panel_view.py#clearance_payload` | `tests/integration/test_cli_panel.py;tests/unit/test_cli_panel_rules.py` | `pytest` | `tests/integration/test_cli_panel.py::test_data_check_blocks_with_a_non_zero_exit_when_no_session_corroborates_the_factors` |
 | `OA-PANEL-016` | panel | Data-readiness REST and SDK face with one rendering behind both | `NATIVE_COMPLETE` | `src/openalpha_cn/panel_view.py#panel_store;src/openalpha_cn/panel_view.py#stored_calendar;src/openalpha_cn/panel_view.py#panel_request;src/openalpha_cn/panel_view.py#dataset_readiness;src/openalpha_cn/panel_view.py#readiness_payload;src/openalpha_cn/panel_view.py#health_report_payload;src/openalpha_cn/panel_view.py#clearance_payload;src/openalpha_cn/panel_view.py#PanelRequestError;src/openalpha_cn/panel_view.py#PanelUnreadableError;src/openalpha_cn/api/app.py#PANEL_HTTP_STATUS;src/openalpha_cn/api/app.py#_panel_query;src/openalpha_cn/sdk.py#panel_readiness;src/openalpha_cn/sdk.py#panel_health;src/openalpha_cn/sdk.py#panel_clearance;src/openalpha_cn/panel_view.py#PanelViewError;src/openalpha_cn/api/app.py#_panel_refusal;src/openalpha_cn/cli.py#_panel_request` | `tests/integration/test_panel_interfaces.py;tests/unit/test_panel_view.py;tests/unit/test_panel_ingest_import_isolation.py` | `pytest` | `tests/integration/test_panel_interfaces.py::test_sdk_and_rest_refuse_the_same_request_and_the_refusal_is_not_a_success` |
+| `OA-BT-012` | backtest | Strongly typed label contract from prediction day to tradability | `NATIVE_COMPLETE` | `src/openalpha_cn/domain/horizon.py#HORIZON_PATTERN;src/openalpha_cn/domain/horizon.py#HorizonUnit;src/openalpha_cn/domain/horizon.py#ResearchHorizon;src/openalpha_cn/domain/horizon.py#parse_horizon;src/openalpha_cn/domain/labels.py#LabelWindow;src/openalpha_cn/domain/labels.py#WindowReturn;src/openalpha_cn/domain/labels.py#OutcomeLabel;src/openalpha_cn/domain/labels.py#LabelRefusal;src/openalpha_cn/domain/labels.py#LABEL_REFUSAL_CODES;src/openalpha_cn/domain/labels.py#KNOWN_LABEL_LIMITATIONS;src/openalpha_cn/domain/labels.py#build_label_window;src/openalpha_cn/domain/labels.py#window_return;src/openalpha_cn/domain/labels.py#label_outcome;src/openalpha_cn/backtest/validation.py#observation_from_label;src/openalpha_cn/domain/signal.py#SignalFrame` | `tests/unit/domain/test_labels.py;tests/unit/domain/test_horizon.py;tests/unit/backtest/test_observation_from_label.py;tests/integration/panel/test_label_contract.py` | `pytest` | `tests/unit/domain/test_labels.py::test_the_label_return_is_right_across_an_ex_rights_day_where_the_naive_path_flips_sign` |
 
 ## 边界
 

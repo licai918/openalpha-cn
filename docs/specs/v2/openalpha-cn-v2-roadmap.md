@@ -465,6 +465,16 @@ Task 12 建多版本读取时发现并经评审实测验证：**`schema_version`
 P4 必须写一次**显式的身份重写迁移**：读旧行 → 升版 → 重算 ID → 同事务内更新所有引用它的行。
 这不是 Task 12 的范围（Task 12 只建机制），但没有这条记录，P4 会踩。
 
+**更正（2026-08，`V2-P1-017` 落地后）**：上面点名的「horizon 改动经 `SignalFrame`」这一项
+**没有**发生身份变更，因此不进入 P4 的重写迁移清单。`V2-P1-017` 把 `horizon` 从
+`Field(min_length=1, max_length=64)` **收窄**为 `Field(pattern=HORIZON_PATTERN)`
+（`^[1-9][0-9]{0,2}[dwmy]$`，见 `domain/horizon.py`），既没有 bump `schema_version`，
+也没有对任何已接受的取值做归一化 —— 收窄一个字段的**定义域**不改变仍然合法的取值的
+canonical JSON，所以 `5d`/`10d`/`3m` 三个本仓在用的字面量逐字节不变，`signal_id` 一个都没动
+（`tests/unit/domain/test_horizon.py::test_constraining_the_horizon_field_did_not_restate_any_accepted_value`）。
+唯一对外可见的变化是 `docs/api/schemas/signal-frame-v1.json` 现在发布了这条 pattern。
+本节的结论对 attribution 经 `ValidationResult` 的那一项仍然成立。
+
 ## 9. `config_digest` 与 `random_seed` 不进入任何内容寻址身份（2026-08 实测更正）
 
 Task 17 的评审驱动真实 `run_cycle`，固定时钟与 `run_id`，逐个变量单独变更后读 `decision_id`：
