@@ -12,6 +12,12 @@ same six mutants die against a panel built *only* out of `PANEL_SHAPES` -- so th
 property of the generator and survives a later migration off the hand-written builders, and so
 a seventh dataset arriving in P2 inherits it instead of rediscovering it.
 
+Since `V2-P2-000` it also carries three things the six mutants do not need and P2 does: the
+`PanelShape.provokes` table checked in both directions against a real `panel_health_report`
+(including the two shapes that make a generated panel *unhealthy*, one `warning` and one
+`blocking`), the round trips that justify the generator hand-writing `namechange`'s and
+`index_member_all`'s panel encodings, and `write_generated_panel`'s dataset selection.
+
 The six, each with the mutant it kills:
 
 - `industry.session_adjacent_handover` + `industry.coverage_hole`
@@ -44,8 +50,11 @@ from panel_fixtures import (
     EARLIER_PERIOD,
     INDEX_CODE,
     LATE_ANNOUNCEMENT,
+    PANEL_SHAPES,
+    UNCORROBORATED_RESTATEMENT,
     YEAR,
     GeneratedPanel,
+    PanelFixtureError,
     generate_panel,
     write_generated_panel,
 )
@@ -61,11 +70,29 @@ from openalpha_cn.domain.industry_classification import (
 )
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_doctor import PanelHealthReport, panel_health_report
+from openalpha_cn.panel_ingest import load_industry_histories, load_name_histories
 
-HEALTHY_SHAPES = (
+HEALTHY_SHAPES = tuple(shape_id for shape_id, shape in PANEL_SHAPES.items() if not shape.provokes)
+"""Every shape that is a form of *sound* data rather than an injected defect.
+
+Derived from `PanelShape.provokes` rather than listed, because a hand-list is a second place
+the same judgement is recorded and the two drift: the previous one carried a reason -- "the two
+industry shapes and the two `name_history` shapes carry no stored dataset at all" -- that
+stopped being true the moment `namechange` and `index_member_all` gained partitions, and
+nothing failed. `EXPECTED_HEALTHY_SHAPES` below pins what the derivation currently yields, so
+the membership is still a visible diff; what is gone is the possibility of the two disagreeing.
+
+`calendar.multi_session_recess` is in for the same reason `mid_window_weekday_closure` is: a
+closed weekday the calendar agrees is closed is sound data, and the session census that would
+otherwise refuse the short partition reads the same calendar.
+"""
+
+EXPECTED_HEALTHY_SHAPES = (
     "calendar.mid_window_weekday_closure",
     "calendar.multi_session_recess",
     "universe.delisted_security",
+    "name_history.announcement_precedes_effect",
+    "name_history.reform_prefixed_special_treatment",
     "adjustment.step_down",
     "daily.close_moves_between_sessions",
     "daily.ex_rights_session",
@@ -74,25 +101,23 @@ HEALTHY_SHAPES = (
     "suspension.resumption",
     "price_limits.limit_free_sentinel",
     "index.published_weights_do_not_sum_to_exactly_one_hundred",
-    "financials.second_statement_dataset",
     "financials.earlier_period_announced_later",
+    "financials.second_statement_dataset",
+    "financials.statement_dataset_without_a_revision_label",
+    "industry.session_adjacent_handover",
+    "industry.coverage_hole",
 )
-"""Every shape that is a form of *sound* data rather than an injected defect: thirteen of the
-nineteen, and the six left out are left out for two stated reasons rather than by omission.
+"""Eighteen of the twenty-two, in table order. The four left out, and why:
 
+- `daily.uncorroborated_factor_step` is a `warning` and
+  `financials.announced_after_the_as_of` is a `blocking` -- the two shapes that exist precisely
+  so a generated panel can be unhealthy, which is what `V2-P2`'s nine injection issues need.
 - `financials.same_day_duplicate_versions` and `financials.three_versions_of_one_key` produce a
   real `ambiguous_filing` **notice**, so a panel carrying them is still clean but no longer
   finding-free -- and the point of the healthy case is that a shape-rich panel produces
   **nothing at all** to report. `financials.earlier_period_announced_later` is *not* one of
   them: an older period re-announced later is ordinary filing behaviour and the doctor has
-  nothing to say about it, so it belongs here.
-- The two industry shapes and the two `name_history` shapes carry no stored dataset at all:
-  `index_member_all` and `namechange` are handed back as domain carriers rather than as panel
-  batches (see `panel_fixtures.STORED_DATASETS`), so there is nothing for the doctor to read.
-
-`calendar.multi_session_recess` is in for the same reason `mid_window_weekday_closure` is: a
-closed weekday the calendar agrees is closed is sound data, and the session census that would
-otherwise refuse the short partition reads the same calendar.
+  nothing to say about it, so it belongs above.
 """
 
 
@@ -146,6 +171,262 @@ def test_the_shapeless_panel_is_storable_too_so_the_comparison_is_like_for_like(
 
     assert report.findings == ()
     assert report.is_clean
+
+
+def test_the_healthy_set_is_the_shapes_that_claim_nothing_and_is_still_a_visible_list() -> None:
+    assert HEALTHY_SHAPES == EXPECTED_HEALTHY_SHAPES
+    assert set(HEALTHY_SHAPES) | {
+        shape_id for shape_id, shape in PANEL_SHAPES.items() if shape.provokes
+    } == set(PANEL_SHAPES)
+
+
+# --- the provocation table, checked in both directions against a real report -----------------
+
+
+@pytest.mark.parametrize("shape_id", sorted(PANEL_SHAPES))
+def test_a_shape_provokes_exactly_the_health_codes_it_declares(
+    shape_id: str, tmp_path: Path
+) -> None:
+    """The half of `PANEL_SHAPES` a detector cannot see.
+
+    A detector answers "is the form in the artifact"; `provokes` answers "and what does the
+    product say about it", which is a different question with a different failure mode. Until
+    `V2-P2-000` every shape wrote a panel the doctor was silent about, so the entire
+    "must report unhealthy" half of `panel_doctor` and `panel_gate` was reachable only by
+    unlinking a Parquet file or asking about a year that was never built -- neither of which is
+    a defect of the *data*, which is what the nine injection issues are about.
+
+    Both directions are asserted by the same equality: a shape declaring `()` that starts
+    complaining fails here, and so does a shape whose declared code stops arriving. Sorted
+    rather than positional because the report's order is not part of anything's contract."""
+    panel = generate_panel(shapes=(shape_id,))
+
+    store, datasets = _stored(tmp_path, panel)
+    report = _report(store, panel, datasets)
+
+    assert sorted({finding.code for finding in report.findings}) == sorted(
+        PANEL_SHAPES[shape_id].provokes
+    )
+
+
+def test_the_two_defect_shapes_are_the_ones_that_make_a_generated_panel_unhealthy(
+    tmp_path: Path,
+) -> None:
+    """`is_clean` is "no blocking and no warning", so the notice-producing shapes are not
+    enough: a generator whose worst output is a notice cannot exercise a single branch that
+    exists to refuse. One shape reaches each severity, and this pins which."""
+    severities: dict[str, dict[str, int]] = {}
+    for shape_id in ("daily.uncorroborated_factor_step", "financials.announced_after_the_as_of"):
+        panel = generate_panel(shapes=(shape_id,))
+        store, datasets = _stored(tmp_path / shape_id, panel)
+        report = _report(store, panel, datasets)
+        counts: dict[str, int] = {}
+        for finding in report.findings:
+            counts[finding.severity] = counts.get(finding.severity, 0) + 1
+        severities[shape_id] = counts
+        assert report.is_clean is False
+
+    assert severities == {
+        "daily.uncorroborated_factor_step": {"warning": 1},
+        "financials.announced_after_the_as_of": {"blocking": 1, "warning": 1},
+    }
+
+
+MINIMUM_RETURN_PATH_GAP = 0.0327
+"""3.27 percentage points: `V2-P1-006`'s Critical, `+2.742251%` against `-0.530973%`.
+
+The floor the generated disagreement has to clear, in return space rather than in yuan of
+`pre_close`, because "the two paths disagree" and "the two paths disagree by enough to matter"
+are the two statements this fixture has to make and only the first is checkable from the shape
+table."""
+
+
+def test_the_unrecorded_factor_step_is_the_v2_p1_006_critical_and_not_a_rounding_gap(
+    tmp_path: Path,
+) -> None:
+    """The finding has to come from a disagreement big enough to move an answer, not from one
+    sitting a hair outside `pre_close_tolerance`. `V2-P1-006`'s Critical answered -0.530973%
+    against a true +2.742251% -- 3.27 percentage points and the wrong sign -- and a fixture
+    whose two paths differed by a tick would produce the same *code* while proving nothing
+    about what the code is for. This is `SESSION_STEP`'s lesson applied to the second constant
+    whose magnitude the shape table cannot see: `_has_uncorroborated_factor_step` only asks
+    whether the gap clears half a published tick, so `UNCORROBORATED_RESTATEMENT` could be
+    shrunk to 1.0005 with every shape assertion still green and the finding gone."""
+    panel = generate_panel(shapes=("daily.uncorroborated_factor_step",))
+    code, session = panel.securities[2], panel.sessions[-1]
+    closes = {
+        (str(subject), str(day)): float(close)  # type: ignore[arg-type]
+        for subject, day, close in panel.rows_of("daily", "trade_date", "close")
+    }
+    pre_closes = {
+        (str(subject), str(day)): float(value)  # type: ignore[arg-type]
+        for subject, day, value in panel.rows_of("daily", "trade_date", "pre_close")
+    }
+    factors = {
+        (str(subject), str(day)): float(value)  # type: ignore[arg-type]
+        for subject, day, value in panel.rows_of("adj_factor", "factor_date", "adj_factor")
+    }
+    previous = panel.sessions[-2]
+
+    store, datasets = _stored(tmp_path, panel)
+    report = _report(store, panel, datasets)
+
+    published_pre_close = pre_closes[(code, session.isoformat())]
+    implied_pre_close = closes[(code, previous.isoformat())]
+    close = closes[(code, session.isoformat())]
+    published_return = close / published_pre_close - 1.0
+    adjusted_return = close / implied_pre_close - 1.0
+    assert factors[(code, previous.isoformat())] == factors[(code, session.isoformat())]
+    assert abs(published_pre_close - implied_pre_close) > pre_close_tolerance(
+        implied_pre_close, factor=1.0, previous_factor=1.0
+    )
+    assert published_return == pytest.approx(UNCORROBORATED_RESTATEMENT - 1.0, abs=1e-9)
+    assert adjusted_return == pytest.approx(0.0, abs=1e-9)
+    assert abs(published_return - adjusted_return) >= MINIMUM_RETURN_PATH_GAP
+    (finding,) = report.findings_with_code("return_path_disagreement")
+    assert finding.severity == "warning"
+    assert finding.items == (code,)
+    assert finding.dates == (session,)
+
+
+def test_a_filing_announced_after_the_read_blocks_its_partition_and_nothing_else(
+    tmp_path: Path,
+) -> None:
+    """Roadmap section 11's constraint, met rather than worked around: the refusal has to be
+    attributable to the injected row, not to `not_yet_knowable`'s partition granularity. The
+    same partition at the same `as_of` is `ready` without the row, so the year is not simply
+    too young -- and every other dataset in the same panel stays `ready`, so the block is the
+    income partition's and not the read's."""
+    injected = generate_panel(shapes=("financials.announced_after_the_as_of",))
+    clean = generate_panel()
+
+    dirty_store, datasets = _stored(tmp_path / "injected", injected)
+    clean_store, _ = _stored(tmp_path / "clean", clean)
+    dirty = _report(dirty_store, injected, datasets)
+    healthy = _report(clean_store, clean, datasets)
+
+    assert (
+        max(available for available in injected.batch("income").timeline.available_time)
+        > injected.as_of
+    )
+    assert {health.dataset: health.readiness.state for health in healthy.datasets}["income"] == (
+        "ready"
+    )
+    assert {
+        health.dataset: health.readiness.state
+        for health in dirty.datasets
+        if health.readiness.state != "ready"
+    } == {"income": "blocked"}
+    (blocked,) = dirty.findings_with_code("not_yet_knowable")
+    assert blocked.severity == "blocking"
+    assert blocked.datasets == ("income",)
+
+
+# --- the two encodings the generator writes by hand, checked against the real decoders -------
+
+
+def test_the_generated_rename_rows_read_back_as_the_carriers_they_were_built_from(
+    tmp_path: Path,
+) -> None:
+    """`namechange` was left unstored on the grounds that its panel encoding is produced by the
+    provider's row splitting. It is not: `write_name_history`'s own docstring says this dataset
+    stays one row per record precisely *because* a rename's effective date is published in its
+    own announcement, so there is nothing to split. The encoding is a plain projection, and
+    this is the proof that the projection and `name_histories_from_panel_rows` agree."""
+    panel = generate_panel(
+        shapes=(
+            "name_history.announcement_precedes_effect",
+            "name_history.reform_prefixed_special_treatment",
+        )
+    )
+
+    store, _ = _stored(tmp_path, panel)
+    histories = load_name_histories(
+        store, years=(panel.year,), as_of=panel.as_of, max_staleness=None
+    )
+
+    assert set(histories) == set(panel.name_records)
+    assert {code: history.records for code, history in histories.items()} == {
+        code: tuple(sorted(records, key=lambda record: record.effective_from))
+        for code, records in panel.name_records.items()
+    }
+
+
+def test_a_closed_industry_interval_is_stored_as_two_rows_and_folds_back_into_one(
+    tmp_path: Path,
+) -> None:
+    """`index_member_all` is the one encoding here that really does split -- an opening row
+    dated at `industry_from` and a closing row dated at `industry_through`, because the two
+    ends became knowable at different instants. Writing it out is a second statement of the
+    provider's projection only if nothing checks it against the decoder; `_fold_split_rows`
+    lives in `domain/`, so this round trip is what makes it one statement.
+
+    The row count is asserted, not just the fold: a generator that emitted one row per
+    assignment would still read back correctly here while quietly making a 2026-01-09 hand-over
+    visible to a reader standing on 2026-01-02."""
+    panel = generate_panel(shapes=("industry.session_adjacent_handover", "industry.coverage_hole"))
+    closed = sum(
+        1
+        for group in panel.industry_assignments.values()
+        for assignment in group
+        if assignment.effective_through is not None
+    )
+    total = sum(len(group) for group in panel.industry_assignments.values())
+
+    store, _ = _stored(tmp_path, panel)
+    histories = load_industry_histories(
+        store, years=(panel.year,), as_of=panel.as_of, max_staleness=None
+    )
+
+    assert closed == 2
+    assert panel.batch("index_member_all").row_count == total + closed
+    assert {code: history.assignments for code, history in histories.items()} == {
+        code: tuple(sorted(group, key=lambda item: item.effective_from))
+        for code, group in panel.industry_assignments.items()
+    }
+
+
+# --- writing a subset, and refusing an incoherent one ----------------------------------------
+
+
+def test_a_named_subset_writes_only_those_datasets_in_the_same_order(tmp_path: Path) -> None:
+    """A test that reads one dataset paid for eleven before this, and a test asserting about a
+    fixed dataset list broke the day the generator learned to carry a twelfth."""
+    panel = generate_panel()
+    store = PanelStore(tmp_path / "panel")
+
+    stored = write_generated_panel(store, panel, datasets=("trade_cal", "stock_basic"))
+
+    assert stored == ("trade_cal", "stock_basic")
+    assert {
+        dataset: store.registered_years(dataset) for dataset in ("trade_cal", "stock_basic")
+    } == {"trade_cal": (YEAR,), "stock_basic": (YEAR,)}
+    assert {dataset: store.registered_years(dataset) for dataset in ("daily", "income")} == {
+        "daily": (),
+        "income": (),
+    }
+
+
+def test_writing_daily_without_the_halts_it_reads_back_is_refused_rather_than_answered(
+    tmp_path: Path,
+) -> None:
+    """`_refuse_unexplained_thin_sessions` reads `suspend_d` **out of the store**, so a
+    selection that omits it does not skip the guard -- it runs it against an empty corpus,
+    where every session has zero halts and the one withheld bar becomes unexplained. Refusing
+    is the difference between a waiver a caller asked for and one they fell into."""
+    panel = generate_panel()
+    store = PanelStore(tmp_path / "panel")
+
+    with pytest.raises(PanelFixtureError, match=r"halts=False"):
+        write_generated_panel(store, panel, datasets=("trade_cal", "daily", "daily_basic"))
+
+
+def test_a_dataset_the_panel_does_not_carry_is_refused_by_name(tmp_path: Path) -> None:
+    panel = generate_panel()
+    store = PanelStore(tmp_path / "panel")
+
+    with pytest.raises(PanelFixtureError, match=r"carries no \['cashflow'\] batch to write"):
+        write_generated_panel(store, panel, datasets=("trade_cal", "cashflow"))
 
 
 # --- gap 1: the band between "adjacent" and "seventeen years" --------------------------------

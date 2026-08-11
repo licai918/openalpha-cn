@@ -16,6 +16,15 @@ than as one test per shape:
 Each is a dict compared against a dict literal, for `panel_gate.GATE_CODE_BLOCKS`' reason: a
 shape that stops working shows up as a diff on its own line, and a shape added to the table
 without a working detector fails here rather than being waved through.
+
+A fourth, un-numbered guard sits at the bottom of the file:
+`test_a_detector_follows_the_stored_column_and_not_the_generators_intent` hand-edits one column
+of the shapeless panel *through* `ColumnarPanelBatch` and requires the answer to flip. It is
+the only one that proves a detector reads bytes rather than any generator-side state.
+
+Since `V2-P2-000` the table also carries `PanelShape.provokes` -- the health codes a shape
+makes a real report emit. This file checks the claims are spellable; whether they are *true*
+needs a store and lives in `tests/integration/panel/test_panel_shape_coverage.py`.
 """
 
 from __future__ import annotations
@@ -26,15 +35,26 @@ from pathlib import Path
 
 import pytest
 from panel_fixtures import (
+    AS_OF,
     EVERY_SHAPE,
+    EXCHANGE,
     PANEL_SHAPES,
+    STATEMENT_DATASETS,
     STORED_DATASETS,
+    YEAR,
     GeneratedPanel,
     PanelFixtureError,
     generate_panel,
 )
 
+from openalpha_cn.domain.financial_statements import (
+    DATASETS_WITH_REVISION_LABEL,
+    FINANCIAL_INDICATOR_DATASET,
+    FINANCIAL_STATEMENT_DATASETS,
+    INCOME_DATASET,
+)
 from openalpha_cn.domain.panel_batch import PanelColumn
+from openalpha_cn.panel_doctor import PANEL_HEALTH_CODES
 
 EXPECTED_SHAPE_IDS = (
     "adjustment.step_down",
@@ -43,9 +63,12 @@ EXPECTED_SHAPE_IDS = (
     "daily.bar_without_valuation",
     "daily.close_moves_between_sessions",
     "daily.ex_rights_session",
+    "daily.uncorroborated_factor_step",
+    "financials.announced_after_the_as_of",
     "financials.earlier_period_announced_later",
     "financials.same_day_duplicate_versions",
     "financials.second_statement_dataset",
+    "financials.statement_dataset_without_a_revision_label",
     "financials.three_versions_of_one_key",
     "index.published_weights_do_not_sum_to_exactly_one_hundred",
     "industry.coverage_hole",
@@ -62,6 +85,40 @@ EXPECTED_SHAPE_IDS = (
 Written as a literal rather than derived from `PANEL_SHAPES` so that adding a shape is a
 visible diff on this list too -- the same reason `tests/unit/test_panel_gate_rules.py` spells
 `GATE_CODE_BLOCKS` out instead of asserting a property of it.
+"""
+
+EXPECTED_PROVOCATIONS = {
+    "adjustment.step_down": (),
+    "calendar.mid_window_weekday_closure": (),
+    "calendar.multi_session_recess": (),
+    "daily.bar_without_valuation": (),
+    "daily.close_moves_between_sessions": (),
+    "daily.ex_rights_session": (),
+    "daily.uncorroborated_factor_step": ("return_path_disagreement",),
+    "financials.announced_after_the_as_of": ("not_yet_knowable", "check_unavailable"),
+    "financials.earlier_period_announced_later": (),
+    "financials.same_day_duplicate_versions": ("ambiguous_filing", "duplicate_versions"),
+    "financials.second_statement_dataset": (),
+    "financials.statement_dataset_without_a_revision_label": (),
+    "financials.three_versions_of_one_key": ("ambiguous_filing", "duplicate_versions"),
+    "index.published_weights_do_not_sum_to_exactly_one_hundred": (),
+    "industry.coverage_hole": (),
+    "industry.session_adjacent_handover": (),
+    "name_history.announcement_precedes_effect": (),
+    "name_history.reform_prefixed_special_treatment": (),
+    "price_limits.limit_free_sentinel": (),
+    "suspension.resumption": (),
+    "suspension.timed_interruption": (),
+    "universe.delisted_security": (),
+}
+"""What each shape claims a `panel_health_report` will say about it, spelled out here too.
+
+This file can only check the claim is *well formed* -- that every code named is one
+`panel_doctor` declares. Whether the shape really provokes it, and whether a shape claiming
+nothing really provokes nothing, needs a store and a report, and lives in
+`tests/integration/panel/test_panel_shape_coverage.py`. Both halves are required: without the
+second the table is a wish, and without the first a typo'd code would fail as "the report did
+not emit `retrun_path_disagreement`" rather than as "there is no such code".
 """
 
 
@@ -119,6 +176,42 @@ def test_every_measurement_cites_a_module_that_is_really_there() -> None:
         )
         for shape_id, shape in PANEL_SHAPES.items()
     } == {shape_id: (True, ()) for shape_id in EXPECTED_SHAPE_IDS}
+
+
+def test_every_declared_provocation_is_a_code_the_doctor_can_actually_emit() -> None:
+    """A shape may claim a finding, and the claim has to be spellable.
+
+    `PANEL_HEALTH_CODES` is the closed union of `evaluate_readiness`' codes and the doctor's
+    own, so a `provokes` entry outside it can never be emitted by anything and would make the
+    integration assertion fail for the wrong reason."""
+    assert {
+        shape_id: tuple(shape.provokes) for shape_id, shape in PANEL_SHAPES.items()
+    } == EXPECTED_PROVOCATIONS
+    assert {
+        code for shape in PANEL_SHAPES.values() for code in shape.provokes
+    } <= PANEL_HEALTH_CODES
+
+
+def test_the_four_statement_endpoints_are_the_domains_own_four() -> None:
+    """`financials.statement_dataset_without_a_revision_label` claims all four endpoints are
+    stored and exactly one of them carries no `update_flag`. Both halves are counts, so a fifth
+    endpoint arriving in `domain/financial_statements.py` has to fail here rather than leave
+    the shape quietly covering four fifths of its own claim."""
+    assert STATEMENT_DATASETS == FINANCIAL_STATEMENT_DATASETS
+    assert set(DATASETS_WITH_REVISION_LABEL) == set(STATEMENT_DATASETS) - {
+        FINANCIAL_INDICATOR_DATASET
+    }
+    assert set(STORED_DATASETS) & set(STATEMENT_DATASETS) == {INCOME_DATASET}
+
+
+def test_every_shape_that_claims_a_finding_names_a_dataset_the_finding_is_about() -> None:
+    """A provoking shape whose `datasets` did not overlap the report's request would produce
+    its finding only by accident of what else the panel holds."""
+    assert {
+        shape_id: bool(set(shape.datasets) & set(STORED_DATASETS))
+        for shape_id, shape in PANEL_SHAPES.items()
+        if shape.provokes
+    } == {shape_id: True for shape_id, codes in EXPECTED_PROVOCATIONS.items() if codes}
 
 
 def test_asking_for_a_shape_produces_a_panel_that_actually_carries_it() -> None:
@@ -187,6 +280,24 @@ def test_the_shapeless_panel_still_carries_every_dataset_the_writers_need() -> N
 
     assert tuple(sorted(shapeless.batches)) == tuple(sorted(STORED_DATASETS))
     assert shapeless.batch("suspend_d").row_count == 1
+
+
+def test_the_panel_carries_its_own_frame_and_not_only_its_rows() -> None:
+    """`YEAR`/`AS_OF`/`EXCHANGE` were importable beside the generator and absent from what it
+    returned, so every caller had to know which module a panel's partition year came from."""
+    panel = generate_panel()
+
+    assert (panel.year, panel.as_of, panel.exchange) == (YEAR, AS_OF, EXCHANGE)
+    assert panel.calendar().exchange == panel.exchange
+    assert {day.year for day in panel.sessions} == {panel.year}
+    assert (
+        max(
+            available
+            for batch in panel.batches.values()
+            for available in batch.timeline.available_time
+        )
+        <= panel.as_of
+    )
 
 
 def test_the_generator_reports_the_sessions_it_actually_left_open() -> None:

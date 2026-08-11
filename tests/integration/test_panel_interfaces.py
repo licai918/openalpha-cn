@@ -323,10 +323,12 @@ def test_sdk_and_rest_report_the_same_unreadable_panel(tmp_path: Path) -> None:
     """A real hole in the panel, not a fact about the request: the catalog still registers the
     `daily` partition and its Parquet file is gone.
 
-    None of `tests/panel_fixtures.py`'s nineteen shapes can produce a `blocking` or a `warning`
-    finding -- every one of them writes a panel the real `panel_ingest` writers accept, which
-    is what makes them fixtures -- so a defect of the *panel* has to be dug by hand. This is
-    the smallest one that is unambiguously the panel's fault and not the request's.
+    Two of `tests/panel_fixtures.py`'s shapes now do produce a `blocking` and a `warning`
+    (`V2-P2-000`), and this case is deliberately not rewritten onto them. Both of those are
+    defects the writers *accept* -- a factor series that disagrees with the prices, a filing
+    announced after the read -- and what this asserts is the other kind: the catalog still
+    registers the `daily` partition and its Parquet file is gone. A store that lost a file is
+    not a shape and never will be, so it stays dug by hand.
     """
     store = seed_panel(tmp_path)
     next((store.root / DAILY_DATASET / str(YEAR)).glob("*.parquet")).unlink()

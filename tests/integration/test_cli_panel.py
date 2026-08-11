@@ -973,14 +973,19 @@ def test_panel_doctor_human_output_omits_the_limitation_line_for_a_dataset_with_
 ) -> None:
     """`namechange` is the only one of the fifteen declared datasets whose module registers no
     structural limitation, so the count line has to be absent rather than reading
-    "INFO 0 known limitation(s)" -- and the branch that decides has to be reachable."""
+    "INFO 0 known limitation(s)" -- and the branch that decides has to be reachable.
+
+    It reads `READY` rather than `BLOCKED` since `V2-P2-000` gave the generator a `namechange`
+    partition, and that is the stronger form of the same assertion: a blocked dataset could
+    have been silent about limitations because the report never got as far as looking them up.
+    """
     seed_fixture_panel(tmp_path)
 
     result = read_side(["panel", "doctor"], tmp_path, datasets=("namechange",), sessions=())
 
-    assert result.exit_code == PanelExit.unhealthy
+    assert result.exit_code == PanelExit.ok
     assert "known limitation" not in result.stdout
-    assert "BLOCKED namechange" in result.stdout
+    assert "READY namechange" in result.stdout
 
 
 def test_panel_doctor_refuses_a_dataset_with_no_declared_cadence_as_a_bad_request(

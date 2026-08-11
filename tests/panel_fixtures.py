@@ -27,15 +27,30 @@ becomes a property of the generator, checkable in one place
 
 `generate_panel()` with no shapes builds the smallest panel the real writers accept: one price
 per security that never moves, one factor that never steps, one filing per security with one
-version, one industry assignment that never changes. **That is deliberately the fixture whose
-poverty this task exists to name.** It is here so every shape can be shown to be *absent* from
-it -- a detector that answers `True` on the shapeless panel is measuring nothing, and
-`tests/unit/test_panel_fixtures.py` fails it.
+version, one name that is never changed, one industry assignment that never changes. **That is
+deliberately the fixture whose poverty this task exists to name.** It is here so every shape
+can be shown to be *absent* from it -- a detector that answers `True` on the shapeless panel is
+measuring nothing, and `tests/unit/test_panel_fixtures.py` fails it.
 
 One thing the shapeless panel does carry is a single untimed `suspend_d` halt, with the bar and
 the valuation for that name and session withheld. `suspend_d` needs at least one row for the
 partition to exist at all, and an untimed halt with no bar is the only row shape that is not
 itself a defect. It is named here rather than filed as a shape for that reason.
+
+## A shape may be a defect, and it has to say so
+
+Every shape was a form of *sound* data until `V2-P2` needed one that was not. Nineteen shapes
+that all wrote panels the real writers accept and the doctor is silent about is what a fixture
+table should be -- and it left the whole "must report unhealthy" half of `panel_doctor` and
+`panel_gate` reachable only by digging a hole in the store by hand (`.unlink()` on a Parquet
+file) or by asking a question about a year that was never built. Neither is a defect of the
+*data*, which is what the nine `V2-P2` injection issues are about.
+
+So `PanelShape.provokes` names the health codes a shape makes the report emit, empty for the
+sound ones, and `tests/integration/panel/test_panel_shape_coverage.py` asserts the table in
+both directions against a real `panel_health_report`. Two shapes carry a `warning` and a
+`blocking` between them: `daily.uncorroborated_factor_step` and
+`financials.announced_after_the_as_of`.
 
 ## What a shape is allowed to imply
 
@@ -88,17 +103,37 @@ from openalpha_cn.domain.daily_prices import (
     MAX_PRE_CLOSE_DISAGREEMENT,
 )
 from openalpha_cn.domain.financial_statements import (
+    ANNOUNCEMENT_DATE_COLUMN,
+    BALANCE_SHEET_DATASET,
     CASH_FLOW_DATASET,
+    DATASETS_WITH_REVISION_LABEL,
+    FINANCIAL_INDICATOR_DATASET,
+    FIRST_ANNOUNCEMENT_COLUMN,
     INCOME_DATASET,
+    REPORT_PERIOD_COLUMN,
+    REVISION_LABEL_COLUMN,
     STATEMENT_DATA_COLUMNS,
     ReportRow,
 )
 from openalpha_cn.domain.index_membership import INDEX_WEIGHT_DATASET
 from openalpha_cn.domain.industry_classification import (
+    INDUSTRY_FROM_COLUMN,
+    INDUSTRY_L1_COLUMN,
+    INDUSTRY_L2_COLUMN,
+    INDUSTRY_L3_COLUMN,
     INDUSTRY_MEMBERSHIP_DATASET,
+    INDUSTRY_THROUGH_COLUMN,
     IndustryAssignment,
 )
-from openalpha_cn.domain.name_history import NAMECHANGE_DATASET, NameRecord, RiskWarning
+from openalpha_cn.domain.name_history import (
+    NAME_ANNOUNCEMENT_COLUMN,
+    NAME_COLUMN,
+    NAME_EFFECTIVE_COLUMN,
+    NAME_REASON_COLUMN,
+    NAMECHANGE_DATASET,
+    NameRecord,
+    RiskWarning,
+)
 from openalpha_cn.domain.panel_batch import (
     ColumnarPanelBatch,
     PanelColumn,
@@ -127,6 +162,8 @@ from openalpha_cn.panel_ingest import (
     write_daily_panel,
     write_financial_statements,
     write_index_weights,
+    write_industry_memberships,
+    write_name_history,
     write_price_limits,
     write_stock_universe,
     write_suspensions,
@@ -225,10 +262,41 @@ close, and to be at least the 0.06 the shape's own `measurement` records for
 INCOME_COLUMNS: Final[tuple[str, ...]] = STATEMENT_DATA_COLUMNS[INCOME_DATASET]
 CASHFLOW_COLUMNS: Final[tuple[str, ...]] = STATEMENT_DATA_COLUMNS[CASH_FLOW_DATASET]
 
+STATEMENT_DATASETS: Final[tuple[str, ...]] = (
+    INCOME_DATASET,
+    BALANCE_SHEET_DATASET,
+    CASH_FLOW_DATASET,
+    FINANCIAL_INDICATOR_DATASET,
+)
+"""The four statement endpoints, in `FINANCIAL_STATEMENT_DATASETS`' order.
+
+Restated rather than imported, and reconciled against the domain's own tuple in
+`tests/unit/test_panel_fixtures.py::test_the_four_statement_endpoints_are_the_domains_own_four`.
+`financials.statement_dataset_without_a_revision_label` claims something about *four* endpoints
+-- all four stored, exactly one of them label-less -- so a generator that silently followed the
+domain to a fifth would keep answering `True` while covering four fifths of it. The
+reconciliation is what makes the restatement a pin rather than a copy.
+"""
+
+BALANCE_SHEET_COLUMNS: Final[tuple[str, ...]] = STATEMENT_DATA_COLUMNS[BALANCE_SHEET_DATASET]
+FINANCIAL_INDICATOR_COLUMNS: Final[tuple[str, ...]] = STATEMENT_DATA_COLUMNS[
+    FINANCIAL_INDICATOR_DATASET
+]
+
 BASE_PERIOD: Final[date] = date(2025, 9, 30)
 EARLIER_PERIOD: Final[date] = date(2025, 6, 30)
 BASE_ANNOUNCEMENT: Final[date] = date(2026, 1, 5)
 LATE_ANNOUNCEMENT: Final[date] = date(2026, 1, 12)
+FUTURE_ANNOUNCEMENT: Final[date] = date(2026, 1, 20)
+"""Three days after `AS_OF`, and still inside the panel's own partition year.
+
+Both halves are load-bearing. After `AS_OF` is what makes the row unknowable to the read;
+inside 2026 is what keeps the refusal attributable to the row rather than to the granularity
+of the check -- roadmap section 11 records that `not_yet_knowable` is decided per partition and
+a partition is a year, so an `as_of` that simply predates a whole year's worth of data is
+blocked for a reason that has nothing to do with anything injected. Here the same partition at
+the same `as_of` is `ready` without this row and `blocked` with it.
+"""
 
 DAILY_BASIC_EXTRA_COLUMNS: Final[tuple[str, ...]] = (
     "turnover_rate",
@@ -276,9 +344,21 @@ class GeneratedPanel:
     batches: Mapping[str, ColumnarPanelBatch]
     name_records: Mapping[str, tuple[NameRecord, ...]]
     industry_assignments: Mapping[str, tuple[IndustryAssignment, ...]]
+    year: int = YEAR
+    as_of: datetime = AS_OF
+    exchange: str = EXCHANGE
+    """The frame, carried on the panel rather than only importable beside it.
+
+    `YEAR`, `AS_OF` and `EXCHANGE` were module constants a caller had to import separately, so
+    every reader of a panel had to know which module its partition year came from -- and a
+    second frame arriving later (a two-year panel, a second exchange) would have had to change
+    every call site rather than one object. They are defaulted from the constants, not
+    duplicated: `generate_panel` never passes them, and `dataclasses.replace` on a panel keeps
+    whatever the panel already carried.
+    """
 
     def calendar(self) -> TradingCalendar:
-        return build_trading_calendar(EXCHANGE, self.calendar_days)
+        return build_trading_calendar(self.exchange, self.calendar_days)
 
     def batch(self, dataset: str) -> ColumnarPanelBatch:
         """The batch for `dataset`, or a refusal naming what is stored.
@@ -321,10 +401,11 @@ class GeneratedPanel:
         """
         value_columns = STATEMENT_DATA_COLUMNS[dataset]
         values = {name: self.column(dataset, name) for name in value_columns}
-        periods = self.column(dataset, "report_period")
-        announcements = self.column(dataset, "ann_date")
-        first = self.column(dataset, "f_ann_date")
-        labels = self.column(dataset, "update_flag")
+        periods = self.column(dataset, REPORT_PERIOD_COLUMN)
+        announcements = self.column(dataset, ANNOUNCEMENT_DATE_COLUMN)
+        labelled = dataset in DATASETS_WITH_REVISION_LABEL
+        first = self.column(dataset, FIRST_ANNOUNCEMENT_COLUMN) if labelled else ()
+        labels = self.column(dataset, REVISION_LABEL_COLUMN) if labelled else ()
         rows: dict[str, list[ReportRow]] = {}
         for index, subject in enumerate(self.batch(dataset).subjects):
             rows.setdefault(subject, []).append(
@@ -332,8 +413,8 @@ class GeneratedPanel:
                     period=date.fromisoformat(str(periods[index])),
                     announced_on=date.fromisoformat(str(announcements[index])),
                     values={name: float(column[index]) for name, column in values.items()},  # type: ignore[arg-type]
-                    first_announced_on=date.fromisoformat(str(first[index])),
-                    revision_label=str(labels[index]),
+                    first_announced_on=date.fromisoformat(str(first[index])) if labelled else None,
+                    revision_label=str(labels[index]) if labelled else None,
                 )
             )
         return MappingProxyType({code: tuple(group) for code, group in rows.items()})
@@ -357,6 +438,17 @@ class PanelShape:
     summary: str
     measurement: str
     detect: Callable[[GeneratedPanel], bool]
+    provokes: tuple[str, ...] = ()
+    """The `panel_doctor` codes a panel carrying this shape and nothing else reports.
+
+    Empty for a shape that is a form of *sound* data, which is what every shape was until
+    `V2-P2-000`. It is stated rather than left to each test because the two useful questions
+    about a fixture -- "does asking for this produce a clean panel?" and "does asking for this
+    produce exactly this complaint?" -- are the same question with a different answer, and a
+    table is the only place a reviewer can total them up. `test_panel_shape_coverage.py`
+    asserts both directions against the real report, so a code named here that the doctor does
+    not emit fails, and so does a shape declaring `()` that turns out to complain.
+    """
 
 
 def _has_mid_window_weekday_closure(panel: GeneratedPanel) -> bool:
@@ -447,6 +539,38 @@ def _has_ex_rights_session(panel: GeneratedPanel) -> bool:
         if abs(float(pre_close) - closes[code][previous]) > MAX_PRE_CLOSE_DISAGREEMENT / 2:  # type: ignore[arg-type]
             return True
     return False
+
+
+def _has_uncorroborated_factor_step(panel: GeneratedPanel) -> bool:
+    """A restated `pre_close` whose factor series did **not** move with it.
+
+    Exactly the clause `_has_ex_rights_session` excludes, and it is the panel's only reachable
+    `return_path_disagreement`: the published return and the factor-adjusted one then answer
+    different numbers for the same session, and neither can be trusted.
+    """
+    factors = _factor_series(panel)
+    closes = _close_series(panel, DAILY_DATASET)
+    for subject, day, pre_close in panel.rows_of(DAILY_DATASET, "trade_date", "pre_close"):
+        code, session = str(subject), str(day)
+        steps = dict(factors.get(code, []))
+        earlier = [other for other in sorted(closes.get(code, {})) if other < session]
+        if not earlier or session not in steps:
+            continue
+        previous = earlier[-1]
+        if steps.get(previous) != steps[session]:
+            continue
+        if abs(float(pre_close) - closes[code][previous]) > MAX_PRE_CLOSE_DISAGREEMENT / 2:  # type: ignore[arg-type]
+            return True
+    return False
+
+
+def _has_disclosure_after_the_as_of(panel: GeneratedPanel) -> bool:
+    """A stored row that had not become knowable by the panel's own `as_of`."""
+    return any(
+        available > panel.as_of
+        for batch in panel.batches.values()
+        for available in batch.timeline.available_time
+    )
 
 
 def _has_bar_without_valuation(panel: GeneratedPanel) -> bool:
@@ -569,6 +693,30 @@ def _has_second_statement_dataset(panel: GeneratedPanel) -> bool:
         return False
     stored = {column.name for column in panel.batch(CASH_FLOW_DATASET).columns}
     return bool(stored & set(CASHFLOW_COLUMNS)) and not (stored & set(INCOME_COLUMNS))
+
+
+def _labelled_statement_datasets(panel: GeneratedPanel) -> dict[str, bool]:
+    """Every stored statement dataset, mapped to whether it carries a revision label."""
+    return {
+        dataset: REVISION_LABEL_COLUMN in {column.name for column in panel.batch(dataset).columns}
+        for dataset in STATEMENT_DATASETS
+        if dataset in panel.batches
+    }
+
+
+def _has_statement_dataset_without_a_revision_label(panel: GeneratedPanel) -> bool:
+    """All four endpoints stored, and exactly the one that has no `update_flag` lacking it.
+
+    Both halves are the shape. A panel holding only `fina_indicator` would satisfy "a dataset
+    with no label" while proving nothing about the branch, because there would be no labelled
+    dataset for the reader to have taken the wrong turning towards.
+    """
+    labelled = _labelled_statement_datasets(panel)
+    if set(labelled) != set(STATEMENT_DATASETS):
+        return False
+    return {dataset for dataset, has_label in labelled.items() if not has_label} == {
+        FINANCIAL_INDICATOR_DATASET
+    }
 
 
 def _transitions(panel: GeneratedPanel) -> Iterable[tuple[IndustryAssignment, IndustryAssignment]]:
@@ -706,6 +854,37 @@ _SHAPES: Final[tuple[PanelShape, ...]] = (
         detect=_has_ex_rights_session,
     ),
     PanelShape(
+        shape_id="daily.uncorroborated_factor_step",
+        datasets=(DAILY_DATASET, ADJ_FACTOR_DATASET),
+        summary="a restated pre_close the adjustment factors do not corroborate",
+        measurement=(
+            "the `V2-P1-006` Critical, reproduced: with 000001.SZ's 2026-06-12 row present in "
+            "daily (close 11.24, pre_close 10.94 against 11.30) and the matching "
+            "134.5794 -> 139.008 step absent from adj_factor, the partition is `ready` with "
+            "`issues == []` and adjusted_return answers -0.530973% against a true +2.742251% "
+            "-- the sign is wrong, not just the magnitude (domain/daily_prices.py). Across the "
+            "market 28 of 5,351 securities' factors moved between 2023-12-29 and 2024-06-28, "
+            "so a fetch that drops one is a routine partial read rather than an exotic one"
+        ),
+        detect=_has_uncorroborated_factor_step,
+        provokes=("return_path_disagreement",),
+    ),
+    PanelShape(
+        shape_id="financials.announced_after_the_as_of",
+        datasets=(INCOME_DATASET,),
+        summary="a filing that had not been announced yet when the panel is read",
+        measurement=(
+            "the announcement clock is the only thing standing between a reader and next "
+            "quarter's numbers: income dates every row at its own ann_date, so 001278.SZ's "
+            "2018 annual report -- announced 2022-01-06 -- is invisible to every as_of before "
+            "that day and lands in the 2022 partition (domain/financial_statements.py). A "
+            "corpus fetched on one day and read as of an earlier one is the ordinary case, "
+            "not a contrived one: `panel build` writes what it can see now"
+        ),
+        detect=_has_disclosure_after_the_as_of,
+        provokes=("not_yet_knowable", "check_unavailable"),
+    ),
+    PanelShape(
         shape_id="daily.bar_without_valuation",
         datasets=(DAILY_DATASET, DAILY_BASIC_DATASET),
         summary="a security with a daily bar and no daily_basic row that session",
@@ -772,6 +951,7 @@ _SHAPES: Final[tuple[PanelShape, ...]] = (
             "(53-security probe 2026-08-09, domain/financial_statements.py)"
         ),
         detect=_has_same_day_duplicate_versions,
+        provokes=("ambiguous_filing", "duplicate_versions"),
     ),
     PanelShape(
         shape_id="financials.three_versions_of_one_key",
@@ -789,6 +969,7 @@ _SHAPES: Final[tuple[PanelShape, ...]] = (
             "(live probe 2026-08-10, domain/financial_statements.py)"
         ),
         detect=_has_three_versions_of_one_key,
+        provokes=("ambiguous_filing", "duplicate_versions"),
     ),
     PanelShape(
         shape_id="financials.earlier_period_announced_later",
@@ -814,6 +995,26 @@ _SHAPES: Final[tuple[PanelShape, ...]] = (
             "over them from a read of the first one"
         ),
         detect=_has_second_statement_dataset,
+    ),
+    PanelShape(
+        shape_id="financials.statement_dataset_without_a_revision_label",
+        datasets=(
+            INCOME_DATASET,
+            BALANCE_SHEET_DATASET,
+            CASH_FLOW_DATASET,
+            FINANCIAL_INDICATOR_DATASET,
+        ),
+        summary="the fourth endpoint, which carries neither update_flag nor f_ann_date",
+        measurement=(
+            "three of the four endpoints carry update_flag and f_ann_date and fina_indicator "
+            "carries neither, which is why DATASETS_WITH_REVISION_LABEL is a declared tuple of "
+            "3 rather than a dataset-name test -- and it is the endpoint that needs them most: "
+            "2,671 of its 3,270 keys (81.7%) hold more than one row, against income's 633 of "
+            "3,201 (53-security probe 2026-08-09, domain/financial_statements.py). A fixture "
+            "storing only labelled datasets cannot tell a reader that branches on the label's "
+            "presence from one that assumes it"
+        ),
+        detect=_has_statement_dataset_without_a_revision_label,
     ),
     PanelShape(
         shape_id="industry.session_adjacent_handover",
@@ -889,13 +1090,23 @@ def _batch(
     event_time: Sequence[datetime],
     available_time: Sequence[datetime],
     revision_time: Sequence[datetime] | None = None,
+    fetched_at: datetime = AS_OF,
 ) -> ColumnarPanelBatch:
+    """One batch, fetched at `AS_OF` unless a shape needs a later fetch.
+
+    `fetched_at` is the whole mechanism behind `financials.announced_after_the_as_of`.
+    `ColumnarPanelBatch` refuses a row whose `available_time` is after its own `as_of`
+    (`domain/panel_batch.py::_check_visible_at_as_of`), so a row that is not yet knowable *at
+    the read's* `as_of` cannot be smuggled in by lying about the batch -- it has to be a batch
+    genuinely fetched later, which is what a real corpus built on Tuesday and queried as of
+    Friday-before is. The read's `as_of` stays `AS_OF`; only the fetch moves.
+    """
     return ColumnarPanelBatch(
         provider_id="tushare",
         dataset=dataset,
         kind=dataset,
-        as_of=AS_OF,
-        fetched_at=AS_OF,
+        as_of=fetched_at,
+        fetched_at=fetched_at,
         status="success",
         subjects=tuple(subjects),
         timeline=TimelineColumns(
@@ -1020,6 +1231,43 @@ def _close_of(
     return base + SESSION_STEP * sessions.index(day)
 
 
+UNCORROBORATED_RESTATEMENT: Final[float] = 1.05
+UNCORROBORATED_SECURITY_INDEX: Final[int] = 2
+"""`securities[2]`, on the panel's **last** session.
+
+The security index keeps this shape off `daily.ex_rights_session`'s `securities[0]` and
+`adjustment.step_down`'s `securities[1]`, so all three compose. The session is the last one
+because the three session-scoped cross-checks run only on the sessions the *request* names
+(`panel_gate.SESSION_SCOPED_CROSS_CHECKS`), and `panel.sessions[-1]` is the one a caller
+reaches for -- a defect on an unnamed session is invisible to the gate, which is a true fact
+about the gate and a useless place to put a fixture.
+"""
+
+
+def _published_factor_of(
+    code: str,
+    day: date,
+    *,
+    sessions: Sequence[date],
+    securities: Sequence[str],
+    shapes: frozenset[str],
+) -> float:
+    """The factor the *published* `pre_close` was restated by.
+
+    Equal to `_factor_of` everywhere except where `daily.uncorroborated_factor_step` pulls the
+    two apart on purpose -- which is the whole of that shape: `adj_factor` keeps saying nothing
+    happened while `daily` restates its previous close as though something did.
+    """
+    factor = _factor_of(code, day, sessions=sessions, securities=securities, shapes=shapes)
+    if (
+        "daily.uncorroborated_factor_step" in shapes
+        and code == securities[UNCORROBORATED_SECURITY_INDEX]
+        and day >= sessions[-1]
+    ):
+        return factor * UNCORROBORATED_RESTATEMENT
+    return factor
+
+
 def _pre_close_of(
     code: str,
     day: date,
@@ -1041,8 +1289,10 @@ def _pre_close_of(
             SESSION_STEP if "daily.close_moves_between_sessions" in shapes else 0.0
         )
     earlier = _close_of(code, previous, sessions=sessions, securities=securities, shapes=shapes)
-    factor = _factor_of(code, day, sessions=sessions, securities=securities, shapes=shapes)
-    previous_factor = _factor_of(
+    factor = _published_factor_of(
+        code, day, sessions=sessions, securities=securities, shapes=shapes
+    )
+    previous_factor = _published_factor_of(
         code, previous, sessions=sessions, securities=securities, shapes=shapes
     )
     return earlier * previous_factor / factor
@@ -1357,6 +1607,19 @@ def _income_rows(securities: Sequence[str], shapes: frozenset[str]) -> tuple[_St
                 values=(50.0, *(1.0 for _ in range(width - 1))),
             )
         )
+    if "financials.announced_after_the_as_of" in shapes:
+        # The same (security, period) key as that security's own base row, announced after the
+        # read: a restatement a reader standing on AS_OF must not be able to see. Its own
+        # `available_time` is what pushes the partition's `max_available_time` past AS_OF.
+        rows.append(
+            _StatementRow(
+                security=securities[0],
+                period=BASE_PERIOD,
+                announced_on=FUTURE_ANNOUNCEMENT,
+                label="1",
+                values=(THIRD_VERSION_VALUE, *(1.0 for _ in range(width - 1))),
+            )
+        )
     return tuple(rows)
 
 
@@ -1395,17 +1658,42 @@ def _cashflow_rows(securities: Sequence[str], shapes: frozenset[str]) -> tuple[_
 def _statement_batch(
     dataset: str, columns: Sequence[str], rows: Sequence[_StatementRow]
 ) -> ColumnarPanelBatch:
+    """One statement endpoint's partition, through its own projection and its own clock.
+
+    The two label columns are present for exactly the three datasets that carry them.
+    `fina_indicator` has neither, which is not an omission here but the shape of the endpoint --
+    `statement_panel_columns` and `write_financial_statements`' `revision_field` both branch on
+    `DATASETS_WITH_REVISION_LABEL`, and a generator that always emitted the labels would leave
+    the branch that reads `None` unreachable from any generated panel.
+
+    The fetch instant is derived from the rows rather than fixed at `AS_OF`: a filing announced
+    after the read is only storable in a batch that was fetched after it, which is what makes
+    `financials.announced_after_the_as_of` a property of the data rather than of the request.
+    """
     announced = [_midnight_shanghai(row.announced_on) for row in rows]
+    labels: list[PanelColumn] = []
+    if dataset in DATASETS_WITH_REVISION_LABEL:
+        labels = [
+            PanelColumn(
+                FIRST_ANNOUNCEMENT_COLUMN,
+                "string",
+                tuple(row.announced_on.isoformat() for row in rows),
+            ),
+            PanelColumn(REVISION_LABEL_COLUMN, "string", tuple(row.label for row in rows)),
+        ]
     return _batch(
         dataset,
         subjects=[row.security for row in rows],
         columns=[
-            PanelColumn("report_period", "string", tuple(row.period.isoformat() for row in rows)),
-            PanelColumn("ann_date", "string", tuple(row.announced_on.isoformat() for row in rows)),
             PanelColumn(
-                "f_ann_date", "string", tuple(row.announced_on.isoformat() for row in rows)
+                REPORT_PERIOD_COLUMN, "string", tuple(row.period.isoformat() for row in rows)
             ),
-            PanelColumn("update_flag", "string", tuple(row.label for row in rows)),
+            PanelColumn(
+                ANNOUNCEMENT_DATE_COLUMN,
+                "string",
+                tuple(row.announced_on.isoformat() for row in rows),
+            ),
+            *labels,
             *(
                 PanelColumn(name, "float", tuple(row.values[index] for row in rows))
                 for index, name in enumerate(columns)
@@ -1413,6 +1701,121 @@ def _statement_batch(
         ],
         event_time=announced,
         available_time=announced,
+        fetched_at=max([AS_OF, *announced]),
+    )
+
+
+def _plain_statement_rows(
+    securities: Sequence[str], base: float, width: int
+) -> tuple[_StatementRow, ...]:
+    """One filing per security and nothing else, for an endpoint no shape varies."""
+    return tuple(
+        _StatementRow(
+            security=code,
+            period=BASE_PERIOD,
+            announced_on=BASE_ANNOUNCEMENT,
+            label="1",
+            values=(base + index, *(1.0 for _ in range(width - 1))),
+        )
+        for index, code in enumerate(securities)
+    )
+
+
+def _namechange_batch(records: Mapping[str, tuple[NameRecord, ...]]) -> ColumnarPanelBatch:
+    """The rename corpus as `namechange` stores it: one panel row per `NameRecord`.
+
+    No splitting, unlike `stock_basic` and `index_member_all`. A rename's effective date is
+    published *in* its announcement, so one record states one fact that became knowable at one
+    instant -- which is why `write_name_history`'s docstring can say this dataset "stay[s] one
+    row per record while `stock_basic` splits", and why writing the encoding out here is a
+    projection rather than a second statement of a contract. `name_histories_from_panel_rows`
+    is the counterpart, and `test_panel_shape_coverage.py` round-trips these rows back through
+    it to the carriers they were built from.
+
+    Both clocks are the announcement, matching `providers/tushare.py`'s descriptor: the row is
+    dated at `ann_date` because a request window here is an announcement window, and the
+    effective date rides along as `effective_date`.
+    """
+    rows = sorted(
+        (record for group in records.values() for record in group),
+        key=lambda record: (record.announced_on, record.ts_code, record.name),
+    )
+    announced = [_midnight_shanghai(record.announced_on) for record in rows]
+    return _batch(
+        NAMECHANGE_DATASET,
+        subjects=[record.ts_code for record in rows],
+        columns=[
+            PanelColumn(NAME_COLUMN, "string", tuple(record.name for record in rows)),
+            PanelColumn(
+                NAME_EFFECTIVE_COLUMN,
+                "string",
+                tuple(record.effective_from.isoformat() for record in rows),
+            ),
+            PanelColumn(
+                NAME_ANNOUNCEMENT_COLUMN,
+                "string",
+                tuple(record.announced_on.isoformat() for record in rows),
+            ),
+            PanelColumn(
+                NAME_REASON_COLUMN, "string", tuple(record.change_reason for record in rows)
+            ),
+        ],
+        event_time=announced,
+        available_time=announced,
+    )
+
+
+def _industry_membership_batch(
+    assignments: Mapping[str, tuple[IndustryAssignment, ...]],
+) -> ColumnarPanelBatch:
+    """The assignments as `index_member_all` stores them: **two rows for a closed interval**.
+
+    An opening row dated at `industry_from` with `industry_through` empty, and -- only when the
+    interval has closed -- a closing row dated at `industry_through` carrying both ends. The
+    split is not decoration: the two ends became knowable at different instants, and a single
+    row carrying both would make a 2026-01-09 hand-over visible to a reader standing on
+    2026-01-02.
+
+    This is the one encoding in this module that a reader could reasonably call a second
+    statement of `providers/tushare.py::_industry_membership_panel_rows`. It is written out
+    anyway, because the alternative -- handing `IndustryAssignment` carriers back and storing
+    nothing -- leaves `index_member_all` with no partition, and a dataset with no partition
+    cannot be blocked, cannot be stale, and cannot carry a row that is not yet knowable. What
+    makes it one statement rather than two is that `domain/industry_classification.py` already
+    owns the *decoder* (`industry_histories_from_panel_rows` and its `_fold_split_rows`), so
+    `test_panel_shape_coverage.py` asserts the round trip: these rows, driven through the real
+    writer and read back by the real reader, reproduce the carriers they were built from.
+    """
+    rows: list[tuple[IndustryAssignment, date, date | None]] = []
+    for group in assignments.values():
+        for assignment in group:
+            rows.append((assignment, assignment.effective_from, None))
+            if assignment.effective_through is not None:
+                rows.append(
+                    (assignment, assignment.effective_through, assignment.effective_through)
+                )
+    rows.sort(key=lambda row: (row[1], row[0].ts_code))
+    dated = [_midnight_shanghai(event) for _, event, _ in rows]
+    return _batch(
+        INDUSTRY_MEMBERSHIP_DATASET,
+        subjects=[assignment.ts_code for assignment, _, _ in rows],
+        columns=[
+            PanelColumn(
+                INDUSTRY_FROM_COLUMN,
+                "string",
+                tuple(assignment.effective_from.isoformat() for assignment, _, _ in rows),
+            ),
+            PanelColumn(
+                INDUSTRY_THROUGH_COLUMN,
+                "string",
+                tuple(None if through is None else through.isoformat() for _, _, through in rows),
+            ),
+            PanelColumn(INDUSTRY_L1_COLUMN, "string", tuple(item.l1_code for item, _, _ in rows)),
+            PanelColumn(INDUSTRY_L2_COLUMN, "string", tuple(item.l2_code for item, _, _ in rows)),
+            PanelColumn(INDUSTRY_L3_COLUMN, "string", tuple(item.l3_code for item, _, _ in rows)),
+        ],
+        event_time=dated,
+        available_time=dated,
     )
 
 
@@ -1533,9 +1936,27 @@ def generate_panel(*, shapes: Iterable[str] = ()) -> GeneratedPanel:
             INCOME_DATASET, INCOME_COLUMNS, _income_rows(securities, asked)
         ),
     }
-    if "financials.second_statement_dataset" in asked:
+    names = _name_records(securities, asked)
+    assignments = _industry_assignments(securities, asked)
+    batches[NAMECHANGE_DATASET] = _namechange_batch(names)
+    batches[INDUSTRY_MEMBERSHIP_DATASET] = _industry_membership_batch(assignments)
+    if (
+        "financials.second_statement_dataset" in asked
+        or "financials.statement_dataset_without_a_revision_label" in asked
+    ):
         batches[CASH_FLOW_DATASET] = _statement_batch(
             CASH_FLOW_DATASET, CASHFLOW_COLUMNS, _cashflow_rows(securities, asked)
+        )
+    if "financials.statement_dataset_without_a_revision_label" in asked:
+        batches[BALANCE_SHEET_DATASET] = _statement_batch(
+            BALANCE_SHEET_DATASET,
+            BALANCE_SHEET_COLUMNS,
+            _plain_statement_rows(securities, 300.0, len(BALANCE_SHEET_COLUMNS)),
+        )
+        batches[FINANCIAL_INDICATOR_DATASET] = _statement_batch(
+            FINANCIAL_INDICATOR_DATASET,
+            FINANCIAL_INDICATOR_COLUMNS,
+            _plain_statement_rows(securities, 400.0, len(FINANCIAL_INDICATOR_COLUMNS)),
         )
     return GeneratedPanel(
         shapes=asked,
@@ -1543,40 +1964,75 @@ def generate_panel(*, shapes: Iterable[str] = ()) -> GeneratedPanel:
         sessions=sessions,
         securities=securities,
         batches=MappingProxyType(batches),
-        name_records=_name_records(securities, asked),
-        industry_assignments=_industry_assignments(securities, asked),
+        name_records=names,
+        industry_assignments=assignments,
     )
 
 
 STORED_DATASETS: Final[tuple[str, ...]] = (
     TRADING_CALENDAR_DATASET,
     STOCK_BASIC_DATASET,
+    NAMECHANGE_DATASET,
     ADJ_FACTOR_DATASET,
     DAILY_DATASET,
     DAILY_BASIC_DATASET,
     SUSPENSION_DATASET,
     PRICE_LIMIT_DATASET,
     INDEX_WEIGHT_DATASET,
+    INDUSTRY_MEMBERSHIP_DATASET,
     INCOME_DATASET,
 )
-"""The datasets `write_generated_panel` always stores, in write order.
+"""The datasets every generated panel carries, in write order.
 
-`namechange` and `index_member_all` are absent on purpose: their panel encoding is produced by
-`providers/tushare.py`'s own row splitting rather than by a plain projection of the response,
-so the generator hands those two back as the domain carriers -- `NameRecord`,
-`IndustryAssignment` -- that `build_name_history` and `build_security_industry_history` take.
-Generating a second, hand-rolled encoding of them here would be a second statement of a
-contract that already has one.
+`index_classify` is the one declared dataset that is **not** here, and the reason is the frame
+rather than the encoding. `write_industry_tree` files a vintage's whole tree under the
+vintage's own effective year -- 2021 for SW2021 -- and `industry_trees_from_panel_rows` refuses
+a stored `taxonomy_date` that disagrees with `INDUSTRY_TAXONOMY_EFFECTIVE_FROM`, so the tree
+cannot be moved into this generator's single 2026 partition year and a panel carrying it would
+have to hand every caller a per-dataset year map. That is an interface change to
+`GeneratedPanel`, and it should arrive with the first shape that needs a second partition year
+rather than ahead of it. No P2 injection does: `V2-P2-004` injects a *membership* change, which
+`index_member_all` carries, and the tree only resolves a code to a name and a parent.
+
+`namechange` and `index_member_all` **were** absent for a different reason, recorded here
+because it was half wrong. The claim was that both encodings are produced by
+`providers/tushare.py`'s row splitting rather than by a projection, so restating them here
+would state one contract twice. `index_member_all` really does split -- see
+`_industry_membership_batch` -- but `namechange` never has: `write_name_history`'s own
+docstring says it "stay[s] one row per record while `stock_basic` splits", because a rename's
+effective date is published in its own announcement. And for the one that does split, the
+answer to "stated twice" is not to store nothing; it is that `domain/` already owns the
+decoder, so the round trip is assertable. Storing nothing had a cost that abstention hides: a
+dataset with no partition cannot be blocked, cannot be stale, and cannot hold a row that is not
+yet knowable, so `V2-P2-003`/`004`'s whole subject matter was unreachable from the generator.
 """
 
 
+def _write_statements(store: PanelStore, panel: GeneratedPanel, selected: frozenset[str]) -> None:
+    for dataset in STATEMENT_DATASETS:
+        if dataset in panel.batches and dataset in selected:
+            write_financial_statements(store, [panel.batch(dataset)])
+
+
 def write_generated_panel(
-    store: PanelStore, panel: GeneratedPanel, *, halts: bool = True
+    store: PanelStore,
+    panel: GeneratedPanel,
+    *,
+    halts: bool = True,
+    datasets: Iterable[str] | None = None,
 ) -> tuple[str, ...]:
     """Drive `panel` through the real `panel_ingest` writers; return the datasets stored.
 
     Every write-time guard runs, which is the point: a shape that produced a panel the real
     writers refuse would be a shape no test could use, and this is where that shows up.
+
+    `datasets=None` writes everything the panel carries. Naming a subset writes only those, in
+    the same order, which is what a test asserting about a fixed dataset list needs when the
+    generator later learns to carry more -- and what a test that only reads one dataset needs
+    to stop paying for ten. It refuses a name the panel does not carry, and refuses a selection
+    that asks for `daily` without `suspend_d` while the halt guard is on, because
+    `_refuse_unexplained_thin_sessions` reads the halts back **out of the store**: the request
+    would otherwise succeed and mean something different from what it says.
 
     `halts=False` passes `write_daily_panel(halts=None)`, which switches off
     `_refuse_unexplained_thin_sessions` -- the strongest guard that writer has, and the one
@@ -1588,27 +2044,76 @@ def write_generated_panel(
     Deliberately keyword-only with the guard on by default: a waiver that is a default is an
     accident, which is `write_daily_panel`'s own argument for having no default at all.
     """
+    available = tuple(name for name in _write_order(panel) if name in panel.batches)
+    selected = _selected_datasets(available, datasets, halts=halts)
     calendar = panel.calendar()
-    write_trading_calendar(store, panel.batch(TRADING_CALENDAR_DATASET))
-    write_stock_universe(store, panel.batch(STOCK_BASIC_DATASET))
-    write_adjustment_factors(store, [panel.batch(ADJ_FACTOR_DATASET)], calendar=calendar)
-    write_suspensions(store, [panel.batch(SUSPENSION_DATASET)])
-    write_daily_panel(
-        store,
-        bars=[panel.batch(DAILY_DATASET)],
-        fundamentals=[panel.batch(DAILY_BASIC_DATASET)],
-        calendar=calendar,
-        halts=(
-            load_suspensions(store, years=(YEAR,), as_of=AS_OF, max_staleness=None)
-            if halts
-            else None
-        ),
+    if TRADING_CALENDAR_DATASET in selected:
+        write_trading_calendar(store, panel.batch(TRADING_CALENDAR_DATASET))
+    if STOCK_BASIC_DATASET in selected:
+        write_stock_universe(store, panel.batch(STOCK_BASIC_DATASET))
+    if NAMECHANGE_DATASET in selected:
+        write_name_history(store, panel.batch(NAMECHANGE_DATASET))
+    if ADJ_FACTOR_DATASET in selected:
+        write_adjustment_factors(store, [panel.batch(ADJ_FACTOR_DATASET)], calendar=calendar)
+    if SUSPENSION_DATASET in selected:
+        write_suspensions(store, [panel.batch(SUSPENSION_DATASET)])
+    if DAILY_DATASET in selected:
+        write_daily_panel(
+            store,
+            bars=[panel.batch(DAILY_DATASET)],
+            fundamentals=[panel.batch(DAILY_BASIC_DATASET)],
+            calendar=calendar,
+            halts=(
+                load_suspensions(store, years=(panel.year,), as_of=panel.as_of, max_staleness=None)
+                if halts
+                else None
+            ),
+        )
+    if PRICE_LIMIT_DATASET in selected:
+        write_price_limits(store, [panel.batch(PRICE_LIMIT_DATASET)], calendar=calendar)
+    if INDEX_WEIGHT_DATASET in selected:
+        write_index_weights(store, [panel.batch(INDEX_WEIGHT_DATASET)])
+    if INDUSTRY_MEMBERSHIP_DATASET in selected:
+        write_industry_memberships(store, [panel.batch(INDUSTRY_MEMBERSHIP_DATASET)])
+    _write_statements(store, panel, selected)
+    return tuple(name for name in available if name in selected)
+
+
+def _write_order(panel: GeneratedPanel) -> tuple[str, ...]:
+    """`STORED_DATASETS` followed by whichever optional statement endpoints the panel carries."""
+    optional = tuple(
+        dataset
+        for dataset in STATEMENT_DATASETS
+        if dataset not in STORED_DATASETS and dataset in panel.batches
     )
-    write_price_limits(store, [panel.batch(PRICE_LIMIT_DATASET)], calendar=calendar)
-    write_index_weights(store, [panel.batch(INDEX_WEIGHT_DATASET)])
-    write_financial_statements(store, [panel.batch(INCOME_DATASET)])
-    stored = list(STORED_DATASETS)
-    if CASH_FLOW_DATASET in panel.batches:
-        write_financial_statements(store, [panel.batch(CASH_FLOW_DATASET)])
-        stored.append(CASH_FLOW_DATASET)
-    return tuple(stored)
+    return (*STORED_DATASETS, *optional)
+
+
+def _selected_datasets(
+    available: Sequence[str], datasets: Iterable[str] | None, *, halts: bool
+) -> frozenset[str]:
+    if datasets is None:
+        return frozenset(available)
+    asked = frozenset(datasets)
+    unknown = sorted(asked - set(available))
+    if unknown:
+        raise PanelFixtureError(
+            f"this panel carries no {unknown} batch to write; it carries {sorted(available)}"
+        )
+    if DAILY_DATASET in asked and DAILY_BASIC_DATASET not in asked:
+        raise PanelFixtureError(
+            f"{DAILY_DATASET!r} and {DAILY_BASIC_DATASET!r} are written by one call to "
+            "write_daily_panel and cannot be selected apart"
+        )
+    if DAILY_BASIC_DATASET in asked and DAILY_DATASET not in asked:
+        raise PanelFixtureError(
+            f"{DAILY_BASIC_DATASET!r} is written by write_daily_panel alongside "
+            f"{DAILY_DATASET!r} and cannot be selected without it"
+        )
+    if halts and DAILY_DATASET in asked and SUSPENSION_DATASET not in asked:
+        raise PanelFixtureError(
+            f"writing {DAILY_DATASET!r} with the halt guard on reads {SUSPENSION_DATASET!r} "
+            "back out of the store, so a selection that omits it would silently judge every "
+            "session as having no halts; add it, or pass halts=False"
+        )
+    return asked
