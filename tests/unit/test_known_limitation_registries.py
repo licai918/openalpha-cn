@@ -78,6 +78,7 @@ from openalpha_cn.domain.industry_classification import KNOWN_INDUSTRY_LIMITATIO
 from openalpha_cn.domain.labels import KNOWN_LABEL_LIMITATIONS
 from openalpha_cn.domain.price_limits import KNOWN_SUSPENSION_LIMITATIONS
 from openalpha_cn.domain.stock_universe import KNOWN_UNIVERSE_LIMITATIONS
+from openalpha_cn.panel.catalog import KNOWN_STORAGE_LIMITATIONS
 from openalpha_cn.panel_doctor import KNOWN_PANEL_LIMITATIONS
 
 ROOT: Final[Path] = Path(__file__).resolve().parents[2]
@@ -109,6 +110,7 @@ LIMITATION_REGISTRIES: Final[dict[str, Sequence[_Limitation]]] = {
     "KNOWN_LABEL_LIMITATIONS": KNOWN_LABEL_LIMITATIONS,
     "KNOWN_SUSPENSION_LIMITATIONS": KNOWN_SUSPENSION_LIMITATIONS,
     "KNOWN_UNIVERSE_LIMITATIONS": KNOWN_UNIVERSE_LIMITATIONS,
+    "KNOWN_STORAGE_LIMITATIONS": KNOWN_STORAGE_LIMITATIONS,
     "KNOWN_PANEL_LIMITATIONS": KNOWN_PANEL_LIMITATIONS,
 }
 """The ten registries whose entries are identified by a `code`, keyed by their own names.
@@ -232,7 +234,7 @@ def test_the_registry_table_is_every_known_registry_in_the_source_tree() -> None
     }
 
     assert found == set(LIMITATION_REGISTRIES) | set(CODELESS_REGISTRIES)
-    assert len(LIMITATION_REGISTRIES) == 10
+    assert len(LIMITATION_REGISTRIES) == 11
     assert set(LIMITATION_REGISTRIES) & set(CODELESS_REGISTRIES) == set()
 
 
@@ -311,9 +313,12 @@ def test_the_registries_together_carry_the_entry_count_the_report_folds() -> Non
     """A total, so this module fails on a registry that empties itself out.
 
     Every assertion above is per-entry and would be satisfied by a registry of length zero.
-    `KNOWN_PANEL_LIMITATIONS` is the fold of seven of the others plus one code of its own, so
-    the two halves of the count are stated separately: the folded seven, and the ten as a
-    whole."""
+    `KNOWN_PANEL_LIMITATIONS` is a fold of two kinds of source, and they are counted apart
+    because they enter `_limitations()` differently: seven **dataset** registries fold in
+    one-for-one against the datasets they bound, `KNOWN_STORAGE_LIMITATIONS` folds in with an
+    empty `datasets` because a storage boundary holds for every dataset at once, and one
+    calendar code is the report's own -- `KNOWN_CALENDAR_LOOKAHEAD` is three reproductions of a
+    single defect and is folded to one entry rather than three."""
     codes = declared_codes()
     folded = sum(
         len(codes[registry])
@@ -327,6 +332,7 @@ def test_the_registries_together_carry_the_entry_count_the_report_folds() -> Non
             "KNOWN_FINANCIAL_STATEMENT_LIMITATIONS",
         )
     )
+    plane_wide = len(codes["KNOWN_STORAGE_LIMITATIONS"])
 
-    assert len(codes["KNOWN_PANEL_LIMITATIONS"]) == folded + 1
+    assert len(codes["KNOWN_PANEL_LIMITATIONS"]) == folded + plane_wide + 1
     assert all(codes[registry] for registry in codes)
