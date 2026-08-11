@@ -235,6 +235,7 @@ GATE_CODE_BLOCKS: Final[Mapping[str, bool]] = MappingProxyType(
         "partition_missing": True,
         "partition_file_missing": True,
         "partition_file_unreadable": True,
+        "partition_row_count_mismatch": True,
         "coverage_missing": True,
         "coverage_stale": True,
         "date_gap": True,
@@ -253,16 +254,27 @@ GATE_CODE_BLOCKS: Final[Mapping[str, bool]] = MappingProxyType(
         "unexplained_unpriced": True,
         "check_unavailable": True,
         "domain_rebuild_refused": True,
+        # The other clock. `evaluate_readiness` compares availability against `as_of` and never
+        # the event instant, so a row about an event that has not happened yet passes every
+        # readiness dimension; `load_stock_universe` then refuses the partition this gate would
+        # have cleared. Same shape as `domain_rebuild_refused`, one clock over.
+        "event_after_as_of": True,
         # Measured to be ordinary on this corpus, and each already refused where it is
         # decidable rather than at the granularity of a whole dataset.
         "ambiguous_filing": False,
         "duplicate_versions": False,
         "revised_rows": False,
+        # An inherent limitation of `trade_cal` with no remedy on the read side, made
+        # conditional on this panel's own horizon. Blocking it would refuse, permanently, every
+        # panel reaching 2015-09-03/04 or 2020-01-31 -- see `panel_doctor.HEALTH_CODE_SEVERITY`
+        # for the full argument. It rides on `DependencyClearance.notices` instead, so a
+        # cleared caller holds the dates rather than being told nothing.
+        "calendar_lookahead_in_horizon": False,
     }
 )
 """What this gate does about each of `PANEL_HEALTH_CODES`, as a table rather than as a branch.
 
-Total over the closed code set, so a twenty-first code added upstream fails
+Total over the closed code set, so a twenty-fifth code added upstream fails
 `tests/unit/test_panel_gate_rules.py` rather than arriving with no verdict and being waved
 through -- which is the shape of fail-open this whole issue is about. Written out as a literal
 for `HEALTH_CODE_SEVERITY`'s reason: this mapping decides whether a downstream read happens at
@@ -271,7 +283,7 @@ entry, not a line inside a function nobody re-reads.
 """
 
 GATE_BLOCK_CODES: Final[frozenset[str]] = PANEL_HEALTH_CODES | GATE_REFUSAL_CODES
-"""Every code a `GateBlock` or a `ClearedDataset` caveat may carry: the twenty health codes
+"""Every code a `GateBlock` or a `ClearedDataset` caveat may carry: the twenty-four health codes
 plus the gate's own refusals. One closed set for both, because `unverified_daily_coverage` is
 the same question at two strengths -- a refusal when nothing corroborated the dataset at all,
 a caveat when something did but only over the sessions the request named."""

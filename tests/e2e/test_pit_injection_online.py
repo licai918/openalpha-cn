@@ -16,7 +16,7 @@ and are written by a five-invocation build rather than by one call. This module 
 P2 that had no e2e representative: **build a real panel, put a defect into a real partition
 through the real writer, and ask the CLI, the HTTP face and the SDK.**
 
-## The three injections, and why these three
+## The four injections, and why these four
 
 Each is aimed at a mechanism the register exercises on generated rows, chosen so that the
 mechanism -- not the shape of a fixture -- is what is under test.
@@ -37,6 +37,21 @@ mechanism -- not the shape of a fixture -- is what is under test.
    there is no row-level `available_time` filter, so the earlier question is refused outright
    instead of being answered from the version that was current then, and the later question is
    refused too because two rows now contradict each other about one session.
+4. **A legal Parquet file whose contents changed behind the store** (P2's product acceptance).
+   The three injections above all go *through* the writer, which is right for them and is
+   exactly what makes this fourth one a different question. `test_panel_chain_online.py` covers
+   two file-level defects -- a partition **deleted** and one **replaced by bytes that are not
+   Parquet** -- and both are decided by the file's existence and its first and last eight
+   bytes. The third shape was missing, and it is the one that was invisible: a file that is
+   still a valid Parquet file, still registered, still magic at both ends, and no longer
+   holding what the catalog says. On a real `stock_basic` partition one appended row produced
+   `READY ... rows=152` over a 153-row file, `CLEARED` with exit 0, and the injected security
+   inside `load_stock_universe`'s answer. Both halves are asserted here: the row count is now
+   reconciled against the footer (`partition_row_count_mismatch`), and an edit that changes a
+   value *in place* still is not, which is the disclosed residue
+   (`KNOWN_STORAGE_LIMITATIONS.a_value_edited_in_place_leaves_the_census_intact`) and is
+   asserted in both directions -- the census does not see it, the cross-check that reads the
+   column does.
 
 ## Every injection is a pair
 
@@ -51,6 +66,12 @@ The reverse direction is load-bearing in its own right -- a red-team gate that r
 panel is worse than none -- so the "before" half of every test below asserts the untouched panel
 answers cleanly, and `test_the_untouched_panel_is_still_ready_after_every_injection_above` is
 the control for the module.
+
+Injection 4 keeps the pairing and changes what the two halves are, because its subject is a
+write the store never saw: both halves are the *same* stored partition, asked at the same
+`as_of`, before and after the file underneath it is swapped. `withheld_partition` moves the
+build's own file aside and restores it, so the "before" reading and the restored panel are the
+same bytes rather than a rewrite that happens to agree.
 
 ## Determinism
 
@@ -73,6 +94,12 @@ rest of this module exists: the test would then be about a file rather than abou
 that the panel twenty-three other tests share comes back byte for byte -- would have nothing to
 check. The other seven injections go into `suspend_d` and cost about a second each, so
 `-k "not pct_chg"` is the way to iterate.
+
+Injection 4 is the one case where editing the Parquet file directly is not a shortcut but the
+whole subject, so it does exactly that -- through `withheld_partition`, which moves the build's
+own file aside and restores it in a `finally`. Its `daily` half rewrites the 20 MB partition
+once with one cell changed, which is seconds rather than the three minutes the same defect
+costs through `write_panel_batch`.
 """
 
 from __future__ import annotations
@@ -84,12 +111,17 @@ from typing import Any
 
 import pytest
 from e2e_support import (
+    PARQUET_MAGIC,
     BuiltPanel,
     E2EEnvironmentError,
     InjectPartition,
     StoredPartition,
+    WithholdPartition,
+    catalogued_path,
     http_get,
     knowable_datasets,
+    parquet_with_a_row_appended,
+    parquet_with_one_cell_changed,
     read_as_of,
     read_stored_partition,
     rewrite_partition,
@@ -728,6 +760,205 @@ def test_a_correction_published_after_the_read_serves_neither_version(
     refused = findings(payload, "domain_rebuild_refused")
     assert refused, payload["findings"]
     assert original.subjects[index] in " ".join(finding["detail"] for finding in refused)
+
+
+# --- injection 4: a legal Parquet file whose contents changed behind the store ----------------
+
+INJECTED_SUBJECT: str = "999999.ZZ"
+"""The identity the appended row carries.
+
+A name no exchange issues, so the row cannot be confused with anything the build fetched, and
+`assessed`'s subject census cannot accidentally have contained it already."""
+
+
+def test_a_valid_parquet_with_one_row_appended_behind_the_store_blocks_its_partition(
+    built_panel: BuiltPanel, cli_workspace: Path, withheld_partition: WithholdPartition
+) -> None:
+    """The third shape of file tampering, and the one the chain had no case for.
+
+    `test_panel_chain_online.py` covers two: a partition file **deleted**
+    (`partition_file_missing`) and one **replaced by bytes that are not Parquet**
+    (`partition_file_unreadable`). Both are decided by facts about the file's existence and its
+    first and last eight bytes. This is the third: a file that is still a perfectly valid
+    Parquet file, still readable, still registered, and no longer holding what the catalog says
+    -- which is what P2's product acceptance drove a real `stock_basic` partition into, one
+    appended row with an `available_time` in 2035, and watched `panel doctor` answer
+    `READY ... rows=152` over a 153-row file, `data-check` answer `CLEARED` with exit 0, and
+    `load_stock_universe(as_of=2026-08-11).listed_on(2024-07-02)` come back with the injected
+    security in it.
+
+    The Parquet magic is asserted *after* the swap on purpose. Without it this test would be
+    indistinguishable from the `partition_file_unreadable` case it exists to be different from,
+    and a helper that quietly produced rubble would make it pass for the wrong reason.
+
+    Injected through `withheld_partition` rather than through `injected_partition`: the whole
+    point is a write that did **not** go through the store, so the catalog is left describing
+    the previous file. `injected_partition` re-runs the real writer and makes the catalog agree,
+    which is the right instrument for the three injections above and would erase this one.
+    """
+    as_of = read_as_of(built_panel)
+    datasets = assessed(built_panel)
+    store = built_panel.store
+    path = catalogued_path(store, dataset=SUSPENSION_DATASET, year=built_panel.year)
+    coverage = store.read_coverage(SUSPENSION_DATASET, built_panel.year)
+    assert coverage is not None
+    tampered = parquet_with_a_row_appended(
+        path,
+        subject=INJECTED_SUBJECT,
+        available_time=as_of + PUBLICATION_LAG,
+        workspace=cli_workspace,
+    )
+
+    before = run_doctor(built_panel, cli_workspace, datasets=datasets, as_of=as_of)
+    assert readiness_state(before, SUSPENSION_DATASET) == "ready"
+    assert "partition_row_count_mismatch" not in codes(before)
+
+    withheld_partition(SUSPENSION_DATASET, built_panel.year, replacement=tampered)
+
+    # Still a Parquet file at both ends, so this is not the `partition_file_unreadable` case:
+    # every fact the store had before this task's change still agrees with the catalog.
+    written = path.read_bytes()
+    assert written[: len(PARQUET_MAGIC)] == PARQUET_MAGIC
+    assert written[-len(PARQUET_MAGIC) :] == PARQUET_MAGIC
+
+    after = run_doctor(built_panel, cli_workspace, datasets=datasets, as_of=as_of)
+    blocked = findings(after, "partition_row_count_mismatch")
+    assert len(blocked) == 1, after["findings"]
+    assert blocked[0]["severity"] == "blocking"
+    assert blocked[0]["category"] == "inconsistent"
+    assert SUSPENSION_DATASET in blocked[0]["datasets"]
+    # Both numbers, matched with their surrounding words: the detail also carries the
+    # partition's absolute path, and a bare `str(2293) in detail` could pass on a path digit.
+    assert f"describing {coverage.row_count} row(s)" in blocked[0]["detail"], blocked[0]["detail"]
+    assert f"says it holds {coverage.row_count + 1};" in blocked[0]["detail"], blocked[0]["detail"]
+    assert readiness_state(after, SUSPENSION_DATASET) == "blocked"
+    assert after["is_clean"] is False
+
+    # And the row does not reach an answer, which is the half that makes this a look-ahead
+    # finding rather than a bookkeeping one.
+    with pytest.raises(PanelStorageError, match=r"partition_row_count_mismatch"):
+        load_suspensions(
+            built_panel.store, years=(built_panel.year,), as_of=as_of, max_staleness=None
+        )
+
+    exit_code, gate = run_data_check(
+        built_panel,
+        cli_workspace,
+        datasets=datasets,
+        as_of=as_of,
+        extra=("--session", built_panel.sessions()[-1].isoformat()),
+    )
+    assert exit_code == 1
+    assert "partition_row_count_mismatch" in {block["code"] for block in gate["blocks"]}
+    assert SUSPENSION_DATASET in gate["blocked_datasets"]
+
+
+def test_a_value_edited_in_place_is_invisible_to_the_census_and_visible_to_the_witness(
+    built_panel: BuiltPanel, cli_workspace: Path, withheld_partition: WithholdPartition
+) -> None:
+    """The residue of the check above, asserted rather than described.
+
+    The footer's row count catches every row inserted or removed behind the store. It cannot
+    catch an edit that changes a value *in place*, because that moves none of the three facts
+    the store reads off the file -- the magic at both ends, the file's presence, and the count
+    -- and none of the catalog's own. `KNOWN_STORAGE_LIMITATIONS`'
+    `a_value_edited_in_place_leaves_the_census_intact` says so, and a disclosure with no test
+    under it is the prose this whole module exists to replace.
+
+    So both directions are asserted on one file. The **census** stays `ready` and its coverage
+    record is unchanged in every dimension. The **witness** that reads the column sees it:
+    `session_returns`' third witness recomputes the session's return from `close` and
+    `pre_close` and finds it cannot be the `pct_chg` the row now states, which is
+    `return_path_disagreement`, and the gate blocks on it. That is the boundary stated exactly
+    -- what protects a column is a check that reads it, and a column no cross-check reads is
+    protected by nothing.
+
+    The same defect as `test_a_close_that_disagrees_with_its_own_pct_chg_is_caught_only_by_the_
+    third_witness`, aimed one layer down. That one goes through `write_panel_batch` and takes
+    185s because it must; this one edits the file, which is the whole subject here, and takes
+    seconds.
+    """
+    as_of = read_as_of(built_panel)
+    datasets = assessed(built_panel)
+    store = built_panel.store
+    ts_code, session = a_bar_the_return_check_reaches(built_panel)
+    # One security's rows rather than the whole 796,497-row partition: this test edits the file
+    # and never rebuilds a batch from it, so `read_stored_partition`'s full transposition would
+    # be paid for nothing. The date cell is taken as the writer stored it, so the `WHERE` the
+    # tamper builds matches on the same value rather than on a re-derived text form.
+    held = store.query(
+        DAILY_DATASET,
+        year=built_panel.year,
+        columns=(PRICE_DATE_COLUMN, "pct_chg"),
+        filters={"subject": ts_code},
+    )
+    (day_cell, published) = next(row for row in held if stored_date(row[0]) == session)
+    corrupted = float(str(published)) + PCT_CHG_ERROR
+    path = catalogued_path(store, dataset=DAILY_DATASET, year=built_panel.year)
+    original = store.read_coverage(DAILY_DATASET, built_panel.year)
+    assert original is not None
+    extra = ("--session", session.isoformat())
+
+    def about_this_bar(payload: Mapping[str, Any], code: str) -> list[Mapping[str, Any]]:
+        return [
+            finding
+            for finding in findings(payload, code)
+            if ts_code in finding["items"] and session.isoformat() in finding["dates"]
+        ]
+
+    before = run_doctor(built_panel, cli_workspace, datasets=datasets, as_of=as_of, extra=extra)
+    assert readiness_state(before, DAILY_DATASET) == "ready"
+    assert not about_this_bar(before, "return_path_disagreement")
+
+    tampered = parquet_with_one_cell_changed(
+        path,
+        subject=ts_code,
+        key_column=PRICE_DATE_COLUMN,
+        key_value=day_cell,
+        column="pct_chg",
+        value=corrupted,
+        workspace=cli_workspace,
+    )
+    withheld_partition(DAILY_DATASET, built_panel.year, replacement=tampered)
+
+    after = run_doctor(built_panel, cli_workspace, datasets=datasets, as_of=as_of, extra=extra)
+
+    # The census is blind to this, and that is the disclosed limitation rather than a bug.
+    assert readiness_state(after, DAILY_DATASET) == "ready"
+    assert "partition_row_count_mismatch" not in codes(after)
+    coverage = store.read_coverage(DAILY_DATASET, built_panel.year)
+    assert coverage is not None
+    assert coverage.row_count == original.row_count
+    assert coverage.max_available_time == original.max_available_time
+    assert coverage.subjects == original.subjects
+    # The edited cell really is on disk, so "the census is blind" is a statement about the
+    # census rather than about a tamper that did not land.
+    assert corrupted in {
+        float(str(row[1]))
+        for row in store.query(
+            DAILY_DATASET,
+            year=built_panel.year,
+            columns=(PRICE_DATE_COLUMN, "pct_chg"),
+            filters={"subject": ts_code},
+        )
+    }
+    # The disclosure is on the artifact the reader is handed, not only in a docstring.
+    assert "a_value_edited_in_place_leaves_the_census_intact" in {
+        limitation["code"] for limitation in after["limitations"]
+    }
+
+    # The witness that reads the column is not blind to it.
+    caught = about_this_bar(after, "return_path_disagreement")
+    assert len(caught) == 1, after["findings"]
+    assert caught[0]["severity"] == "warning"
+    assert "pct_chg" in caught[0]["detail"], caught[0]["detail"]
+    assert repr(corrupted) in caught[0]["detail"], caught[0]["detail"]
+
+    exit_code, gate = run_data_check(
+        built_panel, cli_workspace, datasets=datasets, as_of=as_of, extra=extra
+    )
+    assert exit_code == 1
+    assert "return_path_disagreement" in {block["code"] for block in gate["blocks"]}
 
 
 # --- the harness, and the reverse direction ---------------------------------------------------

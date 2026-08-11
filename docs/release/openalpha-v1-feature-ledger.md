@@ -4,8 +4,8 @@
 
 ## 对账结论
 
-- 功能总数: 134
-- 当前真实完成: 129 (96.27%)
+- 功能总数: 138
+- 当前真实完成: 133 (96.38%)
 - `UNREVIEWED=0`
 - `UNKNOWN=0`
 - `legacy_acceptance_rows=86` (历史散文验收、尚未绑定为可执行 pytest/CI 断言)
@@ -18,7 +18,7 @@
 | `DEFERRED` | 1 |
 | `ENHANCED_REPLACEMENT` | 20 |
 | `EXCLUDED` | 4 |
-| `NATIVE_COMPLETE` | 108 |
+| `NATIVE_COMPLETE` | 112 |
 
 ## 功能明细
 
@@ -158,6 +158,10 @@
 | `OA-BT-014` | backtest | One tradability predicate, two contracts, driven from one stored panel | `NATIVE_COMPLETE` | `src/openalpha_cn/backtest/execution.py#suspended_at_the_close;src/openalpha_cn/backtest/execution.py#KNOWN_EXECUTION_LIMITATIONS;src/openalpha_cn/backtest/execution.py#ExecutionLimitation;tests/panel_fixtures.py#PANEL_SHAPES;tests/panel_fixtures.py#LOCKED_SECURITY_INDEX;tests/panel_fixtures.py#LOCKED_SESSION_INDEX` | `tests/integration/panel/test_execution_label_parity.py;tests/unit/test_panel_fixtures.py;tests/integration/panel/test_panel_shape_coverage.py` | `pytest` | `tests/integration/panel/test_execution_label_parity.py::test_the_two_contracts_agree_on_every_session_either_of_them_can_price` |
 | `OA-OPS-027` | operations | P2 injection register: one parametrised table, both directions, and the CI gate it is | `NATIVE_COMPLETE` | `tests/integration/test_injection_register.py#INJECTION_VECTORS;tests/integration/test_injection_register.py#InjectionVector;tests/integration/test_injection_register.py#DISCLOSED_EXCLUSIONS;tests/integration/test_injection_register.py#DisclosedExclusion;tests/integration/test_injection_register.py#P2_INJECTION_ISSUES;tests/integration/panel/test_lookahead_injection.py#LOOKAHEAD_INJECTIONS` | `tests/integration/test_injection_register.py;tests/integration/test_research_cycle.py` | `pytest` | `tests/integration/test_injection_register.py::test_the_injected_half_is_refused_and_names_its_own_rule` |
 | `OA-OPS-028` | operations | P2 red-team gates on a live panel: the injection register's e2e half | `NATIVE_COMPLETE` | `tests/e2e/e2e_support.py#StoredPartition;tests/e2e/e2e_support.py#read_stored_partition;tests/e2e/e2e_support.py#rewrite_partition;tests/e2e/e2e_support.py#knowable_from;tests/e2e/conftest.py#injected_partition` | `tests/e2e/test_pit_injection_online.py;tests/integration/test_injection_register.py` | `pytest` | `tests/e2e/test_pit_injection_online.py::test_a_row_that_became_knowable_after_the_read_blocks_its_partition_in_the_doctor` |
+| `OA-PANEL-023` | panel | The Parquet footer reconciled against the catalog on every readiness assessment | `NATIVE_COMPLETE` | `src/openalpha_cn/panel/catalog.py#READINESS_ISSUE_CODES;src/openalpha_cn/panel/catalog.py#PartitionState;src/openalpha_cn/panel/catalog.py#evaluate_readiness;src/openalpha_cn/panel/store.py#_parquet_row_count;src/openalpha_cn/panel_doctor.py#READINESS_CODE_CATEGORY;src/openalpha_cn/panel_gate.py#GATE_CODE_BLOCKS` | `tests/unit/panel/test_readiness_rules.py;tests/integration/panel/test_panel_readiness.py;tests/integration/panel/test_panel_store_hardening.py;tests/e2e/test_pit_injection_online.py` | `pytest` | `tests/integration/panel/test_panel_readiness.py::test_a_valid_parquet_file_of_a_different_length_is_refused_before_anything_scans_it` |
+| `OA-PANEL-024` | panel | The event clock, which readiness never compares against as_of | `NATIVE_COMPLETE` | `src/openalpha_cn/panel_doctor.py#DOCTOR_ISSUE_CODES;src/openalpha_cn/panel_doctor.py#DOCTOR_CODE_CATEGORY;src/openalpha_cn/panel_doctor.py#HEALTH_CODE_SEVERITY;src/openalpha_cn/panel_doctor.py#dataset_health;src/openalpha_cn/panel_gate.py#GATE_CODE_BLOCKS` | `tests/integration/panel/test_panel_doctor.py;tests/unit/test_panel_doctor_rules.py;tests/unit/test_panel_gate_rules.py` | `pytest` | `tests/integration/panel/test_panel_doctor.py::test_a_row_whose_event_has_not_happened_yet_is_reported_though_readiness_clears_it` |
+| `OA-PANEL-025` | panel | The calendar's own disclosed look-ahead, made conditional on the panel's horizon | `NATIVE_COMPLETE` | `src/openalpha_cn/panel_doctor.py#calendar_lookahead_findings;src/openalpha_cn/panel_doctor.py#CALENDAR_LOOKAHEAD_CHECK;src/openalpha_cn/panel_doctor.py#panel_health_report;src/openalpha_cn/domain/trading_calendar.py#KNOWN_CALENDAR_LOOKAHEAD` | `tests/unit/test_panel_doctor_rules.py;tests/integration/panel/test_panel_doctor.py` | `pytest` | `tests/integration/panel/test_panel_doctor.py::test_a_calendar_whose_horizon_covers_a_proven_lookahead_date_says_so_on_this_panel` |
+| `OA-PANEL-026` | panel | The un-gated read named, disclosed on every report, and bound to an allowlist | `NATIVE_COMPLETE` | `src/openalpha_cn/panel/catalog.py#KNOWN_STORAGE_LIMITATIONS;src/openalpha_cn/panel/catalog.py#StorageLimitation;src/openalpha_cn/panel_doctor.py#storage_limitations;src/openalpha_cn/panel/store.py#PanelStore` | `tests/unit/panel/test_query_callers.py;tests/unit/test_panel_doctor_rules.py;tests/integration/panel/test_panel_doctor.py` | `pytest` | `tests/unit/panel/test_query_callers.py::test_only_the_store_itself_reads_a_partition_without_a_readiness_verdict` |
 
 ## 边界
 

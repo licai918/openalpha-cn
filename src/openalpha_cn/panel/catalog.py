@@ -60,7 +60,9 @@ migrating a live catalog.
 ## The readiness contract
 
 `evaluate_readiness` answers a different question from the catalog's: not "what is in there"
-but "can this be used". Four properties are load-bearing for the issues that depend on it:
+but "can this be used". Six properties are load-bearing for the issues that depend on it (the
+count said four while five were listed, which is the kind of drift a reader is entitled to
+distrust the rest of a docstring for):
 
 - **It is fail-closed.** Absence of knowledge is never absence of a problem. A registered
   partition with no coverage record cannot answer any of S8's five questions, so it blocks
@@ -87,10 +89,45 @@ but "can this be used". Four properties are load-bearing for the issues that dep
   from `panel_partitions`, never recomputed from the Parquet file -- recomputing it would mean
   re-serialising every row of the partition on every gate check. So the rule detects a
   partition re-written *through the store*; it does not detect a file changed behind the
-  store's back, which is `partition_file_unreadable`'s (structural, eight-byte) job and, for a
-  swap to a different-but-valid Parquet file, `V2-P1-012`'s. Keeping those two catalog rows in
-  agreement with the file is the write path's responsibility, and `panel/store.py`'s "The
-  catalog upsert commits before the rename" is how it discharges it.
+  store's back. Keeping those two catalog rows in agreement with the file is the write path's
+  responsibility, and `panel/store.py`'s "The catalog upsert commits before the rename" is how
+  it discharges it.
+- **One fact is read from the file itself, and it is the cheapest one there is.** The bullet
+  above used to end by handing a file changed behind the store's back entirely to
+  `partition_file_unreadable`'s eight-byte magic check and to `V2-P1-012`'s deep pass, on the
+  stated ground that a swap to a *different but valid* Parquet file "is out of reach of any
+  O(1) check". That was wrong, and P2's product acceptance measured how wrong: a row appended
+  to a real `stock_basic` partition with `available_time` in 2035 left `panel doctor` reporting
+  `READY ... rows=152` (the catalog's number, over a 153-row file), `data-check` `CLEARED`,
+  exit 0 -- and `load_stock_universe(as_of=2026-08-11).listed_on(2024-07-02)` then answered
+  with the injected security in it. A file's *row count* is not out of reach: Parquet carries
+  it in the footer, DuckDB answers `count(*)` over `read_parquet` from metadata rather than by
+  scanning (0.26 ms measured on a 796,497-row, 20 MB partition; 0.3 ms on a 2,000,000-row one,
+  so it is independent of size), and the store already reads it on the write path for exactly
+  this reason. So `PartitionState.file_row_count` is read from the footer on every readiness
+  assessment and compared against the coverage record's own `row_count`; a disagreement, or a
+  footer that cannot be read at all, blocks with `partition_row_count_mismatch`.
+
+  The whole cost is one footer read per requested year, and the widest assessment this
+  repository makes is the one to measure it on: `stock_basic` over the 37 lifecycle years a
+  real panel holds went from 123 ms to 134 ms per `assess_readiness` call. A single-year
+  assessment pays 0.3 ms.
+
+  Say precisely what that closes and what it does not, because the previous sentence's mistake
+  was overclaiming in the other direction. Every insertion and every deletion behind the
+  store's back moves the count, so all of them are now caught. An edit that changes *values*
+  in place leaves the count identical and is still invisible here -- it is visible only to a
+  check that reads the column, which is `V2-P1-012`'s cross-dataset work (`return_path_
+  disagreement` catches a corrupted `pct_chg` on live rows) and, where no cross-check reads
+  the column, to nothing. `KNOWN_STORAGE_LIMITATIONS` carries that residue as a disclosure
+  rather than leaving it to be inferred from this paragraph.
+
+  The comparison is against `PartitionCoverage.row_count` and not against
+  `panel_partitions.row_count`, and it is sound because the check runs *after* `coverage_stale`
+  has passed: `record_coverage` refuses a record whose `row_count` disagrees with the
+  registered partition's, and `coverage_stale` proves the record still describes the catalog's
+  current content hash. So at this point the two catalog numbers are provably equal and one
+  field on `PartitionState` carries both.
 - **It is relative to `as_of`, never to the wall clock.** Staleness is
   `as_of - last_event_time`, and a partition whose newest `available_time` post-dates `as_of`
   is refused outright (`not_yet_knowable`) rather than leaking hindsight into a point-in-time
@@ -252,6 +289,7 @@ READINESS_ISSUE_CODES: Final[frozenset[str]] = frozenset(
         "partition_missing",
         "partition_file_missing",
         "partition_file_unreadable",
+        "partition_row_count_mismatch",
         "coverage_missing",
         "coverage_stale",
         "date_gap",
@@ -282,6 +320,66 @@ entry in `DatasetReadiness.checks_waived`.
 """
 
 ReadinessState = Literal["ready", "blocked"]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class StorageLimitation:
+    """One structural boundary of the **storage plane itself**, as opposed to of a dataset.
+
+    Shaped as `(code, detail)` so that `panel_doctor._limitations` folds it in exactly the way
+    it folds the seven dataset registries -- there is no base class to share, because a
+    `domain/` registry may not import this module and this module may not import `panel_doctor`
+    (`tests/unit/test_import_layering.py`).
+    """
+
+    code: str
+    detail: str
+
+
+KNOWN_STORAGE_LIMITATIONS: Final[tuple[StorageLimitation, ...]] = (
+    StorageLimitation(
+        code="a_value_edited_in_place_leaves_the_census_intact",
+        detail=(
+            "readiness reconciles a partition against its catalog record on three facts the "
+            "file itself supplies -- Parquet's magic at both ends, the file's presence, and "
+            "the footer's row count -- so every row inserted or removed behind the store is "
+            "refused (partition_row_count_mismatch). An edit that changes values *in place* "
+            "moves none of the three: measured on a real 2026 daily partition, five "
+            "percentage points added to one row's pct_chg leaves row_count, subjects, dates "
+            "and all four clocks identical and readiness reports ready. Such an edit is "
+            "visible only to a check that reads the column -- return_path_disagreement sees a "
+            "corrupted pct_chg, close_disagreement sees a corrupted close -- and to nothing "
+            "at all for a column no cross-check reads. Detecting it in general needs a digest "
+            "of the file's bytes, which is O(rows) on every gate check and is deliberately "
+            "not paid here"
+        ),
+    ),
+    StorageLimitation(
+        code="panel_store_query_is_public_and_passes_no_point_in_time_gate",
+        detail=(
+            "PanelStore.query() takes no as_of, consults no readiness verdict and carries no "
+            "row-level available_time predicate: it returns every row of the resolved "
+            "partition. Measured on a real stock_basic 2024 partition it returns 152 rows, of "
+            "which 92 were not knowable at 2024-07-01. The point-in-time gate is read_if_ready"
+            "(), which is opt-in rather than structural, and every src/ reader goes through "
+            "it -- pinned by tests/unit/panel/test_query_callers.py, which fails when a new "
+            "module calls query() directly, because a caller that filtered by available_time "
+            "itself would move the guarantee out of this plane with nothing auditing it. "
+            "Adding the predicate here was considered and declined: a filtered read hands "
+            "back a short partition and every consumer above this plane reads shortness as "
+            "missing data (see tests/integration/panel/test_lookahead_injection.py)"
+        ),
+    ),
+)
+"""What the storage plane structurally cannot answer, whoever fetched the data.
+
+Separate from the seven `domain/` registries because these are not properties of a dataset:
+they hold for `daily` and for `income` alike, and attaching them to a dataset list would make
+`known_limitations('adj_factor')` stop meaning "what the adjustment corpus cannot answer".
+`panel_doctor` folds them into `PanelHealthReport.limitations` with an empty `datasets` tuple,
+which is what keeps the dataset-scoped selection unchanged while still putting them in front of
+every reader of a report.
+"""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -429,6 +527,14 @@ class PartitionState:
     which readiness treats as blocking, not as agreement. A field defaulting to `None` would
     have let a hand-built state silently skip the freshness cross-check that
     `partition_content_hash` exists for.
+
+    `file_row_count` is mandatory and nullable for exactly the same reason, and it is the one
+    field here read from the *file* rather than from the catalog: how many rows the Parquet
+    footer says the partition holds, or `None` when the store could not ask (no file, not a
+    Parquet file, an unreadable footer). `None` blocks. Defaulting it would have made the
+    cheapest available check against a partition changed behind the store's back opt-in, which
+    is the shape P2's product acceptance found: see this module's docstring's "One fact is read
+    from the file itself".
     """
 
     year: int
@@ -436,6 +542,7 @@ class PartitionState:
     file_present: bool
     file_readable: bool
     content_hash: str | None
+    file_row_count: int | None
     coverage: PartitionCoverage | None
     path: Path | None = None
 
@@ -676,6 +783,27 @@ def evaluate_readiness(
                         f"{state.content_hash!r}; the record describes a write that is no "
                         "longer on disk, so its subjects, fields, dates, revisions and "
                         "freshness cannot be trusted"
+                    ),
+                )
+            )
+            continue
+        if state.file_row_count != state.coverage.row_count:
+            issues.append(
+                ReadinessIssue(
+                    code="partition_row_count_mismatch",
+                    dataset=dataset,
+                    year=year,
+                    detail=(
+                        f"{dataset} year={year} has a coverage record describing "
+                        f"{state.coverage.row_count} row(s), but the Parquet file at "
+                        f"{state.path} says it holds "
+                        + (
+                            "a number of rows this store could not read"
+                            if state.file_row_count is None
+                            else f"{state.file_row_count}"
+                        )
+                        + "; the file has been changed behind the store, so nothing the "
+                        "catalog says about it can be trusted"
                     ),
                 )
             )

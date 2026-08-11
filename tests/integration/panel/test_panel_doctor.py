@@ -29,11 +29,13 @@ from openalpha_cn.domain.panel_batch import (
     PanelColumn,
     TimelineColumns,
 )
+from openalpha_cn.domain.stock_universe import StockUniverseError
 from openalpha_cn.domain.trading_calendar import (
     CalendarDay,
     TradingCalendar,
     build_trading_calendar,
 )
+from openalpha_cn.panel.catalog import KNOWN_STORAGE_LIMITATIONS
 from openalpha_cn.panel.store import ColumnSpec, PanelStore
 from openalpha_cn.panel_doctor import (
     REBUILDABLE_DATASETS,
@@ -51,6 +53,7 @@ from openalpha_cn.panel_ingest import (
     STOCK_BASIC_DATASET,
     SUSPENSION_DATASET,
     TRADING_CALENDAR_DATASET,
+    load_stock_universe,
     load_suspensions,
     write_adjustment_factors,
     write_daily_panel,
@@ -1772,3 +1775,180 @@ def test_a_coverage_record_that_no_longer_describes_the_partition_is_not_compare
         (ADJ_FACTOR_DATASET,)
     ]
     assert report.findings_with_code("subject_set_disagreement") == ()
+
+
+# --- the event clock, and the calendar's own disclosed look-ahead -----------------------------
+
+
+FUTURE_LISTING = date(2026, 12, 31)
+"""A listing dated after `AS_OF` (2026-01-17), inside the panel's own year.
+
+Inside the year on purpose: a lifecycle year is the partition key, so a listing in a *later*
+year would land in a different partition and the finding would be about which partition was
+asked for rather than about the clock."""
+
+
+def universe_batch_with_a_future_listing() -> ColumnarPanelBatch:
+    """The registry plus one security whose listing has not happened yet.
+
+    The shape P2's product acceptance drove through the whole chain: the row became knowable on
+    the same day as every other (`available_time` at `LISTED_ON`, well before the read), so the
+    batch contract accepts it, the writer accepts it, and `evaluate_readiness` -- which compares
+    only `max_available_time` against `as_of` -- reports `ready`. `load_stock_universe` then
+    raises `StockUniverseError: ... lists on 2026-12-31, after the ... registry snapshot`.
+    """
+    securities = (*SECURITIES, "000004.SZ")
+    listings = [LISTED_ON] * len(SECURITIES) + [FUTURE_LISTING]
+    return _batch(
+        STOCK_BASIC_DATASET,
+        subjects=list(securities),
+        columns=[
+            PanelColumn("lifecycle_event", "string", tuple("listing" for _ in securities)),
+            PanelColumn("lifecycle_date", "string", tuple(day.isoformat() for day in listings)),
+            PanelColumn("exchange", "string", tuple(EXCHANGE for _ in securities)),
+        ],
+        event_time=[_midnight_shanghai(day) for day in listings],
+        available_time=[_midnight_shanghai(LISTED_ON)] * len(securities),
+    )
+
+
+def test_a_row_whose_event_has_not_happened_yet_is_reported_though_readiness_clears_it(
+    tmp_path: Path,
+) -> None:
+    """The gap between the two clocks, end to end on a real store.
+
+    `evaluate_readiness` compares `max_available_time` against `as_of` and nothing else, so a
+    row that *was* knowable and describes an event that has not happened passes every readiness
+    dimension. The proof that this is the gate's own promise failing -- not a bookkeeping
+    preference -- is the last assertion: the reader this report exists to authorise refuses the
+    partition the report just called `ready`.
+    """
+    store = PanelStore(tmp_path / "panel")
+    write_trading_calendar(store, calendar_batch())
+    write_panel_batch(store, universe_batch_with_a_future_listing(), year=YEAR)
+
+    report = report_for(store, datasets=(STOCK_BASIC_DATASET,), cross_section_days=())
+
+    assert report.dataset(STOCK_BASIC_DATASET).readiness.state == "ready"
+    (finding,) = report.findings_with_code("event_after_as_of")
+    assert finding.severity == "warning"
+    assert finding.category == "unanswerable"
+    assert finding.datasets == (STOCK_BASIC_DATASET,)
+    # The instant in the detail and the business date beside it are the same event, read
+    # from the two places the coverage record keeps them.
+    assert _midnight_shanghai(FUTURE_LISTING).isoformat() in finding.detail
+    assert finding.dates == (FUTURE_LISTING,)
+    assert report.is_clean is False
+    with pytest.raises(StockUniverseError, match=r"lists on 2026-12-31"):
+        load_stock_universe(store, years=(YEAR,), as_of=AS_OF, max_staleness=None)
+
+
+def test_a_calendar_published_a_year_ahead_is_not_reported_as_a_row_about_the_future(
+    tmp_path: Path,
+) -> None:
+    """The exemption, and why it cannot be dropped. The stored 2026 calendar reaches
+    2026-12-31 -- eleven months past this `as_of` -- because that is what a published schedule
+    is. `trade_cal` is the only `published_in_advance` dataset, and a rule without that
+    exemption would refuse the calendar on every panel this repository builds."""
+    report = report_for(seed(tmp_path))
+    calendar_health = report.dataset(TRADING_CALENDAR_DATASET)
+
+    assert calendar_health.readiness.last_event_time is not None
+    assert calendar_health.readiness.last_event_time > AS_OF
+    assert report.findings_with_code("event_after_as_of") == ()
+
+
+def _wide_calendar(first: date, last: date) -> TradingCalendar:
+    span = (last - first).days + 1
+    days = tuple(first + timedelta(days=offset) for offset in range(span))
+    return build_trading_calendar(
+        EXCHANGE,
+        [CalendarDay(calendar_date=day, is_trading=day.weekday() < 5) for day in days],
+    )
+
+
+def test_a_calendar_whose_horizon_covers_a_proven_lookahead_date_says_so_on_this_panel(
+    tmp_path: Path,
+) -> None:
+    """`TradingCalendar.known_lookahead()` reaching a report, which is what it was built for.
+
+    Its docstring says it exists "so `V2-P1-013`'s gate can see them" and it had no caller in
+    `src/` at all: on a real 2015 partition `panel doctor --json` answered
+    `is_clean: true, findings: []` while the three dates sat unconditionally in `limitations`.
+
+    A `notice`, and `is_clean` staying `True` is the argument rather than an oversight: this is
+    an inherent limitation of `trade_cal` with no read-side remedy, and a `warning` would
+    refuse, permanently, every panel whose calendar reaches 2015 or 2020. See
+    `panel_doctor.HEALTH_CODE_SEVERITY`.
+    """
+    store = seed(tmp_path)
+
+    report = report_for(
+        store,
+        datasets=(TRADING_CALENDAR_DATASET,),
+        calendar=_wide_calendar(date(2015, 1, 1), LAST_DAY),
+        cross_section_days=(),
+    )
+
+    (finding,) = report.findings_with_code("calendar_lookahead_in_horizon")
+    assert finding.severity == "notice"
+    assert finding.dates == (date(2015, 9, 3), date(2015, 9, 4), date(2020, 1, 31))
+    assert finding.related_limitations == (
+        "the_published_schedule_can_be_amended_after_it_becomes_answerable",
+    )
+    assert report.is_clean is True
+    # The limitation it points at is on the same report, so a reader meeting the finding is not
+    # sent looking for a code that is not there.
+    assert "the_published_schedule_can_be_amended_after_it_becomes_answerable" in {
+        item.code for item in report.limitations
+    }
+
+
+def test_the_same_panel_with_a_2026_calendar_reports_nothing_and_still_says_it_looked(
+    tmp_path: Path,
+) -> None:
+    """The conditional half, which is the whole improvement over the static prose: the same
+    store, the same datasets, a horizon that reaches none of the three dates."""
+    report = report_for(seed(tmp_path))
+
+    assert report.findings_with_code("calendar_lookahead_in_horizon") == ()
+    (outcome,) = [check for check in report.cross_checks if check.name == "calendar_lookahead"]
+    assert outcome.ran is True
+    assert outcome.finding_count == 0
+
+
+def test_a_report_with_no_calendar_records_that_the_lookahead_check_did_not_run(
+    tmp_path: Path,
+) -> None:
+    """Task 35's rule. Without a horizon there is nothing to compare the proven instances
+    against, and an absent finding would otherwise read as a clean window."""
+    report = report_for(
+        seed(tmp_path),
+        datasets=(TRADING_CALENDAR_DATASET,),
+        calendar=None,
+        cross_section_days=(),
+    )
+
+    (outcome,) = [check for check in report.cross_checks if check.name == "calendar_lookahead"]
+    assert outcome.ran is False
+    assert outcome.skipped_reason is not None
+    assert "no calendar was supplied" in outcome.skipped_reason
+    assert report.findings_with_code("calendar_lookahead_in_horizon") == ()
+
+
+def test_the_storage_planes_own_limitations_reach_a_report_scoped_to_one_dataset(
+    tmp_path: Path,
+) -> None:
+    """A boundary of the plane is not a boundary of a dataset, and a reader of any report has to
+    be shown it: that `PanelStore.query()` passes no point-in-time gate, and that an edit which
+    changes values in place leaves the census intact, are as true of a report scoped to
+    `adj_factor` as of one scoped to everything."""
+    narrow = report_for(seed(tmp_path), datasets=(ADJ_FACTOR_DATASET,), cross_section_days=())
+
+    storage_codes = {entry.code for entry in KNOWN_STORAGE_LIMITATIONS}
+    disclosed = {item.code for item in narrow.limitations}
+
+    assert storage_codes <= disclosed
+    # They name no dataset, which is what keeps a dataset-scoped question answering about the
+    # dataset.
+    assert all(item.datasets == () for item in narrow.limitations if item.code in storage_codes)

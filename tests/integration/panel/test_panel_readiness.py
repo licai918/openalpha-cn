@@ -345,24 +345,78 @@ def test_a_partition_overwritten_with_unrelated_bytes_is_reported(tmp_path: Path
 def test_a_scan_that_fails_after_a_ready_verdict_surfaces_as_a_panel_storage_error(
     tmp_path: Path,
 ) -> None:
-    """The residual case the eight-byte magic check cannot reach: the file *is* a valid
-    Parquet file, just not the one the catalog describes. Detecting that needs a digest of
-    the file's bytes on every gate check, which is `V2-P1-012`'s deep pass, not this one's.
-    What must not happen is a raw DuckDB exception escaping `read_if_ready()` -- the method
+    """The residual case none of the store's three on-disk facts can reach: the file *is* a
+    valid Parquet file, holds *exactly* as many rows as the catalog says, and is not the one
+    the catalog describes.
+
+    The swap is six rows rather than one, and that number is the point rather than an
+    arithmetic detail. Readiness now reads the Parquet footer
+    (`partition_row_count_mismatch`), so a replacement of a different length is refused before
+    anything scans -- P2's product acceptance is why. What survives is a replacement of the
+    same length, which no O(1) fact separates from the real partition, and detecting it needs a
+    digest of the bytes on every gate check. That cost is declined and disclosed
+    (`KNOWN_STORAGE_LIMITATIONS.a_value_edited_in_place_leaves_the_census_intact`).
+
+    So what must not happen is a raw DuckDB exception escaping `read_if_ready()` -- the method
     promises a verdict, so a failure it did not predict is still reported in its own
     vocabulary."""
     store = _ready_store(tmp_path)
     partition = store.root / DATASET / "2024" / "data.parquet"
     with duckdb.connect(":memory:") as swap:
-        swap.execute("COPY (SELECT 1 AS unrelated) TO ? (FORMAT PARQUET)", [str(partition)])
+        rows = len(TRADING_DATES) * len(SUBJECTS)
+        swap.execute(
+            f"COPY (SELECT * FROM generate_series(1, {rows}) AS t(unrelated)) "
+            "TO ? (FORMAT PARQUET)",
+            [str(partition)],
+        )
 
-    # Readiness still says ready: the catalog row, the coverage record and the file's own
-    # Parquet magic are all untouched by a swap performed outside the store.
+    # Readiness still says ready: the catalog row, the coverage record, the file's own Parquet
+    # magic and now its footer's row count are all satisfied by a same-length swap.
     waived = _requirement(required_dates=None, required_subjects=None, required_fields=None)
     assert store.assess_readiness(waived).state == "ready"
 
     with pytest.raises(PanelStorageError, match="passed readiness but could not be read"):
         store.read_if_ready(waived, year=2024, columns=["close"])
+
+
+def test_a_valid_parquet_file_of_a_different_length_is_refused_before_anything_scans_it(
+    tmp_path: Path,
+) -> None:
+    """The half of the case above that P2 closed, and the shape the acceptance measured.
+
+    A file swapped behind the store for a valid Parquet file holding a *different* number of
+    rows leaves every catalog fact intact -- the partition is registered, the file is present,
+    it carries `PAR1` at both ends, and the two catalog rows agree with each other -- so until
+    the footer was read on this path, `panel doctor` reported `READY ... rows=152` over a
+    153-row `stock_basic` partition, `data-check` answered `CLEARED` with exit 0, and the row
+    that had been appended (`available_time` in 2035) came back inside
+    `load_stock_universe(as_of=2026-08-11).listed_on(2024-07-02)`.
+
+    Asserted as a pair with the test above: the difference between the two is the row count and
+    nothing else, which is what makes the refusal attributable to the footer rather than to the
+    swap.
+    """
+    store = _ready_store(tmp_path)
+    partition = store.root / DATASET / "2024" / "data.parquet"
+    stored = len(TRADING_DATES) * len(SUBJECTS)
+    with duckdb.connect(":memory:") as swap:
+        swap.execute(
+            f"COPY (SELECT * FROM generate_series(1, {stored + 1}) AS t(unrelated)) "
+            "TO ? (FORMAT PARQUET)",
+            [str(partition)],
+        )
+
+    waived = _requirement(required_dates=None, required_subjects=None, required_fields=None)
+    verdict = store.assess_readiness(waived)
+
+    assert verdict.state == "blocked"
+    assert [issue.code for issue in verdict.issues] == ["partition_row_count_mismatch"]
+    # Both numbers, matched with their surrounding words: the detail also carries the
+    # partition path, and a bare `str(6) in detail` would pass on a tmp_path digit.
+    assert f"describing {stored} row(s)" in verdict.issues[0].detail
+    assert f"says it holds {stored + 1};" in verdict.issues[0].detail
+    # Nothing scans: the outcome is a verdict, not the wrapped scan failure above.
+    assert store.read_if_ready(waived, year=2024, columns=["close"]).rows_or_none is None
 
 
 # --- a check that was never configured is not a check that passed ---------------------------
