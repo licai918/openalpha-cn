@@ -28,7 +28,12 @@ from openalpha_cn.domain.trading_calendar import (
     TradingCalendar,
     build_trading_calendar,
 )
-from openalpha_cn.panel.catalog import READINESS_ISSUE_CODES, DatasetReadiness, ReadinessIssue
+from openalpha_cn.panel.catalog import (
+    KNOWN_STORAGE_LIMITATIONS,
+    READINESS_ISSUE_CODES,
+    DatasetReadiness,
+    ReadinessIssue,
+)
 from openalpha_cn.panel_doctor import (
     BLOCKS_A_READ,
     DATASET_CADENCE,
@@ -43,9 +48,11 @@ from openalpha_cn.panel_doctor import (
     QUARTERLY_DISCLOSURE_BOUND,
     SUBJECT_CONTAINMENTS,
     PanelDoctorError,
+    calendar_lookahead_findings,
     findings_from_readiness,
     freshness_policy,
     known_limitations,
+    storage_limitations,
     subject_containment_findings,
 )
 
@@ -311,7 +318,7 @@ def test_every_statement_dataset_is_quarterly() -> None:
 
 
 def test_every_entry_of_every_known_registry_reaches_the_report() -> None:
-    """Eight registries, and the report must carry all of them: a limitation that is recorded
+    """Nine registries, and the report must carry all of them: a limitation that is recorded
     in the codebase but absent from the health report is one a reader of the report will
     mistake for a defect of this fetch."""
     registry_total = sum(
@@ -328,8 +335,47 @@ def test_every_entry_of_every_known_registry_reaches_the_report() -> None:
     )
 
     # The seven `(code, detail)` registries carry one entry each; the calendar's is a list of
-    # dated instances of one defect, so it folds into a single entry carrying those dates.
-    assert len(KNOWN_PANEL_LIMITATIONS) == registry_total + 1
+    # dated instances of one defect, so it folds into a single entry carrying those dates; and
+    # the storage plane's fold in one for one, naming no dataset because they hold for all.
+    assert len(KNOWN_PANEL_LIMITATIONS) == registry_total + 1 + len(KNOWN_STORAGE_LIMITATIONS)
+
+
+def test_the_storage_limitations_are_the_entries_that_name_no_dataset() -> None:
+    """The two selectors partition one list rather than reading two.
+
+    `known_limitations` answers "what can this dataset not tell me" and `storage_limitations`
+    answers "what can this plane not tell me about any dataset", and a boundary that ended up
+    in neither -- or in both -- would either vanish from every report or be shown twice.
+    """
+    scoped = {item.code for item in KNOWN_PANEL_LIMITATIONS if item.datasets}
+    unscoped = {item.code for item in storage_limitations()}
+
+    assert unscoped == {item.code for item in KNOWN_STORAGE_LIMITATIONS}
+    assert not (scoped & unscoped)
+    assert scoped | unscoped == {item.code for item in KNOWN_PANEL_LIMITATIONS}
+    # A dataset-scoped question never returns them, which is what keeps
+    # `known_limitations('adj_factor')` meaning "what the adjustment corpus cannot answer".
+    assert not ({item.code for item in known_limitations(("adj_factor",))} & unscoped)
+
+
+def test_both_storage_limitations_carry_the_measurement_that_motivated_them() -> None:
+    """A disclosure with no number in it is the prose these two replace.
+
+    One says every insertion and deletion behind the store is now refused and a value edited in
+    place is not; the other says `PanelStore.query()` passes no point-in-time gate. Each is
+    only actionable if the reader is told how big it is, so each carries the count it was
+    measured at on a real partition.
+    """
+    by_code = {item.code: item.detail for item in KNOWN_STORAGE_LIMITATIONS}
+
+    assert (
+        "partition_row_count_mismatch"
+        in by_code["a_value_edited_in_place_leaves_the_census_intact"]
+    )
+    assert "pct_chg" in by_code["a_value_edited_in_place_leaves_the_census_intact"]
+    query_detail = by_code["panel_store_query_is_public_and_passes_no_point_in_time_gate"]
+    assert "152" in query_detail and "92" in query_detail
+    assert "read_if_ready" in query_detail
 
 
 def test_the_calendar_limitation_carries_its_proven_instances_as_dates() -> None:
@@ -417,6 +463,80 @@ def test_the_price_registry_reaches_both_price_datasets() -> None:
     from_basic = {item.code for item in known_limitations(("daily_basic",))}
 
     assert from_daily == from_basic == {item.code for item in KNOWN_PRICE_LIMITATIONS}
+
+
+# --- the calendar's own disclosed look-ahead, made conditional on the panel -------------------
+
+
+def test_a_calendar_covering_a_proven_lookahead_date_reports_it_with_the_date_and_the_size() -> (
+    None
+):
+    """The check `TradingCalendar.known_lookahead()` was built for and never had.
+
+    Its docstring says it exists "so `V2-P1-013`'s gate can see them", and until this check no
+    module under `src/` called it: on a real 2015 partition `panel doctor --json` answered
+    `is_clean: true, findings: []` while the three dates sat in `limitations` in a sentence
+    that reads the same whether the panel reaches them or not.
+    """
+    covering = _weekday_calendar(first=date(2015, 1, 1), last=date(2015, 12, 31))
+
+    (finding,) = calendar_lookahead_findings(covering)
+    assert finding.code == "calendar_lookahead_in_horizon"
+    assert finding.category == "unanswerable"
+    assert finding.severity == "notice"
+    assert finding.datasets == ("trade_cal",)
+    assert finding.dates == (date(2015, 9, 3), date(2015, 9, 4))
+    assert finding.count == 2
+    # The size, not only the date: 2015-01-01 to the 2015-05-13 announcement is 132 days, and a
+    # reader deciding whether to scope around it needs the width rather than the fact.
+    assert "132 days of look-ahead" in finding.detail
+    assert finding.related_limitations == (
+        "the_published_schedule_can_be_amended_after_it_becomes_answerable",
+    )
+
+
+def test_a_calendar_that_reaches_none_of_them_reports_nothing() -> None:
+    """The conditional half, which is the whole improvement over the static prose: a 2026 panel
+    is not contaminated by a 2015 amendment, and a check that fired anyway would be that prose
+    with extra steps. That silence is distinguishable from a run with no calendar at all is the
+    `cross_checks` entry's job, pinned in
+    `tests/integration/panel/test_panel_doctor.py`."""
+    clean = _weekday_calendar(first=date(2026, 1, 1), last=date(2026, 12, 31))
+
+    assert calendar_lookahead_findings(clean) == ()
+
+
+def test_every_proven_lookahead_instance_is_reachable_by_some_horizon() -> None:
+    """A registry entry no window can surface is a disclosure that never reaches a reader.
+
+    Both amendments are covered: 2015's two dates and 2020's one, each by a calendar spanning
+    its own year, so an instance added to `KNOWN_CALENDAR_LOOKAHEAD` with a date this check
+    cannot reach fails here rather than sitting unreported.
+    """
+    reported: set[date] = set()
+    for instance in KNOWN_CALENDAR_LOOKAHEAD:
+        year = instance.calendar_date.year
+        horizon = _weekday_calendar(first=date(year, 1, 1), last=date(year, 12, 31))
+        reported.update(
+            day for finding in calendar_lookahead_findings(horizon) for day in finding.dates
+        )
+
+    assert reported == {instance.calendar_date for instance in KNOWN_CALENDAR_LOOKAHEAD}
+
+
+# --- the event clock, which readiness never compares against as_of ---------------------------
+
+
+def test_the_only_cadence_exempt_from_the_event_clock_is_the_one_that_publishes_ahead() -> None:
+    """`event_after_as_of` cannot be a blanket rule, and the measurement is why: on the real
+    panel this was taken against, `trade_cal` 2026 reaches 2026-12-30 -- five months past the
+    read -- while every other partition's newest event is the day before it. The exemption is
+    therefore the `published_in_advance` cadence, which exists to say exactly that, and
+    `trade_cal` is its only member. A second dataset would earn the exemption by declaring the
+    cadence rather than by being named in `panel_doctor`."""
+    ahead = {name for name, cadence in DATASET_CADENCE.items() if cadence == "published_in_advance"}
+
+    assert ahead == {"trade_cal"}
 
 
 # --- cross-dataset composition -------------------------------------------------------------
@@ -520,6 +640,7 @@ def test_the_severity_of_every_declared_code_is_pinned_code_by_code() -> None:
         "partition_missing": "blocking",
         "partition_file_missing": "blocking",
         "partition_file_unreadable": "blocking",
+        "partition_row_count_mismatch": "blocking",
         "coverage_missing": "blocking",
         "coverage_stale": "blocking",
         "date_gap": "blocking",
@@ -534,10 +655,17 @@ def test_the_severity_of_every_declared_code_is_pinned_code_by_code() -> None:
         "unexplained_unpriced": "warning",
         "check_unavailable": "warning",
         "domain_rebuild_refused": "warning",
+        # The event clock nothing in `evaluate_readiness` compares against `as_of`, measured
+        # the same way `domain_rebuild_refused` was: the read this report clears is the read
+        # that raised.
+        "event_after_as_of": "warning",
         # Measured facts `V2-P1-011` showed to be ordinary on this corpus.
         "ambiguous_filing": "notice",
         "duplicate_versions": "notice",
         "revised_rows": "notice",
+        # An inherent limitation of `trade_cal` with no read-side remedy, made conditional on
+        # the panel's own horizon. See `HEALTH_CODE_SEVERITY` for the three-part argument.
+        "calendar_lookahead_in_horizon": "notice",
     }
 
 

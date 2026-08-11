@@ -978,6 +978,14 @@ def test_panel_doctor_human_output_omits_the_limitation_line_for_a_dataset_with_
     It reads `READY` rather than `BLOCKED` since `V2-P2-000` gave the generator a `namechange`
     partition, and that is the stronger form of the same assertion: a blocked dataset could
     have been silent about limitations because the report never got as far as looking them up.
+
+    **The second half is new and is the point of the split.** Since P2's product acceptance the
+    report also carries the *storage plane's* own boundaries -- that `PanelStore.query()` passes
+    no point-in-time gate, and that an edit changing values in place leaves the census intact --
+    and those hold for `namechange` exactly as they hold for `daily`. They are rendered on their
+    own line with their own wording, so a reader of this command is not told that `namechange`
+    has limitations when what has them is the plane underneath it, and so that the dataset
+    branch above stays reachable in both directions.
     """
     seed_fixture_panel(tmp_path)
 
@@ -985,6 +993,7 @@ def test_panel_doctor_human_output_omits_the_limitation_line_for_a_dataset_with_
 
     assert result.exit_code == PanelExit.ok
     assert "known limitation" not in result.stdout
+    assert "structural boundary(ies) of the panel store itself" in result.stdout
     assert "READY namechange" in result.stdout
 
 

@@ -72,8 +72,16 @@ required `as_of` (ISO-8601, **timezone-aware**), required `exchange`, required
   narrower question than the one they typed.
 - `GET /api/v1/panel/health` returns the whole health report: per-dataset readiness and
   freshness, the cross-dataset checks with a record of which of them actually ran, and
-  the datasets' inherent limitations kept separate from this fetch's defects. Distinct
+  the inherent limitations kept separate from this fetch's defects. Distinct
   from `GET /health`, which is the dependency-free liveness probe.
+
+  `limitations` carries two kinds of entry and they are told apart by `datasets`. An
+  entry that **names** datasets is a boundary of those datasets — what `trade_cal` or
+  `adj_factor` structurally cannot answer. An entry that names **none** is a boundary of
+  the storage plane itself, true of every dataset alike: today, that
+  `PanelStore.query()` passes no point-in-time gate, and that an edit changing values in
+  place leaves the catalog's census intact. A report scoped to one dataset carries that
+  dataset's entries and all of the plane's.
 - `GET /api/v1/panel/gate` runs the fail-closed dependency gate.
 
 `exchange` is required on all three, and when `calendar=false` it reaches nothing:

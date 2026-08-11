@@ -193,13 +193,31 @@ described. The ordering is what keeps the two rows honest; this hash is what mak
 disagreement visible when it happens.
 
 A partition file *damaged behind the store's back* is a different fault with a different
-answer: nothing in the catalog changes, so no hash comparison can see it. Readiness checks
-Parquet's own magic at both ends of the file (`_looks_like_parquet`, eight bytes) and reports
-`partition_file_unreadable` for a truncated or overwritten one; a file replaced by a
-different but *valid* Parquet file is out of reach of any O(1) check and belongs to
-`V2-P1-012`'s deep pass. `read_if_ready()` additionally wraps its scan, so even an
-unanticipated corruption surfaces as a `PanelStorageError` rather than as a bare
-`duckdb.InvalidInputException` escaping a method that promises a verdict.
+answer: nothing in the catalog changes, so no hash comparison can see it. Readiness asks the
+file two questions of its own instead. It checks Parquet's own magic at both ends
+(`_looks_like_parquet`, eight bytes) and reports `partition_file_unreadable` for a truncated
+or overwritten one; and it reads the **footer's row count** (`_parquet_row_count`) and reports
+`partition_row_count_mismatch` when the file no longer holds the number of rows the coverage
+record describes.
+
+That second check is new, and this paragraph used to say the opposite -- that a file replaced
+by a different but *valid* Parquet file "is out of reach of any O(1) check". It is not: the
+count is metadata, and DuckDB answers it without scanning, at 0.3 ms on a 2,000,000-row
+partition. P2's product acceptance is what falsified the sentence, by appending one row with
+an `available_time` in 2035 to a real `stock_basic` partition and watching `panel doctor`
+report `READY ... rows=152` over a 153-row file, `data-check` answer `CLEARED` with exit 0,
+and `load_stock_universe(as_of=2026-08-11)` then return the injected security from
+`listed_on(2024-07-02)`. Every insertion and every deletion moves the count, so all of them
+now block.
+
+What is still out of reach here is an edit that changes values *in place*: it moves neither
+the magic, nor the count, nor anything in the catalog. That belongs to a check that reads the
+column -- `V2-P1-012`'s `return_path_disagreement` catches a corrupted `pct_chg`, its
+`close_disagreement` a corrupted `close` -- and is disclosed rather than argued, as
+`panel/catalog.py::KNOWN_STORAGE_LIMITATIONS`'
+`a_value_edited_in_place_leaves_the_census_intact`. `read_if_ready()` additionally wraps its
+scan, so even an unanticipated corruption surfaces as a `PanelStorageError` rather than as a
+bare `duckdb.InvalidInputException` escaping a method that promises a verdict.
 
 Every value a `PartitionCoverage` carries is validated here, in `_validated_coverage()`, and
 nowhere else. `panel/catalog.py`'s dataclasses deliberately have no validating
@@ -358,10 +376,12 @@ What this ordering deliberately does **not** do is verify the bytes on disk.
 partition; recomputing `_content_hash` would mean re-serialising every row of a ~1.35e7-row
 partition on every gate check, which is not a cost a fail-closed gate that runs on every read
 can carry. So the guarantee is precisely stated: this store keeps its own two records honest
-with each other, and a partition file changed *behind* the store's back is still out of reach
-here -- the same boundary `_looks_like_parquet` draws, and the same deep pass (`V2-P1-012`) it
-defers to. The one disk-derived fact anywhere in this module is `_parquet_row_count`, and it
-runs on the write path only, where a single footer read is affordable.
+with each other, and *how many rows* the file holds is now checked against them
+(`_parquet_row_count` runs on the read path too, one footer read per requested year), while
+the **values** in those rows are not. Re-hashing is the only thing that would see a value
+edited in place, and that cost is still declined; the residue is disclosed as
+`panel/catalog.py::KNOWN_STORAGE_LIMITATIONS`'
+`a_value_edited_in_place_leaves_the_census_intact` rather than left implicit here.
 
 ## Numerical-stack boundary (ADR-0003)
 
@@ -856,6 +876,31 @@ class PanelStore:
         """Return the requested `columns` for `(dataset, year)`, optionally filtered by
         equality on `filters`. Empty list if the partition was never written -- no error.
 
+        ## This method passes no point-in-time gate, and that is not a detail
+
+        It takes no `as_of`, consults no readiness verdict and carries no row-level
+        `available_time` predicate: it hands back **every** row of the resolved partition. On a
+        real `stock_basic` 2024 partition that is 152 rows, of which 92 were not knowable at
+        2024-07-01. The gate is `read_if_ready()`, which is opt-in rather than structural, and
+        every reader in `src/` goes through it -- `tests/unit/panel/test_query_callers.py` is
+        what keeps that true, by failing when a module that is not this one calls `query()`
+        directly.
+
+        That test exists because of a specific, named risk rather than as tidiness. A caller
+        that finds `read_if_ready()` too coarse -- P3's factor engine will, because
+        `not_yet_knowable` is judged per partition and a partition is a year -- will reach for
+        `query()` and filter by `available_time` itself, and the point-in-time guarantee then
+        lives in that caller with nothing auditing it. Adding the predicate here instead was
+        considered twice and declined both times, for a reason that is about the consumers and
+        not about the grammar: a filtered read hands back a *short* partition, and every
+        consumer above this plane reads shortness as missing data rather than as withheld data
+        (`build_index_membership` refuses a gap in the month sequence,
+        `load_industry_histories` refuses an interval whose closing row was filtered away,
+        `build_stock_universe` refuses a delisting whose listing was). See
+        `tests/integration/panel/test_lookahead_injection.py`'s "What is deliberately not here"
+        and `panel/catalog.py::KNOWN_STORAGE_LIMITATIONS`, which carries this as a disclosure a
+        report shows its reader.
+
         Resolves the partition's file path through the catalog (an indexed point lookup,
         never a directory listing) and hands DuckDB that single explicit path, so the scan
         can only ever touch this one partition -- see the module docstring's "The catalog"
@@ -1094,6 +1139,17 @@ class PanelStore:
         same `panel_partitions` row that resolves the path -- it costs nothing extra, and
         dropping it (as an earlier version did, keeping only `path.is_file()`) is what left
         a coverage record's agreement with the partition it describes permanently unchecked.
+
+        `file_row_count` is the one fact here taken from the **file** rather than from the
+        catalog, and it is asked only of a file that already carries Parquet's magic at both
+        ends -- a footer read on anything else would raise inside the helper and answer `None`
+        by the longer route. It comes off the footer through the connection already open for
+        the catalog (0.3 ms on a 2,000,000-row partition, independent of size; see
+        `_parquet_row_count`), which is the same order as the eight bytes above it. Until P2's
+        product acceptance this was read on the write path only, and the consequence was
+        measured rather than argued: a row appended to a real `stock_basic` partition left
+        `panel doctor` reporting the catalog's `rows=152` over a 153-row file, `data-check`
+        `CLEARED`, and the injected security inside `load_stock_universe`'s answer.
         """
         years = sorted(set(requirement.years))
         if not self.catalog_path.exists():
@@ -1112,13 +1168,17 @@ class PanelStore:
                     states.append(_absent_partition(year))
                     continue
                 present = reference.path.is_file()
+                readable = present and _looks_like_parquet(reference.path)
                 states.append(
                     PartitionState(
                         year=year,
                         registered=True,
                         file_present=present,
-                        file_readable=present and _looks_like_parquet(reference.path),
+                        file_readable=readable,
                         content_hash=reference.content_hash,
+                        file_row_count=(
+                            _parquet_row_count(connection, reference.path) if readable else None
+                        ),
                         coverage=_read_coverage(connection, requirement.dataset, year),
                         path=reference.path,
                     )
@@ -1235,6 +1295,7 @@ def _absent_partition(year: int) -> PartitionState:
         file_present=False,
         file_readable=False,
         content_hash=None,
+        file_row_count=None,
         coverage=None,
     )
 
@@ -1354,10 +1415,15 @@ def _parquet_row_count(connection: duckdb.DuckDBPyConnection, path: Path) -> int
     partition -- the same order as the eight bytes `_looks_like_parquet` reads, and
     independent of partition size. It runs on the already-open read-only catalog connection
     (DuckDB reads an external Parquet file happily from one) rather than opening a second
-    database, and only on `write_partition()`'s no-op path.
+    database. Two callers: `write_partition()`'s no-op path, where it stops a retry from
+    reporting success over a file the rename never reached, and `_partition_states`, once per
+    requested year, where it is the only fact readiness has about the file's *contents*.
 
-    `None` rather than an exception for an unreadable file, because the one caller's question
-    is "can this write be skipped", and every answer other than a confident yes is no.
+    `None` rather than an exception for an unreadable file, because both callers' question is
+    a confidence question -- "can this write be skipped" on the write path, "does the file
+    still hold what the record describes" on the read path -- and every answer other than a
+    confident yes is no. Readiness treats `None` as `partition_row_count_mismatch` for that
+    reason: a footer this store cannot read is not a footer that agrees.
     """
     try:
         row = connection.execute("SELECT count(*) FROM read_parquet(?)", [str(path)]).fetchone()
@@ -1372,10 +1438,11 @@ def _looks_like_parquet(path: Path) -> bool:
     Structural sanity, not content verification: it separates "a Parquet file is there" from
     "a file is there", which `Path.is_file()` cannot. A zero-byte file, a truncated write and
     a file overwritten with unrelated bytes all fail it. A file replaced by a *different but
-    valid* Parquet file passes it -- catching that needs a digest of the file's bytes, which
-    would mean re-hashing the whole partition on every gate check, and belongs to
-    `V2-P1-012`'s deep health pass rather than to a fail-closed gate that has to be cheap
-    enough to run on every read.
+    valid* Parquet file passes it, and this docstring used to stop there and hand the whole
+    case to a byte digest. `_parquet_row_count` takes the half of it that is metadata: a
+    replacement holding a different number of rows is caught by the footer, not by these eight
+    bytes. What is left for a digest is a replacement of exactly the same length, and that cost
+    is still declined -- see this module's docstring.
     """
     try:
         with path.open("rb") as handle:

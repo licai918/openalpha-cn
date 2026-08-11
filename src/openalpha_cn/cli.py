@@ -1172,14 +1172,28 @@ def _echo_report(report: PanelHealthReport) -> None:
             f"findings={check.finding_count}" if check.ran else f"skipped: {check.skipped_reason}"
         )
         typer.echo(f"CHECK {check.name} [{','.join(check.datasets)}] {outcome}")
-    if report.limitations:
-        # Deliberately a count and not the list: `known_limitations` returns up to 55 entries,
-        # each a paragraph, and a human report that buried its own findings under them would
-        # teach its readers to skim both -- the exact failure `PanelHealthReport` keeps
-        # `limitations` a sibling of `findings` to avoid.
+    # Two lines and not one, keyed on whether an entry names a dataset. A boundary of
+    # `adj_factor` and a boundary of the store itself are different claims with different
+    # audiences -- one is answered by choosing a different dataset, the other never is -- and
+    # merging them would tell a reader of `panel doctor --dataset namechange` that `namechange`
+    # has limitations when what has them is the plane underneath it. `panel_doctor`'s
+    # `known_limitations` / `storage_limitations` split is the same distinction one layer down.
+    #
+    # Deliberately a count and not the list on both lines: the dataset half returns up to 55
+    # entries, each a paragraph, and a human report that buried its own findings under them
+    # would teach its readers to skim both -- the exact failure `PanelHealthReport` keeps
+    # `limitations` a sibling of `findings` to avoid.
+    scoped = [item for item in report.limitations if item.datasets]
+    plane = [item for item in report.limitations if not item.datasets]
+    if scoped:
         typer.echo(
-            f"INFO {len(report.limitations)} known limitation(s) of these datasets "
+            f"INFO {len(scoped)} known limitation(s) of these datasets "
             "(structural, not defects of this fetch); --json carries them in full"
+        )
+    if plane:
+        typer.echo(
+            f"INFO {len(plane)} structural boundary(ies) of the panel store itself "
+            "(true of every dataset alike); --json carries them in full"
         )
 
 

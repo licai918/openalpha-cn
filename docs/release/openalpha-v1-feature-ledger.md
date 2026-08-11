@@ -4,8 +4,8 @@
 
 ## 对账结论
 
-- 功能总数: 136
-- 当前真实完成: 131 (96.32%)
+- 功能总数: 140
+- 当前真实完成: 135 (96.43%)
 - `UNREVIEWED=0`
 - `UNKNOWN=0`
 - `legacy_acceptance_rows=86` (历史散文验收、尚未绑定为可执行 pytest/CI 断言)
@@ -18,7 +18,7 @@
 | `DEFERRED` | 1 |
 | `ENHANCED_REPLACEMENT` | 20 |
 | `EXCLUDED` | 4 |
-| `NATIVE_COMPLETE` | 110 |
+| `NATIVE_COMPLETE` | 114 |
 
 ## 功能明细
 
@@ -160,6 +160,10 @@
 | `OA-OPS-028` | operations | P2 red-team gates on a live panel: the injection register's e2e half | `NATIVE_COMPLETE` | `tests/e2e/e2e_support.py#StoredPartition;tests/e2e/e2e_support.py#read_stored_partition;tests/e2e/e2e_support.py#rewrite_partition;tests/e2e/e2e_support.py#knowable_from;tests/e2e/conftest.py#injected_partition` | `tests/e2e/test_pit_injection_online.py;tests/integration/test_injection_register.py` | `pytest` | `tests/e2e/test_pit_injection_online.py::test_a_row_that_became_knowable_after_the_read_blocks_its_partition_in_the_doctor` |
 | `OA-OPS-029` | operations | Three surviving-mutant bindings: a boundary operator, a cleared pattern and a detector's scope | `NATIVE_COMPLETE` | `tests/unit/domain/test_daily_prices.py#test_a_gap_of_exactly_one_tick_is_accepted_and_the_next_representable_gap_is_not;tests/unit/domain/test_daily_prices.py#PUBLISHED_TICK_IN_PERCENT;tests/integration/test_injection_register.py#test_no_vectors_cleared_answer_matches_another_vectors_cleared_pattern;tests/unit/test_panel_fixtures.py#CROSS_TRIGGERS;tests/unit/test_panel_fixtures.py#test_no_detector_answers_true_on_a_shape_that_is_not_its_own;tests/integration/panel/test_panel_shape_coverage.py#_shape_datasets;tests/integration/panel/test_panel_shape_coverage.py#WRITER_COUPLED_DATASETS` | `tests/unit/domain/test_daily_prices.py;tests/integration/test_injection_register.py;tests/unit/test_panel_fixtures.py;tests/integration/panel/test_panel_shape_coverage.py` | `pytest` | `tests/unit/test_panel_fixtures.py::test_no_detector_answers_true_on_a_shape_that_is_not_its_own` |
 | `OA-OPS-030` | operations | Every KNOWN_* limitation registry bound to the suite by structure | `NATIVE_COMPLETE` | `tests/unit/test_known_limitation_registries.py#LIMITATION_REGISTRIES;tests/unit/test_known_limitation_registries.py#CODELESS_REGISTRIES;tests/unit/test_known_limitation_registries.py#executable_string_literals;tests/unit/test_known_limitation_registries.py#docstring_string_literals;tests/unit/test_known_limitation_registries.py#declared_codes;tests/unit/test_known_limitation_registries.py#PROSE_SENTINEL` | `tests/unit/test_known_limitation_registries.py;tests/unit/domain/test_stock_universe.py;tests/unit/domain/test_labels.py;tests/unit/domain/test_financial_statements.py;tests/unit/domain/test_price_limits.py;tests/unit/domain/test_industry_classification.py;tests/unit/test_panel_doctor_rules.py` | `pytest` | `tests/unit/test_known_limitation_registries.py::test_every_declared_limitation_code_is_named_in_executable_test_code` |
+| `OA-PANEL-023` | panel | The Parquet footer reconciled against the catalog on every readiness assessment | `NATIVE_COMPLETE` | `src/openalpha_cn/panel/catalog.py#READINESS_ISSUE_CODES;src/openalpha_cn/panel/catalog.py#PartitionState;src/openalpha_cn/panel/catalog.py#evaluate_readiness;src/openalpha_cn/panel/store.py#_parquet_row_count;src/openalpha_cn/panel_doctor.py#READINESS_CODE_CATEGORY;src/openalpha_cn/panel_gate.py#GATE_CODE_BLOCKS` | `tests/unit/panel/test_readiness_rules.py;tests/integration/panel/test_panel_readiness.py;tests/integration/panel/test_panel_store_hardening.py;tests/e2e/test_pit_injection_online.py` | `pytest` | `tests/integration/panel/test_panel_readiness.py::test_a_valid_parquet_file_of_a_different_length_is_refused_before_anything_scans_it` |
+| `OA-PANEL-024` | panel | The event clock, which readiness never compares against as_of | `NATIVE_COMPLETE` | `src/openalpha_cn/panel_doctor.py#DOCTOR_ISSUE_CODES;src/openalpha_cn/panel_doctor.py#DOCTOR_CODE_CATEGORY;src/openalpha_cn/panel_doctor.py#HEALTH_CODE_SEVERITY;src/openalpha_cn/panel_doctor.py#dataset_health;src/openalpha_cn/panel_gate.py#GATE_CODE_BLOCKS` | `tests/integration/panel/test_panel_doctor.py;tests/unit/test_panel_doctor_rules.py;tests/unit/test_panel_gate_rules.py` | `pytest` | `tests/integration/panel/test_panel_doctor.py::test_a_row_whose_event_has_not_happened_yet_is_reported_though_readiness_clears_it` |
+| `OA-PANEL-025` | panel | The calendar's own disclosed look-ahead, made conditional on the panel's horizon | `NATIVE_COMPLETE` | `src/openalpha_cn/panel_doctor.py#calendar_lookahead_findings;src/openalpha_cn/panel_doctor.py#CALENDAR_LOOKAHEAD_CHECK;src/openalpha_cn/panel_doctor.py#panel_health_report;src/openalpha_cn/domain/trading_calendar.py#KNOWN_CALENDAR_LOOKAHEAD` | `tests/unit/test_panel_doctor_rules.py;tests/integration/panel/test_panel_doctor.py` | `pytest` | `tests/integration/panel/test_panel_doctor.py::test_a_calendar_whose_horizon_covers_a_proven_lookahead_date_says_so_on_this_panel` |
+| `OA-PANEL-026` | panel | The un-gated read named, disclosed on every report, and bound to an allowlist | `NATIVE_COMPLETE` | `src/openalpha_cn/panel/catalog.py#KNOWN_STORAGE_LIMITATIONS;src/openalpha_cn/panel/catalog.py#StorageLimitation;src/openalpha_cn/panel_doctor.py#storage_limitations;src/openalpha_cn/panel/store.py#PanelStore` | `tests/unit/panel/test_query_callers.py;tests/unit/test_panel_doctor_rules.py;tests/integration/panel/test_panel_doctor.py` | `pytest` | `tests/unit/panel/test_query_callers.py::test_only_the_store_itself_reads_a_partition_without_a_readiness_verdict` |
 
 ## 边界
 

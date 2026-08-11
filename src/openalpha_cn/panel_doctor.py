@@ -7,7 +7,7 @@ Eight datasets landed before this one and each brought its own health instrument
 plus the calendar's dated look-ahead list, `close_disagreements`, `explain_unpriced`,
 `financial_ambiguity_report`, `PartitionCoverage.revised_row_count` and its label census.
 Every one of them is *called* here and none is reimplemented. What this module adds is the
-four things none of them could do alone:
+five things none of them could do alone:
 
 1. **One contract for all of it.** A single closed code set, a category per code and a
    severity per code, so `V2-P1-013`'s gate can branch and `V2-P1-016`'s REST face can
@@ -26,6 +26,13 @@ four things none of them could do alone:
    enough for the statement datasets is the second. It is a *fortnight* and not a session:
    see the warning under `_longest_closure` for what a real exchange calendar does to this
    bound, and `date_gap` for the check that actually finds a hole the next morning.
+5. **A disclosed defect turned into a statement about *this* panel.** A registry entry is
+   unconditional prose: `KNOWN_CALENDAR_LOOKAHEAD`'s three dates read the same whether the
+   panel reaches them or not, which is how a real 2015 calendar partition produced
+   `is_clean: true, findings: []` while carrying 132 days of proven look-ahead. The dataset
+   modules cannot close that, because none of them can see the window this report was asked
+   about. `_calendar_lookahead_check` can, and that is the whole of what it adds: the same
+   disclosure, conditional on the horizon, with the dates named.
 
 ## Why the freshness bounds are here at all, when every `*_requirement` refuses to choose one
 
@@ -89,12 +96,18 @@ clean, and a panel carrying a `close_disagreement` is not.
 
 ## What the report cannot check, it says it could not check -- and where each half says it
 
-`cross_checks` records every **cross-dataset** check by name with `ran` and, when it did not,
-why: silence from a check that never ran is otherwise indistinguishable from silence from one
-that passed. A blocked or damaged dataset makes the loads underneath a cross-check raise, and
-a doctor that propagated that would be a doctor that crashes precisely on the panels it exists
-for -- so each check is wrapped, the failure becomes a `check_unavailable` finding, and the
-rest of the report is still produced.
+`cross_checks` records every check that spans more than one dataset's own census by name, with
+`ran` and, when it did not, why: silence from a check that never ran is otherwise
+indistinguishable from silence from one that passed. A blocked or damaged dataset makes the
+loads underneath a cross-check raise, and a doctor that propagated that would be a doctor that
+crashes precisely on the panels it exists for -- so each check is wrapped, the failure becomes
+a `check_unavailable` finding, and the rest of the report is still produced.
+
+`calendar_lookahead` is the one entry there that opens no partition at all: its whole input is
+the `TradingCalendar` the caller supplied, so it cannot fail that way, and the reason it is on
+this list rather than being a per-dataset finding is that the calendar it judges is the same
+one three datasets' `required_dates` were derived from. Its `ran=False` case is the ordinary
+one -- a report given no calendar -- and it is exactly the case that must not read as clean.
 
 `cross_checks` is only that half. The **per-dataset** checks that did not run are on
 `DatasetHealth.readiness.checks_waived`, which is `panel/catalog.py`'s own contract
@@ -196,6 +209,7 @@ from openalpha_cn.domain.trading_calendar import (
 )
 from openalpha_cn.panel.catalog import (
     DEFAULT_DATE_TIMEZONE,
+    KNOWN_STORAGE_LIMITATIONS,
     READINESS_ISSUE_CODES,
     DatasetReadiness,
     PanelStorageError,
@@ -266,6 +280,7 @@ READINESS_CODE_CATEGORY: Final[Mapping[str, HealthCategory]] = MappingProxyType(
         "partition_missing": "missing",
         "partition_file_missing": "missing",
         "partition_file_unreadable": "missing",
+        "partition_row_count_mismatch": "inconsistent",
         "coverage_missing": "missing",
         "date_gap": "missing",
         "subject_missing": "missing",
@@ -277,9 +292,16 @@ READINESS_CODE_CATEGORY: Final[Mapping[str, HealthCategory]] = MappingProxyType(
 """Every code `evaluate_readiness` emits, filed under one of this report's headings.
 
 Stated as a table rather than derived from a naming convention, and pinned against
-`READINESS_ISSUE_CODES` by equality in `tests/unit/test_panel_doctor_rules.py`: a thirteenth
+`READINESS_ISSUE_CODES` by equality in `tests/unit/test_panel_doctor_rules.py`: a fourteenth
 code added upstream must fail a test here rather than arrive with no category and vanish from
-every grouped view."""
+every grouped view.
+
+`partition_row_count_mismatch` is the one readiness code filed under `inconsistent` rather
+than `missing`, and the reason is the reason `HEALTH_CATEGORIES` gives for having six
+headings: the file may hold *more* rows than the record describes as easily as fewer, so
+"missing" would tell a reader that data is absent when the truth is that two records of the
+same partition disagree. `domain_rebuild_refused` is filed there for the same shape one plane
+up -- one dataset contradicting itself rather than two datasets contradicting each other."""
 
 DOCTOR_ISSUE_CODES: Final[frozenset[str]] = frozenset(
     {
@@ -292,6 +314,8 @@ DOCTOR_ISSUE_CODES: Final[frozenset[str]] = frozenset(
         "revised_rows",
         "check_unavailable",
         "domain_rebuild_refused",
+        "event_after_as_of",
+        "calendar_lookahead_in_horizon",
     }
 )
 """The codes this module adds -- one per gap the eight dataset issues left open.
@@ -309,7 +333,31 @@ assessed from the catalog's own census -- files, subjects, fields, dates, freshn
 row-level contradiction is invisible to every one of those. So a `suspend_d` partition serving
 one security both an `R` row and an `S` row for one session was `READY` here and `CLEARED` by
 `V2-P1-013`'s gate while `load_suspensions` on that same partition, at that same `as_of`,
-raised. See `_rebuild_check`."""
+raised. See `_rebuild_check`.
+
+`event_after_as_of` is the **other** clock. `evaluate_readiness` compares one instant against
+`as_of` -- `max_available_time`, which answers "could anyone have known this yet" -- and says
+nothing about `last_event_time`, which answers "has this happened yet". Those come apart,
+because nothing in `ColumnarPanelBatch` requires a row's event to precede its availability and
+`trade_cal` is the reason: the exchange publishes next year's sessions this year, so a calendar
+row's event is legitimately in the future. P2's product acceptance measured what that costs
+everywhere else -- one `stock_basic` row whose listing is dated 2026-12-31 and which became
+knowable on 2026-01-02 passed the batch contract, passed the writer, was reported `READY` here
+and `CLEARED` by the gate, and then made `load_stock_universe` raise
+`StockUniverseError: ... lists on 2026-12-31, after the 2026-08-11 registry snapshot`. The
+exemption is by cadence rather than by dataset name: `published_in_advance` is the one cadence
+that means "this dataset's newest event is normally in the future", and on the panel this was
+measured against `trade_cal` was the only one of nine partitions whose `last_event_time`
+post-dated the read. See `dataset_health`.
+
+`calendar_lookahead_in_horizon` is the repository's own disclosed look-ahead, made conditional
+on the panel. `KNOWN_CALENDAR_LOOKAHEAD` records three dates whose stored availability instant
+this repository overstates, and `TradingCalendar.known_lookahead()` was built to report the
+ones a given window covers "so `V2-P1-013`'s gate can see them" -- and then had no caller in
+`src/` at all. A real 2015 calendar partition (365 rows, covering 2015-09-03 with 132 days of
+look-ahead) therefore produced `is_clean: true, findings: []`, with the three dates appearing
+only as a sentence in `limitations` that reads the same whether or not the panel reaches them.
+See `_calendar_lookahead_check` for why the severity is `notice` and not `warning`."""
 
 DOCTOR_CODE_CATEGORY: Final[Mapping[str, HealthCategory]] = MappingProxyType(
     {
@@ -322,8 +370,19 @@ DOCTOR_CODE_CATEGORY: Final[Mapping[str, HealthCategory]] = MappingProxyType(
         "revised_rows": "revised",
         "check_unavailable": "unanswerable",
         "domain_rebuild_refused": "inconsistent",
+        "event_after_as_of": "unanswerable",
+        "calendar_lookahead_in_horizon": "unanswerable",
     }
 )
+"""The heading each of this module's own codes files under.
+
+Both new codes are `unanswerable` and `HEALTH_CATEGORIES`' own definition is why: it is where
+"a partition holding information from after `as_of`" lands. `event_after_as_of` is exactly that
+sentence with the *event* clock substituted for the availability one. `calendar_lookahead_in_
+horizon` is the same shape at one remove -- the question "was this session's status knowable at
+the instant the store claims" has no answer here, because `trade_cal` serves one snapshot and
+no revision history -- and filing it under `inconsistent` would promise a second witness that
+does not exist."""
 
 PANEL_HEALTH_CODES: Final[frozenset[str]] = READINESS_ISSUE_CODES | DOCTOR_ISSUE_CODES
 """The closed set every finding's `code` is drawn from; `V2-P1-013` branches on it."""
@@ -341,9 +400,11 @@ HEALTH_CODE_SEVERITY: Final[Mapping[str, HealthSeverity]] = MappingProxyType(
         "unexplained_unpriced": "warning",
         "check_unavailable": "warning",
         "domain_rebuild_refused": "warning",
+        "event_after_as_of": "warning",
         "ambiguous_filing": "notice",
         "duplicate_versions": "notice",
         "revised_rows": "notice",
+        "calendar_lookahead_in_horizon": "notice",
     }
 )
 """What each code means for `is_clean`, as a table rather than as an argument at each site.
@@ -362,6 +423,25 @@ could not look" must not read as "I looked and it was fine". `domain_rebuild_ref
 `warning` for the sharper version of that: the read this report exists to authorise is the
 read that raised, and `GATE_BLOCKING_SEVERITIES` counts `warning`, so this is the severity at
 which the gate stops clearing a partition its own reader will not return.
+`event_after_as_of` is a `warning` for that same reason and is measured the same way: the read
+it clears is the read that raised (`load_stock_universe`, on the partition this report called
+`READY`).
+
+**`calendar_lookahead_in_horizon` is the one code here that is deliberately a `notice`, and
+the argument is not that it is harmless.** Three things decide it. It is an *inherent*
+limitation of `trade_cal`, already carried in `KNOWN_PANEL_LIMITATIONS`, rather than a defect
+of this fetch -- and `is_clean` is the verdict on the fetch, which is the separation this whole
+module exists to keep (`KnownLimitation`'s docstring). It has **no remedy**: every blocking and
+warning code in this table names an action (re-fetch, rebuild, name a session, narrow the
+request), and this one cannot, because removing the defect needs a revision history the
+endpoint does not serve. And a `warning` would refuse, permanently and with no way forward,
+every panel whose calendar reaches 2015-09-03, 2015-09-04 or 2020-01-31 -- which is most
+historical research this repository exists for -- and "a gate that refuses everything gets
+switched off" is the argument this module already accepted twice, for the three measured
+notices and for `unverified_daily_coverage`'s caveat form. What the `notice` buys over the
+static prose it replaces is that it is *conditional*: it fires only when this panel's horizon
+actually covers one of those dates, it names which, and it rides on the clearance
+(`DependencyClearance.notices`) so a cleared caller holds it.
 
 Pinned entry by entry in `tests/unit/test_panel_doctor_rules.py`: severity is the field
 `V2-P1-013`'s gate branches on after `code`, and a silent demotion is the one change to this
@@ -575,7 +655,7 @@ def freshness_policy(dataset: str, *, calendar: TradingCalendar | None = None) -
     )
 
 
-# --- inherent limitations, from the eight registries ------------------------------------------
+# --- inherent limitations, from the eight dataset registries and the storage plane ------------
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -587,7 +667,14 @@ class KnownLimitation:
     healthy panel as a sick one.
 
     `dates` is populated only for the calendar's entry, whose registry is a list of dated
-    instances of one defect rather than a list of distinct defects."""
+    instances of one defect rather than a list of distinct defects.
+
+    `datasets` is **empty** for the entries that come from `KNOWN_STORAGE_LIMITATIONS`, and
+    that is a statement rather than an omission: those boundaries belong to the storage plane
+    and hold for every dataset alike, so naming one would be false and naming all fifteen would
+    make `known_limitations('adj_factor')` stop meaning "what the adjustment corpus cannot
+    answer". `storage_limitations()` selects them; `panel_health_report` appends them to every
+    report."""
 
     code: str
     datasets: tuple[str, ...]
@@ -647,23 +734,48 @@ def _limitations() -> tuple[KnownLimitation, ...]:
             dates=tuple(sorted(instance.calendar_date for instance in KNOWN_CALENDAR_LOOKAHEAD)),
         )
     )
+    collected.extend(
+        KnownLimitation(code=entry.code, datasets=(), detail=entry.detail)
+        for entry in KNOWN_STORAGE_LIMITATIONS
+    )
     return tuple(collected)
 
 
 KNOWN_PANEL_LIMITATIONS: Final[tuple[KnownLimitation, ...]] = _limitations()
-"""Every entry of all eight registries, in one shape.
+"""Every entry of all eight dataset registries plus the storage plane's own, in one shape.
 
 Seven of them are `(code, detail)` pairs and fold one-for-one. The calendar's is a list of
 three dated instances of a *single* defect, so it folds into one entry carrying those dates:
 mapping each date to its own limitation would tell a reader that the calendar has three
 distinct problems, when it has one problem with three reproductions and an unknown number of
-unreproduced ones."""
+unreproduced ones.
+
+`KNOWN_STORAGE_LIMITATIONS` folds in with an empty `datasets`, which is what keeps
+`known_limitations()` a purely dataset-scoped question while still letting every report carry
+them; see `KnownLimitation.datasets` and `storage_limitations()`."""
 
 
 def known_limitations(datasets: Sequence[str]) -> tuple[KnownLimitation, ...]:
-    """Every recorded limitation touching at least one of `datasets`, in registry order."""
+    """Every recorded limitation touching at least one of `datasets`, in registry order.
+
+    Storage-plane limitations are deliberately **not** returned: they name no dataset, so
+    `wanted & set(item.datasets)` is empty for them by construction. A caller asking "what can
+    `adj_factor` not answer" gets the adjustment corpus' own boundaries and nothing else.
+    `panel_health_report` adds `storage_limitations()` alongside this.
+    """
     wanted = set(datasets)
     return tuple(item for item in KNOWN_PANEL_LIMITATIONS if wanted & set(item.datasets))
+
+
+def storage_limitations() -> tuple[KnownLimitation, ...]:
+    """The boundaries of the storage plane itself, which hold for every dataset alike.
+
+    Selected by "names no dataset" rather than by re-reading `KNOWN_STORAGE_LIMITATIONS`, so
+    that `KNOWN_PANEL_LIMITATIONS` stays the single list a reader has to know about and the two
+    selectors provably partition it (`known_limitations` takes the entries that name a dataset,
+    this one takes the rest).
+    """
+    return tuple(item for item in KNOWN_PANEL_LIMITATIONS if not item.datasets)
 
 
 # --- cross-dataset composition ------------------------------------------------------------------
@@ -976,6 +1088,7 @@ _INVALIDATES_COVERAGE: Final[frozenset[str]] = frozenset(
         "partition_missing",
         "partition_file_missing",
         "partition_file_unreadable",
+        "partition_row_count_mismatch",
         "coverage_missing",
         "coverage_stale",
     }
@@ -989,14 +1102,17 @@ either would manufacture a fact that is really just the stale record. One defect
 `coverage_stale` finding says the record no longer describes the partition, and the counts read
 off that record are not then presented as measurements of the partition.
 
-**The reach of this is exactly the store's own write path.** `coverage_stale` is decided by
-comparing the catalog's record against the partition file's identity, so a partition replaced
-through `PanelStore.write_partition` without a matching catalog write is caught, and so is a
-deleted or truncated file. A partition file swapped underneath the catalog by anything that is
-not the store -- an `mv` of one valid Parquet file over another, or a hand-edited `row_count`
-in the catalog -- is not caught here and cannot be: nothing re-reads the partition to
-corroborate the record. That is `panel/catalog.py`'s boundary rather than this module's, but a
-reader of this table has to know it is a write-path guarantee and not a filesystem one."""
+**The reach of this is the store's own write path plus two facts read off the file.**
+`coverage_stale` is decided by comparing two catalog rows, so a partition replaced through
+`PanelStore.write_partition` without a matching catalog write is caught; `partition_file_
+missing` and `partition_file_unreadable` catch a deleted or truncated one; and
+`partition_row_count_mismatch` catches an `mv` of a valid Parquet file holding a different
+number of rows, which this note previously said "cannot be" caught because "nothing re-reads
+the partition to corroborate the record". Something does now, once per requested year, off the
+Parquet footer. What is still uncaught is a replacement of exactly the same length, or an edit
+that changes values in place -- disclosed as `KNOWN_STORAGE_LIMITATIONS`'
+`a_value_edited_in_place_leaves_the_census_intact` rather than left to be inferred from
+here."""
 
 
 def _requirement_for(
@@ -1175,7 +1291,27 @@ def dataset_health(
     readiness says the record no longer describes the partition (`_INVALIDATES_COVERAGE`),
     which is the same rule `_subject_check` applies to the subject list off the same record --
     "this partition holds two versions of some rows" is a claim about the partition, and it
-    cannot be made from a record already known not to describe it."""
+    cannot be made from a record already known not to describe it.
+
+    `event_after_as_of` is withheld under the same rule and for the same reason: it is read off
+    `DatasetReadiness.last_event_time`, which is pooled from the coverage records readiness
+    found usable, so on a partition whose record is stale it would be a claim about a write
+    that is no longer there. It is exempted by **cadence** rather than by dataset name --
+    `published_in_advance` is the declaration that a dataset's newest event is normally ahead of
+    the reader, and `trade_cal` is its only member -- so a second such dataset gets the
+    exemption by declaring its cadence rather than by being added to a list here. See
+    `DOCTOR_ISSUE_CODES` for the measurement that motivated the code.
+
+    It is withheld once more, and this one is `_rebuild_check`'s rule rather than
+    `_subject_check`'s: **a partition readiness already refused as `not_yet_knowable` is not
+    reported a second time here.** Both codes are about a row the reader should not be given,
+    read off two different clocks, and on the three generated shapes that inject a row dated
+    after the read (`financials.announced_after_the_as_of`,
+    `index.publication_after_the_as_of`, `industry.reclassification_after_the_as_of`) both
+    clocks move together -- so emitting both would double-count one defect in two vocabularies,
+    which is exactly what `_rebuild_check` declines to do for a dataset readiness has already
+    faulted. What is left is the case this code exists for and nothing else: a row that *was*
+    knowable at `as_of`, so availability clears it, describing an event that has not happened."""
     policy = freshness or freshness_policy(dataset, calendar=calendar)
     requested = tuple(sorted(set(years)))
     requirement, note = _requirement_for(
@@ -1210,6 +1346,39 @@ def dataset_health(
         {issue.code for issue in readiness.issues} & _INVALIDATES_COVERAGE
     )
 
+    already_refused_on_the_other_clock = "not_yet_knowable" in {
+        issue.code for issue in readiness.issues
+    }
+    if (
+        describes_the_partition
+        and not already_refused_on_the_other_clock
+        and policy.cadence != "published_in_advance"
+        and readiness.last_event_time is not None
+        and readiness.last_event_time > as_of
+    ):
+        findings.append(
+            _finding(
+                "event_after_as_of",
+                datasets=(dataset,),
+                detail=(
+                    f"{dataset} holds a row whose event instant is "
+                    f"{readiness.last_event_time.isoformat()}, after the requested as_of "
+                    f"{as_of.isoformat()}: the row was knowable by then but the event it "
+                    f"describes had not happened. {dataset} publishes on the "
+                    f"{policy.cadence} cadence, which carries no schedule ahead of itself, so "
+                    "this is a row about the future rather than a publication in advance -- "
+                    "and readiness cannot see it, because the only clock it compares against "
+                    "as_of is availability"
+                ),
+                count=1,
+                # The census' own newest event *date*, in the partition's declared timezone,
+                # beside the instant the detail prints. A reader deciding whether a row is a
+                # provider artefact or a real future-dated event needs the business date, and
+                # deriving one from the instant here would be this module choosing a timezone
+                # the coverage record already declares.
+                dates=(() if readiness.last_event_date is None else (readiness.last_event_date,)),
+            )
+        )
     if revised and describes_the_partition:
         findings.append(
             _finding(
@@ -1731,6 +1900,118 @@ def _rebuild_check(
     )
 
 
+CALENDAR_LOOKAHEAD_CHECK: Final[str] = "calendar_lookahead"
+"""The name `_calendar_lookahead_check` records itself under in `cross_checks`.
+
+A constant rather than a literal at its two emission sites, because the name is matched
+elsewhere by *absence*: `panel_gate.SESSION_SCOPED_CROSS_CHECKS` is the set of checks that
+open a named session and therefore corroborate a waived `required_dates`, and this one opens
+no session, compares no two datasets and corroborates nothing about coverage. Adding it there
+would make a calendar the gate's evidence that a price partition's sessions are all present."""
+
+
+def calendar_lookahead_findings(calendar: TradingCalendar) -> tuple[HealthFinding, ...]:
+    """The proven look-ahead instances `calendar`'s own horizon covers, as findings.
+
+    Public and pure for `subject_containment_findings`' reason: the rule is decidable from one
+    argument and no store, so it is testable as a rule (`tests/unit/test_panel_doctor_rules.py`)
+    while `_calendar_lookahead_check` below owns the "was there a calendar at all" half that
+    only a report can answer.
+
+    Empty is **not** a clean bill. `KNOWN_CALENDAR_LOOKAHEAD` holds three reproduced instances
+    of a defect that recurs with every mid-year amendment to the holiday schedule, and
+    `trade_cal` carries nothing that would let any code here enumerate the rest. The finding
+    says so in its own detail, and the limitation keeps saying what the list is not.
+    """
+    covered = calendar.known_lookahead()
+    if not covered:
+        return ()
+    return (
+        _finding(
+            "calendar_lookahead_in_horizon",
+            datasets=(TRADING_CALENDAR_DATASET,),
+            detail=(
+                f"this calendar's horizon ({calendar.horizon.first_date.isoformat()}.."
+                f"{calendar.horizon.last_date.isoformat()}) covers "
+                f"{len(covered)} date(s) whose stored availability instant this repository "
+                "overstates, so a point-in-time claim made over this window is known to be "
+                "contaminated on them: "
+                + "; ".join(
+                    f"{instance.calendar_date.isoformat()} answered from "
+                    f"{instance.claimed_available_from.isoformat()} but announced "
+                    f"{instance.announced_on.isoformat()}, "
+                    f"{instance.lookahead_days} days of look-ahead"
+                    for instance in covered
+                )
+                + ". This is an inherent limitation of trade_cal and not a defect of this "
+                "fetch, and the list is the reproduced instances rather than an enumeration"
+            ),
+            count=len(covered),
+            dates=tuple(instance.calendar_date for instance in covered),
+            related_limitations=(
+                "the_published_schedule_can_be_amended_after_it_becomes_answerable",
+            ),
+        ),
+    )
+
+
+def _calendar_lookahead_check(
+    calendar: TradingCalendar | None,
+) -> tuple[tuple[HealthFinding, ...], CrossCheckOutcome]:
+    """Report the proven calendar look-ahead instances this panel's own window covers.
+
+    ## The check that had no caller
+
+    `TradingCalendar.known_lookahead()` says in its docstring that it is "the interface
+    `V2-P1-013`'s dependency gate needs", and until this function it had no caller anywhere in
+    `src/` -- only tests. The consequence was measured on a real 2015 partition (365 rows,
+    built from the same live endpoint the rest of the calendar contract is): `panel doctor
+    --json` answered `is_clean: true, findings: []`, and the three dates appeared only inside
+    `limitations`, in a sentence that reads identically whether the panel covers them or not.
+    A disclosure that cannot tell those two panels apart is prose, not a check, which is
+    exactly what P2's product acceptance called it.
+
+    ## Why it is a cross-check and not a per-dataset finding
+
+    The contamination is not `trade_cal`'s alone. Three datasets' `required_dates` are derived
+    from this calendar (`daily`, `daily_basic`, `stk_limit`), so a window covering an amended
+    date is a window in which those datasets' hole detection was decided against a session list
+    this repository claims to have known earlier than it did -- whether or not `trade_cal` was
+    among the datasets the request named. And a check with no calendar has to be visibly
+    *unrun* rather than silently clean, which is what `cross_checks` is for: "silence from a
+    check that never ran is otherwise indistinguishable from silence from one that passed".
+
+    ## Severity
+
+    `notice`, argued in full under `HEALTH_CODE_SEVERITY`. The short form: this is an inherent
+    limitation of `trade_cal` rather than a defect of this fetch, it has no remedy on the read
+    side, and a `warning` would permanently refuse every panel reaching 2015 or 2020.
+
+    An empty result is **not** a clean bill. `KNOWN_CALENDAR_LOOKAHEAD` is three reproduced
+    instances of a defect that recurs with every mid-year amendment to the holiday schedule,
+    and `trade_cal` carries nothing that would let any code here enumerate the rest -- so the
+    outcome below records that the check ran over the horizon it was given, and the limitation
+    keeps saying what the list is not.
+    """
+    if calendar is None:
+        return (), CrossCheckOutcome(
+            name=CALENDAR_LOOKAHEAD_CHECK,
+            datasets=(),
+            ran=False,
+            skipped_reason=(
+                "no calendar was supplied, so there was no horizon to compare the proven "
+                "look-ahead instances against"
+            ),
+        )
+    findings = calendar_lookahead_findings(calendar)
+    return findings, CrossCheckOutcome(
+        name=CALENDAR_LOOKAHEAD_CHECK,
+        datasets=(TRADING_CALENDAR_DATASET,),
+        ran=True,
+        finding_count=len(findings),
+    )
+
+
 def _unavailable(
     name: str, datasets: tuple[str, ...], error: Exception
 ) -> tuple[tuple[HealthFinding, ...], CrossCheckOutcome]:
@@ -1818,6 +2099,10 @@ def panel_health_report(
     cross_findings: list[HealthFinding] = []
     checks: list[CrossCheckOutcome] = []
 
+    findings, outcome = _calendar_lookahead_check(calendar)
+    cross_findings.extend(findings)
+    checks.append(outcome)
+
     findings, outcome = _subject_check(store, healths)
     cross_findings.extend(findings)
     checks.append(outcome)
@@ -1883,5 +2168,5 @@ def panel_health_report(
         datasets=tuple(healths),
         cross_dataset_findings=tuple(cross_findings),
         cross_checks=tuple(checks),
-        limitations=known_limitations(requested),
+        limitations=(*known_limitations(requested), *storage_limitations()),
     )

@@ -726,15 +726,22 @@ def test_a_partition_file_truncated_behind_the_stores_back_is_rewritten_not_wave
 def test_a_file_that_only_looks_like_parquet_is_rewritten_rather_than_trusted(
     tmp_path: Path,
 ) -> None:
-    """The gap between the store's two on-disk checks, and why the write path reads the row
-    count rather than inferring it.
+    """The gap between the store's two on-disk checks -- **closed** -- and why both paths read
+    the row count rather than inferring it.
 
     `_looks_like_parquet` reads eight bytes, so a file that begins and ends with `PAR1` and
-    holds nothing usable in between passes it -- readiness still says `ready`, because every
-    fact it has agrees. DuckDB cannot answer how many rows that file holds, and
-    `_parquet_row_count` reports that as `None` rather than raising: not a confident yes, so
-    the no-op branch declines and the write repairs the partition instead of reporting success
-    over bytes nothing can read.
+    holds nothing usable in between passes it. This test used to record the consequence as a
+    gap: readiness said `ready`, because every fact it had agreed, and the refusal came only
+    from `read_if_ready` wrapping the scan that then failed. P2's product acceptance measured
+    what that gap costs on a *well-formed* replacement rather than on this rubble -- one row
+    appended to a real `stock_basic` partition, `panel doctor` reporting the catalog's count
+    over a file one row longer, `data-check` `CLEARED` -- so `_parquet_row_count` now runs on
+    the read path too and this file is refused before anything scans it.
+
+    Its `None` answer is what both paths turn on, and it means the same thing in both: DuckDB
+    cannot say how many rows these bytes hold, and not a confident yes is a no. The write's
+    no-op branch declines and repairs the partition; readiness reports
+    `partition_row_count_mismatch` and blocks.
     """
     root = tmp_path / "panel"
     store = PanelStore(root, clock=_frozen_clock)
@@ -743,11 +750,12 @@ def test_a_file_that_only_looks_like_parquet_is_rewritten_rather_than_trusted(
     target = root / _DATASET / "2024" / "data.parquet"
     target.write_bytes(b"PAR1" + b"\x00" * 64 + b"PAR1")
 
-    # The eight-byte check is satisfied, so the gate clears it -- that is the gap.
-    assert _readiness(store) == ("ready", [])
-    with pytest.raises(PanelStorageError, match="passed readiness but could not be read"):
-        store.read_if_ready(_requirement(), year=2024, columns=["ts_code"])
+    # The eight-byte check is satisfied and the footer is not: the gate refuses on the footer.
+    assert _readiness(store) == ("blocked", ["partition_row_count_mismatch"])
+    outcome = store.read_if_ready(_requirement(), year=2024, columns=["ts_code"])
+    assert outcome.rows_or_none is None
 
     store.write_partition(_DATASET, 2024, _COLUMNS, _three_rows())
 
+    assert _readiness(store) == ("ready", [])
     assert len(store.query(_DATASET, year=2024, columns=["ts_code"])) == 3

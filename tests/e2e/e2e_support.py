@@ -94,10 +94,11 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import urlopen
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import duckdb
@@ -758,6 +759,19 @@ Named here rather than spelled out at each use because the fixture's signature i
 positional things and a test that got the order wrong would fail somewhere else entirely."""
 
 
+class WithholdPartition(Protocol):
+    """What `conftest.py::withheld_partition` hands a test.
+
+    A `Protocol` rather than a `Callable` alias because `replacement` is keyword-only and
+    carries the whole distinction between the file-level defects: `None` deletes the partition
+    (`partition_file_missing`) and bytes replace it -- with rubble
+    (`partition_file_unreadable`) or, since P2's product acceptance, with a valid Parquet file
+    of a different length (`partition_row_count_mismatch`).
+    """
+
+    def __call__(self, dataset: str, year: int, *, replacement: bytes | None = None) -> Path: ...
+
+
 def rewrite_partition(
     store: PanelStore,
     stored: StoredPartition,
@@ -771,6 +785,104 @@ def rewrite_partition(
         stored.as_batch(as_of=as_of, fetched_at=fetched_at),
         year=stored.coverage.year,
         date_timezone=stored.coverage.date_timezone,
+    )
+
+
+PARQUET_MAGIC: bytes = b"PAR1"
+"""What a Parquet file carries at both ends.
+
+Spelled out here rather than imported from `panel/store.py`'s private `_PARQUET_MAGIC` because
+the tests below use it to assert the *opposite* of what that constant is used for: the tampered
+files they produce must still pass the store's own structural check, or they would be the
+`partition_file_unreadable` case the chain already covers rather than the third shape it did
+not -- a file that is still a valid Parquet file and no longer holds what the catalog says."""
+
+
+def _parquet_bytes(statement: str, parameters: Sequence[object], *, workspace: Path) -> bytes:
+    """Run `statement` (a `SELECT`) and return the bytes of its result as a Parquet file.
+
+    Bytes rather than a path, because the one consumer is `withheld_partition`'s `replacement`
+    argument -- the fixture that moves the build's own file aside and puts it back in a
+    `finally`. Going through it means a tamper cannot outlive the test that made it, on a panel
+    twenty-odd other tests share.
+    """
+    target = workspace / f"tampered-{uuid4().hex}.parquet"
+    with duckdb.connect() as connection:
+        connection.execute(
+            f"COPY ({statement}) TO '{target}' (FORMAT PARQUET)",
+            list(parameters),
+        )
+    try:
+        return target.read_bytes()
+    finally:
+        target.unlink(missing_ok=True)
+
+
+def parquet_with_a_row_appended(
+    path: Path, *, subject: str, available_time: datetime, workspace: Path
+) -> bytes:
+    """`path` plus one row: a copy of its first row under `subject`, re-clocked.
+
+    The injection this repository had no e2e case for. The two file-level defects the chain
+    already covers are a *deleted* partition and one *replaced by bytes that are not Parquet*;
+    both are caught by facts about the file's existence and its first and last eight bytes.
+    This is the third shape, and it is the one that was invisible: a file that is still a
+    perfectly valid Parquet file, still readable, still registered, and holding one row the
+    catalog's census does not describe.
+
+    The copied row keeps every data column of the original and changes only its identity and
+    its three later clocks, so the difference between the two files is exactly one row rather
+    than one row plus a schema. `available_time` is pushed past the read, because a row nobody
+    could have known about is the thing this defect would let through into an answer.
+    """
+    # The second arm is parenthesised, and that is not style: DuckDB binds a trailing `ORDER
+    # BY ... LIMIT` to the whole `UNION ALL` rather than to the arm it is written next to, so
+    # the unparenthesised form silently produces a **one-row** file instead of an appended one
+    # -- a tamper that lands as a deletion, which would still block and would prove the wrong
+    # thing.
+    return _parquet_bytes(
+        f"SELECT * FROM read_parquet('{path}') "
+        "UNION ALL "
+        "(SELECT * REPLACE ("
+        "  ? AS subject,"
+        "  CAST(? AS TIMESTAMPTZ) AS available_time,"
+        "  CAST(? AS TIMESTAMPTZ) AS ingested_time,"
+        "  CAST(? AS TIMESTAMPTZ) AS revision_time"
+        f") FROM read_parquet('{path}') ORDER BY subject, event_time LIMIT 1)",
+        [subject, available_time, available_time, available_time],
+        workspace=workspace,
+    )
+
+
+def parquet_with_one_cell_changed(
+    path: Path,
+    *,
+    subject: str,
+    key_column: str,
+    key_value: object,
+    column: str,
+    value: object,
+    workspace: Path,
+) -> bytes:
+    """`path` with `column` set to `value` on the one row keyed by `(subject, key_value)`.
+
+    The other half of the pair: an edit that moves no clock, no date, no subject and no row
+    count, so the store's three file-level facts -- present, still Parquet, still the right
+    number of rows -- all still hold. `KNOWN_STORAGE_LIMITATIONS`'
+    `a_value_edited_in_place_leaves_the_census_intact` is the disclosure this exists to make
+    true rather than merely stated, and the test that uses it asserts both directions: the
+    census does not see it, and the cross-check that reads the column does.
+
+    `key_value` is the cell as the writer stored it, read back off the partition rather than
+    reconstructed here, so the match does not depend on which text form the date column
+    happens to hold.
+    """
+    return _parquet_bytes(
+        f'SELECT * REPLACE (CASE WHEN subject = ? AND "{key_column}" = ? THEN ? '
+        f'ELSE "{column}" END AS "{column}") '
+        f"FROM read_parquet('{path}')",
+        [subject, key_value, value],
+        workspace=workspace,
     )
 
 

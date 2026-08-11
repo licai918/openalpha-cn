@@ -196,9 +196,14 @@ def withheld_partition(built_panel: BuiltPanel) -> Iterator[Callable[..., Path]]
     it. The `finally` restores the exact bytes, so a failure inside a test cannot leave the
     session-scoped panel broken for the tests that follow.
 
-    `replacement` is what separates the defects the catalog distinguishes: `None` deletes the
-    file (`partition_file_missing`), and bytes that are not Parquet leave one that cannot be
-    opened (`partition_file_unreadable`).
+    `replacement` is what separates the defects the catalog distinguishes, and there are three
+    rather than the two this docstring used to name. `None` deletes the file
+    (`partition_file_missing`). Bytes that are not Parquet leave one that cannot be opened
+    (`partition_file_unreadable`). And a **valid Parquet file of a different length** -- which
+    `e2e_support.parquet_with_a_row_appended` builds -- is the shape neither of those reaches:
+    it satisfies every catalog fact and is caught only by the footer's own row count
+    (`partition_row_count_mismatch`). That third case is what P2's product acceptance drove a
+    real `stock_basic` partition into and watched `panel doctor` call `READY`.
     """
     taken: list[tuple[Path, Path]] = []
 

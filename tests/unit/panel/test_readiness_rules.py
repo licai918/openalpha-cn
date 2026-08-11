@@ -79,6 +79,29 @@ def _coverage(
     )
 
 
+def _agreeing(coverage: PartitionCoverage, **overrides: object) -> PartitionState:
+    """A partition state whose file holds exactly the rows its coverage record describes.
+
+    The agreeing case has to be built by one helper rather than spelled out per test, for
+    `CONTENT_HASH`'s reason one field over: `PartitionState.file_row_count` is read from the
+    Parquet footer and `PartitionCoverage.row_count` from the catalog, and their disagreement
+    is itself a fault under test (`partition_row_count_mismatch`). A test that wrote a literal
+    would pass the check by having guessed the same number rather than by construction, and
+    would stop agreeing the moment its coverage changed shape.
+    """
+    defaults: dict[str, object] = {
+        "year": coverage.year,
+        "registered": True,
+        "file_present": True,
+        "file_readable": True,
+        "content_hash": CONTENT_HASH,
+        "file_row_count": coverage.row_count,
+        "coverage": coverage,
+    }
+    defaults.update(overrides)
+    return PartitionState(**defaults)  # type: ignore[arg-type]
+
+
 def _state(
     *,
     year: int = 2024,
@@ -88,13 +111,15 @@ def _state(
     content_hash: str | None = CONTENT_HASH,
     profiled: bool = True,
 ) -> PartitionState:
+    coverage = _coverage(year=year)
     return PartitionState(
         year=year,
         registered=registered,
         file_present=file_present,
         file_readable=file_readable,
         content_hash=content_hash,
-        coverage=_coverage(year=year) if profiled else None,
+        file_row_count=coverage.row_count,
+        coverage=coverage if profiled else None,
     )
 
 
@@ -187,14 +212,7 @@ def test_a_registered_but_never_profiled_partition_blocks_instead_of_passing_sil
 
 def test_a_date_hole_is_named_rather_than_merely_counted() -> None:
     covered = (COVERED_DATES[0], COVERED_DATES[2])
-    state = PartitionState(
-        year=2024,
-        registered=True,
-        file_present=True,
-        file_readable=True,
-        content_hash=CONTENT_HASH,
-        coverage=_coverage(dates=covered),
-    )
+    state = _agreeing(_coverage(dates=covered))
 
     readiness = evaluate_readiness(_requirement(), partitions=(state,))
 
@@ -253,31 +271,21 @@ def test_not_yet_knowable_is_decided_by_the_latest_year_and_not_by_the_earliest(
     that survives here is a mutant that silently unbuilds that gate.
     """
     as_of = datetime(2026, 3, 1, tzinfo=UTC)
-    historical = PartitionState(
-        year=2020,
-        registered=True,
-        file_present=True,
-        file_readable=True,
-        content_hash=CONTENT_HASH,
-        coverage=_coverage(
+    historical = _agreeing(
+        _coverage(
             year=2020,
             dates=(date(2020, 1, 2),),
             last_event_time=datetime(2020, 1, 2, 7, 0, tzinfo=UTC),
             max_available_time=datetime(2020, 1, 2, 8, 30, tzinfo=UTC),
-        ),
+        )
     )
-    with_hindsight = PartitionState(
-        year=2026,
-        registered=True,
-        file_present=True,
-        file_readable=True,
-        content_hash=CONTENT_HASH,
-        coverage=_coverage(
+    with_hindsight = _agreeing(
+        _coverage(
             year=2026,
             dates=(date(2026, 8, 3),),
             last_event_time=datetime(2026, 8, 3, 7, 0, tzinfo=UTC),
             max_available_time=datetime(2026, 8, 3, 8, 30, tzinfo=UTC),
-        ),
+        )
     )
     requirement = _bare_requirement(as_of=as_of, years=(2020, 2026))
 
@@ -329,18 +337,13 @@ def test_not_yet_knowable_is_partition_level_so_an_as_of_inside_a_year_reads_not
     partition-level gate instead.
     """
     as_of = datetime(2024, 6, 30, 12, 0, tzinfo=UTC)
-    whole_year = PartitionState(
-        year=2024,
-        registered=True,
-        file_present=True,
-        file_readable=True,
-        content_hash=CONTENT_HASH,
-        coverage=_coverage(
+    whole_year = _agreeing(
+        _coverage(
             year=2024,
             dates=(date(2024, 1, 2), date(2024, 12, 30)),
             last_event_time=datetime(2024, 12, 30, 7, 0, tzinfo=UTC),
             max_available_time=datetime(2024, 12, 30, 8, 30, tzinfo=UTC),
-        ),
+        )
     )
 
     midyear = evaluate_readiness(
@@ -419,19 +422,64 @@ def test_a_coverage_record_that_never_recorded_a_partition_hash_blocks_too() -> 
     """What a `panel-catalog/v1` coverage row reads back as. Unknown is not agreement: the
     record cannot be shown to describe what is on disk, so it blocks rather than being taken
     on trust -- one `record_coverage()` call clears it."""
-    legacy = PartitionState(
-        year=2024,
-        registered=True,
-        file_present=True,
-        file_readable=True,
-        content_hash=CONTENT_HASH,
-        coverage=_coverage(partition_content_hash=None),
-    )
+    legacy = _agreeing(_coverage(partition_content_hash=None))
 
     verdict = evaluate_readiness(_bare_requirement(), partitions=(legacy,))
 
     assert verdict.state == "blocked"
     assert [issue.code for issue in verdict.issues] == ["coverage_stale"]
+
+
+def test_a_file_holding_one_more_row_than_its_record_describes_blocks() -> None:
+    """The fault P2's product acceptance found, as a rule-table test.
+
+    One row appended to a real `stock_basic` Parquet file, behind the store, moved nothing the
+    catalog knows: the partition is registered, the file is present, it still carries Parquet's
+    magic at both ends, and both catalog rows agree with each other about a write that is no
+    longer what is on disk. `panel doctor` reported `READY ... rows=152` over a 153-row file
+    and `data-check` answered `CLEARED`. The footer's own count is the one fact that separates
+    them, and it is what this blocks on.
+    """
+    coverage = _coverage()
+    injected = _agreeing(coverage, file_row_count=coverage.row_count + 1)
+
+    verdict = evaluate_readiness(_bare_requirement(), partitions=(injected,))
+
+    assert verdict.state == "blocked"
+    assert [issue.code for issue in verdict.issues] == ["partition_row_count_mismatch"]
+    assert f"describing {coverage.row_count} row(s)" in verdict.issues[0].detail
+    assert f"says it holds {coverage.row_count + 1};" in verdict.issues[0].detail
+    # The record is not then used for anything else: a partition whose file disagrees with its
+    # census contributes no subjects, no dates and no clocks to the pooled checks below it.
+    assert verdict.years_present == ()
+    assert verdict.row_count == 0
+    assert verdict.last_event_time is None
+
+
+def test_a_file_whose_row_count_could_not_be_read_blocks_rather_than_being_taken_on_trust() -> None:
+    """`None` is "the store could not ask", and unknown is not agreement -- the same rule
+    `content_hash=None` gets one field over. A footer this store cannot read is not a footer
+    that agrees, and treating it as one would make the check opt-out for exactly the files
+    most likely to have been tampered with."""
+    unknown = _agreeing(_coverage(), file_row_count=None)
+
+    verdict = evaluate_readiness(_bare_requirement(), partitions=(unknown,))
+
+    assert verdict.state == "blocked"
+    assert [issue.code for issue in verdict.issues] == ["partition_row_count_mismatch"]
+    assert "could not read" in verdict.issues[0].detail
+
+
+def test_a_file_holding_one_row_fewer_blocks_too_so_the_check_is_not_one_sided() -> None:
+    """A deletion behind the store is the same fault as an insertion and must not read as a
+    narrower one: `!=` rather than `<`, pinned so that a mutant relaxing it into an inequality
+    fails here rather than silently clearing every partition rows were removed from."""
+    coverage = _coverage()
+    pruned = _agreeing(coverage, file_row_count=coverage.row_count - 1)
+
+    verdict = evaluate_readiness(_bare_requirement(), partitions=(pruned,))
+
+    assert [issue.code for issue in verdict.issues] == ["partition_row_count_mismatch"]
 
 
 def test_a_declared_but_empty_expectation_blocks_instead_of_passing_vacuously() -> None:
@@ -453,14 +501,7 @@ def test_the_year_long_partition_holding_one_trading_day_is_no_longer_vacuously_
     2024, assessed at the end of 2024, reported `ready` with no issues under a requirement
     built entirely from field defaults. There are no such defaults now: the two checks that
     would have caught it have to be stated, and stating them catches it."""
-    sparse = PartitionState(
-        year=2024,
-        registered=True,
-        file_present=True,
-        file_readable=True,
-        content_hash=CONTENT_HASH,
-        coverage=_coverage(dates=(date(2024, 1, 2),)),
-    )
+    sparse = _agreeing(_coverage(dates=(date(2024, 1, 2),)))
     year_end = datetime(2024, 12, 31, tzinfo=UTC)
 
     verdict = evaluate_readiness(
@@ -512,18 +553,13 @@ def test_coverage_spanning_several_years_is_pooled_before_the_date_check() -> No
         required_dates=(date(2023, 12, 29), *COVERED_DATES),
         required_subjects=SUBJECTS,
     )
-    older = PartitionState(
-        year=2023,
-        registered=True,
-        file_present=True,
-        file_readable=True,
-        content_hash=CONTENT_HASH,
-        coverage=_coverage(
+    older = _agreeing(
+        _coverage(
             year=2023,
             dates=(date(2023, 12, 29),),
             last_event_time=datetime(2023, 12, 29, 7, 0, tzinfo=UTC),
             max_available_time=datetime(2023, 12, 29, 8, 30, tzinfo=UTC),
-        ),
+        )
     )
 
     verdict = evaluate_readiness(requirement, partitions=(older, _state()))
@@ -546,6 +582,7 @@ def test_every_issue_this_evaluator_can_emit_is_declared_in_the_closed_code_set(
     emitted.update(_codes(_requirement(), (_state(file_readable=False),)))
     emitted.update(_codes(_requirement(), (_state(profiled=False),)))
     emitted.update(_codes(_requirement(), (_state(content_hash="sha256:" + "b" * 64),)))
+    emitted.update(_codes(_requirement(), (_agreeing(_coverage(), file_row_count=99),)))
     emitted.update(
         _codes(
             _requirement(required_dates=(*COVERED_DATES, date(2024, 1, 5))),
