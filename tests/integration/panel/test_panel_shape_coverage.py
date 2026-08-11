@@ -41,7 +41,9 @@ generated shapes rather than around them.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
+from typing import Final
 
 import pytest
 from panel_fixtures import (
@@ -59,7 +61,11 @@ from panel_fixtures import (
     write_generated_panel,
 )
 
-from openalpha_cn.domain.daily_prices import pre_close_tolerance
+from openalpha_cn.domain.daily_prices import (
+    DAILY_BASIC_DATASET,
+    DAILY_DATASET,
+    pre_close_tolerance,
+)
 from openalpha_cn.domain.financial_statements import (
     AmbiguousReportError,
     build_statement_history,
@@ -68,6 +74,7 @@ from openalpha_cn.domain.industry_classification import (
     SW2021_TAXONOMY,
     build_security_industry_history,
 )
+from openalpha_cn.domain.price_limits import SUSPENSION_DATASET
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_doctor import PanelHealthReport, panel_health_report
 from openalpha_cn.panel_ingest import load_industry_histories, load_name_histories
@@ -124,9 +131,53 @@ EXPECTED_HEALTHY_SHAPES = (
 """
 
 
-def _stored(tmp_path: Path, panel: GeneratedPanel) -> tuple[PanelStore, tuple[str, ...]]:
+def _stored(
+    tmp_path: Path, panel: GeneratedPanel, datasets: Iterable[str] | None = None
+) -> tuple[PanelStore, tuple[str, ...]]:
     store = PanelStore(tmp_path / "panel")
-    return store, write_generated_panel(store, panel)
+    return store, write_generated_panel(store, panel, datasets=datasets)
+
+
+WRITER_COUPLED_DATASETS: Final[tuple[frozenset[str], ...]] = (
+    frozenset({DAILY_DATASET, DAILY_BASIC_DATASET, SUSPENSION_DATASET}),
+)
+"""Groups `write_generated_panel` refuses to split, so a shape's own `datasets` cannot name one
+half and stop there.
+
+`daily` and `daily_basic` are one call to `write_daily_panel`, and that call reads `suspend_d`
+back **out of the store** for `_refuse_unexplained_thin_sessions` -- so a selection naming
+`daily` alone is refused by name rather than quietly judging every session as having no halts.
+Written as a table of groups instead of three `if`s because the closure below is one line over
+it, and because a second such group (a fifth statement endpoint, say) is then a row rather than
+another branch."""
+
+
+def _shape_datasets(shape_id: str) -> tuple[str, ...]:
+    """What a panel carrying exactly `shape_id` has to store for its own shape to be judged.
+
+    `PanelShape.datasets` already declares which datasets each shape touches, and `V2-P2-000`
+    gave `write_generated_panel` the ability to store a subset -- but nothing here used either,
+    so every one of the twenty-five cases below built and wrote all eleven datasets and ran a
+    whole-panel health report over them. The cost was almost entirely independent of which
+    shape was being tested, which is the signature of a fixed overhead rather than of work the
+    assertion needs.
+
+    Narrowing is sound and not merely faster, because the report is scoped by its `datasets`
+    argument on both sides: `panel_health_report` assesses exactly what it is handed, and every
+    cross-dataset check is gated on its own inputs being in scope, so a dataset left out can
+    only remove findings. It cannot invent one -- which is what would make a `provokes` entry
+    an accident of the panel's other ten datasets. The direction that *can* break is the
+    opposite one, a declared code that stops arriving because the check producing it no longer
+    has its inputs, and `test_a_shape_provokes_exactly_the_health_codes_it_declares` asserts
+    equality rather than containment, so it is exactly what fails if `datasets` under-declares.
+    """
+    asked = set(PANEL_SHAPES[shape_id].datasets)
+    for group in WRITER_COUPLED_DATASETS:
+        if asked & group:
+            asked |= group
+    # Sorted rather than the set's own order, so two runs under different hash seeds hand
+    # `write_generated_panel` the same argument even though it only reads it as a set.
+    return tuple(sorted(asked))
 
 
 def _report(
@@ -201,10 +252,15 @@ def test_a_shape_provokes_exactly_the_health_codes_it_declares(
 
     Both directions are asserted by the same equality: a shape declaring `()` that starts
     complaining fails here, and so does a shape whose declared code stops arriving. Sorted
-    rather than positional because the report's order is not part of anything's contract."""
+    rather than positional because the report's order is not part of anything's contract.
+
+    Only the shape's own datasets are written and reported on -- see `_shape_datasets` for why
+    that is sound as well as ~4x cheaper. It also makes the case narrower rather than merely
+    faster: a `provokes` entry that arrived from one of the ten datasets the shape does not
+    name would now be missing, so the equality is about this shape and not about the panel."""
     panel = generate_panel(shapes=(shape_id,))
 
-    store, datasets = _stored(tmp_path, panel)
+    store, datasets = _stored(tmp_path, panel, _shape_datasets(shape_id))
     report = _report(store, panel, datasets)
 
     assert sorted({finding.code for finding in report.findings}) == sorted(
@@ -241,7 +297,7 @@ def test_the_defect_shapes_are_the_ones_that_make_a_generated_panel_unhealthy(
     severities: dict[str, dict[str, int]] = {}
     for shape_id in DEFECT_SHAPES:
         panel = generate_panel(shapes=(shape_id,))
-        store, datasets = _stored(tmp_path / shape_id, panel)
+        store, datasets = _stored(tmp_path / shape_id, panel, _shape_datasets(shape_id))
         report = _report(store, panel, datasets)
         counts: dict[str, int] = {}
         for finding in report.findings:

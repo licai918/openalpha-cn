@@ -29,6 +29,7 @@ from openalpha_cn.domain.industry_classification import (
     INDUSTRY_MEMBERSHIP_PANEL_COLUMNS,
     INDUSTRY_TAXONOMY_EFFECTIVE_FROM,
     INDUSTRY_TREE_PANEL_COLUMNS,
+    KNOWN_INDUSTRY_LIMITATIONS,
     SW2014_TAXONOMY,
     SW2021_L1_COUNT,
     SW2021_TAXONOMY,
@@ -1225,3 +1226,40 @@ def test_two_assignments_that_share_their_boundary_day_are_refused() -> None:
 
     with pytest.raises(IndustryClassificationError, match="overlaps the one starting"):
         build_security_industry_history("000001.SZ", touching, taxonomy=SW2021_TAXONOMY)
+
+
+# --- the disclosures ------------------------------------------------------------------
+
+
+def test_the_known_limitations_are_named_rather_than_argued_away() -> None:
+    """`KNOWN_INDUSTRY_LIMITATIONS` had no assertion of any kind until this one.
+
+    Ten entries, two of which are cited by name elsewhere in the repository:
+    `no_announcement_and_no_revision_history` is what dates an assignment's availability at
+    `in_date`'s midnight and is cited by name in `panel_fixtures.py`'s
+    `industry.reclassification_after_the_as_of` measurement, and
+    `every_pre_2021_answer_is_a_backfill` is the reason `IndustryAnswer` carries a taxonomy at
+    all. Cited, and until now spelled only in prose -- so a rename broke the citations and
+    failed nothing.
+
+    The set is an equality rather than a subset for the reason
+    `tests/unit/test_known_limitation_registries.py` states once for all ten registries: a
+    membership check cannot see a deletion, and a registry nobody can delete from by accident
+    is the only kind worth citing.
+    """
+    assert {entry.code for entry in KNOWN_INDUSTRY_LIMITATIONS} == {
+        "every_pre_2021_answer_is_a_backfill",
+        "the_taxonomy_revision_itself_is_erased",
+        "the_first_in_date_is_not_a_classification_event",
+        "a_security_can_be_unclassified_inside_its_listed_life",
+        "a_membership_can_name_a_node_the_tree_does_not_carry",
+        "the_default_response_hides_the_history",
+        "no_announcement_and_no_revision_history",
+        "a_partial_year_read_cannot_see_an_interval_close",
+        "no_cross_section_before_the_taxonomy_is_readable_at_all",
+        "silent_truncation_at_the_response_cap",
+    }
+    assert len({entry.code for entry in KNOWN_INDUSTRY_LIMITATIONS}) == len(
+        KNOWN_INDUSTRY_LIMITATIONS
+    ), "a code is declared twice"
+    assert all(len(entry.detail) > 120 for entry in KNOWN_INDUSTRY_LIMITATIONS)

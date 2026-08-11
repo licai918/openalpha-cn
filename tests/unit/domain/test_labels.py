@@ -1041,6 +1041,28 @@ def test_the_declared_limitations_are_distinct_and_each_carries_a_reason() -> No
     assert all(len(item.detail) > 200 for item in KNOWN_LABEL_LIMITATIONS)
 
 
+def test_the_known_limitations_are_named_rather_than_argued_away() -> None:
+    """The eight codes as a set literal, which is what makes the test above about *these* eight.
+
+    Uniqueness and a detail length are properties of any eight strings. This module's own
+    docstring for `KNOWN_LABEL_LIMITATIONS` concedes that "the only thing that mechanically
+    holds them to the code is tests/unit/domain/test_labels.py" -- a convention, and one that
+    a rename would break without failing anything. The set literal is the check that concession
+    asks for, and `tests/unit/test_known_limitation_registries.py` is what stops the next
+    registry from shipping without one.
+    """
+    assert {item.code for item in KNOWN_LABEL_LIMITATIONS} == {
+        "a_pre_open_signal_is_entered_one_session_late",
+        "a_calendar_horizon_cannot_size_a_window",
+        "halted_over_counts_before_2015",
+        "no_published_band_refuses_the_whole_of_the_early_history",
+        "only_the_two_ends_are_tested_for_tradability",
+        "a_delisting_inside_the_window_is_refused_rather_than_priced",
+        "a_timed_halt_that_ended_before_the_close_is_assumed_tradeable_at_it",
+        "overlap_is_annotated_and_neither_purging_nor_embargo_is_implemented",
+    }
+
+
 # --- overlap between windows (`V2-P2-005`) ----------------------------------------------------
 #
 # `S28` asks for purging and embargo over overlapping labels, and `V2-P2-005` asks for "explicit

@@ -4,8 +4,8 @@
 
 ## 对账结论
 
-- 功能总数: 134
-- 当前真实完成: 129 (96.27%)
+- 功能总数: 136
+- 当前真实完成: 131 (96.32%)
 - `UNREVIEWED=0`
 - `UNKNOWN=0`
 - `legacy_acceptance_rows=86` (历史散文验收、尚未绑定为可执行 pytest/CI 断言)
@@ -18,7 +18,7 @@
 | `DEFERRED` | 1 |
 | `ENHANCED_REPLACEMENT` | 20 |
 | `EXCLUDED` | 4 |
-| `NATIVE_COMPLETE` | 108 |
+| `NATIVE_COMPLETE` | 110 |
 
 ## 功能明细
 
@@ -158,6 +158,8 @@
 | `OA-BT-014` | backtest | One tradability predicate, two contracts, driven from one stored panel | `NATIVE_COMPLETE` | `src/openalpha_cn/backtest/execution.py#suspended_at_the_close;src/openalpha_cn/backtest/execution.py#KNOWN_EXECUTION_LIMITATIONS;src/openalpha_cn/backtest/execution.py#ExecutionLimitation;tests/panel_fixtures.py#PANEL_SHAPES;tests/panel_fixtures.py#LOCKED_SECURITY_INDEX;tests/panel_fixtures.py#LOCKED_SESSION_INDEX` | `tests/integration/panel/test_execution_label_parity.py;tests/unit/test_panel_fixtures.py;tests/integration/panel/test_panel_shape_coverage.py` | `pytest` | `tests/integration/panel/test_execution_label_parity.py::test_the_two_contracts_agree_on_every_session_either_of_them_can_price` |
 | `OA-OPS-027` | operations | P2 injection register: one parametrised table, both directions, and the CI gate it is | `NATIVE_COMPLETE` | `tests/integration/test_injection_register.py#INJECTION_VECTORS;tests/integration/test_injection_register.py#InjectionVector;tests/integration/test_injection_register.py#DISCLOSED_EXCLUSIONS;tests/integration/test_injection_register.py#DisclosedExclusion;tests/integration/test_injection_register.py#P2_INJECTION_ISSUES;tests/integration/panel/test_lookahead_injection.py#LOOKAHEAD_INJECTIONS` | `tests/integration/test_injection_register.py;tests/integration/test_research_cycle.py` | `pytest` | `tests/integration/test_injection_register.py::test_the_injected_half_is_refused_and_names_its_own_rule` |
 | `OA-OPS-028` | operations | P2 red-team gates on a live panel: the injection register's e2e half | `NATIVE_COMPLETE` | `tests/e2e/e2e_support.py#StoredPartition;tests/e2e/e2e_support.py#read_stored_partition;tests/e2e/e2e_support.py#rewrite_partition;tests/e2e/e2e_support.py#knowable_from;tests/e2e/conftest.py#injected_partition` | `tests/e2e/test_pit_injection_online.py;tests/integration/test_injection_register.py` | `pytest` | `tests/e2e/test_pit_injection_online.py::test_a_row_that_became_knowable_after_the_read_blocks_its_partition_in_the_doctor` |
+| `OA-OPS-029` | operations | Three surviving-mutant bindings: a boundary operator, a cleared pattern and a detector's scope | `NATIVE_COMPLETE` | `tests/unit/domain/test_daily_prices.py#test_a_gap_of_exactly_one_tick_is_accepted_and_the_next_representable_gap_is_not;tests/unit/domain/test_daily_prices.py#PUBLISHED_TICK_IN_PERCENT;tests/integration/test_injection_register.py#test_no_vectors_cleared_answer_matches_another_vectors_cleared_pattern;tests/unit/test_panel_fixtures.py#CROSS_TRIGGERS;tests/unit/test_panel_fixtures.py#test_no_detector_answers_true_on_a_shape_that_is_not_its_own;tests/integration/panel/test_panel_shape_coverage.py#_shape_datasets;tests/integration/panel/test_panel_shape_coverage.py#WRITER_COUPLED_DATASETS` | `tests/unit/domain/test_daily_prices.py;tests/integration/test_injection_register.py;tests/unit/test_panel_fixtures.py;tests/integration/panel/test_panel_shape_coverage.py` | `pytest` | `tests/unit/test_panel_fixtures.py::test_no_detector_answers_true_on_a_shape_that_is_not_its_own` |
+| `OA-OPS-030` | operations | Every KNOWN_* limitation registry bound to the suite by structure | `NATIVE_COMPLETE` | `tests/unit/test_known_limitation_registries.py#LIMITATION_REGISTRIES;tests/unit/test_known_limitation_registries.py#CODELESS_REGISTRIES;tests/unit/test_known_limitation_registries.py#executable_string_literals;tests/unit/test_known_limitation_registries.py#docstring_string_literals;tests/unit/test_known_limitation_registries.py#declared_codes;tests/unit/test_known_limitation_registries.py#PROSE_SENTINEL` | `tests/unit/test_known_limitation_registries.py;tests/unit/domain/test_stock_universe.py;tests/unit/domain/test_labels.py;tests/unit/domain/test_financial_statements.py;tests/unit/domain/test_price_limits.py;tests/unit/domain/test_industry_classification.py;tests/unit/test_panel_doctor_rules.py` | `pytest` | `tests/unit/test_known_limitation_registries.py::test_every_declared_limitation_code_is_named_in_executable_test_code` |
 
 ## 边界
 
