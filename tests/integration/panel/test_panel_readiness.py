@@ -120,9 +120,18 @@ def test_an_unwritten_year_is_reported_as_a_missing_partition(tmp_path: Path) ->
 def test_deleting_a_partitions_parquet_file_is_reported(tmp_path: Path) -> None:
     """The injected defect in its most dangerous form: the catalog still advertises the
     partition, so any check that trusted the catalog alone would call this dataset healthy.
-    `query()` on such a partition raises out of DuckDB's Parquet reader instead of returning
-    data, so a caller that never asked about readiness gets a stack trace rather than a
-    diagnosis."""
+
+    **The second assertion changed in the P1 re-verification, and it is the only pre-existing
+    assertion that group moved.** It used to be `pytest.raises(duckdb.IOException)`, pinning
+    the claim this docstring made in prose -- that a caller who skips readiness "gets a stack
+    trace rather than a diagnosis". That was a description of a defect written down as though
+    it were a design: `PanelStore` promises `PanelStorageError` on every other refusal on this
+    path, and `cli._panel_command` turns an exception it does not recognise into
+    `internal_error` (exit 5), so `query()` answered "the CLI has a defect" for the state
+    `assess_readiness` names four lines up. The diagnosis is now available from `query()` too,
+    and it names the same state -- which is a strictly stronger version of what this test was
+    written to say, so the test says it instead.
+    """
     store = _ready_store(tmp_path)
     partition = store.root / DATASET / "2024" / "data.parquet"
     assert partition.is_file()
@@ -137,10 +146,9 @@ def test_deleting_a_partitions_parquet_file_is_reported(tmp_path: Path) -> None:
         ("partition_file_missing", 2024)
     ]
     assert str(partition) in readiness.issues[0].detail
-    # The claim in this test's docstring, demonstrated rather than asserted in prose: a
-    # caller that skips readiness and goes straight to `query()` gets DuckDB's own I/O error.
-    with pytest.raises(duckdb.IOException):
+    with pytest.raises(PanelStorageError, match="partition_file_missing") as raised:
         store.query(DATASET, year=2024, columns=["close"])
+    assert isinstance(raised.value.__cause__, duckdb.IOException)
 
 
 def test_a_hole_in_the_date_coverage_is_reported_with_the_missing_day(tmp_path: Path) -> None:

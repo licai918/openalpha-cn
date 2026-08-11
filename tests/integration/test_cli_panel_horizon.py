@@ -226,11 +226,11 @@ def _payload(result: Any) -> Any:
     return json.loads(result.stdout)
 
 
-def _seeded(runtime_dir: Path) -> None:
+def _seeded(runtime_dir: Path, *extra: str) -> None:
     """`trade_cal` in the store, which every session-scoped target needs to have been written
     first. Built at `EARLY_CLOCK`; a calendar is a whole year and carries no horizon of its own,
     which is why `trade_cal` is not in `cli.SESSION_SCOPED_DATASETS`."""
-    assert _build(runtime_dir, TRADING_CALENDAR_DATASET, "--json").exit_code == PanelExit.ok
+    assert _build(runtime_dir, TRADING_CALENDAR_DATASET, "--json", *extra).exit_code == PanelExit.ok
 
 
 # --- the horizon is reported, and can be pinned ----------------------------------------------
@@ -284,6 +284,94 @@ def test_an_unpinned_second_build_would_have_run_to_a_later_horizon(
 
     assert result.exit_code == PanelExit.ok, result.stdout
     assert _payload(result)["sessions"]["count"] == LATE_SESSIONS
+
+
+# --- the horizon may be pinned; the point-in-time filter may not ------------------------------
+
+FUTURE_PIN = "2026-01-22T12:00:00+08:00"
+"""Two days past `EARLY_CLOCK`. `_build_sessions` bounds the loop at this instant's local date
+minus one, so it reaches 2026-01-20 -- a session whose 16:30 cross section has not published at
+the wall clock these tests run on."""
+
+
+def test_an_as_of_ahead_of_the_wall_clock_cannot_store_a_session_that_has_not_published(
+    tmp_path: Path, transport: HorizonTransport
+) -> None:
+    """The defect `--as-of` introduced, and the reason it is not merely a horizon flag.
+
+    `TushareProvider._decode_panel_rows` keeps a row only if it was knowable **both** at the
+    request's `as_of` and at the instant the fetch ran. `V2-P1-018` passed the resolved
+    `--as-of` in as the provider's `clock`, so both halves read the same caller-supplied value
+    and the second one became true by construction. Measured against `90beba8` with exactly
+    this frame: `exit 0`, a stored `adj_factor` partition reaching 2026-01-20, and a
+    `max_available_time` of 16:30 Asia/Shanghai -- four and a half hours after the wall clock
+    the build ran on. Look-ahead, written to disk, by a flag whose whole job was alignment.
+
+    The fetch instant is now `clock`, which no flag reaches, so the session is dropped, the
+    writer refuses the year that is missing it, and nothing lands.
+    """
+    _seeded(tmp_path, "--as-of", FUTURE_PIN)
+
+    result = _build(tmp_path, ADJ_FACTOR_DATASET, "--as-of", FUTURE_PIN)
+
+    assert result.exit_code == PanelExit.unhealthy, result.stdout
+    assert "none of which was yet knowable" in result.stderr
+    assert "or at the instant of the fetch" in result.stderr
+    assert panel_store(tmp_path).registered_years(ADJ_FACTOR_DATASET) == ()
+
+
+def test_the_same_pin_builds_that_session_once_the_wall_clock_has_reached_it(
+    tmp_path: Path, transport: HorizonTransport, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The premise the refusal above rests on, asserted separately.
+
+    Without this, that test would pass just as well if `--as-of` had been broken outright, or
+    if this module's scripted frame simply could not produce a twelfth session. Same pin, same
+    transport, wall clock moved past the session -- and the build lands all twelve.
+    """
+    _seeded(tmp_path, "--as-of", FUTURE_PIN)
+    _at(monkeypatch, LATE_CLOCK)
+
+    result = _build(tmp_path, ADJ_FACTOR_DATASET, "--as-of", FUTURE_PIN, "--json")
+
+    assert result.exit_code == PanelExit.ok, result.stderr
+    assert _payload(result)["sessions"]["count"] == LATE_SESSIONS
+    assert _payload(result)["sessions"]["last"] == "2026-01-20"
+
+
+def test_a_rebuild_at_the_same_as_of_rewrites_nothing_even_after_the_clock_moves(
+    tmp_path: Path, transport: HorizonTransport, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What separating the stamp from the clock had to preserve, and the reason `--as-of` is
+    not simply refused when it runs ahead of the wall clock.
+
+    `ingested_time` is one of the four clock columns every partition stores, so it is inside
+    `PanelStore._content_hash`. Read it from the wall clock and a re-fetch of an unchanged year
+    is a *different* partition every time -- new hash, new `written_at`, new Parquet file.
+    Pinning it makes the rebuild the no-op it should always have been, which is what
+    `PanelStore._reusable_partition` was built to detect, and this asserts all three facts
+    rather than only the hash.
+    """
+    _seeded(tmp_path)
+    assert _build(tmp_path, ADJ_FACTOR_DATASET, "--as-of", EARLY_CLOCK.isoformat()).exit_code == 0
+    store = panel_store(tmp_path)
+    parquet = tmp_path / "panel" / ADJ_FACTOR_DATASET / str(YEAR) / "data.parquet"
+    first = store.read_coverage(ADJ_FACTOR_DATASET, YEAR)
+    assert first is not None
+    before = (first.partition_content_hash, parquet.stat().st_mtime_ns, parquet.stat().st_size)
+
+    _at(monkeypatch, LATE_CLOCK)
+    again = _build(tmp_path, ADJ_FACTOR_DATASET, "--as-of", EARLY_CLOCK.isoformat(), "--json")
+
+    assert again.exit_code == PanelExit.ok, again.stderr
+    assert _payload(again)["sessions"]["count"] == EARLY_SESSIONS
+    second = store.read_coverage(ADJ_FACTOR_DATASET, YEAR)
+    assert second is not None
+    assert before == (
+        second.partition_content_hash,
+        parquet.stat().st_mtime_ns,
+        parquet.stat().st_size,
+    )
 
 
 # --- the split horizon is refused ------------------------------------------------------------

@@ -416,7 +416,8 @@ from __future__ import annotations
 import json
 import threading
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from hashlib import sha256
@@ -877,7 +878,8 @@ class PanelStore:
             if partition_path is None:
                 return []
             sql, parameters = _build_scan_sql(partition_path, columns, filters)
-            result = connection.execute(sql, parameters).fetchall()
+            with _scan_failures_as_storage_errors(dataset, year):
+                result = connection.execute(sql, parameters).fetchall()
         return cast(list[tuple[object, ...]], result)
 
     def profile_query(
@@ -925,7 +927,8 @@ class PanelStore:
             profile_path = self.root / f".profile-{dataset}-{year}-{uuid.uuid4().hex}.json"
             connection.execute("PRAGMA enable_profiling='json'")
             connection.execute(f"PRAGMA profiling_output='{profile_path}'")
-            connection.execute(sql, parameters).fetchall()
+            with _scan_failures_as_storage_errors(dataset, year):
+                connection.execute(sql, parameters).fetchall()
             connection.execute("PRAGMA disable_profiling")
         try:
             profile = json.loads(profile_path.read_text(encoding="utf-8"))
@@ -1234,6 +1237,53 @@ def _absent_partition(year: int) -> PartitionState:
         content_hash=None,
         coverage=None,
     )
+
+
+@contextmanager
+def _scan_failures_as_storage_errors(dataset: str, year: int) -> Iterator[None]:
+    """Translate a failed partition scan into this module's own error.
+
+    Every other refusal on the read path is a `PanelStorageError`; the scan itself was the one
+    that was not. The window the P1 stage review opened is real and reachable: the catalog
+    upsert now commits **before** the rename (see the module docstring), so a crash between the
+    two leaves a catalog row naming a Parquet file that is not there, and `assess_readiness`
+    already has a name for that state -- `partition_file_missing`. `query()` and
+    `profile_query()` answered it with a bare `duckdb.IOException` instead, and
+    `cli._panel_command` classifies anything it does not recognise as `internal_error`
+    (exit 5): "the CLI has a defect" for what is plainly a fact about the panel. That is the
+    same misclassification `SuspensionError` was added to `cli._PANEL_WRITE_REFUSALS` to close,
+    one plane over.
+
+    Not a correctness hole -- every supported read goes through `read_if_ready`, which refuses
+    this state before it scans -- but `query()` is public and this is what it owed its callers.
+
+    ## Only `IOException`, and the narrowness is load-bearing rather than timid
+
+    Two other things DuckDB raises out of this same scan are *already* somebody's answer and
+    must keep their identity. A hostile projection or filter name reaches the binder as one
+    quoted identifier and comes back `Referenced column ... not found` -- that binder error is
+    the evidence `test_a_hostile_projection_name_cannot_run_a_second_statement` reads to prove
+    the injection was neutralised, and a `PanelStorageError` saying "could not be scanned"
+    would prove nothing of the sort. And a partition whose file is *present but damaged* is
+    `read_if_ready`'s own case: it wraps anything escaping `query()` as "passed readiness but
+    could not be read", which is a stronger statement than this one -- readiness said yes and
+    the bytes said no -- and re-raises `PanelStorageError` untouched, so swallowing it here
+    would replace that sentence with a weaker one. `IOException` is the state readiness has a
+    name for and the one the scan had no answer for.
+
+    DuckDB's own message is withheld rather than wrapped: it carries the partition's absolute
+    path, which is the store's filesystem layout rather than anything about the data, and the
+    dataset, year and remedy below are what a caller can actually act on.
+    """
+    try:
+        yield
+    except duckdb.IOException as error:
+        raise PanelStorageError(
+            f"the partition registered for {dataset} year={year} could not be scanned. The "
+            "catalog names a Parquet file this scan could not read; `assess_readiness` reports "
+            "that state as partition_file_missing. Re-write the partition -- the catalog row "
+            "is a claim about a file, and this one is not being kept"
+        ) from error
 
 
 def _build_scan_sql(

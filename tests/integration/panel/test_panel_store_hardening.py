@@ -591,6 +591,38 @@ def test_a_first_write_interrupted_at_the_rename_blocks_instead_of_reporting_rea
     assert _readiness(store) == ("blocked", ["partition_file_missing"])
 
 
+def test_the_missing_file_reaches_a_direct_reader_as_this_modules_own_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same window, seen from `query()` and `profile_query()` instead of from readiness.
+
+    Every other refusal on this module's read path is a `PanelStorageError`, and the scan was
+    the one that was not: it answered with a bare `duckdb.IOException` carrying the partition's
+    absolute path. Not a correctness hole -- `read_if_ready` refuses this state before it scans,
+    and that is the only read the gate supports -- but `query()` is public, and
+    `cli._panel_command` turns an exception it does not recognise into `internal_error`
+    (exit 5). "The CLI has a defect" for what readiness right above calls
+    `partition_file_missing` is the same misclassification `SuspensionError` was added to
+    `cli._PANEL_WRITE_REFUSALS` to close.
+
+    DuckDB's own message is withheld rather than wrapped, so the store's filesystem layout is
+    not printed to whatever is reading the error; the chained `__cause__` still carries it for
+    a debugger.
+    """
+    store = PanelStore(tmp_path / "panel", clock=_frozen_clock)
+    monkeypatch.setattr(Path, "replace", _refuse_rename)
+    with pytest.raises(OSError, match="rename interrupted"):
+        store.write_partition(_DATASET, 2024, _COLUMNS, _rows())
+    monkeypatch.undo()
+
+    for read in (store.query, store.profile_query):
+        with pytest.raises(PanelStorageError, match="could not be scanned") as raised:
+            read(_DATASET, year=2024, columns=["ts_code"])
+        assert "partition_file_missing" in str(raised.value)
+        assert str(tmp_path) not in str(raised.value)
+        assert isinstance(raised.value.__cause__, duckdb.Error)
+
+
 def test_a_rewrite_interrupted_at_the_rename_blocks_as_coverage_stale(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -7,7 +7,7 @@ import platform
 import sys
 from collections.abc import Iterator, Mapping, Sequence, Set
 from contextlib import contextmanager
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import MAXYEAR, MINYEAR, UTC, date, datetime, time, timedelta
 from enum import IntEnum, StrEnum
 from pathlib import Path
 from time import monotonic
@@ -1626,7 +1626,12 @@ def _build_panel(
     return sessions, halt_state
 
 
-def _stored_so_far(written: Mapping[str, Sequence[PartitionRef]]) -> str:
+def _all_refs(written: Mapping[str, Sequence[PartitionRef]]) -> list[PartitionRef]:
+    """Every partition in a `written` mapping, flattened, in the order the targets ran."""
+    return [ref for group in written.values() for ref in group]
+
+
+def _stored_so_far(refs: Sequence[PartitionRef]) -> str:
     """What is on disk at the moment a build was refused, as a sentence a reader can act on.
 
     An earlier version of `panel_build` said "nothing partial was stored" here, and that was
@@ -1636,8 +1641,11 @@ def _stored_so_far(written: Mapping[str, Sequence[PartitionRef]]) -> str:
     `suspend_d` in the store. Only the writer that raised is all-or-nothing; the build is not,
     and a caller deciding whether to re-run or to clear the runtime directory needs the
     difference.
+
+    Takes a flat sequence rather than the per-year `written` mapping because a build now spans
+    years (`--start`/`--end`): the partitions on disk when the fourth year is refused include
+    the three that finished, and a mapping keyed by target alone cannot hold them.
     """
-    refs = [ref for group in written.values() for ref in group]
     if not refs:
         return "No partition had been written when this build stopped."
     listed = ", ".join(f"{ref.dataset}:{ref.year}({ref.row_count} rows)" for ref in refs)
@@ -1687,7 +1695,7 @@ def _audit_written_partitions(
             f"{silent} is in PANEL_BUILD_TARGETS but produced no partition, so this build "
             "reported success without building it. That is a defect in this command -- a "
             "target the table accepts and no branch builds -- not a fact about the panel. "
-            f"{_stored_so_far(written)}",
+            f"{_stored_so_far(_all_refs(written))}",
         )
     misfiled = [
         f"{ref.dataset}:{ref.year}"
@@ -1704,8 +1712,138 @@ def _audit_written_partitions(
             "returned another year's data. Anything this build read back for --year "
             f"{year} came from an earlier run rather than from this fetch, and any halt corpus "
             "it reported as corroborated was not corroborated by it. "
-            f"{_stored_so_far(written)}",
+            f"{_stored_so_far(_all_refs(written))}",
         )
+
+
+def _build_years(years: Sequence[int], start: int | None, end: int | None) -> tuple[int, ...]:
+    """Resolve `--year` / `--start` / `--end` into the years this build will run, ascending.
+
+    ## Why `--year` is repeatable, and why the old shape was the dangerous kind of wrong
+
+    It used to be `Annotated[int, ...]`, which Click resolves by keeping the **last** value and
+    discarding the rest without a word: `panel build --dataset trade_cal --year 2025 --year
+    2026` printed `WROTE trade_cal year=2026` and 2025 simply never happened. Silently dropping
+    an argument a caller passed is indistinguishable from that caller never having passed it,
+    so nothing downstream -- not the exit code, not `--json`, not `panel doctor` run on a year
+    nobody built -- can tell the two apart. It was also the same flag name `panel doctor`
+    already took as a `list[int]`, so one word meant two things one command apart.
+
+    ## Why the range form exists as well
+
+    The P1 gate is `panel build --start 2015 --end 2026`, and writing that as twelve `--year`
+    flags is a different sentence from the one the roadmap asks for. Both forms resolve here so
+    there is exactly one place that decides what "the years" are; passing both is refused
+    rather than merged, because `--year 2019 --start 2015 --end 2026` has two readings and
+    neither is obviously the intended one.
+
+    Every refusal below is `bad_request`: no re-fetch fixes an argument list.
+    """
+    named = tuple(dict.fromkeys(years))
+    ranged = start is not None or end is not None
+    if named and ranged:
+        raise _panel_fail(
+            PanelExit.bad_request,
+            f"--year {list(named)} and --start/--end were both given, and a build cannot be "
+            "scoped two ways at once: --year names the years, --start/--end names a closed "
+            "range. Pass one form",
+        )
+    if not named and not ranged:
+        raise _panel_fail(
+            PanelExit.bad_request,
+            "no year was given: pass --year (repeatable) or a closed --start/--end range. "
+            "Nothing is inferred -- a build that picked its own years would be a fetch nobody "
+            "asked for, against a quota this command does not own",
+        )
+    if ranged:
+        if start is None or end is None:
+            raise _panel_fail(
+                PanelExit.bad_request,
+                f"--start and --end are a closed range and only "
+                f"{'--start' if end is None else '--end'} was given; the open end has no "
+                "defensible default, so name both",
+            )
+        if end < start:
+            raise _panel_fail(
+                PanelExit.bad_request,
+                f"--start {start} is after --end {end}; a build runs oldest year first and "
+                "this range is empty",
+            )
+        named = tuple(range(start, end + 1))
+    for value in named:
+        if not MINYEAR <= value <= MAXYEAR:
+            raise _panel_fail(
+                PanelExit.bad_request,
+                f"{value} is not a year this calendar can represent ({MINYEAR}-{MAXYEAR})",
+            )
+    return tuple(sorted(named))
+
+
+def _resumable_targets(
+    store: PanelStore,
+    *,
+    targets: frozenset[str],
+    year: int,
+    exchange: str,
+    now: datetime,
+) -> tuple[frozenset[str], tuple[date, ...]]:
+    """Which of `targets` this year already holds in full, and the sessions that proves it.
+
+    ## What `--resume` is, and what it deliberately is not
+
+    It is **year-granular** and it reads only what the store already recorded. A target is
+    skipped for a year when every session-scoped dataset it writes already reaches the last
+    session this build would fetch -- `_stored_horizon` against `_build_sessions`, which is
+    `_refuse_split_horizon`'s own comparison turned around.
+
+    The horizon rather than the whole session set, and that is not a weaker check: both
+    write-time censuses (`panel_ingest._session_census`, used by the price panel and by
+    `_refuse_missing_factor_sessions`) require **every** open session from 1 January to the day
+    before the fetch, so a partition that exists at all is complete up to the horizon its build
+    ran to, and the horizon is the only remaining degree of freedom. Comparing the full census
+    instead would be wrong rather than stricter: `adj_factor` is stored as a *compressed* step
+    function whose census holds only the load-bearing sessions, so an equality against the
+    calendar would never match and `--resume` would silently never resume. So the evidence is
+    the data the writers already accepted -- no progress file, no second on-disk format,
+    nothing to go stale.
+
+    It is **not** intra-year resumption, and that is a judgement rather than an omission. A
+    `PanelStore` partition is written whole (there is no append) and `_session_census` requires
+    every open session from 1 January, so a half-fetched year cannot be stored as a readable
+    partition at all -- it would have to live in a second format with its own staleness and
+    integrity questions, and the failure mode of getting that wrong is a partition that *looks*
+    complete and is not, which is the one failure this whole module is built to make impossible.
+    What is bought instead is that the unit of loss for `--start 2015 --end 2026` is one year
+    rather than twelve; the bounded retry in `TushareProvider._post` is what keeps a transient
+    socket error from costing even that.
+
+    `trade_cal` and `stock_basic` are never skipped and are not evidence for skipping anything
+    else. Each is a **single** request -- twelve of them across the whole gate range, against
+    the ~2,900 a year of `price` costs -- so skipping them would save nothing measurable while
+    making a resumed build read a calendar it did not verify. `suspend_d` is not evidence
+    either, for `_EMPTY_SESSION_IS_ORDINARY`'s reason: a session on which nothing was halted
+    serves zero rows, so its census is a fact about the market. A complete `daily` partition is
+    the stronger witness anyway -- `write_daily_panel` refuses a session whose missing bars
+    nothing accounts for, so that partition existing means the halt corpus was read.
+    """
+    skippable = {name for name in targets if name in _NEEDS_STORED_CALENDAR}
+    if not skippable:
+        return frozenset(), ()
+    if year not in store.registered_years(TRADING_CALENDAR_DATASET):
+        return frozenset(), ()
+    calendar = _stored_calendar(store, exchange=exchange, years=(year,), as_of=now)
+    sessions = _build_sessions(calendar, year, now)
+    reached = sessions[-1]
+    resumed = {
+        target
+        for target in skippable
+        if all(
+            _stored_horizon(store, name, year) == reached
+            for name in PANEL_BUILD_TARGETS[target]
+            if name in SESSION_SCOPED_DATASETS
+        )
+    }
+    return frozenset(resumed), sessions
 
 
 _BUILD_AS_OF_HELP = (
@@ -1714,7 +1852,10 @@ _BUILD_AS_OF_HELP = (
     "passing the same value to every target of one panel is what makes them stop on the same "
     "session -- see `_refuse_split_horizon`, which refuses the build rather than letting them "
     "diverge. Every run reports the instant it used, as `as_of` in --json and as the AS-OF "
-    "line otherwise, so a later re-fetch of one target can be pinned to it."
+    "line otherwise, so a later re-fetch of one target can be pinned to it. It pins what this "
+    "build *stamps* -- fetched_at and every row's ingested_time, which is what makes a re-fetch "
+    "of an unchanged year a true no-op -- and never what the provider's point-in-time filter "
+    "judges rows against, which is always the wall clock."
 )
 
 _BUILD_DATASET_HELP = (
@@ -1727,10 +1868,35 @@ _BUILD_DATASET_HELP = (
 )
 
 
+_BUILD_YEAR_HELP = (
+    "A partition year to build, repeatable and mutually exclusive with --start/--end. Years "
+    "run oldest first. Until V2-P1-019 this was a single value, which Click resolved by "
+    "keeping the last one and discarding the rest in silence."
+)
+
+_BUILD_START_HELP = (
+    "First year of a closed range to build, oldest first. Requires --end and refuses --year."
+)
+
+_BUILD_END_HELP = "Last year of a closed range to build, inclusive. Requires --start."
+
+_BUILD_RESUME_HELP = (
+    "Skip a target for a year whose stored partitions already reach the last session this "
+    "build would fetch, so an interrupted multi-year build costs one year rather than all of "
+    "them. Year-granular and evidence-based -- the census the writers already validated, not a "
+    "progress file. trade_cal and stock_basic are never skipped, and there is no intra-year "
+    "resumption; see `_resumable_targets`. Off by default: a rebuild that quietly fetched "
+    "nothing would be the wrong default for a command whose ordinary job is to replace what "
+    "is there."
+)
+
+
 @panel_app.command("build")
 def panel_build(
     dataset: Annotated[list[str], typer.Option("--dataset", help=_BUILD_DATASET_HELP)],
-    year: Annotated[int, typer.Option("--year", help="The partition year to build.")],
+    year: Annotated[list[int] | None, typer.Option("--year", help=_BUILD_YEAR_HELP)] = None,
+    start: Annotated[int | None, typer.Option("--start", help=_BUILD_START_HELP)] = None,
+    end: Annotated[int | None, typer.Option("--end", help=_BUILD_END_HELP)] = None,
     runtime_dir: Annotated[Path, typer.Option("--runtime-dir")] = Path("./runtime"),
     exchange: Annotated[
         str, typer.Option("--exchange", help="Which exchange's calendar to fetch and read.")
@@ -1747,11 +1913,12 @@ def panel_build(
         ),
     ] = True,
     as_of: Annotated[str, typer.Option("--as-of", help=_BUILD_AS_OF_HELP)] = "",
+    resume: Annotated[bool, typer.Option("--resume", help=_BUILD_RESUME_HELP)] = False,
     json_output: Annotated[
         bool, typer.Option("--json", help="Emit a machine-readable build report.")
     ] = False,
 ) -> None:
-    """Fetch and store one year of the panel plane through the real `panel_ingest` writers.
+    """Fetch and store one or more years of the panel plane through the real writers.
 
     Nothing here bypasses a write-time guard, and that is the whole design: the batches this
     command assembles go into `write_trading_calendar`, `write_stock_universe`,
@@ -1774,10 +1941,19 @@ def panel_build(
     can assess cleanly. The default stays the wall clock -- pinning is the deliberate act, not
     the ordinary one -- and `_refuse_split_horizon` is what stops the default from being a trap:
     a build whose horizon disagrees with a partition already stored is refused before it fetches
-    anything, with the exact `--as-of` that would resolve it.
+    anything, with the exact `--as-of` that would resolve it. `--as-of` pins what this command
+    *stamps*, never what the provider's point-in-time filter judges rows against; see the
+    comment at the `TushareProvider` construction below and `TushareProvider._stamp`.
+
+    **Years run oldest first, one `_build_panel` each, and a refusal stops the whole run.**
+    That order is what makes `--resume` mean anything -- the years before the refusal are the
+    ones already on disk -- and it is why the refusal names both what landed and the exact
+    command that carries on from there. There is no transaction across years any more than
+    there is one across targets.
     """
     with _panel_command("panel build"):
         targets = _build_targets(dataset)
+        years = _build_years(year or (), start, end)
         store = _panel_store(runtime_dir)
         now = _panel_as_of(as_of)
         # **One instant for the whole invocation, and the provider gets it too.** The clock this
@@ -1797,50 +1973,99 @@ def panel_build(
         # build's duration (~45 minutes on a whole year). That is immaterial to every consumer of
         # the field -- the census, whose bound is a whole day, and provenance -- and the value is
         # reported as `as_of` in this command's own output rather than being left to be inferred.
-        provider = TushareProvider(transport=_panel_transport(), clock=lambda: now)
-        written: dict[str, list[PartitionRef]] = {}
-        try:
-            sessions, halt_state = _build_panel(
-                store,
-                provider,
-                written=written,
-                targets=targets,
-                year=year,
-                exchange=exchange,
-                halts=halts,
-                now=now,
+        #
+        # **`stamped_at`, not `clock`.** `V2-P1-018` passed the resolved instant as the
+        # provider's `clock`, which pinned what the provider *stamps* -- the point above -- and
+        # also, silently, what it *judges* rows against: `TushareProvider._decode_panel_rows`
+        # keeps a row only if it was knowable both at the request's `as_of` and at the instant
+        # the fetch ran, and the second half read the same clock. A `--as-of` ahead of the wall
+        # clock therefore stored a cross section that had not published. The provider now takes
+        # the two apart: `stamped_at` is pinned here, `clock` stays the wall clock this module
+        # reads its own default from, and the caller can no longer raise the ceiling on what a
+        # fetch may know. `_panel_clock` rather than the provider's own default so that a test
+        # which moves this module's clock moves the provider's too.
+        provider = TushareProvider(transport=_panel_transport(), clock=_panel_clock, stamped_at=now)
+        stored: list[PartitionRef] = []
+        builds: list[dict[str, object]] = []
+        for index, one_year in enumerate(years):
+            resumed, covered = (
+                _resumable_targets(
+                    store, targets=targets, year=one_year, exchange=exchange, now=now
+                )
+                if resume
+                else (frozenset[str](), ())
             )
-        except _PANEL_WRITE_REFUSALS as error:
-            raise _panel_fail(
-                PanelExit.unhealthy,
-                f"the panel refused this build: {error}. {_stored_so_far(written)}",
-            ) from error
-        except Exception:
-            # Everything else that can stop a build midway: a provider failure or a stated
-            # refusal raised as `typer.Exit` from inside the loop, or something unanticipated
-            # that `_panel_command` will turn into `internal_error`. None of them can know how
-            # far the build got, and by then partitions are on disk. Re-raised untouched --
-            # this clause adds the one fact the raiser did not have, and decides nothing.
-            typer.echo(_stored_so_far(written), err=True)
-            raise
-        _audit_written_partitions(written, targets=targets, year=year)
+            fetched = targets - resumed
+            written: dict[str, list[PartitionRef]] = {}
+            sessions: tuple[date, ...] = covered
+            halt_state = "resumed" if resumed and not fetched else "not-applicable"
+            try:
+                if fetched:
+                    sessions, halt_state = _build_panel(
+                        store,
+                        provider,
+                        written=written,
+                        targets=fetched,
+                        year=one_year,
+                        exchange=exchange,
+                        halts=halts,
+                        now=now,
+                    )
+                    sessions = sessions or covered
+            except _PANEL_WRITE_REFUSALS as error:
+                raise _panel_fail(
+                    PanelExit.unhealthy,
+                    f"the panel refused this build: {error}. "
+                    f"{_stored_so_far([*stored, *_all_refs(written)])}"
+                    f"{_years_left(years, index)}",
+                ) from error
+            except Exception:
+                # Everything else that can stop a build midway: a provider failure or a stated
+                # refusal raised as `typer.Exit` from inside the loop, or something
+                # unanticipated that `_panel_command` will turn into `internal_error`. None of
+                # them can know how far the build got, and by then partitions are on disk.
+                # Re-raised untouched -- this clause adds the one fact the raiser did not have,
+                # and decides nothing.
+                typer.echo(
+                    f"{_stored_so_far([*stored, *_all_refs(written)])}{_years_left(years, index)}",
+                    err=True,
+                )
+                raise
+            _audit_written_partitions(written, targets=fetched, year=one_year)
+            landed = _all_refs(written)
+            stored.extend(landed)
+            builds.append(
+                {
+                    "year": one_year,
+                    "halts": halt_state,
+                    "resumed": sorted(resumed),
+                    "sessions": {
+                        "first": sessions[0].isoformat() if sessions else None,
+                        "last": sessions[-1].isoformat() if sessions else None,
+                        "count": len(sessions),
+                    },
+                    "partitions": [
+                        {"dataset": ref.dataset, "year": ref.year, "row_count": ref.row_count}
+                        for ref in landed
+                    ],
+                }
+            )
 
-        stored = [ref for group in written.values() for ref in group]
         payload = {
-            "year": year,
+            "years": list(years),
             "exchange": exchange,
             "targets": sorted(targets),
-            "halts": halt_state,
+            "halts": _one_halt_state(builds),
             # The instant this build's horizon came from, reported whether it was passed or
             # defaulted. It is what a later `--dataset`-at-a-time re-fetch of this same panel
             # has to be pinned to, and a value a caller can only get by being told: `sessions`
             # below names the last session, not the instant that bounded the loop.
             "as_of": now.isoformat(),
-            "sessions": {
-                "first": sessions[0].isoformat() if sessions else None,
-                "last": sessions[-1].isoformat() if sessions else None,
-                "count": len(sessions),
-            },
+            # The span across every year this invocation covered. Identical to the single
+            # year's own entry when one year was asked for, which is every caller that existed
+            # before `--start`/`--end`; `builds` is where a multi-year run is legible.
+            "sessions": _session_span(builds),
+            "builds": builds,
             "partitions": [
                 {"dataset": ref.dataset, "year": ref.year, "row_count": ref.row_count}
                 for ref in stored
@@ -1850,14 +2075,63 @@ def panel_build(
             typer.echo(json.dumps(payload, ensure_ascii=False, sort_keys=True))
             return
         typer.echo(f"AS-OF {now.isoformat()}")
-        if sessions:
-            typer.echo(
-                f"SESSIONS {len(sessions)} from {sessions[0].isoformat()} to "
-                f"{sessions[-1].isoformat()}"
-            )
-        for ref in stored:
-            typer.echo(f"WROTE {ref.dataset} year={ref.year} rows={ref.row_count}")
-        typer.echo(f"HALTS {halt_state}")
+        for entry in builds:
+            span = cast(Mapping[str, object], entry["sessions"])
+            if span["count"]:
+                typer.echo(
+                    f"SESSIONS {entry['year']} {span['count']} from {span['first']} to "
+                    f"{span['last']}"
+                )
+            for name in cast(Sequence[str], entry["resumed"]):
+                typer.echo(f"RESUMED {name} year={entry['year']} (already complete)")
+            for ref in cast(Sequence[Mapping[str, object]], entry["partitions"]):
+                typer.echo(f"WROTE {ref['dataset']} year={ref['year']} rows={ref['row_count']}")
+        typer.echo(f"HALTS {_one_halt_state(builds)}")
+
+
+def _years_left(years: Sequence[int], index: int) -> str:
+    """The command that carries on from the year a multi-year build stopped in, or nothing.
+
+    Printed beside `_stored_so_far` for the same reason that sentence exists: a build across
+    twelve years that dies in the fourth has eight left, and "re-run it" is not a remedy when
+    the first three cost hours. Empty for a single-year build, which has nothing to carry on
+    from and where the extra sentence would be noise.
+
+    The finished years are named only when there are some. `Years [] finished` is a true
+    sentence and a bad one, and the range below already says everything a build that stopped in
+    its first year needs -- which is the same range it was given.
+    """
+    if len(years) == 1:
+        return ""
+    finished = list(years[:index])
+    stopped = f"Years {finished} finished; {years[index]}" if finished else f"{years[index]}"
+    return (
+        f" {stopped} is the one that stopped. Carry on with "
+        f"--start {years[index]} --end {years[-1]} --resume."
+    )
+
+
+def _one_halt_state(builds: Sequence[Mapping[str, object]]) -> str:
+    """The halt state every built year reported, or `mixed` when they disagree.
+
+    One invocation carries one `--halts` flag, so the states agree unless `--resume` skipped a
+    year (`resumed`) beside one that was fetched. Total rather than "the last one wins": a
+    single word that silently described one year of twelve is exactly the reporting this
+    command's own `_audit_written_partitions` exists to refuse elsewhere.
+    """
+    states = {str(entry["halts"]) for entry in builds}
+    return states.pop() if len(states) == 1 else "mixed"
+
+
+def _session_span(builds: Sequence[Mapping[str, object]]) -> dict[str, object]:
+    """First session, last session and total count across every year of one invocation."""
+    spans = [cast(Mapping[str, object], entry["sessions"]) for entry in builds]
+    covered = [span for span in spans if span["count"]]
+    return {
+        "first": covered[0]["first"] if covered else None,
+        "last": covered[-1]["last"] if covered else None,
+        "count": sum(cast(int, span["count"]) for span in spans),
+    }
 
 
 # --- panel doctor and data-check ---------------------------------------------------------------

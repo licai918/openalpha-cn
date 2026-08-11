@@ -303,6 +303,9 @@ stk_limit ...）有三个命令：`openalpha panel build` 抓取并写入，`ope
 # 构建：五个目标，按依赖序执行，与 --dataset 出现顺序无关
 uv run openalpha panel build --dataset trade_cal --dataset price --year 2026
 
+# 多年：--year 可重复，或用闭区间 --start/--end；年份由老到新依次构建
+uv run openalpha panel build --dataset trade_cal --dataset price --start 2015 --end 2026 --resume
+
 # 体检：--json 输出与 REST/SDK 面序列化同一个 PanelHealthReport
 uv run openalpha panel doctor --dataset daily --year 2026 --session 2026-01-16 --json
 
@@ -342,6 +345,21 @@ uv run openalpha data-check --dataset daily --dataset adj_factor --year 2026 \
   descriptor 声明了实测的 `page_size=4000`，provider 会用 `limit`/`offset` 分页重取同一个
   请求——分页顺序与整页响应逐元素一致，所以分区的 `content_digest` 与 store 的
   `content_hash` 都不变。
+- **`--as-of` 钉住的是这次构建给数据打的时间戳，不是「什么算已知」的上界。** provider 的
+  时点过滤器保留一行的条件是它在请求的 `as_of` **和这次抓取真正发生的时刻**都已可知，
+  第二个时刻永远是墙钟，任何 flag 都够不到。`V2-P1-018` 曾把解析后的 `--as-of` 当作
+  provider 的 `clock` 传进去，两个时刻塌成一个：把 `--as-of` 钉在墙钟之前方两天，
+  当天 16:30 才发布的横截面就会被写进分区。现在 `stamped_at`（可钉）与 `clock`（墙钟）
+  是两个入参，重建仍然是真正的 no-op（`content_hash`/`written_at`/文件 mtime 全不变），
+  而两道下界都真的守。
+- **`--year` 可重复，`--start`/`--end` 是闭区间，两种形式不能混用。** 此前 `--year` 是单值，
+  click 只保留最后一个并**静默丢弃**其余：`--year 2025 --year 2026` 只构建 2026，
+  没有任何输出提到 2025 被丢掉了。年份按从老到新执行。
+- **`--resume` 是年粒度的断点续传，证据是数据本身而不是进度文件。** 某一年的某个目标，
+  只要它写的每个会话级数据集都已经覆盖到这次构建会取到的最后一个会话，就跳过；写时的
+  会话普查（`_session_census`）已经保证了这样的分区从 1 月 1 日起没有洞。`trade_cal` 与
+  `stock_basic` 永不跳过（各一次请求）。**年内没有断点续传**：分区是整体写入、没有追加，
+  半年份只能落成第二套磁盘格式，而它最坏的失败形态正是「看起来完整的半截」。
 - 凭证不经过 CLI：`TushareProvider` 在自己的构造函数里解析 `TUSHARE_TOKEN`，
   `ProviderFailure` 的原始消息（可能带着 token 或整条 query string）永不打印、永不入日志。
 

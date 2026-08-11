@@ -1656,9 +1656,9 @@ def _taxonomy_backfill_timeline(
     `ingested_time` is raised to `available_time` when the latter runs ahead of the fetch, for
     `_calendar_static_timeline`'s reason and with the same bound on the consequence: the raise
     exists only so the row can be represented long enough for `_decode_panel_rows` to drop it at
-    `min(as_of, ingested_at)`. The corpus's newest `out_date` is 2026-06-30 and its newest
-    `in_date` 2026-07-31, both behind the probe, so this is defence rather than an observed case
-    -- but a vintage published after a fetch would produce exactly it.
+    the earlier of `as_of` and the fetch instant. The corpus's newest `out_date` is 2026-06-30
+    and its newest `in_date` 2026-07-31, both behind the probe, so this is defence rather than
+    an observed case -- but a vintage published after a fetch would produce exactly it.
     """
     effective_day = _parse_tushare_date(row[date_field])
     event_time = datetime.combine(effective_day, time(0, 0), tzinfo=_CHINA_TZ)
@@ -1921,11 +1921,14 @@ TUSHARE_DATASETS: tuple[TushareDatasetDescriptor, ...] = (
         # but that made `trade_cal` the one dataset in this table with neither witness *and*
         # no compensating control, guarding the single source of truth every date-completeness
         # check on the panel plane (`required_dates`, `_session_census`, `date_gap`) is
-        # measured against. The flag costs nothing: probed live on 2026-08-10, the one-year
-        # request returned 366 rows with `has_more=False`, the whole-calendar request 13,527
-        # rows with `has_more=False`, and the same request under `limit=200` returned 200 rows
-        # with `has_more=True` -- so the flag is present on every response and does flip when
-        # this endpoint truncates.
+        # measured against. The flag costs nothing: probed live on 2026-08-10, the 2026
+        # one-year request returned **365** rows with `has_more=False`, the whole-calendar
+        # request 13,527 rows with `has_more=False`, and the same request under `limit=200`
+        # returned 200 rows with `has_more=True` -- so the flag is present on every response
+        # and does flip when this endpoint truncates. An earlier version of this comment said
+        # 366 for the one-year request, which is the *bound* two lines up and not the
+        # measurement: 2026 is not a leap year. Re-measured 2026-08-10 alongside 2024, which
+        # is one and does answer 366.
         requires_truncation_flag=True,
         # `name` is the panel column, `source_field` is Tushare's response column. They
         # coincide today and are still written out separately: renaming one must not silently
@@ -2490,10 +2493,16 @@ def _daily_close_timeline(row: dict[str, Any], date_field: str, ingested_at: dat
     for the full argument. In short: lowering `available_time` would invent a publication, while
     raising `ingested_time` overstates the one clock no point-in-time filter reads
     (`is_visible_at` reads `available_time`), and the raise exists **only so the row can be
-    represented long enough to be discarded** -- `_decode_panel_rows` bounds its filter at
-    `min(as_of, ingested_at)`, so a row whose availability runs past the fetch instant never
-    reaches a partition. `panel build` cannot reach this branch at all: `_build_sessions` stops
-    a day before its own clock, so every session it asks for published before it ran.
+    represented long enough to be discarded** -- `_decode_panel_rows` bounds its filter at the
+    earlier of the request's `as_of` and the instant the fetch ran, so a row whose availability
+    runs past that instant never reaches a partition.
+
+    `panel build` *can* reach this branch, and an earlier version of this docstring said it
+    could not ("`_build_sessions` stops a day before its own clock, so every session it asks
+    for published before it ran"). `_build_sessions` stops a day before the build's `--as-of`,
+    which is a value a caller supplies rather than a reading of a clock: pinned ahead of the
+    wall clock it asks for a session that has not published, and the drop above is then the
+    only thing standing between the response and the partition. See `TushareProvider._stamp`.
     """
     trading_day = _parse_tushare_date(row[date_field])
     event_time = datetime.combine(trading_day, SESSION_CLOSE_TIME, tzinfo=_CHINA_TZ)
@@ -2551,11 +2560,11 @@ def _announcement_timeline(row: dict[str, Any], date_field: str, ingested_at: da
     ``ingested_time`` is raised to the announcement when the latter runs ahead of the fetch, for
     ``_calendar_static_timeline``'s reason: ``Timeline`` refuses an ``ingested_time`` before its
     ``available_time``, and the row has to be representable long enough for
-    ``_decode_panel_rows`` to drop it at ``min(as_of, ingested_at)``. Defence rather than an
-    observed case here -- a statement endpoint serves nothing it has not already announced --
-    but ``fina_indicator``'s request window is a *report period* year rather than an
-    announcement year (see ``_financial_statement_params``), so a request for the current year
-    routinely names periods whose announcement has not happened.
+    ``_decode_panel_rows`` to drop it at the earlier of ``as_of`` and the fetch instant.
+    Defence rather than an observed case here -- a statement endpoint serves nothing it has not
+    already announced -- but ``fina_indicator``'s request window is a *report period* year
+    rather than an announcement year (see ``_financial_statement_params``), so a request for
+    the current year routinely names periods whose announcement has not happened.
     """
     ann_moment = datetime.combine(
         _parse_tushare_date(row["ann_date"]), time(0, 0), tzinfo=_CHINA_TZ
@@ -2606,15 +2615,21 @@ def _calendar_static_timeline(
     is on this side. It is still an overstatement, so it is not allowed to survive: the raise
     exists **only so the row can be represented long enough to be discarded**.
     ``TushareProvider._decode_panel_rows`` bounds its point-in-time filter at
-    ``min(as_of, ingested_at)``, so any row whose availability runs past the fetch instant is
+    ``min(as_of, clock())``, so any row whose availability runs past the fetch instant is
     dropped there, and the raised clock never reaches a stored partition -- not for an
     ``as_of`` in the future, not for one a caller set to the end of the current year, not at
     all. An earlier version of this docstring said the raised value "reaches a stored
     partition only for a caller who has arranged for it to", which described a filter bounded
     at ``as_of`` alone; ``ProviderRequest`` accepts any ``as_of``, and dating the fetch at the
     end of the calendar year is a shape this repository's own fixtures use.
-    ``tests/contract/providers/test_tushare_registry_datasets.py`` pins both branches, and
-    ``tests/integration/panel/test_registry_ingest.py`` pins the drop.
+
+    ``clock()`` and not the instant the row is *stamped* with, which a caller may pin and
+    ``cli.panel_build`` does (``TushareProvider._stamp``). While the two were one parameter,
+    a build pinned ahead of its wall clock supplied the very ceiling this sentence relies on
+    and the guarantee above was vacuous for it.
+    ``tests/contract/providers/test_tushare_registry_datasets.py`` pins both branches,
+    ``tests/integration/panel/test_registry_ingest.py`` pins the drop, and
+    ``tests/integration/test_cli_panel_horizon.py`` pins it through the CLI that broke it.
     """
     moment = datetime.combine(_parse_tushare_date(row[date_field]), time(0, 0), tzinfo=_CHINA_TZ)
     return Timeline(
@@ -2880,6 +2895,28 @@ def _refuse_overlapping_pages(
     yet, and `subject_field` is `None` for the calendar-shaped datasets. A whole-row comparison
     is the conservative one anyway -- two identical rows from one paged fetch mean the pages
     are not a partition of the answer, whatever the key would have been.
+
+    ## What this cannot witness, stated because "no duplicates" reads like more than it is
+
+    `limit`/`offset` addresses positions in a result set the endpoint re-evaluates per request,
+    so a set that *changes between two pages* moves rows across the boundary, and the two
+    directions are not symmetric:
+
+    - A row **removed** between page N and page N+1 shifts the tail back into the window
+      already read, so a row is served twice and this check fires. Witnessed.
+    - A row **inserted** shifts the tail forward past the offset, so exactly one row is never
+      served -- and it produces **no duplicate**. There is no witness here, and none anywhere
+      else either: `has_more=False` is still true of the last page, no page is over its
+      `limit`, and the concatenation is a plausible short answer.
+
+    Out of reach for the one descriptor that declares a `page_size`: `stk_limit` is fetched one
+    `trade_date` at a time and only for sessions that have already closed, so the set being
+    paged is fixed before the first page is asked for. It is not out of reach *in general*, and
+    it is the reason `page_size` is opt-in behind a measurement per endpoint rather than a
+    default -- a whole-market endpoint paged during its own publication window would have this
+    hole and this module would report success. An earlier version of this docstring named
+    duplication as "the observable half" of the `namechange` failure, which is true of that
+    failure and was read as a statement about paging in general; it is not one.
     """
     seen: set[tuple[tuple[str, str], ...]] = set()
     for index, page in enumerate(pages):
@@ -3233,6 +3270,7 @@ class TushareProvider:
         token: str | None = None,
         transport: TushareTransport | None = None,
         clock: Callable[[], datetime] = utc_now,
+        stamped_at: datetime | None = None,
         attempts: int = TUSHARE_TRANSPORT_ATTEMPTS,
         sleep: Callable[[float], None] = _sleep,
         jitter: Callable[[], float] = random.random,
@@ -3242,6 +3280,7 @@ class TushareProvider:
         self._token = token if token is not None else os.getenv("TUSHARE_TOKEN", "")
         self._transport = transport or UrllibTushareTransport()
         self._clock = clock
+        self._stamped_at = stamped_at
         self._attempts = attempts
         self._sleep = sleep
         self._jitter = jitter
@@ -3249,6 +3288,35 @@ class TushareProvider:
         that a test cannot fast-forward is a bounded backoff no test will cover. Nothing in
         this repository passes them outside the retry tests, and the defaults are the real
         ones."""
+
+    def _stamp(self) -> datetime:
+        """The instant this provider **attributes** its observation to.
+
+        Two different instants have been called "the fetch clock" here and conflating them cost
+        this repository a point-in-time guard, so they are now named apart:
+
+        - ``clock()`` is **when this process is actually running**. It is a reading, nothing
+          may pin it to a value the wall clock has not reached, and it is the ceiling on what
+          any fetch can know (see `_decode_panel_rows`).
+        - ``stamped_at`` is **what this provider reports as its observation instant**:
+          ``ProviderBatch.fetched_at``, ``ColumnarPanelBatch.fetched_at`` and every row's
+          ``Timeline.ingested_time``. A caller may pin it, and `cli.panel_build` does, because
+          ``ingested_time`` is a stored column and therefore part of a partition's content hash:
+          without a pin, five invocations of one build stamp five instants, the same year
+          re-fetched at the same ``--as-of`` produces a different partition every time, and
+          `panel_ingest._session_census` and `cli._build_sessions` bound themselves at two
+          different readings of ``datetime.now()``.
+
+        The asymmetry is the whole point and it runs one way only: a pin can make this
+        provider **understate** how recently it observed a row -- by up to the duration of a
+        build, which is the cost `cli.panel_build` states -- and it can never make a row
+        knowable that was not. ``V2-P1-018`` passed the resolved ``--as-of`` as ``clock``
+        itself, which collapsed ``min(as_of, ingested_at)`` into ``min(as_of, as_of)`` and let a
+        build pinned two days ahead of the wall clock store a cross section that had not
+        published; `tests/integration/test_cli_panel_horizon.py` drives that case through the
+        real CLI.
+        """
+        return self._clock() if self._stamped_at is None else self._stamped_at
 
     @property
     def metadata(self) -> ProviderMetadata:
@@ -3353,14 +3421,14 @@ class TushareProvider:
             return ProviderBatch(
                 provider_id=self.metadata.provider_id,
                 request=request,
-                fetched_at=self._clock(),
+                fetched_at=self._stamp(),
                 status="no_data",
                 no_data_reason="Tushare returned no records visible at the request clock.",
             )
         return ProviderBatch(
             provider_id=self.metadata.provider_id,
             request=request,
-            fetched_at=self._clock(),
+            fetched_at=self._stamp(),
             status="success",
             records=records,
         )
@@ -3418,7 +3486,7 @@ class TushareProvider:
         # validating itself, and a failure there is this module's own bug. Wrapping the second
         # as the first would let a descriptor that projects a string into a boolean column
         # read as a Tushare outage.
-        fetched_at = self._clock()
+        fetched_at = self._stamp()
         if not decoded.rows:
             return ColumnarPanelBatch(
                 provider_id=self.metadata.provider_id,
@@ -3703,11 +3771,25 @@ class TushareProvider:
         overstate to make it fit. A response whose rows are all dropped this way is
         ``no_data`` with ``served`` non-zero, which already says "served but not yet
         knowable".
+
+        ## The second bound reads ``clock()`` and never ``_stamp()``, and that is the fix
+
+        Those two lines are one line apart below and they are deliberately not the same
+        expression. ``ingested_at`` is what the row is *stamped* with and a caller may pin it
+        (`_stamp`); ``knowable_by`` is what the row is *judged* against and nothing may pin
+        it. ``V2-P1-018`` gave `cli.panel_build` a ``--as-of`` and wired it in as the
+        provider's ``clock``, so both sides read the same caller-supplied value and
+        ``min(as_of, ingested_at)`` became ``min(as_of, as_of)`` -- a second bound that was
+        documented here, exercised nowhere the first bound did not already cover, and true by
+        construction. Measured through the real CLI: a wall clock at 12:00 Asia/Shanghai and
+        ``--as-of`` two days ahead stored the 16:30 cross section of a session that had not
+        published. A bound whose ceiling the caller supplies is not a bound, and this is a
+        repository whose next phase is a look-ahead red team.
         """
         expanded = _expand_panel_rows(descriptor, items)
         _check_panel_projection(descriptor, expanded, self.metadata.provider_id)
-        ingested_at = self._clock()
-        knowable_by = min(request.as_of, ingested_at)
+        ingested_at = self._stamp()
+        knowable_by = min(request.as_of, self._clock())
         kept: list[tuple[date, dict[str, Any], Timeline]] = []
         for row in expanded:
             timeline = _CLOCK_BUILDERS[descriptor.clock](row, descriptor.date_field, ingested_at)
@@ -3758,7 +3840,7 @@ class TushareProvider:
         request: ProviderRequest,
     ) -> tuple[ProviderRecord, ...]:
         """Point-in-time filter already-decoded response rows into evidence records."""
-        ingested_at = self._clock()
+        ingested_at = self._stamp()
         records: list[ProviderRecord] = []
         for row in items:
             timeline = _CLOCK_BUILDERS[descriptor.clock](row, descriptor.date_field, ingested_at)

@@ -367,6 +367,68 @@ def test_a_raised_ingest_clock_never_survives_the_filter_however_late_the_as_of_
     assert "or at the instant of the fetch" in batch.no_data_reason
 
 
+def test_a_pinned_stamp_cannot_raise_the_ceiling_the_filter_is_bounded_at(
+    fake_tushare_transport,
+) -> None:
+    """The bound reads `clock()`, never the instant a caller pinned the stamps at.
+
+    `V2-P1-018` gave `cli.panel_build` an `--as-of` and passed it in as the provider's `clock`,
+    for a real reason -- `ingested_time` is a stored column, so an unpinned rebuild rewrites the
+    partition every time. But it pinned the *judge* along with the *stamp*: the bound
+    `min(as_of, ingested_at)` became `min(as_of, as_of)`, and this very row -- announced
+    2026-08-11, already in the corpus on 2026-08-08 -- went back through it.
+
+    `stamped_at` is now the pin and `clock` is the ceiling, and the assertion below is that they
+    are not the same knob: the stamp is pinned three days past the announcement and the row is
+    still dropped, because the process is still running on 2026-08-08.
+    """
+    fetch_clock = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
+    transport = fake_tushare_transport(_response(NAMECHANGE_FIELDS, [FUTURE_ANNOUNCEMENT]))
+    provider = TushareProvider(
+        token="secret-token",
+        transport=transport,
+        clock=lambda: fetch_clock,
+        stamped_at=datetime(2026, 8, 14, 12, 0, tzinfo=UTC),
+    )
+
+    batch = provider.fetch_panel(
+        ProviderRequest(dataset=NAMECHANGE_DATASET, as_of=datetime(2026, 12, 31, 12, 0, tzinfo=UTC))
+    )
+
+    assert batch.status == "no_data"
+    assert batch.no_data_reason is not None
+    assert "or at the instant of the fetch" in batch.no_data_reason
+
+
+def test_a_pinned_stamp_is_what_every_kept_row_and_the_batch_itself_carry(
+    fake_tushare_transport,
+) -> None:
+    """The other half of `_stamp`: pinning still does the job it was added for.
+
+    `fetched_at` and every row's `ingested_time` come from the pin rather than from the clock,
+    which is what makes a partition re-fetched at the same `--as-of` hash to the same value --
+    `ingested_time` is one of the four clock columns `ColumnarPanelBatch.storage_columns()`
+    persists. Asserted against a clock deliberately *later* than the pin, so a fixture that
+    quietly stopped pinning would show up here rather than only under `--as-of`.
+    """
+    stamped_at = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
+    transport = fake_tushare_transport(_response(NAMECHANGE_FIELDS, PING_AN_ITEMS))
+    provider = TushareProvider(
+        token="secret-token",
+        transport=transport,
+        clock=lambda: datetime(2026, 8, 9, 3, 0, tzinfo=UTC),
+        stamped_at=stamped_at,
+    )
+
+    batch = provider.fetch_panel(
+        ProviderRequest(dataset=NAMECHANGE_DATASET, as_of=datetime(2026, 8, 8, 23, 0, tzinfo=UTC))
+    )
+
+    assert batch.status == "success"
+    assert batch.fetched_at == stamped_at
+    assert set(batch.timeline.ingested_time) == {stamped_at}
+
+
 def test_a_late_as_of_still_keeps_every_row_that_was_knowable_when_the_fetch_ran(
     fake_tushare_transport,
 ) -> None:
