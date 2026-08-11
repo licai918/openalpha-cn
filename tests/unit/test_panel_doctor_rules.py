@@ -341,6 +341,38 @@ def test_the_calendar_limitation_carries_its_proven_instances_as_dates() -> None
     assert len(entry.dates) == 3
 
 
+def test_the_calendar_fold_is_the_one_panel_code_no_dataset_registry_declares() -> None:
+    """`_limitations()` folds seven registries one-for-one and then appends a code of its own.
+
+    The seven folded registries are each pinned by a set literal in their own module's tests,
+    which covers every `KNOWN_PANEL_LIMITATIONS` entry except this one: it is constructed here
+    rather than declared anywhere, so no domain test can name it and nothing did. Renaming it
+    was a green change, and the name is what a reader of a health report searches for.
+
+    Asserted as the exact difference rather than as a membership, so the arithmetic in
+    `test_every_entry_of_every_known_registry_reaches_the_report` gains the name the count was
+    standing in for -- and so a second locally constructed code has to be added here too.
+    """
+    folded = {
+        item.code
+        for registry in (
+            KNOWN_UNIVERSE_LIMITATIONS,
+            KNOWN_ADJUSTMENT_LIMITATIONS,
+            KNOWN_PRICE_LIMITATIONS,
+            KNOWN_SUSPENSION_LIMITATIONS,
+            KNOWN_INDEX_MEMBERSHIP_LIMITATIONS,
+            KNOWN_INDUSTRY_LIMITATIONS,
+            KNOWN_FINANCIAL_STATEMENT_LIMITATIONS,
+        )
+        for item in registry
+    }
+
+    assert {item.code for item in KNOWN_PANEL_LIMITATIONS} - folded == {
+        "the_published_schedule_can_be_amended_after_it_becomes_answerable"
+    }
+    assert folded - {item.code for item in KNOWN_PANEL_LIMITATIONS} == set()
+
+
 def test_every_limitation_names_datasets_that_have_a_declared_cadence() -> None:
     """A limitation attached to a dataset the report never assesses is one no reader will ever
     be shown."""

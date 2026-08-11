@@ -22,6 +22,7 @@ two decimals: the exact restated previous close is 10.940003.
 
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 from datetime import date, timedelta
 from typing import Any
@@ -592,6 +593,59 @@ def test_the_published_return_bound_is_one_tick_of_a_two_decimal_percentage() ->
     with pytest.raises(PriceDataError, match=r"the same row's pct_chg says"):
         session_returns(
             outside, previous_close=11.3, previous_day=JUNE_11, factors=_factor_history(PING_AN)
+        )
+
+
+PUBLISHED_TICK_IN_PERCENT = 0.01
+"""One published tick of a two-decimal `pct_chg`, in the units `pct_chg` is stored in.
+
+`MAX_PUBLISHED_RETURN_DISAGREEMENT` is this tick divided by 100, and `0.01 / 100.0` is the same
+double as `1e-4` -- which is what lets the test below place a gap *exactly* on the bound rather
+than near it.
+"""
+
+
+def test_a_gap_of_exactly_one_tick_is_accepted_and_the_next_representable_gap_is_not() -> None:
+    """The boundary operator itself, which 0.9x and 1.1x step over.
+
+    The test above places the gap at 0.9 and 1.1 of the bound, so `>` and `>=` are
+    indistinguishable to it: nothing in the file ever presents a gap of exactly 1.0x. Widening
+    the comparison in `session_returns` to `>=` therefore left the whole suite green, and a
+    `>=` is not a rounding difference here -- the bound *is* one published tick, so the row it
+    would newly refuse is the row that is off by exactly the amount the constant was sized to
+    allow. Refusing that one is refusing the calibration.
+
+    The gap is placed exactly rather than approximately, and both halves of that are
+    deliberate. `close == pre_close` makes `published_return` exactly `0.0` -- a session that
+    closed where it opened the day at, which is the ordinary shape of a name that barely
+    traded and the same one the test below relies on when it says "`open == close` on an
+    untraded name leaves nothing to disagree about". And `0.01 / 100.0` is bit-for-bit `1e-4`,
+    so `published_return_disagreement` is the bound's own double and the equality below is `==`
+    rather than `approx`. The other side is one ULP further out: the smallest gap the machine
+    can express past the bound, which is the tightest available statement that the comparison
+    is still an inequality and not an equality.
+    """
+    bar = daily_bars_from_panel_rows(_bar_rows(day="2026-06-12"))[PING_AN]
+    on_the_bound = replace(bar, close=bar.pre_close, pct_chg=PUBLISHED_TICK_IN_PERCENT)
+    one_ulp_past = replace(
+        on_the_bound, pct_chg=math.nextafter(PUBLISHED_TICK_IN_PERCENT, math.inf)
+    )
+
+    assert on_the_bound.published_return == 0.0
+    assert on_the_bound.published_return_disagreement == MAX_PUBLISHED_RETURN_DISAGREEMENT
+    assert one_ulp_past.published_return_disagreement > MAX_PUBLISHED_RETURN_DISAGREEMENT
+
+    accepted = session_returns(
+        on_the_bound, previous_close=11.3, previous_day=JUNE_11, factors=_factor_history(PING_AN)
+    )
+    assert accepted.published_disagreement == MAX_PUBLISHED_RETURN_DISAGREEMENT
+
+    with pytest.raises(PriceDataError, match=r"the same row's pct_chg says"):
+        session_returns(
+            one_ulp_past,
+            previous_close=11.3,
+            previous_day=JUNE_11,
+            factors=_factor_history(PING_AN),
         )
 
 

@@ -45,9 +45,10 @@ dates.
 ## What is deliberately not here
 
 No row-level `available_time` filter is added to `PanelStore.query()`. `panel/catalog.py`'s
-"Disclosure" section leaves that to P2 by name -- "splitting this into a partition-level gate
-plus a row-level `available_time` filter ... is explicitly left to P2 rather than smuggled in
-here" -- and the judgement recorded by this task is that it should not be taken. The column is
+"Disclosure" section is where "splitting this into a partition-level gate plus a row-level
+`available_time` filter" was put to P2 as its first design decision, and the judgement recorded
+by this task is that it should not be taken -- which is now what that section says, in place of
+the forward reference it carried while the question was open. The column is
 stored (every partition carries all four clocks, so `query()` can already select it) and
 `_build_scan_sql` supports equality filters only, so taking it would mean a comparison grammar
 as well. Neither is the reason to decline. The reason is that a filtered read hands back a

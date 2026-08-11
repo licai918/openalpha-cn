@@ -229,6 +229,32 @@ def test_every_declared_limitation_carries_a_code_and_a_detail() -> None:
         assert entry.detail.strip()
 
 
+def test_the_known_limitations_are_named_rather_than_argued_away() -> None:
+    """Set **equality**, in the shape `KNOWN_ADJUSTMENT_LIMITATIONS` has had since `V2-P1-005`.
+
+    The test above is about the registry's *form* -- codes are unique, details are non-empty --
+    and every one of its assertions survives renaming an entry, deleting one, or adding one.
+    That is not hypothetical here: `a_listed_only_registry_is_invisible_to_every_downstream_check`
+    is the entry `V2-P2-008`'s whole finding rests on, `test_injection_register.py`'s disclosed
+    exclusion points a reader at it by name, and until this test its name appeared nowhere the
+    suite could see -- only in two docstrings, which are prose the test runner does not read.
+    Renaming it left every test green while the exclusion's citation silently stopped resolving.
+
+    Naming all seven, rather than asserting membership for the interesting one, is
+    `tests/unit/test_known_limitation_registries.py`'s rule and this repository's older one: a
+    universal claim tested on a sample it chose cannot see what it left out.
+    """
+    assert {entry.code for entry in KNOWN_UNIVERSE_LIMITATIONS} == {
+        "a_shares_only",
+        "delistings_only_back_to_the_first_recorded_one",
+        "suspension_invisible",
+        "announcement_clock_absent",
+        "snapshot_has_no_as_of",
+        "a_listed_only_registry_is_invisible_to_every_downstream_check",
+        "ts_code_is_not_a_permanent_security_identity",
+    }
+
+
 # --- construction is fail-closed ------------------------------------------------------
 
 

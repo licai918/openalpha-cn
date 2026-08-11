@@ -135,9 +135,13 @@ through a year while reading that year's partition, because every step inside th
 The design is deliberate and fail-closed: `evaluate_readiness` is pure over catalog metadata
 and has no access to rows, so a row-level answer would mean promising something about rows it
 never filtered. Splitting this into a partition-level gate plus a row-level `available_time`
-filter is the obvious alternative, it changes what `read_if_ready` *promises* rather than only
-what it refuses, and it is explicitly left to P2 rather than smuggled in here.
-`tests/unit/panel/test_readiness_rules.py::
+filter is the obvious alternative, and it changes what `read_if_ready` *promises* rather than
+only what it refuses. **P2 considered it and declined**: a filtered read hands back a short
+partition, and every consumer above this plane reads shortness as missing data rather than as
+withheld data, so it would turn a fail-closed refusal into a plausible-looking short answer.
+The reasoning is recorded in full in
+`tests/integration/panel/test_lookahead_injection.py`'s module docstring; the partition-level
+gate stays. `tests/unit/panel/test_readiness_rules.py::
 test_not_yet_knowable_is_partition_level_so_an_as_of_inside_a_year_reads_nothing` pins the
 behaviour and carries the same disclosure next to the assertions.
 

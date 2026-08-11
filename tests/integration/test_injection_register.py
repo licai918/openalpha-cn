@@ -16,12 +16,17 @@ row added without an implementation is a row whose `inject` does not refuse and 
 red. That is the shape `V2-P1-015`'s review named -- a table and an implementation drifting
 apart with nothing failing -- inverted, so that the table *is* the call.
 
-Four audits sit on top of it, and each closes a different way a register rots:
+Five audits sit on top of it, and each closes a different way a register rots:
 
 - `test_no_vectors_refusal_matches_another_vectors_refusal` runs every injection and
   cross-matches every declared pattern against every *other* vector's actual refusal text. A
   pattern loose enough to match a neighbour's refusal is a pattern that does not prove which
   rule refused, which is this repository's `pytest.raises(match=...)` rule made mechanical.
+- `test_no_vectors_cleared_answer_matches_another_vectors_cleared_pattern` is that same matrix
+  on the other half of the row, plus the one statement the matrix cannot make on its own: no
+  `cleared` pattern may match the empty answer. `cleared` exists because "it did not raise" is
+  satisfied by a read that answered nothing, and a `.*` in that field *is* that read -- which
+  is why the field needed the same audit it was introduced to provide.
 - `test_every_p2_injection_issue_is_a_vector_or_a_disclosed_exclusion` requires all eight
   issues to be accounted for, and
   `test_each_disclosed_exclusion_names_a_test_that_exists` AST-parses the file each exclusion
@@ -721,6 +726,53 @@ def test_no_vectors_refusal_matches_another_vectors_refusal(tmp_path: Path) -> N
         for vector in INJECTION_VECTORS
         for other in messages
     }
+
+
+def test_no_vectors_cleared_answer_matches_another_vectors_cleared_pattern(
+    tmp_path: Path,
+) -> None:
+    """The same audit as above, on the field that had none -- and the reason it needed one.
+
+    `cleared` exists because "it did not raise" is satisfied by a read that answered nothing.
+    That argument applies to `cleared` itself with no change of a single word: a pattern of
+    `.*` is *the* read that answers nothing, and until this test one could be written and the
+    whole suite stayed green. The refusal side has had the 8x8 unit matrix since this file was
+    written; the cleared side was audited by nothing at all, which made it the loose half of a
+    row whose whole job is to be narrow on both halves.
+
+    Two statements, and the second is not implied by the first:
+
+    - The unit matrix, exactly as `test_no_vectors_refusal_matches_another_vectors_refusal`
+      builds it. A pattern that matches a neighbour's answer does not prove which read
+      answered. This is what catches `.*`, and it also catches the near misses -- `answered`
+      alone would match both the income and the industry rows.
+    - No pattern matches the **empty** answer. A vector whose read came back with nothing is
+      exactly the failure `cleared` was introduced to see, so a pattern that would accept it is
+      disqualified whether or not it happens to be distinguishable from its seven neighbours. A
+      single-row register has no neighbours and would pass the matrix vacuously; it would still
+      fail this.
+
+    Both halves are asserted over the whole matrix rather than per row, so the failure names
+    which pair collided instead of which row happened to run first.
+    """
+    answers = {
+        vector.vector_id: vector.clear(tmp_path / vector.vector_id) for vector in INJECTION_VECTORS
+    }
+
+    matches = {
+        (vector.vector_id, other): bool(re.search(vector.cleared, answers[other]))
+        for vector in INJECTION_VECTORS
+        for other in answers
+    }
+
+    assert matches == {
+        (vector.vector_id, other): vector.vector_id == other
+        for vector in INJECTION_VECTORS
+        for other in answers
+    }
+    assert {
+        vector.vector_id: bool(re.search(vector.cleared, "")) for vector in INJECTION_VECTORS
+    } == {vector.vector_id: False for vector in INJECTION_VECTORS}
 
 
 def test_every_p2_injection_issue_is_a_vector_or_a_disclosed_exclusion() -> None:

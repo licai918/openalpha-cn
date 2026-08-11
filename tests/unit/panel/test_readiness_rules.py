@@ -320,8 +320,13 @@ def test_not_yet_knowable_is_partition_level_so_an_as_of_inside_a_year_reads_not
       partition at each step; a walk-forward inside one year sees `blocked` at every step.
 
     Splitting the judgement into a partition-level gate plus a row-level `available_time`
-    filter is the obvious alternative and is explicitly **not** done here -- it is P2's first
-    design decision, and it changes what `read_if_ready` promises, not just what it refuses.
+    filter is the obvious alternative and is **not** done here. It was P2's first design
+    decision and P2 declined it: a filtered read hands back a *short* partition, and every
+    consumer above this plane reads shortness as missing data rather than as withheld data,
+    which turns a fail-closed refusal into a plausible-looking short answer. The judgement is
+    recorded in `tests/integration/panel/test_lookahead_injection.py`'s module docstring, which
+    is also where the three read-side injections it would have served are pinned against the
+    partition-level gate instead.
     """
     as_of = datetime(2024, 6, 30, 12, 0, tzinfo=UTC)
     whole_year = PartitionState(

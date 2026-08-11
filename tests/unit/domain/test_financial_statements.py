@@ -1351,6 +1351,30 @@ def test_every_dataset_is_named_and_the_limitations_are_unique_and_specific() ->
         assert len(limitation.detail) > 200, limitation.code
 
 
+def test_the_known_limitations_are_named_rather_than_argued_away() -> None:
+    """All eleven, as a set literal, closing the six the memberships above never mention.
+
+    The test above names three of the eleven and the one below names two more, which leaves six
+    entries whose existence no assertion depends on -- so deleting or renaming any of them was
+    a green change. Membership assertions are additive and can never see what is missing; an
+    equality can, in both directions, which is why every registry in this repository is asked
+    for one by `tests/unit/test_known_limitation_registries.py`.
+    """
+    assert {limitation.code for limitation in KNOWN_FINANCIAL_STATEMENT_LIMITATIONS} == {
+        "a_correction_carries_no_instant_of_its_own",
+        "fina_indicator_has_no_version_column_at_all",
+        "the_merge_rule_is_agreement_in_the_projection",
+        "the_disagreement_reaches_headline_numbers",
+        "update_flag_does_not_say_which_version_is_current",
+        "an_announcement_date_carries_no_time_of_day",
+        "the_two_announcement_dates_are_not_ordered",
+        "f_ann_date_is_deliberately_not_a_point_in_time_filter",
+        "the_corpus_starts_before_the_exchanges_did",
+        "a_partial_year_read_answers_from_inside_its_window",
+        "only_the_consolidated_report_is_served",
+    }
+
+
 def test_the_two_gaps_the_review_found_are_named_rather_than_only_fixed() -> None:
     """A limitation is only useful if a caller can find it by name and read a number off it.
     Both of these are disclosure, not defect: the collapse is right about what it compares, and

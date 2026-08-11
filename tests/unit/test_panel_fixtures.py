@@ -2,7 +2,7 @@
 
 `tests/panel_fixtures.py` exists because a fixture that quietly lacks a form the live data has
 lets a wrong implementation pass. A *generator* that quietly lacks it is the same defect with a
-wider blast radius, so the contract is asserted here as three whole-table statements rather
+wider blast radius, so the contract is asserted here as four whole-table statements rather
 than as one test per shape:
 
 1. **Asking for a shape produces the shape.** Every id in `PANEL_SHAPES`, generated on its own,
@@ -12,6 +12,11 @@ than as one test per shape:
 3. **No detector reads the request.** Each detector is re-run against the shapeless artifact
    relabelled as if it carried the shape. This is the one failure mode that would make the
    whole table a tautology, and it is the only way to rule it out from the outside.
+4. **No detector answers for somebody else's shape.** The full 25x25 matrix, with the five
+   containments that really do hold declared in `CROSS_TRIGGERS`. (1)-(3) are all satisfied by
+   a detector that is about something far wider than the shape it is filed under -- and the
+   three look-ahead shapes stay three separate injections only because each reads its own
+   dataset, which was true and untested until this statement.
 
 Each is a dict compared against a dict literal, for `panel_gate.GATE_CODE_BLOCKS`' reason: a
 shape that stops working shows up as a diff on its own line, and a shape added to the table
@@ -248,6 +253,91 @@ def test_no_detector_answers_from_the_request_instead_of_from_the_artifact() -> 
     assert {shape_id: shape.detect(mislabelled) for shape_id, shape in PANEL_SHAPES.items()} == {
         shape_id: False for shape_id in EXPECTED_SHAPE_IDS
     }
+
+
+CROSS_TRIGGERS = {
+    "calendar.mid_window_weekday_closure": ("calendar.multi_session_recess",),
+    "daily.ex_rights_session": ("adjustment.step_down",),
+    "daily.uncorroborated_factor_step": ("daily.close_moves_between_sessions",),
+    "financials.same_day_duplicate_versions": ("financials.three_versions_of_one_key",),
+    "financials.second_statement_dataset": (
+        "financials.statement_dataset_without_a_revision_label",
+    ),
+}
+"""Detector -> the other shapes' panels it also answers `True` on. Five, each declared.
+
+Statement (4) below is "a detector answers `False` on somebody else's shape", and these are the
+pairs where it does not. None is a detector reaching outside what it names; each is one shape's
+panel really containing another shape's form, which is a fact about the generator and has to be
+written down rather than allowed by a loose assertion. In order:
+
+- `calendar.multi_session_recess` closes 2026-01-08 **and** 2026-01-09 to open the five-day gap
+  it is named for. Both are weekdays inside the session window, which is
+  `mid_window_weekday_closure` exactly. Set inclusion, and
+  `test_asking_for_every_shape_at_once_still_produces_every_one_of_them`'s docstring already
+  says so in prose; this is the same sentence as an assertion.
+- `adjustment.step_down` moves `securities[1]`'s factor at `sessions[6]`, and `_pre_close_of`
+  restates every published `pre_close` by whatever the factors did overnight. A corroborated
+  restatement **is** an ex-rights session -- that is `_has_ex_rights_session`'s own definition,
+  both halves of it -- so a factor step that the generator stays self-consistent about cannot
+  fail to be one. The two shapes differ in which direction the factor moves, not in kind: the
+  step-down entry's own measurement is 28 of 5,351 securities whose factors fell.
+- `daily.close_moves_between_sessions` is the one pair that is not an implication of meaning,
+  and it comes from the shapeless panel's own halt. `_missing_bars` withholds
+  `securities[-1]`'s bar on `sessions[4]`, so that name's next stored bar is `sessions[5]`,
+  whose `pre_close` is `sessions[4]`'s close -- a close no row carries. With a flat series the
+  two are the same number and nothing shows; once the closes move they differ by one
+  `SESSION_STEP`, with a flat `adj_factor` beside them, which is `_has_uncorroborated_factor_step`
+  read literally. The detector is not wrong about the bytes: a reader holding this panel cannot
+  tell a restatement from an unpublished session, and a detector that could would be reading
+  the generator's intent rather than the artifact, which is the one thing
+  `PanelShape.detect`'s docstring forbids. `panel_doctor` does not report it because the
+  return-path check is session-scoped to the requested day (see `UNCORROBORATED_SECURITY_INDEX`),
+  which is why the two shapes' `provokes` stay `()` and `("return_path_disagreement",)`.
+- `financials.three_versions_of_one_key` puts three rows under one `(period, announcement)`
+  key. Any two of them are two rows under one key that disagree, so the narrower shape is
+  contained in the wider one by construction -- and `EXPECTED_PROVOCATIONS` records the
+  consequence, both declaring the same two codes.
+- `financials.statement_dataset_without_a_revision_label` stores all four statement endpoints,
+  of which `second_statement_dataset` asks for two. Again containment, and the reverse
+  direction is `False`: two datasets are not four.
+
+The table is a dict literal for `EXPECTED_PROVOCATIONS`' reason. A sixth pair appearing is a
+diff on this list and a decision somebody makes, rather than a silently widened detector.
+"""
+
+
+def test_no_detector_answers_true_on_a_shape_that_is_not_its_own() -> None:
+    """Statement (4): the scope guard, and the third way this table could be a tautology.
+
+    (1) says a detector fires on its own shape and (2) says it is silent on the shapeless
+    panel, and a detector can satisfy both while being about something much wider than the
+    shape it is filed under. `_has_disclosure_after_the_as_of` is the live example: it reads
+    `income`'s rows and nothing else, and that narrowness is the reason the three look-ahead
+    shapes -- `income`, `index_weight`, `index_member_all` -- cannot answer for one another.
+    Widening it to sweep every batch keeps (1), (2) and (3) green and turns three independent
+    injections into one, which is precisely the property `V2-P2-001`/`003`/`004` are three
+    issues for.
+
+    So the whole matrix is pinned, not just its diagonal: 25 panels, each detector run against
+    all of them. The declared cross-triggers are named in `CROSS_TRIGGERS` above with the
+    reason each one is a containment rather than a leak.
+    """
+    panels = {shape_id: generate_panel(shapes=(shape_id,)) for shape_id in EVERY_SHAPE}
+
+    detected = {
+        shape_id: tuple(
+            other
+            for other in EXPECTED_SHAPE_IDS
+            if other != shape_id and shape.detect(panels[other])
+        )
+        for shape_id, shape in PANEL_SHAPES.items()
+    }
+
+    assert detected == {
+        shape_id: CROSS_TRIGGERS.get(shape_id, ()) for shape_id in EXPECTED_SHAPE_IDS
+    }
+    assert set(CROSS_TRIGGERS) <= set(EXPECTED_SHAPE_IDS)
 
 
 def test_asking_for_every_shape_at_once_still_produces_every_one_of_them() -> None:

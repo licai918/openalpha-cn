@@ -765,6 +765,38 @@ def test_the_known_limitations_name_the_measured_boundaries() -> None:
     assert all(len(entry.detail) > 120 for entry in KNOWN_SUSPENSION_LIMITATIONS)
 
 
+def test_the_known_limitations_are_named_rather_than_argued_away() -> None:
+    """The subset above, closed into an equality -- and the three entries that were outside it.
+
+    The subset form was chosen so a later issue could add an entry without forcing an edit
+    here, and later issues added three. One of them,
+    `a_resumption_and_a_halt_can_share_one_session`, has its own test below and says in that
+    test's docstring that it is pinned separately "so that renaming this entry out of the table
+    fails a test instead of quietly withdrawing the disclosure" -- which is exactly the right
+    reasoning and was applied to one of the three. The other two,
+    `the_halt_corpus_is_empty_before_1999_...` and
+    `stk_limit_covers_funds_and_b_shares_as_well_as_stocks`, were pinned by nothing at all.
+    That is the cost the subset form was buying convenience with: an entry can arrive and leave
+    again without failing anything.
+
+    Forcing the edit is the point. Adding a limitation is a decision about what this repository
+    discloses, and a decision that costs one line in a set literal is a decision somebody
+    reviewed. The subset assertion above is deliberately left alone -- it is what says which
+    six were there first.
+    """
+    assert {entry.code for entry in KNOWN_SUSPENSION_LIMITATIONS} == {
+        "intraday_halts_are_unmarked_before_2015",
+        "a_resumption_and_a_halt_can_share_one_session",
+        "stk_limit_starts_in_2007_and_reached_the_beijing_board_late",
+        "the_limit_free_sentinel_encoding_has_changed_twice",
+        "the_halt_corpus_is_empty_before_1999_so_the_explained_floor_cannot_run_there",
+        "the_published_band_is_not_reproducible_from_board_and_st_alone",
+        "stk_limit_covers_funds_and_b_shares_as_well_as_stocks",
+        "both_datasets_are_dated_one_session_late_rather_than_at_the_open",
+        "silent_truncation_at_a_cap_this_cross_section_is_close_to",
+    }
+
+
 def test_the_r_plus_s_shape_is_disclosed_with_the_census_that_measured_it() -> None:
     """A reconciliation that is not disclosed is a silent repair.
 
