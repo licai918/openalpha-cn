@@ -328,6 +328,32 @@ EVERY_BUILD_TARGET: tuple[str, ...] = (
     "price",
     "stk_limit",
 )
+"""The five targets this module's scripted transport answers for.
+
+Not `cli.PANEL_BUILD_TARGETS` any more: the P3 prerequisite added eight, whose fetch shapes are
+one request per security, per index-month and per industry slice, and driving those through this
+module's two-security frame would make every test here a fixture-maintenance exercise. They are
+exercised in `tests/integration/test_cli_panel_extra_targets.py`, which carries a transport
+shaped for them.
+
+`tests/e2e/` still builds these five and only these five. Extending that suite is deliberately
+not part of this change -- its build is already half an hour and the eight new targets add a
+whole-market statement sweep measured at 2h55m per dataset-year -- so what stands behind the new
+targets against the real endpoint is the manual live run recorded in this issue's ledger notes,
+not an automated one.
+"""
+
+UNBUILT_TARGET: str = "moneyflow"
+"""A Tushare dataset name this repository has no descriptor, no writer and no branch for.
+
+The mutation two tests below inject, and the name every "unknown target" assertion here drives.
+Both used to be real dataset names -- the mutation was `namechange` under a comment reading
+"which is what a future issue wiring `namechange` will do first", and the refusal cases were
+`income` because it was a dataset this repository could write and this command could not build.
+That issue has now landed, so both names are real targets with real branches and both tests
+would have quietly stopped testing what they say. A name the whole repository does not know
+cannot acquire an implementation by accident.
+"""
 
 
 # --- panel build ------------------------------------------------------------------------------
@@ -417,7 +443,14 @@ def test_panel_build_refuses_a_bare_daily_because_the_price_writer_couples_the_p
 def test_panel_build_refuses_an_unknown_target_by_naming_the_closed_table(
     tmp_path: Path, scripted_build: ScriptedTushareTransport
 ) -> None:
-    result = build(tmp_path, "income")
+    """The refusal names the whole table, so a caller learns what *is* buildable.
+
+    The name driven here used to be `income`, which was chosen because it was a dataset this
+    repository could write and this command could not build -- the hole three acceptance passes
+    reported and the P3 prerequisite closed. It is a real target now, so the unknown name has to
+    be one nothing in the repository knows.
+    """
+    result = build(tmp_path, UNBUILT_TARGET)
 
     assert result.exit_code == PanelExit.bad_request
     for target in EVERY_BUILD_TARGET:
@@ -603,16 +636,15 @@ def test_a_target_the_table_names_and_no_branch_builds_cannot_exit_zero(
     """The exact shape this whole issue exists to make unavailable, one layer further in.
 
     `_build_targets` accepts any key `PANEL_BUILD_TARGETS` holds, and `_build_panel` dispatches
-    on an `if` chain. Add a sixth entry -- which is what a future issue wiring `namechange` will
-    do first -- and forget the branch, and the command fetches nothing, writes nothing, and
-    reports `exit 0` with `"partitions": []`: an empty success in the one place a CI job has
-    only the exit code to read.
+    on an `if` chain. Add a fourteenth entry and forget the branch, and the command fetches
+    nothing, writes nothing, and reports `exit 0` with `"partitions": []`: an empty success in
+    the one place a CI job has only the exit code to read.
 
     Neither of this module's two existing table tests can see it.
     `test_panel_build_runs_the_targets_in_dependency_order_and_not_in_flag_order` asserts the
-    order of the five known targets' writes, and
+    order of the known targets' writes, and
     `test_the_build_targets_are_a_closed_table_in_dependency_order` compares the table against a
-    literal that whoever adds the sixth entry updates in the same edit -- correctly, because
+    literal that whoever adds the next entry updates in the same edit -- correctly, because
     that is what that test is for. So the check has to be in the command: every requested target
     produced at least one partition, or it did not build what it was asked for.
 
@@ -622,13 +654,44 @@ def test_a_target_the_table_names_and_no_branch_builds_cannot_exit_zero(
     monkeypatch.setattr(
         cli,
         "PANEL_BUILD_TARGETS",
-        MappingProxyType({**cli.PANEL_BUILD_TARGETS, "namechange": ("namechange",)}),
+        MappingProxyType({**cli.PANEL_BUILD_TARGETS, UNBUILT_TARGET: (UNBUILT_TARGET,)}),
     )
 
-    result = build(tmp_path, "namechange", extra=["--json"])
+    result = build(tmp_path, UNBUILT_TARGET, extra=["--json"])
 
     assert result.exit_code == PanelExit.internal_error
-    assert "namechange" in result.stderr
+    assert UNBUILT_TARGET in result.stderr
+    assert "PANEL_BUILD_TARGETS" in result.stderr
+    assert scripted_build.payloads == []
+
+
+def test_a_span_target_the_table_names_and_no_branch_builds_cannot_exit_zero_either(
+    tmp_path: Path, scripted_build: ScriptedTushareTransport, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same mutation aimed at the second build phase, which the first test cannot reach.
+
+    `PANEL_BUILD_SPAN_TARGETS` runs its targets outside the year loop, so an entry that lands in
+    that set skips `_build_panel` entirely and its audit with it. Adding a phase without
+    extending the audit would have reopened the exit-0-with-no-partitions hole in the half of the
+    command that builds the industry corpus and the financial indicators -- the datasets P3's
+    neutralisation and its value/quality/growth families are specified against.
+
+    So `_audit_written_partitions` is called for the span phase too, with `year=None` because
+    there is no `--year` a span partition could be compared against.
+    """
+    monkeypatch.setattr(
+        cli,
+        "PANEL_BUILD_TARGETS",
+        MappingProxyType({**cli.PANEL_BUILD_TARGETS, UNBUILT_TARGET: (UNBUILT_TARGET,)}),
+    )
+    monkeypatch.setattr(
+        cli, "PANEL_BUILD_SPAN_TARGETS", cli.PANEL_BUILD_SPAN_TARGETS | {UNBUILT_TARGET}
+    )
+
+    result = build(tmp_path, UNBUILT_TARGET, extra=["--json"])
+
+    assert result.exit_code == PanelExit.internal_error
+    assert UNBUILT_TARGET in result.stderr
     assert "PANEL_BUILD_TARGETS" in result.stderr
     assert scripted_build.payloads == []
 
@@ -779,11 +842,11 @@ def test_a_refusal_leaves_stdout_parseable_and_says_why_on_stderr(
     which means guessing where it ends. Asserted here because the argument lives in a docstring
     and nothing pinned it.
     """
-    result = build(tmp_path, "income", extra=["--json"])
+    result = build(tmp_path, UNBUILT_TARGET, extra=["--json"])
 
     assert result.exit_code == PanelExit.bad_request
     assert result.stdout == ""
-    assert "income" in result.stderr
+    assert UNBUILT_TARGET in result.stderr
 
 
 def test_a_command_that_breaks_is_not_reported_as_an_unhealthy_panel(tmp_path: Path) -> None:
@@ -821,13 +884,19 @@ def test_a_command_that_breaks_is_not_reported_as_an_unhealthy_panel(tmp_path: P
 
 def test_the_build_help_names_every_target_it_will_accept(tmp_path: Path) -> None:
     """The design is "refuse by name", so the names have to be discoverable without triggering a
-    refusal to read them. They were in the error message and not in `--help`."""
+    refusal to read them. They were in the error message and not in `--help`.
+
+    Asserted against `cli.PANEL_BUILD_TARGETS` rather than this module's five, because the point
+    is that the *whole* table is discoverable: the eight the P3 prerequisite added are exactly
+    the ones a caller had no way to learn about, having been told for two phases that `income`
+    "is not one of this command's build targets".
+    """
     result = runner.invoke(app, ["panel", "build", "--help"])
     rendered = " ".join(result.stdout.split())
 
     assert result.exit_code == 0
-    for target in EVERY_BUILD_TARGET:
-        assert target in rendered
+    for target in cli.PANEL_BUILD_TARGETS:
+        assert target in rendered, f"{target} is a build target and --help does not name it"
 
 
 # --- the panels the read side is pointed at ----------------------------------------------------
@@ -1206,7 +1275,7 @@ def test_every_situation_maps_to_the_exit_code_the_table_declares(
     observed = {
         "build.written": build(tmp_path / "built", *EVERY_BUILD_TARGET).exit_code,
         "build.coupled_dataset": build(tmp_path / "built", "daily").exit_code,
-        "build.unknown_target": build(tmp_path / "built", "income").exit_code,
+        "build.unknown_target": build(tmp_path / "built", UNBUILT_TARGET).exit_code,
         "doctor.clean": read_side(["panel", "doctor"], panel_dir).exit_code,
         "doctor.blocking": read_side(
             ["panel", "doctor"], panel_dir, extra=["--year", str(YEAR - 1), "--no-calendar"]
