@@ -108,6 +108,7 @@ from openalpha_cn.domain.daily_prices import (
     DAILY_BASIC_DATASET,
     DAILY_DATASET,
     MAX_PRE_CLOSE_DISAGREEMENT,
+    DailyBar,
 )
 from openalpha_cn.domain.financial_statements import (
     ANNOUNCEMENT_DATE_COLUMN,
@@ -150,6 +151,7 @@ from openalpha_cn.domain.price_limits import (
     PRICE_LIMIT_DATASET,
     SUSPENSION_DATASET,
     PriceLimit,
+    limit_touch,
 )
 from openalpha_cn.domain.stock_universe import (
     DELISTING_EVENT,
@@ -686,6 +688,46 @@ def _has_limit_free_sentinel(panel: GeneratedPanel) -> bool:
     return False
 
 
+def _has_one_price_limit_up(panel: GeneratedPanel) -> bool:
+    """A session the domain's own `limit_touch` calls locked at the upper band.
+
+    Asked through `limit_touch` rather than by re-spelling `low >= up_limit` here, for
+    `_has_limit_free_sentinel`'s reason: a detector that restates the rule agrees with a
+    mutated rule.
+    """
+    bands = {
+        (str(subject), str(day)): (float(up), float(down))  # type: ignore[arg-type]
+        for subject, day, up, down in panel.rows_of(
+            PRICE_LIMIT_DATASET, "trade_date", "up_limit", "down_limit"
+        )
+    }
+    for subject, day, high, low, close in panel.rows_of(
+        DAILY_DATASET, "trade_date", "high", "low", "close"
+    ):
+        band = bands.get((str(subject), str(day)))
+        if band is None:
+            continue
+        session = date.fromisoformat(str(day))
+        bar = DailyBar(
+            ts_code=str(subject),
+            trade_date=session,
+            open=float(close),  # type: ignore[arg-type]
+            high=float(high),  # type: ignore[arg-type]
+            low=float(low),  # type: ignore[arg-type]
+            close=float(close),  # type: ignore[arg-type]
+            pre_close=float(close),  # type: ignore[arg-type]
+            pct_chg=0.0,
+            vol=1000.0,
+            amount=10000.0,
+        )
+        limit = PriceLimit(
+            ts_code=str(subject), trade_date=session, up_limit=band[0], down_limit=band[1]
+        )
+        if limit_touch(bar, limit).one_price_up:
+            return True
+    return False
+
+
 def _has_inexact_weight_sum(panel: GeneratedPanel) -> bool:
     totals: dict[tuple[str, str], float] = {}
     for subject, day, weight in panel.rows_of(INDEX_WEIGHT_DATASET, "publication_date", "weight"):
@@ -985,6 +1027,23 @@ _SHAPES: Final[tuple[PanelShape, ...]] = (
             "(domain/price_limits.py)"
         ),
         detect=_has_limit_free_sentinel,
+    ),
+    PanelShape(
+        shape_id="price_limits.one_price_limit_up",
+        datasets=(PRICE_LIMIT_DATASET, DAILY_DATASET),
+        summary="a session that traded at one price, and that price was the upper band",
+        measurement=(
+            "the 一字板 the two tradability contracts both claim to judge and judge "
+            "differently. limit_touch separates at_up (the bar reached its band) from "
+            "one_price_up (the whole session traded there) and only the second means there "
+            "was no counterparty; domain/labels.py refuses such a session on either end "
+            "(REFUSAL_LOCKED_AT_LIMIT) while backtest/execution.py refuses only the buy side "
+            "of it. Without this shape the generated panel has no locked session at all -- "
+            "every band is the session's own close +/-10% against a bar whose high, low and "
+            "close are equal -- so the whole one-price half of both contracts was reachable "
+            "only from hand-written carriers (domain/price_limits.py)"
+        ),
+        detect=_has_one_price_limit_up,
     ),
     PanelShape(
         shape_id="index.published_weights_do_not_sum_to_exactly_one_hundred",
@@ -1564,6 +1623,22 @@ pins the pair to (99999.999, 0.01) -- what SSE has published since 2023-06-21.
 """
 
 
+LOCKED_SECURITY_INDEX: Final[int] = 3
+LOCKED_SESSION_INDEX: Final[int] = 1
+"""`securities[3]` on `sessions[1]`, which is the one cell no other shape writes to.
+
+`securities[0]` carries the ex-rights step, the limit-free sentinel and the timed halt,
+`securities[1]` the factor step-down, `securities[2]` the uncorroborated restatement and
+`securities[-1]` the whole-day halt and the resumption; `sessions[0]` is the sentinel's session
+and the first session of every window a label test builds. So a panel carrying every shape at
+once still has exactly one locked session, which is what lets the parity test name it.
+"""
+
+
+def _locked_key(sessions: Sequence[date], securities: Sequence[str]) -> tuple[str, date]:
+    return securities[LOCKED_SECURITY_INDEX], sessions[LOCKED_SESSION_INDEX]
+
+
 def _limit_batch(
     *, sessions: Sequence[date], securities: Sequence[str], shapes: frozenset[str]
 ) -> ColumnarPanelBatch:
@@ -1571,6 +1646,9 @@ def _limit_batch(
     sentinel: tuple[str, date] | None = None
     if "price_limits.limit_free_sentinel" in shapes:
         sentinel = (securities[0], sessions[0])
+    locked: tuple[str, date] | None = None
+    if "price_limits.one_price_limit_up" in shapes:
+        locked = _locked_key(sessions, securities)
     up: list[float] = []
     down: list[float] = []
     for day, code in pairs:
@@ -1579,6 +1657,15 @@ def _limit_batch(
             down.append(SENTINEL_DOWN_LIMIT)
             continue
         reference = _close_of(code, day, sessions=sessions, securities=securities, shapes=shapes)
+        if locked is not None and (code, day) == locked:
+            # The band is the lever, not the bar: every generated bar already has
+            # `open == high == low == close`, so publishing an upper limit *at* that price is
+            # exactly `limit_touch`'s `one_price_up` (`low >= up_limit`) and nothing else in
+            # the panel moves. Restating the close instead would restate the next session's
+            # `pre_close` and every return chained through it.
+            up.append(reference)
+            down.append(reference * 0.9)
+            continue
         up.append(reference * 1.1)
         down.append(reference * 0.9)
     return _batch(

@@ -112,6 +112,26 @@ folded into a `None`:
   between 6.415 and 0.6604 for years after its last bar, so an adjusted return spanning a
   delisting date is untrustworthy by measurement rather than by caution.
 
+## Overlap between two windows is annotated; only a contradiction is refused
+
+`V2-P2-005` asks for "explicit refusal or annotation" of overlapping labels, and the two verbs
+are not interchangeable here -- which of them applies is decided by measurement rather than by
+preference. A window at horizon `h` spans `h + 1` sessions, so two prediction days one session
+apart produce windows sharing `h` of them: **five of six at 5d, and nine of ten at 10d**.
+Overlap is therefore what a daily-frequency label set is *made of*, and a contract that refused
+it would refuse every training set this repository could build. `overlapping_windows` reports
+it, once, as a `LabelOverlap` per pair.
+
+What is refused is the one shape that cannot be a horizon artefact: **two samples of one
+security on one prediction day**. That is not an overlap of 100%, it is two different answers
+to one question -- two horizons fitted as one row, or one horizon whose sessions moved because
+the calendar did -- and no purge can repair it, because purging drops samples from one side of
+a split and both of these are on the same side.
+
+**This is not purging and not embargo** (`S28`), and `KNOWN_LABEL_LIMITATIONS` says so by name.
+Both need a train/test split to be defined against, and nothing in this repository has one yet;
+what a splitter will need from this plane is the overlap graph, which is what this returns.
+
 ## Every input has to be able to say what it does not cover
 
 Four of the five market inputs already refuse a question outside their own read: `bars` and
@@ -135,7 +155,7 @@ date is a decision this repository already records once (`panel/catalog.py`'s
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, tzinfo
 from typing import Final
@@ -355,6 +375,27 @@ KNOWN_LABEL_LIMITATIONS: Final[tuple[LabelLimitation, ...]] = (
             "only_the_two_ends_are_tested_for_tradability's reason."
         ),
     ),
+    LabelLimitation(
+        code="overlap_is_annotated_and_neither_purging_nor_embargo_is_implemented",
+        detail=(
+            "overlapping_windows reports every pair of one security's samples whose windows "
+            "share a session, and refuses only a repeated (ts_code, prediction_day). It does "
+            "not purge and it does not embargo, which is what PRD story S28 asks for. Both "
+            "need a train/test split to be defined against and this repository has none: "
+            "backtest/validation.py validates one decision against one observation, and there "
+            "is no splitter, no fold and no fitted model for a purge to run between. The "
+            "quantity that makes the distinction matter is measured rather than argued: a "
+            "window at horizon h spans h + 1 sessions, so two prediction days one session "
+            "apart share h of them -- 5 of 6 at 5d and 9 of 10 at 10d, the two horizons this "
+            "repository actually stores -- which is why the verb here is annotate and not "
+            "refuse. A run of k consecutive daily prediction days at 5d yields 5k - 15 "
+            "overlapping pairs for k >= 5 and every one of them is legitimate. What this "
+            "cannot see at all is leakage through anything other than a shared session: two "
+            "windows that share none can still both be driven by one announcement, and a "
+            "feature computed over a trailing window can reach across the gap an embargo "
+            "would open. Naming those needs a feature contract, which is P3's."
+        ),
+    ),
 )
 """Named boundaries on what a label answers, each traceable to a measurement made elsewhere.
 
@@ -492,6 +533,118 @@ class LabelWindow:
                 "outside the window would date a price the label never read"
             )
         return datetime.combine(day, SESSION_CLOSE_TIME, tzinfo=self.zone)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class LabelSample:
+    """One `(security, window)` pair -- the unit a supervised training set is built out of.
+
+    `label_outcome` already takes exactly these two, as a positional window and a keyword
+    `ts_code`, because it answers about one of them at a time. A *set* of labels needs the pair
+    to travel together, and a bare `tuple[str, LabelWindow]` would leave every caller to
+    remember which element is which.
+
+    A plain carrier, `LabelRefusal`'s precedent: the rules live in `overlapping_windows`.
+    """
+
+    ts_code: str
+    window: LabelWindow
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class LabelOverlap:
+    """Two samples of one security whose outcome windows are measured over shared sessions.
+
+    Reported rather than refused, for this module's docstring's reason: at horizon `h` two
+    prediction days one session apart share `h` of the `h + 1` sessions each window spans, so
+    overlap is the ordinary shape of a daily-frequency label set and not a defect in it. What
+    it *is* is the input a purge needs -- two samples sharing a session cannot be treated as
+    independent observations of it -- so it is named here rather than left to be rediscovered.
+    """
+
+    ts_code: str
+    earlier: LabelWindow
+    later: LabelWindow
+    shared_sessions: tuple[date, ...]
+
+    @property
+    def shared_fraction(self) -> float:
+        """Shared sessions as a fraction of the shorter of the two windows.
+
+        The shorter one is the denominator because the two windows may carry different
+        horizons: a 5d window wholly inside a 60d one shares 100% of *its* sessions and 10% of
+        the other's, and the first is the number that says the shorter sample carries no
+        information the longer one does not already contain.
+        """
+        shortest = min(len(self.earlier.sessions), len(self.later.sessions))
+        return len(self.shared_sessions) / shortest
+
+    @property
+    def summary(self) -> str:
+        """One line naming the security, the two prediction days, and what they share."""
+        return (
+            f"{self.ts_code}'s samples of {self.earlier.prediction_day.isoformat()} and "
+            f"{self.later.prediction_day.isoformat()} share "
+            f"{len(self.shared_sessions)} session(s) "
+            f"({self.shared_sessions[0].isoformat()}..{self.shared_sessions[-1].isoformat()}), "
+            f"{self.shared_fraction:.1%} of the shorter window"
+        )
+
+
+def overlapping_windows(samples: Iterable[LabelSample]) -> tuple[LabelOverlap, ...]:
+    """Every pair of one security's samples whose windows share a session, in a legitimate set.
+
+    Raises `LabelError` for the one shape that is not a horizon artefact: **two samples of one
+    security on one prediction day**. `LabelWindow` is a function of `(prediction_day, horizon,
+    calendar)`, so a repeated `(ts_code, prediction_day)` means either two horizons entered as
+    one sample -- one feature row with two targets -- or one horizon whose sessions moved
+    because the calendar under it did. Neither is repairable by dropping samples from one side
+    of a split, which is all a purge can do, so it is refused here where the set is assembled.
+    That is `HaltCorpus.require_coverage`'s distinction applied one level up: a malformed
+    *question* raises, and a property of the market is reported.
+
+    Pairs are grouped by security first. Two securities' windows may span the very same
+    sessions and that is not an overlap in any sense a purge cares about: their outcomes are
+    two different random variables, and a cross-sectional label set is *built* by asking every
+    name about the same window.
+
+    Returned in `(ts_code, earlier prediction day, later prediction day)` order so that a
+    caller diffing two runs is diffing a stable list, and `earlier`/`later` are ordered by
+    prediction day rather than by the order the samples arrived in.
+    """
+    by_code: dict[str, list[LabelSample]] = {}
+    for sample in samples:
+        by_code.setdefault(sample.ts_code, []).append(sample)
+    found: list[LabelOverlap] = []
+    for ts_code in sorted(by_code):
+        ordered = sorted(by_code[ts_code], key=lambda item: item.window.prediction_day)
+        spans = [frozenset(item.window.sessions) for item in ordered]
+        for position, sample in enumerate(ordered):
+            for offset, other in enumerate(ordered[position + 1 :], start=position + 1):
+                if sample.window.prediction_day == other.window.prediction_day:
+                    raise LabelError(
+                        f"{ts_code} carries two samples for prediction day "
+                        f"{sample.window.prediction_day.isoformat()} "
+                        f"({sample.window.horizon.text} over "
+                        f"{sample.window.entry_day.isoformat()}.."
+                        f"{sample.window.exit_day.isoformat()} and {other.window.horizon.text} "
+                        f"over {other.window.entry_day.isoformat()}.."
+                        f"{other.window.exit_day.isoformat()}); one prediction day is one "
+                        "question, so this is two targets on one feature row rather than an "
+                        "overlap, and no purge can separate two samples that sit on the same "
+                        "side of every split"
+                    )
+                shared = tuple(day for day in sample.window.sessions if day in spans[offset])
+                if shared:
+                    found.append(
+                        LabelOverlap(
+                            ts_code=ts_code,
+                            earlier=sample.window,
+                            later=other.window,
+                            shared_sessions=shared,
+                        )
+                    )
+    return tuple(found)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

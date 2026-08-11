@@ -4,8 +4,8 @@
 
 ## 对账结论
 
-- 功能总数: 130
-- 当前真实完成: 125 (96.15%)
+- 功能总数: 133
+- 当前真实完成: 128 (96.24%)
 - `UNREVIEWED=0`
 - `UNKNOWN=0`
 - `legacy_acceptance_rows=86` (历史散文验收、尚未绑定为可执行 pytest/CI 断言)
@@ -18,7 +18,7 @@
 | `DEFERRED` | 1 |
 | `ENHANCED_REPLACEMENT` | 20 |
 | `EXCLUDED` | 4 |
-| `NATIVE_COMPLETE` | 104 |
+| `NATIVE_COMPLETE` | 107 |
 
 ## 功能明细
 
@@ -154,6 +154,9 @@
 | `OA-PANEL-020` | panel | One clock the caller cannot move, and a build that spans the years it names | `NATIVE_COMPLETE` | `src/openalpha_cn/providers/tushare.py#TushareProvider;src/openalpha_cn/providers/tushare.py#_refuse_overlapping_pages;src/openalpha_cn/cli.py#_build_years;src/openalpha_cn/cli.py#_resumable_targets;src/openalpha_cn/cli.py#_years_left;src/openalpha_cn/cli.py#_one_halt_state;src/openalpha_cn/cli.py#_session_span;src/openalpha_cn/cli.py#_all_refs;src/openalpha_cn/cli.py#_stored_so_far;src/openalpha_cn/cli.py#panel_build;src/openalpha_cn/panel/store.py#_scan_failures_as_storage_errors` | `tests/integration/test_cli_panel_horizon.py;tests/integration/test_cli_panel_years.py;tests/contract/providers/test_tushare_registry_datasets.py;tests/integration/panel/test_panel_store_hardening.py` | `pytest` | `tests/integration/test_cli_panel_horizon.py::test_an_as_of_ahead_of_the_wall_clock_cannot_store_a_session_that_has_not_published` |
 | `OA-PANEL-021` | panel | Generated panels that are unhealthy on purpose, and the datasets P2 injects into | `NATIVE_COMPLETE` | `tests/panel_fixtures.py#PanelShape;tests/panel_fixtures.py#STORED_DATASETS;tests/panel_fixtures.py#STATEMENT_DATASETS;tests/panel_fixtures.py#FUTURE_ANNOUNCEMENT;tests/panel_fixtures.py#UNCORROBORATED_RESTATEMENT;tests/panel_fixtures.py#write_generated_panel;tests/panel_fixtures.py#generate_panel` | `tests/unit/test_panel_fixtures.py;tests/integration/panel/test_panel_shape_coverage.py` | `pytest` | `tests/integration/panel/test_panel_shape_coverage.py::test_the_defect_shapes_are_the_ones_that_make_a_generated_panel_unhealthy` |
 | `OA-PANEL-022` | panel | Read-side look-ahead injection, paired against the same partition without the row | `NATIVE_COMPLETE` | `tests/panel_fixtures.py#PANEL_SHAPES;tests/panel_fixtures.py#FUTURE_PUBLICATION;tests/panel_fixtures.py#RECLASSIFIED_FROM;tests/panel_fixtures.py#RECLASSIFIED_THROUGH;src/openalpha_cn/panel/catalog.py#evaluate_readiness;src/openalpha_cn/panel/catalog.py#READINESS_ISSUE_CODES;src/openalpha_cn/panel_ingest.py#load_statement_histories;src/openalpha_cn/panel_ingest.py#load_index_membership;src/openalpha_cn/panel_ingest.py#load_industry_histories` | `tests/integration/panel/test_lookahead_injection.py;tests/unit/test_panel_fixtures.py;tests/integration/panel/test_panel_shape_coverage.py` | `pytest` | `tests/integration/panel/test_lookahead_injection.py::test_a_row_the_read_cannot_see_blocks_it_and_the_same_partition_without_that_row_does_not` |
+| `OA-BT-013` | backtest | Overlapping label windows annotated, and the one contradiction refused | `NATIVE_COMPLETE` | `src/openalpha_cn/domain/labels.py#LabelSample;src/openalpha_cn/domain/labels.py#LabelOverlap;src/openalpha_cn/domain/labels.py#overlapping_windows;src/openalpha_cn/domain/labels.py#KNOWN_LABEL_LIMITATIONS` | `tests/unit/domain/test_labels.py;tests/integration/test_injection_register.py` | `pytest` | `tests/unit/domain/test_labels.py::test_consecutive_prediction_days_share_five_of_six_sessions_and_are_annotated` |
+| `OA-BT-014` | backtest | One tradability predicate, two contracts, driven from one stored panel | `NATIVE_COMPLETE` | `src/openalpha_cn/backtest/execution.py#suspended_at_the_close;src/openalpha_cn/backtest/execution.py#KNOWN_EXECUTION_LIMITATIONS;src/openalpha_cn/backtest/execution.py#ExecutionLimitation;tests/panel_fixtures.py#PANEL_SHAPES;tests/panel_fixtures.py#LOCKED_SECURITY_INDEX;tests/panel_fixtures.py#LOCKED_SESSION_INDEX` | `tests/integration/panel/test_execution_label_parity.py;tests/unit/test_panel_fixtures.py;tests/integration/panel/test_panel_shape_coverage.py` | `pytest` | `tests/integration/panel/test_execution_label_parity.py::test_the_two_contracts_agree_on_every_session_either_of_them_can_price` |
+| `OA-OPS-027` | operations | P2 injection register: one parametrised table, both directions, and the CI gate it is | `NATIVE_COMPLETE` | `tests/integration/test_injection_register.py#INJECTION_VECTORS;tests/integration/test_injection_register.py#InjectionVector;tests/integration/test_injection_register.py#DISCLOSED_EXCLUSIONS;tests/integration/test_injection_register.py#DisclosedExclusion;tests/integration/test_injection_register.py#P2_INJECTION_ISSUES;tests/integration/panel/test_lookahead_injection.py#LOOKAHEAD_INJECTIONS` | `tests/integration/test_injection_register.py;tests/integration/test_research_cycle.py` | `pytest` | `tests/integration/test_injection_register.py::test_the_injected_half_is_refused_and_names_its_own_rule` |
 
 ## 边界
 

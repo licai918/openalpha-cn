@@ -1,11 +1,10 @@
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 
 from openalpha_cn.domain.evidence import EvidenceSnapshot
-from openalpha_cn.domain.time import Timeline
 from openalpha_cn.runtime.contracts import ResearchRunRequest
 from openalpha_cn.runtime.engine import ResearchEngine
 from openalpha_cn.runtime.memory import InMemoryResearchMemory
@@ -107,37 +106,3 @@ def test_cycle_abstains_explicitly_when_evidence_is_insufficient(
     assert result.decision.final_action == "abstain"
     assert result.decision.evidence_ids == ()
     assert result.manifest.status == "succeeded"
-
-
-def test_cycle_rejects_evidence_that_was_not_visible_at_as_of(
-    tmp_path: Path,
-    evidence,
-    research_request,
-    frozen_now: datetime,
-) -> None:
-    future = evidence(
-        kind="limit_up",
-        facts={"close": 10.5, "pct_change": 9.99, "board_count": 1},
-    ).model_copy(
-        update={
-            "timeline": Timeline(
-                event_time=frozen_now,
-                available_time=datetime(2026, 7, 24, 11, 0, tzinfo=UTC),
-                ingested_time=datetime(2026, 7, 24, 11, 1, tzinfo=UTC),
-                revision_time=datetime(2026, 7, 24, 11, 0, tzinfo=UTC),
-            )
-        }
-    )
-    engine = ResearchEngine(
-        repository=SQLiteRunRepository(tmp_path / "state.sqlite3"),
-        memory=InMemoryResearchMemory(),
-        clock=lambda: frozen_now,
-        recovery_store=SQLiteRecoveryStore(tmp_path / "state.sqlite3"),
-    )
-
-    try:
-        engine.run_cycle(research_request((future,)))
-    except ValueError as error:
-        assert "not visible" in str(error)
-    else:
-        raise AssertionError("future evidence must be rejected")

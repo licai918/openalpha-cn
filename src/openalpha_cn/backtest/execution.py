@@ -29,27 +29,155 @@ both of which are simply false against those numbers, `0.0` included. A bar with
 therefore fills on both sides, which is correct, and it does so through the same two lines that
 handle every other bar. `down_limit` is the one price on `MarketBar` bounded by `ge=0` rather
 than `gt=0`, and that is what lets a `.BJ` listing day be represented at all.
+
+## `suspended` is a bool and the halt corpus is not (`V2-P2-007`)
+
+This policy and `domain/labels.py` both answer "could this session have been traded at its
+close", and they were built from different inputs: `MarketBar.suspended` is a `bool` the caller
+supplies, while the label contract reads `suspend_d`'s three-valued `TradingState` plus the
+`suspend_timing` window and refuses through `halted_into_the_close`. `TradingState.__bool__`
+raises precisely so that the collapse cannot happen by accident -- but this model needs a bool,
+so the collapse has to happen *somewhere*, and the obvious one is wrong on the common shape:
+`state is TradingState.halted` reads a security halted `13:00-15:00` as tradeable, and **39 of
+the 59 timed `S` rows served across 68 whole-market sessions run through the close**, 30 of
+2015-07-08's 31 among them. `suspended_at_the_close` is that collapse, made once, for
+`published_limit_fields`' reason.
+
+The two contracts still do not answer the same question everywhere, and
+`KNOWN_EXECUTION_LIMITATIONS` names the three places rather than asserting an agreement that
+does not hold. They are not merged: this policy judges **one order against one bar** and the
+label contract judges **one window of sessions**, this policy's verdicts are pinned by tests
+written against the derived band (see above), and a gate that rewrote the thing it measures
+would measure nothing.
 """
 
+from dataclasses import dataclass
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Literal, Self
+from typing import Final, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from openalpha_cn.domain.execution import ExecutionResult
-from openalpha_cn.domain.price_limits import PriceLimit
+from openalpha_cn.domain.price_limits import PriceLimit, TradingState, halt_spans_the_close
 
 __all__ = [
+    "KNOWN_EXECUTION_LIMITATIONS",
     "AShareExecutionPolicy",
     "CostSchedule",
+    "ExecutionLimitation",
     "ExecutionRequest",
     "ExecutionResult",
     "MarketBar",
     "published_limit_fields",
+    "suspended_at_the_close",
 ]
 
 _CENT = Decimal("0.01")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ExecutionLimitation:
+    """One named boundary on what this policy's verdict can be trusted to mean."""
+
+    code: str
+    detail: str
+
+
+KNOWN_EXECUTION_LIMITATIONS: Final[tuple[ExecutionLimitation, ...]] = (
+    ExecutionLimitation(
+        code="the_registry_verdict_is_not_an_input",
+        detail=(
+            "MarketBar carries a subject and a session and nothing that says whether the "
+            "registry stood behind that security then. So a delisted name, a name that had "
+            "not listed yet, and a session past the registry's own snapshot all execute like "
+            "any other bar, while domain/labels.py refuses all three by name "
+            "(delisted_in_window, not_yet_listed_in_window, beyond_registry_snapshot). The "
+            "difference is not academic on the delisting side: "
+            "KNOWN_ADJUSTMENT_LIMITATIONS.delisted_securities_carry_unstable_factors measured "
+            "600069.SH's factor oscillating between 6.415 and 0.6604 for years after its last "
+            "bar, and stock_basic serves 339 terminated securities against 5,539 listed. The "
+            "defence is that a caller filters its universe before it builds bars, which is "
+            "a discipline this contract cannot audit."
+        ),
+    ),
+    ExecutionLimitation(
+        code="an_absent_band_is_derived_rather_than_refused",
+        detail=(
+            "up_limit=None means 'the caller supplied no band', never 'the exchange published "
+            "none', and _price_band then derives one from board and is_st -- which is wrong on "
+            "159 of the 5,338 priced names of 2024-06-28 for the four reasons this module's "
+            "docstring lists. domain/labels.py refuses the same fact "
+            "(REFUSAL_UNPUBLISHED_BAND) because stk_limit serves 0 rows before 2007-01-04 and "
+            "reached the Beijing board a decade after daily did, so an absent band is a real "
+            "shape. The two are therefore fail-open and fail-closed on one input, and the "
+            "direction here is the one that answers. Closing it would mean a third state on "
+            "two optional fields, which is a signature change for every existing caller; what "
+            "is done instead is that the two paths are pinned against each other and the gap "
+            "is stated."
+        ),
+    ),
+    ExecutionLimitation(
+        code="a_one_price_session_refuses_one_side_here_and_both_ends_there",
+        detail=(
+            "_rejection_reason refuses a buy into a one-price limit-up bar and a sell into a "
+            "one-price limit-down bar, and fills the other two combinations -- selling into a "
+            "limit-up lock is exactly the trade that had a counterparty. domain/labels.py's "
+            "REFUSAL_LOCKED_AT_LIMIT refuses the entry or the exit on *either* flag, because a "
+            "label prices a round trip and does not know which side it will be. So the label "
+            "is strictly the more conservative of the two and the two verdicts are not "
+            "interchangeable: agreement holds on the buy side of the entry and the sell side "
+            "of the exit, which is the long round trip a label assumes, and not on the other "
+            "two."
+        ),
+    ),
+)
+"""What this policy cannot see that `domain/labels.py` can, and one place they disagree.
+
+`V2-P2-007` asked whether the two implementations should be merged. They are not: this one
+judges one order against one bar and that one judges a window of sessions, and this one's
+verdicts are pinned by `tests/unit/backtest/test_execution.py` against the derived band. What
+the two owe each other is agreement on the predicate they both claim -- "could this session be
+traded at its close" -- which `tests/integration/panel/test_execution_label_parity.py` drives
+from one stored panel through both. These three are where that agreement stops, stated rather
+than asserted away.
+"""
+
+
+def suspended_at_the_close(state: TradingState | None, timing: str | None) -> bool:
+    """Whether `MarketBar.suspended` must be `True` for a session `suspend_d` describes.
+
+    The only supported way to build that field from a stored halt corpus, for
+    `published_limit_fields`' reason: the conversion has a trap in it, and the trap is the
+    obvious spelling.
+
+    `suspend_d` is three-valued (`TradingState`) plus a window, and `suspended` is one bool, so
+    something has to collapse them. `state is TradingState.halted` is what a reader reaches for
+    and it is fail-open on the common shape: a security halted `13:00-15:00` *traded* -- all 31
+    of 2015-07-08's timed `S` rows have a bar -- so it is `interrupted` rather than `halted`,
+    while its `daily.close` is the last print before 13:00 and no order could have filled at
+    it. **39 of the 59 timed `S` rows served across 68 whole-market sessions run through the
+    close**, 30 of that 2015-07-08 set among them, so the naive collapse is wrong on two thirds
+    of the shape it is asked about. This returns `True` for those, which is
+    `domain/labels.py`'s `REFUSAL_HALTED_INTO_THE_CLOSE` under this contract's one bool.
+
+    `None` -- no row mentions the security that session -- is `False`: 5,312 of 2024-06-28's
+    5,338 priced names have no halt row at all, so an absent row is the ordinary case. That is
+    only true of a corpus that knows what it covers; `HaltCorpus.require_coverage` is the guard
+    that makes an absent row mean "nothing happened" rather than "nobody read the partition",
+    and a caller that reaches past it gets this answer for a year it never loaded.
+
+    `TradingState.resumed` is `False` for the same reason the label contract does not refuse
+    it: an `R` row means the security traded that session, and nothing in it says the trading
+    stopped again. An `interrupted` row with no window is `True`, matching
+    `halt_spans_the_close`'s rule for one it cannot parse -- a right endpoint that cannot be
+    read is a right endpoint that is unknown.
+    """
+    if state is None or state is TradingState.resumed:
+        return False
+    if state is TradingState.halted:
+        return True
+    return timing is None or halt_spans_the_close(timing)
 
 
 class MarketBar(BaseModel):

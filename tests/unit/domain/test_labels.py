@@ -45,12 +45,14 @@ from openalpha_cn.domain.labels import (
     REFUSAL_UNPUBLISHED_BAND,
     HaltCorpus,
     LabelError,
+    LabelSample,
     LabelWindow,
     OutcomeLabel,
     WindowReturn,
     build_label_window,
     halt_corpus_for_years,
     label_outcome,
+    overlapping_windows,
     window_return,
 )
 from openalpha_cn.domain.price_limits import (
@@ -1037,3 +1039,193 @@ def test_the_declared_limitations_are_distinct_and_each_carries_a_reason() -> No
 
     assert len(codes) == len(set(codes))
     assert all(len(item.detail) > 200 for item in KNOWN_LABEL_LIMITATIONS)
+
+
+# --- overlap between windows (`V2-P2-005`) ----------------------------------------------------
+#
+# `S28` asks for purging and embargo over overlapping labels, and `V2-P2-005` asks for "explicit
+# refusal or annotation". Which of the two verbs applies is a measurement rather than a
+# preference, and these are where it is made: at horizon `h` a window spans `h + 1` sessions, so
+# consecutive prediction days share `h` of them and refusing overlap would refuse every training
+# set this repository could build. What *is* refused is the shape that is not a horizon artefact.
+
+OVERLAP_HORIZON = "5d"
+OTHER_CODE = "000002.SZ"
+
+
+def _sample(day: date, *, horizon: str = OVERLAP_HORIZON, code: str = CODE) -> LabelSample:
+    """One `(security, window)` sample whose prediction day is `day`, off the June calendar."""
+    return LabelSample(
+        ts_code=code,
+        window=build_label_window(
+            as_of=datetime(day.year, day.month, day.day, 8, 30, tzinfo=UTC),
+            zone=SHANGHAI,
+            horizon=parse_horizon(horizon),
+            calendar=_calendar(),
+        ),
+    )
+
+
+def _sessions() -> tuple[date, ...]:
+    return _calendar().trading_days_between(FIRST_DAY, LAST_DAY)
+
+
+def test_two_samples_of_one_security_on_one_prediction_day_are_refused_by_name() -> None:
+    """The one overlap shape a purge could not repair, and the reason it raises rather than
+    being reported.
+
+    `LabelWindow` is a function of `(prediction_day, horizon, calendar)`, so a repeated
+    `(ts_code, prediction_day)` is either two horizons entered as one sample -- one feature row
+    with two targets -- or one horizon whose sessions moved because the calendar under it did.
+    Dropping samples from one side of a split is all a purge can do, and both of these sit on
+    the same side of every split.
+    """
+    day = _sessions()[0]
+
+    with pytest.raises(LabelError, match=r"carries two samples for prediction day 2026-06-01"):
+        overlapping_windows((_sample(day, horizon="1d"), _sample(day, horizon="3d")))
+
+
+def test_the_refusal_names_both_windows_so_a_reader_can_see_which_two_collided() -> None:
+    """ "two samples for 2026-06-01" is satisfied by any two. The horizons and both intervals
+    are in the message because a set is assembled by a loop and the loop is what has to be
+    fixed."""
+    day = _sessions()[0]
+
+    with pytest.raises(
+        LabelError,
+        match=(
+            r"\(1d over 2026-06-02\.\.2026-06-03 and 3d over 2026-06-02\.\.2026-06-05\); "
+            r"one prediction day is one question"
+        ),
+    ):
+        overlapping_windows((_sample(day, horizon="1d"), _sample(day, horizon="3d")))
+
+
+def test_consecutive_prediction_days_share_five_of_six_sessions_and_are_annotated() -> None:
+    """The magnitude that decides the verb.
+
+    Two 5d samples one session apart share five of the six sessions each spans -- 83.3% -- so a
+    contract that refused overlap would refuse the ordinary case. Asserted as the count and the
+    fraction rather than as "they overlap", because "they overlap" is true of any pair a rule
+    that refused everything would also report.
+    """
+    first, second = _sessions()[0], _sessions()[1]
+
+    (overlap,) = overlapping_windows((_sample(first), _sample(second)))
+
+    assert overlap.ts_code == CODE
+    assert len(overlap.earlier.sessions) == 6
+    assert len(overlap.shared_sessions) == 5
+    assert overlap.shared_fraction == pytest.approx(5 / 6, abs=1e-12)
+    assert overlap.shared_sessions == (
+        date(2026, 6, 3),
+        date(2026, 6, 4),
+        date(2026, 6, 5),
+        date(2026, 6, 8),
+        date(2026, 6, 9),
+    )
+    assert "share 5 session(s) (2026-06-03..2026-06-09), 83.3% of the shorter window" in (
+        overlap.summary
+    )
+
+
+def test_a_run_of_eight_daily_samples_at_five_days_yields_the_twenty_five_pairs_it_should() -> None:
+    """`KNOWN_LABEL_LIMITATIONS`' `5k - 15` formula, run rather than asserted in prose.
+
+    Every pair whose prediction days are five sessions apart or fewer overlaps, so a run of `k`
+    consecutive days yields `sum(k - d for d in 1..5)`. At `k = 8` that is 25 of the 28 pairs
+    the run contains, and the three that do **not** overlap are the ones six and seven sessions
+    apart -- which is what makes this a count of the horizon rather than a count of the set.
+    """
+    days = _sessions()[:8]
+
+    overlaps = overlapping_windows(tuple(_sample(day) for day in days))
+
+    position = {day: index for index, day in enumerate(days)}
+    gaps = sorted(
+        position[item.later.prediction_day] - position[item.earlier.prediction_day]
+        for item in overlaps
+    )
+
+    assert len(overlaps) == 5 * len(days) - 15
+    assert len(overlaps) == 25
+    assert set(gaps) == {1, 2, 3, 4, 5}
+    assert [gaps.count(gap) for gap in (1, 2, 3, 4, 5)] == [7, 6, 5, 4, 3]
+
+
+def test_windows_that_share_no_session_are_not_reported_at_all() -> None:
+    """Six prediction days apart at a 5d horizon is exactly one session past touching, so this
+    is the boundary rather than a wide gap: the pair five apart still shares one session."""
+    days = _sessions()
+
+    assert len(overlapping_windows((_sample(days[0]), _sample(days[5])))) == 1
+    assert overlapping_windows((_sample(days[0]), _sample(days[6]))) == ()
+
+
+def test_two_securities_over_the_very_same_sessions_are_not_an_overlap() -> None:
+    """A cross-sectional label set is *built* by asking every name about one window, so two
+    securities sharing sessions is not a fact a purge cares about: their outcomes are two
+    different random variables. Same day, same horizon, same calendar -- nothing reported."""
+    day = _sessions()[0]
+
+    assert overlapping_windows((_sample(day), _sample(day, code=OTHER_CODE))) == ()
+
+
+def test_the_shorter_window_is_the_denominator_when_one_window_contains_the_other() -> None:
+    """A 3d window wholly inside a 10d one shares 100% of *its* sessions and 36% of the other's,
+    and the first is the number that says the shorter sample carries nothing the longer one does
+    not already contain."""
+    days = _sessions()
+
+    (overlap,) = overlapping_windows(
+        (_sample(days[0], horizon="10d"), _sample(days[3], horizon="3d"))
+    )
+
+    assert len(overlap.earlier.sessions) == 11
+    assert len(overlap.later.sessions) == 4
+    assert len(overlap.shared_sessions) == 4
+    assert overlap.shared_fraction == 1.0
+
+
+def test_the_overlaps_come_back_ordered_by_security_and_then_by_prediction_day() -> None:
+    """Declared order, so a caller diffing two runs is diffing a stable list. The input here is
+    deliberately shuffled across both keys at once."""
+    days = _sessions()
+    shuffled = (
+        _sample(days[1], code=OTHER_CODE),
+        _sample(days[2]),
+        _sample(days[0], code=OTHER_CODE),
+        _sample(days[0]),
+    )
+
+    overlaps = overlapping_windows(shuffled)
+
+    assert [(item.ts_code, item.earlier.prediction_day) for item in overlaps] == [
+        (CODE, days[0]),
+        (OTHER_CODE, days[0]),
+    ]
+    assert [item.later.prediction_day for item in overlaps] == [days[2], days[1]]
+
+
+def test_a_set_too_small_to_have_a_pair_reports_nothing_rather_than_refusing() -> None:
+    """An empty label set and a one-sample one are both legitimate, and neither is an overlap.
+    Stated because the refusal above is raised from inside the same loop."""
+    assert overlapping_windows(()) == ()
+    assert overlapping_windows((_sample(_sessions()[0]),)) == ()
+
+
+def test_overlap_is_reported_and_purging_is_declared_unimplemented() -> None:
+    """The limitation is the deliverable's other half: this plane annotates, and `S28`'s purge
+    and embargo are not here. Pinned against the registry so that an implementation arriving
+    later has to remove the sentence that says it has not."""
+    entry = next(
+        item
+        for item in KNOWN_LABEL_LIMITATIONS
+        if item.code == "overlap_is_annotated_and_neither_purging_nor_embargo_is_implemented"
+    )
+
+    assert "5 of 6 at 5d and 9 of 10 at 10d" in entry.detail
+    assert "5k - 15" in entry.detail
+    assert not hasattr(labels_module, "purge")
+    assert not hasattr(labels_module, "embargo")
