@@ -183,6 +183,7 @@ from openalpha_cn.domain.industry_classification import (
     INDUSTRY_MEMBERSHIP_DATASET,
     INDUSTRY_TREE_DATASET,
     KNOWN_INDUSTRY_LIMITATIONS,
+    IndustryClassificationError,
 )
 from openalpha_cn.domain.name_history import NAMECHANGE_DATASET
 from openalpha_cn.domain.panel_batch import PanelBatchError
@@ -1476,6 +1477,7 @@ _LOAD_FAILURES: Final[tuple[type[Exception], ...]] = (
     SuspensionError,
     StockUniverseError,
     IndexMembershipError,
+    IndustryClassificationError,
     FinancialStatementError,
     TradingCalendarError,
 )
@@ -1484,7 +1486,15 @@ did not run instead of taking the whole report down with it.
 
 Deliberately a list of named domain errors rather than `Exception`: a `TypeError` out of this
 module's own code is a bug in the doctor and must not be laundered into "a check could not
-run"."""
+run".
+
+**Equal, as a set, to `cli._PANEL_WRITE_REFUSALS`**, and that equality is pinned by
+`tests/unit/test_cli_panel_rules.py` because the two lists are one question's answer -- "which
+exceptions are facts about stored data rather than defects in the code that read them" -- and
+they had drifted apart once already, at a cost recorded in that test. `IndustryClassificationError`
+is here for that reason rather than because a cross-check raises it: no check in this module reads
+the industry panel today, and `panel build` now writes it, so the set learns the tenth error in
+one edit instead of being two modules' separate inventories."""
 
 
 def _close_check(

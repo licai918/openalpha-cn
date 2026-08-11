@@ -28,8 +28,27 @@ from openalpha_cn.domain.daily_prices import (
     DAILY_DATASET,
     PriceDataError,
 )
-from openalpha_cn.domain.financial_statements import FinancialStatementError
-from openalpha_cn.domain.index_membership import IndexMembershipError
+from openalpha_cn.domain.financial_statements import (
+    BALANCE_SHEET_DATASET,
+    CASH_FLOW_DATASET,
+    FINANCIAL_INDICATOR_DATASET,
+    FINANCIAL_STATEMENT_DATASETS,
+    INCOME_DATASET,
+    FinancialStatementError,
+)
+from openalpha_cn.domain.index_membership import (
+    INDEX_WEIGHT_DATASET,
+    INDEX_WEIGHT_INDEX_CODES,
+    IndexMembershipError,
+)
+from openalpha_cn.domain.industry_classification import (
+    INDUSTRY_MEMBERSHIP_DATASET,
+    INDUSTRY_MEMBERSHIP_TAXONOMY,
+    INDUSTRY_TAXONOMY_EFFECTIVE_FROM,
+    INDUSTRY_TREE_DATASET,
+    IndustryClassificationError,
+)
+from openalpha_cn.domain.name_history import NAMECHANGE_DATASET
 from openalpha_cn.domain.panel_batch import ColumnarPanelBatch, PanelBatchError
 from openalpha_cn.domain.price_limits import (
     PRICE_LIMIT_DATASET,
@@ -58,10 +77,19 @@ from openalpha_cn.panel_gate import (
     require_datasets,
 )
 from openalpha_cn.panel_ingest import (
+    load_industry_trees,
+    load_stock_universe,
     load_suspensions,
     load_trading_calendar,
+    merge_panel_batches,
+    split_panel_batch_by_year,
     write_adjustment_factors,
     write_daily_panel,
+    write_financial_statements,
+    write_index_weights,
+    write_industry_memberships,
+    write_industry_tree,
+    write_name_history,
     write_price_limits,
     write_stock_universe,
     write_suspensions,
@@ -86,6 +114,8 @@ from openalpha_cn.providers.base import (
 from openalpha_cn.providers.chainlin import ChainLinDataProvider
 from openalpha_cn.providers.file import FileProvider
 from openalpha_cn.providers.tushare import (
+    CURRENT_INDUSTRY_MEMBERSHIP,
+    SUPERSEDED_INDUSTRY_MEMBERSHIP,
     TRADING_CALENDAR_DEFAULT_EXCHANGE,
     TushareProvider,
     TushareTransport,
@@ -814,6 +844,14 @@ PANEL_BUILD_TARGETS: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
         ADJ_FACTOR_DATASET: (ADJ_FACTOR_DATASET,),
         "price": (SUSPENSION_DATASET, DAILY_DATASET, DAILY_BASIC_DATASET),
         PRICE_LIMIT_DATASET: (PRICE_LIMIT_DATASET,),
+        NAMECHANGE_DATASET: (NAMECHANGE_DATASET,),
+        INDEX_WEIGHT_DATASET: (INDEX_WEIGHT_DATASET,),
+        INCOME_DATASET: (INCOME_DATASET,),
+        BALANCE_SHEET_DATASET: (BALANCE_SHEET_DATASET,),
+        CASH_FLOW_DATASET: (CASH_FLOW_DATASET,),
+        INDUSTRY_TREE_DATASET: (INDUSTRY_TREE_DATASET,),
+        INDUSTRY_MEMBERSHIP_DATASET: (INDUSTRY_MEMBERSHIP_DATASET,),
+        FINANCIAL_INDICATOR_DATASET: (FINANCIAL_INDICATOR_DATASET,),
     }
 )
 """What `panel build --dataset X` fetches and writes, as a closed table in **build order**.
@@ -839,21 +877,39 @@ sessions). A standalone `suspend_d` target is therefore a sound addition, delibe
 `V2-P1-016` rather than taken here, because adding it changes this table and the closed-table
 test that pins it.
 
-The order this table declares is the order `_build_panel` runs its targets in, and it is a
-dependency order rather than an alphabetical one: `adj_factor`, `price` and `stk_limit` all read
-the stored calendar, so `trade_cal` has to have been written first on a fresh store. The command
+The order this table declares is the order the two build phases run their targets in, and it is
+a dependency order rather than an alphabetical one: `adj_factor`, `price` and `stk_limit` all
+read the stored calendar, so `trade_cal` has to have been written first on a fresh store; the
+three statement targets read the stored registry, so `stock_basic` comes before them; and
+`index_member_all` reads the stored tree, so `index_classify` comes before it. The command
 therefore ignores the order the `--dataset` flags arrived in, which
 `tests/integration/test_cli_panel.py::
 test_panel_build_runs_the_targets_in_dependency_order_and_not_in_flag_order` pins by driving them
 backwards.
 
-**Five targets, not twelve.** `namechange`, `index_weight`, the two industry datasets and the
-four financial-statement endpoints have writers and are not offered here. Each is a different
-fetch plan -- one announcement year per request, one index-month, one `l1_code` slice, one
-`(security, period-year)` window (~5,500 requests for one market year) -- and wiring them from a
-transport this issue cannot exercise would be surface with no test behind it. They are refused
-by name, so a caller asking for one is told this command does not build it rather than being
-given an empty success.
+**Thirteen targets, and the last three are not per-year.** `V2-P1-015` shipped five and refused
+the other eight by name, because each is a different fetch plan and wiring them from a transport
+that issue could not exercise would have been surface with no test behind it. The consequence was
+that `providers/tushare.py`'s fifteen datasets and `panel_ingest`'s twelve writers had eight
+datasets nothing could build: `panel build --dataset income` said "not one of this command's
+build targets" and `panel doctor --dataset income` therefore reported `partition_missing`
+forever, which is the state P2's `002`/`003`/`004` gates and P3's whole factor stack were
+specified against. The eight are wired here, each with its measured request shape:
+
+- `namechange` -- one announcement year of the whole market per request. One request per `--year`.
+- `index_weight` -- one index for one calendar month. `INDEX_WEIGHT_INDEX_CODES` x 12 months,
+  36 requests per `--year`; see `_build_index_weights` for the interior-gap refusal.
+- `income` / `balancesheet` / `cashflow` -- one `(security, announcement year)` window, and
+  `ts_code` is mandatory, so one request per security in the stored registry: **5,881 requests
+  per `--year`, per dataset** (measured 2026-08-11).
+- `index_classify` -- one taxonomy vintage per request; two requests for the whole invocation.
+- `index_member_all` -- one `(l1_code, is_new)` slice; 31 x 2 = 62 requests for the whole
+  invocation.
+- `fina_indicator` -- one `(security, report-period year)` window; 5,881 requests per period year,
+  for the whole invocation.
+
+`PANEL_BUILD_SPAN_TARGETS` is why the last three say "for the whole invocation" rather than "per
+`--year`", and it is a fact about their requests rather than a convenience.
 """
 
 PANEL_BUILD_COUPLED_DATASETS: Final[Mapping[str, str]] = MappingProxyType(
@@ -872,14 +928,106 @@ not have a daily panel" -- the opposite of the truth. `V2-P1-007`'s coupling is 
 which is a scope decision -- see `PANEL_BUILD_TARGETS`.
 """
 
-_LIFECYCLE_YEAR_TARGETS: Final[frozenset[str]] = frozenset({STOCK_BASIC_DATASET})
+PANEL_BUILD_SPAN_TARGETS: Final[frozenset[str]] = frozenset(
+    {INDUSTRY_TREE_DATASET, INDUSTRY_MEMBERSHIP_DATASET, FINANCIAL_INDICATOR_DATASET}
+)
+"""Targets whose unit of work is the **whole invocation** rather than one `--year`, and why.
+
+`panel build` runs its targets year by year, oldest first. Three of the thirteen cannot be run
+that way, and in each case the reason is a property of the endpoint rather than a preference:
+
+- **`index_classify`** takes a `src` and nothing else. One request is one vintage's whole tree,
+  dated at that vintage's own effective day, so running it once per year would fetch the same
+  511 rows twelve times and write the same 2021 partition twelve times.
+- **`index_member_all`** takes an `(l1_code, is_new)` slice and no date filter at all. One sweep
+  of 62 requests is the whole 7,893-row corpus, which `write_industry_memberships` files into
+  ~38 event-year partitions; a per-year loop would re-fetch all 62 for each year and, worse,
+  hand the writer a corpus it would file into the same 38 partitions each time.
+- **`fina_indicator`** is the one where a per-year loop would be *destructive*, and this is the
+  finding that put this set here. Its request window filters `end_date` -- the report period --
+  while its rows are dated and filed at `ann_date`. So a request for period year *P* returns
+  rows announced in *P* (the three interim reports) and in *P+1* (the annual), and an
+  announcement year *A* is assembled from **at least two** period years: the annual of *A-1*
+  plus the interims of *A*. `PanelStore` replaces a partition whole, so a loop that wrote period
+  year 2015 and then period year 2016 would replace announcement year 2016's annual-2015 rows
+  with 2016's interims -- more rows than before, the same securities, and no guard anywhere that
+  can see it. Accumulating every requested period year into one write is the only shape that is
+  not silently lossy; `_refuse_shrinking_statement_years` covers the cross-invocation half.
+
+Every member is also in `_UNPINNED_PARTITION_YEAR_TARGETS`, necessarily: a target that does not
+run per year cannot write the year it was asked for.
+"""
+
+_UNPINNED_PARTITION_YEAR_TARGETS: Final[frozenset[str]] = frozenset(
+    {
+        STOCK_BASIC_DATASET,
+        INDUSTRY_TREE_DATASET,
+        INDUSTRY_MEMBERSHIP_DATASET,
+        FINANCIAL_INDICATOR_DATASET,
+    }
+)
 """Targets whose partitions are not the `--year` that was asked for, and why that is legitimate.
 
-Exactly one. `stock_basic` has no date filter, so one request is the whole registry and
-`write_stock_universe` splits it into one partition per *lifecycle* year -- a security listed in
-1991 goes to 1991 whatever `--year` said. Every other target writes the year it was asked for,
-which is what `_audit_written_partitions` checks; this set is the exemption, stated once so a
-future target cannot acquire the exemption by accident.
+Four, and each is exempt for its own measured reason rather than by family resemblance. Every
+other target writes the year it was asked for, which is what `_audit_written_partitions` checks;
+this set is the exemption, stated once so a future target cannot acquire it by accident.
+
+- **`stock_basic`** has no date filter, so one request is the whole registry and
+  `write_stock_universe` splits it into one partition per *lifecycle* year -- a security listed
+  in 1991 goes to 1991 whatever `--year` said.
+- **`index_classify`** has no date column at all. `providers/tushare.py` dates every node at its
+  vintage's effective day, so SW2014's tree is a 2014 partition and SW2021's is a 2021 one, on
+  every invocation and for every `--year`.
+- **`index_member_all`** is filed by *membership event* year: an assignment that opened in 1993
+  and closed in 2017 puts one row in each of those partitions. A 62-request sweep therefore
+  lands in roughly 38 years at once.
+- **`fina_indicator`** is asked for a report-period year and filed by announcement year, and the
+  two are not the same year even in the ordinary case (`001278.SZ` announced its 2018 annual on
+  2022-01-06). See `PANEL_BUILD_SPAN_TARGETS`.
+
+Renamed from `_LIFECYCLE_YEAR_TARGETS`, which described the one member it used to have.
+"""
+
+_NEEDS_STORED_UNIVERSE: Final[frozenset[str]] = frozenset(FINANCIAL_STATEMENT_DATASETS)
+"""Targets that cannot name their own subjects and read them out of the stored registry.
+
+All four statement endpoints, and the reason is `_financial_statement_params`': `ts_code` is
+**mandatory** on every one of them -- a request without it fails `code=50101`, and a comma-joined
+list answers zero rows with `code=0` on three of the four -- so there is no cross-section fetch
+and the securities have to come from somewhere. They come from `stock_basic`, exactly as the
+session-scoped targets' sessions come from `trade_cal`, which is what `_NEEDS_STORED_CALENDAR`
+says one dependency over. A caller may narrow it with `--subject`; nothing infers it.
+"""
+
+_NEEDS_STORED_INDUSTRY_TREE: Final[frozenset[str]] = frozenset({INDUSTRY_MEMBERSHIP_DATASET})
+"""`index_member_all`, whose 31 `l1_code` slices are read off the stored `index_classify` tree.
+
+The alternative was a 31-entry literal in this module, which would be a second copy of a table
+the panel already stores and would go stale the day Shenwan adds an industry -- and would go
+stale *silently*, because a missing `l1_code` is a slice nobody fetched rather than an error. The
+tree is two requests and it is the join target for every membership row anyway, so requiring it
+first costs one dependency and removes a constant that could drift.
+
+**The vintage matters and is not defaulted.** `INDUSTRY_MEMBERSHIP_TAXONOMY` is SW2021 --
+measured: every one of `index_member_all`'s 7,893 rows carries an SW2021 L1 code, and the
+endpoint takes no `src` -- while `index_classify`'s own default is **SW2014**. Slicing SW2021
+memberships by SW2014's 28 L1 codes would silently fetch a corpus missing three whole industries.
+"""
+
+_REGISTERED_PARTITION_RESUME: Final[frozenset[str]] = frozenset(
+    {INDEX_WEIGHT_DATASET, INCOME_DATASET, BALANCE_SHEET_DATASET, CASH_FLOW_DATASET}
+)
+"""Targets `--resume` skips on a registered partition alone, with no census behind the skip.
+
+Deliberately a separate, named set rather than "everything the session rule cannot judge",
+because the evidence really is weaker and the difference should be legible at the call site as
+well as in `_resumable_targets`' docstring, which is where the residue is stated and the test
+that measures it is named. Four members: `index_weight` at 36 requests a year and the three
+announcement-year statement targets at 5,881 each, which is the scale that makes a weak resume
+worth more than no resume.
+
+`namechange` is not here even though it is the same shape, for `trade_cal`'s reason: it is one
+request a year, so skipping it saves nothing and costs a corpus the resumed build did not verify.
 """
 
 _EMPTY_SESSION_IS_ORDINARY: Final[frozenset[str]] = frozenset({SUSPENSION_DATASET})
@@ -900,6 +1048,7 @@ _PANEL_WRITE_REFUSALS: Final[tuple[type[Exception], ...]] = (
     SuspensionError,
     StockUniverseError,
     IndexMembershipError,
+    IndustryClassificationError,
     FinancialStatementError,
     TradingCalendarError,
 )
@@ -919,6 +1068,17 @@ verdict about the panel", with the exception's own message withheld on the groun
 unanticipated failure might carry a credential. That refusal names one ticker and one session.
 Two modules disagreeing about what counts as a data fact is the drift the equality test exists
 to stop; if a tenth domain error is added, both lists must learn it together.
+
+**`IndustryClassificationError` is that tenth**, added when `panel build` gained the two industry
+targets. It is raised by `write_industry_memberships`, `write_industry_tree`,
+`build_industry_tree` (a vintage whose parent chain is broken -- which is what a partial read of
+the tree partition looks like) and `load_industry_trees`, and `index_member_all`'s own fetch plan
+goes *through* that loader to get its 31 `l1_code` slices. So a malformed stored tree stops a
+build, and without this entry it would have stopped it as `internal_error` with the message
+withheld -- `SuspensionError`'s defect exactly, in a dataset that had not been built yet when
+that one was found. `panel_doctor._LOAD_FAILURES` learns it in the same edit, as that test
+requires; no cross-check raises it today, and the set is one question's answer rather than two
+modules' separate inventories of what they happen to catch.
 """
 
 _NEEDS_STORED_CALENDAR: Final[frozenset[str]] = frozenset(
@@ -1243,6 +1403,39 @@ def _build_targets(requested: Sequence[str]) -> frozenset[str]:
     return frozenset(asked)
 
 
+def _build_subjects(requested: Sequence[str], targets: frozenset[str]) -> tuple[str, ...]:
+    """Resolve `--subject`, refusing it for every target that does not take one.
+
+    `--subject` narrows the securities the four statement targets fetch, which is the one place
+    in this command where the caller can shrink a whole-market fetch: `income` for one year is
+    one request per security in the stored registry, so naming three securities turns 5,881
+    requests into 3. Everything it is good for is that; everything else it could be pointed at
+    is a dataset whose partition **is** the whole market, and narrowing one of those does not
+    produce a smaller panel but a wrong one -- `_stock_basic_params` refuses a filtered registry
+    for that reason in the provider, and `PanelStore` replaces a partition whole, so a narrowed
+    write destroys a full one.
+
+    Refused rather than ignored. A flag the command silently drops is indistinguishable from a
+    flag the caller never passed, which is `_build_years`' finding about `--year` and the reason
+    that one became repeatable; the difference here is that the silently-ignored version would
+    also have looked like it worked.
+    """
+    asked = tuple(dict.fromkeys(requested))
+    if not asked:
+        return ()
+    stray = sorted(targets - _NEEDS_STORED_UNIVERSE)
+    if stray:
+        raise _panel_fail(
+            PanelExit.bad_request,
+            f"--subject narrows the securities a statement target fetches and {stray} "
+            f"{'do' if len(stray) > 1 else 'does'} not take one: every other target's partition "
+            "is the whole market, and a partition is replaced whole, so a narrowed write would "
+            f"destroy a full one rather than build a smaller panel. Statement targets are "
+            f"{sorted(_NEEDS_STORED_UNIVERSE)}",
+        )
+    return asked
+
+
 def _year_as_of(year: int) -> datetime:
     """Midnight on 1 January of `year`, in the panel's own zone.
 
@@ -1251,6 +1444,66 @@ def _year_as_of(year: int) -> datetime:
     available from the start of that year, so this instant sees the whole year and no more.
     """
     return datetime(year, 1, 1, tzinfo=PANEL_DATE_ZONE)
+
+
+def _year_end_as_of(year: int, now: datetime) -> datetime:
+    """The last instant of `year` in the panel's zone, never later than this build's clock.
+
+    What `namechange`, `income`, `balancesheet` and `cashflow` are asked at, and it has to be
+    the *end* of the year rather than `_year_as_of`'s start. All four take a `{start_date,
+    end_date}` window that the provider derives from `as_of`'s Asia/Shanghai year, and all four
+    are clocked at the **announcement**: a row announced on 14 June is available from that day
+    and no earlier, so a request made at 1 January fetches exactly the right window and
+    `_decode_panel_rows` then drops every row in it except any announced on 1 January itself.
+    `trade_cal` is the contrast that makes this a per-dataset choice rather than a global one:
+    `_calendar_publication_timeline` dates a whole year's sessions as available from the start of
+    that year, so `_year_as_of` is right there and would be wrong here. Measured 2026-08-11:
+    `namechange` asked at the end of 2012 returns 320 rows whose announcement dates run
+    2012-01-05..2012-12-31, and at the end of 2024, 330.
+
+    `min(..., now)` is what makes the current year work. `_decode_panel_rows` bounds its filter at
+    the earlier of `as_of` and the wall clock, so an `as_of` in December would already be safe --
+    but `ColumnarPanelBatch.as_of` is a stored provenance field, and a partition that claims to
+    answer as of a December that has not happened is a claim this command should not write down.
+    The measured behaviour is the same either way: 381 `namechange` rows for 2026 on 2026-08-11.
+
+    Refuses a year that has not begun, for `_build_sessions`' reason at the other end of the same
+    question -- without it, `--year 2030` would fetch 2026's window, store a 2026 partition, and
+    be caught only by `_audit_written_partitions`' misfiled-year check, which would report a
+    fetch fault for what is a plain fact about the calendar.
+    """
+    opens_on = datetime(year, 1, 1, tzinfo=PANEL_DATE_ZONE)
+    if now < opens_on:
+        raise _panel_fail(
+            PanelExit.bad_request,
+            f"{year} had not begun at {now.isoformat()}; there is nothing to build yet",
+        )
+    return min(datetime(year, 12, 31, 23, 59, 59, tzinfo=PANEL_DATE_ZONE), now)
+
+
+def _month_end_as_of(year: int, month: int, now: datetime) -> datetime | None:
+    """The last instant of one calendar month, clamped at `now`, or `None` if it has not begun.
+
+    `index_weight`'s request window. `_index_weight_params` derives `{start_date, end_date}` from
+    `as_of`'s Asia/Shanghai *month* and the endpoint publishes on that month's last open session,
+    so the instant has to sit at or after that session's 16:30 -- which the month's own last
+    instant always does, and its first never does. Measured on 2026-08-11 for `000300.SH`: 19
+    month-end requests (all twelve months of 2024, January to July of 2026) each returned exactly
+    one 300-row publication, and 20 first-of-month requests over the same span returned `no_data`
+    every time.
+
+    `None` rather than a refusal for a month that has not begun, because a partial current year
+    is the ordinary case rather than a fault: `_build_index_weights` is what decides whether the
+    resulting gap is legitimate, and it can only decide that by looking at all twelve.
+    """
+    opens_on = datetime(year, month, 1, tzinfo=PANEL_DATE_ZONE)
+    if now < opens_on:
+        return None
+    # The first of the following month, less one microsecond, is this month's last instant --
+    # no table of month lengths and no leap-year branch, which is the arithmetic
+    # `_index_weight_params` uses for the same boundary.
+    next_month = datetime(year + month // 12, month % 12 + 1, 1, tzinfo=PANEL_DATE_ZONE)
+    return min(next_month - timedelta(microseconds=1), now)
 
 
 def _session_as_of(day: date) -> datetime:
@@ -1442,7 +1695,7 @@ def _fetch_panel(
 
 
 PANEL_PROGRESS_EVERY: Final[int] = 10
-"""How many sessions one `panel build` progress line covers.
+"""The smallest number of requests one `panel build` progress line may cover.
 
 Ten, against a year-to-date build of ~145 sessions, so a target reports about fifteen times --
 often enough that a stalled fetch is visible within a minute or two, rarely enough that the
@@ -1450,25 +1703,74 @@ lines are not themselves the output. The measured builds this was chosen against
 386--444s, `price` ~1,000--2,374s, `stk_limit` ~330s, whole build ~30--50 minutes, during which
 this command printed **nothing at all** and a caller could not tell a live fetch from a wedged
 one without `lsof`.
+
+A *floor* rather than the stride itself since the statement targets arrived: those loop over the
+5,881 securities of the stored registry rather than over 145 sessions, and a line every ten would
+be 589 of them for one dataset-year. `_progress_stride` is what keeps both readable, and this
+constant is what keeps every loop that existed before them reporting exactly as it did.
+"""
+
+PANEL_PROGRESS_REPORTS: Final[int] = 40
+"""At most about this many progress lines from one loop, whatever its length.
+
+Forty, and the number is a compromise between two things that cannot both be had on a loop of
+5,881 requests: few enough lines that they are not themselves the output, and short enough gaps
+that a wedged fetch is visible. At the 1.1--4.6s per request measured on 2026-08-11 a whole-market
+statement year is roughly two to seven hours, so forty reports is one every three to ten minutes;
+ten reports would have been one every twenty, and one every two minutes would be nearly six
+hundred lines. The `BUDGET` line is what covers the interval before the first report.
+
+It binds only above 400 requests: below that `PANEL_PROGRESS_EVERY` is the larger of the two, so
+every loop this command already ran keeps its existing cadence to the line -- 145 sessions and
+even a 244-session year still report every ten, and
+`tests/integration/test_cli_panel_horizon.py` pins the eleven-session case unchanged.
 """
 
 
-def _echo_progress(datasets: Sequence[str], done: int, total: int, started: float) -> None:
+def _progress_stride(total: int) -> int:
+    """How often to report over a loop of `total` requests. See the two constants above."""
+    return max(PANEL_PROGRESS_EVERY, -(-total // PANEL_PROGRESS_REPORTS))
+
+
+def _echo_progress(
+    datasets: Sequence[str], done: int, total: int, started: float, *, unit: str = "sessions"
+) -> None:
     """One progress line on stderr: what, how far, how long, and how much longer.
 
     stderr rather than stdout, for `_panel_fail`'s reason at the other end of the same command:
     `--json` has to stay parseable on stdout, and a progress line interleaved into it would make
-    every scripted caller's `json.loads` fail. The remaining estimate is linear in sessions
-    fetched, which is the right model here -- every session is the same whole-market request --
-    and it is labelled `eta` rather than presented as a promise.
+    every scripted caller's `json.loads` fail. The remaining estimate is linear in requests made,
+    which is the right model for every loop that uses it -- each iteration is one round trip of
+    the same shape -- and it is labelled `eta` rather than presented as a promise.
+
+    `unit` names what is being counted, because the loops are no longer all sessions: the
+    statement targets count `securities`, `index_weight` counts `index-months` and
+    `index_member_all` counts `industry-slices`. The default keeps every existing line
+    byte-identical.
     """
     elapsed = monotonic() - started
     rate = elapsed / done if done else 0.0
     typer.echo(
-        f"FETCHING {'+'.join(datasets)} {done}/{total} sessions "
+        f"FETCHING {'+'.join(datasets)} {done}/{total} {unit} "
         f"elapsed={elapsed:.0f}s eta={rate * (total - done):.0f}s",
         err=True,
     )
+
+
+def _echo_budget(label: str, total: int, unit: str, reason: str) -> None:
+    """State the size of a fetch **before** it starts, on stderr.
+
+    The statement targets turned this command's unit of cost from minutes into hours: `income`
+    for one year is one request per security in the registry, 5,881 of them, and at the 1.1--4.6s
+    per round trip measured on 2026-08-11 that is between two and seven hours for one
+    dataset-year. A caller who typed `--start 2015 --end 2026` has asked for twelve times that,
+    per dataset, and the only honest moment to say so is before the first request rather than in
+    an `eta` that appears after ten minutes.
+
+    Printed for every fetch loop, not only the expensive ones, so that the number a caller reads
+    is always the same kind of number. `_echo_progress` then tracks it.
+    """
+    typer.echo(f"BUDGET {label} {total} {unit} ({reason})", err=True)
 
 
 def _session_batches(
@@ -1482,20 +1784,71 @@ def _session_batches(
     single-dataset target uses. A second copy of this loop for the price panel would leave the
     `_EMPTY_SESSION_IS_ORDINARY` branch dead in one of the two.
 
-    Reports progress every `PANEL_PROGRESS_EVERY` sessions and once at the end. This is the one
-    loop in the command that takes minutes rather than seconds, so it is the only one that
-    needs to say anything while it runs.
+    Reports progress every `_progress_stride` sessions and once at the end, after stating the
+    size of the loop up front. This was the one loop in the command that took minutes rather
+    than seconds; the statement targets' loop now takes hours, which is why the cadence and the
+    budget line are shared rather than written here.
     """
     collected: dict[str, list[ColumnarPanelBatch]] = {name: [] for name in datasets}
+    _echo_budget(
+        "+".join(datasets),
+        len(sessions) * len(datasets),
+        "requests",
+        f"{len(sessions)} sessions x {len(datasets)} whole-market cross sections",
+    )
     started = monotonic()
+    stride = _progress_stride(len(sessions))
     for index, day in enumerate(sessions, start=1):
         for name in datasets:
             batch = _fetch_panel(provider, name, as_of=_session_as_of(day))
             if batch.status == "no_data" and name in _EMPTY_SESSION_IS_ORDINARY:
                 continue
             collected[name].append(batch)
-        if index % PANEL_PROGRESS_EVERY == 0 or index == len(sessions):
+        if index % stride == 0 or index == len(sessions):
             _echo_progress(datasets, index, len(sessions), started)
+    return collected
+
+
+def _subject_batches(
+    provider: TushareProvider,
+    dataset: str,
+    *,
+    subjects: Sequence[str],
+    as_of: datetime,
+    label: str,
+    reason: str,
+    extra: tuple[str, ...] = (),
+) -> list[ColumnarPanelBatch]:
+    """Fetch one dataset once per subject, keeping the batches that carried rows.
+
+    The statement targets' loop. `_session_batches`' shape with the axes swapped: there the
+    request is a whole-market cross section and the loop is over days, here the request is one
+    security's window and the loop is over the registry, because `_financial_statement_params`'
+    `ts_code` is mandatory and a comma-joined list answers zero rows rather than an error on
+    three of the four endpoints.
+
+    **A `no_data` subject is ordinary here, and that is measured rather than assumed.** It is the
+    opposite of `_EMPTY_SESSION_IS_ORDINARY`, which is a closed set of one because every other
+    session-scoped dataset publishes on every open session. A security that announced nothing in
+    a given year is the common case, not the exception: `000013.SZ` served no `income` row for
+    the 2024 window on 2026-08-11 while `000003.SZ` -- delisted in 2002 -- served three. So the
+    filter is on the whole loop rather than on a named dataset, and what stands behind it is the
+    caller's own refusal when *nothing at all* came back (see `_build_statement_panel`).
+
+    `extra` carries the second subject `fina_indicator` needs, the report-period year. It is a
+    request subject and never a stored one -- `subject_field` reads `ts_code` off the row -- which
+    is the arrangement `index_member_all` already has for `is_new`.
+    """
+    collected: list[ColumnarPanelBatch] = []
+    _echo_budget(label, len(subjects), "requests", reason)
+    started = monotonic()
+    stride = _progress_stride(len(subjects))
+    for index, subject in enumerate(subjects, start=1):
+        batch = _fetch_panel(provider, dataset, as_of=as_of, subjects=(subject, *extra))
+        if batch.status == "success":
+            collected.append(batch)
+        if index % stride == 0 or index == len(subjects):
+            _echo_progress((dataset,), index, len(subjects), started, unit="securities")
     return collected
 
 
@@ -1550,30 +1903,408 @@ def _build_price_panel(
     return "corroborated" if corpus is not None else "waived"
 
 
+def _stored_universe(store: PanelStore, *, now: datetime) -> tuple[str, ...]:
+    """Every security the stored registry knows about, or an exit naming what to build first.
+
+    `_NEEDS_STORED_CALENDAR`'s shape for the statement targets, and the same argument: the
+    request needs something the panel already holds, so the build reads it rather than inventing
+    it. What it reads is `stock_basic`, the only whole-market security list this repository has.
+
+    ## Every security, not the ones that were listed that year
+
+    The obvious saving is to skip a security that had not listed yet, or had already died -- and
+    it is measurably unsound in **both** directions. `688981.SH` listed on the A-share market in
+    2020 and its `income` window for 2015 returns five rows; `000003.SZ` was delisted in 2002
+    and its `income` window for 2024 returns three. Both measured on 2026-08-11. An announcement
+    year is a disclosure calendar rather than a trading calendar: pre-listing filings enter the
+    corpus when a company registers, and restatements keep arriving long after a delisting. So a
+    lifecycle filter would drop real filings, and would drop them silently -- the missing
+    security would simply have no row, which is what "this company did not file" looks like.
+
+    ## `require_years_through` rather than the bare registered years
+
+    `load_stock_universe`'s own docstring names `store.registered_years(...)` as "the natural
+    argument -- and it is also the trap", because passing it makes the request exactly equal to
+    whatever the store happens to hold and a missing year can never be noticed. The switch it
+    provides is used here: the read must cover a contiguous window through this build's own year,
+    which on a complete ingest costs nothing (a live probe found lifecycle events in every year
+    from 1990 to 2026) and on an incomplete one refuses rather than handing back a universe in
+    which everything that died in the gap is still listed.
+
+    `max_staleness=None` for `_build_price_panel`'s reason at the same layer: this read is asking
+    which securities *exist*, not how fresh the registry is, and a bound chosen here would be
+    chosen for the caller. A registry that has missed a month of listings yields a slightly small
+    universe rather than a wrong one, and `--dataset stock_basic` in the same invocation refreshes
+    it before this runs.
+    """
+    years = store.registered_years(STOCK_BASIC_DATASET)
+    if not years:
+        raise _panel_fail(
+            PanelExit.unhealthy,
+            f"the statement targets fetch one request per security and {STOCK_BASIC_DATASET} is "
+            f"not in {store.root}: the endpoints require a ts_code and there is no cross-section "
+            "fetch, so the registry is where the securities come from. Build it first: "
+            "`openalpha panel build --dataset stock_basic --year <year>`, or name the securities "
+            "with --subject",
+        )
+    universe = load_stock_universe(
+        store,
+        years=years,
+        as_of=now,
+        max_staleness=None,
+        require_years_through=now.astimezone(PANEL_DATE_ZONE).year,
+    )
+    return tuple(entry.ts_code for entry in universe.securities)
+
+
+def _build_statement_panel(
+    store: PanelStore,
+    provider: TushareProvider,
+    *,
+    dataset: str,
+    subjects: Sequence[str],
+    as_of: datetime,
+    label: str,
+    reason: str,
+    extra: tuple[str, ...] = (),
+) -> list[ColumnarPanelBatch]:
+    """Fetch one statement dataset for every subject and refuse a sweep that served nothing.
+
+    Returns the batches rather than writing them, because the three announcement-year targets
+    and `fina_indicator` write at different moments -- per year and once per invocation
+    respectively (`PANEL_BUILD_SPAN_TARGETS`) -- and a helper that wrote would have to know which.
+
+    The refusal is the counterweight to `_subject_batches` treating `no_data` as ordinary. One
+    security with nothing to report is the common case; **every** security with nothing to report
+    is a fetch that did not work, and without this it would reach `write_financial_statements` as
+    an empty list and be refused by `merge_panel_batches` with "needs at least one batch" -- a
+    true sentence about a list, several layers from the fetch that produced it.
+    """
+    batches = _subject_batches(
+        provider, dataset, subjects=subjects, as_of=as_of, label=label, reason=reason, extra=extra
+    )
+    if not batches:
+        raise _panel_fail(
+            PanelExit.unhealthy,
+            f"{label}: none of the {len(subjects)} securities served a filing. A security that "
+            "announced nothing in a window is ordinary and all of them is not, so this is a "
+            "fetch to investigate rather than an empty partition to write",
+        )
+    return batches
+
+
+def _build_index_weights(
+    store: PanelStore, provider: TushareProvider, *, year: int, now: datetime
+) -> list[PartitionRef]:
+    """Fetch every index-month of one year and write them as one partition.
+
+    One request is one index for one calendar month (`_index_weight_params`), and a year's
+    partition has to arrive in **one** call: `PanelStore` replaces a partition whole and its key
+    has no index dimension, so a per-index loop leaves the year holding whichever index went last
+    -- which `write_index_weights`' own docstring names, along with the per-month loop its subject
+    guard cannot see. This function is the caller that docstring asks for.
+
+    ## Which months are allowed to be missing
+
+    The endpoint publishes on the last open session of each month, so a full past year has twelve
+    publications and the current year has one per month that has finished publishing. Measured on
+    2026-08-11: `000300.SH` returns exactly one 300-row publication for each of 2024's twelve
+    months and for 2026 January through July, and `no_data` for August, whose last open session
+    had not arrived.
+
+    A gap at either **end** is therefore legitimate -- an index that had not launched yet at the
+    start of the year (`000852.SH` begins in 2014), and the months of the current year that have
+    not published. A gap in the **middle** is not, and it is refused here rather than left to the
+    read: `domain/index_membership.py::build_index_membership` does refuse a hole in the month
+    sequence, but only when the partition is loaded, so without this the build reports success and
+    the panel is unreadable from then on.
+
+    An index that published in **no** month of the year contributes nothing and is not refused,
+    because a year entirely before an index's launch has no interior to have a hole in. What
+    stops that from quietly shrinking a stored year is `panel_ingest._refuse_to_drop_stored_
+    subjects`, whose subject column is the index precisely so it can see one go missing.
+
+    ## The three indices are the build's scope, and this command offers no way to widen it
+
+    `INDEX_WEIGHT_INDEX_CODES` is not a limit on what the descriptor can fetch -- it takes any
+    `index_code` -- but it is a limit on what has been *measured*: the response cap, the monthly
+    cadence, the weight-sum tolerance and the constituent-count exceptions in
+    `domain/index_membership.py` were all established on those three, and a fourth index would
+    inherit the code without inheriting any of that. `--subject` is deliberately not repurposed
+    here; adding an index is a measurement, not a flag.
+    """
+    batches: list[ColumnarPanelBatch] = []
+    months = [month for month in range(1, 13) if _month_end_as_of(year, month, now) is not None]
+    total = len(months) * len(INDEX_WEIGHT_INDEX_CODES)
+    _echo_budget(
+        f"{INDEX_WEIGHT_DATASET} year={year}",
+        total,
+        "requests",
+        f"{len(INDEX_WEIGHT_INDEX_CODES)} indices x {len(months)} month-end publications",
+    )
+    started = monotonic()
+    stride = _progress_stride(total)
+    done = 0
+    for index_code in INDEX_WEIGHT_INDEX_CODES:
+        published: list[int] = []
+        for month in months:
+            instant = _month_end_as_of(year, month, now)
+            assert instant is not None  # `months` is exactly the ones that resolved
+            batch = _fetch_panel(
+                provider, INDEX_WEIGHT_DATASET, as_of=instant, subjects=(index_code,)
+            )
+            done += 1
+            if batch.status == "success":
+                published.append(month)
+                batches.append(batch)
+            if done % stride == 0 or done == total:
+                _echo_progress((INDEX_WEIGHT_DATASET,), done, total, started, unit="index-months")
+        absent = [
+            month
+            for month in months
+            if published and published[0] < month < published[-1] and month not in published
+        ]
+        if absent:
+            raise _panel_fail(
+                PanelExit.unhealthy,
+                f"{index_code} published in months {published} of {year} and served nothing for "
+                f"{absent}, which lie between two publications. A month inside an index's life "
+                "with no publication is a hole rather than a horizon, and "
+                "build_index_membership refuses one on every read -- so the partition this build "
+                "would write could never be loaded",
+            )
+    if not batches:
+        raise _panel_fail(
+            PanelExit.unhealthy,
+            f"none of {list(INDEX_WEIGHT_INDEX_CODES)} published a constituent weighting in "
+            f"{year}; the earliest of the three begins in 2005 and the newest in 2014, so a year "
+            "before that has no partition to write rather than an empty one",
+        )
+    return [write_index_weights(store, batches)]
+
+
+def _build_industry_tree(
+    store: PanelStore, provider: TushareProvider, *, now: datetime
+) -> list[PartitionRef]:
+    """Fetch every measured taxonomy vintage's whole tree, one partition each.
+
+    Two requests, one per entry in `INDUSTRY_TAXONOMY_EFFECTIVE_FROM`, and both of them rather
+    than only the one `index_member_all` speaks. The endpoint refuses an unmeasured `src` and
+    answers a bare request with **SW2014** while every membership row is SW2021, so the vintage
+    can never be defaulted; having refused the default, the remaining question is which of the two
+    measured vintages to fetch, and the answer is that the set is closed and two requests long.
+    Fetching only SW2021 would leave `panel doctor --dataset index_classify --year 2014` reporting
+    `partition_missing` for a vintage this repository has measured, dated and can read back.
+
+    `--year` does not scope this and cannot: the response carries no date column at all, so
+    `providers/tushare.py` dates every node at its vintage's effective day and the partition year
+    is 2014 or 2021 whatever was asked for. `_UNPINNED_PARTITION_YEAR_TARGETS` is the exemption.
+    Measured on 2026-08-11: SW2014 is 359 nodes (28 L1 / 104 L2 / 227 L3) filed under 2014, and
+    SW2021 is 511 (31 / 134 / 346) filed under 2021.
+    """
+    written: list[PartitionRef] = []
+    _echo_budget(
+        INDUSTRY_TREE_DATASET,
+        len(INDUSTRY_TAXONOMY_EFFECTIVE_FROM),
+        "requests",
+        "one per measured taxonomy vintage; the partition year is the vintage's, not --year",
+    )
+    for taxonomy in sorted(INDUSTRY_TAXONOMY_EFFECTIVE_FROM):
+        batch = _fetch_panel(provider, INDUSTRY_TREE_DATASET, as_of=now, subjects=(taxonomy,))
+        if batch.status != "success":
+            raise _panel_fail(
+                PanelExit.unhealthy,
+                f"{INDUSTRY_TREE_DATASET} served no node for vintage {taxonomy}, whose effective "
+                f"date is {INDUSTRY_TAXONOMY_EFFECTIVE_FROM[taxonomy].isoformat()}. An empty tree "
+                "would read as a taxonomy with no industries in it",
+            )
+        written.append(write_industry_tree(store, batch))
+    return written
+
+
+def _stored_level_one_codes(store: PanelStore, *, now: datetime) -> tuple[str, ...]:
+    """The `l1_code` slices `index_member_all` is fetched in, read off the stored tree.
+
+    `_stored_calendar`'s shape one dataset over: the request needs something the panel already
+    holds. See `_NEEDS_STORED_INDUSTRY_TREE` for why it is read rather than written down here,
+    and why the vintage is `INDUSTRY_MEMBERSHIP_TAXONOMY` rather than the endpoint's own default.
+    """
+    vintage_year = INDUSTRY_TAXONOMY_EFFECTIVE_FROM[INDUSTRY_MEMBERSHIP_TAXONOMY].year
+    try:
+        trees = load_industry_trees(store, years=(vintage_year,), as_of=now, max_staleness=None)
+    except (PanelStorageError, IndustryClassificationError) as error:
+        raise _panel_fail(
+            PanelExit.unhealthy,
+            f"the {INDUSTRY_MEMBERSHIP_TAXONOMY} industry tree could not be read out of "
+            f"{store.root}: {error}. {INDUSTRY_MEMBERSHIP_DATASET} is fetched one l1_code slice "
+            "at a time and the tree is where those codes come from. Build it first: `openalpha "
+            "panel build --dataset index_classify --year <year>`",
+        ) from error
+    tree = trees.get(INDUSTRY_MEMBERSHIP_TAXONOMY)
+    if tree is None:
+        raise _panel_fail(
+            PanelExit.unhealthy,
+            f"the {vintage_year} tree partition holds "
+            f"{sorted(trees)} and not {INDUSTRY_MEMBERSHIP_TAXONOMY}, which is the one vintage "
+            f"every {INDUSTRY_MEMBERSHIP_DATASET} row is labelled with",
+        )
+    return tuple(node.index_code for node in tree.nodes_at("L1"))
+
+
+def _build_industry_memberships(
+    store: PanelStore, provider: TushareProvider, *, codes: Sequence[str], now: datetime
+) -> list[PartitionRef]:
+    """Sweep every `(l1_code, is_new)` slice and write the corpus as one partition per event year.
+
+    Two subjects per request and both mandatory. The `l1_code` slice is what keeps a response
+    under this table's lowest cap (3,000 rows against a 7,893-row corpus); the `is_new` state is
+    the refusal the dataset exists for -- a bare request returns the 5,889 **current** assignments
+    with no flag and no short count to notice the 2,004 superseded ones by, which is a current
+    snapshot indistinguishable from a complete history.
+
+    So this loop asks for both states, and it refuses a sweep that came back with no superseded
+    assignment at all. That is the one shape `write_industry_memberships` names as invisible to
+    its own subject guard: a current-only corpus carries *every* security and reads as a market in
+    which nobody has ever been reclassified. Measured on 2026-08-11, `801010.SI` alone answers
+    126 current and 116 superseded, so a whole sweep with none of the latter is not a quiet market.
+
+    `codes` is resolved by the caller, from the stored tree, for the reason `_build_panel` resolves
+    the calendar before the targets that need it: a store with no `index_classify` in it is refused
+    after zero round trips rather than after some of the 62.
+    """
+    states = (CURRENT_INDUSTRY_MEMBERSHIP, SUPERSEDED_INDUSTRY_MEMBERSHIP)
+    total = len(codes) * len(states)
+    _echo_budget(
+        INDUSTRY_MEMBERSHIP_DATASET,
+        total,
+        "requests",
+        f"{len(codes)} {INDUSTRY_MEMBERSHIP_TAXONOMY} l1_code slices x {len(states)} membership "
+        "states; the partition years are the membership events', not --year",
+    )
+    batches: list[ColumnarPanelBatch] = []
+    superseded = 0
+    started = monotonic()
+    stride = _progress_stride(total)
+    done = 0
+    for code in codes:
+        for state in states:
+            batch = _fetch_panel(
+                provider, INDUSTRY_MEMBERSHIP_DATASET, as_of=now, subjects=(code, state)
+            )
+            done += 1
+            if batch.status == "success":
+                batches.append(batch)
+                if state == SUPERSEDED_INDUSTRY_MEMBERSHIP:
+                    superseded += batch.row_count
+            if done % stride == 0 or done == total:
+                _echo_progress(
+                    (INDUSTRY_MEMBERSHIP_DATASET,),
+                    done,
+                    total,
+                    started,
+                    unit="industry-slices",
+                )
+    if not batches:
+        raise _panel_fail(
+            PanelExit.unhealthy,
+            f"none of the {total} {INDUSTRY_MEMBERSHIP_DATASET} slices served a row; an empty "
+            "corpus would read as a market in which nothing has ever been classified",
+        )
+    if not superseded:
+        raise _panel_fail(
+            PanelExit.unhealthy,
+            f"this sweep fetched {len(codes)} l1_code slices in both membership states and every "
+            f"is_new={SUPERSEDED_INDUSTRY_MEMBERSHIP!r} slice came back empty, so the corpus is "
+            "the current snapshot alone. That is the one shape write_industry_memberships' "
+            "subject guard cannot see -- it carries every security and no history, and reads as "
+            "a market in which nobody has ever been reclassified",
+        )
+    return list(write_industry_memberships(store, batches))
+
+
+def _refuse_shrinking_statement_years(
+    store: PanelStore, *, dataset: str, batches: Sequence[ColumnarPanelBatch]
+) -> None:
+    """Refuse a `fina_indicator` write that would replace a stored year with fewer rows.
+
+    ## The partition this stops from being destroyed
+
+    `fina_indicator`'s request window filters `end_date` and its rows are filed by `ann_date`, so
+    an announcement year is assembled from at least two report-period years: the annual of *A-1*
+    plus the three interim reports of *A*. A partition is replaced whole. So a build over period
+    years 2015..2026 writes announcement year 2016 with ~23,000 rows, and a later `--year 2016`
+    on its own would write the same partition with only that period year's interims -- fewer
+    rows, the *same* securities, and therefore nothing for
+    `panel_ingest._refuse_to_drop_stored_subjects` to see. The rows that vanish are every annual
+    report in that year, which is the one filing a value factor cannot do without.
+
+    `PANEL_BUILD_SPAN_TARGETS` closes the half of this that happens inside one invocation, by
+    accumulating every requested period year into one write. This closes the half that happens
+    *across* invocations, which no amount of accumulation can.
+
+    ## Why a row count, and what it does not claim
+
+    It is not a claim that upstream never withdraws a row. It is a statement about this build:
+    a write that shrinks a stored announcement year is one whose period-year span does not
+    reproduce what that year already holds, and the remedy -- widen `--start`/`--end` -- is the
+    caller's. If the publisher genuinely did withdraw filings, the refusal names the partition
+    and clearing it is a deliberate act rather than a side effect of a narrower re-run.
+
+    Scoped to `fina_indicator` because it is the only target whose partitions straddle its
+    requests. The three announcement-year statement endpoints write exactly the year they were
+    asked for from one request per security, so the only way to shrink one of those is
+    `--subject`, which `_refuse_to_drop_stored_subjects` already refuses by name.
+    """
+    merged = merge_panel_batches(batches)
+    shrinking: list[str] = []
+    for year, yearly in split_panel_batch_by_year(merged):
+        existing = store.read_coverage(dataset, year)
+        if existing is not None and yearly.row_count < existing.row_count:
+            shrinking.append(f"{year} holds {existing.row_count} and would get {yearly.row_count}")
+    if shrinking:
+        raise _panel_fail(
+            PanelExit.unhealthy,
+            f"this {dataset} build would replace stored announcement years with fewer rows than "
+            f"they hold: {shrinking}. Its request window filters the report period and its rows "
+            "are filed by announcement date, so an announcement year is assembled from at least "
+            "two period years -- the annual of the year before plus the interims of the year "
+            "itself -- and a narrower span cannot reproduce a wider one. Widen --start/--end to "
+            "cover the period years that fed those partitions, or clear them deliberately if the "
+            "publisher has withdrawn the filings",
+        )
+
+
 def _build_panel(
     store: PanelStore,
     provider: TushareProvider,
     *,
     written: dict[str, list[PartitionRef]],
     targets: frozenset[str],
+    subjects: Sequence[str],
     year: int,
     exchange: str,
     halts: bool,
     now: datetime,
 ) -> tuple[tuple[date, ...], str]:
-    """Run every requested target in `PANEL_BUILD_TARGETS`' declared order.
+    """Run every requested **year-scoped** target in `PANEL_BUILD_TARGETS`' declared order.
 
     `written` is the caller's, keyed by target and filled as each partition lands, for two
     reasons that a returned value cannot serve. A build is a sequence of whole-partition writes
     with no transaction around them, so when a later target is refused the earlier ones are
     already on disk and the command has to be able to *name* them (`_stored_so_far`). And a
     target that this function accepted but wrote nothing for is only visible as an absent key
-    (`_audit_written_partitions`) -- the failure a sixth entry in `PANEL_BUILD_TARGETS` with no
-    branch below produces, which would otherwise be an exit 0 with an empty `partitions` list.
+    (`_audit_written_partitions`) -- the failure a fourteenth entry in `PANEL_BUILD_TARGETS` with
+    no branch below produces, which would otherwise be an exit 0 with an empty `partitions` list.
+
+    The three `PANEL_BUILD_SPAN_TARGETS` are not run here: their unit of work is the whole
+    invocation rather than one year, which `_build_span_targets` does once after this loop has
+    finished. That set's docstring says why for each of them, and the reason is never
+    convenience -- for `fina_indicator` a per-year loop is silently destructive.
     """
     sessions: tuple[date, ...] = ()
     calendar: TradingCalendar | None = None
     halt_state = "not-applicable"
+    universe: tuple[str, ...] = ()
 
     if TRADING_CALENDAR_DATASET in targets:
         written.setdefault(TRADING_CALENDAR_DATASET, []).append(
@@ -1590,11 +2321,20 @@ def _build_panel(
     if STOCK_BASIC_DATASET in targets:
         # `--year` does not scope this one and cannot: `stock_basic` has no date filter, so one
         # request is the whole registry and `write_stock_universe` splits it into one partition
-        # per lifecycle year. Recorded in the command's help, in `_LIFECYCLE_YEAR_TARGETS` (which
-        # exempts it from the partition-year audit) rather than papered over.
+        # per lifecycle year. Recorded in the command's help, in
+        # `_UNPINNED_PARTITION_YEAR_TARGETS` (which exempts it from the partition-year audit)
+        # rather than papered over.
         written.setdefault(STOCK_BASIC_DATASET, []).extend(
             write_stock_universe(store, _fetch_panel(provider, STOCK_BASIC_DATASET, as_of=now))
         )
+    if targets & _NEEDS_STORED_UNIVERSE:
+        # Resolved here rather than at the top of this function, and the position is the whole
+        # point: after the `stock_basic` branch, so `--dataset stock_basic --dataset income` in
+        # one invocation reads the registry this build just wrote; and before every remaining
+        # target, so a store with no registry costs one round trip rather than an hour of
+        # `price`. `_NEEDS_STORED_CALENDAR` sits at the same seam one line down for the same
+        # reason.
+        universe = tuple(subjects) or _stored_universe(store, now=now)
     if targets & _NEEDS_STORED_CALENDAR:
         calendar = _stored_calendar(store, exchange=exchange, years=(year,), as_of=now)
         sessions = _build_sessions(calendar, year, now)
@@ -1637,7 +2377,108 @@ def _build_panel(
                 calendar=calendar,
             )
         )
+    if NAMECHANGE_DATASET in targets:
+        written.setdefault(NAMECHANGE_DATASET, []).append(
+            write_name_history(
+                store,
+                _fetch_panel(provider, NAMECHANGE_DATASET, as_of=_year_end_as_of(year, now)),
+            )
+        )
+    if INDEX_WEIGHT_DATASET in targets:
+        written.setdefault(INDEX_WEIGHT_DATASET, []).extend(
+            _build_index_weights(store, provider, year=year, now=now)
+        )
+    for dataset in (INCOME_DATASET, BALANCE_SHEET_DATASET, CASH_FLOW_DATASET):
+        if dataset not in targets:
+            continue
+        written.setdefault(dataset, []).extend(
+            write_financial_statements(
+                store,
+                _build_statement_panel(
+                    store,
+                    provider,
+                    dataset=dataset,
+                    subjects=universe,
+                    # The **end** of the announcement year: these three filter `ann_date`, so a
+                    # window taken at 1 January fetches the right year and the point-in-time
+                    # filter then drops every row in it. See `_year_end_as_of`.
+                    as_of=_year_end_as_of(year, now),
+                    label=f"{dataset} year={year}",
+                    reason=(
+                        f"one per security; ts_code is mandatory on {dataset} and there is no "
+                        "cross-section fetch"
+                    ),
+                ),
+            )
+        )
     return sessions, halt_state
+
+
+def _build_span_targets(
+    store: PanelStore,
+    provider: TushareProvider,
+    *,
+    written: dict[str, list[PartitionRef]],
+    targets: frozenset[str],
+    subjects: Sequence[str],
+    years: Sequence[int],
+    now: datetime,
+) -> None:
+    """Run the `PANEL_BUILD_SPAN_TARGETS` once for the whole invocation, in table order.
+
+    `_build_panel`'s counterpart for the three targets a per-year loop cannot serve, and it takes
+    `years` rather than a year for the one of them that uses them at all: `fina_indicator`'s
+    period years are exactly the years the caller named, accumulated into a single write because
+    an announcement-year partition is assembled from several of them.
+
+    Runs after the year loop so `stock_basic` and `index_classify` -- both of which a span target
+    reads out of the store -- can have been written by the same invocation. That is the whole
+    reason for the phase order rather than an accident of it: `openalpha panel build --dataset
+    index_classify --dataset index_member_all` on a fresh store has to work, and it does, because
+    the tree lands before the sweep that reads its `l1_code` slices.
+    """
+    universe: tuple[str, ...] = ()
+    if targets & _NEEDS_STORED_UNIVERSE:
+        # Before the first request of this phase rather than beside the branch that uses it: a
+        # store with no registry would otherwise be refused after `index_member_all`'s 62 round
+        # trips, which is the cost `_build_panel` resolves its own universe early to avoid.
+        universe = tuple(subjects) or _stored_universe(store, now=now)
+    if INDUSTRY_TREE_DATASET in targets:
+        written.setdefault(INDUSTRY_TREE_DATASET, []).extend(
+            _build_industry_tree(store, provider, now=now)
+        )
+    if targets & _NEEDS_STORED_INDUSTRY_TREE:
+        codes = _stored_level_one_codes(store, now=now)
+        written.setdefault(INDUSTRY_MEMBERSHIP_DATASET, []).extend(
+            _build_industry_memberships(store, provider, codes=codes, now=now)
+        )
+    if FINANCIAL_INDICATOR_DATASET in targets:
+        batches: list[ColumnarPanelBatch] = []
+        for period_year in years:
+            batches.extend(
+                _build_statement_panel(
+                    store,
+                    provider,
+                    dataset=FINANCIAL_INDICATOR_DATASET,
+                    subjects=universe,
+                    # `now`, not a year-derived instant. This endpoint's window comes from the
+                    # period year in `extra`, so `as_of` does only its own job -- bounding what
+                    # was knowable -- which is the split `_financial_indicator_params` exists for.
+                    as_of=now,
+                    label=f"{FINANCIAL_INDICATOR_DATASET} period-year={period_year}",
+                    reason=(
+                        "one per security; the report-period year is a request subject and the "
+                        "partitions are announcement years"
+                    ),
+                    extra=(str(period_year),),
+                )
+            )
+        _refuse_shrinking_statement_years(
+            store, dataset=FINANCIAL_INDICATOR_DATASET, batches=batches
+        )
+        written.setdefault(FINANCIAL_INDICATOR_DATASET, []).extend(
+            write_financial_statements(store, batches)
+        )
 
 
 def _all_refs(written: Mapping[str, Sequence[PartitionRef]]) -> list[PartitionRef]:
@@ -1671,7 +2512,10 @@ def _stored_so_far(refs: Sequence[PartitionRef]) -> str:
 
 
 def _audit_written_partitions(
-    written: Mapping[str, Sequence[PartitionRef]], *, targets: frozenset[str], year: int
+    written: Mapping[str, Sequence[PartitionRef]],
+    *,
+    targets: frozenset[str],
+    year: int | None,
 ) -> None:
     """Refuse a build that answered `ok` without having built what it was asked for.
 
@@ -1679,8 +2523,14 @@ def _audit_written_partitions(
     not say what it looks like it says, and neither of which any writer below can see -- the
     writers are told what to store, not what was requested.
 
-    1. **A requested target wrote no partition at all.** This is what a sixth entry in
-       `PANEL_BUILD_TARGETS` with no matching branch in `_build_panel` produces: `_build_targets`
+    `year` is `None` for the span phase, where there is no `--year` a partition could be checked
+    against: `_build_span_targets` runs once per invocation and every one of its targets is in
+    `_UNPINNED_PARTITION_YEAR_TARGETS` anyway. Check 1 still runs, and has to -- a fourteenth
+    entry in `PANEL_BUILD_TARGETS` with no branch is exactly as invisible in that phase as in the
+    other, and adding a phase without extending this audit is the same defect wearing a new coat.
+
+    1. **A requested target wrote no partition at all.** This is what a fourteenth entry in
+       `PANEL_BUILD_TARGETS` with no matching branch produces: `_build_targets`
        accepts the name because the table has it, every `if` misses, and the command reports
        `exit 0` with `"partitions": []` -- the empty success this whole issue exists to make
        unavailable, at the one layer where nothing downstream can catch it. It is
@@ -1699,8 +2549,11 @@ def _audit_written_partitions(
        legitimately be days before `as_of` -- but waiving it means a five-year-old corpus and
        this year's are the same observation to that call. The year is the check that survives.
 
-       `stock_basic` is exempt and only `stock_basic` (`_LIFECYCLE_YEAR_TARGETS`): its
-       partitions are lifecycle years by construction.
+       Four targets are exempt and only those four (`_UNPINNED_PARTITION_YEAR_TARGETS`), each
+       because its partition year is a property of the rows rather than of the request:
+       `stock_basic`'s are lifecycle years, `index_classify`'s are taxonomy vintages,
+       `index_member_all`'s are membership-event years and `fina_indicator`'s are announcement
+       years derived from a report-period request.
     """
     silent = sorted(name for name in targets if not written.get(name))
     if silent:
@@ -1711,10 +2564,12 @@ def _audit_written_partitions(
             "target the table accepts and no branch builds -- not a fact about the panel. "
             f"{_stored_so_far(_all_refs(written))}",
         )
+    if year is None:
+        return
     misfiled = [
         f"{ref.dataset}:{ref.year}"
         for name, group in written.items()
-        if name not in _LIFECYCLE_YEAR_TARGETS
+        if name not in _UNPINNED_PARTITION_YEAR_TARGETS
         for ref in group
         if ref.year != year
     ]
@@ -1831,20 +2686,53 @@ def _resumable_targets(
     rather than twelve; the bounded retry in `TushareProvider._post` is what keeps a transient
     socket error from costing even that.
 
-    `trade_cal` and `stock_basic` are never skipped and are not evidence for skipping anything
-    else. Each is a **single** request -- twelve of them across the whole gate range, against
-    the ~2,900 a year of `price` costs -- so skipping them would save nothing measurable while
-    making a resumed build read a calendar it did not verify. `suspend_d` is not evidence
-    either, for `_EMPTY_SESSION_IS_ORDINARY`'s reason: a session on which nothing was halted
-    serves zero rows, so its census is a fact about the market. A complete `daily` partition is
-    the stronger witness anyway -- `write_daily_panel` refuses a session whose missing bars
-    nothing accounts for, so that partition existing means the halt corpus was read.
+    `trade_cal`, `stock_basic` and `namechange` are never skipped and are not evidence for
+    skipping anything else. Each is a **single** request -- twelve of them across the whole gate
+    range, against the ~2,900 a year of `price` costs -- so skipping them would save nothing
+    measurable while making a resumed build read a calendar it did not verify. `suspend_d` is not
+    evidence either, for `_EMPTY_SESSION_IS_ORDINARY`'s reason: a session on which nothing was
+    halted serves zero rows, so its census is a fact about the market. A complete `daily`
+    partition is the stronger witness anyway -- `write_daily_panel` refuses a session whose
+    missing bars nothing accounts for, so that partition existing means the halt corpus was read.
+
+    ## The second rule, and it is weaker on purpose rather than by oversight
+
+    `_REGISTERED_PARTITION_RESUME` -- `index_weight` and the three announcement-year statement
+    targets -- is skipped on a **registered partition** alone, because there is nothing stronger
+    to read. Their datasets have no session census: a security that announced nothing in a year
+    is absent from the partition and indistinguishable from one that was never fetched, so
+    "which securities should be here" has no answer the store can give. What the rule buys is the
+    only thing that matters at this scale -- `income` alone is 5,881 requests per year, so a
+    twelve-year build that dies in the eleventh costs one year rather than eleven.
+
+    What it cannot see is a partition an earlier `--subject` run narrowed: that partition is
+    registered, so `--resume` skips it, and the year stays narrow. The residue is left visible
+    rather than argued away -- `tests/integration/test_cli_panel.py` pins exactly that case, so
+    it is a measured limitation and not a claim -- and it is bounded on the other side by
+    `panel_ingest._refuse_to_drop_stored_subjects`, which refuses the narrowing write itself
+    whenever a wider partition is already there. Re-running without `--resume` is the remedy and
+    is always available.
+
+    ## `PANEL_BUILD_SPAN_TARGETS` are never skipped, and `fina_indicator` cannot be
+
+    `index_classify` is two requests and `index_member_all` is 62, so for both the answer is
+    `trade_cal`'s. `fina_indicator` is 5,881 requests per period year and is the one target here
+    that would genuinely benefit -- and it is *structurally* unresumable, not merely unimplemented:
+    it writes nothing until every requested period year has been fetched, because an announcement
+    year is assembled from several of them, so there is no intermediate state for a resume to
+    read. The lever a caller has instead is a narrower `--start`/`--end`, at the cost
+    `_refuse_shrinking_statement_years` states.
     """
     skippable = {name for name in targets if name in _NEEDS_STORED_CALENDAR}
+    registered = {
+        name
+        for name in targets & _REGISTERED_PARTITION_RESUME
+        if year in store.registered_years(name)
+    }
     if not skippable:
-        return frozenset(), ()
+        return frozenset(registered), ()
     if year not in store.registered_years(TRADING_CALENDAR_DATASET):
-        return frozenset(), ()
+        return frozenset(registered), ()
     calendar = _stored_calendar(store, exchange=exchange, years=(year,), as_of=now)
     sessions = _build_sessions(calendar, year, now)
     reached = sessions[-1]
@@ -1857,7 +2745,7 @@ def _resumable_targets(
             if name in SESSION_SCOPED_DATASETS
         )
     }
-    return frozenset(resumed), sessions
+    return frozenset(resumed | registered), sessions
 
 
 _BUILD_AS_OF_HELP = (
@@ -1873,12 +2761,28 @@ _BUILD_AS_OF_HELP = (
 )
 
 _BUILD_DATASET_HELP = (
-    "A build target, repeatable. The five this command builds, in the order it runs them: "
+    "A build target, repeatable. The thirteen this command builds, in the order it runs them: "
     f"{', '.join(PANEL_BUILD_TARGETS)}. Anything else is refused by name. One target is one "
     "unit of work a panel_ingest writer accepts, which is not always one dataset: 'price' is "
     "daily + daily_basic + suspend_d, because write_daily_panel takes the pair together and its "
-    "halts argument has no default. 'stock_basic' ignores --year: the registry has no date "
-    "filter and is split into one partition per lifecycle year."
+    f"halts argument has no default. Four of them do not write the --year they were given, "
+    f"because their partition year comes from the rows rather than from the request "
+    f"({', '.join(sorted(_UNPINNED_PARTITION_YEAR_TARGETS))}): the registry is split by "
+    "lifecycle year, the industry tree by taxonomy vintage, the memberships by event year, and "
+    "fina_indicator is asked for a report-period year and filed by announcement year. The last "
+    f"three of those ({', '.join(sorted(PANEL_BUILD_SPAN_TARGETS))}) run once for the whole "
+    "invocation rather than once per year."
+)
+
+_BUILD_SUBJECT_HELP = (
+    "A ts_code the statement targets fetch, repeatable. Only income, balancesheet, cashflow and "
+    "fina_indicator take one -- naming it for any other target is refused rather than ignored, "
+    "because their partitions are the whole market and a partition is replaced whole. Without "
+    "it the securities come from the stored stock_basic registry, which is 5,881 requests per "
+    "dataset per year; with it, one per name. Nothing is inferred from --year: a security that "
+    "had not listed yet can still have filings announced in a window (688981.SH answers the "
+    "2015 window) and one delisted in 2002 can still have filings announced in 2024 "
+    "(000003.SZ), both measured, so no lifecycle filter is applied."
 )
 
 
@@ -1898,10 +2802,13 @@ _BUILD_RESUME_HELP = (
     "Skip a target for a year whose stored partitions already reach the last session this "
     "build would fetch, so an interrupted multi-year build costs one year rather than all of "
     "them. Year-granular and evidence-based -- the census the writers already validated, not a "
-    "progress file. trade_cal and stock_basic are never skipped, and there is no intra-year "
-    "resumption; see `_resumable_targets`. Off by default: a rebuild that quietly fetched "
-    "nothing would be the wrong default for a command whose ordinary job is to replace what "
-    "is there."
+    "progress file. trade_cal, stock_basic and namechange are never skipped, and there is no "
+    "intra-year resumption. index_weight and the three announcement-year statement targets are "
+    "skipped on a registered partition alone, which is weaker: it cannot tell a whole-market "
+    "year from one an earlier --subject run narrowed. fina_indicator cannot be resumed at all, "
+    "because it writes nothing until every requested period year has been fetched. See "
+    "`_resumable_targets`. Off by default: a rebuild that quietly fetched nothing would be the "
+    "wrong default for a command whose ordinary job is to replace what is there."
 )
 
 
@@ -1911,6 +2818,9 @@ def panel_build(
     year: Annotated[list[int] | None, typer.Option("--year", help=_BUILD_YEAR_HELP)] = None,
     start: Annotated[int | None, typer.Option("--start", help=_BUILD_START_HELP)] = None,
     end: Annotated[int | None, typer.Option("--end", help=_BUILD_END_HELP)] = None,
+    subject: Annotated[
+        list[str] | None, typer.Option("--subject", help=_BUILD_SUBJECT_HELP)
+    ] = None,
     runtime_dir: Annotated[Path, typer.Option("--runtime-dir")] = Path("./runtime"),
     exchange: Annotated[
         str, typer.Option("--exchange", help="Which exchange's calendar to fetch and read.")
@@ -1964,10 +2874,30 @@ def panel_build(
     ones already on disk -- and it is why the refusal names both what landed and the exact
     command that carries on from there. There is no transaction across years any more than
     there is one across targets.
+
+    **Two phases, and the second is not an optimisation.** The year loop runs the ten year-scoped
+    targets; `_build_span_targets` then runs the three in `PANEL_BUILD_SPAN_TARGETS` once for the
+    whole invocation, because their requests carry no year (`index_classify`, `index_member_all`)
+    or carry one that is not the partition's (`fina_indicator`, whose announcement years are
+    assembled from several report-period years and which a per-year loop would silently truncate).
+    The span phase runs second so that `stock_basic` and `index_classify`, which it reads out of
+    the store, can have been written by the same invocation.
+
+    **What a whole-market build now costs.** The five original targets were ~2,900 requests for a
+    year. `income`, `balancesheet` and `cashflow` are one request per security each -- 5,881 on
+    2026-08-11 -- so a single year of the four statement endpoints is ~23,500 round trips, and
+    `--start 2015 --end 2026` is ~282,000. At the 1.1--4.6s per request measured on that date the
+    twelve-year statement backfill is days rather than hours, and the account's own 500-per-minute
+    quota is not the binding constraint at that latency. Every fetch loop therefore states its
+    size before it starts (`_echo_budget`) and reports progress with an `eta` while it runs, and
+    `--subject` is the lever that turns the registry sweep into a named handful.
     """
     with _panel_command("panel build"):
         targets = _build_targets(dataset)
+        subjects = _build_subjects(subject or (), targets)
         years = _build_years(year or (), start, end)
+        year_targets = targets - PANEL_BUILD_SPAN_TARGETS
+        span_targets = targets & PANEL_BUILD_SPAN_TARGETS
         store = _panel_store(runtime_dir)
         now = _panel_as_of(as_of)
         # **One instant for the whole invocation, and the provider gets it too.** The clock this
@@ -2004,12 +2934,12 @@ def panel_build(
         for index, one_year in enumerate(years):
             resumed, covered = (
                 _resumable_targets(
-                    store, targets=targets, year=one_year, exchange=exchange, now=now
+                    store, targets=year_targets, year=one_year, exchange=exchange, now=now
                 )
                 if resume
                 else (frozenset[str](), ())
             )
-            fetched = targets - resumed
+            fetched = year_targets - resumed
             written: dict[str, list[PartitionRef]] = {}
             sessions: tuple[date, ...] = covered
             halt_state = "resumed" if resumed and not fetched else "not-applicable"
@@ -2020,6 +2950,7 @@ def panel_build(
                         provider,
                         written=written,
                         targets=fetched,
+                        subjects=subjects,
                         year=one_year,
                         exchange=exchange,
                         halts=halts,
@@ -2065,11 +2996,54 @@ def panel_build(
                 }
             )
 
+        span_written: dict[str, list[PartitionRef]] = {}
+        if span_targets:
+            try:
+                _build_span_targets(
+                    store,
+                    provider,
+                    written=span_written,
+                    targets=span_targets,
+                    subjects=subjects,
+                    years=years,
+                    now=now,
+                )
+            except _PANEL_WRITE_REFUSALS as error:
+                raise _panel_fail(
+                    PanelExit.unhealthy,
+                    f"the panel refused this build: {error}. "
+                    f"{_stored_so_far([*stored, *_all_refs(span_written)])}",
+                ) from error
+            except Exception:
+                # `_build_panel`'s clause, for the phase that has no year to carry on from: the
+                # span targets are one unit of work across the whole invocation, so there is no
+                # `--start` that resumes them and `_years_left` would name a range that means
+                # nothing here.
+                typer.echo(
+                    _stored_so_far([*stored, *_all_refs(span_written)]),
+                    err=True,
+                )
+                raise
+            _audit_written_partitions(span_written, targets=span_targets, year=None)
+            stored.extend(_all_refs(span_written))
+
         payload = {
             "years": list(years),
             "exchange": exchange,
             "targets": sorted(targets),
             "halts": _one_halt_state(builds),
+            # What the span phase wrote, kept apart from `builds` because it belongs to no year:
+            # `index_classify`'s partitions are taxonomy vintages, `index_member_all`'s are
+            # membership-event years and `fina_indicator`'s are announcement years assembled from
+            # every requested period year. Folding them into one year's entry would attribute
+            # them to a year that did not produce them.
+            "span": {
+                "targets": sorted(span_targets),
+                "partitions": [
+                    {"dataset": ref.dataset, "year": ref.year, "row_count": ref.row_count}
+                    for ref in _all_refs(span_written)
+                ],
+            },
             # The instant this build's horizon came from, reported whether it was passed or
             # defaulted. It is what a later `--dataset`-at-a-time re-fetch of this same panel
             # has to be pinned to, and a value a caller can only get by being told: `sessions`
@@ -2097,10 +3071,29 @@ def panel_build(
                     f"{span['last']}"
                 )
             for name in cast(Sequence[str], entry["resumed"]):
-                typer.echo(f"RESUMED {name} year={entry['year']} (already complete)")
+                typer.echo(f"RESUMED {name} year={entry['year']} ({_resume_evidence(name)})")
             for ref in cast(Sequence[Mapping[str, object]], entry["partitions"]):
                 typer.echo(f"WROTE {ref['dataset']} year={ref['year']} rows={ref['row_count']}")
+        for landed_ref in _all_refs(span_written):
+            typer.echo(
+                f"WROTE {landed_ref.dataset} year={landed_ref.year} "
+                f"rows={landed_ref.row_count} (span)"
+            )
         typer.echo(f"HALTS {_one_halt_state(builds)}")
+
+
+def _resume_evidence(target: str) -> str:
+    """Why `--resume` skipped this target, in the output rather than only in a docstring.
+
+    The two rules are not equally strong (`_resumable_targets`), and a caller reading `RESUMED
+    income year=2024` has no way to know which one applied. Saying so on the line is what makes
+    the weaker one a disclosure instead of a silence: a partition an earlier `--subject` run
+    narrowed is registered, and this is the only place the difference is visible at the moment it
+    matters.
+    """
+    if target in _REGISTERED_PARTITION_RESUME:
+        return "partition registered; this rule does not check which securities it holds"
+    return "already complete"
 
 
 def _years_left(years: Sequence[int], index: int) -> str:

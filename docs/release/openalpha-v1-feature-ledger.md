@@ -4,8 +4,8 @@
 
 ## 对账结论
 
-- 功能总数: 140
-- 当前真实完成: 135 (96.43%)
+- 功能总数: 141
+- 当前真实完成: 136 (96.45%)
 - `UNREVIEWED=0`
 - `UNKNOWN=0`
 - `legacy_acceptance_rows=86` (历史散文验收、尚未绑定为可执行 pytest/CI 断言)
@@ -18,7 +18,7 @@
 | `DEFERRED` | 1 |
 | `ENHANCED_REPLACEMENT` | 20 |
 | `EXCLUDED` | 4 |
-| `NATIVE_COMPLETE` | 114 |
+| `NATIVE_COMPLETE` | 115 |
 
 ## 功能明细
 
@@ -164,6 +164,7 @@
 | `OA-PANEL-024` | panel | The event clock, which readiness never compares against as_of | `NATIVE_COMPLETE` | `src/openalpha_cn/panel_doctor.py#DOCTOR_ISSUE_CODES;src/openalpha_cn/panel_doctor.py#DOCTOR_CODE_CATEGORY;src/openalpha_cn/panel_doctor.py#HEALTH_CODE_SEVERITY;src/openalpha_cn/panel_doctor.py#dataset_health;src/openalpha_cn/panel_gate.py#GATE_CODE_BLOCKS` | `tests/integration/panel/test_panel_doctor.py;tests/unit/test_panel_doctor_rules.py;tests/unit/test_panel_gate_rules.py` | `pytest` | `tests/integration/panel/test_panel_doctor.py::test_a_row_whose_event_has_not_happened_yet_is_reported_though_readiness_clears_it` |
 | `OA-PANEL-025` | panel | The calendar's own disclosed look-ahead, made conditional on the panel's horizon | `NATIVE_COMPLETE` | `src/openalpha_cn/panel_doctor.py#calendar_lookahead_findings;src/openalpha_cn/panel_doctor.py#CALENDAR_LOOKAHEAD_CHECK;src/openalpha_cn/panel_doctor.py#panel_health_report;src/openalpha_cn/domain/trading_calendar.py#KNOWN_CALENDAR_LOOKAHEAD` | `tests/unit/test_panel_doctor_rules.py;tests/integration/panel/test_panel_doctor.py` | `pytest` | `tests/integration/panel/test_panel_doctor.py::test_a_calendar_whose_horizon_covers_a_proven_lookahead_date_says_so_on_this_panel` |
 | `OA-PANEL-026` | panel | The un-gated read named, disclosed on every report, and bound to an allowlist | `NATIVE_COMPLETE` | `src/openalpha_cn/panel/catalog.py#KNOWN_STORAGE_LIMITATIONS;src/openalpha_cn/panel/catalog.py#StorageLimitation;src/openalpha_cn/panel_doctor.py#storage_limitations;src/openalpha_cn/panel/store.py#PanelStore` | `tests/unit/panel/test_query_callers.py;tests/unit/test_panel_doctor_rules.py;tests/integration/panel/test_panel_doctor.py` | `pytest` | `tests/unit/panel/test_query_callers.py::test_only_the_store_itself_reads_a_partition_without_a_readiness_verdict` |
+| `OA-PANEL-027` | panel | Every declared dataset has a build target, in two phases | `NATIVE_COMPLETE` | `src/openalpha_cn/cli.py#PANEL_BUILD_TARGETS;src/openalpha_cn/cli.py#PANEL_BUILD_SPAN_TARGETS;src/openalpha_cn/cli.py#_UNPINNED_PARTITION_YEAR_TARGETS;src/openalpha_cn/cli.py#_NEEDS_STORED_UNIVERSE;src/openalpha_cn/cli.py#_NEEDS_STORED_INDUSTRY_TREE;src/openalpha_cn/cli.py#_REGISTERED_PARTITION_RESUME;src/openalpha_cn/cli.py#_build_subjects;src/openalpha_cn/cli.py#_year_end_as_of;src/openalpha_cn/cli.py#_month_end_as_of;src/openalpha_cn/cli.py#_progress_stride;src/openalpha_cn/cli.py#_echo_budget;src/openalpha_cn/cli.py#_subject_batches;src/openalpha_cn/cli.py#_stored_universe;src/openalpha_cn/cli.py#_build_statement_panel;src/openalpha_cn/cli.py#_build_index_weights;src/openalpha_cn/cli.py#_build_industry_tree;src/openalpha_cn/cli.py#_stored_level_one_codes;src/openalpha_cn/cli.py#_build_industry_memberships;src/openalpha_cn/cli.py#_refuse_shrinking_statement_years;src/openalpha_cn/cli.py#_build_span_targets;src/openalpha_cn/cli.py#_audit_written_partitions;src/openalpha_cn/cli.py#_resumable_targets;src/openalpha_cn/cli.py#_resume_evidence;src/openalpha_cn/cli.py#panel_build;src/openalpha_cn/panel_doctor.py#_LOAD_FAILURES` | `tests/integration/test_cli_panel_extra_targets.py;tests/integration/test_cli_panel.py;tests/unit/test_cli_panel_rules.py` | `pytest` | `tests/integration/test_cli_panel_extra_targets.py::test_every_new_target_writes_a_partition_through_the_real_writers` |
 
 ## 边界
 

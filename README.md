@@ -277,9 +277,11 @@ OpenAlpha CN 不把“多接几个行情 API”当作数据优势。优势落在
 
 ## 面板数据平面的三个命令
 
-面板数据平面（trade_cal / stock_basic / adj_factor / daily / daily_basic / suspend_d /
-stk_limit ...）有三个命令：`openalpha panel build` 抓取并写入，`openalpha panel doctor`
-体检已存数据，`openalpha data-check` 跑读取前的 fail-closed 依赖门。
+面板数据平面（15 个数据集：trade_cal / stock_basic / adj_factor / daily / daily_basic /
+suspend_d / stk_limit / namechange / index_weight / index_classify / index_member_all /
+income / balancesheet / cashflow / fina_indicator）有三个命令：`openalpha panel build`
+抓取并写入，`openalpha panel doctor` 体检已存数据，`openalpha data-check` 跑读取前的
+fail-closed 依赖门。
 
 **退出码就是交付物。** 三个命令共用同一张退出码表，各码对应的补救动作不同，所以不合并：
 
@@ -300,8 +302,15 @@ stk_limit ...）有三个命令：`openalpha panel build` 抓取并写入，`ope
 让 notice 非零等于让每次诚实体检都失败，然后这个命令会在第一条流水线里被 `|| true` 掉。
 
 ```bash
-# 构建：五个目标，按依赖序执行，与 --dataset 出现顺序无关
+# 构建：十三个目标，按依赖序执行，与 --dataset 出现顺序无关
 uv run openalpha panel build --dataset trade_cal --dataset price --year 2026
+
+# 行业分类（P3 中性化的前置）：树按 vintage 年落盘，成分按 l1_code 切片全量扫描
+uv run openalpha panel build --dataset index_classify --dataset index_member_all --year 2026
+
+# 财报：ts_code 必填且没有横截面，所以是「每只证券一次请求」，默认取自已存的 stock_basic
+uv run openalpha panel build --dataset stock_basic --dataset income --year 2024
+uv run openalpha panel build --dataset income --year 2024 --subject 000001.SZ
 
 # 多年：--year 可重复，或用闭区间 --start/--end；年份由老到新依次构建
 uv run openalpha panel build --dataset trade_cal --dataset price --start 2015 --end 2026 --resume
@@ -320,26 +329,43 @@ uv run openalpha data-check --dataset daily --dataset adj_factor --year 2026 \
   + `suspend_d` 一次会话循环取完，因为 `write_daily_panel` 必须同时收到前两者，且它的
   `halts` 参数没有默认值。所以 `--dataset daily` 会**按名字被拒**并告知原因，而不是被
   click 当作未知选项拒掉（后者读起来像「本仓库没有 daily 面板」，与事实相反）。
-- 未提供的目标（`namechange`、`index_weight`、两个行业数据集、四个财报接口）同样**按名字
-  被拒**，而不是给一个空的成功。
+- **十三个目标覆盖 `providers/tushare.py` 声明的全部 15 个数据集。** 早先只有五个，
+  `namechange`、`index_weight`、两个行业数据集和四个财报接口有 writer、有 loader、有体检
+  检查，却没有抓取路径 —— `panel build --dataset income` 按名字被拒，`panel doctor
+  --dataset income` 因此永远报 `partition_missing`。表里不存在的名字仍然**按名字被拒**，
+  而不是给一个空的成功；`_audit_written_partitions` 会在运行期堵住「表里加了键、没加实现」
+  这条缝（两个构建阶段都堵）。
+- **三个目标的工作单元是「整次调用」而不是「一个 `--year`」**（`index_classify`、
+  `index_member_all`、`fina_indicator`）。前两个的请求根本没有日期维度；`fina_indicator`
+  的窗口过滤的是**报告期**、行却按**公告日**归档，所以一个公告年至少由两个报告期年拼成
+  （上一年的年报 + 本年的三个季报），按年循环写会把前一年写进去的年报**静默替换掉**。
+  跨调用的那一半由「不允许缩小已存公告年」的拒绝守住。
+- **财报是全市场 5,881 次请求／数据集／年**（2026-08-11 实测）。每个抓取循环在发第一个
+  请求之前先在 stderr 打一行 `BUDGET`，`--subject` 把这个扫描缩到点名的几只。不做上市
+  生命周期过滤，因为两个方向都实测反例：`688981.SH` 2020 年才上市却有 2015 年公告的报表，
+  `000003.SZ` 2002 年就退市却有 2024 年公告的报表。
 - `--no-halts` 是一次**记录在案的弃检**，不是默认值：它让 `write_daily_panel` 拿到
   `halts=None`，从而关掉「缺失的行情没有任何东西解释」这条守卫。
 - `panel doctor` 与顶层 `openalpha doctor` 是两个命令：后者探的是 **provider 凭证与能力**，
   前者读的是**面板本身**。
 - 分区年份由**数据行自身的日期**决定，`--year` 只界定抓取范围；两者不一致时 `panel build`
-  会拒绝并点名（`stock_basic` 例外，它按上市生命周期年拆分）。
+  会拒绝并点名。四个目标是例外，每个都有自己的理由：`stock_basic` 按上市生命周期年拆分，
+  `index_classify` 按 vintage 年（SW2014 → 2014，SW2021 → 2021），`index_member_all`
+  按成分变更**事件年**（一次 62 请求的扫描落进约 38 个分区），`fina_indicator` 按公告年。
 - 构建是一串「整分区写入」，之间没有事务。中途被拒时命令会**列出已经落盘的分区**，而不是
   声称什么都没写。
 - **一次 `panel build` 只读一次时钟，`--as-of` 把这个时钟钉在多次调用之间。** 会话循环的
-  上界是该时刻的 Asia/Shanghai 日期减一天，而五个目标是五次调用；跨过本地零点的构建会让
+  上界是该时刻的 Asia/Shanghai 日期减一天，而一个面板往往是多次调用；跨过本地零点的构建会让
   一部分目标停在昨天、另一部分停在今天，产出的面板在**任何** `as_of` 都体检不干净
   （早于最新分区的最后一行 → `not_yet_knowable`，不早于它 → 旧分区 `date_gap`）。
   每次构建都会把用到的时刻打印出来（`--json` 里的 `as_of`，人类输出里的 `AS-OF` 行），
   之后单独重取某一个目标时把它传回来即可；而 `_refuse_split_horizon` 会在**取第一个会话
   之前**拒绝一个会造成这种分裂的构建，并给出能修好它的那个 `--as-of`。要把面板整体往前推
   一天，就在**一次调用里**同时点名所有会话级目标（分区是整体替换，没有追加）。
-- 会话循环每 10 个交易日往 **stderr** 打一行进度（`FETCHING <目标> 40/145 sessions
-  elapsed=89s eta=233s`）；stdout 留给 `--json`，所以脚本调用不受影响。
+- 每个抓取循环都往 **stderr** 打进度（`FETCHING <目标> 40/145 sessions elapsed=89s
+  eta=233s`），间隔是 `max(10, ceil(总数/40))` —— 145 个交易日仍然每 10 个一行，5,881 只
+  证券则每 148 个一行；循环开始前还会先打一行 `BUDGET` 说明这次要发多少个请求。
+  stdout 留给 `--json`，所以脚本调用不受影响。
 - `stk_limit` 的横截面离它 7,800 行的每响应上限只剩 66 行（2026-08-10 实测 7,734 行，
   +2.231 行/交易日 ≈ 29.6 个交易日）。撞上后单次请求仍然**拒收**而不是存半截，但
   descriptor 声明了实测的 `page_size=4000`，provider 会用 `limit`/`offset` 分页重取同一个
