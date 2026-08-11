@@ -13,18 +13,9 @@ it.
 
 from __future__ import annotations
 
-import json
-import os
-import socket
-import subprocess
-import time
-from collections.abc import Iterator
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
-from urllib.error import HTTPError
-from urllib.parse import urlencode
-from urllib.request import urlopen
 from zoneinfo import ZoneInfo
 
 import duckdb
@@ -35,13 +26,17 @@ from e2e_support import (
     STORED_DATASETS,
     BuiltPanel,
     catalogued_path,
-    console_script,
     knowable_datasets,
+    knowable_from,
     last_covered_session,
     readable_halt_days,
     run_cli,
+    run_data_check,
+    run_doctor,
     stored_sessions,
 )
+from e2e_support import http_get as _get
+from e2e_support import read_as_of as _as_of
 
 from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET
 from openalpha_cn.domain.daily_prices import (
@@ -394,38 +389,13 @@ def _assessed(built_panel: BuiltPanel) -> tuple[str, ...]:
 
 
 def _doctor(built_panel: BuiltPanel, workspace: Path, *extra: str) -> Any:
-    result = run_cli(
-        "panel",
-        "doctor",
-        *[argument for dataset in _assessed(built_panel) for argument in ("--dataset", dataset)],
-        "--year",
-        str(built_panel.year),
-        "--runtime-dir",
-        str(built_panel.runtime_dir),
-        "--exchange",
-        built_panel.exchange,
-        "--as-of",
-        _as_of(built_panel).isoformat(),
-        "--json",
-        *extra,
-        cwd=workspace,
+    return run_doctor(
+        built_panel,
+        workspace,
+        datasets=_assessed(built_panel),
+        as_of=_as_of(built_panel),
+        extra=extra,
     )
-    assert result.exit_code in {0, 1}, (
-        f"panel doctor exited {result.exit_code}; only 0 (clean) and 1 (unhealthy) are verdicts "
-        f"about the panel. stderr: {result.stderr[:1000]}"
-    )
-    return result.payload()
-
-
-def _as_of(built_panel: BuiltPanel) -> datetime:
-    """The instant the last stored session became knowable.
-
-    Derived from the panel rather than from the wall clock so that the same panel gives the
-    same answer tomorrow: a point-in-time question asked at `now()` moves every day, and a
-    partition that is fresh this afternoon is stale next week.
-    """
-    last = built_panel.sessions()[-1]
-    return datetime.combine(last, DAILY_AVAILABILITY_TIME, tzinfo=PANEL_ZONE) + timedelta(hours=1)
 
 
 def test_the_doctor_reports_nothing_missing_about_the_panel_that_was_just_built(
@@ -481,25 +451,13 @@ def test_the_doctors_session_scoped_checks_run_when_a_real_session_is_named(
 
 
 def _data_check(built_panel: BuiltPanel, workspace: Path, *extra: str) -> tuple[int, Any]:
-    result = run_cli(
-        "data-check",
-        *[argument for dataset in _assessed(built_panel) for argument in ("--dataset", dataset)],
-        "--year",
-        str(built_panel.year),
-        "--runtime-dir",
-        str(built_panel.runtime_dir),
-        "--exchange",
-        built_panel.exchange,
-        "--as-of",
-        _as_of(built_panel).isoformat(),
-        "--json",
-        *extra,
-        cwd=workspace,
+    return run_data_check(
+        built_panel,
+        workspace,
+        datasets=_assessed(built_panel),
+        as_of=_as_of(built_panel),
+        extra=extra,
     )
-    assert result.exit_code in {0, 1}, (
-        f"data-check exited {result.exit_code}. stderr: {result.stderr[:1000]}"
-    )
-    return result.exit_code, result.payload()
 
 
 def test_the_gate_opens_on_a_real_session_of_the_panel_it_was_given(
@@ -568,72 +526,6 @@ def test_the_gate_refuses_a_daily_dataset_that_no_session_corroborated(
 
 
 # --- step 5: the HTTP face and the SDK answer the same question ----------------------------
-
-
-@pytest.fixture
-def served(built_panel: BuiltPanel, cli_workspace: Path) -> Iterator[str]:
-    """A real `openalpha serve` process over the built panel, and its base URL.
-
-    A subprocess rather than `TestClient`: `serve` resolves its own configuration, binds a
-    socket and runs uvicorn, and none of that is exercised by an ASGI transport. The port is
-    taken from the operating system and released before uvicorn binds it, which is the usual
-    small race; a bind failure surfaces as the readiness poll timing out with the child's own
-    stderr attached.
-    """
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
-    environment = os.environ.copy()
-    environment["OPENALPHA_RUNTIME_DIR"] = str(built_panel.runtime_dir)
-    # uvicorn's own log goes to a file rather than to a pipe nobody drains: a `PIPE` that fills
-    # its 64 KiB buffer blocks the writing process, so an access log long enough to fill it
-    # would wedge the very server this fixture is waiting on.
-    log = cli_workspace / "serve.log"
-    with log.open("w", encoding="utf-8") as sink:
-        child = subprocess.Popen(
-            [*console_script(), "serve", "--host", "127.0.0.1", "--port", str(port)],
-            cwd=cli_workspace,
-            env=environment,
-            stdout=sink,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-    base = f"http://127.0.0.1:{port}"
-    try:
-        deadline = time.monotonic() + 60.0
-        while time.monotonic() < deadline:
-            if child.poll() is not None:
-                raise AssertionError(
-                    f"`openalpha serve` exited {child.returncode} before it answered: "
-                    f"{log.read_text(encoding='utf-8')[:2000]}"
-                )
-            try:
-                with urlopen(f"{base}/health", timeout=2) as response:
-                    if response.status == 200:
-                        break
-            except OSError:
-                time.sleep(0.25)
-        else:  # pragma: no cover - a server that never binds is the finding
-            raise AssertionError(
-                "`openalpha serve` did not answer /health within 60s: "
-                f"{log.read_text(encoding='utf-8')[:2000]}"
-            )
-        yield base
-    finally:
-        child.terminate()
-        try:
-            child.wait(timeout=20)
-        except subprocess.TimeoutExpired:  # pragma: no cover - only on a wedged child
-            child.kill()
-
-
-def _get(base: str, path: str, params: list[tuple[str, str]]) -> tuple[int, Any]:
-    url = f"{base}{path}?{urlencode(params)}"
-    try:
-        with urlopen(url, timeout=30) as response:
-            return response.status, json.loads(response.read())
-    except HTTPError as error:
-        return error.code, json.loads(error.read())
 
 
 @pytest.fixture(scope="session")
@@ -767,7 +659,36 @@ def labelled(built_panel: BuiltPanel) -> tuple[str, Any, Any]:
     refusal test the first time that name was suspended.
     """
     store = built_panel.store
-    as_of_read = _as_of(built_panel)
+    # The five reads below span two planes, so the clock has to be the later of the two.
+    # `_as_of` is the price plane's own -- the last stored bar's publication instant plus an
+    # hour -- and it is not a clock the *registry* beside it can answer at: `stock_basic` is
+    # fetched whole and Tushare publishes a listing before it trades, so on the panel built
+    # 2026-08-11 that partition's newest availability is 2026-08-11T00:00+08:00, the midnight
+    # of a security whose `list_date` is the day after this panel's last bar and 6.5 hours
+    # later than its 17:30 close. `evaluate_readiness` refused the whole partition for it and
+    # three tests below errored with `PanelStorageError ... ['not_yet_knowable']` -- correctly:
+    # the fault was asking one plane's question with the other plane's clock, not the gate
+    # answering it. `knowable_from` takes the maximum over exactly the partitions these reads
+    # touch, and it stays a property of the artifact rather than of the wall clock, so a panel
+    # reused a week later still answers as it did on the day it was built.
+    #
+    # Reading later cannot import hindsight into the label: the window is built from
+    # `prediction_day`, seven sessions back from the end of the panel, and `label_outcome`
+    # reads only the sessions that window names. What `as_of_read` decides is which stored
+    # partitions may be opened at all, and every one of them was complete before this instant.
+    as_of_read = max(
+        _as_of(built_panel),
+        knowable_from(
+            store,
+            {
+                STOCK_BASIC_DATASET: store.registered_years(STOCK_BASIC_DATASET),
+                ADJ_FACTOR_DATASET: (built_panel.year,),
+                SUSPENSION_DATASET: (built_panel.year,),
+                DAILY_DATASET: (built_panel.year,),
+                PRICE_LIMIT_DATASET: (built_panel.year,),
+            },
+        ),
+    )
     calendar = built_panel.calendar
     horizon = parse_horizon("5d")
 

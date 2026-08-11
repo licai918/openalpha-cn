@@ -72,8 +72,16 @@ reports open). Measured on 2026-08-10 that is 144 sessions and 720 whole-market 
 ~1000s, `stk_limit` ~330s -- around half an hour wall clock, dominated by the round trips.
 
 That is why it is not in CI and why `OPENALPHA_E2E_RUNTIME_DIR` exists: point it at a panel a
-previous run built and the whole chain runs against it in about a minute. When it is not set,
-this fixture builds one and asserts the build report as it goes.
+previous run built and the whole chain runs against it in seconds. When it is not set, this
+fixture builds one and asserts the build report as it goes.
+
+Re-measured 2026-08-11 on a slower link: 2,492s to build (`adj_factor` alone took 1,650s of it)
+and 215s for all 31 tests against the panel that build produced. 195s of that 215 is
+`tests/e2e/test_pit_injection_online.py`, and 185s of *that* is one test: its injection is into
+`daily`, whose 2026 partition is 796,497 rows, and `write_panel_batch` is driven twice over it
+(once to inject, once to restore). The other seven injections go into `suspend_d` and cost about
+a second each. Splitting the fee is deliberate -- see that module's docstring -- and `-k "not
+pct_chg"` is the way to skip it while iterating.
 """
 
 from __future__ import annotations
@@ -82,18 +90,32 @@ import json
 import os
 import subprocess
 import sys
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
+from urllib.error import HTTPError
+from urllib.parse import urlencode
+from urllib.request import urlopen
 from zoneinfo import ZoneInfo
 
 import duckdb
 import pytest
 
 from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET
-from openalpha_cn.domain.daily_prices import DAILY_BASIC_DATASET, DAILY_DATASET
+from openalpha_cn.domain.daily_prices import (
+    DAILY_AVAILABILITY_TIME,
+    DAILY_BASIC_DATASET,
+    DAILY_DATASET,
+)
+from openalpha_cn.domain.panel_batch import (
+    CLOCK_COLUMN_NAMES,
+    SUBJECT_COLUMN_NAME,
+    ColumnarPanelBatch,
+    PanelColumn,
+    TimelineColumns,
+)
 from openalpha_cn.domain.price_limits import (
     PRICE_LIMIT_DATASET,
     SUSPENSION_DATASET,
@@ -103,8 +125,9 @@ from openalpha_cn.domain.price_limits import (
 )
 from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET
 from openalpha_cn.domain.trading_calendar import TradingCalendar
+from openalpha_cn.panel.catalog import PartitionCoverage
 from openalpha_cn.panel.store import PanelStore
-from openalpha_cn.panel_ingest import load_suspensions, load_trading_calendar
+from openalpha_cn.panel_ingest import load_suspensions, load_trading_calendar, write_panel_batch
 from openalpha_cn.panel_view import panel_store
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -520,3 +543,332 @@ def knowable_datasets(
         if coverage is not None and coverage.max_available_time <= as_of:
             knowable.append(dataset)
     return tuple(knowable)
+
+
+def knowable_from(store: PanelStore, requested: Mapping[str, Sequence[int]]) -> datetime:
+    """The earliest instant at which *every* named partition may be read at all.
+
+    `evaluate_readiness` refuses a partition whose newest `available_time` is after the read's
+    `as_of`, and it judges that per partition rather than per row (`panel/catalog.py`'s
+    "Disclosure" section). A read that names several datasets is therefore answerable only from
+    the latest of their availability instants onwards, and that instant is a property of the
+    stored artifact -- so a panel reused through `OPENALPHA_E2E_RUNTIME_DIR` gives the same
+    answer next week as it did on the day it was built, which `datetime.now()` would not.
+
+    **Why a caller needs this rather than the price plane's own last close.** `_as_of` -- the
+    last stored session's publication instant plus an hour -- is the right clock for the five
+    price datasets and the wrong one for the registry beside them. `stock_basic` is fetched
+    whole, and Tushare publishes a listing *before* it trades: on the panel built 2026-08-11
+    the `stock_basic` 2026 partition's `max_available_time` is 2026-08-11T00:00+08:00, the
+    midnight of a security whose `list_date` is the day after the panel's last bar, which is
+    6.5 hours later than that bar's 17:30 close. Any read that names the registry and the price
+    plane together at the close instant is refused for the registry, and the refusal is correct
+    -- the fault is in choosing one plane's clock for a read that spans two.
+
+    Raises `E2EEnvironmentError` for a `(dataset, year)` with no coverage record, because a
+    missing partition silently contributing nothing to a maximum is how this helper would hand
+    back an instant that answers for less than the caller asked about.
+    """
+    instants: list[datetime] = []
+    for dataset, years in requested.items():
+        for year in years:
+            coverage = store.read_coverage(dataset, year)
+            if coverage is None:
+                raise E2EEnvironmentError(
+                    f"{dataset} year={year} has no coverage record, so the instant it becomes "
+                    "knowable is not a fact this panel carries"
+                )
+            instants.append(coverage.max_available_time)
+    if not instants:
+        raise E2EEnvironmentError("knowable_from was given no partition to answer about")
+    return max(instants)
+
+
+# --- reading a real partition back as the batch that wrote it -------------------------------
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class StoredPartition:
+    """One real partition read back off disk, in the shape the writer took it in.
+
+    The point of round-tripping through this rather than editing the Parquet file is that a
+    row-level injection has to move the **catalog** too. `not_yet_knowable` is decided from
+    `PartitionCoverage.max_available_time`, which `panel_ingest.panel_coverage` computes from
+    the batch; a file rewritten behind the catalog's back would carry a future row that
+    readiness cannot see, which would test nothing. So an injection here is applied to the
+    columns, the batch is rebuilt through `ColumnarPanelBatch` -- which re-runs the subject,
+    clock and shape checks and recomputes the digest -- and the whole thing goes through
+    `write_panel_batch`, the same call `panel build` makes. Nothing about the write path is
+    stubbed, and the catalog's census is recomputed rather than patched.
+
+    `tests/integration/panel/test_lookahead_injection.py::_without_the_rows_the_read_cannot_see`
+    is the same idiom over a *generated* panel. This is that idiom aimed at rows Tushare served.
+    """
+
+    coverage: PartitionCoverage
+    subjects: tuple[str, ...]
+    clocks: Mapping[str, tuple[datetime, ...]]
+    """The four clock columns by `CLOCK_COLUMN_NAMES`."""
+    columns: tuple[PanelColumn, ...]
+    """The data columns, in the partition's own stored order."""
+
+    @property
+    def row_count(self) -> int:
+        return len(self.subjects)
+
+    def column(self, name: str) -> PanelColumn:
+        for column in self.columns:
+            if column.name == name:
+                return column
+        raise AssertionError(f"{self.coverage.dataset} has no column {name!r}")
+
+    def taking(self, indices: Sequence[int]) -> StoredPartition:
+        """The same partition restricted to (or duplicating) `indices`, in that order."""
+        return replace(
+            self,
+            subjects=tuple(self.subjects[index] for index in indices),
+            clocks={
+                name: tuple(values[index] for index in indices)
+                for name, values in self.clocks.items()
+            },
+            columns=tuple(
+                replace(column, values=tuple(column.values[index] for index in indices))
+                for column in self.columns
+            ),
+        )
+
+    def with_row(
+        self,
+        index: int,
+        *,
+        clocks: Mapping[str, datetime] | None = None,
+        values: Mapping[str, object] | None = None,
+    ) -> StoredPartition:
+        """The same partition with one row's named clocks and/or data cells replaced."""
+        clocks = clocks or {}
+        values = values or {}
+
+        def _swap(current: tuple[object, ...], value: object) -> tuple[object, ...]:
+            return (*current[:index], value, *current[index + 1 :])
+
+        return replace(
+            self,
+            clocks={
+                name: cast(
+                    tuple[datetime, ...],
+                    _swap(current, clocks[name]) if name in clocks else current,
+                )
+                for name, current in self.clocks.items()
+            },
+            columns=tuple(
+                replace(column, values=_swap(column.values, values[column.name]))
+                if column.name in values
+                else column
+                for column in self.columns
+            ),
+        )
+
+    def as_batch(
+        self, *, as_of: datetime, fetched_at: datetime | None = None
+    ) -> ColumnarPanelBatch:
+        """This partition as a batch a provider could have served at `as_of`.
+
+        `as_of` is the *fetch's* clock, not the read's, and the two are what the whole
+        injection turns on: `ColumnarPanelBatch` refuses a batch holding a row that became
+        available after its own `as_of` (`_check_visible_at_as_of`, the write-side half of the
+        point-in-time contract), so a future row can only be stored by a fetch late enough to
+        have seen it -- which is exactly how a real one arrives. The read then asks the earlier
+        question, and `evaluate_readiness` is what has to refuse.
+
+        `fetched_at` defaults to `as_of` and is separable so that a *restore* can hand back the
+        instant the build recorded rather than a plausible substitute: it is what the doctor's
+        `fetch_age` is measured from, so a restore that moved it would put the panel back with a
+        different provenance than the one it had.
+        """
+        return ColumnarPanelBatch(
+            provider_id=self.coverage.provider_id,
+            dataset=self.coverage.dataset,
+            kind=self.coverage.kind,
+            as_of=as_of,
+            fetched_at=as_of if fetched_at is None else fetched_at,
+            status="success",
+            subjects=self.subjects,
+            timeline=TimelineColumns(**{name: self.clocks[name] for name in CLOCK_COLUMN_NAMES}),
+            columns=self.columns,
+        )
+
+
+def read_stored_partition(store: PanelStore, *, dataset: str, year: int) -> StoredPartition:
+    """Read one partition's rows and its coverage record back out of a real store.
+
+    The column order and every column's logical kind come from the coverage record's own
+    `fields` census -- which `panel_coverage` wrote from `batch.storage_columns()` -- so the
+    batch this reassembles has the partition's shape rather than one this file assumed.
+
+    Refuses a partition whose coverage carries a revision census, because the discriminator
+    field that produced it is not recoverable from the catalog (`RevisionCoverage` stores the
+    label, not the column it came from) and rewriting without it would silently drop that
+    census. No dataset `panel build` writes has one today; a future one would stop here rather
+    than round-trip into something subtly smaller.
+    """
+    coverage = store.read_coverage(dataset, year)
+    if coverage is None:
+        raise AssertionError(f"{dataset} year={year} has no coverage record")
+    if coverage.revisions:
+        raise AssertionError(
+            f"{dataset} year={year} carries a revision census {coverage.revisions!r}; the field "
+            "it was computed from is not recorded, so this reader cannot reproduce it"
+        )
+    names = tuple(field.name for field in coverage.fields)
+    expected = (SUBJECT_COLUMN_NAME, *CLOCK_COLUMN_NAMES)
+    if names[: len(expected)] != expected:
+        raise AssertionError(f"{dataset} year={year} stores {names[:5]}, expected {expected}")
+    path = catalogued_path(store, dataset=dataset, year=year)
+    projection = ", ".join(f'"{name}"' for name in names)
+    with duckdb.connect() as reader:
+        rows = reader.execute(f"SELECT {projection} FROM read_parquet(?)", [str(path)]).fetchall()
+    if len(rows) != coverage.row_count:
+        raise AssertionError(
+            f"{dataset} year={year}: the file holds {len(rows)} rows and the catalog says "
+            f"{coverage.row_count}"
+        )
+    held = tuple(zip(*rows, strict=True))
+    return StoredPartition(
+        coverage=coverage,
+        subjects=tuple(str(value) for value in held[0]),
+        clocks={
+            name: cast(tuple[datetime, ...], held[position])
+            for position, name in enumerate(CLOCK_COLUMN_NAMES, start=1)
+        },
+        columns=tuple(
+            PanelColumn(field.name, cast(Any, field.kind), held[position])
+            for position, field in enumerate(coverage.fields)
+            if position >= len(expected)
+        ),
+    )
+
+
+MutatePartition = Callable[["StoredPartition"], "StoredPartition"]
+"""What an injection does to a partition it has read back: hand out a changed copy."""
+
+InjectPartition = Callable[[str, int, MutatePartition, datetime], None]
+"""What `conftest.py::injected_partition` hands a test: `(dataset, year, mutate, fetched_at)`.
+
+Named here rather than spelled out at each use because the fixture's signature is four
+positional things and a test that got the order wrong would fail somewhere else entirely."""
+
+
+def rewrite_partition(
+    store: PanelStore,
+    stored: StoredPartition,
+    *,
+    as_of: datetime,
+    fetched_at: datetime | None = None,
+) -> None:
+    """Put `stored` back on disk through `panel_ingest`'s own writer."""
+    write_panel_batch(
+        store,
+        stored.as_batch(as_of=as_of, fetched_at=fetched_at),
+        year=stored.coverage.year,
+        date_timezone=stored.coverage.date_timezone,
+    )
+
+
+def read_as_of(built_panel: BuiltPanel) -> datetime:
+    """The instant the last stored session became knowable.
+
+    Derived from the panel rather than from the wall clock so that the same panel gives the
+    same answer tomorrow: a point-in-time question asked at `now()` moves every day, and a
+    partition that is fresh this afternoon is stale next week.
+
+    This is the *price plane's* clock and not the whole panel's; `knowable_from` is what a read
+    spanning two planes needs, and its docstring says why.
+    """
+    last = built_panel.sessions()[-1]
+    return datetime.combine(last, DAILY_AVAILABILITY_TIME, tzinfo=PANEL_ZONE) + timedelta(hours=1)
+
+
+def run_doctor(
+    built_panel: BuiltPanel,
+    workspace: Path,
+    *,
+    datasets: Sequence[str],
+    as_of: datetime,
+    extra: Sequence[str] = (),
+) -> Any:
+    """One `openalpha panel doctor --json` over the built panel, as its payload.
+
+    Exits 2 and above are refused here rather than in each caller: only `0` (clean) and `1`
+    (unhealthy) are verdicts *about the panel*, and a command that failed to run at all must
+    not be read as one.
+    """
+    result = run_cli(
+        "panel",
+        "doctor",
+        *[argument for dataset in datasets for argument in ("--dataset", dataset)],
+        "--year",
+        str(built_panel.year),
+        "--runtime-dir",
+        str(built_panel.runtime_dir),
+        "--exchange",
+        built_panel.exchange,
+        "--as-of",
+        as_of.isoformat(),
+        "--json",
+        *extra,
+        cwd=workspace,
+    )
+    assert result.exit_code in {0, 1}, (
+        f"panel doctor exited {result.exit_code}; only 0 (clean) and 1 (unhealthy) are verdicts "
+        f"about the panel. stderr: {result.stderr[:1000]}"
+    )
+    return result.payload()
+
+
+def run_data_check(
+    built_panel: BuiltPanel,
+    workspace: Path,
+    *,
+    datasets: Sequence[str],
+    as_of: datetime,
+    extra: Sequence[str] = (),
+) -> tuple[int, Any]:
+    """One `openalpha data-check --json`, as its exit code and its payload.
+
+    The exit code is returned rather than asserted because it *is* this command's deliverable.
+    """
+    result = run_cli(
+        "data-check",
+        *[argument for dataset in datasets for argument in ("--dataset", dataset)],
+        "--year",
+        str(built_panel.year),
+        "--runtime-dir",
+        str(built_panel.runtime_dir),
+        "--exchange",
+        built_panel.exchange,
+        "--as-of",
+        as_of.isoformat(),
+        "--json",
+        *extra,
+        cwd=workspace,
+    )
+    assert result.exit_code in {0, 1}, (
+        f"data-check exited {result.exit_code}. stderr: {result.stderr[:1000]}"
+    )
+    return result.exit_code, result.payload()
+
+
+def http_get(base: str, path: str, params: Sequence[tuple[str, str]]) -> tuple[int, Any]:
+    """One GET against a running `openalpha serve`, as its status and its decoded body.
+
+    A refusal is a return value rather than an exception because the status code *is* the
+    contract under test (`api/app.py::PANEL_HTTP_STATUS`): the gate answers `409` with a whole
+    clearance payload, and a helper that raised on it would make the interesting half of these
+    tests the harder half to write.
+    """
+    url = f"{base}{path}?{urlencode(list(params))}"
+    try:
+        with urlopen(url, timeout=30) as response:
+            return response.status, json.loads(response.read())
+    except HTTPError as error:
+        return error.code, json.loads(error.read())
