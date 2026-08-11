@@ -91,6 +91,66 @@ normalised so its earliest session is 1.0: across the 75,204 factor cells of tho
 the minimum is exactly 1.0 and the maximum 10,055.6401, so the tolerance never exceeds
 `0.01 + 2e-4 * implied`. It is not bounded by contract, and a factor below 1.0 would widen it.
 
+## The third witness, and the column `close` it is the only one that watches
+
+The `pre_close` check above is a cross-examination of `daily` and `adj_factor` about one
+morning's corporate action, and it is blind in one direction that matters: `implied_pre_close`
+is `prev_close * f_prev / f` and `published_pre_close` is `bar.pre_close`, so **`bar.close`
+appears in none of it**. A `close` that arrived wrong -- the `open` column stored one position
+over, a cell corrupted in transit, a security's row merged from the wrong fetch -- passes that
+check untouched and comes back as a return that is wrong by whatever the mistake was worth.
+
+`pct_chg` is the row's own answer to the same question, computed upstream and stored beside the
+prices, and `session_returns` reconciles it against `close / pre_close - 1`. That is what
+`DAILY_DATA_COLUMNS` means by keeping a column it could otherwise derive.
+
+### The bound is one published tick, and the grid is not the one a recent sample shows
+
+`pct_chg` is a percentage on a fixed decimal grid, so unlike the `pre_close` comparison this
+tolerance does **not** scale with the price: the grid is already in return space. What it does
+scale with is the era. Measured over 108,967 rows on 37 whole-market sessions spanning
+2001-01-02 to 2026-08-07, the endpoint publishes `pct_chg` on **two** grids:
+
+    2018-07-02   3,366 rows   3,002 carry two decimals   worst gap 5.0442e-05
+    2019-01-02   3,579 rows   3,037 carry four decimals  worst gap 5.0000e-07
+
+and the cut is not clean by date -- 2009-01-05 served 1,324 of 1,529 rows on the four-decimal
+grid, thirteen years inside the coarse era. Grouped by the decimals a row actually carries
+(42,117 rows over 13 of those sessions):
+
+    decimals   rows     worst |pct_chg/100 - (close/pre_close - 1)|
+    1           2,508   5.0360e-05
+    2          10,709   5.0498e-05     <- 601666.SH 2011-01-04, 21.69/21.09, pct_chg 2.85
+    3           2,619   4.9977e-07
+    4          26,281   5.0000e-07
+
+So the coarse grid is two decimals of a percentage, one tick of which is `1e-4` in return
+space, and `MAX_PUBLISHED_RETURN_DISAGREEMENT` is that tick. A **half** tick (5e-5), which is
+all pure round-to-nearest would need, is breached by 171 of the 108,967 rows; a full tick by
+**none**. That is the same choice `ADJ_FACTOR_PUBLICATION_TICK` makes and for the same measured
+reason: the residue is not only rounding, and the upstream's own quotient is not exactly ours.
+
+A per-row tolerance keyed on the decimals a stored `float` carries was considered and not
+taken. A value's decimals are not the grid it was published on -- `2.10` stores and `repr`s as
+`2.1` -- so the rule reads one decimal where the publisher used two and *widens* the tolerance
+tenfold on exactly the rows the coarse era is made of, which is why the 1-decimal class above
+sits at a two-decimal residue. Capping it back at the coarse grid recovers the safety and then
+the cap decides every row below four decimals, which is one constant doing the work of two.
+
+### What one tick still catches, measured
+
+On the same 42,117 rows, injecting the two defects the check exists for:
+
+    the open column stored where close belongs   40,089 / 42,117 = 95.18% refused
+    close off by one published tick (0.01 yuan)  41,330 / 42,117 = 98.13% refused
+
+Neither is 100% and neither can be: `open == close` on an untraded or limit-locked name leaves
+nothing to disagree about, and one fen on a 1,476-yuan stock is 6.8e-6 of return, well inside a
+grid whose coarse era cannot resolve it. What the bound does buy is that a `close` wrong by
+more than a hundredth of a percentage point of return is refused on 2026 rows and on 2001 rows
+alike, by a comparison that shares not one term with the `pre_close` one above and whose other
+side was computed upstream rather than here.
+
 ## The join with `adj_factor`, and the 49 names that separate them
 
 On 2024-06-28 `adj_factor` served 5,387 rows and `daily` 5,338, with `daily` a strict subset.
@@ -168,7 +228,8 @@ DAILY_DATA_COLUMNS: Final[tuple[str, ...]] = (
 `change` is the one response field deliberately not stored: it is `close - pre_close` to two
 decimals and carries nothing `close` and `pre_close` do not. `pct_chg` *is* stored even though
 it is likewise derivable, because it is the upstream's own statement of the session return and
-therefore the third witness `session_returns` is checked against -- see this module's docstring.
+therefore the third witness `session_returns` reconciles against -- and the only one that sees
+`close` at all, which the `pre_close` cross-check does not. See this module's docstring.
 """
 
 DAILY_PANEL_COLUMNS: Final[tuple[str, ...]] = (SUBJECT_COLUMN_NAME, *DAILY_DATA_COLUMNS)
@@ -326,6 +387,21 @@ here costs 1.3 points of missing-step detection while removing three quarters of
 refusals. Both numbers are measured in this module's docstring.
 """
 
+MAX_PUBLISHED_RETURN_DISAGREEMENT: Final[float] = 1e-4
+"""How far `pct_chg / 100` may sit from `close / pre_close - 1` before the row is refused.
+
+One published tick of a **two**-decimal percentage, which is the coarser of the two grids the
+endpoint serves `pct_chg` on. Flat, and flat by construction rather than by simplification:
+`pct_chg` is quantised in return space, so unlike `pre_close_tolerance` there is no price for
+the bound to scale with.
+
+Measured over 108,967 rows on 37 whole-market sessions spanning 2001-01-02 to 2026-08-07: the
+worst honest gap is 5.0498e-05 (`601666.SH` on 2011-01-04, 21.69/21.09 against a published
+2.85), a half tick refuses 171 of those rows and a full tick refuses none. See this module's
+docstring for the grid census, for why a per-row tolerance keyed on a stored float's decimals
+is not it, and for what one tick still detects.
+"""
+
 
 class PriceDataError(ValueError):
     """Raised for any malformed daily row, or any malformed question about one.
@@ -420,6 +496,25 @@ KNOWN_PRICE_LIMITATIONS: Final[tuple[PriceLimitation, ...]] = (
         ),
     ),
     PriceLimitation(
+        code="pct_chg_is_published_on_two_grids_so_the_third_witness_is_era_wide",
+        detail=(
+            "session_returns reconciles daily.pct_chg against close/pre_close - 1, and the "
+            "strength of that witness is set by the coarsest grid the endpoint publishes the "
+            "percentage on rather than by the row in hand. Measured over 108,967 rows on 37 "
+            "whole-market sessions from 2001-01-02 to 2026-08-07: 3,002 of 2018-07-02's 3,366 "
+            "rows carry two decimals and 3,037 of 2019-01-02's 3,579 carry four, and the cut "
+            "is not clean by date -- 2009-01-05 served 1,324 of 1,529 rows on the four-decimal "
+            "grid. Worst honest gap 5.0498e-05 (601666.SH 2011-01-04); 171 rows over a half "
+            "tick, none over a full one. So MAX_PUBLISHED_RETURN_DISAGREEMENT is 1e-4, which "
+            "on a 2026 row is a hundred times looser than that row's own four decimals would "
+            "allow: a close wrong by less than a hundredth of a percentage point of return is "
+            "invisible to this check on every era, and on the modern era that is a bound the "
+            "data could have carried and this constant does not. Tightening it needs a "
+            "per-row grid, and a stored float's decimals are not that grid -- 2.10 reprs as "
+            "2.1 -- so the tighter bound is not available from the row alone."
+        ),
+    ),
+    PriceLimitation(
         code="silent_truncation_at_the_response_cap",
         detail=(
             "Both endpoints serve at most 6,000 rows per response and drop the oldest. "
@@ -461,16 +556,31 @@ class DailyBar:
 
     @property
     def published_return(self) -> float:
-        """`close / pre_close - 1`: the session return, correct across ex-rights days.
-
-        Equals Tushare's own `pct_chg / 100` to the four decimals it publishes. It is *not*
-        exactly `round(published_return * 100, 4)` for every row -- 12 of the 5,338 bars on
-        2024-06-28 differ in the last digit, because the exact quotient lands on a half-way
-        point that Python's round-half-even and the upstream's rounding resolve differently
-        (`600644.SH`: 6.49/6.40 - 1 is 1.40624999...%, published as 1.4063). So the agreement is
-        pinned with a tolerance and not as an equality.
-        """
+        """`close / pre_close - 1`: the session return, correct across ex-rights days."""
         return self.close / self.pre_close - 1
+
+    @property
+    def upstream_return(self) -> float:
+        """`pct_chg / 100`: the upstream's own statement of the same session return.
+
+        Not a fourth path. It is the third *witness* to `published_return`, and the only one
+        that reads `close` -- `pre_close_tolerance`'s comparison never touches it. See this
+        module's docstring.
+        """
+        return self.pct_chg / 100.0
+
+    @property
+    def published_return_disagreement(self) -> float:
+        """How far the row's own two statements of its return are apart, unsigned.
+
+        Not `round(published_return * 100, 4) == pct_chg`, and that is measured rather than
+        conceded: 12 of the 5,338 bars on 2024-06-28 differ in the last digit, because the
+        exact quotient lands on a half-way point that Python's round-half-even and the
+        upstream's rounding resolve differently (`600644.SH`: 6.49/6.40 - 1 is 1.40624999...%,
+        published as 1.4063). So the agreement is a bound and not an equality, and the bound is
+        `MAX_PUBLISHED_RETURN_DISAGREEMENT`, which `session_returns` enforces.
+        """
+        return abs(self.published_return - self.upstream_return)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -505,12 +615,16 @@ class DailyValuation:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SessionReturns:
-    """The three ways to compute one session's return, side by side.
+    """The three ways to compute one session's return, side by side, and the upstream's own.
 
     `unadjusted` is carried so the size of the error is visible when a reader compares them,
     never so it is used: on 2026-06-12 it is `-0.530973%` against a true `+2.742230%`. There is
     no method here that returns "the" return, because which of `published` and `adjusted` a
     caller wants depends on whether it is also adjusting prices, and both are correct.
+
+    `upstream` is not a fourth path but the witness `published` was checked against, carried
+    for the reason `factor`/`previous_factor` are: so a reader holding the record can recompute
+    the comparison that let it be built rather than being told it passed.
     """
 
     ts_code: str
@@ -522,6 +636,8 @@ class SessionReturns:
     """`(close*f) / (prev_close*f_prev) - 1`. Two rows and `V2-P1-006`'s step function."""
     unadjusted: float
     """`close / prev_close - 1`. **Wrong** on any ex-rights day. Reported, never used."""
+    upstream: float
+    """`pct_chg / 100`, the upstream's own statement of `published`. Checked, never used."""
     published_pre_close: float
     implied_pre_close: float
     """`prev_close * f_prev / f`: what `pre_close` must be if the factor series is right."""
@@ -549,6 +665,15 @@ class SessionReturns:
         return pre_close_tolerance(
             self.implied_pre_close, factor=self.factor, previous_factor=self.previous_factor
         )
+
+    @property
+    def published_disagreement(self) -> float:
+        """How far `published` sits from the upstream's own `pct_chg`, unsigned.
+
+        Bounded by `MAX_PUBLISHED_RETURN_DISAGREEMENT`, which is flat because the grid
+        `pct_chg` is published on is already in return space.
+        """
+        return abs(self.published - self.upstream)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -709,16 +834,26 @@ def session_returns(
     previous_day: date,
     factors: AdjustmentHistory,
 ) -> SessionReturns:
-    """The three return paths for one session, with the two correct ones cross-checked.
+    """The three return paths for one session, cross-checked against each other and the row.
 
-    Raises `PriceDataError` when the published `pre_close` and the one implied by the factor
-    series differ by more than `pre_close_tolerance` allows for the two rows' own publication
-    precision -- one tick of `pre_close` plus one tick of each `adj_factor`, the second of which
-    scales with the price. That refusal is the point of this
-    function: `daily` and `adj_factor` are two independent statements about the same corporate
-    action, and a caller who has wired the wrong factor history, the wrong previous session, or
-    a naive close-to-close gets an error rather than a number that is wrong by 3.3 percentage
-    points with the sign reversed.
+    Raises `PriceDataError` on either of **two** disagreements, and they are blind to different
+    mistakes:
+
+    - The published `pre_close` and the one implied by the factor series differ by more than
+      `pre_close_tolerance` allows for the two rows' own publication precision -- one tick of
+      `pre_close` plus one tick of each `adj_factor`, the second of which scales with the price.
+      `daily` and `adj_factor` are two independent statements about the same corporate action,
+      and a caller who has wired the wrong factor history, the wrong previous session, or a
+      naive close-to-close gets an error rather than a number that is wrong by 3.3 percentage
+      points with the sign reversed. This comparison never reads `bar.close`.
+    - The row's own `pct_chg` and `close / pre_close - 1` differ by more than
+      `MAX_PUBLISHED_RETURN_DISAGREEMENT`, one tick of the coarser grid the upstream publishes
+      that percentage on. This is the only check here that reads `bar.close`, so it is the one
+      that sees a close that arrived wrong. See this module's docstring for both bounds and for
+      what the second one detects, measured.
+
+    Checked before any arithmetic that would use the disputed number, so a bar whose two
+    statements of its own return disagree never reaches a division.
 
     Propagates `AdjustmentHorizonError` from `factor_on` when the factor series does not cover
     both days. That is the honest answer: a return across a window the factor read never saw is
@@ -738,6 +873,16 @@ def session_returns(
             f"{bar.trade_date.isoformat()}; a session return needs two distinct days in order"
         )
     _require_price(previous_close, "previous_close")
+    if bar.published_return_disagreement > MAX_PUBLISHED_RETURN_DISAGREEMENT:
+        raise PriceDataError(
+            f"{bar.ts_code} on {bar.trade_date.isoformat()}: close {bar.close!r} over pre_close "
+            f"{bar.pre_close!r} is a return of {bar.published_return!r} and the same row's "
+            f"pct_chg says {bar.pct_chg!r}% -- a gap of "
+            f"{bar.published_return_disagreement!r}, past the "
+            f"{MAX_PUBLISHED_RETURN_DISAGREEMENT} that one tick of a two-decimal percentage "
+            "allows. The row disagrees with itself about its own session, so the close it was "
+            "computed from is not the close the upstream published it for"
+        )
     factor = factors.factor_on(bar.trade_date)
     previous_factor = factors.factor_on(previous_day)
     implied_pre_close = previous_close * previous_factor / factor
@@ -748,6 +893,7 @@ def session_returns(
         published=bar.published_return,
         adjusted=(bar.close * factor) / (previous_close * previous_factor) - 1,
         unadjusted=bar.close / previous_close - 1,
+        upstream=bar.upstream_return,
         published_pre_close=bar.pre_close,
         implied_pre_close=implied_pre_close,
         factor=factor,

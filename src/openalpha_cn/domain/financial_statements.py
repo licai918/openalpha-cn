@@ -504,6 +504,32 @@ KNOWN_FINANCIAL_STATEMENT_LIMITATIONS: Final[tuple[FinancialStatementLimitation,
         ),
     ),
     FinancialStatementLimitation(
+        code="f_ann_date_is_deliberately_not_a_point_in_time_filter",
+        detail=(
+            "filings_on -- and therefore filing_for, latest_filing_on and periods_on, which are "
+            "all built on it -- reads ann_date and ONLY ann_date. f_ann_date is parsed, is part "
+            "of a version's identity, and is reported by announcement_is_ambiguous, but it "
+            "never gates when a filing becomes readable. That is a decision with two measured "
+            "halves and not an omission. First, f_ann_date is the FIRST announcement, so it is "
+            "the earlier date wherever the two differ in the common direction, and filtering on "
+            "it would be look-ahead: 000001.SZ's income carries end_date=20060331 with "
+            "ann_date=20070426 and f_ann_date=20060426 (live probe 2026-08-11, 2 of the 8 rows "
+            "in that two-year window), so a reader standing on 2006-04-26 would see a filing "
+            "announced 365 days later. Second, f_ann_date is not ordered against ann_date at "
+            "all -- 116 violations of f_ann_date >= ann_date in the 53-security sample against "
+            "55 / 59 / 23 rows where it is genuinely later -- so neither min nor max of the two "
+            "is a clock either. The decisive reason is agreement with the layer above: "
+            "providers/tushare.py::_announcement_timeline sets available_time from ann_date "
+            "alone and uses max(ann_date, f_ann_date) only for revision_time, so a filings_on "
+            "keyed on anything else would make a row visible to the domain on a day the panel's "
+            "own point-in-time filter hides it, or the reverse. The cost, stated plainly: "
+            "V2-P2-002's second restatement form -- a correction whose f_ann_date post-dates "
+            "its ann_date -- has no point-in-time consequence here. It is visible as a "
+            "distinct version and as PartitionCoverage.revised_row_count, and not as a "
+            "different answer before and after a date."
+        ),
+    ),
+    FinancialStatementLimitation(
         code="the_corpus_starts_before_the_exchanges_did",
         detail=(
             "The earliest report period in the 53-security sample is 1989-12-31 and its "
@@ -725,6 +751,13 @@ class StatementHistory:
         The plain point-in-time filter, and the thing every other reader here is built from --
         so the `answerable_through` bound is checked here once rather than in each of the three
         readers built on it.
+
+        `announced_on` is `ann_date` and **`f_ann_date` is deliberately not consulted**, which
+        is a decision rather than an oversight: it is the *first* announcement, so on the real
+        rows where the two differ it is the earlier one, and a filter that read it would make
+        `000001.SZ`'s 2006Q1 income visible on 2006-04-26 against an `ann_date` of 2007-04-26.
+        `KNOWN_FINANCIAL_STATEMENT_LIMITATIONS` carries the measurement and what it costs, under
+        `f_ann_date_is_deliberately_not_a_point_in_time_filter`.
         """
         _require_plain_date(day, "day")
         self._require_year_was_read(day)

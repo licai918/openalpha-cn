@@ -718,6 +718,65 @@ def test_two_rows_carrying_the_same_update_flag_are_still_two_versions() -> None
     assert filing.value_of("n_income_attr_p") == 209556865.25
 
 
+def test_a_first_announcement_date_never_moves_the_day_a_filing_becomes_readable() -> None:
+    """`V2-P2-002`'s second restatement form, pinned as a **decision** rather than left as a
+    gap the next reader has to rediscover.
+
+    The two rows are real and were re-probed live on 2026-08-11: `000001.SZ`'s `income` returns
+    8 rows for 2006..2007 and 2 of them carry an `f_ann_date` a full year *before* their
+    `ann_date` -- `end_date=20060331` announced 2007-04-26 with `f_ann_date=20060426`, and
+    `end_date=20051231` announced 2007-03-22 with `f_ann_date=20060401`.
+
+    So `f_ann_date` is the **first** announcement, and a point-in-time filter that consulted it
+    would be look-ahead by 365 days on the first of these. Both directions are asserted here:
+    nothing is readable before its `ann_date` however early `f_ann_date` is, and everything is
+    readable on its `ann_date` however late `f_ann_date` is. The column is not discarded -- it
+    survives onto the version, which is what `announcement_is_ambiguous` reads -- it simply
+    does not gate visibility, and `filings_on` is the single place that would have to change.
+
+    Deleting either half of this leaves a `filings_on` keyed on `min(...)` or `max(...)` of the
+    two dates passing every other test in this file.
+    """
+    history = build_statement_history(
+        security="000001.SZ",
+        dataset=INCOME_DATASET,
+        rows=[
+            ReportRow(
+                period=date(2006, 3, 31),
+                announced_on=date(2007, 4, 26),
+                first_announced_on=date(2006, 4, 26),
+                revision_label="0",
+                values=LIAONING_2024_A,
+            ),
+            ReportRow(
+                period=date(2024, 12, 31),
+                announced_on=date(2025, 4, 26),
+                first_announced_on=date(2026, 4, 25),
+                revision_label="1",
+                values=LIAONING_2024_B,
+            ),
+        ],
+    )
+
+    # The earlier `f_ann_date` does not bring the filing forward: 2006-04-26 is a year early.
+    assert history.filings_on(date(2006, 4, 26)) == ()
+    assert history.filings_on(date(2007, 4, 25)) == ()
+    assert history.filing_for(date(2006, 3, 31), date(2007, 4, 26)).announced_on == date(
+        2007, 4, 26
+    )
+
+    # The later `f_ann_date` does not hold the filing back either.
+    on_its_own_day = history.filing_for(date(2024, 12, 31), date(2025, 4, 26))
+    assert on_its_own_day.value_of("revenue") == 10769999495.94
+    assert history.periods_on(date(2025, 4, 26)) == (date(2006, 3, 31), date(2024, 12, 31))
+    assert history.periods_on(date(2025, 4, 25)) == (date(2006, 3, 31),)
+
+    # And the column is carried rather than dropped, so the disagreement stays visible.
+    assert [
+        version.first_announced_on for filing in history.filings for version in filing.versions
+    ] == [date(2006, 4, 26), date(2026, 4, 25)]
+
+
 def test_versions_that_differ_only_in_the_first_announcement_date_stay_apart() -> None:
     """`f_ann_date` is part of what the row says, so two rows that disagree about it are two
     rows. No number is ambiguous, and `announcement_is_ambiguous` is what reports it."""

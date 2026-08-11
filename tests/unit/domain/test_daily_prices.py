@@ -22,6 +22,7 @@ two decimals: the exact restated previous close is 10.940003.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, timedelta
 from typing import Any
 
@@ -40,6 +41,7 @@ from openalpha_cn.domain.daily_prices import (
     DAILY_PANEL_COLUMNS,
     KNOWN_PRICE_LIMITATIONS,
     MAX_PRE_CLOSE_DISAGREEMENT,
+    MAX_PUBLISHED_RETURN_DISAGREEMENT,
     DailyBar,
     PriceDataError,
     SessionReturns,
@@ -124,6 +126,28 @@ MAOTAI_FACTORS_2024: tuple[tuple[str, float], ...] = (
     ("2024-06-24", 8.0204),
     ("2024-06-25", 8.0205),
 )
+
+# Two real rows from the era when `pct_chg` was published to **two** decimals rather than four,
+# which is the half of the history a sample of recent sessions cannot see. Both sit just past
+# the 5e-5 half tick of that grid and well inside the 1e-4 full tick, which is why
+# `MAX_PUBLISHED_RETURN_DISAGREEMENT` is the full one. `002736.SZ`'s is the widest gap found
+# anywhere in the 2-decimal class; `000569.SZ`'s is the oldest session probed at all.
+# fmt: off
+COARSE_GRID_BARS: tuple[tuple[Any, ...], ...] = (
+    ("002736.SZ", "2016-10-10", 16.59, 16.8, 16.49, 16.7, 16.48, 1.34, 93560.77, 155786.2351),
+    ("000569.SZ", "2001-01-02", 7.18, 7.32, 7.15, 7.31, 7.16, 2.1, 9098.13, 6579.5778),
+)
+# fmt: on
+COARSE_GRID_DISAGREEMENTS: tuple[float, ...] = (5.0485e-05, 5.0279e-05)
+"""`|pct_chg/100 - (close/pre_close - 1)|` for the two rows above, in the same order."""
+
+FINE_GRID_HALF_TICK = 5e-7
+"""Half a tick of a four-decimal percentage: the worst gap any 2019..2026 row produced.
+
+26,281 four-decimal rows over 13 whole-market sessions never exceeded it, which is what makes
+the 1e-4 bound 200 times wider than the modern era needs -- see
+`KNOWN_PRICE_LIMITATIONS.pct_chg_is_published_on_two_grids_so_the_third_witness_is_era_wide`.
+"""
 
 # Two real rows the first version of this module refused outright, which is what made 2017 and
 # 2018 unstorable. `300290.SZ` has a null `free_share` on 74 consecutive sessions from
@@ -461,6 +485,154 @@ def test_the_disagreement_tolerance_is_one_published_tick() -> None:
     assert MAX_PRE_CLOSE_DISAGREEMENT == 0.01
 
 
+# --- the third witness: the row's own pct_chg ------------------------------------------
+
+
+def test_every_real_bar_in_this_file_reconciles_with_the_upstreams_own_pct_chg() -> None:
+    """The reconciliation the stored `pct_chg` column exists for, on every real row here.
+
+    Nine bars, all from the four-decimal era, and the claim is a magnitude rather than "it
+    agrees": each gap is inside half a tick of that grid, which is 200 times tighter than the
+    bound the guard has to carry for the two-decimal era. Measured whole-market: 26,281
+    four-decimal rows over 13 sessions never exceeded 5.0000e-07.
+    """
+    bars = [daily_bars_from_panel_rows([row])[row[0]] for row in (*BARS, MAOTAI_BAR_2024_06_25)]
+
+    assert len(bars) == 9
+    worst = max(bar.published_return_disagreement for bar in bars)
+    assert worst <= FINE_GRID_HALF_TICK
+    assert worst * 200 < MAX_PUBLISHED_RETURN_DISAGREEMENT
+    # And each bar's `upstream_return` really is the stored column rather than a recomputation.
+    assert [bar.upstream_return for bar in bars] == [bar.pct_chg / 100.0 for bar in bars]
+
+
+def test_the_factor_path_and_the_upstream_percentage_meet_without_a_third_constant() -> None:
+    """`V2-P2-006`'s literal pairing -- the `adj_factor` path against `daily.pct_chg` -- and
+    why it is a consequence here rather than a third guard.
+
+    The roadmap asks for `adj_factor` self-computed against `daily.pct_chg` row by row. What
+    `session_returns` enforces is two *adjacent* comparisons: `adjusted` against `published`
+    through `pre_close_tolerance`, and `published` against `upstream` through
+    `MAX_PUBLISHED_RETURN_DISAGREEMENT`. The pairing the roadmap names is their sum by the
+    triangle inequality, and stating it as a third tolerance would introduce a constant that
+    is arithmetically determined by the other two and calibrated by nothing -- a free
+    parameter of exactly the kind this repository has been bitten by.
+
+    So it is asserted as a bound that follows, and the measured gap is three orders inside it
+    rather than merely under it. `pre_close_tolerance` is carried into return space by dividing
+    by the published `pre_close`, which is the same conversion `WindowReturn.tolerance` uses.
+    """
+    bar = daily_bars_from_panel_rows(_bar_rows(day="2026-06-12"))[PING_AN]
+    returns = session_returns(
+        bar, previous_close=11.3, previous_day=JUNE_11, factors=_factor_history(PING_AN)
+    )
+
+    # `pre_close_tolerance` is stated in yuan of implied previous close; `close * tol /
+    # (implied * published)` is what one yuan of it is worth on this session's return.
+    factor_path_bound = bar.close * returns.tolerance / (returns.implied_pre_close * bar.pre_close)
+    implied_bound = MAX_PUBLISHED_RETURN_DISAGREEMENT + factor_path_bound
+    gap = abs(returns.adjusted - returns.upstream)
+
+    assert abs(returns.adjusted - returns.published) <= factor_path_bound
+    assert returns.published_disagreement <= MAX_PUBLISHED_RETURN_DISAGREEMENT
+    assert gap <= implied_bound
+    assert gap == pytest.approx(5.0615e-7, abs=5e-11)
+    assert implied_bound == pytest.approx(1.04065e-3, abs=5e-8)
+    # Three orders of headroom, so "it is under the bound" is not the whole claim.
+    assert gap * 1000 < implied_bound
+
+
+def test_the_two_decimal_era_is_inside_the_bound_and_a_half_tick_would_have_refused_it() -> None:
+    """Why the bound is one full published tick, on the rows that decide it.
+
+    `pct_chg` is not published on one grid. Before 2019 it is a two-decimal percentage -- 3,002
+    of 2018-07-02's 3,366 rows -- and from 2019 a four-decimal one, with 2009-01-05 sitting on
+    the fine grid thirteen years early, so the era cannot be inferred from the date either.
+    These two rows are the coarse half: `002736.SZ` on 2016-10-10 is the widest gap found in
+    the whole two-decimal class and `000569.SZ` on 2001-01-02 is the oldest session probed.
+
+    Both sit **past** the 5e-5 half tick that pure round-to-nearest would allow and inside the
+    1e-4 full tick. Across 108,967 rows on 37 sessions from 2001-01-02 to 2026-08-07 a half
+    tick refuses 171 and a full tick refuses none, which is what a bound calibrated on recent
+    sessions alone would have got wrong -- and it would have got it wrong by refusing the first
+    eighteen years of the panel this repository is built to hold.
+    """
+    bars = [daily_bars_from_panel_rows([row])[row[0]] for row in COARSE_GRID_BARS]
+    gaps = [bar.published_return_disagreement for bar in bars]
+
+    assert gaps == [pytest.approx(value, abs=5e-9) for value in COARSE_GRID_DISAGREEMENTS]
+    for gap in gaps:
+        assert gap > 5e-5
+        assert gap < MAX_PUBLISHED_RETURN_DISAGREEMENT
+    # Ten times the fine grid's half tick would refuse both, so the era is load-bearing.
+    assert min(gaps) > 10 * FINE_GRID_HALF_TICK
+
+
+def test_the_published_return_bound_is_one_tick_of_a_two_decimal_percentage() -> None:
+    """The constant reaches the decision, from both sides of it.
+
+    Without this, `MAX_PUBLISHED_RETURN_DISAGREEMENT` could be raised to 1.0 and every other
+    test in this file would stay green: the real rows all sit at 3e-7 and the injected ones at
+    9e-3, three orders away on either side. Here the gap is placed at 0.9 and 1.1 of the bound
+    itself, so the bound is what separates the two answers.
+    """
+    bar = daily_bars_from_panel_rows(_bar_rows(day="2026-06-12"))[PING_AN]
+    published_percent = bar.published_return * 100.0
+    bound_in_percent = MAX_PUBLISHED_RETURN_DISAGREEMENT * 100.0
+    inside = replace(bar, pct_chg=published_percent - 0.9 * bound_in_percent)
+    outside = replace(bar, pct_chg=published_percent - 1.1 * bound_in_percent)
+
+    assert MAX_PUBLISHED_RETURN_DISAGREEMENT == 1e-4
+    accepted = session_returns(
+        inside, previous_close=11.3, previous_day=JUNE_11, factors=_factor_history(PING_AN)
+    )
+    assert accepted.published_disagreement == pytest.approx(0.9e-4, abs=1e-9)
+    assert accepted.upstream == pytest.approx(inside.pct_chg / 100.0, abs=1e-15)
+
+    with pytest.raises(PriceDataError, match=r"the same row's pct_chg says"):
+        session_returns(
+            outside, previous_close=11.3, previous_day=JUNE_11, factors=_factor_history(PING_AN)
+        )
+
+
+@pytest.mark.parametrize(
+    ("close", "label"),
+    [(11.0, "the open column stored one position over"), (11.14, "a digit slipped in close")],
+)
+def test_a_close_the_pre_close_check_cannot_see_is_caught_by_the_third_witness(
+    close: float, label: str
+) -> None:
+    """The reason `pct_chg` had to become a witness rather than only a stored column.
+
+    `implied_pre_close` is `prev_close * f_prev / f` and `published_pre_close` is `bar.pre_close`
+    -- **`close` is in neither**. So a `close` that arrived wrong walks straight through the
+    `daily` x `adj_factor` cross-check, which is asserted here rather than argued: the
+    `pre_close` disagreement is unchanged by the corruption and stays three orders inside its
+    own tolerance, while the return the caller would have received moves by percentage points.
+
+    Both injected values are the shapes that actually occur. Measured over 42,117 rows on 13
+    whole-market sessions spanning 2001..2026, the 1e-4 bound refuses 95.18% of rows when the
+    `open` column is stored where `close` belongs and 98.13% when `close` is off by one
+    published tick of 0.01 yuan. Neither reaches 100% and neither can: `open == close` on an
+    untraded name leaves nothing to disagree about, and one fen on a 1,476-yuan stock is 6.8e-6
+    of return.
+    """
+    bar = replace(daily_bars_from_panel_rows(_bar_rows(day="2026-06-12"))[PING_AN], close=close)
+    implied_pre_close = 11.3 * 134.5794 / 139.008
+
+    # The first witness is blind: it never reads `close`, so the corruption does not move it.
+    assert abs(implied_pre_close - bar.pre_close) < 1e-5
+    assert abs(implied_pre_close - bar.pre_close) < pre_close_tolerance(
+        implied_pre_close, factor=139.008, previous_factor=134.5794
+    )
+    # The second one is not, and the answer it stops is wrong by percentage points.
+    assert bar.published_return_disagreement > 50 * MAX_PUBLISHED_RETURN_DISAGREEMENT
+    with pytest.raises(PriceDataError, match=r"the same row's pct_chg says 2\.7422%"):
+        session_returns(
+            bar, previous_close=11.3, previous_day=JUNE_11, factors=_factor_history(PING_AN)
+        )
+
+
 def _maotai_2024_history():
     return build_adjustment_history(
         MAOTAI,
@@ -537,6 +709,7 @@ def test_the_disagreement_is_unsigned_because_both_directions_are_real_failures(
         "published": 0.0,
         "adjusted": 0.0,
         "unadjusted": 0.0,
+        "upstream": 0.0,
     }
     missing_step = SessionReturns(
         day=JUNE_12,
@@ -747,6 +920,7 @@ def test_every_named_limitation_carries_a_code_and_a_detail() -> None:
         "daily_basic_omits_the_beijing_board_before_2024",
         "a_priced_security_can_be_absent_from_the_registry",
         "a_partial_cross_section_is_invisible_without_suspend_d",
+        "pct_chg_is_published_on_two_grids_so_the_third_witness_is_era_wide",
         "silent_truncation_at_the_response_cap",
     }
     for entry in KNOWN_PRICE_LIMITATIONS:
@@ -754,6 +928,15 @@ def test_every_named_limitation_carries_a_code_and_a_detail() -> None:
 
 
 def test_a_daily_bar_is_a_plain_value_and_reports_its_own_published_return() -> None:
+    """The carrier's own arithmetic, and the third witness meeting it.
+
+    The second half is the correction this test needed. It used to assert only the first line:
+    `pct_chg=2.7422` was handwritten into the bar and `PUBLISHED_RETURN_2026_06_12` handwritten
+    beside it, and the two never met -- `pct_chg` could be set to any float at all and this
+    stayed green, which is exactly the shape of an equivalence test fed the same value on both
+    sides. `upstream_return` and `published_return_disagreement` are what make the stored
+    column reach a comparison.
+    """
     bar = DailyBar(
         ts_code=PING_AN,
         trade_date=JUNE_12,
@@ -767,6 +950,12 @@ def test_a_daily_bar_is_a_plain_value_and_reports_its_own_published_return() -> 
         amount=2263042.93057,
     )
     assert bar.published_return == pytest.approx(PUBLISHED_RETURN_2026_06_12, abs=1e-12)
+    assert bar.upstream_return == pytest.approx(0.027422, abs=1e-15)
+    assert bar.published_return_disagreement == pytest.approx(3.0347e-7, abs=1e-11)
+
+    # And the bound is reached from the column, not from a constant beside it.
+    wrong = replace(bar, pct_chg=2.7622)
+    assert wrong.published_return_disagreement > MAX_PUBLISHED_RETURN_DISAGREEMENT
 
 
 # --- the guards on the valuation reader and the arithmetic inputs ------------------------

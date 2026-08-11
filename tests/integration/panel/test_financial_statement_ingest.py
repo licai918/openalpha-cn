@@ -24,7 +24,7 @@ The six things this file is really about:
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -1039,6 +1039,90 @@ def test_an_identical_pair_survives_the_round_trip_as_one_answer(tmp_path) -> No
     assert not filing.is_ambiguous
     assert filing.versions[0].labels == ("0", "1")
     assert filing.value_of("ebit") == 73148000000.0
+
+
+def test_no_as_of_at_all_answers_with_the_value_before_a_same_day_correction(tmp_path) -> None:
+    """`V2-P2-002`'s third restatement form, stated as the refusal it is instead of as a
+    question with an answer.
+
+    The roadmap asks a point-in-time read to "return the value before the correction". For a
+    correction that shares its original's `ann_date` **that value does not exist as a stored
+    fact**, and the failure mode is not that the read gets it wrong -- it is that a read which
+    picked either row would look right. `000001.SZ`'s 2018 interim is the real shape: two rows,
+    both announced 2018-08-16, `update_flag` 0 and 1, agreeing on nine of the ten projected
+    columns and disagreeing on `ebit` (39,700,000,000 against nothing at all).
+
+    So the assertion is a sweep rather than a point. There is no `day` that separates them:
+    before 2018-08-16 the period is not announced at all, and on every day after it both
+    versions are present and `ebit` refuses. `values_of` is the escape hatch and it is plural
+    by design -- a caller that wants the disagreement has to hold both numbers.
+
+    A `filing_for` that resolved ambiguity by taking the first row, the last row, or the row
+    whose `update_flag` is 0 would satisfy every other test in this file and fail this one on
+    the very first day of the sweep.
+    """
+    store = _store(tmp_path)
+    write_financial_statements(store, [_fetch(_provider(), "000001.SZ")])
+    history = load_statement_histories(
+        store, dataset=INCOME_DATASET, years=(2018,), as_of=AS_OF, max_staleness=None
+    )["000001.SZ"]
+    period, announced = date(2018, 6, 30), date(2018, 8, 16)
+
+    with pytest.raises(FinancialStatementHorizonError, match=r"had not announced its 2018-06-30"):
+        history.filing_for(period, announced - timedelta(days=1))
+
+    days = [announced + timedelta(days=offset) for offset in (0, 1, 7, 100, 1000, 2500)]
+    assert days[-1] < AS_OF.date()
+    for day in days:
+        filing = history.filing_for(period, day)
+        assert filing.is_ambiguous
+        assert filing.disagreeing_fields == ("ebit",)
+        assert sorted(filing.values_of("ebit"), key=lambda value: value is None) == [
+            39700000000.0,
+            None,
+        ]
+        assert filing.value_of("revenue") == 57241000000.0
+        with pytest.raises(AmbiguousReportError, match=r"'ebit'"):
+            filing.value_of("ebit")
+
+
+def test_a_whole_read_answers_with_the_pre_restatement_value_until_the_day_it_moved(
+    tmp_path,
+) -> None:
+    """`V2-P2-002`'s first restatement form, carried through the store rather than only through
+    the domain -- which is where it lived until now.
+
+    `920403.BJ` announced its 2022 annual on 2023-03-14 with no `ebit` at all and re-announced
+    it on 2024-01-05 with 41,082,309.3. Both partitions are written and both are read, so
+    `answerable_through` is `None` and nothing is bounded away: the only thing standing between
+    a reader and the later number is the day they are standing on.
+
+    The pair either side of the boundary is the assertion. `filing_for(period, 2024-01-04)`
+    answering 41,082,309.3 would be look-ahead of exactly one day, and that is the form of it
+    the domain-level test cannot see -- there the rows never went through a partition, a
+    coverage census, `read_if_ready`'s point-in-time gate or a Parquet round trip.
+    """
+    store = _store(tmp_path)
+    provider = _provider()
+    write_financial_statements(store, [_fetch(provider, "920403.BJ", 2023)])
+    write_financial_statements(store, [_fetch(provider, "920403.BJ", 2024)])
+
+    whole = load_statement_histories(
+        store, dataset=INCOME_DATASET, years=(2023, 2024), as_of=AS_OF, max_staleness=None
+    )["920403.BJ"]
+    period = date(2022, 12, 31)
+
+    assert whole.answerable_through is None
+    before = whole.filing_for(period, date(2024, 1, 4))
+    after = whole.filing_for(period, date(2024, 1, 5))
+
+    assert before.announced_on == date(2023, 3, 14)
+    assert before.value_of("ebit") is None
+    assert after.announced_on == date(2024, 1, 5)
+    assert after.value_of("ebit") == 41082309.3
+    # The restatement is a *different filing*, not a mutated one, so both remain readable.
+    assert before is not after
+    assert whole.periods_on(date(2024, 1, 4)) == whole.periods_on(date(2024, 1, 5))
 
 
 def test_the_ambiguity_report_is_computed_from_the_stored_corpus(tmp_path) -> None:

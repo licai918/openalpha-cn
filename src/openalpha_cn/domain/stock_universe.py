@@ -277,6 +277,26 @@ KNOWN_UNIVERSE_LIMITATIONS: Final[tuple[UniverseLimitation, ...]] = (
         ),
     ),
     UniverseLimitation(
+        code="a_listed_only_registry_is_invisible_to_every_downstream_check",
+        detail=(
+            "listed_on is a pure interval test over whatever rows the registry holds, so a "
+            "partition fetched with list_status='L' alone -- 5,539 rows against 'L,D''s 5,878 "
+            "on 2026-08-08 -- is self-consistent on every cross section and reports a smaller "
+            "market rather than a broken one. Nothing downstream can tell the two apart. "
+            "panel_doctor's SubjectContainment asks that daily's subjects be a subset of "
+            "stock_basic's, and dropping the delisted half only shrinks both sides of a "
+            "historical read; the coverage census counts rows without a target; and "
+            "panel_gate.require_datasets therefore clears a listed-only registry with the same "
+            "verdict, the same notices and the same caveats as a whole one. That is asserted "
+            "rather than assumed, in tests/integration/panel/test_panel_gate.py. What it costs "
+            "is survivorship bias of a measured size: a live probe rebuilt 2019-06-28 from the "
+            "listed set alone and lost 227 securities, every one of them with a delist_date "
+            "after that day. The defence is at fetch time -- providers/tushare.py requests "
+            "'L,D' -- and it is a request parameter, which is exactly the kind of thing a read "
+            "side cannot audit."
+        ),
+    ),
+    UniverseLimitation(
         code="ts_code_is_not_a_permanent_security_identity",
         detail=(
             "A code migration produces two entries rather than one history: 000024.SZ "

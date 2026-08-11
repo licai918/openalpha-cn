@@ -60,6 +60,7 @@ from openalpha_cn.panel_ingest import (
     TRADING_CALENDAR_DATASET,
     load_adjustment_histories,
     load_daily_bars,
+    load_stock_universe,
     load_suspensions,
     write_adjustment_factors,
     write_daily_panel,
@@ -86,6 +87,13 @@ INDEX_CODE = "000300.SH"
 INCOME_DATASET = "income"
 CASHFLOW_DATASET = "cashflow"
 LISTED_ON = date(2026, 1, 2)
+TERMINATED_SECURITY = "000004.SZ"
+TERMINATED_ON = date(2026, 1, 5)
+"""A fourth name that left the market on the first stored session; `delist_date` is exclusive.
+
+So it is listed on 2026-01-02..01-04 and on no session this panel holds, which is what lets the
+registry carry a termination without any price dataset having to carry a fourth security.
+"""
 FILING_ANNOUNCED = date(2026, 1, 5)
 REPORT_PERIOD = date(2025, 12, 31)
 
@@ -285,19 +293,34 @@ def calendar_batch() -> ColumnarPanelBatch:
     )
 
 
-def universe_batch(securities: Sequence[str] = SECURITIES) -> ColumnarPanelBatch:
+def universe_batch(
+    securities: Sequence[str] = SECURITIES, *, terminated: bool = False
+) -> ColumnarPanelBatch:
+    """The registry, optionally carrying the delisted half the live fetch asks for.
+
+    `terminated=False` is the `list_status='L'` shape -- 5,539 rows against `'L,D'`'s 5,878 on
+    the real endpoint -- and it is what every other test here uses, because it is what a
+    listed-only registry looks like: entirely well formed. The extra name is deliberately not
+    one of `SECURITIES` and its termination lands on the first stored session, so it is in no
+    cross section and the price datasets are untouched.
+    """
+    codes = list(securities)
+    events = ["listing"] * len(codes)
+    days = [LISTED_ON] * len(codes)
+    if terminated:
+        codes.extend((TERMINATED_SECURITY, TERMINATED_SECURITY))
+        events.extend(("listing", "delisting"))
+        days.extend((LISTED_ON, TERMINATED_ON))
     return _batch(
         STOCK_BASIC_DATASET,
-        subjects=list(securities),
+        subjects=codes,
         columns=[
-            PanelColumn("lifecycle_event", "string", tuple("listing" for _ in securities)),
-            PanelColumn(
-                "lifecycle_date", "string", tuple(LISTED_ON.isoformat() for _ in securities)
-            ),
-            PanelColumn("exchange", "string", tuple(EXCHANGE for _ in securities)),
+            PanelColumn("lifecycle_event", "string", tuple(events)),
+            PanelColumn("lifecycle_date", "string", tuple(day.isoformat() for day in days)),
+            PanelColumn("exchange", "string", tuple(EXCHANGE for _ in codes)),
         ],
-        event_time=[_midnight_shanghai(LISTED_ON)] * len(securities),
-        available_time=[_midnight_shanghai(LISTED_ON)] * len(securities),
+        event_time=[_midnight_shanghai(day) for day in days],
+        available_time=[_midnight_shanghai(day) for day in days],
     )
 
 
@@ -541,12 +564,13 @@ def seed(
     factors: ColumnarPanelBatch | None = None,
     income: ColumnarPanelBatch | None = None,
     cashflow: ColumnarPanelBatch | None = None,
+    universe: ColumnarPanelBatch | None = None,
 ) -> PanelStore:
     store = PanelStore(tmp_path / "panel")
     real = calendar()
     halted = ((HALTED_SECURITY, HALTED_SESSION),)
     write_trading_calendar(store, calendar_batch())
-    write_stock_universe(store, universe_batch(securities))
+    write_stock_universe(store, universe or universe_batch(securities))
     write_adjustment_factors(store, [factors or factor_batch(securities=securities)], calendar=real)
     write_suspensions(store, [suspension_batch(halted)])
     write_daily_panel(
@@ -619,6 +643,57 @@ def test_a_healthy_panel_clears_the_gate_and_the_downstream_read_returns_real_ro
     )
     assert sorted(bars) == sorted(SECURITIES)
     assert bars[PING_AN].close == 11.24
+
+
+def test_a_registry_missing_its_delisted_half_clears_exactly_as_a_whole_one_does(
+    tmp_path: Path,
+) -> None:
+    """`V2-P2-008`'s residue, stated as what the gate **cannot** see rather than pretended away.
+
+    The delisted half of `stock_basic` staying in a historical universe is structural rather
+    than special-cased -- `listed_on` is `listed_on <= day < delisted_on` over whatever rows
+    are stored, so the delisted rows need no branch -- and the unit, integration and Parquet
+    round trips all cover it. What none of them covers is the shape where the *fetch* asked for
+    `list_status='L'` and the delisted rows were never stored at all, because that registry is
+    not malformed: it is smaller, and it is self-consistent on every cross section.
+
+    This is the assertion that says so. Both panels are put through the whole gate and the two
+    verdicts are compared field by field -- cleared datasets, their year and session scope,
+    their caveats, the blocks and the notices -- and they are **identical**. `SubjectContainment`
+    cannot see it either: it asks that `daily`'s subjects be a subset of `stock_basic`'s, and
+    dropping the delisted half shrinks the superset without breaking the containment.
+
+    The second half is the cost, and it is why this is disclosure rather than a shrug: on a day
+    inside the terminated name's own listing the two registries return different markets. At
+    live scale that difference was measured at 227 securities on 2019-06-28, every one of them
+    with a `delist_date` after that day, against a whole registry of 5,878. The defence is at
+    fetch time (`providers/tushare.py::STOCK_BASIC_LIST_STATUS` is `'L,D'`), which is a request
+    parameter no read-side check can audit. See
+    `KNOWN_UNIVERSE_LIMITATIONS.a_listed_only_registry_is_invisible_to_every_downstream_check`.
+    """
+    listed_only = seed(tmp_path / "listed-only")
+    whole = seed(tmp_path / "whole", universe=universe_batch(terminated=True))
+
+    narrow = require_datasets(listed_only, request_for())
+    wide = require_datasets(whole, request_for())
+
+    assert narrow.blocks == () and wide.blocks == ()
+    assert narrow.cleared == wide.cleared
+    assert [notice.code for notice in narrow.notices] == [notice.code for notice in wide.notices]
+    assert STOCK_BASIC_DATASET in _cleared_names(narrow)
+
+    # And the two panels do not hold the same market.
+    universes = {
+        name: load_stock_universe(store, years=(YEAR,), as_of=AS_OF, max_staleness=None)
+        for name, store in (("narrow", listed_only), ("wide", whole))
+    }
+    inside_its_listing = date(2026, 1, 3)
+
+    assert set(universes["wide"].listed_on(inside_its_listing)) - set(
+        universes["narrow"].listed_on(inside_its_listing)
+    ) == {TERMINATED_SECURITY}
+    # After the termination the two agree again, which is why no cross section can catch it.
+    assert universes["wide"].listed_on(LAST_SESSION) == universes["narrow"].listed_on(LAST_SESSION)
 
 
 def test_the_session_scoped_cross_checks_this_gate_leans_on_all_ran(tmp_path: Path) -> None:

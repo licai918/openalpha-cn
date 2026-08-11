@@ -1480,9 +1480,11 @@ def _return_path_check(
     """Recompute each session's return on both correct paths and report where they part.
 
     `session_returns` **raises** when the published `pre_close` and the one implied by the
-    factor series disagree past the two rows' own publication precision. That refusal is right
-    for a reader and wrong for a health check, whose job is to survive the panel it is
-    inspecting -- so it is caught per security and turned into a line."""
+    factor series disagree past the two rows' own publication precision, and also when a bar's
+    own `pct_chg` does not corroborate the `close / pre_close` it publishes -- the second being
+    the only one of the two that reads `close` at all. Either refusal is right for a reader and
+    wrong for a health check, whose job is to survive the panel it is inspecting -- so both are
+    caught per security and turned into a line."""
     findings: list[HealthFinding] = []
     try:
         histories = load_adjustment_histories(
