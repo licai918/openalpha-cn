@@ -98,3 +98,50 @@ These are warnings for whoever introduces the numerical stack, not abstract conc
 [ADR-0002](./ADR-0002-two-data-planes.md) for why the panel plane — where `DataFrame` /
 `ndarray` are allowed — exists as a separate storage layer rather than living inside the
 evidence plane or the domain layer.
+
+## Update, 2026-08-11 (`V2-P3-002`): the factor engine did not need it
+
+The Decision above stands unchanged — numpy + pandas remain the adopted stack, and this
+section adds no new one. What it records is that the *first* consumer named in the Context
+("the factor layer needs cross-sectional regression and rank correlation") arrived, and did
+not need either package, so the runtime dependency set is still the nine it was.
+
+`openalpha_cn.panel_factors` computes a factor for a whole cross section at one `as_of`: it
+groups DuckDB's own row tuples by `(subject, session)`, takes the last `lookback_sessions` of
+each security's own sessions, and calls one scalar function per security. There is no matrix,
+no broadcast, no linear algebra and no regression in that workload; the column projection is
+done in SQL, so a factor reading one column of `daily` never materialises the other eight.
+
+The Context's claim was accurate about the *layer* and imprecise about *which issue*. The
+cross-sectional regression is `V2-P3-004`'s neutralisation and the rank correlation is
+`V2-P3-005`'s IC, and neither has been written. That is the right place to re-open this
+question, with the workload in front of whoever decides — because the Consequences above are
+the price of the decision, and paying them one issue early buys nothing: two more runtime
+dependencies, an explicit `float(...)`/`cast(...)` at every public boundary in the layer, and
+the `NPY`/`PD`/`S` ruff evaluation, all in exchange for arithmetic that is currently a division.
+
+Measured rather than asserted, at ADR-0002's own stated panel scale. A synthetic `daily`
+partition of **5,534 securities x 122 sessions = 675,148 rows** was written through the real
+store, and `compute_factor` evaluated the whole cross section at one `as_of`:
+
+| step | time |
+|---|---|
+| `compute_factor`, cold (read + group + classify + evaluate 5,534 securities) | **1.95 s** |
+| the same call again, warm | 1.91 s |
+| (for context, the existing write path: `write_panel_batch` for that partition) | 288 s |
+
+Two seconds of single-threaded pure Python for 675k rows is ~2.9 us/row end to end, and a full
+244-session year extrapolates to ~4 s. That is not a number numpy would rescue: the read itself
+is DuckDB's, the grouping is a `dict` insert per row, and the arithmetic is one division per
+security. It is also two orders of magnitude below the *write* path this same partition already
+pays, which is where a performance issue on this plane actually lives.
+
+The first run of this measurement said 2.01 s, and the difference is worth naming because it
+was a real defect rather than noise: `manifest_id` is a pydantic `computed_field`, which is not
+cached, and it was being read inside the per-security loop -- so the whole build manifest was
+re-canonicalised and re-hashed 5,534 times. `domain/panel_batch.py` documents exactly that trap
+(`payload_digest`, 10.5 ms on first access and 10.2 ms on the second) and this module walked
+into it anyway; hoisting the read out of the loop is the fix.
+
+The nine runtime dependencies are pinned by `tests/unit/test_repository_assets.py`, which is
+what would go red if this update were wrong.

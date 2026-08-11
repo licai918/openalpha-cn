@@ -629,3 +629,42 @@ test_not_yet_knowable_is_partition_level_so_an_as_of_inside_a_year_reads_nothing
 这会改变 `read_if_ready` **承诺**什么，而不只是它拒绝什么 —— 因此是一次接口决策，
 不是一次实现改动。在做出这个决策之前，把 `not_yet_knowable` 当作 P2 闸门信号是可以的，
 但闸门的 `as_of` 必须取在分区年份之外，否则拒绝的原因是粒度而不是被注入的违规。
+
+### 决策（`V2-P3-002`，2026-08-11）：**第二扇门**，不是改第一扇
+
+以上三个候选（拆 `read_if_ready` / 因子层自己过滤 / 只在年边界算）**都没有采用**。落地的是第四条：
+
+- **`read_if_ready` 一字未改**，承诺不变，`panel_ingest` 的十四个 loader 一个都没动，
+  `not_yet_knowable` 在那条路径上仍然整块拒绝。
+- **新增 `PanelStore.read_visible_at`**：跑**同一张** `evaluate_readiness` 规则表，
+  只有当它找到的问题**全部**落在新常量 `ROW_FILTERABLE_ISSUE_CODES`（今天只有
+  `not_yet_knowable` 一个）里时，才改用 `WHERE available_time <= as_of` 扫描而不是拒绝；
+  任何其它 code（单独或并存）照旧整块拒绝。没有第二张规则表，
+  以后加的 readiness code 默认在两条路径上都阻塞。
+- **「短读」被说出来而不是被推断**：返回类型是**另一个**类型 `PanelVisibleReadOutcome`，
+  带 `withheld_row_count`（拿到行就必然同时拿到这个数）。P2 拒绝行级过滤的理由是
+  「过滤后的读交回一个短分区，而这个平面之上每个消费者都把短读成缺数据」——
+  那个理由针对的是**沉默的**短读，且对 `build_index_membership` /
+  `load_industry_histories` / `build_stock_universe` 依然成立，它们仍走原来的门。
+- **可审计**：`tests/unit/panel/test_visible_read_callers.py` 钉住哪些 `src/` 文件可以调它
+  （今天一个：`panel_factors.py`），形状与 `test_query_callers.py` 一致；
+  且因子引擎**不**调 `query()`，所以 PIT 保证仍在存储层，没有搬到因子层。
+
+代价与残差都已量化并落盘：
+
+- **量级**：fixture 面板上 `read_if_ready` 在年中 `as_of` 整块拒绝，`read_visible_at`
+  交回 39 行、扣下 40 行，两者之和等于分区行数（断言如此）。ADR-0002 口径的真实规模上实测：
+  5,534 只 × 122 个会话 = 675,148 行的合成 `daily` 分区，`compute_factor` 跑完整个横截面
+  （读 + 分组 + 定级 + 求值）**冷 1.95 秒、热 1.91 秒**，约 2.9 微秒/行；同一个分区**写**要
+  288 秒。这个数字同时是「不引入 numpy/pandas」的依据（见 ADR-0003 的 2026-08-11 更新）。
+  被放弃的两条代价：每个 `as_of` 重建一次面板是单次年度构建的 120 倍（P2 技术验收实测）；
+  只在年边界算则 `V2-P3-005` 的 IC 衰减与 `V2-P4-013` 的 walk-forward 每年只有一个观测。
+- **不能承诺的部分**：过滤一个**事后**写成的分区，复现的是「已存储的行说当时可知什么」，
+  不是「当时真去抓会拿到什么」——上游只要不是 append-only 就会不同（§7 实测
+  `fina_indicator` 81.7% 的键多行且四个时钟逐字节相同，`available_time` 分不开版本）。
+  这条作为第三条 `KNOWN_STORAGE_LIMITATIONS`
+  （`a_visibility_filtered_read_replays_a_partition_that_was_not_there_yet`）落盘，
+  因此出现在每一份 `panel doctor` 报告里。
+
+**对 P4 的后果**：walk-forward 现在可以让 `as_of` 在年内逐步推进，
+条件是走 `read_visible_at` 并把自己加进那张 allowlist —— 那是一次有评审的动作，不是障碍。

@@ -182,6 +182,32 @@ gate stays. `tests/unit/panel/test_readiness_rules.py::
 test_not_yet_knowable_is_partition_level_so_an_as_of_inside_a_year_reads_nothing` pins the
 behaviour and carries the same disclosure next to the assertions.
 
+**P3 took the decision the section above left open, and took neither of the two options it was
+posed as.** `read_if_ready` is unchanged -- it promises exactly what it promised, every one of
+its fourteen callers is untouched, and `not_yet_knowable` still refuses a whole partition
+there. What `V2-P3-002` added is a *second*, differently named read on the same store,
+`PanelStore.read_visible_at`, which runs the identical rule table and then, **only** when every
+issue it found is in `ROW_FILTERABLE_ISSUE_CODES` (that is: only `not_yet_knowable`), scans the
+partition with a `WHERE available_time <= as_of` predicate instead of refusing it. Three
+properties make that a different trade from the one P2 declined:
+
+- The short answer is **stated**, not inferred. `PanelVisibleReadOutcome` carries
+  `withheld_row_count`, so "shortness" arrives as a number beside the rows rather than as
+  something a consumer has to notice. The consumers P2 named -- `build_index_membership`,
+  `load_industry_histories`, `build_stock_universe` -- read shortness as missing data because
+  nothing told them otherwise, and they still take the un-filtered path.
+- It is a **different type**, so a filtered read cannot be handed to a reader that expects a
+  whole partition without mypy saying so, and `tests/unit/panel/test_visible_read_callers.py`
+  pins which `src/` files may call it at all.
+- Exactly one readiness code is compensated by the predicate. Every other issue still refuses
+  the partition whole, so nothing about the structural checks weakened; see
+  `ROW_FILTERABLE_ISSUE_CODES` for the code-by-code argument.
+
+What it cannot promise is disclosed rather than argued away, in
+`KNOWN_STORAGE_LIMITATIONS.a_visibility_filtered_read_replays_a_partition_that_was_not_there_yet`:
+filtering a retrospectively written partition reconstructs what the *stored* rows say was
+knowable then, which is not the same as what a fetch made at that instant would have returned.
+
 ## What is deliberately not here
 
 No trading calendar. `ReadinessRequirement.required_dates` is supplied by the caller because
@@ -312,6 +338,32 @@ be invisible to both, which is why
 drives the evaluator into every branch and asserts the emitted set equals this one exactly.
 """
 
+ROW_FILTERABLE_ISSUE_CODES: Final[frozenset[str]] = frozenset({"not_yet_knowable"})
+"""The one issue a row-level `available_time` predicate can answer better than a refusal.
+
+`PanelStore.read_visible_at` (`V2-P3-002`) is allowed to proceed over a partition whose *only*
+readiness issue is one of these, replacing the refusal with a `WHERE available_time <= as_of`
+scan. Every other code stays a refusal, and the rule is written as this set difference rather
+than as a second rule table, so `evaluate_readiness` is still the one place a verdict is
+computed and a code added there arrives blocking on both paths.
+
+**Exactly one member, and each of the other twelve is excluded for a reason a filter cannot
+touch.** `partition_missing` / `partition_file_missing` / `partition_file_unreadable` /
+`partition_row_count_mismatch` / `coverage_missing` / `coverage_stale` say the partition is not
+what the catalog claims, and filtering rows out of a partition you cannot trust filters nothing
+useful. `date_gap` / `subject_missing` / `field_missing` say the data the caller requires is
+absent, and withholding *more* of it does not supply it. `stale` says the newest event is older
+than the caller's bound -- a predicate that removes recent rows can only make that worse.
+`no_years_requested` / `empty_requirement` say the requirement inspected nothing.
+
+`not_yet_knowable` is different in kind: it is the one verdict that is true *of some rows and
+not others*. `evaluate_readiness` compares one number per partition -- `max_available_time` --
+and a partition is a year, so a complete 2015 partition is refused at every `as_of` in 2015
+even though most of its rows were knowable at most of them. The refusal is sound and the
+granularity is the whole of the problem, which is what roadmap section 11 records and what this
+constant names.
+"""
+
 READINESS_WAIVABLE_CHECKS: Final[frozenset[str]] = frozenset(
     {"required_dates", "required_subjects", "required_fields", "max_staleness"}
 )
@@ -372,6 +424,29 @@ KNOWN_STORAGE_LIMITATIONS: Final[tuple[StorageLimitation, ...]] = (
             "Adding the predicate here was considered and declined: a filtered read hands "
             "back a short partition and every consumer above this plane reads shortness as "
             "missing data (see tests/integration/panel/test_lookahead_injection.py)"
+        ),
+    ),
+    StorageLimitation(
+        code="a_visibility_filtered_read_replays_a_partition_that_was_not_there_yet",
+        detail=(
+            "read_visible_at() answers a mid-year as_of by scanning the year partition with a "
+            "row-level available_time <= as_of predicate instead of refusing it, and reports "
+            "how many rows it withheld. What it reconstructs is what the STORED partition says "
+            "was knowable then -- not what a fetch made at that instant would have returned. "
+            "The two differ wherever the upstream is not append-only: a partition is written "
+            "whole and once, months after the sessions in it, so a filing that was later "
+            "restated is stored only in its restated form (roadmap section 7 measured "
+            "fina_indicator carrying two rows for 81.7% of its keys with identical four-clock "
+            "timelines, so no available_time separates the versions), a security absent from "
+            "the registry snapshot the partition was built from is absent at every as_of "
+            "inside it, and a row the upstream served then and does not serve now is not "
+            "there at all. Nothing on this plane can close that: it needs a revision history "
+            "the endpoints do not publish. Every structural readiness check still runs -- the "
+            "filter replaces exactly one code, ROW_FILTERABLE_ISSUE_CODES, and a partition "
+            "with any other issue is refused whole. The residue that IS closable is closed "
+            "elsewhere: tests/unit/panel/test_visible_read_callers.py pins which src/ files "
+            "may take this path, because a filtered read hands back a short partition and "
+            "every domain rebuilder above this plane reads shortness as missing data"
         ),
     ),
 )
@@ -668,6 +743,131 @@ class PanelReadOutcome:
                 "use `rows_or_none` to handle blocked and empty together on purpose"
             )
         return self.rows_or_none
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PanelVisibleReadOutcome:
+    """A verdict, the rows that were knowable at `as_of`, and how many were held back.
+
+    `PanelStore.read_visible_at`'s answer, and a **different type** from `PanelReadOutcome`
+    rather than a flag on it. That is the point rather than fastidiousness: the two make
+    different promises, and mypy refusing to pass one where the other is expected is what keeps
+    a caller from handing a filtered, deliberately short read to something that reads shortness
+    as missing data.
+
+    ## What it promises that `PanelReadOutcome` does not
+
+    `rows` here is not the partition. It is the partition minus every row whose
+    `available_time` post-dates `as_of`, and `withheld_row_count` says how many that was --
+    which is the whole reason this type exists. P2 declined a row-level filter on the ground
+    that "a filtered read hands back a *short* partition, and every consumer above this plane
+    reads shortness as missing data rather than as withheld data". The objection is about a
+    *silently* short answer: `build_index_membership` cannot tell a filtered month from an
+    absent one because nothing tells it. Here something does, as a number the caller cannot
+    receive rows without also receiving.
+
+    ## The sentinels, and the mistake each one is measured against
+
+    - **`rows` raises on a blocked outcome**, and the merged shape is available only as
+      `rows_or_none`. `PanelReadOutcome`'s own docstring records why: `if not outcome.rows:`
+      and `outcome.rows or []` both type-check and both silently merge blocked with
+      ready-and-empty.
+    - **`withheld_row_count` raises on a blocked outcome** for the same reason, with the same
+      escape hatch under the name `withheld_row_count_or_none`. A blocked read withheld
+      *everything*, and answering `0` would be the one number a caller must not be told.
+    - **`bool()`, `len()` and iteration all raise -- including on a ready outcome.** `if
+      outcome:` is the most available way to write this check and it is true of a blocked
+      outcome, because a dataclass instance is truthy. `DependencyClearance` (`panel_gate.py`)
+      set this precedent and refuses all three on the clearing path as well as the blocking
+      one, for the reason that matters: a guard that only rejects the failing case teaches
+      nothing on the passing case and is removed the first time someone reads it as noise.
+
+    ## `readiness.state` may say `blocked` on an outcome that carries rows
+
+    That is not a contradiction and it is not a leak: `readiness` is the verdict
+    `read_if_ready` **would** have returned, kept verbatim rather than rewritten, because the
+    whole of this type's contract is "the rule table refused this partition for exactly these
+    reasons, and a row predicate answered them". Rewriting the verdict to `ready` would erase
+    the only record of *which* refusal was compensated, and rewriting it is also what would let
+    a future second filterable code pass unnoticed.
+
+    So `is_blocked` is this outcome's own answer and `readiness.state` is the gate's, and
+    `compensated_issue_codes` names the difference -- which is what a report shows a reader and
+    what `V2-P3-002`'s manifest could carry if a later issue needs it. A caller branching on
+    `outcome.readiness.is_ready` instead of `outcome.is_blocked` would skip rows it was given;
+    that is the one mistake this type cannot make raise, so it is named here and the positively
+    stated accessor is provided next to it.
+    """
+
+    readiness: DatasetReadiness
+    as_of: datetime
+    rows_or_none: tuple[tuple[object, ...], ...] | None
+    withheld_row_count_or_none: int | None
+
+    @property
+    def is_blocked(self) -> bool:
+        return self.rows_or_none is None
+
+    @property
+    def rows(self) -> tuple[tuple[object, ...], ...]:
+        """The rows visible at `as_of`, or `PanelStorageError` if the dataset was blocked."""
+        if self.rows_or_none is None:
+            raise PanelStorageError(
+                f"{self.readiness.dataset} is blocked at {self.as_of.isoformat()}, so it has no "
+                f"visible rows to read: {[issue.code for issue in self.readiness.issues]}; "
+                "use `rows_or_none` to handle blocked and empty together on purpose"
+            )
+        return self.rows_or_none
+
+    @property
+    def withheld_row_count(self) -> int:
+        """How many rows the availability predicate held back, or an error if blocked."""
+        if self.withheld_row_count_or_none is None:
+            raise PanelStorageError(
+                f"{self.readiness.dataset} is blocked at {self.as_of.isoformat()}, so nothing "
+                "was read and 'how many rows were withheld' has no answer; use "
+                "`withheld_row_count_or_none` to handle blocked and zero together on purpose"
+            )
+        return self.withheld_row_count_or_none
+
+    @property
+    def visible_row_count(self) -> int:
+        return len(self.rows)
+
+    @property
+    def compensated_issue_codes(self) -> tuple[str, ...]:
+        """The refusals the availability predicate answered, in sorted order.
+
+        Empty on a partition the rule table cleared outright -- which is the honest answer,
+        because then nothing was compensated and the predicate removed nothing. Non-empty on a
+        read that was blocked and is now answered, so a caller (or a report) can say *why* the
+        rows it holds are a filtered subset rather than having to infer it from
+        `withheld_row_count` being greater than zero, which is a different fact: a partition can
+        be refused for `not_yet_knowable` and still withhold nothing from a narrow enough
+        filter.
+        """
+        if self.rows_or_none is None:
+            return ()
+        return tuple(sorted({issue.code for issue in self.readiness.issues}))
+
+    def __bool__(self) -> bool:
+        raise PanelStorageError(
+            "a visibility-filtered read outcome has no truth value: `if outcome:` is true of a "
+            "blocked one too. Ask `outcome.is_blocked`"
+        )
+
+    def __len__(self) -> int:
+        raise PanelStorageError(
+            "a visibility-filtered read outcome has no length: `len(outcome)` reads as the row "
+            "count and would hide the withheld ones. Ask `outcome.visible_row_count` and "
+            "`outcome.withheld_row_count`"
+        )
+
+    def __iter__(self) -> object:
+        raise PanelStorageError(
+            "a visibility-filtered read outcome is not iterable: iterating it would look like "
+            "iterating the partition, which is exactly what it is not. Iterate `outcome.rows`"
+        )
 
 
 def evaluate_readiness(

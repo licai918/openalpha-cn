@@ -442,7 +442,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
-from typing import cast
+from typing import Final, cast
 from zoneinfo import ZoneInfo
 
 import duckdb
@@ -451,17 +451,33 @@ from openalpha_cn.panel.catalog import (
     PANEL_BATCH_SCHEMA_VERSIONS_READABLE,
     PANEL_CATALOG_SCHEMA_VERSION,
     PANEL_CATALOG_SCHEMA_VERSIONS_READABLE,
+    ROW_FILTERABLE_ISSUE_CODES,
     DatasetReadiness,
     DateCoverage,
     FieldCoverage,
     PanelReadOutcome,
     PanelStorageError,
+    PanelVisibleReadOutcome,
     PartitionCoverage,
     PartitionState,
     ReadinessRequirement,
     RevisionCoverage,
     evaluate_readiness,
 )
+
+AVAILABILITY_COLUMN: Final[str] = "available_time"
+"""The clock column every panel partition carries, and the only one this module compares.
+
+`domain/panel_batch.py::CLOCK_COLUMN_NAMES` declares it as one of the four columns
+`ColumnarPanelBatch` writes on every row of every dataset, and `RESERVED_COLUMN_NAMES` stops
+any provider column shadowing it -- which is what makes `read_visible_at`'s predicate
+dataset-independent rather than a per-dataset convention. Restated here rather than imported,
+for the reason `_utc_now` is a local definition and
+`PANEL_BATCH_SCHEMA_VERSIONS_READABLE` is a local copy: `openalpha_cn.panel` imports no sibling
+subpackage at all. `tests/unit/panel/test_visible_read_callers.py::
+test_the_availability_column_this_module_filters_on_is_the_one_the_batch_contract_writes`
+pins the two copies together.
+"""
 
 __all__ = [
     "DUCKDB_COLUMN_TYPES",
@@ -1131,6 +1147,153 @@ class PanelStore:
             ) from error
         return PanelReadOutcome(readiness=readiness, rows_or_none=tuple(rows))
 
+    def read_visible_at(
+        self,
+        requirement: ReadinessRequirement,
+        *,
+        year: int,
+        columns: Sequence[str],
+        filters: Mapping[str, object] | None = None,
+    ) -> PanelVisibleReadOutcome:
+        """Read the rows of a partition that were knowable at `requirement.as_of`, and say how
+        many were not (`V2-P3-002`).
+
+        ## The one thing this does that `read_if_ready` does not
+
+        It runs the **same** `evaluate_readiness` over the **same** `PartitionState`s, and then
+        makes one substitution: if every issue the rule table found is in
+        `ROW_FILTERABLE_ISSUE_CODES` -- today that means `not_yet_knowable` and nothing else --
+        it scans the partition with `WHERE available_time <= as_of` instead of refusing it, and
+        counts what the predicate removed. Any other issue, alone or alongside, blocks exactly
+        as `read_if_ready` blocks. There is no second rule table and no readiness argument to
+        weaken: a code added to `evaluate_readiness` tomorrow arrives blocking on both paths,
+        and making it filterable is a deliberate edit to a named constant.
+
+        ## Why this exists at all, and why it is not a flag on `read_if_ready`
+
+        `not_yet_knowable` is judged per partition and a partition is a year, so a complete
+        2015 partition is refused at every `as_of` inside 2015 -- the whole of it, for the sake
+        of the December rows. Roadmap section 11 records the consequence: P3 cannot compute a
+        factor at a mid-year `as_of` through `read_if_ready`, and P4's walk-forward cannot step
+        an `as_of` through a year. The alternative measured for P3 was rebuilding the panel once
+        per `as_of`, at 120x a single annual build.
+
+        A flag on `read_if_ready` was the obvious shape and is the wrong one, for the reason
+        `query(..., unchecked=True)` was rejected one method over: a keyword that changes what a
+        method *promises* leaves fourteen existing call sites reading as if nothing had changed.
+        A separate name and a separate return type mean a filtered read cannot reach a reader
+        that expects a whole partition without the type checker saying so -- which matters
+        because the objection P2 raised is still true of every one of those readers.
+        `build_index_membership` refuses a gap in the month sequence,
+        `load_industry_histories`' `answerable_through` exists because a read that stops short
+        of an interval's closing row "reassembles an interval that never ends", and
+        `build_stock_universe` refuses a delisting whose listing was filtered away. Those three
+        read shortness as missing data, correctly, and they still take the un-filtered path.
+        What changed is that shortness is now *sayable*: `PanelVisibleReadOutcome.
+        withheld_row_count` is a number the caller receives with the rows, so a consumer that
+        wants to distinguish "withheld" from "absent" can, and one that would rather not know
+        cannot get the rows without it.
+
+        `tests/unit/panel/test_visible_read_callers.py` is the audit: an allowlist of the `src/`
+        files permitted to call this at all, in the shape `test_query_callers.py` established.
+
+        ## What it does not promise
+
+        Filtering a partition that was written months after the sessions in it replays what the
+        **stored** rows say was knowable then. That is not the same as what a fetch made at that
+        instant would have returned, wherever the upstream is not append-only -- a later
+        restatement is stored only in its restated form, and a security absent from the registry
+        snapshot the partition was built from is absent at every `as_of` inside it. Disclosed as
+        `KNOWN_STORAGE_LIMITATIONS.
+        a_visibility_filtered_read_replays_a_partition_that_was_not_there_yet` rather than left
+        to be inferred from this paragraph.
+
+        `columns` need not include `available_time`: the predicate is applied in SQL, over the
+        stored column, whether or not the caller projects it.
+        """
+        if year not in requirement.years:
+            raise PanelStorageError(
+                f"year {year} is not among the years this requirement was assessed over "
+                f"({sorted(set(requirement.years))})"
+            )
+        readiness = self.assess_readiness(requirement)
+        found = {issue.code for issue in readiness.issues}
+        if found - ROW_FILTERABLE_ISSUE_CODES:
+            return PanelVisibleReadOutcome(
+                readiness=readiness,
+                as_of=requirement.as_of,
+                rows_or_none=None,
+                withheld_row_count_or_none=None,
+            )
+        try:
+            rows, withheld = self._scan_visible(
+                requirement.dataset,
+                year=year,
+                as_of=requirement.as_of,
+                columns=columns,
+                filters=filters,
+            )
+        except PanelStorageError:
+            raise
+        except Exception as error:
+            raise PanelStorageError(
+                f"{requirement.dataset} year={year} passed the structural checks but could not "
+                f"be read at {requirement.as_of.isoformat()}: {type(error).__name__}: {error}"
+            ) from error
+        return PanelVisibleReadOutcome(
+            readiness=readiness,
+            as_of=requirement.as_of,
+            rows_or_none=rows,
+            withheld_row_count_or_none=withheld,
+        )
+
+    def _scan_visible(
+        self,
+        dataset: str,
+        *,
+        year: int,
+        as_of: datetime,
+        columns: Sequence[str],
+        filters: Mapping[str, object] | None,
+    ) -> tuple[tuple[tuple[object, ...], ...], int]:
+        """The visible rows and the withheld count, from one read-only catalog connection.
+
+        Two statements over the same resolved partition path rather than one, because they
+        answer two questions and a single statement answering both would either return the
+        withheld rows (defeating the filter) or carry the count on every row (paying for it
+        `row_count` times). The second is a `count(*)` with the complementary predicate, which
+        DuckDB answers from the Parquet column rather than by materialising anything.
+
+        A missing partition is impossible here: `read_visible_at` only reaches this after
+        readiness has confirmed every requested year is registered, present, readable, profiled
+        and unchanged, so `_resolve_partition_path` returning `None` would be a catalog that
+        changed between two connections. It is refused rather than answered with `((), 0)`,
+        which would read as "the partition is there and nothing was knowable yet".
+        """
+        _validate_dataset(dataset)
+        if not self.catalog_path.exists():
+            raise PanelStorageError(
+                f"{dataset} year={year} passed readiness but the catalog is gone; nothing can "
+                "be read from it"
+            )
+        with duckdb.connect(str(self.catalog_path), read_only=True) as connection:
+            _check_catalog_schema_version(connection)
+            partition_path = self._resolve_partition_path(connection, dataset, year)
+            if partition_path is None:
+                raise PanelStorageError(
+                    f"{dataset} year={year} passed readiness but is no longer registered in the "
+                    "catalog; the catalog changed underneath this read"
+                )
+            visible_sql, visible_parameters = _build_visible_scan_sql(
+                partition_path, columns, filters
+            )
+            withheld_sql, withheld_parameters = _build_withheld_count_sql(partition_path, filters)
+            with _scan_failures_as_storage_errors(dataset, year):
+                scanned = connection.execute(visible_sql, [*visible_parameters, as_of]).fetchall()
+                counted = connection.execute(withheld_sql, [*withheld_parameters, as_of]).fetchone()
+        withheld = 0 if counted is None else int(cast(int, counted[0]))
+        return tuple(cast(list[tuple[object, ...]], scanned)), withheld
+
     def _partition_states(self, requirement: ReadinessRequirement) -> tuple[PartitionState, ...]:
         """What the store can see about each requested year, as evidence for the rule table.
 
@@ -1360,6 +1523,63 @@ def _build_scan_sql(
         parameters.extend(filters.values())
         where_sql = " WHERE " + " AND ".join(clauses)
     return f"SELECT {column_list} FROM read_parquet(?){where_sql}", parameters
+
+
+def _equality_clauses(filters: Mapping[str, object] | None) -> tuple[list[str], list[object]]:
+    """`filters` as escaped `col = ?` clauses and their bound values, in one place.
+
+    Shared by the visible scan and the withheld count so the two cannot answer about different
+    row sets: a count taken without the caller's filters would say how many rows of the whole
+    partition were withheld, which is a different and much larger number than "how many of the
+    rows I asked for".
+    """
+    if not filters:
+        return [], []
+    clauses = [f"{_quote_identifier(key, role='filter')} = ?" for key in filters]
+    return clauses, list(filters.values())
+
+
+def _build_visible_scan_sql(
+    partition_path: Path, columns: Sequence[str], filters: Mapping[str, object] | None
+) -> tuple[str, list[object]]:
+    """`read_visible_at`'s projection, with the availability predicate **in the statement**.
+
+    The predicate is last in the `WHERE` list and is a bound `?`, never interpolated, so an
+    `as_of` cannot become SQL. It is added unconditionally rather than only when the readiness
+    verdict said `not_yet_knowable`: a partition whose newest row predates `as_of` is filtered
+    by a predicate that removes nothing, and a conditional predicate would mean the point-in-
+    time guarantee depended on a verdict computed from catalog metadata rather than on the rows.
+    That is the difference between a filter and a hope, and
+    `tests/integration/panel/test_visibility_filtered_read.py` mutates the comparison to prove
+    the assertions can see it.
+    """
+    if not columns:
+        raise PanelStorageError("must request at least one column")
+    column_list = ", ".join(_quote_identifier(name) for name in columns)
+    clauses, values = _equality_clauses(filters)
+    clauses.append(f"{_quote_identifier(AVAILABILITY_COLUMN)} <= ?")
+    return (
+        f"SELECT {column_list} FROM read_parquet(?) WHERE {' AND '.join(clauses)}",
+        [str(partition_path), *values],
+    )
+
+
+def _build_withheld_count_sql(
+    partition_path: Path, filters: Mapping[str, object] | None
+) -> tuple[str, list[object]]:
+    """How many of the rows the caller asked for were held back: the exact complement.
+
+    `>` rather than `NOT (<=)` spelled out, and the same equality clauses, so
+    `visible + withheld` is the filtered partition's row count exactly --
+    `test_the_two_halves_of_a_filtered_read_add_up_to_the_partition` asserts that identity
+    rather than trusting the two statements to agree.
+    """
+    clauses, values = _equality_clauses(filters)
+    clauses.append(f"{_quote_identifier(AVAILABILITY_COLUMN)} > ?")
+    return (
+        f"SELECT count(*) FROM read_parquet(?) WHERE {' AND '.join(clauses)}",
+        [str(partition_path), *values],
+    )
 
 
 def _content_hash(

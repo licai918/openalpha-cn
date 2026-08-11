@@ -378,6 +378,50 @@ def test_both_storage_limitations_carry_the_measurement_that_motivated_them() ->
     assert "read_if_ready" in query_detail
 
 
+def test_the_visibility_filtered_read_is_disclosed_with_what_it_cannot_promise() -> None:
+    """`V2-P3-002`'s third storage-plane boundary, held to the same standard as the two above.
+
+    Written as a separate test rather than folded into
+    `test_both_storage_limitations_carry_the_measurement_that_motivated_them`, which is left
+    exactly as it was: it names the two it names, and both claims are still true of them.
+
+    What this one has to carry is different in kind from a count, and that difference is the
+    reason `read_visible_at` is disclosed at all. `PanelStore.query()`'s entry is sized by a
+    number (152 rows, 92 unknowable) because the risk is quantity. This one's risk is a
+    *category*: filtering a partition written months after the sessions in it replays what the
+    stored rows say was knowable then, which is not what a fetch made at that instant would have
+    returned wherever the upstream restates or re-scopes. So the disclosure must name the
+    mechanism (`available_time`), the bound on how much it changes
+    (`ROW_FILTERABLE_ISSUE_CODES` -- one code, every other issue still refuses), and at least
+    one measured instance of the divergence rather than a general worry.
+    """
+    by_code = {item.code: item.detail for item in KNOWN_STORAGE_LIMITATIONS}
+
+    detail = by_code["a_visibility_filtered_read_replays_a_partition_that_was_not_there_yet"]
+    assert "available_time" in detail
+    assert "ROW_FILTERABLE_ISSUE_CODES" in detail
+    assert "81.7%" in detail and "fina_indicator" in detail
+    assert "withheld" in detail
+
+
+def test_the_storage_plane_discloses_three_boundaries_and_the_report_carries_all_three() -> None:
+    """The total, so a disclosure that quietly stopped reaching a reader fails.
+
+    Every other assertion about these entries is per-entry and would be satisfied by a registry
+    that lost one. `KNOWN_PANEL_LIMITATIONS` is where a reader of `panel doctor` actually meets
+    them, so the count is asserted on both sides of the fold.
+    """
+    codes = {item.code for item in KNOWN_STORAGE_LIMITATIONS}
+
+    assert codes == {
+        "a_value_edited_in_place_leaves_the_census_intact",
+        "panel_store_query_is_public_and_passes_no_point_in_time_gate",
+        "a_visibility_filtered_read_replays_a_partition_that_was_not_there_yet",
+    }
+    assert codes <= {item.code for item in KNOWN_PANEL_LIMITATIONS}
+    assert all(item.datasets == () for item in KNOWN_PANEL_LIMITATIONS if item.code in codes)
+
+
 def test_the_calendar_limitation_carries_its_proven_instances_as_dates() -> None:
     (entry,) = [item for item in KNOWN_PANEL_LIMITATIONS if item.datasets == ("trade_cal",)]
 

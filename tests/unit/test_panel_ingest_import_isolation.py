@@ -77,11 +77,26 @@ without anyone having argued for it -- and this is the module that must reach th
 things it does not render, since it is the one the HTTP app imports.
 """
 
+_ALLOWED_FACTOR_DEPENDENCIES = _ALLOWED_INTERNAL_DEPENDENCIES | {"openalpha_cn.panel_ingest"}
+"""`openalpha_cn.panel_factors` (`V2-P3-002`), stated in full for the reason above.
+
+It shares all three with `panel_doctor` and shares none of that module's reasons. It reaches
+`domain` for the factor contracts and the columnar batch, `panel` for `PanelStore` and the
+readiness vocabulary, and `panel_ingest` for the three writer helpers that turn a batch into a
+partition (`write_panel_batch`, `merge_panel_batches`, `split_panel_batch_by_year`) -- not for a
+requirement builder, which is the edge it deliberately does not use: `compute_factor` takes each
+input dataset's `ReadinessRequirement` from its caller, so the question the engine puts to
+`daily` is the one `daily_requirement` puts, and an engine that built its own could ask
+something weaker. That is `panel_gate`'s argument, and the difference is that the gate can avoid
+the import entirely while this module needs the same package for its writers.
+"""
+
 PANEL_MODULE_DEPENDENCIES: dict[str, set[str]] = {
     "openalpha_cn.panel_ingest": _ALLOWED_INTERNAL_DEPENDENCIES,
     "openalpha_cn.panel_doctor": _ALLOWED_DOCTOR_DEPENDENCIES,
     "openalpha_cn.panel_gate": _ALLOWED_GATE_DEPENDENCIES,
     "openalpha_cn.panel_view": _ALLOWED_VIEW_DEPENDENCIES,
+    "openalpha_cn.panel_factors": _ALLOWED_FACTOR_DEPENDENCIES,
 }
 """Every top-level `panel_*` module and the sibling packages it may join.
 
@@ -229,6 +244,29 @@ def test_the_shared_face_joins_the_panel_plane_and_reaches_nothing_above_it() ->
         f"openalpha_cn.panel_view may import exactly {sorted(_ALLOWED_VIEW_DEPENDENCIES)}, "
         f"found {sorted(dependencies)}"
     )
+
+
+def test_the_factor_engine_joins_the_plane_below_it_and_nothing_above() -> None:
+    """`panel_factors` (`V2-P3-002`) may import exactly the three the plane is made of.
+
+    The absence that matters here is not `runtime` or `api` -- `test_no_top_level_panel_module_
+    reaches_a_composition_root_or_a_credential` covers those for every module at once -- it is
+    `openalpha_cn.storage`, where `ParquetEvidenceStore` lives, and `openalpha_cn.evidence`,
+    where the normaliser that feeds it does. `V2-P3-002` forbids factor observations from the
+    evidence plane, and an import graph with no edge is what makes that a structural obstacle
+    rather than a convention somebody has to remember. Asserted from this module's own row as
+    an equality, so an edge added later fails here as well as in
+    `tests/unit/panel/test_visible_read_callers.py`, which asks the same question from the
+    factor side.
+    """
+    dependencies = _direct_internal_dependencies("openalpha_cn.panel_factors")
+
+    assert dependencies == _ALLOWED_FACTOR_DEPENDENCIES, (
+        f"openalpha_cn.panel_factors may import exactly "
+        f"{sorted(_ALLOWED_FACTOR_DEPENDENCIES)}, found {sorted(dependencies)}"
+    )
+    assert "openalpha_cn.storage" not in dependencies
+    assert "openalpha_cn.evidence" not in dependencies
 
 
 def test_the_shared_face_adds_no_edge_into_anything_it_renders() -> None:
