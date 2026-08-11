@@ -48,9 +48,16 @@ file) or by asking a question about a year that was never built. Neither is a de
 
 So `PanelShape.provokes` names the health codes a shape makes the report emit, empty for the
 sound ones, and `tests/integration/panel/test_panel_shape_coverage.py` asserts the table in
-both directions against a real `panel_health_report`. Two shapes carry a `warning` and a
-`blocking` between them: `daily.uncorroborated_factor_step` and
-`financials.announced_after_the_as_of`.
+both directions against a real `panel_health_report`. Four shapes carry a `warning` and three
+`blocking`s between them: `daily.uncorroborated_factor_step` restates a `pre_close` the factors
+do not corroborate, and `financials.announced_after_the_as_of`,
+`index.publication_after_the_as_of` and `industry.reclassification_after_the_as_of` each store a
+row that had not become knowable at the read -- one per dataset, which is `V2-P2-001`, `003`
+and `004`. All three of those are built to the same rule: the injected row is dated after the
+read **and inside the panel's own partition year**, so the same partition at the same `as_of` is
+`ready` without it and `blocked` with it, and the refusal is attributable to the row rather than
+to the year (`tests/integration/panel/test_lookahead_injection.py` asserts the pair by pruning
+the batch itself, and pins the boundary at a microsecond).
 
 ## What a shape is allowed to imply
 
@@ -296,6 +303,35 @@ of the check -- roadmap section 11 records that `not_yet_knowable` is decided pe
 a partition is a year, so an `as_of` that simply predates a whole year's worth of data is
 blocked for a reason that has nothing to do with anything injected. Here the same partition at
 the same `as_of` is `ready` without this row and `blocked` with it.
+"""
+
+FUTURE_PUBLICATION: Final[date] = date(2026, 2, 27)
+"""The last open weekday of the month *after* the read, and still inside 2026.
+
+`FUTURE_ANNOUNCEMENT`'s two halves, in the one dataset that cannot use its date.
+`build_index_membership` refuses a doubled month and a missing one, so a second publication
+cannot be dropped three days after the first the way a restatement can: it has to be the next
+month's, which on this generator's calendar is Friday 2026-02-27 (the 28th is a Saturday).
+That is late enough to be unknowable at `AS_OF` and early enough to stay in the same partition,
+which is what keeps the refusal attributable to the injected publication rather than to the
+year the partition covers.
+"""
+
+RECLASSIFIED_THROUGH: Final[date] = date(2026, 1, 16)
+RECLASSIFIED_FROM: Final[date] = date(2026, 2, 2)
+"""A reclassification whose *opening* row is the only thing the read cannot see.
+
+`index_member_all` dates a row's availability at the day it is about (see
+`KNOWN_INDUSTRY_LIMITATIONS.no_announcement_and_no_revision_history`), so closing the old
+interval on the panel's last session keeps that row knowable -- 2026-01-15 16:00Z, before
+`AS_OF` -- while the new interval's opening row, dated 2026-02-02, is not. **Exactly one stored
+row of the partition is after `AS_OF`**, which is what makes "remove that row and the same
+partition at the same `as_of` is `ready`" a literal statement rather than an approximate one.
+
+The 17-day delta is chosen to stay clear of both existing industry shapes' detectors:
+`_has_session_adjacent_handover` only counts a hand-over of 10 days or fewer, and
+`_has_industry_coverage_hole` counts sessions strictly between the two, of which there are none
+past the window's last session. So this shape composes with them instead of implying them.
 """
 
 DAILY_BASIC_EXTRA_COLUMNS: Final[tuple[str, ...]] = (
@@ -564,13 +600,34 @@ def _has_uncorroborated_factor_step(panel: GeneratedPanel) -> bool:
     return False
 
 
-def _has_disclosure_after_the_as_of(panel: GeneratedPanel) -> bool:
-    """A stored row that had not become knowable by the panel's own `as_of`."""
-    return any(
-        available > panel.as_of
-        for batch in panel.batches.values()
-        for available in batch.timeline.available_time
+def _rows_after_the_as_of(panel: GeneratedPanel, dataset: str) -> int:
+    """How many of `dataset`'s stored rows had not become knowable by the panel's own `as_of`.
+
+    Per dataset rather than over the whole panel, which is what the three look-ahead shapes
+    need to stay independent: a detector that swept every batch would answer `True` for
+    `financials.announced_after_the_as_of` on a panel carrying only the *index* injection, and
+    the table's one non-negotiable property is that a detector reports the form it names.
+    """
+    if dataset not in panel.batches:
+        return 0
+    return sum(
+        1 for available in panel.batch(dataset).timeline.available_time if available > panel.as_of
     )
+
+
+def _has_disclosure_after_the_as_of(panel: GeneratedPanel) -> bool:
+    """An `income` row that had not become knowable by the panel's own `as_of`."""
+    return _rows_after_the_as_of(panel, INCOME_DATASET) > 0
+
+
+def _has_publication_after_the_as_of(panel: GeneratedPanel) -> bool:
+    """An `index_weight` row that had not become knowable by the panel's own `as_of`."""
+    return _rows_after_the_as_of(panel, INDEX_WEIGHT_DATASET) > 0
+
+
+def _has_reclassification_after_the_as_of(panel: GeneratedPanel) -> bool:
+    """An `index_member_all` row that had not become knowable by the panel's own `as_of`."""
+    return _rows_after_the_as_of(panel, INDUSTRY_MEMBERSHIP_DATASET) > 0
 
 
 def _has_bar_without_valuation(panel: GeneratedPanel) -> bool:
@@ -940,6 +997,48 @@ _SHAPES: Final[tuple[PanelShape, ...]] = (
             "check stand in for the derived tolerance"
         ),
         detect=_has_inexact_weight_sum,
+    ),
+    PanelShape(
+        shape_id="index.publication_after_the_as_of",
+        datasets=(INDEX_WEIGHT_DATASET,),
+        summary="a second monthly publication, with a changed membership, dated after the read",
+        measurement=(
+            "the response carries no announcement column, so availability is dated at the "
+            "publication session's own close over all 633 publications "
+            "(KNOWN_INDEX_MEMBERSHIP_LIMITATIONS.publication_lag_is_not_in_the_response, "
+            "domain/index_membership.py) -- which makes 'a publication the read cannot see yet' "
+            "the ordinary monthly case rather than a contrived one. It is a composition change "
+            "and not a repeat because 166 of the 630 measured publication-to-publication "
+            "transitions changed the membership; 000300.SH's 2026-05-29 and 2026-06-30 "
+            "publications differ by 19 names, 000905.SH's by 50 and 000852.SH's by 100. Those "
+            "two numbers are cited for the size of a real rebalance and nothing else -- the "
+            "49,900 name-session look-ahead they belong to is "
+            "scheduled_review_takes_effect_before_it_is_published, a rebalance that took effect "
+            "BEFORE the publication reporting it, which is the opposite direction from this "
+            "shape and is not what this injects"
+        ),
+        detect=_has_publication_after_the_as_of,
+        provokes=("not_yet_knowable",),
+    ),
+    PanelShape(
+        shape_id="industry.reclassification_after_the_as_of",
+        datasets=(INDUSTRY_MEMBERSHIP_DATASET,),
+        summary="an assignment that takes effect after the read, closing one that already had",
+        measurement=(
+            "neither industry endpoint carries an announcement column, so inside a vintage's own "
+            "era an assignment's availability is dated at in_date's midnight "
+            "(KNOWN_INDUSTRY_LIMITATIONS.no_announcement_and_no_revision_history, "
+            "domain/industry_classification.py) -- so on this dataset 'a reclassification the "
+            "read cannot see yet' is exactly an in_date after the as_of, with nothing else to "
+            "distinguish it. The corpus's 7,893 membership rows over 5,889 securities hold "
+            "2,004 superseded intervals, so a security whose interval closes and reopens is the "
+            "form the feed actually serves. This is not the 1,038,252-pair (10.85%) SW2021 "
+            "backfill the module's own docstring measures: that one is a 2021 taxonomy stated "
+            "over 1984 memberships, a revision erased BACKWARDS, where this is an assignment "
+            "the read is standing in front of"
+        ),
+        detect=_has_reclassification_after_the_as_of,
+        provokes=("not_yet_knowable",),
     ),
     PanelShape(
         shape_id="financials.same_day_duplicate_versions",
@@ -1506,23 +1605,44 @@ equality test would accept, which is the entire point of the shape.
 def _index_weight_batch(
     *, sessions: Sequence[date], securities: Sequence[str], shapes: frozenset[str]
 ) -> ColumnarPanelBatch:
-    day = sessions[-1]
+    """One publication a month, and a second month only when a shape asks for one.
+
+    The first publication is byte-identical whether or not `index.publication_after_the_as_of`
+    is requested, which is what makes the pair of panels a controlled comparison: the injected
+    panel is the clean one plus `FUTURE_PUBLICATION`'s rows and nothing else.
+    """
     if "index.published_weights_do_not_sum_to_exactly_one_hundred" in shapes:
         constituents = tuple(securities[:3])
         weights = tuple(INEXACT_WEIGHT for _ in constituents)
     else:
         constituents = tuple(securities[:2])
         weights = tuple(100.0 / len(constituents) for _ in constituents)
+    publications: list[tuple[date, tuple[str, ...], tuple[float, ...]]] = [
+        (sessions[-1], constituents, weights)
+    ]
+    if "index.publication_after_the_as_of" in shapes:
+        # One name dropped and one added against whichever first publication was built, so the
+        # later publication is a rebalance rather than a repeat -- otherwise a read that leaked
+        # it would answer the same constituents and the leak would be undetectable.
+        later = tuple(securities[1:3])
+        publications.append((FUTURE_PUBLICATION, later, tuple(100.0 / len(later) for _ in later)))
+    rows = [
+        (day, con_code, weight)
+        for day, codes, cells in publications
+        for con_code, weight in zip(codes, cells, strict=True)
+    ]
+    available = [_published_time(day) for day, _, _ in rows]
     return _batch(
         INDEX_WEIGHT_DATASET,
-        subjects=[INDEX_CODE] * len(constituents),
+        subjects=[INDEX_CODE] * len(rows),
         columns=[
-            PanelColumn("publication_date", "string", tuple(day.isoformat() for _ in constituents)),
-            PanelColumn("con_code", "string", constituents),
-            PanelColumn("weight", "float", weights),
+            PanelColumn("publication_date", "string", tuple(day.isoformat() for day, _, _ in rows)),
+            PanelColumn("con_code", "string", tuple(code for _, code, _ in rows)),
+            PanelColumn("weight", "float", tuple(weight for _, _, weight in rows)),
         ],
-        event_time=[_close_time(day)] * len(constituents),
-        available_time=[_published_time(day)] * len(constituents),
+        event_time=[_close_time(day) for day, _, _ in rows],
+        available_time=available,
+        fetched_at=max([AS_OF, *available]),
     )
 
 
@@ -1796,6 +1916,10 @@ def _industry_membership_batch(
                 )
     rows.sort(key=lambda row: (row[1], row[0].ts_code))
     dated = [_midnight_shanghai(event) for _, event, _ in rows]
+    # `_statement_batch`'s rule, for the same reason: an assignment that takes effect after the
+    # read is only storable in a batch genuinely fetched after it, because `ColumnarPanelBatch`
+    # refuses a row whose `available_time` is after its own `as_of`. The read's `as_of` does not
+    # move; only the fetch does.
     return _batch(
         INDUSTRY_MEMBERSHIP_DATASET,
         subjects=[assignment.ts_code for assignment, _, _ in rows],
@@ -1816,6 +1940,7 @@ def _industry_membership_batch(
         ],
         event_time=dated,
         available_time=dated,
+        fetched_at=max([AS_OF, *dated]),
     )
 
 
@@ -1899,6 +2024,14 @@ def _industry_assignments(
         assignments[code] = (
             _assignment(code, 0, since=LISTED_ON, through=HOLE_THROUGH),
             _assignment(code, 1, since=HOLE_FROM, through=None),
+        )
+    if "industry.reclassification_after_the_as_of" in shapes:
+        # `securities[2]`, so all three industry shapes compose: the hand-over is on
+        # `securities[0]` and the coverage hole on `securities[1]`.
+        code = securities[2]
+        assignments[code] = (
+            _assignment(code, 0, since=LISTED_ON, through=RECLASSIFIED_THROUGH),
+            _assignment(code, 1, since=RECLASSIFIED_FROM, through=None),
         )
     return MappingProxyType(assignments)
 

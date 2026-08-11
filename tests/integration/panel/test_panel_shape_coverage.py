@@ -107,11 +107,13 @@ EXPECTED_HEALTHY_SHAPES = (
     "industry.session_adjacent_handover",
     "industry.coverage_hole",
 )
-"""Eighteen of the twenty-two, in table order. The four left out, and why:
+"""Eighteen of the twenty-four, in table order. The six left out, and why:
 
-- `daily.uncorroborated_factor_step` is a `warning` and
-  `financials.announced_after_the_as_of` is a `blocking` -- the two shapes that exist precisely
-  so a generated panel can be unhealthy, which is what `V2-P2`'s nine injection issues need.
+- `daily.uncorroborated_factor_step` is a `warning`, and `financials.announced_after_the_as_of`,
+  `index.publication_after_the_as_of` and `industry.reclassification_after_the_as_of` are each a
+  `blocking` -- the shapes that exist precisely so a generated panel can be unhealthy, which is
+  what `V2-P2`'s nine injection issues need. The three blocking ones are the same injection
+  aimed at three datasets, which is `V2-P2-001`/`003`/`004` respectively.
 - `financials.same_day_duplicate_versions` and `financials.three_versions_of_one_key` produce a
   real `ambiguous_filing` **notice**, so a panel carrying them is still clean but no longer
   finding-free -- and the point of the healthy case is that a shape-rich panel produces
@@ -209,14 +211,34 @@ def test_a_shape_provokes_exactly_the_health_codes_it_declares(
     )
 
 
-def test_the_two_defect_shapes_are_the_ones_that_make_a_generated_panel_unhealthy(
+DEFECT_SHAPES = (
+    "daily.uncorroborated_factor_step",
+    "financials.announced_after_the_as_of",
+    "index.publication_after_the_as_of",
+    "industry.reclassification_after_the_as_of",
+)
+"""Every shape that makes a generated panel unhealthy, spelled out rather than derived.
+
+`provokes` alone cannot name this set: `financials.same_day_duplicate_versions` declares two
+codes and both are `notice`s, so a panel carrying it is still `is_clean`. Severity is
+`panel_doctor`'s to assign, which is why the assertion below reads it off a real report instead
+of recomputing it here."""
+
+
+def test_the_defect_shapes_are_the_ones_that_make_a_generated_panel_unhealthy(
     tmp_path: Path,
 ) -> None:
     """`is_clean` is "no blocking and no warning", so the notice-producing shapes are not
     enough: a generator whose worst output is a notice cannot exercise a single branch that
-    exists to refuse. One shape reaches each severity, and this pins which."""
+    exists to refuse. Both severities are reached, and this pins which shape reaches which.
+
+    The three `blocking` ones are the same injection -- a stored row that had not become
+    knowable at the read -- aimed at `income`, `index_weight` and `index_member_all` in turn,
+    which is `V2-P2-001`, `003` and `004`. They are listed separately rather than collapsed
+    because each partition is judged on its own `max_available_time`, so a regression that lost
+    one dataset's coverage census would leave the other two green."""
     severities: dict[str, dict[str, int]] = {}
-    for shape_id in ("daily.uncorroborated_factor_step", "financials.announced_after_the_as_of"):
+    for shape_id in DEFECT_SHAPES:
         panel = generate_panel(shapes=(shape_id,))
         store, datasets = _stored(tmp_path / shape_id, panel)
         report = _report(store, panel, datasets)
@@ -229,7 +251,10 @@ def test_the_two_defect_shapes_are_the_ones_that_make_a_generated_panel_unhealth
     assert severities == {
         "daily.uncorroborated_factor_step": {"warning": 1},
         "financials.announced_after_the_as_of": {"blocking": 1, "warning": 1},
+        "index.publication_after_the_as_of": {"blocking": 1},
+        "industry.reclassification_after_the_as_of": {"blocking": 1},
     }
+    assert set(DEFECT_SHAPES) | set(HEALTHY_SHAPES) < set(PANEL_SHAPES)
 
 
 MINIMUM_RETURN_PATH_GAP = 0.0327
