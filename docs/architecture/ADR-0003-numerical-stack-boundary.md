@@ -138,7 +138,7 @@ a performance issue on this plane actually lives -- see the correction below for
 why a single number for it is no longer quoted.
 
 **Correction (`V2-P3-002` review, 2026-08-11): the write figure was `288 s` and is withdrawn as
-an absolute.** Four measurements of one nominal quantity now exist and they span more than an
+an absolute.** Five measurements of one nominal quantity now exist and they span more than an
 order of magnitude:
 
 | measurement of `write_panel_batch` at 675,148 rows | time |
@@ -146,21 +146,22 @@ order of magnitude:
 | the original, as first recorded here | 288 s |
 | re-measured at the same row count during review | 56.7 s |
 | extrapolated from a fifth of the scale | 234 s |
-| re-measured again during the remediation (10 stored columns) | 617.9 s |
+| re-measured during the `V2-P3-001`/`002` identity remediation | 350.6 s |
+| re-measured again during this remediation (10 stored columns) | 617.9 s |
 
-Column count and machine explain some of that and plainly not all of it, and none of the four
+Column count and machine explain some of that and plainly not all of it, and none of the five
 was taken under stated, controlled conditions. So this table no longer quotes a second-count for
 this step: an absolute nobody can reproduce is worse than a comparison everybody can.
 
-What survives is the comparison this row was here to make, and the smallest of the four is still
-enough for it: against the 1.95 s read, the write is **29x** at 56.7 s, 148x at 288 s and 317x
-at 617.9 s. So "the write path dominates by at least an order of magnitude, and by two on three
-of the four measurements" is what this ADR now claims, and the decision it records -- that the
-factor engine's arithmetic is not where a numerical stack would pay for itself -- does not
-depend on which of the four is right. (The earlier paragraph's "two orders of magnitude" was
-written when 288 s was the only figure; at 56.7 s it would have been an overclaim.) The read
-side is the half that reproduces: 1.61 s cold and 1.60 s warm on an independently built
-partition of the same size, slightly faster than the 1.95 s above.
+What survives is the comparison this row was here to make, and the smallest of the five is still
+enough for it: against the 1.95 s read, the write is **29x** at 56.7 s, 148x at 288 s, 180x at
+350.6 s and 317x at 617.9 s. So "the write path dominates by at least an order of magnitude, and
+by two on four of the five measurements" is what this ADR now claims, and the decision it
+records -- that the factor engine's arithmetic is not where a numerical stack would pay for
+itself -- does not depend on which of the five is right. (The earlier paragraph's "two orders of
+magnitude" was written when 288 s was the only figure; at 56.7 s it would have been an
+overclaim.) The read side is the half that reproduces: 1.61 s cold and 1.60 s warm on an
+independently built partition of the same size, slightly faster than the 1.95 s above.
 
 The first run of this measurement said 2.01 s, and the difference is worth naming because it
 was a real defect rather than noise: `manifest_id` is a pydantic `computed_field`, which is not
@@ -168,6 +169,27 @@ cached, and it was being read inside the per-security loop -- so the whole build
 re-canonicalised and re-hashed 5,534 times. `domain/panel_batch.py` documents exactly that trap
 (`payload_digest`, 10.5 ms on first access and 10.2 ms on the second) and this module walked
 into it anyway; hoisting the read out of the loop is the fix.
+
+### Re-measured after the `V2-P3-001`/`002` review remediation
+
+The remediation added two per-build passes and one per-security check to the same workload: the
+union of every visible session (`_panel_sessions`), the refusal of a panel narrower than the
+lookback, and two binary searches per security for the window's span in panel sessions
+(`_window_span`). Re-measured on the same shape -- 5,534 securities x 122 sessions = 675,148
+rows through the real store:
+
+| step | before | after |
+|---|---|---|
+| `compute_factor`, cold | 1.95 s | **2.24 s** (3.3 us/row) |
+| the same call again, warm | 1.91 s | 2.26 s |
+
+The conclusion is unchanged and so is the *kind* of arithmetic: still no matrix, no broadcast,
+no regression, and the added work is a sorted-set union plus `bisect` over a list of at most
+2,000 dates. The write path still dominates: `write_panel_batch` for the same partition took
+350.6 s on this run, which is the fourth row of the correction table above and 180x this read.
+That is one of five measurements spanning more than an order of magnitude, so the ordering is
+what is claimed and not the second-count -- see the correction for why.
+`V2-P3-004`'s neutralisation is still the issue that should re-open the question.
 
 The nine runtime dependencies are pinned by `tests/unit/test_repository_assets.py`, which is
 what would go red if this update were wrong.

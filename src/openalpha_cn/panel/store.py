@@ -646,22 +646,45 @@ class PartitionRef:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class _VisibleSummary:
+    """What one partition contributes to a filtered read, without its rows.
+
+    The two aggregates `evaluate_visible_slice` judges (`last_event_time`, `subjects`) plus the
+    one `PanelVisibleReadOutcome` reports (`withheld_row_count`). Split out of `_VisibleScan`
+    because the pooled checks are decided over **every** year the requirement names, and the
+    years other than the one being projected contribute these aggregates and no rows at all.
+
+    `subjects` is `None` when the requirement waived `required_subjects` and no probe ran, and
+    `frozenset()` when a probe ran and found none of them -- see `_probe_visible_subjects`.
+    """
+
+    withheld_row_count: int
+    last_event_time: datetime | None
+    subjects: frozenset[str] | None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class _VisibleScan:
-    """Everything one visibility-filtered scan learned, before anything judges it.
+    """Everything one visibility-filtered read learned, before anything judges it.
 
     Private and deliberately not a `PanelVisibleReadOutcome`: this is what the *store* saw, and
     the outcome is what the caller is allowed to conclude from it. Keeping them separate is what
     lets `read_visible_at` build a **blocked** outcome out of a **successful** scan, which is the
     shape the second gate needs and the first cut of `V2-P3-002` had no way to express.
 
-    `subjects` is `None` when the requirement waived `required_subjects` and no probe ran, and
-    `frozenset()` when a probe ran and found none of them -- see `_probe_visible_subjects`.
+    **`partition` and `answer` are two different scopes and conflating them was a real defect.**
+    `partition` describes the year being projected -- its rows are what comes back, and its
+    `withheld_row_count` and `last_event_time` are what the outcome reports. `answer` pools the
+    same aggregates over every year `requirement.years` names, which is the scope
+    `evaluate_readiness` decides `stale` and `subject_missing` at (`max(...)` over the usable
+    years' coverage, and the union of their subject censuses). Judging a pooled check at
+    partition scope refuses reads the requirement permits; see `read_visible_at` for the
+    measurement.
     """
 
     rows: tuple[tuple[object, ...], ...]
-    withheld_row_count: int
-    last_event_time: datetime | None
-    subjects: frozenset[str] | None
+    partition: _VisibleSummary
+    answer: _VisibleSummary
 
 
 _CATALOG_DDL = """
@@ -1209,21 +1232,56 @@ class PanelStore:
 
         ## The second gate, and why one was not enough
 
-        `evaluate_readiness` judges the **partition**; this method answers with a **subset of
-        its rows**. For three of the thirteen codes the check's *pass* is a claim about rows the
-        predicate then removes, so inheriting it hands the caller a conclusion nothing supports
-        -- `SCOPE_SENSITIVE_ISSUE_CODES` names them and carries the criterion. So after the scan
-        the two that can be re-decided here are re-decided, over the rows about to be returned,
-        through the same functions `evaluate_readiness` calls (`evaluate_visible_slice`). A slice
-        that fails one is **refused**, and the reason lands in
+        `evaluate_readiness` judges what the **catalog** says; this method answers with a
+        **subset of the rows**. For three of the thirteen codes the check's *pass* is a claim
+        about rows the predicate then removes, so inheriting it hands the caller a conclusion
+        nothing supports -- `SCOPE_SENSITIVE_ISSUE_CODES` names them and carries the criterion.
+        So after the scan the two that can be re-decided here are re-decided, over the rows
+        about to be returned, through the same functions `evaluate_readiness` calls
+        (`evaluate_visible_slice`). A read that fails one is **refused**, and the reason lands in
         `PanelVisibleReadOutcome.visible_slice_issues`.
 
-        `stale` is the case that forced this. It compares `as_of` against the *partition's*
-        newest event, and on the read this method exists for -- a year partition at an `as_of`
-        inside it -- that instant is after `as_of`, the difference is negative, and the check
-        cannot fire at all. Measured on the fixture panel through `daily_requirement`: bounds of
-        one hour, one day and two days all answered, with a visible slice 2 days 21 hours behind
-        `as_of`. The caller's declared bound was accepted and structurally ignored.
+        `stale` is the case that forced this. It compares `as_of` against the newest event the
+        *catalog* records, and on the read this method exists for -- a year partition at an
+        `as_of` inside it -- that instant is after `as_of`, the difference is negative, and the
+        check cannot fire at all. Measured on the fixture panel through `daily_requirement`:
+        bounds of one hour, one day and two days all answered, with a visible slice 2 days 21
+        hours behind `as_of`. The caller's declared bound was accepted and structurally ignored.
+
+        ## The re-decided checks are pooled over `requirement.years`, not over one partition
+
+        This is the correction the P3 merge forced, and it is a **scope** fix rather than a
+        weakening: the rule and the row set are unchanged, the set of partitions the rule is
+        asked about is not.
+
+        `max_staleness` and `required_subjects` are fields of the `ReadinessRequirement`, which
+        names a *set of years*, and `evaluate_readiness` decides both over that whole set --
+        `max(coverage.last_event_time for coverage in usable)` and the union of the usable
+        years' subject censuses. So `years=(2025, 2026)` with a five-day bound at an `as_of` of
+        2026-01-08 is **ready**: 2026 reaches 2026-01-07 and that is what the bound was declared
+        about. The first cut of the re-check compared the same bound against **one partition's**
+        visible slice, which for that requirement is 2025's, reaching 2025-12-31 -- seven days
+        and twenty-one hours behind, so `read_visible_at(..., year=2025)` refused a read
+        `read_if_ready` on the identical requirement permits. Measured on a two-year probe
+        partition; every test that existed when the re-check landed named a single year, where
+        pooled and per-partition coincide, so nothing saw it.
+
+        The consequence is not a corner case. A 120-session momentum factor evaluated in January
+        has to name the previous year in `requirement.years` or it reads a handful of sessions;
+        with the check at partition scope the only bound that lets it read is one wide enough to
+        span the whole look-back window, which is the bound the 172-day build above was refused
+        by. Pooling restores the two properties together: that build is still refused (its
+        requirement names one year, so the pool is its own slice), and a cross-year window is
+        answerable under a bound about *freshness* rather than about window width.
+
+        Every year in the pool costs one aggregate (plus one bounded subject probe when subjects
+        are required) on the connection already open; only `year` is projected. See
+        `_scan_visible`. A requirement that waives **both** re-decidable checks pools nothing,
+        because `evaluate_visible_slice` then returns `()` whatever it is handed -- the same
+        argument `_probe_visible_subjects` makes for skipping its statement, and the same
+        consequence: the derived read-back path (`factor_observation_requirement` and
+        `factor_manifest_requirement` waive both) costs exactly what it did before this pooling
+        existed, however many years it names.
 
         ## Why this exists at all, and why it is not a flag on `read_if_ready`
 
@@ -1286,10 +1344,16 @@ class PanelStore:
                 rows_or_none=None,
                 withheld_row_count_or_none=None,
             )
+        pooled_years = (
+            requirement.years
+            if requirement.max_staleness is not None or requirement.required_subjects is not None
+            else (year,)
+        )
         try:
             scan = self._scan_visible(
                 requirement.dataset,
                 year=year,
+                answer_years=pooled_years,
                 as_of=requirement.as_of,
                 columns=columns,
                 filters=filters,
@@ -1304,8 +1368,8 @@ class PanelStore:
             ) from error
         slice_issues = evaluate_visible_slice(
             requirement,
-            visible_last_event_time=scan.last_event_time,
-            visible_subjects=scan.subjects,
+            visible_last_event_time=scan.answer.last_event_time,
+            visible_subjects=scan.answer.subjects,
         )
         if slice_issues:
             return PanelVisibleReadOutcome(
@@ -1319,8 +1383,8 @@ class PanelStore:
             readiness=readiness,
             as_of=requirement.as_of,
             rows_or_none=scan.rows,
-            withheld_row_count_or_none=scan.withheld_row_count,
-            visible_last_event_time_or_none=scan.last_event_time,
+            withheld_row_count_or_none=scan.partition.withheld_row_count,
+            visible_last_event_time_or_none=scan.partition.last_event_time,
         )
 
     def _scan_visible(
@@ -1328,26 +1392,35 @@ class PanelStore:
         dataset: str,
         *,
         year: int,
+        answer_years: Sequence[int],
         as_of: datetime,
         columns: Sequence[str],
         filters: Mapping[str, object] | None,
         probe_subjects: Sequence[str] | None,
     ) -> _VisibleScan:
-        """The visible rows, and everything the second gate needs to judge them.
+        """The visible rows of `year`, and everything the second gate needs to judge them.
 
-        Two statements over the same resolved partition path rather than one, because they
-        answer two questions and a single statement answering both would either return the
-        withheld rows (defeating the filter) or carry the count on every row (paying for it
-        `row_count` times). The second is an aggregate over the *whole* selection -- withheld
-        count and visible reach in one pass, which DuckDB answers from the Parquet columns
-        rather than by materialising anything -- and it replaced a bare `count(*)` when the
-        review found `stale` could not fire on this path.
+        Two statements over the resolved partition path rather than one, because they answer
+        two questions and a single statement answering both would either return the withheld
+        rows (defeating the filter) or carry the count on every row (paying for it `row_count`
+        times). The second is an aggregate over the *whole* selection -- withheld count and
+        visible reach in one pass, which DuckDB answers from the Parquet columns rather than by
+        materialising anything -- and it replaced a bare `count(*)` when the review found
+        `stale` could not fire on this path.
 
         A third statement runs only when the requirement names `required_subjects`, and it is
         bounded by that list rather than by the partition: `DISTINCT subject ... WHERE subject
         IN (...)` returns at most as many rows as the caller asked about. Skipping it when the
         check is waived is not an optimisation, it is the truth -- `evaluate_visible_slice`
         raises if a requirement that names subjects arrives with none probed.
+
+        **`answer_years` is why those aggregates are taken more than once.** The pooled checks
+        are decided at the scope the requirement declares them at -- every year in
+        `answer_years` -- so each of the other years contributes its aggregates through the same
+        two statements, with no projection: `_build_visible_scan_sql` is run for `year` alone.
+        The other years cost one census (plus one bounded subject probe when subjects are
+        required) each, on the connection already open, and no partition is materialised for
+        them. `read_visible_at` carries the argument for the scope.
 
         A missing partition is impossible here: `read_visible_at` only reaches this after
         readiness has confirmed every requested year is registered, present, readable, profiled
@@ -1372,27 +1445,82 @@ class PanelStore:
             visible_sql, visible_parameters = _build_visible_scan_sql(
                 partition_path, columns, filters
             )
-            census_sql, census_parameters = _build_visible_census_sql(
-                partition_path, filters, as_of=as_of
-            )
             with _scan_failures_as_storage_errors(dataset, year):
                 scanned = connection.execute(visible_sql, [*visible_parameters, as_of]).fetchall()
-                census = connection.execute(census_sql, census_parameters).fetchone()
-                subjects = self._probe_visible_subjects(
-                    connection,
-                    partition_path,
-                    as_of=as_of,
-                    filters=filters,
-                    probe_subjects=probe_subjects,
+            partition = self._summarise_visible(
+                connection,
+                partition_path,
+                dataset=dataset,
+                year=year,
+                as_of=as_of,
+                filters=filters,
+                probe_subjects=probe_subjects,
+            )
+            answer = partition
+            for other in sorted(set(answer_years) - {year}):
+                other_path = self._resolve_partition_path(connection, dataset, other)
+                if other_path is None:
+                    raise PanelStorageError(
+                        f"{dataset} year={other} passed readiness but is no longer registered "
+                        "in the catalog; the catalog changed underneath this read"
+                    )
+                answer = _pool_visible_summaries(
+                    answer,
+                    self._summarise_visible(
+                        connection,
+                        other_path,
+                        dataset=dataset,
+                        year=other,
+                        as_of=as_of,
+                        filters=filters,
+                        probe_subjects=probe_subjects,
+                    ),
                 )
+        return _VisibleScan(
+            rows=tuple(cast(list[tuple[object, ...]], scanned)),
+            partition=partition,
+            answer=answer,
+        )
+
+    def _summarise_visible(
+        self,
+        connection: duckdb.DuckDBPyConnection,
+        partition_path: Path,
+        *,
+        dataset: str,
+        year: int,
+        as_of: datetime,
+        filters: Mapping[str, object] | None,
+        probe_subjects: Sequence[str] | None,
+    ) -> _VisibleSummary:
+        """One partition's contribution to the answer: how much it withheld, how far what is
+        left reaches, and which required subjects survived.
+
+        The aggregates only. Factored out of `_scan_visible` so the years that contribute to the
+        pooled verdict without contributing rows go through the *same* two statements as the
+        year being projected -- a second way of computing "how far does this partition reach at
+        this `as_of`" is exactly the duplicate rule table `ROW_FILTERABLE_ISSUE_CODES` was
+        written to avoid.
+        """
+        census_sql, census_parameters = _build_visible_census_sql(
+            partition_path, filters, as_of=as_of
+        )
+        with _scan_failures_as_storage_errors(dataset, year):
+            census = connection.execute(census_sql, census_parameters).fetchone()
+            subjects = self._probe_visible_subjects(
+                connection,
+                partition_path,
+                as_of=as_of,
+                filters=filters,
+                probe_subjects=probe_subjects,
+            )
         if census is None:
             raise PanelStorageError(
                 f"{dataset} year={year} was scanned but its aggregate over the same rows "
                 "returned nothing; an aggregate with no GROUP BY always returns one row, so the "
                 "two statements did not see the same partition"
             )
-        return _VisibleScan(
-            rows=tuple(cast(list[tuple[object, ...]], scanned)),
+        return _VisibleSummary(
             withheld_row_count=int(cast(int, census[0])),
             last_event_time=cast(datetime | None, census[1]),
             subjects=subjects,
@@ -1770,6 +1898,36 @@ def _build_visible_subject_probe_sql(
     return (
         f"SELECT DISTINCT {subject} FROM read_parquet(?) WHERE {' AND '.join(clauses)}",
         [str(partition_path), *values, as_of, *wanted],
+    )
+
+
+def _pool_visible_summaries(left: _VisibleSummary, right: _VisibleSummary) -> _VisibleSummary:
+    """Fold one partition's visible aggregates into the answer's, the way `evaluate_readiness`
+    folds coverage records.
+
+    `max(...)` over the reaches and the union of the subject probes -- the same two reductions
+    `evaluate_readiness` performs over `usable` (`max(coverage.last_event_time ...)` and
+    `{subject for coverage in usable for subject in coverage.subjects}`), so the filtered path
+    arrives at the pooled verdict by the same arithmetic the partition path does.
+
+    `withheld_row_count` is summed for completeness of the fold and is **not** what the outcome
+    reports: `PanelVisibleReadOutcome.withheld_row_count` is the projected partition's own,
+    because it is the count that pairs with the rows the caller was handed.
+
+    `subjects` is `None` for every partition or for none of them -- the probe runs exactly when
+    `requirement.required_subjects` is not `None`, and that is one decision for the whole read
+    -- so the mixed case cannot arise and is folded as `None` rather than silently unioned with
+    an absent probe.
+    """
+    if left.subjects is None or right.subjects is None:
+        pooled_subjects = None
+    else:
+        pooled_subjects = left.subjects | right.subjects
+    reaches = [item for item in (left.last_event_time, right.last_event_time) if item is not None]
+    return _VisibleSummary(
+        withheld_row_count=left.withheld_row_count + right.withheld_row_count,
+        last_event_time=max(reaches) if reaches else None,
+        subjects=pooled_subjects,
     )
 
 

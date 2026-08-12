@@ -438,14 +438,22 @@ changes nothing:
 
 The three that are here are here for measured reasons, not by inspection:
 
-- **`stale`** compares `as_of - last_event_time` and `last_event_time` is the partition's. On
-  the path `read_visible_at` exists for -- a year partition at an `as_of` inside it -- the
-  newest event post-dates `as_of`, the difference is negative, and the check is not merely
-  scope-wrong but *unreachable*. See this module's docstring for the two measurements.
-- **`subject_missing`** pools `coverage.subjects` over the partition. A security whose rows all
-  became knowable after `as_of` is in the coverage census and absent from the answer, so a
-  requirement naming it clears and the caller silently receives a smaller cross section.
+- **`stale`** compares `as_of - last_event_time`, and `last_event_time` is read off the coverage
+  records. On the path `read_visible_at` exists for -- a year partition at an `as_of` inside it
+  -- the newest recorded event post-dates `as_of`, the difference is negative, and the check is
+  not merely scope-wrong but *unreachable*. See this module's docstring for the two
+  measurements.
+- **`subject_missing`** pools `coverage.subjects`. A security whose rows all became knowable
+  after `as_of` is in the coverage census and absent from the answer, so a requirement naming it
+  clears and the caller silently receives a smaller cross section.
 - **`date_gap`** pools `coverage.dates` the same way, with the same consequence.
+
+**"Scope-sensitive" means the row set, and only the row set.** All three of these pool across
+**every usable year of the requirement** -- `evaluate_readiness` takes `max(...)` over the
+years' reaches and unions their subject and date censuses -- and re-deciding them over one
+partition's visible rows changes two things at once where only one was intended. The first cut
+of `read_visible_at` did exactly that and refused two-year requirements `read_if_ready` permits;
+`read_visible_at` carries the measurement and now pools the re-check the same way.
 
 `VISIBLE_SLICE_RECHECKS` says which of the three `read_visible_at` re-decides over the rows it
 returns. It is deliberately a *strict* subset, and the residue is disclosed rather than
@@ -1106,8 +1114,8 @@ through both the SDK and the HTTP face, and a qualifier added to the *unchanged*
 been a gratuitous break of an assertion nothing had falsified.
 """
 
-VISIBLE_SLICE_SCOPE: Final[str] = " restricted to the rows this read returns"
-"""What `read_visible_at` returns, and therefore what its re-decided checks judge.
+VISIBLE_SLICE_SCOPE: Final[str] = " restricted to the rows its requested years return"
+"""What `read_visible_at` answers with, and therefore what its re-decided checks judge.
 
 Deliberately *not* "the rows visible at that `as_of`", which would be one qualifier short. The
 selection these checks are decided over is the availability predicate **and the caller's own
@@ -1117,6 +1125,13 @@ security while requiring two is therefore refused with `subject_missing`, and th
 intended answer: the check is about the answer being handed back, not about what the partition
 holds. The partition-level `subject_missing` still reads the coverage census and ignores
 `filters`, so the two verdicts remain about the two different things their `scope` strings say.
+
+**"its requested years", plural, is the correction the P3 merge forced.** This read "the rows
+this read returns", which described one `read_visible_at` call -- one year. The checks it
+qualifies are pooled over `requirement.years` (see `read_visible_at`), so on a two-year
+requirement the old wording named the rows of one partition beside a reach taken from another,
+which is a misleading account of a refusal in exactly the way reporting `readiness.issues`
+instead of `blocking_issues` was.
 
 Threaded into the issue detail rather than into the *code*, so a consumer branching on `stale`
 keeps branching on `stale` and a human reading the message is told which set of rows the number
@@ -1222,11 +1237,19 @@ def evaluate_visible_slice(
 ) -> tuple[ReadinessIssue, ...]:
     """Re-decide `VISIBLE_SLICE_RECHECKS` over the rows a filtered read is about to return.
 
-    `evaluate_readiness` judges the partition; this judges the answer. The two disagree exactly
-    for `SCOPE_SENSITIVE_ISSUE_CODES`, whose *pass* is a claim about rows the predicate may have
-    removed -- see that constant for the criterion and the code-by-code argument, and this
-    module's docstring for the two measurements that made this function necessary rather than
-    merely tidy.
+    `evaluate_readiness` judges what the catalog records; this judges the answer. The two
+    disagree exactly for `SCOPE_SENSITIVE_ISSUE_CODES`, whose *pass* is a claim about rows the
+    predicate may have removed -- see that constant for the criterion and the code-by-code
+    argument, and this module's docstring for the two measurements that made this function
+    necessary rather than merely tidy.
+
+    **Both arguments are pooled over `requirement.years`, and passing one partition's is a
+    defect rather than a stricter reading.** `max_staleness` and `required_subjects` are fields
+    of the requirement, which names a year set, and `evaluate_readiness` decides both over the
+    whole of it -- `max(...)` over the usable years' reaches and the union of their subject
+    censuses. This function reduces nothing and cannot tell which scope it was handed, so the
+    caller owns it: `PanelStore.read_visible_at` pools, and its docstring carries the
+    measurement of what happened when it did not.
 
     Pure and I/O-free, like the evaluator it complements: the store does the scanning and hands
     over what it found. `visible_subjects` is `None` only when the requirement waived

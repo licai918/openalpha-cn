@@ -46,9 +46,11 @@ makes the exclusion affordable is asserted rather than quoted: see
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from typing import Final
 
 import pytest
 from panel_fixtures import AS_OF, YEAR, generate_panel, write_generated_panel
@@ -61,6 +63,7 @@ from openalpha_cn.panel.catalog import (
     ROW_FILTERABLE_ISSUE_CODES,
     SCOPE_SENSITIVE_ISSUE_CODES,
     VISIBLE_SLICE_RECHECKS,
+    VISIBLE_SLICE_SCOPE,
     DateCoverage,
     FieldCoverage,
     PanelReadOutcome,
@@ -453,6 +456,101 @@ def _write_late_subject_probe(store: PanelStore, *, dataset: str, late_name: str
     )
 
 
+CROSS_YEAR_SESSIONS: Final[dict[int, tuple[date, ...]]] = {
+    2025: (date(2025, 12, 29), date(2025, 12, 30), date(2025, 12, 31)),
+    2026: (date(2026, 1, 5), date(2026, 1, 6), date(2026, 1, 7), date(2026, 1, 8)),
+}
+"""A look-back window's worth of sessions either side of a year end.
+
+Read at `CROSS_YEAR_AS_OF`, 2026-01-08T04:00Z: the 2026-01-08 row publishes at 08:30 that day
+and is therefore *not* knowable, so the partition carries `not_yet_knowable` and the filtered
+read is exercised on the path it exists for rather than on the trivial one.
+"""
+
+CROSS_YEAR_AS_OF: Final[datetime] = datetime(2026, 1, 8, 4, 0, tzinfo=UTC)
+"""Noon Asia/Shanghai on the fourth 2026 session. The visible answer reaches 2026-01-07 (21
+hours behind), and the 2025 partition alone reaches 2025-12-31 (7 days 21 hours behind), so a
+five-day bound separates the two scopes."""
+
+CROSS_YEAR_BOUND: Final[timedelta] = timedelta(days=5)
+"""One trading week: wider than the 21 hours the whole answer is behind, narrower than the 7
+days 21 hours the earlier partition alone is behind, and narrower than the 10-day span of the
+window itself. A bound that had to cover the window's span would not be a freshness bound."""
+
+CROSS_YEAR_ABANDONED_SESSIONS: Final[dict[int, tuple[date, ...]]] = {
+    2025: (date(2025, 12, 29), date(2025, 12, 30), date(2025, 12, 31)),
+    2026: (
+        date(2026, 1, 5),
+        date(2026, 1, 6),
+        date(2026, 1, 7),
+        date(2026, 1, 8),
+        date(2026, 1, 9),
+        date(2026, 12, 28),
+        date(2026, 12, 29),
+    ),
+}
+"""`_write_reach_probe`'s shape spread over two years: a January the read can see and a December
+it cannot.
+
+Read at 2026-06-30 the December rows have not published, so `not_yet_knowable` fires and the
+filtered read *is* taken -- and what it returns then reaches 2026-01-09, 172 days back. That is
+the C1 build, and this is it at two-year scope.
+"""
+
+
+def _write_cross_year_probe(
+    store: PanelStore,
+    *,
+    dataset: str,
+    sessions: Mapping[int, tuple[date, ...]],
+    subject: str = "000001.SZ",
+) -> None:
+    """One partition per year of `sessions`, written through the real batch writer.
+
+    Rows are dated 07:00Z (15:00 Asia/Shanghai) and published at 08:30Z the same day, which is
+    the shape `_write_probe` uses; the only difference is that this spans a year end, and a year
+    end is the whole point.
+    """
+    for year, days in sessions.items():
+        written = datetime(year, 12, 31, 12, 0, tzinfo=UTC)
+        event = tuple(datetime(d.year, d.month, d.day, 7, 0, tzinfo=UTC) for d in days)
+        available = tuple(datetime(d.year, d.month, d.day, 8, 30, tzinfo=UTC) for d in days)
+        write_panel_batch(
+            store,
+            ColumnarPanelBatch(
+                provider_id="synthetic",
+                dataset=dataset,
+                kind="probe",
+                as_of=written,
+                fetched_at=written,
+                status="success",
+                subjects=(subject,) * len(days),
+                timeline=TimelineColumns(
+                    event_time=event,
+                    available_time=available,
+                    ingested_time=available,
+                    revision_time=available,
+                ),
+                columns=(PanelColumn("score", "float", tuple(float(i) for i in range(len(days)))),),
+            ),
+            year=year,
+        )
+
+
+def _cross_year_requirement(
+    dataset: str, *years: int, as_of: datetime = CROSS_YEAR_AS_OF
+) -> ReadinessRequirement:
+    return ReadinessRequirement(
+        dataset=dataset,
+        as_of=as_of,
+        years=years,
+        required_dates=None,
+        required_subjects=None,
+        required_fields=(SUBJECT_COLUMN,),
+        max_staleness=CROSS_YEAR_BOUND,
+    )
+
+
 def _write_reach_probe(store: PanelStore, *, dataset: str) -> None:
     """The review's fourteen rows: ten January, four December, two securities."""
     subjects: list[str] = []
@@ -677,7 +775,8 @@ def test_a_required_subject_visible_only_after_the_as_of_refuses_the_read(
 def test_the_visible_slice_checks_judge_the_callers_own_selection_filters_included(
     store: PanelStore,
 ) -> None:
-    """`VISIBLE_SLICE_SCOPE` is "the rows this read returns", and `filters` are part of that.
+    """`VISIBLE_SLICE_SCOPE` is "the rows its requested years return", and `filters` are part of
+    that.
 
     The re-decided checks share `_equality_clauses` with the withheld count, so all three answer
     about one row set. The consequence is worth pinning rather than discovering: a caller that
@@ -712,7 +811,8 @@ def test_the_visible_slice_checks_judge_the_callers_own_selection_filters_includ
     assert narrowed.is_blocked
     assert [issue.code for issue in narrowed.visible_slice_issues] == ["subject_missing"]
     assert narrowed.visible_slice_issues[0].missing_items == ("000002.SZ",)
-    assert "the rows this read returns" in narrowed.visible_slice_issues[0].detail
+    assert VISIBLE_SLICE_SCOPE in narrowed.visible_slice_issues[0].detail
+    assert "restricted to the rows" in narrowed.visible_slice_issues[0].detail
 
 
 def test_a_visible_slice_that_reaches_nothing_is_refused_rather_than_answered_empty(
@@ -778,6 +878,96 @@ def test_the_reach_and_the_withheld_count_are_not_the_same_fact(store: PanelStor
 
     assert refused.is_blocked
     assert [issue.code for issue in refused.visible_slice_issues] == ["stale"]
+
+
+def test_the_freshness_bound_is_decided_over_every_year_the_requirement_names(
+    tmp_path: Path,
+) -> None:
+    """The scope of the re-decided bound, pinned against the path it has to agree with.
+
+    `max_staleness` is a field of the `ReadinessRequirement`, which names a *year set*, and
+    `evaluate_readiness` decides it over `max(...)` of that set's reaches. The first cut of the
+    visible-slice re-check decided the same bound over **one partition's** rows, and the two
+    verdicts then disagreed on the requirement that motivates the whole cross-year read: at
+    `CROSS_YEAR_AS_OF` under a five-day bound the rule table finds **no `stale` at all** on
+    `years=(2025, 2026)` -- its only issue is the one the predicate exists to compensate --
+    while `read_visible_at(..., year=2025)` refused with `stale` quoting 7 days 21 hours, which
+    is the span of the look-back window rather than the age of the answer.
+
+    Both scopes are asserted, because pooling would otherwise be indistinguishable from waiving:
+    the same partitions under a requirement that names **only** 2025 are still refused, by both
+    paths, with the same code. What the bound means did not change; which partitions it is asked
+    about did.
+
+    The reach assertions are the pair that makes the two scopes visible in one read. The 2025
+    partition still *reports* its own reach (2025-12-31, more than the bound behind `as_of`), so
+    pooling did not smear the outcome's own numbers -- it changed only which rows the verdict
+    was taken over, which is the whole of the fix.
+    """
+    dataset = "probe_cross_year_scope"
+    store = PanelStore(tmp_path / "panel")
+    _write_cross_year_probe(store, dataset=dataset, sessions=CROSS_YEAR_SESSIONS)
+    pooled = _cross_year_requirement(dataset, 2025, 2026)
+    earlier_only = _cross_year_requirement(dataset, 2025)
+
+    assert [issue.code for issue in store.assess_readiness(pooled).issues] == ["not_yet_knowable"]
+    reads = {
+        year: store.read_visible_at(pooled, year=year, columns=(SUBJECT_COLUMN,))
+        for year in (2025, 2026)
+    }
+
+    assert not reads[2025].is_blocked
+    assert not reads[2026].is_blocked
+    assert {str(row[0]) for row in reads[2025].rows} == {"000001.SZ"}
+    assert len(reads[2025].rows) == 3
+    assert reads[2025].compensated_issue_codes == ("not_yet_knowable",)
+
+    earlier_reach = reads[2025].visible_last_event_time
+    assert earlier_reach is not None
+    assert earlier_reach.astimezone(UTC).date() == date(2025, 12, 31)
+    assert CROSS_YEAR_AS_OF - earlier_reach > CROSS_YEAR_BOUND
+
+    answer_reach = reads[2026].visible_last_event_time
+    assert answer_reach is not None
+    assert answer_reach.astimezone(UTC).date() == date(2026, 1, 7)
+    assert CROSS_YEAR_AS_OF - answer_reach <= CROSS_YEAR_BOUND
+
+    refused = store.read_visible_at(earlier_only, year=2025, columns=(SUBJECT_COLUMN,))
+    assert [issue.code for issue in store.assess_readiness(earlier_only).issues] == ["stale"]
+    assert refused.is_blocked
+    assert [issue.code for issue in refused.blocking_issues] == ["stale"]
+
+
+def test_a_bound_still_refuses_a_multi_year_answer_that_is_old_in_every_partition(
+    tmp_path: Path,
+) -> None:
+    """The other direction of the same fix, and the one that keeps `V2-P3-002`'s C1 shut.
+
+    Pooling the bound over the requirement's years must not become a way to buy freshness from a
+    year that is also stale. The 172-day build is rebuilt here at *two-year* scope: December rows
+    that have not published yet, so `not_yet_knowable` fires and the filtered read is genuinely
+    taken, and a visible answer that reaches only 2026-01-09. Every year of the requirement is
+    refused, not only the earlier one, and the refusal is a **visible-slice** one -- the
+    partition-level bound cleared, exactly as it did in the build C1 was raised against.
+    """
+    dataset = "probe_cross_year_old"
+    store = PanelStore(tmp_path / "panel")
+    _write_cross_year_probe(store, dataset=dataset, sessions=CROSS_YEAR_ABANDONED_SESSIONS)
+    late = datetime(2026, 6, 30, 12, 0, tzinfo=UTC)
+    requirement = _cross_year_requirement(dataset, 2025, 2026, as_of=late)
+
+    assert [issue.code for issue in store.assess_readiness(requirement).issues] == [
+        "not_yet_knowable"
+    ]
+    for year in (2025, 2026):
+        outcome = store.read_visible_at(requirement, year=year, columns=(SUBJECT_COLUMN,))
+        assert outcome.is_blocked
+        assert [issue.code for issue in outcome.visible_slice_issues] == ["stale"]
+        detail = outcome.visible_slice_issues[0].detail
+        assert "2026-01-09" in detail
+        assert VISIBLE_SLICE_SCOPE in detail
+
+    assert late - datetime(2026, 1, 9, 7, 0, tzinfo=UTC) > timedelta(days=170)
 
 
 def test_a_row_with_no_availability_instant_is_withheld_and_still_counted(

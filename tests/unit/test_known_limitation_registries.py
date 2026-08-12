@@ -4,7 +4,7 @@
 must be the suffix of a test function declared in the same module, checked off that module's
 AST. Three separate attempts to break it -- renaming a registry entry, renaming its test,
 adding a fourth entry with no test -- each go red. **It was installed on exactly one of the
-eleven registries.** The other ten were held together by the convention that somebody would
+registries.** All the others were held together by the convention that somebody would
 write a test, and the P2 review measured what that is worth: renaming
 `KNOWN_UNIVERSE_LIMITATIONS.a_listed_only_registry_is_invisible_to_every_downstream_check` --
 the entry `V2-P2-008`'s whole finding rests on, and the one
@@ -15,8 +15,9 @@ inside a docstring, which is prose the runner never reads.
 ## Why the mechanism is not copied as it stands
 
 `007`'s form is "one test per entry, named after the entry". At three entries that is exactly
-right. Across all eleven registries there are 128 entries -- 59 in `KNOWN_PANEL_LIMITATIONS`
-alone -- and it stops being right somewhere well before that, for three reasons and not one:
+right. Across the eleven code-carrying registries there are **136** entries -- 63 in
+`KNOWN_PANEL_LIMITATIONS` alone -- and it stops being right somewhere well before that, for
+three reasons and not one:
 
 1. **The volume is not the real objection; the shape is.** Most of these entries are
    disclosures about what the *upstream* does not serve -- "`stock_basic` carries no
@@ -24,13 +25,23 @@ alone -- and it stops being right somewhere well before that, for three reasons 
    drive and no refusal to provoke, so a test named after such an entry would assert something
    about the sentence rather than about the code, and a test that asserts about a sentence is
    the drift this whole idea exists to stop wearing the badge of the fix.
-2. **`KNOWN_PANEL_LIMITATIONS` is derived.** `panel_doctor._limitations()` folds seven of the
-   registries one-for-one, so 58 of its 59 codes are already somebody else's. Requiring a test
-   named after each would mean writing every one of those tests twice, in a module that has
-   nothing to say about them.
+2. **`KNOWN_PANEL_LIMITATIONS` is derived.** `panel_doctor._limitations()` folds seven dataset
+   registries one-for-one and `KNOWN_STORAGE_LIMITATIONS` plane-wide, so 62 of its 63 codes are
+   already somebody else's. Requiring a test named after each would mean writing every one of
+   those tests twice, in a module that has nothing to say about them.
 3. **A per-entry test is only as strong as its body.** `007`'s three have real bodies because
    somebody wrote them that way; the AST check cannot tell `def test_<code>(): pass` from a
    proof. The naming convention is what is enforced, not the exercising.
+
+**Those two totals are the argument, so they are not left as prose.**
+`test_the_registries_together_carry_the_entry_count_the_report_folds` holds a floor under both,
+and a floor is the direction that can falsify the claim: entries only ever arrive, and "one test
+per entry does not scale" stops being true if the registries shrink back towards `007`'s three.
+The figures above were measured at the P3 merge, and they had already drifted twice before it --
+`128 entries -- 59 in KNOWN_PANEL_LIMITATIONS` was still written here when the counts were 134
+and 62, because the P2 merge that folded in an eleventh registry updated the arithmetic below
+and left the prose alone. That is the drift this module exists to stop, arriving in this module,
+which is why the number is now executable rather than quoted.
 
 ## The binding that is installed instead
 
@@ -43,7 +54,7 @@ draw and a reviewer cannot forget to.
 It is weaker than `007`'s and it is weaker in a way worth naming: it does not require the
 reference to be a proof of the limitation, only that the registry and the suite agree on what
 the limitation is *called*. What it does buy is the whole registry rather than three entries of
-it. Every rename, every deletion and every addition now fails something, in all eleven
+it. Every rename, every deletion and every addition now fails something, in every one of the
 registries, without anybody remembering to install anything -- including in a registry that
 does not exist yet, because `test_the_registry_table_is_every_known_registry_in_the_source_tree`
 reads the source tree rather than this list. `007`'s stronger binding stays where it is; this
@@ -113,7 +124,7 @@ LIMITATION_REGISTRIES: Final[dict[str, Sequence[_Limitation]]] = {
     "KNOWN_STORAGE_LIMITATIONS": KNOWN_STORAGE_LIMITATIONS,
     "KNOWN_PANEL_LIMITATIONS": KNOWN_PANEL_LIMITATIONS,
 }
-"""The ten registries whose entries are identified by a `code`, keyed by their own names.
+"""The eleven registries whose entries are identified by a `code`, keyed by their own names.
 
 Imported and named rather than reached through `importlib`: a test may import every one of
 these directly, so a name-to-module indirection would buy nothing and would hide from the
@@ -239,7 +250,7 @@ def test_the_registry_table_is_every_known_registry_in_the_source_tree() -> None
 
 
 def test_every_declared_limitation_code_is_named_in_executable_test_code() -> None:
-    """The binding itself, over all ten registries and all of their entries.
+    """The binding itself, over all eleven code-carrying registries and all of their entries.
 
     A code that appears nowhere but in prose is a code the suite has no opinion about: rename
     it and everything stays green while every citation of it silently stops resolving. That is
@@ -310,7 +321,8 @@ def test_every_registry_entry_is_uniquely_identified_within_its_own_registry() -
 
 
 def test_the_registries_together_carry_the_entry_count_the_report_folds() -> None:
-    """A total, so this module fails on a registry that empties itself out.
+    """A total, so this module fails on a registry that empties itself out, and the floor under
+    the volume argument in this module's docstring.
 
     Every assertion above is per-entry and would be satisfied by a registry of length zero.
     `KNOWN_PANEL_LIMITATIONS` is a fold of two kinds of source, and they are counted apart
@@ -336,3 +348,5 @@ def test_the_registries_together_carry_the_entry_count_the_report_folds() -> Non
 
     assert len(codes["KNOWN_PANEL_LIMITATIONS"]) == folded + plane_wide + 1
     assert all(codes[registry] for registry in codes)
+    assert sum(len(entries) for entries in codes.values()) >= 136
+    assert len(codes["KNOWN_PANEL_LIMITATIONS"]) >= 63
