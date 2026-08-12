@@ -612,6 +612,34 @@ KNOWN_STORAGE_LIMITATIONS: Final[tuple[StorageLimitation, ...]] = (
             "required session is present in the partition and entirely withheld from the answer"
         ),
     ),
+    StorageLimitation(
+        code="a_derived_partition_may_outlive_the_build_its_rows_point_at",
+        detail=(
+            "this plane has no cross-dataset referential integrity, and V2-P3-003 is the first "
+            "issue whose rows depend on one. A processed factor observation names the raw "
+            "observation it was computed from by (source_manifest_id, subject, as_of), which is "
+            "the exact key of a row in factor_obs_<key>_v<n> -- and nothing stops the raw "
+            "partition being rewritten without it. MEASURED, NOT INFERRED: on the fixture panel, "
+            "a raw build at 2026-01-12 was written, transformed and stored, and then "
+            "write_factor_panels was called for a second as_of with supersedes naming the first "
+            "build. The write succeeded, the manifest partition then held one build (the new "
+            "one), and all 8 processed rows still carried the superseded build's ID -- 8 of 8 "
+            "resolving to nothing. The processed partition was not touched, no refusal fired and "
+            "no reader can tell from the processed row alone. Closing it needs the raw writer to "
+            "consult every processed partition derived from the factor it is replacing, which is "
+            "a partition SCAN rather than a catalog read (PartitionCoverage.subjects on the "
+            "transform manifest partition holds transform_manifest_ids, not the "
+            "source_manifest_ids they point at) and would put a cross-dataset dependency inside "
+            "a writer that has none today. WHAT BOUNDS IT: supersedes is the only path to it -- "
+            "an ordinary rebuild reproduces its manifest_id (the wall clock and the provider's "
+            "batch digest are both out of the address, which V2-P3-001's remediation established "
+            "for this reason), and _refuse_to_drop_a_stored_build refuses every other write that "
+            "would remove a stored build. So the dangling pointer requires a deliberate act that "
+            "already names the build it is destroying, and the recovery is to recompute the "
+            "transform against the replacement -- which reproduces its own identity from the new "
+            "source and can be written straight over the old one"
+        ),
+    ),
 )
 """What the storage plane structurally cannot answer, whoever fetched the data.
 

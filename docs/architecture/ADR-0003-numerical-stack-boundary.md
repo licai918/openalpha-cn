@@ -193,3 +193,50 @@ what is claimed and not the second-count -- see the correction for why.
 
 The nine runtime dependencies are pinned by `tests/unit/test_repository_assets.py`, which is
 what would go red if this update were wrong.
+
+## Update, 2026-08-12 (`V2-P3-003`): the preprocessing transforms did not need it either
+
+The Decision above still stands unchanged and this section adds no new one. What it records is
+that the second candidate consumer arrived — winsorization, standardization and a missing-value
+policy over a whole cross section — and was re-measured on its own workload rather than assumed
+to inherit the previous section's answer. That distinction matters: `compute_factor`'s arithmetic
+is one scalar call per security and has no shape a numerical stack helps with, while a transform
+is genuinely *cross-sectional* (a sort for the quantiles, a two-pass mean and deviation, an
+average-rank pass), which is the first thing in this repository that looks like an array
+operation.
+
+Measured at ADR-0002's stated panel scale — 5,534 participants at one `as_of`, 3% of them holes
+for the missing-value policy to fill, three repetitions per configuration, minimum reported:
+
+| step | time |
+|---|---|
+| `apply_factor_transform`, quantile winsorization + z-score | **36.7 ms** (6.6 µs/security) |
+| the same, mad winsorization + z-score | 35.9 ms |
+| the same, quantile winsorization + centred rank | 37.6 ms |
+| the same, mad winsorization + centred rank | 36.9 ms |
+| `observation_digest` alone (canonical JSON + one sha256 over the source cross section) | 2.8 ms |
+| `processed_observation_batch` + `transform_manifest_batch` for the same panel | 14.9 ms |
+
+The comparison is what decides it, and it points the same way at both ends. The transform is
+**1.6%** of the `compute_factor` (2.24 s) that must run before it, and **0.06%** of the
+`write_panel_batch` that follows it at the *smallest* of the five write measurements above
+(56.7 s). So a numpy implementation of these four steps could at best remove a quantity already
+two orders of magnitude below the step before it and three below the step after it — in exchange
+for two runtime dependencies, an explicit `float(...)`/`cast(...)` at every public boundary in
+the layer, the `NPY`/`PD`/`S` ruff evaluation and the thread-count pinning in Consequence 6.
+
+Two implementation notes, because both are places where pure Python was the *better* answer
+rather than merely an adequate one:
+
+- The quantile rule is written out (`panel_factors._quantile`, linear interpolation between
+  order statistics) rather than taken from `statistics.quantiles`, whose default is an
+  *exclusive* rule returning cut points. Pinning the definition is what lets
+  `FactorTransformSpec.min_cross_section` be derived from it — `1 / lower_quantile` — instead of
+  chosen.
+- The z-score divides by the **population** deviation, computed two-pass with `math.fsum`. The
+  one-pass `E[x²] − E[x]²` form cancels catastrophically on a cross section whose values are
+  large and close together, which is an ordinary shape for a price-level factor.
+
+`V2-P3-004`'s neutralisation — a cross-sectional regression against industry dummies and market
+cap — is still the issue that should re-open this question, and it is still the first workload in
+the repository with a matrix in it. The nine runtime dependencies are unchanged.

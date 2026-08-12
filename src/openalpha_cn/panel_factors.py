@@ -1,4 +1,29 @@
-"""The panel feature computation engine (`V2-P3-002`): factor observations, on the panel plane.
+"""The panel feature computation engine (`V2-P3-002`) and its preprocessing transforms
+(`V2-P3-003`): factor observations and their processed twins, on the panel plane.
+
+## Two issues in one module, and the reason that is the right seam
+
+`V2-P3-002` computes a raw factor observation per `(security, as_of)`. `V2-P3-003` turns one
+`as_of`'s cross section of those into a winsorized, standardized, missing-value-resolved cross
+section that is stored **beside** the raw one and never over it. The second half lives here
+rather than in a `panel_factor_transforms.py` of its own for three reasons, and the first is the
+only structural one:
+
+- `apply_factor_transform` consumes a `FactorPanel` and `write_processed_factor_panels` files
+  its output under a dataset name built from the same `FactorDefinition`. A separate top-level
+  module would import this one for both, add a row to `tests/unit/
+  test_panel_ingest_import_isolation.py`'s dependency table, and -- because reading a processed
+  partition back has exactly the mid-year problem reading a raw one does -- would also have to
+  be added to `tests/unit/panel/test_visible_read_callers.py`'s `FILTERED_READ_CALLERS`. Two
+  allowlists widened to hold one function's worth of separation.
+- The two halves share `EVENT_TIME_COLUMN`, `FACTOR_PROVIDER_ID`, the dataset-name budget,
+  `_iso`, `_stored_value`, `_coverage_code` and `_refuse_to_drop_a_stored_build`. Splitting them
+  means either duplicating those or importing them across a seam that buys nothing.
+- The size is in family: `panel_ingest.py` is 3,221 lines.
+
+What is *not* shared is the storage: a processed observation is a different record type in a
+different pair of datasets, which is D8's "与原值分离" and is argued in
+`domain/factor_transform.py`.
 
 ## Where the output goes, and why that is structural rather than a convention
 
@@ -28,11 +53,14 @@
   adding an import that a test refuses. That is a *structural* obstacle with a review attached,
   which is the honest description; "impossible" would not be.
 
-## Two datasets per factor, because a manifest is not an observation and a year is a partition
+## Four datasets per factor, because a manifest is not an observation and a year is a partition
 
 `factor_obs_<key>_v<n>` holds one row per `(security, as_of)`. `factor_manifest_<key>_v<n>`
 holds one row per `(build, input partition)`, keyed by `FactorBuildManifest.manifest_id`, which
-every observation carries as a column. They are separate datasets because the second is
+every observation carries as a column. `V2-P3-003` adds `factor_proc_<key>_v<n>` and
+`factor_procmn_<key>_v<n>`, the same pair for processed observations and their transform
+manifests; see "The processed plane is a second pair of datasets" below. They are separate
+datasets because the second is
 per-build rather than per-security -- denormalising it onto the observations would repeat the
 same provenance 5,534 times per as_of, and could not represent a factor with a variable number
 of input partitions at all.
@@ -142,6 +170,62 @@ every historical cross section; a security that listed nine sessions ago
 problem. `V2-P3-005` has to exclude all four from a correlation rather than treat them as
 zeros, and only a code set lets it.
 
+## The processed plane is a second pair of datasets, and the transform is a *column* in it
+
+`V2-P3-003`'s "与原值分离" is a storage layout rather than a discipline. A processed value is a
+`ProcessedFactorObservation` in `factor_proc_<key>_v<n>`; the raw one it came from stays exactly
+where it was, untouched, and the processed row names it by `(source_manifest_id, subject,
+as_of)`. There is no code path that writes a processed value into the raw dataset: the row type
+there is `FactorObservation`, whose coverage vocabulary has no member a processed value could
+take, and `factor_observation_batch` builds its columns from that type alone.
+
+**The factor is the partition axis and the transform is not**, which is forced arithmetic rather
+than a preference. `MAX_IDENTIFIER_LENGTH` caps a panel dataset at 63 characters and
+`MAX_FACTOR_KEY_LENGTH` is 40, so a name carrying both keys needs at least
+`len("fproc_") + 40 + len("_v999") + len("_") + len("_v999") = 57` characters before the
+transform key gets a single letter. So one processed partition per factor holds **every**
+transform of that factor, and two costs follow, both stated because neither is free:
+
+- a read of one transform opens the rows of all of them and filters in Python
+  (`load_processed_factor_observations`), because `read_visible_at` projects columns and does not
+  take a predicate;
+- a year of one factor's processed observations has to reach `write_processed_factor_panels` in
+  one call **across every transform of it**, since `PanelStore.write_partition` replaces a
+  partition whole. That is the `as_of`-axis constraint this module already documents, multiplied
+  by the number of transforms, and `V2-P3-014`'s build schedule is where it is scheduled around.
+
+## The cross section a transform sees is the source panel's, and nothing else
+
+Winsorization and standardization are cross-sectional: one security's processed value depends on
+the other securities at the same `as_of`. That is a look-ahead surface, and it is closed here by
+arithmetic rather than by care:
+
+`apply_factor_transform` takes a `FactorPanel` and **no store**. It has no `PanelStore`
+parameter, no `as_of` parameter (it uses the panel's own), and reads no row from anywhere -- so
+the securities that participate in a cross-sectional statistic are exactly the observations
+`compute_factor` produced at that `as_of`, which `V2-P3-002` already established were read
+through `PanelStore.read_visible_at` at a declared freshness bound pooled over
+`requirement.years`. This layer does not re-open that; it cannot reach it.
+
+Two consequences are asserted rather than argued.
+`test_a_transform_introduces_no_security_the_source_panel_did_not_have` pins that the output's
+subject set is the input's, and `test_the_processed_values_at_a_mid_year_as_of_are_the_ones_the_
+visible_window_implies` derives every expected z-score from the closes that were knowable at
+that `as_of` -- so a transform that ever consulted a later row would produce different numbers
+rather than a different subject list.
+
+**Only `computed` observations participate in the statistics, and the imputed values do not feed
+back into them.** The first half is not a choice: a non-`computed` observation has `value=None`
+by a rule with three enforcement points, so there is no number to include, and treating it as
+zero is the thing `FactorPanel.values()` exists to refuse. The second half *is* a choice and it
+is the load-bearing one -- if a `fill_cross_sectional_median` imputation re-entered the mean and
+standard deviation it was derived from, every processed value in the cross section would move
+with the *coverage rate*, so the same market on the same day would standardize differently
+because one security's filing was late. Measured in both directions by
+`test_a_filled_observation_does_not_move_the_statistics_it_was_filled_from`: adding non-computed
+observations to a panel leaves every computed security's processed value byte-identical while
+moving `transform_manifest_id` (the source digest changed, and it must).
+
 ## No numpy, no pandas -- and that is a measurement rather than a preference
 
 ADR-0003 permits both. This module needs neither, and adding them would take the runtime
@@ -172,6 +256,29 @@ magnitude, and two on three of the four", not the flat "two orders of magnitude"
 carried when 288 s was the only figure. ADR-0003 carries the table and the one defect the
 original measurement found (a `computed_field` read inside the per-security loop, which
 re-hashed the build manifest 5,534 times).
+
+**`V2-P3-003`'s transforms re-opened the question with their own workload and came to the same
+answer, measured rather than inherited.** A winsorization is `O(n log n)` (one sort) and a
+z-score, a rank and a median are `O(n)` or `O(n log n)`, which is a different shape of arithmetic
+from `compute_factor`'s per-security scalar call -- so "the last one did not need numpy" is not
+an argument, and the numbers are:
+
+| workload at 5,534 participants (3% of them holes to fill) | time |
+|---|---|
+| `apply_factor_transform`, quantile winsorization + z-score | **36.7 ms** (6.6 us/security) |
+| the same, mad winsorization + z-score | 35.9 ms |
+| the same, quantile + centred rank | 37.6 ms |
+| the same, mad + centred rank | 36.9 ms |
+| `observation_digest` alone (the canonical-JSON hash of the source cross section) | 2.8 ms |
+| `processed_observation_batch` + `transform_manifest_batch` for the same panel | 14.9 ms |
+
+Against the 2.24 s `compute_factor` that has to run first, the whole transform is **1.6%**, and
+against the write path that follows it (56.7 s at the smallest of ADR-0003's five measurements)
+it is 0.06%. A numpy implementation of the same four steps could at best remove a number that is
+already two orders of magnitude below the step before it and three below the step after it, in
+exchange for the two runtime dependencies and every consequence ADR-0003 lists. `V2-P3-004`'s
+cross-sectional regression is still the issue that should re-open it, and it is still the first
+one with a matrix in it.
 
 ## What is deliberately not here
 
@@ -212,6 +319,29 @@ from openalpha_cn.domain.factor import (
     FactorRegistry,
     set_digest,
     validate_factor_observation,
+)
+from openalpha_cn.domain.factor_transform import (
+    MISSING_VALUE_ACTIONS,
+    MISSING_VALUE_COVERAGE_ORDER,
+    PROCESSED_COVERAGE_CODES,
+    PROCESSED_COVERAGE_ORDER,
+    STANDARDIZATION_METHODS,
+    STANDARDIZATION_NEUTRAL,
+    WINSORIZATION_METHODS,
+    FactorTransformError,
+    FactorTransformManifest,
+    FactorTransformRegistry,
+    FactorTransformSpec,
+    FactorTransformStatistics,
+    MissingValueAction,
+    MissingValuePolicy,
+    ProcessedCoverage,
+    ProcessedFactorObservation,
+    StandardizationMethod,
+    WinsorizationMethod,
+    WinsorizationPolicy,
+    observation_digest,
+    validate_processed_factor_observation,
 )
 from openalpha_cn.domain.panel_batch import (
     SUBJECT_COLUMN_NAME,
@@ -1595,6 +1725,13 @@ def _refuse_to_drop_a_stored_build(
     rather than the build; what it gains is a unit of work -- the build -- that `supersedes` and
     `load_factor_manifests` can both address.
 
+    **Shared verbatim with `write_processed_factor_panels`** (`V2-P3-003`), because the fact it
+    enforces -- a partition is replaced whole -- is the same one on the processed plane, and the
+    unit has the same shape there: a transform manifest partition's subject is a
+    `transform_manifest_id`. That sharing is also why this refusal is a `FactorEngineError` on
+    both planes while a transform's *computational* refusals are `FactorTransformError`s; see
+    `domain/factor_transform.py::FactorTransformError` for the seam.
+
     `builds` is `PartitionCoverage.subjects` for this partition, read by the caller: one catalog
     row, no partition scan. An empty one is a partition with no coverage record and is not
     protected, for the reason the ingest version gives -- there is nothing to read the stored
@@ -1935,3 +2072,1666 @@ def _coverage_code(value: object, *, dataset: str) -> FactorCoverage:
         f"not declare ({list(FACTOR_COVERAGE_ORDER)}); it was written by a build that knows a "
         "code this one does not"
     )
+
+
+# ==================================================================================================
+# V2-P3-003: the versioned preprocessing transform
+# ==================================================================================================
+
+# --- the two datasets a transform writes ----------------------------------------------------------
+
+
+FACTOR_PROCESSED_DATASET_PREFIX: Final[str] = "factor_proc_"
+FACTOR_TRANSFORM_MANIFEST_DATASET_PREFIX: Final[str] = "factor_procmn_"
+"""The processed plane's two dataset-name prefixes, one pair per **factor**.
+
+Deliberately short, and the shortness is a budget rather than terseness for its own sake.
+`MAX_IDENTIFIER_LENGTH` is 63 and `MAX_FACTOR_KEY_LENGTH` is 40, so the longer of these two plus
+the longest declarable factor key plus `"_v999"` is `14 + 40 + 5 = 59`.
+`tests/unit/test_factor_transform_rules.py::
+test_the_longest_legal_factor_key_still_names_a_legal_processed_dataset` builds that worst case
+out of the constants rather than restating the arithmetic, so widening either one fails there
+instead of at the first write.
+"""
+
+FACTOR_PROCESSED_KIND: Final[str] = "processed_factor_observation"
+FACTOR_TRANSFORM_MANIFEST_KIND: Final[str] = "factor_transform_manifest"
+
+
+def processed_factor_dataset(definition: FactorDefinition) -> str:
+    """The panel dataset one factor's **processed** observations are filed under.
+
+    Keyed by the factor and not by the transform; see this module's docstring for the
+    name-length arithmetic that forces it and the two costs that follow.
+    """
+    return f"{FACTOR_PROCESSED_DATASET_PREFIX}{definition.key}_v{definition.version}"
+
+
+def factor_transform_manifest_dataset(definition: FactorDefinition) -> str:
+    """The panel dataset one factor's transform manifests are filed under."""
+    return f"{FACTOR_TRANSFORM_MANIFEST_DATASET_PREFIX}{definition.key}_v{definition.version}"
+
+
+PROCESSED_OBSERVATION_DATA_COLUMNS: Final[tuple[str, ...]] = (
+    "transform_id",
+    "transform_key",
+    "transform_version",
+    "value",
+    "coverage",
+    "transform_manifest_id",
+    "source_factor_id",
+    "source_manifest_id",
+    "source_coverage",
+)
+"""One stored processed observation, column by column.
+
+`subject` and the four clocks come from `ColumnarPanelBatch`, exactly as they do for a raw
+observation, and for a derived row every clock is the build's `as_of`.
+
+The three `source_*` columns are what makes D8's "报告可比较 raw / processed / neutralized ...
+而不覆盖源观测" answerable from a stored row:
+
+- **`source_manifest_id`** with the row's own `subject` and `as_of` is the exact key of the raw
+  observation in `factor_obs_<key>_v<n>`. `tests/integration/panel/test_factor_transforms.py::
+  test_a_processed_row_names_the_exact_raw_row_it_came_from` performs that join rather than
+  describing it, and `apply_factor_transform` refuses a source panel whose observations do not
+  all carry its own `manifest_id`, so the pointer is a proved key rather than an assumed one.
+- **`source_factor_id`** is the raw *definition*, so a reader of this partition alone knows which
+  factor was transformed without parsing the dataset name.
+- **`source_coverage`** is the raw row's own five-code marker, carried so that
+  `source_not_computed` does not collapse the distinction the raw vocabulary spent five members
+  drawing -- and so that "this value was imputed **because** the input was null" is a fact on one
+  row rather than a join away.
+
+`transform_key` and `transform_version` sit beside the opaque `transform_id` for the reason
+`factor_key` and `factor_version` sit beside `factor_id`: a reader querying the partition
+directly would otherwise need this build's registry to know what the rows are about.
+"""
+
+PROCESSED_OBSERVATION_PANEL_COLUMNS: Final[tuple[str, ...]] = (
+    SUBJECT_COLUMN_NAME,
+    *PROCESSED_OBSERVATION_DATA_COLUMNS,
+)
+
+_PROCESSED_COLUMN_KINDS: Final[Mapping[str, PanelColumnKind]] = MappingProxyType(
+    {
+        "transform_id": "string",
+        "transform_key": "string",
+        "transform_version": "integer",
+        "value": "float",
+        "coverage": "string",
+        "transform_manifest_id": "string",
+        "source_factor_id": "string",
+        "source_manifest_id": "string",
+        "source_coverage": "string",
+    }
+)
+
+PROCESSED_CENSUS_COLUMNS: Final[tuple[str, ...]] = tuple(
+    f"{FACTOR_CENSUS_COLUMN_PREFIX}{code}" for code in PROCESSED_COVERAGE_ORDER
+)
+"""One stored count per declared processed coverage code, derived from the vocabulary.
+
+`FACTOR_CENSUS_COLUMNS`' argument one plane over, and sharper here: a transform whose cross
+section was too thin produces `insufficient_cross_section` for every security and a partition
+full of nulls, which is byte-indistinguishable in storage from a transform that ran and imputed
+nothing -- unless the counts are stored. Sharing `FACTOR_CENSUS_COLUMN_PREFIX` is deliberate:
+these columns live in a different dataset from the raw census columns, so there is no collision,
+and one prefix is one fewer string for a reader to learn.
+"""
+
+MISSING_VALUE_COLUMN_PREFIX: Final[str] = "missing_"
+
+MISSING_VALUE_COLUMNS: Final[tuple[str, ...]] = tuple(
+    f"{MISSING_VALUE_COLUMN_PREFIX}{code}" for code in MISSING_VALUE_COVERAGE_ORDER
+)
+"""One stored column per non-`computed` coverage code, holding the action the spec declared.
+
+Derived from `MISSING_VALUE_COVERAGE_ORDER` rather than listed, so a sixth coverage code brings
+a column without anybody remembering to add one -- and `domain/factor_transform.py`'s import-time
+audit already refuses a sixth code with no policy field, so the two ends cannot drift apart in
+either direction.
+"""
+
+TRANSFORM_MANIFEST_DATA_COLUMNS: Final[tuple[str, ...]] = (
+    "transform_id",
+    "transform_key",
+    "transform_version",
+    "source_factor_id",
+    "source_factor_key",
+    "source_factor_version",
+    "source_manifest_id",
+    "source_observation_digest",
+    "as_of_time",
+    "code_commit",
+    "winsorization_method",
+    "winsorization_lower_quantile",
+    "winsorization_upper_quantile",
+    "winsorization_mad_scale",
+    "standardization_method",
+    "min_cross_section",
+    *MISSING_VALUE_COLUMNS,
+    *PROCESSED_CENSUS_COLUMNS,
+    "participant_count",
+    "winsorized_low_count",
+    "winsorized_high_count",
+    "imputed_count",
+    "lower_bound",
+    "upper_bound",
+    "location",
+    "scale",
+)
+"""One row per transform build. Three families, and only the first is in the content address.
+
+- **The ten head columns** are `FactorTransformManifest`'s own fields (minus `schema_version`),
+  so `_transform_manifest_from_rows` reassembles a build from them and checks that the identity
+  it reproduces is the one the row was stored under.
+- **The declared policy** -- the winsorization method and its parameters, the standardization
+  method, `min_cross_section` and the four missing-value actions -- is a projection of
+  `transform_id`, stored for `FactorBuildManifest.direction`'s reason and a sharper one: a
+  processed `value` column is *uninterpretable* without knowing whether it is a z-score, a
+  centred rank or a raw winsorized number, and a reader who cannot resolve `transform_id`
+  against a registry has no other way to find out.
+- **The statistics** are `FactorTransformStatistics`: outputs, recorded and deliberately out of
+  the content address (an identity computed from a build's outputs is one nobody can predict
+  before running the build). `winsorized_low_count` and `winsorized_high_count` are the pair that
+  makes a declared winsorization *falsifiable* on a stored partition -- a 1% policy that clipped
+  one name out of three clipped 33% of the cross section, and only a count says so.
+
+Flat rather than nested for `FACTOR_MANIFEST_DATA_COLUMNS`' reason: a partition is a rectangle,
+and the alternatives are a JSON blob in one column (which the panel plane exists to stop) or a
+third dataset.
+"""
+
+TRANSFORM_MANIFEST_PANEL_COLUMNS: Final[tuple[str, ...]] = (
+    SUBJECT_COLUMN_NAME,
+    *TRANSFORM_MANIFEST_DATA_COLUMNS,
+)
+
+_TRANSFORM_MANIFEST_HEAD_COLUMNS: Final[tuple[str, ...]] = TRANSFORM_MANIFEST_DATA_COLUMNS[:10]
+"""The ten columns `FactorTransformManifest` is reassembled from.
+
+A slice of the tuple above rather than a second list, so the two cannot drift; the slice is
+reconciled against `FactorTransformManifest`'s own field set by
+`tests/unit/test_factor_transform_rules.py::
+test_the_stored_head_columns_are_exactly_the_hashed_manifests_own_fields`, which is what keeps
+`10` from being a number somebody has to remember.
+"""
+
+
+def _kinds(names: Sequence[str], kind: PanelColumnKind) -> dict[str, PanelColumnKind]:
+    """One SQL kind for a family of derived column names, keeping the family and its type paired.
+
+    `dict.fromkeys(names, kind)` infers `dict[str, str]` under mypy strict, so the alternative is
+    a `cast` at each of the two call sites -- and a `cast` is exactly what should not stand
+    between a derived column list and its declared type, because the thing being asserted is that
+    every member of the family has one.
+    """
+    return dict.fromkeys(names, kind)
+
+
+_TRANSFORM_MANIFEST_COLUMN_KINDS: Final[Mapping[str, PanelColumnKind]] = MappingProxyType(
+    {
+        "transform_id": "string",
+        "transform_key": "string",
+        "transform_version": "integer",
+        "source_factor_id": "string",
+        "source_factor_key": "string",
+        "source_factor_version": "integer",
+        "source_manifest_id": "string",
+        "source_observation_digest": "string",
+        "as_of_time": "timestamp",
+        "code_commit": "string",
+        "winsorization_method": "string",
+        "winsorization_lower_quantile": "float",
+        "winsorization_upper_quantile": "float",
+        "winsorization_mad_scale": "float",
+        "standardization_method": "string",
+        "min_cross_section": "integer",
+        **_kinds(MISSING_VALUE_COLUMNS, "string"),
+        **_kinds(PROCESSED_CENSUS_COLUMNS, "integer"),
+        "participant_count": "integer",
+        "winsorized_low_count": "integer",
+        "winsorized_high_count": "integer",
+        "imputed_count": "integer",
+        "lower_bound": "float",
+        "upper_bound": "float",
+        "location": "float",
+        "scale": "float",
+    }
+)
+
+
+# --- the transform that ships ---------------------------------------------------------------------
+
+
+CROSS_SECTION_STANDARD: Final[FactorTransformSpec] = FactorTransformSpec(
+    key="cross_section_standard",
+    version=1,
+    winsorization=WinsorizationPolicy(method="quantile", lower_quantile=0.01, upper_quantile=0.99),
+    standardization="zscore",
+    missing_values=MissingValuePolicy(
+        not_in_universe="exclude",
+        insufficient_history="exclude",
+        input_missing="fill_cross_sectional_median",
+        undefined_value="exclude",
+    ),
+    min_cross_section=100,
+    summary=(
+        "The conventional cross-sectional preprocessing: clip to the empirical 1st and 99th "
+        "percentiles of the securities that were scored at this as_of, then z-score what "
+        "remains against the population mean and standard deviation of the clipped values. A "
+        "security that was not in the universe is excluded rather than filled -- it is not a "
+        "hole, it is a name that should have no value. A security that was in the universe and "
+        "too young for the lookback is excluded too, because imputing the median for it would "
+        "score a listing on data it does not have. A null input is filled with the median of "
+        "the processed cross section, which is the case a fill is actually for. An undefined "
+        "arithmetic result is excluded rather than refused, because a zero denominator is a "
+        "property of the factor's own definition and a whole build should not die of one "
+        "security's. min_cross_section is 100 because that is 1 / lower_quantile: the smallest "
+        "cross section for which a 1% winsorization clips about 1% of it. Below it the bound is "
+        "an interpolation whose position is set by n rather than by the tail -- at n=3 the same "
+        "policy clips a third of the cross section -- and this transform declines to produce "
+        "numbers whose winsorization was a function of how many names happened to be scored."
+    ),
+)
+"""The single registered transform, and every one of its settings is a stated judgement.
+
+It is not a default in the sense of "what you get if you say nothing": `apply_factor_transform`
+takes the spec as a mandatory argument, and this is the one this build ships so that the shipped
+configuration is exercised end to end rather than only probe specs invented by tests.
+
+`min_cross_section = 100 = 1 / lower_quantile` is the only number here that is *derived* rather
+than chosen, and it is derived because the alternative is the failure this repository has already
+paid for once -- a delivered proof hanging on a free parameter. `_quantile` interpolates between
+order statistics, so the `q`-quantile of `n` points sits at position `(n - 1) * q` and the number
+of names strictly below it is `ceil((n - 1) q)` -- **never fewer than one**. That floor is what
+makes a small cross section misbehave: the fraction actually clipped is `max(1 / n, ~q)`, so a
+policy that says 1% clips 33% of a three-name cross section and 10% of a ten-name one, and
+`n = 1 / q` is the smallest size at which it first clips what it declares.
+`tests/unit/test_factor_transform_rules.py::
+test_a_one_percent_winsorization_clips_a_third_of_a_three_name_cross_section` measures the whole
+curve, counts and fractions both.
+"""
+
+FACTOR_TRANSFORMS: Final[FactorTransformRegistry] = FactorTransformRegistry(
+    (CROSS_SECTION_STANDARD,)
+)
+"""Every preprocessing transform this build declares. `V2-P3-014`'s three-tier report extends it."""
+
+
+# --- winsorization -------------------------------------------------------------------------------
+
+
+class _Winsorizer(Protocol):
+    """The clipping half of a transform: a policy and an ascending cross section in, bounds out.
+
+    `None` means "this method clips nothing", which is `method="none"`'s whole answer and is not
+    the same as bounds that happen to be the minimum and the maximum -- the second would report
+    every value as unclipped while putting a `lower_bound` on the manifest that a reader would
+    take for a policy decision.
+    """
+
+    def __call__(
+        self, policy: WinsorizationPolicy, ordered: Sequence[float]
+    ) -> tuple[float, float] | None: ...
+
+
+def _no_winsorization(
+    policy: WinsorizationPolicy, ordered: Sequence[float]
+) -> tuple[float, float] | None:
+    return None
+
+
+def _quantile_bounds(
+    policy: WinsorizationPolicy, ordered: Sequence[float]
+) -> tuple[float, float] | None:
+    """`[quantile(lower), quantile(upper)]` of the ascending participants."""
+    lower, upper = policy.lower_quantile, policy.upper_quantile
+    if lower is None or upper is None:
+        raise FactorTransformError(
+            f"a quantile winsorization declares no quantiles ({lower!r}, {upper!r}); "
+            "WinsorizationPolicy's validator refuses that, so this policy reached the engine "
+            "through model_construct or a subclass rather than through the contract"
+        )
+    return (_quantile(ordered, lower), _quantile(ordered, upper))
+
+
+def _mad_bounds(
+    policy: WinsorizationPolicy, ordered: Sequence[float]
+) -> tuple[float, float] | None:
+    """`median +/- mad_scale * MAD`, where `MAD` is the median absolute deviation from the median.
+
+    The deviations are re-sorted rather than assumed to inherit the input's order: `|x - median|`
+    is V-shaped about the median, so an ascending series of values is a descending-then-ascending
+    series of deviations, and `_quantile` of it unsorted would be refused (it checks) or, without
+    that check, would return an arbitrary element.
+    """
+    scale = policy.mad_scale
+    if scale is None:
+        raise FactorTransformError(
+            "a mad winsorization declares no mad_scale; WinsorizationPolicy's validator refuses "
+            "that, so this policy reached the engine through model_construct or a subclass "
+            "rather than through the contract"
+        )
+    centre = _quantile(ordered, 0.5)
+    deviation = _median(sorted(abs(value - centre) for value in ordered))
+    return (centre - scale * deviation, centre + scale * deviation)
+
+
+_WINSORIZERS: Final[Mapping[WinsorizationMethod, _Winsorizer]] = MappingProxyType(
+    {
+        "none": _no_winsorization,
+        "quantile": _quantile_bounds,
+        "mad": _mad_bounds,
+    }
+)
+
+
+# --- standardization ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _Standardized:
+    """One standardized cross section, plus whatever location and scale were estimated for it."""
+
+    values: tuple[float, ...]
+    location: float | None
+    scale: float | None
+
+
+class _Standardizer(Protocol):
+    """The scaling half of a transform: winsorized values in, standardized values out.
+
+    `None` means **this method found nothing to order in this cross section**, and it becomes
+    `degenerate_cross_section`. It is returned by the method rather than decided by the engine
+    from a `min == max` test, which is the difference between a rule and a guess: a z-score's
+    degeneracy is `stdev == 0` or a `stdev` that is not finite, and floating-point overflow makes
+    the second reachable on values that are very much not equal -- `[1e308, -1e308]` sums a
+    variance to `inf`.
+    """
+
+    def __call__(self, values: Sequence[float]) -> _Standardized | None: ...
+
+
+def _standardize_none(values: Sequence[float]) -> _Standardized | None:
+    """Pass the winsorized values through, estimating nothing.
+
+    The one method that is never degenerate. It makes no ordering claim -- "do not standardize"
+    is exactly what it was asked to do -- so a constant cross section is a faithful answer rather
+    than a z-score's `0 / 0`. `STANDARDIZATION_NEUTRAL` records the other side of that: there is
+    no neutral point on a scale nothing was centred on, and a `fill_neutral` beside it is refused
+    at declaration time.
+    """
+    return _Standardized(values=tuple(values), location=None, scale=None)
+
+
+def _standardize_zscore(values: Sequence[float]) -> _Standardized | None:
+    """`(x - mean) / population_stdev`, or `None` when there is no usable scale.
+
+    Two-pass rather than `E[x^2] - E[x]^2`, and `math.fsum` rather than `sum`, because the
+    one-pass form cancels catastrophically on a cross section whose values are large and close
+    together -- a factor whose raw values sit around 1e6 with a spread of 1e-3 is exactly that
+    shape, and the naive variance of it comes out negative as often as not.
+
+    Population rather than sample: see `StandardizationMethod`. There is no third guard on the
+    output because there cannot be one to catch -- `scale` is the root mean square of
+    `x - mean`, so `|x_i - mean| <= sqrt(n) * scale` for every `i`, and every z-score of a cross
+    section with a finite positive scale is bounded by `sqrt(n)` by construction.
+
+    Squared with `delta * delta` rather than `delta ** 2`, and that is not a style choice:
+    CPython's float `**` raises `OverflowError` where `*` returns `inf`, so the exponent form
+    turns an over-wide cross section into an exception from inside an arithmetic helper instead
+    of into the `degenerate_cross_section` this function is supposed to report.
+    `test_a_z_score_whose_variance_overflows_is_degenerate_rather_than_infinite` drives it.
+    """
+    count = len(values)
+    mean = math.fsum(values) / count
+    scale = math.sqrt(math.fsum((value - mean) * (value - mean) for value in values) / count)
+    if scale <= 0.0 or not math.isfinite(scale):
+        return None
+    return _Standardized(
+        values=tuple((value - mean) / scale for value in values), location=mean, scale=scale
+    )
+
+
+def _standardize_rank(values: Sequence[float]) -> _Standardized | None:
+    """The centred average rank: `(rank - (n + 1) / 2) / n`, or `None` when everything ties.
+
+    Mean exactly zero for every `n`, including `n = 1`, which is why the denominator is `n` and
+    not the `n - 1` that would make the range exactly `[-0.5, 0.5]`: a rule with a special case at
+    `n = 1` is a rule with a branch nothing exercises until the day it does. Bounded by `0.5`
+    either way, so the output is always finite.
+
+    Estimates no location and no scale: a rank is not an affine image of its input, so neither
+    number would describe what was done, and storing a mean the transform did not subtract would
+    be a provenance field that is wrong rather than absent.
+
+    **All-tied is `None` rather than a cross section of zeros**, and that is the judgement worth
+    stating because the arithmetic has an answer here and `zscore`'s does not. A cross section
+    where every value ties has nothing to order, and `0.0` for everybody reads downstream as a
+    valid centred score -- an information coefficient or a neutralisation would consume it as
+    data. A z-score's `0 / 0` and a rank's total tie are the same fact about the cross section,
+    and answering them differently would make the degeneracy depend on a knob that is about
+    output *shape* rather than about whether there is anything to say. `none` is different in
+    kind, not in degree: it declines to order at all.
+
+    Ties are found by **exact** float equality, which is the honest bound: two values differing
+    in the last bit rank as distinct, so a factor with a heavily discretised numerator gets an
+    ordering its raw numbers barely support. A tolerance would need a scale to be relative to,
+    and the only scale on offer is the cross section's own dispersion -- the quantity `rank`
+    exists to avoid depending on.
+    """
+    if min(values) == max(values):
+        return None
+    count = len(values)
+    middle = (count + 1) / 2.0
+    return _Standardized(
+        values=tuple((rank - middle) / count for rank in _average_ranks(values)),
+        location=None,
+        scale=None,
+    )
+
+
+_STANDARDIZERS: Final[Mapping[StandardizationMethod, _Standardizer]] = MappingProxyType(
+    {
+        "none": _standardize_none,
+        "zscore": _standardize_zscore,
+        "rank": _standardize_rank,
+    }
+)
+
+
+# --- the missing-value policy, applied ------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _Imputation:
+    """What a missing-value action produced: a value or none, and the code it is stored under."""
+
+    value: float | None
+    coverage: ProcessedCoverage
+
+
+@dataclass(frozen=True, slots=True)
+class _FillContext:
+    """What a fill may draw on: the processed cross section's median, and the method's neutral.
+
+    Both are computed from the **already standardized** participants, which is the whole of the
+    "an imputation does not feed back into the statistics it was drawn from" property: the
+    context is built after `_STANDARDIZERS` has run and nothing in it re-enters the mean, the
+    deviation or the winsorization bounds.
+    """
+
+    processed_median: float
+    neutral: float | None
+
+
+class _MissingValueApplier(Protocol):
+    def __call__(self, context: _FillContext) -> _Imputation: ...
+
+
+def _exclude_from_the_cross_section(context: _FillContext) -> _Imputation:
+    return _Imputation(value=None, coverage="source_not_computed")
+
+
+def _fill_with_the_cross_sectional_median(context: _FillContext) -> _Imputation:
+    return _Imputation(value=context.processed_median, coverage="imputed")
+
+
+def _fill_with_the_neutral_value(context: _FillContext) -> _Imputation:
+    if context.neutral is None:
+        raise FactorTransformError(
+            "fill_neutral was asked for under a standardization with no neutral point; "
+            "FactorTransformSpec's validator refuses that combination, so this spec reached the "
+            "engine through model_construct or a subclass rather than through the contract"
+        )
+    return _Imputation(value=context.neutral, coverage="imputed")
+
+
+_MISSING_VALUE_APPLIERS: Final[Mapping[MissingValueAction, _MissingValueApplier]] = (
+    MappingProxyType(
+        {
+            "exclude": _exclude_from_the_cross_section,
+            "fill_cross_sectional_median": _fill_with_the_cross_sectional_median,
+            "fill_neutral": _fill_with_the_neutral_value,
+        }
+    )
+)
+"""Three of the four declared actions. The fourth is named below rather than left missing."""
+
+REFUSAL_ACTION: Final[MissingValueAction] = "refuse"
+"""The one `MissingValueAction` that is not an imputation and therefore not in the table above.
+
+Named as a constant rather than left as an absence, because "the table is missing an entry" and
+"the table deliberately does not cover this member" look identical to a reader and are opposite
+facts to a maintainer. `_refuse_transform_table_drift` asserts both halves -- that the appliers
+plus this one are exactly `MISSING_VALUE_ACTIONS`, and that this one is *not* among the appliers
+-- so a fifth action has to be classified into one of the two before the module will import.
+
+It is applied before anything else in `apply_factor_transform`
+(`_refuse_source_codes_the_policy_rejects`) rather than inside the per-observation loop, and the
+ordering is load-bearing: a caller who declared "an `undefined_value` in this cross section is a
+fault" gets that refusal even at an `as_of` whose cross section was too thin to process at all,
+because the fault is in the inputs and the thinness is a separate fact about them.
+"""
+
+
+def _refuse_transform_table_drift(
+    winsorizers: Mapping[WinsorizationMethod, _Winsorizer],
+    standardizers: Mapping[StandardizationMethod, _Standardizer],
+    appliers: Mapping[MissingValueAction, _MissingValueApplier],
+    coverage_order: Sequence[str],
+) -> None:
+    """Refuse a vocabulary with a member no branch implements, and a branch with no member.
+
+    `_refuse_table_drift`'s argument applied to four closed sets at once, with the same measured
+    failure behind it: `PANEL_BUILD_TARGETS` gained keys whose branches did not exist and the
+    command answered exit 0 with an empty partition list. The shape here would be worse than an
+    empty success -- a declared `WinsorizationMethod` with no winsorizer raises `KeyError` from a
+    dict lookup at the first cross section that uses it, in production, with a message that names
+    neither the method nor the spec.
+
+    Five checks rather than one, because they fail differently and a reader has to know which: a
+    method with no implementation, an implementation with no declared method, a standardization
+    with no declared neutral point (which decides whether `fill_neutral` is even legal beside it),
+    an action that is neither an imputation nor the one refusal, and a census order that has
+    drifted from the vocabulary it restates.
+
+    Every input is an argument rather than a module global, so all five failure directions are
+    drivable from a test. An audit whose only call site is the one that passes is an audit nobody
+    has seen fail, which is the shape `_refuse_table_drift` earned a third test for.
+    """
+    # The implemented sets are widened to `set[str]` rather than left as sets of the `Literal`
+    # they are keyed by: mypy reads `frozenset[str] != set[Literal[...]]` as a non-overlapping
+    # comparison and refuses it, which would make the audit's own equality unwritable.
+    checks: tuple[tuple[str, frozenset[str], set[str]], ...] = (
+        ("winsorization method", WINSORIZATION_METHODS, {str(key) for key in winsorizers}),
+        ("standardization method", STANDARDIZATION_METHODS, {str(key) for key in standardizers}),
+        (
+            "standardization neutral point",
+            STANDARDIZATION_METHODS,
+            {str(key) for key in STANDARDIZATION_NEUTRAL},
+        ),
+    )
+    for name, declared, implemented in checks:
+        if declared != implemented:
+            raise FactorTransformError(
+                f"the {name} vocabulary and its table disagree: "
+                f"{sorted(declared - implemented)} are declared with no entry and "
+                f"{sorted(implemented - declared)} are implemented with nothing declaring them. "
+                "A declared method with no branch behind it fails at the first cross section "
+                "that asks for it"
+            )
+    covered = {str(key) for key in appliers} | {str(REFUSAL_ACTION)}
+    if covered != MISSING_VALUE_ACTIONS or REFUSAL_ACTION in appliers:
+        raise FactorTransformError(
+            f"the missing-value actions are {sorted(MISSING_VALUE_ACTIONS)} and this build "
+            f"imputes {sorted(appliers)} with {REFUSAL_ACTION!r} handled separately; every "
+            "action must be exactly one of the two, because an action in neither is one no "
+            "cross section will ever apply and an action in both is one applied twice"
+        )
+    if set(coverage_order) != PROCESSED_COVERAGE_CODES or len(set(coverage_order)) != len(
+        coverage_order
+    ):
+        raise FactorTransformError(
+            f"the processed census order is {list(coverage_order)} and the declared codes are "
+            f"{sorted(PROCESSED_COVERAGE_CODES)}; the order decides a census key order and a "
+            "stored column list, and two copies of a closed set drift"
+        )
+
+
+_refuse_transform_table_drift(
+    _WINSORIZERS, _STANDARDIZERS, _MISSING_VALUE_APPLIERS, PROCESSED_COVERAGE_ORDER
+)
+
+
+# --- the arithmetic ------------------------------------------------------------------------------
+
+
+def _quantile(ordered: Sequence[float], fraction: float) -> float:
+    """The `fraction`-quantile of an **ascending** sequence, by linear interpolation.
+
+    The definition is pinned here rather than borrowed, and the choice matters more than it
+    looks: `statistics.quantiles` cuts a distribution into `n` intervals under an *exclusive*
+    rule by default and returns cut points rather than one quantile; numpy's default is this one.
+    The rule is that the quantile sits at position `(len - 1) * fraction` among the order
+    statistics, interpolating linearly between the two it falls between -- so `fraction=0` is the
+    minimum, `fraction=1` is the maximum, and `fraction=0.5` is the median (the average of the two
+    middle values on an even-length sequence).
+
+    `_median` is this function at `0.5` rather than `statistics.median`, so the transform layer
+    has one definition of "the middle" instead of two that agree today.
+
+    **The consequence on a small cross section is the one worth knowing**, and it is a property
+    of the rule rather than of any implementation: at `len = 3`, `fraction = 0.01` puts the
+    position at `0.02`, so the "1% quantile" sits 2% of the way from the smallest value to the
+    second smallest -- a bound whose distance from the minimum is set by the *size* of the cross
+    section and not by its tail. `FactorTransformSpec.min_cross_section` is the declared answer to
+    that, and `tests/unit/test_factor_transform_rules.py` carries the arithmetic as numbers.
+
+    Ascending order is a precondition rather than something this function establishes, because
+    every caller already holds a sorted sequence and re-sorting at 5,534 names per `as_of` is a
+    real cost. The precondition is *checked* rather than assumed: an unsorted argument would
+    otherwise return a plausible number computed from the wrong order statistics, which is the
+    kind of defect that never surfaces as an error.
+    """
+    if not ordered:
+        raise FactorTransformError("a quantile of an empty cross section has no value")
+    if not 0.0 <= fraction <= 1.0:
+        raise FactorTransformError(f"a quantile fraction must be in [0, 1]; got {fraction!r}")
+    if any(ordered[index] > ordered[index + 1] for index in range(len(ordered) - 1)):
+        raise FactorTransformError(
+            "_quantile takes an ascending sequence and was given an unsorted one; it would "
+            "otherwise return a number computed from the wrong order statistics"
+        )
+    if len(ordered) == 1:
+        return ordered[0]
+    position = (len(ordered) - 1) * fraction
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return ordered[lower]
+    return ordered[lower] + (position - lower) * (ordered[upper] - ordered[lower])
+
+
+def _median(ordered: Sequence[float]) -> float:
+    """The middle of an ascending sequence, defined as `_quantile(ordered, 0.5)`."""
+    return _quantile(ordered, 0.5)
+
+
+def _average_ranks(values: Sequence[float]) -> tuple[float, ...]:
+    """One-based ranks in the argument's own order, with tied values sharing their average rank.
+
+    `(1.0, 3.0, 3.0, 7.0)` ranks as `(1.0, 2.5, 2.5, 4.0)`: the two tied values would have taken
+    ranks 2 and 3, and averaging is what keeps the rank sum equal to `n (n + 1) / 2` whatever the
+    ties are -- which is what makes `_standardize_rank`'s centring exact rather than
+    approximately zero.
+
+    Ties are found by exact float equality; see `_standardize_rank` for the bound that puts on
+    this.
+    """
+    order = sorted(range(len(values)), key=lambda index: values[index])
+    ranks = [0.0] * len(values)
+    start = 0
+    while start < len(order):
+        end = start
+        while end + 1 < len(order) and values[order[end + 1]] == values[order[start]]:
+            end += 1
+        average = (start + end) / 2.0 + 1.0
+        for position in range(start, end + 1):
+            ranks[order[position]] = average
+        start = end + 1
+    return tuple(ranks)
+
+
+def _population_stdev(values: Sequence[float]) -> float:
+    """The population standard deviation, exposed for the test that pins the estimator.
+
+    `_standardize_zscore` computes it inline -- it needs the mean anyway, and a second pass over
+    5,534 values per `as_of` for a number it already holds is a cost with no buyer. This is the
+    same arithmetic under a name a test can drive directly, and the two are reconciled by
+    `tests/unit/test_factor_transform_rules.py::
+    test_the_z_score_divides_by_the_population_deviation_this_function_returns`, so the
+    "obvious" `statistics.stdev` substitution fails there instead of shipping numbers that are
+    0.5% different at n=100 and 22% different at n=3.
+    """
+    if not values:
+        raise FactorTransformError("the standard deviation of an empty cross section has no value")
+    mean = math.fsum(values) / len(values)
+    return math.sqrt(math.fsum((value - mean) * (value - mean) for value in values) / len(values))
+
+
+# --- the processed result -------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ProcessedFactorPanel:
+    """One transform of one factor at one `as_of`: the manifest, every row, and what it measured.
+
+    `FactorPanel`'s shape one plane up, and `built_at` is here rather than on
+    `FactorTransformManifest` for the same reason it is here rather than on
+    `FactorBuildManifest`: the wall clock is recorded (it becomes the partition's
+    `ColumnarPanelBatch.fetched_at`) and kept out of the content address, so re-applying the same
+    transform to the same source build reproduces its `transform_manifest_id` -- which is what
+    makes a rebuild writable past `_refuse_to_drop_a_stored_build` at all.
+    """
+
+    definition: FactorDefinition
+    spec: FactorTransformSpec
+    manifest: FactorTransformManifest
+    observations: tuple[ProcessedFactorObservation, ...]
+    statistics: FactorTransformStatistics
+    built_at: datetime
+
+    @property
+    def as_of(self) -> datetime:
+        return self.manifest.as_of
+
+    def coverage_census(self) -> Mapping[str, int]:
+        """How many rows carry each processed coverage code, including the zeros.
+
+        Every declared code is present with a count, `FactorPanel.coverage_census()`'s reason: a
+        report reads "0 imputed" rather than inferring it from an absent key.
+        """
+        census: dict[str, int] = dict.fromkeys(PROCESSED_COVERAGE_ORDER, 0)
+        for observation in self.observations:
+            census[observation.coverage] += 1
+        return MappingProxyType(census)
+
+    def values(self) -> Mapping[str, float]:
+        """Every subject that has a processed number, **including the imputed ones**.
+
+        The inclusive reading, because a caller that declared a fill policy asked for those
+        numbers; `measured_values()` is the other half and `imputed_subjects()` is how a caller
+        separates them without re-deriving the policy.
+        """
+        return MappingProxyType(
+            {
+                observation.subject: observation.value
+                for observation in self.observations
+                if observation.value is not None
+            }
+        )
+
+    def measured_values(self) -> Mapping[str, float]:
+        """Only the subjects whose number came from a `computed` raw observation.
+
+        The cross section an information coefficient should be computed on: an imputed median is
+        a number this repository made up, and a correlation that consumed it would be measuring
+        the fill rate as much as the factor. `V2-P3-005` is the first caller that has to choose,
+        and the point of having two methods is that it has to choose rather than inherit.
+        """
+        return MappingProxyType(
+            {
+                observation.subject: observation.value
+                for observation in self.observations
+                if observation.coverage == "processed" and observation.value is not None
+            }
+        )
+
+    def imputed_subjects(self) -> tuple[str, ...]:
+        """Every subject whose number the missing-value policy supplied, in row order."""
+        return tuple(
+            observation.subject
+            for observation in self.observations
+            if observation.coverage == "imputed"
+        )
+
+
+# --- applying ------------------------------------------------------------------------------------
+
+
+def apply_factor_transform(
+    panel: FactorPanel,
+    spec: FactorTransformSpec,
+    *,
+    code_commit: str,
+    built_at: datetime,
+) -> ProcessedFactorPanel:
+    """Winsorize, standardize and resolve the missing values of one cross section.
+
+    ## The four arguments, and the one that is not here
+
+    - **`panel`** is the whole input. There is no `store`, no `as_of` and no universe: the
+      securities that participate in a cross-sectional statistic are exactly the observations
+      `compute_factor` produced at that `as_of`, and the `as_of` is the panel's own. That absence
+      is the point-in-time argument at this layer -- a transform cannot read a row that was not
+      knowable, because it cannot read a row at all -- and it is audited by signature rather than
+      asserted: `test_the_transform_takes_no_store_and_therefore_no_second_visibility_rule` reads
+      the parameters and their annotations.
+    - **`spec`** is mandatory and has no default. A defaulted preprocessing policy is the shape
+      `ReadinessRequirement`'s four checks were changed to refuse: the most permissive
+      configuration would also be the easiest one to get, and the *stored* numbers would then
+      depend on a decision nobody recorded taking.
+    - **`code_commit`** is provenance the panel plane cannot resolve for itself (no top-level
+      `panel_*` module may import `runtime`, where `resolve_code_commit()` lives), and it has no
+      default for the reason `V2-P0B-009` deleted `"development"`.
+    - **`built_at`** is the wall clock, deliberately out of the content address.
+
+    **`date_timezone` is deliberately not a parameter**, and its absence is a claim rather than
+    an omission: this function resolves no date. `compute_factor` needs one because it turns a
+    UTC instant into a session date and the resolution decides which rows fall in a window; a
+    transform reads values and codes off observations that already carry an aware `as_of`. The
+    only timezone in its life belongs to `write_processed_factor_panels`, which uses one to
+    decide a partition **year**, exactly as `write_factor_panels` does.
+
+    ## The order of operations, and why each step is where it is
+
+    1. **Refuse what the policy declared unacceptable.** Before anything else, so that a caller
+       who said "an `undefined_value` here is a fault" gets that answer even at an `as_of` whose
+       cross section was too thin to process. See `REFUSAL_ACTION`.
+    2. **Select the participants: exactly the `computed` observations.** Not a choice so much as
+       an arithmetic -- every other code carries `value=None` by a rule with three enforcement
+       points, so there is no number to include, and substituting zero is what
+       `FactorPanel.values()` exists to refuse.
+    3. **Refuse a cross section thinner than `spec.min_cross_section`**, as a whole-panel
+       `insufficient_cross_section` rather than as an exception: a thin cross section at some
+       historical `as_of` is an answer about the market, and a build that raised on it could not
+       backfill a year that contains one.
+    4. **Winsorize the raw participant values.** Bounds come from the *raw* cross section,
+       because that is what a tail is.
+    5. **Standardize the winsorized values.** In that order, because clipping first is the entire
+       reason to clip: the standard deviation a z-score divides by should not be the one the
+       outliers set. Reversing the two changes every number, and
+       `test_the_deviation_the_z_score_divides_by_is_the_winsorized_one` measures the difference
+       rather than asserting the order.
+    6. **Resolve the non-participants** from the standardized cross section. Fills are drawn
+       *after* step 5 and never re-enter it; see this module's docstring for the measurement.
+
+    ## What determines the answers, and therefore what `transform_manifest_id` has to cover
+
+    Every argument is either represented in `manifest.transform_manifest_id` or exempt with a
+    written reason, and `tests/integration/panel/test_factor_transforms.py::
+    test_every_determinant_of_this_transform_is_either_in_the_identity_or_exempted_by_name` reads
+    this function's own signature and fails on a parameter in neither list --
+    `test_every_determinant_of_this_build_is_either_in_the_identity_or_exempted_by_name`'s
+    instrument, applied to the function this issue adds. A fifth parameter fails the audit until
+    somebody classifies it.
+
+    `panel` reaches the identity twice over: through `source_manifest_id`, which says which build
+    it was, and through `source_observation_digest`, which says what the numbers in it were. The
+    second is not redundant -- a manifest identifies a computation's *inputs*, so two panels
+    carrying one `manifest_id` and different observations are constructible, and without the
+    digest the audit would be exempting `panel` on a promise. See
+    `domain/factor_transform.py::observation_digest`.
+    """
+    observations = panel.observations
+    if not observations:
+        raise FactorTransformError(
+            "apply_factor_transform needs a panel with at least one observation; an empty cross "
+            "section produces an empty processed panel that is indistinguishable from one where "
+            "nothing could be transformed"
+        )
+    _refuse_a_source_panel_that_does_not_own_its_observations(panel)
+    _refuse_source_codes_the_policy_rejects(observations, spec)
+    manifest = FactorTransformManifest(
+        transform_id=spec.transform_id,
+        transform_key=spec.key,
+        transform_version=spec.version,
+        source_factor_id=panel.definition.factor_id,
+        source_factor_key=panel.definition.key,
+        source_factor_version=panel.definition.version,
+        source_manifest_id=panel.manifest.manifest_id,
+        source_observation_digest=observation_digest(observations),
+        as_of=panel.as_of,
+        code_commit=code_commit,
+    )
+    # Read once, outside every loop below. `transform_manifest_id` is a pydantic
+    # `computed_field`, which is not cached -- `domain/panel_batch.py` measured 10.5 ms on a
+    # first access and 10.2 ms on a second for `ProviderBatch.payload_digest`, and ADR-0003
+    # records this module walking into exactly that trap once already, re-hashing a build
+    # manifest 5,534 times inside a per-security loop.
+    manifest_id = manifest.transform_manifest_id
+    participants = tuple(item for item in observations if item.coverage == "computed")
+    raw = tuple(item.value for item in participants if item.value is not None)
+    if len(raw) != len(participants):
+        raise FactorTransformError(
+            f"{len(participants) - len(raw)} of this panel's `computed` observations carry no "
+            "value; exactly the `computed` code carries one and every other code carries None, "
+            "so such a row reached the panel past both of validate_factor_observation's call "
+            "sites -- through a subclass that overrode __post_init__"
+        )
+
+    if len(participants) < spec.min_cross_section:
+        return _uniform_processed_panel(
+            panel,
+            spec,
+            manifest=manifest,
+            manifest_id=manifest_id,
+            coverage="insufficient_cross_section",
+            statistics=FactorTransformStatistics(
+                participant_count=len(participants),
+                winsorized_low_count=0,
+                winsorized_high_count=0,
+                imputed_count=0,
+                lower_bound=None,
+                upper_bound=None,
+                location=None,
+                scale=None,
+            ),
+            built_at=built_at,
+        )
+
+    ordered = sorted(raw)
+    bounds = _WINSORIZERS[spec.winsorization.method](spec.winsorization, ordered)
+    if bounds is None:
+        winsorized, lower, upper, low_count, high_count = raw, None, None, 0, 0
+    else:
+        lower, upper = bounds
+        _refuse_a_scale_estimator_that_collapsed(spec, ordered=ordered, lower=lower, upper=upper)
+        winsorized = tuple(min(max(value, lower), upper) for value in raw)
+        low_count = sum(1 for value in raw if value < lower)
+        high_count = sum(1 for value in raw if value > upper)
+
+    standardized = _STANDARDIZERS[spec.standardization](winsorized)
+    if standardized is None:
+        return _uniform_processed_panel(
+            panel,
+            spec,
+            manifest=manifest,
+            manifest_id=manifest_id,
+            coverage="degenerate_cross_section",
+            statistics=FactorTransformStatistics(
+                participant_count=len(participants),
+                winsorized_low_count=low_count,
+                winsorized_high_count=high_count,
+                imputed_count=0,
+                lower_bound=lower,
+                upper_bound=upper,
+                location=None,
+                scale=None,
+            ),
+            built_at=built_at,
+        )
+
+    processed = dict(zip((item.subject for item in participants), standardized.values, strict=True))
+    context = _FillContext(
+        processed_median=_median(sorted(standardized.values)),
+        neutral=STANDARDIZATION_NEUTRAL[spec.standardization],
+    )
+    rows: list[ProcessedFactorObservation] = []
+    imputed = 0
+    for observation in observations:
+        if observation.coverage == "computed":
+            rows.append(
+                _processed_row(
+                    observation,
+                    spec,
+                    manifest_id=manifest_id,
+                    value=processed[observation.subject],
+                    coverage="processed",
+                )
+            )
+            continue
+        imputation = _MISSING_VALUE_APPLIERS[spec.missing_values.action_for(observation.coverage)](
+            context
+        )
+        imputed += int(imputation.value is not None)
+        rows.append(
+            _processed_row(
+                observation,
+                spec,
+                manifest_id=manifest_id,
+                value=imputation.value,
+                coverage=imputation.coverage,
+            )
+        )
+    return ProcessedFactorPanel(
+        definition=panel.definition,
+        spec=spec,
+        manifest=manifest,
+        observations=tuple(rows),
+        statistics=FactorTransformStatistics(
+            participant_count=len(participants),
+            winsorized_low_count=low_count,
+            winsorized_high_count=high_count,
+            imputed_count=imputed,
+            lower_bound=lower,
+            upper_bound=upper,
+            location=standardized.location,
+            scale=standardized.scale,
+        ),
+        built_at=built_at,
+    )
+
+
+def _processed_row(
+    observation: FactorObservation,
+    spec: FactorTransformSpec,
+    *,
+    manifest_id: str,
+    value: float | None,
+    coverage: ProcessedCoverage,
+) -> ProcessedFactorObservation:
+    """One processed row, carrying the pointer back to the raw row it came from."""
+    return ProcessedFactorObservation(
+        subject=observation.subject,
+        as_of=observation.as_of,
+        value=value,
+        coverage=coverage,
+        transform_id=spec.transform_id,
+        transform_manifest_id=manifest_id,
+        source_factor_id=observation.factor_id,
+        source_manifest_id=observation.manifest_id,
+        source_coverage=observation.coverage,
+    )
+
+
+def _uniform_processed_panel(
+    panel: FactorPanel,
+    spec: FactorTransformSpec,
+    *,
+    manifest: FactorTransformManifest,
+    manifest_id: str,
+    coverage: ProcessedCoverage,
+    statistics: FactorTransformStatistics,
+    built_at: datetime,
+) -> ProcessedFactorPanel:
+    """One row per source observation, all carrying a whole-panel code and no value.
+
+    Both whole-panel codes reach every observation, **including the ones whose source was not
+    `computed`**, and that is a judgement rather than a shortcut. "There is no processed cross
+    section at this `as_of`" is the dominant fact; reporting `source_not_computed` for some names
+    while others said `degenerate_cross_section` would suggest the first group could have been
+    processed and merely lacked an input, which is false -- nothing was processed. The reason
+    each individual name had no raw value is not lost: `source_coverage` is on every row.
+    """
+    return ProcessedFactorPanel(
+        definition=panel.definition,
+        spec=spec,
+        manifest=manifest,
+        observations=tuple(
+            _processed_row(
+                observation, spec, manifest_id=manifest_id, value=None, coverage=coverage
+            )
+            for observation in panel.observations
+        ),
+        statistics=statistics,
+        built_at=built_at,
+    )
+
+
+def _refuse_a_source_panel_that_does_not_own_its_observations(panel: FactorPanel) -> None:
+    """Refuse a panel whose rows do not all belong to the build its manifest describes.
+
+    What makes `(source_manifest_id, subject, as_of)` a **proved** key of the raw partition
+    rather than an assumed one. `compute_factor` stamps one `manifest_id`, one `factor_id` and
+    one `as_of` on every observation it produces, so this never fires on its output -- but this
+    function's input is a `FactorPanel`, which is a public frozen dataclass anybody can
+    construct, and a hand-assembled one with a mismatched row would store a processed value
+    whose provenance pointer names a build that does not hold it. That is a dangling reference
+    written as a fact, which is worse than a missing one: `_batch_digests_by_partition` refuses
+    the same shape one plane down for the same reason.
+    """
+    if panel.manifest.factor_id != panel.definition.factor_id:
+        raise FactorTransformError(
+            f"this panel's manifest describes factor {panel.manifest.factor_id!r} and its "
+            f"definition is {panel.definition.factor_id!r}; the two are produced together by "
+            "compute_factor and a panel where they disagree cannot be transformed"
+        )
+    manifest_id = panel.manifest.manifest_id
+    factor_id = panel.definition.factor_id
+    as_of = panel.as_of
+    stray = sorted(
+        {
+            item.subject
+            for item in panel.observations
+            if item.manifest_id != manifest_id or item.factor_id != factor_id or item.as_of != as_of
+        }
+    )
+    if stray:
+        raise FactorTransformError(
+            f"{stray[:5]}{'...' if len(stray) > 5 else ''} carry a build, a factor or an as_of "
+            f"that is not this panel's ({manifest_id}, {factor_id}, {as_of.isoformat()}); every "
+            "processed row points at its source with (source_manifest_id, subject, as_of), and a "
+            "row from another build would make that pointer name a build that does not hold it"
+        )
+
+
+def _refuse_source_codes_the_policy_rejects(
+    observations: Sequence[FactorObservation], spec: FactorTransformSpec
+) -> None:
+    """Raise when the cross section carries a coverage code the policy declared unacceptable.
+
+    `REFUSAL_ACTION`'s branch. The message names the code, the count and one example, because
+    "some observation somewhere was undefined" is not actionable and the census this refusal
+    replaces would have been.
+    """
+    offending = {
+        item.coverage: [other.subject for other in observations if other.coverage == item.coverage]
+        for item in observations
+        if item.coverage != "computed"
+        and spec.missing_values.action_for(item.coverage) == REFUSAL_ACTION
+    }
+    if not offending:
+        return
+    detail = "; ".join(
+        f"{code}: {len(subjects)} security(ies), e.g. {sorted(subjects)[0]}"
+        for code, subjects in sorted(offending.items())
+    )
+    raise FactorTransformError(
+        f"{spec.qualified_key} declares {REFUSAL_ACTION!r} for coverage code(s) this cross "
+        f"section carries -- {detail}. That is the action for a caller who would rather a build "
+        "fail than silently carry a hole: an undefined_value census that grew overnight is a "
+        "broken factor, and a policy that imputed it would report the same numbers it reported "
+        "yesterday. Change the action, or fix the input the code is about"
+    )
+
+
+def _refuse_a_scale_estimator_that_collapsed(
+    spec: FactorTransformSpec, *, ordered: Sequence[float], lower: float, upper: float
+) -> None:
+    """Refuse bounds that clip a cross section with dispersion down to a single point.
+
+    The one run-time refusal about the *data* rather than about the spec, and its predicate is
+    exact: bounds are equal **and** the raw participants were not.
+
+    Both halves are load-bearing and the asymmetry is the whole design. `mad` on a cross section
+    where more than half the names share one value estimates `MAD = 0`, so the interval is
+    `[median, median]` and **every** participant is clipped to the median -- which is not
+    winsorization by any reading of the word, and which would then flow into `zscore` as a zero
+    deviation or into `none` as a cross section where the 40% of names carrying all the
+    information have been flattened onto the 60% that carry none. Measured on
+    `[1.0, 1.0, 1.0, 1.0, 9.0]` with `mad_scale=3`, and on the same values with
+    `lower_quantile=0.25, upper_quantile=0.75`: both estimators collapse.
+
+    The second half is what keeps this from firing on data that was *already* constant. A cross
+    section of five identical values collapses any estimator and nothing was destroyed by doing
+    so; that is a fact about the market at that `as_of`, and `degenerate_cross_section` is the
+    code for it. A refusal there would make an unrelated knob -- which winsorization was declared
+    -- decide whether an all-tied cross section is an answer or an error.
+
+    A `FactorTransformError` rather than a coverage code because the alternative outcomes are
+    both silent: under `zscore` the collapse arrives downstream as `degenerate_cross_section`,
+    which reads as "the market had no dispersion today" and is false, and under `none` it arrives
+    as a cross section of identical numbers with no code at all.
+    """
+    if lower != upper or ordered[0] == ordered[-1]:
+        return
+    raise FactorTransformError(
+        f"{spec.qualified_key}'s {spec.winsorization.method} winsorization put both bounds on "
+        f"{lower!r} for a cross section spanning {ordered[0]!r} to {ordered[-1]!r}, so it would "
+        f"clip all {len(ordered)} participants to one point. That is not pulling in the tails: a "
+        "median absolute deviation of zero means more than half the cross section shares one "
+        "value, and a quantile interval of zero width means the same thing between the declared "
+        "quantiles. Widen the interval, use a quantile rule instead of a mad one, or declare "
+        "winsorization 'none' -- and see whether the factor is producing a value for most of the "
+        "market at all"
+    )
+
+
+# --- writing the processed plane --------------------------------------------------------------
+
+
+def processed_observation_batch(panel: ProcessedFactorPanel) -> ColumnarPanelBatch:
+    """One transform's processed rows as a columnar batch, ready for the store.
+
+    Every clock on every row is the build's `as_of`, `factor_observation_batch`'s argument
+    unchanged: a processed observation is a statement made *at* `as_of` out of information
+    knowable *at* `as_of`, it became knowable at that instant, and it has no revision. The wall
+    clock is the batch's `fetched_at`.
+
+    **Every row is re-validated here**, which is the second call site
+    `domain/factor_transform.py::validate_processed_factor_observation` exists for: a
+    `__post_init__` is a method, a frozen dataclass with `slots=True` is still subclassable, and
+    the write boundary is the last place a row that skipped the constructor's rules can be
+    stopped before it is a column in a Parquet file. The rules that matter most at this boundary
+    are the two provenance ones -- a `processed` row must come from a `computed` source and an
+    `imputed` row must not -- because a violation of either stores a number this repository
+    invented under the code that says a security produced it.
+    """
+    observations = panel.observations
+    for observation in observations:
+        validate_processed_factor_observation(observation)
+    instants = tuple(observation.as_of for observation in observations)
+    columns: dict[str, list[object]] = {
+        "transform_id": [observation.transform_id for observation in observations],
+        "transform_key": [panel.spec.key] * len(observations),
+        "transform_version": [panel.spec.version] * len(observations),
+        "value": [observation.value for observation in observations],
+        "coverage": [observation.coverage for observation in observations],
+        "transform_manifest_id": [item.transform_manifest_id for item in observations],
+        "source_factor_id": [observation.source_factor_id for observation in observations],
+        "source_manifest_id": [observation.source_manifest_id for observation in observations],
+        "source_coverage": [observation.source_coverage for observation in observations],
+    }
+    return ColumnarPanelBatch(
+        provider_id=FACTOR_PROVIDER_ID,
+        dataset=processed_factor_dataset(panel.definition),
+        kind=FACTOR_PROCESSED_KIND,
+        as_of=panel.as_of,
+        fetched_at=panel.built_at,
+        status="success",
+        subjects=tuple(observation.subject for observation in observations),
+        timeline=TimelineColumns(
+            event_time=instants,
+            available_time=instants,
+            ingested_time=instants,
+            revision_time=instants,
+        ),
+        columns=tuple(
+            PanelColumn(name, _PROCESSED_COLUMN_KINDS[name], tuple(values))
+            for name, values in columns.items()
+        ),
+        source_uri=None,
+    )
+
+
+def transform_manifest_batch(panel: ProcessedFactorPanel) -> ColumnarPanelBatch:
+    """One transform build as a single row, keyed by `transform_manifest_id`.
+
+    One row rather than `factor_manifest_batch`'s one-per-input-partition, because a transform
+    has exactly one input: the source build. The `subject` is the build, `trade_cal`'s precedent
+    -- `subject` is the entity the row is about -- and it buys the same write guard, since
+    `PartitionCoverage.subjects` is then the set of transform builds a partition holds and
+    `_refuse_to_drop_a_stored_build` can see an overwrite that would destroy one without reading
+    a single row.
+
+    The census and the statistics are here for `factor_manifest_batch`'s reason: a build that
+    processed nobody is otherwise indistinguishable in storage from one that standardized the
+    whole market, and the objects that could say so speak only to a caller that thinks to ask.
+    """
+    manifest = panel.manifest
+    spec = panel.spec
+    statistics = panel.statistics
+    census = panel.coverage_census()
+    columns: dict[str, list[object]] = {
+        "transform_id": [manifest.transform_id],
+        "transform_key": [manifest.transform_key],
+        "transform_version": [manifest.transform_version],
+        "source_factor_id": [manifest.source_factor_id],
+        "source_factor_key": [manifest.source_factor_key],
+        "source_factor_version": [manifest.source_factor_version],
+        "source_manifest_id": [manifest.source_manifest_id],
+        "source_observation_digest": [manifest.source_observation_digest],
+        "as_of_time": [manifest.as_of],
+        "code_commit": [manifest.code_commit],
+        "winsorization_method": [spec.winsorization.method],
+        "winsorization_lower_quantile": [spec.winsorization.lower_quantile],
+        "winsorization_upper_quantile": [spec.winsorization.upper_quantile],
+        "winsorization_mad_scale": [spec.winsorization.mad_scale],
+        "standardization_method": [spec.standardization],
+        "min_cross_section": [spec.min_cross_section],
+        **{
+            f"{MISSING_VALUE_COLUMN_PREFIX}{code}": [spec.missing_values.action_for(code)]
+            for code in MISSING_VALUE_COVERAGE_ORDER
+        },
+        **{
+            f"{FACTOR_CENSUS_COLUMN_PREFIX}{code}": [census[code]]
+            for code in PROCESSED_COVERAGE_ORDER
+        },
+        "participant_count": [statistics.participant_count],
+        "winsorized_low_count": [statistics.winsorized_low_count],
+        "winsorized_high_count": [statistics.winsorized_high_count],
+        "imputed_count": [statistics.imputed_count],
+        "lower_bound": [statistics.lower_bound],
+        "upper_bound": [statistics.upper_bound],
+        "location": [statistics.location],
+        "scale": [statistics.scale],
+    }
+    return ColumnarPanelBatch(
+        provider_id=FACTOR_PROVIDER_ID,
+        dataset=factor_transform_manifest_dataset(panel.definition),
+        kind=FACTOR_TRANSFORM_MANIFEST_KIND,
+        as_of=manifest.as_of,
+        fetched_at=panel.built_at,
+        status="success",
+        subjects=(manifest.transform_manifest_id,),
+        timeline=TimelineColumns(
+            event_time=(manifest.as_of,),
+            available_time=(manifest.as_of,),
+            ingested_time=(manifest.as_of,),
+            revision_time=(manifest.as_of,),
+        ),
+        columns=tuple(
+            PanelColumn(name, _TRANSFORM_MANIFEST_COLUMN_KINDS[name], tuple(values))
+            for name, values in columns.items()
+        ),
+        source_uri=None,
+    )
+
+
+def write_processed_factor_panels(
+    store: PanelStore,
+    panels: Sequence[ProcessedFactorPanel],
+    *,
+    supersedes: Collection[str] = (),
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> tuple[PartitionRef, ...]:
+    """Write every processed panel and its manifest, merged into one partition per year.
+
+    `write_factor_panels`' shape, and every one of its arguments applies unchanged: a partition
+    is replaced whole and has no append, so everything belonging to one `(dataset, year)` has to
+    reach the store in one call; `supersedes` names the `transform_manifest_id`s this call is
+    deliberately replacing; a `supersedes` entry no partition holds is refused rather than
+    ignored, because a typo would silently turn the drop guard off for the write it arrived with;
+    and every guard runs before the first write, so a refusal changes nothing at all.
+
+    **The unit of the drop guard is a transform build**, which is what makes it complete here.
+    `_refuse_to_drop_a_stored_build` reads the target manifest partition's stored subjects off
+    the catalog -- one row, no partition scan -- and a `transform_manifest_id` covers
+    `source_observation_digest`, so a write carrying every stored build carries every stored
+    security *and every stored transform of them* by construction. The processed observation
+    partition is covered by that rather than by a guard of its own, for the reason the raw one is:
+    a securities-level guard both refuses correct writes (a rebuild over a narrower cross section)
+    and permits incorrect ones (a write that drops a whole `as_of` while keeping the names).
+
+    **One partition holds every transform of one factor**, so the call that writes a year has to
+    carry every `(transform, as_of)` pair belonging to it -- not just every `as_of` of one
+    transform. That is the one way this differs from `write_factor_panels`' constraint, it
+    follows from the dataset-name arithmetic in this module's docstring rather than from a
+    choice, and it is *enforced* rather than documented: a second transform written on its own
+    would drop the first's build and the guard refuses it.
+    """
+    if not panels:
+        raise FactorEngineError(
+            "write_processed_factor_panels needs at least one panel; an empty write would be a "
+            "call that reports success and stores nothing"
+        )
+    _refuse_two_applications_of_one_transform_at_one_as_of(panels)
+    planned = [
+        (year, yearly)
+        for batches in _processed_batches_by_dataset(panels)
+        for year, yearly in split_panel_batch_by_year(
+            merge_panel_batches(batches), date_timezone=date_timezone
+        )
+    ]
+    superseded = set(supersedes)
+    stored: list[tuple[ColumnarPanelBatch, int, frozenset[str]]] = []
+    for year, yearly in planned:
+        if yearly.kind != FACTOR_TRANSFORM_MANIFEST_KIND:
+            continue
+        existing = store.read_coverage(yearly.dataset, year)
+        stored.append(
+            (yearly, year, frozenset() if existing is None else frozenset(existing.subjects))
+        )
+    unmatched = sorted(superseded - {build for _, _, builds in stored for build in builds})
+    if unmatched:
+        raise FactorEngineError(
+            f"supersedes names {unmatched}, which no partition this write touches holds; a "
+            "transform_manifest_id that matches nothing is a typo, and letting it through would "
+            "turn the drop guard off for the write it arrived with"
+        )
+    for yearly, year, builds in stored:
+        _refuse_to_drop_a_stored_build(yearly, year, builds=builds, superseded=superseded)
+    return tuple(
+        write_panel_batch(store, yearly, year=year, date_timezone=date_timezone)
+        for year, yearly in planned
+    )
+
+
+def _processed_batches_by_dataset(
+    panels: Sequence[ProcessedFactorPanel],
+) -> tuple[tuple[ColumnarPanelBatch, ...], ...]:
+    """One group of same-dataset batches per factor and per kind, observations before manifests.
+
+    `_batches_by_dataset`' shape. Grouped by dataset **name** rather than by definition, so the
+    grouping key is the same string the store files the partition under -- and here that matters
+    more than it does one plane down, because several *transforms* of one factor legitimately
+    produce the same dataset name and have to merge into one partition rather than race for it.
+    """
+    grouped: dict[str, list[ColumnarPanelBatch]] = {}
+    for build in (processed_observation_batch, transform_manifest_batch):
+        for panel in panels:
+            batch = build(panel)
+            grouped.setdefault(batch.dataset, []).append(batch)
+    return tuple(tuple(batches) for batches in grouped.values())
+
+
+def _refuse_two_applications_of_one_transform_at_one_as_of(
+    panels: Sequence[ProcessedFactorPanel],
+) -> None:
+    """Refuse a call that answers one `(transform, factor, as_of)` question twice.
+
+    Keyed by the three rather than by `transform_manifest_id`, because two applications that
+    differed only in their source build carry two identities and would still store two rows for
+    every `(subject, as_of, transform_id)` -- which is a reader left to choose between them, the
+    exact thing `_refuse_two_builds_of_one_factor_at_one_as_of` exists to prevent one plane down.
+    """
+    seen: dict[tuple[str, str, datetime], int] = {}
+    for panel in panels:
+        key = (panel.spec.transform_id, panel.manifest.source_factor_id, panel.as_of)
+        seen[key] = seen.get(key, 0) + 1
+    repeated = sorted(
+        f"{transform_id} of {factor_id} at {as_of.isoformat()}"
+        for (transform_id, factor_id, as_of), count in seen.items()
+        if count > 1
+    )
+    if repeated:
+        raise FactorEngineError(
+            f"this write carries more than one application of {repeated}; a second answer to one "
+            "cross-section question would store two rows for every (subject, as_of, transform) "
+            "and leave a reader to choose between them. Supersede the earlier build instead"
+        )
+
+
+# --- reading the processed plane back ----------------------------------------------------------
+
+
+def processed_factor_requirement(
+    definition: FactorDefinition, *, years: Sequence[int], as_of: datetime
+) -> ReadinessRequirement:
+    """What a processed partition must satisfy before its values may be read back.
+
+    The same three waivers `factor_observation_requirement` takes and for exactly the same
+    reasons -- the dates here are the `as_of`s somebody chose to compute rather than the sessions
+    an exchange was open, the subjects are the cross section the read is *for*, and a derived
+    partition has no upstream to be stale against, so a bound invented here would refuse a sound
+    historical backfill. `required_fields` is not waived: the nine stored columns plus the subject
+    are exactly what `load_processed_factor_observations` decodes, and a partition missing one
+    would fail as a binder error rather than as a readiness verdict.
+    """
+    return ReadinessRequirement(
+        dataset=processed_factor_dataset(definition),
+        as_of=as_of,
+        years=tuple(sorted(set(years))),
+        required_dates=None,
+        required_subjects=None,
+        required_fields=PROCESSED_OBSERVATION_PANEL_COLUMNS,
+        max_staleness=None,
+    )
+
+
+def transform_manifest_requirement(
+    definition: FactorDefinition, *, years: Sequence[int], as_of: datetime
+) -> ReadinessRequirement:
+    """What a transform-manifest partition must satisfy before its builds may be read back."""
+    return ReadinessRequirement(
+        dataset=factor_transform_manifest_dataset(definition),
+        as_of=as_of,
+        years=tuple(sorted(set(years))),
+        required_dates=None,
+        required_subjects=None,
+        required_fields=TRANSFORM_MANIFEST_PANEL_COLUMNS,
+        max_staleness=None,
+    )
+
+
+def load_processed_factor_observations(
+    store: PanelStore,
+    definition: FactorDefinition,
+    spec: FactorTransformSpec,
+    *,
+    years: Sequence[int],
+    as_of: datetime,
+) -> tuple[ProcessedFactorObservation, ...]:
+    """One transform's stored processed rows, filtered to what was knowable at `as_of`.
+
+    Through `read_visible_at` rather than `read_if_ready` for `load_factor_observations`' reason:
+    a processed row's `available_time` is the `as_of` it was computed at, so a year partition
+    holding a year of daily cross sections has a `max_available_time` in December and
+    `read_if_ready` would refuse it at every `as_of` inside the year -- including the ones whose
+    own rows are sitting in it.
+
+    **The transform is a filter here and the factor is the dataset**, which is the opposite of
+    the arrangement one plane down and is forced by the dataset-name arithmetic (see this
+    module's docstring). The cost is stated rather than hidden: reading one transform of a factor
+    opens the rows of every transform of it and drops the others in Python, because
+    `read_visible_at` projects columns and takes no predicate. The alternative -- returning every
+    transform's rows in one tuple -- would hand a caller z-scores and centred ranks mixed
+    together under one type, with the filter left as an exercise; `load_factor_transform_manifests`
+    is how a caller discovers which transforms a partition holds in order to ask for one.
+    """
+    requirement = processed_factor_requirement(definition, years=years, as_of=as_of)
+    dataset = requirement.dataset
+    found: list[ProcessedFactorObservation] = []
+    for year in sorted(set(years)):
+        outcome = store.read_visible_at(
+            requirement,
+            year=year,
+            columns=(EVENT_TIME_COLUMN, *PROCESSED_OBSERVATION_PANEL_COLUMNS),
+        )
+        if outcome.is_blocked:
+            raise FactorEngineError(
+                f"{dataset} year={year} cannot be read at "
+                f"{as_of.isoformat()}: {[issue.code for issue in outcome.blocking_issues]}"
+            )
+        found.extend(
+            row
+            for row in (
+                _processed_observation_from_row(cells, dataset=dataset) for cells in outcome.rows
+            )
+            if row.transform_id == spec.transform_id
+        )
+    return tuple(found)
+
+
+def load_factor_transform_manifests(
+    store: PanelStore,
+    definition: FactorDefinition,
+    *,
+    years: Sequence[int],
+    as_of: datetime,
+) -> tuple[FactorTransformManifest, ...]:
+    """Every transform build of one factor stored in `years` and knowable at `as_of`.
+
+    The read `write_processed_factor_panels`' refusal points at, and the reason it can point
+    anywhere: a partition is replaced whole and a stored build may not be dropped, so a caller
+    who wants to add an `as_of` -- or a second transform -- to a year has to know what the year
+    already holds. It also carries the discovery half `load_processed_factor_observations` needs,
+    since a partition holds every transform of the factor and a caller has to name one.
+
+    **The policy and statistic columns are stored and are deliberately not reassembled here.**
+    They are not fields of `FactorTransformManifest` (see `TRANSFORM_MANIFEST_DATA_COLUMNS`), so
+    putting them back on one would either not fit or would move the `transform_manifest_id` of
+    the manifest this function returns -- and the whole point of this read is that a reassembled
+    build reproduces the identity it was stored under. They are columns in the partition for a
+    reader that wants them; `FACTOR_TRANSFORMS.by_id` is how a caller turns a `transform_id` back
+    into the policy this build declares.
+    """
+    requirement = transform_manifest_requirement(definition, years=years, as_of=as_of)
+    dataset = requirement.dataset
+    found: list[FactorTransformManifest] = []
+    for year in sorted(set(years)):
+        outcome = store.read_visible_at(
+            requirement, year=year, columns=TRANSFORM_MANIFEST_PANEL_COLUMNS
+        )
+        if outcome.is_blocked:
+            raise FactorEngineError(
+                f"{dataset} year={year} cannot be read at "
+                f"{as_of.isoformat()}: {[issue.code for issue in outcome.blocking_issues]}"
+            )
+        found.extend(_transform_manifest_from_row(row, dataset=dataset) for row in outcome.rows)
+    return tuple(found)
+
+
+def _processed_observation_from_row(
+    row: Sequence[object], *, dataset: str
+) -> ProcessedFactorObservation:
+    """Rebuild one processed row from `(event_time, *PROCESSED_OBSERVATION_PANEL_COLUMNS)`.
+
+    Refuses the wrong width rather than unpacking positionally into whatever fits, and decodes
+    both coverage columns *from* their vocabularies rather than casting -- `_coverage_code` for
+    the source's five codes and `_processed_coverage_code` for this plane's five. A partition
+    written by a build that knows a sixth of either would otherwise decode into a dataclass whose
+    fields the type system believes are closed sets and are not.
+    """
+    expected = 1 + len(PROCESSED_OBSERVATION_PANEL_COLUMNS)
+    if len(row) != expected:
+        raise FactorEngineError(
+            f"a {dataset} row has {len(row)} values, expected {expected} "
+            f"({EVENT_TIME_COLUMN}, {', '.join(PROCESSED_OBSERVATION_PANEL_COLUMNS)})"
+        )
+    cells = dict(zip((EVENT_TIME_COLUMN, *PROCESSED_OBSERVATION_PANEL_COLUMNS), row, strict=True))
+    as_of = cells[EVENT_TIME_COLUMN]
+    if not isinstance(as_of, datetime):
+        raise FactorEngineError(
+            f"a {dataset} row carries {type(as_of).__name__} for "
+            f"{EVENT_TIME_COLUMN}, not a datetime"
+        )
+    return ProcessedFactorObservation(
+        subject=str(cells[SUBJECT_COLUMN_NAME]),
+        as_of=as_of,
+        value=_stored_processed_value(cells["value"], dataset=dataset),
+        coverage=_processed_coverage_code(cells["coverage"], dataset=dataset),
+        transform_id=str(cells["transform_id"]),
+        transform_manifest_id=str(cells["transform_manifest_id"]),
+        source_factor_id=str(cells["source_factor_id"]),
+        source_manifest_id=str(cells["source_manifest_id"]),
+        source_coverage=_coverage_code(cells["source_coverage"], dataset=dataset),
+    )
+
+
+def _stored_processed_value(value: object, *, dataset: str) -> float | None:
+    """A stored processed `value` cell as a finite float or `None`, or a refusal.
+
+    `_stored_value`'s rule for the processed column, and it is a separate function rather than a
+    call to that one because the message has to name the right remedy: a non-finite *raw* value
+    belongs under `undefined_value`, and this plane has no code that carries one at all -- an
+    infinity here is a row no declared coverage code describes.
+    """
+    if value is None:
+        return None
+    parsed = float(str(value))
+    if not math.isfinite(parsed):
+        raise FactorEngineError(
+            f"a {dataset} row carries value {value!r}, which is not a finite number; no declared "
+            "processed coverage code carries one, and a `processed` row holding it poisons every "
+            "mean, rank and regression built on the column"
+        )
+    return parsed
+
+
+def _processed_coverage_code(value: object, *, dataset: str) -> ProcessedCoverage:
+    """A stored processed `coverage` cell as one of the five declared codes, or a refusal.
+
+    `_coverage_code`'s argument on this plane's vocabulary: matched against
+    `PROCESSED_COVERAGE_ORDER` and returned *from* it rather than cast, so a partition written by
+    a build that knows a sixth code is refused where the dataset can be named.
+    """
+    text = str(value)
+    for code in PROCESSED_COVERAGE_ORDER:
+        if code == text:
+            return code
+    raise FactorEngineError(
+        f"a {dataset} row carries coverage {text!r}, which this build does not declare "
+        f"({list(PROCESSED_COVERAGE_ORDER)}); it was written by a build that knows a code this "
+        "one does not"
+    )
+
+
+def _transform_manifest_from_row(row: Sequence[object], *, dataset: str) -> FactorTransformManifest:
+    """Rebuild one transform manifest from its row, and prove it is the one it was stored under.
+
+    `_manifest_from_rows`' argument, without the fold: a transform build reads exactly one input
+    -- the source factor build -- so it is one row rather than one per input partition.
+
+    The reassembled `transform_manifest_id` is checked against the `manifest_id` the row was
+    filed under, and that is not belt and braces: every field this reads is one the identity was
+    computed from, so a decoder that dropped or mistyped one would hand back a build nobody ever
+    ran, under the ID a caller then uses to name it in `supersedes`.
+    """
+    if len(row) != len(TRANSFORM_MANIFEST_PANEL_COLUMNS):
+        raise FactorEngineError(
+            f"a {dataset} row has {len(row)} values, expected "
+            f"{len(TRANSFORM_MANIFEST_PANEL_COLUMNS)} "
+            f"({', '.join(TRANSFORM_MANIFEST_PANEL_COLUMNS)})"
+        )
+    cells = dict(zip(TRANSFORM_MANIFEST_PANEL_COLUMNS, row, strict=True))
+    as_of = cells["as_of_time"]
+    if not isinstance(as_of, datetime):
+        raise FactorEngineError(
+            f"a {dataset} row carries {type(as_of).__name__} for as_of_time, not a datetime"
+        )
+    manifest = FactorTransformManifest(
+        transform_id=str(cells["transform_id"]),
+        transform_key=str(cells["transform_key"]),
+        transform_version=int(str(cells["transform_version"])),
+        source_factor_id=str(cells["source_factor_id"]),
+        source_factor_key=str(cells["source_factor_key"]),
+        source_factor_version=int(str(cells["source_factor_version"])),
+        source_manifest_id=str(cells["source_manifest_id"]),
+        source_observation_digest=str(cells["source_observation_digest"]),
+        as_of=as_of,
+        code_commit=str(cells["code_commit"]),
+    )
+    stored = str(cells[SUBJECT_COLUMN_NAME])
+    if manifest.transform_manifest_id != stored:
+        raise FactorEngineError(
+            f"a {dataset} build stored under {stored!r} reassembles to "
+            f"{manifest.transform_manifest_id!r}; the row and the identity it was filed under "
+            "disagree, so this partition was written by a build whose manifest contract is not "
+            "this one's"
+        )
+    return manifest
