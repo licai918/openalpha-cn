@@ -18,14 +18,23 @@ moment somebody adds a field -- silently, because every case in it still passes.
 back and fails on the difference, which is the only shape of check this repository has found to
 hold a table against an implementation.
 
-**The seven required properties are fields, and each is constrained.** `V2-P3-001`'s acceptance
-lists stable identity, version, family, required fields, lookback window and direction;
-`max_window_sessions` is the seventh, and it is the correction of a defect the other six had
-between them (a lookback that says how many of a security's own sessions to take and nothing
-about when they were). A test that only checked they were *present* would pass against a
-definition whose family is `"whatever"` and whose lookback is `0` -- the shape
-`SignalFrame.horizon` had until `V2-P1-017` narrowed it (`min_length=1, max_length=64` admitted
-`'whenever'`).
+**The declared properties are fields, and each is constrained on both sides.** `V2-P3-001`'s
+acceptance lists stable identity, version, family, required fields, lookback window and
+direction; the two *reaches* are the correction of defects those six had between them -- a
+lookback that says how many of a security's own sessions to take and nothing about when they
+were, and no way at all to say how far back a **filing** has to go. A test that only checked
+they were *present* would pass against a definition whose family is `"whatever"` and whose
+lookback is `0` -- the shape `SignalFrame.horizon` had until `V2-P1-017` narrowed it
+(`min_length=1, max_length=64` admitted `'whenever'`) -- and a test that only checked the floors
+would pass against a `lookback_periods` of 60,000, which a mutation run measured.
+
+**Prose is not a field, and that is asserted rather than promised.** All three factor identity
+contracts carried a `summary` inside their own content addresses until `V2-P3-014`'s
+prerequisite, so fixing a typo moved every stored build's identity and changed no number.
+`test_a_prose_edit_moves_no_identity_because_prose_is_not_a_field` and
+`test_a_setting_edit_moves_the_identity_and_is_therefore_distinguishable_from_a_typo` are the
+pair that discriminates, and `test_prose_cannot_be_put_into_the_contract_at_all` is why the
+first is structural rather than conventional.
 
 **The registry refuses the two shapes that make a lookup meaningless**, and declines to refuse
 a third. An empty registry satisfies every "for each definition" assertion vacuously, which is
@@ -55,6 +64,7 @@ from openalpha_cn.domain.factor import (
     FACTOR_DIRECTIONS,
     FACTOR_FAMILIES,
     MAX_FACTOR_KEY_LENGTH,
+    PERIOD_INDEXED_DATASETS,
     FactorBuildManifest,
     FactorCoverage,
     FactorDefinition,
@@ -64,11 +74,13 @@ from openalpha_cn.domain.factor import (
     FactorField,
     FactorInputProvenance,
     FactorInputRef,
+    FactorNote,
     FactorObservation,
     FactorRegistry,
     set_digest,
     validate_factor_observation,
 )
+from openalpha_cn.domain.financial_statements import FINANCIAL_STATEMENT_DATASETS
 
 AS_OF = datetime(2026, 1, 12, 4, 0, tzinfo=UTC)
 
@@ -82,7 +94,30 @@ def _definition(**overrides: Any) -> FactorDefinition:
         "required_fields": (FactorField(dataset="daily", column="close"),),
         "lookback_sessions": 20,
         "max_window_sessions": 25,
-        "summary": "a probe",
+        "lookback_periods": None,
+        "max_window_periods": None,
+        **overrides,
+    }
+    return FactorDefinition(**fields)
+
+
+def _filing_definition(**overrides: Any) -> FactorDefinition:
+    """A definition on the **report-period** axis and nothing else.
+
+    `V2-P3-010`'s ROE shape: one `fina_indicator` column, no price, so no session reach at all.
+    It exists here because the two axes' rules are not symmetric until both are exercised -- a
+    session-only probe cannot show that `lookback_sessions=None` is a legal declaration.
+    """
+    fields = {
+        "key": "probe_filing",
+        "version": 1,
+        "family": "quality",
+        "direction": "higher_is_better",
+        "required_fields": (FactorField(dataset="fina_indicator", column="roe"),),
+        "lookback_sessions": None,
+        "max_window_sessions": None,
+        "lookback_periods": 5,
+        "max_window_periods": 5,
         **overrides,
     }
     return FactorDefinition(**fields)
@@ -111,6 +146,8 @@ def _manifest(**overrides: Any) -> FactorBuildManifest:
         "direction": "higher_is_better",
         "lookback_sessions": 20,
         "max_window_sessions": 25,
+        "lookback_periods": 5,
+        "max_window_periods": 6,
         "subject_count": 8,
         "subject_digest": set_digest(("000001.SZ", "000002.SZ")),
         "universe_count": 8,
@@ -121,13 +158,13 @@ def _manifest(**overrides: Any) -> FactorBuildManifest:
     return FactorBuildManifest(**fields)
 
 
-# --- the six properties ------------------------------------------------------------------------
+# --- the declared properties ---------------------------------------------------------------------
 
 
-def test_a_definition_carries_all_seven_properties_the_contract_names() -> None:
-    """`V2-P3-001`'s acceptance names six; `max_window_sessions` is the seventh and is the
-    correction of a defect the six had between them -- a lookback that counted a security's own
-    rows and said nothing about when they were."""
+def test_a_definition_carries_every_property_the_contract_names() -> None:
+    """`V2-P3-001`'s acceptance names six; the two reaches are the correction of defects the six
+    had between them -- a lookback that counted a security's own sessions and said nothing about
+    when they were, and no way at all to say how far back a *filing* had to reach."""
     definition = _definition()
 
     assert definition.factor_id.startswith("fct_")
@@ -136,7 +173,16 @@ def test_a_definition_carries_all_seven_properties_the_contract_names() -> None:
     assert definition.required_fields == (FactorField(dataset="daily", column="close"),)
     assert definition.lookback_sessions == 20
     assert definition.max_window_sessions == 25
+    assert definition.lookback_periods is None
+    assert definition.max_window_periods is None
     assert definition.direction in FACTOR_DIRECTIONS
+
+    filing = _filing_definition()
+
+    assert filing.lookback_sessions is None
+    assert filing.max_window_sessions is None
+    assert filing.lookback_periods == 5
+    assert filing.max_window_periods == 5
 
 
 def test_the_family_and_direction_vocabularies_are_closed_and_match_their_literals() -> None:
@@ -161,7 +207,6 @@ _CONSTRAINED_PROPERTIES: Final[tuple[tuple[str, object, str], ...]] = (
     ("max_window_sessions", 0, "greater than or equal to 1"),
     ("version", 0, "greater than or equal to 1"),
     ("required_fields", (), "at least 1 item"),
-    ("summary", "", "at least 1 character"),
 )
 
 
@@ -190,6 +235,134 @@ def test_a_window_narrower_than_its_own_lookback_is_refused() -> None:
         _definition(lookback_sessions=20, max_window_sessions=19)
 
     assert _definition(lookback_sessions=20, max_window_sessions=20).max_window_sessions == 20
+
+
+def test_a_period_window_narrower_than_its_own_lookback_is_refused() -> None:
+    """The same impossibility on the other axis, matched on its own field names so the two
+    cannot be satisfied by one check that happens to fire."""
+    with pytest.raises(ValidationError, match="narrower than lookback_periods"):
+        _filing_definition(lookback_periods=5, max_window_periods=4)
+
+    assert _filing_definition(lookback_periods=5, max_window_periods=5).max_window_periods == 5
+
+
+_REACH_BOUNDS: Final[tuple[tuple[str, dict[str, Any], dict[str, Any]], ...]] = (
+    (
+        "lookback_sessions",
+        {"lookback_sessions": 2000, "max_window_sessions": 4000},
+        {"lookback_sessions": 2001, "max_window_sessions": 4000},
+    ),
+    (
+        "max_window_sessions",
+        {"lookback_sessions": 20, "max_window_sessions": 4000},
+        {"lookback_sessions": 20, "max_window_sessions": 4001},
+    ),
+    (
+        "lookback_periods",
+        {"lookback_periods": 60, "max_window_periods": 120},
+        {"lookback_periods": 61, "max_window_periods": 120},
+    ),
+    (
+        "max_window_periods",
+        {"lookback_periods": 5, "max_window_periods": 120},
+        {"lookback_periods": 5, "max_window_periods": 121},
+    ),
+)
+
+
+@pytest.mark.parametrize(("field", "widest", "beyond"), _REACH_BOUNDS)
+def test_each_reach_has_the_upper_bound_it_declares(
+    field: str, widest: dict[str, Any], beyond: dict[str, Any]
+) -> None:
+    """Both sides of every ceiling, because only the pair says where it is.
+
+    A lower-bound case alone (`_CONSTRAINED_PROPERTIES`) leaves the ceiling free, and that is a
+    measurement rather than a worry: widening `lookback_periods` from 60 to 60,000 survived every
+    other assertion in this file and in the engine's when a mutation run tried it.
+
+    What a ceiling buys here is what a `Field(le=...)` buys anywhere -- `min_cross_section`'s own
+    argument -- the stored column holds a plausible reach rather than an unbounded integer, and a
+    caller who typed a *session* count into `lookback_periods` is refused at the contract instead
+    of at the first build. 60 report periods is fifteen A-share years of quarterly filings and
+    120 is its span twin; `V2-P3-011`'s year-on-year acceleration is the widest reach
+    `009`..`013` asks for, at nine.
+    """
+    base = _filing_definition if field.endswith("periods") else _definition
+
+    assert getattr(base(**widest), field) == widest[field]
+    with pytest.raises(ValidationError, match="less than or equal to"):
+        base(**beyond)
+
+
+_HALF_DECLARED_REACHES: Final[tuple[tuple[dict[str, Any], str], ...]] = (
+    ({"lookback_sessions": None}, "lookback_sessions and max_window_sessions are stated together"),
+    ({"max_window_sessions": None}, "lookback_sessions and max_window_sessions are stated"),
+    (
+        {"lookback_periods": 5, "max_window_periods": None},
+        "lookback_periods and max_window_periods are stated together",
+    ),
+    (
+        {"lookback_periods": None, "max_window_periods": 5},
+        "lookback_periods and max_window_periods are stated together",
+    ),
+)
+
+
+@pytest.mark.parametrize(("overrides", "message"), _HALF_DECLARED_REACHES)
+def test_half_a_reach_is_refused_on_either_axis(overrides: dict[str, Any], message: str) -> None:
+    """A count with no span bound is a window whose reach nothing decides, and a span bound with
+    no count is a bound on a window that is never formed.
+
+    Both directions on both axes, each matched on the pair it is about: one unmatched
+    `pytest.raises` here would pass while three of the four had stopped being checked.
+    """
+    with pytest.raises(ValidationError, match=message):
+        _definition(**overrides)
+
+
+def test_a_reach_is_declared_exactly_when_the_axis_is_read() -> None:
+    """The equivalence, in all four of its failing corners.
+
+    This is what makes each nullable pair non-vacuous: a reach for an axis the factor is not on
+    is a number inside `factor_id` that no branch of `panel_factors` can consult -- the "field
+    with no reader" this contract refused a report-period dimension for until it had one -- and a
+    missing reach for an axis the factor *is* on is an unbounded window.
+    """
+    price = (FactorField(dataset="daily", column="close"),)
+    filing = (FactorField(dataset="income", column="revenue"),)
+
+    with pytest.raises(ValidationError, match="declares no session reach and reads"):
+        _definition(required_fields=price, lookback_sessions=None, max_window_sessions=None)
+    with pytest.raises(ValidationError, match="declares session reach and reads"):
+        _filing_definition(lookback_sessions=20, max_window_sessions=25)
+    with pytest.raises(ValidationError, match="declares no report-period reach and reads"):
+        _definition(required_fields=filing, lookback_sessions=None, max_window_sessions=None)
+    with pytest.raises(ValidationError, match="declares report-period reach and reads"):
+        _definition(lookback_periods=5, max_window_periods=5)
+
+    both = _definition(
+        required_fields=(*price, *filing),
+        lookback_periods=5,
+        max_window_periods=5,
+    )
+
+    assert both.session_datasets == ("daily",)
+    assert both.period_datasets == ("income",)
+
+
+def test_the_period_axis_is_exactly_the_four_statement_datasets() -> None:
+    """`PERIOD_INDEXED_DATASETS` is derived from the domain's own tuple rather than written out,
+    so a fifth statement endpoint joins the axis without anybody extending a list.
+
+    Asserted in both directions against `FINANCIAL_STATEMENT_DATASETS` and against a dataset that
+    is emphatically not one: `daily_basic` carries `total_mv`, which `V2-P3-009`'s BP reads
+    beside a filing, and putting it on the period axis would index a daily row by a column it
+    does not have.
+    """
+    assert frozenset(FINANCIAL_STATEMENT_DATASETS) == PERIOD_INDEXED_DATASETS
+    assert {"income", "balancesheet", "cashflow", "fina_indicator"} == PERIOD_INDEXED_DATASETS
+    assert "daily" not in PERIOD_INDEXED_DATASETS
+    assert "daily_basic" not in PERIOD_INDEXED_DATASETS
 
 
 @pytest.mark.parametrize(
@@ -283,9 +456,25 @@ _DEFINITION_FIELD_VARIATIONS: Final[tuple[tuple[str, object], ...]] = (
     ("direction", "lower_is_better"),
     ("lookback_sessions", 21),
     ("max_window_sessions", 26),
-    ("summary", "a different probe"),
+    ("lookback_periods", 4),
+    ("max_window_periods", 6),
     ("required_fields", (FactorField(dataset="daily", column="vol"),)),
 )
+"""One way to move each declared field, one field at a time.
+
+The period entries are varied against `_filing_definition` rather than `_definition`, because
+the session-only baseline cannot legally carry a period reach at all -- the equivalence refuses
+it before an identity is consulted. `_definition_pair` picks the baseline that admits each
+variation, so every case is still exactly one field moved against a baseline that differs in
+nothing else.
+"""
+
+
+def _definition_pair(field: str, value: object) -> tuple[FactorDefinition, FactorDefinition]:
+    """`(baseline, varied)` for one field, on a baseline whose axes admit the variation."""
+    if field in {"lookback_periods", "max_window_periods"}:
+        return (_filing_definition(), _filing_definition(**{field: value}))
+    return (_definition(), _definition(**{field: value}))
 
 
 @pytest.mark.parametrize(("field", "value"), _DEFINITION_FIELD_VARIATIONS)
@@ -295,7 +484,9 @@ def test_every_definition_field_reaches_the_identity(field: str, value: object) 
     A field that is carried and never hashed is provenance, not identity, and the way that goes
     unnoticed is a test that asserts the ID exists.
     """
-    assert _definition(**{field: value}).factor_id != _definition().factor_id
+    baseline, varied = _definition_pair(field, value)
+
+    assert varied.factor_id != baseline.factor_id
 
 
 _INPUT_REF_FIELD_VARIATIONS: Final[tuple[tuple[str, object], ...]] = (
@@ -356,7 +547,7 @@ def test_a_registry_refuses_to_be_empty() -> None:
 
 def test_a_registry_refuses_two_definitions_answering_to_one_name() -> None:
     with pytest.raises(FactorError, match="declared more than once"):
-        FactorRegistry((_definition(), _definition(summary="restated, version not bumped")))
+        FactorRegistry((_definition(), _definition(lookback_sessions=21)))
 
 
 def test_two_distinct_names_can_never_share_a_content_address() -> None:
@@ -399,6 +590,128 @@ def test_two_versions_of_one_key_coexist_and_have_different_identities() -> None
     assert len(set(registry.factor_ids)) == 2
 
 
+# --- prose is recorded and is not a field ---------------------------------------------------------
+
+
+def test_a_prose_edit_moves_no_identity_because_prose_is_not_a_field() -> None:
+    """The measurement this change exists to make possible, in the form the defect had.
+
+    Before it, `FactorDefinition.summary` was inside `factor_id`, so fixing a typo moved the
+    identity of every stored build derived from the definition and changed no number --
+    `V2-P3-004` had to break its own "edit only with a version bump" rule to retract three
+    unreproducible figures from `INDUSTRY_AND_SIZE.summary` for exactly this reason. Now the two
+    registries below differ in nothing but their prose and every content address in them is
+    byte-identical.
+
+    Asserted on the whole `factor_ids` tuple rather than on one ID, so a contract that hashed the
+    note for *some* definitions could not pass.
+    """
+    definitions = (_definition(key="alpha_probe"), _definition(key="beta_probe"))
+    before = FactorRegistry(
+        definitions,
+        notes=(
+            FactorNote(subject="alpha_probe/v1", summary="a one-sesion return"),
+            FactorNote(subject="beta_probe/v1", summary="the same, restated"),
+        ),
+    )
+    after = FactorRegistry(
+        definitions,
+        notes=(
+            FactorNote(subject="alpha_probe/v1", summary="a one-session return"),
+            FactorNote(subject="beta_probe/v1", summary="the same, restated"),
+        ),
+    )
+
+    assert before.note_for("alpha_probe/v1") == "a one-sesion return"
+    assert after.note_for("alpha_probe/v1") == "a one-session return"
+    assert before.factor_ids == after.factor_ids
+    assert before.factor_ids == FactorRegistry(definitions).factor_ids
+
+
+def test_a_setting_edit_moves_the_identity_and_is_therefore_distinguishable_from_a_typo() -> None:
+    """The other half of the pair, and the half that has to keep working.
+
+    "Prose no longer moves the identity" would be satisfiable by an identity that moves for
+    nothing at all, so the discriminating statement is the two halves together: a definition
+    whose *settings* differ has a different address on the same registry shape a typo leaves
+    untouched.
+    """
+    definitions = (_definition(key="alpha_probe"), _definition(key="beta_probe"))
+    notes = (FactorNote(subject="alpha_probe/v1", summary="unchanged prose"),)
+    baseline = FactorRegistry(definitions, notes=notes)
+    restated = FactorRegistry(
+        (_definition(key="alpha_probe", lookback_sessions=21), _definition(key="beta_probe")),
+        notes=notes,
+    )
+
+    assert baseline.note_for("alpha_probe/v1") == restated.note_for("alpha_probe/v1")
+    assert baseline.factor_ids[0] != restated.factor_ids[0]
+    assert baseline.factor_ids[1] == restated.factor_ids[1]
+
+
+def test_prose_cannot_be_put_into_the_contract_at_all() -> None:
+    """Why the half above is a *structural* claim rather than a convention anybody could break.
+
+    `extra="forbid"` means there is no `summary=` to pass, so "editing prose cannot move this
+    identity" is not a rule a future author has to remember -- it is a model that will not accept
+    prose. Matched on pydantic's own refusal so the case cannot pass because some *other*
+    validator rejected the call.
+    """
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        _definition(summary="why these settings")
+
+    assert "summary" not in FactorDefinition.model_fields
+    assert "summary" not in FactorBuildManifest.model_fields
+
+
+def test_a_note_about_an_undeclared_contract_is_refused() -> None:
+    """Prose about nothing is how a note outlives the spec it described and goes on being shown.
+
+    The duplicate case is the same lookup made arbitrary from the other side, and both are
+    matched narrowly enough to say which refused.
+    """
+    with pytest.raises(FactorError, match="is not a declared factor"):
+        FactorRegistry((_definition(),), notes=(FactorNote(subject="ghost/v1", summary="x"),))
+    with pytest.raises(FactorError, match="carries more than one factor note"):
+        FactorRegistry(
+            (_definition(),),
+            notes=(
+                FactorNote(subject="probe_factor/v1", summary="one"),
+                FactorNote(subject="probe_factor/v1", summary="two"),
+            ),
+        )
+
+
+def test_a_registry_with_no_note_answers_none_and_still_refuses_an_unknown_handle() -> None:
+    """ "Nothing is written about this factor" is an answer; "this is not a factor" is a fault.
+
+    A registry a test builds out of probe definitions has nothing to say about them, and forcing
+    a sentence would produce the placeholder prose `V2-P0B-009` deleted elsewhere -- so the empty
+    case is legal and returns `None`. Asking about a handle the registry does not declare goes
+    through `get`, which names what it knows.
+    """
+    registry = FactorRegistry((_definition(),))
+    partly_written = FactorRegistry(
+        (_definition(key="alpha_probe"), _definition(key="beta_probe")),
+        notes=(FactorNote(subject="alpha_probe/v1", summary="only this one is written about"),),
+    )
+
+    assert registry.note_for("probe_factor/v1") is None
+    assert partly_written.note_for("beta_probe/v1") is None
+    assert partly_written.note_for("alpha_probe/v1") == "only this one is written about"
+    with pytest.raises(FactorError, match="is not a declared factor; this build knows"):
+        registry.note_for("ghost/v1")
+
+
+def test_a_note_refuses_to_be_empty_on_either_half() -> None:
+    """A note with no subject is unattachable and one with no prose is a record of nothing;
+    whitespace counts as neither, which is what `str.strip` is doing there."""
+    with pytest.raises(FactorError, match="must name the contract it is about"):
+        FactorNote(subject="   ", summary="prose")
+    with pytest.raises(FactorError, match="carries no prose"):
+        FactorNote(subject="probe_factor/v1", summary="  ")
+
+
 # --- the build manifest --------------------------------------------------------------------------
 
 
@@ -412,6 +725,8 @@ _MANIFEST_FIELD_VARIATIONS: Final[tuple[tuple[str, object], ...]] = (
     ("direction", "lower_is_better"),
     ("lookback_sessions", 21),
     ("max_window_sessions", 26),
+    ("lookback_periods", 6),
+    ("max_window_periods", 7),
     ("subject_count", 9),
     ("subject_digest", set_digest(("600000.SH", "600519.SH"))),
     ("universe_count", 7),
@@ -490,6 +805,8 @@ def test_the_wall_clock_is_not_a_manifest_field_so_a_rebuild_reproduces_the_iden
         "direction",
         "lookback_sessions",
         "max_window_sessions",
+        "lookback_periods",
+        "max_window_periods",
         "subject_count",
         "subject_digest",
         "universe_count",
@@ -625,6 +942,36 @@ def test_a_window_with_one_end_or_a_backwards_one_is_refused() -> None:
             input_session_first=date(2026, 1, 9),
             input_session_last=date(2026, 1, 8),
         )
+
+
+def test_the_period_window_is_held_to_the_same_two_rules_as_the_session_one() -> None:
+    """The pair the `None` defaults could otherwise have smuggled half of in.
+
+    `input_period_first` and `input_period_last` default to `None` where the session pair does
+    not, because absent is the right answer for every factor that reads no filing. That default
+    is only safe if the *pairing* is still enforced, so both refusals are matched here on the
+    period field names -- a check that fired on `input_session_first` would satisfy an unmatched
+    version of this test while the period pair went unchecked.
+    """
+    with pytest.raises(FactorError, match="input_period_first and input_period_last"):
+        _observation(
+            value=None,
+            coverage="input_missing",
+            input_period_first=date(2025, 9, 30),
+            input_period_last=None,
+        )
+    with pytest.raises(FactorError, match=r"the input period window .* runs backwards"):
+        _observation(
+            value=None,
+            coverage="input_missing",
+            input_period_first=date(2025, 12, 31),
+            input_period_last=date(2025, 9, 30),
+        )
+
+    both = _observation(input_period_first=date(2024, 12, 31), input_period_last=date(2025, 9, 30))
+
+    assert both.input_session_first == date(2026, 1, 8)
+    assert both.input_period_last == date(2025, 9, 30)
 
 
 def test_an_observation_is_frozen_and_comparable_by_value() -> None:

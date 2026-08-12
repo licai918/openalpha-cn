@@ -131,7 +131,6 @@ def _spec(**overrides: Any) -> FactorTransformSpec:
             undefined_value="exclude",
         ),
         "min_cross_section": 1,
-        "summary": "a probe transform",
         **overrides,
     }
     return FactorTransformSpec(**settings)
@@ -171,6 +170,8 @@ def _panel(values: dict[str, float | None], codes: dict[str, str] | None = None)
         direction=REVERSAL_1D.direction,
         lookback_sessions=REVERSAL_1D.lookback_sessions,
         max_window_sessions=REVERSAL_1D.max_window_sessions,
+        lookback_periods=None,
+        max_window_periods=None,
         subject_count=len(subjects),
         subject_digest=set_digest(subjects),
         universe_count=len(subjects),
@@ -817,7 +818,8 @@ def test_a_panel_whose_manifest_describes_a_different_factor_cannot_be_transform
         required_fields=(FactorField(dataset="daily", column="close"),),
         lookback_sessions=2,
         max_window_sessions=2,
-        summary="a second definition",
+        lookback_periods=None,
+        max_window_periods=None,
     )
     panel = _panel(_cross_section(1.0, 2.0))
     mismatched = FactorPanel(
@@ -930,7 +932,6 @@ _OTHER_SPEC: Final[FactorTransformSpec] = _spec(
     key="probe_other",
     winsorization=WinsorizationPolicy(method="quantile", lower_quantile=0.05, upper_quantile=0.95),
     standardization="rank",
-    summary="a second probe, differing in every stored policy column",
 )
 
 
@@ -976,7 +977,8 @@ def test_a_processed_panel_filed_under_another_factors_definition_reaches_no_col
         required_fields=(FactorField(dataset="daily", column="close"),),
         lookback_sessions=2,
         max_window_sessions=2,
-        summary="a second definition",
+        lookback_periods=None,
+        max_window_periods=None,
     )
 
     with pytest.raises(FactorEngineError, match="source_factor_id is"):
@@ -1074,7 +1076,8 @@ def test_the_longest_legal_factor_key_still_names_a_legal_processed_dataset() ->
         required_fields=(FactorField(dataset="daily", column="close"),),
         lookback_sessions=2,
         max_window_sessions=2,
-        summary="the longest key and the highest version this contract admits",
+        lookback_periods=None,
+        max_window_periods=None,
     )
 
     for name in (processed_factor_dataset(longest), factor_transform_manifest_dataset(longest)):

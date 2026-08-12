@@ -114,15 +114,12 @@ def _spec(**overrides: Any) -> FactorTransformSpec:
             undefined_value="exclude",
         ),
         "min_cross_section": 1,
-        "summary": "a probe transform over the fixture panel's eight names",
         **overrides,
     }
     return FactorTransformSpec(**settings)
 
 
-RANK_SPEC: Final[FactorTransformSpec] = _spec(
-    key="probe_rank", standardization="rank", summary="the same panel, ranked instead"
-)
+RANK_SPEC: Final[FactorTransformSpec] = _spec(key="probe_rank", standardization="rank")
 
 
 @pytest.fixture
@@ -652,7 +649,8 @@ WIDE_DEFINITION: Final[FactorDefinition] = FactorDefinition(
     required_fields=(FactorField(dataset=WIDE_DATASET, column="score"),),
     lookback_sessions=1,
     max_window_sessions=1,
-    summary="a one-session probe over a cross section wide enough for the shipped transform",
+    lookback_periods=None,
+    max_window_periods=None,
 )
 
 
@@ -1010,7 +1008,6 @@ MAD_RANK_PROBE: Final[FactorTransformSpec] = FactorTransformSpec(
         undefined_value="fill_cross_sectional_median",
     ),
     min_cross_section=50,
-    summary="a probe whose four missing-value actions are four different actions",
 )
 """A second shipped-shape transform that differs from `CROSS_SECTION_STANDARD` in **every**
 stored policy column, and whose four missing-value actions are four different actions.

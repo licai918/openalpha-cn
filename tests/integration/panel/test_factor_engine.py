@@ -45,6 +45,15 @@ behind it.
   on a parameter that is neither shown to move the ID nor listed with a reason it does not. A
   parametrized equivalence test cannot reach that: it varies what the model declares, and the
   defect was a determinant the model did not declare.
+
+## What is deliberately in the sibling file instead
+
+Every definition here is on the **session** axis, which is the axis this file's fixture panel
+has. The report-period axis -- what `PERIOD_INDEXED_DATASETS` changes about `_read_dataset`, how
+a filing window is formed and bounded, and which multiplicity refusals did and did not change --
+is measured in `test_factor_report_periods.py`, against `income` partitions of its own. The two
+files share no fixture on purpose: a corpus of trading sessions cannot exhibit two periods
+disclosed on one day, which is the shape the second axis exists for.
 """
 
 from __future__ import annotations
@@ -187,7 +196,8 @@ def _probe(
         required_fields=(FactorField(dataset=dataset, column=column),),
         lookback_sessions=lookback_sessions,
         max_window_sessions=max_window_sessions,
-        summary=f"a probe over {lookback_sessions} sessions within {max_window_sessions}",
+        lookback_periods=None,
+        max_window_periods=None,
     )
 
 
@@ -461,7 +471,8 @@ def test_a_required_column_absent_on_a_window_session_is_input_missing(tmp_path:
         ),
         lookback_sessions=2,
         max_window_sessions=2,
-        summary="a probe that needs both halves of the price panel",
+        lookback_periods=None,
+        max_window_periods=None,
     )
 
     result = compute_factor(
@@ -1156,7 +1167,8 @@ def test_a_definition_the_evaluator_table_does_not_implement_is_refused_at_the_c
         required_fields=(FactorField(dataset=DAILY_DATASET, column="close"),),
         lookback_sessions=2,
         max_window_sessions=2,
-        summary="declared for this test and implemented nowhere",
+        lookback_periods=None,
+        max_window_periods=None,
     )
 
     with pytest.raises(FactorEngineError, match="has no evaluator"):
@@ -1220,7 +1232,8 @@ def test_a_factor_declaring_a_non_numeric_column_is_refused_rather_than_marked(
         required_fields=(FactorField(dataset=DAILY_DATASET, column="trade_date"),),
         lookback_sessions=2,
         max_window_sessions=2,
-        summary="a probe that declares a text column as a factor input",
+        lookback_periods=None,
+        max_window_periods=None,
     )
 
     with pytest.raises(FactorEngineError, match="cannot be one of this factor's required_fields"):
@@ -1273,7 +1286,8 @@ def test_a_dataset_serving_two_rows_for_one_security_and_session_is_refused(
         required_fields=(FactorField(dataset="probe_doubles", column="score"),),
         lookback_sessions=1,
         max_window_sessions=1,
-        summary="a probe that reads a dataset with two rows for one key",
+        lookback_periods=None,
+        max_window_periods=None,
     )
     requirement = ReadinessRequirement(
         dataset="probe_doubles",

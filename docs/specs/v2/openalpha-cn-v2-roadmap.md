@@ -915,3 +915,73 @@ max **1.6738**，**跨两个数量级**。而它的来源是合成的 ——
 - Gram 对角线比 `1.37e15` 是 `_panel(19)` 的，而引用它的
   `test_the_closed_form_reproduces_a_dense_least_squares_solve` 驱动的是 `_panel(7)`（实测 **2.35e15**）。
   数字本身是真的，归属错了；两个种子现在都写明。
+
+### `V2-P3-014` 前置（2026-08-12）：报告期维度落地，`summary` 退出内容地址
+
+上面「排序约束」那一节的窗口到期了。两件事**一起**做，因为两件都移动 `factor_id`，
+并级联移动 `manifest_id` / `transform_manifest_id` / `neutralization_manifest_id`；
+`ContractVersions` 刻意不为这四个契约注册，存量行没有回迁路径，分两次就要付两次。
+**今天代价为零**：全库没有任何因子 / 预处理 / 中性化分区，`cli.py` 与 `scripts/` 对三者零引用。
+
+#### 一、报告期 reach（`lookback_periods` / `max_window_periods`）
+
+**为什么会话轴不够 —— 一次单引擎 A/B 实测**（`tests/integration/panel/test_factor_report_periods.py`）：
+财报行的四个时钟全是 `ann_date`（`providers/tushare.py#_announcement_timeline`），
+所以在会话轴上，「年报与一季报同日披露」就是同一 `(subject, event_time)` 键的两行，
+`compute_factor` **整个构建直接抛**。同一份语料换个数据集名写第二遍（落到报告期轴），同样的行算得出来。
+这不是关于某个已不可运行的旧版本的论证，是同一个引擎的两次调用。
+
+**加了四个字段，两两成对，全部可空**：
+
+| 字段 | 读者 |
+|---|---|
+| `lookback_sessions` / `max_window_sessions`（改为可空） | `_classify` 的会话窗形成与跨度检查；`_refuse_a_panel_narrower_than_the_lookback`；manifest 投影列 |
+| `lookback_periods` / `max_window_periods`（新增） | 同上，报告期轴；`FactorBuildManifest` 的两个新投影列 |
+
+**每条 reach 当且仅当 `required_fields` 把该因子放到那条轴上时才允许声明**
+（`validate_each_axis_is_declared_exactly_when_it_is_read`）。
+两个方向都会红：为没读的轴声明 reach，就是一个 `factor_id` 里没有任何分支能读的数
+（`001` 拒绝报告期维度的原话「a field with no reader」）；为读了的轴不声明，就是无界窗口。
+`V2-P3-010` 的 ROE 只读 `fina_indicator.roe`，因此**不声明会话 reach** —— 这是把
+`lookback_sessions` 改成可空的唯一理由。
+
+**同比不是第三个维度**：`lookback_periods=5` 的窗口里 `[-5]` 就是去年同期，加速度再退一步；
+让 `window[-5]` 真的是去年同期的，是 `max_window_periods == lookback_periods`
+这条「窗口内不缺期」。**单季 vs 累计是因子自己的事**，而它需要的连续性前提是契约的事 —— 同一条约束。
+
+**多行键的 fail-closed 没有被削弱，实测**：同一 `(subject, period)` **同日**两行仍抛
+（`fina_indicator` 81.7% 的键是这个形状，且没有 `update_flag` / `f_ann_date` 可排序）；
+**不同日**的两行按 `StatementHistory.filing_for` 的规则取较晚公告。这条规则在引擎里是第二份实现 ——
+复用 `statement_histories_from_panel_rows` 会让只读一列的因子拉全部十列 ——
+所以配了一条**运行期审计**把两份实现放在同一份语料上对齐
+（`test_the_engines_period_selection_is_the_domains_filing_for`）。
+停止抛的只有「同日两个**不同期次**」，那本来就不是重复键，正是它让普通的 `income` 输入读不了。
+
+**没有第六个覆盖码**：期次数量不足与期次跨度超限都是 `insufficient_history`，
+靠 `input_period_first/last` 在存储行上区分（前者无窗口，后者带着被拒的窗口）——
+`max_window_sessions` 的先例原样复用。
+**面板期次日历是可见读返回的 `report_period` 并集**，理由与 `max_window_sessions` 数面板会话一样：
+自造财季算术会是第二本与分区打架的日历，还得裁决非季末 `end_date` 属于哪一季。
+
+#### 二、`summary` 移出三个内容地址
+
+`FactorDefinition` / `FactorTransformSpec` / `FactorNeutralizationSpec` 的 `summary`
+都进各自的内容地址，于是**改一个错别字会移动每个已存 build 的身份而不改变任何一个数字** ——
+正是 `FactorTransformManifest` 拿来拒绝 `date_timezone` 的那条
+「reaches the identity and decides nothing」。
+`V2-P3-003` 复审记为「继承约定」放过；`V2-P3-004` 为撤回三个复现不出的数字**有意违反**了
+`FactorNeutralizationSpec.summary` 自己那条「改串必须升版本」，并记下了例外与到期时间
+（`V2-P3-014`）。**这里就是到期。**
+
+**修法是契约形状的改变而不是哈希的改变**（`exclude=True` 正是第 9 节 `config_digest` 的形状）：
+prose 变成 `domain/factor.py::FactorNote`，一个 `stable_model_id` 从不作用其上的冻结 dataclass，
+由三个注册表以 `notes=` 携带，`validate_notes` 审计（为未声明契约写的 note 是「关于虚无的散文」；
+同一契约两条 note 让 `note_for` 变得任意）。三者处理一致，因此不再有
+「三个身份契约互相不一致」这个顾虑。
+
+**两者现在可区分，且都有实测**：只差散文的两个注册表，`factor_ids` **逐字节相同**；
+只差一个设置的，`factor_id` 移动。并且散文**根本进不来** —— `extra="forbid"` 让
+`FactorDefinition(summary=...)` 直接被拒，所以这是结构性质而不是约定。
+
+`FactorNeutralizationSpec.summary` docstring 里那条例外条款随字段一起删除；
+`INDUSTRY_AND_SIZE_NOTE` 逐字保留了当时的撤回文字。

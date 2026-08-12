@@ -1,6 +1,6 @@
 """The factor engine's rules that need no store (`V2-P3-002`).
 
-Three groups, each closing a hole this repository has already fallen into once.
+Four groups, each closing a hole this repository has already fallen into once.
 
 **The two tables must name the same factors.** `panel build`'s `PANEL_BUILD_TARGETS` gained
 keys whose branches did not exist, and the command answered exit 0 with an empty partition list
@@ -18,12 +18,20 @@ the claim that it works.
 **The reporting vocabularies must agree with the contract's.** `FACTOR_COVERAGE_ORDER` is a
 second copy of `FACTOR_COVERAGE_CODES` that exists for a stable census key order, and two copies
 of a closed set drift.
+
+**Every shipped contract carries its prose.** The three factor identity contracts each had a
+mandatory `summary` field until `V2-P3-014`'s prerequisite, which met that obligation and also
+put prose inside three content addresses. The field is gone; `FactorNote` and
+`test_every_shipped_contract_carries_its_prose` are what replaced it, and the obligation is
+required of the *shipped* registries only -- `validate_notes` argues why an arbitrary one is
+exempt.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
 from types import MappingProxyType
+from typing import Any, Final
 
 import pytest
 
@@ -51,6 +59,7 @@ from openalpha_cn.panel_factors import (
     FACTOR_OBSERVATION_DATA_COLUMNS,
     FACTOR_OBSERVATION_DATASET_PREFIX,
     FACTOR_OBSERVATION_PANEL_COLUMNS,
+    FACTOR_TRANSFORMS,
     REVERSAL_1D,
     FactorEngineError,
     FactorPanel,
@@ -64,6 +73,7 @@ from openalpha_cn.panel_factors import (
     factor_manifest_dataset,
     factor_observation_dataset,
 )
+from openalpha_cn.panel_neutralization import FACTOR_NEUTRALIZATIONS
 
 AS_OF = datetime(2026, 1, 12, 4, 0, tzinfo=UTC)
 OBSERVATIONS = factor_observation_dataset(REVERSAL_1D)
@@ -76,6 +86,7 @@ def _window(*closes: float) -> FactorWindow:
         subject="000001.SZ",
         as_of=AS_OF,
         sessions=sessions,
+        periods=(),
         values=MappingProxyType({("daily", "close"): closes}),
     )
 
@@ -100,7 +111,8 @@ def test_a_definition_with_no_evaluator_is_refused_rather_than_answered_emptily(
         required_fields=(FactorField(dataset="daily", column="close"),),
         lookback_sessions=2,
         max_window_sessions=2,
-        summary="declared with nothing behind it",
+        lookback_periods=None,
+        max_window_periods=None,
     )
 
     with pytest.raises(FactorEngineError, match="declared with no evaluator"):
@@ -126,17 +138,24 @@ def test_the_drift_audit_passes_only_on_agreement() -> None:
 # --- the shipped definition ----------------------------------------------------------------------
 
 
-def test_the_verification_factor_declares_the_seven_properties_the_engine_reads() -> None:
-    """It is the engine's own probe rather than a `V2-P3-012` deliverable, and each of the seven
-    is chosen for what it makes reachable: one required column so `input_missing` has exactly
-    one way to happen, a lookback of 2 so `insufficient_history` is reachable at all (a
-    1-session window is satisfied by any security with one row), a denominator so
-    `undefined_value` is a branch rather than a declaration, and a `max_window_sessions` equal to
-    the lookback so the window-span refusal is reachable against the fixture panel's one halt.
+def test_the_verification_factor_declares_the_properties_the_engine_reads() -> None:
+    """It is the engine's own probe rather than a `V2-P3-012` deliverable, and each property is
+    chosen for what it makes reachable: one required column so `input_missing` has exactly one
+    way to happen, a lookback of 2 so `insufficient_history` is reachable at all (a 1-session
+    window is satisfied by any security with one row), a denominator so `undefined_value` is a
+    branch rather than a declaration, and a `max_window_sessions` equal to the lookback so the
+    window-span refusal is reachable against the fixture panel's one halt.
 
-    The equality is the point rather than a spare setting: a factor whose summary says "one
-    session's close-to-close simple return" has no reading under which the two sessions may
-    straddle a halt, and `V2-P3-012`'s 120-session momentum is where a wider tolerance belongs.
+    The equality is the point rather than a spare setting: a factor declared as one session's
+    close-to-close simple return has no reading under which the two sessions may straddle a halt,
+    and `V2-P3-012`'s 120-session momentum is where a wider tolerance belongs.
+
+    **The absent report-period reach is a declared property too.** `FactorDefinition` requires
+    each axis to be declared exactly when `required_fields` puts the factor on it, so
+    `lookback_periods is None` here is the contract's statement that a close-to-close return
+    reads no filing -- not an unset field. The prose is asserted on the registry's note rather
+    than on the definition, because that is where it now lives and where a typo in it moves
+    nothing.
     """
     assert REVERSAL_1D.qualified_key == "reversal_1d/v1"
     assert REVERSAL_1D.family == "momentum_reversal"
@@ -144,8 +163,13 @@ def test_the_verification_factor_declares_the_seven_properties_the_engine_reads(
     assert REVERSAL_1D.required_fields == (FactorField(dataset="daily", column="close"),)
     assert REVERSAL_1D.lookback_sessions == 2
     assert REVERSAL_1D.max_window_sessions == 2
+    assert REVERSAL_1D.lookback_periods is None
+    assert REVERSAL_1D.max_window_periods is None
     assert REVERSAL_1D.datasets == ("daily",)
-    assert "verification factor" in REVERSAL_1D.summary
+    assert REVERSAL_1D.session_datasets == ("daily",)
+    assert REVERSAL_1D.period_datasets == ()
+    note = FACTOR_DEFINITIONS.note_for(REVERSAL_1D.qualified_key)
+    assert note is not None and "verification factor" in note
 
 
 @pytest.mark.parametrize(
@@ -191,6 +215,7 @@ def test_an_evaluator_reaching_for_an_undeclared_column_is_refused_by_the_window
         subject="000001.SZ",
         as_of=AS_OF,
         sessions=(date(2026, 1, 8), date(2026, 1, 9)),
+        periods=(),
         values=MappingProxyType({("daily", "vol"): (1.0, 2.0)}),
     )
 
@@ -239,6 +264,8 @@ def _stored_row(**overrides: object) -> tuple[object, ...]:
         "input_row_count": 2,
         "input_session_first": "2026-01-08",
         "input_session_last": "2026-01-09",
+        "input_period_first": None,
+        "input_period_last": None,
         **overrides,
     }
     return tuple(cells.values())
@@ -248,7 +275,7 @@ def test_a_stored_row_of_the_wrong_width_is_refused_rather_than_unpacked_positio
     """A partition written by a build with a different column list would otherwise decode into
     plausible values in the wrong fields -- a `manifest_id` read as a `factor_id`, a session
     date read as a coverage code. The width check is what makes that a refusal."""
-    with pytest.raises(FactorEngineError, match="expected 11"):
+    with pytest.raises(FactorEngineError, match="expected 13"):
         _observation_from_row(("too", "few"), dataset=OBSERVATIONS)
 
 
@@ -367,6 +394,8 @@ def _manifest_cells_from(**overrides: object) -> dict[str, object]:
         "direction": "lower_is_better",
         "lookback_sessions": 2,
         "max_window_sessions": 2,
+        "lookback_periods": None,
+        "max_window_periods": None,
         "subject_count": 2,
         "subject_digest": set_digest(("000001.SZ", "000002.SZ")),
         "universe_count": 2,
@@ -387,7 +416,7 @@ def _manifest_cells_from(**overrides: object) -> dict[str, object]:
 def test_a_stored_manifest_row_of_the_wrong_width_is_refused() -> None:
     """`_observation_from_row`'s argument one dataset over: a partition written by a build with a
     different column list would decode into plausible values in the wrong fields."""
-    with pytest.raises(FactorEngineError, match="expected 25"):
+    with pytest.raises(FactorEngineError, match="expected 27"):
         _manifest_cells(("too", "few"), dataset=MANIFESTS)
 
 
@@ -443,6 +472,8 @@ def test_a_panel_whose_provenance_does_not_cover_its_inputs_cannot_be_written() 
         direction=REVERSAL_1D.direction,
         lookback_sessions=REVERSAL_1D.lookback_sessions,
         max_window_sessions=REVERSAL_1D.max_window_sessions,
+        lookback_periods=None,
+        max_window_periods=None,
         subject_count=1,
         subject_digest=set_digest(("000001.SZ",)),
         universe_count=1,
@@ -499,7 +530,8 @@ def test_the_longest_legal_factor_key_still_names_a_legal_panel_dataset() -> Non
         required_fields=(FactorField(dataset="daily", column="close"),),
         lookback_sessions=2,
         max_window_sessions=2,
-        summary="the longest key and the highest version this contract admits",
+        lookback_periods=None,
+        max_window_periods=None,
     )
 
     for name in (factor_observation_dataset(longest), factor_manifest_dataset(longest)):
@@ -528,3 +560,45 @@ def test_the_factor_planes_datasets_are_derived_and_therefore_have_no_cadence() 
 
     assert derived
     assert not (derived & set(DATASET_CADENCE))
+
+
+# --- the prose the three shipped registries carry -------------------------------------------------
+
+
+SHIPPED_REGISTRIES: Final[tuple[tuple[str, tuple[str, ...], object], ...]] = (
+    ("factor", FACTOR_DEFINITIONS.qualified_keys, FACTOR_DEFINITIONS),
+    ("transform", FACTOR_TRANSFORMS.qualified_keys, FACTOR_TRANSFORMS),
+    ("neutralisation", FACTOR_NEUTRALIZATIONS.qualified_keys, FACTOR_NEUTRALIZATIONS),
+)
+"""The three registries a build actually ships, each with the handles it declares.
+
+Written out rather than discovered, because the point of the test below is that *these three*
+are covered: a fourth identity contract with prose would have to be added here, which is the
+review the row exists to create.
+"""
+
+
+@pytest.mark.parametrize(("role", "handles", "registry"), SHIPPED_REGISTRIES)
+def test_every_shipped_contract_carries_its_prose(
+    role: str, handles: tuple[str, ...], registry: Any
+) -> None:
+    """`validate_notes` refuses a note about nothing and declines to require the converse; this
+    is the converse, required where it is a real obligation.
+
+    An arbitrary registry has no such duty -- a test's two probe specs have nothing to say about
+    themselves, and forcing a sentence would produce the placeholder prose `V2-P0B-009` deleted.
+    A *shipped* contract is different: it is the configuration this build runs, its settings are
+    each a stated judgement, and the prose is where the judgement is stated. Before this change
+    the obligation was met by a mandatory `summary` field that also poisoned the content address;
+    the field is gone and this is what replaced it.
+
+    Asserted per registry rather than over a merged set, so a failure names which of the three
+    lost its prose, and on `handles` rather than on the notes, so a note for a contract that no
+    longer exists cannot make the count come out right.
+    """
+    assert handles
+    for handle in handles:
+        note = registry.note_for(handle)
+        assert note is not None, f"the shipped {role} {handle} carries no note"
+        assert note.strip() == note
+        assert len(note) > 100, f"the {role} note for {handle} says almost nothing"

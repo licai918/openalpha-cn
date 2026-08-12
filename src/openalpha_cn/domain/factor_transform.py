@@ -114,7 +114,9 @@ from openalpha_cn.domain._identity import stable_model_id
 from openalpha_cn.domain.factor import (
     FACTOR_COVERAGE_CODES,
     FactorCoverage,
+    FactorNote,
     FactorObservation,
+    validate_notes,
 )
 from openalpha_cn.domain.panel_batch import PanelBatchError, validate_panel_identifier
 from openalpha_cn.domain.time import ensure_aware
@@ -599,26 +601,6 @@ class FactorTransformSpec(BaseModel):
     test_the_floor_bound_is_a_range_check_and_admits_a_transform_wider_than_the_market` holds
     both halves, so the justification cannot drift back to the one this bound does not support.
     """
-    summary: str = Field(min_length=1, max_length=2000)
-    """Why these settings, in prose, for the reader of a stored partition.
-
-    **It is in `transform_id`, and that is a known defect rather than a design.** Prose decides
-    nothing: fixing a typo here moves `transform_id`, therefore every stored build's
-    `transform_manifest_id`, without changing a single number -- which is precisely the shape
-    `FactorTransformManifest`'s docstring rejects `date_timezone` for ("reaches the identity and
-    decides nothing"). The two are not symmetric enough to fix the same way: `date_timezone`
-    was a field being *considered*, and this one is an existing convention --
-    `FactorDefinition.summary` has been inside `factor_id` since `V2-P3-001`, so taking it out
-    here would either leave the two identity contracts disagreeing or move every stored
-    `factor_id` in the tree.
-
-    So it stays, and the cost is stated instead of the claim being softened: **edit this string
-    only together with a version bump**, since a build whose numbers are unchanged and whose ID
-    moved is one `_refuse_to_drop_a_stored_build` will treat as a new build.
-    `tests/unit/domain/test_factor_transform.py::
-    test_a_prose_only_edit_moves_the_identity_and_changes_no_number` pins the defect as a
-    measurement, so it cannot be quietly inherited a third time.
-    """
 
     @field_validator("key")
     @classmethod
@@ -680,6 +662,8 @@ class FactorTransformRegistry:
     """
 
     specs: tuple[FactorTransformSpec, ...]
+    notes: tuple[FactorNote, ...] = ()
+    """The prose about these specs, out of every content address. See `factor.FactorNote`."""
 
     def __post_init__(self) -> None:
         if not self.specs:
@@ -694,6 +678,24 @@ class FactorTransformRegistry:
                 f"{duplicates} is declared more than once; two specs answering to one name make "
                 "a lookup arbitrary -- bump `version` on the restatement"
             )
+        validate_notes(
+            self.notes,
+            declared=tuple(keys),
+            role="transform",
+            error=FactorTransformError,
+        )
+
+    def note_for(self, qualified_key: str) -> str | None:
+        """The prose about `key/vN`, or `None` when this registry carries none for it.
+
+        `FactorRegistry.note_for`'s contract, including that an undeclared handle is refused by
+        `get` rather than answered `None`.
+        """
+        self.get(qualified_key)
+        for note in self.notes:
+            if note.subject == qualified_key:
+                return note.summary
+        return None
 
     @property
     def qualified_keys(self) -> tuple[str, ...]:
@@ -820,12 +822,15 @@ class FactorTransformManifest(BaseModel):
     it is for `write_factor_panels`. A field here would be one that reaches the identity and
     decides nothing, which is the mirror image of the defect roadmap section 9 records.
 
-    **One field already in this identity has that property, and it is named rather than left for
-    a reader to notice.** `transform_id` is a hash of `FactorTransformSpec`, whose `summary` is
-    prose -- so a typo fixed there moves every stored `transform_manifest_id` and changes no
-    number. See `FactorTransformSpec.summary`: it is an inherited convention
-    (`FactorDefinition.summary` sits inside `factor_id` the same way), which is why it is
-    disclosed with its cost instead of being used to argue `date_timezone` back in.
+    **One field used to have that property and no longer does**, which is worth recording because
+    it was the counter-example this paragraph had to disclose. `transform_id` is a hash of
+    `FactorTransformSpec`, which carried a `summary` -- so a typo fixed there moved every stored
+    `transform_manifest_id` and changed no number, the very thing `date_timezone` is refused for.
+    It was an inherited convention (`FactorDefinition.summary` sat inside `factor_id` the same
+    way) and it was disclosed with its cost rather than fixed twice. All three contracts dropped
+    it together in one change, and the prose lives in `domain/factor.py::FactorNote`, which no
+    `stable_model_id` is applied to. So the rule this class states about `date_timezone` now
+    holds without an exception beside it.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)

@@ -219,7 +219,7 @@ from types import MappingProxyType
 from typing import Final, Protocol
 
 from openalpha_cn.domain.daily_prices import DailyValuation
-from openalpha_cn.domain.factor import FactorDefinition
+from openalpha_cn.domain.factor import FactorDefinition, FactorNote
 from openalpha_cn.domain.factor_neutralization import (
     INDUSTRY_LEVELS,
     MARKET_CAP_MEASURES,
@@ -553,6 +553,22 @@ INDUSTRY_AND_SIZE: Final[FactorNeutralizationSpec] = FactorNeutralizationSpec(
     participation="measured_only",
     min_industry_members=2,
     min_cross_section=100,
+)
+"""The single registered neutralisation, and every one of its settings is a stated judgement.
+
+It is not a default in the sense of "what you get if you say nothing": `apply_factor_neutralization`
+takes the spec as a mandatory argument, and this is the one this build ships so that the shipped
+configuration is exercised end to end rather than only probe specs invented by tests.
+
+`min_industry_members = 2` is the only number here that is *forced* rather than chosen, and the
+contract forces it: `FactorNeutralizationSpec` will not accept 1, because a one-member industry's
+residual is exactly `0.0` for every factor and every slope. See that field's docstring for the
+measurement, which also shows that excluding such a name leaves the slope bit-identical and every
+other residual unmoved.
+"""
+
+INDUSTRY_AND_SIZE_NOTE: Final[FactorNote] = FactorNote(
+    subject=INDUSTRY_AND_SIZE.qualified_key,
     summary=(
         "The conventional cross-sectional neutralisation: remove each SW2021 level-one "
         "industry's own mean and the part of what is left that the log of total market "
@@ -577,23 +593,23 @@ INDUSTRY_AND_SIZE: Final[FactorNeutralizationSpec] = FactorNeutralizationSpec(
         "produce numbers on a cross section the transform itself declined to standardize."
     ),
 )
-"""The single registered neutralisation, and every one of its settings is a stated judgement.
+"""`INDUSTRY_AND_SIZE`'s prose, out of `neutralization_id`.
 
-It is not a default in the sense of "what you get if you say nothing": `apply_factor_neutralization`
-takes the spec as a mandatory argument, and this is the one this build ships so that the shipped
-configuration is exercised end to end rather than only probe specs invented by tests.
-
-`min_industry_members = 2` is the only number here that is *forced* rather than chosen, and the
-contract forces it: `FactorNeutralizationSpec` will not accept 1, because a one-member industry's
-residual is exactly `0.0` for every factor and every slope. See that field's docstring for the
-measurement, which also shows that excluding such a name leaves the slope bit-identical and every
-other residual unmoved.
+Word for word what the spec's own `summary` field carried until this change, so the diff shows a
+relocation rather than an edit -- **including the retraction `V2-P3-004`'s review had to make
+against the contract's own rule.** That field's docstring recorded the exception and gave it an
+expiry (`V2-P3-014`); the expiry is spent here instead, by removing the field the rule was about.
+Editing this string moves no identity at all now, which is what makes the rule unnecessary rather
+than waived -- see `domain/factor.py::FactorNote`.
 """
 
 FACTOR_NEUTRALIZATIONS: Final[FactorNeutralizationRegistry] = FactorNeutralizationRegistry(
-    (INDUSTRY_AND_SIZE,)
+    (INDUSTRY_AND_SIZE,), notes=(INDUSTRY_AND_SIZE_NOTE,)
 )
-"""Every neutralisation this build declares. `V2-P3-014`'s three-tier report extends it."""
+"""Every neutralisation this build declares, and the prose about it.
+
+`V2-P3-014`'s three-tier report extends both.
+"""
 
 
 # --- the market-cap regressor ---------------------------------------------------------------------

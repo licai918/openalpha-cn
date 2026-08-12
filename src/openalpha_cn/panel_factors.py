@@ -35,7 +35,7 @@ corrected here:
   name here is a deliberate act with a review attached, which is the property this test exists
   to create" -- the same designed extension path `KNOWN_STORAGE_LIMITATIONS` is, and the one
   this issue used to extend it.
-- **The size is stated rather than excused.** At 3,912 lines this module is the largest in
+- **The size is stated rather than excused.** At 4,214 lines this module is the largest in
   `src/` (`providers/tushare.py`, 3,867, is now second) and larger than `panel_ingest.py`'s
   3,221, so "in family" -- which this list said before the transform half landed -- is not true.
   The seam a split would fall on is the one the third bullet found: the arithmetic and the
@@ -182,6 +182,33 @@ universe of names that listed last month genuinely has no 120-session momentum, 
 answer `insufficient_history` exists to give. The two are distinguishable exactly and cheaply,
 which is why one is a refusal and the other is a code.
 
+The same sentence is now true of the **report-period** axis, with a longer lever: a statement
+partition is filed by *announcement* year while a reach is counted in report periods, so an
+eight-period window can need four announcement years named in `requirement.years`
+(`cli.py::PANEL_BUILD_SPAN_TARGETS` is the writer-side half of that fact). See "Two axes" below.
+
+## Two axes, because a filing does not live on the session one
+
+`V2-P3-009`..`011` are all built on filings, and `providers/tushare.py::_announcement_timeline`
+dates every statement row at `ann_date` on all four clocks -- so a filing's `event_time` is the
+day it was *disclosed*, and disclosure days are neither one-per-period nor one-period-per-day.
+An A-share issuer routinely discloses its annual report and its Q1 report together, which under
+a session index is two rows of one `(subject, event_time)` key and therefore a refusal of the
+whole build; and one period announced twice fills two slots of a window that was meant to count
+periods.
+
+So `domain/factor.py::PERIOD_INDEXED_DATASETS` (the four statement endpoints, derived from
+`FINANCIAL_STATEMENT_DATASETS`) names the datasets `_read_dataset` takes on the `report_period`
+column instead, `FactorWindow` carries both tuples, and a `FactorDefinition` declares each reach
+exactly when `required_fields` puts it on that axis. The measurement is
+`tests/integration/panel/test_factor_report_periods.py`, which writes one corpus twice -- once
+under a session-axis name and once under `income` -- and asserts the first raises and the second
+computes. Neither the multiplicity refusal nor the coverage vocabulary was widened for it: two
+rows of one `(subject, period)` at one announcement still raise (that is the shape carrying
+81.7% of `fina_indicator`'s real duplication), and a period shortfall or a period span overrun
+is `insufficient_history`, distinguishable on the stored row by the period window rather than by
+a sixth code.
+
 ## Coverage is a code, never a bool
 
 `FactorCoverage` has five members and `domain/factor.py` argues each one. The short version:
@@ -257,9 +284,11 @@ moving `transform_manifest_id` (the source digest changed, and it must).
 ADR-0003 permits both. This module needs neither, and adding them would take the runtime
 dependency set from nine to eleven and pull in ADR-0003's recorded mypy consequence
 (`follow_imports=skip` plus `warn_return_any` makes every function returning a pandas
-expression an error). What the engine actually does is: group rows by `(subject, session)`,
-take the last `lookback_sessions` of each subject's sessions, and call one scalar function per
-subject. There is no matrix, no broadcast, no linear algebra and no cross-sectional regression
+expression an error). What the engine actually does is: group rows by `(subject, point)` on that
+dataset's own axis, take the last `lookback_sessions` or `lookback_periods` of each subject's
+own points, and call one scalar function per subject. On the period axis it also keeps the
+greatest visible announcement per key, which is one comparison per row. There is no matrix, no
+broadcast, no linear algebra and no cross-sectional regression
 -- `V2-P3-004`'s neutralisation is the first issue that has one, and it is the right place to
 re-open the question with a real workload behind it. The grouping is a `dict` of tuples over
 DuckDB's own row tuples, which is the same shape `panel_ingest`'s loaders already use at panel
@@ -329,11 +358,12 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from types import MappingProxyType
-from typing import Final, Protocol, cast
+from typing import Final, Literal, Protocol, cast
 from zoneinfo import ZoneInfo
 
 from openalpha_cn.domain.factor import (
     FACTOR_DIRECTIONS,
+    PERIOD_INDEXED_DATASETS,
     FactorBuildManifest,
     FactorCoverage,
     FactorDefinition,
@@ -341,6 +371,7 @@ from openalpha_cn.domain.factor import (
     FactorField,
     FactorInputProvenance,
     FactorInputRef,
+    FactorNote,
     FactorObservation,
     FactorRegistry,
     set_digest,
@@ -369,6 +400,7 @@ from openalpha_cn.domain.factor_transform import (
     observation_digest,
     validate_processed_factor_observation,
 )
+from openalpha_cn.domain.financial_statements import REPORT_PERIOD_COLUMN
 from openalpha_cn.domain.panel_batch import (
     SUBJECT_COLUMN_NAME,
     ColumnarPanelBatch,
@@ -387,6 +419,16 @@ from openalpha_cn.panel_ingest import (
     split_panel_batch_by_year,
     write_panel_batch,
 )
+
+FactorAxis = Literal["session", "period"]
+"""Which index a dataset's rows are taken on: a trading session, or a fiscal report period.
+
+Two members and no third, because the axis is a property of the *dataset* and is decided by
+`domain/factor.py::PERIOD_INDEXED_DATASETS` -- a closed set derived from the four statement
+endpoints. A `Literal` rather than a bool for `FactorCoverage`'s reason: "not a session" is not
+one fact, and a third axis (an intraday one, say) would have to be declared here rather than
+arrive as the false branch of an `if`.
+"""
 
 EVENT_TIME_COLUMN: Final[str] = "event_time"
 """The clock column the engine resolves to a session date.
@@ -463,6 +505,8 @@ FACTOR_OBSERVATION_DATA_COLUMNS: Final[tuple[str, ...]] = (
     "input_row_count",
     "input_session_first",
     "input_session_last",
+    "input_period_first",
+    "input_period_last",
 )
 """One stored observation, column by column, answering `V2-P3-002`'s six-part acceptance.
 
@@ -470,9 +514,14 @@ FACTOR_OBSERVATION_DATA_COLUMNS: Final[tuple[str, ...]] = (
 six the acceptance names land as: **subject** -> `subject`; **as-of** -> `event_time` /
 `available_time`, which for a derived row are both the `as_of` the build was made at;
 **value** -> `value`, null unless `coverage` is `computed`; **coverage marker** -> `coverage`,
-one of five codes; **input reference** -> `input_row_count` / `input_session_first` /
-`input_session_last` for the rows, and `manifest_id` for the partitions; **build manifest** ->
-`manifest_id`, resolvable in this factor's own `factor_manifest_<key>_v<n>`.
+one of five codes; **input reference** -> `input_row_count` and the two window pairs for the
+rows, and `manifest_id` for the partitions; **build manifest** -> `manifest_id`, resolvable in
+this factor's own `factor_manifest_<key>_v<n>`.
+
+**Two window pairs rather than one**, because a factor can be on both axes at once and one pair
+of columns would then hold two kinds of date for one row. Both are null on an observation whose
+factor does not read that axis, which is most observations on either -- `FactorDefinition`'s own
+equivalence is what makes "null here" mean "not on this axis" rather than "unrecorded".
 
 `factor_key` and `factor_version` are stored beside `factor_id` even though the ID determines
 them, because `factor_id` is opaque: a reader querying the partition directly (which is what
@@ -505,6 +554,8 @@ _OBSERVATION_COLUMN_KINDS: Final[Mapping[str, PanelColumnKind]] = MappingProxyTy
         "input_row_count": "integer",
         "input_session_first": "string",
         "input_session_last": "string",
+        "input_period_first": "string",
+        "input_period_last": "string",
     }
 )
 
@@ -537,6 +588,8 @@ FACTOR_MANIFEST_DATA_COLUMNS: Final[tuple[str, ...]] = (
     "direction",
     "lookback_sessions",
     "max_window_sessions",
+    "lookback_periods",
+    "max_window_periods",
     "subject_count",
     "subject_digest",
     "universe_count",
@@ -583,6 +636,8 @@ _MANIFEST_COLUMN_KINDS: Final[Mapping[str, PanelColumnKind]] = MappingProxyType(
         "direction": "string",
         "lookback_sessions": "integer",
         "max_window_sessions": "integer",
+        "lookback_periods": "integer",
+        "max_window_periods": "integer",
         "subject_count": "integer",
         "subject_digest": "string",
         "universe_count": "integer",
@@ -632,15 +687,30 @@ class FactorWindow:
     recent session that was knowable at `as_of` -- not necessarily `as_of`'s own calendar date,
     because a session publishes after its close (`daily` at 16:30 Asia/Shanghai) and an `as_of`
     at noon sees yesterday's.
+
+    `periods` is the same statement about the other axis: ascending, exactly `lookback_periods`
+    entries, and `[-1]` is the most recent report period the security had **announced** by
+    `as_of` -- which is not the period of its most recent announcement, because a security may
+    announce an earlier period after a later one. Empty for a factor that reads no filing, as
+    `sessions` is empty for one that reads only filings; a factor declares each axis exactly when
+    it reads it, so an evaluator indexing `periods` on a definition that declared no period reach
+    is indexing an empty tuple and fails loudly rather than silently.
     """
 
     subject: str
     as_of: datetime
     sessions: tuple[date, ...]
+    periods: tuple[date, ...]
     values: Mapping[tuple[str, str], tuple[float, ...]]
 
     def series(self, dataset: str, column: str) -> tuple[float, ...]:
-        """`dataset.column` over `sessions`, aligned index for index.
+        """`dataset.column` over that dataset's own axis, aligned index for index.
+
+        Aligned to `sessions` for an ordinary panel dataset and to `periods` for one of
+        `PERIOD_INDEXED_DATASETS`, which is what lets `V2-P3-009`'s EP divide a filing by a price
+        without the two having to live on one index. `FactorDefinition.session_datasets` and
+        `period_datasets` say which is which, and an evaluator that wants to know can ask its own
+        definition rather than this window.
 
         Raises `FactorEngineError` for a column the definition did not declare, rather than
         `KeyError`: an evaluator reaching for an undeclared column is a definition whose
@@ -684,6 +754,32 @@ REVERSAL_1D: Final[FactorDefinition] = FactorDefinition(
     required_fields=(FactorField(dataset="daily", column="close"),),
     lookback_sessions=2,
     max_window_sessions=2,
+    lookback_periods=None,
+    max_window_periods=None,
+)
+"""The single registered factor, chosen to depend on `daily` and nothing else.
+
+Three properties made it the right verification subject and each was a choice: it reads one
+column, so a coverage check has exactly one way to fail and the test that provokes
+`input_missing` can be pointed at it; its lookback is 2, the smallest window for which
+`insufficient_history` is reachable at all (a 1-session window is satisfied by any security
+with one row); and its formula has a denominator, so `undefined_value` is reachable rather than
+declared and never emitted. A factor with no possible undefined result would have made that
+code a table entry with no branch behind it -- which is the exact drift `V2-P0A-001`'s AST
+validation and `panel build`'s `_audit_written_partitions` were both added to close.
+
+**It declares no report-period reach, and that is a fourth property rather than an omission.**
+`FactorDefinition` requires each axis to be declared exactly when `required_fields` puts the
+factor on it, so `lookback_periods=None` here is the contract's own statement that a close-to-
+close return reads no filing. The period axis is exercised against definitions the tests declare,
+which is where a factor that reads `income` belongs until `V2-P3-009` ships one for research
+reasons rather than for engine-verification ones: shipping a `fina_indicator` probe in this
+registry would put a factor in `FACTOR_DEFINITIONS` that no issue owns and that
+`V2-P3-008`'s redundancy analysis would then group.
+"""
+
+REVERSAL_1D_NOTE: Final[FactorNote] = FactorNote(
+    subject=REVERSAL_1D.qualified_key,
     summary=(
         "The engine's verification factor: one session's close-to-close simple return, "
         "close[t] / close[t-1] - 1, over the two consecutive sessions most recently knowable "
@@ -697,16 +793,12 @@ REVERSAL_1D: Final[FactorDefinition] = FactorDefinition(
         "insignificant is the expected result."
     ),
 )
-"""The single registered factor, chosen to depend on `daily` and nothing else.
+"""`REVERSAL_1D`'s prose, out of `factor_id`.
 
-Three properties made it the right verification subject and each was a choice: it reads one
-column, so a coverage check has exactly one way to fail and the test that provokes
-`input_missing` can be pointed at it; its lookback is 2, the smallest window for which
-`insufficient_history` is reachable at all (a 1-session window is satisfied by any security
-with one row); and its formula has a denominator, so `undefined_value` is reachable rather than
-declared and never emitted. A factor with no possible undefined result would have made that
-code a table entry with no branch behind it -- which is the exact drift `V2-P0A-001`'s AST
-validation and `panel build`'s `_audit_written_partitions` were both added to close.
+Word for word what the definition's own `summary` field carried until this change, moved rather
+than rewritten so the diff shows a relocation and not an edit. It is *outside* the content
+address now, so fixing a typo in it moves nothing -- which is the whole point, and is measured in
+`tests/unit/domain/test_factor.py`. See `domain/factor.py::FactorNote`.
 """
 
 
@@ -728,8 +820,10 @@ def _reversal_1d(window: FactorWindow) -> float | None:
     return closes[-1] / previous - 1.0
 
 
-FACTOR_DEFINITIONS: Final[FactorRegistry] = FactorRegistry((REVERSAL_1D,))
-"""Every factor this build declares. `V2-P3-009`..`013` extend it."""
+FACTOR_DEFINITIONS: Final[FactorRegistry] = FactorRegistry(
+    (REVERSAL_1D,), notes=(REVERSAL_1D_NOTE,)
+)
+"""Every factor this build declares, and the prose about it. `V2-P3-009`..`013` extend both."""
 
 FACTOR_EVALUATORS: Final[Mapping[str, FactorEvaluator]] = MappingProxyType(
     {REVERSAL_1D.qualified_key: _reversal_1d}
@@ -931,9 +1025,13 @@ def compute_factor(
         inputs.extend(refs)
         provenance.extend(digests)
 
-    panel_sessions = _panel_sessions(readings)
+    panel_sessions = _panel_axis_points(readings, axis="session")
+    panel_periods = _panel_axis_points(readings, axis="period")
     _refuse_a_panel_narrower_than_the_lookback(
-        definition, panel_sessions=panel_sessions, requirements=requirements
+        definition,
+        panel_sessions=panel_sessions,
+        panel_periods=panel_periods,
+        requirements=requirements,
     )
     manifest = FactorBuildManifest(
         factor_id=definition.factor_id,
@@ -945,6 +1043,8 @@ def compute_factor(
         direction=definition.direction,
         lookback_sessions=definition.lookback_sessions,
         max_window_sessions=definition.max_window_sessions,
+        lookback_periods=definition.lookback_periods,
+        max_window_periods=definition.max_window_periods,
         subject_count=len(ordered_subjects),
         subject_digest=set_digest(ordered_subjects),
         universe_count=len(set(universe)),
@@ -967,6 +1067,7 @@ def compute_factor(
             in_universe=subject in listed,
             readings=readings,
             panel_sessions=panel_sessions,
+            panel_periods=panel_periods,
             evaluator=evaluator,
             manifest_id=manifest_id,
         )
@@ -983,66 +1084,89 @@ def compute_factor(
 
 @dataclass(frozen=True, slots=True)
 class _DatasetReading:
-    """One dataset's visible rows, indexed the two ways `_classify` asks about them."""
+    """One dataset's visible rows, indexed on that dataset's own axis.
 
-    sessions_by_subject: Mapping[str, tuple[date, ...]]
+    `points_by_subject` and `values` are keyed by a session for an ordinary dataset and by a
+    report period for one of `PERIOD_INDEXED_DATASETS`; `axis` says which, so `_classify` never
+    has to consult a dataset name. One reading type rather than two, because everything after the
+    read is the same arithmetic on a different index -- and two types would mean two copies of
+    `_stored_rows`, `_complete_series` and the window formation.
+    """
+
+    points_by_subject: Mapping[str, tuple[date, ...]]
     values: Mapping[tuple[str, date], tuple[float | None, ...]]
     columns: tuple[str, ...]
+    axis: FactorAxis
 
 
-def _panel_sessions(readings: Mapping[str, _DatasetReading]) -> tuple[date, ...]:
-    """Every session the visible read returned, across every dataset and every security.
+def _panel_axis_points(
+    readings: Mapping[str, _DatasetReading], *, axis: FactorAxis
+) -> tuple[date, ...]:
+    """Every point on one axis the visible read returned, across datasets and securities.
 
-    The engine's own calendar, and the *only* one it has: `compute_factor` is not given a
-    `TradingCalendar` and must not build one, for the reason it is not given a universe -- a
-    second source for "which days were open" is a second thing that can disagree with the
-    partition it is reading.
+    The engine's own calendar for that axis, and the *only* one it has: `compute_factor` is not
+    given a `TradingCalendar` and must not build one, for the reason it is not given a universe --
+    a second source for "which days were open" is a second thing that can disagree with the
+    partition it is reading. The same argument decides the period axis and decides it more
+    sharply: a fiscal-quarter arithmetic of this module's own devising would have to rule on what
+    quarter a non-quarter-end `end_date` belongs to, and the union of the periods actually stored
+    needs no such rule.
 
-    Two checks read it, and both are exact rather than heuristic because a security's own
-    sessions are always a subset of this: whether any security could satisfy the lookback at all
-    (`_refuse_a_panel_narrower_than_the_lookback`), and how many sessions a formed window spans
+    Two checks read it, and both are exact rather than heuristic because a security's own points
+    are always a subset of the panel's: whether any security could satisfy the reach at all
+    (`_refuse_a_panel_narrower_than_the_lookback`), and how many points a formed window spans
     (`_window_span`).
     """
-    sessions: set[date] = set()
+    points: set[date] = set()
     for reading in readings.values():
-        for days in reading.sessions_by_subject.values():
-            sessions.update(days)
-    return tuple(sorted(sessions))
+        if reading.axis != axis:
+            continue
+        for days in reading.points_by_subject.values():
+            points.update(days)
+    return tuple(sorted(points))
 
 
 def _refuse_a_panel_narrower_than_the_lookback(
     definition: FactorDefinition,
     *,
     panel_sessions: tuple[date, ...],
+    panel_periods: tuple[date, ...],
     requirements: Mapping[str, ReadinessRequirement],
 ) -> None:
-    """Refuse a build whose visible panel cannot satisfy the lookback for **anybody**.
+    """Refuse a build whose visible panel cannot satisfy a declared reach for **anybody**.
 
-    Every security's session set is a subset of the panel's, so a panel holding fewer sessions
-    than `lookback_sessions` makes `insufficient_history` for the whole cross section a matter of
-    arithmetic. That is `FactorEngineError`'s own category -- "this build has no answer for
-    anybody" -- and a panel of `insufficient_history` returned for it is the fail-open dressed as
-    coverage that class exists to name.
+    Every security's point set is a subset of the panel's on the same axis, so a panel holding
+    fewer sessions than `lookback_sessions` -- or fewer report periods than `lookback_periods` --
+    makes `insufficient_history` for the whole cross section a matter of arithmetic. That is
+    `FactorEngineError`'s own category -- "this build has no answer for anybody" -- and a panel of
+    `insufficient_history` returned for it is the fail-open dressed as coverage that class exists
+    to name.
 
-    The message leads with the years, because that is where the fault is: the sessions a factor
-    can see are the ones in `requirement.years`, and a 120-session window evaluated in January
-    needs the previous year in that tuple or nothing qualifies. Nothing else in this engine's
-    eight mandatory arguments is as easy to get wrong or as quiet when it is.
+    The message leads with the years, because that is where the fault is: the points a factor can
+    see are the ones in `requirement.years`, and a 120-session window evaluated in January needs
+    the previous year in that tuple or nothing qualifies. The period axis has the same fault with
+    a longer lever -- a statement partition is filed by **announcement** year while its request
+    window is a report-period year, so an eight-period reach can need four announcement years
+    named -- and `cli.py::PANEL_BUILD_SPAN_TARGETS` is the writer-side half of that same fact.
 
-    What this does **not** refuse is a wide-enough panel over securities that are individually
-    too young. That is a real answer and `insufficient_history` is the code for it.
+    What this does **not** refuse is a wide-enough panel over securities that are individually too
+    young. That is a real answer and `insufficient_history` is the code for it.
     """
-    if len(panel_sessions) >= definition.lookback_sessions:
-        return
     years = sorted({year for requirement in requirements.values() for year in requirement.years})
-    raise FactorEngineError(
-        f"{definition.qualified_key} needs {definition.lookback_sessions} sessions and the "
-        f"visible panel over year(s) {years} holds {len(panel_sessions)}, so no security in any "
-        "cross section could qualify and every observation would be insufficient_history. That "
-        "is a fault in the request rather than an answer about the data: widen the `years` of "
-        "the requirements this factor reads -- a window that spans a year boundary needs the "
-        "earlier year named too -- or evaluate at a later as_of"
-    )
+    for axis, lookback, points, noun in (
+        ("session", definition.lookback_sessions, panel_sessions, "sessions"),
+        ("period", definition.lookback_periods, panel_periods, "report periods"),
+    ):
+        if lookback is None or len(points) >= lookback:
+            continue
+        raise FactorEngineError(
+            f"{definition.qualified_key} needs {lookback} {noun} and the visible panel over "
+            f"year(s) {years} holds {len(points)}, so no security in any cross section could "
+            "qualify and every observation would be insufficient_history. That is a fault in the "
+            "request rather than an answer about the data: widen the `years` of the requirements "
+            f"this factor reads -- a {axis} window that spans a year boundary needs the earlier "
+            "year named too -- or evaluate at a later as_of"
+        )
 
 
 def _resolve_evaluator(
@@ -1124,7 +1248,15 @@ def _validate_requirements(
                 "the rows every year in this requirement makes visible, so a window spanning a "
                 "year end is bounded by the age of its answer rather than by its own span"
             )
-        missing = sorted(set(definition.columns_of(dataset)) - set(requirement.required_fields))
+        needed_columns = set(definition.columns_of(dataset))
+        if dataset in PERIOD_INDEXED_DATASETS:
+            # The engine projects `report_period` for these datasets whether or not the factor
+            # names it, because it is the axis their rows are taken on. A requirement that did
+            # not require it would report `ready` for a partition the projection then fails to
+            # bind -- the same fault this check exists for on the factor's own columns, one
+            # column further out.
+            needed_columns.add(REPORT_PERIOD_COLUMN)
+        missing = sorted(needed_columns - set(requirement.required_fields))
         if missing:
             raise FactorEngineError(
                 f"{definition.qualified_key} reads {missing} from {dataset} and the requirement "
@@ -1162,10 +1294,51 @@ def _read_dataset(
     `FactorInputRef` and the unhashed `FactorInputProvenance`. Splitting them here rather than at
     the manifest is what keeps the wall clock the provider batch carries out of a content
     address that has to be reproducible; see `domain/factor.py::FactorInputProvenance`.
+
+    ## Two axes, one read, and the multiplicity rule each of them is under
+
+    A dataset in `PERIOD_INDEXED_DATASETS` is indexed by its `report_period` column and every
+    other by the session its `event_time` resolves to. That is the whole of the branch, and both
+    halves keep a **fail-closed** multiplicity rule rather than one of them relaxing it:
+
+    - **Session axis, unchanged.** Two rows for one `(subject, session)` raise. A dataset with
+      several versions of one observation needs a reducer chosen for it before a factor may read
+      it, and nothing here chooses one.
+    - **Period axis.** Two rows for one `(subject, period)` announced on **different** days are an
+      ordinary point-in-time restatement, and the later announcement is the one a reader standing
+      at `as_of` would have -- exactly `financial_statements.StatementHistory.filing_for`'s rule,
+      which takes `max(announced_on)` among the filings visible on the day. Two rows announced on
+      the **same** day are the case no column in these datasets orders: `fina_indicator` carries
+      more than one row for 81.7% of its `(ts_code, end_date, ann_date)` keys, has no
+      `update_flag` and no `f_ann_date`, and `providers/tushare.py::_announcement_timeline`
+      deliberately gives such rows byte-equal four-clock timelines. Those raise, with the same
+      sentence the session axis uses.
+
+    So the refusal that fired before this axis existed still fires: under a session index the
+    same-day duplicates collided on `(subject, event_time)` and raised, and under a period index
+    they collide on `(subject, period)` at one announcement and raise. What stopped raising is the
+    case that was never a duplicate at all -- an annual and a Q1 disclosed on one day, two periods
+    under one `event_time` -- which is why an ordinary `income` input could not be read before.
+    `tests/integration/panel/test_factor_engine.py` measures both directions.
+
+    The selection is a second statement of `filing_for`'s rule rather than a call into it:
+    `statement_histories_from_panel_rows` requires the dataset's **whole** projected column set,
+    so reusing it would make a factor that reads one column fetch all ten. The copy is held
+    against the original by `test_the_engines_period_selection_is_the_domains_filing_for`, which
+    runs both over one corpus -- a run-time audit, which is the only thing that has ever kept two
+    statements of one rule together in this repository.
     """
-    projection = (SUBJECT_COLUMN_NAME, EVENT_TIME_COLUMN, *columns)
-    sessions: dict[str, list[date]] = {}
+    period_indexed = dataset in PERIOD_INDEXED_DATASETS
+    axis: FactorAxis = "period" if period_indexed else "session"
+    projection = (
+        (SUBJECT_COLUMN_NAME, EVENT_TIME_COLUMN, REPORT_PERIOD_COLUMN, *columns)
+        if period_indexed
+        else (SUBJECT_COLUMN_NAME, EVENT_TIME_COLUMN, *columns)
+    )
+    offset = 3 if period_indexed else 2
+    points: dict[str, list[date]] = {}
     values: dict[tuple[str, date], tuple[float | None, ...]] = {}
+    announced: dict[tuple[str, date], date] = {}
     references: list[FactorInputRef] = []
     provenance: list[FactorInputProvenance] = []
     for year in sorted(set(requirement.years)):
@@ -1196,25 +1369,37 @@ def _read_dataset(
         )
         for row in outcome.rows:
             subject = str(row[0])
-            session = _session_date(row[1], dataset=dataset, zone=zone)
-            key = (subject, session)
-            if key in values:
-                raise FactorEngineError(
-                    f"{dataset} carries more than one row for {subject} on "
-                    f"{session.isoformat()}; this engine reads one row per security per "
-                    "session, so a dataset with several versions of one observation needs a "
-                    "reducer chosen for it before a factor may read it"
-                )
-            values[key] = tuple(
-                _numeric(value, dataset=dataset, column=name, subject=subject, session=session)
-                for name, value in zip(columns, row[2:], strict=True)
+            announcement = _session_date(row[1], dataset=dataset, zone=zone)
+            point = (
+                _report_period(row[2], dataset=dataset, subject=subject)
+                if period_indexed
+                else announcement
             )
-            sessions.setdefault(subject, []).append(session)
+            key = (subject, point)
+            if key in values:
+                previous = announced[key]
+                if announcement < previous:
+                    continue
+                if announcement == previous:
+                    raise FactorEngineError(
+                        f"{dataset} carries more than one row for {subject} on "
+                        f"{point.isoformat()}; this engine reads one row per security per "
+                        f"{axis}, so a dataset with several versions of one observation needs a "
+                        "reducer chosen for it before a factor may read it"
+                    )
+            else:
+                points.setdefault(subject, []).append(point)
+            announced[key] = announcement
+            values[key] = tuple(
+                _numeric(value, dataset=dataset, column=name, subject=subject, point=point)
+                for name, value in zip(columns, row[offset:], strict=True)
+            )
     return (
         _DatasetReading(
-            MappingProxyType({name: tuple(sorted(days)) for name, days in sessions.items()}),
+            MappingProxyType({name: tuple(sorted(days)) for name, days in points.items()}),
             MappingProxyType(values),
             columns,
+            axis,
         ),
         tuple(references),
         tuple(provenance),
@@ -1230,8 +1415,33 @@ def _session_date(value: object, *, dataset: str, zone: ZoneInfo) -> date:
     return value.astimezone(zone).date()
 
 
+def _report_period(value: object, *, dataset: str, subject: str) -> date:
+    """A stored `report_period` cell as a fiscal period, or a refusal that names the row.
+
+    A refusal rather than a coverage code, for `_numeric`'s reason: a `report_period` that is not
+    an ISO date is a property of the *partition* rather than of this security's fundamentals, and
+    `input_missing` would tell a reader to re-fetch a row that is already there. It is stored as
+    text (`providers/tushare.py` projects `end_date` through `_calendar_date_text`) because the
+    panel plane has no date kind, so this is the same decode `financial_statements
+    ._parse_iso_date` performs on the same column -- and the same refusal.
+    """
+    if not isinstance(value, str):
+        raise FactorEngineError(
+            f"{dataset}.{REPORT_PERIOD_COLUMN} holds {type(value).__name__} for {subject}; this "
+            "engine indexes a filing by its fiscal period and cannot resolve one from anything "
+            "but the stored ISO date"
+        )
+    try:
+        return date.fromisoformat(value)
+    except ValueError as error:
+        raise FactorEngineError(
+            f"{dataset}.{REPORT_PERIOD_COLUMN} holds {value!r} for {subject}, which is not an "
+            "ISO date; the report-period axis is ordered by it"
+        ) from error
+
+
 def _numeric(
-    value: object, *, dataset: str, column: str, subject: str, session: date
+    value: object, *, dataset: str, column: str, subject: str, point: date
 ) -> float | None:
     """A stored cell as a float, `None` for a missing observation, or a refusal.
 
@@ -1240,13 +1450,17 @@ def _numeric(
     security's data: reporting `input_missing` would tell a reader to re-fetch, which would
     never fix it. `bool` is refused explicitly because it is an `int` in Python and `True`
     would otherwise arrive as `1.0`.
+
+    `point` is the row's index on its dataset's own axis -- a session or a report period -- and
+    is named for the axis rather than for one member of it, because the message it lands in is
+    read by somebody looking for the row.
     """
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise FactorEngineError(
             f"{dataset}.{column} holds {type(value).__name__} for {subject} on "
-            f"{session.isoformat()}; a factor input must be a stored number, and this column "
+            f"{point.isoformat()}; a factor input must be a stored number, and this column "
             "cannot be one of this factor's required_fields"
         )
     return float(value)
@@ -1260,6 +1474,7 @@ def _classify(
     in_universe: bool,
     readings: Mapping[str, _DatasetReading],
     panel_sessions: tuple[date, ...],
+    panel_periods: tuple[date, ...],
     evaluator: FactorEvaluator,
     manifest_id: str,
 ) -> FactorObservation:
@@ -1271,11 +1486,18 @@ def _classify(
     cells to check; nullity before arithmetic, because an evaluator is only ever handed a
     complete window.
 
-    "History" is two questions rather than one, and both are `insufficient_history`: whether the
-    security has `lookback_sessions` of its own sessions at all, and whether the most recent
-    `lookback_sessions` of them fit inside `max_window_sessions` panel sessions. The two are
-    distinguishable on the stored row without a sixth code -- the first carries no window
-    (there was none to record) and the second carries the window it was refused for.
+    "History" is four questions rather than one and every one of them is `insufficient_history`:
+    on each declared axis, whether the security has the reach's worth of its own points at all,
+    and whether the most recent of them fit inside the declared span. They stay distinguishable
+    on the stored row without a fifth or sixth coverage code, and that is what the two window
+    pairs buy: a count shortfall carries no window on the axis that fell short (there was none to
+    record) and a span overrun carries the window it was refused for, on each axis independently.
+
+    **The report-period axis reuses `insufficient_history` rather than earning its own code**, and
+    that is the `max_window_sessions` precedent applied rather than a convenience. A security with
+    three filings and a factor needing five does not have enough history *near `as_of`* -- which
+    is what the code says -- and a `insufficient_filings` beside it would split one fact into two
+    codes that `V2-P3-005` would have to exclude from a correlation in exactly the same way.
     """
     if not in_universe:
         return FactorObservation(
@@ -1288,12 +1510,16 @@ def _classify(
             input_row_count=0,
             input_session_first=None,
             input_session_last=None,
+            input_period_first=None,
+            input_period_last=None,
         )
-    available: set[date] = set()
-    for reading in readings.values():
-        available.update(reading.sessions_by_subject.get(subject, ()))
-    ordered = sorted(available)
-    if len(ordered) < definition.lookback_sessions:
+    sessions_held = _points_held(subject, readings=readings, axis="session")
+    periods_held = _points_held(subject, readings=readings, axis="period")
+    sessions = _form_window(sessions_held, definition.lookback_sessions)
+    periods = _form_window(periods_held, definition.lookback_periods)
+    if sessions is None or periods is None:
+        session_first, session_last = _window_ends(sessions)
+        period_first, period_last = _window_ends(periods)
         return FactorObservation(
             subject=subject,
             as_of=as_of,
@@ -1301,13 +1527,24 @@ def _classify(
             coverage="insufficient_history",
             factor_id=definition.factor_id,
             manifest_id=manifest_id,
-            input_row_count=_stored_rows(subject, sessions=tuple(ordered), readings=readings),
-            input_session_first=None,
-            input_session_last=None,
+            input_row_count=_stored_rows(
+                subject, sessions=sessions_held, periods=periods_held, readings=readings
+            ),
+            input_session_first=session_first,
+            input_session_last=session_last,
+            input_period_first=period_first,
+            input_period_last=period_last,
         )
-    window = tuple(ordered[-definition.lookback_sessions :])
-    row_count = _stored_rows(subject, sessions=window, readings=readings)
-    if _window_span(window, panel_sessions=panel_sessions) > definition.max_window_sessions:
+    row_count = _stored_rows(subject, sessions=sessions, periods=periods, readings=readings)
+    ends = {
+        "input_session_first": sessions[0] if sessions else None,
+        "input_session_last": sessions[-1] if sessions else None,
+        "input_period_first": periods[0] if periods else None,
+        "input_period_last": periods[-1] if periods else None,
+    }
+    if _overruns_its_span(
+        definition, sessions=sessions, periods=periods, points=(panel_sessions, panel_periods)
+    ):
         return FactorObservation(
             subject=subject,
             as_of=as_of,
@@ -1316,10 +1553,9 @@ def _classify(
             factor_id=definition.factor_id,
             manifest_id=manifest_id,
             input_row_count=row_count,
-            input_session_first=window[0],
-            input_session_last=window[-1],
+            **ends,
         )
-    series = _complete_series(subject, window=window, readings=readings)
+    series = _complete_series(subject, sessions=sessions, periods=periods, readings=readings)
     if series is None:
         return FactorObservation(
             subject=subject,
@@ -1329,10 +1565,13 @@ def _classify(
             factor_id=definition.factor_id,
             manifest_id=manifest_id,
             input_row_count=row_count,
-            input_session_first=window[0],
-            input_session_last=window[-1],
+            **ends,
         )
-    computed = evaluator(FactorWindow(subject=subject, as_of=as_of, sessions=window, values=series))
+    computed = evaluator(
+        FactorWindow(
+            subject=subject, as_of=as_of, sessions=sessions, periods=periods, values=series
+        )
+    )
     usable = computed is not None and math.isfinite(computed)
     return FactorObservation(
         subject=subject,
@@ -1342,52 +1581,113 @@ def _classify(
         factor_id=definition.factor_id,
         manifest_id=manifest_id,
         input_row_count=row_count,
-        input_session_first=window[0],
-        input_session_last=window[-1],
+        **ends,
     )
 
 
-def _window_span(window: tuple[date, ...], *, panel_sessions: tuple[date, ...]) -> int:
-    """How many **panel** sessions the window reaches across, first and last included.
+def _points_held(
+    subject: str, *, readings: Mapping[str, _DatasetReading], axis: FactorAxis
+) -> tuple[date, ...]:
+    """Every point on one axis this security has a row on, ascending and de-duplicated."""
+    held: set[date] = set()
+    for reading in readings.values():
+        if reading.axis == axis:
+            held.update(reading.points_by_subject.get(subject, ()))
+    return tuple(sorted(held))
 
-    Equal to `len(window)` for a security that traded every session in it, and larger by exactly
-    the number it missed. Counted against the panel's own session set rather than in calendar
-    days, because a calendar-day bound would be a second calendar for the engine to disagree
-    with the partition it is reading, and because "halted for three weeks" is a number of
-    sessions rather than a number of days.
 
-    `panel_sessions` is sorted, so this is two binary searches rather than a scan -- the check
-    runs once per security per build (5,534 times for a whole-market cross section).
+def _form_window(held: tuple[date, ...], lookback: int | None) -> tuple[date, ...] | None:
+    """The most recent `lookback` points, `()` for an axis this factor is not on, `None` short.
+
+    Three outcomes rather than two, because "this factor declares no reach on this axis" and
+    "this security is short of the reach it declares" are different facts with different answers:
+    the first is not a coverage question at all and the second is `insufficient_history`. A
+    function that returned `()` for both would make a statement-only factor report every security
+    as short of a session window it never asked for.
     """
-    left = bisect.bisect_left(panel_sessions, window[0])
-    right = bisect.bisect_right(panel_sessions, window[-1])
+    if lookback is None:
+        return ()
+    if len(held) < lookback:
+        return None
+    return held[-lookback:]
+
+
+def _window_ends(window: tuple[date, ...] | None) -> tuple[date | None, date | None]:
+    """A formed window's first and last point, or `(None, None)` when there is no window."""
+    if not window:
+        return (None, None)
+    return (window[0], window[-1])
+
+
+def _overruns_its_span(
+    definition: FactorDefinition,
+    *,
+    sessions: tuple[date, ...],
+    periods: tuple[date, ...],
+    points: tuple[tuple[date, ...], tuple[date, ...]],
+) -> bool:
+    """Whether either formed window reaches across more panel points than it declared."""
+    panel_sessions, panel_periods = points
+    for window, bound, panel in (
+        (sessions, definition.max_window_sessions, panel_sessions),
+        (periods, definition.max_window_periods, panel_periods),
+    ):
+        if window and bound is not None and _window_span(window, panel_points=panel) > bound:
+            return True
+    return False
+
+
+def _window_span(window: tuple[date, ...], *, panel_points: tuple[date, ...]) -> int:
+    """How many **panel** points the window reaches across, first and last included.
+
+    Equal to `len(window)` for a security present at every point in it, and larger by exactly the
+    number it missed. Counted against the panel's own point set rather than in calendar days,
+    because a calendar-day bound would be a second calendar for the engine to disagree with the
+    partition it is reading, and because "halted for three weeks" is a number of sessions rather
+    than a number of days -- and, on the period axis, because "skipped a quarter" is a number of
+    filings rather than a number of months.
+
+    `panel_points` is sorted, so this is two binary searches rather than a scan -- the check runs
+    once per security per axis per build (5,534 times for a whole-market cross section).
+    """
+    left = bisect.bisect_left(panel_points, window[0])
+    right = bisect.bisect_right(panel_points, window[-1])
     return right - left
 
 
 def _stored_rows(
-    subject: str, *, sessions: tuple[date, ...], readings: Mapping[str, _DatasetReading]
+    subject: str,
+    *,
+    sessions: tuple[date, ...],
+    periods: tuple[date, ...],
+    readings: Mapping[str, _DatasetReading],
 ) -> int:
-    """How many input rows this security actually has over `sessions`, across every dataset.
+    """How many input rows this security actually has over both windows, across every dataset.
 
-    Counted rather than derived as `len(sessions) * len(readings)`, which is only right when
-    every dataset covers every session and is exactly wrong on the two observations where the
-    number matters most: an `input_missing` row is one where a cell is absent, and an
+    Counted rather than derived as `len(window) * len(readings)`, which is only right when every
+    dataset covers every point and is exactly wrong on the two observations where the number
+    matters most: an `input_missing` row is one where a cell is absent, and an
     `insufficient_history` row is one whose datasets disagree about how much history there is.
     A count that over-reported on precisely those two would be a provenance field that is
     accurate only when nobody needs it.
+
+    Each reading is counted over its **own** axis's window, so a factor that reads a price and a
+    filing gets one number covering both rather than a session count with the filings missing.
     """
+    windows: Mapping[FactorAxis, tuple[date, ...]] = {"session": sessions, "period": periods}
     return sum(
         1
         for reading in readings.values()
-        for session in sessions
-        if (subject, session) in reading.values
+        for point in windows[reading.axis]
+        if (subject, point) in reading.values
     )
 
 
 def _complete_series(
     subject: str,
     *,
-    window: tuple[date, ...],
+    sessions: tuple[date, ...],
+    periods: tuple[date, ...],
     readings: Mapping[str, _DatasetReading],
 ) -> Mapping[tuple[str, str], tuple[float, ...]] | None:
     """Every required column over `window`, or `None` if any cell is absent or null.
@@ -1416,12 +1716,13 @@ def _complete_series(
     early return, and widening `input_missing` into two codes would not fix it -- the missing
     fact is *which* input, not which kind of absence.
     """
+    windows: Mapping[FactorAxis, tuple[date, ...]] = {"session": sessions, "period": periods}
     series: dict[tuple[str, str], list[float]] = {}
     for dataset, reading in readings.items():
         for column in reading.columns:
             series[(dataset, column)] = []
-        for session in window:
-            cells = reading.values.get((subject, session))
+        for point in windows[reading.axis]:
+            cells = reading.values.get((subject, point))
             if cells is None:
                 return None
             for column, cell in zip(reading.columns, cells, strict=True):
@@ -1479,6 +1780,8 @@ def factor_observation_batch(panel: FactorPanel) -> ColumnarPanelBatch:
         "input_row_count": [observation.input_row_count for observation in observations],
         "input_session_first": [_iso(item.input_session_first) for item in observations],
         "input_session_last": [_iso(item.input_session_last) for item in observations],
+        "input_period_first": [_iso(item.input_period_first) for item in observations],
+        "input_period_last": [_iso(item.input_period_last) for item in observations],
     }
     return ColumnarPanelBatch(
         provider_id=FACTOR_PROVIDER_ID,
@@ -1551,6 +1854,8 @@ def factor_manifest_batch(panel: FactorPanel) -> ColumnarPanelBatch:
         "direction": [manifest.direction] * len(inputs),
         "lookback_sessions": [manifest.lookback_sessions] * len(inputs),
         "max_window_sessions": [manifest.max_window_sessions] * len(inputs),
+        "lookback_periods": [manifest.lookback_periods] * len(inputs),
+        "max_window_periods": [manifest.max_window_periods] * len(inputs),
         "subject_count": [manifest.subject_count] * len(inputs),
         "subject_digest": [manifest.subject_digest] * len(inputs),
         "universe_count": [manifest.universe_count] * len(inputs),
@@ -1971,8 +2276,10 @@ def _manifest_from_rows(
         date_timezone=str(head["date_timezone"]),
         code_commit=str(head["code_commit"]),
         direction=_direction_code(head["direction"], dataset=dataset),
-        lookback_sessions=int(str(head["lookback_sessions"])),
-        max_window_sessions=int(str(head["max_window_sessions"])),
+        lookback_sessions=_stored_count(head["lookback_sessions"]),
+        max_window_sessions=_stored_count(head["max_window_sessions"]),
+        lookback_periods=_stored_count(head["lookback_periods"]),
+        max_window_periods=_stored_count(head["max_window_periods"]),
         subject_count=int(str(head["subject_count"])),
         subject_digest=str(head["subject_digest"]),
         universe_count=int(str(head["universe_count"])),
@@ -1997,6 +2304,17 @@ def _manifest_from_rows(
             "so this partition was written by a build whose manifest contract is not this one's"
         )
     return manifest
+
+
+def _stored_count(value: object) -> int | None:
+    """A stored reach column as an integer, preserving the null that means "not on this axis".
+
+    `int(str(None))` raises and `int(str(cell))` would turn a genuine null into a `TypeError`
+    several frames from the column it came out of, so the null is a branch rather than an
+    accident. It is a real value here: a factor that reads no filing stores no period reach, and
+    `FactorBuildManifest` accepts `None` exactly for that case.
+    """
+    return None if value is None else int(str(value))
 
 
 def _direction_code(value: object, *, dataset: str) -> FactorDirection:
@@ -2037,8 +2355,6 @@ def _observation_from_row(row: Sequence[object], *, dataset: str) -> FactorObser
             f"a {dataset} row carries {type(as_of).__name__} for "
             f"{EVENT_TIME_COLUMN}, not a datetime"
         )
-    first = cells["input_session_first"]
-    last = cells["input_session_last"]
     return FactorObservation(
         subject=str(cells[SUBJECT_COLUMN_NAME]),
         as_of=as_of,
@@ -2047,9 +2363,16 @@ def _observation_from_row(row: Sequence[object], *, dataset: str) -> FactorObser
         factor_id=str(cells["factor_id"]),
         manifest_id=str(cells["manifest_id"]),
         input_row_count=int(str(cells["input_row_count"])),
-        input_session_first=None if first is None else date.fromisoformat(str(first)),
-        input_session_last=None if last is None else date.fromisoformat(str(last)),
+        input_session_first=_stored_date(cells["input_session_first"]),
+        input_session_last=_stored_date(cells["input_session_last"]),
+        input_period_first=_stored_date(cells["input_period_first"]),
+        input_period_last=_stored_date(cells["input_period_last"]),
     )
+
+
+def _stored_date(value: object) -> date | None:
+    """A stored window-end column as a date, preserving the null that means "no window"."""
+    return None if value is None else date.fromisoformat(str(value))
 
 
 def _stored_value(value: object, *, dataset: str) -> float | None:
@@ -2353,23 +2676,6 @@ CROSS_SECTION_STANDARD: Final[FactorTransformSpec] = FactorTransformSpec(
         undefined_value="exclude",
     ),
     min_cross_section=100,
-    summary=(
-        "The conventional cross-sectional preprocessing: clip to the empirical 1st and 99th "
-        "percentiles of the securities that were scored at this as_of, then z-score what "
-        "remains against the population mean and standard deviation of the clipped values. A "
-        "security that was not in the universe is excluded rather than filled -- it is not a "
-        "hole, it is a name that should have no value. A security that was in the universe and "
-        "too young for the lookback is excluded too, because imputing the median for it would "
-        "score a listing on data it does not have. A null input is filled with the median of "
-        "the processed cross section, which is the case a fill is actually for. An undefined "
-        "arithmetic result is excluded rather than refused, because a zero denominator is a "
-        "property of the factor's own definition and a whole build should not die of one "
-        "security's. min_cross_section is 100 because that is 1 / lower_quantile: the smallest "
-        "cross section for which a 1% winsorization clips about 1% of it. Below it the bound is "
-        "an interpolation whose position is set by n rather than by the tail -- at n=3 the same "
-        "policy clips a third of the cross section -- and this transform declines to produce "
-        "numbers whose winsorization was a function of how many names happened to be scored."
-    ),
 )
 """The single registered transform, and every one of its settings is a stated judgement.
 
@@ -2390,10 +2696,39 @@ test_a_one_percent_winsorization_clips_a_third_of_a_three_name_cross_section` me
 curve, counts and fractions both.
 """
 
-FACTOR_TRANSFORMS: Final[FactorTransformRegistry] = FactorTransformRegistry(
-    (CROSS_SECTION_STANDARD,)
+CROSS_SECTION_STANDARD_NOTE: Final[FactorNote] = FactorNote(
+    subject=CROSS_SECTION_STANDARD.qualified_key,
+    summary=(
+        "The conventional cross-sectional preprocessing: clip to the empirical 1st and 99th "
+        "percentiles of the securities that were scored at this as_of, then z-score what "
+        "remains against the population mean and standard deviation of the clipped values. A "
+        "security that was not in the universe is excluded rather than filled -- it is not a "
+        "hole, it is a name that should have no value. A security that was in the universe and "
+        "too young for the lookback is excluded too, because imputing the median for it would "
+        "score a listing on data it does not have. A null input is filled with the median of "
+        "the processed cross section, which is the case a fill is actually for. An undefined "
+        "arithmetic result is excluded rather than refused, because a zero denominator is a "
+        "property of the factor's own definition and a whole build should not die of one "
+        "security's. min_cross_section is 100 because that is 1 / lower_quantile: the smallest "
+        "cross section for which a 1% winsorization clips about 1% of it. Below it the bound is "
+        "an interpolation whose position is set by n rather than by the tail -- at n=3 the same "
+        "policy clips a third of the cross section -- and this transform declines to produce "
+        "numbers whose winsorization was a function of how many names happened to be scored."
+    ),
 )
-"""Every preprocessing transform this build declares. `V2-P3-014`'s three-tier report extends it."""
+"""`CROSS_SECTION_STANDARD`'s prose, out of `transform_id`. See `domain/factor.py::FactorNote`.
+
+Word for word what the spec's own `summary` field carried until this change, so the diff shows a
+relocation rather than an edit.
+"""
+
+FACTOR_TRANSFORMS: Final[FactorTransformRegistry] = FactorTransformRegistry(
+    (CROSS_SECTION_STANDARD,), notes=(CROSS_SECTION_STANDARD_NOTE,)
+)
+"""Every preprocessing transform this build declares, and the prose about it.
+
+`V2-P3-014`'s three-tier report extends both.
+"""
 
 
 # --- winsorization -------------------------------------------------------------------------------

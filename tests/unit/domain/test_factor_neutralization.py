@@ -21,6 +21,7 @@ from typing import Any, Final
 import pytest
 from pydantic import ValidationError
 
+from openalpha_cn.domain.factor import FactorNote
 from openalpha_cn.domain.factor_neutralization import (
     ELIGIBILITY_CODES,
     INDUSTRY_LEVEL_FIELDS,
@@ -71,7 +72,6 @@ def _spec(**overrides: Any) -> FactorNeutralizationSpec:
         "participation": "measured_only",
         "min_industry_members": 2,
         "min_cross_section": 10,
-        "summary": "a probe neutralisation",
         **overrides,
     }
     return FactorNeutralizationSpec(**settings)
@@ -317,7 +317,6 @@ def test_an_assignment_with_a_blank_code_at_the_declared_level_names_no_group() 
         ("participation", "measured_and_imputed"),
         ("min_industry_members", 3),
         ("min_cross_section", 11),
-        ("summary", "a different sentence entirely"),
     ],
 )
 def test_every_declared_spec_field_moves_the_identity(field: str, value: object) -> None:
@@ -388,19 +387,21 @@ def test_a_key_that_is_not_a_panel_identifier_is_refused() -> None:
         _spec(key="not a key")
 
 
-def test_a_prose_only_edit_moves_the_identity_and_changes_no_number() -> None:
-    """The inherited defect, pinned as a measurement so it cannot be quietly inherited again.
+def test_prose_cannot_reach_this_identity_because_it_cannot_enter_this_contract() -> None:
+    """The inherited defect, measured as closed rather than pinned as a cost.
 
-    `FactorTransformSpec.summary` carries the same one. Two specs whose only difference is prose
-    describe the same arithmetic and have two identities -- so every stored
-    `neutralization_manifest_id` moves for a typo fix. Edit `summary` only with a version bump.
+    This test used to assert the opposite: two specs whose only difference was prose described
+    the same arithmetic and had two identities, so every stored `neutralization_manifest_id`
+    moved for a typo fix, and the rule was "edit `summary` only with a version bump". `V2-P3-004`
+    then had to break that rule to retract three unreproducible figures, recorded the exception
+    in the field's own docstring, and gave it an expiry. This is the expiry: all three contracts
+    dropped the field together, so there is no `summary=` to pass and no rule left to break.
     """
-    original = _spec()
-    retyped = _spec(summary=_spec().summary + ".")
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        _spec(summary="remove the industry mean, then the size slope")
 
-    assert original.neutralization_id != retyped.neutralization_id
-    for field in ("industry_level", "market_cap_measure", "market_cap_scale", "participation"):
-        assert getattr(original, field) == getattr(retyped, field)
+    assert "summary" not in FactorNeutralizationSpec.model_fields
+    assert "summary" not in FactorNeutralizationManifest.model_fields
 
 
 # --- the registry -------------------------------------------------------------------------------
@@ -429,6 +430,24 @@ def test_a_registry_resolves_by_qualified_key_and_by_identity() -> None:
         registry.get("absent/v1")
     with pytest.raises(FactorNeutralizationError, match="is not a neutralisation this build"):
         registry.by_id("fnz_absent")
+
+
+def test_the_registry_resolves_prose_and_refuses_it_for_an_undeclared_handle() -> None:
+    """`FactorRegistry.note_for`'s three ways on the third registry, so the contract is the same
+    contract everywhere rather than three that happen to be spelled alike: written prose comes
+    back, a declared spec with nothing written about it answers `None`, and a handle this build
+    does not declare is a fault rather than an absence."""
+    written = FactorNote(subject="probe_neutral/v1", summary="industry mean, then the size slope")
+    registry = FactorNeutralizationRegistry((_spec(), _spec(key="other_neutral")), notes=(written,))
+
+    assert registry.note_for("probe_neutral/v1") == written.summary
+    assert registry.note_for("other_neutral/v1") is None
+    with pytest.raises(FactorNeutralizationError, match="is not a declared neutralisation"):
+        registry.note_for("absent/v1")
+    with pytest.raises(FactorNeutralizationError, match="is not a declared neutralisation, so"):
+        FactorNeutralizationRegistry(
+            (_spec(),), notes=(FactorNote(subject="ghost/v1", summary="x"),)
+        )
 
 
 # --- the second cross section --------------------------------------------------------------------

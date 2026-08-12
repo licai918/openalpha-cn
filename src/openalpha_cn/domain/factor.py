@@ -1,10 +1,10 @@
 """The versioned factor definition registry (`V2-P3-001`), and the records a computation of
 one produces (`V2-P3-002`'s contracts, minus the engine).
 
-## The seven properties, and why each is a field rather than a convention
+## The properties, and why each is a field rather than a convention
 
-A factor definition has to answer seven questions before anything is allowed to compute it, and
-every one of them is load-bearing for a *different* downstream issue. They are fields on
+A factor definition has to answer a fixed set of questions before anything is allowed to compute
+it, and every one of them is load-bearing for a *different* downstream issue. They are fields on
 `FactorDefinition` rather than notebook conventions because each is read by code:
 
 - **stable identity** -> `factor_id`. `V2-P3-002` stamps it on every observation and
@@ -15,21 +15,54 @@ every one of them is load-bearing for a *different* downstream issue. They are f
   populate one each.
 - **required fields** -> `required_fields`. `V2-P3-002`'s coverage check: which panel columns
   must be present and non-null before a value may be produced.
-- **lookback window** -> `lookback_sessions`. Point-in-time: a 120-session momentum factor
-  needs 120 sessions **at or before `as_of`**, and a security with fewer gets
-  `insufficient_history` rather than a quiet `None`.
-- **how far that window may reach** -> `max_window_sessions`. The six above say *how many* of a
-  security's own sessions to take and nothing at all about *when* they were, which is a hole
-  with a measured shape: a security halted for three months has a "120-session momentum"
-  spanning 210 calendar days and the observation reported it as `computed`. See that field's
-  own docstring.
+- **how far back on the session axis** -> `lookback_sessions` / `max_window_sessions`.
+  Point-in-time: a 120-session momentum factor needs 120 sessions **at or before `as_of`**, and
+  a security with fewer gets `insufficient_history` rather than a quiet `None`. The count alone
+  says nothing about *when* those sessions were, which is a hole with a measured shape -- a
+  security halted for three months has a "120-session momentum" spanning 210 calendar days and
+  the observation reported it as `computed` -- so the reach carries a span bound as well as a
+  count. See both fields' own docstrings.
+- **how far back on the report-period axis** -> `lookback_periods` / `max_window_periods`. The
+  same pair of questions asked of a *filing* rather than of a session, because an EP or a ROE
+  is not a session count at all. See "The second axis" below.
 - **direction** -> `direction`. `V2-P3-005`'s IC sign; a rank correlation is uninterpretable
   until somebody has said which end of the cross section is the good one.
 
-`V2-P3-001`'s acceptance names six; the seventh is the correction of a defect the six had
-between them, and it is a *declared* property rather than an engine constant for the reason the
-other six are -- a one-session reversal and a 120-session momentum tolerate different amounts of
-stretch, and an engine that picked one number for both would be making a factor's decision.
+`V2-P3-001`'s acceptance names six of these; the reaches are the correction of defects the six
+had between them, and each is a *declared* property rather than an engine constant for the
+reason the others are -- a one-session reversal and a 120-session momentum tolerate different
+amounts of stretch, and an engine that picked one number for both would be making a factor's
+decision.
+
+## The second axis, and why it is two nullable pairs rather than four numbers
+
+`V2-P3-009`..`011` (EP/BP/SP/EPcut, ROE/ROIC/margin stability/accruals, revenue and net-income
+year-on-year plus acceleration) are all built on filings, and a filing does not live on the
+session axis:
+
+- **A filing's own index is its report period.** `providers/tushare.py::_announcement_timeline`
+  dates every statement row at `ann_date` on **all four** clocks, so the panel's `event_time` for
+  a filing is the day it was disclosed. Two facts follow and both were measured against the
+  engine before this change: an annual and a Q1 announced on one day are two rows under one
+  `(subject, event_time)` key, which `compute_factor` refuses outright, and one period announced
+  twice occupies two slots of a "lookback window" that was counting periods in the reader's head.
+  So the reach for a statement input has to be counted in **periods**, and the engine has to
+  index those inputs by period. `panel_factors::PERIOD_INDEXED_DATASETS` is the axis table.
+- **A factor declares exactly the axes it reads.** `required_fields` already says which datasets
+  a factor touches, so which axes it is on is *derivable* -- and a reach declared for an axis
+  the factor does not read would be a number in the content address that decides nothing, while
+  a missing one would be an unbounded window. Both pairs are therefore `int | None` and
+  `validate_each_axis_is_declared_exactly_when_it_is_read` makes the correspondence an
+  equivalence in both directions. A statement-only factor (`V2-P3-010`'s ROE reads
+  `fina_indicator.roe` and nothing else) declares no session reach, and a `lookback_sessions=1`
+  on it would have been a field with no reader on that one definition.
+- **Year-on-year is not a third dimension.** A revenue YoY at period *P* needs *P* and *P-4*;
+  the acceleration of it needs one more step back again. Those are the same two numbers with
+  larger values -- `lookback_periods=5` hands the evaluator a window whose `[-5]` is the
+  year-earlier period -- and what makes index arithmetic on that window legitimate is
+  `max_window_periods == lookback_periods`, which is the contract's way of saying "no missed
+  filing inside the window". Cumulative-to-single-quarter differencing needs exactly the same
+  guarantee, which is why *that* choice is the factor's and this precondition is the contract's.
 
 ## The ordering constraint this module is under, and why it is stated here
 
@@ -42,9 +75,9 @@ registered for these models (they are never stored as JSON rows), so a stored ob
 The consequence is a *sequencing* rule rather than a prohibition: **every field this contract is
 going to need must land before `V2-P3-014` writes the first immutable artifact.** Today there is
 no production factor partition anywhere, so the cost of a field is zero; after `014` it is a
-corpus with no path back. `lookback_sessions`' own docstring names the field this contract still
-owes -- a *report-period* reach for `V2-P3-009`..`011`'s EP and ROE -- and that one is
-deliberately absent because it has no reader yet, which makes it the constraint's first test.
+corpus with no path back. The report-period reach is the field this contract used to owe, and it
+lands here for that reason -- together with the removal of `summary`, because both move
+`factor_id` and paying that once is the whole point of doing them in one change.
 
 ## Identity is `stable_model_id`, not a hash of this module's own devising
 
@@ -88,6 +121,27 @@ measured, because this contract had a defect in each direction:
   build could then never be written. The wall clock is out of the identity on the input side
   now for exactly the reason `built_at` is out of it on the build side; `FactorInputProvenance`
   is where it went.
+
+## Prose is recorded and is **not** a field, which is a correction rather than an omission
+
+`FactorDefinition` carried a `summary` from `V2-P3-001` until this change, and so did
+`FactorTransformSpec` and `FactorNeutralizationSpec`. Every one of them was inside its own
+content address, which made **fixing a typo move the identity of every stored build without
+changing a single number** -- precisely the shape `FactorTransformManifest`'s docstring rejects
+`date_timezone` for ("reaches the identity and decides nothing"). The bill had already been paid
+twice: `V2-P3-003`'s review recorded it as an inherited convention and left it, and `V2-P3-004`
+had to knowingly break its own "edit only with a version bump" rule to retract three figures that
+could not be reproduced.
+
+The fix is a *contract shape* change and not a hashing change, because `stable_model_id` hashes
+whatever the model declares and a field carved out of the hash with `exclude=True` is exactly the
+shape roadmap section 9's `config_digest` had. So the prose left the models and became
+`FactorNote`, a plain frozen dataclass no `stable_model_id` is ever applied to, carried by the
+three registries beside the specs it is about. Editing a note moves nothing;
+`tests/unit/domain/test_factor.py::test_a_prose_edit_moves_no_identity_because_prose_is_not_a
+_field` builds two registries that differ only in their notes and asserts every `factor_id` in
+them is byte-identical, and the same file asserts that `summary=` is no longer *accepted* by any
+of the three contracts.
 
 ## What is deliberately *not* here
 
@@ -142,6 +196,7 @@ from typing import Final, Literal, Self, get_args
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
 from openalpha_cn.domain._identity import stable_model_id
+from openalpha_cn.domain.financial_statements import FINANCIAL_STATEMENT_DATASETS
 from openalpha_cn.domain.panel_batch import (
     RESERVED_COLUMN_NAMES,
     PanelBatchError,
@@ -234,6 +289,28 @@ FACTOR_COVERAGE_CODES: Final[frozenset[str]] = frozenset(get_args(FactorCoverage
 ones from a correlation rather than treat them as zeros.
 """
 
+PERIOD_INDEXED_DATASETS: Final[frozenset[str]] = frozenset(FINANCIAL_STATEMENT_DATASETS)
+"""The panel datasets whose rows a factor reads **by report period** rather than by session.
+
+The four statement endpoints, and the reason is a property of their clocks rather than a
+classification of their subject matter. `providers/tushare.py::_announcement_timeline` gives every
+statement row `event_time == available_time == ann_date`, so the panel's own session column for a
+filing is *the day it was disclosed*, and disclosure days are neither one-per-period nor
+one-period-per-day:
+
+- **Many periods on one day.** An A-share issuer routinely discloses its annual report and its
+  first-quarter report together. Under a session index those are two rows of one
+  `(subject, event_time)` key, which `panel_factors._read_dataset` refuses -- so before this
+  table existed, an ordinary `income` input made the engine raise for the whole build.
+- **One period on many days.** A restatement announced later is a second row for the same period.
+  Under a session index it fills a second slot of a window that was meant to count periods.
+
+Derived from `domain/financial_statements.FINANCIAL_STATEMENT_DATASETS` rather than written out,
+so a fifth statement endpoint joins the period axis without anybody remembering to extend a list;
+`tests/unit/test_factor_engine_rules.py` asserts the correspondence in both directions. It is
+`frozenset` rather than the domain's tuple because every reader of it asks membership.
+"""
+
 MAX_FACTOR_KEY_LENGTH: Final[int] = 40
 """How long a factor key may be, and the bound is a *storage* budget rather than a taste.
 
@@ -324,10 +401,11 @@ class FactorField(BaseModel):
 
 
 class FactorDefinition(BaseModel):
-    """One versioned factor: the seven properties, and nothing that cannot be hashed.
+    """One versioned factor: the declared properties, and nothing that decides nothing.
 
-    See this module's docstring for the property-by-property argument and for why identity is
-    `stable_model_id` rather than a hash of this module's own devising.
+    See this module's docstring for the property-by-property argument, for why identity is
+    `stable_model_id` rather than a hash of this module's own devising, and for why prose is a
+    `FactorNote` on the registry rather than a field here.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
@@ -357,7 +435,7 @@ class FactorDefinition(BaseModel):
     Duplicates are refused: a repeated field would be read twice and would make
     `FactorBuildManifest.inputs` describe one partition under two entries.
     """
-    lookback_sessions: int = Field(ge=1, le=2000)
+    lookback_sessions: int | None = Field(ge=1, le=2000)
     """How many sessions of visible history the factor needs at `as_of`, inclusive.
 
     Sessions of the session-indexed panel, not calendar days: a 120-session momentum factor
@@ -367,13 +445,16 @@ class FactorDefinition(BaseModel):
     The upper bound is 2000, a little over eight A-share years, because a window wider than the
     panel's own partition granularity is a request the engine cannot serve from the years a
     caller names without that being visible; see `panel_factors.compute_factor`'s `years`
-    argument. What this field deliberately does *not* express is a *report-period* reach -- an
-    EP factor needs "the latest filing knowable at `as_of`", which is not a session count.
-    `V2-P3-009`..`011` will need a second dimension for that, and adding one now would be a
-    field with no reader -- **but see this module's docstring's ordering constraint: it has to
-    land before `V2-P3-014`, not after.**
+    argument.
+
+    **`None` means "this factor is not on the session axis at all"**, and it is a declaration
+    rather than a default: `validate_each_axis_is_declared_exactly_when_it_is_read` refuses
+    `None` for a factor whose `required_fields` name any dataset outside
+    `PERIOD_INDEXED_DATASETS`, and refuses a number for one whose fields are all filings.
+    `V2-P3-010`'s ROE reads `fina_indicator.roe` and nothing else; a `lookback_sessions=1` on it
+    would be a number in the content address that no branch of the engine could read.
     """
-    max_window_sessions: int = Field(ge=1, le=4000)
+    max_window_sessions: int | None = Field(ge=1, le=4000)
     """How many *panel* sessions the `lookback_sessions` window is allowed to span.
 
     `lookback_sessions` counts a security's **own** rows and says nothing about when they were,
@@ -384,8 +465,8 @@ class FactorDefinition(BaseModel):
         000002.SZ  computed  0.50  window 2026-01-05..2026-06-30  (176 days)
 
     Both are "the last two sessions this security traded". The second is a +50% move across half
-    a year reported by a factor whose own summary says "one session's close-to-close simple
-    return", marked `computed`, and handed to `FactorPanel.values()` for a rank correlation.
+    a year reported by a factor whose declared window is one session's close-to-close simple
+    return, marked `computed`, and handed to `FactorPanel.values()` for a rank correlation.
     Scaled to `V2-P3-012`'s 120-session momentum, a name halted for three months earns a
     "120-session momentum" spanning 210 calendar days.
 
@@ -403,8 +484,61 @@ class FactorDefinition(BaseModel):
     Equality is the strict setting and it is a real one: `max_window_sessions ==
     lookback_sessions` means "no missed session inside the window", which is what a one-session
     return should mean. A wider setting is the number of missed sessions the factor tolerates.
+
+    `None` exactly when `lookback_sessions` is `None`; see that field.
     """
-    summary: str = Field(min_length=1, max_length=2000)
+    lookback_periods: int | None = Field(ge=1, le=60)
+    """How many of the security's own **report periods** the factor needs, knowable at `as_of`.
+
+    Counted in filings and not in sessions, which is the whole reason this pair exists: an EP
+    factor needs "the latest filing knowable at `as_of`", and a ROE needs that one; a
+    gross-margin *stability* needs several; a revenue year-on-year needs the period four
+    quarters back as well as the latest one. None of those is a number of trading days.
+
+    "The security's own periods, knowable at `as_of`" is exactly the set
+    `financial_statements.StatementHistory.periods_on(day)` answers, and the most recent member
+    of it is what `latest_filing_on` returns -- the most recent **period**, which is not the most
+    recent *announcement*: a security may announce an earlier period after a later one, measured
+    at 12 of `income`'s 3,796 answerable days over a 76-security probe. `panel_factors` selects
+    on the same key for the same reason, and
+    `tests/integration/panel/test_factor_engine.py::test_the_engines_period_selection_is_the_
+    domains_filing_for` pins the two against each other on one corpus rather than leaving them
+    two implementations of one rule.
+
+    The upper bound is 60, fifteen A-share years of quarterly filings. Wide enough that no
+    factor in `V2-P3-009`..`013` argues with it (`011`'s year-on-year acceleration is the widest
+    at nine periods) and narrow enough that a caller who typed a session count into it is refused
+    at the contract.
+
+    **`None` means "this factor reads no filing"**, under the same equivalence
+    `lookback_sessions` is under: declared exactly when `required_fields` names a member of
+    `PERIOD_INDEXED_DATASETS`.
+    """
+    max_window_periods: int | None = Field(ge=1, le=120)
+    """How many *panel* report periods the `lookback_periods` window is allowed to span.
+
+    `max_window_sessions`' argument, transposed, and it is not decoration on this axis either:
+    `lookback_periods` counts a security's own filings and says nothing about whether they are
+    consecutive. A name that stopped filing for two years and resumed has "the last four
+    periods" spanning twelve, and a year-on-year computed from `window[-1]` against `window[-5]`
+    on such a window compares two periods that are not a year apart.
+
+    Counted in **panel** periods -- the union of every `report_period` the visible read returned,
+    which is the engine's own period calendar and the only one it has -- for the reason
+    `max_window_sessions` is counted in panel sessions: a fiscal-quarter arithmetic of this
+    module's own devising would be a second calendar to disagree with the partition, and it would
+    have to decide what quarter a non-quarter-end `end_date` belongs to. A security's own periods
+    are always a subset of the panel's, so the span is exact rather than heuristic.
+
+    Equality is the strict setting and is the one the year-on-year factors need:
+    `max_window_periods == lookback_periods` means **"no missed filing inside the window"**,
+    which is what makes `window[-5]` the year-earlier period and what makes differencing two
+    cumulative periods into a single quarter arithmetic rather than a guess. Which of those a
+    factor does is the factor's business; that the window it does it on is contiguous is this
+    contract's.
+
+    `None` exactly when `lookback_periods` is `None`.
+    """
 
     @field_validator("key")
     @classmethod
@@ -427,14 +561,57 @@ class FactorDefinition(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def validate_the_window_can_hold_its_own_lookback(self) -> Self:
-        if self.max_window_sessions < self.lookback_sessions:
-            raise ValueError(
-                f"max_window_sessions {self.max_window_sessions} is narrower than "
-                f"lookback_sessions {self.lookback_sessions}; {self.lookback_sessions} of a "
-                "security's own sessions span at least that many panel sessions, so this "
-                "factor could never compute a value for anybody"
-            )
+    def validate_each_axis_is_declared_exactly_when_it_is_read(self) -> Self:
+        """Each reach is declared **iff** `required_fields` puts this factor on that axis.
+
+        An equivalence rather than two independent checks, because each direction fails
+        differently and both are reachable. A reach declared for an axis the factor does not read
+        is a number inside `factor_id` that no branch of `panel_factors` can consult -- the "field
+        with no reader" this contract refused a report-period dimension for until it had one. A
+        reach *missing* for an axis the factor does read is the opposite and is worse: the engine
+        has no bound to apply, so the window would be whatever the read happened to return.
+
+        `required_fields` has `min_length=1`, so at least one axis is always declared and a
+        definition with no reach at all is unconstructible.
+        """
+        for axis, datasets, lookback, window, names in (
+            (
+                "session",
+                self.session_datasets,
+                self.lookback_sessions,
+                self.max_window_sessions,
+                ("lookback_sessions", "max_window_sessions"),
+            ),
+            (
+                "report-period",
+                self.period_datasets,
+                self.lookback_periods,
+                self.max_window_periods,
+                ("lookback_periods", "max_window_periods"),
+            ),
+        ):
+            count_name, window_name = names
+            if (lookback is None) != (window is None):
+                raise ValueError(
+                    f"{count_name} and {window_name} are stated together or not at all; a count "
+                    "with no span bound is a window whose reach nothing decides, and a span "
+                    "bound with no count is a bound on a window that is never formed"
+                )
+            if bool(datasets) != (lookback is not None):
+                stated = "declares" if lookback is not None else "declares no"
+                raise ValueError(
+                    f"this factor {stated} {axis} reach and reads {sorted(datasets)} on the "
+                    f"{axis} axis; {count_name} is declared exactly when required_fields names a "
+                    "dataset on that axis -- a reach for an axis nothing is read on is a number "
+                    "in the content address that no branch can consult, and a missing one is an "
+                    "unbounded window"
+                )
+            if lookback is not None and window is not None and window < lookback:
+                raise ValueError(
+                    f"{window_name} {window} is narrower than {count_name} {lookback}; "
+                    f"{lookback} of a security's own {axis} points span at least that many panel "
+                    f"{axis} points, so this factor could never compute a value for anybody"
+                )
         return self
 
     @computed_field(return_type=str)  # type: ignore[prop-decorator]
@@ -464,9 +641,102 @@ class FactorDefinition(BaseModel):
             seen.setdefault(item.dataset, None)
         return tuple(seen)
 
+    @property
+    def session_datasets(self) -> tuple[str, ...]:
+        """The datasets this factor reads on the **session** axis, in first-declared order."""
+        return tuple(name for name in self.datasets if name not in PERIOD_INDEXED_DATASETS)
+
+    @property
+    def period_datasets(self) -> tuple[str, ...]:
+        """The datasets this factor reads on the **report-period** axis, in declared order.
+
+        The partition of `datasets` `PERIOD_INDEXED_DATASETS` induces. Derived rather than
+        declared for the reason the axis table is derived: a factor should not be able to say
+        which axis `income` is on, because then two factors could disagree about it.
+        """
+        return tuple(name for name in self.datasets if name in PERIOD_INDEXED_DATASETS)
+
     def columns_of(self, dataset: str) -> tuple[str, ...]:
         """The columns this factor reads from `dataset`, in declared order."""
         return tuple(item.column for item in self.required_fields if item.dataset == dataset)
+
+
+@dataclass(frozen=True, slots=True)
+class FactorNote:
+    """Prose about one declared contract: recorded, resolvable, **never hashed**.
+
+    Where `FactorDefinition.summary`, `FactorTransformSpec.summary` and
+    `FactorNeutralizationSpec.summary` went, and the move is the correction of a defect all three
+    shared. Prose decides nothing, so a typo fix in any of them moved a content address and
+    therefore the identity of every stored build derived from it, without changing a number.
+
+    A separate dataclass rather than an `exclude=True` field on the specs, for
+    `FactorInputProvenance`'s reason stated one level up: the property these contracts are under
+    is "every field of the hashed model reaches the identity", and a field carved out of the hash
+    is exactly the shape roadmap section 9's `config_digest` had. Splitting keeps that property
+    literally true and auditable by asserting on the hashed payload's key set. A `dataclass`
+    rather than a `BaseModel` because nothing validates prose beyond its being non-empty and
+    because the surest way for a record never to acquire a content address is for it not to be
+    the kind of object `stable_model_id` accepts.
+
+    `subject` is the `qualified_key` the note is about, so a note is self-describing rather than
+    positional: a registry that paired notes to specs by index would silently re-attribute every
+    note the moment somebody inserted a spec. The three registries audit that every note names a
+    contract they declare, which is the same shape as `panel_factors._refuse_table_drift`.
+    """
+
+    subject: str
+    summary: str
+
+    def __post_init__(self) -> None:
+        if not self.subject.strip():
+            raise FactorError("a note must name the contract it is about")
+        if not self.summary.strip():
+            raise FactorError(f"the note for {self.subject!r} carries no prose")
+
+
+def validate_notes(
+    notes: tuple[FactorNote, ...],
+    *,
+    declared: tuple[str, ...],
+    role: str,
+    error: type[ValueError] = FactorError,
+) -> None:
+    """Refuse notes that do not name contracts this registry declares, or name one twice.
+
+    One function with three call sites -- `FactorRegistry`, `FactorTransformRegistry` and
+    `FactorNeutralizationRegistry` -- rather than three copies, because the rule is the same rule
+    and the three registries' *refusals* are what their own classes are written out separately
+    for. A note for an undeclared contract is prose about nothing, which is how a note survives
+    the removal of the spec it described and goes on being shown; two notes for one contract make
+    `note_for` arbitrary.
+
+    `error` is the caller's own exception type rather than this module's, so a registry refuses
+    its notes with the same class it refuses everything else with: a caller that writes
+    `except FactorTransformError` around a registry construction should not have one of that
+    object's refusals escape as `FactorError` because the rule happens to be shared. Every one of
+    the three is a `ValueError`, so the parameter narrows the type rather than widening it, and
+    each registry's own test asserts on its own class.
+
+    The converse -- every declared contract has a note -- is deliberately **not** enforced here.
+    A registry a test builds out of two probe specs has nothing to say about them, and forcing a
+    sentence would produce the placeholder prose `V2-P0B-009` deleted elsewhere. It is required of
+    the three *shipped* registries instead, where it is a real obligation, by
+    `tests/unit/test_factor_engine_rules.py::test_every_shipped_contract_carries_its_prose`.
+    """
+    subjects = [note.subject for note in notes]
+    if len(set(subjects)) != len(subjects):
+        duplicates = sorted({name for name in subjects if subjects.count(name) > 1})
+        raise error(
+            f"{duplicates} carries more than one {role} note; two notes about one contract make "
+            "the lookup arbitrary"
+        )
+    orphans = sorted(set(subjects) - set(declared))
+    if orphans:
+        raise error(
+            f"{orphans} is not a declared {role}, so its note is prose about nothing; this "
+            f"registry declares {list(declared)}"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -499,6 +769,8 @@ class FactorRegistry:
     """
 
     definitions: tuple[FactorDefinition, ...]
+    notes: tuple[FactorNote, ...] = ()
+    """The prose about these definitions, out of every content address. See `FactorNote`."""
 
     def __post_init__(self) -> None:
         if not self.definitions:
@@ -513,6 +785,21 @@ class FactorRegistry:
                 f"{duplicates} is declared more than once; two definitions answering to one "
                 "name make a lookup arbitrary -- bump `version` on the restatement"
             )
+        validate_notes(self.notes, declared=tuple(keys), role="factor")
+
+    def note_for(self, qualified_key: str) -> str | None:
+        """The prose about `key/vN`, or `None` when this registry carries none for it.
+
+        `None` rather than a refusal: a registry with no notes is legitimate (see
+        `validate_notes`), so "there is nothing written about this factor" is an answer and not a
+        fault. Asking about a factor the registry does not declare is a fault, and `get` is where
+        it is refused -- reached first, so a typo in the handle does not read as absent prose.
+        """
+        self.get(qualified_key)
+        for note in self.notes:
+            if note.subject == qualified_key:
+                return note.summary
+        return None
 
     @property
     def qualified_keys(self) -> tuple[str, ...]:
@@ -697,8 +984,8 @@ class FactorBuildManifest(BaseModel):
     nothing about the number says which -- so a reader of the observation partition who cannot
     resolve `factor_id` against a registry cannot read the sign of what is stored. `V2-P3-005`
     is its first consumer."""
-    lookback_sessions: int = Field(ge=1, le=2000)
-    max_window_sessions: int = Field(ge=1, le=4000)
+    lookback_sessions: int | None = Field(ge=1, le=2000)
+    max_window_sessions: int | None = Field(ge=1, le=4000)
     """`FactorDefinition.max_window_sessions` as this build applied it.
 
     Carried on the manifest for the reason `lookback_sessions` is: it is a *bound on the
@@ -707,6 +994,14 @@ class FactorBuildManifest(BaseModel):
     reach. It is determined by `factor_id`, which is also here; that is a projection for
     readability, not a second source of truth, and `compute_factor` sets both from one
     definition."""
+    lookback_periods: int | None = Field(ge=1, le=60)
+    max_window_periods: int | None = Field(ge=1, le=120)
+    """The report-period reach as this build applied it, both halves, for the session pair's
+    reason and one sharper: a stored observation whose window is a set of *filings* is
+    uninterpretable without knowing how many and how far apart they were allowed to be, and the
+    session columns say nothing at all about that axis. `None` on both for a factor that reads no
+    filing, which is what `FactorDefinition`'s own equivalence guarantees -- so a manifest cannot
+    claim a period bound for a build that never formed a period window."""
     subject_count: int = Field(ge=1)
     """How many securities were asked about. At least one: a build over an empty cross section
     produces no observation and would leave a manifest describing nothing."""
@@ -794,6 +1089,20 @@ class FactorObservation:
     """The first and last session of the window this value was computed over, or `None` when
     there was no window. Together with `input_row_count` this is what makes a stored
     observation re-derivable without re-running the engine's session selection."""
+    input_period_first: date | None = None
+    input_period_last: date | None = None
+    """The first and last **report period** of the filing window, on the same terms.
+
+    A second pair rather than a reinterpretation of the session pair, because a factor can be on
+    both axes at once -- `V2-P3-009`'s EP reads a price and a filing -- and one pair of columns
+    would then have to hold two different kinds of date for one row.
+
+    Defaulted to `None` where the session pair is not, and the asymmetry is deliberate: absent is
+    the answer for every factor that reads no filing, which is most of them, and it is a *value*
+    rather than an omission. `panel_factors._classify` passes both explicitly on every path all
+    the same, and `validate_factor_observation` holds the pair to the same both-or-neither and
+    not-backwards rules the session pair is under, so a default cannot smuggle in half a window.
+    """
 
     def __post_init__(self) -> None:
         # Normalised rather than merely required to be aware, because a stored observation
@@ -847,12 +1156,14 @@ def validate_factor_observation(observation: FactorObservation) -> None:
         )
     if observation.input_row_count < 0:
         raise FactorError("input_row_count cannot be negative")
-    first = observation.input_session_first
-    last = observation.input_session_last
-    if (first is None) != (last is None):
-        raise FactorError(
-            "input_session_first and input_session_last are both present or both absent; "
-            "a window with only one end is not a window"
-        )
-    if first is not None and last is not None and first > last:
-        raise FactorError(f"the input window {first} to {last} runs backwards")
+    for axis, first, last in (
+        ("session", observation.input_session_first, observation.input_session_last),
+        ("period", observation.input_period_first, observation.input_period_last),
+    ):
+        if (first is None) != (last is None):
+            raise FactorError(
+                f"input_{axis}_first and input_{axis}_last are both present or both absent; "
+                "a window with only one end is not a window"
+            )
+        if first is not None and last is not None and first > last:
+            raise FactorError(f"the input {axis} window {first} to {last} runs backwards")

@@ -220,7 +220,6 @@ def _transform_spec(**overrides: Any) -> FactorTransformSpec:
             undefined_value="exclude",
         ),
         "min_cross_section": 1,
-        "summary": "a probe transform over the fixture panel's eight names",
         **overrides,
     }
     return FactorTransformSpec(**settings)
@@ -243,7 +242,6 @@ def _spec(**overrides: Any) -> FactorNeutralizationSpec:
         "participation": "measured_only",
         "min_industry_members": 2,
         "min_cross_section": 2,
-        "summary": "a probe neutralisation over the fixture panel's eight names",
         **overrides,
     }
     return FactorNeutralizationSpec(**settings)

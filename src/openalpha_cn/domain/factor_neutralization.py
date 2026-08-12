@@ -160,6 +160,7 @@ from typing import Final, Literal, Self, get_args
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
 from openalpha_cn.domain._identity import stable_model_id
+from openalpha_cn.domain.factor import FactorNote, validate_notes
 from openalpha_cn.domain.factor_transform import (
     PROCESSED_COVERAGE_CODES,
     PROCESSED_VALUE_CODES,
@@ -528,29 +529,6 @@ class FactorNeutralizationSpec(BaseModel):
     since 10,000 sits above the ~5,500-name whole-market cross section ADR-0002 sizes the panel
     plane against.
     """
-    summary: str = Field(min_length=1, max_length=2000)
-    """Why these settings, in prose, for the reader of a stored partition.
-
-    **It is in `neutralization_id`, and that is an inherited defect rather than a design.**
-    `FactorTransformSpec.summary` carries the full statement: prose decides nothing, so fixing a
-    typo moves the identity and therefore every stored `neutralization_manifest_id` without
-    changing a single number. It stays for that field's reason -- `FactorDefinition.summary` has
-    been inside `factor_id` since `V2-P3-001`, and taking it out here alone would leave three
-    identity contracts disagreeing -- and the cost is stated instead of the claim being softened:
-    **edit this string only together with a version bump.**
-
-    **That rule has one exception and it has already been used once**, so the exception is written
-    down rather than left for the next reader to re-derive from a diff.
-    `INDUSTRY_AND_SIZE.summary` was edited without a version bump by `V2-P3-004`'s review, which
-    retracted three figures from it that could not be reproduced (see `MarketCapScale` and
-    `tests/unit/test_factor_neutralization_rules.py::MEASURE_GAP_FLOOR`). Both halves of the rule's
-    reason were absent: `version` is documented as bumped when the *meaning* changes, and no
-    setting moved -- and the cost the rule protects against is stored
-    `neutralization_manifest_id`s becoming unreproducible, of which there were none, because
-    nothing in `cli.py` or `scripts/` builds a neutralisation yet. A bump would have claimed a
-    second neutralisation policy that does not exist. **The window closes when `V2-P3-014` writes
-    the first partition**; after that the rule has no exception, because the cost stops being zero.
-    """
 
     @field_validator("key")
     @classmethod
@@ -628,6 +606,8 @@ class FactorNeutralizationRegistry:
     """
 
     specs: tuple[FactorNeutralizationSpec, ...]
+    notes: tuple[FactorNote, ...] = ()
+    """The prose about these specs, out of every content address. See `factor.FactorNote`."""
 
     def __post_init__(self) -> None:
         if not self.specs:
@@ -642,6 +622,24 @@ class FactorNeutralizationRegistry:
                 f"{duplicates} is declared more than once; two specs answering to one name make "
                 "a lookup arbitrary -- bump `version` on the restatement"
             )
+        validate_notes(
+            self.notes,
+            declared=tuple(keys),
+            role="neutralisation",
+            error=FactorNeutralizationError,
+        )
+
+    def note_for(self, qualified_key: str) -> str | None:
+        """The prose about `key/vN`, or `None` when this registry carries none for it.
+
+        `FactorRegistry.note_for`'s contract, including that an undeclared handle is refused by
+        `get` rather than answered `None`.
+        """
+        self.get(qualified_key)
+        for note in self.notes:
+            if note.subject == qualified_key:
+                return note.summary
+        return None
 
     @property
     def qualified_keys(self) -> tuple[str, ...]:

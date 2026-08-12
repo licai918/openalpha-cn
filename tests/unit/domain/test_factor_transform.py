@@ -36,6 +36,7 @@ from pydantic import ValidationError
 from openalpha_cn.domain.factor import (
     FACTOR_COVERAGE_CODES,
     FactorCoverage,
+    FactorNote,
     FactorObservation,
 )
 from openalpha_cn.domain.factor_transform import (
@@ -85,7 +86,6 @@ def _spec(**overrides: Any) -> FactorTransformSpec:
         "standardization": "zscore",
         "missing_values": _policy(),
         "min_cross_section": 50,
-        "summary": "a probe transform",
         **overrides,
     }
     return FactorTransformSpec(**settings)
@@ -159,7 +159,6 @@ _SPEC_VARIATIONS: Final[tuple[tuple[str, dict[str, Any]], ...]] = (
     ("missing_values.input_missing", {"missing_values": _policy(input_missing="exclude")}),
     ("missing_values.undefined_value", {"missing_values": _policy(undefined_value="exclude")}),
     ("min_cross_section", {"min_cross_section": 51}),
-    ("summary", {"summary": "a different probe transform"}),
 )
 """Every declared field of `FactorTransformSpec`, including the nested policies', and one way to
 move each. `schema_version` is a `Literal` with one member and is covered by the field-set
@@ -214,30 +213,29 @@ def test_a_transform_key_that_could_not_be_a_panel_identifier_is_refused() -> No
         _spec(key="probe/v2")
 
 
-def test_a_prose_only_edit_moves_the_identity_and_changes_no_number() -> None:
-    """`summary` is prose, it is inside `transform_id`, and that is a disclosed defect.
+def test_prose_cannot_reach_this_identity_because_it_cannot_enter_this_contract() -> None:
+    """The defect this test used to *pin* rather than fix, now measured as closed.
 
-    The exact shape `FactorTransformManifest`'s docstring refuses `date_timezone` for -- a field
-    that "reaches the identity and decides nothing" -- sitting inside the identity already. Two
-    specs differing in one character of prose declare the same winsorization, the same
-    standardization, the same floor and the same four actions, and get two `transform_id`s;
-    every build stored under the first is then a build `FACTOR_TRANSFORMS.by_id` cannot resolve.
+    It read: "`summary` is prose, it is inside `transform_id`, and that is a disclosed defect" --
+    the exact shape `FactorTransformManifest`'s docstring refuses `date_timezone` for, a field
+    that reaches the identity and decides nothing. Two specs differing in one character of prose
+    declared the same winsorization, standardization, floor and four actions and got two
+    `transform_id`s, so every build stored under the first became one `FACTOR_TRANSFORMS.by_id`
+    could not resolve. It was left in place because `FactorDefinition.summary` had been inside
+    `factor_id` since `V2-P3-001` and removing one alone would leave the identity contracts
+    disagreeing.
 
-    It is not fixed here: `FactorDefinition.summary` has been inside `factor_id` since
-    `V2-P3-001`, so removing it would either leave the two identity contracts disagreeing or move
-    every stored `factor_id`. It is *pinned*, so that the cost is a measurement in the suite
-    rather than a sentence in a docstring, and so that a later decision to take it out has a test
-    to delete rather than a claim to re-derive.
+    All three dropped it together, so the statement is now structural rather than conventional:
+    there is no `summary=` to pass. The prose lives in `factor.FactorNote`, which no
+    `stable_model_id` is applied to, and the note's own registry is what
+    `tests/unit/domain/test_factor.py::test_a_prose_edit_moves_no_identity_because_prose_is_not
+    _a_field` measures across two spellings of one sentence.
     """
-    original = _spec(summary="clip the tails, then z-score")
-    typo_fixed = _spec(summary="clip the tails, then z-score.")
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        _spec(summary="clip the tails, then z-score")
 
-    assert original.transform_id != typo_fixed.transform_id
-    assert original.winsorization == typo_fixed.winsorization
-    assert original.standardization == typo_fixed.standardization
-    assert original.missing_values == typo_fixed.missing_values
-    assert original.min_cross_section == typo_fixed.min_cross_section
-    assert original.qualified_key == typo_fixed.qualified_key
+    assert "summary" not in FactorTransformSpec.model_fields
+    assert "summary" not in FactorTransformManifest.model_fields
 
 
 def test_the_floor_bound_is_a_range_check_and_admits_a_transform_wider_than_the_market() -> None:
@@ -692,6 +690,22 @@ def test_the_registry_resolves_a_spec_by_name_and_by_content_address() -> None:
         registry.get("absent/v1")
     with pytest.raises(FactorTransformError, match="not a transform this build declares"):
         registry.by_id("ftx_absent")
+
+
+def test_the_registry_resolves_prose_and_refuses_it_for_an_undeclared_handle() -> None:
+    """`note_for` on this registry answers `FactorRegistry.note_for`'s three ways, and the
+    middle one is the reason the method is not a plain dict lookup: a spec this registry declares
+    and has nothing written about answers `None`, while a handle it does not declare at all is a
+    fault and goes through `get`. A dict would answer `None` to both."""
+    written = FactorNote(subject="probe/v1", summary="clip nothing, then z-score")
+    registry = FactorTransformRegistry((_spec(), _spec(key="other")), notes=(written,))
+
+    assert registry.note_for("probe/v1") == written.summary
+    assert registry.note_for("other/v1") is None
+    with pytest.raises(FactorTransformError, match="not a declared transform"):
+        registry.note_for("absent/v1")
+    with pytest.raises(FactorTransformError, match="is not a declared transform, so its note"):
+        FactorTransformRegistry((_spec(),), notes=(FactorNote(subject="ghost/v1", summary="x"),))
 
 
 def _statistics(**overrides: Any) -> FactorTransformStatistics:
