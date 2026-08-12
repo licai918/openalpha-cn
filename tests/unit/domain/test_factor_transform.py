@@ -214,6 +214,54 @@ def test_a_transform_key_that_could_not_be_a_panel_identifier_is_refused() -> No
         _spec(key="probe/v2")
 
 
+def test_a_prose_only_edit_moves_the_identity_and_changes_no_number() -> None:
+    """`summary` is prose, it is inside `transform_id`, and that is a disclosed defect.
+
+    The exact shape `FactorTransformManifest`'s docstring refuses `date_timezone` for -- a field
+    that "reaches the identity and decides nothing" -- sitting inside the identity already. Two
+    specs differing in one character of prose declare the same winsorization, the same
+    standardization, the same floor and the same four actions, and get two `transform_id`s;
+    every build stored under the first is then a build `FACTOR_TRANSFORMS.by_id` cannot resolve.
+
+    It is not fixed here: `FactorDefinition.summary` has been inside `factor_id` since
+    `V2-P3-001`, so removing it would either leave the two identity contracts disagreeing or move
+    every stored `factor_id`. It is *pinned*, so that the cost is a measurement in the suite
+    rather than a sentence in a docstring, and so that a later decision to take it out has a test
+    to delete rather than a claim to re-derive.
+    """
+    original = _spec(summary="clip the tails, then z-score")
+    typo_fixed = _spec(summary="clip the tails, then z-score.")
+
+    assert original.transform_id != typo_fixed.transform_id
+    assert original.winsorization == typo_fixed.winsorization
+    assert original.standardization == typo_fixed.standardization
+    assert original.missing_values == typo_fixed.missing_values
+    assert original.min_cross_section == typo_fixed.min_cross_section
+    assert original.qualified_key == typo_fixed.qualified_key
+
+
+def test_the_floor_bound_is_a_range_check_and_admits_a_transform_wider_than_the_market() -> None:
+    """`min_cross_section`'s upper bound does **not** rule out a floor above the whole market,
+    and the docstring no longer says it does.
+
+    It read that 10,000 is "comfortably above the ~5,500-name whole-market cross section ...
+    a `min_cross_section` above the market is a transform that can never produce anything, which
+    is the vacuity `FactorRegistry` refuses an empty registry for". A bound of 10,000 admits
+    exactly that transform, which is what the first two assertions measure. The rest is why that
+    is acceptable rather than a hole: a floor above the cross section is an *answer* --
+    `insufficient_cross_section` for every security, with the participant count recorded -- and
+    not an error, so refusing it at declaration time would be hard-coding today's listing count
+    into a contract.
+    """
+    above_the_market = _spec(min_cross_section=10_000)
+
+    assert above_the_market.min_cross_section == 10_000
+    with pytest.raises(ValidationError, match="less than or equal to 10000"):
+        _spec(min_cross_section=10_001)
+    with pytest.raises(ValidationError, match="greater than or equal to 1"):
+        _spec(min_cross_section=0)
+
+
 # --- the manifest's identity ---------------------------------------------------------------------
 
 
@@ -495,6 +543,39 @@ def test_the_observation_digest_refuses_a_duplicated_subject() -> None:
     """Two answers to one question would give two different cross sections one address."""
     with pytest.raises(FactorTransformError, match="appears more than once"):
         observation_digest([_observation(), _observation(value=0.30)])
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_a_non_finite_value_is_refused_by_a_message_that_names_the_security(value: float) -> None:
+    """`allow_nan=False` was already load-bearing; what it raised was not actionable.
+
+    The refusal is right -- a cross section carrying a nan has no reproducible content address,
+    so minting one is worse than failing. But `json.dumps` raises a bare
+    `ValueError: Out of range float values are not JSON compliant`, which names no security, no
+    dataset and no remedy, and the reader of it is holding a panel of thousands of rows. The
+    translation carries the subject and the door the row came through, which is the only door it
+    can have come through: `validate_factor_observation` refuses a non-finite value at both of
+    its call sites, so a subclass overrode `__post_init__`.
+    """
+
+    class _Unchecked(FactorObservation):
+        def __post_init__(self) -> None:
+            return None
+
+    smuggled = _Unchecked(
+        subject="600519.SH",
+        as_of=AS_OF,
+        value=value,
+        coverage="computed",
+        factor_id="fct_probe",
+        manifest_id="fmn_probe",
+        input_row_count=2,
+        input_session_first=None,
+        input_session_last=None,
+    )
+
+    with pytest.raises(FactorTransformError, match=r"600519\.SH.*non-finite value"):
+        observation_digest([_observation(), smuggled])
 
 
 # --- the processed observation's rules ------------------------------------------------------------

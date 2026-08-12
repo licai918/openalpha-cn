@@ -6,20 +6,43 @@
 `V2-P3-002` computes a raw factor observation per `(security, as_of)`. `V2-P3-003` turns one
 `as_of`'s cross section of those into a winsorized, standardized, missing-value-resolved cross
 section that is stored **beside** the raw one and never over it. The second half lives here
-rather than in a `panel_factor_transforms.py` of its own for three reasons, and the first is the
-only structural one:
+rather than in a `panel_factor_transforms.py` of its own, and the reasons are stated at the
+strength they actually have -- the first version of this list overstated the first one and is
+corrected here:
 
-- `apply_factor_transform` consumes a `FactorPanel` and `write_processed_factor_panels` files
-  its output under a dataset name built from the same `FactorDefinition`. A separate top-level
-  module would import this one for both, add a row to `tests/unit/
-  test_panel_ingest_import_isolation.py`'s dependency table, and -- because reading a processed
-  partition back has exactly the mid-year problem reading a raw one does -- would also have to
-  be added to `tests/unit/panel/test_visible_read_callers.py`'s `FILTERED_READ_CALLERS`. Two
-  allowlists widened to hold one function's worth of separation.
-- The two halves share `EVENT_TIME_COLUMN`, `FACTOR_PROVIDER_ID`, the dataset-name budget,
-  `_iso`, `_stored_value`, `_coverage_code` and `_refuse_to_drop_a_stored_build`. Splitting them
-  means either duplicating those or importing them across a seam that buys nothing.
-- The size is in family: `panel_ingest.py` is 3,221 lines.
+- **The shared surface is real and is the whole of it.** The two halves share
+  `EVENT_TIME_COLUMN`, `FACTOR_PROVIDER_ID`, the dataset-name budget, `_iso`, `_stored_value`,
+  `_coverage_code` and `_refuse_to_drop_a_stored_build`, and the processed plane's guards are
+  written as mirrors of the raw plane's (`_refuse_a_processed_panel_that_does_not_own_its_rows`
+  against `_refuse_a_source_panel_that_does_not_own_its_observations`,
+  `_refuse_two_applications_of_one_transform_at_one_as_of` against
+  `_refuse_two_builds_of_one_factor_at_one_as_of`). A split means duplicating those or importing
+  them across a seam, and it puts each mirror a file away from the thing it mirrors.
+- **A split module would add a row to `tests/unit/test_panel_ingest_import_isolation.py`'s
+  dependency table**, because `apply_factor_transform` consumes a `FactorPanel` and
+  `write_processed_factor_panels` files its output under a dataset name built from the same
+  `FactorDefinition`.
+- **What this list used to claim about a *second* allowlist is false for most of this code, and
+  saying so is worth more than the argument was.** It read that a split module would also have
+  to join `tests/unit/panel/test_visible_read_callers.py`'s `FILTERED_READ_CALLERS`, because
+  reading a processed partition back has the raw one's mid-year problem. That holds for exactly
+  two functions -- `load_processed_factor_observations` and `load_factor_transform_manifests` --
+  which with the requirements and decoders they need are the 268 lines below
+  "reading the processed plane back", out of the 1,809 this half occupies. The contracts, the
+  four estimators, `apply_factor_transform` and both batch builders call no store method at all,
+  so a module holding them would widen no allowlist at all. And a name added to
+  `FILTERED_READ_CALLERS` is not a guard relaxed: that constant's own docstring says "adding a
+  name here is a deliberate act with a review attached, which is the property this test exists
+  to create" -- the same designed extension path `KNOWN_STORAGE_LIMITATIONS` is, and the one
+  this issue used to extend it.
+- **The size is stated rather than excused.** At 3,912 lines this module is the largest in
+  `src/` (`providers/tushare.py`, 3,867, is now second) and larger than `panel_ingest.py`'s
+  3,221, so "in family" -- which this list said before the transform half landed -- is not true.
+  The seam a split would fall on is the one the third bullet found: the arithmetic and the
+  writers on one side, the two filtered readers on the other. That is not the raw/processed seam
+  this section is about, which is why it is not taken here; `V2-P3-004`'s neutralisation is the
+  next issue to add to this file and the point at which the trade should be re-taken with a
+  third transform's worth of evidence rather than a second's.
 
 What is *not* shared is the storage: a processed observation is a different record type in a
 different pair of datasets, which is D8's "与原值分离" and is argued in
@@ -188,7 +211,10 @@ transform of that factor, and two costs follow, both stated because neither is f
 
 - a read of one transform opens the rows of all of them and filters in Python
   (`load_processed_factor_observations`), because `read_visible_at` projects columns and does not
-  take a predicate;
+  take a predicate. Measured on a 2,000-name cross section: 32.8 ms with one transform in the
+  partition and 160.0 ms with eight, for the same 2,000 rows returned -- linear in the stored
+  rows and **4.9x** at eight. That loader's docstring carries the table and what `V2-P3-014`
+  should do about it;
 - a year of one factor's processed observations has to reach `write_processed_factor_panels` in
   one call **across every transform of it**, since `PanelStore.write_partition` replaces a
   partition whole. That is the `as_of`-axis constraint this module already documents, multiplied
@@ -2224,8 +2250,11 @@ TRANSFORM_MANIFEST_DATA_COLUMNS: Final[tuple[str, ...]] = (
 """One row per transform build. Three families, and only the first is in the content address.
 
 - **The ten head columns** are `FactorTransformManifest`'s own fields (minus `schema_version`),
-  so `_transform_manifest_from_rows` reassembles a build from them and checks that the identity
-  it reproduces is the one the row was stored under.
+  so `_transform_manifest_from_row` reassembles a build from them and checks that the identity it
+  reproduces is the one the row was stored under. "Head" is a description of this literal and not
+  a requirement on it: that decoder addresses cells by column *name*, so moving a hashed field
+  down the tuple would change nothing at run time. What the grouping buys is that
+  `_TRANSFORM_MANIFEST_HEAD_COLUMNS` can be a slice instead of a second list.
 - **The declared policy** -- the winsorization method and its parameters, the standardization
   method, `min_cross_section` and the four missing-value actions -- is a projection of
   `transform_id`, stored for `FactorBuildManifest.direction`'s reason and a sharper one: a
@@ -2249,13 +2278,20 @@ TRANSFORM_MANIFEST_PANEL_COLUMNS: Final[tuple[str, ...]] = (
 )
 
 _TRANSFORM_MANIFEST_HEAD_COLUMNS: Final[tuple[str, ...]] = TRANSFORM_MANIFEST_DATA_COLUMNS[:10]
-"""The ten columns `FactorTransformManifest` is reassembled from.
+"""The ten columns `FactorTransformManifest` is reassembled from -- an audit handle, not a
+run-time one.
 
-A slice of the tuple above rather than a second list, so the two cannot drift; the slice is
-reconciled against `FactorTransformManifest`'s own field set by
-`tests/unit/test_factor_transform_rules.py::
-test_the_stored_head_columns_are_exactly_the_hashed_manifests_own_fields`, which is what keeps
-`10` from being a number somebody has to remember.
+**Nothing in `src/` reads this.** `_transform_manifest_from_row` zips
+`TRANSFORM_MANIFEST_PANEL_COLUMNS` against the row and addresses every cell by name, so the
+hashed fields could sit anywhere in the tuple and the decoder would not notice. Its one consumer
+is `tests/unit/test_factor_transform_rules.py::
+test_the_stored_head_columns_are_exactly_the_hashed_manifests_own_fields`, which reconciles the
+slice against `FactorTransformManifest`'s own field set -- so an eleventh manifest field, or a
+hashed field that stopped being stored, fails there instead of at the first read-back. That is
+what keeps `10` from being a number somebody has to remember; it is not a claim that the column
+*order* is load-bearing.
+
+A slice of the tuple above rather than a second list, so the two cannot drift.
 """
 
 
@@ -3244,6 +3280,101 @@ def _refuse_a_scale_estimator_that_collapsed(
 # --- writing the processed plane --------------------------------------------------------------
 
 
+def _refuse_a_processed_panel_that_does_not_own_its_rows(panel: ProcessedFactorPanel) -> None:
+    """Refuse a processed panel whose four parts do not describe **one** application.
+
+    `_refuse_a_source_panel_that_does_not_own_its_observations`' mirror on the output side, and
+    it exists for that function's reason rather than for a new one: `ProcessedFactorPanel` is a
+    public frozen dataclass anybody can construct, `apply_factor_transform` never produces an
+    inconsistent one, and the write boundary is where a hand-assembled one becomes a column in a
+    Parquet file. The input side already had this guard; without this the output side did not.
+
+    **What a missing check actually stores.** The two batch builders below read one row's worth
+    of facts off three different fields. `transform_manifest_batch` takes its ten head columns
+    off `manifest` and its nine policy columns off `spec`; `processed_observation_batch` takes
+    `transform_key`/`transform_version` off `spec` and every other column off the rows; both take
+    the dataset name off `definition`. So `dataclasses.replace(result, spec=other)` is accepted
+    by every other guard and stores a manifest row whose `transform_id` names one transform and
+    whose `standardization_method` names another -- which falsifies
+    `TRANSFORM_MANIFEST_DATA_COLUMNS`' claim that the stored policy is *a projection of*
+    `transform_id`, and leaves a stored `value` column that reads as a z-score and is a centred
+    rank. `_transform_manifest_from_row`'s identity self-check cannot see it: the ten head
+    columns it reassembles are internally consistent, and the policy columns are not among them.
+
+    Row level as well as head level, and for `_refuse_a_source_panel_that_does_not_own_its_
+    observations`' exact argument one plane up: a row carrying another build's
+    `transform_manifest_id` is a pointer, written as a fact, at a manifest this partition does
+    not hold -- and `load_processed_factor_observations` filters on the row's own `transform_id`,
+    so a row whose `transform_id` is not the spec's is a row the transform that wrote it cannot
+    read back.
+
+    **Every identity is read once, above the row loop**, which is not style: `transform_id` and
+    `transform_manifest_id` are pydantic `computed_field`s and are not cached, so reading one
+    inside the comprehension re-hashes the model per security. This function was first written
+    with `spec.transform_id` in the predicate and measured at **24.4 ms** on a 5,534-name cross
+    section -- 27,675 `stable_model_id` calls for 5,534 rows -- against **0.19 ms** hoisted. That
+    is ADR-0003's recorded defect (a `computed_field` re-hashing a build manifest inside a
+    per-security loop) arriving a second time, inside the fix for something else, which is the
+    shape this repository's own lessons say to expect. Hoisted, both batch builders together
+    measure 14.7 ms at that scale against the 14.9 ms this module's docstring recorded for them
+    before the guard existed, so the check is free at the size it has to run at.
+    """
+    spec = panel.spec
+    manifest = panel.manifest
+    definition = panel.definition
+    transform_id = spec.transform_id
+    manifest_id = manifest.transform_manifest_id
+    source_factor_id = manifest.source_factor_id
+    source_manifest_id = manifest.source_manifest_id
+    as_of = manifest.as_of
+    mismatched = [
+        f"{column} is {stored!r} on the manifest and {declared!r} on the {origin}"
+        for column, stored, declared, origin in (
+            ("transform_id", manifest.transform_id, transform_id, "spec"),
+            ("transform_key", manifest.transform_key, spec.key, "spec"),
+            ("transform_version", str(manifest.transform_version), str(spec.version), "spec"),
+            ("source_factor_id", source_factor_id, definition.factor_id, "definition"),
+            ("source_factor_key", manifest.source_factor_key, definition.key, "definition"),
+            (
+                "source_factor_version",
+                str(manifest.source_factor_version),
+                str(definition.version),
+                "definition",
+            ),
+        )
+        if stored != declared
+    ]
+    if mismatched:
+        raise FactorEngineError(
+            f"this processed panel's manifest does not describe the transform and factor it "
+            f"carries ({'; '.join(mismatched)}); the stored identity columns come off the "
+            "manifest and the stored policy columns come off the spec, so a panel where the two "
+            "are not one application files one transform's numbers under another's transform_id "
+            "with a policy that never produced them -- and the head columns reassemble "
+            "consistently, so no reader could tell. Apply the transform rather than assembling "
+            "its result"
+        )
+    stray = sorted(
+        {
+            row.subject
+            for row in panel.observations
+            if row.transform_id != transform_id
+            or row.transform_manifest_id != manifest_id
+            or row.source_factor_id != source_factor_id
+            or row.source_manifest_id != source_manifest_id
+            or row.as_of != as_of
+        }
+    )
+    if stray:
+        raise FactorEngineError(
+            f"{stray[:5]}{'...' if len(stray) > 5 else ''} carry a transform, a build or an "
+            f"as_of that is not this panel's ({transform_id}, {manifest_id}, "
+            f"{source_manifest_id}, {as_of.isoformat()}); every processed row is filed under the "
+            "manifest row this same call writes, and a row naming another one is a pointer at a "
+            "build this partition does not hold"
+        )
+
+
 def processed_observation_batch(panel: ProcessedFactorPanel) -> ColumnarPanelBatch:
     """One transform's processed rows as a columnar batch, ready for the store.
 
@@ -3260,7 +3391,14 @@ def processed_observation_batch(panel: ProcessedFactorPanel) -> ColumnarPanelBat
     are the two provenance ones -- a `processed` row must come from a `computed` source and an
     `imputed` row must not -- because a violation of either stores a number this repository
     invented under the code that says a security produced it.
+
+    **The panel is checked as a whole first**, by
+    `_refuse_a_processed_panel_that_does_not_own_its_rows`: `transform_key` and
+    `transform_version` below come off `panel.spec` while every row's `transform_id` comes off
+    the row, so a panel whose spec is not the one that produced its rows would write two
+    transforms' names into one row.
     """
+    _refuse_a_processed_panel_that_does_not_own_its_rows(panel)
     observations = panel.observations
     for observation in observations:
         validate_processed_factor_observation(observation)
@@ -3311,7 +3449,13 @@ def transform_manifest_batch(panel: ProcessedFactorPanel) -> ColumnarPanelBatch:
     The census and the statistics are here for `factor_manifest_batch`'s reason: a build that
     processed nobody is otherwise indistinguishable in storage from one that standardized the
     whole market, and the objects that could say so speak only to a caller that thinks to ask.
+
+    **The ten head columns come off `manifest` and the nine policy columns come off `spec`**, so
+    `_refuse_a_processed_panel_that_does_not_own_its_rows` runs first: without it this function
+    is the one that writes a row whose `transform_id` and whose `standardization_method` describe
+    two different transforms, and the identity check on the way back cannot see it.
     """
+    _refuse_a_processed_panel_that_does_not_own_its_rows(panel)
     manifest = panel.manifest
     spec = panel.spec
     statistics = panel.statistics
@@ -3468,10 +3612,22 @@ def _refuse_two_applications_of_one_transform_at_one_as_of(
     differed only in their source build carry two identities and would still store two rows for
     every `(subject, as_of, transform_id)` -- which is a reader left to choose between them, the
     exact thing `_refuse_two_builds_of_one_factor_at_one_as_of` exists to prevent one plane down.
+
+    **All three components are read off `panel.manifest`, and that is the fix for a defect this
+    function had.** The transform half used to come from `panel.spec` -- a *declaration* -- while
+    the rows this call stores carry the observations' own `transform_id` and are filed under
+    `manifest.transform_manifest_id`. Two panels sharing a manifest and carrying two specs
+    therefore keyed apart and both were written: measured, two manifest rows under one
+    `transform_manifest_id` and sixteen processed rows for an eight-name cross section, which is
+    exactly the reader-left-to-choose this function's own docstring says it prevents.
+    `_refuse_a_processed_panel_that_does_not_own_its_rows` now refuses that panel outright at the
+    batch builders, and this key is off the manifest so the two guards cannot disagree about what
+    a duplicate is.
     """
     seen: dict[tuple[str, str, datetime], int] = {}
     for panel in panels:
-        key = (panel.spec.transform_id, panel.manifest.source_factor_id, panel.as_of)
+        manifest = panel.manifest
+        key = (manifest.transform_id, manifest.source_factor_id, manifest.as_of)
         seen[key] = seen.get(key, 0) + 1
     repeated = sorted(
         f"{transform_id} of {factor_id} at {as_of.isoformat()}"
@@ -3552,6 +3708,25 @@ def load_processed_factor_observations(
     transform's rows in one tuple -- would hand a caller z-scores and centred ranks mixed
     together under one type, with the filter left as an exercise; `load_factor_transform_manifests`
     is how a caller discovers which transforms a partition holds in order to ask for one.
+
+    **And the cost has a magnitude, because a cost stated without one is a cost nobody can plan
+    around.** Measured on a 2,000-name cross section at one `as_of`, storing `N` transforms of one
+    factor in the partition and then reading exactly one of them back (best of three warm reads):
+
+    | transforms in the partition | stored rows | rows returned | read |
+    |---|---|---|---|
+    | 1 | 2,000 | 2,000 | 32.8 ms |
+    | 2 | 4,000 | 2,000 | 51.4 ms |
+    | 4 | 8,000 | 2,000 | 88.4 ms |
+    | 8 | 16,000 | 2,000 | **160.0 ms** |
+
+    Linear in the stored rows and **4.9x at eight transforms for the same answer**. That factor
+    is the one `V2-P3-014` pays: a three-tier report holds raw, processed and neutralized at once,
+    and a year is 244 `as_of`s, so the multiplier lands on every one of them rather than on a
+    single read. The way out is not a predicate on this call -- `read_visible_at` has none -- but
+    a partition axis, and the dataset-name budget in this module's docstring is why there is not
+    one. `V2-P3-014` is where a report that needs several transforms should read the year once
+    and group in Python instead of calling this function per transform.
     """
     requirement = processed_factor_requirement(definition, years=years, as_of=as_of)
     dataset = requirement.dataset

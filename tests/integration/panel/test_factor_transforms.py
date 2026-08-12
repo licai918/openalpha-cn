@@ -47,17 +47,24 @@ from panel_fixtures import YEAR, GeneratedPanel, generate_panel, write_generated
 from openalpha_cn.domain.daily_prices import DAILY_DATASET
 from openalpha_cn.domain.factor import FactorDefinition, FactorField
 from openalpha_cn.domain.factor_transform import (
+    PROCESSED_COVERAGE_ORDER,
     FactorTransformSpec,
     MissingValuePolicy,
     ProcessedFactorObservation,
     WinsorizationPolicy,
 )
-from openalpha_cn.domain.panel_batch import ColumnarPanelBatch, PanelColumn, TimelineColumns
+from openalpha_cn.domain.panel_batch import (
+    SUBJECT_COLUMN_NAME,
+    ColumnarPanelBatch,
+    PanelColumn,
+    TimelineColumns,
+)
 from openalpha_cn.panel.catalog import KNOWN_STORAGE_LIMITATIONS, ReadinessRequirement
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import (
     CROSS_SECTION_STANDARD,
     REVERSAL_1D,
+    TRANSFORM_MANIFEST_DATA_COLUMNS,
     FactorEngineError,
     FactorPanel,
     ProcessedFactorPanel,
@@ -731,8 +738,15 @@ def test_the_shipped_transform_standardizes_a_cross_section_wide_enough_for_its_
 
     Three things are asserted as numbers rather than as shapes: the 1% winsorization clips two
     names at each end of a 120-name cross section (`ceil(119 * 0.01) = 2`), the deviation the
-    z-score divides by is the *winsorized* one and is more than eight times smaller than the raw
-    one, and the whole processed cross section sums to zero.
+    z-score divides by is the *winsorized* one and is more than two and a half times smaller than
+    the raw one, and the whole processed cross section sums to zero.
+
+    **The ratio in that sentence was wrong and the number below is what it always was.** It read
+    "more than eight times smaller" against pinned values of `raw_scale = 92.128623` and
+    `scale = 34.600725`, whose ratio is 2.6626 -- the very ratio the assertion under it tests.
+    (The "27 times" in `test_the_deviation_the_z_score_divides_by_is_the_winsorized_one` is
+    correct: 39.0128 / 1.4142 = 27.6. This fixture's outlier is one name in 120 rather than one
+    in six, so it moves the deviation by less.)
     """
     subjects = _wide_subjects()
     raw = compute_factor(
@@ -866,3 +880,443 @@ def test_an_input_missing_hole_is_imputed_with_the_processed_median_and_stored_a
     assert result.statistics.participant_count == WIDE_COUNT
     assert HOLED_SUBJECT not in result.measured_values()
     assert HOLED_SUBJECT in result.values()
+
+
+# --- what the stored manifest row actually says ---------------------------------------------------
+#
+# Everything above this line asserts on objects `apply_factor_transform` returned, or on the nine
+# processed columns `load_processed_factor_observations` decodes. The twenty-three columns below
+# are stored by `transform_manifest_batch` and reassembled by nothing -- `load_factor_transform_
+# manifests` deliberately does not put them back on a `FactorTransformManifest` -- so until this
+# section existed the suite asserted their *names* and never once read a value.
+#
+# Measured with a falsifier injected at the two batch builders, one column at a time, over the
+# four files that cover this issue: with these four tests deselected, **all twenty-four**
+# (the twenty-three plus `transform_manifest_id` on the processed rows) came back
+# `250 passed` -- twenty-four falsified partitions, zero red tests. With them selected, all
+# twenty-four go red, under each of three falsifications: `+1000` / `+1000.0` /
+# `"zzz_falsified"`, the same written as a constant, and the constant written over the nulls
+# too. That last one is why the four builds below are chosen the way they are -- see
+# `MAD_RANK_PROBE`.
+
+
+_UNREASSEMBLED_MANIFEST_COLUMNS: Final[tuple[str, ...]] = TRANSFORM_MANIFEST_DATA_COLUMNS[10:]
+"""Every stored transform-manifest column that no read path rebuilds an object out of.
+
+The head ten are covered by `_transform_manifest_from_row`'s own identity self-check, which is
+why they were the columns a falsification already failed on. These are the rest: the declared
+policy, the census and the statistics -- exactly the columns
+`TRANSFORM_MANIFEST_DATA_COLUMNS`, `PROCESSED_CENSUS_COLUMNS` and
+`test_the_stored_statistics_columns_make_a_declared_winsorization_falsifiable` justify at length
+and nothing read. Taken as a slice so that a twenty-fourth arriving with no expectation fails
+`_assert_the_partition_says_what_the_transform_measured`'s first line rather than passing
+silently.
+"""
+
+
+def _assert_the_partition_says_what_the_transform_measured(
+    store: PanelStore,
+    definition: FactorDefinition,
+    result: ProcessedFactorPanel,
+    expected: dict[str, object],
+) -> None:
+    """Read this build's manifest row off the partition and hold every column to a value.
+
+    Three bindings:
+
+    1. **Every one of the twenty-three** columns above is held to an expected value, by an
+       equality on the key set rather than by a list somebody keeps in step -- a twenty-fourth
+       arriving with no expectation fails on the first line.
+    2. **The processed rows' own `transform_manifest_id`** must be this build's. It is the
+       twenty-fourth stored column no read path checks: `_processed_observation_from_row` decodes
+       it with `str()`, so a wrong one round-trips cleanly and points every row at a manifest the
+       partition may not hold.
+    3. **The census columns are recounted against the processed rows in the other partition.**
+       This is what makes them falsifiable rather than merely asserted: a census column and the
+       rows it counts are written by two different functions out of two different objects, so a
+       build that stored one and not the other -- `PROCESSED_CENSUS_COLUMNS`' whole argument --
+       shows up as a disagreement between two partitions rather than as a number nobody compared
+       to anything.
+    """
+    assert len(_UNREASSEMBLED_MANIFEST_COLUMNS) == 23
+    assert set(expected) == set(_UNREASSEMBLED_MANIFEST_COLUMNS)
+    manifest_id = result.manifest.transform_manifest_id
+    rows = store.query(
+        factor_transform_manifest_dataset(definition),
+        year=YEAR,
+        columns=[SUBJECT_COLUMN_NAME, *_UNREASSEMBLED_MANIFEST_COLUMNS],
+    )
+    stored = {
+        str(row[0]): dict(zip(_UNREASSEMBLED_MANIFEST_COLUMNS, row[1:], strict=True))
+        for row in rows
+    }
+    assert manifest_id in stored, sorted(stored)
+    for name, want in expected.items():
+        found = stored[manifest_id][name]
+        assert found == (pytest.approx(want) if isinstance(want, float) else want), name
+
+    processed = store.query(
+        processed_factor_dataset(definition),
+        year=YEAR,
+        columns=["transform_id", "transform_manifest_id", "coverage"],
+    )
+    mine = [row for row in processed if row[0] == result.spec.transform_id]
+    assert mine
+    assert {row[1] for row in mine} == {manifest_id}
+    census = dict.fromkeys(PROCESSED_COVERAGE_ORDER, 0)
+    for row in mine:
+        census[str(row[2])] += 1
+    assert census == {code: expected[f"census_{code}"] for code in PROCESSED_COVERAGE_ORDER}
+
+
+def _wide_raw(
+    store: PanelStore,
+    subjects: tuple[str, ...],
+    universe: frozenset[str],
+    *,
+    score: Any = None,
+) -> FactorPanel:
+    """`compute_factor` over the wide probe partition, with the evaluator left substitutable.
+
+    The `score` hook exists for one case only -- a cross section where every name carries the
+    same number, which is the only way to reach `degenerate_cross_section` on a partition whose
+    scores are distinct by construction.
+    """
+    return compute_factor(
+        store,
+        WIDE_DEFINITION,
+        as_of=WIDE_AS_OF,
+        subjects=subjects,
+        universe=universe,
+        requirements={WIDE_DATASET: _wide_requirement()},
+        code_commit=COMMIT,
+        built_at=BUILT_AT,
+        evaluators={
+            WIDE_DEFINITION.qualified_key: score
+            or (lambda window: window.series(WIDE_DATASET, "score")[-1])
+        },
+    )
+
+
+MAD_RANK_PROBE: Final[FactorTransformSpec] = FactorTransformSpec(
+    key="probe_mad_rank",
+    version=2,
+    winsorization=WinsorizationPolicy(method="mad", mad_scale=3.0),
+    standardization="rank",
+    missing_values=MissingValuePolicy(
+        not_in_universe="refuse",
+        insufficient_history="fill_neutral",
+        input_missing="exclude",
+        undefined_value="fill_cross_sectional_median",
+    ),
+    min_cross_section=50,
+    summary="a probe whose four missing-value actions are four different actions",
+)
+"""A second shipped-shape transform that differs from `CROSS_SECTION_STANDARD` in **every**
+stored policy column, and whose four missing-value actions are four different actions.
+
+Both properties are deliberate and are what makes the assertions below falsify a constant rather
+than only a perturbation. A column every test expects `"exclude"` in is one a build could write
+`"exclude"` into unconditionally; here `missing_not_in_universe` is `"refuse"`,
+`missing_insufficient_history` is `"fill_neutral"`, `missing_input_missing` is `"exclude"` and
+`missing_undefined_value` is `"fill_cross_sectional_median"`, so no single constant satisfies
+this row and `CROSS_SECTION_STANDARD`'s at once. Same for `mad` against `quantile`, `rank`
+against `zscore`, `mad_scale=3.0` against two quantiles, and `50` against `100`.
+"""
+
+
+def test_the_stored_policy_census_and_statistics_are_the_ones_this_build_actually_used(
+    wide_store: PanelStore,
+) -> None:
+    """The shipped transform, with one name outside the universe and one hole to fill.
+
+    Every number here is reproducible by hand from `_wide_score`: 119 participants (`000001.SZ`
+    is out of the universe), a 1% winsorization at `(119 - 1) * 0.01 = 1.18` and `* 0.99 =
+    116.82`, so the bounds interpolate to 2.18 and 117.82 and clip two names at each end, and the
+    winsorized mean and population deviation are 60.0 and 34.312284. An independent
+    reimplementation of the quantile rule, the clip and the deviation agrees with all seven.
+    """
+    subjects = (*_wide_subjects(), HOLED_SUBJECT)
+    excluded = subjects[0]
+    raw = _wide_raw(wide_store, subjects, frozenset(subjects) - {excluded})
+    result = apply_factor_transform(
+        raw, CROSS_SECTION_STANDARD, code_commit=COMMIT, built_at=BUILT_AT
+    )
+    write_processed_factor_panels(wide_store, [result])
+
+    _assert_the_partition_says_what_the_transform_measured(
+        wide_store,
+        WIDE_DEFINITION,
+        result,
+        {
+            "winsorization_method": "quantile",
+            "winsorization_lower_quantile": 0.01,
+            "winsorization_upper_quantile": 0.99,
+            "winsorization_mad_scale": None,
+            "standardization_method": "zscore",
+            "min_cross_section": 100,
+            "missing_not_in_universe": "exclude",
+            "missing_insufficient_history": "exclude",
+            "missing_input_missing": "fill_cross_sectional_median",
+            "missing_undefined_value": "exclude",
+            "census_processed": 119,
+            "census_imputed": 1,
+            "census_source_not_computed": 1,
+            "census_insufficient_cross_section": 0,
+            "census_degenerate_cross_section": 0,
+            "participant_count": 119,
+            "winsorized_low_count": 2,
+            "winsorized_high_count": 2,
+            "imputed_count": 1,
+            "lower_bound": 2.18,
+            "upper_bound": 117.82,
+            "location": 60.0,
+            "scale": 34.312284,
+        },
+    )
+
+
+def test_the_stored_policy_columns_are_the_declared_policy_and_not_a_default(
+    wide_store: PanelStore,
+) -> None:
+    """`MAD_RANK_PROBE` end to end, because a policy column is only falsifiable against a second
+    policy.
+
+    This is the row that makes `TRANSFORM_MANIFEST_DATA_COLUMNS`' claim -- the stored policy is
+    "a projection of `transform_id`" -- mean something on a partition: a reader who cannot
+    resolve the `transform_id` finds `mad`, `3.0`, `rank`, `50` and four different missing-value
+    actions here, and finds `quantile`, `0.01`/`0.99`, `zscore`, `100` in the test above, so the
+    column is carrying the declaration rather than a shape.
+
+    The statistics are the mad rule's own: the median of `0..118, 1000` is 59.5, its median
+    absolute deviation is 30.0, so the interval is `59.5 +/- 90.0` and clips exactly the one
+    outlier at the top and nothing at the bottom. `rank` estimates no location and no scale, so
+    both are stored null -- which is the pair that would be silently plausible if nobody read
+    them.
+    """
+    subjects = (*_wide_subjects(), HOLED_SUBJECT)
+    raw = _wide_raw(wide_store, subjects, frozenset(subjects))
+    result = apply_factor_transform(raw, MAD_RANK_PROBE, code_commit=COMMIT, built_at=BUILT_AT)
+    write_processed_factor_panels(wide_store, [result])
+
+    _assert_the_partition_says_what_the_transform_measured(
+        wide_store,
+        WIDE_DEFINITION,
+        result,
+        {
+            "winsorization_method": "mad",
+            "winsorization_lower_quantile": None,
+            "winsorization_upper_quantile": None,
+            "winsorization_mad_scale": 3.0,
+            "standardization_method": "rank",
+            "min_cross_section": 50,
+            "missing_not_in_universe": "refuse",
+            "missing_insufficient_history": "fill_neutral",
+            "missing_input_missing": "exclude",
+            "missing_undefined_value": "fill_cross_sectional_median",
+            "census_processed": WIDE_COUNT,
+            "census_imputed": 0,
+            "census_source_not_computed": 1,
+            "census_insufficient_cross_section": 0,
+            "census_degenerate_cross_section": 0,
+            "participant_count": WIDE_COUNT,
+            "winsorized_low_count": 0,
+            "winsorized_high_count": 1,
+            "imputed_count": 0,
+            "lower_bound": -30.5,
+            "upper_bound": 149.5,
+            "location": None,
+            "scale": None,
+        },
+    )
+
+
+def test_a_degenerate_cross_section_stores_its_own_census_and_not_an_empty_one(
+    wide_store: PanelStore,
+) -> None:
+    """`PROCESSED_CENSUS_COLUMNS`' stated reason, driven: "a transform whose cross section was
+    too thin produces a partition full of nulls, which is byte-indistinguishable in storage from
+    a transform that ran and imputed nothing -- unless the counts are stored".
+
+    Here the cross section is not thin, it is flat: 120 names all carrying 7.0, so the
+    winsorization clips nobody, the z-score finds a zero deviation and every row is
+    `degenerate_cross_section` with no value. The stored `value` column is therefore identical to
+    the one the *next* test's build writes, and only `census_degenerate_cross_section == 120`
+    against `census_insufficient_cross_section == 120` tells the two apart.
+    """
+    subjects = _wide_subjects()
+    raw = _wide_raw(wide_store, subjects, frozenset(subjects), score=lambda window: 7.0)
+    result = apply_factor_transform(
+        raw, CROSS_SECTION_STANDARD, code_commit=COMMIT, built_at=BUILT_AT
+    )
+    write_processed_factor_panels(wide_store, [result])
+
+    _assert_the_partition_says_what_the_transform_measured(
+        wide_store,
+        WIDE_DEFINITION,
+        result,
+        {
+            "winsorization_method": "quantile",
+            "winsorization_lower_quantile": 0.01,
+            "winsorization_upper_quantile": 0.99,
+            "winsorization_mad_scale": None,
+            "standardization_method": "zscore",
+            "min_cross_section": 100,
+            "missing_not_in_universe": "exclude",
+            "missing_insufficient_history": "exclude",
+            "missing_input_missing": "fill_cross_sectional_median",
+            "missing_undefined_value": "exclude",
+            "census_processed": 0,
+            "census_imputed": 0,
+            "census_source_not_computed": 0,
+            "census_insufficient_cross_section": 0,
+            "census_degenerate_cross_section": WIDE_COUNT,
+            "participant_count": WIDE_COUNT,
+            "winsorized_low_count": 0,
+            "winsorized_high_count": 0,
+            "imputed_count": 0,
+            "lower_bound": 7.0,
+            "upper_bound": 7.0,
+            "location": None,
+            "scale": None,
+        },
+    )
+
+
+def test_a_cross_section_below_the_floor_stores_the_count_that_says_so(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """The other half of the pair, on the eight-name fixture panel and the shipped floor of 100.
+
+    `participant_count == 8` beside `census_insufficient_cross_section == 8` is the whole
+    disclosure: the build saw eight securities, declined to standardize them, and said which of
+    the two whole-panel reasons it was. Every bound and both estimators are null, because there
+    is no interval and nothing was estimated -- and a build that stored zeros there instead would
+    read as a winsorization that clipped at 0.0.
+    """
+    raw = _compute(store, panel)
+    result = apply_factor_transform(
+        raw, CROSS_SECTION_STANDARD, code_commit=COMMIT, built_at=BUILT_AT
+    )
+    write_processed_factor_panels(store, [result])
+
+    _assert_the_partition_says_what_the_transform_measured(
+        store,
+        REVERSAL_1D,
+        result,
+        {
+            "winsorization_method": "quantile",
+            "winsorization_lower_quantile": 0.01,
+            "winsorization_upper_quantile": 0.99,
+            "winsorization_mad_scale": None,
+            "standardization_method": "zscore",
+            "min_cross_section": 100,
+            "missing_not_in_universe": "exclude",
+            "missing_insufficient_history": "exclude",
+            "missing_input_missing": "fill_cross_sectional_median",
+            "missing_undefined_value": "exclude",
+            "census_processed": 0,
+            "census_imputed": 0,
+            "census_source_not_computed": 0,
+            "census_insufficient_cross_section": len(panel.securities),
+            "census_degenerate_cross_section": 0,
+            "participant_count": len(panel.securities),
+            "winsorized_low_count": 0,
+            "winsorized_high_count": 0,
+            "imputed_count": 0,
+            "lower_bound": None,
+            "upper_bound": None,
+            "location": None,
+            "scale": None,
+        },
+    )
+
+
+# --- the guards on the way out --------------------------------------------------------------------
+
+
+def test_a_write_of_a_panel_whose_spec_did_not_produce_it_is_refused_and_stores_nothing(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """`ProcessedFactorPanel` is a public frozen dataclass, and the write boundary now says so.
+
+    Measured before `_refuse_a_processed_panel_that_does_not_own_its_rows` existed, on a pair of
+    probe specs differing in every stored policy column: the write was accepted and the stored
+    manifest row read back as
+    `('ftm_3dbe...', 'ftx_bea6...', 'probe_a', 'rank', 'quantile', 1)` -- the first transform's
+    `transform_id` and `transform_key` beside the second's `standardization_method` and
+    `winsorization_method`, over a partition of the first transform's z-scores. The identity
+    self-check on the way back could not see it, because the ten head columns it reassembles were
+    consistent with each other.
+
+    The second assertion is the one that makes the refusal worth having: every guard runs before
+    the first write, so a refused call leaves no partition at all.
+    """
+    raw = _compute(store, panel)
+    write_factor_panels(store, [raw])
+    result = _apply(raw)
+
+    with pytest.raises(FactorEngineError, match="does not describe the transform and factor"):
+        write_processed_factor_panels(store, [dataclasses.replace(result, spec=RANK_SPEC)])
+
+    assert store.query(PROCESSED, year=YEAR, columns=[SUBJECT_COLUMN_NAME]) == []
+    assert store.query(TRANSFORM_MANIFESTS, year=YEAR, columns=[SUBJECT_COLUMN_NAME]) == []
+
+
+def test_two_panels_of_one_build_wearing_two_spec_labels_are_still_one_application(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """`_refuse_two_applications_of_one_transform_at_one_as_of` keyed on the *spec* and guarded
+    rows filed under the *manifest*, so relabelling one panel's spec split the key.
+
+    Measured before the fix: this write was accepted, the manifest partition came back holding
+    two rows under one `transform_manifest_id`, and `load_processed_factor_observations` returned
+    sixteen rows for an eight-name cross section -- two answers to one question, which is what
+    that function's docstring says it exists to prevent.
+    """
+    raw = _compute(store, panel)
+    write_factor_panels(store, [raw])
+    result = _apply(raw)
+
+    with pytest.raises(FactorEngineError, match="more than one application"):
+        write_processed_factor_panels(store, [result, dataclasses.replace(result, spec=RANK_SPEC)])
+
+    assert store.query(TRANSFORM_MANIFESTS, year=YEAR, columns=[SUBJECT_COLUMN_NAME]) == []
+
+
+def test_a_processed_partition_can_be_written_when_the_raw_one_never_was(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """The wider edge of the disclosed dangling-pointer limitation, which the entry first missed.
+
+    `KNOWN_STORAGE_LIMITATIONS.a_derived_partition_may_outlive_the_build_its_rows_point_at` said
+    `supersedes` is the only path to a processed row naming a build no partition holds, so the
+    pointer "requires a deliberate act that already names the build it is destroying". It does
+    not: **nothing requires the raw partition to have been written at all.** Write order is not
+    enforced across datasets, because this plane has no cross-dataset integrity -- which is the
+    entry's own first sentence, and the reason the narrower bound was wrong rather than merely
+    incomplete.
+
+    Asserted rather than left in prose for the reason the `supersedes` reproduction already is:
+    a disclosure whose only reader is a docstring is one the suite has no opinion about. This
+    one also fails in the useful direction -- close the hole and the second assertion goes red
+    with the disclosure that has to come out beside it.
+    """
+    raw = _compute(store, panel)
+    result = _apply(raw)
+
+    write_processed_factor_panels(store, [result])
+    stored = load_processed_factor_observations(
+        store, REVERSAL_1D, _spec(), years=(YEAR,), as_of=MID_WINDOW
+    )
+
+    assert len(stored) == len(panel.securities)
+    assert {item.source_manifest_id for item in stored} == {raw.manifest.manifest_id}
+    with pytest.raises(FactorEngineError, match="cannot be read at"):
+        load_factor_observations(store, REVERSAL_1D, years=(YEAR,), as_of=MID_WINDOW)
+
+    disclosure = {item.code: item.detail for item in KNOWN_STORAGE_LIMITATIONS}
+    assert (
+        "nothing requires the raw partition to have been written at all"
+        in (disclosure["a_derived_partition_may_outlive_the_build_its_rows_point_at"])
+    )

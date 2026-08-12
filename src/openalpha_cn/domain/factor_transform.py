@@ -574,12 +574,51 @@ class FactorTransformSpec(BaseModel):
     defensible choice for a `rank` transform and a poor one for a 1% quantile winsorization; the
     contract's job is to record which was chosen, not to choose.
 
-    The upper bound is 10,000, comfortably above the ~5,500-name whole-market cross section
-    ADR-0002 sizes the panel plane against: a `min_cross_section` above the market is a transform
-    that can never produce anything, which is the vacuity `FactorRegistry` refuses an empty
-    registry for.
+    **The upper bound is 10,000, and it is a range check on a stored integer rather than a
+    vacuity guard.** That distinction is written out because the obvious reading is wrong and was
+    written here once: 10,000 is *above* the ~5,500-name whole-market cross section ADR-0002
+    sizes the panel plane against, so a spec that can never produce a value on today's market --
+    `min_cross_section=10000` -- is declarable and this contract accepts it. Measured: 10,000
+    validates, 10,001 does not, and the shipped registry's own market is 5,534 names. A bound
+    that permits the case it is said to rule out is not a guard, so the guard is not claimed.
+
+    **It is not claimed for a reason, and the reason is that the vacuity is an answer here.** A
+    floor above the cross section produces `insufficient_cross_section` for every security, with
+    the participant count stored on the manifest -- the same coded, auditable outcome a genuinely
+    thin cross section at some historical `as_of` produces, which `apply_factor_transform`
+    deliberately does not raise on. `FactorRegistry`'s empty-registry refusal is not the analogy:
+    an empty registry has nothing to answer *with*, while this has an answer and stores it.
+    Refusing a high floor at declaration time would also mean hard-coding today's listing count
+    into a contract, so a listing wave -- or a caller declaring a transform for a single-industry
+    cross section of 40 names -- would be arguing with a constant nobody re-measured.
+
+    What 10,000 buys, then, is what a `Field(le=...)` buys anywhere: the stored
+    `min_cross_section` column holds a plausible cross-section size rather than an unbounded
+    integer, and a caller who typed a share count into it is refused at the contract instead of
+    at the first build. `tests/unit/domain/test_factor_transform.py::
+    test_the_floor_bound_is_a_range_check_and_admits_a_transform_wider_than_the_market` holds
+    both halves, so the justification cannot drift back to the one this bound does not support.
     """
     summary: str = Field(min_length=1, max_length=2000)
+    """Why these settings, in prose, for the reader of a stored partition.
+
+    **It is in `transform_id`, and that is a known defect rather than a design.** Prose decides
+    nothing: fixing a typo here moves `transform_id`, therefore every stored build's
+    `transform_manifest_id`, without changing a single number -- which is precisely the shape
+    `FactorTransformManifest`'s docstring rejects `date_timezone` for ("reaches the identity and
+    decides nothing"). The two are not symmetric enough to fix the same way: `date_timezone`
+    was a field being *considered*, and this one is an existing convention --
+    `FactorDefinition.summary` has been inside `factor_id` since `V2-P3-001`, so taking it out
+    here would either leave the two identity contracts disagreeing or move every stored
+    `factor_id` in the tree.
+
+    So it stays, and the cost is stated instead of the claim being softened: **edit this string
+    only together with a version bump**, since a build whose numbers are unchanged and whose ID
+    moved is one `_refuse_to_drop_a_stored_build` will treat as a new build.
+    `tests/unit/domain/test_factor_transform.py::
+    test_a_prose_only_edit_moves_the_identity_and_changes_no_number` pins the defect as a
+    measurement, so it cannot be quietly inherited a third time.
+    """
 
     @field_validator("key")
     @classmethod
@@ -717,6 +756,13 @@ def observation_digest(observations: Sequence[FactorObservation]) -> str:
     rather than inherited: a non-finite value cannot reach a stored observation (three separate
     guards see to that), and if one ever did, this function refuses to hash it rather than
     minting an address for a cross section that cannot be reproduced.
+
+    **That refusal is translated rather than propagated.** `json.dumps` raises a bare
+    `ValueError("Out of range float values are not JSON compliant")`, which names no security, no
+    dataset and no remedy -- the reader of it is somebody holding a panel of thousands of rows
+    with no way to find the one. The reachable path is a `FactorObservation` subclass that
+    overrode `__post_init__` -- the same door `validate_factor_observation`'s two call sites
+    exist for -- so the message says which subjects carry it and which code they belong under.
     """
     subjects = [item.subject for item in observations]
     if len(set(subjects)) != len(subjects):
@@ -727,9 +773,25 @@ def observation_digest(observations: Sequence[FactorObservation]) -> str:
             "cross sections one address"
         )
     payload = sorted([item.subject, item.coverage, item.value] for item in observations)
-    canonical = json.dumps(
-        payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False
-    ).encode()
+    try:
+        canonical = json.dumps(
+            payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+        ).encode()
+    except ValueError as error:
+        offending = sorted(
+            item.subject
+            for item in observations
+            if item.value is not None and not math.isfinite(item.value)
+        )
+        raise FactorTransformError(
+            f"{offending} carry a non-finite value (nan or an infinity) in the source cross "
+            "section, so it has no content address: the canonical form this digest hashes "
+            "refuses one, and hashing a substitute would mint an address for a cross section "
+            "nobody can reproduce. A non-finite raw value belongs under the undefined_value "
+            "coverage code with value None, and validate_factor_observation refuses it at both "
+            "of its call sites -- a row carrying one reached this panel through a "
+            "FactorObservation subclass that overrode __post_init__"
+        ) from error
     return f"obs_{sha256(canonical).hexdigest()[:24]}"
 
 
@@ -757,6 +819,13 @@ class FactorTransformManifest(BaseModel):
     partition **year** a row belongs to -- a storage question, settled at the write, exactly as
     it is for `write_factor_panels`. A field here would be one that reaches the identity and
     decides nothing, which is the mirror image of the defect roadmap section 9 records.
+
+    **One field already in this identity has that property, and it is named rather than left for
+    a reader to notice.** `transform_id` is a hash of `FactorTransformSpec`, whose `summary` is
+    prose -- so a typo fixed there moves every stored `transform_manifest_id` and changes no
+    number. See `FactorTransformSpec.summary`: it is an inherited convention
+    (`FactorDefinition.summary` sits inside `factor_id` the same way), which is why it is
+    disclosed with its cost instead of being used to argue `date_timezone` back in.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)

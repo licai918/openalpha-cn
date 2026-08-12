@@ -29,7 +29,11 @@ reassembles to its own identity are each refused where the dataset can be named.
 
 from __future__ import annotations
 
+import ast
+import dataclasses
+from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Final
 
 import pytest
@@ -92,11 +96,14 @@ from openalpha_cn.panel_factors import (
     _quantile,
     _quantile_bounds,
     _refuse_transform_table_drift,
+    _refuse_two_applications_of_one_transform_at_one_as_of,
     _stored_processed_value,
     _transform_manifest_from_row,
     apply_factor_transform,
     factor_transform_manifest_dataset,
     processed_factor_dataset,
+    processed_observation_batch,
+    transform_manifest_batch,
 )
 
 AS_OF: Final[datetime] = datetime(2026, 1, 12, 4, 0, tzinfo=UTC)
@@ -912,6 +919,129 @@ def test_a_neutral_fill_with_no_neutral_point_is_refused_where_it_is_applied() -
         _fill_with_the_neutral_value(_FillContext(processed_median=0.5, neutral=None))
 
 
+# --- the same door on the way out ----------------------------------------------------------------
+#
+# `ProcessedFactorPanel` is a public frozen dataclass for exactly the reason `FactorPanel` is, and
+# the guards above were only on the way in. Everything below drives
+# `_refuse_a_processed_panel_that_does_not_own_its_rows`, which is what closes the output side.
+
+
+_OTHER_SPEC: Final[FactorTransformSpec] = _spec(
+    key="probe_other",
+    winsorization=WinsorizationPolicy(method="quantile", lower_quantile=0.05, upper_quantile=0.95),
+    standardization="rank",
+    summary="a second probe, differing in every stored policy column",
+)
+
+
+def _processed_panel(**overrides: Any) -> ProcessedFactorPanel:
+    result = _apply(_panel(_cross_section(1.0, 2.0, 3.0)), _spec())
+    return dataclasses.replace(result, **overrides)
+
+
+@pytest.mark.parametrize("build", [processed_observation_batch, transform_manifest_batch])
+def test_a_processed_panel_carrying_a_spec_that_did_not_produce_it_reaches_no_column(
+    build: Callable[[ProcessedFactorPanel], object],
+) -> None:
+    """The defect this guard closes, at both of the boundaries that would have written it.
+
+    `transform_manifest_batch` takes its ten head columns off `panel.manifest` and its nine
+    policy columns off `panel.spec`, and nothing reconciled the two. Measured before the guard:
+    `dataclasses.replace(result, spec=other)` stored one row whose `transform_id` and
+    `transform_key` were the first transform's and whose `standardization_method` was `'rank'`
+    and `winsorization_method` `'quantile'` -- neither of which produced the z-scores in the
+    processed partition beside it. `_transform_manifest_from_row`'s identity self-check cannot
+    see it, because it reassembles only the ten head columns and those agree with each other.
+
+    That falsifies `TRANSFORM_MANIFEST_DATA_COLUMNS`' stated reason for storing the policy at all
+    -- "a projection of `transform_id`" -- and it falsifies it in the direction that matters,
+    since the columns exist because "a processed `value` column is *uninterpretable* without
+    knowing whether it is a z-score, a centred rank or a raw winsorized number".
+    """
+    with pytest.raises(FactorEngineError, match="does not describe the transform and factor"):
+        build(_processed_panel(spec=_OTHER_SPEC))
+
+
+def test_a_processed_panel_filed_under_another_factors_definition_reaches_no_column() -> None:
+    """The definition half of the same guard, and it is not decoration: the *dataset name* both
+    batches are filed under comes off `panel.definition` while `source_factor_id` comes off the
+    manifest, so a mismatched pair writes a row into one factor's partition claiming to be about
+    another's -- `_refuse_a_source_panel_that_does_not_own_its_observations`' failure mode with
+    the arrow reversed."""
+    other = FactorDefinition(
+        key="other_probe",
+        version=1,
+        family="value",
+        direction="higher_is_better",
+        required_fields=(FactorField(dataset="daily", column="close"),),
+        lookback_sessions=2,
+        max_window_sessions=2,
+        summary="a second definition",
+    )
+
+    with pytest.raises(FactorEngineError, match="source_factor_id is"):
+        transform_manifest_batch(_processed_panel(definition=other))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("transform_id", "ftx_somebody_elses_transform"),
+        ("transform_manifest_id", "ftm_somebody_elses_build"),
+        ("source_manifest_id", "fmn_somebody_elses_build"),
+    ],
+)
+def test_a_processed_row_pointing_at_another_build_reaches_no_column(
+    field: str, value: str
+) -> None:
+    """One row at a time, because one row is all it takes.
+
+    A row's `transform_manifest_id` is the pointer at the manifest row the *same call* writes,
+    and `load_processed_factor_observations` filters on the row's own `transform_id` -- so a row
+    carrying another transform's is a row the transform that stored it cannot read back, and a
+    row carrying another build's `source_manifest_id` is the dangling pointer
+    `_refuse_a_source_panel_that_does_not_own_its_observations` refuses on the way in.
+    """
+    result = _apply(_panel(_cross_section(1.0, 2.0, 3.0)), _spec())
+    first, *rest = result.observations
+    tampered = dataclasses.replace(
+        result, observations=(dataclasses.replace(first, **{field: value}), *rest)
+    )
+
+    with pytest.raises(FactorEngineError, match="carry a transform, a build or an as_of"):
+        processed_observation_batch(tampered)
+
+
+def test_the_two_batch_builders_agree_that_a_well_formed_panel_is_well_formed() -> None:
+    """The direction an audit is worthless without: `apply_factor_transform`'s own output passes
+    both guards, so the refusals above are about hand-assembly rather than about the engine."""
+    result = _apply(_panel(_cross_section(1.0, 2.0, 3.0)), _spec())
+
+    assert processed_observation_batch(result).dataset == PROCESSED
+    assert transform_manifest_batch(result).dataset == TRANSFORM_MANIFESTS
+
+
+def test_two_panels_sharing_a_manifest_are_one_application_however_their_specs_are_labelled() -> (
+    None
+):
+    """`_refuse_two_applications_of_one_transform_at_one_as_of` keyed on `panel.spec` and the
+    rows it guards are filed under `panel.manifest`, so the two disagreed about what a duplicate
+    is. Measured before the fix: `[result, replace(result, spec=other)]` was accepted, the
+    manifest partition came back holding **two rows under one `transform_manifest_id`**, and an
+    eight-name cross section read back as sixteen processed rows -- "a reader left to choose
+    between them", which is the thing that function's own docstring says it exists to prevent.
+
+    Keyed off the manifest now, and asserted here without a store because the key is a pure
+    function of the panels.
+    """
+    result = _apply(_panel(_cross_section(1.0, 2.0, 3.0)), _spec())
+
+    with pytest.raises(FactorEngineError, match="more than one application"):
+        _refuse_two_applications_of_one_transform_at_one_as_of(
+            [result, dataclasses.replace(result, spec=_OTHER_SPEC)]
+        )
+
+
 # --- the stored shape ----------------------------------------------------------------------------
 
 
@@ -1030,6 +1160,36 @@ def test_the_stored_statistics_columns_make_a_declared_winsorization_falsifiable
         "location",
         "scale",
     } <= set(TRANSFORM_MANIFEST_DATA_COLUMNS)
+
+
+def test_the_head_column_slice_is_an_audit_handle_and_nothing_in_src_reads_it() -> None:
+    """`_TRANSFORM_MANIFEST_HEAD_COLUMNS` describes the stored layout; it does not enforce it.
+
+    Its docstring used to read as though the column *order* were load-bearing -- "the ten columns
+    `FactorTransformManifest` is reassembled from". It is not: `_transform_manifest_from_row`
+    zips `TRANSFORM_MANIFEST_PANEL_COLUMNS` against the row and addresses every cell by name, so
+    a hashed field moved down the tuple would change nothing at run time. The constant's only
+    consumer is the test below, and this asserts that -- an `ast.Load` of the name anywhere in
+    `src/` would mean the correction has gone stale and the constant has acquired a run-time job
+    that needs its own argument.
+    """
+    source_root = Path(__file__).resolve().parents[2] / "src" / "openalpha_cn"
+    name = "_TRANSFORM_MANIFEST_HEAD_COLUMNS"
+    mentions = {
+        path.relative_to(source_root).as_posix()
+        for path in source_root.rglob("*.py")
+        if name in path.read_text(encoding="utf-8")
+    }
+    read_sites = [
+        node
+        for node in ast.walk(
+            ast.parse((source_root / "panel_factors.py").read_text(encoding="utf-8"))
+        )
+        if isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, ast.Load)
+    ]
+
+    assert mentions == {"panel_factors.py"}
+    assert read_sites == []
 
 
 def test_the_stored_head_columns_are_exactly_the_hashed_manifests_own_fields() -> None:
