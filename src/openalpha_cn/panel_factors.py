@@ -150,8 +150,9 @@ below reads one year per call, and a January window naming the previous year wou
 refused for a reach that is a look-back window old by construction. `read_visible_at` pools the
 re-decided checks over `requirement.years`, so the bound this engine forces callers to state
 bounds the age of the *answer* -- see that method for the measurement, and
-`tests/integration/panel/test_factor_engine.py::test_a_declared_freshness_bound_survives_the_
-cross_year_window_it_has_to_allow` for both directions of it.
+`tests/integration/panel/test_factor_engine.py::
+test_a_declared_freshness_bound_survives_the_cross_year_window_it_has_to_allow` for both
+directions of it.
 
 **The alternative was measured, not assumed.** The cost of *not* filtering is a panel rebuilt
 once per `as_of` (P2's technical acceptance put it at 120x a single annual build); the cost of
@@ -1067,7 +1068,6 @@ def compute_factor(
             in_universe=subject in listed,
             readings=readings,
             panel_sessions=panel_sessions,
-            panel_periods=panel_periods,
             evaluator=evaluator,
             manifest_id=manifest_id,
         )
@@ -1107,15 +1107,24 @@ def _panel_axis_points(
     The engine's own calendar for that axis, and the *only* one it has: `compute_factor` is not
     given a `TradingCalendar` and must not build one, for the reason it is not given a universe --
     a second source for "which days were open" is a second thing that can disagree with the
-    partition it is reading. The same argument decides the period axis and decides it more
-    sharply: a fiscal-quarter arithmetic of this module's own devising would have to rule on what
-    quarter a non-quarter-end `end_date` belongs to, and the union of the periods actually stored
-    needs no such rule.
+    partition it is reading.
 
-    Two checks read it, and both are exact rather than heuristic because a security's own points
-    are always a subset of the panel's: whether any security could satisfy the reach at all
-    (`_refuse_a_panel_narrower_than_the_lookback`), and how many points a formed window spans
-    (`_window_span`).
+    **On the session axis that is a calendar. On the period axis it is a census, and the
+    difference is load-bearing.** Every security in a cross section is quoted on every open day,
+    so a session absent from this union is a session the market was closed -- the union *is* the
+    trading calendar of the read. Report periods have no such property: a period absent from the
+    union means only that nobody in this build filed it, which is one witness away from meaning
+    nothing at all. Measured, on one corpus and one security, changing only whether some *other*
+    security filed the missing period: `computed` with a fifteen-month "year-on-year" when nobody
+    did, `insufficient_history` when one did. So the span check no longer counts on this union for
+    periods -- it counts on `FISCAL_QUARTER_ENDS`, which is knowable without reading a row; see
+    `_period_span`.
+
+    What still reads it on **both** axes is `_refuse_a_panel_narrower_than_the_lookback`, and
+    there the census is exactly the right question: a security's own points are always a subset of
+    the panel's, so a panel holding fewer points than the reach makes `insufficient_history` for
+    the whole cross section arithmetic. That is a statement about what this read can answer, not
+    about what the world contains.
     """
     points: set[date] = set()
     for reading in readings.values():
@@ -1316,17 +1325,49 @@ def _read_dataset(
 
     So the refusal that fired before this axis existed still fires: under a session index the
     same-day duplicates collided on `(subject, event_time)` and raised, and under a period index
-    they collide on `(subject, period)` at one announcement and raise. What stopped raising is the
-    case that was never a duplicate at all -- an annual and a Q1 disclosed on one day, two periods
+    they collide on `(subject, period, announcement)` and raise. What stopped raising is the case
+    that was never a duplicate at all -- an annual and a Q1 disclosed on one day, two periods
     under one `event_time` -- which is why an ordinary `income` input could not be read before.
-    `tests/integration/panel/test_factor_engine.py` measures both directions.
+    `tests/integration/panel/test_factor_report_periods.py` measures both directions.
+
+    **The refusal is decided on the triple and not on the row the scan happens to reach first**,
+    and that is the correction of a defect rather than a way of spelling it. The check used to sit
+    behind the restatement branch -- `announcement < previous` continued, `announcement ==
+    previous` raised -- so a same-day pair was only ever compared against whatever
+    `announced[key]` held at the time. Once a *later* announcement of the same period had been
+    seen, both members of the pair were silently discarded. Measured on one corpus of three rows
+    (two versions announced 2024-04-20, a restatement announced 2024-08-10), varying nothing but
+    the order they were written in:
+
+        [dup_a, dup_b, later] -> raised
+        [later, dup_a, dup_b] -> computed 555.0
+        [dup_a, later, dup_b] -> computed 555.0
+
+    `panel/store.py::read_visible_at` issues `SELECT ... FROM read_parquet(?) WHERE ... <= ?` with
+    no `ORDER BY`, over a multi-row-group partition DuckDB is free to scan in parallel, so that
+    order is decided by neither the caller nor the provider. One partition could refuse a build on
+    one run and answer it on the next -- and `V2-P3-014`'s artifacts have to be reproducible. The
+    value the answering runs produced was *right*; what was non-deterministic was whether the
+    build succeeded, which is the worse of the two to leave in.
+
+    A row whose `event_time` resolves after `as_of` raises here too, on both axes. The visible
+    read decides what a caller may see from `available_time` alone, and this engine orders and
+    indexes on `event_time`; when a partition's clocks disagree the two questions have different
+    answers, and the one that reaches the window is `event_time`'s. Measured with the later
+    announcement of a period given an `available_time` before the earlier one's: the engine took
+    the restatement at an `as_of` two months before it was announced. `_announcement_timeline`
+    makes all four clocks equal for every statement row, so nothing today can construct it --
+    which is exactly why it is checked rather than assumed.
 
     The selection is a second statement of `filing_for`'s rule rather than a call into it:
     `statement_histories_from_panel_rows` requires the dataset's **whole** projected column set,
     so reusing it would make a factor that reads one column fetch all ten. The copy is held
-    against the original by `test_the_engines_period_selection_is_the_domains_filing_for`, which
-    runs both over one corpus -- a run-time audit, which is the only thing that has ever kept two
-    statements of one rule together in this repository.
+    against the original by `tests/integration/panel/test_factor_report_periods.py::
+    test_the_engines_period_selection_is_the_domains_filing_for`, which runs both over one corpus.
+    It is a **test-time** audit and not a run-time one -- `_refuse_table_drift` runs at import and
+    this does not -- so it holds only what its corpus varies, and its corpus now varies the year
+    set the two sides read; see `_refuse_a_read_that_cannot_see_what_as_of_holds` for the
+    divergence that audit did not have the language to see until it did.
     """
     period_indexed = dataset in PERIOD_INDEXED_DATASETS
     axis: FactorAxis = "period" if period_indexed else "session"
@@ -1336,9 +1377,14 @@ def _read_dataset(
         else (SUBJECT_COLUMN_NAME, EVENT_TIME_COLUMN, *columns)
     )
     offset = 3 if period_indexed else 2
+    as_of_day = requirement.as_of.astimezone(zone).date()
+    _refuse_a_read_that_cannot_see_what_as_of_holds(
+        store, dataset=dataset, requirement=requirement, as_of_day=as_of_day
+    )
     points: dict[str, list[date]] = {}
     values: dict[tuple[str, date], tuple[float | None, ...]] = {}
     announced: dict[tuple[str, date], date] = {}
+    filed: set[tuple[str, date, date]] = set()
     references: list[FactorInputRef] = []
     provenance: list[FactorInputProvenance] = []
     for year in sorted(set(requirement.years)):
@@ -1370,23 +1416,32 @@ def _read_dataset(
         for row in outcome.rows:
             subject = str(row[0])
             announcement = _session_date(row[1], dataset=dataset, zone=zone)
+            if announcement > as_of_day:
+                raise FactorEngineError(
+                    f"{dataset} carries a row for {subject} whose event_time resolves to "
+                    f"{announcement.isoformat()}, after the as_of {as_of_day.isoformat()} this "
+                    "build reads at; the visible read cleared it on available_time while this "
+                    "engine orders and indexes on event_time, so the two clocks disagree about "
+                    "whether it had happened and a filing announced after as_of could win its "
+                    "period"
+                )
             point = (
                 _report_period(row[2], dataset=dataset, subject=subject)
                 if period_indexed
                 else announcement
             )
+            if (subject, point, announcement) in filed:
+                raise FactorEngineError(
+                    f"{dataset} carries more than one row for {subject} on "
+                    f"{point.isoformat()}; this engine reads one row per security per "
+                    f"{axis}, so a dataset with several versions of one observation needs a "
+                    "reducer chosen for it before a factor may read it"
+                )
+            filed.add((subject, point, announcement))
             key = (subject, point)
             if key in values:
-                previous = announced[key]
-                if announcement < previous:
+                if announcement < announced[key]:
                     continue
-                if announcement == previous:
-                    raise FactorEngineError(
-                        f"{dataset} carries more than one row for {subject} on "
-                        f"{point.isoformat()}; this engine reads one row per security per "
-                        f"{axis}, so a dataset with several versions of one observation needs a "
-                        "reducer chosen for it before a factor may read it"
-                    )
             else:
                 points.setdefault(subject, []).append(point)
             announced[key] = announcement
@@ -1406,6 +1461,64 @@ def _read_dataset(
     )
 
 
+def _refuse_a_read_that_cannot_see_what_as_of_holds(
+    store: PanelStore,
+    *,
+    dataset: str,
+    requirement: ReadinessRequirement,
+    as_of_day: date,
+) -> None:
+    """The engine's `StatementHistory.answerable_through`, applied to the read rather than after
+    it.
+
+    `panel_ingest.load_statement_histories` compares the years it was asked for against
+    `store.registered_years(dataset)` and bounds the assembled history at the year before the
+    first stored partition it skipped, after which `filings_on` and everything built on it refuse
+    rather than answer -- `KNOWN_FINANCIAL_STATEMENT_LIMITATIONS
+    .a_partial_year_read_answers_from_inside_its_window`. `compute_factor` had no such bound and
+    read exactly `requirement.years`, which made the same partial read report a **pre-restatement
+    value as `computed`**: measured, a store holding 2024 and 2025, a build reading only 2024 at
+    `as_of=2025-05-20` answered 110.0 while the domain's history over both years answers 999.0 and
+    its `answerable_through=2024` refuses the day outright.
+
+    `max_staleness` does not stand in for this and that is measured too, at the 120 days this
+    engine's own tests argue for: a restatement announced in January leaves the skipped year's
+    partition reaching a date well inside the bound, so every structural check clears and the
+    stale number is returned.
+
+    **Only a year at or after the earliest year this read covers can hide anything.** A stored
+    year *below* that is history the factor chose not to reach for, and its cost is
+    `insufficient_history` on securities that needed it -- an honest, visible answer. A stored
+    year at or after it is an announcement a reader standing at `as_of` holds and this read cannot
+    see, so the bound is the year before the first such year, and a build stamped after it is
+    refused. A registered year later than `as_of`'s own is no bound at all: nothing in it is
+    knowable yet, and `read_visible_at`'s predicate is what says so.
+
+    Refused rather than reported as coverage, for `_refuse_a_panel_narrower_than_the_lookback`'s
+    reason: the fault is in the request, it is the same for every security in the cross section,
+    and the remedy is a wider `years`.
+    """
+    covered = set(requirement.years)
+    earliest = min(covered)
+    unread = sorted(year for year in store.registered_years(dataset) if year not in covered)
+    inside = [year for year in unread if year >= earliest]
+    if not inside:
+        return
+    answerable_through = inside[0] - 1
+    if as_of_day.year <= answerable_through:
+        return
+    raise FactorEngineError(
+        f"{dataset} is stored for year(s) {unread} that this requirement does not name, and "
+        f"{inside[0]} is at or after the earliest year it reads ({earliest}), so this read "
+        f"answers only through {answerable_through} and this build is stamped "
+        f"{as_of_day.isoformat()}. A filing announced in a year the read skips is one a reader "
+        "standing at as_of holds and this read cannot see, so the value would be reported as "
+        "computed from the version it superseded -- StatementHistory.answerable_through refuses "
+        "the same day for the same reason. Name every stored year from the earliest this factor "
+        "reads through the one as_of falls in"
+    )
+
+
 def _session_date(value: object, *, dataset: str, zone: ZoneInfo) -> date:
     if not isinstance(value, datetime):
         raise FactorEngineError(
@@ -1413,6 +1526,21 @@ def _session_date(value: object, *, dataset: str, zone: ZoneInfo) -> date:
             "datetime; the engine resolves a session date from it and cannot from anything else"
         )
     return value.astimezone(zone).date()
+
+
+FISCAL_QUARTER_ENDS: Final[tuple[tuple[int, int], ...]] = ((3, 31), (6, 30), (9, 30), (12, 31))
+"""The four `(month, day)` pairs an A-share fiscal period can end on.
+
+A statutory fact rather than a convention this module chose: a PRC listed company's accounting
+year is the calendar year, so `end_date` on all four statement endpoints is one of these four
+days -- every value the probes in `domain/financial_statements.py` record is
+(`20260331`, `20251231`, `20060331`, `20051231`, `19891231`, ...), and a period that is not one
+of them is refused by `_report_period` rather than rounded into a quarter.
+
+This is the grid `_period_span` counts on, and it is the whole of what makes
+`max_window_periods == lookback_periods` mean "no missed filing inside the window"; see that
+field's docstring and `_period_span`.
+"""
 
 
 def _report_period(value: object, *, dataset: str, subject: str) -> date:
@@ -1424,6 +1552,13 @@ def _report_period(value: object, *, dataset: str, subject: str) -> date:
     text (`providers/tushare.py` projects `end_date` through `_calendar_date_text`) because the
     panel plane has no date kind, so this is the same decode `financial_statements
     ._parse_iso_date` performs on the same column -- and the same refusal.
+
+    A well-formed date that is not one of `FISCAL_QUARTER_ENDS` is refused on the same grounds and
+    for a sharper reason: `_period_span` counts the window's reach in fiscal quarters, and a
+    period that is not a quarter end has no place on that grid. Rounding one into the quarter it
+    falls in would be the fiscal-quarter arithmetic of this module's own devising that
+    `_panel_axis_points` refuses to perform, and it would do it silently -- 2024-05-15 and
+    2024-06-30 would become one point.
     """
     if not isinstance(value, str):
         raise FactorEngineError(
@@ -1432,12 +1567,20 @@ def _report_period(value: object, *, dataset: str, subject: str) -> date:
             "but the stored ISO date"
         )
     try:
-        return date.fromisoformat(value)
+        period = date.fromisoformat(value)
     except ValueError as error:
         raise FactorEngineError(
             f"{dataset}.{REPORT_PERIOD_COLUMN} holds {value!r} for {subject}, which is not an "
             "ISO date; the report-period axis is ordered by it"
         ) from error
+    if (period.month, period.day) not in FISCAL_QUARTER_ENDS:
+        raise FactorEngineError(
+            f"{dataset}.{REPORT_PERIOD_COLUMN} holds {value!r} for {subject}, which is not an "
+            "A-share fiscal quarter end; this engine measures a period window's reach in "
+            "quarters, and a period off that grid would either be rounded into a neighbour or "
+            "make the reach unmeasurable"
+        )
+    return period
 
 
 def _numeric(
@@ -1474,7 +1617,6 @@ def _classify(
     in_universe: bool,
     readings: Mapping[str, _DatasetReading],
     panel_sessions: tuple[date, ...],
-    panel_periods: tuple[date, ...],
     evaluator: FactorEvaluator,
     manifest_id: str,
 ) -> FactorObservation:
@@ -1543,7 +1685,7 @@ def _classify(
         "input_period_last": periods[-1] if periods else None,
     }
     if _overruns_its_span(
-        definition, sessions=sessions, periods=periods, points=(panel_sessions, panel_periods)
+        definition, sessions=sessions, periods=periods, panel_sessions=panel_sessions
     ):
         return FactorObservation(
             subject=subject,
@@ -1624,35 +1766,88 @@ def _overruns_its_span(
     *,
     sessions: tuple[date, ...],
     periods: tuple[date, ...],
-    points: tuple[tuple[date, ...], tuple[date, ...]],
+    panel_sessions: tuple[date, ...],
 ) -> bool:
-    """Whether either formed window reaches across more panel points than it declared."""
-    panel_sessions, panel_periods = points
-    for window, bound, panel in (
-        (sessions, definition.max_window_sessions, panel_sessions),
-        (periods, definition.max_window_periods, panel_periods),
+    """Whether either formed window reaches across more points than it declared.
+
+    The two axes ask the same question and measure it against **different grids**, which is the
+    correction of a defect rather than an asymmetry for its own sake; see `_period_span`.
+    """
+    if (
+        sessions
+        and definition.max_window_sessions is not None
+        and _session_span(sessions, panel_sessions=panel_sessions) > definition.max_window_sessions
     ):
-        if window and bound is not None and _window_span(window, panel_points=panel) > bound:
-            return True
-    return False
+        return True
+    return (
+        bool(periods)
+        and definition.max_window_periods is not None
+        and _period_span(periods) > definition.max_window_periods
+    )
 
 
-def _window_span(window: tuple[date, ...], *, panel_points: tuple[date, ...]) -> int:
-    """How many **panel** points the window reaches across, first and last included.
+def _session_span(window: tuple[date, ...], *, panel_sessions: tuple[date, ...]) -> int:
+    """How many **panel** sessions the window reaches across, first and last included.
 
-    Equal to `len(window)` for a security present at every point in it, and larger by exactly the
-    number it missed. Counted against the panel's own point set rather than in calendar days,
-    because a calendar-day bound would be a second calendar for the engine to disagree with the
-    partition it is reading, and because "halted for three weeks" is a number of sessions rather
-    than a number of days -- and, on the period axis, because "skipped a quarter" is a number of
-    filings rather than a number of months.
+    Equal to `len(window)` for a security present at every session in it, and larger by exactly
+    the number it missed. Counted against the panel's own session set rather than in calendar
+    days, because a calendar-day bound would be a second calendar for the engine to disagree with
+    the partition it is reading, and because "halted for three weeks" is a number of sessions
+    rather than a number of days.
 
-    `panel_points` is sorted, so this is two binary searches rather than a scan -- the check runs
+    The panel's session set is the right grid here and is *not* the right grid on the period axis,
+    and the difference is that the sessions a panel returns are the trading calendar: every
+    security in the cross section is quoted on every open day, so a session missing from the union
+    is a session the market was closed. Nothing of the kind is true of report periods.
+
+    `panel_sessions` is sorted, so this is two binary searches rather than a scan -- the check runs
     once per security per axis per build (5,534 times for a whole-market cross section).
     """
-    left = bisect.bisect_left(panel_points, window[0])
-    right = bisect.bisect_right(panel_points, window[-1])
+    left = bisect.bisect_left(panel_sessions, window[0])
+    right = bisect.bisect_right(panel_sessions, window[-1])
     return right - left
+
+
+def _period_span(window: tuple[date, ...]) -> int:
+    """How many **fiscal quarters** the period window reaches across, first and last included.
+
+    Counted on `FISCAL_QUARTER_ENDS`' grid and therefore on nothing this build happened to read,
+    which is the whole of the fix. The panel's own period set -- the union of every
+    `report_period` the visible read returned -- is what this used to count on, and it made the
+    contract's central claim false in a way that was measured rather than argued:
+
+        lookback_periods=5, max_window_periods=5, a security missing 2024-12-31 and no other
+        security in the cross section filing that period either
+        -> coverage='computed', value=0.5555555555555556
+           window ['2023-12-31','2024-03-31','2024-06-30','2024-09-30','2025-03-31']
+           [-5] to [-1] is fifteen months, and the "year-on-year" is 140/90-1
+
+    The gap was not on the panel's grid, so the panel's grid could not see it: what
+    `max_window_periods == lookback_periods` bought was "no filing this security missed that some
+    *other* security in this build filed", which is a property of the cross section rather than of
+    the security -- one witness away from a different answer, as the second half of that
+    measurement showed: under the panel measure, adding one other security that filed 2024-12-31
+    turned the identical build into `insufficient_history`.
+
+    A quarter grid is exact and read-independent because an A-share fiscal year is the calendar
+    year: the periods between two quarter ends are enumerable without consulting a single row.
+    That is not the "fiscal-quarter arithmetic of this module's own devising" `_panel_axis_points`
+    declines to perform -- that one would have to rule on which quarter a *non*-quarter-end
+    `end_date` belongs to, and `_report_period` refuses such a period outright instead.
+
+    Strictly stronger than the panel count it replaces, never weaker: every panel period is a
+    quarter end, so the panel's points between the window's ends are a subset of the grid's.
+    """
+    return _quarter_index(window[-1]) - _quarter_index(window[0]) + 1
+
+
+def _quarter_index(period: date) -> int:
+    """A fiscal quarter end as its ordinal on the quarter grid, so two of them can be subtracted.
+
+    `_report_period` has already refused anything that is not one of `FISCAL_QUARTER_ENDS`, so
+    `month // 3` is the quarter of the year rather than a rounding.
+    """
+    return period.year * 4 + period.month // 3 - 1
 
 
 def _stored_rows(

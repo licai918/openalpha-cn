@@ -985,3 +985,90 @@ prose 变成 `domain/factor.py::FactorNote`，一个 `stable_model_id` 从不作
 
 `FactorNeutralizationSpec.summary` docstring 里那条例外条款随字段一起删除；
 `INDUSTRY_AND_SIZE_NOTE` 逐字保留了当时的撤回文字。
+
+### `V2-P3-014` 前置复审（2026-08-12）：契约形状成立，三条引擎行为被实测证伪
+
+上一节的字段那一半站得住 —— 轴等价的四个失败角全挡、四个上界两侧全钉死、
+`None`/`0` 三处不混淆、身份迁移三条逐字节可复算、全树无硬编码身份字面量。
+**被证伪的三条全在引擎里，修它们不需要动任何字段，因此没有第二次身份迁移。**
+
+#### M-1：同日多行的 fail-closed 依赖分区行序
+
+上一节写的是「同一 `(subject, period)` **同日**两行仍抛」。实测：只有当两个同日行都在
+该期次的**较晚公告之前**被扫到时才抛。判重坐在重述分支**后面**
+（`announcement < previous` 先 `continue`，`announcement == previous` 才抛），
+所以 `announced[key]` 一旦被更晚的公告抬高，两个同日行都被静默丢弃。
+同一份三行语料，只改写入顺序：
+
+```
+[dup, dup, later] -> 抛
+[later, dup, dup] -> computed 555.0
+[dup, later, dup] -> computed 555.0
+```
+
+`panel/store.py::read_visible_at` 的可见读是 `SELECT … FROM read_parquet(?) WHERE … <= ?`，
+**没有 `ORDER BY`**，分区是多 row-group、DuckDB 可并行扫描 —— 行序既不由调用方也不由 provider 决定。
+**不抛的那两支给出的值（555.0）是对的**，所以非确定的不是数字而是**构建成败**，
+而 `V2-P3-014` 的不可变制品必须可复现。
+
+判重改为按 `(subject, point, announcement)` 三元组决定，构造上与扫描序无关；
+会话轴上 `point == announcement`，三元组退化成原来的键，行为逐字不变。
+
+#### M-2：`max_window_periods == lookback_periods` 不等于「窗口内无缺报」
+
+这是 `V2-P3-011` 整个 `window[-5]` 论证的前提。跨度原本量在**面板期次集**上 ——
+可见读返回的 `report_period` 并集 —— 而**没有任何证券填过的那一期不在这个集合里**。实测：
+
+```
+lookback_periods=5, max_window_periods=5，某证券漏报 2024-12-31
+[没有别人填过那期] -> coverage=computed value=0.5555555555555556
+    window 2023-12-31..2025-03-31，[-5] 到 [-1] 相隔 15 个月
+    报出的「同比」是 140/90-1，连续时应是 140/100-1
+[有一个证人填了那期] -> coverage=insufficient_history
+```
+
+也就是说这条契约买到的是「相对于本次读到的那批行没有缺报」——
+**一个 build 安全与否取决于分区里别人的构成**。上一节那句
+「面板期次日历是可见读返回的并集，理由与 `max_window_sessions` 数面板会话一样」
+就是把这个洞盖住的句子，**类比本身是错的**：会话并集**就是**交易日历（每只证券每个开市日都有报价，
+并集里缺的一天是市场没开），期次并集没有任何东西保证稠密。
+
+`panel_factors::_period_span` 改为在**财季网格**上计数（`FISCAL_QUARTER_ENDS`）：
+A 股会计年度即公历年度，两个期末之间隔几个季度是**不读任何一行就能知道**的。
+`_report_period` 同时拒绝非季末的 `report_period` —— 把它归入某一季正是引擎拒绝自造的那本日历，
+而且会静默把 2024-05-15 与 2024-06-30 并成一个点。
+新度量**恒不弱于旧的**：每个面板期次都是季末，所以面板点是网格点的子集。
+会话轴保留面板会话度量，非对称是论证过的而不是将就。
+
+#### M-3：引擎的 `filing_for` 复制品没有 `answerable_through` 视界
+
+`panel_ingest.load_statement_histories` 把 `store.registered_years(dataset) - requested`
+的第一个未读年份减一作为 `answerable_through`，`filings_on` 据此拒绝其后的日子
+（`KNOWN_FINANCIAL_STATEMENT_LIMITATIONS.a_partial_year_read_answers_from_inside_its_window`）。
+`compute_factor` 从不比对 `registered_years`，只读 `requirement.years`，于是把**重述前的旧值**当作
+`computed` 报出：实测 110.0，而 domain 读两个年份给的是 999.0 且 `answerable_through=2024`
+直接拒答那天。`max_staleness` 顶不上，用本引擎自己测试论证的 120 天界限复现过（1 月重述）。
+
+`_refuse_a_read_that_cannot_see_what_as_of_holds` 是引擎侧的对等物，且在一个方向上**故意比
+domain 的规则窄**：只有**位于本次读到的最早年份及其之后**的已存年份才可能藏住公告；
+更早的已存年份是因子自己选择不去够的历史，代价只是 `insufficient_history` —— 诚实且可见。
+
+上一节说这条对齐是「**运行期审计**」，措辞是错的：它只在 pytest 下跑，
+`_refuse_table_drift` 那种才是 import 期的。而且它的语料让两边读**相同**的年份，
+结构上看不见唯一已经存在的分歧。审计语料已扩到两边读不同年份，措辞已改。
+
+#### 三条较小的
+
+- **三个时钟只因 provider 让它们相等才一致。** 可见性由 `available_time` 裁决，
+  引擎按 `event_time` 排序与索引，domain 的 `filing_for` 按 `ann_date` **列**排序。
+  把某期较晚公告的 `available_time` 提前到较早公告之前，引擎会取用**公告日在 `as_of` 之后**的那一行
+  （实测 `computed 999.0`，`as_of` 早于公告两个月）。`event_time` 晚于 `as_of` 的行现在两条轴上都抛。
+  今天不可构造（`_announcement_timeline` 让四个时钟全等），**这恰恰是逐字节相等的语料
+  结构上看不见它的原因**。
+- **落盘 reach 列没有能把它和邻居分开的 fixture。** 两条轴的往返 fixture 都用相等的一对
+  （期次 5/5，会话 `REVERSAL_1D` 的 2/2），两个列互换变异**全树存活**；
+  新增一条两轴同测、四个数取 2/3/4/5 的往返。
+- **docstring 里指向测试的引用会失效。** 本次引入一条、更早还有一条，
+  `tests/unit/test_source_cited_tests.py` 现在把包内每一条 `tests/…::name` 引用对着代码树解析
+  （`OA-OPS-031`）；`SHIPPED_REGISTRIES` 这张手写表也改为对着 AST 扫描核对，
+  第四个身份注册表不带散文会红而不是根本不被问到。

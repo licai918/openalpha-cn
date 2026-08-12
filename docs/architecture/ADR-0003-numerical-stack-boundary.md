@@ -173,9 +173,9 @@ into it anyway; hoisting the read out of the loop is the fix.
 ### Re-measured after the `V2-P3-001`/`002` review remediation
 
 The remediation added two per-build passes and one per-security check to the same workload: the
-union of every visible session (`_panel_sessions`), the refusal of a panel narrower than the
+union of every visible session (`_panel_axis_points`), the refusal of a panel narrower than the
 lookback, and two binary searches per security for the window's span in panel sessions
-(`_window_span`). Re-measured on the same shape -- 5,534 securities x 122 sessions = 675,148
+(`_session_span`). Re-measured on the same shape -- 5,534 securities x 122 sessions = 675,148
 rows through the real store:
 
 | step | before | after |

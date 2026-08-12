@@ -64,6 +64,16 @@ session axis:
   filing inside the window". Cumulative-to-single-quarter differencing needs exactly the same
   guarantee, which is why *that* choice is the factor's and this precondition is the contract's.
 
+  **That sentence was false when it was first written and it is the engine that made it true.**
+  The span was measured against the panel's own period set -- the union of the `report_period`s
+  the read returned -- and a quarter no security in the cross section filed is not in that union,
+  so a five-period window straddling it "spanned five". Measured: a security missing 2024-12-31
+  in a build where nobody filed 2024-12-31 was `computed`, with a `[-5]`-to-`[-1]` interval of
+  fifteen months; add one other security that filed the period and the same build answered
+  `insufficient_history`. `panel_factors::_period_span` now counts on the fiscal-quarter grid,
+  which is knowable without reading a row, so what the equality buys is a property of the
+  security rather than of the cross section it was built with.
+
 ## The ordering constraint this module is under, and why it is stated here
 
 Adding, removing or renaming a field of `FactorDefinition` or of `FactorBuildManifest` changes
@@ -138,10 +148,10 @@ whatever the model declares and a field carved out of the hash with `exclude=Tru
 shape roadmap section 9's `config_digest` had. So the prose left the models and became
 `FactorNote`, a plain frozen dataclass no `stable_model_id` is ever applied to, carried by the
 three registries beside the specs it is about. Editing a note moves nothing;
-`tests/unit/domain/test_factor.py::test_a_prose_edit_moves_no_identity_because_prose_is_not_a
-_field` builds two registries that differ only in their notes and asserts every `factor_id` in
-them is byte-identical, and the same file asserts that `summary=` is no longer *accepted* by any
-of the three contracts.
+`tests/unit/domain/test_factor.py::
+test_a_prose_edit_moves_no_identity_because_prose_is_not_a_field` builds two registries that
+differ only in their notes and asserts every `factor_id` in them is byte-identical, and the same
+file asserts that `summary=` is no longer *accepted* by any of the three contracts.
 
 ## What is deliberately *not* here
 
@@ -501,9 +511,9 @@ class FactorDefinition(BaseModel):
     recent *announcement*: a security may announce an earlier period after a later one, measured
     at 12 of `income`'s 3,796 answerable days over a 76-security probe. `panel_factors` selects
     on the same key for the same reason, and
-    `tests/integration/panel/test_factor_engine.py::test_the_engines_period_selection_is_the_
-    domains_filing_for` pins the two against each other on one corpus rather than leaving them
-    two implementations of one rule.
+    `tests/integration/panel/test_factor_report_periods.py::
+    test_the_engines_period_selection_is_the_domains_filing_for` pins the two against each other
+    on one corpus rather than leaving them two implementations of one rule.
 
     The upper bound is 60, fifteen A-share years of quarterly filings. Wide enough that no
     factor in `V2-P3-009`..`013` argues with it (`011`'s year-on-year acceleration is the widest
@@ -515,7 +525,7 @@ class FactorDefinition(BaseModel):
     `PERIOD_INDEXED_DATASETS`.
     """
     max_window_periods: int | None = Field(ge=1, le=120)
-    """How many *panel* report periods the `lookback_periods` window is allowed to span.
+    """How many **fiscal quarters** the `lookback_periods` window is allowed to span.
 
     `max_window_sessions`' argument, transposed, and it is not decoration on this axis either:
     `lookback_periods` counts a security's own filings and says nothing about whether they are
@@ -523,12 +533,20 @@ class FactorDefinition(BaseModel):
     periods" spanning twelve, and a year-on-year computed from `window[-1]` against `window[-5]`
     on such a window compares two periods that are not a year apart.
 
-    Counted in **panel** periods -- the union of every `report_period` the visible read returned,
-    which is the engine's own period calendar and the only one it has -- for the reason
-    `max_window_sessions` is counted in panel sessions: a fiscal-quarter arithmetic of this
-    module's own devising would be a second calendar to disagree with the partition, and it would
-    have to decide what quarter a non-quarter-end `end_date` belongs to. A security's own periods
-    are always a subset of the panel's, so the span is exact rather than heuristic.
+    **Counted on the calendar's quarter grid and not on the panel's period set**, which is where
+    the two axes part company and is the correction of a real defect rather than a preference.
+    `max_window_sessions` counts panel sessions because the sessions a cross section returns *are*
+    the trading calendar -- every security is quoted on every open day, so a session missing from
+    the union is a day the market was shut. Report periods carry no such guarantee: a period
+    missing from the union means only that nobody in this build filed it. Measured, changing
+    nothing but whether one other security filed the quarter this one skipped, `computed` with a
+    fifteen-month "year-on-year" became `insufficient_history` -- so the panel-set measure made
+    this contract's guarantee a property of the build's composition. `panel_factors
+    ::FISCAL_QUARTER_ENDS` is the grid instead: a PRC listed company's accounting year is the
+    calendar year, so the quarters between two period ends are enumerable without consulting a
+    row. That is not the "fiscal-quarter arithmetic of this module's own devising" the engine
+    declines to perform -- that one would have to rule on which quarter a *non*-quarter-end
+    `end_date` belongs to, and `panel_factors::_report_period` refuses such a period outright.
 
     Equality is the strict setting and is the one the year-on-year factors need:
     `max_window_periods == lookback_periods` means **"no missed filing inside the window"**,

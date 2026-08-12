@@ -991,7 +991,7 @@ def apply_factor_neutralization(
 
     Every argument is either represented in `manifest.neutralization_manifest_id` or exempt with a
     written reason, and `tests/integration/panel/test_factor_neutralizations.py::
-    test_every_determinant_of_this_neutralisation_is_either_in_the_identity_or_exempted_by_name`
+    test_every_determinant_is_either_in_the_identity_or_exempted_by_name`
     reads this function's own signature and fails on a parameter in neither list. A sixth
     parameter fails the audit until somebody classifies it.
 

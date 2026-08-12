@@ -69,6 +69,7 @@ from openalpha_cn.domain.financial_statements import (
     INCOME_DATA_COLUMNS,
     INCOME_DATASET,
     REPORT_PERIOD_COLUMN,
+    FinancialStatementHorizonError,
     statement_histories_from_panel_rows,
     statement_panel_columns,
 )
@@ -81,6 +82,7 @@ from openalpha_cn.domain.panel_batch import (
 from openalpha_cn.panel.catalog import ReadinessRequirement
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import (
+    FISCAL_QUARTER_ENDS,
     FactorEngineError,
     FactorPanel,
     FactorWindow,
@@ -90,7 +92,11 @@ from openalpha_cn.panel_factors import (
     load_factor_observations,
     write_factor_panels,
 )
-from openalpha_cn.panel_ingest import financial_statement_requirement, write_panel_batch
+from openalpha_cn.panel_ingest import (
+    financial_statement_requirement,
+    load_statement_histories,
+    write_panel_batch,
+)
 
 SHANGHAI: Final[ZoneInfo] = ZoneInfo("Asia/Shanghai")
 
@@ -165,6 +171,44 @@ CORPUS: Final[tuple[_Filing, ...]] = (
 
 SUBJECTS: Final[tuple[str, ...]] = ("000001.SZ", "000002.SZ", "600000.SH")
 
+MISSED_PERIOD: Final[date] = date(2024, 12, 31)
+EARLIER_PERIOD: Final[date] = date(2023, 12, 31)
+EARLIER_REVENUE: Final[float] = 90.0
+
+NOBODY_FILED_THE_GAP: Final[tuple[_Filing, ...]] = (
+    ("000001.SZ", EARLIER_PERIOD, date(2024, 3, 20), EARLIER_REVENUE),
+    ("000001.SZ", date(2024, 3, 31), date(2024, 4, 20), 100.0),
+    ("000001.SZ", date(2024, 6, 30), date(2024, 8, 25), 110.0),
+    ("000001.SZ", date(2024, 9, 30), date(2024, 10, 25), 120.0),
+    # `MISSED_PERIOD` is never filed -- not by this security and not by anybody else.
+    ("000001.SZ", date(2025, 3, 31), DISCLOSURE_DAY, 140.0),
+)
+"""Five filings spanning **six** quarters, because one quarter in the middle is filed by nobody.
+
+The corpus behind `test_a_missed_filing_is_a_gap_whether_or_not_another_security_filed_it`, and
+the reason the panel's own period set cannot be the grid a window's reach is measured on: the
+union of the periods this read returns holds exactly five, so a five-period window over it
+"spans five" and the contract's `max_window_periods == lookback_periods` reported a fifteen-month
+year-on-year as `computed`.
+"""
+
+THE_WITNESS: Final[_Filing] = ("000002.SZ", MISSED_PERIOD, date(2025, 4, 18), 500.0)
+"""One other security filing the period `000001.SZ` missed, and nothing else about the build.
+
+Adding it moves `000001.SZ`'s answer under the panel-set measure and must not move it under the
+quarter-grid one -- the whole content of "a build's verdict about a security must not depend on
+the rest of the cross section".
+"""
+
+CROSS_YEAR_RESTATEMENT: Final[_Filing] = ("000001.SZ", date(2024, 3, 31), date(2025, 4, 21), 999.0)
+"""`000001.SZ` restating its 2024 Q1 in the **next** announcement year.
+
+`920403.BJ` restated its 2022 annual on 2024-01-05, which is the real shape
+`KNOWN_FINANCIAL_STATEMENT_LIMITATIONS.a_partial_year_read_answers_from_inside_its_window`
+records; this is that shape inside this file's own corpus. A read that names 2024 and not 2025
+holds only the 100.0 it superseded, and nothing in the read itself says so.
+"""
+
 YEARS: Final[tuple[int, ...]] = (2024, 2025)
 """The **announcement** years these rows land in, which is how a statement partition is filed.
 
@@ -178,12 +222,20 @@ def _midnight(day: date) -> datetime:
     return datetime.combine(day, time(0, 0), tzinfo=SHANGHAI)
 
 
-def _batch(dataset: str, rows: tuple[_Filing, ...]) -> ColumnarPanelBatch:
+def _batch(
+    dataset: str, rows: tuple[_Filing, ...], *, available: tuple[datetime, ...] | None = None
+) -> ColumnarPanelBatch:
     """One announcement year's filings, through `income`'s own projection and its own clock.
 
     All four clocks are the announcement instant, which is what
     `providers/tushare.py::_announcement_timeline` does for every statement row and why two
     versions of one filing cannot be told apart by any of them.
+
+    `available` overrides that on the availability clock alone, and is used by exactly one test:
+    the engine's period selection reads `event_time` while the visible read decides on
+    `available_time`, and a corpus where the two are byte-equal cannot show which one a value came
+    from. Nothing a provider in this repository writes can produce a row like that -- which is why
+    a test has to build one by hand for the engine's refusal to be measurable at all.
     """
     announced = tuple(_midnight(item[2]) for item in rows)
     columns = (
@@ -211,7 +263,7 @@ def _batch(dataset: str, rows: tuple[_Filing, ...]) -> ColumnarPanelBatch:
         subjects=tuple(item[0] for item in rows),
         timeline=TimelineColumns(
             event_time=announced,
-            available_time=announced,
+            available_time=announced if available is None else available,
             ingested_time=tuple(max(BUILT_AT, moment) for moment in announced),
             revision_time=announced,
         ),
@@ -232,6 +284,29 @@ def _written(tmp_path: Path, *, dataset: str, rows: tuple[_Filing, ...] = CORPUS
 @pytest.fixture
 def store(tmp_path: Path) -> PanelStore:
     return _written(tmp_path, dataset=INCOME_DATASET)
+
+
+def _both_axes_store(tmp_path: Path) -> PanelStore:
+    """`CORPUS` under `income` plus a price row per security per panel period under the probe name.
+
+    The price side is written under the probe name so it lands on the **session** axis. Its rows
+    are dated at the period ends only so the two axes' points are comparable by eye; nothing reads
+    its `report_period` column, because a session-indexed dataset is not projected for one.
+
+    Shared by the two tests that need a factor on both axes at once -- `V2-P3-009`'s EP shape and
+    the round trip that has to tell four reach columns apart.
+    """
+    store = _written(tmp_path, dataset=INCOME_DATASET)
+    prices: tuple[_Filing, ...] = tuple(
+        (code, period, period, 10.0 + index)
+        for code in ("000001.SZ", "600000.SH")
+        for index, period in enumerate(PANEL_PERIODS)
+    )
+    for year in YEARS:
+        rows = tuple(item for item in prices if item[2].year == year)
+        if rows:
+            write_panel_batch(store, _batch(SESSION_DATASET, rows), year=year)
+    return store
 
 
 def _requirement(dataset: str = INCOME_DATASET, **overrides: Any) -> ReadinessRequirement:
@@ -375,6 +450,93 @@ def test_two_versions_of_one_filing_announced_on_one_day_still_refuse_the_whole_
         _compute(store, _definition())
 
 
+DUPLICATE_DAY: Final[date] = date(2024, 4, 20)
+SUPERSEDING_DAY: Final[date] = date(2024, 8, 10)
+ONE_PERIOD_AS_OF: Final[datetime] = datetime(2024, 9, 2, 4, 0, tzinfo=UTC)
+"""Three weeks after `SUPERSEDING_DAY`, so a 120-day bound clears the whole of the corpus below."""
+
+ORDER_PROBE: Final[dict[str, tuple[_Filing, ...]]] = {
+    name: rows
+    for name, rows in (
+        (
+            "[duplicate, duplicate, superseding]",
+            (
+                ("000001.SZ", date(2024, 3, 31), DUPLICATE_DAY, 100.0),
+                ("000001.SZ", date(2024, 3, 31), DUPLICATE_DAY, 999.0),
+                ("000001.SZ", date(2024, 3, 31), SUPERSEDING_DAY, 555.0),
+            ),
+        ),
+        (
+            "[superseding, duplicate, duplicate]",
+            (
+                ("000001.SZ", date(2024, 3, 31), SUPERSEDING_DAY, 555.0),
+                ("000001.SZ", date(2024, 3, 31), DUPLICATE_DAY, 100.0),
+                ("000001.SZ", date(2024, 3, 31), DUPLICATE_DAY, 999.0),
+            ),
+        ),
+        (
+            "[duplicate, superseding, duplicate]",
+            (
+                ("000001.SZ", date(2024, 3, 31), DUPLICATE_DAY, 100.0),
+                ("000001.SZ", date(2024, 3, 31), SUPERSEDING_DAY, 555.0),
+                ("000001.SZ", date(2024, 3, 31), DUPLICATE_DAY, 999.0),
+            ),
+        ),
+    )
+}
+"""One period, one same-day pair and one later restatement, in the three orders that matter.
+
+The same three rows every time. The only thing that varies is the order they are written in --
+which is the only handle a test has on the order a partition returns them in, and which nothing
+in production has at all.
+"""
+
+
+@pytest.mark.parametrize("order", sorted(ORDER_PROBE))
+def test_the_same_day_refusal_does_not_depend_on_the_order_the_partition_returns_its_rows(
+    tmp_path: Path, order: str
+) -> None:
+    """The refusal above, asked three times of one corpus in three row orders.
+
+    The duplicate pair used to be compared only against whatever announcement had been seen for
+    that period *so far*: an earlier announcement than the one already held was skipped before the
+    equality check could run, so once the 2024-08-10 restatement had been read both members of the
+    2024-04-20 pair were silently discarded. Measured, before this was fixed, varying nothing but
+    the write order:
+
+        [duplicate, duplicate, superseding] -> raised
+        [superseding, duplicate, duplicate] -> computed 555.0
+        [duplicate, superseding, duplicate] -> computed 555.0
+
+    The 555.0 was the *right* number -- the superseding announcement is the one a reader at
+    `as_of` holds -- so what was non-deterministic was not the value but whether the build
+    succeeded at all. `panel/store.py::read_visible_at` issues its scan with no `ORDER BY`, over a
+    partition DuckDB may read in parallel row groups, so nothing downstream of the provider
+    decides which of the three orders a real build gets. `V2-P3-014`'s artifacts have to be
+    reproducible, and a build whose success is drawn from the scan is not.
+
+    This is the "refusal" half of what
+    `test_the_later_announcement_wins_whichever_order_the_partition_returns_them_in` already holds
+    for the "value" half, and it is parametrised rather than looped so a failure names the order.
+    """
+    store = PanelStore(tmp_path / "one_partition")
+    write_panel_batch(store, _batch(INCOME_DATASET, ORDER_PROBE[order]), year=2024)
+    requirement = financial_statement_requirement(
+        dataset=INCOME_DATASET, years=(2024,), as_of=ONE_PERIOD_AS_OF, max_staleness=STALENESS
+    )
+
+    with pytest.raises(FactorEngineError, match=r"more than one row for 000001.SZ on 2024-03-31"):
+        _compute(
+            store,
+            _definition(key="probe_one_period", lookback_periods=1, max_window_periods=1),
+            evaluator=lambda window: window.series(INCOME_DATASET, "revenue")[-1],
+            as_of=ONE_PERIOD_AS_OF,
+            subjects=("000001.SZ",),
+            universe=frozenset({"000001.SZ"}),
+            requirements={INCOME_DATASET: requirement},
+        )
+
+
 def test_the_engines_period_selection_is_the_domains_filing_for(store: PanelStore) -> None:
     """The engine's selection rule against the domain's, over one corpus rather than two
     docstrings.
@@ -382,10 +544,17 @@ def test_the_engines_period_selection_is_the_domains_filing_for(store: PanelStor
     `_read_dataset` states `filing_for`'s rule a second time -- keep the greatest visible
     announcement for a period -- because reusing `statement_histories_from_panel_rows` would make
     a factor that reads one column fetch all ten of `income`'s projected values. A second
-    statement of one rule is only safe with a run-time audit against the first, which is this.
+    statement of one rule is only safe with an audit against the first, which is this.
 
     `RESTATED_PERIOD` is the case that discriminates: two announcements, two revenues, and the
     later one is what a reader standing at `AS_OF` has.
+
+    **This audit runs under pytest and not at import**, so it holds exactly what its corpus
+    varies and nothing else -- and what this corpus does not vary is the *years* the two sides
+    read, which is where the two implementations had already diverged when it was written. That
+    half is `test_a_read_that_skips_a_stored_announcement_year_is_refused_where_the_domain_
+    refuses` below, and it is a separate test rather than more assertions here because the two
+    sides do not merely disagree there: one of them refuses.
     """
     captured: dict[str, FactorWindow] = {}
 
@@ -423,6 +592,163 @@ def test_the_engines_period_selection_is_the_domains_filing_for(store: PanelStor
     assert history.filing_for(RESTATED_PERIOD, day).announced_on == LATER_ANNOUNCEMENT
     assert RESTATED_REVENUE in window.series(INCOME_DATASET, "revenue")
     assert FIRST_REVENUE not in window.series(INCOME_DATASET, "revenue")
+
+
+def test_a_read_that_skips_a_stored_announcement_year_is_refused_where_the_domain_refuses(
+    tmp_path: Path,
+) -> None:
+    """The half the audit above could not see: the two sides reading **different years**.
+
+    `panel_ingest.load_statement_histories` compares the years it was asked for against
+    `store.registered_years` and bounds the history at the year before the first stored partition
+    it skipped, after which `filings_on` and everything on it refuse --
+    `KNOWN_FINANCIAL_STATEMENT_LIMITATIONS.a_partial_year_read_answers_from_inside_its_window`.
+    `compute_factor` had no counterpart and read exactly `requirement.years`, so the same partial
+    read reported the **superseded** value as `computed`: measured on this corpus, 100.0 where the
+    reader standing at `AS_OF` holds 999.0.
+
+    `max_staleness` is not a stand-in and that was measured too, at the 120 days `STALENESS`
+    argues for: `CROSS_YEAR_RESTATEMENT` is announced 2025-04-21 and the skipped partition's own
+    newest row is 2025-04-20, well inside the bound, so every structural check clears and the
+    stale number comes back.
+
+    The domain reads here waive `max_staleness` and the engine's do not, which is not a loosening
+    of the comparison but the one difference between the two readers that is *not* what this test
+    is about: `load_statement_histories` goes through `read_if_ready`, which decides freshness one
+    partition at a time, while `compute_factor` goes through `read_visible_at`, which decides it
+    over every year the requirement names. A shared bound would refuse the domain side for a
+    reason that has nothing to do with the horizon.
+    """
+    store = _written(tmp_path, dataset=INCOME_DATASET, rows=(*CORPUS, CROSS_YEAR_RESTATEMENT))
+    day = AS_OF.astimezone(SHANGHAI).date()
+    captured: dict[str, FactorWindow] = {}
+
+    def capture(window: FactorWindow) -> float | None:
+        captured[window.subject] = window
+        return 1.0
+
+    def build(*years: int) -> FactorPanel:
+        return _compute(
+            store,
+            _definition(),
+            evaluator=capture,
+            requirements={INCOME_DATASET: _requirement(years=years)},
+        )
+
+    def histories(*years: int) -> Any:
+        return load_statement_histories(
+            store, dataset=INCOME_DATASET, years=years, as_of=AS_OF, max_staleness=None
+        )
+
+    narrow = histories(2024)["000001.SZ"]
+    whole = histories(*YEARS)["000001.SZ"]
+
+    assert narrow.answerable_through == 2024
+    assert whole.answerable_through is None
+    with pytest.raises(FactorEngineError, match="answers only through 2024"):
+        build(2024)
+    with pytest.raises(FactorEngineError, match=r"income is stored for year\(s\) \[2025\]"):
+        build(2024)
+    with pytest.raises(FinancialStatementHorizonError, match="2025-05-20 is after 2024"):
+        narrow.filing_for(date(2024, 3, 31), day)
+
+    build(*YEARS)
+
+    assert whole.filing_for(date(2024, 3, 31), day).value_of("revenue") == CROSS_YEAR_RESTATEMENT[3]
+    assert captured["000001.SZ"].series(INCOME_DATASET, "revenue")[0] == CROSS_YEAR_RESTATEMENT[3]
+    assert narrow.filing_for(date(2024, 3, 31), date(2024, 12, 31)).value_of("revenue") == 100.0
+
+
+INSIDE_THE_FIRST_YEAR: Final[datetime] = datetime(2024, 12, 1, 4, 0, tzinfo=UTC)
+"""An `as_of` in the earlier of the two stored announcement years."""
+
+
+def test_a_stored_year_as_of_has_not_reached_yet_is_no_horizon_at_all(store: PanelStore) -> None:
+    """The other side of the horizon, and the reason it is stated as a year rather than as a set.
+
+    A read that skips a stored year is only narrow about days **after** that year began. The bound
+    is `answerable_through`, not "every stored year must be named": at an `as_of` inside 2024 the
+    2025 partition holds nothing a reader standing there could have, so refusing the build for it
+    would refuse every point-in-time replay of a year the store has since grown past -- which is
+    the whole use `read_visible_at` exists for.
+
+    Asserted as a computed value rather than as the absence of an exception, because "did not
+    raise" is also what a check that never ran looks like.
+    """
+    panel = _compute(
+        store,
+        _definition(key="probe_inside_2024", lookback_periods=1, max_window_periods=1),
+        evaluator=lambda window: window.series(INCOME_DATASET, "revenue")[-1],
+        as_of=INSIDE_THE_FIRST_YEAR,
+        subjects=("000001.SZ",),
+        universe=frozenset({"000001.SZ"}),
+        requirements={
+            INCOME_DATASET: financial_statement_requirement(
+                dataset=INCOME_DATASET,
+                years=(2024,),
+                as_of=INSIDE_THE_FIRST_YEAR,
+                max_staleness=STALENESS,
+            )
+        },
+    )
+    observation = panel.observations[0]
+
+    assert observation.coverage == "computed"
+    assert observation.value == pytest.approx(120.0)
+    assert observation.input_period_last == date(2024, 9, 30)
+
+
+CLOCK_SKEW_AS_OF: Final[datetime] = datetime(2024, 8, 30, 4, 0, tzinfo=UTC)
+"""Between the two announcements below, and more than two months before the later one."""
+
+
+def test_a_row_whose_event_time_is_after_as_of_is_refused_rather_than_winning_its_period(
+    tmp_path: Path,
+) -> None:
+    """Three clocks decide three things, and they agree only because one provider makes them.
+
+    The visible read decides what a caller may see from `available_time`; the engine indexes and
+    orders on `event_time`; the domain's `filing_for` orders on the `ann_date` **column**.
+    `providers/tushare.py::_announcement_timeline` gives every statement row the same instant on
+    all four clocks, so nothing this repository writes can tell them apart -- which is exactly the
+    kind of agreement that stops being true one provider later, and exactly the kind an audit over
+    a byte-equal corpus is structurally unable to see.
+
+    So the corpus is built by hand: the later announcement is made *available* a day before the
+    earlier one while keeping its own announcement date. At an `as_of` two months before it was
+    announced, the engine used to take it -- `computed 999.0`, a restatement that had not happened
+    winning its period. It now refuses, and the refusal names both clocks, because a partition
+    whose clocks disagree is a property of the partition rather than of this security's
+    fundamentals.
+    """
+    skewed: tuple[_Filing, ...] = (
+        ("000002.SZ", date(2024, 3, 31), date(2024, 4, 22), 200.0),
+        ("000002.SZ", date(2024, 3, 31), LATER_ANNOUNCEMENT, 999.0),
+    )
+    store = PanelStore(tmp_path / "clock_skew")
+    write_panel_batch(
+        store,
+        _batch(
+            INCOME_DATASET,
+            skewed,
+            available=(_midnight(date(2024, 4, 22)), _midnight(date(2024, 4, 21))),
+        ),
+        year=2024,
+    )
+    requirement = financial_statement_requirement(
+        dataset=INCOME_DATASET, years=(2024,), as_of=CLOCK_SKEW_AS_OF, max_staleness=STALENESS
+    )
+
+    with pytest.raises(FactorEngineError, match="event_time resolves to 2024-11-10"):
+        _compute(
+            store,
+            _definition(key="probe_one_period", lookback_periods=1, max_window_periods=1),
+            evaluator=lambda window: window.series(INCOME_DATASET, "revenue")[-1],
+            as_of=CLOCK_SKEW_AS_OF,
+            subjects=("000002.SZ",),
+            universe=frozenset({"000002.SZ"}),
+            requirements={INCOME_DATASET: requirement},
+        )
 
 
 def test_the_later_announcement_wins_whichever_order_the_partition_returns_them_in(
@@ -494,6 +820,31 @@ def test_a_report_period_that_is_not_a_stored_iso_date_is_refused(
     assert _report_period("2024-03-31", dataset=INCOME_DATASET, subject="000001.SZ") == date(
         2024, 3, 31
     )
+
+
+@pytest.mark.parametrize("stored", ["2024-05-15", "2024-03-30", "2024-06-31", "2025-01-01"])
+def test_a_report_period_that_is_not_a_fiscal_quarter_end_is_refused(stored: str) -> None:
+    """A well-formed ISO date off the quarter grid, which is the refusal `_period_span` needs.
+
+    A window's reach on this axis is counted in fiscal quarters -- see `FISCAL_QUARTER_ENDS` and
+    `test_a_missed_filing_is_a_gap_whether_or_not_another_security_filed_it` -- and a period that
+    is not a quarter end has no ordinal on that grid. The alternative to refusing is rounding, and
+    rounding is silent: `2024-05-15` and `2024-06-30` would become one point, which is the
+    "fiscal-quarter arithmetic of this module's own devising" the engine declines to perform.
+
+    Four shapes for four ways of being off the grid: a mid-quarter day, a day one short of a
+    quarter end, an impossible day of a quarter month (which `date.fromisoformat` rejects first,
+    so it holds the *order* of the two checks), and a first-of-year that is a quarter *start*.
+    Every one of `FISCAL_QUARTER_ENDS` is asserted to survive in the same breath, because a check
+    that refused everything would pass a test that only asserted refusals.
+    """
+    with pytest.raises(FactorEngineError, match=f"holds '{stored}' for 000001.SZ"):
+        _report_period(stored, dataset=INCOME_DATASET, subject="000001.SZ")
+
+    for month, day in FISCAL_QUARTER_ENDS:
+        assert _report_period(
+            date(2024, month, day).isoformat(), dataset=INCOME_DATASET, subject="000001.SZ"
+        ) == date(2024, month, day)
 
 
 # --- what the two period fields decide ------------------------------------------------------------
@@ -578,6 +929,59 @@ def test_a_gap_in_the_filings_is_separable_from_the_count_by_max_window_periods_
     assert tolerant.values()["000002.SZ"] == pytest.approx(240.0)
 
 
+def test_a_missed_filing_is_a_gap_whether_or_not_another_security_filed_it(
+    tmp_path: Path,
+) -> None:
+    """What `max_window_periods == lookback_periods` actually buys, measured rather than asserted.
+
+    `domain/factor.py` says the equality is "the contract's way of saying 'no missed filing inside
+    the window'", and `V2-P3-011`'s whole `window[-5]` argument stands on it. Against the panel's
+    own period set it was **false**, and the counterexample is not exotic: a security that skipped
+    2024-12-31 in a build where nobody else filed 2024-12-31 either. The gap is not on the union
+    of the periods the read returned, so nothing could measure it -- the five filings "spanned
+    five" and a fifteen-month interval came back as a year-on-year:
+
+        coverage='computed'  value=0.5555555555555556  window 2023-12-31..2025-03-31
+        140/90-1, where a contiguous window would have given 140/100-1
+
+    So the guarantee this contract was selling was "no filing missed that some *other* security in
+    this cross section filed", which is a property of the build's composition rather than of the
+    security -- one witness away from a different verdict. `THE_WITNESS` is that one witness, and
+    the two stores here differ in nothing else.
+
+    The span is now counted on `FISCAL_QUARTER_ENDS`, which is knowable without reading a row, so
+    both stores answer the same. Six quarters is what the window really reaches across, and
+    `max_window_periods=6` is the setting that *declares* a tolerance for the missed filing --
+    under which the fifteen-month number is the factor's own choice rather than the engine's
+    silence.
+    """
+    alone = _written(tmp_path / "alone", dataset=INCOME_DATASET, rows=NOBODY_FILED_THE_GAP)
+    witnessed = _written(
+        tmp_path / "witnessed", dataset=INCOME_DATASET, rows=(*NOBODY_FILED_THE_GAP, THE_WITNESS)
+    )
+    lonely = ("000001.SZ",)
+    both = ("000001.SZ", "000002.SZ")
+
+    strict_alone = _compute(alone, _definition(), subjects=lonely, universe=frozenset(lonely))
+    strict_witnessed = _compute(witnessed, _definition(), subjects=both, universe=frozenset(both))
+    tolerant = _compute(
+        alone,
+        _definition(key="probe_tolerates_a_gap", lookback_periods=5, max_window_periods=6),
+        subjects=lonely,
+        universe=frozenset(lonely),
+    )
+    refused = strict_alone.observations[0]
+
+    assert _coverage(strict_alone)["000001.SZ"] == "insufficient_history"
+    assert _coverage(strict_witnessed)["000001.SZ"] == "insufficient_history"
+    assert refused.input_period_first == EARLIER_PERIOD
+    assert refused.input_period_last == date(2025, 3, 31)
+    assert refused.input_row_count == 5
+    assert _coverage(tolerant)["000001.SZ"] == "computed"
+    assert tolerant.values()["000001.SZ"] == pytest.approx(140.0 / EARLIER_REVENUE - 1.0)
+    assert MISSED_PERIOD not in {item[1] for item in NOBODY_FILED_THE_GAP}
+
+
 def test_a_reach_wider_than_the_whole_panel_is_a_refusal_rather_than_a_panel_of_codes(
     store: PanelStore,
 ) -> None:
@@ -646,6 +1050,80 @@ def test_the_period_reach_and_the_period_window_survive_the_round_trip(
     assert short.coverage == "insufficient_history"
 
 
+def test_the_four_reach_columns_round_trip_to_four_different_numbers(tmp_path: Path) -> None:
+    """A round trip whose fixture can tell each stored reach column from its own neighbour.
+
+    The test above round-trips a `5 / 5` period pair and the session round trip in
+    `test_factor_engine.py` round-trips `REVERSAL_1D`'s `2 / 2`, so on both axes the two columns
+    hold the same number -- and a writer that put `lookback_*` into the `max_window_*` column
+    would satisfy every assertion in either. Measured as mutants, both survived the whole tree:
+
+        [manifest max_window_periods column -> lookback_periods]  *** SURVIVED ***
+        [manifest max_window_sessions column -> lookback_sessions] *** SURVIVED ***
+
+    There is a structural backstop -- `load_factor_manifests` recomputes `manifest_id` from the
+    stored rows and refuses a partition where the identity disagrees, which a tampered column does
+    trip -- but a reader that goes at the partition columns directly, which is the direction
+    `V2-P3-014`/`015` take, gets none of it.
+
+    So: one factor on both axes with `2 / 3 / 4 / 5`, four distinct numbers in the four columns,
+    and each asserted by value. The window columns are separated the same way, `600000.SH`
+    carrying the case where one axis forms a window and the other does not.
+    """
+    store = _both_axes_store(tmp_path)
+    subjects = ("000001.SZ", "600000.SH")
+    definition = FactorDefinition(
+        key="probe_four_reaches",
+        version=1,
+        family="value",
+        direction="higher_is_better",
+        required_fields=(
+            FactorField(dataset=INCOME_DATASET, column="revenue"),
+            FactorField(dataset=SESSION_DATASET, column="revenue"),
+        ),
+        lookback_sessions=2,
+        max_window_sessions=3,
+        lookback_periods=4,
+        max_window_periods=5,
+    )
+    write_factor_panels(
+        store,
+        [
+            _compute(
+                store,
+                definition,
+                evaluator=lambda window: window.series(INCOME_DATASET, "revenue")[-1],
+                subjects=subjects,
+                universe=frozenset(subjects),
+                requirements={
+                    INCOME_DATASET: _requirement(INCOME_DATASET),
+                    SESSION_DATASET: _requirement(SESSION_DATASET),
+                },
+            )
+        ],
+    )
+
+    (manifest,) = load_factor_manifests(store, definition, years=(AS_OF.year,), as_of=AS_OF)
+    observations = load_factor_observations(store, definition, years=(AS_OF.year,), as_of=AS_OF)
+    computed = next(item for item in observations if item.subject == "000001.SZ")
+    short = next(item for item in observations if item.subject == "600000.SH")
+
+    assert manifest.lookback_sessions == 2
+    assert manifest.max_window_sessions == 3
+    assert manifest.lookback_periods == 4
+    assert manifest.max_window_periods == 5
+    assert computed.coverage == "computed"
+    assert computed.input_session_first == date(2024, 12, 31)
+    assert computed.input_session_last == date(2025, 3, 31)
+    assert computed.input_period_first == date(2024, 6, 30)
+    assert computed.input_period_last == date(2025, 3, 31)
+    assert short.coverage == "insufficient_history"
+    assert short.input_session_first == date(2024, 12, 31)
+    assert short.input_session_last == date(2025, 3, 31)
+    assert short.input_period_first is None
+    assert short.input_period_last is None
+
+
 def test_the_period_reach_reaches_the_build_identity(store: PanelStore) -> None:
     """Two builds that differ only in `max_window_periods` produce different numbers here --
     `000002.SZ` is `computed` under one and not the other -- so a `manifest_id` that ignored the
@@ -684,21 +1162,7 @@ def test_a_factor_on_both_axes_gets_one_window_per_axis(tmp_path: Path) -> None:
     arithmetic an EP would do, so a window that aligned the filing to sessions would divide by
     the wrong number rather than raise.
     """
-    store = _written(tmp_path, dataset=INCOME_DATASET)
-    # The price side is written under the probe name so it lands on the session axis. Its rows
-    # are dated at the period ends only so the two axes' points are comparable by eye; nothing
-    # here reads its `report_period` column, because a session-indexed dataset is not projected
-    # for one.
-    prices: tuple[_Filing, ...] = tuple(
-        (code, period, period, 10.0 + index)
-        for code in ("000001.SZ", "600000.SH")
-        for index, period in enumerate(PANEL_PERIODS)
-    )
-    for year in YEARS:
-        rows = tuple(item for item in prices if item[2].year == year)
-        if rows:
-            write_panel_batch(store, _batch(SESSION_DATASET, rows), year=year)
-
+    store = _both_axes_store(tmp_path)
     definition = FactorDefinition(
         key="probe_earnings_yield",
         version=1,

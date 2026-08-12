@@ -29,7 +29,10 @@ exempt.
 
 from __future__ import annotations
 
+import ast
+from collections.abc import Iterator
 from datetime import UTC, date, datetime
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Final
 
@@ -78,6 +81,7 @@ from openalpha_cn.panel_neutralization import FACTOR_NEUTRALIZATIONS
 AS_OF = datetime(2026, 1, 12, 4, 0, tzinfo=UTC)
 OBSERVATIONS = factor_observation_dataset(REVERSAL_1D)
 MANIFESTS = factor_manifest_dataset(REVERSAL_1D)
+SOURCE_ROOT: Final[Path] = Path(__file__).resolve().parents[2] / "src" / "openalpha_cn"
 
 
 def _window(*closes: float) -> FactorWindow:
@@ -572,10 +576,53 @@ SHIPPED_REGISTRIES: Final[tuple[tuple[str, tuple[str, ...], object], ...]] = (
 )
 """The three registries a build actually ships, each with the handles it declares.
 
-Written out rather than discovered, because the point of the test below is that *these three*
-are covered: a fourth identity contract with prose would have to be added here, which is the
-review the row exists to create.
+Written out because the test below is parametrised on it and a failure has to name which of the
+three lost its prose. That it is *these three* and not two or four is not left to the writing:
+`test_the_shipped_registry_table_is_every_registry_this_build_declares` reads the source tree for
+module-level registry constants and holds this tuple against what it finds.
 """
+
+REGISTRY_ANNOTATIONS: Final[frozenset[str]] = frozenset(
+    {"FactorRegistry", "FactorTransformRegistry", "FactorNeutralizationRegistry"}
+)
+"""The registry types a shipped constant can be annotated with, as the source spells them."""
+
+
+def _module_level_registry_names(path: Path) -> Iterator[str]:
+    """Every `NAME: Final[<a registry type>] = ...` this module declares, by AST rather than
+    import: a registry that is declared and never referenced still ships."""
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in tree.body:
+        if not isinstance(node, ast.AnnAssign) or not isinstance(node.target, ast.Name):
+            continue
+        annotation = ast.unparse(node.annotation)
+        if any(f"[{name}]" in annotation for name in REGISTRY_ANNOTATIONS):
+            yield node.target.id
+
+
+def test_the_shipped_registry_table_is_every_registry_this_build_declares() -> None:
+    """The direction a hand-written table cannot cover: a **fourth** registry.
+
+    `test_every_shipped_contract_carries_its_prose` is parametrised on `SHIPPED_REGISTRIES`, so a
+    fourth identity contract shipped without prose would not fail it -- it would simply not be
+    asked. That is the same shape as `KNOWN_*`'s: ten registries arrived under a per-module
+    binding and none of them acquired one, until
+    `test_the_registry_table_is_every_known_registry_in_the_source_tree` read the tree instead.
+    This is that check for this table.
+
+    The narrow half of the gap is already closed and is worth saying so the two are not confused:
+    adding a *definition* to one of these three registries and forgetting its note fails at
+    import, because each registry validates its own notes -- which is the road `V2-P3-009`..`013`
+    take. What was open is the registry nobody has written yet.
+    """
+    found = {
+        name
+        for path in sorted(SOURCE_ROOT.rglob("*.py"))
+        for name in _module_level_registry_names(path)
+    }
+
+    assert found == {"FACTOR_DEFINITIONS", "FACTOR_TRANSFORMS", "FACTOR_NEUTRALIZATIONS"}
+    assert len(SHIPPED_REGISTRIES) == len(found)
 
 
 @pytest.mark.parametrize(("role", "handles", "registry"), SHIPPED_REGISTRIES)
