@@ -70,19 +70,37 @@ SOURCE = ROOT / "src" / "openalpha_cn"
 FILTERED_READ = "read_visible_at"
 """The `PanelStore` method that answers with a deliberately short partition."""
 
-FILTERED_READ_CALLERS: frozenset[str] = frozenset({"panel_factors.py"})
+FILTERED_READ_CALLERS: frozenset[str] = frozenset({"panel_factors.py", "panel_neutralization.py"})
 """Every `src/` file allowed to call `read_visible_at`, relative to `src/openalpha_cn`.
 
-One entry, and it is the factor engine -- the caller `V2-P3-002` added the method for. Its
-inputs are year partitions being read at a mid-year `as_of`, which `read_if_ready` refuses
-whole (roadmap section 11), and its output partition has the same shape when it is read back:
-an observation's `available_time` is the `as_of` it was computed at, so a year of daily cross
+The first entry is the factor engine -- the caller `V2-P3-002` added the method for. Its inputs
+are year partitions being read at a mid-year `as_of`, which `read_if_ready` refuses whole
+(roadmap section 11), and its output partition has the same shape when it is read back: an
+observation's `available_time` is the `as_of` it was computed at, so a year of daily cross
 sections has a `max_available_time` in December.
 
 Adding a name here is a deliberate act with a review attached, which is the property this test
 exists to create. A diff that grants it must say what the new caller does about shortness --
 specifically, whether it can tell a withheld row from an absent one, because the three domain
 rebuilders named in this module's docstring cannot.
+
+**`panel_neutralization.py` (`V2-P3-004`) is the second, and here is its answer to that.** It
+takes the filtered read in exactly two places -- `load_neutralized_factor_observations` and
+`load_factor_neutralization_manifests` -- both of which read back **its own output partitions**,
+whose rows have the factor plane's mid-year shape for the factor plane's reason. Neither
+reassembles anything: a neutralised row is decoded on its own and carries every field it needs,
+so a withheld row is a later `as_of` of the same factor rather than a hole in a structure. That
+is precisely the property the three domain rebuilders lack -- `build_index_membership` refuses a
+gap in a month sequence, `load_industry_histories` needs `answerable_through` because a read that
+stops short of a closing row reassembles an interval that never ends, and `build_stock_universe`
+refuses a delisting whose listing was filtered away.
+
+What the entry is *not* spent on is the neutralisation's two **foreign** inputs. The industry
+memberships and the market caps are read through `panel_ingest.load_industry_histories` and
+`panel_ingest.load_daily_valuations`, which take `read_if_ready` -- the un-gated door that
+refuses a partition whose newest row post-dates `as_of` rather than filtering it. So the newly
+allowlisted module reads its foreign data at a *stricter* setting than the already-allowlisted
+one reads its own.
 """
 
 

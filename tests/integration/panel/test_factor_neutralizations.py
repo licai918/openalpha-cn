@@ -1,0 +1,1490 @@
+"""The neutralisation against a real panel (`V2-P3-004`).
+
+The acceptance is D8's third tier: *"报告可比较 raw / processed / neutralized 表现而不覆盖源观测"*.
+Each half is asserted here against partitions on disk rather than against in-memory objects,
+because the round trip is where a column that was never written, or one that decodes into the
+wrong field, becomes visible.
+
+## The five claims this file exists to hold
+
+1. **Three tiers coexist and none is written over another.** The raw and processed partitions are
+   asserted **byte-identical** before and after a neutralisation is written over the same year,
+   and all three are read back in one test.
+2. **A neutralised row names the exact processed row it came from, which names the exact raw
+   row.** Both hops are performed as joins rather than described.
+3. **The two foreign inputs come off the real store, and the arithmetic layer never sees one.**
+   `load_industry_market_cap_cross_section` is driven against real partitions, and the industry a
+   security gets is the one the *stored assignments* imply on that session -- including the
+   hand-over that moves one name into a group of its own.
+4. **What determines the answers is either in the identity or exempted by name**, audited off
+   `apply_factor_neutralization`'s own signature.
+5. **Every one of the 34 stored manifest columns is read back and held to a value.** `V2-P3-003`'s
+   review measured what the absence of that costs: 23 stored columns whose values were never
+   asserted could all be written as constants with 233 tests staying green.
+
+## The frame
+
+The generated panel's eight securities, with two industry shapes requested so that the session at
+`SESSION` carries two group sizes: seven names in one industry and one alone in another, which is
+`thin_industry` under a floor of 2. The fixture's `daily_basic` writes `total_mv = 1.0` on every
+row, which is a design with no within-industry dispersion at all -- so the market caps are
+replaced with a spread before the panel is written, and the untouched version is kept for the
+`degenerate_design` test.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import inspect
+import math
+from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
+from typing import Any, Final
+
+import pytest
+from panel_fixtures import (
+    DAILY_BASIC_DATASET,
+    SECURITIES,
+    YEAR,
+    GeneratedPanel,
+    generate_panel,
+    write_generated_panel,
+)
+
+from openalpha_cn.domain.daily_prices import DAILY_DATASET
+from openalpha_cn.domain.factor_neutralization import (
+    FactorNeutralizationError,
+    FactorNeutralizationSpec,
+    IndustryMarketCapCrossSection,
+    NeutralizedFactorObservation,
+    SecurityCharacteristic,
+    build_industry_market_cap_cross_section,
+)
+from openalpha_cn.domain.factor_transform import (
+    FactorTransformSpec,
+    MissingValuePolicy,
+    WinsorizationPolicy,
+)
+from openalpha_cn.domain.industry_classification import INDUSTRY_MEMBERSHIP_TAXONOMY
+from openalpha_cn.domain.panel_batch import ColumnarPanelBatch, PanelColumn
+from openalpha_cn.panel.catalog import PanelStorageError, ReadinessRequirement
+from openalpha_cn.panel.store import PanelStore
+from openalpha_cn.panel_factors import (
+    REVERSAL_1D,
+    FactorEngineError,
+    FactorPanel,
+    ProcessedFactorPanel,
+    apply_factor_transform,
+    compute_factor,
+    factor_observation_dataset,
+    load_factor_observations,
+    load_processed_factor_observations,
+    processed_factor_dataset,
+    write_factor_panels,
+    write_processed_factor_panels,
+)
+from openalpha_cn.panel_ingest import daily_requirement, write_panel_batch
+from openalpha_cn.panel_neutralization import (
+    INDUSTRY_AND_SIZE,
+    NEUTRALIZATION_MANIFEST_DATA_COLUMNS,
+    NEUTRALIZATION_MANIFEST_PANEL_COLUMNS,
+    NeutralizedFactorPanel,
+    apply_factor_neutralization,
+    factor_neutralization_manifest_dataset,
+    load_factor_neutralization_manifests,
+    load_industry_market_cap_cross_section,
+    load_neutralized_factor_observations,
+    neutralized_factor_dataset,
+    write_neutralized_factor_panels,
+)
+
+AS_OF: Final[datetime] = datetime(2026, 1, 17, 4, 0, tzinfo=UTC)
+"""The fixture panel's own `as_of`: after the last session's `daily_basic` became knowable.
+
+**Not a mid-window instant, and the reason is a measured refusal rather than convenience.** Both
+foreign inputs are read through `panel_ingest`'s loaders, which take `PanelStore.read_if_ready`,
+whose `not_yet_knowable` verdict is decided on a partition's **max** `available_time`. So a
+`daily_basic` year partition is unreadable at every `as_of` inside the year it covers -- roadmap
+section 11's problem, which `V2-P3-002` solved for the *factor's* own inputs by adding
+`read_visible_at` and which this issue deliberately does not solve for a foreign dataset.
+`test_a_mid_year_as_of_cannot_assemble_the_second_cross_section_at_all` drives it, and
+`KNOWN_NEUTRALIZATION_LIMITATIONS
+.the_two_foreign_inputs_are_read_whole_partition_so_a_mid_year_as_of_is_refused` records it.
+"""
+
+MID_WINDOW: Final[datetime] = datetime(2026, 1, 12, 4, 0, tzinfo=UTC)
+"""Noon Asia/Shanghai on the sixth of ten sessions. Used only to drive the refusal above."""
+
+SESSION: Final[date] = date(2026, 1, 16)
+"""The last session of the fixture's window, and the day the two foreign inputs are read for.
+
+A *session* rather than the `as_of`'s own calendar day, because `as_of` is a Saturday and
+`load_daily_valuations` refuses a day the exchange was shut before touching a partition. Choosing
+it is the caller's job for `compute_factor`'s reason -- a builder that derived it would be putting
+a second policy decision inside an engine.
+"""
+
+BUILT_AT: Final[datetime] = datetime(2026, 3, 1, 9, 0, tzinfo=UTC)
+COMMIT: Final[str] = "a1b2c3d"
+INPUT_STALENESS_BOUND: Final[timedelta] = timedelta(days=5)
+
+SHAPES: Final[tuple[str, ...]] = (
+    "daily.close_moves_between_sessions",
+    "industry.session_adjacent_handover",
+)
+"""Two shapes, and the second is what gives the session at `SESSION` two group sizes.
+
+`industry.session_adjacent_handover` moves `SECURITIES[0]` into the second industry from
+2026-01-12 and leaves it there, so on 2026-01-16 it is the only member of that group --
+`thin_industry` under a floor of 2, while the other seven share the first industry.
+
+`industry.coverage_hole` is deliberately not requested: it would put `SECURITIES[1]` back into
+the second industry from 2026-01-14 and give that group two members, which is a second group with
+nothing to distinguish it. `industry_missing` is exercised through a narrowed cross section
+instead, exactly as `market_cap_missing` is.
+"""
+
+LONE: Final[str] = SECURITIES[0]
+MEMBERSHIP_YEARS: Final[tuple[int, ...]] = (YEAR,)
+
+OBSERVATIONS: Final[str] = factor_observation_dataset(REVERSAL_1D)
+PROCESSED: Final[str] = processed_factor_dataset(REVERSAL_1D)
+NEUTRALIZED: Final[str] = neutralized_factor_dataset(REVERSAL_1D)
+NEUTRALIZATION_MANIFESTS: Final[str] = factor_neutralization_manifest_dataset(REVERSAL_1D)
+
+CAP_BASE: Final[float] = 2_000_000.0
+CAP_STEP: Final[float] = 750_000.0
+"""The replacement `total_mv` grid: `CAP_BASE + CAP_STEP * index` over the eight names.
+
+Distinct per security and monotone in the fixture's own security order, so the expected residuals
+below are derivable from the order rather than copied out of a run. The fixture writes `1.0` on
+every row, which is a design with **zero** within-industry dispersion -- `degenerate_design` --
+and that version is kept for the test that asserts it.
+"""
+
+
+def _transform_spec(**overrides: Any) -> FactorTransformSpec:
+    """A probe transform whose floor is 1, so the eight-name fixture panel can be processed."""
+    settings: dict[str, Any] = {
+        "key": "probe_zscore",
+        "version": 1,
+        "winsorization": WinsorizationPolicy(method="none"),
+        "standardization": "zscore",
+        "missing_values": MissingValuePolicy(
+            not_in_universe="exclude",
+            insufficient_history="exclude",
+            input_missing="exclude",
+            undefined_value="exclude",
+        ),
+        "min_cross_section": 1,
+        "summary": "a probe transform over the fixture panel's eight names",
+        **overrides,
+    }
+    return FactorTransformSpec(**settings)
+
+
+def _spec(**overrides: Any) -> FactorNeutralizationSpec:
+    """A probe neutralisation whose floors fit an eight-name panel.
+
+    `min_cross_section=2` and `min_industry_members=2`: the second is the contract's own floor and
+    is what makes `SECURITIES[0]`'s one-member industry a `thin_industry` rather than a stored
+    zero. The shipped `INDUSTRY_AND_SIZE` has a floor of 100 and is exercised separately, on the
+    only assertion an eight-name panel can make about it.
+    """
+    settings: dict[str, Any] = {
+        "key": "probe_neutral",
+        "version": 1,
+        "industry_level": "L1",
+        "market_cap_measure": "total_mv",
+        "market_cap_scale": "log",
+        "participation": "measured_only",
+        "min_industry_members": 2,
+        "min_cross_section": 2,
+        "summary": "a probe neutralisation over the fixture panel's eight names",
+        **overrides,
+    }
+    return FactorNeutralizationSpec(**settings)
+
+
+def _with_market_caps(panel: GeneratedPanel) -> GeneratedPanel:
+    """The generated panel with a `total_mv` that actually varies.
+
+    Rebuilt off the fixture's own batch rather than hand-written, so every other column -- the
+    closes `write_daily_panel` cross-checks against `daily`, the four clocks, the subjects -- is
+    the fixture's and the only thing this function changes is the regressor.
+    """
+    batch = panel.batch(DAILY_BASIC_DATASET)
+    caps = tuple(CAP_BASE + CAP_STEP * SECURITIES.index(str(subject)) for subject in batch.subjects)
+    columns = tuple(
+        PanelColumn(column.name, column.kind, caps) if column.name == "total_mv" else column
+        for column in batch.columns
+    )
+    replaced: ColumnarPanelBatch = dataclasses.replace(batch, columns=columns)
+    return dataclasses.replace(panel, batches={**panel.batches, DAILY_BASIC_DATASET: replaced})
+
+
+@pytest.fixture
+def panel() -> GeneratedPanel:
+    return _with_market_caps(generate_panel(shapes=SHAPES))
+
+
+@pytest.fixture
+def flat_cap_panel() -> GeneratedPanel:
+    """The fixture as generated: `total_mv = 1.0` on every row, which is a degenerate design."""
+    return generate_panel(shapes=SHAPES)
+
+
+@pytest.fixture
+def store(tmp_path: Path, panel: GeneratedPanel) -> PanelStore:
+    built = PanelStore(tmp_path / "panel")
+    write_generated_panel(built, panel)
+    return built
+
+
+def _compute(store: PanelStore, panel: GeneratedPanel, **overrides: Any) -> FactorPanel:
+    settings: dict[str, Any] = {
+        "as_of": AS_OF,
+        "subjects": panel.securities,
+        "universe": frozenset(panel.securities),
+        "requirements": {
+            DAILY_DATASET: daily_requirement(
+                panel.calendar(),
+                years=(YEAR,),
+                as_of=AS_OF,
+                max_staleness=INPUT_STALENESS_BOUND,
+            )
+        },
+        "code_commit": COMMIT,
+        "built_at": BUILT_AT,
+        **overrides,
+    }
+    return compute_factor(store, REVERSAL_1D, **settings)
+
+
+def _process(source: FactorPanel) -> ProcessedFactorPanel:
+    return apply_factor_transform(source, _transform_spec(), code_commit=COMMIT, built_at=BUILT_AT)
+
+
+def _cross_section(
+    store: PanelStore, panel: GeneratedPanel, spec: FactorNeutralizationSpec | None = None
+) -> IndustryMarketCapCrossSection:
+    return load_industry_market_cap_cross_section(
+        store,
+        _spec() if spec is None else spec,
+        subjects=panel.securities,
+        day=SESSION,
+        as_of=AS_OF,
+        calendar=panel.calendar(),
+        membership_years=MEMBERSHIP_YEARS,
+        max_staleness=None,
+    )
+
+
+def _neutralize(
+    processed: ProcessedFactorPanel,
+    characteristics: IndustryMarketCapCrossSection,
+    spec: FactorNeutralizationSpec | None = None,
+) -> NeutralizedFactorPanel:
+    return apply_factor_neutralization(
+        processed,
+        _spec() if spec is None else spec,
+        characteristics,
+        code_commit=COMMIT,
+        built_at=BUILT_AT,
+    )
+
+
+def _build(store: PanelStore, panel: GeneratedPanel) -> NeutralizedFactorPanel:
+    return _neutralize(_process(_compute(store, panel)), _cross_section(store, panel))
+
+
+def _partition_bytes(store: PanelStore, dataset: str, year: int) -> bytes:
+    """The Parquet file behind one partition, so "untouched" is bytes rather than a claim.
+
+    Reached through the store's own layout (`<root>/<dataset>/<year>/data.parquet`) because the
+    point of this helper is to compare what is on disk, which no reader API exposes.
+    """
+    return (store.root / dataset / str(year) / "data.parquet").read_bytes()
+
+
+# --- the two foreign inputs, read point-in-time --------------------------------------------------
+
+
+def test_the_industry_and_size_cross_section_is_the_one_the_stored_panel_implies(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """The store-side half, driven against real partitions rather than a hand-built value.
+
+    `SECURITIES[0]` handed over to the second industry on this very session, so a builder that
+    resolved the assignment by "the last one that started" rather than by the one *covering* the
+    day would put it in the first industry and give the panel a single 8-name group. The two
+    answers differ on exactly one name and produce entirely different residuals for the other
+    seven, because the group mean they are measured against changes.
+    """
+    cross = _cross_section(store, panel)
+
+    assert cross.as_of == AS_OF
+    assert cross.taxonomy == INDUSTRY_MEMBERSHIP_TAXONOMY
+    assert cross.industry_level == "L1"
+    assert cross.market_cap_measure == "total_mv"
+    assert cross.without_industry == ()
+    assert cross.without_market_cap == ()
+    assert set(cross.subjects()) == set(panel.securities)
+
+    groups = {item.subject: item.industry_code for item in cross.characteristics}
+    assert groups[LONE] == "801120.SI"
+    assert {groups[code] for code in panel.securities if code != LONE} == {"801780.SI"}
+    assert cross.backfilled_count == 0
+
+
+def test_the_market_caps_are_the_stored_ones_and_the_declared_measure_selects_them(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """`total_mv` and `circ_mv` are two columns and the spec picks one.
+
+    The fixture writes `circ_mv = 1.0` and this file replaces `total_mv` with a spread, so the two
+    measures produce visibly different cross sections off one partition -- which is what makes
+    `market_cap_measure` a declaration rather than a formality.
+    """
+    by_total = _cross_section(store, panel)
+    by_circ = _cross_section(store, panel, _spec(market_cap_measure="circ_mv"))
+
+    caps = {item.subject: item.market_cap for item in by_total.characteristics}
+    for code in caps:
+        assert caps[code] == pytest.approx(CAP_BASE + CAP_STEP * SECURITIES.index(code)), code
+    assert {item.market_cap for item in by_circ.characteristics} == {1.0}
+
+
+def test_a_mid_year_as_of_cannot_assemble_the_second_cross_section_at_all(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """The measurement behind this issue's sharpest operational constraint.
+
+    `read_if_ready` decides `not_yet_knowable` on a partition's **max** `available_time`, so a
+    `daily_basic` year partition is unreadable at every `as_of` inside its own year -- here the
+    year's last session becomes available 2026-01-16T08:30Z and the read is taken at
+    2026-01-12T04:00Z. Nothing about that `as_of`'s own session is missing; the whole partition is
+    refused.
+
+    That is roadmap section 11's problem, which `V2-P3-002` solved for the *factor's* own inputs
+    by adding `read_visible_at`. It is deliberately not solved here for a foreign dataset, and
+    `KNOWN_NEUTRALIZATION_LIMITATIONS
+    .the_two_foreign_inputs_are_read_whole_partition_so_a_mid_year_as_of_is_refused` says why and
+    what the levers are. This test is what would go red if that ever changed, which is the point
+    of driving it rather than writing it down.
+    """
+    with pytest.raises(PanelStorageError, match="not_yet_knowable"):
+        load_industry_market_cap_cross_section(
+            store,
+            _spec(),
+            subjects=panel.securities,
+            day=date(2026, 1, 9),
+            as_of=MID_WINDOW,
+            calendar=panel.calendar(),
+            membership_years=MEMBERSHIP_YEARS,
+            max_staleness=None,
+        )
+
+
+def test_an_empty_subject_list_is_refused_rather_than_answered_with_an_empty_cross_section(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    with pytest.raises(FactorEngineError, match="needs at least one subject"):
+        load_industry_market_cap_cross_section(
+            store,
+            _spec(),
+            subjects=(),
+            day=SESSION,
+            as_of=AS_OF,
+            calendar=panel.calendar(),
+            membership_years=MEMBERSHIP_YEARS,
+            max_staleness=None,
+        )
+
+
+# --- the residuals -------------------------------------------------------------------------------
+
+
+def test_the_residuals_are_the_regression_the_stored_inputs_imply(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """Every stored residual derived by hand from the two stored cross sections.
+
+    Not a property assertion. The expected numbers are computed here from the processed values and
+    the stored `total_mv`s by the same algebra the closed form implements, so an engine that
+    demeaned the wrong variable, used the wrong group, or skipped the slope would produce
+    different numbers for every security rather than a differently shaped output.
+
+    The six-name industry is the only one regressed: `SECURITIES[0]` is alone in its group and
+    below the floor, and `SECURITIES[1]` has no group at all.
+    """
+    processed = _process(_compute(store, panel))
+    cross = _cross_section(store, panel)
+    result = _neutralize(processed, cross)
+
+    regressed = [code for code in panel.securities if code != LONE]
+    values = {item.subject: item.value for item in processed.observations}
+    caps = {item.subject: math.log(item.market_cap) for item in cross.characteristics}
+    mean_y = math.fsum(values[code] for code in regressed) / len(regressed)
+    mean_x = math.fsum(caps[code] for code in regressed) / len(regressed)
+    dy = {code: values[code] - mean_y for code in regressed}
+    dx = {code: caps[code] - mean_x for code in regressed}
+    slope = math.fsum(dx[code] * dy[code] for code in regressed) / math.fsum(
+        dx[code] * dx[code] for code in regressed
+    )
+
+    assert result.statistics.market_cap_slope == pytest.approx(slope)
+    assert sorted(result.values()) == sorted(regressed)
+    for code in regressed:
+        assert result.values()[code] == pytest.approx(dy[code] - slope * dx[code]), code
+
+
+def test_a_one_member_industry_is_coded_rather_than_given_its_structural_zero(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """`thin_industry`, end to end on real partitions, and the number it refuses to store.
+
+    `SECURITIES[0]` is alone in its industry on this session. Its residual would be exactly `0.0`
+    -- it is its own group mean in both variables -- and a build that stored it under
+    `neutralized` would put a structural constant into the column `V2-P3-005` correlates and
+    `V2-P3-014` ranks, indistinguishable from a security genuinely at its industry's centre.
+    """
+    result = _build(store, panel)
+    by_subject = {item.subject: item for item in result.observations}
+
+    assert by_subject[LONE].coverage == "thin_industry"
+    assert by_subject[LONE].value is None
+    assert by_subject[LONE].industry_code is None
+    assert by_subject[LONE].source_coverage == "processed"
+
+    census = result.coverage_census()
+    assert census["neutralized"] == 7
+    assert census["thin_industry"] == 1
+    assert census["industry_missing"] == 0
+    assert census["market_cap_missing"] == 0
+    assert census["not_a_participant"] == 0
+    assert sum(census.values()) == len(panel.securities)
+
+
+def test_a_security_the_classification_does_not_cover_is_its_own_code(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """`industry_missing`, and why it is not the same fact as `market_cap_missing`.
+
+    The residue is real and permanent -- 2,694 of 2,776 listed names classified on 2015-06-30, a
+    2.95% hole -- and it belongs to a *different dataset* from a missing capitalisation, so one
+    code for both would report a classification problem as a price-feed one on every affected
+    name. Driven through a narrowed cross section rather than through the fixture's coverage-hole
+    shape, because that shape makes the membership partition unreadable at this `as_of`; see
+    `test_a_membership_row_effective_after_the_as_of_blocks_the_whole_neutralisation`.
+    """
+    processed = _process(_compute(store, panel))
+    cross = _cross_section(store, panel)
+    dropped = next(item for item in cross.characteristics if item.subject != LONE)
+    narrowed = build_industry_market_cap_cross_section(
+        as_of=cross.as_of,
+        taxonomy=cross.taxonomy,
+        industry_level=cross.industry_level,
+        market_cap_measure=cross.market_cap_measure,
+        characteristics=[item for item in cross.characteristics if item is not dropped],
+        without_industry=(dropped.subject,),
+    )
+
+    result = _neutralize(processed, narrowed)
+    by_subject = {item.subject: item for item in result.observations}
+
+    assert by_subject[dropped.subject].coverage == "industry_missing"
+    assert by_subject[dropped.subject].value is None
+    assert by_subject[dropped.subject].industry_code is None
+    assert result.coverage_census()["industry_missing"] == 1
+    assert result.statistics.participant_count == 6
+
+
+def test_a_market_cap_the_partition_does_not_carry_is_its_own_code(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """`market_cap_missing`, driven by moving one name into the second residue.
+
+    `daily_basic` genuinely omits Beijing-board names on historical sessions -- 60 of 3,843 on
+    2020-03-02, all `.BJ` (`panel_ingest.load_daily_valuations`) -- so this is the market's shape
+    rather than an invented one, and the code has to be distinguishable from `industry_missing`
+    because the two point at different datasets and only one of them is a classification problem.
+    """
+    processed = _process(_compute(store, panel))
+    cross = _cross_section(store, panel)
+    dropped = next(item for item in cross.characteristics if item.subject != LONE)
+    narrowed = build_industry_market_cap_cross_section(
+        as_of=cross.as_of,
+        taxonomy=cross.taxonomy,
+        industry_level=cross.industry_level,
+        market_cap_measure=cross.market_cap_measure,
+        characteristics=[item for item in cross.characteristics if item is not dropped],
+        without_market_cap=(dropped.subject,),
+    )
+
+    result = _neutralize(processed, narrowed)
+    by_subject = {item.subject: item for item in result.observations}
+
+    assert by_subject[dropped.subject].coverage == "market_cap_missing"
+    assert by_subject[dropped.subject].value is None
+    assert by_subject[dropped.subject].industry_code is None
+    assert result.coverage_census()["market_cap_missing"] == 1
+    assert result.coverage_census()["industry_missing"] == 0
+    assert result.statistics.participant_count == 6
+
+
+def test_a_design_with_no_within_industry_dispersion_produces_no_residual_at_all(
+    tmp_path: Path, flat_cap_panel: GeneratedPanel
+) -> None:
+    """The fixture as generated -- `total_mv = 1.0` everywhere -- is a degenerate design.
+
+    Whole-panel, and every row carries the code including the one that had its own reason for
+    having no residual, `_uniform_neutralized_panel`'s stated judgement: "there is no neutralised
+    cross section at this `as_of`" is the dominant fact, and reporting `thin_industry` for one
+    name while the others said `degenerate_design` would suggest that one could have been
+    regressed and merely lacked company.
+    """
+    built = PanelStore(tmp_path / "panel")
+    write_generated_panel(built, flat_cap_panel)
+
+    result = _build(built, flat_cap_panel)
+
+    assert result.coverage_census()["degenerate_design"] == len(flat_cap_panel.securities)
+    assert result.coverage_census()["thin_industry"] == 0
+    assert result.values() == {}
+    assert result.industries() == {}
+    assert result.statistics.market_cap_slope is None
+    assert result.statistics.market_cap_dispersion is None
+    assert result.statistics.residual_dispersion is None
+    assert result.statistics.participant_count == 7
+
+
+def test_a_cross_section_thinner_than_the_declared_floor_is_a_whole_panel_code(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """The shipped `INDUSTRY_AND_SIZE`'s floor of 100 against an eight-name market.
+
+    The one assertion a fixture panel can make about the *shipped* configuration, and it is worth
+    making: a floor above the market produces a coded, auditable outcome with the participant
+    count stored, rather than an exception -- which is what lets a backfill cross a historical
+    `as_of` whose market was genuinely thin.
+    """
+    processed = _process(_compute(store, panel))
+    cross = _cross_section(store, panel, INDUSTRY_AND_SIZE)
+
+    result = _neutralize(processed, cross, INDUSTRY_AND_SIZE)
+
+    assert result.coverage_census()["insufficient_cross_section"] == len(panel.securities)
+    assert result.statistics.participant_count == 7
+    assert result.values() == {}
+
+
+def test_the_member_floor_admits_a_group_of_exactly_its_size_and_refuses_one_below(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """The boundary of `min_industry_members`, on both sides of it.
+
+    The seven-name group is *exactly* the floor at 7, so a `>` where the code has `>=` codes the
+    whole market `thin_industry` -- and a test that only drove the one-name group would not see
+    it, because 1 fails both comparisons. Written after a mutant survived precisely that gap.
+    """
+    processed = _process(_compute(store, panel))
+    cross = _cross_section(store, panel)
+
+    at_the_floor = _neutralize(processed, cross, _spec(min_industry_members=7, min_cross_section=7))
+    above_it = _neutralize(processed, cross, _spec(min_industry_members=8, min_cross_section=8))
+
+    assert at_the_floor.coverage_census()["neutralized"] == 7
+    assert at_the_floor.coverage_census()["thin_industry"] == 1
+    assert at_the_floor.statistics.smallest_industry_size == 7
+    assert above_it.coverage_census()["neutralized"] == 0
+    assert above_it.coverage_census()["insufficient_cross_section"] == len(panel.securities)
+
+
+def test_a_thin_industrys_members_do_not_count_toward_the_cross_section_floor(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """The ordering of steps 4 and 5, measured rather than argued.
+
+    Eight names are eligible -- every one has an industry and a capitalisation -- and with a
+    member floor of 7 only seven of them are admissible. A whole-panel floor of 8 therefore
+    cannot be met. **The opposite order counts the eligible eight, clears the floor of 8, and then
+    regresses seven of them under a manifest saying the cross section was eight**, which is a
+    build reporting a market it did not score. The two assertions below are what tell the orders
+    apart: the census must be `insufficient_cross_section` for everybody rather than
+    `neutralized` for seven.
+    """
+    processed = _process(_compute(store, panel))
+    cross = _cross_section(store, panel)
+
+    result = _neutralize(processed, cross, _spec(min_industry_members=7, min_cross_section=8))
+
+    assert result.coverage_census()["insufficient_cross_section"] == len(panel.securities)
+    assert result.coverage_census()["neutralized"] == 0
+    assert result.coverage_census()["thin_industry"] == 0
+    assert result.statistics.participant_count == 7
+
+
+def test_an_imputed_processed_value_enters_the_regression_only_when_the_rule_says_so(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """The participation rule, and it moves every residual rather than only the imputed row's.
+
+    A narrowed universe gives one name `not_in_universe`, which the transform fills with the
+    processed median under a `fill_cross_sectional_median` policy. Under `measured_only` that name
+    is `not_a_participant`; under `measured_and_imputed` it joins its industry and moves that
+    group's own mean, so every other security's residual moves with it.
+    """
+    excluded = SECURITIES[3]
+    raw = _compute(store, panel, universe=frozenset(panel.securities) - {excluded})
+    filling = _transform_spec(
+        key="probe_fill",
+        missing_values=MissingValuePolicy(
+            not_in_universe="exclude",
+            insufficient_history="exclude",
+            input_missing="fill_cross_sectional_median",
+            undefined_value="fill_cross_sectional_median",
+        ),
+    )
+    processed = apply_factor_transform(raw, filling, code_commit=COMMIT, built_at=BUILT_AT)
+    cross = _cross_section(store, panel)
+
+    strict = _neutralize(processed, cross, _spec(participation="measured_only"))
+    inclusive = _neutralize(processed, cross, _spec(participation="measured_and_imputed"))
+    by_subject = {item.subject: item for item in strict.observations}
+
+    assert by_subject[excluded].coverage == "not_a_participant"
+    assert by_subject[excluded].source_coverage == "source_not_computed"
+    assert strict.statistics.participant_count == 6
+    assert inclusive.statistics.participant_count == 6
+    assert strict.manifest.neutralization_manifest_id != (
+        inclusive.manifest.neutralization_manifest_id
+    )
+
+
+# --- the guards -----------------------------------------------------------------------------------
+
+
+def test_a_cross_section_for_another_instant_is_refused_rather_than_joined(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """The substitute for "the engine cannot reach a store", and it is exact rather than a
+    tolerance: both values carry an aware instant and the two must be the same one."""
+    processed = _process(_compute(store, panel))
+    cross = _cross_section(store, panel)
+    shifted = dataclasses.replace(cross, as_of=cross.as_of + timedelta(days=1))
+
+    with pytest.raises(FactorEngineError, match="the two instants must be the same one"):
+        _neutralize(processed, shifted)
+
+
+def test_a_cross_section_that_does_not_cover_the_panel_is_refused(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """The guard with no other detector.
+
+    A name the second cross section never heard of resolves to the same `None` as a name it has no
+    industry for -- so without this check, a cross section assembled for half the market would be
+    stored as a market that was half unclassified.
+    """
+    processed = _process(_compute(store, panel))
+    cross = _cross_section(store, panel)
+    truncated = build_industry_market_cap_cross_section(
+        as_of=cross.as_of,
+        taxonomy=cross.taxonomy,
+        industry_level=cross.industry_level,
+        market_cap_measure=cross.market_cap_measure,
+        characteristics=cross.characteristics[:2],
+    )
+
+    with pytest.raises(FactorEngineError, match="places them in none of its three collections"):
+        _neutralize(processed, truncated)
+
+
+def test_a_cross_section_at_another_level_or_measure_than_the_spec_declares_is_refused(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    processed = _process(_compute(store, panel))
+    cross = _cross_section(store, panel)
+
+    with pytest.raises(FactorEngineError, match="files one taxonomy level's groups"):
+        _neutralize(processed, dataclasses.replace(cross, industry_level="L2"))
+    with pytest.raises(FactorEngineError, match="same numbers under two meanings"):
+        _neutralize(processed, dataclasses.replace(cross, market_cap_measure="circ_mv"))
+
+
+def test_a_processed_panel_that_does_not_own_its_rows_is_refused(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """What makes `(source_transform_manifest_id, subject, as_of)` a proved key rather than
+    an assumed one."""
+    processed = _process(_compute(store, panel))
+    stray = dataclasses.replace(processed.observations[0], transform_manifest_id="ftm_elsewhere")
+    tampered = dataclasses.replace(processed, observations=(stray, *processed.observations[1:]))
+
+    with pytest.raises(FactorEngineError, match="would make that pointer name a build"):
+        _neutralize(tampered, _cross_section(store, panel))
+
+
+def test_a_panel_whose_spec_is_not_the_one_that_produced_its_rows_is_refused_at_the_write(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """`V2-P3-003`'s review defect, closed here at birth rather than after a measurement.
+
+    The manifest columns come off `manifest` and the policy columns off `spec`, so a panel wearing
+    another spec's label stores a manifest row whose `neutralization_id` and whose
+    `market_cap_scale` describe two different builds -- and the identity self-check on the way back
+    cannot see it, because the policy columns are not among the twelve it reassembles.
+    """
+    result = _build(store, panel)
+    mislabelled = dataclasses.replace(result, spec=_spec(key="other_neutral"))
+
+    with pytest.raises(FactorEngineError, match="are not one application"):
+        write_neutralized_factor_panels(store, [mislabelled])
+
+
+def test_a_panel_with_a_blank_taxonomy_is_refused_at_the_write(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """The one stored column hashed only inside `characteristic_digest` and nowhere else."""
+    result = _build(store, panel)
+
+    with pytest.raises(FactorEngineError, match="blank one tells a reader of the partition"):
+        write_neutralized_factor_panels(store, [dataclasses.replace(result, industry_taxonomy=" ")])
+
+
+def test_two_neutralisations_of_one_build_at_one_as_of_are_refused(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    result = _build(store, panel)
+
+    with pytest.raises(FactorEngineError, match="more than one application of"):
+        write_neutralized_factor_panels(store, [result, result])
+
+
+def test_an_empty_write_and_an_empty_panel_are_both_refused(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    processed = _process(_compute(store, panel))
+
+    with pytest.raises(FactorEngineError, match="needs at least one panel"):
+        write_neutralized_factor_panels(store, [])
+    with pytest.raises(FactorEngineError, match="at least one observation"):
+        _neutralize(dataclasses.replace(processed, observations=()), _cross_section(store, panel))
+
+
+def test_superseding_a_build_no_partition_holds_is_refused(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    result = _build(store, panel)
+    write_neutralized_factor_panels(store, [result])
+
+    with pytest.raises(FactorEngineError, match="which no partition this write touches holds"):
+        write_neutralized_factor_panels(store, [result], supersedes=["fnm_nothing"])
+
+
+# --- the round trip ------------------------------------------------------------------------------
+
+
+def test_three_tiers_coexist_and_the_two_below_are_byte_identical_after_the_write(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """D8's "不覆盖源观测", as bytes on disk rather than as a claim about code paths."""
+    raw = _compute(store, panel)
+    processed = _process(raw)
+    write_factor_panels(store, [raw])
+    write_processed_factor_panels(store, [processed])
+    raw_before = _partition_bytes(store, OBSERVATIONS, YEAR)
+    processed_before = _partition_bytes(store, PROCESSED, YEAR)
+
+    write_neutralized_factor_panels(store, [_neutralize(processed, _cross_section(store, panel))])
+
+    assert _partition_bytes(store, OBSERVATIONS, YEAR) == raw_before
+    assert _partition_bytes(store, PROCESSED, YEAR) == processed_before
+    assert len(load_factor_observations(store, REVERSAL_1D, years=(YEAR,), as_of=AS_OF)) == 8
+    assert (
+        len(
+            load_processed_factor_observations(
+                store, REVERSAL_1D, _transform_spec(), years=(YEAR,), as_of=AS_OF
+            )
+        )
+        == 8
+    )
+    assert (
+        len(
+            load_neutralized_factor_observations(
+                store, REVERSAL_1D, _spec(), years=(YEAR,), as_of=AS_OF
+            )
+        )
+        == 8
+    )
+
+
+def test_a_neutralised_row_names_the_exact_processed_row_which_names_the_exact_raw_row(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """Both hops of the provenance chain, performed as joins rather than described.
+
+    Three tiers, two pointers, no copies: a neutralised row's
+    `(source_transform_manifest_id, subject, as_of)` is the exact key of a processed row, and that
+    row's `(source_manifest_id, subject, as_of)` is the exact key of a raw one.
+    """
+    raw = _compute(store, panel)
+    processed = _process(raw)
+    result = _neutralize(processed, _cross_section(store, panel))
+    write_factor_panels(store, [raw])
+    write_processed_factor_panels(store, [processed])
+    write_neutralized_factor_panels(store, [result])
+
+    stored = load_neutralized_factor_observations(
+        store, REVERSAL_1D, _spec(), years=(YEAR,), as_of=AS_OF
+    )
+    processed_rows = {
+        (item.source_manifest_id, item.subject, item.as_of): item
+        for item in load_processed_factor_observations(
+            store, REVERSAL_1D, _transform_spec(), years=(YEAR,), as_of=AS_OF
+        )
+    }
+    raw_rows = {
+        (item.manifest_id, item.subject, item.as_of): item
+        for item in load_factor_observations(store, REVERSAL_1D, years=(YEAR,), as_of=AS_OF)
+    }
+    processed_by_key = {
+        (item.transform_manifest_id, item.subject, item.as_of): item
+        for item in processed_rows.values()
+    }
+
+    assert len(stored) == 8
+    for row in stored:
+        parent = processed_by_key[(row.source_transform_manifest_id, row.subject, row.as_of)]
+        assert parent.coverage == row.source_coverage
+        grandparent = raw_rows[(parent.source_manifest_id, parent.subject, parent.as_of)]
+        assert grandparent.factor_id == row.source_factor_id
+
+
+def test_every_stored_column_survives_the_round_trip_with_its_value(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """Each of the eleven observation columns read back off the partition and held to a value.
+
+    Coverage is worthless here and `V2-P3-003`'s review measured why: 23 stored columns whose
+    names were asserted and whose values never were could all be written as constants with 233
+    tests staying green. So this reads the decoded row and compares every field.
+
+    **Built over a narrowed universe on purpose.** With every security computed, `source_coverage`
+    is `"processed"` on all eight rows -- so a builder that wrote the constant `"processed"` into
+    that column would round-trip perfectly and the assertion would prove nothing. Excluding one
+    name gives the panel a `source_not_computed` row, which is what makes the comparison able to
+    fail. Measured: a per-column falsification found exactly that gap.
+    """
+    excluded = SECURITIES[5]
+    raw = _compute(store, panel, universe=frozenset(panel.securities) - {excluded})
+    processed = _process(raw)
+    result = _neutralize(processed, _cross_section(store, panel))
+    write_neutralized_factor_panels(store, [result])
+
+    stored = {
+        item.subject: item
+        for item in load_neutralized_factor_observations(
+            store, REVERSAL_1D, _spec(), years=(YEAR,), as_of=AS_OF
+        )
+    }
+    expected = {item.subject: item for item in result.observations}
+
+    assert set(stored) == set(expected)
+    assert {item.source_coverage for item in expected.values()} == {
+        "processed",
+        "source_not_computed",
+    }
+    for subject, row in stored.items():
+        source: NeutralizedFactorObservation = expected[subject]
+        assert row.as_of == source.as_of, subject
+        assert row.coverage == source.coverage, subject
+        assert row.industry_code == source.industry_code, subject
+        assert row.neutralization_id == source.neutralization_id, subject
+        assert row.neutralization_manifest_id == source.neutralization_manifest_id, subject
+        assert row.source_factor_id == source.source_factor_id, subject
+        assert row.source_transform_id == source.source_transform_id, subject
+        assert row.source_transform_manifest_id == source.source_transform_manifest_id, subject
+        assert row.source_coverage == source.source_coverage, subject
+        if source.value is None:
+            assert row.value is None, subject
+        else:
+            assert row.value == pytest.approx(source.value), subject
+
+
+def test_the_two_observation_columns_no_decoder_reassembles_are_still_asserted(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """`neutralization_key` and `neutralization_version`, read straight off the partition.
+
+    **These two are the only stored observation columns `NeutralizedFactorObservation` does not
+    carry**, so `load_neutralized_factor_observations` never looks at them and no round-trip
+    comparison can. They exist for `factor_key`/`transform_key`'s reason -- a reader querying the
+    partition directly would otherwise need this build's registry to know what the rows are about
+    -- and without this test they would be two columns rendered and never read, which is exactly
+    the shape `V2-P3-003`'s review found 23 of. Measured: writing either as a constant left the
+    three covering files green until this test existed.
+    """
+    result = _build(store, panel)
+    write_neutralized_factor_panels(store, [result])
+
+    rows = store.query(
+        NEUTRALIZED,
+        year=YEAR,
+        columns=("subject", "neutralization_key", "neutralization_version"),
+    )
+
+    assert len(rows) == len(panel.securities)
+    assert {str(row[1]) for row in rows} == {"probe_neutral"}
+    assert {int(str(row[2])) for row in rows} == {1}
+    assert {str(row[0]) for row in rows} == set(panel.securities)
+
+
+def test_every_stored_manifest_column_is_read_back_and_held_to_a_value(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """All 34 manifest columns, off the partition, against values derived here.
+
+    The instrument `V2-P3-003`'s review installed after finding that 23 rendered-but-unasserted
+    columns could be written as constants without turning anything red. The census is recounted
+    against the *observation* partition rather than copied off the panel, so the two datasets have
+    to agree with each other and not merely with the object that wrote them.
+    """
+    result = _build(store, panel)
+    write_neutralized_factor_panels(store, [result])
+    rows = store.query(
+        NEUTRALIZATION_MANIFESTS, year=YEAR, columns=NEUTRALIZATION_MANIFEST_PANEL_COLUMNS
+    )
+    assert len(rows) == 1
+    cells = dict(zip(NEUTRALIZATION_MANIFEST_PANEL_COLUMNS, rows[0], strict=True))
+
+    stored_rows = load_neutralized_factor_observations(
+        store, REVERSAL_1D, _spec(), years=(YEAR,), as_of=AS_OF
+    )
+    recounted = {code: 0 for code in result.coverage_census()}
+    for row in stored_rows:
+        recounted[row.coverage] += 1
+    statistics = result.statistics
+    manifest = result.manifest
+
+    assert cells["subject"] == manifest.neutralization_manifest_id
+    assert cells["neutralization_id"] == manifest.neutralization_id
+    assert cells["neutralization_key"] == "probe_neutral"
+    assert cells["neutralization_version"] == 1
+    assert cells["source_factor_id"] == REVERSAL_1D.factor_id
+    assert cells["source_factor_key"] == REVERSAL_1D.key
+    assert cells["source_factor_version"] == REVERSAL_1D.version
+    assert cells["source_transform_id"] == _transform_spec().transform_id
+    assert cells["source_transform_manifest_id"] == manifest.source_transform_manifest_id
+    assert cells["source_processed_digest"] == manifest.source_processed_digest
+    assert cells["characteristic_digest"] == manifest.characteristic_digest
+    assert cells["as_of_time"] == AS_OF
+    assert cells["code_commit"] == COMMIT
+    assert cells["industry_level"] == "L1"
+    assert cells["market_cap_measure"] == "total_mv"
+    assert cells["market_cap_scale"] == "log"
+    assert cells["participation"] == "measured_only"
+    assert cells["min_industry_members"] == 2
+    assert cells["min_cross_section"] == 2
+    assert cells["industry_taxonomy"] == INDUSTRY_MEMBERSHIP_TAXONOMY
+    assert cells["participant_count"] == 7
+    assert cells["industry_count"] == 1
+    assert cells["smallest_industry_size"] == 7
+    assert cells["largest_industry_size"] == 7
+    assert cells["backfilled_industry_count"] == 0
+    assert cells["market_cap_slope"] == pytest.approx(statistics.market_cap_slope)
+    assert cells["market_cap_dispersion"] == pytest.approx(statistics.market_cap_dispersion)
+    assert cells["residual_dispersion"] == pytest.approx(statistics.residual_dispersion)
+    for code, count in recounted.items():
+        assert cells[f"census_{code}"] == count, code
+    assert set(cells) - {"subject"} == set(NEUTRALIZATION_MANIFEST_DATA_COLUMNS)
+
+
+def test_a_reassembled_manifest_reproduces_the_identity_it_was_stored_under(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    result = _build(store, panel)
+    write_neutralized_factor_panels(store, [result])
+
+    stored = load_factor_neutralization_manifests(store, REVERSAL_1D, years=(YEAR,), as_of=AS_OF)
+
+    assert len(stored) == 1
+    assert stored[0].neutralization_manifest_id == result.manifest.neutralization_manifest_id
+    assert stored[0] == result.manifest
+
+
+def test_a_second_neutralisation_of_one_factor_shares_the_partition_and_reads_apart(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """The dataset-name budget's stated consequence, exercised rather than described.
+
+    One `factor_neut_*` partition holds every neutralisation of the factor, so a year has to be
+    written in one call across all of them -- and a read of one opens the rows of both and filters
+    on `neutralization_id` in Python.
+    """
+    processed = _process(_compute(store, panel))
+    cross = _cross_section(store, panel)
+    by_log = _neutralize(processed, cross)
+    level_spec = _spec(key="probe_level", market_cap_scale="level")
+    by_level = _neutralize(processed, cross, level_spec)
+
+    write_neutralized_factor_panels(store, [by_log, by_level])
+    log_rows = load_neutralized_factor_observations(
+        store, REVERSAL_1D, _spec(), years=(YEAR,), as_of=AS_OF
+    )
+    level_rows = load_neutralized_factor_observations(
+        store, REVERSAL_1D, level_spec, years=(YEAR,), as_of=AS_OF
+    )
+
+    assert len(store.query(NEUTRALIZED, year=YEAR, columns=("subject",))) == 16
+    assert len(log_rows) == 8
+    assert len(level_rows) == 8
+    assert {row.neutralization_id for row in log_rows} == {_spec().neutralization_id}
+    assert {row.neutralization_id for row in level_rows} == {level_spec.neutralization_id}
+    assert by_log.values() != by_level.values()
+
+
+def test_a_write_that_would_drop_a_stored_build_is_refused(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """The shared drop guard, reached through this plane's writer."""
+    processed = _process(_compute(store, panel))
+    cross = _cross_section(store, panel)
+    first = _neutralize(processed, cross)
+    second = _neutralize(processed, cross, _spec(key="probe_level", market_cap_scale="level"))
+    write_neutralized_factor_panels(store, [first, second])
+
+    with pytest.raises(FactorEngineError, match="would drop"):
+        write_neutralized_factor_panels(store, [first])
+
+    assert write_neutralized_factor_panels(
+        store, [first], supersedes=[second.manifest.neutralization_manifest_id]
+    )
+
+
+# --- the determinant audit ------------------------------------------------------------------------
+
+
+IDENTITY_ARGUMENTS: Final[frozenset[str]] = frozenset(
+    {"panel", "spec", "characteristics", "code_commit"}
+)
+"""Parameters of `apply_factor_neutralization` that reach `neutralization_manifest_id`.
+
+`panel` three times over -- `source_transform_id`, `source_transform_manifest_id` and
+`source_processed_digest`; `spec` through `neutralization_id`; `characteristics` through
+`characteristic_digest`; `code_commit` directly.
+"""
+
+EXEMPT_ARGUMENTS: Final[frozenset[str]] = frozenset({"built_at"})
+"""The wall clock, deliberately out of the content address: re-applying the same neutralisation to
+the same processed build must reproduce its identity, or a rebuild could never be written past
+`_refuse_to_drop_a_stored_build`."""
+
+
+def test_every_determinant_is_either_in_the_identity_or_exempted_by_name() -> None:
+    """Read off the function's own signature, so a sixth parameter fails until it is classified.
+
+    An equivalence test varies what a model declares and cannot show that the model declares
+    everything -- which is `test_every_determinant_of_this_build_is_either_in_the_identity_or_
+    exempted_by_name`'s argument, and the reason this audit reads `inspect.signature` instead of
+    maintaining a list.
+    """
+    parameters = set(inspect.signature(apply_factor_neutralization).parameters)
+
+    assert parameters == IDENTITY_ARGUMENTS | EXEMPT_ARGUMENTS
+    assert set() == IDENTITY_ARGUMENTS & EXEMPT_ARGUMENTS
+
+
+def test_the_neutralisation_takes_no_store_and_therefore_no_second_visibility_rule() -> None:
+    """The structural half of the point-in-time claim, audited by signature.
+
+    `apply_factor_transform` established the form: a function that cannot read a row cannot read
+    one that was not knowable. This one needs two foreign datasets and still takes no store -- the
+    substitute is that its second input is a *value* stamped with the instant it was read at, and
+    `test_a_cross_section_for_another_instant_is_refused_rather_than_joined` is the measurement of
+    the substitute.
+    """
+    signature = inspect.signature(apply_factor_neutralization)
+    annotations = {
+        name: str(parameter.annotation) for name, parameter in signature.parameters.items()
+    }
+
+    assert "store" not in signature.parameters
+    assert "as_of" not in signature.parameters
+    assert "universe" not in signature.parameters
+    assert "date_timezone" not in signature.parameters
+    assert not any("PanelStore" in text for text in annotations.values())
+    assert not any("ReadinessRequirement" in text for text in annotations.values())
+
+
+def test_a_source_panel_whose_numbers_moved_moves_the_neutralisation_identity(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """What makes exempting nothing on the `panel` argument a measurement rather than a promise.
+
+    Built by hand because `apply_factor_transform` will not produce a panel whose manifest is
+    unchanged and whose values are not -- and `ProcessedFactorPanel` is a public frozen dataclass
+    that can.
+    """
+    processed = _process(_compute(store, panel))
+    cross = _cross_section(store, panel)
+    first = processed.observations[0]
+    assert first.value is not None
+    moved = dataclasses.replace(
+        processed,
+        observations=(
+            dataclasses.replace(first, value=first.value + 1.0),
+            *processed.observations[1:],
+        ),
+    )
+
+    baseline = _neutralize(processed, cross)
+    shifted = _neutralize(moved, cross)
+
+    assert baseline.manifest.source_transform_manifest_id == (
+        shifted.manifest.source_transform_manifest_id
+    )
+    assert baseline.manifest.source_processed_digest != shifted.manifest.source_processed_digest
+    assert baseline.manifest.neutralization_manifest_id != (
+        shifted.manifest.neutralization_manifest_id
+    )
+
+
+def test_a_cross_section_whose_industries_moved_moves_the_identity_too(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """The same instrument on the second input, which no manifest field names directly."""
+    processed = _process(_compute(store, panel))
+    cross = _cross_section(store, panel)
+    relabelled = build_industry_market_cap_cross_section(
+        as_of=cross.as_of,
+        taxonomy=cross.taxonomy,
+        industry_level=cross.industry_level,
+        market_cap_measure=cross.market_cap_measure,
+        characteristics=[
+            dataclasses.replace(item, is_backfilled=True) for item in cross.characteristics
+        ],
+        without_industry=cross.without_industry,
+        without_market_cap=cross.without_market_cap,
+    )
+
+    baseline = _neutralize(processed, cross)
+    moved = _neutralize(processed, relabelled)
+
+    assert baseline.values() == pytest.approx(dict(moved.values()))
+    assert baseline.manifest.characteristic_digest != moved.manifest.characteristic_digest
+    assert baseline.manifest.neutralization_manifest_id != (
+        moved.manifest.neutralization_manifest_id
+    )
+    assert moved.statistics.backfilled_industry_count == 7
+
+
+def test_re_running_the_same_neutralisation_reproduces_its_identity_and_is_writable(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """`built_at`'s exemption, measured: a rebuild at a different wall clock is the same build."""
+    processed = _process(_compute(store, panel))
+    cross = _cross_section(store, panel)
+    first = _neutralize(processed, cross)
+    again = apply_factor_neutralization(
+        processed,
+        _spec(),
+        cross,
+        code_commit=COMMIT,
+        built_at=BUILT_AT + timedelta(days=30),
+    )
+    write_neutralized_factor_panels(store, [first])
+
+    assert again.manifest.neutralization_manifest_id == (first.manifest.neutralization_manifest_id)
+    assert write_neutralized_factor_panels(store, [again])
+
+
+# --- the readiness contract -----------------------------------------------------------------------
+
+
+def test_the_read_requirement_waives_the_three_checks_a_derived_partition_cannot_answer(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """`required_dates`, `required_subjects` and `max_staleness`, waived with `required_fields` not.
+
+    The dates here are `as_of`s somebody chose to compute rather than sessions an exchange was
+    open; the subjects are the cross section the read is *for*; a derived partition has no upstream
+    to be stale against. The stored columns are not waived, because they are exactly what the
+    decoder needs and a missing one would surface as a binder error rather than a verdict.
+    """
+    result = _build(store, panel)
+    write_neutralized_factor_panels(store, [result])
+    requirement: ReadinessRequirement = (store.read_visible_at.__self__ and None) or None  # type: ignore[assignment]
+
+    from openalpha_cn.panel_neutralization import (
+        neutralization_manifest_requirement,
+        neutralized_factor_requirement,
+    )
+
+    for builder in (neutralized_factor_requirement, neutralization_manifest_requirement):
+        built = builder(REVERSAL_1D, years=(YEAR,), as_of=AS_OF)
+        assert built.required_dates is None
+        assert built.required_subjects is None
+        assert built.max_staleness is None
+        assert built.required_fields is not None
+        assert "subject" in built.required_fields
+    assert requirement is None
+
+
+def test_a_neutralised_row_is_invisible_before_the_as_of_it_was_computed_at(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """The filtered read doing its job on this plane's own output.
+
+    A neutralised row's `available_time` is the `as_of` it was computed at, so an earlier read
+    sees nothing -- and `read_if_ready` would refuse the whole partition rather than answering
+    with the rows that were knowable, which is why this module is on `FILTERED_READ_CALLERS`.
+    """
+    result = _build(store, panel)
+    write_neutralized_factor_panels(store, [result])
+
+    earlier = load_neutralized_factor_observations(
+        store, REVERSAL_1D, _spec(), years=(YEAR,), as_of=AS_OF - timedelta(days=1)
+    )
+    at_the_time = load_neutralized_factor_observations(
+        store, REVERSAL_1D, _spec(), years=(YEAR,), as_of=AS_OF
+    )
+
+    assert earlier == ()
+    assert len(at_the_time) == 8
+
+
+def test_a_partition_carrying_an_undeclared_code_is_refused_where_the_dataset_can_be_named(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """A build that knows an eighth coverage code is a partition this build cannot interpret."""
+    result = _build(store, panel)
+    write_neutralized_factor_panels(store, [result])
+    batch = store.read_coverage(NEUTRALIZED, YEAR)
+    assert batch is not None
+
+    from openalpha_cn.panel_neutralization import _neutralized_code, _stored_residual
+
+    with pytest.raises(FactorEngineError, match="does not declare"):
+        _neutralized_code("squashed", dataset=NEUTRALIZED)
+    with pytest.raises(FactorEngineError, match="not a finite number"):
+        _stored_residual("inf", dataset=NEUTRALIZED)
+
+
+def test_a_stored_manifest_row_whose_identity_does_not_reassemble_is_refused(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """The decoder's self-check, driven by writing a row under the wrong subject."""
+    result = _build(store, panel)
+    write_neutralized_factor_panels(store, [result])
+    from openalpha_cn.panel_neutralization import neutralization_manifest_batch
+
+    batch = neutralization_manifest_batch(result)
+    tampered = dataclasses.replace(batch, subjects=("fnm_wrong",))
+    write_panel_batch(store, tampered, year=YEAR)
+
+    with pytest.raises(FactorEngineError, match="reassembles to"):
+        load_factor_neutralization_manifests(store, REVERSAL_1D, years=(YEAR,), as_of=AS_OF)
+
+
+def test_a_hand_built_cross_section_can_carry_numbers_the_store_never_had(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """The disclosed residue, asserted rather than left as a sentence in a docstring.
+
+    Nothing at the arithmetic layer can tell a cross section assembled from the store from one a
+    caller invented and stamped with the right instant -- exactly as nothing can tell a computed
+    `FactorPanel` from a hand-assembled one. The obstacle is that
+    `load_industry_market_cap_cross_section` is the only builder in `src/`, not that this is
+    impossible, and this test is what keeps the docstring from overclaiming.
+    """
+    processed = _process(_compute(store, panel))
+    invented = build_industry_market_cap_cross_section(
+        as_of=AS_OF,
+        taxonomy=INDUSTRY_MEMBERSHIP_TAXONOMY,
+        industry_level="L1",
+        market_cap_measure="total_mv",
+        characteristics=[
+            SecurityCharacteristic(
+                subject=code,
+                industry_code="801999.SI",
+                market_cap=1_000.0 + index,
+                is_backfilled=False,
+            )
+            for index, code in enumerate(panel.securities)
+        ],
+    )
+
+    result = _neutralize(processed, invented)
+
+    assert result.coverage_census()["neutralized"] == 8
+    assert set(result.industries().values()) == {"801999.SI"}
+
+
+def test_a_cross_section_with_a_non_positive_capitalisation_cannot_be_built_at_all(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    with pytest.raises(FactorNeutralizationError, match="finite positive number"):
+        build_industry_market_cap_cross_section(
+            as_of=AS_OF,
+            taxonomy=INDUSTRY_MEMBERSHIP_TAXONOMY,
+            industry_level="L1",
+            market_cap_measure="total_mv",
+            characteristics=[
+                SecurityCharacteristic(
+                    subject=panel.securities[0],
+                    industry_code="801999.SI",
+                    market_cap=0.0,
+                    is_backfilled=False,
+                )
+            ],
+        )
+
+
+def test_a_security_the_industry_corpus_never_carried_lands_in_the_residue(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """A code `index_member_all` has no history for at all, which is one of three "no answer"s.
+
+    The corpus carries 14 codes `stock_basic` has never had and the registry carries names the
+    corpus does not (`IndustryCoverageReport.unknown_to_registry`), so a subject with no history
+    is a real shape rather than an invented one. It is folded into `without_industry` with the
+    other two, because all three mean "this build has no industry for this security on this day".
+    """
+    stranger = "999999.SZ"
+
+    cross = load_industry_market_cap_cross_section(
+        store,
+        _spec(),
+        subjects=(*panel.securities, stranger),
+        day=SESSION,
+        as_of=AS_OF,
+        calendar=panel.calendar(),
+        membership_years=MEMBERSHIP_YEARS,
+        max_staleness=None,
+    )
+
+    assert cross.without_industry == (stranger,)
+    assert stranger not in {item.subject for item in cross.characteristics}
+
+
+def test_a_day_inside_a_coverage_hole_lands_in_the_residue_rather_than_carrying_a_stale_label(
+    tmp_path: Path,
+) -> None:
+    """The 49 measured coverage holes, at the only scale a fixture reproduces them.
+
+    `000639.SZ` is unclassified for **4,103 sessions** inside its listed life
+    (`KNOWN_INDUSTRY_LIMITATIONS.a_security_can_be_unclassified_inside_its_listed_life`), and
+    carrying the previous label across such a gap would be an answer no row supports.
+    `SecurityIndustryHistory.assignment_on` refuses the day, and this builder turns that refusal
+    into `industry_missing` rather than into an exception -- which is the right shape, because on
+    a 2015 cross section the residue is 3% of the market and an exception would refuse every day.
+    """
+    holed = _with_market_caps(
+        generate_panel(shapes=("daily.close_moves_between_sessions", "industry.coverage_hole"))
+    )
+    built = PanelStore(tmp_path / "panel")
+    write_generated_panel(built, holed)
+
+    cross = load_industry_market_cap_cross_section(
+        built,
+        _spec(),
+        subjects=holed.securities,
+        day=date(2026, 1, 9),
+        as_of=AS_OF,
+        calendar=holed.calendar(),
+        membership_years=MEMBERSHIP_YEARS,
+        max_staleness=None,
+    )
+
+    assert cross.without_industry == (SECURITIES[1],)
+    assert SECURITIES[1] not in {item.subject for item in cross.characteristics}
+    assert set(cross.subjects()) == set(holed.securities)
+
+
+def test_a_security_with_no_daily_basic_row_that_session_lands_in_the_other_residue(
+    tmp_path: Path,
+) -> None:
+    """`daily_basic` omitting a name the bars carry, which is measured rather than invented.
+
+    60 of 3,843 securities on 2020-03-02 had a bar and no valuation, all `.BJ`
+    (`panel_ingest.load_daily_valuations`). The builder puts such a name in `without_market_cap`
+    and not in `without_industry`, because it *has* an industry -- and the two codes point at
+    different datasets, so collapsing them would report a price-feed gap as a classification one.
+    """
+    thin = _with_market_caps(
+        generate_panel(
+            shapes=(
+                "daily.close_moves_between_sessions",
+                "industry.session_adjacent_handover",
+                "daily.bar_without_valuation",
+            )
+        )
+    )
+    built = PanelStore(tmp_path / "panel")
+    write_generated_panel(built, thin)
+
+    cross = load_industry_market_cap_cross_section(
+        built,
+        _spec(),
+        subjects=thin.securities,
+        day=SESSION,
+        as_of=AS_OF,
+        calendar=thin.calendar(),
+        membership_years=MEMBERSHIP_YEARS,
+        max_staleness=None,
+    )
+
+    assert cross.without_market_cap == (LONE,)
+    assert cross.without_industry == ()
+
+
+def test_a_processed_panel_whose_manifest_names_another_factor_is_refused(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """The first half of the input-side guard: the manifest and the definition must agree.
+
+    They are produced together by `apply_factor_transform`, so this never fires on its output --
+    and `ProcessedFactorPanel` is a public frozen dataclass that anybody can assemble otherwise.
+    """
+    processed = _process(_compute(store, panel))
+    mismatched = dataclasses.replace(
+        processed,
+        manifest=processed.manifest.model_copy(update={"source_factor_id": "fct_elsewhere"}),
+    )
+
+    with pytest.raises(FactorEngineError, match="cannot be neutralised"):
+        _neutralize(mismatched, _cross_section(store, panel))
+
+
+def test_a_neutralised_row_from_another_build_is_refused_at_the_write(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """The output-side guard's row half: a pointer, written as a fact, at a build this partition
+    does not hold."""
+    result = _build(store, panel)
+    stray = dataclasses.replace(result.observations[0], neutralization_manifest_id="fnm_elsewhere")
+    tampered = dataclasses.replace(result, observations=(stray, *result.observations[1:]))
+
+    with pytest.raises(FactorEngineError, match="is a pointer at a build this partition"):
+        write_neutralized_factor_panels(store, [tampered])
+
+
+def test_both_loaders_refuse_a_partition_the_readiness_rule_blocks(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """A year the store does not hold is blocked by `partition_missing`, not answered empty.
+
+    Both readers report the issue codes rather than a bare failure, because a caller holding an
+    empty tuple cannot tell "this year has no builds" from "this year could not be read".
+    """
+    result = _build(store, panel)
+    write_neutralized_factor_panels(store, [result])
+
+    with pytest.raises(FactorEngineError, match="cannot be read at"):
+        load_neutralized_factor_observations(
+            store, REVERSAL_1D, _spec(), years=(YEAR - 1,), as_of=AS_OF
+        )
+    with pytest.raises(FactorEngineError, match="cannot be read at"):
+        load_factor_neutralization_manifests(store, REVERSAL_1D, years=(YEAR - 1,), as_of=AS_OF)
