@@ -143,5 +143,25 @@ re-canonicalised and re-hashed 5,534 times. `domain/panel_batch.py` documents ex
 (`payload_digest`, 10.5 ms on first access and 10.2 ms on the second) and this module walked
 into it anyway; hoisting the read out of the loop is the fix.
 
+### Re-measured after the `V2-P3-001`/`002` review remediation
+
+The remediation added two per-build passes and one per-security check to the same workload: the
+union of every visible session (`_panel_sessions`), the refusal of a panel narrower than the
+lookback, and two binary searches per security for the window's span in panel sessions
+(`_window_span`). Re-measured on the same shape -- 5,534 securities x 122 sessions = 675,148
+rows through the real store:
+
+| step | before | after |
+|---|---|---|
+| `compute_factor`, cold | 1.95 s | **2.24 s** (3.3 us/row) |
+| the same call again, warm | 1.91 s | 2.26 s |
+
+The conclusion is unchanged and so is the *kind* of arithmetic: still no matrix, no broadcast,
+no regression, and the added work is a sorted-set union plus `bisect` over a list of at most
+2,000 dates. The write path is still two orders of magnitude above it (350.6 s for the same
+partition on this run, against 288 s on the first -- that figure is machine-dependent and only
+the ordering is claimed). `V2-P3-004`'s neutralisation is still the issue that should re-open
+the question.
+
 The nine runtime dependencies are pinned by `tests/unit/test_repository_assets.py`, which is
 what would go red if this update were wrong.

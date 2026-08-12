@@ -358,13 +358,21 @@ def test_the_storage_limitations_are_the_entries_that_name_no_dataset() -> None:
     assert not ({item.code for item in known_limitations(("adj_factor",))} & unscoped)
 
 
-def test_both_storage_limitations_carry_the_measurement_that_motivated_them() -> None:
+def test_the_two_quantified_storage_limitations_carry_the_count_they_were_measured_at() -> None:
     """A disclosure with no number in it is the prose these two replace.
 
     One says every insertion and deletion behind the store is now refused and a value edited in
     place is not; the other says `PanelStore.query()` passes no point-in-time gate. Each is
     only actionable if the reader is told how big it is, so each carries the count it was
     measured at on a real partition.
+
+    Named "the two quantified" rather than "both": `KNOWN_STORAGE_LIMITATIONS` has more than two
+    entries now, and the ones this test does not name carry a *category* of risk rather than a
+    quantity -- see `test_the_visibility_filtered_read_is_disclosed_with_what_it_cannot_promise`.
+    The assertions below are unchanged and were always about these two; what was wrong was the
+    name, which counted the registry rather than the cases, and which therefore goes stale every
+    time the registry grows. A test name is documentation, and a false one is the drift this
+    repository refuses everywhere else.
     """
     by_code = {item.code: item.detail for item in KNOWN_STORAGE_LIMITATIONS}
 
@@ -382,8 +390,10 @@ def test_the_visibility_filtered_read_is_disclosed_with_what_it_cannot_promise()
     """`V2-P3-002`'s third storage-plane boundary, held to the same standard as the two above.
 
     Written as a separate test rather than folded into
-    `test_both_storage_limitations_carry_the_measurement_that_motivated_them`, which is left
-    exactly as it was: it names the two it names, and both claims are still true of them.
+    `test_the_two_quantified_storage_limitations_carry_the_count_they_were_measured_at`, whose
+    assertions are left exactly as they were: they name the two they name, and both claims are
+    still true of them. Only that test's *name* changed, because "both" counted the registry
+    rather than the two cases it actually checks, and the registry has since grown.
 
     What this one has to carry is different in kind from a count, and that difference is the
     reason `read_visible_at` is disclosed at all. `PanelStore.query()`'s entry is sized by a
