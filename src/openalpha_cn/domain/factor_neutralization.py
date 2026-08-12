@@ -42,22 +42,36 @@ The regression is the factor value on **industry dummies plus one market-cap reg
 stored number is the residual. Four things about it change every residual, so all four are
 fields on `FactorNeutralizationSpec` rather than constants in an engine:
 
-| declared | what it decides | measured effect on the residuals |
+| declared | what it decides | effect on the residuals |
 | --- | --- | --- |
 | `industry_level` | 31 groups (L1), 134 (L2) or 346 (L3) | changes the group means entirely |
-| `market_cap_measure` | `total_mv` or `circ_mv` | max 0.0196 on residuals whose rms is 0.995 |
-| `market_cap_scale` | `level` or `log` | max 0.195 on the same cross section |
+| `market_cap_measure` | `total_mv` or `circ_mv` | moves them, by a **floor** rather than a figure |
+| `market_cap_scale` | `level` or `log` | the same, and by more |
 | `participation` | whether an *imputed* processed value is in the regression | changes the sample |
+
+**"A floor rather than a figure" is a deliberate retreat from an earlier claim and is worth
+reading as one.** The middle two rows once carried point estimates (`0.0196` and `0.195`, against
+"residuals whose rms is 0.995"). They came from one seed of the synthetic probe in
+`tests/unit/test_factor_neutralization_rules.py`, whose "circulating" capitalisation is a
+`Normal(0.7, 0.25)` float ratio invented in the test and not a stored `circ_mv` -- and the
+quantity is not stable enough to quote: over the eight seeds that test now sweeps, the measure gap
+spans 0.0067..0.0591 and the scale gap 0.021..1.222, both against residuals whose deviation is 1
+by construction. So what this repository asserts is what it can hold: **every seed clears a
+floor**, which falsifies "these are formalities" and claims nothing further. A number that varies
+by 58x across an arbitrary parameter is not evidence about the market.
 
 **And one thing that looks like a choice and provably is not: re-scaling the regressor.** OLS
 residuals are the projection onto the orthogonal complement of the design's column space, and an
 affine map of one regressor leaves that space unchanged whenever the constant it adds is already
 in the span -- which a complete set of industry dummies always contains, since they sum to one on
 every row. So "standardize the market cap first" is not a declarable option here, because it is
-not an option: measured on a 5,534-name cross section, z-scoring `log(total_mv)` moves every
-residual by at most **4.44e-16**, and `1000 * log(cap) + 7` by the same. A field for it would be
-one that reaches the identity and decides nothing, which is the defect `FactorTransformManifest`
-rejected `date_timezone` for. See `MarketCapScale` for what *does* move them.
+not an option: measured on the 5,534-name probe, z-scoring `log(total_mv)` moves every residual by
+**4.44e-16** and `1000 * log(cap) + 7` by the same. A field for it would be one that reaches the
+identity and decides nothing, which is the defect `FactorTransformManifest` rejected
+`date_timezone` for. What is *not* claimed is that `4.44e-16` bounds every affine map: `1e-6 * x
+- 3` measures **8.4e-12** on the same probe, because the demeaned regressor's own scale sets how
+much cancellation the subtraction costs. The invariance is of the *answer*, not of the bits. See
+`MarketCapScale` for what does move them.
 
 ## The rank of the design, which is a real question with a measured answer
 
@@ -198,12 +212,20 @@ sessions spanning 2001..2026**, which is why a null in any of the six is refused
 tolerated -- "`total_mv` and `circ_mv` are P3 neutralisation inputs and a null one silently drops
 a name from a regression" is that module's own sentence about this module.
 
-The two are not interchangeable and the difference is measured rather than asserted: on a
-5,534-name cross section whose residuals have an rms of 0.995, swapping `log(total_mv)` for
-`log(circ_mv)` moves a residual by up to **0.0196**. Total market cap is the whole company;
-circulating market cap excludes the restricted shares, so on a name whose float is a third of its
-capital the two differ by more than a point of size decile. Neither is right for every study,
-which is why this is declared and stored rather than chosen here.
+**That probe is about nulls and says nothing about how much the two measures differ**, and the
+paragraph break is there so the two are not read as one finding. The difference *is* driven, but
+only on the synthetic cross section in
+`tests/unit/test_factor_neutralization_rules.py::_panel`, whose "circulating" series is a
+`Normal(0.7, 0.25)` float ratio the test invents -- no stored `circ_mv` has ever been through it.
+On that probe swapping `log(total_mv)` for `log(circ_mv)` moves a residual by 0.0067..0.0591 over
+eight seeds, against residuals whose deviation is 1 by construction, so
+`test_the_declared_choices_that_do_move_the_residuals_move_them_by_a_reportable_amount` asserts a
+floor every seed clears and this docstring quotes no figure.
+
+What is claimed without a probe is the direction, which is arithmetic rather than statistics:
+total market cap is the whole company and circulating market cap excludes the restricted shares,
+so on a name whose float is a third of its capital they are two different size variables. Neither
+is right for every study, which is why this is declared and stored rather than chosen here.
 """
 
 MARKET_CAP_MEASURES: Final[frozenset[str]] = frozenset(get_args(MarketCapMeasure))
@@ -221,11 +243,21 @@ MarketCapScale = Literal["level", "log"]
   Declarable rather than refused, because a study that wants it should be able to say so and have
   the choice recorded; what it must not be is the silent default.
 
-**This is a declared field because it changes the answers, unlike a re-scaling.** Measured on a
-5,534-name cross section with residual rms 0.995: `level` against `log` moves a residual by up to
-**0.195**, roughly a fifth of a standard deviation, while an affine re-scaling of either moves
-one by at most 4.44e-16. See this module's docstring for why the second is arithmetic rather than
-a finding.
+**This is a declared field because it changes the answers; a re-scaling is not a field because it
+does not.** The two halves are different kinds of statement and are worded differently on purpose:
+
+- **The scale moves residuals by a reportable amount, and the amount is not a constant.** On the
+  synthetic 5,534-name probe, `level` against `log` moves a residual by 0.021..1.222 across the
+  eight seeds `test_the_declared_choices_that_do_move_the_residuals_move_them_by_a_reportable_
+  amount` sweeps, against residuals whose deviation is 1 by construction -- a 58x spread over an
+  arbitrary parameter. So that test asserts a floor every seed clears, and this docstring quotes
+  no single figure: one would be a property of the seed.
+- **Re-scaling moves nothing that is not floating-point noise**, because a complete dummy set
+  already spans the constant. Z-scoring `log(total_mv)` and `1000 * x + 7` both move a residual by
+  **4.44e-16**, three ulps. That figure is *not* a uniform bound over affine maps -- `1e-6 * x -
+  3` measures 8.4e-12 on the same probe, because shrinking the regressor by six orders costs six
+  orders of relative precision in the subtraction. The invariance is of the answer, not of the
+  bits. See this module's docstring for the algebra.
 """
 
 MARKET_CAP_SCALES: Final[frozenset[str]] = frozenset(get_args(MarketCapScale))
@@ -379,9 +411,15 @@ def _refuse_a_participation_table_that_cannot_answer_every_valued_processed_code
     rule with no entry, an entry naming a code the processed vocabulary does not declare, and a
     valued processed code no rule admits.
 
-    Takes its inputs as arguments rather than reading the module's own globals, so that all three
-    failure directions are drivable from a test. An audit whose only call site is the one that
-    passes is an audit nobody has seen fail.
+    Takes the **table and the rule list** as arguments rather than reading this module's own
+    `PARTICIPATING_PROCESSED_CODES` and `PARTICIPATION_RULE_ORDER`, which is what makes all three
+    failure directions drivable from a test. It is *not* free of globals and the docstring used to
+    imply it was: the two vocabularies it reconciles against -- `PROCESSED_COVERAGE_CODES` and
+    `PROCESSED_VALUE_CODES` -- are read straight off `domain/factor_transform.py`, deliberately, so
+    that the audit compares against the neighbouring plane's live declaration rather than against
+    a copy a caller passed in. All three failures are still reachable through the `table`
+    parameter alone, which is the property that matters: an audit whose only call site is the one
+    that passes is an audit nobody has seen fail.
     """
     declared = set(rules)
     if set(table) != declared:
@@ -500,6 +538,18 @@ class FactorNeutralizationSpec(BaseModel):
     been inside `factor_id` since `V2-P3-001`, and taking it out here alone would leave three
     identity contracts disagreeing -- and the cost is stated instead of the claim being softened:
     **edit this string only together with a version bump.**
+
+    **That rule has one exception and it has already been used once**, so the exception is written
+    down rather than left for the next reader to re-derive from a diff.
+    `INDUSTRY_AND_SIZE.summary` was edited without a version bump by `V2-P3-004`'s review, which
+    retracted three figures from it that could not be reproduced (see `MarketCapScale` and
+    `tests/unit/test_factor_neutralization_rules.py::MEASURE_GAP_FLOOR`). Both halves of the rule's
+    reason were absent: `version` is documented as bumped when the *meaning* changes, and no
+    setting moved -- and the cost the rule protects against is stored
+    `neutralization_manifest_id`s becoming unreproducible, of which there were none, because
+    nothing in `cli.py` or `scripts/` builds a neutralisation yet. A bump would have claimed a
+    second neutralisation policy that does not exist. **The window closes when `V2-P3-014` writes
+    the first partition**; after that the rule has no exception, because the cost stops being zero.
     """
 
     @field_validator("key")
@@ -515,15 +565,19 @@ class FactorNeutralizationSpec(BaseModel):
     def refuse_a_floor_no_industry_can_leave_room_under(self) -> Self:
         """Refuse `min_industry_members` above `min_cross_section`.
 
-        Not tidiness: the two floors are counted over the same securities, so a spec whose
-        per-industry floor exceeds its whole-panel floor is one where clearing the second
-        guarantees nothing about the first and the second can never bind -- every cross section
-        big enough to be processed at all is one where at least one industry is below the member
-        floor is *not* implied, but the reverse is: with `min_industry_members >
-        min_cross_section`, a cross section sitting exactly on `min_cross_section` cannot contain
-        a single admissible industry, so the build produces `thin_industry` for the entire market
-        while reporting that it had enough participants. Two floors that can contradict each
-        other are one floor and a trap.
+        Not tidiness. Both floors are counted over the same eligible securities, and with
+        `min_industry_members > min_cross_section` the two can contradict each other on a real
+        cross section: one sitting exactly on `min_cross_section` has fewer members in total than
+        the per-industry floor demands, so **no** industry in it can be admissible. The build then
+        clears its whole-panel floor, reports that many participants, and codes every single one
+        of them `thin_industry` -- a manifest saying "enough names" over a partition with no
+        values in it. Refusing the spec is cheaper than explaining that row.
+
+        The implication runs one way only, which is why this is a bound and not an equality:
+        `min_industry_members <= min_cross_section` does **not** promise that some industry will
+        clear the member floor (a wide, finely split cross section can still code everybody), and
+        no declaration could promise that, because it is a fact about the market on the day. What
+        the bound removes is the configuration where the contradiction is guaranteed in advance.
         """
         if self.min_industry_members > self.min_cross_section:
             raise ValueError(
@@ -871,8 +925,9 @@ def characteristic_digest(cross_section: IndustryMarketCapCrossSection) -> str:
     for it would be a second statement of the same fact that could disagree with the digest --
     and `index_member_all` speaks exactly one vintage today, which would make a separate hashed
     field a constant that reaches the identity and decides nothing. The measure is hashed too,
-    because `total_mv` and `circ_mv` are the same numbers under two meanings on any day a caller
-    assembles the wrong one.
+    because a cross section carrying `total_mv` and one carrying `circ_mv` are the same *shape*
+    holding two different size variables, and a caller who assembled the wrong one would otherwise
+    reproduce an identity the numbers do not belong to.
 
     The same canonicalisation `stable_model_id`, `set_digest` and `observation_digest` use --
     `json.dumps` with fixed separators, `ensure_ascii=False` and `allow_nan=False`.
@@ -1302,13 +1357,22 @@ KNOWN_NEUTRALIZATION_LIMITATIONS: Final[tuple[NeutralizationLimitation, ...]] = 
         detail=(
             "A stored residual is orthogonal to the industry dummies and to the ONE declared "
             "market-cap regressor, over the participants of THIS cross section. It is not "
-            "orthogonal to a differently scaled size variable: measured on a 5,534-name cross "
-            "section, residuals against log(total_mv) and against total_mv differ by up to 0.195 "
-            "where their rms is 0.995, and against log(circ_mv) by up to 0.0196. So 'size "
-            "neutralised' is a statement about market_cap_measure and market_cap_scale together "
-            "and reading it as a general one is an overclaim. What is invariant is affine "
-            "re-scaling of the declared regressor -- z-scoring it moves a residual by at most "
-            "4.44e-16 -- because a complete dummy set spans the constant."
+            "orthogonal to a differently scaled size variable, so 'size neutralised' is a "
+            "statement about market_cap_measure and market_cap_scale TOGETHER and reading it as a "
+            "general one is an overclaim. HOW FAR FROM ORTHOGONAL IS DELIBERATELY NOT QUOTED AS A "
+            "NUMBER HERE, and the retraction is part of the entry: this text used to say 'up to "
+            "0.195 where their rms is 0.995, and against log(circ_mv) by up to 0.0196'. Those "
+            "three figures came from ONE seed of the synthetic probe in "
+            "tests/unit/test_factor_neutralization_rules.py -- whose circulating capitalisation "
+            "is a Normal(0.7, 0.25) float ratio the test invents, never a stored circ_mv -- and "
+            "the quantity is not stable enough to quote: across the eight seeds that test now "
+            "sweeps the scale gap spans 0.021..1.222 and the measure gap 0.0067..0.0591, against "
+            "residuals whose deviation is 1 by construction. What IS asserted is that every seed "
+            "clears a floor, which falsifies 'these are formalities' and claims nothing further. "
+            "What is invariant is affine re-scaling of the declared regressor, because a complete "
+            "dummy set spans the constant: z-scoring it and 1000*x+7 each move a residual by "
+            "4.44e-16. That is not a uniform bound over affine maps -- 1e-6*x-3 measures 8.4e-12 "
+            "on the same probe -- so the invariance is of the answer and not of the bits."
         ),
     ),
     NeutralizationLimitation(
@@ -1338,7 +1402,29 @@ KNOWN_NEUTRALIZATION_LIMITATIONS: Final[tuple[NeutralizationLimitation, ...]] = 
             "load_industry_market_cap_cross_section's membership_years (narrowing has its own "
             "cost: answerable_through then refuses a day past the last year read) and choosing an "
             "as_of after the partitions close. V2-P3-014's build schedule is where a daily "
-            "neutralised series has to be scheduled around this."
+            "neutralised series has to be scheduled around this. "
+            "THERE IS A SECOND HOP AND IT IS THE ONE THAT REACHES THE READER: THE STORED RESIDUAL "
+            "IS ITSELF INVISIBLE THROUGHOUT THE YEAR IT COVERS. neutralized_observation_batch "
+            "stamps every row's available_time (and its three other clocks) with the BUILD's "
+            "as_of, and the paragraph above forces that as_of to be at or after the daily_basic "
+            "partition's max available_time -- which is the year's last session. Put together: a "
+            "residual for ANY trading day of year Y carries an available_time after Y's last "
+            "session. load_neutralized_factor_observations reads through read_visible_at, which "
+            "filters ROWS rather than refusing the partition, so an in-year as_of returns EMPTY "
+            "rather than an error -- driven by tests/integration/panel/"
+            "test_factor_neutralizations.py::"
+            "test_a_residual_about_a_session_is_invisible_at_that_sessions_own_close, which takes "
+            "the read at the very end of the session the residuals are about and gets (), and by "
+            "test_a_neutralised_row_is_invisible_before_the_as_of_it_was_computed_at. THE CONTENT "
+            "OF THE RESIDUALS IS STILL CLEAN (each uses the industry and the capitalisation of the "
+            "day it is about), so what is lost is the honesty of the TIMESTAMP, not the "
+            "arithmetic: a caller cannot ask 'which residuals did I hold at as_of 2026-06-30' and "
+            "get anything but zero. The consequence is graded and is recorded in roadmap section "
+            "11: V2-P3-005's IC decay is not blocked but must document that it reads a year-end "
+            "snapshot, while V2-P4-013's walk-forward IS blocked below annual granularity, "
+            "because a year's twelve months of residuals all become visible at the same instant. "
+            "The fix is a partition-granularity or day-bounded read of daily_basic, which is a "
+            "V2-P1 storage-contract change and deliberately out of V2-P3-004's scope."
         ),
     ),
     NeutralizationLimitation(

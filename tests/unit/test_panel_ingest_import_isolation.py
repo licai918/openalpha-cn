@@ -111,8 +111,16 @@ a neutralisation regresses against. Had this code stayed in `panel_factors`, tha
 have been invisible here --
 `openalpha_cn.panel_ingest` is already in `_ALLOWED_FACTOR_DEPENDENCIES` and this table records
 dependencies at package granularity, so the factor engine would have silently gained two datasets
-it has no business knowing about, with nothing to go red. A separate module makes the widening a
-row somebody has to approve, which is what this table is for.
+it has no business knowing about, with nothing to go red. A separate module made the widening a
+row somebody had to approve, which is what this table is for.
+
+**And that is the whole of what it bought -- one review, at one moment.** It is not a standing
+detector on datasets, because this row is package-granular in exactly the way the one above it
+is: `openalpha_cn.panel_ingest` is now *inside* `_ALLOWED_NEUTRALIZATION_DEPENDENCIES`, so a later
+commit that has `panel_neutralization` call `load_daily_bars` or `load_index_weights` widens its
+reach with nothing here going red. This table sees **modules**. A guard that saw datasets would be
+a different instrument and this issue did not build one; saying so is cheaper than a reader
+inferring a promise from the row's existence.
 
 The edge runs one way only. `panel_factors` does not import `panel_neutralization` -- its own row
 above is an *equality*, so an edge back would fail that assertion rather than this comment.

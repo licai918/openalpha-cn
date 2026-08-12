@@ -26,6 +26,16 @@ rather than a second's."* The evidence arrived and it points the other way, on o
   turns it into a new row in `PANEL_MODULE_DEPENDENCIES` that a reviewer has to read and approve.
   That is the repository's own preference, stated in that file: a new row must be argued for in
   the module's own docstring, which is what this paragraph is.
+
+  **The exact strength of that, because it is easy to overstate.** What the split bought is one
+  reviewed row -- a human read, once. It did **not** buy a continuing detector, because the new
+  row is package-granular too: `openalpha_cn.panel_ingest` now sits in
+  `_ALLOWED_NEUTRALIZATION_DEPENDENCIES` as well, so a later edit that adds
+  `load_daily_bars` or `load_index_weights` to *this* module widens its dataset reach with nothing
+  going red. The audit sees **modules**, never datasets. So the honest claim is that the widening
+  was made visible **at the moment it happened**, not that it is policed from here on; the thing
+  that would police it is a dataset-level allowlist, which does not exist and is not proposed
+  here.
 - **The size, which is now indefensible rather than merely large.** `panel_factors.py` is 3,912
   lines and already the largest module in `src/`; this issue is ~1,000 more. A 4,900-line module
   is not a seam anybody re-takes later.
@@ -85,16 +95,19 @@ the slope's two sums are accumulated with `math.fsum` rather than `sum`, because
 together -- and `level` market caps in 10k CNY are exactly that shape, spanning 1e3 to 1e8 with
 industry means in the same range.
 
-**The normal equations are never formed, and the reason is measured.** The Gram matrix of
-`31 dummies + total_mv` has a diagonal spanning `149` to `2.05e17`, a ratio of **1.37e15** --
-within a factor of ten of double precision's own epsilon. Under `log` the same ratio is 6.4e3.
-The closed form has no such matrix: its only division is by the within-industry sum of squared
-deviations, which is one positive number that `degenerate_design` tests directly. What is *not*
-claimed is that this rescued anything measurable: the dense reference, solved with pivoting and
-`fsum`, still agreed to 4.44e-16 on the raw-cap design, because a dummy block is orthogonal by
-construction and the effective conditioning is far better than the diagonal suggests. So the
-closed form is chosen for its `O(n)` cost and its absent matrix, and the conditioning is a reason
-to prefer it rather than a defect it was observed to avoid.
+**The normal equations are never formed, and the reason is measured.** On the level-capitalisation
+design of the `_panel(7)` probe that comparison test drives, the Gram matrix of
+`31 dummies + total_mv` has a diagonal spanning `151` to `3.55e17`, a ratio of **2.35e15** --
+within a factor of ten of double precision's own epsilon. (`_panel(19)`, the probe the *other*
+tests use, gives `149` to `2.05e17` and `1.37e15`; the seed is named because the number is a
+property of it.) Under `log` the same ratio is 6.3e3. The closed form has no such matrix: its only
+division is by the within-industry sum of squared deviations, which is one positive number that
+`degenerate_design` tests directly. What is *not* claimed is that this rescued anything
+measurable: the dense reference, solved with pivoting and `fsum`, still agreed to 4.44e-16 on the
+raw-cap design, because a dummy block is orthogonal by construction and the effective conditioning
+is far better than the diagonal suggests. So the closed form is chosen for its `O(n)` cost and its
+absent matrix, and the conditioning is a reason to prefer it rather than a defect it was observed
+to avoid.
 
 ## No numpy, no pandas -- and this is the workload ADR-0003 named
 
@@ -174,6 +187,28 @@ fresh should this be" is a question about the build schedule.
 test_the_neutralised_planes_datasets_are_derived_and_therefore_have_no_cadence` pins it against a
 live registry, so a factor added by `V2-P3-009`..`013` is covered without anybody extending a
 list.
+
+**No caller.** Nothing in `cli.py` and nothing in `scripts/` imports this module, so `V2-P3-004`
+ships a library and **has never produced a real partition** -- every residual this repository has
+seen was computed from a generated fixture. Wiring it is `V2-P3-014`'s (the three-tier report's)
+work and the split is deliberate, but the consequence belongs here rather than in a commit
+message: the guards below are argued from their inputs and driven from tests, and no operator has
+run one against `index_member_all` and `daily_basic` as they actually arrive.
+
+## The one thing a reader of a stored residual has to know before using it
+
+**A residual is invisible for the whole of the year it covers.** Every clock on a stored row is
+the *build's* `as_of` (`neutralized_observation_batch`), and that `as_of` cannot precede the
+`daily_basic` partition's newest row, which is the year's last session. So a row about any day in
+year Y is only visible at an `as_of` after Y has closed -- and because
+`load_neutralized_factor_observations` filters rows rather than refusing partitions, an in-year
+read returns **empty rather than an error**. The residuals' *contents* are point-in-time correct
+(each uses its own day's industry and capitalisation); what is not honest is the timestamp. That
+costs `V2-P3-005` a disclosure and costs `V2-P4-013` sub-annual walk-forward outright. It is
+`KNOWN_NEUTRALIZATION_LIMITATIONS
+.the_two_foreign_inputs_are_read_whole_partition_so_a_mid_year_as_of_is_refused` and roadmap
+section 11's `V2-P4` prerequisite, and it is not fixable from this module: the lever is a
+partition-granularity or day-bounded read of `daily_basic`, which is a `V2-P1` storage contract.
 """
 
 import math
@@ -526,11 +561,13 @@ INDUSTRY_AND_SIZE: Final[FactorNeutralizationSpec] = FactorNeutralizationSpec(
         "and L3's 346 give 16 -- and a group mean estimated from 16 names is mostly the names. "
         "total_mv rather than circ_mv because the whole company is what an industry peer group "
         "is compared on, and because the restricted-share fraction circ_mv excludes is a "
-        "governance fact rather than a size one; the two differ by up to 0.0196 on residuals "
-        "whose rms is 0.995, so this is a choice and not a formality. log rather than level "
+        "governance fact rather than a size one; the two are a different size variable rather "
+        "than the same one twice, so this is a choice and not a formality. log rather than level "
         "because A-share capitalisations span four orders of magnitude inside one industry, and "
-        "a level regressor makes the fit a statement about the largest handful; the two differ "
-        "by up to 0.195 on the same cross section. measured_only because an imputed value is a "
+        "a level regressor makes the fit a statement about the largest handful. Both of those "
+        "swaps move residuals by an amount this repository asserts as a floor rather than as a "
+        "figure, because the only probe it can run offline is synthetic and the amount varies by "
+        "an order of magnitude across its seed. measured_only because an imputed value is a "
         "number this repository made up and a group mean estimated partly from its own fills "
         "moves with the coverage rate. min_industry_members is 2, the contract's own floor: at 1 "
         "the residual is exactly 0.0 by construction and would be stored as though it were "
@@ -1296,8 +1333,9 @@ def _refuse_a_cross_section_that_is_not_this_panels(
         raise FactorEngineError(
             f"this build declares market_cap_measure {spec.market_cap_measure!r} and the "
             f"characteristic cross section carries {characteristics.market_cap_measure!r}; "
-            "total_mv and circ_mv are the same numbers under two meanings and differ by up to "
-            "0.0196 on residuals whose rms is 0.995"
+            "total_mv is the whole company and circ_mv excludes the restricted shares, so the "
+            "two are different size variables and the residuals against them are different "
+            "numbers under one stored manifest column"
         )
     covered = set(characteristics.subjects())
     missing = sorted(

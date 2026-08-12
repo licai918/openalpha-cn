@@ -287,11 +287,14 @@ and the thread-count pinning Consequence 6 requires.
 ### The conditioning argument, stated at the strength it has
 
 Consequence 6 and the ordinary objection to normal equations both point the same way, and the
-diagonal of the Gram matrix this design would form is measured: on a **level** market-cap
-regressor it spans `149` to `2.05e17`, a ratio of **1.37e15**, within a factor of ten of double
-precision's own epsilon; under `log` the ratio is 6.4e3. The closed form never forms that matrix —
-its only division is by the within-industry sum of squared deviations, one positive number that
-the `degenerate_design` coverage code tests directly.
+diagonal of the Gram matrix this design would form is measured — **on a named probe seed, because
+the ratio is a property of the draw and not of the design**. On the `_panel(7)` cross section that
+`test_the_closed_form_reproduces_a_dense_least_squares_solve` drives, a **level** market-cap
+regressor gives a diagonal spanning `151` to `3.55e17`, a ratio of **2.35e15**, within a factor of
+ten of double precision's own epsilon; `_panel(19)` gives `149` to `2.05e17` and `1.37e15`. Under
+`log` the ratio is 6.3e3 on both. The closed form never forms that matrix — its only division is
+by the within-industry sum of squared deviations, one positive number that the `degenerate_design`
+coverage code tests directly.
 
 **What is not claimed is that this rescued a failure that was observed.** The dense reference,
 solved with pivoting and `fsum`, still agreed to 4.44e-16 on the raw-capitalisation design,

@@ -119,8 +119,10 @@ def _solve_normal_equations(design: list[list[float]], target: list[float]) -> l
 
     The textbook route this repository's engine deliberately does not take. It is here so that
     "the closed form is the OLS residual" is a *comparison* rather than an assertion, and it is
-    also the measurement behind the module docstring's conditioning note: the Gram matrix this
-    forms has a diagonal spanning 149 to 2.05e17 on a level-capitalisation design.
+    also the measurement behind the module docstring's conditioning note: on a
+    level-capitalisation design the Gram matrix this forms has a diagonal spanning 151 to 3.55e17
+    on `_panel(7)` and 149 to 2.05e17 on `_panel(19)`. The seed is part of the measurement -- the
+    ratio is a property of the draw, not of the design.
     """
     width = len(design[0])
     gram = [
@@ -187,12 +189,16 @@ def _max_gap(left: list[float], right: list[float]) -> float:
 def test_the_closed_form_reproduces_a_dense_least_squares_solve(log_cap: bool) -> None:
     """The claim the whole `O(n)` implementation rests on, measured on both regressor scalings.
 
-    Both scalings are driven because the level one is where the textbook objection lives: its
-    Gram matrix has a diagonal ratio of 1.37e15, within a factor of ten of double precision's own
-    epsilon. Measured, the dense solve still agrees -- a dummy block is orthogonal by
-    construction, so the effective conditioning is far better than the diagonal suggests. That is
-    why `panel_neutralization`'s docstring claims the closed form for its cost and its absent
-    matrix, and does *not* claim it rescued a numerical failure that was observed.
+    Both scalings are driven because the level one is where the textbook objection lives: on
+    **this** probe -- `_panel(7)` -- its Gram matrix has a diagonal spanning 151 to 3.55e17, a
+    ratio of **2.35e15**, within a factor of ten of double precision's own epsilon. (The `1.37e15`
+    that used to be quoted here is `_panel(19)`'s, 149 to 2.05e17; it is a real measurement of a
+    different probe, and it is named as such in `panel_neutralization`'s docstring rather than
+    attributed to the seed this test drives.) Measured, the dense solve still agrees -- a dummy
+    block is orthogonal by construction, so the effective conditioning is far better than the
+    diagonal suggests. That is why `panel_neutralization`'s docstring claims the closed form for
+    its cost and its absent matrix, and does *not* claim it rescued a numerical failure that was
+    observed.
     """
     subjects, groups, regressor, values = _panel(7, log_cap=log_cap)
 
@@ -224,6 +230,23 @@ def test_the_two_identifications_of_the_dummy_set_give_the_same_residuals() -> N
     assert _max_gap([fit.residuals[subject] for subject in subjects], drop_first) < AGREEMENT_BOUND
 
 
+EXTREME_RESCALING_BOUND: Final[float] = 1e-9
+"""How far a residual may move under an affine map that *shrinks* the regressor six orders.
+
+`AGREEMENT_BOUND` does not hold here and the gap between the two bounds is the finding. `1e-6 * x
+- 3` measures **8.4e-12** on `_panel(13)`, five orders above the 4.44e-16 that z-scoring and
+`1000 * x + 7` both give -- because the closed form's cancellation happens in `x - mean_x[g]`, and
+a map that divides the demeaned regressor by a million divides the absolute precision of that
+subtraction by a million too. The *answer* is unchanged; the last bits are not.
+
+This constant exists because `MarketCapScale`'s docstring used to claim that "an affine re-scaling
+of either moves one by at most 4.44e-16", which is a bound the arithmetic does not support. The
+claim is now that re-scaling changes no answer, and this bound is what "no answer" is worth: 1e-9
+is still seven orders below the 0.02 a dropped slope term moves, which is the error class this
+family of tests exists to falsify.
+"""
+
+
 def test_rescaling_the_regressor_moves_no_residual_which_is_why_it_is_not_declarable() -> None:
     """The measurement that decides what `FactorNeutralizationSpec` does **not** declare.
 
@@ -231,6 +254,11 @@ def test_rescaling_the_regressor_moves_no_residual_which_is_why_it_is_not_declar
     complete dummy set already spans the constant. So "standardize the market cap first" is not a
     policy this contract could record -- it would be a field that reaches the identity and decides
     nothing, which is the defect `FactorTransformManifest` rejected `date_timezone` for.
+
+    **The third map is the honest one and it is here because the docstrings overclaimed without
+    it.** `4.44e-16` is what z-scoring and `1000 * x + 7` measure, and quoting it as "an affine
+    re-scaling moves a residual by at most 4.44e-16" reads as a bound over the whole family. It is
+    not one: `1e-6 * x - 3` is five orders worse. See `EXTREME_RESCALING_BOUND`.
     """
     subjects, groups, regressor, values = _panel(13)
     baseline = _neutralize(subjects, groups, regressor, values)
@@ -240,25 +268,61 @@ def test_rescaling_the_regressor_moves_no_residual_which_is_why_it_is_not_declar
     deviation = _population_stdev(regressor)
     zscored = _neutralize(subjects, groups, [(v - mean) / deviation for v in regressor], values)
     shifted = _neutralize(subjects, groups, [1000.0 * v + 7.0 for v in regressor], values)
+    shrunk = _neutralize(subjects, groups, [1e-6 * v - 3.0 for v in regressor], values)
     assert zscored is not None
     assert shifted is not None
+    assert shrunk is not None
 
     reference = [baseline.residuals[subject] for subject in subjects]
     assert _max_gap([zscored.residuals[s] for s in subjects], reference) < AGREEMENT_BOUND
     assert _max_gap([shifted.residuals[s] for s in subjects], reference) < AGREEMENT_BOUND
 
+    shrunk_gap = _max_gap([shrunk.residuals[s] for s in subjects], reference)
+    assert shrunk_gap < EXTREME_RESCALING_BOUND
+    assert shrunk_gap > AGREEMENT_BOUND
+
+
+GAP_SWEEP_SEEDS: Final[tuple[int, ...]] = (19, 23, 29, 31, 37, 41, 43, 47)
+"""The panel seeds the measure/scale sweep runs, pinned so the range below is reproducible."""
+
+MEASURE_GAP_FLOOR: Final[float] = 0.005
+SCALE_GAP_FLOOR: Final[float] = 0.01
+"""Floors every seed in `GAP_SWEEP_SEEDS` clears, set under the measured minima with room.
+
+Measured across those eight seeds, against residuals whose population deviation is 1 by
+construction (0.985..1.005): the **measure** gap spans **0.0067..0.0591** and the **scale** gap
+**0.0210..1.2221**. Those are the numbers, and stating them as ranges is the point of this
+constant existing.
+
+**The floors are what this repository asserts, and no docstring quotes a figure any more.** An
+earlier version of `MarketCapMeasure`, `MarketCapScale`, `INDUSTRY_AND_SIZE.summary` and
+`KNOWN_NEUTRALIZATION_LIMITATIONS.the_residual_is_orthogonal_to_the_design_and_not_to_size_itself`
+each carried `0.0196` and `0.195` "on residuals whose rms is 0.995", which were one seed's answers
+presented as a property of a 5,534-name cross section. They are not: the scale gap moves by a
+factor of **58** across these eight draws, and the panel they are measured on is synthetic --
+`_panel`'s "circulating" capitalisation is a `Normal(0.7, 0.25)` float ratio invented three lines
+below, and no stored `circ_mv` has ever been through this code. A floor that every seed clears is
+the strongest honest claim available offline, and it is enough: it falsifies "these are
+formalities", which is the only thing the two fields need.
+"""
+
 
 def test_the_declared_choices_that_do_move_the_residuals_move_them_by_a_reportable_amount() -> None:
     """The other half, and it is what makes `market_cap_measure` and `market_cap_scale` fields.
 
-    Against a residual set whose population deviation is about 1, swapping the *measure* moves a
-    residual by ~0.02 and swapping the *scale* by ~0.2. Both are asserted with a floor rather than
-    an exact figure, because the exact figure is a function of the seed and the floor is what
-    falsifies "these are formalities".
+    Against a residual set whose population deviation is about 1, swapping the *measure* or the
+    *scale* moves residuals by an amount that clears a floor **on every one of eight seeds**, and
+    the spread across those seeds is itself asserted -- because the spread is why the floors are
+    floors and not the exact figures four docstrings used to quote. See `MEASURE_GAP_FLOOR`.
+
+    The first block below is the original single-seed probe, kept verbatim so the sweep is an
+    addition rather than a replacement.
     """
     subjects, groups, log_total, values = _panel(19)
     rng = random.Random(23)
     # circulating cap is a varying fraction of total, which is what makes the two measures differ
+    # -- and it is INVENTED HERE. No stored circ_mv reaches this test, so nothing measured on this
+    # line is a statement about the market; see MEASURE_GAP_FLOOR.
     log_circ = [value + math.log(min(1.0, max(0.05, rng.gauss(0.7, 0.25)))) for value in log_total]
     level_total = [math.exp(value) for value in log_total]
 
@@ -273,6 +337,30 @@ def test_the_declared_choices_that_do_move_the_residuals_move_them_by_a_reportab
     assert _population_stdev(reference) == pytest.approx(1.0, abs=0.05)
     assert _max_gap([by_circ.residuals[s] for s in subjects], reference) > 0.005
     assert _max_gap([by_level.residuals[s] for s in subjects], reference) > 0.05
+
+    measure_gaps: list[float] = []
+    scale_gaps: list[float] = []
+    for seed in GAP_SWEEP_SEEDS:
+        names, industries, logs, factor = _panel(seed)
+        draw = random.Random(seed * 3 + 1)
+        circ = [v + math.log(min(1.0, max(0.05, draw.gauss(0.7, 0.25)))) for v in logs]
+        total_fit = _neutralize(names, industries, logs, factor)
+        circ_fit = _neutralize(names, industries, circ, factor)
+        level_fit = _neutralize(names, industries, [math.exp(v) for v in logs], factor)
+        assert total_fit is not None
+        assert circ_fit is not None
+        assert level_fit is not None
+        base = [total_fit.residuals[name] for name in names]
+        assert _population_stdev(base) == pytest.approx(1.0, abs=0.05), seed
+        measure_gaps.append(_max_gap([circ_fit.residuals[n] for n in names], base))
+        scale_gaps.append(_max_gap([level_fit.residuals[n] for n in names], base))
+
+    assert min(measure_gaps) > MEASURE_GAP_FLOOR
+    assert min(scale_gaps) > SCALE_GAP_FLOOR
+    # The instability itself, asserted rather than described: an order of magnitude across an
+    # arbitrary parameter is why no docstring quotes one of these numbers.
+    assert max(scale_gaps) > 10.0 * min(scale_gaps)
+    assert max(measure_gaps) > 5.0 * min(measure_gaps)
 
 
 def test_the_residual_is_orthogonal_to_both_halves_of_the_design() -> None:

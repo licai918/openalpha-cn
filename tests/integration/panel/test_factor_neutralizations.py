@@ -22,14 +22,20 @@ wrong field, becomes visible.
    review measured what the absence of that costs: 23 stored columns whose values were never
    asserted could all be written as constants with 233 tests staying green.
 
-## The frame
+## The frame, which is **two** panels and not one
 
-The generated panel's eight securities, with two industry shapes requested so that the session at
-`SESSION` carries two group sizes: seven names in one industry and one alone in another, which is
+The generated panel's eight securities. `SHAPES` requests two industry shapes so that the session
+at `SESSION` carries seven names in one industry and one alone in another, which is
 `thin_industry` under a floor of 2. The fixture's `daily_basic` writes `total_mv = 1.0` on every
 row, which is a design with no within-industry dispersion at all -- so the market caps are
 replaced with a spread before the panel is written, and the untouched version is kept for the
 `degenerate_design` test.
+
+`WIDE_SHAPES` adds a third and gives the same session **two admitted industries**, 2 names and 6,
+with visibly different mean capitalisations. That second fixture is not a variant for its own
+sake: with one admitted group the industry dummies decide nothing, so an engine that discarded
+every industry code kept this file green. See `WIDE_SHAPES` for the measurement and for the two
+tests that now fail on it.
 """
 
 from __future__ import annotations
@@ -37,7 +43,7 @@ from __future__ import annotations
 import dataclasses
 import inspect
 import math
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Final
 
@@ -138,10 +144,47 @@ SHAPES: Final[tuple[str, ...]] = (
 2026-01-12 and leaves it there, so on 2026-01-16 it is the only member of that group --
 `thin_industry` under a floor of 2, while the other seven share the first industry.
 
-`industry.coverage_hole` is deliberately not requested: it would put `SECURITIES[1]` back into
-the second industry from 2026-01-14 and give that group two members, which is a second group with
-nothing to distinguish it. `industry_missing` is exercised through a narrowed cross section
-instead, exactly as `market_cap_missing` is.
+`industry.coverage_hole` is not requested *here*, because this shape set is the one that produces
+a `thin_industry` row: `SECURITIES[0]` alone in the second group is what makes the member floor
+visible. `WIDE_SHAPES` below adds the coverage hole precisely to get the *other* arrangement, and
+the two fixtures are both needed -- see that constant.
+
+`industry_missing` is exercised through a narrowed cross section, exactly as `market_cap_missing`
+is.
+"""
+
+WIDE_SHAPES: Final[tuple[str, ...]] = (*SHAPES, "industry.coverage_hole")
+"""The same panel with a **second admitted industry**, which `SHAPES` alone cannot produce.
+
+`industry.coverage_hole` puts `SECURITIES[1]` into the second industry from 2026-01-14, so on
+2026-01-16 that group holds `SECURITIES[0]` **and** `SECURITIES[1]` -- two members, which clears a
+floor of 2 -- while the other six share the first. Two groups of 2 and 6, and their mean
+capitalisations are 2,375,000 against 5,375,000 because `CAP_BASE + CAP_STEP * index` is monotone
+in the fixture's own security order and the two names in the small group are its first two.
+
+**This fixture exists because its absence was a measured hole rather than because two groups are
+tidier than one.** Under `SHAPES`, every path that reaches `apply_factor_neutralization` regresses
+exactly **one** admitted group: the seven-name industry, with `SECURITIES[0]` coded
+`thin_industry`. A group-demeaning engine and one that demeaned the whole cross section produce
+identical residuals on a single group, so
+`fit = _neutralize(subjects, ["_ONE_" for _ in groups], regressor, values)` -- an engine that
+throws every industry code away and keeps only the size regression -- left all 146 tests in this
+issue's three files green.
+
+That mutation is not harmless anywhere else. On `test_factor_neutralization_rules._panel`'s
+5,534-name cross section it moves residuals by 0.12..0.16 against a residual deviation of 1.00 --
+and that probe assigns industries **at random**, so it carries no industry effect at all and is
+the least favourable case the mutation has. On this fixture the gap is larger than the residuals'
+own dispersion, which
+`test_the_residuals_are_the_two_group_regression_the_stored_inputs_imply` asserts as a number
+rather than describing. That test is what now fails on the mutation, and it fails on hand-computed
+per-group residuals rather than on a shape.
+
+The same single group is why `smallest_industry_size` and `largest_industry_size` were both 7 in
+every stored manifest this file wrote, so swapping the two expressions that compute them changed
+no assertion either;
+`test_the_two_industry_size_columns_are_two_answers_and_not_one_on_a_two_group_market` is that
+mutation's detector, and 2 against 6 is what makes it one.
 """
 
 LONE: Final[str] = SECURITIES[0]
@@ -238,6 +281,19 @@ def flat_cap_panel() -> GeneratedPanel:
 def store(tmp_path: Path, panel: GeneratedPanel) -> PanelStore:
     built = PanelStore(tmp_path / "panel")
     write_generated_panel(built, panel)
+    return built
+
+
+@pytest.fixture
+def wide_panel() -> GeneratedPanel:
+    """The panel whose session at `SESSION` carries two admitted industries. See `WIDE_SHAPES`."""
+    return _with_market_caps(generate_panel(shapes=WIDE_SHAPES))
+
+
+@pytest.fixture
+def wide_store(tmp_path: Path, wide_panel: GeneratedPanel) -> PanelStore:
+    built = PanelStore(tmp_path / "wide")
+    write_generated_panel(built, wide_panel)
     return built
 
 
@@ -437,6 +493,81 @@ def test_the_residuals_are_the_regression_the_stored_inputs_imply(
     assert sorted(result.values()) == sorted(regressed)
     for code in regressed:
         assert result.values()[code] == pytest.approx(dy[code] - slope * dx[code]), code
+
+
+def test_the_residuals_are_the_two_group_regression_the_stored_inputs_imply(
+    wide_store: PanelStore, wide_panel: GeneratedPanel
+) -> None:
+    """The same hand computation over **two** industries, which is what makes it about industries.
+
+    The test above regresses a single admitted group, and on a single group the industry dummies
+    decide nothing: demeaning by group and demeaning the whole cross section are the same
+    arithmetic. So it -- and every other path in this file -- stayed green under
+    `_neutralize(subjects, ["_ONE_" for _ in groups], regressor, values)`, an engine that discards
+    the classification entirely and stores a pure size residual. Nothing in this issue's 146 tests
+    could tell "industry **and** size were removed" from "size was removed" -- while the acceptance
+    this issue is measured against is that the industry classification is used to do a *real
+    industry* neutralisation.
+
+    Here the two groups hold 2 and 6 names with mean capitalisations of 2,375,000 and 5,375,000,
+    so the group a security is in moves its residual by much more than floating point. Both answers
+    are computed below -- the per-group one the engine must produce, and the pooled one the
+    discarding engine would -- and the assertions hold every security to the first and require the
+    second to be materially different. The expected numbers come from the two stored cross
+    sections by the algebra the closed form implements, not from a recorded run.
+    """
+    processed = _process(_compute(wide_store, wide_panel))
+    cross = _cross_section(wide_store, wide_panel)
+
+    result = _neutralize(processed, cross)
+
+    values = {item.subject: item.value for item in processed.observations}
+    caps = {item.subject: math.log(item.market_cap) for item in cross.characteristics}
+    group_of = {item.subject: item.industry_code for item in cross.characteristics}
+    members: dict[str, list[str]] = {}
+    for code, group in group_of.items():
+        members.setdefault(group, []).append(code)
+    regressed = sorted(group_of)
+    mean_y = {
+        group: math.fsum(values[code] for code in names) / len(names)
+        for group, names in members.items()
+    }
+    mean_x = {
+        group: math.fsum(caps[code] for code in names) / len(names)
+        for group, names in members.items()
+    }
+    dy = {code: values[code] - mean_y[group_of[code]] for code in regressed}
+    dx = {code: caps[code] - mean_x[group_of[code]] for code in regressed}
+    slope = math.fsum(dx[code] * dy[code] for code in regressed) / math.fsum(
+        dx[code] * dx[code] for code in regressed
+    )
+
+    pooled_y = math.fsum(values[code] for code in regressed) / len(regressed)
+    pooled_x = math.fsum(caps[code] for code in regressed) / len(regressed)
+    flat_y = {code: values[code] - pooled_y for code in regressed}
+    flat_x = {code: caps[code] - pooled_x for code in regressed}
+    pooled_slope = math.fsum(flat_x[code] * flat_y[code] for code in regressed) / math.fsum(
+        flat_x[code] * flat_x[code] for code in regressed
+    )
+
+    assert sorted(members) == ["801120.SI", "801780.SI"]
+    assert sorted(len(names) for names in members.values()) == [2, 6]
+    assert result.coverage_census()["neutralized"] == len(wide_panel.securities)
+    assert result.coverage_census()["thin_industry"] == 0
+    assert result.statistics.industry_count == 2
+    assert result.statistics.market_cap_slope == pytest.approx(slope)
+    assert sorted(result.values()) == regressed
+    for code in regressed:
+        assert result.values()[code] == pytest.approx(dy[code] - slope * dx[code]), code
+        assert result.industries()[code] == group_of[code], code
+
+    # The mutation this test exists for, stated as a number rather than as an intention: the
+    # engine that threw the groups away would store `flat` for every name, and the gap is larger
+    # than the residuals' own dispersion.
+    flat = {code: flat_y[code] - pooled_slope * flat_x[code] for code in regressed}
+    gap = max(abs(result.values()[code] - flat[code]) for code in regressed)
+    assert result.statistics.residual_dispersion is not None
+    assert gap > result.statistics.residual_dispersion
 
 
 def test_a_one_member_industry_is_coded_rather_than_given_its_structural_zero(
@@ -709,7 +840,10 @@ def test_a_cross_section_at_another_level_or_measure_than_the_spec_declares_is_r
 
     with pytest.raises(FactorEngineError, match="files one taxonomy level's groups"):
         _neutralize(processed, dataclasses.replace(cross, industry_level="L2"))
-    with pytest.raises(FactorEngineError, match="same numbers under two meanings"):
+    # The `match=` moved with the message: the refusal used to end "differ by up to 0.0196 on
+    # residuals whose rms is 0.995", a figure this review retracted (see MEASURE_GAP_FLOOR). The
+    # new phrase is just as narrow -- nothing else in this module says "different size variables".
+    with pytest.raises(FactorEngineError, match="different size variables"):
         _neutralize(processed, dataclasses.replace(cross, market_cap_measure="circ_mv"))
 
 
@@ -950,6 +1084,15 @@ def test_every_stored_manifest_column_is_read_back_and_held_to_a_value(
     columns could be written as constants without turning anything red. The census is recounted
     against the *observation* partition rather than copied off the panel, so the two datasets have
     to agree with each other and not merely with the object that wrote them.
+
+    **Two of the 34 are asserted here and are nonetheless not separated here**, and saying so is
+    the point rather than an apology. This fixture admits one industry, so
+    `smallest_industry_size` and `largest_industry_size` are both 7 and the two assertions below
+    cannot tell the columns apart -- swapping the expressions that compute them left this test
+    green, which is exactly the "written as a constant and nothing goes red" shape one column
+    further on. `test_the_two_industry_size_columns_are_two_answers_and_not_one_on_a_two_group_
+    market` is the assertion that separates them, on `WIDE_SHAPES`' 2-and-6 market. The rows
+    stay here so that the "every stored column" claim is literally true on one partition.
     """
     result = _build(store, panel)
     write_neutralized_factor_panels(store, [result])
@@ -999,6 +1142,43 @@ def test_every_stored_manifest_column_is_read_back_and_held_to_a_value(
     for code, count in recounted.items():
         assert cells[f"census_{code}"] == count, code
     assert set(cells) - {"subject"} == set(NEUTRALIZATION_MANIFEST_DATA_COLUMNS)
+
+
+def test_the_two_industry_size_columns_are_two_answers_and_not_one_on_a_two_group_market(
+    wide_store: PanelStore, wide_panel: GeneratedPanel
+) -> None:
+    """`smallest_industry_size` and `largest_industry_size`, on a market where they differ.
+
+    `FactorNeutralizationStatistics.__post_init__` refuses a build whose smallest group is bigger
+    than its largest -- "the two run backwards" -- and that guard had **no reachable driver**,
+    because every stored manifest in this file came from a one-group cross section where the two
+    numbers are equal by construction. Swapping `min` and `max` at the call site therefore changed
+    nothing anybody asserted.
+
+    Here the groups hold 2 and 6, so the two columns carry two different numbers and the pair is
+    read back off the partition rather than off the object that wrote it -- which is what makes
+    this an assertion about a stored column and not about a dataclass. `industry_count` and
+    `participant_count` are held here too, for the same reason: 1 and 7 on the narrow fixture are
+    also both derivable from a constant.
+    """
+    result = _neutralize(
+        _process(_compute(wide_store, wide_panel)), _cross_section(wide_store, wide_panel)
+    )
+    write_neutralized_factor_panels(wide_store, [result])
+
+    rows = wide_store.query(
+        NEUTRALIZATION_MANIFESTS, year=YEAR, columns=NEUTRALIZATION_MANIFEST_PANEL_COLUMNS
+    )
+    assert len(rows) == 1
+    cells = dict(zip(NEUTRALIZATION_MANIFEST_PANEL_COLUMNS, rows[0], strict=True))
+
+    assert cells["smallest_industry_size"] == 2
+    assert cells["largest_industry_size"] == 6
+    assert cells["smallest_industry_size"] != cells["largest_industry_size"]
+    assert cells["industry_count"] == 2
+    assert cells["participant_count"] == len(wide_panel.securities)
+    assert cells["census_neutralized"] == len(wide_panel.securities)
+    assert cells["census_thin_industry"] == 0
 
 
 def test_a_reassembled_manifest_reproduces_the_identity_it_was_stored_under(
@@ -1253,6 +1433,48 @@ def test_a_neutralised_row_is_invisible_before_the_as_of_it_was_computed_at(
 
     assert earlier == ()
     assert len(at_the_time) == 8
+
+
+def test_a_residual_about_a_session_is_invisible_at_that_sessions_own_close(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """The second hop of the mid-year problem, which is the one a reader actually hits.
+
+    `KNOWN_NEUTRALIZATION_LIMITATIONS
+    .the_two_foreign_inputs_are_read_whole_partition_so_a_mid_year_as_of_is_refused` used to record
+    only the first hop -- the two *foreign* inputs cannot be read at an in-year `as_of`. The
+    consequence that reaches a consumer is the second: because the build's `as_of` must therefore
+    sit at or after the `daily_basic` partition's newest row, and because
+    `neutralized_observation_batch` stamps **every** clock on **every** row with that `as_of`, a
+    residual about a given session is not visible at that session at all.
+
+    Driven here rather than written down: the last session of the fixture's window is `SESSION`,
+    the residuals are about it, and a read taken at the very end of that session's own calendar day
+    -- hours after the exchange closed and after every input row became knowable -- returns
+    **empty**. Not an error, which is the sharp part: `load_neutralized_factor_observations` filters
+    rows, so a caller asking "what did I hold on 2026-01-16" gets a plausible-looking short answer.
+
+    `V2-P3-005` may read this plane anyway (the residuals' contents are point-in-time correct) but
+    has to say it is reading a year-end snapshot; `V2-P4-013` cannot do sub-annual walk-forward
+    until `V2-P4-026` lands. Roadmap section 11 carries the decision.
+    """
+    result = _build(store, panel)
+    write_neutralized_factor_panels(store, [result])
+    last_session = panel.sessions[-1]
+    end_of_that_day = datetime.combine(last_session, time(23, 59), tzinfo=UTC)
+
+    at_the_close = load_neutralized_factor_observations(
+        store, REVERSAL_1D, _spec(), years=(YEAR,), as_of=end_of_that_day
+    )
+    afterwards = load_neutralized_factor_observations(
+        store, REVERSAL_1D, _spec(), years=(YEAR,), as_of=AS_OF
+    )
+
+    assert last_session == SESSION
+    assert end_of_that_day < AS_OF
+    assert at_the_close == ()
+    assert {row.as_of for row in afterwards} == {AS_OF}
+    assert len(afterwards) == len(panel.securities)
 
 
 def test_a_partition_carrying_an_undeclared_code_is_refused_where_the_dataset_can_be_named(
