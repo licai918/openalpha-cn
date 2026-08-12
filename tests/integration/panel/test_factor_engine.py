@@ -35,7 +35,7 @@ behind it.
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -76,6 +76,23 @@ FIRST_SESSION_ONLY = datetime(2026, 1, 6, 4, 0, tzinfo=UTC)
 """Noon on the second session: exactly one session has published, so a 2-session window cannot
 be formed for anybody. `insufficient_history` for the whole cross section."""
 
+INPUT_STALENESS_BOUND = timedelta(days=5)
+"""The freshness bound every input requirement here states, because the engine refuses a waiver.
+
+Five days rather than a number chosen to make the fixture pass: it is one trading week, and the
+widest gap this panel actually produces between an `as_of` and the newest session visible at it
+is the weekend one (2026-01-12T04:00Z sees 2026-01-09, 2 days 21 hours). A bound that only just
+cleared would make every assertion in this file depend on the arithmetic of one fixture."""
+
+PROBE_STALENESS_BOUND = timedelta(days=30)
+"""The bound the hand-written `probe_doubles` partition states, and why it is not the above.
+
+That partition holds a single session (2026-01-08) with nothing to do with the generated panel's
+calendar, and it is read at `AS_OF` on 2026-01-17 -- 8 days 21 hours, which
+`INPUT_STALENESS_BOUND` would refuse for a reason unrelated to what that test is about. Widened
+deliberately and named separately rather than by relaxing the bound the real requirements use:
+one number moved to accommodate a probe is how a bound stops meaning anything."""
+
 BUILT_AT = datetime(2026, 3, 1, 9, 0, tzinfo=UTC)
 COMMIT = "a1b2c3d"
 
@@ -112,7 +129,9 @@ def _requirements(
         DAILY_BASIC_DATASET: daily_basic_requirement,
     }
     return {
-        dataset: builders[dataset](panel.calendar(), years=(YEAR,), as_of=as_of, max_staleness=None)
+        dataset: builders[dataset](
+            panel.calendar(), years=(YEAR,), as_of=as_of, max_staleness=INPUT_STALENESS_BOUND
+        )
         for dataset in datasets
     }
 
@@ -434,6 +453,40 @@ def test_the_engine_refuses_a_requirement_that_does_not_require_the_columns_it_r
             )
 
 
+def test_the_engine_refuses_an_input_requirement_that_waives_its_freshness_bound(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """The sibling of the test above, added by `V2-P3-002`'s review, and for a sharper reason.
+
+    A waived `required_fields` lets readiness clear a partition without the columns this factor
+    reads. A waived `max_staleness` lets it clear a partition whose **visible slice** reaches
+    arbitrarily far short of `as_of` -- and unlike the columns case there is no binder error
+    downstream to catch it: the build succeeds, every observation reads `coverage="computed"`,
+    and the `as_of` stamped on it is months ahead of the newest session behind it. Measured at
+    172 days on a 14-row partition, with `withheld_row_count` at 4, so the shortness the design
+    relies on being *stated* was small while the answer was worst.
+
+    The pair matters as much as the refusal: the same call with a bound stated answers, so the
+    refusal is attributable to the waiver rather than to anything else about this fixture.
+    """
+    sound = _requirements(panel, MID_WINDOW)[DAILY_DATASET]
+    waived = replace(sound, max_staleness=None)
+
+    with pytest.raises(FactorEngineError, match=r"waives max_staleness"):
+        compute_factor(
+            store,
+            REVERSAL_1D,
+            as_of=MID_WINDOW,
+            subjects=panel.securities,
+            universe=frozenset(panel.securities),
+            requirements={DAILY_DATASET: waived},
+            code_commit=COMMIT,
+            built_at=BUILT_AT,
+        )
+
+    assert _compute(store, panel).observations != ()
+
+
 def test_a_blocked_input_partition_raises_instead_of_becoming_a_panel_of_coverage_codes(
     tmp_path: Path, panel: GeneratedPanel
 ) -> None:
@@ -589,7 +642,7 @@ def test_a_dataset_serving_two_rows_for_one_security_and_session_is_refused(
         required_dates=None,
         required_subjects=None,
         required_fields=("subject", "score"),
-        max_staleness=None,
+        max_staleness=PROBE_STALENESS_BOUND,
     )
 
     with pytest.raises(FactorEngineError, match=r"more than one row for 000001\.SZ"):

@@ -655,8 +655,9 @@ test_not_yet_knowable_is_partition_level_so_an_as_of_inside_a_year_reads_nothing
 - **量级**：fixture 面板上 `read_if_ready` 在年中 `as_of` 整块拒绝，`read_visible_at`
   交回 39 行、扣下 40 行，两者之和等于分区行数（断言如此）。ADR-0002 口径的真实规模上实测：
   5,534 只 × 122 个会话 = 675,148 行的合成 `daily` 分区，`compute_factor` 跑完整个横截面
-  （读 + 分组 + 定级 + 求值）**冷 1.95 秒、热 1.91 秒**，约 2.9 微秒/行；同一个分区**写**要
-  288 秒。这个数字同时是「不引入 numpy/pandas」的依据（见 ADR-0003 的 2026-08-11 更新）。
+  （读 + 分组 + 定级 + 求值）**冷 1.95 秒、热 1.91 秒**，约 2.9 微秒/行。
+  写路径远贵于读路径（同一分区的 `write_panel_batch` 至少贵一个数量级，四次测量里有三次贵两个），
+  这条**序**是结论；绝对秒数不是 —— 见下方修订。
   被放弃的两条代价：每个 `as_of` 重建一次面板是单次年度构建的 120 倍（P2 技术验收实测）；
   只在年边界算则 `V2-P3-005` 的 IC 衰减与 `V2-P4-013` 的 walk-forward 每年只有一个观测。
 - **不能承诺的部分**：过滤一个**事后**写成的分区，复现的是「已存储的行说当时可知什么」，
@@ -668,3 +669,77 @@ test_not_yet_knowable_is_partition_level_so_an_as_of_inside_a_year_reads_nothing
 
 **对 P4 的后果**：walk-forward 现在可以让 `as_of` 在年内逐步推进，
 条件是走 `read_visible_at` 并把自己加进那张 allowlist —— 那是一次有评审的动作，不是障碍。
+
+### 修订（`V2-P3-002` 评审，2026-08-11）：上面这个决策有一条被实测证伪的安全性声明
+
+上面写着「任何其它 code 照旧整块拒绝，所以结构性检查一点没削弱」。**这句话是错的**，
+而且错在一个一般性的地方，值得连同修法一起留在这里。
+
+`evaluate_readiness` 判的是**分区元数据**；`read_visible_at` 交回的是**那个分区的行子集**。
+十三个 code 里有十个的判决只读元数据或 requirement 本身，过滤前后一样；
+另外三个（`stale` / `subject_missing` / `date_gap`）的**通过结论**是关于行的，
+而那些行可能正好被谓词删掉了 —— 于是「没报错」被搬给了一个它并不支持的答案。
+这三个现在由 `SCOPE_SENSITIVE_ISSUE_CODES` 具名，判据写在常量的 docstring 里。
+
+`stale` 是最锋利的一例，而且它不只是范围错，是**数学上打不响**：
+`stale` 比的是 `as_of - coverage.last_event_time`，而 `last_event_time` 是整个分区的；
+`not_yet_knowable` 触发恰恰意味着分区里有 `as_of` 之后才可知的行，
+所以最新事件也在 `as_of` 之后，差值为负。仓库自己的 fixture 面板实测：
+`max_staleness` 给 1 小时 / 1 天 / 2 天，三次都不阻塞，而可见切片最新事件落后 as_of **2 天 21 小时**。
+端到端更难看：一个 14 行分区（10 行可见、4 行扣下），因子盖 `as_of=2026-06-30` 的戳，
+最新输入会话是 2026-01-09 —— **172 天**陈旧度，调用方声明的 `max_staleness=7 天` 从未被看到，
+每条观测都写着 `coverage="computed"`。
+
+修法不是改措辞：
+
+- **`read_visible_at` 在扫描之后，对「即将交回的那些行」重跑可重跑的范围敏感检查**
+  （`VISIBLE_SLICE_RECHECKS` = `stale` + `subject_missing`），
+  走的是 `evaluate_readiness` 调的**同两个函数**（`staleness_issue` / `subject_gap_issue`），
+  所以仍然只有一处在算判决 —— 变的是输入（可见切片而不是 coverage 普查），不是规则。
+  不合格就**整块拒绝**，理由落在 `PanelVisibleReadOutcome.visible_slice_issues` 上。
+- **`withheld_row_count` 不能替代「答案伸到哪里」**，这两个数不相关：
+  172 天那个例子只扣下 4 行。所以 outcome 上新增 `visible_last_event_time`，
+  它是重跑 `stale` 用的那个证据本身，也是 `max_staleness` 被显式弃权时调用方手里唯一的数。
+- **`date_gap` 没有重跑**，理由是结构性的（在 SQL 里把 `event_time` 还原成会话日期
+  等于把 `panel_ingest._date_census` 的时区换算抄第二份，而 `openalpha_cn.panel`
+  连导入它都不允许），并且有实测边界：今天所有会走到 `read_visible_at` 的路径上，
+  重跑都是**空操作** —— `panel_ingest` 里只有 `_price_requirement` 声明 `required_dates`，
+  它用 `_sessions_published_through` 夹在 16:30（正是 provider 给 `available_time` 的同一时刻），
+  所以要求的会话按构造必然可见（fixture 面板 2026-01-12T04:00Z：要 5 个、回 5 个）。
+  残差作为第四条 `KNOWN_STORAGE_LIMITATIONS`
+  （`date_gap_clears_on_partition_rows_the_filtered_read_withholds`）落盘。
+- **「类型不同，mypy 会挡」被高估了**：`PanelVisibleReadOutcome.rows` 与
+  `PanelReadOutcome.rows` 的静态类型**完全相同**，而 P2 点名的三个消费者吃的是 rows 不是
+  outcome，所以 `stock_universe_from_panel_rows(list(filtered.rows), ...)`
+  在 `mypy --strict` 下零报错。类型只挡「把整个 outcome 传给另一个 outcome 的读者」这一种错。
+  **真正的障碍是那张 AST allowlist**，措辞已按此改准，并由
+  `test_the_two_read_outcomes_expose_rows_at_the_same_static_type` 钉住。
+- **`available_time` 为 NULL 的行**曾经从「可见」和「扣下」两半里同时消失
+  （三值逻辑：`NULL <= x` 与 `NULL > x` 都不成立），于是被断言的
+  `visible + withheld == row_count` 恒等式为假（实测 2 + 0 ≠ 3），且该行无声蒸发。
+  扣下侧的谓词改成 `> ? OR IS NULL`：fail-closed（这种行在任何 `as_of` 都不可见）
+  且恒等式恢复，代价是 `withheld_row_count` 里包含**永久**扣下的行，这一点已写进 docstring。
+- **allowlist 检测器自述的残差说反了**：实测「参数被 splat」**照样抓得到**
+  （`*args` / `**kwargs` / 两者并用 / `self._store.read_visible_at(...)` 全部命中，
+  因为匹配的是被调用表达式而不是参数形状）；真正漏网的是绑定方法别名
+  （`reader = store.read_visible_at; reader(...)`）与 `getattr`。两个方向都已写成断言。
+- **那条新 `KNOWN_STORAGE_LIMITATIONS` 的严重性补齐了两处**：一是**量级**与机制写在一起
+  （81.7% 是 `fina_indicator` 受影响键的**占比**，且偏差是单向的 —— 每个这样的键读回的都是
+  重述后的值），二是明说**这条路径是该偏差第一次变得可达**（`read_if_ready` 在年内每个
+  `as_of` 都整块拒绝，所以在 `read_visible_at` 之前，年中重放不是「会做错」而是「做不到」）。
+  对应测试从「`"81.7%"` 出现在字符串里」改成要求这两件事都在。
+- **写路径 288 秒这个绝对数字不再被引用**。同一个量现在有四次测量：288 秒（原始）、
+  56.7 秒（评审，同样 675,148 行）、234 秒（另一名评审在 1/5 规模外推）、
+  617.9 秒（本次修复中复测，10 个存储列）。列数与机器不同可以解释一部分，
+  一个数量级以上的离散解释不完，而且四次都不是在写明的受控条件下取的。
+  对 1.95 秒的读来说这四次分别是 148 倍 / 29 倍 / — / 317 倍，所以现在的说法是
+  「至少一个数量级，四次里三次是两个数量级」，而不是原来那句平铺的「两个数量级」。
+  「写 ≫ 读」这条序成立并保留，绝对秒数不做承诺。读路径那一侧是可复现的
+  （评审自建同规模分区实跑 1.61 秒冷 / 1.60 秒热，比自述的 1.95 秒更快）。
+
+**因子引擎侧的后果**：`compute_factor` 现在**拒绝**一个弃权了 `max_staleness` 的输入
+requirement，理由与它早就拒绝弃权 `required_fields` 的理由同形 ——
+弃权会让 readiness 放行一个回答不了这个因子的分区，只是这次没有下游的 binder 错误兜底：
+构建会成功，每条观测写着 `computed`，而戳在上面的 `as_of` 比背后最新的会话晚几个月。
+`factor_observation_requirement`（读回**派生**分区）的弃权保持不变，它的理由（派生分区没有上游可落后）
+仍然成立。

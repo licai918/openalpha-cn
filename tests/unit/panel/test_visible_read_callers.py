@@ -16,13 +16,22 @@ refuses a delisting whose listing was filtered away.
 
 P3 did not overturn that argument; it built a second door and left the first one shut. What
 changed is that shortness is now *stated*: `PanelVisibleReadOutcome.withheld_row_count` is a
-number the caller cannot get rows without also getting, and the outcome is a different type, so
-a filtered read cannot be handed to a reader expecting a whole partition without mypy objecting.
-Neither of those stops somebody pointing a domain rebuilder at the new method on purpose, and
-that is what this allowlist is for. `tests/unit/panel/test_query_callers.py` established the
-form; this is the same instrument on the second door, and it is deliberately an allowlist and
-not a ban -- a future reader with a real need may take the path, and what it may not do is take
-it silently.
+number the caller cannot get rows without also getting, and `visible_last_event_time` says how
+far the answer reaches, which the first number does not imply.
+
+**This file's own claim about the type split was too strong and is corrected here.** It read
+"the outcome is a different type, so a filtered read cannot be handed to a reader expecting a
+whole partition without mypy objecting". Measured under `mypy --strict`:
+`PanelVisibleReadOutcome.rows` and `PanelReadOutcome.rows` have the *identical* static type, the
+three rebuilders above take **rows** rather than outcomes, and
+`stock_universe_from_panel_rows(list(filtered.rows), ...)` therefore type-checks clean. The type
+checker refuses exactly one thing -- passing a whole outcome where the other outcome was
+expected. So the allowlist below is not a belt beside a brace; **it is the obstacle**, and
+`tests/integration/panel/test_visibility_filtered_read.py::
+test_the_two_read_outcomes_expose_rows_at_the_same_static_type` pins the fact that makes that
+true. `tests/unit/panel/test_query_callers.py` established the form; this is the same instrument
+on the second door, and it is deliberately an allowlist and not a ban -- a future reader with a
+real need may take the path, and what it may not do is take it silently.
 
 ## 2. Factor observations are kept off the evidence plane by the import graph
 
@@ -48,8 +57,12 @@ from pathlib import Path
 
 import grimp
 
-from openalpha_cn.domain.panel_batch import CLOCK_COLUMN_NAMES, RESERVED_COLUMN_NAMES
-from openalpha_cn.panel.store import AVAILABILITY_COLUMN
+from openalpha_cn.domain.panel_batch import (
+    CLOCK_COLUMN_NAMES,
+    RESERVED_COLUMN_NAMES,
+    SUBJECT_COLUMN_NAME,
+)
+from openalpha_cn.panel.store import AVAILABILITY_COLUMN, EVENT_TIME_COLUMN, SUBJECT_COLUMN
 
 ROOT = Path(__file__).resolve().parents[3]
 SOURCE = ROOT / "src" / "openalpha_cn"
@@ -78,9 +91,21 @@ def _calls(tree: ast.AST, name: str) -> bool:
 
     Matched on the attribute name alone, unlike `test_query_callers.py`'s `columns` keyword
     discriminator, because `read_visible_at` is not an English word that another class in this
-    tree happens to use -- it exists once, on `PanelStore`. The same residue applies and is
-    named rather than papered over: a call that splats its arguments is invisible to an AST
-    allowlist, which raises the cost of the bypass without making it impossible.
+    tree happens to use -- it exists once, on `PanelStore`.
+
+    **The residue was named wrongly and is corrected.** It said "a call that splats its arguments
+    is invisible to an AST allowlist". Measured: it is not -- `store.read_visible_at(*args)`,
+    `store.read_visible_at(requirement, **kwargs)` and `store.read_visible_at(*args, **kwargs)`
+    are all `ast.Call` nodes with an `ast.Attribute` func, so all three are caught, and so is a
+    chained receiver such as `self._store.read_visible_at(...)`. Argument shape is irrelevant to
+    this matcher; only the *callee expression* matters.
+
+    What actually escapes is a call whose callee is not an attribute access at the call site:
+    binding the method to a name first (`reader = store.read_visible_at; reader(...)`) or going
+    through `getattr(store, "read_visible_at")(...)`. Both are measured in
+    `test_the_detector_sees_the_call_shapes_it_claims_to_and_names_the_two_it_does_not`, which is
+    the shape of a bypass a reviewer can recognise on sight -- which is the property this
+    allowlist buys, since it never claimed to be unbypassable.
     """
     return any(
         isinstance(node, ast.Call)
@@ -92,6 +117,42 @@ def _calls(tree: ast.AST, name: str) -> bool:
 
 def _source_modules() -> list[Path]:
     return sorted(SOURCE.rglob("*.py"))
+
+
+CAUGHT_SHAPES: tuple[str, ...] = (
+    "store.read_visible_at(requirement, year=2026, columns=())",
+    "store.read_visible_at(*args)",
+    "store.read_visible_at(requirement, **kwargs)",
+    "store.read_visible_at(*args, **kwargs)",
+    "self._store.read_visible_at(**kwargs)",
+)
+"""Call shapes this detector sees. The three splat forms are here because the docstring it
+replaced claimed they were not."""
+
+ESCAPING_SHAPES: tuple[str, ...] = (
+    "reader = store.read_visible_at\nreader(requirement)",
+    'getattr(store, "read_visible_at")(requirement)',
+)
+"""Call shapes this detector does not see: the callee is not an attribute access at the call."""
+
+
+def test_the_detector_sees_the_call_shapes_it_claims_to_and_names_the_two_it_does_not() -> None:
+    """`_calls`' own residue, measured rather than asserted from the shape of the code.
+
+    Both directions are here for the reason the allowlist has two tests: the positive half stops
+    the detector quietly matching nothing, and the negative half is the honest boundary. If a
+    later change strengthens `_calls` -- resolving a bound-method alias, say -- the second loop
+    goes red, and that is the intended signal: the docstring's residue paragraph is then wrong
+    and has to be narrowed rather than left standing as a warning about a hole that closed.
+    """
+    for source in CAUGHT_SHAPES:
+        assert _calls(ast.parse(source), FILTERED_READ), f"{source!r} should be caught"
+
+    for source in ESCAPING_SHAPES:
+        assert not _calls(ast.parse(source), FILTERED_READ), (
+            f"{source!r} is now caught; `_calls` was strengthened, so this module's residue "
+            "paragraph overstates the hole and must be narrowed"
+        )
 
 
 def test_only_the_allowlisted_modules_take_the_visibility_filtered_read() -> None:
@@ -157,6 +218,23 @@ def test_the_availability_column_this_module_filters_on_is_the_one_the_batch_con
     """
     assert AVAILABILITY_COLUMN in CLOCK_COLUMN_NAMES
     assert AVAILABILITY_COLUMN in RESERVED_COLUMN_NAMES
+
+
+def test_the_two_columns_the_second_gate_reads_are_pinned_the_same_way() -> None:
+    """`V2-P3-002`'s review added two more restated names, so they get the same pin.
+
+    `read_visible_at` now aggregates `event_time` (to say how far the visible rows reach) and
+    probes `subject` (to re-decide `subject_missing`), both by literal name in SQL. Each is
+    restated in `panel/store.py` for the reason `AVAILABILITY_COLUMN` is -- `openalpha_cn.panel`
+    imports no sibling subpackage -- and two copies of a string that has to be identical is the
+    drift the assertion above exists for. A predicate naming a column no panel row carries would
+    make the re-decided checks refuse every partition; a `subject` a provider column could shadow
+    would make the probe answer about the wrong thing.
+    """
+    assert EVENT_TIME_COLUMN in CLOCK_COLUMN_NAMES
+    assert EVENT_TIME_COLUMN in RESERVED_COLUMN_NAMES
+    assert SUBJECT_COLUMN == SUBJECT_COLUMN_NAME
+    assert SUBJECT_COLUMN in RESERVED_COLUMN_NAMES
 
 
 def test_no_top_level_panel_module_can_reach_the_evidence_plane_at_all() -> None:

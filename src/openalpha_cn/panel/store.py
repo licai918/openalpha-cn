@@ -463,6 +463,7 @@ from openalpha_cn.panel.catalog import (
     ReadinessRequirement,
     RevisionCoverage,
     evaluate_readiness,
+    evaluate_visible_slice,
 )
 
 AVAILABILITY_COLUMN: Final[str] = "available_time"
@@ -477,6 +478,24 @@ for the reason `_utc_now` is a local definition and
 subpackage at all. `tests/unit/panel/test_visible_read_callers.py::
 test_the_availability_column_this_module_filters_on_is_the_one_the_batch_contract_writes`
 pins the two copies together.
+"""
+
+EVENT_TIME_COLUMN: Final[str] = "event_time"
+"""The clock a filtered read reports its **reach** from, restated for the same reason.
+
+`read_visible_at` has to answer "how far do the rows I am handing back reach", which is the
+question `stale` asks and the one `withheld_row_count` cannot answer. That is `event_time` --
+`PartitionCoverage.last_event_time` is the same column aggregated at write time, which is what
+makes the visible-slice check the *same* check over a different row set rather than a new one.
+Pinned against `domain/panel_batch.py::CLOCK_COLUMN_NAMES` alongside `AVAILABILITY_COLUMN`.
+"""
+
+SUBJECT_COLUMN: Final[str] = "subject"
+"""The identity column a filtered read probes for `subject_missing`, restated likewise.
+
+Pinned against `domain/panel_batch.py::SUBJECT_COLUMN_NAME` rather than against
+`CLOCK_COLUMN_NAMES`: it is not a clock, and `RESERVED_COLUMN_NAMES` is what stops a provider
+column shadowing it.
 """
 
 __all__ = [
@@ -624,6 +643,25 @@ class PartitionRef:
     path: Path
     row_count: int
     content_hash: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _VisibleScan:
+    """Everything one visibility-filtered scan learned, before anything judges it.
+
+    Private and deliberately not a `PanelVisibleReadOutcome`: this is what the *store* saw, and
+    the outcome is what the caller is allowed to conclude from it. Keeping them separate is what
+    lets `read_visible_at` build a **blocked** outcome out of a **successful** scan, which is the
+    shape the second gate needs and the first cut of `V2-P3-002` had no way to express.
+
+    `subjects` is `None` when the requirement waived `required_subjects` and no probe ran, and
+    `frozenset()` when a probe ran and found none of them -- see `_probe_visible_subjects`.
+    """
+
+    rows: tuple[tuple[object, ...], ...]
+    withheld_row_count: int
+    last_event_time: datetime | None
+    subjects: frozenset[str] | None
 
 
 _CATALOG_DDL = """
@@ -1169,6 +1207,24 @@ class PanelStore:
         weaken: a code added to `evaluate_readiness` tomorrow arrives blocking on both paths,
         and making it filterable is a deliberate edit to a named constant.
 
+        ## The second gate, and why one was not enough
+
+        `evaluate_readiness` judges the **partition**; this method answers with a **subset of
+        its rows**. For three of the thirteen codes the check's *pass* is a claim about rows the
+        predicate then removes, so inheriting it hands the caller a conclusion nothing supports
+        -- `SCOPE_SENSITIVE_ISSUE_CODES` names them and carries the criterion. So after the scan
+        the two that can be re-decided here are re-decided, over the rows about to be returned,
+        through the same functions `evaluate_readiness` calls (`evaluate_visible_slice`). A slice
+        that fails one is **refused**, and the reason lands in
+        `PanelVisibleReadOutcome.visible_slice_issues`.
+
+        `stale` is the case that forced this. It compares `as_of` against the *partition's*
+        newest event, and on the read this method exists for -- a year partition at an `as_of`
+        inside it -- that instant is after `as_of`, the difference is negative, and the check
+        cannot fire at all. Measured on the fixture panel through `daily_requirement`: bounds of
+        one hour, one day and two days all answered, with a visible slice 2 days 21 hours behind
+        `as_of`. The caller's declared bound was accepted and structurally ignored.
+
         ## Why this exists at all, and why it is not a flag on `read_if_ready`
 
         `not_yet_knowable` is judged per partition and a partition is a year, so a complete
@@ -1181,18 +1237,23 @@ class PanelStore:
         A flag on `read_if_ready` was the obvious shape and is the wrong one, for the reason
         `query(..., unchecked=True)` was rejected one method over: a keyword that changes what a
         method *promises* leaves fourteen existing call sites reading as if nothing had changed.
-        A separate name and a separate return type mean a filtered read cannot reach a reader
-        that expects a whole partition without the type checker saying so -- which matters
-        because the objection P2 raised is still true of every one of those readers.
-        `build_index_membership` refuses a gap in the month sequence,
+        A separate name and a separate return type keep the two promises apart -- though **not
+        as strongly as `V2-P3-002` first claimed**: `PanelVisibleReadOutcome.rows` and
+        `PanelReadOutcome.rows` have the identical static type, so the type checker stops a
+        caller passing the whole *outcome* to a reader written for the other and does not stop
+        `filtered.rows` reaching one. The objection P2 raised is still true of every one of those
+        readers -- `build_index_membership` refuses a gap in the month sequence,
         `load_industry_histories`' `answerable_through` exists because a read that stops short
         of an interval's closing row "reassembles an interval that never ends", and
-        `build_stock_universe` refuses a delisting whose listing was filtered away. Those three
-        read shortness as missing data, correctly, and they still take the un-filtered path.
-        What changed is that shortness is now *sayable*: `PanelVisibleReadOutcome.
-        withheld_row_count` is a number the caller receives with the rows, so a consumer that
-        wants to distinguish "withheld" from "absent" can, and one that would rather not know
-        cannot get the rows without it.
+        `build_stock_universe` refuses a delisting whose listing was filtered away -- and what
+        keeps them apart from this method is the audit below, not the annotations.
+
+        What changed is that shortness is now *sayable*, in two numbers rather than one:
+        `withheld_row_count` says how much the predicate removed, and `visible_last_event_time`
+        says how far what is left reaches. The second is not a refinement of the first. The
+        measurement that added it is a build whose visible slice was 172 days behind its own
+        `as_of` while withholding four rows out of fourteen -- shortness was small and the answer
+        was bad, and only one of the two numbers could see it.
 
         `tests/unit/panel/test_visible_read_callers.py` is the audit: an allowlist of the `src/`
         files permitted to call this at all, in the shape `test_query_callers.py` established.
@@ -1226,12 +1287,13 @@ class PanelStore:
                 withheld_row_count_or_none=None,
             )
         try:
-            rows, withheld = self._scan_visible(
+            scan = self._scan_visible(
                 requirement.dataset,
                 year=year,
                 as_of=requirement.as_of,
                 columns=columns,
                 filters=filters,
+                probe_subjects=requirement.required_subjects,
             )
         except PanelStorageError:
             raise
@@ -1240,11 +1302,25 @@ class PanelStore:
                 f"{requirement.dataset} year={year} passed the structural checks but could not "
                 f"be read at {requirement.as_of.isoformat()}: {type(error).__name__}: {error}"
             ) from error
+        slice_issues = evaluate_visible_slice(
+            requirement,
+            visible_last_event_time=scan.last_event_time,
+            visible_subjects=scan.subjects,
+        )
+        if slice_issues:
+            return PanelVisibleReadOutcome(
+                readiness=readiness,
+                as_of=requirement.as_of,
+                rows_or_none=None,
+                withheld_row_count_or_none=None,
+                visible_slice_issues=slice_issues,
+            )
         return PanelVisibleReadOutcome(
             readiness=readiness,
             as_of=requirement.as_of,
-            rows_or_none=rows,
-            withheld_row_count_or_none=withheld,
+            rows_or_none=scan.rows,
+            withheld_row_count_or_none=scan.withheld_row_count,
+            visible_last_event_time_or_none=scan.last_event_time,
         )
 
     def _scan_visible(
@@ -1255,19 +1331,28 @@ class PanelStore:
         as_of: datetime,
         columns: Sequence[str],
         filters: Mapping[str, object] | None,
-    ) -> tuple[tuple[tuple[object, ...], ...], int]:
-        """The visible rows and the withheld count, from one read-only catalog connection.
+        probe_subjects: Sequence[str] | None,
+    ) -> _VisibleScan:
+        """The visible rows, and everything the second gate needs to judge them.
 
         Two statements over the same resolved partition path rather than one, because they
         answer two questions and a single statement answering both would either return the
         withheld rows (defeating the filter) or carry the count on every row (paying for it
-        `row_count` times). The second is a `count(*)` with the complementary predicate, which
-        DuckDB answers from the Parquet column rather than by materialising anything.
+        `row_count` times). The second is an aggregate over the *whole* selection -- withheld
+        count and visible reach in one pass, which DuckDB answers from the Parquet columns
+        rather than by materialising anything -- and it replaced a bare `count(*)` when the
+        review found `stale` could not fire on this path.
+
+        A third statement runs only when the requirement names `required_subjects`, and it is
+        bounded by that list rather than by the partition: `DISTINCT subject ... WHERE subject
+        IN (...)` returns at most as many rows as the caller asked about. Skipping it when the
+        check is waived is not an optimisation, it is the truth -- `evaluate_visible_slice`
+        raises if a requirement that names subjects arrives with none probed.
 
         A missing partition is impossible here: `read_visible_at` only reaches this after
         readiness has confirmed every requested year is registered, present, readable, profiled
         and unchanged, so `_resolve_partition_path` returning `None` would be a catalog that
-        changed between two connections. It is refused rather than answered with `((), 0)`,
+        changed between two connections. It is refused rather than answered with an empty scan,
         which would read as "the partition is there and nothing was knowable yet".
         """
         _validate_dataset(dataset)
@@ -1287,12 +1372,61 @@ class PanelStore:
             visible_sql, visible_parameters = _build_visible_scan_sql(
                 partition_path, columns, filters
             )
-            withheld_sql, withheld_parameters = _build_withheld_count_sql(partition_path, filters)
+            census_sql, census_parameters = _build_visible_census_sql(
+                partition_path, filters, as_of=as_of
+            )
             with _scan_failures_as_storage_errors(dataset, year):
                 scanned = connection.execute(visible_sql, [*visible_parameters, as_of]).fetchall()
-                counted = connection.execute(withheld_sql, [*withheld_parameters, as_of]).fetchone()
-        withheld = 0 if counted is None else int(cast(int, counted[0]))
-        return tuple(cast(list[tuple[object, ...]], scanned)), withheld
+                census = connection.execute(census_sql, census_parameters).fetchone()
+                subjects = self._probe_visible_subjects(
+                    connection,
+                    partition_path,
+                    as_of=as_of,
+                    filters=filters,
+                    probe_subjects=probe_subjects,
+                )
+        if census is None:
+            raise PanelStorageError(
+                f"{dataset} year={year} was scanned but its aggregate over the same rows "
+                "returned nothing; an aggregate with no GROUP BY always returns one row, so the "
+                "two statements did not see the same partition"
+            )
+        return _VisibleScan(
+            rows=tuple(cast(list[tuple[object, ...]], scanned)),
+            withheld_row_count=int(cast(int, census[0])),
+            last_event_time=cast(datetime | None, census[1]),
+            subjects=subjects,
+        )
+
+    def _probe_visible_subjects(
+        self,
+        connection: duckdb.DuckDBPyConnection,
+        partition_path: Path,
+        *,
+        as_of: datetime,
+        filters: Mapping[str, object] | None,
+        probe_subjects: Sequence[str] | None,
+    ) -> frozenset[str] | None:
+        """Which of the subjects the caller *required* survived the availability predicate.
+
+        `None` when nothing was required, which is the only shape `evaluate_visible_slice`
+        accepts a missing probe in. An empty `frozenset()` is a different answer -- "you named
+        some and none of them are visible" -- and the two must not collapse, which is why this
+        returns `None` rather than an empty set for the waived case.
+        """
+        if probe_subjects is None:
+            return None
+        wanted = sorted(set(probe_subjects))
+        if not wanted:  # pragma: no cover - `required_subjects=()` is `empty_requirement`,
+            # which is not row-filterable, so the gate refuses before any scan happens and this
+            # method is never reached with an empty list. Kept as an early return rather than
+            # deleted because the alternative is a malformed `IN ()` if that ever changes.
+            return frozenset()
+        sql, parameters = _build_visible_subject_probe_sql(
+            partition_path, filters, wanted, as_of=as_of
+        )
+        rows = connection.execute(sql, parameters).fetchall()
+        return frozenset(str(row[0]) for row in rows)
 
     def _partition_states(self, requirement: ReadinessRequirement) -> tuple[PartitionState, ...]:
         """What the store can see about each requested year, as evidence for the rule table.
@@ -1564,21 +1698,78 @@ def _build_visible_scan_sql(
     )
 
 
-def _build_withheld_count_sql(
-    partition_path: Path, filters: Mapping[str, object] | None
+def _build_visible_census_sql(
+    partition_path: Path, filters: Mapping[str, object] | None, *, as_of: datetime
 ) -> tuple[str, list[object]]:
-    """How many of the rows the caller asked for were held back: the exact complement.
+    """One aggregate over the caller's selection: how much was withheld, and how far the rest
+    reaches.
 
-    `>` rather than `NOT (<=)` spelled out, and the same equality clauses, so
-    `visible + withheld` is the filtered partition's row count exactly --
-    `test_the_two_halves_of_a_filtered_read_add_up_to_the_partition` asserts that identity
-    rather than trusting the two statements to agree.
+    ## The complement is spelled `> ? OR IS NULL`, and the `OR` is the fix rather than noise
+
+    This was `count(*) ... WHERE available_time > ?`, documented as making `visible + withheld`
+    the filtered partition's row count "exactly". It did not. `available_time` is nullable in
+    Parquet, and SQL's three-valued logic drops a NULL row from **both** halves: `NULL <= x` and
+    `NULL > x` are each unknown, so the row appeared in neither and the asserted identity was
+    false (measured: 2 visible + 0 withheld over a 3-row partition). It also vanished silently
+    -- no readiness code names it, and `partition_row_count_mismatch` cannot see it because the
+    Parquet footer count is unchanged.
+
+    The disjunct fixes both halves of that at once and it is **fail-closed by construction**: a
+    row with no availability instant is never visible at any `as_of` (the `<=` predicate is
+    unchanged and still drops it) and is always counted as withheld, so the identity holds and
+    the row is never leaked. What that means for a reader is stated rather than implied:
+    `withheld_row_count` counts rows that are withheld *permanently*, not only rows that are not
+    knowable yet. `domain/panel_batch.py::TimelineColumns._reject_missing_clock_values` keeps
+    such a row off the batch write path entirely, so the only door left is `write_partition`
+    with raw rows.
+
+    ## Why the reach rides along here
+
+    `max(event_time)` over the visible rows is what `evaluate_visible_slice` needs to re-decide
+    `stale`, and taking it in this statement costs one aggregate rather than one more scan. It
+    is `FILTER (WHERE available_time <= ?)` rather than a second `WHERE`, so the withheld count
+    and the reach are read from the same pass over the same selection and cannot disagree about
+    which rows the caller asked for -- the property `_equality_clauses` exists for.
+
+    There is deliberately **no** visible `count(*)` here. `visible_row_count` is `len(rows)` off
+    the projection statement, and asking SQL for the same number twice would be a value that can
+    disagree with the rows actually returned while looking authoritative.
     """
     clauses, values = _equality_clauses(filters)
-    clauses.append(f"{_quote_identifier(AVAILABILITY_COLUMN)} > ?")
+    where_sql = "" if not clauses else " WHERE " + " AND ".join(clauses)
+    available = _quote_identifier(AVAILABILITY_COLUMN)
+    event = _quote_identifier(EVENT_TIME_COLUMN)
     return (
-        f"SELECT count(*) FROM read_parquet(?) WHERE {' AND '.join(clauses)}",
-        [str(partition_path), *values],
+        f"SELECT count(*) FILTER (WHERE {available} > ? OR {available} IS NULL), "
+        f"max({event}) FILTER (WHERE {available} <= ?) "
+        f"FROM read_parquet(?){where_sql}",
+        [as_of, as_of, str(partition_path), *values],
+    )
+
+
+def _build_visible_subject_probe_sql(
+    partition_path: Path,
+    filters: Mapping[str, object] | None,
+    wanted: Sequence[str],
+    *,
+    as_of: datetime,
+) -> tuple[str, list[object]]:
+    """Which of `wanted` still have at least one row visible at `as_of`.
+
+    Bounded by the caller's own list rather than by the partition -- `DISTINCT subject` over
+    675,148 rows would be a hash aggregate nobody asked for, and the question is only ever about
+    the subjects the requirement named. Every name is a bound `?`, so a subject cannot become
+    SQL; `_quote_identifier` covers the column and the filter keys the same way it does on the
+    other two statements.
+    """
+    clauses, values = _equality_clauses(filters)
+    subject = _quote_identifier(SUBJECT_COLUMN)
+    placeholders = ", ".join("?" for _ in wanted)
+    clauses.append(f"{_quote_identifier(AVAILABILITY_COLUMN)} <= ?")
+    clauses.append(f"{subject} IN ({placeholders})")
+    return (
+        f"SELECT DISTINCT {subject} FROM read_parquet(?) WHERE {' AND '.join(clauses)}",
+        [str(partition_path), *values, as_of, *wanted],
     )
 
 

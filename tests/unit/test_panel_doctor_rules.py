@@ -394,6 +394,16 @@ def test_the_visibility_filtered_read_is_disclosed_with_what_it_cannot_promise()
     mechanism (`available_time`), the bound on how much it changes
     (`ROW_FILTERABLE_ISSUE_CODES` -- one code, every other issue still refuses), and at least
     one measured instance of the divergence rather than a general worry.
+
+    **The review found the last of those three too weak and it is strengthened here.** The
+    assertion was `"81.7%" in detail`, which pins a string and no behaviour, and the entry it
+    passed on named the *mechanism* without the *magnitude* -- `V2-P3-002`'s own Task-37 failure
+    mode, existence checked and size not. Two things are now required of the sentence and both
+    are facts a reader can act on: that 81.7% is stated as the affected **share** rather than as
+    a citation, and that the entry says this path is where the bias first becomes reachable at
+    all, because `read_if_ready` refuses a year partition at every `as_of` inside it. An entry
+    that describes a divergence without saying it was previously unreachable describes an
+    inherited condition, and this one is not.
     """
     by_code = {item.code: item.detail for item in KNOWN_STORAGE_LIMITATIONS}
 
@@ -402,14 +412,47 @@ def test_the_visibility_filtered_read_is_disclosed_with_what_it_cannot_promise()
     assert "ROW_FILTERABLE_ISSUE_CODES" in detail
     assert "81.7%" in detail and "fina_indicator" in detail
     assert "withheld" in detail
+    assert "affected share of keys is 81.7%" in detail
+    assert "REACHABLE AT ALL" in detail and "read_if_ready refuses" in detail
 
 
-def test_the_storage_plane_discloses_three_boundaries_and_the_report_carries_all_three() -> None:
+def test_the_scope_carry_residue_of_the_filtered_read_is_disclosed_with_what_bounds_it() -> None:
+    """`V2-P3-002`'s fourth boundary, added by the review that found the third one incomplete.
+
+    A readiness check that *passed* over the whole partition was being carried to an answer made
+    of a subset of its rows. Two of the three checks that can break under that are re-decided
+    against the returned rows; `date_gap` is not, and an exclusion is only a disclosure if it
+    says what still bounds the gap. So the entry has to name the mechanism, the reason the
+    re-check is not run, and the two checks that do still catch the ordinary cases -- otherwise
+    it reads as "we know" rather than as "here is the shape of what gets through".
+    """
+    by_code = {item.code: item.detail for item in KNOWN_STORAGE_LIMITATIONS}
+
+    detail = by_code["date_gap_clears_on_partition_rows_the_filtered_read_withholds"]
+    assert "SCOPE_SENSITIVE_ISSUE_CODES" in detail
+    assert "_date_census" in detail
+    assert "no-op" in detail and "_sessions_published_through" in detail
+    assert "stale" in detail
+
+
+def test_the_storage_plane_discloses_every_boundary_it_declares_and_the_report_carries_them() -> (
+    None
+):
     """The total, so a disclosure that quietly stopped reaching a reader fails.
 
     Every other assertion about these entries is per-entry and would be satisfied by a registry
     that lost one. `KNOWN_PANEL_LIMITATIONS` is where a reader of `panel doctor` actually meets
     them, so the count is asserted on both sides of the fold.
+
+    **The set grew from three to four in `V2-P3-002`'s remediation, and that is the assertion
+    working rather than an exception to it.** The name carried the number `three` and no longer
+    does, because a count in a test name is a second copy of the table that nothing checks.
+
+    The judgement criterion, since more than one branch may add an entry: this set is the union
+    of every code `KNOWN_STORAGE_LIMITATIONS` declares. A diff that adds an entry adds it here in
+    the same diff; a diff that finds this failing after a merge adds the missing code rather than
+    deleting the one it does not recognise. Losing a member to a merge is the exact failure
+    `V2-P2`'s remediation paid for once already.
     """
     codes = {item.code for item in KNOWN_STORAGE_LIMITATIONS}
 
@@ -417,6 +460,7 @@ def test_the_storage_plane_discloses_three_boundaries_and_the_report_carries_all
         "a_value_edited_in_place_leaves_the_census_intact",
         "panel_store_query_is_public_and_passes_no_point_in_time_gate",
         "a_visibility_filtered_read_replays_a_partition_that_was_not_there_yet",
+        "date_gap_clears_on_partition_rows_the_filtered_read_withholds",
     }
     assert codes <= {item.code for item in KNOWN_PANEL_LIMITATIONS}
     assert all(item.datasets == () for item in KNOWN_PANEL_LIMITATIONS if item.code in codes)

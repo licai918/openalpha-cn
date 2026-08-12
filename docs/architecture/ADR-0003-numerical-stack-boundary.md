@@ -128,13 +128,39 @@ store, and `compute_factor` evaluated the whole cross section at one `as_of`:
 |---|---|
 | `compute_factor`, cold (read + group + classify + evaluate 5,534 securities) | **1.95 s** |
 | the same call again, warm | 1.91 s |
-| (for context, the existing write path: `write_panel_batch` for that partition) | 288 s |
+| (for context, the existing write path: `write_panel_batch` for that partition) | see below |
 
 Two seconds of single-threaded pure Python for 675k rows is ~2.9 us/row end to end, and a full
 244-session year extrapolates to ~4 s. That is not a number numpy would rescue: the read itself
 is DuckDB's, the grouping is a `dict` insert per row, and the arithmetic is one division per
-security. It is also two orders of magnitude below the *write* path this same partition already
-pays, which is where a performance issue on this plane actually lives.
+security. It is also far below the *write* path this same partition already pays, which is where
+a performance issue on this plane actually lives -- see the correction below for how far, and
+why a single number for it is no longer quoted.
+
+**Correction (`V2-P3-002` review, 2026-08-11): the write figure was `288 s` and is withdrawn as
+an absolute.** Four measurements of one nominal quantity now exist and they span more than an
+order of magnitude:
+
+| measurement of `write_panel_batch` at 675,148 rows | time |
+|---|---|
+| the original, as first recorded here | 288 s |
+| re-measured at the same row count during review | 56.7 s |
+| extrapolated from a fifth of the scale | 234 s |
+| re-measured again during the remediation (10 stored columns) | 617.9 s |
+
+Column count and machine explain some of that and plainly not all of it, and none of the four
+was taken under stated, controlled conditions. So this table no longer quotes a second-count for
+this step: an absolute nobody can reproduce is worse than a comparison everybody can.
+
+What survives is the comparison this row was here to make, and the smallest of the four is still
+enough for it: against the 1.95 s read, the write is **29x** at 56.7 s, 148x at 288 s and 317x
+at 617.9 s. So "the write path dominates by at least an order of magnitude, and by two on three
+of the four measurements" is what this ADR now claims, and the decision it records -- that the
+factor engine's arithmetic is not where a numerical stack would pay for itself -- does not
+depend on which of the four is right. (The earlier paragraph's "two orders of magnitude" was
+written when 288 s was the only figure; at 56.7 s it would have been an overclaim.) The read
+side is the half that reproduces: 1.61 s cold and 1.60 s warm on an independently built
+partition of the same size, slightly faster than the 1.95 s above.
 
 The first run of this measurement said 2.01 s, and the difference is worth naming because it
 was a real defect rather than noise: `manifest_id` is a pydantic `computed_field`, which is not

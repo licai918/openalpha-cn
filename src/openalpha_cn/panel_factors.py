@@ -89,10 +89,19 @@ materialises the other eight.
 Measured at ADR-0002's stated panel scale rather than argued: a synthetic `daily` partition of
 5,534 securities x 122 sessions (675,148 rows) written through the real store, and
 `compute_factor` over the whole cross section at one `as_of` -- read, grouping, classification
-and evaluation together -- takes **1.95 s** cold and 1.91 s warm, about 2.9 us/row. The same
-partition costs 288 s to *write*, which is where a performance problem on this plane actually
-is. ADR-0003 carries the same table and the one defect the measurement found (a `computed_field`
-read inside the per-security loop, which re-hashed the build manifest 5,534 times).
+and evaluation together -- takes **1.95 s** cold and 1.91 s warm, about 2.9 us/row. That half
+reproduces: an independent re-measurement on its own partition of the same row count came back
+at 1.61 s cold and 1.60 s warm.
+
+The write path dominates it and is where a performance problem on this plane actually is -- but
+only the *ordering* is claimed here, and only as wide as the weakest measurement supports. The
+absolute figure this docstring first quoted (288 s) did not reproduce: four measurements of that
+one quantity now read 288 s, 56.7 s, 234 s (extrapolated from a fifth of the scale) and 617.9 s,
+which against the 1.95 s read is 148x, 29x and 317x. So the claim is "at least an order of
+magnitude, and two on three of the four", not the flat "two orders of magnitude" this paragraph
+carried when 288 s was the only figure. ADR-0003 carries the table and the one defect the
+original measurement found (a `computed_field` read inside the per-security loop, which
+re-hashed the build manifest 5,534 times).
 
 ## What is deliberately not here
 
@@ -702,6 +711,16 @@ def _validate_requirements(
                 f"for a partition with none of {list(definition.columns_of(dataset))} in it; a "
                 "factor's inputs are exactly what that check exists for"
             )
+        if requirement.max_staleness is None:
+            raise FactorEngineError(
+                f"the {dataset} requirement waives max_staleness, and this engine reads through "
+                "read_visible_at, which answers with the rows knowable at as_of rather than "
+                "with the partition. A waived bound therefore accepts a slice that reaches "
+                "arbitrarily far short of as_of while every structural check clears: measured, "
+                "a build stamped 2026-06-30 over a visible slice ending 2026-01-09, reported as "
+                "coverage='computed'. State a bound -- read_visible_at re-decides it against "
+                "the rows it returns"
+            )
         missing = sorted(set(definition.columns_of(dataset)) - set(requirement.required_fields))
         if missing:
             raise FactorEngineError(
@@ -726,6 +745,15 @@ def _read_dataset(
     `(subject, event_time, *columns)` -- `available_time` is deliberately not projected, because
     the predicate is applied in SQL and a caller-side re-filter would be a second copy of the
     rule that can disagree with the first.
+
+    **The refusal is reported from `blocking_issues`, not from `readiness.issues`**, and the
+    difference is not cosmetic. A filtered read now has two verdicts -- one about the partition
+    and one about the rows it was going to return -- and only the second can say "the slice you
+    would have got reaches five months before your `as_of`". Reading the first alone reports
+    `not_yet_knowable` for such a refusal, which is a true statement about the year and a
+    misleading account of why this call failed: measured against a partition whose visible slice
+    ended 2026-01-09 at an `as_of` of 2026-06-30, `readiness.issues` said only "the year is not
+    over" while the bound that was actually breached went unnamed.
     """
     projection = (SUBJECT_COLUMN_NAME, EVENT_TIME_COLUMN, *columns)
     sessions: dict[str, list[date]] = {}
@@ -736,8 +764,8 @@ def _read_dataset(
         if outcome.is_blocked:
             raise FactorEngineError(
                 f"{dataset} year={year} cannot be read at {requirement.as_of.isoformat()}: "
-                f"{[issue.code for issue in outcome.readiness.issues]}; "
-                f"{'; '.join(issue.detail for issue in outcome.readiness.issues)}"
+                f"{[issue.code for issue in outcome.blocking_issues]}; "
+                f"{'; '.join(issue.detail for issue in outcome.blocking_issues)}"
             )
         coverage = store.read_coverage(dataset, year)
         if coverage is None or coverage.partition_content_hash is None:
@@ -1199,7 +1227,7 @@ def load_factor_observations(
         if outcome.is_blocked:
             raise FactorEngineError(
                 f"{FACTOR_OBSERVATION_DATASET} year={year} cannot be read at "
-                f"{as_of.isoformat()}: {[issue.code for issue in outcome.readiness.issues]}"
+                f"{as_of.isoformat()}: {[issue.code for issue in outcome.blocking_issues]}"
             )
         found.extend(_observation_from_row(row) for row in outcome.rows)
     return tuple(found)

@@ -188,20 +188,60 @@ its fourteen callers is untouched, and `not_yet_knowable` still refuses a whole 
 there. What `V2-P3-002` added is a *second*, differently named read on the same store,
 `PanelStore.read_visible_at`, which runs the identical rule table and then, **only** when every
 issue it found is in `ROW_FILTERABLE_ISSUE_CODES` (that is: only `not_yet_knowable`), scans the
-partition with a `WHERE available_time <= as_of` predicate instead of refusing it. Three
-properties make that a different trade from the one P2 declined:
+partition with a `WHERE available_time <= as_of` predicate instead of refusing it.
+
+### The correction `V2-P3-002`'s review forced, and why it was not a wording change
+
+The first version of this section said the substitution left the rule table alone: "every other
+issue still refuses the partition whole, so nothing about the structural checks weakened". That
+was **false, and measurably so**, and the reason is worth stating in full because it is the
+general shape of the defect rather than one instance.
+
+`evaluate_readiness` judges *partition metadata*. `read_visible_at` answers with a *subset of
+that partition's rows*. For most codes the distinction does not matter -- a missing file is
+missing however you filter it -- but for three of the thirteen the check's **pass** is a
+statement about rows the filter then removes, so carrying the verdict over to the filtered
+answer carries a conclusion that is no longer supported. `SCOPE_SENSITIVE_ISSUE_CODES` names
+those three and the constant carries the code-by-code argument.
+
+`stale` was the sharpest case and it was not merely unsound, it was **structurally dead**.
+`stale` compares `as_of - coverage.last_event_time` against the caller's bound, and
+`last_event_time` is the newest event in the *whole* partition. `not_yet_knowable` fires
+exactly when `max_available_time > as_of`; on a year partition read mid-year the newest event
+is also after `as_of`, so the difference is negative and `stale` cannot fire. Measured on this
+repository's own fixture panel through `panel_ingest.daily_requirement`: at `as_of`
+2026-01-12T04:00Z the filtered read answered with `max_staleness` set to one hour, one day and
+two days alike, while the newest **visible** event was 2026-01-09 -- 2 days 21 hours behind a
+bound the caller had stated and the store had silently ignored. End to end that produced a
+factor stamped `as_of` 2026-06-30 whose newest input session was 2026-01-09, 172 days of
+staleness under a declared bound of 7 days, reported as `coverage="computed"`.
+
+So `read_visible_at` now **re-runs the scope-sensitive checks against the rows it is about to
+return**, through the same predicate `evaluate_readiness` uses (`staleness_issue`), not a
+second copy of it. `VISIBLE_SLICE_RECHECKS` names which two are re-run, the third (`date_gap`)
+is disclosed in `KNOWN_STORAGE_LIMITATIONS` with the measurement that rules the re-check out,
+and a slice that fails one of them is **refused**, not annotated.
+
+Three properties make the result a different trade from the one P2 declined:
 
 - The short answer is **stated**, not inferred. `PanelVisibleReadOutcome` carries
   `withheld_row_count`, so "shortness" arrives as a number beside the rows rather than as
-  something a consumer has to notice. The consumers P2 named -- `build_index_membership`,
-  `load_industry_histories`, `build_stock_universe` -- read shortness as missing data because
-  nothing told them otherwise, and they still take the un-filtered path.
-- It is a **different type**, so a filtered read cannot be handed to a reader that expects a
-  whole partition without mypy saying so, and `tests/unit/panel/test_visible_read_callers.py`
-  pins which `src/` files may call it at all.
-- Exactly one readiness code is compensated by the predicate. Every other issue still refuses
-  the partition whole, so nothing about the structural checks weakened; see
-  `ROW_FILTERABLE_ISSUE_CODES` for the code-by-code argument.
+  something a consumer has to notice, and `visible_last_event_time` says how far the answer
+  actually reaches -- which is a *different* fact, and the one that matters. The two are not
+  correlated: the 172-day build above withheld four rows out of fourteen. The consumers P2
+  named -- `build_index_membership`, `load_industry_histories`, `build_stock_universe` -- read
+  shortness as missing data because nothing told them otherwise, and they still take the
+  un-filtered path.
+- `tests/unit/panel/test_visible_read_callers.py` pins which `src/` files may call it at all.
+  The **types** do not carry this: `PanelVisibleReadOutcome.rows` and `PanelReadOutcome.rows`
+  have the identical static type, so a type checker stops only the mistake of passing a whole
+  *outcome* where the other was expected, and the three rebuilders above take rows. The AST
+  allowlist is the obstacle; the type split is a smaller thing than the first version of this
+  paragraph claimed, and `test_the_two_read_outcomes_expose_rows_at_the_same_static_type` pins
+  the fact the claim now rests on.
+- Exactly one readiness code is compensated by the predicate, and the checks whose conclusion
+  the filter could invalidate are re-decided over the filtered rows rather than inherited; see
+  `ROW_FILTERABLE_ISSUE_CODES` and `SCOPE_SENSITIVE_ISSUE_CODES` for the code-by-code argument.
 
 What it cannot promise is disclosed rather than argued away, in
 `KNOWN_STORAGE_LIMITATIONS.a_visibility_filtered_read_replays_a_partition_that_was_not_there_yet`:
@@ -222,6 +262,7 @@ disagreeing by one day (a session at 08:00 Asia/Shanghai is the previous date in
 from __future__ import annotations
 
 from collections.abc import Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -353,7 +394,7 @@ touch.** `partition_missing` / `partition_file_missing` / `partition_file_unread
 what the catalog claims, and filtering rows out of a partition you cannot trust filters nothing
 useful. `date_gap` / `subject_missing` / `field_missing` say the data the caller requires is
 absent, and withholding *more* of it does not supply it. `stale` says the newest event is older
-than the caller's bound -- a predicate that removes recent rows can only make that worse.
+than the caller's bound, and a predicate that removes recent rows can only make that worse.
 `no_years_requested` / `empty_requirement` say the requirement inspected nothing.
 
 `not_yet_knowable` is different in kind: it is the one verdict that is true *of some rows and
@@ -362,6 +403,85 @@ and a partition is a year, so a complete 2015 partition is refused at every `as_
 even though most of its rows were knowable at most of them. The refusal is sound and the
 granularity is the whole of the problem, which is what roadmap section 11 records and what this
 constant names.
+
+**This set answers "can a filter repair the refusal", which is only half the question.** The
+other half -- "does the *pass* still hold once the filter has run" -- is `SCOPE_SENSITIVE_
+ISSUE_CODES`, and the first version of this constant did not distinguish them. Membership here
+was and remains correct; what was missing is that three of the twelve exclusions above are
+arguments about a code that *fired*, and say nothing about the same code staying silent over a
+smaller row set.
+"""
+
+SCOPE_SENSITIVE_ISSUE_CODES: Final[frozenset[str]] = frozenset(
+    {"stale", "date_gap", "subject_missing"}
+)
+"""The checks whose **pass** over a whole partition does not carry to a filtered subset of it.
+
+`ROW_FILTERABLE_ISSUE_CODES` decides which refusals `read_visible_at` may replace with a
+predicate. This decides something the first cut of `V2-P3-002` never asked: for the codes that
+did **not** fire, is "no issue found" still true of the rows the caller is actually handed?
+
+**The criterion, so a code added later is classified rather than guessed at.** A code belongs
+here exactly when its verdict reads a *per-row* fact -- an event instant, a subject, a session
+date -- pooled over the partition. Removing rows can then turn a pass into a failure, because
+the evidence for the pass may live entirely in the removed rows. A code belongs *outside* it
+when its verdict reads only catalog metadata or the requirement's own shape, where filtering
+changes nothing:
+
+- `partition_missing`, `partition_file_missing`, `partition_file_unreadable`,
+  `partition_row_count_mismatch`, `coverage_missing`, `coverage_stale` read registration, the
+  file, and the content hash. A subset of rows is not a different file.
+- `field_missing` reads the *column* list. A row predicate removes rows, never columns, so a
+  partition that carries a column still carries it after filtering.
+- `no_years_requested`, `empty_requirement` read the requirement, not the data.
+- `not_yet_knowable` is the one being compensated and is in `ROW_FILTERABLE_ISSUE_CODES`.
+
+The three that are here are here for measured reasons, not by inspection:
+
+- **`stale`** compares `as_of - last_event_time` and `last_event_time` is the partition's. On
+  the path `read_visible_at` exists for -- a year partition at an `as_of` inside it -- the
+  newest event post-dates `as_of`, the difference is negative, and the check is not merely
+  scope-wrong but *unreachable*. See this module's docstring for the two measurements.
+- **`subject_missing`** pools `coverage.subjects` over the partition. A security whose rows all
+  became knowable after `as_of` is in the coverage census and absent from the answer, so a
+  requirement naming it clears and the caller silently receives a smaller cross section.
+- **`date_gap`** pools `coverage.dates` the same way, with the same consequence.
+
+`VISIBLE_SLICE_RECHECKS` says which of the three `read_visible_at` re-decides over the rows it
+returns. It is deliberately a *strict* subset, and the residue is disclosed rather than
+implied.
+"""
+
+VISIBLE_SLICE_RECHECKS: Final[frozenset[str]] = frozenset({"stale", "subject_missing"})
+"""The scope-sensitive checks `read_visible_at` re-runs against the rows it is about to return.
+
+Re-run through the same functions `evaluate_readiness` calls -- `staleness_issue` and
+`subject_gap_issue` -- so there is still exactly one place each verdict is computed. That is
+what keeps this from being the second rule table `ROW_FILTERABLE_ISSUE_CODES` was written to
+avoid: the input changes (the visible slice rather than the coverage census), the rule does not.
+
+**`date_gap` is excluded, and the reason is structural rather than a cost argument.** Re-deciding
+it means turning `event_time` instants back into session dates over the visible rows, which is
+`panel_ingest._date_census`'s conversion -- and `openalpha_cn.panel` imports no sibling
+subpackage, so the store could not share that code even if it wanted to. It would be a *second
+implementation* of one conversion, in SQL rather than Python, against a timezone read from the
+coverage record; the two would have to agree exactly or the check invents gaps in complete data,
+which is the failure mode `evaluate_readiness`'s own `required_dates` validation calls "a blocked
+verdict with an invented cause is worse than a crash".
+
+What makes that trade acceptable rather than merely convenient is measured: on every path that
+reaches `read_visible_at` today the re-check would be a **no-op**. Only `_price_requirement`
+states `required_dates` at all (every other requirement in `panel_ingest` waives it), and it
+clamps them with `_sessions_published_through`, which cuts at 16:30 Asia/Shanghai -- the *same*
+instant the provider dates `available_time` at. So every required session is visible by
+construction: on the fixture panel at 2026-01-12T04:00Z, `daily_requirement` names exactly the
+five sessions the filtered read returns. `test_the_date_gap_recheck_would_be_a_no_op_on_every_
+requirement_that_states_dates` asserts that equality, so the day a caller states dates on some
+other footing the exclusion has to be re-argued instead of inherited.
+
+The residue is real and is disclosed as
+`KNOWN_STORAGE_LIMITATIONS.date_gap_clears_on_partition_rows_the_filtered_read_withholds`,
+with the two things that do still bound it named there.
 """
 
 READINESS_WAIVABLE_CHECKS: Final[frozenset[str]] = frozenset(
@@ -441,12 +561,47 @@ KNOWN_STORAGE_LIMITATIONS: Final[tuple[StorageLimitation, ...]] = (
             "the registry snapshot the partition was built from is absent at every as_of "
             "inside it, and a row the upstream served then and does not serve now is not "
             "there at all. Nothing on this plane can close that: it needs a revision history "
-            "the endpoints do not publish. Every structural readiness check still runs -- the "
-            "filter replaces exactly one code, ROW_FILTERABLE_ISSUE_CODES, and a partition "
-            "with any other issue is refused whole. The residue that IS closable is closed "
-            "elsewhere: tests/unit/panel/test_visible_read_callers.py pins which src/ files "
-            "may take this path, because a filtered read hands back a short partition and "
-            "every domain rebuilder above this plane reads shortness as missing data"
+            "the endpoints do not publish. THE MAGNITUDE IS MEASURED, NOT ONLY THE MECHANISM: "
+            "on fina_indicator the affected share of keys is 81.7%, so for that dataset the "
+            "replay is wrong about the majority of what it replays, and it is wrong in one "
+            "direction -- every such key reads back at its restated value, which is the value "
+            "a backtest would not have had. AND THIS PATH IS WHERE THAT BIAS FIRST BECOMES "
+            "REACHABLE AT ALL: read_if_ready refuses a year partition at every as_of inside "
+            "it, so before read_visible_at existed a mid-year replay was not something this "
+            "store could do wrongly -- it was something it could not do. The entry describes "
+            "an exposure the method created, not one it inherited. Bounded, not closed: the "
+            "filter replaces exactly one code (ROW_FILTERABLE_ISSUE_CODES) and a partition "
+            "with any other issue is refused whole; the checks whose pass a row filter could "
+            "invalidate are re-decided over the returned rows (VISIBLE_SLICE_RECHECKS) rather "
+            "than inherited; and tests/unit/panel/test_visible_read_callers.py pins which src/ "
+            "files may take this path, because a filtered read hands back a short partition "
+            "and every domain rebuilder above this plane reads shortness as missing data"
+        ),
+    ),
+    StorageLimitation(
+        code="date_gap_clears_on_partition_rows_the_filtered_read_withholds",
+        detail=(
+            "date_gap asks whether every required session is present in the partition's "
+            "write-time date census. read_visible_at then answers with the rows knowable at "
+            "as_of, and a session whose rows all became knowable later is in the census and "
+            "not in the answer -- so the check clears on evidence the caller never receives. "
+            "It is the one member of SCOPE_SENSITIVE_ISSUE_CODES that is NOT re-decided over "
+            "the visible slice. Re-deciding it needs event instants turned back into session "
+            "dates in the partition's own timezone, which is panel_ingest._date_census's "
+            "conversion, and openalpha_cn.panel imports no sibling subpackage -- so it would be "
+            "a second implementation of one conversion, in SQL, that has to agree exactly or "
+            "report invented gaps in complete data. MEASURED BOUND ON WHAT THAT COSTS TODAY: "
+            "the re-check would be a no-op on every path that reaches read_visible_at, because "
+            "_price_requirement is the only requirement in panel_ingest that states "
+            "required_dates and it clamps them with _sessions_published_through, which cuts at "
+            "the same 16:30 Asia/Shanghai instant the provider dates available_time at -- so "
+            "every required session is visible by construction (on the fixture panel at "
+            "2026-01-12T04:00Z, five required and the same five returned). What still bounds "
+            "the general case: the partition-level date_gap catches a partition that stops "
+            "short of as_of outright, and the re-decided stale check catches a visible slice "
+            "that does not reach the caller's declared bound. What neither catches is a caller "
+            "stating required_dates on some footing other than the availability clock, whose "
+            "required session is present in the partition and entirely withheld from the answer"
         ),
     ),
 )
@@ -750,21 +905,42 @@ class PanelVisibleReadOutcome:
     """A verdict, the rows that were knowable at `as_of`, and how many were held back.
 
     `PanelStore.read_visible_at`'s answer, and a **different type** from `PanelReadOutcome`
-    rather than a flag on it. That is the point rather than fastidiousness: the two make
-    different promises, and mypy refusing to pass one where the other is expected is what keeps
-    a caller from handing a filtered, deliberately short read to something that reads shortness
-    as missing data.
+    rather than a flag on it, because the two make different promises.
+
+    **What that type split is worth is smaller than `V2-P3-002` first claimed, and the claim is
+    corrected here rather than quietly dropped.** It was written as "mypy refusing to pass one
+    where the other is expected is what keeps a caller from handing a filtered read to something
+    that reads shortness as missing data". Measured: `PanelVisibleReadOutcome.rows` and
+    `PanelReadOutcome.rows` have the *identical* static type, `tuple[tuple[object, ...], ...]`,
+    and the three domain rebuilders the objection is about take rows rather than outcomes -- so
+    `stock_universe_from_panel_rows(list(filtered.rows), ...)` type-checks clean under
+    `mypy --strict`, and so does assigning one `.rows` to a variable annotated for the other.
+    What the type checker does stop is passing a whole *outcome* to a function annotated for the
+    other one. The obstacle that actually holds is
+    `tests/unit/panel/test_visible_read_callers.py`'s AST allowlist, and
+    `test_the_two_read_outcomes_expose_rows_at_the_same_static_type` pins the fact this
+    paragraph now rests on, so a later change that made the types genuinely differ would show up
+    as a failing test rather than as prose drifting back into being true.
 
     ## What it promises that `PanelReadOutcome` does not
 
     `rows` here is not the partition. It is the partition minus every row whose
-    `available_time` post-dates `as_of`, and `withheld_row_count` says how many that was --
-    which is the whole reason this type exists. P2 declined a row-level filter on the ground
-    that "a filtered read hands back a *short* partition, and every consumer above this plane
-    reads shortness as missing data rather than as withheld data". The objection is about a
-    *silently* short answer: `build_index_membership` cannot tell a filtered month from an
-    absent one because nothing tells it. Here something does, as a number the caller cannot
-    receive rows without also receiving.
+    `available_time` post-dates `as_of` (or is absent), and **two numbers describe what that
+    did**, because one of them alone is misleading:
+
+    - `withheld_row_count` -- how many rows the predicate removed. P2 declined a row-level
+      filter on the ground that "a filtered read hands back a *short* partition, and every
+      consumer above this plane reads shortness as missing data rather than as withheld data",
+      and this is the number that makes shortness *stated*: `build_index_membership` cannot
+      tell a filtered month from an absent one because nothing tells it, and here something
+      does.
+    - `visible_last_event_time` -- **how far the answer reaches**. Added by `V2-P3-002`'s review
+      because the first number does not imply it and cannot substitute for it. The two are
+      uncorrelated in the direction that matters: the worst measured case (a factor stamped
+      2026-06-30 whose newest input session was 2026-01-09) withheld *four* rows out of
+      fourteen. A small `withheld_row_count` beside a badly stale slice is the shape the
+      compensation was weakest against, so the second number is not a convenience -- it is the
+      one a caller has to look at.
 
     ## The sentinels, and the mistake each one is measured against
 
@@ -775,12 +951,27 @@ class PanelVisibleReadOutcome:
     - **`withheld_row_count` raises on a blocked outcome** for the same reason, with the same
       escape hatch under the name `withheld_row_count_or_none`. A blocked read withheld
       *everything*, and answering `0` would be the one number a caller must not be told.
+    - **`visible_last_event_time` raises on a blocked outcome**, and answers `None` on a ready
+      outcome whose visible slice is empty. Those are two different facts -- "you may not ask"
+      and "this answer reaches nothing" -- and merging them is what `rows_or_none` versus `()`
+      exists to prevent one field over.
     - **`bool()`, `len()` and iteration all raise -- including on a ready outcome.** `if
       outcome:` is the most available way to write this check and it is true of a blocked
       outcome, because a dataclass instance is truthy. `DependencyClearance` (`panel_gate.py`)
       set this precedent and refuses all three on the clearing path as well as the blocking
       one, for the reason that matters: a guard that only rejects the failing case teaches
       nothing on the passing case and is removed the first time someone reads it as noise.
+
+    ## Two verdicts, because there are two row sets
+
+    `readiness` is what `evaluate_readiness` said about the **partition**.
+    `visible_slice_issues` is what `evaluate_visible_slice` said about the **rows this outcome
+    carries**, and it is non-empty only on an outcome that is blocked *after* a successful scan
+    -- the case `V2-P3-002` originally had no way to express, and therefore never refused. See
+    `SCOPE_SENSITIVE_ISSUE_CODES` for which checks are re-decided and why the other ten are not.
+
+    A caller that wants "why was I refused" has to read both, which is why `blocking_issues`
+    merges them in one place rather than leaving each call site to remember.
 
     ## `readiness.state` may say `blocked` on an outcome that carries rows
 
@@ -803,10 +994,26 @@ class PanelVisibleReadOutcome:
     as_of: datetime
     rows_or_none: tuple[tuple[object, ...], ...] | None
     withheld_row_count_or_none: int | None
+    visible_last_event_time_or_none: datetime | None = None
+    visible_slice_issues: tuple[ReadinessIssue, ...] = ()
 
     @property
     def is_blocked(self) -> bool:
         return self.rows_or_none is None
+
+    @property
+    def blocking_issues(self) -> tuple[ReadinessIssue, ...]:
+        """Every reason this outcome carries no rows, from both verdicts, or `()` if it does.
+
+        Provided because "why was I refused" now has two possible sources and asking only the
+        first is the mistake that would reintroduce the defect this method was corrected for:
+        an outcome refused for a stale *visible slice* has `readiness.issues ==
+        (not_yet_knowable,)`, which reads as "the year has not finished" and says nothing about
+        the bound that was actually breached.
+        """
+        if self.rows_or_none is not None:
+            return ()
+        return (*self.readiness.issues, *self.visible_slice_issues)
 
     @property
     def rows(self) -> tuple[tuple[object, ...], ...]:
@@ -814,7 +1021,7 @@ class PanelVisibleReadOutcome:
         if self.rows_or_none is None:
             raise PanelStorageError(
                 f"{self.readiness.dataset} is blocked at {self.as_of.isoformat()}, so it has no "
-                f"visible rows to read: {[issue.code for issue in self.readiness.issues]}; "
+                f"visible rows to read: {[issue.code for issue in self.blocking_issues]}; "
                 "use `rows_or_none` to handle blocked and empty together on purpose"
             )
         return self.rows_or_none
@@ -829,6 +1036,25 @@ class PanelVisibleReadOutcome:
                 "`withheld_row_count_or_none` to handle blocked and zero together on purpose"
             )
         return self.withheld_row_count_or_none
+
+    @property
+    def visible_last_event_time(self) -> datetime | None:
+        """How far the returned rows reach, `None` if there are none, or an error if blocked.
+
+        The number `withheld_row_count` does not imply. A read can withhold four rows and still
+        answer with a slice whose newest session is 172 days behind `as_of`; that measurement is
+        why this exists. `None` here is "this answer reaches nothing", which is a fact about a
+        real answer -- the blocked case raises instead, so the two cannot be confused.
+        """
+        if self.rows_or_none is None:
+            raise PanelStorageError(
+                f"{self.readiness.dataset} is blocked at {self.as_of.isoformat()}, so nothing "
+                "was read and 'how far do the visible rows reach' has no answer: "
+                f"{[issue.code for issue in self.blocking_issues]}; use "
+                "`visible_last_event_time_or_none` to handle blocked and empty together on "
+                "purpose"
+            )
+        return self.visible_last_event_time_or_none
 
     @property
     def visible_row_count(self) -> int:
@@ -870,6 +1096,175 @@ class PanelVisibleReadOutcome:
         )
 
 
+PARTITION_SCOPE: Final[str] = ""
+"""What `evaluate_readiness` judges: every row the catalog says the partition holds.
+
+**Empty on purpose.** It is interpolated straight after the dataset name, so the partition-level
+messages are byte for byte what they were before the visible-slice checks existed. That is not
+tidiness -- `tests/integration/test_panel_interfaces.py` pins one of these details in full
+through both the SDK and the HTTP face, and a qualifier added to the *unchanged* path would have
+been a gratuitous break of an assertion nothing had falsified.
+"""
+
+VISIBLE_SLICE_SCOPE: Final[str] = " restricted to the rows this read returns"
+"""What `read_visible_at` returns, and therefore what its re-decided checks judge.
+
+Deliberately *not* "the rows visible at that `as_of`", which would be one qualifier short. The
+selection these checks are decided over is the availability predicate **and the caller's own
+`filters`**, exactly as `withheld_row_count` is -- `_equality_clauses` is shared between the
+statements so the two cannot answer about different row sets. A caller that filters to one
+security while requiring two is therefore refused with `subject_missing`, and that is the
+intended answer: the check is about the answer being handed back, not about what the partition
+holds. The partition-level `subject_missing` still reads the coverage census and ignores
+`filters`, so the two verdicts remain about the two different things their `scope` strings say.
+
+Threaded into the issue detail rather than into the *code*, so a consumer branching on `stale`
+keeps branching on `stale` and a human reading the message is told which set of rows the number
+came from. A separate code would have meant `READINESS_ISSUE_CODES` growing a member
+`evaluate_readiness` can never emit, which
+`test_every_issue_this_evaluator_can_emit_is_declared_in_the_closed_code_set` would (correctly)
+refuse.
+"""
+
+
+def staleness_issue(
+    *,
+    dataset: str,
+    as_of: datetime,
+    last_event_time: datetime | None,
+    max_staleness: timedelta | None,
+    scope: str,
+    reaches_nothing_is_stale: bool,
+) -> ReadinessIssue | None:
+    """Is the newest event here recent enough for the caller's declared bound? Asked once.
+
+    Extracted from `evaluate_readiness` for `V2-P3-002`'s review rather than for tidiness.
+    `read_visible_at` has to ask the same question of a different row set -- the slice it is
+    about to hand back -- and a second copy of `as_of - last_event_time > max_staleness` is
+    exactly the second rule table `ROW_FILTERABLE_ISSUE_CODES` was written to avoid. One
+    function, two callers, two `scope` strings.
+
+    `scope` is a **suffix** interpolated straight after the dataset name, and `PARTITION_SCOPE`
+    is the empty string, so this function's partition-path message is byte for byte the one
+    `evaluate_readiness` emitted before the visible-slice checks existed. See `PARTITION_SCOPE`
+    for the assertion that pins one of these details in full.
+
+    `reaches_nothing_is_stale` is the one genuine difference between the two questions and it
+    is a parameter rather than a branch inside, because getting it wrong is silent either way.
+    On the partition path `last_event_time is None` means *no usable coverage was found*, and
+    every such year has already produced its own blocking issue -- adding `stale` on top would
+    report a freshness fault for a partition that is missing. On the visible-slice path it means
+    the predicate kept no row carrying an event instant, which is not a second report of an
+    existing fault: the partition cleared every structural check and the answer still reaches
+    nothing, which no declared bound tolerates.
+    """
+    if max_staleness is None:
+        return None
+    if last_event_time is None:
+        if not reaches_nothing_is_stale:
+            return None
+        return ReadinessIssue(
+            code="stale",
+            dataset=dataset,
+            detail=(
+                f"{dataset}{scope} reaches no event instant at all, so nothing about it is "
+                f"within the requested as_of {as_of.isoformat()} (tolerance {max_staleness}); a "
+                "bound was declared and an answer reaching nothing cannot satisfy it"
+            ),
+        )
+    behind = as_of - last_event_time
+    if behind <= max_staleness:
+        return None
+    return ReadinessIssue(
+        code="stale",
+        dataset=dataset,
+        detail=(
+            f"{dataset}{scope} reaches {last_event_time.isoformat()}, which is "
+            f"{behind} behind the requested as_of {as_of.isoformat()} "
+            f"(tolerance {max_staleness})"
+        ),
+    )
+
+
+def subject_gap_issue(
+    *,
+    dataset: str,
+    required_subjects: Sequence[str] | None,
+    observed_subjects: AbstractSet[str],
+    scope: str,
+) -> ReadinessIssue | None:
+    """Is every subject the caller named actually here? Asked once, for the same reason.
+
+    The partition path passes the coverage census; `read_visible_at` passes the subjects that
+    survived the availability predicate. Same set difference, same code, same `missing_items`
+    payload -- so a consumer that reads `issue.missing_items` to say *which* securities are
+    absent keeps working on both, and the `scope` suffix is what tells a reader whether they are
+    absent from the partition or only from the answer. `PARTITION_SCOPE` is empty, so the
+    partition-path detail is unchanged: `tests/integration/test_panel_interfaces.py` compares
+    this exact sentence through both the SDK and the HTTP face.
+    """
+    missing = tuple(sorted(set(required_subjects or ()) - observed_subjects))
+    if not missing:
+        return None
+    return ReadinessIssue(
+        code="subject_missing",
+        dataset=dataset,
+        detail=f"{len(missing)} required subject(s) are absent from {dataset}{scope}",
+        missing_items=missing,
+    )
+
+
+def evaluate_visible_slice(
+    requirement: ReadinessRequirement,
+    *,
+    visible_last_event_time: datetime | None,
+    visible_subjects: AbstractSet[str] | None,
+) -> tuple[ReadinessIssue, ...]:
+    """Re-decide `VISIBLE_SLICE_RECHECKS` over the rows a filtered read is about to return.
+
+    `evaluate_readiness` judges the partition; this judges the answer. The two disagree exactly
+    for `SCOPE_SENSITIVE_ISSUE_CODES`, whose *pass* is a claim about rows the predicate may have
+    removed -- see that constant for the criterion and the code-by-code argument, and this
+    module's docstring for the two measurements that made this function necessary rather than
+    merely tidy.
+
+    Pure and I/O-free, like the evaluator it complements: the store does the scanning and hands
+    over what it found. `visible_subjects` is `None` only when the requirement waived
+    `required_subjects`, and supplying `None` while the requirement names subjects **raises**
+    rather than passing. That is the sentinel, and it is aimed at the likeliest mistake in this
+    whole arrangement: a caller that adds a statement to the scan, forgets to thread its result
+    through, and gets a green suite because an absent probe reads as an empty set difference.
+    """
+    if requirement.required_subjects is not None and visible_subjects is None:
+        raise PanelStorageError(
+            f"the {requirement.dataset} requirement names "
+            f"{len(requirement.required_subjects)} required subject(s), so the visible slice "
+            "has to be probed for them before it can be judged; passing None here would clear "
+            "the check by not running it"
+        )
+    found: list[ReadinessIssue] = []
+    stale = staleness_issue(
+        dataset=requirement.dataset,
+        as_of=requirement.as_of,
+        last_event_time=visible_last_event_time,
+        max_staleness=requirement.max_staleness,
+        scope=VISIBLE_SLICE_SCOPE,
+        reaches_nothing_is_stale=True,
+    )
+    if stale is not None:
+        found.append(stale)
+    if visible_subjects is not None:
+        absent = subject_gap_issue(
+            dataset=requirement.dataset,
+            required_subjects=requirement.required_subjects,
+            observed_subjects=visible_subjects,
+            scope=VISIBLE_SLICE_SCOPE,
+        )
+        if absent is not None:
+            found.append(absent)
+    return tuple(found)
+
+
 def evaluate_readiness(
     requirement: ReadinessRequirement, *, partitions: Sequence[PartitionState]
 ) -> DatasetReadiness:
@@ -880,6 +1275,11 @@ def evaluate_readiness(
     fault found is reported. `as_of` must be timezone-aware; `PanelStore.assess_readiness`
     enforces that at its boundary, because comparing a naive datetime here would raise
     `TypeError` from inside a rule table rather than name the malformed input.
+
+    **What this judges is the partition**, which is the whole of the distinction
+    `evaluate_visible_slice` exists for. Two of the pooled checks -- `subject_missing` and
+    `stale` -- are computed here through functions that module also calls, so a filtered read
+    can re-decide them over the rows it returns without a second copy of either rule.
     """
     dataset = requirement.dataset
     by_year = {state.year: state for state in partitions}
@@ -1031,16 +1431,14 @@ def evaluate_readiness(
         )
 
     observed_subjects = {subject for coverage in usable for subject in coverage.subjects}
-    missing_subjects = tuple(sorted(set(requirement.required_subjects or ()) - observed_subjects))
-    if missing_subjects:
-        issues.append(
-            ReadinessIssue(
-                code="subject_missing",
-                dataset=dataset,
-                detail=f"{len(missing_subjects)} required subject(s) are absent from {dataset}",
-                missing_items=missing_subjects,
-            )
-        )
+    subject_issue = subject_gap_issue(
+        dataset=dataset,
+        required_subjects=requirement.required_subjects,
+        observed_subjects=observed_subjects,
+        scope=PARTITION_SCOPE,
+    )
+    if subject_issue is not None:
+        issues.append(subject_issue)
 
     observed_fields = {item.name for coverage in usable for item in coverage.fields}
     missing_fields = tuple(sorted(set(requirement.required_fields or ()) - observed_fields))
@@ -1055,22 +1453,16 @@ def evaluate_readiness(
         )
 
     last_event_time = max((coverage.last_event_time for coverage in usable), default=None)
-    if (
-        requirement.max_staleness is not None
-        and last_event_time is not None
-        and requirement.as_of - last_event_time > requirement.max_staleness
-    ):
-        issues.append(
-            ReadinessIssue(
-                code="stale",
-                dataset=dataset,
-                detail=(
-                    f"{dataset} reaches {last_event_time.isoformat()}, which is "
-                    f"{requirement.as_of - last_event_time} behind the requested as_of "
-                    f"{requirement.as_of.isoformat()} (tolerance {requirement.max_staleness})"
-                ),
-            )
-        )
+    stale_issue = staleness_issue(
+        dataset=dataset,
+        as_of=requirement.as_of,
+        last_event_time=last_event_time,
+        max_staleness=requirement.max_staleness,
+        scope=PARTITION_SCOPE,
+        reaches_nothing_is_stale=False,
+    )
+    if stale_issue is not None:
+        issues.append(stale_issue)
 
     max_available = max((coverage.max_available_time for coverage in usable), default=None)
     if max_available is not None and max_available > requirement.as_of:
