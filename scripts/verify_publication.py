@@ -55,8 +55,27 @@ class PublicationReport(TypedDict):
     schema_version: str
     status: str
     files_scanned: int
+    nested_checkouts: list[str]
     blockers: list[Blocker]
     max_git_file_bytes: int
+
+
+def _is_nested_checkout(path: Path) -> bool:
+    """Whether `path` is a directory carrying its own `.git`.
+
+    `git ls-files --others` reports such a directory as a *single* entry rather than
+    descending into it, because its contents belong to another repository. This gate used to
+    treat every entry as a file and died with `IsADirectoryError` on the first one -- which
+    happens whenever an agent worktree exists under `.claude/worktrees/`, i.e. whenever this
+    repository's own tooling is mid-run. A gate that fails on the presence of a sibling
+    directory is reporting on its environment, not on what would be published.
+
+    Skipping is correct rather than a loophole: a nested checkout is not published by *this*
+    repository, and its contents are governed by its own run of this script. But the skip is
+    named in the report instead of being silent -- "I found things I did not look at" is a
+    fact the caller is owed, and `files_scanned` alone cannot carry it.
+    """
+    return path.is_dir() and (path / ".git").exists()
 
 
 def _publication_files() -> list[Path]:
@@ -77,10 +96,15 @@ def _publication_files() -> list[Path]:
 
 
 def _scan() -> PublicationReport:
-    files = _publication_files()
+    listed = _publication_files()
+    nested = [p for p in listed if _is_nested_checkout(p)]
+    files = [p for p in listed if p not in nested]
     blockers: list[Blocker] = []
     for path in files:
         relative = path.relative_to(ROOT).as_posix()
+        if path.is_dir():
+            blockers.append({"path": relative, "reason": "directory git listed but not a checkout"})
+            continue
         suffix = path.suffix.lower()
         if suffix in BLOCKED_SUFFIXES:
             blockers.append({"path": relative, "reason": f"blocked suffix {suffix}"})
@@ -124,9 +148,10 @@ def _scan() -> PublicationReport:
             blockers.append({"path": relative, "reason": "required public metadata missing"})
 
     return {
-        "schema_version": "publication-scan/v1",
+        "schema_version": "publication-scan/v2",
         "status": "ok" if not blockers else "blocked",
         "files_scanned": len(files),
+        "nested_checkouts": sorted(p.relative_to(ROOT).as_posix() for p in nested),
         "blockers": blockers,
         "max_git_file_bytes": MAX_GIT_FILE_BYTES,
     }
@@ -141,6 +166,8 @@ def main() -> int:
         print(json.dumps(report, ensure_ascii=False, sort_keys=True))
     else:
         print(f"publication scan: {report['status']} ({report['files_scanned']} files)")
+        for nested in report["nested_checkouts"]:
+            print(f"- skipped {nested}: nested git checkout, governed by its own scan")
         for blocker in report["blockers"]:
             print(f"- {blocker['path']}: {blocker['reason']}")
     return 0 if report["status"] == "ok" else 1

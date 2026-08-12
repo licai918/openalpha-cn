@@ -1,7 +1,9 @@
 import hashlib
 import importlib.util
+import json
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tomllib
@@ -829,6 +831,64 @@ def test_publication_gate_accepts_tracked_release_sources() -> None:
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_publication_gate_survives_a_nested_checkout_and_says_it_skipped_it(
+    tmp_path: Path,
+) -> None:
+    """An agent worktree under `.claude/worktrees/` used to kill this gate outright.
+
+    `git ls-files --others` reports a directory carrying its own `.git` as one entry rather
+    than descending into it, and the scanner called `read_text` on it: `IsADirectoryError`,
+    exit 1, on a repository whose tracked content was untouched. That made the gate report on
+    whether a sibling directory happened to exist -- and it exists exactly while this project's
+    own tooling is running, so the gate failed when it was needed most.
+
+    Both halves are asserted here. Skipping a nested checkout is correct, because its contents
+    are published by *its* repository and scanned by *its* run. Saying so is not optional: a
+    scan that quietly declines to read something and still answers "ok" is the failure mode
+    every registry in this repository exists to prevent.
+    """
+    nested = ROOT / ".claude" / "worktrees" / "publication-gate-probe"
+    nested.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", str(nested)], check=True, capture_output=True)
+    try:
+        (nested / "decoy.parquet").write_bytes(b"a blocked suffix the outer scan must not see")
+        result = subprocess.run(
+            [sys.executable, "scripts/verify_publication.py", "--json"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        report = json.loads(result.stdout)
+        assert ".claude/worktrees/publication-gate-probe" in report["nested_checkouts"]
+        assert report["blockers"] == []
+    finally:
+        shutil.rmtree(nested, ignore_errors=True)
+
+
+def test_publication_gate_blocks_a_listed_directory_that_is_not_a_checkout(
+    tmp_path: Path,
+) -> None:
+    """The skip above is bounded by `.git`, so it cannot become a way to hide a directory.
+
+    Without this, "skip directories" would be a hole wide enough to drive an unscanned tree
+    through. Git only lists a bare directory when it cannot enumerate its contents, so this
+    branch should never fire in practice -- which is exactly why it must be a blocker rather
+    than a `continue`: an unreachable refusal costs nothing, and a silent one costs everything.
+    """
+    module = _load_verify_publication()
+
+    plain = tmp_path / "not-a-checkout"
+    plain.mkdir()
+    assert module._is_nested_checkout(plain) is False
+
+    checkout = tmp_path / "a-checkout"
+    checkout.mkdir()
+    (checkout / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
+    assert module._is_nested_checkout(checkout) is True
 
 
 def test_publication_gate_blocks_sqlite_backup_files() -> None:
