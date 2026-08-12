@@ -17,9 +17,9 @@ Issue ID: `V2-<阶段>-<序号>`。类型标记：**结**结构 · **产**产品
 | **P1** | 面板数据平面 | 17 | 5–7 周 | 13–18 周 | 8 组数据集全部通过契约 + 未来数据 fail-closed |
 | **P2** | **PIT 红队闸门** | 9 | 2 周 | 5 周 | **必过，否则不得进 P3** |
 | **P3** | 因子层 | 15 | 5–6 周 | 13–15 周 | 首批因子出齐 raw/processed/neutralized 三档 |
-| **P4** | 候选排序与模型基线 | 24 | 6–7 周 | 15–18 周 | 契约升版一次完成 + 预测先落库 |
+| **P4** | 候选排序与模型基线 | 25 | 6–7 周 | 15–18 周 | 契约升版一次完成 + 预测先落库 |
 | **P5** | 组合、验证与工作台 | 24 | 6–8 周 | 15–20 周 | 归因对账 + 多重检验 + 4 页可用 |
-| | **合计** | **114** | **28–36 周** | **70–90 周** | |
+| | **合计** | **115** | **28–36 周** | **70–90 周** | |
 
 > **相对上一版的变化**：上一版估 18–25 周，假设 P0 为 1 周。审计发现 39 条必须在面板层之前关闭的前置 finding（无迁移机制、两个组装根、引擎四合一、无 conftest、look-ahead 靠字符串匹配、`.parquet` 被发布拦截、seed/commit/digest 全为占位），故新增 P0.B。上调的 10–11 周全部是**原先不可见的前置债**，不是范围膨胀。
 
@@ -209,7 +209,7 @@ P3 结束即可独立使用（Jupyter 直连面板 + 因子）
 
 ---
 
-## P4 — 候选排序与模型基线（24 issues）
+## P4 — 候选排序与模型基线（25 issues）
 
 | ID | 标题 | 类型 | 依赖 | 说明 | PRD |
 |---|---|---|---|---|---|
@@ -237,6 +237,7 @@ P3 结束即可独立使用（Jupyter 直连面板 + 因子）
 | `V2-P4-021` | 排序与模型的 REST + SDK + CLI 面（`model-evaluate`、`daily-run`） | 产 | 005,017 | — | S83, S84 |
 | `V2-P4-022` | 已知信噪比合成数据集（含已知 alpha / 已知 null 对照） | 测 | 013 | 现有 `scripts/generate_replay_corpus.py:29-46` 是确定性算术，无噪声模型无已知 IC | T9 |
 | `V2-P4-023` | **榜单级 tradable-ratio + freshness 闸门**：整榜覆盖率或新鲜度不过线时拒绝出榜，而非出一份看似完整的清单 | 技 | 005 | 现有只有个股级过滤（`V2-P4-004`）与数据集级 fail-closed（`V2-P1-013`），榜单层无闸门 | 集成：不过线时返回显式阻塞态 | S14, S48 |
+| `V2-P4-026` | **`daily_basic` 的 as-of 敏感会话级读**（`V2-P4-013` 的硬前置，见 §11 的 `V2-P3-004` 复审小节） | 技 | P1 存储契约 | 中性化残差的四个时钟都盖构建 `as_of`，而该 `as_of` 必须 ≥ `daily_basic` 年分区的 `max_available_time`（该年最后一个会话）——于是**年 Y 任意交易日的残差在 Y 年内一律不可见**（行过滤，返回空而非报错）。`V2-P4-013` 的 walk-forward 因此只能做**年度**粒度；月度/日度做不了。不在 `V2-P3-004` 解决：修法要么给 `daily_basic` 换分区粒度，要么给 `load_daily_valuations` 一条「只读到 `day` 为止」的显式门，两条都动 `V2-P1` 的存储契约 | 集成：年内 `as_of` 能读到该日残差 | S27, S28 |
 
 **闸门**：排序测试覆盖确定性排序、平局政策、弃权、缺失依赖、过期数据、风险/可交易性标记，且每个入选候选证据闭合；模型评估测试用已知信噪比数据验证 walk-forward 切分、purge/embargo、制品身份、前瞻预测落库；契约升版后从 v1 卷迁移的记录仍可读；新 agent 全部经 `run_cycle` 缝验收。
 
@@ -307,7 +308,7 @@ PRD 中 83 条 IN / IN-降级 story，逐条落到 issue。
 | S24 | `V2-P3-014` |
 | S25 | `V2-P4-011` |
 | S26 | `V2-P4-012` |
-| S27, S28 | `V2-P4-013`, `V2-P2-005`, `V2-P1-017` |
+| S27, S28 | `V2-P4-013`, `V2-P4-026`, `V2-P2-005`, `V2-P1-017` |
 | S29 | `V2-P4-014`, `V2-P4-015` |
 | S30 | `V2-P4-016`, `V2-P0B-009` |
 | S32 | `V2-P4-017` |
@@ -820,3 +821,97 @@ subjects 取并集），于是同一个 requirement 在两条路径上得到了�
 
 修复后 `compute_factor` 的**签名本身**成为审计对象：每个参数要么被证明会移动 `manifest_id`，
 要么带着理由出现在豁免表里，加第十个参数会让审计变红。
+
+### `V2-P3-004` 复审（2026-08-12）：中性化残差在其覆盖年内不可见，`V2-P4-013` 因此只能做年度
+
+第 11 节开头那条「分区级判定」在因子层由 `read_visible_at` 解掉了一半，但**中性化把它变回了整块**，
+而且是从**输出**这一侧变回的 —— 这条此前只被记成「两个外部输入在年中读不出来」，
+漏掉了真正致命的第二跳。
+
+两条事实相乘：
+
+1. `neutralized_observation_batch` 把每一行的 `available_time`（以及 `event_time` /
+   `ingested_time` / `revision_time`）都设成**构建的 `as_of`**。派生行没有自己的事件时刻，
+   这个设计本身是对的，与 raw / processed 两层一致。
+2. 而构建的 `as_of` **必须** ≥ 该年 `daily_basic` 分区的 `max_available_time` ——
+   因为 `load_daily_valuations` 走 `read_if_ready`，年中任何 `as_of` 都被整块拒绝
+   （`KNOWN_NEUTRALIZATION_LIMITATIONS`
+   `.the_two_foreign_inputs_are_read_whole_partition_so_a_mid_year_as_of_is_refused`）。
+   而一年分区的 `max_available_time` 就是**该年最后一个会话**。
+
+合起来：**年 Y 中任意交易日的残差，其 `available_time` 都落在 Y 年最后一个 session 之后。**
+而 `load_neutralized_factor_observations` 走的是 `read_visible_at`（**行过滤**），
+所以年内任何 `as_of` 读回来的是**空**，不是报错 ——
+`tests/integration/panel/test_factor_neutralizations.py::`
+`test_a_neutralised_row_is_invisible_before_the_as_of_it_was_computed_at` 正好断言了 `earlier == ()`。
+这是最坏的一种失败形状：一个看起来合理的短答案。
+
+**下游后果是分级的**：
+
+- **`V2-P3-005`（IC 衰减）不阻塞。** 残差的**内容**是干净的 —— 每一行用的是 `day` 当天的行业、
+  当天的市值、当天的 processed 值 —— 所以 IC 与衰减曲线本身不会被前视污染。
+  丢掉的是**时间戳的诚实性**：没法在 `as_of=2026-06-30` 问「当时我手上有哪些残差」，答案永远是零。
+  **但 `005` 必须在自己的文档里写明它读的是年末快照**，否则它的曲线会被读成逐日可得的。
+- **`V2-P4-013`（walk-forward）是真正的阻塞。** 年内每个 rebalance 点读到空集；
+  唯一能读到东西的 `as_of` 是 ≥ 年末，此时该年 12 个月的残差**同时**出现 ——
+  粒度从「逐日可见」塌成「逐年可见」。**目前只能做年度 walk-forward。**
+
+**为什么不在 `V2-P3-004` 解决**：两条可行的修法都动 `V2-P1` 的存储契约，不是因子层的事 ——
+
+- 给 `daily_basic` 换分区粒度（年 → 月/日），让 `max_available_time` 不再是整年的末端；或
+- 给 `load_daily_valuations` 一条「只读到 `day` 为止」的显式门，即一个 as-of 敏感的会话级读。
+
+**不能采用的第三条**：对这两个外部数据集直接改用 `read_visible_at`。
+`index_member_all` 分不出「被扣住的行」和「不存在的行」——
+`SecurityIndustryHistory.answerable_through` 就是为这个存在的 ——
+行过滤会把一个 fail-closed 的拒绝变成一个看起来合理的短答案，
+正是 `tests/unit/panel/test_visible_read_callers.py` 要求每个新调用方回答的那个问题上答「不能」。
+这条不松。
+
+**已立为 `V2-P4-026`，且是 `V2-P4-013` 的硬前置。**
+在它落地之前，**`V2-P3-005` 与 `V2-P3-009`..`013` 都不得在这条上再叠代码**
+（例如按「残差逐日可见」写调度或读路径），否则等 `P4` 发现做不了月度 walk-forward 时要改六个地方。
+
+### `V2-P3-004` 复审（2026-08-12）：三个被六处引用的「实测」数字复现不出，已撤回
+
+`market_cap_measure` 与 `market_cap_scale` 两个声明字段，原先各带一个点估计
+——「换 measure 动 **0.0196**」「换 scale 动 **0.195**」，都挂在「残差 rms **0.995**」上 ——
+出现在 `MarketCapMeasure` / `MarketCapScale` 的 docstring、
+`KNOWN_NEUTRALIZATION_LIMITATIONS.the_residual_is_orthogonal_to_the_design_and_not_to_size_itself`、
+`_refuse_a_cross_section_that_is_not_this_panels` 的报错文案、台账 `notes`，
+以及**出厂 `INDUSTRY_AND_SIZE.summary`（该字段进 `neutralization_id` 内容地址）**，共六处。
+
+**复现不出**。这三个数只可能来自 `tests/unit/test_factor_neutralization_rules.py::_panel`
+这个合成探针，而该探针在它自己的种子（`_panel(19)` + `Random(23)`）上给出的是
+rms **1.0021**、measure gap **0.0561**、scale gap **0.7924**。
+扫 200 个 panel seed × 200 个 circ seed，没有任何一组同时给出 `(0.995, 0.195)`。
+更要命的是这个量本身不稳定：scale gap 在 200 个种子上 min **0.0037** / median **0.2314** /
+max **1.6738**，**跨两个数量级**。而它的来源是合成的 ——
+所谓 `log(circ_mv)` 是探针里现编的 `Normal(0.7, 0.25)` 流通比例，**从没读过真实 `circ_mv`**；
+而 `MarketCapMeasure` 的 docstring 先陈述 51,708 行真实探针（那是关于**空值**的），
+紧接着给出 0.0196，读起来像是同一个真实语料的结论。
+
+**修法是撤回而不是重测**（真实语料需要联网 token，非 e2e 测试不得联网）：
+
+- 六处全部改成「这是一个会实质移动残差的声明选择，量级以**地板**断言而非以数字陈述」，
+  并点名断言它的测试；
+- 测试从单种子两条地板（`> 0.005` / `> 0.05`）扩成 **8 个固定种子的扫描**，
+  断言每个种子都过地板，**并断言离散度本身**（`max > 10 * min`）——
+  把「这个数不稳定」变成一条会红的断言而不是一句说明；
+- 实测区间写进 `MEASURE_GAP_FLOOR` 的 docstring：measure `0.0067..0.0591`、
+  scale `0.0210..1.2221`，残差 population sd `0.985..1.005`。
+
+**`INDUSTRY_AND_SIZE.summary` 改动会移动 `neutralization_id`**，
+而 `summary` 进身份是 `V2-P3-001` 起的继承缺陷。此刻做代价为零：
+`panel_neutralization` 在 `cli.py` 与 `scripts/` 里零引用，**全库没有任何已存的中性化分区**。
+这也是这条**必须现在做**的原因 —— `V2-P3-014` 写下第一份不可变制品之后就没有回头路。
+
+**顺带修正两条措辞级的过度一般化**（同一次复审）：
+
+- 「仿射重标定至多移动 4.44e-16」不是对整个仿射族成立的界。z-score 化与 `1000x+7` 确实是
+  **4.44e-16**，但 `1e-6*x - 3` 实测 **8.4e-12** —— 把回归元缩小六个数量级，
+  就在 `x - mean_x[g]` 这一步损失六个数量级的相对精度。声明改成「重标定不改变**答案**，
+  不是不改变**比特**」，并由 `EXTREME_RESCALING_BOUND` 与一条新断言钉住。
+- Gram 对角线比 `1.37e15` 是 `_panel(19)` 的，而引用它的
+  `test_the_closed_form_reproduces_a_dense_least_squares_solve` 驱动的是 `_panel(7)`（实测 **2.35e15**）。
+  数字本身是真的，归属错了；两个种子现在都写明。

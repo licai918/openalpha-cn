@@ -240,3 +240,90 @@ rather than merely an adequate one:
 `V2-P3-004`'s neutralisation — a cross-sectional regression against industry dummies and market
 cap — is still the issue that should re-open this question, and it is still the first workload in
 the repository with a matrix in it. The nine runtime dependencies are unchanged.
+
+## Update, 2026-08-12 (`V2-P3-004`): the workload this ADR named arrived, and the matrix dissolved
+
+The Decision above stands unchanged and this section adds no new one. What it records is that
+**the consumer this ADR's own Context named — "the factor layer needs cross-sectional regression
+(→ coefficients)" — arrived**, three sections after being deferred twice, and was measured with a
+real design matrix in front of whoever decides. The runtime dependency set is still nine.
+
+### What the workload actually is
+
+`openalpha_cn.panel_neutralization.apply_factor_neutralization` regresses one `as_of`'s processed
+factor cross section on **a complete set of industry dummies plus one market-cap regressor** and
+stores the residual. At ADR-0002's stated panel scale that is a 5,534 × 32 design — which is
+genuinely the first matrix in this repository, and is why this ADR pointed at it twice.
+
+**It has a closed form, and that is what decides the question rather than any benchmark of
+`numpy.linalg.lstsq`.** By the Frisch–Waugh–Lovell theorem the residual of a regression on
+`[D, x]`, where `D` is a complete set of group indicators, equals the residual of the
+group-demeaned `y` on the group-demeaned `x`. So the whole build is: one pass for the group
+means, one for a single slope, one for the residuals. `O(n)`, no matrix formed anywhere.
+
+### Measured, at 5,534 participants over 31 industries
+
+| step | time |
+|---|---|
+| the closed form (group means + one slope + 5,534 residuals) | **1.6 ms** |
+| a dense least-squares solve of the same design, 31 dummies + cap | 143.5 ms |
+| the same, intercept + 30 dummies + cap | 152.7 ms |
+| `apply_factor_neutralization` end to end (guards, two digests, 5,534 row objects) | **17.4 ms** |
+
+The dense reference is pure Python — Gram matrix, Gaussian elimination with partial pivoting,
+`math.fsum` throughout — and it lives in `tests/unit/test_factor_neutralization_rules.py` rather
+than in `src/`, because it is an instrument and not a product. **The two agree to 8.88e-16** on
+every one of the 5,534 residuals, and so do the two identifications of the dummy set, which is
+what makes "the closed form *is* the OLS residual" a comparison rather than an assertion.
+
+Against the steps around it, the whole neutralisation is **0.8%** of the 2.24 s `compute_factor`
+that must run before it, **47%** of the 36.7 ms `apply_factor_transform` between them, and
+**0.03%** of the smallest of the five `write_panel_batch` measurements after it (56.7 s). A numpy
+implementation could at best remove a quantity two orders of magnitude below the step before it
+and three below the step after it, in exchange for two runtime dependencies, an explicit
+`float(...)`/`cast(...)` at every public boundary in the layer, the `NPY`/`PD`/`S` ruff evaluation
+and the thread-count pinning Consequence 6 requires.
+
+### The conditioning argument, stated at the strength it has
+
+Consequence 6 and the ordinary objection to normal equations both point the same way, and the
+diagonal of the Gram matrix this design would form is measured — **on a named probe seed, because
+the ratio is a property of the draw and not of the design**. On the `_panel(7)` cross section that
+`test_the_closed_form_reproduces_a_dense_least_squares_solve` drives, a **level** market-cap
+regressor gives a diagonal spanning `151` to `3.55e17`, a ratio of **2.35e15**, within a factor of
+ten of double precision's own epsilon; `_panel(19)` gives `149` to `2.05e17` and `1.37e15`. Under
+`log` the ratio is 6.3e3 on both. The closed form never forms that matrix — its only division is
+by the within-industry sum of squared deviations, one positive number that the `degenerate_design`
+coverage code tests directly.
+
+**What is not claimed is that this rescued a failure that was observed.** The dense reference,
+solved with pivoting and `fsum`, still agreed to 4.44e-16 on the raw-capitalisation design,
+because a dummy block is orthogonal by construction and the effective conditioning is far better
+than the diagonal suggests. So the closed form is chosen for its `O(n)` cost and its absent
+matrix, and the conditioning is a reason to prefer it rather than a defect it avoided.
+
+### The honest bound on this answer
+
+This is the regression D8 asks for and **not every regression**. A multi-factor risk model with
+`k` correlated continuous regressors has no such closed form and would need a real solve; the
+question this ADR poses would be genuinely open again there, and nothing measured here carries
+over to it. The same is true of `V2-P3-005`'s rank correlation, which is still unwritten.
+
+### One defect found, and it is the one this ADR already records twice
+
+The first measurement of `apply_factor_neutralization` read **148.5 ms**, not 17.4. Two causes,
+both of them shapes this repository has paid for before:
+
+- **A pydantic `computed_field` read inside a per-security loop**, for the third time. `_neutralized_row`
+  read `spec.neutralization_id` per row — 5,534 `stable_model_id` calls for one cross section, 31 ms.
+  The 2026-08-11 section above records `compute_factor` doing this with a build manifest, and
+  `V2-P3-003`'s review records it arriving again *inside the fix for something else* (24.4 ms
+  against 0.19 ms hoisted). The fix here is a signature: `_neutralized_row` takes both identities
+  as `str` and has no object to read one off.
+- **A linear lookup inside the same loop.** `IndustryMarketCapCrossSection.get` scans its
+  characteristics, so the participant loop was `O(n²)` — 322 ms of a 394 ms profiled build, 82% of
+  the call, against 1.6 ms for the regression it feeds. The engine now indexes once; the public
+  accessor keeps its linear form, which is right for a caller asking about one security.
+
+The manifest identity is byte-identical before and after both fixes, which is what makes them
+optimisations rather than changes.

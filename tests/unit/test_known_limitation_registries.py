@@ -15,7 +15,7 @@ inside a docstring, which is prose the runner never reads.
 ## Why the mechanism is not copied as it stands
 
 `007`'s form is "one test per entry, named after the entry". At three entries that is exactly
-right. Across the eleven code-carrying registries there are **136** entries -- 63 in
+right. Across the twelve code-carrying registries there are **141** entries -- 63 in
 `KNOWN_PANEL_LIMITATIONS` alone -- and it stops being right somewhere well before that, for
 three reasons and not one:
 
@@ -83,6 +83,7 @@ from typing import Final, Protocol
 from openalpha_cn.backtest.execution import KNOWN_EXECUTION_LIMITATIONS
 from openalpha_cn.domain.adjustment import KNOWN_ADJUSTMENT_LIMITATIONS
 from openalpha_cn.domain.daily_prices import KNOWN_PRICE_LIMITATIONS
+from openalpha_cn.domain.factor_neutralization import KNOWN_NEUTRALIZATION_LIMITATIONS
 from openalpha_cn.domain.financial_statements import KNOWN_FINANCIAL_STATEMENT_LIMITATIONS
 from openalpha_cn.domain.index_membership import KNOWN_INDEX_MEMBERSHIP_LIMITATIONS
 from openalpha_cn.domain.industry_classification import KNOWN_INDUSTRY_LIMITATIONS
@@ -119,12 +120,21 @@ LIMITATION_REGISTRIES: Final[dict[str, Sequence[_Limitation]]] = {
     "KNOWN_INDEX_MEMBERSHIP_LIMITATIONS": KNOWN_INDEX_MEMBERSHIP_LIMITATIONS,
     "KNOWN_INDUSTRY_LIMITATIONS": KNOWN_INDUSTRY_LIMITATIONS,
     "KNOWN_LABEL_LIMITATIONS": KNOWN_LABEL_LIMITATIONS,
+    "KNOWN_NEUTRALIZATION_LIMITATIONS": KNOWN_NEUTRALIZATION_LIMITATIONS,
     "KNOWN_SUSPENSION_LIMITATIONS": KNOWN_SUSPENSION_LIMITATIONS,
     "KNOWN_UNIVERSE_LIMITATIONS": KNOWN_UNIVERSE_LIMITATIONS,
     "KNOWN_STORAGE_LIMITATIONS": KNOWN_STORAGE_LIMITATIONS,
     "KNOWN_PANEL_LIMITATIONS": KNOWN_PANEL_LIMITATIONS,
 }
-"""The eleven registries whose entries are identified by a `code`, keyed by their own names.
+"""The twelve registries whose entries are identified by a `code`, keyed by their own names.
+
+**`KNOWN_NEUTRALIZATION_LIMITATIONS` is the twelfth and it is deliberately *not* folded into
+`KNOWN_PANEL_LIMITATIONS`**, unlike the seven dataset registries below it. `panel_doctor` folds a
+registry when it bounds a *fetched* dataset, and the neutralised plane is derived -- it has no
+upstream, no `DATASET_CADENCE` entry and nothing for a health report to be fresh against. Folding
+it would put four entries about a regression's own semantics into a report about ingest coverage,
+and would move `test_the_registries_together_carry_the_entry_count_the_report_folds`' arithmetic
+for a registry the report cannot say anything about.
 
 Imported and named rather than reached through `importlib`: a test may import every one of
 these directly, so a name-to-module indirection would buy nothing and would hide from the
@@ -132,7 +142,7 @@ import graph the very dependency this module is asserting about.
 """
 
 CODELESS_REGISTRIES: Final[tuple[str, ...]] = ("KNOWN_CALENDAR_LOOKAHEAD",)
-"""The eleventh, which has no `code` and is bound by its dates instead.
+"""The one registry with no `code`, bound by its dates instead.
 
 `KNOWN_CALENDAR_LOOKAHEAD`'s three entries are three reproductions of **one** defect rather
 than three defects -- `panel_doctor._limitations()` says so by folding all three into the
@@ -231,7 +241,7 @@ def _module_level_known_names(path: Path) -> Iterator[str]:
 
 
 def test_the_registry_table_is_every_known_registry_in_the_source_tree() -> None:
-    """The direction a hand-written list cannot cover: an *eleventh* registry.
+    """The direction a hand-written list cannot cover: a *twelfth* registry.
 
     `V2-P2-007`'s binding is installed per module, so a new `KNOWN_*` tuple arrives with no
     binding and nothing notices -- which is how ten of them got here. The table above is
@@ -245,12 +255,12 @@ def test_the_registry_table_is_every_known_registry_in_the_source_tree() -> None
     }
 
     assert found == set(LIMITATION_REGISTRIES) | set(CODELESS_REGISTRIES)
-    assert len(LIMITATION_REGISTRIES) == 11
+    assert len(LIMITATION_REGISTRIES) == 12
     assert set(LIMITATION_REGISTRIES) & set(CODELESS_REGISTRIES) == set()
 
 
 def test_every_declared_limitation_code_is_named_in_executable_test_code() -> None:
-    """The binding itself, over all eleven code-carrying registries and all of their entries.
+    """The binding itself, over all twelve code-carrying registries and all of their entries.
 
     A code that appears nowhere but in prose is a code the suite has no opinion about: rename
     it and everything stays green while every citation of it silently stops resolving. That is
@@ -348,5 +358,5 @@ def test_the_registries_together_carry_the_entry_count_the_report_folds() -> Non
 
     assert len(codes["KNOWN_PANEL_LIMITATIONS"]) == folded + plane_wide + 1
     assert all(codes[registry] for registry in codes)
-    assert sum(len(entries) for entries in codes.values()) >= 136
+    assert sum(len(entries) for entries in codes.values()) >= 141
     assert len(codes["KNOWN_PANEL_LIMITATIONS"]) >= 63

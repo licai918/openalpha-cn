@@ -91,16 +91,52 @@ something weaker. That is `panel_gate`'s argument, and the difference is that th
 the import entirely while this module needs the same package for its writers.
 """
 
+_ALLOWED_NEUTRALIZATION_DEPENDENCIES = _ALLOWED_INTERNAL_DEPENDENCIES | {
+    "openalpha_cn.panel_ingest",
+    "openalpha_cn.panel_factors",
+}
+"""`openalpha_cn.panel_neutralization` (`V2-P3-004`), stated in full for the reason above.
+
+**It is the first row in this table with an edge to another top-level `panel_*` module, and that
+edge is the point of the row rather than an awkwardness in it.** A neutralisation consumes a
+`ProcessedFactorPanel`, which `panel_factors` owns, and shares that module's `FactorEngineError`,
+its `EVENT_TIME_COLUMN`, its `FACTOR_PROVIDER_ID`, its census-column prefix and its
+`_refuse_to_drop_a_stored_build` -- so the alternative to the edge was either a second copy of
+each or keeping the code inside a module that would then be 4,900 lines.
+
+**What the edge buys the audit is the reason `V2-P3-004` split the file at all.** This module
+reaches `panel_ingest` for two things `panel_factors` deliberately does not:
+`load_industry_histories` and `load_daily_valuations`, the readers of the two **foreign** datasets
+a neutralisation regresses against. Had this code stayed in `panel_factors`, that widening would
+have been invisible here --
+`openalpha_cn.panel_ingest` is already in `_ALLOWED_FACTOR_DEPENDENCIES` and this table records
+dependencies at package granularity, so the factor engine would have silently gained two datasets
+it has no business knowing about, with nothing to go red. A separate module made the widening a
+row somebody had to approve, which is what this table is for.
+
+**And that is the whole of what it bought -- one review, at one moment.** It is not a standing
+detector on datasets, because this row is package-granular in exactly the way the one above it
+is: `openalpha_cn.panel_ingest` is now *inside* `_ALLOWED_NEUTRALIZATION_DEPENDENCIES`, so a later
+commit that has `panel_neutralization` call `load_daily_bars` or `load_index_weights` widens its
+reach with nothing here going red. This table sees **modules**. A guard that saw datasets would be
+a different instrument and this issue did not build one; saying so is cheaper than a reader
+inferring a promise from the row's existence.
+
+The edge runs one way only. `panel_factors` does not import `panel_neutralization` -- its own row
+above is an *equality*, so an edge back would fail that assertion rather than this comment.
+"""
+
 PANEL_MODULE_DEPENDENCIES: dict[str, set[str]] = {
     "openalpha_cn.panel_ingest": _ALLOWED_INTERNAL_DEPENDENCIES,
     "openalpha_cn.panel_doctor": _ALLOWED_DOCTOR_DEPENDENCIES,
     "openalpha_cn.panel_gate": _ALLOWED_GATE_DEPENDENCIES,
     "openalpha_cn.panel_view": _ALLOWED_VIEW_DEPENDENCIES,
     "openalpha_cn.panel_factors": _ALLOWED_FACTOR_DEPENDENCIES,
+    "openalpha_cn.panel_neutralization": _ALLOWED_NEUTRALIZATION_DEPENDENCIES,
 }
 """Every top-level `panel_*` module and the sibling packages it may join.
 
-The four of them are 6,000-odd lines that sit *outside* `openalpha_cn/panel/` precisely so the
+The six of them are 10,000-odd lines that sit *outside* `openalpha_cn/panel/` precisely so the
 package can keep its zero-sibling-edge guarantee, which makes "which packages may this one
 join" the whole justification for each of them being top-level at all. None of
 `pyproject.toml`'s four `lint-imports` contracts mentions `panel*`, so this table and the tests
@@ -108,7 +144,7 @@ below are the only thing standing there.
 
 `test_every_top_level_panel_module_is_in_this_table_and_stays_inside_its_row` keeps it from
 being the hand-maintained enumeration it looks like: the modules are discovered from the
-directory, so a fifth one arrives red rather than unguarded.
+directory, so a seventh one arrives red rather than unguarded.
 """
 
 
