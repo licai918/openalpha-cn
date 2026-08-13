@@ -192,7 +192,7 @@ P3 结束即可独立使用（Jupyter 直连面板 + 因子）
 | `V2-P3-003` | 预处理变换：去极值 + 标准化 + 缺失值政策（显式版本化，与原值分离） | 技 | 002 | — | S18, D8 |
 | `V2-P3-004` | 中性化：行业 + 市值（横截面回归） | 技 | 003 | 依赖 `V2-P1-010`；行业分类实测可用（§6），做真实行业中性化 | S19, D8 |
 | `V2-P3-005` | IC / Rank IC / IC 衰减 / 稳定性 | 技 | 004 | 唯一先例是 `backtest/event_study.py`（纯 stdlib 叶子模块） | S20 |
-| `V2-P3-006` | 分组组合收益（含成本，复用 `AShareExecutionPolicy`） | 技 | 005 | — | S21 |
+| `V2-P3-006` | 分组组合收益（含成本，复用 `AShareExecutionPolicy`） | 技 | 005 | 已交付 `backtest/factor_portfolio.py`（纯 stdlib 叶子，直接吃 `005` 的 `ICCrossSection`，所以 IC 与分组收益必然同一录取样本）。**权责分工**：毛收益取 `OutcomeLabel.realized_return`，**绝不**由两笔成交价反推（那正是 Task 30 实测 −0.5310% 对 +2.7422% 的那条路）；费用取 `AShareExecutionPolicy` 的两个 `ExecutionResult`；能否建仓由**两个契约共同**判定、标注在先。被拒成交**不记 0**，出组并按自身 `HoldingOutcome` 计数，`PortfolioCensus` 强制加总。分组按平均秩（并列同组）、组数与每组下限**均为声明值无默认**，空组是三个覆盖码而非修补。多空价差交付但**明确不是可执行组合**：策略无做空侧、无融券数据集，且空头往返正是 `KNOWN_EXECUTION_LIMITATIONS` 已实测两契约不一致的那对判定。不发累计曲线（重叠窗口），见下方小节 | S21 |
 | `V2-P3-007` | 换手 / 覆盖率 / 容量报告 | 技 | 006 | 让统计上好看但不可实施的信号显形 | S22 |
 | `V2-P3-008` | 相关性与冗余分析 | 技 | 005 | — | S23 |
 | `V2-P3-009` | 因子家族①价值：EP / BP / SP / EPcut | 技 | 004 | 已交付 EP / BP / SP（本仓库第一批双轴出厂因子）；**EPcut 未交付**，扣非净利不在任何一个统计投影里，硬前置是 `V2-P3-017`，见下方小节 | S16 |
@@ -1429,3 +1429,94 @@ the dataset」再次成立。集中度未被动摇：同一语料里 `ebit` 一�
 两者同框排序）。代价是平凡同比要 9 期、加速度要 13 期。
 **9 对 5 这一半是实测的（上表），13 期那一半没有实测，只写成它本来的算术。**
 本 issue 取了另一边并把代价写进出厂 note，而不是把它论证掉。
+### `V2-P3-006` 交付记录（2026-08-13）：逐笔撮合怎么接到组合级，以及被拒成交值多少
+
+`backtest/factor_portfolio.py`，纯 stdlib 叶子，先例是 `backtest/factor_ic.py`。
+输入直接是 `005` 的 `ICCrossSection` —— 不是图省事：**IC 和分组收益因此结构上落在同一录取样本上**，
+一个 IC 0.05 而价差为负的因子，无法用「两边样本不同」解释掉。
+
+#### 六个必答问题
+
+1. **分组**：按因子值分位，成员由 `factor_ic.average_ranks` 决定
+   （`group = int((rank - 0.5) * group_count / n)`）。并列值共享秩、因此**必然同组**，
+   与调用方传入的行顺序无关；排序切片的实现会让边界变成排序器 tie-break 的函数，
+   而离散化因子几乎总是并列。`group_count` 与 `min_securities_per_group` **均无默认值**，
+   下界 2 与 1 都是算术而非口味（一组的价差对任何因子恒为 0；空组的分母不存在）。
+   7 只票分 10 组 = `insufficient_sample` 并附计数，**不是**三个空组。
+2. **组合构建**：每个仓位同一笔**声明预算**（`position_capital`），按板块最小单位取整
+   （非科创板 100 股整手，科创板 200 股起、之上任意股数），组收益是
+   `sum(net_proceeds) / sum(entry_outlay) - 1` —— 组真正在它真正花掉的钱上赚到的，
+   也是唯一能让整手取整**可见**而非被抹平的读法。等**名义金额**不可构造：
+   300 元的票最小仓位 3 万元、3 元的票最小 300 元。
+   **不做再平衡**：一个 `as_of` = 一次往返 = 标注自己的窗口，
+   所以再平衡频率完全是调用方对 `as_of` 间距与 horizon 的选择，本模块拒绝替它发明一个。
+3. **成本怎么进去（本任务的核心）**：不是把逐笔平均掉，而是**分权**——
+   - 毛收益 ← `domain/labels.py`（`OutcomeLabel.realized_return` = `WindowReturn.adjusted`）
+   - 费用 ← `AShareExecutionPolicy`（每仓位两个 `ExecutionResult`：入场日买、出场日卖）
+   - 能否成交 ← **两者都判**，标注在先
+
+   `entry_outlay = notional + 买方费`，`gross_value = notional * (1 + realized)`，
+   `net_proceeds = gross_value - 卖方费`。
+   **无公司行动的窗口上 `gross_value` 与卖单 `notional` 精确到分相等**，
+   除权窗口上分开且方向是对的：现金分红是现金、不缴印花税，
+   所以按已公布收盘价收卖方费是**正确处理**而不是它的近似。
+   收益**绝不**由两笔成交价反推 —— 那正是 `close_exit/close_entry`，
+   Task 30 实测在 `000001.SZ` 2026-06-12 给出 **−0.5310%** 而真值 **+2.7422%**，连符号都反。
+4. **三档**：整套 `TIER_ADMITTED_CODES` 从 `factor_ic` 继承，不重述，
+   所以 `imputed` 仍然不进样本，import 期对账仍然只跑一次。
+5. **`direction`**：与 `005` **一致**，并有一处被算术逼出来的差别，写明而非含混——
+   组下标永远按**原始因子值**升序（组 0 = 最低值），所以存下来的组表始终能与它切自的值对账；
+   声明决定的是**哪一组做多**而不是某个数的符号（相关系数可以取负，组合不能）。
+   `long_short_spread` 在 `lower_is_better` 下是 `raw_spread` 的**逐位精确**取负。
+6. **多空与融券**：价差**交付**，并明确标注为**两个多头组合收益之差、不是可执行组合**。
+   理由是契约级的：`ExecutionRequest` 根本没有做空侧（没有融券费、没有保证金、没有券源），
+   A 股融券是标的名单 + 券商费率 + 不总有的库存，三者本仓库都没有数据集；
+   而且 `KNOWN_EXECUTION_LIMITATIONS.a_one_price_session_refuses_one_side_here_and_both_ends_there`
+   已经实测记录：撮合侧与标注侧**只在「入场买 + 出场卖」这一对上一致**，
+   而空头往返恰好是**另外那一对**，且撮合侧在那对上是 fail-open（一字涨停它让你卖）。
+   把空头腿建在那对判定上，等于用本仓库已实测为不可互换的一对判定造组合。
+
+#### 被拒绝的成交在组合收益里是什么：**什么都不是，绝不是 0**
+
+0 是一个收益。一组里每只涨跌停锁死的票都读成平盘，这组的收益就有一部分是在测锁死率
+—— 与 `factor_ic` 对 `ICCensus.unlabelled_count` 的论证同一条。
+每个开不了仓或平不了仓的标的**离组并按自身 `HoldingOutcome` 计数**
+（`unbarred` / `below_board_minimum` / `rejected_entry` / `rejected_exit`），
+`PortfolioCensus` 强制 `held + 各排除格 + unattempted == offered`，掉一个就自证失败。
+代价是明写的：被拒的恰恰是动得最狠的那些票，所以组收益是**以可交易为条件的**，
+`a_group_return_is_conditioned_on_the_names_that_could_be_traded` 就是这条。
+
+三个「组空了」的覆盖码是分开的而不是一个：`degenerate_scores`（因子在这天只给出一个值）、
+`unfillable_groups`（并列块对上声明的切法填不满）、
+`unfillable_after_execution`（切法成立、**市场**把组掏空了）。
+第三个正是 `V2-P3-007` 要让其显形的读数，所以它也是唯一一个**保留**逐票判定的拒绝码
+（订单确实下了），另外两个把每只票记为 `unattempted` —— 没下过的单不该有逐票判词。
+
+#### 与 `execution.py:135` 那段接缝的关系
+
+除上面第 6 条外，另外两条也落在本模块上：
+`the_registry_verdict_is_not_an_input` 由「标注在先」化解（退市/未上市/超快照都被标注侧先拒）；
+`an_absent_band_is_derived_rather_than_refused` **化解不掉**，只能计数 ——
+`MarketBar` 不带公布涨跌停时策略按推导带判定，而推导带在 2024-06-28 与公布带在 5,338 只中错 159 只。
+`PeriodPortfolio.unpublished_band_legs` 就是这个数：报 0 的期间，每一笔成交都是对着交易所自己的数判的。
+
+#### 不发累计曲线
+
+`QuantilePortfolioSummary` 给均值、离散度、`spread_ir` 和命中率，
+**不给累计收益、不给净值曲线、不给年化**。理由与 `005` 不给 t 统计量是同一条：
+horizon `h` 上相邻一个交易日的两个预测日共享 `h + 1` 个会话中的 `h` 个
+（`domain/labels.py::overlapping_windows` 实测），
+把重叠期间连乘会把同一天的涨跌数进去好几次，出来的曲线随**采样频率**增长而不是随因子增长。
+不重叠的排程是让累计数有意义的前置条件，而本模块从一串期间里看不出调用方用了没有。
+
+#### 实测（ADR-0003 已加 Update 小节）
+
+- 全市场一期往返（5,534 只 × 2 笔）：**35.9 ms**（七次取最好），
+  与 `apply_factor_transform` 在同样 5,534 只上的 35.9–37.6 ms 同量级，
+  比它前面那次 2.24 s 的 `compute_factor` 小 **62 倍**。
+- `CostSchedule.minimum_commission` 的 5 元下限在名义额 **16,666.67 元**以下起作用：
+  往返总摩擦在 2 万元及以上是 **0.1120%**（佣金 6bp + 过户 0.2bp + 印花 5bp），
+  在 1 万元是 **0.1520%**，同一笔交易贵 **35.7%**。
+  这正是 `position_capital` 必须声明并随报告一起存的理由。
+- 钱是 `Decimal` 不是 `float`，因为 `backtest/execution.py` 是；
+  numpy 没有 `Decimal` dtype，所以本 issue 连「要不要向量化」这个问题都不成立。

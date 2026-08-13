@@ -444,3 +444,51 @@ bootstrap over 244 as_ofs x 1,000 resamples, or a rolling covariance matrix acro
 whole factor set, is a different shape of arithmetic and nothing measured here carries over to it.
 The Context's two named workloads are now both answered; the next one to arrive should be measured
 the same way rather than assumed to inherit this answer.
+## Update, 2026-08-13 (`V2-P3-006`): the third workload, and it is `Decimal` rather than `float`
+
+The Decision above stands unchanged and this section adds no new one. It records the first
+workload to arrive **after** the Context's two were both answered, measured the same way rather
+than assumed to inherit their answer -- which is exactly what the section above asked the next one
+to do.
+
+`openalpha_cn.backtest.factor_portfolio` cuts a cross section into quantile portfolios and prices
+each one's round trip through `AShareExecutionPolicy`. One period is one `sorted()` -- the ranks,
+shared with `factor_ic.average_ranks` -- plus **2n** order simulations, each of which builds a
+`pydantic` `ExecutionResult` out of four `Decimal` quantizations. Measured at ADR-0002's
+whole-market cross section of **5,534 securities**, best of seven runs, on the machine this issue
+was built on (which is why the comparisons below are drawn against figures re-read from this
+document rather than re-measured beside it):
+
+| step, n = 5,534 | time |
+|---|---|
+| a whole period's round trips (5,534 buys + 5,534 sells, fees included) | **35.9 ms** |
+| the `MarketBar` construction alone, 5,534 bars | 8.5 ms |
+
+Two comparisons, and neither is close:
+
+- **Against the read that feeds it.** `compute_factor` over a 675,148-row partition is 2.24 s, so
+  a whole-market period of grouped portfolio returns is **62x** smaller than the single read that
+  produces the cross section it consumes.
+- **Against its own neighbour on the same plane.** `apply_factor_transform` over the same 5,534
+  participants is 35.9-37.6 ms across its four configurations. This is the same order for the same
+  cross section, which is the useful reading: the costing step is not a new order of magnitude in
+  the factor pipeline, it is one more pass of it.
+
+**The new argument this workload adds is about the dtype rather than the clock.** The money here
+is `Decimal`, and it is `Decimal` because `backtest/execution.py` is: a commission is
+`max(rate * notional, ¥5.00)` quantized to the cent under `ROUND_HALF_UP`, and a stamp duty is a
+statutory rate on a published price. numpy has no `Decimal` dtype: an array of them is an
+`object` array, whose arithmetic dispatches to the same Python `Decimal.__mul__` this module
+already calls, one element at a time. Whether that is faster or slower than the loop it would
+replace is **not measured here and is not the point** -- the point is that the vectorisation this
+ADR exists to weigh is structurally unavailable for the type, and the type that *is* vectorised
+(`float64`) is the wrong one for a fee schedule whose whole purpose is not to carry a binary
+rounding error into a reported return. **Runtime dependencies remain nine.**
+
+### What is *not* claimed
+
+Nothing here says anything about `V2-P3-014`'s report over the whole factor set at once, about
+`V2-P3-008`'s pairwise correlation matrix, or about a rolling portfolio with a holdings state
+(`V2-P3-007`) -- the last of which has a per-period cost that grows with the *previous* period's
+holdings rather than with the cross section, and is a different shape. Each should be measured on
+its own workload.
