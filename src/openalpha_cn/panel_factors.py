@@ -538,15 +538,131 @@ answering: `_read_dataset` now collapses the duplicate rows that agree, which is
 but the ones that genuinely disagree (261 of `income`'s 3,201 filings, and 8.2% / 8.7% of the
 review's two samples) refuse the whole build rather than one security, and giving one security
 its own answer would need a sixth `FactorCoverage` member that the stored manifest schema is
-pinned against. That is `V2-P3-018`, filed rather than left in prose because `V2-P3-010`'s ROE
-reads `fina_indicator.roe` -- a column already recorded losing 5 reads in a 53-security corpus
-and 33 in a 76-security one -- off the dataset whose ambiguous-filing rate is 13.7%, so the next
-two factor families meet this wall sooner and harder than this one does.
+pinned against. That is `V2-P3-018`, filed rather than left in prose because `V2-P3-010` and
+`V2-P3-011` read more filings per observation than this family does, so they meet the wall sooner
+and harder. `V2-P3-009` expected `V2-P3-010`'s ROE to arrive on `fina_indicator.roe`, off the
+dataset whose ambiguous-filing rate is 13.7%; it did not, and "The quality family" below is the
+argument for computing it instead. The wall is unmoved either way -- `accruals_ttm` reads three
+statement datasets over five contiguous periods and `gross_margin_stability` reads eight.
+
+## The quality family (`V2-P3-010`), and the first factors that read no session at all
+
+Four definitions ship for it -- `return_on_equity_ttm`, `return_on_capital_ttm`,
+`gross_margin_stability` and `accruals_ttm` -- and five judgements are shared by all of them and
+stated here rather than four times over.
+
+**They are the first shipped factors on the report-period axis alone.** `V2-P3-009`'s three read
+a filing over a price and are on both axes; these four read filings and nothing else, so
+`lookback_sessions` is `None` and `FactorDefinition` requires it to be -- a session reach on a
+factor with no session dataset is a number in the content address that no branch can consult. The
+consequence a caller sees is that `compute_factor`'s `panel_sessions` is empty for them and every
+history question is asked of `_period_span`'s fiscal-quarter grid. The window itself is the
+**union** of the report periods of every statement dataset the factor reads, which `_points_held`
+already did and no shipped factor had exercised across two statement endpoints: a security that
+filed an income statement for a period and no balance sheet is `input_missing` rather than
+silently short a term.
+
+**Every ratio here is a flow over a stock, and the stock is the window's last period.** The
+numerator is the same cumulative-to-TTM identity the value family argues for; the denominator is
+one cell at `[-1]`. The textbook alternative -- an average of the window's two ends -- is
+available (`window[0]` is the same quarter one year earlier by construction) and is not taken,
+because `earnings_yield_ttm` and `book_to_price` already ship and already divide this same
+trailing profit and this same closing equity by one market capitalisation. So `EP / BP` **is**
+`return_on_equity_ttm`, exactly, and an averaged denominator would put two incompatible
+statements of what a book value is inside one build. The bias that buys is disclosed with its
+direction in `CAPITAL_TURNOVER_PERIODS`.
+
+**A denominator gets the sign rule a numerator does not, and it is the same column.**
+`book_to_price` reports an insolvent issuer's negative equity as `computed` and negative;
+`return_on_equity_ttm` reports the same negative equity as `undefined_value`. That is not an
+inconsistency -- a negative denominator turns a profit into a negative return and a loss into a
+positive one, so the ordering the whole cross section is built on inverts for exactly the names in
+the worst condition. `_capital_denominator` is the one guard and `_market_capitalisation` is its
+precedent on the other axis.
+
+**Nothing here reads `fina_indicator`, and ROE is where that decision was made.** The full
+argument is `RETURN_ON_EQUITY_TTM`'s; the decisive half is that a published ROE is a
+*cumulative-period* return and no arithmetic converts it to a trailing one, because the
+cumulative-to-TTM identity is an identity about **sums** and a ratio is not a sum. Measured on the
+served rows rather than argued: `600519.SH`'s `roe` reads 10.5688 at 2024Q1, 19.2038 at H1, 26.833
+at Q3 and 38.4283 at the annual -- one profit-accumulation curve, not four estimates of one
+number. And the formula behind it cannot be checked from inside this projection: against the
+closing-equity computation `n_income_attr_p / total_hldr_eqy_exc_min_int`, the published annual
+`roe` differs by 2.0%-9.5% over `600519.SH`'s eight most recent annuals, 2.3%-11.7% over
+`000001.SZ`'s and 1.4%-**36.7%** over `000002.SZ`'s, whose 2025 annual is a published `-55.4220`
+against a computed `-75.7507`. `fina_indicator` carries neither a profit column nor an equity
+column, so a reader holding only that endpoint has nothing to reconcile against.
+
+**Two of the four are blind to financial issuers, by construction and measured.** A bank, insurer
+or broker publishes no cost of sales and no current / non-current balance-sheet split, so
+`oper_cost` and `total_cur_liab` are null and `_complete_series` answers `input_missing` rather
+than inventing a number. Measured on the served rows over every stored period since 2015:
+`total_cur_liab` is null on **68 of 68** of `000001.SZ`'s balance sheets, **67 of 67** of
+`601318.SH`'s and **64 of 64** of `600030.SH`'s (their newest non-null periods are 2006-03-31,
+2006-09-30 and 2006-09-30), and `oper_cost` on **59 of 59**, **57 of 57** and **56 of 56** of
+their income rows -- while the two `comp_type=1` industrials probed beside them carry **0 of 62**
+and **0 of 63** nulls in `total_cur_liab` and **0 of 60** apiece in `oper_cost`. So
+`return_on_capital_ttm` and `gross_margin_stability` score the non-financial cross section and say
+so, which is the right answer for a company type whose capital employed and gross margin are not
+defined quantities.
+
+### What `V2-P3-010` measured on the live endpoint, and what it replaces
+
+`V2-P3-009` was delivered with per-column budgets derived from another sample's totals and its
+review replaced them with direct measurements. This family did the same for its own eight columns
+rather than inheriting either, because two of them (`total_assets`, `n_cashflow_act`) carry a
+recorded refusal count of exactly `0` and `domain/financial_statements.py` says in its own voice
+that "the `0` is the one to distrust". **Two disjoint samples** of 93 and 92 securities -- every
+60th code of `stock_basic`'s 5,543 listed ones, offset 0 and offset 30 -- were paged to exhaustion
+on all four endpoints on 2026-08-13, and every `(security, period, announcement)` key was
+collapsed on the **stored projection**, which is the rule `_read_dataset` applies:
+
+| dataset | filings | ambiguous | rate | recorded |
+|---|---:|---:|---:|---:|
+| `income` | 10,595 | 902 | 8.51% | 8.15% |
+| `balancesheet` | 10,393 | 99 | 0.95% | 1.29% |
+| `cashflow` | 9,602 | 1,643 | **17.11%** | 15.80% |
+| `fina_indicator` | 10,865 | 1,282 | 11.80% | 13.70% |
+
+| column | sample A | sample B | combined | recorded |
+|---|---:|---:|---:|---|
+| `income.n_income_attr_p` | 7 / 5,372 | 17 / 5,223 | 24 / 10,595 = **0.227%** | 0.189% |
+| `income.n_income` | 7 | 17 | 24 / 10,595 = **0.227%** | -- |
+| `income.total_revenue` | 11 | 9 | 20 / 10,595 = 0.189% | 0.123% |
+| `income.oper_cost` | 14 | 11 | 25 / 10,595 = **0.236%** | -- |
+| `income.ebit` (**not read**) | 464 | 424 | 888 / 10,595 = 8.38% | 258 of 288 |
+| `balancesheet.total_hldr_eqy_exc_min_int` | 15 | 20 | 35 / 10,393 = **0.337%** | 0.203% |
+| `balancesheet.total_assets` | 16 | 19 | 35 / 10,393 = **0.337%** | **0**, then 18 |
+| `balancesheet.total_cur_liab` | 4 | 10 | 14 / 10,393 = 0.135% | -- |
+| `cashflow.n_cashflow_act` | 1 | 4 | 5 / 9,602 = **0.052%** | **0** |
+| `cashflow.free_cashflow` (**not read**) | 835 | 808 | 1,643 / 9,602 = 17.11% | 450 of 450 |
+| `fina_indicator.roe` (**not read**) | 16 | 13 | 29 / 10,865 = 0.267% | 5, then 33 |
+
+**Four things this table says that a docstring would not have.** Both recorded zeros are
+falsified: `total_assets` at 35, having already moved from `0` to 18 once, and `n_cashflow_act` at
+5 for the first time. Neither move is large in absolute terms and neither is zero, which is the
+distinction `domain/financial_statements.py` asks for. `cashflow` is worse than
+recorded rather than better, which matters because `accruals_ttm` reads it and because
+`free_cashflow` still accounts for **every** ambiguous filing that endpoint has. Every one of
+`V2-P3-009`'s three measured columns came back *higher* on these two samples than on its own two,
+so the review's figures are a sample property in the same way the ones they replaced were. And the
+column this family declines, `roe`, refuses **less often** than the pair replacing it: see
+`RETURN_ON_EQUITY_TTM`'s fourth argument, which was written the other way round and is kept in its
+falsified form beside the measurement.
+
+**The one identity this family rests on that the projection can check itself**: `n_income =
+total_profit - income_tax`, which is what makes "the term `RETURN_ON_CAPITAL_TTM`'s numerator is
+missing is exactly the after-tax interest" a measurement rather than a reading of the statement's
+shape. Over the six securities probed it holds on every period from 2007 onward -- 446 rows, worst
+relative gap **8.9e-7**, and five of the six at machine precision -- and fails before it, on
+`000001.SZ`'s 2005H1 (3.1e-1) and `000002.SZ`'s 1996H1 (5.9e-2), which is the pre-2007 CAS under
+which 净利润 was already net of minority interest. The assertion is therefore made on modern rows
+and states its own boundary.
 
 ## What is deliberately not here
 
-**Two of the five factor families.** `V2-P3-010` and `V2-P3-011` own quality and growth.
-`V2-P3-009`'s value family, `V2-P3-012`'s momentum and reversal family and `V2-P3-013`'s
+**One of the five factor families.** `V2-P3-011` owns growth. `V2-P3-009`'s value family,
+`V2-P3-010`'s quality family, `V2-P3-012`'s momentum and reversal family and `V2-P3-013`'s
 volatility and liquidity family all ship here. `REVERSAL_1D` stays exactly where it is: it
 predates all of them and is the engine's own verification factor rather than a research
 deliverable -- see its own docstring for what it does and does not claim, and
@@ -619,6 +735,7 @@ from openalpha_cn.domain.factor_transform import (
 )
 from openalpha_cn.domain.financial_statements import (
     BALANCE_SHEET_DATASET,
+    CASH_FLOW_DATASET,
     INCOME_DATASET,
     REPORT_PERIOD_COLUMN,
 )
@@ -2041,6 +2158,33 @@ def _market_capitalisation(window: FactorWindow) -> float | None:
     return in_yuan
 
 
+def _trailing_twelve_month_sum(
+    periods: Sequence[date], cumulative: Sequence[float]
+) -> float | None:
+    """The identity itself, over a bare pair of aligned sequences rather than over a window.
+
+    `cumulative[-1] + cumulative[the December among periods[:-1]] - cumulative[0]`, which is what
+    `TRAILING_TWELVE_MONTH_PERIODS` states. Split out of `_trailing_twelve_months` by `V2-P3-010`
+    because that function reads a whole `FactorWindow` and the quality family needs the same
+    arithmetic on a **slice** of one: `gross_margin_stability` slides a five-period window across
+    an eight-period one, and there is no `FactorWindow` for a slice. Two copies of an identity
+    this repository argues about at length would be two things that can drift apart, which is
+    `_yield_on_market_capitalisation`'s reason one level down.
+
+    `None` -- hence `undefined_value` -- when `periods[:-1]` does not hold exactly one fiscal year
+    end, which is what the caller's contiguity buys and what a gap takes away. See
+    `_trailing_twelve_months` for why that branch is unreachable through the engine at the value
+    family's reach, and `_gross_margin_stability` for why it stays unreachable across every slice
+    of a contiguous eight.
+    """
+    year_ends = [
+        index for index, period in enumerate(periods[:-1]) if period.month == FISCAL_YEAR_END_MONTH
+    ]
+    if len(year_ends) != 1:
+        return None
+    return cumulative[-1] + cumulative[year_ends[0]] - cumulative[0]
+
+
 def _trailing_twelve_months(window: FactorWindow, *, dataset: str, column: str) -> float | None:
     """`cumulative[-1] + cumulative[the December in the window] - cumulative[0]`.
 
@@ -2061,14 +2205,7 @@ def _trailing_twelve_months(window: FactorWindow, *, dataset: str, column: str) 
     test_a_window_with_a_gap_has_no_trailing_twelve_months_rather_than_a_wrong_one` drives it on a
     window this engine will not build, which is the only way to drive it at all.
     """
-    periods = window.periods
-    cumulative = window.series(dataset, column)
-    year_ends = [
-        index for index, period in enumerate(periods[:-1]) if period.month == FISCAL_YEAR_END_MONTH
-    ]
-    if len(year_ends) != 1:
-        return None
-    return cumulative[-1] + cumulative[year_ends[0]] - cumulative[0]
+    return _trailing_twelve_month_sum(window.periods, window.series(dataset, column))
 
 
 def _yield_on_market_capitalisation(
@@ -2347,6 +2484,732 @@ def _sales_yield_ttm(window: FactorWindow) -> float | None:
     )
 
 
+# --- `V2-P3-010`: the quality family -----------------------------------------------------------
+#
+# See this module's docstring section "The quality family" for the five judgements every factor
+# here shares -- the single axis, the mixed stock-and-flow shape, the sign rule a denominator
+# gets that a numerator does not, why nothing here reads `fina_indicator`, and what the two
+# missing add-backs cost.
+
+
+CONSOLIDATED_NET_PROFIT_COLUMN: Final[str] = "n_income"
+"""`income`'s net profit for the **whole consolidated entity**, minority interest included.
+
+`NET_PROFIT_COLUMN` is the other one and the choice between them is made per factor by what the
+denominator covers, which is the same rule `EARNINGS_YIELD_TTM` applies against `total_mv` and
+the opposite answer:
+
+- `RETURN_ON_EQUITY_TTM` divides by `total_hldr_eqy_exc_min_int`, the equity **excluding**
+  minority interest, so its numerator is `n_income_attr_p`. Both halves cover the parent's
+  owners.
+- `RETURN_ON_CAPITAL_TTM` divides by capital employed, which is every provider of long-term
+  finance -- the parent's owners, the minority holders and the non-current creditors -- so its
+  numerator is the consolidated figure. Pairing `n_income_attr_p` with capital employed would put
+  one claim over a base that finances three.
+- `ACCRUALS_TTM` subtracts `cashflow.n_cashflow_act`, which is the whole entity's operating cash,
+  and divides by `total_assets`, which is the whole entity's assets. A consolidated cash flow
+  minus an attributable profit is a difference between two different reporting boundaries.
+
+They are different numbers on real rows and this repository already holds the counterexample:
+`600739.SH`'s 2024 annual gives `n_income` 664,195,391.66 against `n_income_attr_p`
+209,556,865.25, a factor of 3.2.
+"""
+
+TOTAL_ASSETS_COLUMN: Final[str] = "total_assets"
+"""`balancesheet`'s asset total: `ACCRUALS_TTM`'s scaler and half of capital employed.
+
+**Its recorded refusal count is `0` and its measured one is not, which is why it was
+re-measured.** `domain/financial_statements.py` records this column losing 0 reads in the
+53-security corpus and **18** in an independent 76-security probe taken the same day, and says in
+its own voice that "the `0` is the one to distrust". `V2-P3-010`'s own probe read it back over two
+disjoint samples at 16 of 5,250 and 19 of 5,143, **35 of 10,393 filings (0.337%)** -- level with
+`total_hldr_eqy_exc_min_int` and behind only `total_share`'s 57. So the zero was a sample property
+for the third recorded time, and the number that justifies reading this column is the measured
+one. See this module's docstring section "The quality family" for the whole table.
+"""
+
+CURRENT_LIABILITIES_COLUMN: Final[str] = "total_cur_liab"
+"""`balancesheet`'s current-liability total, subtracted from assets to give capital employed.
+
+The one column of the three this family reads from `balancesheet` that a **financial** issuer does
+not publish: a bank's balance sheet is not split into current and non-current, so the cell is
+null and `_complete_series` answers `input_missing` rather than inventing a split. Measured over
+every stored period since 2015 -- null on 68 of 68 for `000001.SZ`, 67 of 67 for `601318.SH` and
+64 of 64 for `600030.SH`, whose newest non-null periods are 2006-03-31, 2006-09-30 and
+2006-09-30, against 0 of 62 and 0 of 63 for two `comp_type=1` industrials. So
+`RETURN_ON_CAPITAL_TTM` is blind to banks, insurers and brokers by construction, and its own
+docstring states that as a coverage fact rather than leaving it to be discovered.
+
+Its disagreement rate is the *lowest* of the three `balancesheet` columns this family reads: **14
+of 10,393 filings (0.135%)** over `V2-P3-010`'s two disjoint samples, against 35 apiece for
+`total_assets` and `total_hldr_eqy_exc_min_int`. So the second column `RETURN_ON_CAPITAL_TTM`
+reads from this endpoint costs it little; what it costs is the company types above.
+"""
+
+OPERATING_COST_COLUMN: Final[str] = "oper_cost"
+"""`income`'s cost of sales, 营业成本 -- the term a gross margin subtracts from the top line.
+
+Paired with `TOTAL_REVENUE_COLUMN` and not with `revenue`, because the two are the two halves of
+one published subtotal: 营业总收入 less 营业总成本 is the CAS operating result, and 营业收入 less
+营业成本 is the narrower pair. `V2-P3-009`'s review measured where the two revenue columns part --
+37 of 1,468 `comp_type=1` rows, `600519.SH` on all 42 of its stored periods -- so mixing one
+column of each pair is a margin wrong by up to 1.94% of revenue on a real issuer. The top line is
+kept for `SALES_YIELD_TTM`'s reason, and the cost line is the only one this projection carries.
+
+**Null for a financial issuer**, which is a fact this repository already recorded in its own
+fixtures: `tests/contract/providers/test_tushare_financials.py` notes that `000001.SZ`'s
+`oper_cost` is null on both of its rows "because a bank publishes no cost of sales". `V2-P3-010`
+measured how complete that is over every stored period since 2015 -- null on 59 of 59 for
+`000001.SZ`, 57 of 57 for `601318.SH` and 56 of 56 for `600030.SH`, against 0 of 60 and 0 of 60
+for two `comp_type=1` industrials. So `GROSS_MARGIN_STABILITY` is `input_missing` for the company
+types whose gross margin is not a defined quantity, which is the right answer rather than a gap.
+
+**And it is the most-disagreed of `income`'s non-`ebit` columns**, which matters here more than
+elsewhere because this factor reads eight contiguous filings rather than five: **25 of 10,595
+filings (0.236%)** over `V2-P3-010`'s two disjoint samples, against `total_revenue`'s 20 and
+`n_income_attr_p`'s 24. It is the higher of the two columns this factor reads, and the reach it is
+read at is the widest **report-period** one in the build.
+"""
+
+OPERATING_CASH_FLOW_COLUMN: Final[str] = "n_cashflow_act"
+"""`cashflow`'s net cash from operating activities: the cash half of an accrual.
+
+**This is the one column in the family whose recorded refusal count is exactly `0`, and that is
+the reason it was re-measured rather than quoted.** `domain/financial_statements.py` records
+`cashflow` as the worst of the four endpoints by ambiguous filings -- 450 of 2,849, 15.80% -- and
+records **all 450** of that endpoint's refused field reads as `free_cashflow`'s, which leaves this
+column at zero over 14,245 field reads. That module's own sentence about such a number is
+"`revenue`, `total_assets` and `roe` lose 5, 0 and 5 reads in the 53-security corpus and 6, 18 and
+33 in an independent 76-security probe... the `0` is the one to distrust", and `total_assets` is
+the column that moved from `0` to 18.
+
+**Measured, it is not zero.** `V2-P3-010`'s probe read `cashflow` back over two disjoint samples
+at 9,602 filings, of which **1,643 (17.11%)** are ambiguous -- worse than the 15.80% recorded --
+and this column disagrees on **5 of 9,602 (0.052%)**, 1 in the first sample and 4 in the second.
+So the zero was a sample property again and the real figure is small rather than absent, which is
+a different claim and the one this factor is entitled to make.
+
+`free_cashflow` is refused outright and needs no argument beyond the census: it is 450 of 450 as
+recorded and **1,643 of 1,643** as measured -- every ambiguous `cashflow` filing in 185 securities
+disagrees about it -- with a worst case of `+316,026,934` against `-294,173,456` for one filing of
+`300002.SZ`.
+"""
+
+CAPITAL_TURNOVER_PERIODS: Final[int] = TRAILING_TWELVE_MONTH_PERIODS
+"""The reach every flow-over-stock factor here declares: `TRAILING_TWELVE_MONTH_PERIODS`.
+
+Named rather than reused literally because the two constants answer different questions that
+happen to have the same answer. `TRAILING_TWELVE_MONTH_PERIODS` is "how many contiguous filings
+does the cumulative-to-TTM identity need"; this is "how many does a return-on-capital ratio need",
+and the answer is the same five because the *numerator* is that identity and the denominator is
+one stored cell taken at `[-1]` of the same window. Binding them keeps a future change to the
+identity's reach from silently leaving these three behind at a width the numerator no longer has.
+
+**The denominator is the window's last period and not an average of its ends**, which is a
+judgement rather than a default and it is the one place this family departs from the textbook.
+The textbook ROE divides by *average* equity, and the average is available here -- `window[0]` is
+the same quarter one year earlier by construction. It is not taken, for a reason that is a
+property of this repository rather than of accounting: `earnings_yield_ttm` and `book_to_price`
+already ship, they divide the same trailing profit and the same closing equity by the same market
+capitalisation, and so `EP / BP` **is** this factor, exactly, with the capitalisation cancelling.
+An averaged denominator would make the repository carry two incompatible statements of what a
+book value is, and the one that is already shipped is the one three stored factors would have to
+be restated to change.
+`tests/integration/panel/test_quality_family.py::
+test_the_return_on_equity_is_the_earnings_yield_over_the_book_to_price` holds the identity through
+the real engine over one corpus, so it is a measurement rather than a remark.
+
+The cost is stated rather than absorbed: closing equity exceeds average equity for an issuer that
+raised capital during the year, so this ROE reads **lower** than the textbook one for exactly the
+names that grew their equity fastest, and higher for a buyback. That is a bias with a direction,
+which is what makes it a disclosure rather than a rounding.
+"""
+
+GROSS_MARGIN_PERIODS: Final[int] = 8
+"""How many contiguous filings a gross-margin stability needs: eight, and the width is derived.
+
+**A stability is a dispersion of something, and the something has to be comparable across the
+window** -- which is where the value family's whole argument lands again, one level up. Three
+candidate somethings, and only the third survives:
+
+- **The cumulative margin as filed.** `(total_revenue - oper_cost) / total_revenue` off each
+  stored row is a *ratio* of two figures accumulated over the same span, so unlike a cumulative
+  level it is already scale-free and needs no repair. What it is not is horizon-free: a Q1 row is
+  a three-month margin and a Q3 row a nine-month one, so their dispersion measures the seasonal
+  shape of the year at least as much as it measures instability.
+- **The single-quarter margin**, recovered by differencing consecutive cumulative rows. It needs
+  only five periods and it is a genuine quarterly margin -- and its dispersion is dominated by
+  seasonality by construction: a retailer whose fourth quarter is its best would score as
+  unstable every year of its life, which is a fact about the calendar rather than about the
+  business.
+- **The trailing-twelve-month margin**, which is what this factor takes. Every observation spans
+  a full year, so the seasonal term is in all of them equally and cancels out of their dispersion.
+
+The width follows from that choice and from one arithmetic fact rather than from a preference:
+a trailing-twelve-month figure costs `TRAILING_TWELVE_MONTH_PERIODS` contiguous filings, and `k`
+of them ending at consecutive quarter ends cost `TRAILING_TWELVE_MONTH_PERIODS + k - 1`. At
+`k = GROSS_MARGIN_OBSERVATIONS` that is eight, about two years of disclosure -- the widest
+**report-period** reach this build declares, against `CAPITAL_TURNOVER_PERIODS`' five and
+`BOOK_TO_PRICE`'s one, and the coverage price is paid by every young issuer. It is not the widest
+reach in the build: `MOMENTUM_120_SESSIONS` counts 125 sessions on the other axis, and the two
+numbers are not comparable because the axes are not.
+
+**This is where `_trailing_twelve_months` could not be reused, and the failure mode is worse than
+`V2-P3-009` recorded.** The identity finds the fiscal year end inside `periods[:-1]` and answers
+`None` unless there is exactly one, which `V2-P3-009` names as the branch a gapped five-period
+window reaches. `periods[:-1]` of a contiguous **eight** is seven quarters, and seven consecutive
+quarters hold **one or two** Decembers depending on which quarter the window ends at -- so handing
+the identity a whole eight is not fail-closed:
+
+| window ends at | Decembers in `periods[:-1]` | `_trailing_twelve_month_sum` |
+|---|---:|---|
+| Q1, Q2 or Q3 | 2 | `None` -- refuses |
+| **Q4** | **1** | **a number, and the number is wrong** |
+
+At a December ending period the search finds the December of the year *before* the one the
+identity names, and the expression becomes `cumulative[-1] + cumulative[that earlier December] -
+cumulative[the window's first quarter]` -- the true trailing twelve months **plus a whole extra
+fiscal year less that year's first quarter**. That is the shape this repository books Criticals
+for: a guard that looks fail-closed and answers confidently on one quarter in four, with an error
+of the same order as the answer. So the identity is applied to five-period *slices* of the eight
+rather than to
+the eight, and each slice's own `[:-1]` is four **consecutive** quarters, of which exactly one
+ends a year at every alignment.
+`tests/unit/test_factor_quality_family.py::
+test_every_slice_of_a_contiguous_eight_period_window_holds_exactly_one_fiscal_year_end` is that
+claim as an enumeration over all four slices at all four quarter ends, and
+`test_the_whole_eight_period_window_is_no_trailing_year_and_does_not_always_refuse`
+is the table above, including the wrong number.
+"""
+
+GROSS_MARGIN_OBSERVATIONS: Final[int] = 4
+"""How many trailing-twelve-month margins the dispersion is taken over: four.
+
+Four consecutive quarter ends, so the number this factor reports is how far the trailing-year
+gross margin moved over the **most recent year** -- a one-year drift rather than a multi-year
+regime. Two things make four the number rather than a round one:
+
+- `_sample_stdev` is Bessel-corrected, so `k` observations carry `k - 1` degrees of freedom and
+  `k = 2` would be a scaled absolute difference wearing a standard deviation's name. Four is the
+  smallest count at which the estimator is doing what its own docstring says.
+- Each extra observation costs one more contiguous filing, and every one of them is a
+  `(filing, column)` read that can refuse the **whole build** rather than one security -- see
+  `V2-P3-018`. At `income`'s ambiguous-filing rate -- 8.15% recorded and **8.51%** on
+  `V2-P3-010`'s own two-sample probe -- width is not free, and a reach that read three years of
+  margins would be a coverage decision made for a smoother statistic.
+
+The four are **overlapping**: consecutive trailing-twelve-month windows share three of their four
+quarters, so the series is autocorrelated by construction and its dispersion is a drift measure
+rather than four independent draws. That is a property of what is being measured -- "how much did
+the trailing-year margin move" -- and not a defect to be corrected by thinning, which at this
+width would leave one observation.
+"""
+
+
+def _capital_denominator(value: float) -> float | None:
+    """A stock quantity a flow is divided by, or `None` when it is not strictly positive.
+
+    One guard for the family's three ratios, and it is the **opposite** of the rule
+    `BOOK_TO_PRICE` applies to the same `balancesheet` column -- deliberately, because the rule
+    follows the position and not the column. An insolvent issuer's negative equity is a real
+    numerator over a positive price and `book_to_price` reports it as `computed` and negative; the
+    same negative equity as a *denominator* turns a profit into a negative return on equity and a
+    loss into a positive one, so the ordering a cross section is built on would invert for exactly
+    the names in the worst condition. `_market_capitalisation` refuses a non-positive denominator
+    for that reason and this is the same refusal on the other axis.
+
+    Non-positive rather than zero, for the same reason: zero is the case that raises `ZeroDivision`
+    and negative is the case that answers confidently and wrongly.
+    `tests/unit/test_factor_quality_family.py::
+    test_a_negative_equity_is_a_numerator_for_book_to_price_and_a_refusal_for_roe`
+    drives both halves on one number, which is the only way to state that the two rules are a
+    choice rather than an inconsistency.
+    """
+    if value <= 0.0:
+        return None
+    return value
+
+
+def _return_on_equity_ttm(window: FactorWindow) -> float | None:
+    """`RETURN_ON_EQUITY_TTM`: trailing profit over the closing equity, both in yuan."""
+    equity = _capital_denominator(window.series(BALANCE_SHEET_DATASET, BOOK_EQUITY_COLUMN)[-1])
+    if equity is None:
+        return None
+    profit = _trailing_twelve_months(window, dataset=INCOME_DATASET, column=NET_PROFIT_COLUMN)
+    if profit is None:
+        return None
+    return profit / equity
+
+
+def _return_on_capital_ttm(window: FactorWindow) -> float | None:
+    """`RETURN_ON_CAPITAL_TTM`: trailing consolidated profit over capital employed.
+
+    Capital employed is `total_assets - total_cur_liab`, read at `[-1]` of the same window the
+    numerator is summed over. See `RETURN_ON_CAPITAL_TTM` for why that subtraction is the
+    denominator this projection can actually state, and for what the missing interest add-back
+    costs the numerator.
+    """
+    assets = window.series(BALANCE_SHEET_DATASET, TOTAL_ASSETS_COLUMN)[-1]
+    current_liabilities = window.series(BALANCE_SHEET_DATASET, CURRENT_LIABILITIES_COLUMN)[-1]
+    employed = _capital_denominator(assets - current_liabilities)
+    if employed is None:
+        return None
+    profit = _trailing_twelve_months(
+        window, dataset=INCOME_DATASET, column=CONSOLIDATED_NET_PROFIT_COLUMN
+    )
+    if profit is None:
+        return None
+    return profit / employed
+
+
+def _gross_margin_stability(window: FactorWindow) -> float | None:
+    """The sample standard deviation of four trailing-twelve-month gross margins.
+
+    The identity is applied to five-period slices of the eight-period window rather than to the
+    window, which is what keeps every search for a fiscal year end a search over four *consecutive*
+    quarters -- see `GROSS_MARGIN_PERIODS`. Each slice yields one trailing revenue and one trailing
+    cost, and their margin is `(revenue - cost) / revenue`.
+
+    `None` -- hence `undefined_value` -- when any slice's trailing revenue is not strictly
+    positive, which is `_capital_denominator`'s argument on a flow: a zero divides and a negative
+    inverts the margin's sign, and a cross section that ranked an inverted margin beside ordinary
+    ones would order the two backwards. A slice whose periods hold no single fiscal year end is
+    the same answer, and at the declared `8 / 8` reach it is unreachable -- the branch is kept for
+    `_sample_stdev`'s stated reason and driven directly in
+    `tests/unit/test_factor_quality_family.py::
+    test_a_gapped_eight_period_window_has_no_margin_series_rather_than_a_short_one`.
+    """
+    periods = window.periods
+    revenue = window.series(INCOME_DATASET, TOTAL_REVENUE_COLUMN)
+    cost = window.series(INCOME_DATASET, OPERATING_COST_COLUMN)
+    margins: list[float] = []
+    for start in range(len(periods) - TRAILING_TWELVE_MONTH_PERIODS + 1):
+        stop = start + TRAILING_TWELVE_MONTH_PERIODS
+        span = periods[start:stop]
+        trailing_revenue = _trailing_twelve_month_sum(span, revenue[start:stop])
+        trailing_cost = _trailing_twelve_month_sum(span, cost[start:stop])
+        if trailing_revenue is None or trailing_cost is None or trailing_revenue <= 0.0:
+            return None
+        margins.append((trailing_revenue - trailing_cost) / trailing_revenue)
+    return _sample_stdev(margins)
+
+
+def _accruals_ttm(window: FactorWindow) -> float | None:
+    """`ACCRUALS_TTM`: the trailing profit that did not arrive as operating cash, over assets.
+
+    Both trailing sums are taken over the same window and the scaler is the same window's closing
+    `total_assets`, so the three terms are one security's own statements at one point in time.
+    """
+    assets = _capital_denominator(window.series(BALANCE_SHEET_DATASET, TOTAL_ASSETS_COLUMN)[-1])
+    if assets is None:
+        return None
+    profit = _trailing_twelve_months(
+        window, dataset=INCOME_DATASET, column=CONSOLIDATED_NET_PROFIT_COLUMN
+    )
+    operating_cash = _trailing_twelve_months(
+        window, dataset=CASH_FLOW_DATASET, column=OPERATING_CASH_FLOW_COLUMN
+    )
+    if profit is None or operating_cash is None:
+        return None
+    return (profit - operating_cash) / assets
+
+
+_QUALITY_UNMEASURED_DIRECTION_PROSE: Final[str] = (
+    " The declared direction is the quality premium's conventional prior and this repository has "
+    "measured nothing whatever about it, on this factor or on any other. V2-P3-005 is where an "
+    "information coefficient would say something, and V2-P3's own gate records that most "
+    "first-batch factors being insignificant is the expected result rather than a failure."
+)
+"""The direction sentence the four quality notes share, held to `REVERSAL_1D_NOTE`'s standard.
+
+Written once because it is one claim about four factors and a copy is a thing that drifts;
+`_VALUE_DIRECTION_PROSE` is the precedent and the reason is the same.
+"""
+
+_QUALITY_AXIS_PROSE: Final[str] = (
+    " This factor is on the report-period axis and nothing else: it declares no session reach, "
+    "which FactorDefinition requires exactly because required_fields names no session dataset. "
+    "The window it is handed is the union of the report periods of EVERY statement dataset it "
+    "reads, so a security that filed an income statement for a period and no balance sheet is "
+    "input_missing rather than silently short a term. EVERY FLOW this factor reads is accumulated "
+    "inside the calendar fiscal year, so it is read through the cumulative-to-TTM identity rather "
+    "than as the latest stored figure -- cumulative[latest] + cumulative[the December inside the "
+    "window] - cumulative[the same quarter one year earlier] -- and max_window_periods equals "
+    "lookback_periods, which is the contract's own statement that no filing is missing inside the "
+    "window and is what makes that index arithmetic arithmetic rather than a guess."
+)
+"""The axis-and-window sentence the four quality notes share. One claim about four factors."""
+
+
+RETURN_ON_EQUITY_TTM: Final[FactorDefinition] = FactorDefinition(
+    key="return_on_equity_ttm",
+    version=1,
+    family="quality",
+    direction="higher_is_better",
+    required_fields=(
+        FactorField(dataset=INCOME_DATASET, column=NET_PROFIT_COLUMN),
+        FactorField(dataset=BALANCE_SHEET_DATASET, column=BOOK_EQUITY_COLUMN),
+    ),
+    lookback_sessions=None,
+    max_window_sessions=None,
+    lookback_periods=CAPITAL_TURNOVER_PERIODS,
+    max_window_periods=CAPITAL_TURNOVER_PERIODS,
+)
+"""ROE: trailing-twelve-month profit attributable to the parent, over the closing parent equity.
+
+**It is computed from two statement columns rather than read from `fina_indicator.roe`, and that
+is this issue's first decision rather than an inherited one.** `V2-P3-009` refused the published
+`pe`, `pb` and `ps` for one reason -- inverting a published multiple scores the upstream's own
+arithmetic -- and that reason applies here too but is *not* the decisive one. Three arguments
+survived a live probe, in the order of how much they decide; a fourth was written, measured, and
+**falsified in the direction that matters**, and it is kept below rather than deleted.
+
+1. **A published ROE is a cumulative-period return and no arithmetic converts it to a trailing
+   one.** A-share statements accumulate inside the calendar fiscal year, so a Q1 `roe` is three
+   months of profit over equity and a Q3 `roe` is nine, and one cross section read at one `as_of`
+   mixes both the moment two issuers file on different schedules -- exactly the defect
+   `TRAILING_TWELVE_MONTH_PERIODS` exists to remove from `earnings_yield_ttm`. There the repair is
+   an identity over *sums*; here there is none, because a ratio is not a sum. `roe[P] +
+   roe[December] - roe[P - 4 quarters]` is the trailing return on equity of nothing at all: its
+   three terms carry three different denominators. So reading the column means shipping a
+   mixed-horizon quantity into a cross section, which is the one thing this family may not do.
+2. **The formula behind the number is not stated and cannot be checked from inside the
+   projection.** Nothing in the response says whether the denominator is opening, closing or
+   weighted-average equity, whether the numerator is attributable or consolidated, or whether it
+   is the deducted profit. `fina_indicator` carries no profit column and no equity column, so a
+   reader holding only that endpoint has nothing to reconcile against; the reconciliation exists
+   only because this factor's own two columns exist, which is the argument for reading them.
+3. **`fina_indicator` is the endpoint this repository's statement contract was written about.**
+   It has **no `update_flag`, no `f_ann_date` and no `report_type`**, 81.7% of its keys carry more
+   than one row, and its ambiguous-filing rate is 13.70% as recorded and **11.80%** over
+   `V2-P3-010`'s two disjoint samples, against `income`'s 8.51% and `balancesheet`'s 0.95% on the
+   same securities. And the disagreement reaches this exact number: the two versions of
+   `603049.SH`'s 2024 annual give `roe` as **23.9249 and 176.0751**, a factor of 7.4, under one
+   `ann_date` with nothing in the dataset to order them, and nothing in the response says which is
+   current.
+4. **The refusal-exposure argument was written, measured and points the other way.** The sentence
+   this docstring carried first was that `roe`'s recorded loss -- 5 reads in a 53-security corpus
+   and 33 in a 76-security one, a 6.6x move -- made it the riskier read. `V2-P3-010`'s probe
+   measured all three columns over two disjoint samples, 185 securities, and the ordering is the
+   opposite:
+
+   | column | sample A | sample B | combined |
+   |---|---:|---:|---:|
+   | `fina_indicator.roe` | 16 / 5,491 | 13 / 5,374 | 29 / 10,865 (**0.267%**) |
+   | `n_income_attr_p` | 7 / 5,372 | 17 / 5,223 | 24 / 10,595 (**0.227%**) |
+   | `total_hldr_eqy_exc_min_int` | 15 / 5,250 | 20 / 5,143 | 35 / 10,393 (**0.337%**) |
+
+   The computed route reads **both** of the other two, over **five** contiguous periods, where the
+   served column would have been one read at one period. So computing costs *more* refusal
+   surface, not less -- about 0.56% against 0.27% per filing before the reach is counted at all.
+   The 6.6x move is real and is a fact about samples rather than about this column; it does not
+   make the published column the safer read, and this factor does not claim it does.
+
+**So what it costs is the fourth argument turned around, stated rather than absorbed.** Reading
+two datasets means a refusal in *either* refuses the read; the five-period reach means a security
+with fewer than five contiguous filings is `insufficient_history` here where one
+`fina_indicator.roe` row would have answered; and `V2-P3-018`'s wall is met sooner because the
+whole build refuses on any ambiguity anywhere in the cross section. All three are paid for
+arguments 1 to 3, and 1 is the one that cannot be bought off: a mixed-horizon quantity in a cross
+section is not a factor with a coverage cost, it is a different number per security.
+"""
+
+RETURN_ON_EQUITY_TTM_NOTE: Final[FactorNote] = FactorNote(
+    subject=RETURN_ON_EQUITY_TTM.qualified_key,
+    summary=(
+        "ROE: the trailing twelve months of income.n_income_attr_p divided by "
+        "balancesheet.total_hldr_eqy_exc_min_int at the last period of the same window. It is "
+        "COMPUTED and is deliberately NOT fina_indicator.roe, and the decisive reason is not the "
+        "one V2-P3-009 gave for refusing the published multiples: a published ROE is a "
+        "CUMULATIVE-period return -- three months of profit over equity at Q1, nine at Q3 -- and "
+        "no arithmetic converts it to a trailing one, because the cumulative-to-TTM identity is "
+        "an identity about sums and a ratio is not a sum; roe[P] + roe[December] - roe[P-4] has "
+        "three different denominators and is the trailing return on equity of nothing. Three "
+        "further reasons: the formula behind the number is unstated (opening, closing or "
+        "weighted-average equity; attributable or consolidated; deducted or not) and "
+        "fina_indicator carries neither a profit nor an equity column to reconcile it against; "
+        "fina_indicator is the endpoint with no update_flag, no f_ann_date and no report_type, "
+        "81.7% of its keys carrying more than one row and 11.80% of its filings ambiguous on "
+        "V2-P3-010's own two-sample probe against income's 8.51% and balancesheet's 0.95%, and "
+        "the disagreement reaches this exact number -- the two versions of 603049.SH's 2024 "
+        "annual give roe as 23.9249 and as 176.0751, a factor of 7.4. A FOURTH argument was "
+        "written, measured on a live probe of 185 securities and FALSIFIED in the direction that "
+        "matters, and it is recorded rather than deleted: the refusal exposure of the computed "
+        "route is WORSE, not better. Over two disjoint samples fina_indicator.roe's versions "
+        "disagree on 29 of 10,865 filings (0.267%) against 24 of 10,595 (0.227%) for "
+        "income.n_income_attr_p and 35 of 10,393 (0.337%) for "
+        "balancesheet.total_hldr_eqy_exc_min_int -- and this factor reads BOTH of the latter two "
+        "over FIVE contiguous periods where the served column would have been one read at one "
+        "period, about 0.56% against 0.27% per filing before the reach is counted. What it costs "
+        "is therefore paid rather than hidden: two datasets means a refusal "
+        "in EITHER refuses the read, five contiguous filings means a young issuer is "
+        "insufficient_history where one fina_indicator row would have answered, and V2-P3-018's "
+        "wall is met sooner. The denominator is the CLOSING equity and not "
+        "the average of the window's ends, which departs from the textbook on purpose: "
+        "earnings_yield_ttm and book_to_price already ship and divide this same trailing profit "
+        "and this same closing equity by one market capitalisation, so EP / BP is exactly this "
+        "factor and an averaged denominator would make the repository carry two incompatible "
+        "statements of what a book value is. The bias that buys has a direction and is disclosed: "
+        "closing equity exceeds average equity for an issuer that raised capital during the year, "
+        "so this ROE reads lower than the textbook one for the names that grew equity fastest. A "
+        "non-positive equity is undefined_value and NOT a negative ratio, which is the opposite "
+        "of book_to_price's rule on the same column -- the rule follows the position, because a "
+        "negative denominator turns a profit into a negative return and a loss into a positive "
+        "one." + _QUALITY_AXIS_PROSE + _QUALITY_UNMEASURED_DIRECTION_PROSE
+    ),
+)
+"""`RETURN_ON_EQUITY_TTM`'s prose, out of `factor_id`. See `domain/factor.py::FactorNote`."""
+
+RETURN_ON_CAPITAL_TTM: Final[FactorDefinition] = FactorDefinition(
+    key="return_on_capital_ttm",
+    version=1,
+    family="quality",
+    direction="higher_is_better",
+    required_fields=(
+        FactorField(dataset=INCOME_DATASET, column=CONSOLIDATED_NET_PROFIT_COLUMN),
+        FactorField(dataset=BALANCE_SHEET_DATASET, column=TOTAL_ASSETS_COLUMN),
+        FactorField(dataset=BALANCE_SHEET_DATASET, column=CURRENT_LIABILITIES_COLUMN),
+    ),
+    lookback_sessions=None,
+    max_window_sessions=None,
+    lookback_periods=CAPITAL_TURNOVER_PERIODS,
+    max_window_periods=CAPITAL_TURNOVER_PERIODS,
+)
+"""ROIC: trailing consolidated profit over capital employed, `total_assets - total_cur_liab`.
+
+**Both halves of the textbook ratio are unavailable in this projection and each is replaced by
+the thing it reduces to, on `RETURN_VOL_60`'s terms.** The textbook ROIC is `EBIT * (1 - t)` over
+invested capital, and:
+
+- **The numerator's add-back cannot be done.** `income.ebit` is served and is unusable: it carries
+  **258 of that endpoint's 288** recorded refused field reads and **888 of the 902** ambiguous
+  filings `V2-P3-010`'s own two-sample probe found (8.38% of 10,595), with a worst case of
+  `-7,579,086` against `+3,427,524` for one filing of `603333.SH` -- opposite signs on the number
+  the ratio is about. Reconstructing it needs interest expense, and 财务费用 is in none of the ten
+  stored `income` columns. What the projection does carry is the identity `n_income = total_profit
+  - income_tax`, which is the after-tax profit of the whole consolidated entity -- i.e. NOPAT less
+  the after-tax net interest that cannot be added back.
+  `tests/unit/test_factor_quality_family.py::
+  test_the_consolidated_profit_is_the_pre_tax_profit_less_the_tax_on_real_rows` asserts that
+  identity on real served rows **with its own boundary**: it holds on every period from 2007
+  onward over the six securities probed (446 rows, worst relative residual 8.9e-7) and fails
+  before it, because the pre-2007 CAS reported 净利润 already net of minority interest. That is
+  what makes "the missing term is exactly interest" a measurement rather than a reading of the
+  statement's shape, and it is stated with the boundary rather than as a law.
+- **The denominator's operating form cannot be stated either.** Invested capital in the operating
+  approach is total assets less the *non-interest-bearing* current liabilities, and this
+  projection carries no split of `total_cur_liab` into its interest-bearing and operating parts.
+  `total_assets - total_cur_liab` is capital employed -- equity at every level plus the
+  non-current liabilities -- which is the widest base this projection can state exactly, and it is
+  the base the *consolidated* profit is the return to. That pairing is why the numerator is
+  `n_income` and not `n_income_attr_p`.
+
+So this factor understates a NOPAT-based ROIC for any issuer with non-current borrowings, by the
+after-tax interest on them, and the understatement is largest for the most leveraged names. That
+is a bias with a direction and it is disclosed rather than bounded, because nothing here can
+measure it.
+
+**It is blind to financial issuers, by construction and not by accident.** A bank's balance sheet
+carries no current / non-current split, so `total_cur_liab` is null and the read is
+`input_missing` -- the same shape as `GROSS_MARGIN_STABILITY`'s null `oper_cost`, and the right
+answer for a company type whose "capital employed" is not a defined quantity.
+"""
+
+RETURN_ON_CAPITAL_TTM_NOTE: Final[FactorNote] = FactorNote(
+    subject=RETURN_ON_CAPITAL_TTM.qualified_key,
+    summary=(
+        "ROIC: the trailing twelve months of income.n_income divided by capital employed, which "
+        "is balancesheet.total_assets less balancesheet.total_cur_liab at the last period of the "
+        "same window. BOTH halves of the textbook ratio are unavailable in this projection and "
+        "each is replaced by what it reduces to, which is RETURN_VOL_60's rule rather than a "
+        "rename. The numerator should be NOPAT = EBIT * (1 - t): income.ebit is served and is "
+        "unusable at 258 of that endpoint's 288 refused field reads, worst case -7,579,086 "
+        "against +3,427,524 for one 603333.SH filing -- opposite signs on the very quantity -- "
+        "and no stored column carries interest expense, so the add-back cannot be reconstructed. "
+        "n_income is total_profit less income_tax, which is the after-tax profit of the whole "
+        "consolidated entity, i.e. NOPAT less the after-tax net interest; that identity is "
+        "asserted on real stored rows rather than read off the statement's shape. The denominator "
+        "should be total assets less the NON-INTEREST-BEARING current liabilities, and this "
+        "projection carries no split of total_cur_liab, so capital employed -- equity at every "
+        "level plus non-current liabilities -- is the widest base it can state exactly. The "
+        "consequence is a bias with a direction and it is disclosed rather than bounded: this "
+        "factor understates a NOPAT-based ROIC by the after-tax interest on non-current "
+        "borrowings, most for the most leveraged names. The numerator is n_income and NOT "
+        "n_income_attr_p precisely because capital employed is financed by the parent's owners, "
+        "the minority holders and the non-current creditors together, and the two columns are "
+        "different numbers on real rows -- 600739.SH's 2024 annual gives 664,195,391.66 against "
+        "209,556,865.25. A capital employed that is not strictly positive is undefined_value "
+        "rather than a signed ratio. It is blind to banks, insurers and brokers by construction: "
+        "a financial balance sheet has no current / non-current split, total_cur_liab is null and "
+        "the read is input_missing, which is the right answer for a company type whose capital "
+        "employed is not a defined quantity."
+        + _QUALITY_AXIS_PROSE
+        + _QUALITY_UNMEASURED_DIRECTION_PROSE
+    ),
+)
+"""`RETURN_ON_CAPITAL_TTM`'s prose, out of `factor_id`."""
+
+GROSS_MARGIN_STABILITY: Final[FactorDefinition] = FactorDefinition(
+    key="gross_margin_stability",
+    version=1,
+    family="quality",
+    direction="lower_is_better",
+    required_fields=(
+        FactorField(dataset=INCOME_DATASET, column=TOTAL_REVENUE_COLUMN),
+        FactorField(dataset=INCOME_DATASET, column=OPERATING_COST_COLUMN),
+    ),
+    lookback_sessions=None,
+    max_window_sessions=None,
+    lookback_periods=GROSS_MARGIN_PERIODS,
+    max_window_periods=GROSS_MARGIN_PERIODS,
+)
+"""毛利率稳定性: the dispersion of four trailing-twelve-month gross margins.
+
+**The value is the instability and the key names the property, which is a deliberate pairing
+rather than a slip.** Stability is not a number; the dispersion of the thing whose stability is
+being asked about is, and `direction="lower_is_better"` is the field that says which end is the
+good one -- exactly what `domain/factor.py::FactorDirection` exists for. The alternative was to
+report `-stdev` so that "higher is better" reads literally, and it was refused because negating a
+dispersion puts a sign on the value whose entire content is already in `direction`, and because
+`V2-P3-005` reads that field to sign an IC.
+
+**A standard deviation and not a coefficient of variation.** A gross margin is already
+dimensionless, so the usual reason to divide by the mean does not apply -- and the mean is the
+wrong thing to divide by here for the reason `EARNINGS_YIELD_TTM` is a yield rather than a
+multiple: an issuer whose average margin is near zero would get an explosive coefficient, and one
+whose average margin is negative would get a *negative* one -- ranking the most erratic loss-maker
+below every stable name in a `lower_is_better` cross section. `E/P` is monotone through zero and
+`stdev / mean` is not, and `tests/unit/test_factor_quality_family.py::
+test_a_negative_average_margin_still_has_a_positive_dispersion` drives both halves on one window.
+
+See `GROSS_MARGIN_PERIODS` for why eight contiguous filings and why the trailing-twelve-month
+margin rather than the cumulative or the single-quarter one, and `GROSS_MARGIN_OBSERVATIONS` for
+why four overlapping observations.
+"""
+
+GROSS_MARGIN_STABILITY_NOTE: Final[FactorNote] = FactorNote(
+    subject=GROSS_MARGIN_STABILITY.qualified_key,
+    summary=(
+        "Gross-margin stability: the Bessel-corrected sample standard deviation of four "
+        "trailing-twelve-month gross margins, each (trailing total_revenue - trailing oper_cost) "
+        "/ trailing total_revenue, taken at four consecutive report-period ends off a window of "
+        "eight contiguous filings. The VALUE is the instability and the KEY names the property "
+        "the roadmap asks for; direction=lower_is_better is the field that says which end is "
+        "good, and reporting a negated dispersion was refused because the sign would duplicate "
+        "that field. The margin is trailing and not cumulative-as-filed and not single-quarter, "
+        "because a stability is a dispersion of something comparable: a Q1 cumulative margin is a "
+        "three-month margin and a Q3 one is nine months, and a single-quarter series is dominated "
+        "by seasonality by construction -- a retailer whose fourth quarter is its best would "
+        "score as unstable every year of its life. Every trailing observation spans a full year, "
+        "so the seasonal term is in all four equally and cancels out of their dispersion. THE "
+        "EIGHT-PERIOD WINDOW IS WHERE V2-P3-009's TTM HELPER STOPS APPLYING, AND ITS FAILURE "
+        "MODE THERE IS NOT FAIL-CLOSED: the identity finds the fiscal year end inside "
+        "periods[:-1] and refuses unless there is exactly one, and periods[:-1] of a contiguous "
+        "eight is SEVEN consecutive quarters, which holds two Decembers when the window ends at "
+        "Q1, Q2 or Q3 -- refused -- and exactly ONE when it ends at Q4, where it answers a number "
+        "covering about two years of flow rather than one. So the identity is applied to "
+        "five-period SLICES of the eight -- four of them, at four consecutive quarter ends -- and "
+        "each slice's own periods[:-1] is four CONSECUTIVE quarters, of which exactly one ends a "
+        "year at every alignment. Four is the fewest observations at which a Bessel-corrected "
+        "estimator is doing what its name says, and each further one costs a contiguous filing "
+        "whose ambiguity refuses the whole build rather than one security (V2-P3-018). The four "
+        "overlap by three quarters each, so this is a drift measure and not four independent "
+        "draws. A standard deviation and not a coefficient of variation: a gross margin is "
+        "already dimensionless, and dividing by a mean that can be near zero or negative would "
+        "give an explosive or sign-inverted number for exactly the issuers a margin factor is "
+        "asked about. A slice whose trailing revenue is not strictly positive is undefined_value. "
+        "It is input_missing for banks, insurers and brokers, because a financial publishes no "
+        "cost of sales and oper_cost is null -- which is the right answer for a company type "
+        "whose gross margin is not a defined quantity."
+        + _QUALITY_AXIS_PROSE
+        + _QUALITY_UNMEASURED_DIRECTION_PROSE
+    ),
+)
+"""`GROSS_MARGIN_STABILITY`'s prose, out of `factor_id`."""
+
+ACCRUALS_TTM: Final[FactorDefinition] = FactorDefinition(
+    key="accruals_ttm",
+    version=1,
+    family="quality",
+    direction="lower_is_better",
+    required_fields=(
+        FactorField(dataset=INCOME_DATASET, column=CONSOLIDATED_NET_PROFIT_COLUMN),
+        FactorField(dataset=CASH_FLOW_DATASET, column=OPERATING_CASH_FLOW_COLUMN),
+        FactorField(dataset=BALANCE_SHEET_DATASET, column=TOTAL_ASSETS_COLUMN),
+    ),
+    lookback_sessions=None,
+    max_window_sessions=None,
+    lookback_periods=CAPITAL_TURNOVER_PERIODS,
+    max_window_periods=CAPITAL_TURNOVER_PERIODS,
+)
+"""应计项: the trailing profit that did not arrive as operating cash, scaled by total assets.
+
+**The cash-flow definition and not the balance-sheet one, and the reason is that the balance-sheet
+one is provably contaminated in this projection.** Sloan's accrual is the part of reported
+earnings that is not backed by cash, and it has two standard constructions:
+
+- **`net income - operating cash flow`**, which is what this factor takes. It is one subtraction
+  between two figures the endpoints publish directly, and the quantity it names is the accrual
+  concept itself.
+- **The change in non-cash working capital**, which would be `(total_cur_assets - money_cap -
+  total_cur_liab)` differenced across a year. All four columns are stored, so this was buildable
+  -- and it is wrong here, because `total_cur_liab` includes short-term borrowings and this
+  projection carries no column that removes them. The measure would then move with an issuer's
+  *financing* decisions, and the depreciation add-back the textbook version also needs is in none
+  of the stored columns either.
+
+**`free_cashflow` is refused and needs no argument beyond the census**: it carries **all 450** of
+`cashflow`'s recorded refused field reads and **all 1,643** of the ambiguous filings
+`V2-P3-010`'s two-sample probe found, with a worst case of `+316,026,934` against `-294,173,456`
+for one filing of `300002.SZ`. `n_cashflow_act` is the column this factor reads instead, and its
+recorded refusal count is exactly **`0`** -- which is why it was re-measured rather than quoted;
+see `OPERATING_CASH_FLOW_COLUMN` and this module's docstring section "The quality family".
+
+**The scaler is `total_assets` at the window's last period.** Sloan scales by *average* total
+assets; the closing figure is taken for `CAPITAL_TURNOVER_PERIODS`' reason, so that every ratio in
+this family divides by a stock read at one point in time rather than by a two-point average of a
+path nothing here can see. `cashflow` is the endpoint with the highest ambiguous-filing rate of the
+four -- 450 of 2,849 as recorded and **1,643 of 9,602 (17.11%)** over `V2-P3-010`'s own two
+disjoint samples -- so this is the factor of the family with the widest refusal surface, and it
+reads three datasets where the others read two.
+"""
+
+ACCRUALS_TTM_NOTE: Final[FactorNote] = FactorNote(
+    subject=ACCRUALS_TTM.qualified_key,
+    summary=(
+        "Accruals: the trailing twelve months of income.n_income less the trailing twelve months "
+        "of cashflow.n_cashflow_act, divided by balancesheet.total_assets at the last period of "
+        "the same window -- the part of reported profit that did not arrive as operating cash. "
+        "The cash-flow construction and NOT the balance-sheet one, because the balance-sheet one "
+        "is provably contaminated in this projection: the change in non-cash working capital "
+        "would be (total_cur_assets - money_cap - total_cur_liab) differenced across a year, all "
+        "four columns are stored, and total_cur_liab includes short-term borrowings that no "
+        "stored column removes -- so the measure would move with an issuer's financing decisions "
+        "-- while the depreciation add-back the textbook version also needs is in none of the "
+        "stored columns. free_cashflow is refused on the census alone: it carries ALL 450 of "
+        "cashflow's refused field reads, worst case +316,026,934 against -294,173,456 for one "
+        "300002.SZ filing -- and over V2-P3-010's own two disjoint samples EVERY one of "
+        "cashflow's 1,643 ambiguous filings disagrees about it. n_cashflow_act's own recorded "
+        "refusal count is exactly 0 over 14,245 field reads, which is the number "
+        "domain/financial_statements.py says to distrust -- total_assets moved from 0 to 18 "
+        "between two samples of one day -- so V2-P3-010 measured the column itself rather than "
+        "quoting the zero, and it is 5 of 9,602 filings (0.052%) rather than none. The numerator "
+        "is n_income and not "
+        "n_income_attr_p because an operating cash flow is the whole consolidated entity's, and "
+        "total_assets is the whole entity's too, so all three terms share one reporting boundary. "
+        "This is the factor of the family with the widest refusal surface: it reads three "
+        "datasets where the others read two, and cashflow's ambiguous-filing rate is the highest "
+        "of the four endpoints at 450 of 2,849 as recorded and 1,643 of 9,602 (17.11%) as "
+        "measured. A non-positive total_assets is "
+        "undefined_value. The direction is the accruals anomaly's conventional prior -- lower "
+        "accruals are taken to be the better earnings -- and a negative value is computed and "
+        "negative, because an issuer whose operating cash exceeds its reported profit is the case "
+        "this factor exists to find." + _QUALITY_AXIS_PROSE + _QUALITY_UNMEASURED_DIRECTION_PROSE
+    ),
+)
+"""`ACCRUALS_TTM`'s prose, out of `factor_id`."""
+
+
 FACTOR_DEFINITIONS: Final[FactorRegistry] = FactorRegistry(
     (
         REVERSAL_1D,
@@ -2361,6 +3224,10 @@ FACTOR_DEFINITIONS: Final[FactorRegistry] = FactorRegistry(
         EARNINGS_YIELD_TTM,
         BOOK_TO_PRICE,
         SALES_YIELD_TTM,
+        RETURN_ON_EQUITY_TTM,
+        RETURN_ON_CAPITAL_TTM,
+        GROSS_MARGIN_STABILITY,
+        ACCRUALS_TTM,
     ),
     notes=(
         REVERSAL_1D_NOTE,
@@ -2375,9 +3242,13 @@ FACTOR_DEFINITIONS: Final[FactorRegistry] = FactorRegistry(
         EARNINGS_YIELD_TTM_NOTE,
         BOOK_TO_PRICE_NOTE,
         SALES_YIELD_TTM_NOTE,
+        RETURN_ON_EQUITY_TTM_NOTE,
+        RETURN_ON_CAPITAL_TTM_NOTE,
+        GROSS_MARGIN_STABILITY_NOTE,
+        ACCRUALS_TTM_NOTE,
     ),
 )
-"""Every factor this build declares, and the prose about it. `V2-P3-010`..`011` extend both."""
+"""Every factor this build declares, and the prose about it. `V2-P3-011` extends both."""
 
 FACTOR_EVALUATORS: Final[Mapping[str, FactorEvaluator]] = MappingProxyType(
     {
@@ -2393,6 +3264,10 @@ FACTOR_EVALUATORS: Final[Mapping[str, FactorEvaluator]] = MappingProxyType(
         EARNINGS_YIELD_TTM.qualified_key: _earnings_yield_ttm,
         BOOK_TO_PRICE.qualified_key: _book_to_price,
         SALES_YIELD_TTM.qualified_key: _sales_yield_ttm,
+        RETURN_ON_EQUITY_TTM.qualified_key: _return_on_equity_ttm,
+        RETURN_ON_CAPITAL_TTM.qualified_key: _return_on_capital_ttm,
+        GROSS_MARGIN_STABILITY.qualified_key: _gross_margin_stability,
+        ACCRUALS_TTM.qualified_key: _accruals_ttm,
     }
 )
 """Every factor this build can actually compute, keyed by `key/vN`.

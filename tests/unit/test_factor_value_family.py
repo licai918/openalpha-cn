@@ -245,13 +245,22 @@ def test_the_three_definitions_declare_the_reaches_and_the_axes_the_family_argue
     assert BOOK_TO_PRICE.max_window_periods == 1
 
 
-def test_the_value_family_is_the_first_shipped_factor_on_both_axes_at_once() -> None:
+def test_the_value_family_is_the_only_shipped_factor_on_both_axes_at_once() -> None:
     """The claim the family's own prose makes about the registry, held against the registry.
 
     Every factor shipped before `V2-P3-009` reads sessions and no filing, so the report-period
     reach fields had no production reader at all. That is what makes these three the first real
     users of the second axis, and it is a property of `FACTOR_DEFINITIONS` rather than of a
     docstring -- so it is asserted there, in both directions.
+
+    **The complement half of this test has been narrowed once, by `V2-P3-010`, and it is worth
+    saying which half.** It used to assert that every *other* shipped factor declares no
+    report-period reach at all, which was the same statement while every other factor was
+    session-only. `V2-P3-010`'s quality family is period-**only**, so that form is false and the
+    true statement is the one this test's name always made: no other factor is on both axes, and
+    every other one is on exactly one. `tests/unit/test_factor_quality_family.py::
+    test_the_quality_family_is_the_first_shipped_factor_on_the_period_axis_alone` is the other
+    partition of the same registry, asserted from that family's side.
     """
     on_both = {
         definition.qualified_key
@@ -267,8 +276,9 @@ def test_the_value_family_is_the_first_shipped_factor_on_both_axes_at_once() -> 
     for definition in FACTOR_DEFINITIONS.definitions:
         if definition.qualified_key in on_both:
             continue
-        assert definition.lookback_periods is None
-        assert definition.max_window_periods is None
+        assert (definition.lookback_sessions is None) != (definition.lookback_periods is None)
+        assert (definition.max_window_sessions is None) == (definition.lookback_sessions is None)
+        assert (definition.max_window_periods is None) == (definition.lookback_periods is None)
 
 
 def test_the_two_yield_factors_differ_only_in_the_income_column_they_name() -> None:

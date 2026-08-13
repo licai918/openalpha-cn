@@ -196,7 +196,7 @@ P3 结束即可独立使用（Jupyter 直连面板 + 因子）
 | `V2-P3-007` | 换手 / 覆盖率 / 容量报告 | 技 | 006 | 让统计上好看但不可实施的信号显形 | S22 |
 | `V2-P3-008` | 相关性与冗余分析 | 技 | 005 | — | S23 |
 | `V2-P3-009` | 因子家族①价值：EP / BP / SP / EPcut | 技 | 004 | 已交付 EP / BP / SP（本仓库第一批双轴出厂因子）；**EPcut 未交付**，扣非净利不在任何一个统计投影里，硬前置是 `V2-P3-017`，见下方小节 | S16 |
-| `V2-P3-010` | 因子家族②质量：ROE / ROIC / 毛利率稳定性 / 应计项 | 技 | 004 | — | S16 |
+| `V2-P3-010` | 因子家族②质量：ROE / ROIC / 毛利率稳定性 / 应计项 | 技 | 004 | 已交付四个：`return_on_equity_ttm` / `return_on_capital_ttm` / `gross_margin_stability` / `accruals_ttm`，**本仓库第一批只在报告期轴上的出厂因子**；ROE **不读** `fina_indicator.roe`，理由与实测见下方小节 | S16 |
 | `V2-P3-011` | 因子家族③成长：营收同比 / 净利同比 / 同比加速度 | 技 | 004 | — | S16 |
 | `V2-P3-012` | 因子家族④动量与反转：20/60/120 日 + 行业相对 + 5 日反转 | 技 | 004 | — | S16 |
 | `V2-P3-013` | 因子家族⑤波动与流动性：残差波动 / 特质波动 / 换手率 / Amihud | 技 | 004 | — | S16 |
@@ -945,8 +945,10 @@ max **1.6738**，**跨两个数量级**。而它的来源是合成的 ——
 （`validate_each_axis_is_declared_exactly_when_it_is_read`）。
 两个方向都会红：为没读的轴声明 reach，就是一个 `factor_id` 里没有任何分支能读的数
 （`001` 拒绝报告期维度的原话「a field with no reader」）；为读了的轴不声明，就是无界窗口。
-`V2-P3-010` 的 ROE 只读 `fina_indicator.roe`，因此**不声明会话 reach** —— 这是把
-`lookback_sessions` 改成可空的唯一理由。
+`V2-P3-010` 的四个质量因子只读财报、**不声明会话 reach** —— 这是把 `lookback_sessions`
+改成可空的唯一理由，而且它们是本仓库第一批真正走这条分支的出厂因子。
+（本行原文写的是「ROE 只读 `fina_indicator.roe`」；`010` 交付时论证并实测否掉了那个读法，
+理由见下方 `V2-P3-010` 小节 —— 结论不变，只是列换了。）
 
 **同比不是第三个维度**：`lookback_periods=5` 的窗口里 `[-5]` 就是去年同期，加速度再退一步；
 让 `window[-5]` 真的是去年同期的，是 `max_window_periods == lookback_periods`
@@ -1191,9 +1193,152 @@ widened_projection : rows 7686  filings 4423  collapsed_rows 2566  ambiguous 697
 
 **量级不是边角**：`009` 复审实测 `income` 的歧义 filing 占 **8.2% / 8.7%**
 （`domain/financial_statements.py` 记录 8.15%），`fina_indicator` 记录 **13.7%**；
-而 `V2-P3-010` 的 ROE 要读的 `fina_indicator.roe` 在既有记录里是 53 票丢 5、**76 票丢 33**。
-**`010` / `011` 会比 `009` 更早、更频繁地撞上同一堵墙**，所以这条先立，
-免得 `010` 开工时再论证一遍。
+`009` 当时据此预判「`V2-P3-010` 的 ROE 要读 `fina_indicator.roe`」会更早撞墙。
 
-声明落在 `panel_factors._read_dataset` 与该模块 docstring 的 "The value family" 一节，
-两处都指向本条。
+**`010` 交付后这段的前提换了，结论更强。** 它没有读 `fina_indicator.roe`（见下方小节），
+但四个因子里 `accruals_ttm` 读**三个**财报数据集 × 五个连续期次，
+`gross_margin_stability` 读**八个**连续期次 —— 每一个 `(filing, column)` 都能拒掉整个横截面。
+`010` 自己的两份不相交实测（185 只票）给出的歧义 filing 率是
+`income` 8.51% / `balancesheet` 0.95% / `cashflow` **17.11%** / `fina_indicator` 11.80%，
+其中 `cashflow` 比记录的 15.80% 更差，而 `accruals_ttm` 正好读它。
+**所以 `010` / `011` 比 `009` 更早、更频繁地撞上同一堵墙这句话仍然成立，只是理由从「读哪一列」
+换成了「读几列 × 几期」。**
+
+声明落在 `panel_factors._read_dataset`、该模块 docstring 的 "The value family" 与
+"The quality family" 两节，以及
+`tests/integration/panel/test_quality_family.py::
+test_the_engine_answers_a_column_the_duplicate_rows_agree_about_and_refuses_one_they_do_not`，
+都指向本条。
+
+
+### `V2-P3-010` 交付记录（2026-08-13）：质量家族四个因子，ROE **不读** `fina_indicator.roe`
+
+出厂 `return_on_equity_ttm` / `return_on_capital_ttm` / `gross_margin_stability` /
+`accruals_ttm`，family = `quality`，**四个都只在报告期轴上**（`lookback_sessions is None`），
+是本仓库第一批走这条分支的出厂因子。
+
+#### 本 issue 唯一必须自己论证的题：ROE 自己算还是读上游
+
+`V2-P3-009` 与本文档此前都写着「`V2-P3-010` 的 ROE 只读 `fina_indicator.roe`」。
+**否掉了，决定性理由只有一条，而且它跟 `009` 拒绝 `pe`/`pb`/`ps` 的理由不是同一条**：
+
+**published ROE 是「本财年累计」口径的收益率，而且没有任何算术能把它转成 TTM。**
+A 股财报在自然年内累计，所以 Q1 的 `roe` 是三个月利润 / 净资产、Q3 是九个月，
+一个横截面上只要两只票报送节奏不同就混了两种口径 —— 这正是
+`TRAILING_TWELVE_MONTH_PERIODS` 为 EP / SP 解决的缺陷。区别在于 **这里无解**：
+cumulative→TTM 是一条关于**和**的恒等式，而比率不是和，
+`roe[P] + roe[12-31] − roe[P−4]` 的三项分母互不相同，不是任何东西的 TTM 净资产收益率。
+
+实测（2026-08-13 活探针，`600519.SH` 的 2024 四期）：
+`roe` = 10.5688 / 19.2038 / 26.8330 / 38.4283，
+对应 `n_income_attr_p` = 240.65 / 416.96 / 608.28 / 862.28 亿 ——
+`roe` 各期占全年的比例（0.275 / 0.500 / 0.698）与累计利润占全年的比例
+（0.279 / 0.484 / 0.705）逐期吻合到 0.02 以内。它跟着累计利润走，不是四个对同一个数的估计。
+
+第二条理由：**公式不可核对**。响应里没有任何一列说分母是期初、期末还是加权平均净资产，
+分子是归母还是合并、是否扣非；`fina_indicator` 本身既没有利润列也没有净资产列，
+所以只拿这个端点的读者无从对账。实测把 published `roe` 与期末净资产口径
+`n_income_attr_p / total_hldr_eqy_exc_min_int × 100` 对比（2018 起的各年年报）：
+`600519.SH` 差 2.0%–9.5%，`000001.SZ` 差 2.3%–11.7%，
+`000002.SZ` 差 1.4%–**36.7%**（2025 年报：published `-55.4220` vs 期末口径 `-75.7507`）。
+
+第三条：`fina_indicator` 是**没有 `update_flag` / `f_ann_date` / `report_type`** 的那个端点，
+81.7% 的键多行，`603049.SH` 2024 年报的两个版本给出的 `roe` 就是 **23.9249 与 176.0751**。
+
+**第四条被自己的实测证伪，保留原文并标注。** 原本要写的是「`roe` 记录里 53 票丢 5、76 票丢 33，
+所以读它更危险」。实测两份不相交样本（185 只票）之后顺序是反的：
+`fina_indicator.roe` 29 / 10,865（**0.267%**），
+`income.n_income_attr_p` 24 / 10,595（**0.227%**），
+`balancesheet.total_hldr_eqy_exc_min_int` 35 / 10,393（**0.337%**）——
+自己算要**同时**读后两列、且读**五期**，上游列只需一列一期。
+**自己算的拒绝面更大（约 0.56% vs 0.27%，还没乘 reach），这条代价是为前三条付的。**
+
+#### 活探针实测（2026-08-13，两份不相交样本，93 + 92 = 185 只票）
+
+每 60 只取一只（offset 0 与 offset 30），四个端点 offset 分页取尽，
+按 `_read_dataset` 用的「**投影内相等则折叠**」规则统计：
+
+| 端点 | filings | 歧义 filing | 实测 | 既有记录 |
+|---|---:|---:|---:|---:|
+| `income` | 10,595 | 902 | 8.51% | 8.15% |
+| `balancesheet` | 10,393 | 99 | 0.95% | 1.29% |
+| `cashflow` | 9,602 | 1,643 | **17.11%** | 15.80% |
+| `fina_indicator` | 10,865 | 1,282 | 11.80% | 13.70% |
+
+| 列 | A | B | 合计 | 既有记录 |
+|---|---:|---:|---:|---|
+| `income.n_income_attr_p` | 7 / 5,372 | 17 / 5,223 | 24 / 10,595 = **0.227%** | 0.189% |
+| `income.n_income` | 7 | 17 | 24 / 10,595 = **0.227%** | — |
+| `income.total_revenue` | 11 | 9 | 20 / 10,595 = 0.189% | 0.123% |
+| `income.oper_cost` | 14 | 11 | 25 / 10,595 = **0.236%** | — |
+| `income.ebit`（**不读**） | 464 | 424 | 888 / 10,595 = 8.38% | 288 里 258 |
+| `balancesheet.total_hldr_eqy_exc_min_int` | 15 | 20 | 35 / 10,393 = **0.337%** | 0.203% |
+| `balancesheet.total_assets` | 16 | 19 | 35 / 10,393 = **0.337%** | **0**，再测 18 |
+| `balancesheet.total_cur_liab` | 4 | 10 | 14 / 10,393 = 0.135% | — |
+| `cashflow.n_cashflow_act` | 1 | 4 | 5 / 9,602 = **0.052%** | **0** |
+| `cashflow.free_cashflow`（**不读**） | 835 | 808 | 1,643 / 9,602 = 17.11% | 450 里 450 |
+| `fina_indicator.roe`（**不读**） | 16 | 13 | 29 / 10,865 = 0.267% | 5，再测 33 |
+
+**两个记录里的 `0` 都被证伪**：`total_assets` 35（它此前已经从 `0` 动到过 18，这是第二次），
+`n_cashflow_act` 5（第一次）。两个绝对量都不大，但都不是零 ——
+`domain/financial_statements.py` 自己写的「那个 `0` 才是最该怀疑的」再次成立，
+而且这次两个被怀疑的都是本家族要读的列。
+**`009` 复审那三列在这两份样本上也都比它自己测的高**，所以那组数同样是样本性质。
+`cashflow` 比记录的更差，而 `accruals_ttm` 正好读它 —— 且它那 1,643 个歧义 filing
+**每一个**都是 `free_cashflow` 的分歧。
+
+#### 另外三题的答案
+
+- **ROIC 的分子分母**：`ebit` 实测占 `income` 歧义的 8.38 个百分点（888 / 10,595），
+  且没有任何一列携带利息费用，所以 NOPAT 的加回**做不到**。投影里能精确表述的最宽资本口径是
+  **capital employed = `total_assets` − `total_cur_liab`**（全部权益 + 非流动负债），
+  与之配对的收益是**合并**净利 `n_income`（不是归母），
+  因为这个资本由母公司股东、少数股东与非流动债权人共同提供。
+  代价写明而不是绕开：**本因子相对 NOPAT 口径低估，低估额是非流动借款的税后利息，杠杆越高越低估。**
+  「缺的那一项恰好是利息」不是读报表形状读出来的，是实测的恒等式
+  `n_income = total_profit − income_tax`：六只票 2007 年起的 446 行最大相对残差 **8.9e-7**，
+  其中五只到机器精度；2007 之前不成立（`000001.SZ` 2005H1 差 31.5%、`000002.SZ` 1996H1 差 5.9%），
+  那是旧准则下净利润已扣少数股东损益。断言只写在现代行上，并把边界一起写进去。
+- **毛利率稳定性**：统计量取**样本标准差**（不是变异系数 —— 毛利率本身无量纲，
+  而均值可能接近零或为负，`stdev / mean` 会爆炸或反号）。
+  观测量取**滚动十二个月毛利率**：按期次报的累计毛利率混三个月与九个月口径，
+  单季毛利率则天然被季节性支配（Q4 强的零售商会年年被判为不稳定），
+  只有 TTM 口径每个观测都跨满一年、季节项在四个观测里等量出现从而在离散度里抵消。
+  `k` 个 TTM 观测要 `k + 4` 期，取 `k = 4` ⇒ **`lookback_periods = max_window_periods = 8`**。
+  方向 `lower_is_better`；key 叫「stability」而值是它的离散度，理由写在定义 docstring 里。
+- **多个 12-31 的窗口怎么算 TTM**：**不把恒等式喂给整个八期窗**，而是喂给它的**五期切片**。
+  这里发现一件比 `009` 记录的更糟的事：`periods[:-1]` 对连续八期是**七个**连续季度，
+  含 **1 或 2** 个 12-31 —— 窗口结束在 Q1/Q2/Q3 时是 2 个，`_trailing_twelve_month_sum` 返回 `None`；
+  **结束在 Q4 时只有 1 个，它会返回一个数，而那个数是错的**
+  （等于真 TTM 加上「前一个完整财年减掉该年 Q1」）。也就是说直接复用**不是 fail-closed**，
+  四个对齐里有一个会自信地答错。切片后每个切片的 `[:-1]` 都是四个**连续**季度，
+  任何对齐下都恰好含一个年末。四个对齐全部枚举在
+  `tests/unit/test_factor_quality_family.py::
+  test_the_whole_eight_period_window_is_no_trailing_year_and_does_not_always_refuse`。
+- **应计项**：取**现金流口径** `(TTM n_income − TTM n_cashflow_act) / total_assets`。
+  资产负债表口径（非现金营运资本变动）在本投影里**可证被污染**：
+  `total_cur_liab` 含短期借款而没有任何一列能扣掉它，指标会随融资决策走；
+  折旧加回也不在任何一列里。`free_cashflow` 直接否掉（1,643 / 1,643）。
+  `n_cashflow_act` 记录里的 `0` 见上，实测 5 / 9,602。
+
+#### 两个因子对金融企业是瞎的，而且是实测的
+
+银行 / 保险 / 券商不披露营业成本，也不做流动/非流动划分。2015 年起的每一个已存期次上：
+`total_cur_liab` 在 `000001.SZ` 68/68、`601318.SH` 67/67、`600030.SH` 64/64 为空
+（最后一个非空期次分别是 2006-03-31 / 2006-09-30 / 2006-09-30），
+`oper_cost` 在这三只是 59/59、57/57、56/56 为空；
+同期两只 `comp_type=1` 工业股（`600519.SH` / `000002.SZ`）两列都是 0/62 与 0/63 为空。
+所以 `return_on_capital_ttm` 与 `gross_margin_stability` 对这三类给 `input_missing`，
+这是「资本回报率 / 毛利率对这个公司类型本就无定义」的正确答案，
+另外两个因子在同一次 build 里照常 `computed`。
+
+#### 与 `009` 的一条恒等式
+
+`earnings_yield_ttm / book_to_price` **就是** `return_on_equity_ttm`（市值约掉）。
+这正是分母取窗口末期净资产而不是两端平均的理由：`009` 的两个因子已经出厂，
+改成平均会让同一个 build 里对「账面价值」有两种互不相容的说法。
+偏差方向写明：当期内增发过股本的公司，期末净资产大于平均净资产，
+**本 ROE 因此比教科书口径偏低**，回购则偏高。
+恒等式在真引擎上（三个不同 reach 形成的三个窗口）由
+`tests/integration/panel/test_quality_family.py::
+test_the_return_on_equity_is_the_earnings_yield_over_the_book_to_price` 钉住。
