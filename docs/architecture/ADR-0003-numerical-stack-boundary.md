@@ -327,3 +327,61 @@ both of them shapes this repository has paid for before:
 
 The manifest identity is byte-identical before and after both fixes, which is what makes them
 optimisations rather than changes.
+
+## Update, 2026-08-12 (`V2-P3-005`): the rank correlation did not need it either
+
+The Decision above stands unchanged and this section adds no new one. What it records is that the
+**second** of the two workloads the Context named -- "rank correlation (-> a float information
+coefficient)" -- has now been written, and the runtime dependency set is still the nine it was.
+That closes both halves of the Context's claim: `V2-P3-004`'s section above answered the
+regression, this one answers the correlation, and neither needed numpy or pandas.
+
+`openalpha_cn.backtest.factor_ic` is a standard-library leaf. One `as_of`'s IC is one `sorted()`
+per side plus three linear passes; the sort is the whole of the `O(n log n)`, and there is no
+matrix, no broadcast and no solve anywhere in the module. Measured at ADR-0002's own whole-market
+cross section of **5,534 securities**, best of 25 runs, on the machine that produced the
+`V2-P3-004` figures above:
+
+| step, n = 5,534 | time |
+|---|---|
+| `_pearson` (three linear passes, no sort) | **0.92 ms** |
+| `average_ranks` on a continuous cross section (one sort) | 1.30 ms |
+| `average_ranks` on a heavily tied one (21 distinct values) | 0.70 ms |
+| `spearman` end to end (two `average_ranks` + one `_pearson`) | **3.56 ms** |
+| a whole year of daily as_ofs at spearman (244 cross sections) | 0.90 s |
+| a five-rung decay curve over that year (244 x 5) | 4.48 s |
+
+The scaling is the `n log n` the sort predicts, and it is measured rather than asserted:
+per-element cost rises 0.539 us -> 0.655 us -> 0.836 us across `n = 500`, `5,534` and `55,340`, a
+1.55x rise over a 110x rise in `n`.
+
+Two comparisons decide the question, and neither is close:
+
+- **Against the read that feeds it.** `compute_factor` over a 675,148-row partition is 2.24 s
+  (the section above). One IC on the cross section that read produces is 3.56 ms, **630x
+  smaller**. A year of them is 0.90 s, still under half the cost of the single read.
+- **Against the write beside it.** `write_panel_batch` for the same partition spans 56.7 s to
+  617.9 s across the five measurements this ADR declines to reduce to one number. A whole year of
+  rank ICs is 0.90 s, so even the smallest of the five is **63x** the entire year's correlation
+  work.
+
+Paying the Consequences above for 3.56 ms would buy: two runtime dependencies, an explicit
+`float(...)`/`cast(...)` at every public boundary of a module whose whole surface is floats, the
+`NPY`/`PD`/`S` ruff evaluation, and -- the one that actually costs something here -- the
+determinism hazard in Consequence 6. `numpy.argsort` and a BLAS dot product reduce in an order
+that depends on thread count, and this module's outputs are compared with `==` in several places:
+`ICPoint`'s validator asserts `ic == -raw_ic` exactly, and
+`tests/unit/backtest/test_factor_ic.py::test_the_declared_direction_decides_the_sign_and_reaches_the_stability_summary`
+asserts `up_summary.mean_ic == -down_summary.mean_ic`. Those identities hold because the
+arithmetic is IEEE double in a fixed order; under a threaded reduction they would become
+approximations, and the sign convention this issue exists to make readable would stop being
+exactly reversible.
+
+### What is *not* claimed
+
+The honest bound the `V2-P3-004` section drew still stands, and this section draws its own beside
+it. This is the correlation `V2-P3-005` needs and **not every statistic** P4 might want: a
+bootstrap over 244 as_ofs x 1,000 resamples, or a rolling covariance matrix across `V2-P3-008`'s
+whole factor set, is a different shape of arithmetic and nothing measured here carries over to it.
+The Context's two named workloads are now both answered; the next one to arrive should be measured
+the same way rather than assumed to inherit this answer.
