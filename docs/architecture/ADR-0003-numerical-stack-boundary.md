@@ -444,3 +444,88 @@ bootstrap over 244 as_ofs x 1,000 resamples, or a rolling covariance matrix acro
 whole factor set, is a different shape of arithmetic and nothing measured here carries over to it.
 The Context's two named workloads are now both answered; the next one to arrive should be measured
 the same way rather than assumed to inherit this answer.
+
+## Update, 2026-08-13 (`V2-P3-008`): the pairwise matrix the section above declined to answer for
+
+The Decision above stands unchanged and this section adds no new one. What it records is the
+workload the `V2-P3-005` section named as **out** of its scope by name -- "a rolling covariance
+matrix across `V2-P3-008`'s whole factor set" -- arriving and being measured on its own terms
+rather than inheriting that section's answer. The runtime dependency set is still the nine it was.
+
+`openalpha_cn.backtest.factor_redundancy` is a standard-library leaf that imports `factor_ic`'s
+`average_ranks` and `_pearson` and adds a sorted set intersection per pair. Nineteen factors ship,
+so the matrix is **171** pairs. Measured at ADR-0002's whole-market cross section of **5,534
+securities**, best of 5 runs, on the machine that produced the figures above:
+
+| step, n = 5,534, 19 factors | time |
+|---|---|
+| one `spearman` pair, bare arithmetic | 3.49 ms |
+| one `spearman` pair through `correlate_cross_section` | **4.97 ms** |
+| the whole 171-pair matrix at `pearson` | 0.398 s |
+| the whole 171-pair matrix at `spearman` | **0.860 s** |
+| a year of daily whole-market matrices (244 x 171) at `spearman` | 210 s |
+
+The 3.49 ms row reproduces the `V2-P3-005` section's 3.56 ms, which is the point of quoting it:
+the arithmetic did not change, and the 1.48 ms on top of it is the pair machinery -- the sorted
+intersection, the two dict lookups per subject and the census -- rather than a different
+correlation. Per-element cost rises 0.530 us -> 0.630 us -> 0.745 us across `n = 500`, `5,534` and
+`55,340`, the same `n log n` the sort predicts.
+
+### The optimisation that is 6.3x faster and is wrong
+
+Ranking each factor **once** and correlating the stored rank vectors turns the 171-pair matrix
+from 0.860 s into **0.137 s**. It is not taken, and the reason is correctness rather than taste: a
+rank is a position within a set, so the ranks of a subset are not the subset of the ranks. Two
+factors are admitted for different subjects whenever their coverage differs -- which is the
+ordinary case rather than the exception -- and restricting a 40-name rank vector to a 25-name
+intersection and correlating disagreed with the honest answer on **200 of 200** random trials, by
+as much as **0.100**. `tests/unit/backtest/test_factor_redundancy.py::
+test_ranking_the_whole_market_and_restricting_is_not_ranking_the_intersection` drives it.
+
+So the module ranks inside each pair's own intersection and pays the 0.860 s. That is the number
+this section is about and the one a reader should compare against.
+
+### The comparison, and it is closer than the two above it
+
+- **Against the writes that produced the inputs.** `write_panel_batch` for one 675,148-row
+  partition spans 56.7 s to 617.9 s across the five measurements this ADR declines to reduce to
+  one number. Nineteen factors' partitions is nineteen of those. A whole year of the whole
+  171-pair matrix is 210 s -- **inside the range of a single partition write**, and 5x to 56x
+  smaller than nineteen of them.
+- **Against one cross section.** A single as_of's whole matrix is 0.860 s against
+  `compute_factor`'s 2.24 s for one factor over one partition. The redundancy analysis over all
+  nineteen factors costs less than reading one of them.
+
+**This is not the "630x smaller" the `V2-P3-005` section reported, and the difference is stated
+rather than smoothed.** That section measured one IC; this measures 171 correlations, so the
+factor between the analysis and the data plane has fallen by two orders of magnitude. 210 s for a
+year is a real number and would be worth optimising if it sat in a request path. It does not:
+`V2-P3-014` is a report, the matrix is computed once per study rather than once per decision, and
+the whole of it fits in the time one of its own inputs takes to write.
+
+### What numpy would buy, and what it would cost here
+
+A 5,534 x 19 rank matrix and one `numpy.corrcoef` call would collapse the 171 pairs into a single
+BLAS `syrk` -- and it would be the **unsound** shortcut above, because `corrcoef` over a dense
+matrix has no per-pair intersection at all. Recovering the honest answer under numpy means either
+171 separate calls on 171 different sub-arrays, which is where the array overhead stops
+amortising, or a masked reformulation this repository would then have to test against the plain
+one. Paying the Consequences for that is a worse trade than at `V2-P3-005` rather than a better one.
+
+Consequence 6 also binds harder here than there. `RedundancyPoint`'s validator asserts
+`oriented_correlation == raw_correlation * s(left) * s(right)` with `==`,
+`tests/unit/backtest/test_factor_redundancy.py::
+test_a_pairs_correlation_does_not_depend_on_which_side_is_offered_first` asserts
+`correlate_cross_section(a, b) == correlate_cross_section(b, a)` exactly, and
+`LOCKSTEP_DECIMAL_PLACES` reads a verdict off the **fifteenth decimal place** of a correlation.
+All three hold because the arithmetic is IEEE double in a fixed order. Under a threaded BLAS
+reduction the first two become approximations and the third becomes a coin flip.
+
+### What is *not* claimed
+
+This is the pairwise matrix over nineteen factors at one `as_of`, and **not** the
+eigen-decomposition a principal-components or a risk-model treatment of the same matrix would
+need. A 19 x 19 symmetric eigensolve is a different shape of arithmetic -- iterative rather than a
+sum -- and nothing measured here carries over to it. If `V2-P4` wants one it should be measured
+the same way rather than assumed to inherit this answer, which is now the third time this ADR has
+written that sentence and the third time it has been the right one.

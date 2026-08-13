@@ -194,7 +194,7 @@ P3 结束即可独立使用（Jupyter 直连面板 + 因子）
 | `V2-P3-005` | IC / Rank IC / IC 衰减 / 稳定性 | 技 | 004 | 唯一先例是 `backtest/event_study.py`（纯 stdlib 叶子模块） | S20 |
 | `V2-P3-006` | 分组组合收益（含成本，复用 `AShareExecutionPolicy`） | 技 | 005 | — | S21 |
 | `V2-P3-007` | 换手 / 覆盖率 / 容量报告 | 技 | 006 | 让统计上好看但不可实施的信号显形 | S22 |
-| `V2-P3-008` | 相关性与冗余分析 | 技 | 005 | — | S23 |
+| `V2-P3-008` | 相关性与冗余分析 | 技 | 005 | 已交付 `backtest/factor_redundancy.py`（`005` 之后第二个纯 stdlib 叶子模块）：横截面值/秩相关、IC 序列相关三读，符号由**两个**因子的 `direction` 定向、冗余按**幅值**判定。**算术恒等式与实证相关分开**：`SharedInputs` 从 `required_fields` **算**出来（171 对里 42 对共列、72 对共数据集、16 对**声明完全相同**），`FactorIdentity` 则**声明后再对数据求值**，只有 `verified` 才配得上 `arithmetic` 判决；`V2-P3-012` 那条 `1 + m20 == (1 + m15)(1 + r5)` 在不跳的动量上实测残差 `4.4e-16`（verified），在**出厂**动量上 `1.7e-01`（refuted）。冗余阈值**无默认值**、由调用方声明；`undeclared_lockstep` 用 `round(abs(r), 15) == 1.0` 这条**舍入边界**（不是阈值）兜底。样本下界是 **4** 而非 IC 的 3：`n=3` 时秩相关只能取 `±0.5 / ±1`，任何阈值都判不出东西 | S23 |
 | `V2-P3-009` | 因子家族①价值：EP / BP / SP / EPcut | 技 | 004 | 已交付 EP / BP / SP（本仓库第一批双轴出厂因子）；**EPcut 未交付**，扣非净利不在任何一个统计投影里，硬前置是 `V2-P3-017`，见下方小节 | S16 |
 | `V2-P3-010` | 因子家族②质量：ROE / ROIC / 毛利率稳定性 / 应计项 | 技 | 004 | 已交付四个：`return_on_equity_ttm` / `return_on_capital_ttm` / `gross_margin_stability` / `accruals_ttm`，**本仓库第一批只在报告期轴上的出厂因子**；ROE **不读** `fina_indicator.roe`，理由与实测见下方小节 | S16 |
 | `V2-P3-011` | 因子家族③成长：营收同比 / 净利同比 / 同比加速度 | 技 | 004 | 已交付 `revenue_yoy` / `net_profit_yoy` / `revenue_yoy_acceleration`（本仓库第一批**只读 filing、不读价格**的出厂因子）。同比是**累计对四季度前的累计**（`window[-1]/window[-5]-1`，正是本文件 M-2 论证的那条），加速度是**两条相隔一年的同比之差**（`5 / 5` 与 `9 / 9`）；**全家族不调用 `_trailing_twelve_months`** —— 它按窗口末端对齐找年末，在 `N=8` 上会自信答错，见下方小节 | S16 |
