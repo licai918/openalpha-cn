@@ -374,6 +374,19 @@ idiosyncratic volatility are per-security regressions rather than products, and 
 `V2-P3-005`'s rank correlation. Both are open questions that should be measured on their own
 workloads — which is the method this section follows rather than the conclusion it reached.
 
+**Correction, 2026-08-12: the sentence above asks the wrong question of `V2-P3-013`.** That
+issue measured it and the answer is that there is no regression to cost. A residual volatility
+needs a market or factor return series to regress against, and this panel holds none: the
+fifteen descriptors include `index_weight` (constituent weights) but no index level anywhere,
+and `FactorWindow` carries one security's rows, so an evaluator could not reach a market series
+even if one were stored. A single-factor time-series regression is *univariate* — closed form,
+`O(n)`, no matrix — so had the regressor existed this section's conclusion would have carried
+over unchanged. The blocker is the data and the window's shape, not the numerical stack. The
+measurement lives in `panel_factors.py`'s module docstring and is held by
+`tests/integration/panel/test_volatility_liquidity_family.py::test_the_reason_no_residual_ships_is_a_property_of_the_panel_and_of_the_window`,
+which turns red the day an index price series arrives. The open question that remains for this
+ADR is `V2-P3-004`'s: a risk model with *k* correlated continuous regressors has no closed form.
+
 ## Update, 2026-08-12 (`V2-P3-005`): the rank correlation did not need it either
 
 The Decision above stands unchanged and this section adds no new one. What it records is that the
