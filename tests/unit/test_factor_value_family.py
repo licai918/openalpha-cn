@@ -245,13 +245,21 @@ def test_the_three_definitions_declare_the_reaches_and_the_axes_the_family_argue
     assert BOOK_TO_PRICE.max_window_periods == 1
 
 
-def test_the_value_family_is_the_first_shipped_factor_on_both_axes_at_once() -> None:
+def test_the_value_family_is_the_only_shipped_factor_on_both_axes_at_once() -> None:
     """The claim the family's own prose makes about the registry, held against the registry.
 
     Every factor shipped before `V2-P3-009` reads sessions and no filing, so the report-period
     reach fields had no production reader at all. That is what makes these three the first real
     users of the second axis, and it is a property of `FACTOR_DEFINITIONS` rather than of a
     docstring -- so it is asserted there, in both directions.
+
+    **The converse used to be "every other factor declares no period reach at all", and
+    `V2-P3-011` falsified it** -- its growth family reads `income` and no price, so it is on the
+    period axis and not on the session one, which the old form counted as a violation. What was
+    actually being asserted is that *these three* are the only factors on **both**, and the
+    honest converse of that is that every other factor is on exactly one axis, which is what
+    `FactorDefinition.validate_each_axis_is_declared_exactly_when_it_is_read` makes checkable
+    from the reach fields alone.
     """
     on_both = {
         definition.qualified_key
@@ -267,8 +275,10 @@ def test_the_value_family_is_the_first_shipped_factor_on_both_axes_at_once() -> 
     for definition in FACTOR_DEFINITIONS.definitions:
         if definition.qualified_key in on_both:
             continue
-        assert definition.lookback_periods is None
-        assert definition.max_window_periods is None
+        declared = (definition.lookback_periods is None, definition.lookback_sessions is None)
+        assert declared in {(True, False), (False, True)}, definition.qualified_key
+        assert (definition.max_window_periods is None) == declared[0]
+        assert (definition.max_window_sessions is None) == declared[1]
 
 
 def test_the_two_yield_factors_differ_only_in_the_income_column_they_name() -> None:
