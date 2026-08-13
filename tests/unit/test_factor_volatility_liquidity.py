@@ -1,0 +1,719 @@
+"""The volatility and liquidity family's own arithmetic and its declared properties (`V2-P3-013`).
+
+Everything here runs without a store, because the four evaluators are pure functions of a window
+and the four definitions are data. What needs a real partition -- that `daily.amount` and
+`daily_basic.turnover_rate` are columns a written partition actually binds, that a 60-session
+reach forms the window the contract says it does, and that the span bound is separable from the
+count -- is in `tests/integration/panel/test_volatility_liquidity_family.py`.
+
+## The four claims this file exists to make executable
+
+**Why no factor here is named for a residual is a fact about the code, not a sentence in a note.**
+The roadmap line asks for residual and idiosyncratic volatility, which are one construct and need a
+market return series.
+`test_the_reason_no_residual_ships_is_a_property_of_the_panel_and_of_the_window` pins the two
+things that stand in the way -- none of the fifteen declared Tushare datasets carries an index's
+price, and `FactorWindow` carries one subject's rows -- so the day somebody ingests an index series
+this test says the disclosure needs revisiting. Neither obstacle is arithmetic: the univariate
+regression a residual volatility needs has a closed form and is `O(n)` in pure Python, so
+`ADR-0003`'s numerical-stack question is not the one that blocked this.
+
+**The unit of `daily.amount` is measured, not read off a field list.** `AMIHUD_60`'s value is a
+ratio whose denominator is money, so its unit is the column's unit, and a denominator wrong by a
+factor of 1,000 is invisible to every check downstream of it -- a rank IC and a z-score are both
+scale-free, so a scaled Amihud ranks identically and standardises identically. The measurement is
+`test_the_amount_column_is_thousands_of_yuan_and_the_other_readings_are_out_of_range`, and it is a
+measurement rather than an assertion because the low-high range of each session is an independent
+witness the column pair has to land inside.
+
+**The return path is the one `domain/daily_prices.py` measured, and the wrong one is driven to
+show it is wrong.** All three return-based factors here are built on `close / pre_close - 1`. The
+naive `close[t] / close[t-1] - 1` is wrong by up to 118.30 over the 37,602 rows that module
+measured, and on `000001.SZ`'s 2026-06-12 ex-dividend morning it reverses the *sign*.
+`test_the_return_path_is_close_over_pre_close_and_the_naive_path_has_the_other_sign` runs both
+over the real published rows and reconciles the chosen one against the row's own `pct_chg`.
+
+**No two of the four answer with one number, and that is asserted rather than hoped.** The
+`V2-P3-004` review's finding was a column that *was* asserted, on a fixture where the assertion
+could not tell two answers apart.
+`test_the_four_factors_answer_four_different_numbers_on_one_window` drives all four off a single
+window and pins each magnitude, and three further tests pin the specific coincidences that would be
+easy to write by accident: a downside deviation divided by its own negative count rather than by
+the window, an Amihud that skipped the sessions it could not divide by, and a dispersion computed
+over N-1 returns because the returns came from close-to-close pairs.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import math
+from datetime import UTC, date, datetime
+from types import MappingProxyType
+from typing import Final
+
+import pytest
+
+from openalpha_cn.domain.daily_prices import (
+    CLOSE_COLUMN,
+    DAILY_BASIC_DATA_COLUMNS,
+    DAILY_BASIC_DATASET,
+    DAILY_BASIC_NULLABLE_COLUMNS,
+    DAILY_DATA_COLUMNS,
+    DAILY_DATASET,
+    MAX_PUBLISHED_RETURN_DISAGREEMENT,
+    PRE_CLOSE_COLUMN,
+)
+from openalpha_cn.domain.factor import FactorField
+from openalpha_cn.panel_factors import (
+    AMIHUD_60,
+    AMOUNT_COLUMN,
+    CNY_PER_AMOUNT_UNIT,
+    DOWNSIDE_VOL_60,
+    FACTOR_DEFINITIONS,
+    FACTOR_EVALUATORS,
+    RETURN_VOL_60,
+    TURNOVER_60,
+    TURNOVER_RATE_COLUMN,
+    VOLATILITY_LIQUIDITY_LOOKBACK_SESSIONS,
+    VOLATILITY_LIQUIDITY_MAX_WINDOW_SESSIONS,
+    FactorEngineError,
+    FactorWindow,
+    _amihud_60,
+    _downside_vol_60,
+    _return_vol_60,
+    _sample_stdev,
+    _session_returns,
+    _turnover_60,
+)
+from openalpha_cn.providers.tushare import TUSHARE_DATASETS
+
+AS_OF: Final[datetime] = datetime(2026, 6, 15, 4, 0, tzinfo=UTC)
+
+FAMILY: Final[str] = "volatility_liquidity"
+
+THE_FOUR: Final[tuple[str, ...]] = (
+    "return_vol_60/v1",
+    "downside_vol_60/v1",
+    "turnover_60/v1",
+    "amihud_60/v1",
+)
+
+# --- the real published rows the two unit measurements are taken on -------------------------------
+
+# `(subject, session, low, high, vol, amount)` for eleven real Tushare `daily` rows spanning
+# 2001-01-02 to 2026-06-15, the same rows `tests/unit/domain/test_daily_prices.py` carries as
+# `BARS`, `MAOTAI_BAR_2024_06_25` and `COARSE_GRID_BARS`. Restated here as the six fields this
+# module's measurement reads, because what is being measured is a property of the *feed* -- the
+# unit of a column -- and the witness is that the implied VWAP has to fall inside the session's
+# own traded range.
+# fmt: off
+PRICED_SESSIONS: Final[tuple[tuple[str, str, float, float, float, float], ...]] = (
+    ("000001.SZ", "2026-06-10", 11.07, 11.35, 1543176.39, 1738056.71203),
+    ("000001.SZ", "2026-06-11", 11.25, 11.39, 1156222.22, 1308133.97213),
+    ("000001.SZ", "2026-06-12", 10.88, 11.25, 2032355.46, 2263042.93057),
+    ("000001.SZ", "2026-06-15", 10.98, 11.21, 1541304.95, 1711561.28657),
+    ("600519.SH", "2026-06-10", 1250.21, 1282.00, 39244.14, 4991686.419),
+    ("600519.SH", "2026-06-11", 1266.91, 1282.88, 25351.98, 3230008.22),
+    ("600519.SH", "2026-06-12", 1265.01, 1295.00, 50494.78, 6477910.214),
+    ("600519.SH", "2026-06-15", 1270.10, 1292.70, 41585.56, 5303656.129),
+    ("600519.SH", "2024-06-25", 1477.00, 1502.99, 42097.95, 6273919.386),
+    ("002736.SZ", "2016-10-10", 16.49, 16.80, 93560.77, 155786.2351),
+    ("000569.SZ", "2001-01-02", 7.15, 7.32, 9098.13, 6579.5778),
+)
+# fmt: on
+
+SHARES_PER_LOT: Final[float] = 100.0
+"""The other half of the unit pair: Tushare publishes `daily.vol` in lots of 100 shares.
+
+Read off the same eleven rows by the same witness -- it is `amount * CNY_PER_AMOUNT_UNIT /
+(vol * SHARES_PER_LOT)` that lands in `[low, high]`, so the two constants are measured together
+and neither is separately checkable. Declared here rather than in `src/` because nothing this
+repository computes divides by it: `AMIHUD_60`'s denominator is money, not shares.
+"""
+
+# `000001.SZ` and `600519.SH` on 2026-06-12, the one session this repository stores both turnover
+# columns and both share counts for. `float_share` and `free_share` are in ten-thousands of shares
+# and `vol` is in lots, so `vol / share_count` is already the turnover percentage.
+# `(subject, turnover_rate, turnover_rate_f, vol, float_share, free_share)`.
+# fmt: off
+TURNOVER_ROWS: Final[tuple[tuple[str, float, float, float, float, float], ...]] = (
+    ("000001.SZ", 1.0473, 2.4905, 2032355.46, 1940560.0653, 816048.1215),
+    ("600519.SH", 0.4039, 0.9334, 50494.78, 125008.1601, 54094.8978),
+)
+# fmt: on
+
+TURNOVER_PUBLICATION_TICK: Final[float] = 1e-4
+"""One tick of a four-decimal published percentage; both columns above carry four decimals."""
+
+# `000001.SZ` across its 2026-06-12 ex-dividend morning, verbatim from
+# `domain/daily_prices.py`'s own worked example: `(session, close, pre_close, pct_chg)`.
+EX_RIGHTS_WINDOW: Final[tuple[tuple[str, float, float, float], ...]] = (
+    ("2026-06-11", 11.30, 11.32, -0.1767),
+    ("2026-06-12", 11.24, 10.94, 2.7422),
+)
+
+
+# --- the window the four evaluators are driven off ------------------------------------------------
+
+
+PROBE_PRE_CLOSES: Final[tuple[float, ...]] = (100.0, 100.0, 100.0, 100.0)
+PROBE_CLOSES: Final[tuple[float, ...]] = (110.0, 95.0, 102.0, 92.0)
+"""Four sessions whose returns are +0.10, -0.05, +0.02 and -0.08.
+
+Two up and two down, so a downside deviation is neither zero nor equal to the total one, and the
+count of negatives (2) differs from the window length (4) -- which is what lets
+`test_the_downside_deviation_divides_by_the_window_and_not_by_its_own_negative_count` separate the
+two divisors. A constant `pre_close` keeps the returns exact enough to hand-check while leaving
+the *path* to the ex-rights test, where a constant one would prove nothing.
+"""
+
+PROBE_AMOUNTS: Final[tuple[float, ...]] = (1000.0, 2000.0, 500.0, 4000.0)
+"""Thousands of yuan, four values with no two alike, so an Amihud that dropped or reordered a
+session cannot land on the same mean."""
+
+PROBE_TURNOVER: Final[tuple[float, ...]] = (1.0, 2.0, 3.0, 6.0)
+"""Percent. Their mean is exactly 3.0, which no other quantity in this fixture is near."""
+
+PROBE_RETURNS: Final[tuple[float, ...]] = (0.10, -0.05, 0.02, -0.08)
+
+EXPECTED_RETURN_VOL: Final[float] = 0.08015609770940699
+"""`sqrt(((0.1025)^2 + (0.0475)^2 + (0.0225)^2 + (0.0775)^2) / 3)` about a mean of -0.0025."""
+
+EXPECTED_DOWNSIDE_VOL: Final[float] = 0.047169905660283014
+"""`sqrt((0.05^2 + 0.08^2) / 4)` -- the divisor is the window, not the two negatives."""
+
+EXPECTED_DOWNSIDE_VOL_OVER_ITS_NEGATIVES: Final[float] = 0.06670832032063167
+"""`sqrt((0.05^2 + 0.08^2) / 2)`, the answer the other divisor gives. Never expected; asserted
+against so that the two are known to be distinguishable on this fixture."""
+
+EXPECTED_TURNOVER: Final[float] = 3.0
+
+EXPECTED_AMIHUD: Final[float] = 4.625e-08
+"""`(0.10/1e6 + 0.05/2e6 + 0.02/5e5 + 0.08/4e6) / 4`, the amounts carried into yuan."""
+
+EXPECTED_AMIHUD_WITHOUT_THE_UNIT: Final[float] = 4.625e-05
+"""The same mean with the denominator left in thousands of yuan -- 1,000 times the answer, and
+the whole reason `CNY_PER_AMOUNT_UNIT` is measured rather than assumed."""
+
+
+def _window(
+    *,
+    closes: tuple[float, ...] = PROBE_CLOSES,
+    pre_closes: tuple[float, ...] = PROBE_PRE_CLOSES,
+    amounts: tuple[float, ...] | None = PROBE_AMOUNTS,
+    turnover: tuple[float, ...] | None = PROBE_TURNOVER,
+) -> FactorWindow:
+    """One security's complete window carrying every column this family declares.
+
+    All four columns on one window on purpose: the four factors are then driven off *identical*
+    inputs, which is the only arrangement in which "do any two of them answer with one number" is
+    a question with a meaningful answer.
+    """
+    values: dict[tuple[str, str], tuple[float, ...]] = {
+        (DAILY_DATASET, CLOSE_COLUMN): closes,
+        (DAILY_DATASET, PRE_CLOSE_COLUMN): pre_closes,
+    }
+    if amounts is not None:
+        values[(DAILY_DATASET, AMOUNT_COLUMN)] = amounts
+    if turnover is not None:
+        values[(DAILY_BASIC_DATASET, TURNOVER_RATE_COLUMN)] = turnover
+    return FactorWindow(
+        subject="000001.SZ",
+        as_of=AS_OF,
+        sessions=tuple(date(2026, 6, 8 + index) for index in range(len(closes))),
+        periods=(),
+        values=MappingProxyType(values),
+    )
+
+
+# --- the two column units, measured ---------------------------------------------------------------
+
+
+def test_the_amount_column_is_thousands_of_yuan_and_the_other_readings_are_out_of_range() -> None:
+    """`CNY_PER_AMOUNT_UNIT`, measured against an independent witness rather than declared.
+
+    A session's implied VWAP has to fall between its own low and its own high. Only one reading of
+    the `(vol, amount)` pair does, on all eleven rows: lots and thousands of yuan. The other three
+    are each out by a factor of ten or more on every row, which is what makes the separation robust
+    rather than a coincidence of one session -- `000001.SZ` on 2026-06-12 gives 11.1351 inside
+    [10.88, 11.25] against 1.1135 for "shares and yuan".
+
+    Asserted in both directions. The one-directional version -- "the chosen reading is in range" --
+    would pass for a fixture whose range happened to be wide, and the range on `000569.SZ`'s
+    2001-01-02 row is 2.4% of its own price.
+    """
+    inside: list[str] = []
+    for subject, session, low, high, vol, amount in PRICED_SESSIONS:
+        chosen = amount * CNY_PER_AMOUNT_UNIT / (vol * SHARES_PER_LOT)
+        assert low <= chosen <= high, f"{subject} {session}: {chosen} outside [{low}, {high}]"
+        inside.append(f"{subject} {session}")
+
+        for name, rejected in (
+            ("shares and yuan", amount / vol),
+            ("lots and yuan", amount / (vol * SHARES_PER_LOT)),
+            ("shares and thousands", amount * CNY_PER_AMOUNT_UNIT / vol),
+        ):
+            assert not low <= rejected <= high, f"{subject} {session}: {name} also fits"
+
+    assert len(inside) == 11
+    assert CNY_PER_AMOUNT_UNIT == 1000.0
+
+
+def test_the_turnover_rate_column_is_float_share_turnover_and_the_f_column_is_free_float() -> None:
+    """Which denominator each of the two candidate columns divides by, driven rather than cited.
+
+    `TURNOVER_60` chooses between them, so knowing which is which is a precondition for the choice
+    being a choice at all. Each column is reconciled against its *own* share count to within one
+    published tick, and against the other's to show the reconciliation discriminates -- on both
+    names the free-float measure is more than twice the float measure, so the two columns are not
+    interchangeable and the pick moves every value this factor produces.
+    """
+    for subject, rate, rate_f, vol, float_share, free_share in TURNOVER_ROWS:
+        assert vol / float_share == pytest.approx(rate, abs=TURNOVER_PUBLICATION_TICK)
+        assert vol / free_share == pytest.approx(rate_f, abs=TURNOVER_PUBLICATION_TICK)
+
+        assert vol / free_share != pytest.approx(rate, abs=TURNOVER_PUBLICATION_TICK)
+        assert vol / float_share != pytest.approx(rate_f, abs=TURNOVER_PUBLICATION_TICK)
+        assert rate_f > 2.0 * rate, subject
+
+
+def test_the_family_reads_the_fail_closed_turnover_column_and_not_the_nullable_one() -> None:
+    """The choice `TURNOVER_60_NOTE` argues, held against the contract that decides its cost.
+
+    `turnover_rate_f` is in `DAILY_BASIC_NULLABLE_COLUMNS`, which is the writer's statement that a
+    null in it is data rather than a fault -- and because the engine hands an evaluator only
+    complete windows, one null session is `input_missing` for all 60 `as_of`s whose window contains
+    it. `turnover_rate` is in the fail-closed complement. Asserted on the domain's own set rather
+    than on prose, so moving a column between the two sets fails here.
+    """
+    assert TURNOVER_RATE_COLUMN not in DAILY_BASIC_NULLABLE_COLUMNS
+    assert "turnover_rate_f" in DAILY_BASIC_NULLABLE_COLUMNS
+
+    read = {
+        field.column
+        for item in FACTOR_DEFINITIONS.definitions
+        if item.family == FAMILY
+        for field in item.required_fields
+    }
+    assert read & DAILY_BASIC_NULLABLE_COLUMNS == set()
+    assert TURNOVER_RATE_COLUMN in read
+
+    # Scoped to this family rather than to the whole registry, and the narrowing is a judgement
+    # rather than caution. `V2-P3-009`'s EP and BP read `pe` and `pb`, which are *legitimately*
+    # nullable -- a loss-making company has no P/E and `daily_prices.py` measures 1,102 of 5,338
+    # rows null on one session -- so a registry-wide version of this rule would be false for a
+    # value factor and would fail in that issue's branch for a reason belonging to this one.
+
+
+def test_the_columns_this_family_reads_are_columns_the_daily_contract_declares() -> None:
+    """The binding a shared constant would have bought, as a check instead.
+
+    `AMOUNT_COLUMN` and `TURNOVER_RATE_COLUMN` are spelled in `panel_factors` while
+    `domain/daily_prices.py` carries them only inside its column tuples. `FactorField` validates a
+    reference *syntactically* and says so, so a typo would survive until `compute_factor` bound the
+    projection -- and only for a caller who happened to run that factor.
+    """
+    assert AMOUNT_COLUMN in DAILY_DATA_COLUMNS
+    assert TURNOVER_RATE_COLUMN in DAILY_BASIC_DATA_COLUMNS
+    assert CLOSE_COLUMN in DAILY_DATA_COLUMNS
+    assert PRE_CLOSE_COLUMN in DAILY_DATA_COLUMNS
+
+
+# --- the declared properties ----------------------------------------------------------------------
+
+
+def test_the_family_is_exactly_four_definitions_and_they_are_this_builds_only_members() -> None:
+    """Both directions: the four this issue owns are declared, and nothing else claims the family.
+
+    The second half is what a per-factor test cannot cover. `FactorFamily` is a closed set because
+    `V2-P3-008` groups by it and `V2-P3-014` reports per family, so a fifth member arriving from
+    somewhere else -- a `V2-P3-012` momentum factor mis-labelled, say -- would silently join this
+    family's redundancy group and its report tier.
+    """
+    declared = tuple(
+        item.qualified_key for item in FACTOR_DEFINITIONS.definitions if item.family == FAMILY
+    )
+
+    assert declared == THE_FOUR
+    assert set(THE_FOUR) <= set(FACTOR_EVALUATORS)
+
+
+@pytest.mark.parametrize(
+    ("definition", "direction", "fields"),
+    [
+        (
+            RETURN_VOL_60,
+            "lower_is_better",
+            ((DAILY_DATASET, CLOSE_COLUMN), (DAILY_DATASET, PRE_CLOSE_COLUMN)),
+        ),
+        (
+            DOWNSIDE_VOL_60,
+            "lower_is_better",
+            ((DAILY_DATASET, CLOSE_COLUMN), (DAILY_DATASET, PRE_CLOSE_COLUMN)),
+        ),
+        (TURNOVER_60, "lower_is_better", ((DAILY_BASIC_DATASET, TURNOVER_RATE_COLUMN),)),
+        (
+            AMIHUD_60,
+            "higher_is_better",
+            (
+                (DAILY_DATASET, CLOSE_COLUMN),
+                (DAILY_DATASET, PRE_CLOSE_COLUMN),
+                (DAILY_DATASET, AMOUNT_COLUMN),
+            ),
+        ),
+    ],
+    ids=["return_vol_60", "downside_vol_60", "turnover_60", "amihud_60"],
+)
+def test_each_definition_declares_the_session_reach_and_no_report_period_reach(
+    definition: object, direction: str, fields: tuple[tuple[str, str], ...]
+) -> None:
+    """Every property the engine reads, on every member, including the two absences.
+
+    `lookback_periods is None` is a declaration and not an unset field -- `FactorDefinition`
+    requires each axis to be declared exactly when `required_fields` puts the factor on it, so this
+    is the contract's own statement that a quarterly dispersion reads no filing.
+
+    The directions are the family's conventional priors and nothing here has measured any of them;
+    what *is* asserted is that the two liquidity factors were not given the same sign by reflex.
+    `turnover_60` is `lower_is_better` and `amihud_60` is `higher_is_better`, which is one
+    economics -- less liquid is taken to be better -- written twice with the sign flipped, because
+    a high Amihud and a low turnover are the same state.
+    """
+    assert isinstance(definition, type(RETURN_VOL_60))
+    assert definition.family == FAMILY
+    assert definition.direction == direction
+    assert definition.required_fields == tuple(
+        FactorField(dataset=dataset, column=column) for dataset, column in fields
+    )
+    assert definition.lookback_sessions == VOLATILITY_LIQUIDITY_LOOKBACK_SESSIONS
+    assert definition.max_window_sessions == VOLATILITY_LIQUIDITY_MAX_WINDOW_SESSIONS
+    assert definition.lookback_periods is None
+    assert definition.max_window_periods is None
+    assert definition.period_datasets == ()
+
+
+def test_the_span_bound_allows_one_trading_month_of_halt_and_no_more() -> None:
+    """The two constants' *relationship*, which is the thing a comment would let go stale.
+
+    The slack is the number of sessions a security may have missed inside its own window, and both
+    ends of it are decided: not zero, because half a percent of the market is halted on an ordinary
+    session and a zero-slack quarterly factor would refuse every name that took one announcement
+    halt; not more than a trading month, because 2024's 242 sessions are 20.2 to the month and 80
+    panel sessions already reach across four calendar months.
+    """
+    slack = VOLATILITY_LIQUIDITY_MAX_WINDOW_SESSIONS - VOLATILITY_LIQUIDITY_LOOKBACK_SESSIONS
+
+    assert VOLATILITY_LIQUIDITY_LOOKBACK_SESSIONS == 60
+    assert slack == 20
+    assert slack * 12 <= 242
+    assert VOLATILITY_LIQUIDITY_MAX_WINDOW_SESSIONS > VOLATILITY_LIQUIDITY_LOOKBACK_SESSIONS
+
+
+REQUIRED_DISCLOSURES: Final[dict[str, tuple[str, ...]]] = {
+    "return_vol_60/v1": (
+        "measured nothing about",
+        "deliberately NOT named for a residual",
+        "the panel holds no index or market return series at all",
+        "close / pre_close - 1",
+    ),
+    "downside_vol_60/v1": (
+        "measured nothing about",
+        "it is not the residual of any regression",
+        "NOT the number of negative returns",
+    ),
+    "turnover_60/v1": (
+        "measured nothing about",
+        "It reads turnover_rate and not turnover_rate_f",
+        "DAILY_BASIC_NULLABLE_COLUMNS",
+    ),
+    "amihud_60/v1": (
+        "measured nothing about",
+        "published in THOUSANDS of yuan",
+        "undefined_value",
+    ),
+}
+"""What each member's prose has to say, as a table the suite evaluates.
+
+This is the same binding `KNOWN_*` registries get from
+`tests/unit/test_known_limitation_registries.py` -- a string literal asserted in *executable* test
+code -- applied to a `FactorNote` instead of to a `code`. A new `KNOWN_*` registry was considered
+for the residual disclosure and not added: the note is where a factor's judgements already have to
+live (`test_every_shipped_contract_carries_its_prose` makes one mandatory and holds it to a length),
+so a registry beside it would be a second place for the same sentence to drift from.
+"""
+
+
+def test_the_reason_no_residual_ships_is_a_property_of_the_panel_and_of_the_window() -> None:
+    """The blocker itself, as two structural facts rather than as a sentence in a note.
+
+    A residual volatility is the deviation of `r - a - b*r_m`, so it needs a market return series
+    aligned to the security's own sessions. Two things stand between this build and one, and
+    neither is arithmetic -- the univariate regression has a closed form and is `O(n)` in pure
+    Python, so `ADR-0003`'s numerical-stack question is not the one being answered here:
+
+    - **No dataset carries an index's price.** The fifteen `TUSHARE_DATASETS` descriptors are
+      prices, valuations, adjustment factors, four statement endpoints, calendar, universe,
+      industry tree and membership, index *weights*, suspensions, price limits and name history.
+      `index_weight` is a constituent weight, not a level.
+    - **A window is one subject's.** `FactorWindow.subject` is a single security and
+      `values` is keyed by `(dataset, column)` alone, so even a stored `000300.SH` series would be
+      unreachable from the evaluator that needed it -- `_classify` is called once per subject.
+
+    Asserted rather than described because the day somebody ingests an index price series is the
+    day this family's disclosure needs revisiting, and the first assertion is what will say so.
+    """
+    declared = {descriptor.dataset for descriptor in TUSHARE_DATASETS}
+
+    assert len(declared) == 15
+    assert "index_daily" not in declared
+    assert not any(name.endswith("_daily") for name in declared)
+    assert "index_weight" in declared
+
+    fields = {field.name for field in dataclasses.fields(FactorWindow)}
+    assert fields == {"subject", "as_of", "sessions", "periods", "values"}
+    assert isinstance(_window().subject, str)
+
+
+@pytest.mark.parametrize("handle", THE_FOUR)
+def test_every_member_discloses_what_it_is_and_is_not(handle: str) -> None:
+    """The honesty standard `REVERSAL_1D_NOTE` set, required of all four rather than assumed.
+
+    The roadmap line for this issue names "residual volatility" and "idiosyncratic volatility", and
+    neither is computable in this build: the panel holds no market return series, and `FactorWindow`
+    carries one security's own rows so an evaluator could not read one if it did. A family that
+    shipped under those names would be a declared property this repository cannot support, which is
+    the shape of all thirteen Critical findings it has taken.
+
+    Parametrised over `THE_FOUR` and keyed on an explicit per-factor table, so the assertion is the
+    same strength for every member -- a shared substring checked over all four would be satisfied
+    by one factor's disclosure appearing in another's note.
+    """
+    note = FACTOR_DEFINITIONS.note_for(handle)
+
+    assert note is not None
+    missing = [phrase for phrase in REQUIRED_DISCLOSURES[handle] if phrase not in note]
+    assert missing == [], f"{handle} no longer discloses {missing}"
+
+
+# --- the return path ------------------------------------------------------------------------------
+
+
+def test_the_return_path_is_close_over_pre_close_and_the_naive_path_has_the_other_sign() -> None:
+    """The defect that would have reached all three return-based factors at once.
+
+    `domain/daily_prices.py` measures three ways to compute a session return and one is wrong.
+    Across `000001.SZ`'s 2026-06-12 ex-dividend morning the chosen path answers +2.7422% and the
+    naive close-to-close answers -0.5310%, with the sign reversed -- because `pre_close` on the
+    12th is 10.94 while the 11th closed at 11.30.
+
+    Both halves are driven: the chosen path is reconciled against the row's own `pct_chg` to within
+    `MAX_PUBLISHED_RETURN_DISAGREEMENT`, which is that module's own calibrated bound, and the naive
+    path is computed here and asserted to disagree in sign. A test that only checked the first half
+    would pass for an implementation that also happened to be right for the wrong reason.
+    """
+    closes = tuple(close for _, close, _, _ in EX_RIGHTS_WINDOW)
+    pre_closes = tuple(pre for _, _, pre, _ in EX_RIGHTS_WINDOW)
+
+    returns = _session_returns(_window(closes=closes, pre_closes=pre_closes))
+
+    assert returns is not None
+    for value, (_, _, _, pct_chg) in zip(returns, EX_RIGHTS_WINDOW, strict=True):
+        assert value == pytest.approx(pct_chg / 100.0, abs=MAX_PUBLISHED_RETURN_DISAGREEMENT)
+
+    naive = closes[1] / closes[0] - 1.0
+    assert returns[1] > 0.0
+    assert naive < 0.0
+    assert naive == pytest.approx(-0.00530973, abs=1e-8)
+
+
+def test_a_window_of_n_sessions_yields_exactly_n_returns() -> None:
+    """The property the whole family's sample size rests on, and the reason the path is per-row.
+
+    Each return is computed inside its own session's row, so the count of returns is the count of
+    sessions -- which is `lookback_sessions`, which is the N every divisor here uses. A
+    close-to-close path would yield N-1 and put an off-by-one in the denominator of every value.
+    """
+    for count in (2, 4, 7):
+        window = _window(closes=PROBE_CLOSES[:1] * count, pre_closes=PROBE_PRE_CLOSES[:1] * count)
+        returns = _session_returns(window)
+
+        assert returns is not None
+        assert len(returns) == count == len(window.sessions)
+
+
+@pytest.mark.parametrize(
+    "evaluator",
+    [_session_returns, _return_vol_60, _downside_vol_60, _amihud_60],
+    ids=["_session_returns", "_return_vol_60", "_downside_vol_60", "_amihud_60"],
+)
+def test_a_zero_pre_close_is_undefined_rather_than_a_crash(evaluator: object) -> None:
+    """The `undefined_value` branch, driven directly on every function that can reach it.
+
+    Unreachable through this repository's own writers -- `DAILY_PRICE_COLUMNS` records no null and
+    no non-positive value in any of the five across 58,055 bars spanning 2001 to 2026, and
+    `daily_bars_from_panel_rows` refuses one -- so a guard whose only evidence was a docstring would
+    be exactly the declaration this repository has been wrong about thirteen times.
+    """
+    window = _window(pre_closes=(100.0, 0.0, 100.0, 100.0))
+
+    assert callable(evaluator)
+    assert evaluator(window) is None
+
+
+@pytest.mark.parametrize(
+    "evaluator",
+    [_return_vol_60, _downside_vol_60, _turnover_60, _amihud_60],
+    ids=["_return_vol_60", "_downside_vol_60", "_turnover_60", "_amihud_60"],
+)
+def test_an_empty_window_is_undefined_on_every_member_rather_than_a_zero_division(
+    evaluator: object,
+) -> None:
+    """The other guard the engine's window formation makes unreachable, driven on all four.
+
+    `_form_window` returns `None` for a security short of the reach and the reach here is 60, so no
+    evaluator in production is ever handed a window of length zero. Three of these four would
+    divide by `len(...)` if one arrived and the fourth would take a square root of a zero-length
+    mean; a guard whose only evidence is that argument is a guard nobody has run.
+    """
+    empty = _window(closes=(), pre_closes=(), amounts=(), turnover=())
+
+    assert callable(evaluator)
+    assert evaluator(empty) is None
+
+
+def test_a_dispersion_of_fewer_than_two_returns_is_undefined_rather_than_a_zero_division() -> None:
+    """`_sample_stdev`'s own guard. Unreachable at any reach this family declares -- the engine
+    hands an evaluator exactly `lookback_sessions` rows and the smallest here is 60 -- so it is
+    driven on the helper rather than through a factor."""
+    assert _sample_stdev(()) is None
+    assert _sample_stdev((0.5,)) is None
+    assert _sample_stdev((0.0, 1.0)) == pytest.approx(math.sqrt(0.5))
+
+
+# --- the four answers -----------------------------------------------------------------------------
+
+
+def test_the_four_factors_answer_four_different_numbers_on_one_window() -> None:
+    """Every magnitude pinned, and no two of them equal, off one set of inputs.
+
+    The `V2-P3-004` review's finding was not an unasserted column; it was a column asserted on a
+    fixture where the assertion could not separate two answers. Four factors of one family are
+    exactly where that recurs, so the four are driven off identical inputs and each is held to a
+    number a reader can recompute from `PROBE_CLOSES` by hand.
+    """
+    window = _window()
+
+    answers = {
+        "return_vol_60": _return_vol_60(window),
+        "downside_vol_60": _downside_vol_60(window),
+        "turnover_60": _turnover_60(window),
+        "amihud_60": _amihud_60(window),
+    }
+
+    assert answers["return_vol_60"] == pytest.approx(EXPECTED_RETURN_VOL)
+    assert answers["downside_vol_60"] == pytest.approx(EXPECTED_DOWNSIDE_VOL)
+    assert answers["turnover_60"] == pytest.approx(EXPECTED_TURNOVER)
+    assert answers["amihud_60"] == pytest.approx(EXPECTED_AMIHUD)
+
+    values = [value for value in answers.values() if value is not None]
+    assert len(values) == 4
+    assert len({round(value, 12) for value in values}) == 4
+
+
+def test_the_amihud_denominator_is_yuan_and_not_the_columns_own_thousands() -> None:
+    """The factor-of-1,000 nothing downstream would catch, asserted at the one place it can be.
+
+    A rank IC and a z-score are both scale-free, so an Amihud built on the raw column ranks and
+    standardises identically to one built on yuan. The unit only shows up in a number somebody
+    reads, which is why it is pinned here against the answer the unconverted denominator gives.
+    """
+    value = _amihud_60(_window())
+
+    assert value == pytest.approx(EXPECTED_AMIHUD)
+    assert value != pytest.approx(EXPECTED_AMIHUD_WITHOUT_THE_UNIT)
+    assert pytest.approx(EXPECTED_AMIHUD * CNY_PER_AMOUNT_UNIT) == EXPECTED_AMIHUD_WITHOUT_THE_UNIT
+
+
+def test_the_downside_deviation_divides_by_the_window_and_not_by_its_own_negative_count() -> None:
+    """The divisor that would make a sample size a function of the data.
+
+    Two of `PROBE_RETURNS`' four are negative, so the two divisors give visibly different answers
+    and the fixture can tell them apart -- which a window with all four negative could not. The
+    rule is the family's: a value's sample size is the count its definition declares, never the
+    count of rows that happened to qualify.
+    """
+    value = _downside_vol_60(_window())
+
+    assert value == pytest.approx(EXPECTED_DOWNSIDE_VOL)
+    assert value != pytest.approx(EXPECTED_DOWNSIDE_VOL_OVER_ITS_NEGATIVES)
+    assert sum(1 for item in PROBE_RETURNS if item < 0.0) == 2
+    assert len(PROBE_RETURNS) == 4
+
+
+def test_a_quarter_with_no_down_session_is_a_downside_deviation_of_zero_and_not_undefined() -> None:
+    """Zero is an answer here and `undefined_value` would be a lie about it.
+
+    `validate_factor_observation` refuses a `computed` observation with no value and a
+    non-`computed` one with a value, so the two are not interchangeable downstream: a security with
+    no down day in the quarter is scored, and one whose arithmetic had no answer is not.
+    """
+    rising = _window(closes=(110.0, 120.0, 130.0, 140.0), pre_closes=(100.0, 110.0, 120.0, 130.0))
+
+    downside = _downside_vol_60(rising)
+    total = _return_vol_60(rising)
+
+    assert downside == 0.0
+    assert total is not None and total > 0.0
+
+
+def test_one_zero_turnover_session_makes_the_whole_amihud_undefined_rather_than_shrinking_it() -> (
+    None
+):
+    """The alternative that was rejected, asserted so that choosing it later fails here.
+
+    Skipping the sessions whose `amount` is zero would produce a mean over however many sessions
+    happened to trade, which is a value whose sample size is a function of the data. Fail-closed
+    instead: one such session and the observation is `undefined_value`, whose remedy a reader can
+    tell from `input_missing`'s.
+    """
+    window = _window(amounts=(1000.0, 0.0, 500.0, 4000.0))
+
+    assert _amihud_60(window) is None
+
+    # And the three sessions that *do* have turnover are a mean this could have answered with --
+    # a plausible number, distinct from the four-session answer, that nothing on the stored row
+    # would have said was taken over three sessions rather than sixty.
+    survivors = (0.10 / 1e6, 0.02 / 5e5, 0.08 / 4e6)
+    assert math.fsum(survivors) / 3 == pytest.approx(5.333333333333333e-08)
+    assert math.fsum(survivors) / 3 != pytest.approx(EXPECTED_AMIHUD)
+
+
+def test_a_negative_amount_is_refused_on_the_same_branch_as_a_zero_one() -> None:
+    """`amount` is money and cannot be negative, so this is a corrupt cell rather than a state.
+
+    Guarded on the same `<= 0.0` branch as the zero because the alternative -- letting it through --
+    produces a *negative* illiquidity, which is finite, stores as `computed`, and reverses this
+    factor's declared direction for that security.
+    """
+    assert _amihud_60(_window(amounts=(1000.0, -2000.0, 500.0, 4000.0))) is None
+
+
+def test_turnover_reads_its_own_dataset_and_a_zero_rate_is_a_real_answer() -> None:
+    """A session with a bar and almost no trade has a turnover of zero; that is data.
+
+    Also pins that this factor reads `daily_basic` rather than `daily`: it is the only member of
+    the family that does, and a window carrying only `daily` columns is where an evaluator that
+    reached for the wrong dataset would fail.
+    """
+    assert _turnover_60(_window(turnover=(0.0, 0.0, 0.0, 0.0))) == 0.0
+    assert _turnover_60(_window(turnover=(1.0, 2.0, 3.0, 6.0))) == pytest.approx(3.0)
+
+    with pytest.raises(FactorEngineError, match=r"did not declare daily_basic\.turnover_rate"):
+        _turnover_60(_window(turnover=None))
+
+
+def test_amihud_reaching_for_an_undeclared_amount_is_refused_by_the_window() -> None:
+    """A `KeyError` would read as "the engine is broken"; what it means is that `required_fields`
+    does not cover what the formula reads, which is the field the coverage check is built on."""
+    with pytest.raises(FactorEngineError, match=r"did not declare daily\.amount"):
+        _amihud_60(_window(amounts=None))

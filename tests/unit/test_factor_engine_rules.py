@@ -99,8 +99,16 @@ def _window(*closes: float) -> FactorWindow:
 
 
 def test_the_shipped_registry_and_evaluator_table_name_exactly_the_same_factors() -> None:
+    """An exact tuple rather than a containment check, so a factor that arrives in one table and
+    not the other fails here as well as at import. `V2-P3-009`..`012` each extend it."""
     assert set(FACTOR_DEFINITIONS.qualified_keys) == set(FACTOR_EVALUATORS)
-    assert FACTOR_DEFINITIONS.qualified_keys == ("reversal_1d/v1",)
+    assert FACTOR_DEFINITIONS.qualified_keys == (
+        "reversal_1d/v1",
+        "return_vol_60/v1",
+        "downside_vol_60/v1",
+        "turnover_60/v1",
+        "amihud_60/v1",
+    )
 
 
 def test_a_definition_with_no_evaluator_is_refused_rather_than_answered_emptily() -> None:
