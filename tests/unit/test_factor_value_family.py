@@ -1,7 +1,7 @@
 """The value family's declarations and arithmetic, as functions of a window (`V2-P3-009`).
 
 `tests/integration/panel/test_value_family.py` drives the same three factors through the real
-engine against real partitions. This file measures the four things a partition is the wrong
+engine against real partitions. This file measures the five things a partition is the wrong
 instrument for:
 
 - **The unit of the denominator.** `daily_basic.total_mv` is published in units of 10,000 yuan
@@ -23,6 +23,11 @@ instrument for:
   `_trailing_twelve_months` answers `None` rather than differencing two periods the formula does
   not name. The engine refuses such a window before an evaluator sees it, so the only way to
   drive the branch is to hand the function one directly.
+- **Real rows this repository does not store.** Whether `income.total_revenue` and
+  `income.revenue` are two numbers or one is decided by the endpoint and not by a partition
+  written here: every stored `income` row carries them equal, and three of the four securities
+  those rows belong to are `comp_type=1` names in the 97.5% that agree while the fourth is a
+  bank. The rows that separate the two columns are recorded as constants and asserted directly.
 - **The declarations themselves**, including the two the family is *asked* about and answers
   negatively: that no stored statement projection carries a deducted-profit column, which is why
   EPcut is not a fourth definition, and that none of the four columns the measured refusals are
@@ -369,11 +374,16 @@ DEDUCTED_PROFIT_FIELDS: Final[tuple[str, ...]] = (
 )
 """Tushare's deducted-non-recurring-profit family -- 扣除非经常性损益 -- as the endpoint names it.
 
-`dt_netprofit_yoy` is the one this repository has actually *seen served*: it is named in
+**`profit_dedt` itself has been seen served**, which is the strongest form this claim has: EPcut's
+numerator is not a derivation from a growth rate but a field the endpoint returns, and
+`V2-P3-009`'s review read it back by adding the column to `fina_indicator`'s projection over 101
+securities. `dt_netprofit_yoy` is the weaker witness that came first and is still the recorded
+one: it is named in
 `KNOWN_FINANCIAL_STATEMENT_LIMITATIONS.the_merge_rule_is_agreement_in_the_projection`, which was
 measured by re-fetching **all** response fields for a 76-security sample. So the deducted-profit
 family exists upstream and the projection does not carry it, which is the whole of why EPcut is
-not a fourth definition here.
+not a fourth definition here -- and `V2-P3-017`'s premise is a measurement rather than an
+expectation.
 """
 
 
@@ -386,10 +396,14 @@ def test_no_stored_statement_projection_carries_a_deducted_profit_column() -> No
     `dt_netprofit_yoy` appears in the limitation that counted what the projection cannot see,
     which is a field the endpoint served and `providers/tushare.py` does not request.
 
-    Widening the projection is a `V2-P1-011` contract change with a price that module states --
-    every stored partition's schema moves, and keys move out of the collapsed column and into the
-    refused one -- so this test is the falsifiable form of the disclosure: the day a stored
-    projection gains a deducted-profit column, this goes red and EPcut has to be reconsidered.
+    Widening the projection is a `V2-P1-011` contract change whose price is the schema of every
+    stored partition and the contract tests pinned to the field list. It is **not** a re-pricing
+    of the collapse, which is what this docstring claimed until `V2-P3-009`'s review measured it:
+    adding `profit_dedt` to `fina_indicator`'s projection over 101 securities and 4,423 filings
+    left the folded rows, the ambiguous filings and every existing column's refusals identical,
+    and added 41 refusals that were all the new column's own. See `V2-P3-017`. This test is the
+    falsifiable form of the disclosure either way: the day a stored projection gains a
+    deducted-profit column, it goes red and EPcut has to be reconsidered.
     """
     projected = {column for columns in STATEMENT_DATA_COLUMNS.values() for column in columns}
 
@@ -457,17 +471,60 @@ def test_a_non_finite_stored_cell_is_refused_because_the_collapse_is_built_on_eq
     )
 
 
-def test_the_revenue_column_this_family_reads_is_the_one_that_does_not_change_with_comp_type() -> (
-    None
-):
-    """`total_revenue` and not `revenue`, pinned because no fixture can decide it.
+# --- the two revenue columns, on the rows that separate them -------------------------------------
+#
+# `income.total_revenue` against `income.revenue`, captured 2026-08-13 by `V2-P3-009`'s review
+# from the served rows -- the whole history of 14 comp_type 2/3/4 names and a 47-name comp_type=1
+# sample -- and recorded here to the yuan, which is four orders of magnitude finer than the gap
+# being asserted.
+#
+# (ts_code, comp_type, report_period, total_revenue, revenue, (total_revenue - revenue) / revenue)
+TWO_REVENUE_COLUMNS: Final[tuple[tuple[str, str, str, float, float, float], ...]] = (
+    ("600519.SH", "1", "20240930", 123_122_542_625.0, 120_776_131_875.0, 0.0194),
+    ("002208.SZ", "1", "20220930", 1_612_572_587.0, 1_604_974_825.0, 0.0047),
+    ("000001.SZ", "2", "20180630", 57_241_000_000.0, 57_241_000_000.0, 0.0),
+)
+"""Three real rows: two ordinary industrials where the columns differ, one bank where they do not.
 
-    On an ordinary industrial the two are equal -- every real `income` row this repository stores
-    carries the same number in both -- so a value assertion on a fixture proves nothing about the
-    choice. What decides it is that `total_revenue` is the topmost line and is defined for every
-    `comp_type` the endpoint serves, and that is a statement about the projection: both columns
-    are stored, so this is a choice between two available names rather than an availability.
+The third is the row this file's own source used to cite as an "ordinary industrial" on which
+the two are equal. It is `comp_type='2'` -- a bank -- so it was evidence for the opposite of what
+it was quoted for, and the two industrials are where the endpoint actually separates the columns.
+"""
+
+WORST_TWO_COLUMN_GAP_ROUNDING: Final[float] = 5e-5
+"""How closely the recorded gap has to reproduce, and it decides nothing.
+
+The gaps being asserted are 1.94e-2 and 4.7e-3 and the two are three orders of magnitude apart,
+so any tolerance below about 1e-3 separates them from each other and from the bank row's zero.
+This one is the rounding of the third decimal place of a percentage and nothing else.
+"""
+
+
+def test_the_top_line_and_revenue_are_two_different_numbers_on_a_real_industrial_row() -> None:
+    """`total_revenue` and not `revenue`, decided by rows rather than by a reading of the statement.
+
+    This test used to assert that no fixture could decide the choice, on the ground that the two
+    columns are equal on an ordinary industrial and part only for the company types whose top line
+    is not one number. `V2-P3-009`'s review measured it and every clause of that is false: over
+    the whole history of 14 banks, insurers and brokers the two columns carry the same number on
+    all 1,350 rows, the only place this endpoint separates them is `comp_type=1` -- 37 of 1,468
+    rows in a 47-name sample, including **all 42** of `600519.SH`'s -- and the `000001.SZ` row the
+    argument named as its ordinary industrial is one of the banks.
+
+    So the choice is decidable on a real row and this is that assertion. What it does not measure
+    is which way an evaluator points: `tests/integration/panel/test_value_family.py` builds a
+    partition whose `revenue` is half its `total_revenue` and drives all three factors through the
+    engine over it, which is where a `_sales_yield_ttm` reading the wrong column lands somewhere
+    else.
     """
+    for security, comp_type, period, top_line, revenue, gap in TWO_REVENUE_COLUMNS:
+        where = f"{security} comp_type={comp_type} {period}"
+        assert top_line >= revenue, where
+        assert (top_line - revenue) / revenue == pytest.approx(
+            gap, abs=WORST_TWO_COLUMN_GAP_ROUNDING
+        ), where
+        assert (comp_type == "1") == (top_line != revenue), where
+
     assert TOTAL_REVENUE_COLUMN == "total_revenue"
     assert "revenue" in STATEMENT_DATA_COLUMNS[INCOME_DATASET]
     assert SALES_YIELD_TTM.columns_of(INCOME_DATASET) == ("total_revenue",)

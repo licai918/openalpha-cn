@@ -246,6 +246,34 @@ def test_a_period_window_narrower_than_its_own_lookback_is_refused() -> None:
     assert _filing_definition(lookback_periods=5, max_window_periods=5).max_window_periods == 5
 
 
+def test_a_span_bound_above_one_is_refused_beside_a_count_of_one_on_either_axis() -> None:
+    """At a count of one the span bound decides nothing, so only `1` may be declared.
+
+    One of a security's own points spans exactly one panel point -- `panel_factors::_session_span`
+    and `_period_span` both return 1 when a window's ends coincide -- so `max_window_sessions=50`
+    beside `lookback_sessions=1` is a number in the content address that no branch can consult,
+    which is the objection this contract already makes to a reach for an axis nothing reads.
+
+    Measured before it was refused, and the measurement is why it is refused: raising
+    `earnings_yield_ttm`'s `max_window_sessions` from 1 to 50 and `book_to_price`'s
+    `max_window_periods` from 1 to 8 turned only the declaration tests red and left
+    `tests/integration/panel/test_value_family.py` and `tests/unit/test_factor_engine_rules.py`
+    entirely green. Two factors that compute the same number for every security on every
+    partition would therefore have carried two different `factor_id`s.
+
+    Both axes and both directions, because one unmatched `pytest.raises` here would pass while the
+    other axis had stopped being checked -- and the equal case is asserted so this cannot be
+    satisfied by a rule that refuses `1` as well.
+    """
+    with pytest.raises(ValidationError, match="max_window_sessions 50 is stated beside"):
+        _definition(lookback_sessions=1, max_window_sessions=50)
+    with pytest.raises(ValidationError, match="max_window_periods 8 is stated beside"):
+        _filing_definition(lookback_periods=1, max_window_periods=8)
+
+    assert _definition(lookback_sessions=1, max_window_sessions=1).max_window_sessions == 1
+    assert _filing_definition(lookback_periods=1, max_window_periods=1).max_window_periods == 1
+
+
 _REACH_BOUNDS: Final[tuple[tuple[str, dict[str, Any], dict[str, Any]], ...]] = (
     (
         "lookback_sessions",

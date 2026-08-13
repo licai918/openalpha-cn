@@ -592,6 +592,18 @@ class FactorDefinition(BaseModel):
 
         `required_fields` has `min_length=1`, so at least one axis is always declared and a
         definition with no reach at all is unconstructible.
+
+        **The span bound is pinned at a count of one**, on the same argument one step further in.
+        A one-point window spans exactly one panel point on either axis -- `panel_factors
+        ::_session_span` and `_period_span` both return 1 for a window whose ends coincide -- so
+        every setting of `max_window_*` above 1 decides the same nothing, and this contract's
+        objection to a reach that no branch can consult applies to it word for word. Left free, it
+        was measured to be inert: raising `earnings_yield_ttm`'s `max_window_sessions` from 1 to
+        50 and `book_to_price`'s `max_window_periods` from 1 to 8 turned only the declaration
+        tests red and left the engine's and the integration suite's entirely green -- two
+        behaviourally identical factors carrying two different `factor_id`s, which is the one
+        thing a content address may not do. This refuses that pair rather than documenting it, and
+        it is a validator and not a field, so it moves no `factor_id` that exists.
         """
         for axis, datasets, lookback, window, names in (
             (
@@ -630,6 +642,13 @@ class FactorDefinition(BaseModel):
                     f"{window_name} {window} is narrower than {count_name} {lookback}; "
                     f"{lookback} of a security's own {axis} points span at least that many panel "
                     f"{axis} points, so this factor could never compute a value for anybody"
+                )
+            if lookback == 1 and window is not None and window > 1:
+                raise ValueError(
+                    f"{window_name} {window} is stated beside {count_name} 1; one of a "
+                    f"security's own {axis} points spans exactly one, so no setting above 1 can "
+                    "ever bind and two factors that compute identically would carry different "
+                    f"factor_ids -- declare {window_name}=1, which is what a count of one means"
                 )
         return self
 

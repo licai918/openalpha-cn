@@ -493,19 +493,55 @@ stated as yields rather than as multiples: `E/P` is monotone through zero and `P
 columns -- `ebit` is 258 of `income`'s 288, `total_share` 34 of `balancesheet`'s 43,
 `free_cashflow` all 450 of `cashflow`'s and `fcff` 441 of `fina_indicator`'s 507 -- and this
 family reads **none** of them, nor `bps`, whose two versions of one `603049.SH` filing differ by a
-factor of ten. What that buys is arithmetic on the recorded totals rather than a new measurement:
-the nine non-`ebit` `income` columns share at most 30 refused reads over 3,201 filings and the six
-non-`total_share` `balancesheet` columns at most 9 over 3,170. What it does **not** buy is
-immunity, and the counterexample is in this repository's own fixtures: `002538.SZ`'s 2022 annual
-carries three versions of `total_hldr_eqy_exc_min_int` spanning 3.8%.
+factor of ten. That choice is now backed by the three columns' **own** measured rates rather than
+by arithmetic on a dataset total, because `V2-P3-009`'s review measured them over two disjoint
+91-security samples:
+
+| column | sample A | sample B | combined |
+|---|---:|---:|---:|
+| `income.total_revenue` | 6 / 5,210 | 7 / 5,357 | 13 / 10,567 = **0.123%** |
+| `income.n_income_attr_p` | 7 / 5,210 | 13 / 5,357 | 20 / 10,567 = **0.189%** |
+| `balancesheet.total_hldr_eqy_exc_min_int` | 13 / 5,120 | 8 / 5,249 | 21 / 10,369 = **0.203%** |
+
+**The bound those numbers replace was itself a sample property, which is the point.** Until this
+review the budgets here were derived: "the nine non-`ebit` `income` columns share at most 30
+refused reads over 3,201 filings, the six non-`total_share` `balancesheet` columns at most 9 over
+3,170" -- 0.94% and 0.28% spread over nine and six columns. Both target columns come in under
+those bounds, but the *intermediate* quantity does not: on the review's two samples the
+non-`ebit` `income` residue is 55 / 5,210 and 92 / 5,357 (1.72%) and the non-`total_share`
+`balancesheet` residue 60 / 5,120 (1.17%) and 32 / 5,249 (0.61%), two to four times the recorded
+figures. `domain/financial_statements.py` says it in its own voice -- "how little is a property
+of the sample and not of the dataset", and "the `0` is the one to distrust" -- and a derived
+bound whose middle term moves by 4x is a delivery proof hanging on a free parameter. What it does
+**not** buy either way is immunity, and the counterexample is in this repository's own fixtures:
+`002538.SZ`'s 2022 annual carries three versions of `total_hldr_eqy_exc_min_int` spanning 3.8%.
+
+**A non-finite stored cell now refuses the build, on both axes, and only one axis has a
+measurement behind it.** `_numeric` used to pass `nan` and the infinities through, so an
+evaluator reached one and returned it and `FactorEvaluator`'s rule made it `undefined_value` for
+that one security. The period axis forces the tightening -- the collapse is built on `==` and
+`nan != nan`, so two byte-identical rows would be reported as a disagreement the publisher never
+stated -- but the session axis has no collapse and therefore no such forcing: there the argument
+is that a non-finite cell is poison for every window statistic, which is a judgement rather than
+a measurement. The cost of being wrong about it is that one security's `nan` refuses the whole
+cross section where it used to cost that security alone. Nothing this repository writes can
+produce one (`providers/tushare.py::_finite_number` refuses it at the boundary), so no existing
+test separates the two behaviours and the whole tree stayed green through the change -- which is
+exactly why it is recorded here rather than only in `_numeric`'s docstring. A fail-closed
+tightening that no suite can see is the kind that has to be written down.
 
 **Two things this family does not deliver and says so.** EPcut is not shipped, because no stored
 statement projection carries a deducted-profit column -- see `EARNINGS_YIELD_TTM`, which occupies
-the slot on `RETURN_VOL_60`'s terms. And a build over a *real whole-market* statement partition
-still refuses rather than answering: `_read_dataset` now collapses the duplicate rows that agree,
-which is most of them, but the ones that genuinely disagree (261 of `income`'s 3,201 filings)
-refuse the whole build rather than one security, and giving one security its own answer would need
-a sixth `FactorCoverage` member that the stored manifest schema is pinned against.
+the slot on `RETURN_VOL_60`'s terms, and `V2-P3-017` for what widening the projection actually
+costs. And a build over a *real whole-market* statement partition still refuses rather than
+answering: `_read_dataset` now collapses the duplicate rows that agree, which is most of them,
+but the ones that genuinely disagree (261 of `income`'s 3,201 filings, and 8.2% / 8.7% of the
+review's two samples) refuse the whole build rather than one security, and giving one security
+its own answer would need a sixth `FactorCoverage` member that the stored manifest schema is
+pinned against. That is `V2-P3-018`, filed rather than left in prose because `V2-P3-010`'s ROE
+reads `fina_indicator.roe` -- a column already recorded losing 5 reads in a 53-security corpus
+and 33 in a 76-security one -- off the dataset whose ambiguous-filing rate is 13.7%, so the next
+two factor families meet this wall sooner and harder than this one does.
 
 ## What is deliberately not here
 
@@ -919,6 +955,12 @@ class FactorEvaluator(Protocol):
     the data is there before an evaluator is called. A non-finite return (`inf`, `nan`) is
     treated identically to `None`, because an evaluator that computes its way to `inf` has said
     the same thing less deliberately.
+
+    **That leniency is on the way out, not on the way in.** A non-finite *stored cell* is refused
+    by `_numeric` before any evaluator sees it, so the two rules point opposite ways on purpose:
+    an evaluator's `inf` is this factor's own arithmetic reporting an undefined answer for one
+    security, and a partition's `inf` is a fact about the panel that the period axis's collapse
+    cannot compare and the session axis has no honest use for.
 
     Kept out of `FactorDefinition` because a definition must survive `model_dump(mode="json")`
     to be content-addressed and a callable does not. The two tables are bound at run time; see
@@ -1816,29 +1858,58 @@ listed share has a claim on -- and `total_mv` prices exactly the parent's shares
 The two columns are both stored and are different numbers on real rows: `600739.SH`'s 2024 annual
 gives `n_income` 664,195,391.66 against `n_income_attr_p` 209,556,865.25, a factor of 3.2.
 
-**It is not one of the concentrated columns.** `income`'s 288 refused field reads are 258 `ebit`
-plus 30 spread over the other nine, so this column's own refusal rate is at most 30 in 3,201
-filings on that sample -- see this module's docstring section "The value family" for the whole
-budget and for what it is and is not.
+**It is not one of the concentrated columns, and its own rate is measured rather than bounded.**
+`income`'s 288 refused field reads on the 53-security corpus are 258 `ebit` plus 30 spread over
+the other nine, which bounded this column at 30 in 3,201 filings *on that sample*.
+`V2-P3-009`'s review measured the column itself instead, over two disjoint 91-security samples:
+7 of 5,210 filings and 13 of 5,357, **20 of 10,567 (0.189%)**. The bound held; the intermediate
+quantity it was derived from did not (the non-`ebit` residue is 1.72% on the wider sample against
+the 0.94% recorded), which is why the measurement replaces it -- see this module's docstring
+section "The value family".
 """
 
 TOTAL_REVENUE_COLUMN: Final[str] = "total_revenue"
 """SP's numerator: 营业总收入, cumulative, in yuan -- the top line, and not `revenue`.
 
 Both are stored and the choice is between them rather than a default. `total_revenue` is the
-topmost line of the CAS income statement and is defined for every `comp_type` the endpoint
-serves; `revenue` (营业收入) is a *component* of it for the company types whose top line is not one
-number -- a bank's interest income and an insurer's earned premiums sit above `revenue` and inside
-`total_revenue`. `domain/financial_statements.py` records that the projection "holds only columns
-every company type publishes", and this family reads the one whose meaning does not change with
-`comp_type`.
+topmost line of the CAS income statement and `revenue` (营业收入) is one of the lines it totals, so
+the top line is the **inclusive** one: whatever an issuer reports above its operating revenue is
+inside `total_revenue` and outside `revenue`, and the narrower column drops it without saying so.
+`domain/financial_statements.py` records that the projection "holds only columns every company
+type publishes", and the top line is the one that means the same thing on every `comp_type`.
 
-On an ordinary industrial the two are equal, which is why a fixture cannot decide this and the
-argument has to be about the statement rather than about a number: `000001.SZ`'s 2018H1 carries
-57,241,000,000.0 in both, and so does every other real `income` row this repository stores.
+**Where the two actually part is measured, and it is the opposite of where the shape of the
+statement puts it.** `V2-P3-009`'s review probed the served `income` rows by `comp_type` -- the
+whole history of 14 banks, insurers and brokers, and a 47-name industrial sample:
+
+| `comp_type` | rows | equal | differing |
+|---|---:|---:|---:|
+| `2` bank | 647 | 647 | **0** |
+| `3` insurer | 358 | 358 | **0** |
+| `4` broker | 345 | 345 | **0** |
+| `1` ordinary industrial | 1,468 | 1,431 | **37** |
+
+The company types whose top line is textbook *not* one number -- a bank's interest income, an
+insurer's earned premiums -- arrive with the two columns carrying the same number on all 1,350 of
+those rows, and the only place this endpoint separates them is the ordinary industrial.
+`600519.SH` separates them on **all 42** of its stored periods: 2024Q3 is 123,122,542,625 of
+`total_revenue` against 120,776,131,875 of `revenue`, so `revenue` is short of the top line by
+1.94% of itself; `002208.SZ`'s 2022Q3 is 1,612,572,587 against 1,604,974,825, 0.47%.
+
+**So a fixture can decide this, and one does.**
 `tests/unit/test_factor_value_family.py::
-test_the_revenue_column_this_family_reads_is_the_one_that_does_not_change_with_comp_type` pins
-the choice against the stored projection so that swapping it is a deliberate act.
+test_the_top_line_and_revenue_are_two_different_numbers_on_a_real_industrial_row` asserts those
+rows and the choice against the stored projection, so swapping the column is a deliberate act
+that lands 1.94% away rather than on the same answer. That replaces the argument this docstring
+made until `V2-P3-009`'s review falsified it in both directions -- that the two are equal on an
+ordinary industrial and only a bank could tell them apart. Every real `income` row *this
+repository stores* does carry the two equal, but three of its four securities (`603333.SH`,
+`600739.SH`, `920403.BJ`) are `comp_type=1` names inside the 97.5% that agree and the fourth,
+`000001.SZ`, is a bank and not the "ordinary industrial" that sentence called it --
+`tests/contract/providers/test_tushare_financials.py` says so in its own fixture comment, that
+its `oper_cost` is null on both rows "because a bank publishes no cost of sales". So that corpus
+never had the power to decide this either way, which is this repository's own lesson about an
+assertion whose fixture cannot separate two answers, appearing for the sixth time.
 """
 
 BOOK_EQUITY_COLUMN: Final[str] = "total_hldr_eqy_exc_min_int"
@@ -1862,7 +1933,13 @@ Three candidates existed and two are refused with a measurement:
   two columns where one will do, so a null or a disagreement in either refuses the read.
 - **`total_hldr_eqy_exc_min_int`**, which is the stored column that already means what the
   denominator prices, and is outside `balancesheet`'s concentration: 34 of that dataset's 43
-  refused reads are `total_share`, leaving at most 9 for the other six columns over 3,170 filings.
+  refused reads are `total_share`. That used to be the whole argument, as "at most 9 for the
+  other six columns over 3,170 filings" -- an upper bound derived from a residue *on one sample*,
+  and `V2-P3-009`'s review measured the residue at 60 / 5,120 and 32 / 5,249 on two wider ones,
+  two to four times the 0.28% that bound implied. The column's own rate is measured instead, on
+  those same two disjoint 91-security samples: 13 of 5,120 filings and 8 of 5,249, **21 of
+  10,369 (0.203%)**, which is inside the old bound but is now a number about this column rather
+  than about the five it shares a residue with.
 
 **Not immune, and the repository holds the counterexample.** `002538.SZ`'s 2022 annual, announced
 2023-04-21, is three rows whose values of this column are 5,346,322,691.02, 5,297,379,808.74 and
@@ -1895,12 +1972,24 @@ equality is not a spare setting here: on a window with a gap, `window[:-1]` can 
 at all, and `_trailing_twelve_months` returns `None` rather than differencing two periods that are
 not the ones the formula names.
 
-**The cost is stated rather than absorbed.** Five filings is about fifteen months of disclosure
-history, so a security that listed within the last year is `insufficient_history` for `EP` and
-`SP` where `book_to_price` -- one period, a stock quantity, no differencing -- answers. That is a
-real coverage difference between two factors of one family and it is the price of not putting a
-six-month numerator and a nine-month numerator into one cross section, which is what reading the
-latest cumulative alone would do the moment two issuers file on different schedules.
+**The cost is stated rather than absorbed, and it is wider than the identity's own appetite.**
+Five filings is about fifteen months of disclosure history, so a security that listed within the
+last year is `insufficient_history` for `EP` and `SP` where `book_to_price` -- one period, a
+stock quantity, no differencing -- answers. That is a real coverage difference between two
+factors of one family and it is the price of not putting a six-month numerator and a nine-month
+numerator into one cross section, which is what reading the latest cumulative alone would do the
+moment two issuers file on different schedules.
+
+The arithmetic above reads **three** of the five periods -- `window[-1]`, the December inside
+`window[:-1]` and `window[0]` -- while `5 / 5` requires all five to be there and contiguous. So a
+security that has every period the formula names and is missing only one of the two it never
+reads is `insufficient_history` too: the window cannot be formed, and `_trailing_twelve_months`
+is never reached. **That is the window model's cost and not the identity's**, and it is priced
+that way deliberately -- the contract's guarantee is "no missed filing inside the window", which
+is what makes the December search a search over four *consecutive* quarters rather than over
+whatever four the build happened to read. A reach that admitted the gap would have to decide
+which quarters a three-period window is allowed to skip, and that decision is exactly what
+`max_window_periods` exists to refuse.
 """
 
 MARKET_CAP_SESSIONS: Final[int] = 1
@@ -2070,13 +2159,22 @@ and `MARKET_CAP_SESSIONS` for why one.
 and no column of any of the four stored statement projections carries that number or anything it
 could be derived from: `income`'s ten are the two revenue lines, cost, operating and pre-tax
 profit, tax, net profit at both levels, published EPS and `ebit`, and `fina_indicator`'s eleven
-are ratios and per-share figures. The endpoint does serve the family -- `domain/financial
-_statements.py`'s all-fields probe found `dt_netprofit_yoy` among the 97 `fina_indicator` fields
-the projection does **not** fetch -- so this is a projection boundary and not an upstream
-absence. Widening the projection is a `V2-P1-011` contract change with a measured price, stated
-in this module's docstring, and not this issue's to make. So EP is what EPcut reduces to when the
-non-recurring part cannot be subtracted, exactly as `RETURN_VOL_60` is what a residual volatility
-reduces to when the market return cannot be, and
+are ratios and per-share figures. The endpoint does serve the family, and `V2-P3-009`'s review
+measured that directly rather than by inference: `fina_indicator` **returns `profit_dedt`
+itself** -- the deducted net profit, not only the `dt_netprofit_yoy` growth rate
+`domain/financial_statements.py`'s all-fields probe had already recorded among the 97 fields the
+projection does not fetch. So this is a projection boundary and not an upstream absence, and the
+column EPcut needs is one `response_fields` entry away.
+
+**What that widening costs was measured too, and it is not what this docstring first said.** The
+same review added `profit_dedt` to `fina_indicator`'s projection and read one batch of served
+rows twice, 101 securities and 4,423 filings: the collapsed-row count, the ambiguous-filing count
+and every existing column's refusal count came back **identical**, and the 41 new refusals were
+all `profit_dedt`'s own. So the price is the schema migration and the contract tests pinned to
+the field list, not a re-pricing of the datasets already recorded -- see `V2-P3-017`, which is
+where that widening lives and is not this issue's to make. EP is therefore what EPcut reduces to
+when the non-recurring part cannot be subtracted, exactly as `RETURN_VOL_60` is what a residual
+volatility reduces to when the market return cannot be, and
 `tests/unit/test_factor_value_family.py::
 test_no_stored_statement_projection_carries_a_deducted_profit_column` goes red the day a stored
 projection gains one.
@@ -2099,11 +2197,15 @@ EARNINGS_YIELD_TTM_NOTE: Final[FactorNote] = FactorNote(
         "monotone through zero and P/E is not, which is why daily_basic.pe_ttm is simply null for "
         "a loss-maker on 1,214 of 5,338 rows and why this factor does not invert it. It occupies "
         "V2-P3-009's EPcut slot and is NOT EPcut: the deducted-profit number is in none of the "
-        "four stored statement projections, the endpoint serves the family (dt_netprofit_yoy is "
-        "one of the fina_indicator fields the projection does not fetch), and widening the "
-        "projection is a V2-P1-011 contract change that would move every stored partition's "
-        "schema and change what the collapse rule folds. The cost of the five-period reach is "
-        "stated: a security with fewer than five contiguous filings is insufficient_history here "
+        "four stored statement projections, while the endpoint serves profit_dedt itself, so this "
+        "is a projection boundary and not an upstream absence. Widening the projection is a "
+        "V2-P1-011 contract change that moves every stored partition's schema and the contract "
+        "tests pinned to the field list -- and NOT, as measured on 101 securities and 4,423 "
+        "filings by adding profit_dedt and reading one batch of rows twice, a re-pricing of the "
+        "collapse: the folded rows, the ambiguous filings and every existing column's refusals "
+        "came back identical, and the 41 new refusals were profit_dedt's own. The cost of the "
+        "five-period reach is stated: a security with fewer than five contiguous filings is "
+        "insufficient_history here "
         "and computed for book_to_price." + _VALUE_DENOMINATOR_PROSE + _VALUE_DIRECTION_PROSE
     ),
 )
@@ -2216,17 +2318,21 @@ SALES_YIELD_TTM_NOTE: Final[FactorNote] = FactorNote(
         "capitalisation, on earnings_yield_ttm's terms throughout -- the same cumulative-to-TTM "
         "identity over the same five contiguous report periods, the same denominator, the same "
         "sign convention. total_revenue and not revenue: the first is the topmost line of the CAS "
-        "income statement and is defined for every comp_type the endpoint serves, while revenue "
-        "is a component of it for the company types whose top line is not one number, and "
-        "domain/financial_statements.py's projection holds only columns every company type "
-        "publishes. On an ordinary industrial the two are equal -- 000001.SZ's 2018H1 carries "
-        "57,241,000,000.0 in both -- so this is an argument about the statement rather than about "
-        "a number a fixture could settle. Neither column is one of income's concentrated ones: "
-        "258 of that dataset's 288 refused field reads are ebit, and revenue itself was measured "
-        "losing 5 reads in a 53-security corpus and 6 in an independent 76-security probe. A "
-        "600739.SH-shaped filing, whose two rows both carry update_flag=1 and disagree about "
-        "revenue by 4.6% while agreeing about n_income_attr_p, refuses this factor's read and not "
-        "earnings_yield_ttm's, which is what per-field refusal means on a real pair of rows."
+        "income statement and the second is one of the lines it totals, so the top line is the "
+        "inclusive one and the narrower column drops whatever an issuer reports above its "
+        "operating revenue. Where the two part is measured rather than argued, and it is NOT "
+        "where the shape of the statement puts it: over the whole history of 14 banks, insurers "
+        "and brokers the two columns carry the same number on all 1,350 rows (comp_type 2 / 3 / "
+        "4, zero differences), while on a 47-name comp_type=1 industrial sample they differ on 37 "
+        "of 1,468 -- 600519.SH on ALL 42 of its stored periods, 123,122,542,625 of total_revenue "
+        "against 120,776,131,875 of revenue at 2024Q3, 1.94% of revenue that the narrower column "
+        "does not carry. Neither column is one of income's concentrated ones: ebit is 258 of that "
+        "dataset's 288 refused field reads on the 53-security corpus, and total_revenue's OWN "
+        "refusal rate was measured directly rather than bounded, at 13 of 10,567 filings "
+        "(0.123%) over two disjoint 91-security samples. A 600739.SH-shaped filing, whose two "
+        "rows both carry update_flag=1 and disagree about revenue by 4.6% while agreeing about "
+        "n_income_attr_p, refuses this factor's read and not earnings_yield_ttm's, which is what "
+        "per-field refusal means on a real pair of rows."
         + _VALUE_DENOMINATOR_PROSE
         + _VALUE_DIRECTION_PROSE
     ),
@@ -2816,14 +2922,20 @@ def _read_dataset(
 
     **What this does not buy is a build over a real whole-market partition.** The rows that
     genuinely disagree are still there -- 261 of `income`'s 3,201 filings (8.15%) and 41 of
-    `balancesheet`'s 3,170 (1.29%) -- and one of them anywhere in the cross section still refuses
-    the whole build rather than that one security. A per-security answer would need a sixth
-    `FactorCoverage` member, which is not a widening this issue may make: `FACTOR_CENSUS_COLUMNS`
-    is derived from the coverage vocabulary and is part of `FACTOR_MANIFEST_DATA_COLUMNS`, so a
-    sixth code changes the stored manifest partition's schema, whose width
-    `tests/unit/test_factor_engine_rules.py::
-    test_a_stored_manifest_row_of_the_wrong_width_is_refused` pins. See this module's docstring
-    section "The value family".
+    `balancesheet`'s 3,170 (1.29%), and 8.2% / 8.7% of `income`'s filings on the two independent
+    samples `V2-P3-009`'s review measured -- and one of them anywhere in the cross section still
+    refuses the whole build rather than that one security. A per-security answer would need a
+    sixth `FactorCoverage` member, which is not a widening this issue may make:
+    `FACTOR_CENSUS_COLUMNS` is derived from the coverage vocabulary and is part of
+    `FACTOR_MANIFEST_DATA_COLUMNS`, so a sixth code changes the stored manifest partition's
+    schema, whose width `tests/unit/test_factor_engine_rules.py::
+    test_a_stored_manifest_row_of_the_wrong_width_is_refused` pins, and reusing one of the five
+    would be wrong on the meaning: `input_missing` says the row is not there and
+    `undefined_value` says the arithmetic has no answer, where this says the publisher stated the
+    number twice and disagreed with itself. **That is `V2-P3-018`**, filed on `V2-P3-016`'s and
+    `017`'s terms rather than left in prose, because `V2-P3-010` reads `fina_indicator` -- the
+    dataset whose ambiguous-filing rate is 13.7% -- and meets this wall sooner than the value
+    family does. See this module's docstring section "The value family".
 
     The session axis keeps the strict rule and that asymmetry is deliberate. The period axis has
     a *measured* dataset property behind its collapse -- two versions of one filing under one
@@ -3008,10 +3120,19 @@ def _refuse_two_versions_that_disagree(
 
     `build_statement_history`'s rule reached through a narrower read. Two rows of one
     `(subject, period, announcement)` key whose *projected* cells are equal are one fact stated
-    twice -- 372 of `income`'s 633 duplicate keys, 1,166 of `balancesheet`'s 1,244 and 2,194 of
-    `fina_indicator`'s 2,671 -- and two that are not are the case no column of these datasets
-    orders. The session axis is not routed here at all; `_read_dataset` argues why its second row
-    raises equal or not.
+    twice, and two that are not are the case no column of these datasets orders. The session axis
+    is not routed here at all; `_read_dataset` argues why its second row raises equal or not.
+
+    **The counts quoted for this rule are the projection's, not the whole row's**, and the two are
+    different numbers that `domain/financial_statements.py` is careful to separate. 372 of
+    `income`'s 633 duplicate keys, 1,166 of `balancesheet`'s 1,244 and 2,194 of
+    `fina_indicator`'s 2,671 agree in **every field the endpoint serves** -- all 85 / 152 / 108 of
+    them. The predicate here is coarser and can only fold at least as much: that module's
+    end-to-end table records **372 / 1,205 / 2,223** rows folded under the stored projection,
+    which is the criterion this function applies, and only `income` comes out the same on both.
+    `_read_dataset`'s own summary of the defect is stated on the served-field counts and says so;
+    this docstring used to quote those counts under the word "projected", which is the one place
+    the two were run together.
 
     ## How exactly this lines up with `ReportFiling.value_of`, including where it does not
 
@@ -3200,11 +3321,19 @@ def _numeric(
     so a partition may hold one, and the period axis's collapse is built on `==`. Two rows of one
     filing that are byte-identical apart from carrying `nan` in the same column would compare
     unequal and be reported as a disagreement the publisher never stated, which is a build refusal
-    naming a fault that does not exist. On the session axis it is not a collapse hazard but it is
-    a poison for every window statistic, and this is the last place a message can still name the
-    row it came from. Nothing this repository writes can produce one -- `providers/tushare.py
-    ::_finite_number` refuses a non-finite cell at the boundary -- which is why the guard is
-    driven directly in `tests/unit/test_factor_value_family.py::
+    naming a fault that does not exist.
+
+    **On the session axis the same refusal is a judgement rather than a measurement, and it
+    tightens behaviour.** There is no collapse there, so nothing forces it; the argument is that a
+    non-finite cell is poison for every window statistic and that this is the last place a message
+    can still name the row it came from. What it costs if that argument is wrong is stated rather
+    than absorbed: before this guard, `nan` reached the evaluator, came back out, and
+    `FactorEvaluator`'s rule made it `undefined_value` for **that one security**; now it refuses
+    the whole cross section. Fail-closed in a direction nothing measured -- see this module's
+    docstring section "The value family", which records it as a behaviour change rather than as a
+    detail of this function. Nothing this repository writes can produce one --
+    `providers/tushare.py::_finite_number` refuses a non-finite cell at the boundary -- which is
+    why the guard is driven directly in `tests/unit/test_factor_value_family.py::
     test_a_non_finite_stored_cell_is_refused_because_the_collapse_is_built_on_equality`.
     """
     if value is None:

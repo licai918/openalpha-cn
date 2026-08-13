@@ -16,10 +16,10 @@ Issue ID: `V2-<阶段>-<序号>`。类型标记：**结**结构 · **产**产品
 | **P0.B** | 结构地基与迁移机制 | 16 | 3–4 周 | 8–10 周 | 迁移机制可用 + 单一组装根 + conftest 就位 |
 | **P1** | 面板数据平面 | 17 | 5–7 周 | 13–18 周 | 8 组数据集全部通过契约 + 未来数据 fail-closed |
 | **P2** | **PIT 红队闸门** | 9 | 2 周 | 5 周 | **必过，否则不得进 P3** |
-| **P3** | 因子层 | 17 | 5–6 周 | 13–15 周 | 首批因子出齐 raw/processed/neutralized 三档 |
+| **P3** | 因子层 | 18 | 5–6 周 | 13–15 周 | 首批因子出齐 raw/processed/neutralized 三档 |
 | **P4** | 候选排序与模型基线 | 25 | 6–7 周 | 15–18 周 | 契约升版一次完成 + 预测先落库 |
 | **P5** | 组合、验证与工作台 | 24 | 6–8 周 | 15–20 周 | 归因对账 + 多重检验 + 4 页可用 |
-| | **合计** | **117** | **28–36 周** | **70–90 周** | |
+| | **合计** | **118** | **28–36 周** | **70–90 周** | |
 
 > **相对上一版的变化**：上一版估 18–25 周，假设 P0 为 1 周。审计发现 39 条必须在面板层之前关闭的前置 finding（无迁移机制、两个组装根、引擎四合一、无 conftest、look-ahead 靠字符串匹配、`.parquet` 被发布拦截、seed/commit/digest 全为占位），故新增 P0.B。上调的 10–11 周全部是**原先不可见的前置债**，不是范围膨胀。
 
@@ -183,7 +183,7 @@ P3 结束即可独立使用（Jupyter 直连面板 + 因子）
 
 ---
 
-## P3 — 因子层（15 issues）
+## P3 — 因子层（18 issues）
 
 | ID | 标题 | 类型 | 依赖 | 说明 | PRD |
 |---|---|---|---|---|---|
@@ -203,7 +203,8 @@ P3 结束即可独立使用（Jupyter 直连面板 + 因子）
 | `V2-P3-014` | 不可变因子实验制品 + raw/processed/neutralized 三档报告 | 技 | 005-008 | 否则分不清"因子有效"与"暴露没控住" | S24, D8 |
 | `V2-P3-015` | 因子的 CLI + REST + SDK 面（`factor run --factor <id> --start --end`） | 产 | 014 | — | S83, S84 |
 | `V2-P3-016` | **指数点位序列数据集 + 面板可达的市场收益**（`V2-P3-013` 的残差/特质波动的硬前置，见下方小节） | 技 | P1 存储契约 | `013` 实测：15 个 descriptor 里**没有任何指数点位**（`index_weight` 是成分权重不是点位），且 `FactorWindow` 是单标的的 —— 求值器**按类型**够不到市场序列 | S16 |
-| `V2-P3-017` | **扣非净利列进入统计投影**（`V2-P3-009` 的 EPcut 的硬前置，见下方小节） | 技 | `V2-P1-011` 存储契约 | `009` 实测：四个投影的 10 / 7 / 5 / 11 列里**没有扣非净利**，而端点确实服务这一族（`dt_netprofit_yoy` 已被 76 只票全字段探针记录在 `the_merge_rule_is_agreement_in_the_projection` 里）。加列会动每个已存分区的 schema，并把一批键从「折叠」挪进「拒绝」—— 这是有价的契约变更，不是 `009` 能顺手做的 | S16 |
+| `V2-P3-017` | **扣非净利列进入统计投影**（`V2-P3-009` 的 EPcut 的硬前置，见下方小节） | 技 | `V2-P1-011` 存储契约 | `009` 复审实测：四个投影的 10 / 7 / 5 / 11 列里**没有扣非净利**，而端点**直接服务 `profit_dedt` 本身**（把它加进投影就读得回来，101 只票）。代价是每个已存分区的 schema + 以真实行钉住字段列表的契约测试**都要重写**；**不是**折叠/拒绝口径的重新定价 —— 同一批原始行量两遍，折叠行数、歧义 filing 数、既有 11 列的逐列拒绝数**一字未变** | S16 |
+| `V2-P3-018` | **`FactorCoverage` 第六个码：把「这只票的这次 filing 有歧义」变成单票覆盖码而不是整 build 拒绝**（`V2-P3-009`..`011` 共用的墙，见下方小节） | 技 | `V2-P3-002` 存储契约 | `009` 实测：`income` 歧义 filing 8.2% / 8.7%，`fina_indicator` 记录 13.7%，横截面里任意一只撞上就拒绝整个 build。`FACTOR_CENSUS_COLUMNS` 由 `FACTOR_COVERAGE_ORDER` 推导进 `FACTOR_MANIFEST_DATA_COLUMNS`，第六个码会改已存 manifest 分区的宽度（`test_a_stored_manifest_row_of_the_wrong_width_is_refused` 钉的 27 列）。复用现有五个码在语义上是错的 | S16 |
 
 **闸门**：每个因子同时出三档报告；因子合同测试使用冻结股票池/日历/公司行动/修正，证明 PIT 可见性与确定性取值；P2 红队测试仍全绿。
 
@@ -1115,16 +1116,32 @@ roadmap 给 `V2-P3-009` 写的四个因子是「EP / BP / SP / EPcut」。实际
 利润总额、所得税、两个层级的净利、基本 EPS 和 `ebit`；`fina_indicator` 的十一列是比率与每股数。
 扣非净利（`profit_dedt`）与 `dt_eps` / `dt_netprofit_yoy` 都不在其中。
 
-**这是投影边界，不是上游缺失，而且这一点是实测的**：
+**这是投影边界，不是上游缺失，而且这一点是实测的**：复审把 `profit_dedt` 加进
+`fina_indicator` 的投影后**直接读回了这一列本身**（101 只票 / 4,423 filing），
+比只能引用 `dt_netprofit_yoy` 强一档 —— 后者是
 `KNOWN_FINANCIAL_STATEMENT_LIMITATIONS.the_merge_rule_is_agreement_in_the_projection` 记录的
-76 只票全字段探针里出现了 `dt_netprofit_yoy` —— 它是端点服务、而 `providers/tushare.py`
-的 `response_fields` 不请求的 97 个 `fina_indicator` 字段之一。
+76 只票全字段探针里出现的、端点服务而 `providers/tushare.py` 的 `response_fields` 不请求的
+97 个 `fina_indicator` 字段之一。**`V2-P3-017` 的前提因此是一条测量而不是一个预期。**
 
-**加列是有价的**，这也是 `009` 不顺手做的理由：那条 limitation 自己写着「widening
-`STATEMENT_DATA_COLUMNS` would move keys out of the collapsed column and into the refused one」，
-即已记录的每个数据集拒绝率都会变；而 `statement_panel_columns` 决定分区 schema，
-四个统计数据集的每个已存分区都要重写，`tests/contract/providers/test_tushare_financials.py`
-里以真实行钉住的字段列表也要一起改。**已立为 `V2-P3-017`**。
+**加列是有价的，但代价不是原先写的那一条。** 本小节最初的理由是那条 limitation 的
+「widening `STATEMENT_DATA_COLUMNS` would move keys out of the collapsed column and into the
+refused one」，并据此断言「已记录的每个数据集拒绝率都会变」。复审把同一批原始行量了两遍：
+
+```
+stored_projection  : rows 7686  filings 4423  collapsed_rows 2566  ambiguous 697  refused 833
+widened_projection : rows 7686  filings 4423  collapsed_rows 2566  ambiguous 697  refused 874
+                     新增 41 条全部来自 profit_dedt 自己，既有 11 列逐列一字未变
+```
+
+**折叠行数不变、歧义 filing 数不变、既有列拒绝数不变**；数据集级 rate 从 1.71% 降到 1.65%，
+变化只来自分母变大。37 票的小样本同结论。那条 limitation 作为**条件句**依然成立
+（`fina_indicator` 投影外的分歧确实集中在 `assets_yoy` / `turn_days` / `eqt_yoy` 上），
+但把它当成「加任意一列必然发生」是把条件句读成了必然。
+
+**真实代价是迁移与契约**：`statement_panel_columns` 决定分区 schema，四个统计数据集的每个
+已存分区都要重写，`tests/contract/providers/test_tushare_financials.py` 里以真实行钉住的
+字段列表也要一起改；外加 `profit_dedt` 自己在那个样本上就吃掉 41 条拒绝，
+即 EPcut 的可读性天然低于 EP。**已立为 `V2-P3-017`**。
 
 **`earnings_yield_ttm` 占住 EPcut 这个槽位，口径与 `RETURN_VOL_60` 相同**：EP 就是
 「非经常性损益那一项减不掉时，EPcut 退化成的东西」，因子自己的 note 显式说明它不是 EPcut。
@@ -1133,3 +1150,50 @@ roadmap 给 `V2-P3-009` 写的四个因子是「EP / BP / SP / EPcut」。实际
 
 **台账口径**：`V2-P3-009` 记为已交付的是它实际交付的三个因子（`OA-FACTOR-008`）；
 `017` 落地后才谈得上 EPcut。
+
+
+### `V2-P3-009` 复审更正（2026-08-13）：`total_revenue` vs `revenue` 的理由原本方向写反了
+
+选 `total_revenue` **本身是对的**（顶行、每个 `comp_type` 都填充、是更 inclusive 的那一列），
+但交付时给出的理由是「金融类的顶行不是一个数所以两列分裂，普通工商业上两列相等，
+因此 fixture 判定不了这件事」。复审按 `comp_type` 实测了服务行：
+
+| `comp_type` | 行数 | 相等 | 不等 |
+|---|---:|---:|---:|
+| `2` 银行 | 647 | 647 | **0** |
+| `3` 保险 | 358 | 358 | **0** |
+| `4` 券商 | 345 | 345 | **0** |
+| `1` 普通工商业 | 1,468 | 1,431 | **37** |
+
+**三句全反**：分歧只出现在 `comp_type=1`（原文说这里相等），而原文说会分裂的金融类
+（14 只票全历史，1,350 行）**每一行都相等**；被引作「ordinary industrial」例子的
+`000001.SZ` 2018H1 其 `comp_type='2'`，**是银行**；「a fixture cannot decide this」也是假的 ——
+`600519.SH` **全部 42 个已存期次都不等**，2024Q3 是 `total_revenue` 123,122,542,625 对
+`revenue` 120,776,131,875，差 `revenue` 的 1.94%；`002208.SZ` 2022Q3 差 0.47%。
+
+散文已换成这组实测，并落成一条会红的测试
+`tests/unit/test_factor_value_family.py::test_the_top_line_and_revenue_are_two_different_numbers_on_a_real_industrial_row`。
+**原教训第六次出现**：断言存在但那个 fixture 分不开两个答案 —— 本仓库存的 4 只 `income` 票
+里 3 只是 `comp_type=1` 的低分歧样本、1 只是银行，两列在**每一行**都相等，所以那个语料
+从来没有能力判定这件事，无论朝哪个方向。
+
+
+### `V2-P3-018`（2026-08-13 立）：歧义 filing 现在拒绝整个 build，而不是给那只票一个覆盖码
+
+`V2-P3-009` 让引擎折叠了「可证是同一个事实」的重复行，但**证明是两个事实的那些还在**，
+且一只票撞上就拒绝整个横截面。这不是 `009` 能顺手修的，理由和 `016` / `017` 同规格：
+
+- `FACTOR_CENSUS_COLUMNS` 由 `FACTOR_COVERAGE_ORDER` 推导，进 `FACTOR_MANIFEST_DATA_COLUMNS`，
+  分区 schema 宽度被 `tests/unit/test_factor_engine_rules.py::test_a_stored_manifest_row_of_the_wrong_width_is_refused`
+  以 `match="expected 27"` 钉死 —— 加第六个码要改**每一个已存 manifest 分区**。
+- 复用现有五个码在语义上是错的：`input_missing` 说「行不在」，
+  `undefined_value` 说「算出来没有定义」，而这里的事实是「行在、但发布方说了两遍且不一致」。
+
+**量级不是边角**：`009` 复审实测 `income` 的歧义 filing 占 **8.2% / 8.7%**
+（`domain/financial_statements.py` 记录 8.15%），`fina_indicator` 记录 **13.7%**；
+而 `V2-P3-010` 的 ROE 要读的 `fina_indicator.roe` 在既有记录里是 53 票丢 5、**76 票丢 33**。
+**`010` / `011` 会比 `009` 更早、更频繁地撞上同一堵墙**，所以这条先立，
+免得 `010` 开工时再论证一遍。
+
+声明落在 `panel_factors._read_dataset` 与该模块 docstring 的 "The value family" 一节，
+两处都指向本条。

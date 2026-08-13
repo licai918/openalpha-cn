@@ -6,7 +6,7 @@ module's whole subject: **that key does not identify a row.** A live probe on 20
 every one of them to exhaustion for a 53-security sample spread across the listed universe
 (every 104th code of `stock_basic`'s 5,539, plus six long-history names), and found:
 
-| endpoint | rows | keys | keys with >1 row | identical in **every** served field | differing |
+| endpoint | rows | keys | keys >1 row | identical in **every** served field | differing pairs |
 |---|---:|---:|---:|---:|---:|
 | `income` | 3,836 | 3,201 | 633 | 372 | 259 |
 | `balancesheet` | 4,416 | 3,170 | 1,244 | 1,166 | 76 |
@@ -18,6 +18,19 @@ is not the comparison this module makes -- see "Equal means equal in the project
 and every number here is from that probe unless it names a different one, which two of them do:
 the projection gap and the `latest_filing_on` ordering were re-measured on a fresh 76-security
 sample the same day.
+
+**"differing" counts pairs and "identical" counts keys**, which is why the last two columns do
+not add up to the third on the first two rows, and the residue is exactly the keys that carry
+*three* rows rather than two. The excess-row counts say how many those are: `income` has
+3,836 - 3,201 = 635 rows beyond one per key against 633 duplicate keys, and `balancesheet`
+4,416 - 3,170 = 1,246 against 1,244 -- two rows in each beyond what a corpus of plain pairs
+would carry -- while `cashflow`'s 718 and `fina_indicator`'s 2,671 excess rows match their
+duplicate-key counts exactly and every duplicate there *is* a plain pair. The pair counts then
+fix the shape rather than leaving it open: `633 - 372 = 261` differing keys against 259 differing
+pairs means **two** three-row keys and not one four-row one, and `1,244 - 1,166 = 78` against 76
+says the same for `balancesheet`. So 261 is the number the end-to-end table below reports as
+`income`'s ambiguous filings, and the two tables agree once the unit is named. This was found by
+`V2-P3-009`'s review reading `633 - 372` against the `259` beside it.
 
 ## The dimension these datasets cannot see
 
@@ -78,7 +91,9 @@ anyway, which is where 81.7% of the duplication is.
 Measured on the pairs that disagree, worst case per field, over the 53-security sample:
 
 - `income.ebit`: `603333.SH` 2020Q1, **-7,579,086 against +3,427,524** -- opposite signs.
-  `601398.SH` 2011H1: 159.7bn against 58.5bn. 256 of the 259 differing pairs move `ebit`.
+  `601398.SH` 2011H1: 159.7bn against 58.5bn. 256 of the 259 differing **pairs** move `ebit`,
+  and the end-to-end table below counts 258 refused `ebit` reads over 261 ambiguous filings,
+  which is the same statement with the two three-row keys added back.
 - `income.revenue` / `total_revenue`: `600739.SH` 2024 annual, 10.77bn against 11.29bn (4.6%).
 - `income.n_income_attr_p`: `920454.BJ` 2018 annual, 15,245,326.91 against 14,778,490.42 (3.1%).
 - `cashflow.free_cashflow`: `300002.SZ` 2023H1, **+316,026,934 against -294,173,456**.
