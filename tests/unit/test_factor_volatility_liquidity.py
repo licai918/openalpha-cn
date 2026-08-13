@@ -299,10 +299,15 @@ def test_the_family_reads_the_fail_closed_turnover_column_and_not_the_nullable_o
     assert TURNOVER_RATE_COLUMN in read
 
     # Scoped to this family rather than to the whole registry, and the narrowing is a judgement
-    # rather than caution. `V2-P3-009`'s EP and BP read `pe` and `pb`, which are *legitimately*
-    # nullable -- a loss-making company has no P/E and `daily_prices.py` measures 1,102 of 5,338
-    # rows null on one session -- so a registry-wide version of this rule would be false for a
-    # value factor and would fail in that issue's branch for a reason belonging to this one.
+    # rather than caution: which of `daily_basic`'s seventeen columns a factor may read is a
+    # question each family answers for itself. This comment used to predict that `V2-P3-009`'s EP
+    # and BP would read `pe` and `pb`; they read `total_mv`, which is in the fail-closed
+    # complement, and that issue's own note argues the inversion down on the null rate. The
+    # scoping stands on the general form of that reason rather than on the prediction: `pe`,
+    # `pe_ttm`, `pb`, `ps` and `ps_ttm` are *legitimately* nullable -- a loss-making company has no
+    # P/E, and `daily_prices.py` measures 1,102 of 5,338 rows null on one session -- so a
+    # registry-wide rule here would be this issue's branch deciding a question that belongs to
+    # whichever issue first reaches for one of them.
 
 
 def test_the_columns_this_family_reads_are_columns_the_daily_contract_declares() -> None:

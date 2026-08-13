@@ -204,11 +204,16 @@ column instead, `FactorWindow` carries both tuples, and a `FactorDefinition` dec
 exactly when `required_fields` puts it on that axis. The measurement is
 `tests/integration/panel/test_factor_report_periods.py`, which writes one corpus twice -- once
 under a session-axis name and once under `income` -- and asserts the first raises and the second
-computes. Neither the multiplicity refusal nor the coverage vocabulary was widened for it: two
-rows of one `(subject, period)` at one announcement still raise (that is the shape carrying
-81.7% of `fina_indicator`'s real duplication), and a period shortfall or a period span overrun
-is `insufficient_history`, distinguishable on the stored row by the period window rather than by
-a sixth code.
+computes. The coverage vocabulary was not widened for it: a period shortfall or a period span
+overrun is `insufficient_history`, distinguishable on the stored row by the period window rather
+than by a sixth code.
+
+Two rows of one `(subject, period)` at one announcement -- the shape carrying 81.7% of
+`fina_indicator`'s real duplication -- raise when they **disagree in the columns the factor
+reads** and collapse when they agree, which is `build_statement_history`'s own rule and is what
+makes this engine's answer `ReportFiling.value_of`'s answer. `V2-P3-009` made that change and
+`_read_dataset` argues it; refusing on multiplicity alone had refused 372 of `income`'s 633
+duplicate keys that say exactly the same thing twice.
 
 ## Coverage is a code, never a bool
 
@@ -435,14 +440,81 @@ per `(security, as_of)` rather than a series to take a deviation of -- and it al
 coverage year. A factor that depended on it would inherit that blocker; these four read raw panel
 columns and inherit nothing.
 
+## The value family (`V2-P3-009`), and the first factors on two axes at once
+
+Three definitions ship for it -- `earnings_yield_ttm`, `book_to_price` and `sales_yield_ttm` --
+and five judgements are shared by all of them and stated here rather than three times over.
+
+**A value factor is a filing over a price, so it is on both axes, and the engine already
+supported that before any shipped factor used it.** `FactorDefinition` requires each reach to be
+declared exactly when `required_fields` puts the factor on that axis, `FactorWindow` carries a
+`sessions` tuple and a `periods` tuple with `series()` aligned to whichever its dataset is on,
+`FactorObservation` carries a window pair per axis, and `_classify` forms, bounds and completes
+both independently. All of that was built by the change that added the report-period axis and was
+exercised only by definitions the tests declared;
+`tests/integration/panel/test_factor_report_periods.py::
+test_a_factor_on_both_axes_gets_one_window_per_axis` is the measurement, and these three are what
+that machinery was built for. So the time-point mismatch a value factor has -- a daily
+denominator and a quarterly numerator -- is not resolved by aligning one to the other. Each side
+is read on its own index and the evaluator divides `[-1]` by `[-1]`, which is what the two
+tuples exist for.
+
+**The denominator is `daily_basic.total_mv`, carried into yuan.** Not `circ_mv` (a filing
+describes the whole company), and not the published `pe`, `pe_ttm`, `pb`, `ps` and `ps_ttm`
+inverted, which is the choice with the sharper argument. All five of those are in
+`DAILY_BASIC_NULLABLE_COLUMNS` and their null rate is not incidental: 1,102 null `pe` and 1,214
+null `pe_ttm` of 5,338 rows on 2024-06-28, because a published multiple has no value for a
+loss-maker. A factor built by inverting one would answer `input_missing` for a fifth of the
+market -- precisely the fifth a signed yield scores correctly -- and it would be scoring the
+upstream's own trailing-window arithmetic rather than the filings, which is the reason
+`_compounded_session_return` refuses `pct_chg` and calls it the third witness.
+`CNY_PER_MARKET_CAP_UNIT` is measured on stored rows, and the unit is load-bearing in a way
+nothing downstream can catch: a
+rank IC and a z-score are scale-free, so a denominator wrong by 10,000 reaches every report that
+quotes a number and no test that only ranks.
+
+**The flow numerators are trailing twelve months, not the latest cumulative.** A-share statements
+accumulate within the calendar fiscal year, so the latest cumulative figure is three, six, nine or
+twelve months of profit depending on the period -- and a cross section read at one `as_of` mixes
+those the moment two issuers are on different filing schedules. `TRAILING_TWELVE_MONTH_PERIODS`
+carries the identity and what makes it legitimate: `max_window_periods == lookback_periods` is the
+contract's statement that no filing is missing inside the window, measured against the
+fiscal-quarter grid rather than against the periods this build happened to read. The cost is a
+coverage difference *inside the family* -- five contiguous filings for EP and SP, one for BP --
+and it is visible in the census rather than hidden.
+
+**A negative numerator is `computed` and negative.** A loss-making issuer has a negative earnings
+yield and an insolvent one a negative book-to-price; the arithmetic has an answer and
+`undefined_value` is documented for the case where it does not. This is the reason the family is
+stated as yields rather than as multiples: `E/P` is monotone through zero and `P/E` is not.
+
+**The columns are chosen against the measured concentration of the refusals.**
+`domain/financial_statements.py` records that the refusals are not spread but pooled in four
+columns -- `ebit` is 258 of `income`'s 288, `total_share` 34 of `balancesheet`'s 43,
+`free_cashflow` all 450 of `cashflow`'s and `fcff` 441 of `fina_indicator`'s 507 -- and this
+family reads **none** of them, nor `bps`, whose two versions of one `603049.SH` filing differ by a
+factor of ten. What that buys is arithmetic on the recorded totals rather than a new measurement:
+the nine non-`ebit` `income` columns share at most 30 refused reads over 3,201 filings and the six
+non-`total_share` `balancesheet` columns at most 9 over 3,170. What it does **not** buy is
+immunity, and the counterexample is in this repository's own fixtures: `002538.SZ`'s 2022 annual
+carries three versions of `total_hldr_eqy_exc_min_int` spanning 3.8%.
+
+**Two things this family does not deliver and says so.** EPcut is not shipped, because no stored
+statement projection carries a deducted-profit column -- see `EARNINGS_YIELD_TTM`, which occupies
+the slot on `RETURN_VOL_60`'s terms. And a build over a *real whole-market* statement partition
+still refuses rather than answering: `_read_dataset` now collapses the duplicate rows that agree,
+which is most of them, but the ones that genuinely disagree (261 of `income`'s 3,201 filings)
+refuse the whole build rather than one security, and giving one security its own answer would need
+a sixth `FactorCoverage` member that the stored manifest schema is pinned against.
+
 ## What is deliberately not here
 
-**Three of the five factor families.** `V2-P3-009`..`011` own value, quality and growth.
-`V2-P3-012`'s momentum and reversal family and `V2-P3-013`'s volatility and liquidity family
-both ship here. `REVERSAL_1D` stays exactly where it is: it predates all of them and is the
-engine's own verification factor rather than a research deliverable -- see its own docstring
-for what it does and does not claim, and `REVERSAL_5_SESSIONS`' for why it is not that factor
-with a wider window.
+**Two of the five factor families.** `V2-P3-010` and `V2-P3-011` own quality and growth.
+`V2-P3-009`'s value family, `V2-P3-012`'s momentum and reversal family and `V2-P3-013`'s
+volatility and liquidity family all ship here. `REVERSAL_1D` stays exactly where it is: it
+predates all of them and is the engine's own verification factor rather than a research
+deliverable -- see its own docstring for what it does and does not claim, and
+`REVERSAL_5_SESSIONS`' for why it is not that factor with a wider window.
 
 **No universe loading.** `compute_factor` takes the cross section as an argument rather than
 deriving it, because `stock_basic` has exactly the same mid-year readiness problem this module
@@ -509,7 +581,11 @@ from openalpha_cn.domain.factor_transform import (
     observation_digest,
     validate_processed_factor_observation,
 )
-from openalpha_cn.domain.financial_statements import REPORT_PERIOD_COLUMN
+from openalpha_cn.domain.financial_statements import (
+    BALANCE_SHEET_DATASET,
+    INCOME_DATASET,
+    REPORT_PERIOD_COLUMN,
+)
 from openalpha_cn.domain.panel_batch import (
     SUBJECT_COLUMN_NAME,
     ColumnarPanelBatch,
@@ -1677,6 +1753,494 @@ def _amihud_60(window: FactorWindow) -> float | None:
     ) / len(returns)
 
 
+# --- `V2-P3-009`: the value family --------------------------------------------------------------
+#
+# See this module's docstring section "The value family" for the five judgements every factor
+# here shares -- the two axes, the denominator, the trailing window, the sign, and the column
+# choice -- and for why EPcut is not among them.
+
+
+MARKET_CAP_COLUMN: Final[str] = "total_mv"
+"""`daily_basic`'s whole-company market capitalisation, **in units of 10,000 yuan**.
+
+The denominator of every factor in this family, and `circ_mv` is deliberately not it.
+`panel_neutralization.INDUSTRY_AND_SIZE` already made the same choice one plane down and for the
+reason that applies here too: the whole company is what a filing describes, and the restricted
+fraction `circ_mv` excludes is not a fact about the earnings the numerator counts. A book value
+divided by the float's market value would be a ratio whose two halves cover different share
+counts.
+
+Spelled here rather than imported, on `TURNOVER_RATE_COLUMN`'s terms: `domain/daily_prices.py`
+carries this name only inside `DAILY_BASIC_DATA_COLUMNS`, and
+`tests/unit/test_factor_value_family.py::
+test_the_columns_this_family_reads_are_columns_the_stored_contracts_declare` holds it against
+that tuple in both directions.
+"""
+
+CNY_PER_MARKET_CAP_UNIT: Final[float] = 10_000.0
+"""Yuan per unit of `daily_basic.total_mv`, **measured** on stored rows rather than assumed.
+
+`CNY_PER_AMOUNT_UNIT`'s problem in the other dataset, and it matters here for a sharper reason:
+a value factor divides a filing, published in yuan, by a market capitalisation published in
+something else, so the unit is not a scale on one side of a ratio -- it is the *only* thing that
+makes the two sides commensurable. Get it wrong and every earnings yield in the panel is off by
+a factor of 10,000 while every rank IC, every z-score and every neutralised residual is
+unchanged, because all three are scale-free.
+
+The measurement is a two-step chain over the four real `daily_basic` rows this repository already
+stores in `tests/unit/domain/test_daily_prices.py`, and neither step needs an upstream field list:
+
+1. **`total_share` and `float_share` are in units of 10,000 shares.** `000001.SZ` on 2026-06-12
+   traded 2,032,355.46 lots against `float_share=1,940,560.0653`, and `vol * 100 / (float_share *
+   10,000)` is 1.0473% -- exactly the stored `turnover_rate`. Reading `float_share` as shares puts
+   it at 10,473%.
+2. **`total_mv` is `close * total_share`, so it carries the same 10,000.** `11.24 *
+   1,940,591.8198 = 21,812,252.0546` against a stored `21,812,252.0568`, and `1,291.91 *
+   125,008.1601 = 161,499,292.11` against a stored `161,499,291.9856`. The widest relative gap
+   over the four rows and both capitalisation columns is **2.4e-9**, which is the rounding of two
+   columns published to two and four decimals; the next candidate reading is out by 1e4. In yuan
+   those two caps are 218.1bn and 1.615tn, which are the right order of magnitude for those two
+   companies and the other readings are not.
+
+`tests/unit/test_factor_value_family.py::
+test_the_market_cap_unit_is_ten_thousand_yuan_and_no_other_reading_reproduces_the_close` is that
+chain as an executable measurement, on all four stored rows.
+"""
+
+NET_PROFIT_COLUMN: Final[str] = "n_income_attr_p"
+"""EP's numerator: net profit **attributable to owners of the parent**, cumulative, in yuan.
+
+`n_income` is the consolidated figure and includes the minority interest, which no holder of a
+listed share has a claim on -- and `total_mv` prices exactly the parent's shares. So the pair
+`(n_income_attr_p, total_mv)` covers one claim on both sides and `(n_income, total_mv)` does not.
+The two columns are both stored and are different numbers on real rows: `600739.SH`'s 2024 annual
+gives `n_income` 664,195,391.66 against `n_income_attr_p` 209,556,865.25, a factor of 3.2.
+
+**It is not one of the concentrated columns.** `income`'s 288 refused field reads are 258 `ebit`
+plus 30 spread over the other nine, so this column's own refusal rate is at most 30 in 3,201
+filings on that sample -- see this module's docstring section "The value family" for the whole
+budget and for what it is and is not.
+"""
+
+TOTAL_REVENUE_COLUMN: Final[str] = "total_revenue"
+"""SP's numerator: 营业总收入, cumulative, in yuan -- the top line, and not `revenue`.
+
+Both are stored and the choice is between them rather than a default. `total_revenue` is the
+topmost line of the CAS income statement and is defined for every `comp_type` the endpoint
+serves; `revenue` (营业收入) is a *component* of it for the company types whose top line is not one
+number -- a bank's interest income and an insurer's earned premiums sit above `revenue` and inside
+`total_revenue`. `domain/financial_statements.py` records that the projection "holds only columns
+every company type publishes", and this family reads the one whose meaning does not change with
+`comp_type`.
+
+On an ordinary industrial the two are equal, which is why a fixture cannot decide this and the
+argument has to be about the statement rather than about a number: `000001.SZ`'s 2018H1 carries
+57,241,000,000.0 in both, and so does every other real `income` row this repository stores.
+`tests/unit/test_factor_value_family.py::
+test_the_revenue_column_this_family_reads_is_the_one_that_does_not_change_with_comp_type` pins
+the choice against the stored projection so that swapping it is a deliberate act.
+"""
+
+BOOK_EQUITY_COLUMN: Final[str] = "total_hldr_eqy_exc_min_int"
+"""BP's numerator: owners' equity **excluding** minority interest, a stock rather than a flow.
+
+Three candidates existed and two are refused with a measurement:
+
+- **`fina_indicator.bps` times a share count.** Refused outright. `bps` is the field
+  `domain/financial_statements.py` opens with: the two versions of `603049.SH`'s 2024 annual give
+  22.2055 and 2.2206, a factor of ten, under one `ann_date` on an endpoint with **no
+  `update_flag`, no `f_ann_date` and no `report_type`** -- so nothing in the panel orders them and
+  the wrong pick is a book-to-price wrong by 10x. The share count would have to come from
+  `balancesheet.total_share`, which is that endpoint's *most* disagreed field (34 of its 43
+  refusals; `000002.SZ` 2023H1 at 11,630,709,471 against 11,930,709,471). A numerator built from
+  those two would multiply this family's exposure to the one thing this repository has measured
+  most carefully about these datasets.
+- **`total_assets - total_liab`.** Refused because it is the *consolidated* equity: it includes
+  the minority interest that `total_mv` does not price. On `000002.SZ`'s 2023H1 rows the
+  difference is real -- 1,684,196,409,372.7 less 1,281,551,927,215.46 is 402,644,482,157.24
+  against a stored `total_hldr_eqy_exc_min_int` of 249,326,669,106.12, 61% larger. It also reads
+  two columns where one will do, so a null or a disagreement in either refuses the read.
+- **`total_hldr_eqy_exc_min_int`**, which is the stored column that already means what the
+  denominator prices, and is outside `balancesheet`'s concentration: 34 of that dataset's 43
+  refused reads are `total_share`, leaving at most 9 for the other six columns over 3,170 filings.
+
+**Not immune, and the repository holds the counterexample.** `002538.SZ`'s 2022 annual, announced
+2023-04-21, is three rows whose values of this column are 5,346,322,691.02, 5,297,379,808.74 and
+5,150,097,232.47 -- so a real filing in this repository's own fixtures disagrees about BP's
+numerator by 3.8%. `domain/financial_statements.py`'s warning that "no projected column should be
+read as immune" is not rhetorical here; it is this column, on that filing.
+"""
+
+TRAILING_TWELVE_MONTH_PERIODS: Final[int] = 5
+"""How many contiguous filings a trailing-twelve-month numerator needs: the latest and four back.
+
+**The window is five because the arithmetic needs three of its members and the contract only
+guarantees them contiguously.** A-share statements are *cumulative within the fiscal year* -- Q1
+is three months, H1 six, Q3 nine, the annual twelve -- and a PRC listed company's accounting year
+is the calendar year (`FISCAL_QUARTER_ENDS`). So the trailing twelve months ending at period `P`
+is
+
+    TTM(P) = cumulative[P] + cumulative[the December before P] - cumulative[P - 4 quarters]
+
+and a window of five contiguous quarters ending at `P` contains all three by construction:
+`window[0]` is `P - 4 quarters`, `window[-1]` is `P`, and `window[:-1]` is four consecutive
+quarters and therefore holds **exactly one** December. At `P = 31 December` the December before
+`P` *is* `window[0]`, the two terms cancel and the answer is the annual cumulative itself, which
+is correct.
+
+**What makes the index arithmetic legitimate is `max_window_periods == lookback_periods`**, which
+`FactorDefinition` documents as "no missed filing inside the window" and `_period_span` makes true
+against the fiscal-quarter grid rather than against the periods this build happened to read. That
+equality is not a spare setting here: on a window with a gap, `window[:-1]` can hold no December
+at all, and `_trailing_twelve_months` returns `None` rather than differencing two periods that are
+not the ones the formula names.
+
+**The cost is stated rather than absorbed.** Five filings is about fifteen months of disclosure
+history, so a security that listed within the last year is `insufficient_history` for `EP` and
+`SP` where `book_to_price` -- one period, a stock quantity, no differencing -- answers. That is a
+real coverage difference between two factors of one family and it is the price of not putting a
+six-month numerator and a nine-month numerator into one cross section, which is what reading the
+latest cumulative alone would do the moment two issuers file on different schedules.
+"""
+
+MARKET_CAP_SESSIONS: Final[int] = 1
+"""How many sessions of `daily_basic` a value factor reads: the newest one knowable at `as_of`.
+
+A price is a fact about an instant and the denominator of a value ratio is the price *now*, not
+an average of prices. So the reach is one, and `max_window_sessions` is one too -- with a
+one-session count the span bound can never bind (one of a security's own sessions always spans
+exactly one panel session), and `1` is the setting that says so rather than implying a tolerance
+this factor does not have. `FactorDefinition` requires the pair to be stated whenever
+`required_fields` names a session dataset, which is why it is a declared `1` and not an absence.
+
+Averaging the cap over a window was considered and rejected for `AMIHUD_60`'s reason in the other
+direction: it would make the value a function of a horizon nobody here has measured, and it would
+make a name halted for part of the window carry a denominator from before the halt.
+"""
+
+FISCAL_YEAR_END_MONTH: Final[int] = 12
+"""The month a PRC fiscal year ends in, which is what `_trailing_twelve_months` searches for.
+
+A statutory fact rather than a parameter -- the same one `FISCAL_QUARTER_ENDS` rests on -- and
+named so the search reads as "find the fiscal year end" rather than as a bare `12`.
+"""
+
+
+def _market_capitalisation(window: FactorWindow) -> float | None:
+    """The newest knowable market capitalisation, **in yuan**, or `None` when it is not positive.
+
+    `None` becomes `undefined_value`, and unlike this module's other zero-denominator guards it is
+    reachable through a partition this repository's own writers accept.
+    `domain/daily_prices.py::_stored_number` requires `total_mv` to be a finite float and **not**
+    a positive one -- only the five columns of `DAILY_PRICE_COLUMNS` get `_stored_price`'s
+    positivity check -- so a stored `0.0` is readable, and
+    `tests/integration/panel/test_value_family.py::
+    test_a_zero_market_capitalisation_is_undefined_value_for_every_factor_in_the_family` provokes
+    it end to end on disk. `AMIHUD_60`'s zero `amount` is the same argument in the same shape.
+
+    Non-positive rather than zero, because a negative capitalisation would divide into a value
+    whose sign is the numerator's reversed -- a loss-making company reported as the cheapest name
+    in the cross section. What this repository has measured about `total_mv` is that it was
+    *populated* on every one of 51,708 rows across eighteen sessions spanning 2001 to 2026; it has
+    measured nothing about its sign, so the wider guard is the one whose failure mode is a
+    refusal rather than a wrong number.
+    """
+    capitalisation = window.series(DAILY_BASIC_DATASET, MARKET_CAP_COLUMN)[-1]
+    in_yuan = capitalisation * CNY_PER_MARKET_CAP_UNIT
+    if in_yuan <= 0.0:
+        return None
+    return in_yuan
+
+
+def _trailing_twelve_months(window: FactorWindow, *, dataset: str, column: str) -> float | None:
+    """`cumulative[-1] + cumulative[the December in the window] - cumulative[0]`.
+
+    The identity `TRAILING_TWELVE_MONTH_PERIODS` states, read off the window's own periods rather
+    than off a calendar this module would then have to agree with: the window is aligned to
+    `FactorWindow.periods` index for index, so the December is found by looking at the periods and
+    the arithmetic is done on the values at the same offsets.
+
+    `None` -- hence `undefined_value` -- when `window.periods[:-1]` does not hold exactly one
+    fiscal year end. **That is unreachable at this family's declared reaches and is a branch
+    rather than an assumption**, for `_sample_stdev`'s stated reason: `_report_period` refuses a
+    period that is not one of `FISCAL_QUARTER_ENDS`, `_form_window` hands over exactly
+    `lookback_periods` of them, and `_overruns_its_span` refuses a window whose fiscal-quarter
+    span exceeds `max_window_periods` -- so at `5 == 5` the four earlier periods are four
+    consecutive quarters and exactly one of them ends a year. Relax the span bound and the branch
+    fires;
+    `tests/unit/test_factor_value_family.py::
+    test_a_window_with_a_gap_has_no_trailing_twelve_months_rather_than_a_wrong_one` drives it on a
+    window this engine will not build, which is the only way to drive it at all.
+    """
+    periods = window.periods
+    cumulative = window.series(dataset, column)
+    year_ends = [
+        index for index, period in enumerate(periods[:-1]) if period.month == FISCAL_YEAR_END_MONTH
+    ]
+    if len(year_ends) != 1:
+        return None
+    return cumulative[-1] + cumulative[year_ends[0]] - cumulative[0]
+
+
+def _yield_on_market_capitalisation(
+    window: FactorWindow, *, dataset: str, column: str
+) -> float | None:
+    """A trailing-twelve-month flow over the newest market capitalisation, both in yuan.
+
+    One function for `earnings_yield_ttm` and `sales_yield_ttm`, on `_momentum_sessions`' terms:
+    the two factors differ in exactly one thing -- which `income` column they name -- and two
+    copies of this body would have implied a difference that does not exist.
+
+    **A negative result is `computed` and not `undefined_value`, and that is the reason this
+    family is stated as a yield rather than as a multiple.** A loss-making issuer has a negative
+    trailing net profit and therefore a negative earnings yield, and the arithmetic has an answer:
+    `E/P` is monotone through zero, so `-0.5` ranks below `+0.01` and the ordering says what it
+    should. `P/E` is not -- it runs to `+inf` as earnings approach zero from above and reappears at
+    `-inf` from below, which is why the published `daily_basic.pe`/`pe_ttm` columns are simply
+    *null* for a loss-maker (1,102 and 1,214 nulls of 5,338 rows on 2024-06-28,
+    `domain/daily_prices.py`'s own census). Inverting the published multiple would therefore hand
+    this factor an `input_missing` for about a fifth of the market -- precisely the fifth a signed
+    yield scores correctly.
+    """
+    capitalisation = _market_capitalisation(window)
+    if capitalisation is None:
+        return None
+    trailing = _trailing_twelve_months(window, dataset=dataset, column=column)
+    if trailing is None:
+        return None
+    return trailing / capitalisation
+
+
+_VALUE_DIRECTION_PROSE: Final[str] = (
+    " The declared direction is the value premium's conventional prior -- the cheaper security, "
+    "the one whose fundamental buys more per yuan of price, is taken to be the better one -- and "
+    "this repository has measured nothing whatever about it, on this factor or on any other. "
+    "V2-P3-005 is where an information coefficient would say something, and V2-P3's own gate "
+    "records that most first-batch factors being insignificant is the expected result rather "
+    "than a failure."
+)
+"""The direction sentence the three value notes share, held to `REVERSAL_1D_NOTE`'s standard.
+
+Written once because it is one claim about three factors and a copy is a thing that drifts;
+`_MOMENTUM_DIRECTION_PROSE` is the precedent and the reason is the same.
+"""
+
+_VALUE_DENOMINATOR_PROSE: Final[str] = (
+    " The denominator is daily_basic.total_mv on the newest session knowable at as_of, carried "
+    "into yuan by CNY_PER_MARKET_CAP_UNIT -- 10,000, which is measured on this repository's own "
+    "stored rows rather than taken from a field list: close * total_share reproduces total_mv on "
+    "all four of them to within 2.4e-9 relative, which is the rounding of two columns published "
+    "to two and four decimals, while the next candidate reading is out by a factor of 10,000; and "
+    "turnover_rate reproduces from float_share only when the share counts are read as "
+    "ten-thousands. total_mv and not circ_mv, because a filing describes the whole company "
+    "and the restricted fraction circ_mv excludes is not a fact about it. A capitalisation that "
+    "is not strictly positive makes the ratio undefined_value rather than a number, and that "
+    "code is reachable on a partition this repository's own reader accepts: total_mv is outside "
+    "DAILY_BASIC_NULLABLE_COLUMNS, so daily_valuations_from_panel_rows refuses a null in it, and "
+    "it is outside DAILY_PRICE_COLUMNS, so nothing requires it to be positive and a stored zero "
+    "reads back."
+)
+"""The denominator sentence all three notes share. One claim about three factors; see
+`_VALUE_DIRECTION_PROSE`."""
+
+
+EARNINGS_YIELD_TTM: Final[FactorDefinition] = FactorDefinition(
+    key="earnings_yield_ttm",
+    version=1,
+    family="value",
+    direction="higher_is_better",
+    required_fields=(
+        FactorField(dataset=INCOME_DATASET, column=NET_PROFIT_COLUMN),
+        FactorField(dataset=DAILY_BASIC_DATASET, column=MARKET_CAP_COLUMN),
+    ),
+    lookback_sessions=MARKET_CAP_SESSIONS,
+    max_window_sessions=MARKET_CAP_SESSIONS,
+    lookback_periods=TRAILING_TWELVE_MONTH_PERIODS,
+    max_window_periods=TRAILING_TWELVE_MONTH_PERIODS,
+)
+"""EP: trailing-twelve-month net profit attributable to the parent, over market capitalisation.
+
+**The first factor this repository ships on both axes at once**, and the first that reads a
+filing at all. The reaches are `1 / 1` sessions and `5 / 5` periods, which is the pair the
+contract's own docstring was written against -- see `TRAILING_TWELVE_MONTH_PERIODS` for why five
+and `MARKET_CAP_SESSIONS` for why one.
+
+**It occupies EPcut's slot as well as its own, and that is a disclosure rather than a rename.**
+扣非后盈利收益率 is this factor with the non-recurring gains and losses removed from its numerator,
+and no column of any of the four stored statement projections carries that number or anything it
+could be derived from: `income`'s ten are the two revenue lines, cost, operating and pre-tax
+profit, tax, net profit at both levels, published EPS and `ebit`, and `fina_indicator`'s eleven
+are ratios and per-share figures. The endpoint does serve the family -- `domain/financial
+_statements.py`'s all-fields probe found `dt_netprofit_yoy` among the 97 `fina_indicator` fields
+the projection does **not** fetch -- so this is a projection boundary and not an upstream
+absence. Widening the projection is a `V2-P1-011` contract change with a measured price, stated
+in this module's docstring, and not this issue's to make. So EP is what EPcut reduces to when the
+non-recurring part cannot be subtracted, exactly as `RETURN_VOL_60` is what a residual volatility
+reduces to when the market return cannot be, and
+`tests/unit/test_factor_value_family.py::
+test_no_stored_statement_projection_carries_a_deducted_profit_column` goes red the day a stored
+projection gains one.
+"""
+
+EARNINGS_YIELD_TTM_NOTE: Final[FactorNote] = FactorNote(
+    subject=EARNINGS_YIELD_TTM.qualified_key,
+    summary=(
+        "EP: the trailing twelve months of income.n_income_attr_p divided by market "
+        "capitalisation. A-share statements are cumulative within the calendar fiscal year, so "
+        "the numerator is cumulative[latest] + cumulative[the December inside the window] - "
+        "cumulative[the same quarter one year earlier], read off a window of five contiguous "
+        "report periods; max_window_periods equals lookback_periods, which is the contract's own "
+        "statement that no filing is missing inside it and is what makes that index arithmetic "
+        "arithmetic rather than a guess. n_income_attr_p and not n_income, because total_mv "
+        "prices the parent's shares and the minority interest is not a claim any holder of one "
+        "has -- 600739.SH's 2024 annual gives 664,195,391.66 against 209,556,865.25 for the same "
+        "period, a factor of 3.2. A negative trailing profit is computed and negative rather than "
+        "undefined_value, which is the whole reason this is a yield and not a multiple: E/P is "
+        "monotone through zero and P/E is not, which is why daily_basic.pe_ttm is simply null for "
+        "a loss-maker on 1,214 of 5,338 rows and why this factor does not invert it. It occupies "
+        "V2-P3-009's EPcut slot and is NOT EPcut: the deducted-profit number is in none of the "
+        "four stored statement projections, the endpoint serves the family (dt_netprofit_yoy is "
+        "one of the fina_indicator fields the projection does not fetch), and widening the "
+        "projection is a V2-P1-011 contract change that would move every stored partition's "
+        "schema and change what the collapse rule folds. The cost of the five-period reach is "
+        "stated: a security with fewer than five contiguous filings is insufficient_history here "
+        "and computed for book_to_price." + _VALUE_DENOMINATOR_PROSE + _VALUE_DIRECTION_PROSE
+    ),
+)
+"""`EARNINGS_YIELD_TTM`'s prose, out of `factor_id`. See `domain/factor.py::FactorNote`."""
+
+
+def _earnings_yield_ttm(window: FactorWindow) -> float | None:
+    """`EARNINGS_YIELD_TTM`: trailing net profit over capitalisation, both in yuan."""
+    return _yield_on_market_capitalisation(window, dataset=INCOME_DATASET, column=NET_PROFIT_COLUMN)
+
+
+BOOK_TO_PRICE: Final[FactorDefinition] = FactorDefinition(
+    key="book_to_price",
+    version=1,
+    family="value",
+    direction="higher_is_better",
+    required_fields=(
+        FactorField(dataset=BALANCE_SHEET_DATASET, column=BOOK_EQUITY_COLUMN),
+        FactorField(dataset=DAILY_BASIC_DATASET, column=MARKET_CAP_COLUMN),
+    ),
+    lookback_sessions=MARKET_CAP_SESSIONS,
+    max_window_sessions=MARKET_CAP_SESSIONS,
+    lookback_periods=1,
+    max_window_periods=1,
+)
+"""BP: owners' equity excluding minority interest at the latest knowable period, over market cap.
+
+**One period, and the `1 / 1` pair is a statement rather than a default.** A balance sheet line is
+a *stock*: the figure at 30 September already is the book value at 30 September, so there is
+nothing to accumulate and nothing to difference, and a five-period reach here would refuse
+securities for want of history the arithmetic never touches. The contract still requires the span
+bound, and at a count of one it can never bind -- one of a security's own periods spans exactly
+one fiscal quarter -- so `1` says "the latest filing" without implying a tolerance.
+
+The consequence is the coverage difference this family is asked about and does not hide: on the
+same cross section `book_to_price` scores every security with one filing and the two
+trailing-twelve-month factors score only those with five contiguous ones.
+`tests/integration/panel/test_value_family.py::
+test_the_one_period_reach_and_the_five_period_reach_answer_differently_for_the_same_security` is
+that difference on one partition rather than in prose.
+"""
+
+BOOK_TO_PRICE_NOTE: Final[FactorNote] = FactorNote(
+    subject=BOOK_TO_PRICE.qualified_key,
+    summary=(
+        "BP: balancesheet.total_hldr_eqy_exc_min_int at the latest report period knowable at "
+        "as_of, divided by market capitalisation. One period and not five, because a balance "
+        "sheet line is a stock and not a cumulative flow -- there is nothing to accumulate, so a "
+        "wider reach would refuse securities for history the arithmetic never reads. The "
+        "numerator is the stored equity column and NOT fina_indicator.bps times a share count: "
+        "the two versions of 603049.SH's 2024 annual give bps as 22.2055 and as 2.2206 under one "
+        "ann_date on an endpoint with no update_flag, no f_ann_date and no report_type, and the "
+        "share count would have had to come from balancesheet.total_share, which is that "
+        "endpoint's most-disagreed field at 34 of its 43 refused reads. Nor is it total_assets "
+        "minus total_liab, which is the consolidated equity and includes the minority interest "
+        "total_mv does not price -- on 000002.SZ's 2023H1 rows that difference is "
+        "402,644,482,157.24 against a stored 249,326,669,106.12, 61% larger -- and which reads "
+        "two columns where one answers. The column chosen is not immune and this repository holds "
+        "the counterexample: 002538.SZ's 2022 annual is three versions giving 5,346,322,691.02, "
+        "5,297,379,808.74 and 5,150,097,232.47, a 3.8% spread, and a factor read of it refuses "
+        "rather than picking. A negative book value -- an insolvent issuer -- is computed and "
+        "negative, on the same monotonicity argument earnings_yield_ttm makes for a loss."
+        + _VALUE_DENOMINATOR_PROSE
+        + _VALUE_DIRECTION_PROSE
+    ),
+)
+"""`BOOK_TO_PRICE`'s prose, out of `factor_id`."""
+
+
+def _book_to_price(window: FactorWindow) -> float | None:
+    """`BOOK_TO_PRICE`: the latest knowable book equity over capitalisation, both in yuan.
+
+    No trailing sum: `window.periods` holds one period and `[-1]` is it. A negative book value is
+    a real answer for an insolvent issuer and is `computed`; the only `None` is the non-positive
+    capitalisation `_market_capitalisation` guards.
+    """
+    capitalisation = _market_capitalisation(window)
+    if capitalisation is None:
+        return None
+    return window.series(BALANCE_SHEET_DATASET, BOOK_EQUITY_COLUMN)[-1] / capitalisation
+
+
+SALES_YIELD_TTM: Final[FactorDefinition] = FactorDefinition(
+    key="sales_yield_ttm",
+    version=1,
+    family="value",
+    direction="higher_is_better",
+    required_fields=(
+        FactorField(dataset=INCOME_DATASET, column=TOTAL_REVENUE_COLUMN),
+        FactorField(dataset=DAILY_BASIC_DATASET, column=MARKET_CAP_COLUMN),
+    ),
+    lookback_sessions=MARKET_CAP_SESSIONS,
+    max_window_sessions=MARKET_CAP_SESSIONS,
+    lookback_periods=TRAILING_TWELVE_MONTH_PERIODS,
+    max_window_periods=TRAILING_TWELVE_MONTH_PERIODS,
+)
+"""SP: trailing-twelve-month total operating revenue over market capitalisation.
+
+`EARNINGS_YIELD_TTM` with one column changed, which is the whole of the difference and is why the
+two share `_yield_on_market_capitalisation`. It carries the family's coverage where EP does not:
+a revenue line is positive for almost every going concern, so a cross section that is a fifth
+loss-making has a full SP and a signed EP -- which is a reason to ship both rather than a reason
+to prefer either. See `TOTAL_REVENUE_COLUMN` for why the top line and not `revenue`.
+"""
+
+SALES_YIELD_TTM_NOTE: Final[FactorNote] = FactorNote(
+    subject=SALES_YIELD_TTM.qualified_key,
+    summary=(
+        "SP: the trailing twelve months of income.total_revenue divided by market "
+        "capitalisation, on earnings_yield_ttm's terms throughout -- the same cumulative-to-TTM "
+        "identity over the same five contiguous report periods, the same denominator, the same "
+        "sign convention. total_revenue and not revenue: the first is the topmost line of the CAS "
+        "income statement and is defined for every comp_type the endpoint serves, while revenue "
+        "is a component of it for the company types whose top line is not one number, and "
+        "domain/financial_statements.py's projection holds only columns every company type "
+        "publishes. On an ordinary industrial the two are equal -- 000001.SZ's 2018H1 carries "
+        "57,241,000,000.0 in both -- so this is an argument about the statement rather than about "
+        "a number a fixture could settle. Neither column is one of income's concentrated ones: "
+        "258 of that dataset's 288 refused field reads are ebit, and revenue itself was measured "
+        "losing 5 reads in a 53-security corpus and 6 in an independent 76-security probe. A "
+        "600739.SH-shaped filing, whose two rows both carry update_flag=1 and disagree about "
+        "revenue by 4.6% while agreeing about n_income_attr_p, refuses this factor's read and not "
+        "earnings_yield_ttm's, which is what per-field refusal means on a real pair of rows."
+        + _VALUE_DENOMINATOR_PROSE
+        + _VALUE_DIRECTION_PROSE
+    ),
+)
+"""`SALES_YIELD_TTM`'s prose, out of `factor_id`."""
+
+
+def _sales_yield_ttm(window: FactorWindow) -> float | None:
+    """`SALES_YIELD_TTM`: trailing total revenue over capitalisation, both in yuan."""
+    return _yield_on_market_capitalisation(
+        window, dataset=INCOME_DATASET, column=TOTAL_REVENUE_COLUMN
+    )
+
+
 FACTOR_DEFINITIONS: Final[FactorRegistry] = FactorRegistry(
     (
         REVERSAL_1D,
@@ -1688,6 +2252,9 @@ FACTOR_DEFINITIONS: Final[FactorRegistry] = FactorRegistry(
         DOWNSIDE_VOL_60,
         TURNOVER_60,
         AMIHUD_60,
+        EARNINGS_YIELD_TTM,
+        BOOK_TO_PRICE,
+        SALES_YIELD_TTM,
     ),
     notes=(
         REVERSAL_1D_NOTE,
@@ -1699,9 +2266,12 @@ FACTOR_DEFINITIONS: Final[FactorRegistry] = FactorRegistry(
         DOWNSIDE_VOL_60_NOTE,
         TURNOVER_60_NOTE,
         AMIHUD_60_NOTE,
+        EARNINGS_YIELD_TTM_NOTE,
+        BOOK_TO_PRICE_NOTE,
+        SALES_YIELD_TTM_NOTE,
     ),
 )
-"""Every factor this build declares, and the prose about it. `V2-P3-009`..`011` extend both."""
+"""Every factor this build declares, and the prose about it. `V2-P3-010`..`011` extend both."""
 
 FACTOR_EVALUATORS: Final[Mapping[str, FactorEvaluator]] = MappingProxyType(
     {
@@ -1714,6 +2284,9 @@ FACTOR_EVALUATORS: Final[Mapping[str, FactorEvaluator]] = MappingProxyType(
         DOWNSIDE_VOL_60.qualified_key: _downside_vol_60,
         TURNOVER_60.qualified_key: _turnover_60,
         AMIHUD_60.qualified_key: _amihud_60,
+        EARNINGS_YIELD_TTM.qualified_key: _earnings_yield_ttm,
+        BOOK_TO_PRICE.qualified_key: _book_to_price,
+        SALES_YIELD_TTM.qualified_key: _sales_yield_ttm,
     }
 )
 """Every factor this build can actually compute, keyed by `key/vN`.
@@ -2197,9 +2770,9 @@ def _read_dataset(
     other by the session its `event_time` resolves to. That is the whole of the branch, and both
     halves keep a **fail-closed** multiplicity rule rather than one of them relaxing it:
 
-    - **Session axis, unchanged.** Two rows for one `(subject, session)` raise. A dataset with
-      several versions of one observation needs a reducer chosen for it before a factor may read
-      it, and nothing here chooses one.
+    - **Session axis, unchanged.** Two rows for one `(subject, session)` raise, equal or not. A
+      dataset with several versions of one observation needs a reducer chosen for it before a
+      factor may read it, and nothing here chooses one.
     - **Period axis.** Two rows for one `(subject, period)` announced on **different** days are an
       ordinary point-in-time restatement, and the later announcement is the one a reader standing
       at `as_of` would have -- exactly `financial_statements.StatementHistory.filing_for`'s rule,
@@ -2207,14 +2780,64 @@ def _read_dataset(
       the **same** day are the case no column in these datasets orders: `fina_indicator` carries
       more than one row for 81.7% of its `(ts_code, end_date, ann_date)` keys, has no
       `update_flag` and no `f_ann_date`, and `providers/tushare.py::_announcement_timeline`
-      deliberately gives such rows byte-equal four-clock timelines. Those raise, with the same
-      sentence the session axis uses.
+      deliberately gives such rows byte-equal four-clock timelines. Those raise **when they
+      disagree in the columns this factor asked for**, and collapse when they do not; see below.
 
-    So the refusal that fired before this axis existed still fires: under a session index the
-    same-day duplicates collided on `(subject, event_time)` and raised, and under a period index
-    they collide on `(subject, period, announcement)` and raise. What stopped raising is the case
-    that was never a duplicate at all -- an annual and a Q1 disclosed on one day, two periods
-    under one `event_time` -- which is why an ordinary `income` input could not be read before.
+    ## Collapsing what is provably one fact, on the period axis only (`V2-P3-009`)
+
+    `domain/financial_statements.py` states the rule this engine now applies: *collapse what is
+    provably one fact and refuse what is provably two*. `build_statement_history` folds two rows
+    of one key whose stored values agree, and `ReportFiling.value_of` then raises **per field**,
+    on the fields the survivors disagree about, so a `cashflow` pair that differs only in
+    `free_cashflow` still answers `n_cashflow_act`.
+
+    This function used to refuse on multiplicity alone, which made it strictly stricter than the
+    domain it says it restates -- and the gap is most of the duplication rather than an edge of
+    it. Of the duplicate keys that probe found, **372 of `income`'s 633, 1,166 of
+    `balancesheet`'s 1,244 and 2,194 of `fina_indicator`'s 2,671** carry rows that are identical
+    in every field the endpoint serves. Under the old rule every one of those refused a whole
+    build; `ReportFiling.value_of` answers all of them. The audit that exists to hold the two
+    implementations together could not see it, because its corpus has no key whose duplicate rows
+    agree -- the shape `test_the_engines_period_selection_is_the_domains_filing_for`'s docstring
+    calls "only what its corpus varies".
+
+    So a second row of a `(subject, period, announcement)` triple whose **projected** cells equal
+    the first's is dropped, and one that differs raises with the disagreeing columns named. The
+    projection is the factor's own `required_fields`, which is what makes this `value_of`'s
+    answer on the filing a reader at `as_of` would read rather than an approximation of it:
+    `value_of(field)` returns a value iff every surviving version agrees on that field, and the
+    survivors are distinguished by the *whole* stored projection plus `f_ann_date` -- so "all
+    rows agree about the columns this factor reads" is the same predicate, reached by a narrower
+    read. `_refuse_two_versions_that_disagree` states the one corner where the two still part,
+    and why that corner is deliberate.
+    `tests/integration/panel/test_value_family.py::
+    test_the_engine_answers_a_column_the_duplicate_rows_agree_about_and_refuses_one_they_do_not`
+    drives both halves over one partition built from two real rows.
+
+    **What this does not buy is a build over a real whole-market partition.** The rows that
+    genuinely disagree are still there -- 261 of `income`'s 3,201 filings (8.15%) and 41 of
+    `balancesheet`'s 3,170 (1.29%) -- and one of them anywhere in the cross section still refuses
+    the whole build rather than that one security. A per-security answer would need a sixth
+    `FactorCoverage` member, which is not a widening this issue may make: `FACTOR_CENSUS_COLUMNS`
+    is derived from the coverage vocabulary and is part of `FACTOR_MANIFEST_DATA_COLUMNS`, so a
+    sixth code changes the stored manifest partition's schema, whose width
+    `tests/unit/test_factor_engine_rules.py::
+    test_a_stored_manifest_row_of_the_wrong_width_is_refused` pins. See this module's docstring
+    section "The value family".
+
+    The session axis keeps the strict rule and that asymmetry is deliberate. The period axis has
+    a *measured* dataset property behind its collapse -- two versions of one filing under one
+    announcement, which `domain/financial_statements.py` counts -- and no session-indexed dataset
+    here has anything of the kind: `daily` and `daily_basic` serve one row per security per
+    session, so a second one is a fault rather than a version and dropping it silently would hide
+    the fault.
+
+    So the refusal that fired before this axis existed still fires wherever the rows really
+    disagree: under a session index the same-day duplicates collided on `(subject, event_time)`
+    and raised, and under a period index they collide on `(subject, period, announcement)` and
+    raise. What stopped raising is the case that was never a duplicate at all -- an annual and a
+    Q1 disclosed on one day, two periods under one `event_time` -- which is why an ordinary
+    `income` input could not be read before.
     `tests/integration/panel/test_factor_report_periods.py` measures both directions.
 
     **The refusal is decided on the triple and not on the row the scan happens to reach first**,
@@ -2272,6 +2895,7 @@ def _read_dataset(
     values: dict[tuple[str, date], tuple[float | None, ...]] = {}
     announced: dict[tuple[str, date], date] = {}
     filed: set[tuple[str, date, date]] = set()
+    stated: dict[tuple[str, date, date], tuple[float | None, ...]] = {}
     references: list[FactorInputRef] = []
     provenance: list[FactorInputProvenance] = []
     for year in sorted(set(requirement.years)):
@@ -2317,14 +2941,39 @@ def _read_dataset(
                 if period_indexed
                 else announcement
             )
-            if (subject, point, announcement) in filed:
+            cells = tuple(
+                _numeric(value, dataset=dataset, column=name, subject=subject, point=point)
+                for name, value in zip(columns, row[offset:], strict=True)
+            )
+            filing = (subject, point, announcement)
+            if period_indexed:
+                # The period axis keeps every version's projected cells, because "one fact stated
+                # twice" is decided by comparing them. The session axis keeps only the key: no
+                # session-indexed dataset here has versions, so a second row is a fault and the
+                # values would be a per-row cost with no reader -- at 675,148 rows for one
+                # whole-market `daily` year, which is the scale this loop is measured at.
+                previous = stated.get(filing)
+                if previous is not None:
+                    _refuse_two_versions_that_disagree(
+                        previous,
+                        cells,
+                        dataset=dataset,
+                        subject=subject,
+                        point=point,
+                        announcement=announcement,
+                        columns=columns,
+                    )
+                    continue
+                stated[filing] = cells
+            elif filing in filed:
                 raise FactorEngineError(
                     f"{dataset} carries more than one row for {subject} on "
                     f"{point.isoformat()}; this engine reads one row per security per "
                     f"{axis}, so a dataset with several versions of one observation needs a "
                     "reducer chosen for it before a factor may read it"
                 )
-            filed.add((subject, point, announcement))
+            else:
+                filed.add(filing)
             key = (subject, point)
             if key in values:
                 if announcement < announced[key]:
@@ -2332,10 +2981,7 @@ def _read_dataset(
             else:
                 points.setdefault(subject, []).append(point)
             announced[key] = announcement
-            values[key] = tuple(
-                _numeric(value, dataset=dataset, column=name, subject=subject, point=point)
-                for name, value in zip(columns, row[offset:], strict=True)
-            )
+            values[key] = cells
     return (
         _DatasetReading(
             MappingProxyType({name: tuple(sorted(days)) for name, days in points.items()}),
@@ -2345,6 +2991,68 @@ def _read_dataset(
         ),
         tuple(references),
         tuple(provenance),
+    )
+
+
+def _refuse_two_versions_that_disagree(
+    stated: tuple[float | None, ...],
+    cells: tuple[float | None, ...],
+    *,
+    dataset: str,
+    subject: str,
+    point: date,
+    announcement: date,
+    columns: tuple[str, ...],
+) -> None:
+    """The **period** axis's second-row rule: return if the two say the same thing, else refuse.
+
+    `build_statement_history`'s rule reached through a narrower read. Two rows of one
+    `(subject, period, announcement)` key whose *projected* cells are equal are one fact stated
+    twice -- 372 of `income`'s 633 duplicate keys, 1,166 of `balancesheet`'s 1,244 and 2,194 of
+    `fina_indicator`'s 2,671 -- and two that are not are the case no column of these datasets
+    orders. The session axis is not routed here at all; `_read_dataset` argues why its second row
+    raises equal or not.
+
+    ## How exactly this lines up with `ReportFiling.value_of`, including where it does not
+
+    `value_of(field)` answers when every surviving version agrees on that field, and the survivors
+    are distinguished by the whole stored projection plus `f_ann_date`. "Every row of this filing
+    agrees about the columns this factor reads" is the same predicate reached with fewer columns,
+    so **on the filing a reader standing at `as_of` would read, the two give the same answer.**
+
+    They part on a filing that reader would *not* read: a same-day pair that disagrees under an
+    announcement some **later** announcement of the same period supersedes. `filing_for` takes the
+    later announcement and never consults the superseded one; this refuses the build. That is
+    deliberate and it predates this function -- the same-day check was moved onto the triple
+    precisely so a superseded pair could not be silently discarded, because whether it *was*
+    discarded depended on the order the scan returned the rows in. Measured then, on one corpus
+    of three rows in three write orders: raised, computed, computed. Fail-closed and
+    order-independent is the pair worth having; strictly-equal-to-`value_of` and
+    order-dependent is not.
+
+    Comparison is on the tuple, so it is order-free in the other direction too: rows that all
+    agree collapse whichever order they arrive in, and a triple with any disagreement raises on
+    whichever pair is reached first.
+
+    `None` is compared like any other cell, deliberately: an upstream cell empty on both rows is
+    an agreement about a non-answer, which is exactly what `value_of` returns `None` for. The
+    `nan` hazard `domain/financial_statements.py::_require_finite_values` names -- two rows
+    identical apart from a `nan` in one column, which `==` would call a disagreement -- is closed
+    one step earlier, in `_numeric`, and *has* to be: `domain/panel_batch.py` encodes the
+    non-finite floats on purpose, so a partition can hold one.
+    """
+    if stated == cells:
+        return
+    disagreeing = [
+        name for name, before, after in zip(columns, stated, cells, strict=True) if before != after
+    ]
+    raise FactorEngineError(
+        f"{dataset} carries more than one row for {subject} on {point.isoformat()} announced "
+        f"{announcement.isoformat()}, and they do not agree about {disagreeing}; this engine "
+        "reads one row per security per period and no column of these datasets orders two "
+        "versions announced on one day, so a reducer has to be chosen for them before a factor "
+        "may read them. Rows agreeing in the columns this factor reads are one fact stated twice "
+        "and collapse; these are two facts, and ReportFiling.value_of refuses the same read"
     )
 
 
@@ -2484,6 +3192,20 @@ def _numeric(
     `point` is the row's index on its dataset's own axis -- a session or a report period -- and
     is named for the axis rather than for one member of it, because the message it lands in is
     read by somebody looking for the row.
+
+    **A `nan` or an infinity is refused rather than passed through**, and that is
+    `domain/financial_statements.py::_require_finite_values` applied at the engine's own read, for
+    the reason that function gives. `domain/panel_batch.py::_encode_column` encodes the non-finite
+    floats **on purpose** -- "a missing or non-finite panel observation is ordinary data here" --
+    so a partition may hold one, and the period axis's collapse is built on `==`. Two rows of one
+    filing that are byte-identical apart from carrying `nan` in the same column would compare
+    unequal and be reported as a disagreement the publisher never stated, which is a build refusal
+    naming a fault that does not exist. On the session axis it is not a collapse hazard but it is
+    a poison for every window statistic, and this is the last place a message can still name the
+    row it came from. Nothing this repository writes can produce one -- `providers/tushare.py
+    ::_finite_number` refuses a non-finite cell at the boundary -- which is why the guard is
+    driven directly in `tests/unit/test_factor_value_family.py::
+    test_a_non_finite_stored_cell_is_refused_because_the_collapse_is_built_on_equality`.
     """
     if value is None:
         return None
@@ -2493,7 +3215,15 @@ def _numeric(
             f"{point.isoformat()}; a factor input must be a stored number, and this column "
             "cannot be one of this factor's required_fields"
         )
-    return float(value)
+    number = float(value)
+    if not math.isfinite(number):
+        raise FactorEngineError(
+            f"{dataset}.{column} holds {number!r} for {subject} on {point.isoformat()}; a factor "
+            "input must be a finite number, and two rows of one filing carrying this in the same "
+            "column would never compare equal, so the period axis would report a disagreement "
+            "the publisher never stated"
+        )
+    return number
 
 
 def _classify(

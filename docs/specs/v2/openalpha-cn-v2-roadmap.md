@@ -16,10 +16,10 @@ Issue ID: `V2-<阶段>-<序号>`。类型标记：**结**结构 · **产**产品
 | **P0.B** | 结构地基与迁移机制 | 16 | 3–4 周 | 8–10 周 | 迁移机制可用 + 单一组装根 + conftest 就位 |
 | **P1** | 面板数据平面 | 17 | 5–7 周 | 13–18 周 | 8 组数据集全部通过契约 + 未来数据 fail-closed |
 | **P2** | **PIT 红队闸门** | 9 | 2 周 | 5 周 | **必过，否则不得进 P3** |
-| **P3** | 因子层 | 16 | 5–6 周 | 13–15 周 | 首批因子出齐 raw/processed/neutralized 三档 |
+| **P3** | 因子层 | 17 | 5–6 周 | 13–15 周 | 首批因子出齐 raw/processed/neutralized 三档 |
 | **P4** | 候选排序与模型基线 | 25 | 6–7 周 | 15–18 周 | 契约升版一次完成 + 预测先落库 |
 | **P5** | 组合、验证与工作台 | 24 | 6–8 周 | 15–20 周 | 归因对账 + 多重检验 + 4 页可用 |
-| | **合计** | **116** | **28–36 周** | **70–90 周** | |
+| | **合计** | **117** | **28–36 周** | **70–90 周** | |
 
 > **相对上一版的变化**：上一版估 18–25 周，假设 P0 为 1 周。审计发现 39 条必须在面板层之前关闭的前置 finding（无迁移机制、两个组装根、引擎四合一、无 conftest、look-ahead 靠字符串匹配、`.parquet` 被发布拦截、seed/commit/digest 全为占位），故新增 P0.B。上调的 10–11 周全部是**原先不可见的前置债**，不是范围膨胀。
 
@@ -195,7 +195,7 @@ P3 结束即可独立使用（Jupyter 直连面板 + 因子）
 | `V2-P3-006` | 分组组合收益（含成本，复用 `AShareExecutionPolicy`） | 技 | 005 | — | S21 |
 | `V2-P3-007` | 换手 / 覆盖率 / 容量报告 | 技 | 006 | 让统计上好看但不可实施的信号显形 | S22 |
 | `V2-P3-008` | 相关性与冗余分析 | 技 | 005 | — | S23 |
-| `V2-P3-009` | 因子家族①价值：EP / BP / SP / EPcut | 技 | 004 | — | S16 |
+| `V2-P3-009` | 因子家族①价值：EP / BP / SP / EPcut | 技 | 004 | 已交付 EP / BP / SP（本仓库第一批双轴出厂因子）；**EPcut 未交付**，扣非净利不在任何一个统计投影里，硬前置是 `V2-P3-017`，见下方小节 | S16 |
 | `V2-P3-010` | 因子家族②质量：ROE / ROIC / 毛利率稳定性 / 应计项 | 技 | 004 | — | S16 |
 | `V2-P3-011` | 因子家族③成长：营收同比 / 净利同比 / 同比加速度 | 技 | 004 | — | S16 |
 | `V2-P3-012` | 因子家族④动量与反转：20/60/120 日 + 行业相对 + 5 日反转 | 技 | 004 | — | S16 |
@@ -203,6 +203,7 @@ P3 结束即可独立使用（Jupyter 直连面板 + 因子）
 | `V2-P3-014` | 不可变因子实验制品 + raw/processed/neutralized 三档报告 | 技 | 005-008 | 否则分不清"因子有效"与"暴露没控住" | S24, D8 |
 | `V2-P3-015` | 因子的 CLI + REST + SDK 面（`factor run --factor <id> --start --end`） | 产 | 014 | — | S83, S84 |
 | `V2-P3-016` | **指数点位序列数据集 + 面板可达的市场收益**（`V2-P3-013` 的残差/特质波动的硬前置，见下方小节） | 技 | P1 存储契约 | `013` 实测：15 个 descriptor 里**没有任何指数点位**（`index_weight` 是成分权重不是点位），且 `FactorWindow` 是单标的的 —— 求值器**按类型**够不到市场序列 | S16 |
+| `V2-P3-017` | **扣非净利列进入统计投影**（`V2-P3-009` 的 EPcut 的硬前置，见下方小节） | 技 | `V2-P1-011` 存储契约 | `009` 实测：四个投影的 10 / 7 / 5 / 11 列里**没有扣非净利**，而端点确实服务这一族（`dt_netprofit_yoy` 已被 76 只票全字段探针记录在 `the_merge_rule_is_agreement_in_the_projection` 里）。加列会动每个已存分区的 schema，并把一批键从「折叠」挪进「拒绝」—— 这是有价的契约变更，不是 `009` 能顺手做的 | S16 |
 
 **闸门**：每个因子同时出三档报告；因子合同测试使用冻结股票池/日历/公司行动/修正，证明 PIT 可见性与确定性取值；P2 红队测试仍全绿。
 
@@ -1101,3 +1102,34 @@ ADR-0003 的 `V2-P3-012` 小节原本把 013 描述成「per-security regression
 
 **台账口径**：`V2-P3-013` 记为已交付的是它实际交付的四个因子；
 `016` 落地后才谈得上「残差波动/特质波动」。
+
+
+### `V2-P3-009` 复审记录（2026-08-13）：EPcut **未交付**，原因是投影边界而不是上游缺失
+
+roadmap 给 `V2-P3-009` 写的四个因子是「EP / BP / SP / EPcut」。实际交付三个：
+`earnings_yield_ttm`、`book_to_price`、`sales_yield_ttm`，都是**同时落在两条轴上**的因子
+（会话轴 `daily_basic.total_mv` 1/1，期次轴 5/5 或 1/1）—— 这是本仓库第一批真正使用期次轴的
+出厂因子，此前那两对 reach 字段只被 test-local 定义驱动。
+
+**EPcut 的分子不在任何一个已存投影里。** `income` 的十列是两条收入线、成本、营业利润、
+利润总额、所得税、两个层级的净利、基本 EPS 和 `ebit`；`fina_indicator` 的十一列是比率与每股数。
+扣非净利（`profit_dedt`）与 `dt_eps` / `dt_netprofit_yoy` 都不在其中。
+
+**这是投影边界，不是上游缺失，而且这一点是实测的**：
+`KNOWN_FINANCIAL_STATEMENT_LIMITATIONS.the_merge_rule_is_agreement_in_the_projection` 记录的
+76 只票全字段探针里出现了 `dt_netprofit_yoy` —— 它是端点服务、而 `providers/tushare.py`
+的 `response_fields` 不请求的 97 个 `fina_indicator` 字段之一。
+
+**加列是有价的**，这也是 `009` 不顺手做的理由：那条 limitation 自己写着「widening
+`STATEMENT_DATA_COLUMNS` would move keys out of the collapsed column and into the refused one」，
+即已记录的每个数据集拒绝率都会变；而 `statement_panel_columns` 决定分区 schema，
+四个统计数据集的每个已存分区都要重写，`tests/contract/providers/test_tushare_financials.py`
+里以真实行钉住的字段列表也要一起改。**已立为 `V2-P3-017`**。
+
+**`earnings_yield_ttm` 占住 EPcut 这个槽位，口径与 `RETURN_VOL_60` 相同**：EP 就是
+「非经常性损益那一项减不掉时，EPcut 退化成的东西」，因子自己的 note 显式说明它不是 EPcut。
+声明由 `tests/unit/test_factor_value_family.py::test_no_stored_statement_projection_carries_a_deducted_profit_column`
+钉住 —— **哪天有人把扣非列加进任一投影，那条测试就红，这个声明就必须重审**。
+
+**台账口径**：`V2-P3-009` 记为已交付的是它实际交付的三个因子（`OA-FACTOR-008`）；
+`017` 落地后才谈得上 EPcut。
