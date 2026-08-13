@@ -399,11 +399,50 @@ for any day of year Y are invisible to any read before Y ends. `V2-P4-026` is th
 day by day. Nothing here does: the composition is three in-memory calls, none of which reads a
 stored residual back.
 
+## The volatility and liquidity family (`V2-P3-013`), and the one thing it could not build
+
+Four definitions ship for it -- `return_vol_60`, `downside_vol_60`, `turnover_60` and
+`amihud_60` -- and two judgements are shared by all of them and stated here rather than four
+times in their notes.
+
+**No factor in this family is named for a residual, because none of them is one.** The roadmap
+line asks for "residual volatility" and "idiosyncratic volatility", which are one construct in
+the literature: the dispersion of the part of a return that a market or factor model does not
+explain. Computing either needs a market return series aligned to the security's own sessions,
+and **this panel holds no index or market price series at all** -- the fifteen datasets
+`providers/tushare.py` declares are prices, valuations, adjustment factors, four statement
+endpoints, calendar, universe, industry tree and membership, index *weights*, suspensions, price
+limits and name history, and not one of them carries an index's close. The gap is not only a
+fetch away either: `FactorWindow` is one security's own rows, `_classify` is called once per
+subject, and an evaluator has no way to reach a different subject's series -- so even a stored
+`000300.SH` price row would be invisible to the formula that needed it.
+
+That makes the blocker a **data and engine-shape** one rather than the numerical-stack one
+`ADR-0003` warns about, and the distinction is worth recording because the ADR poses the wrong
+question for this issue. A single-factor time-series regression `r = a + b*r_m + e` is
+*univariate*: `b = cov(r, r_m) / var(r_m)`, the residual deviation is one more pass, the whole
+thing is `O(n)` in pure Python and would need neither numpy nor a new machine. It is `k`
+correlated continuous regressors that has no closed form, which is the case ADR-0003's own
+"honest bound" section names. So nothing here was blocked on arithmetic; what is missing is the
+regressor. `return_vol_60` is the total volatility such a residual reduces to when `b*r_m` cannot
+be subtracted, `downside_vol_60` adds asymmetry rather than a second estimate of one number, and
+both say so in their own notes.
+
+**Nothing in this family reads a neutralised or a processed observation.** `V2-P3-004`'s
+cross-sectional residual is a different object from a volatility model's residual -- one number
+per `(security, as_of)` rather than a series to take a deviation of -- and it also carries
+`V2-P4-026` as a hard precondition, because a neutralisation is not visible inside its own
+coverage year. A factor that depended on it would inherit that blocker; these four read raw panel
+columns and inherit nothing.
+
 ## What is deliberately not here
 
-**No `V2-P3-013` family.** Volatility and liquidity is its own issue. `REVERSAL_1D` also stays
-exactly where it is: it is the engine's verification factor rather than a research deliverable,
-and `REVERSAL_5_SESSIONS`' own docstring says why it is not that factor with a wider window.
+**Three of the five factor families.** `V2-P3-009`..`011` own value, quality and growth.
+`V2-P3-012`'s momentum and reversal family and `V2-P3-013`'s volatility and liquidity family
+both ship here. `REVERSAL_1D` stays exactly where it is: it predates all of them and is the
+engine's own verification factor rather than a research deliverable -- see its own docstring
+for what it does and does not claim, and `REVERSAL_5_SESSIONS`' for why it is not that factor
+with a wider window.
 
 **No universe loading.** `compute_factor` takes the cross section as an argument rather than
 deriving it, because `stock_basic` has exactly the same mid-year readiness problem this module
@@ -425,7 +464,12 @@ from types import MappingProxyType
 from typing import Final, Literal, Protocol, cast
 from zoneinfo import ZoneInfo
 
-from openalpha_cn.domain.daily_prices import CLOSE_COLUMN, DAILY_DATASET, PRE_CLOSE_COLUMN
+from openalpha_cn.domain.daily_prices import (
+    CLOSE_COLUMN,
+    DAILY_BASIC_DATASET,
+    DAILY_DATASET,
+    PRE_CLOSE_COLUMN,
+)
 from openalpha_cn.domain.factor import (
     FACTOR_DIRECTIONS,
     PERIOD_INDEXED_DATASETS,
@@ -1257,6 +1301,382 @@ REVERSAL_5_SESSIONS_NOTE: Final[FactorNote] = FactorNote(
     ),
 )
 
+# --- `V2-P3-013`: the volatility and liquidity family -----------------------------------------
+#
+# See this module's docstring section "The volatility and liquidity family" for the two
+# judgements the whole family rests on -- why no factor here is named for a residual, and why
+# every one of them is 60 sessions wide.
+
+
+VOLATILITY_LIQUIDITY_LOOKBACK_SESSIONS: Final[int] = 60
+"""One A-share quarter, and the reach every `volatility_liquidity` factor declares.
+
+**Not calibrated on any fixture, and not calibrated on this repository's data either**, which is
+the honest statement of what it is: nothing here has measured the sampling properties of an
+A-share turnover or Amihud series, so a window justified by "the estimator's variance" would be a
+number read off a formula fed with a parameter nobody has measured. What decides it is three
+facts that need no data of ours:
+
+- **It is a quarter.** 2024 held 242 sessions (`domain/daily_prices.py::MIN_SESSION_ROW_SHARE`'s
+  census), so a quarter is 60.5 of them. Every source definition in this family is stated on a
+  calendar horizon -- Amihud (2002) averages the daily ratio over a *year*, Barra's turnover
+  descriptors are one month / three months / twelve -- and a quarter is the shortest of the three
+  conventional A-share horizons (20 / 60 / 120) that all four of them can be read at.
+- **One arithmetic fact that is exact.** The relative standard error of a sample standard
+  deviation is `1 / sqrt(2(N-1))` under normality: 16.4% at 20 sessions, **9.2% at 60**, 6.5% at
+  120. Sixty is where that crosses ten percent, and doubling it again buys 2.7 points.
+- **One horizon across the family, deliberately.** `V2-P3-008`'s redundancy analysis groups by
+  family, and two factors measured over different horizons are partly measuring the horizon. With
+  one reach for all four, a correlation between two of them is a statement about their content.
+
+Chosen before any test was written and never moved to make one pass, which is the failure mode
+this repository has already paid for: a delivery whose proof hangs on a free parameter.
+"""
+
+VOLATILITY_LIQUIDITY_MAX_WINDOW_SESSIONS: Final[int] = 80
+"""How far a 60-session window here may be stretched by halts: 20 panel sessions of slack.
+
+`FactorDefinition.max_window_sessions` is the count's span bound, and the slack -- the difference
+between the two -- is exactly the number of sessions the security may have missed inside its own
+window. Both ends of the range are decided rather than one:
+
+- **Not zero.** Equality is `REVERSAL_1D`'s setting and is right for a one-session return; here it
+  would report `insufficient_history` for every name that took a single announcement halt in the
+  quarter. `domain/daily_prices.py` measures the base rate: on the ordinary session 2024-06-28,
+  `adj_factor` served 5,387 rows against `daily`'s 5,338, and **26** of the 49-name difference
+  were listed-and-halted names rather than delisted ones -- half a percent of the market halted on
+  one unremarkable day, each of them for some number of consecutive sessions.
+- **Not more than a trading month.** 2024's 242 sessions are 20.2 a month, so 20 sessions of slack
+  is "this factor tolerates up to one month of halt inside its quarter". At 80 panel sessions the
+  window already reaches across four calendar months; wider than that, a value labelled as the
+  quarter ending at `as_of` is a statement about a different quarter.
+
+The bound is separable from the count rather than merely declared, which is the `V2-P3-004`
+review's lesson (a column asserted on a fixture that cannot tell two answers apart):
+`tests/integration/panel/test_volatility_liquidity_family.py::
+test_the_span_bound_is_separable_from_the_count_at_its_own_boundary` drives 79, 80 and 81 panel
+sessions over the same 60 own-sessions and gets `computed`, `computed`, `insufficient_history`.
+"""
+
+AMOUNT_COLUMN: Final[str] = "amount"
+"""`daily`'s session turnover column, **in thousands of yuan**; see `CNY_PER_AMOUNT_UNIT`."""
+
+TURNOVER_RATE_COLUMN: Final[str] = "turnover_rate"
+"""`daily_basic`'s float-share turnover column, in percent. Not `turnover_rate_f`; see
+`TURNOVER_60_NOTE` for the measurement that decides between them.
+
+Spelled here rather than imported because `domain/daily_prices.py` carries these two only inside
+its column *tuples*, and a second literal is a second thing to drift.
+`tests/unit/test_factor_volatility_liquidity.py::
+test_the_columns_this_family_reads_are_columns_the_daily_contract_declares` holds both against
+those tuples, which is the binding a shared constant would have bought.
+"""
+
+CNY_PER_AMOUNT_UNIT: Final[float] = 1000.0
+"""Yuan per unit of `daily.amount`, **measured** rather than taken from an upstream's field list.
+
+Tushare's `daily` publishes `vol` in lots and `amount` in thousands of yuan, and the way to know
+that without asking the endpoint is that only one reading of the pair puts the session's implied
+VWAP inside the session's own low-high range. On the eleven real rows this repository already
+stores in `tests/unit/domain/test_daily_prices.py` -- `000001.SZ`, `600519.SH`, `002736.SZ` and
+`000569.SZ`, spanning 2001-01-02 to 2026-06-15 -- `amount * 1000 / (vol * 100)` lands inside
+`[low, high]` on all eleven, and the other three readings of the same two columns land outside it
+on all eleven, by factors of ten to a thousand. `000001.SZ` on 2026-06-12 is the plain case:
+11.1351 against a range of 10.88 to 11.25, where "shares and yuan" would give 1.1135.
+
+`tests/unit/test_factor_volatility_liquidity.py::
+test_the_amount_column_is_thousands_of_yuan_and_the_other_readings_are_out_of_range` is that
+measurement as an executable one. It matters because `AMIHUD_60`'s value carries the unit: a
+factor whose denominator is off by 1,000 is off by 1,000 in every report that quotes it, and
+nothing downstream -- a rank IC, a z-score -- would notice, because both are scale-free.
+"""
+
+
+def _session_returns(window: FactorWindow) -> tuple[float, ...] | None:
+    """One simple return per session of the window, or `None` when a `pre_close` is zero.
+
+    **`close / pre_close - 1`, and the path matters more than the arithmetic does.**
+    `domain/daily_prices.py` measures three ways to compute a session return and one of them is
+    wrong: across `000001.SZ`'s 2026-06-12 ex-dividend morning the two correct paths agree to
+    2.1e-7 (+2.742230% and +2.742251%) while `close[t] / close[t-1] - 1` answers **-0.530973%**,
+    with the sign reversed, and across 37,602 rows of seven session pairs it is wrong by up to
+    118.30. Every factor in this family is built on returns, so that is the defect that would have
+    reached all of them at once.
+
+    `pre_close` is already restated for whatever corporate action took effect that morning, which
+    is why this needs no adjustment factor and reads one row per return rather than two. That has
+    a second consequence the whole family rests on: **a window of N sessions yields exactly N
+    returns**, because each return is computed inside its own row. A close-to-close path would
+    yield N-1 and would make the sample size behind a value one less than the count the definition
+    declares -- an off-by-one in a denominator, on every value, silently.
+
+    `None` for a zero `pre_close` becomes `undefined_value`. Unreachable through this repository's
+    own writers (`DAILY_PRICE_COLUMNS`: no null and no non-positive value in any of the five
+    across 58,055 bars spanning 2001 to 2026, and `daily_bars_from_panel_rows` refuses one), so it
+    is driven directly in `tests/unit/test_factor_volatility_liquidity.py` rather than declared --
+    `_reversal_1d`'s precedent and for its reason.
+    """
+    closes = window.series(DAILY_DATASET, CLOSE_COLUMN)
+    previous = window.series(DAILY_DATASET, PRE_CLOSE_COLUMN)
+    if any(value == 0.0 for value in previous):
+        return None
+    return tuple(close / prior - 1.0 for close, prior in zip(closes, previous, strict=True))
+
+
+def _sample_stdev(values: Sequence[float]) -> float | None:
+    """The Bessel-corrected standard deviation of `values`, two-pass, or `None` below two.
+
+    **Sample rather than population, which is the opposite of `_population_stdev`'s choice one
+    file section away, and both are right.** That one standardises a *cross section*, where the
+    values in hand are the whole population being described; this one summarises a *time series
+    window*, which is a sample of a process whose mean is estimated from the same 60 numbers. The
+    `N-1` is the degree of freedom that estimate costs, and it is also what makes
+    `VOLATILITY_LIQUIDITY_LOOKBACK_SESSIONS`' quoted `1 / sqrt(2(N-1))` the right formula.
+
+    Two-pass with `math.fsum` for `_population_stdev`'s reason: the one-pass `E[x^2] - E[x]^2`
+    form cancels catastrophically on values that are large and close together.
+
+    `None` below two values is unreachable at any reach this family declares -- the engine hands an
+    evaluator exactly `lookback_sessions` complete rows -- and is a branch rather than an
+    assumption for the reason the zero-denominator guards are.
+    """
+    count = len(values)
+    if count < 2:
+        return None
+    mean = math.fsum(values) / count
+    return math.sqrt(math.fsum((value - mean) ** 2 for value in values) / (count - 1))
+
+
+RETURN_VOL_60: Final[FactorDefinition] = FactorDefinition(
+    key="return_vol_60",
+    version=1,
+    family="volatility_liquidity",
+    direction="lower_is_better",
+    required_fields=(
+        FactorField(dataset=DAILY_DATASET, column=CLOSE_COLUMN),
+        FactorField(dataset=DAILY_DATASET, column=PRE_CLOSE_COLUMN),
+    ),
+    lookback_sessions=VOLATILITY_LIQUIDITY_LOOKBACK_SESSIONS,
+    max_window_sessions=VOLATILITY_LIQUIDITY_MAX_WINDOW_SESSIONS,
+    lookback_periods=None,
+    max_window_periods=None,
+)
+"""One A-share quarter's daily return dispersion. `V2-P3-013`'s "residual volatility" slot."""
+
+RETURN_VOL_60_NOTE: Final[FactorNote] = FactorNote(
+    subject=RETURN_VOL_60.qualified_key,
+    summary=(
+        "The sample standard deviation of the 60 most recent daily simple returns, each one "
+        "close / pre_close - 1 computed inside its own session's row -- the path "
+        "domain/daily_prices.py measures as correct, and not close[t] / close[t-1] - 1, which "
+        "reverses the sign across an ex-rights morning and is wrong by up to 118.30 over the "
+        "37,602 rows that module measured. It occupies V2-P3-013's residual-volatility slot and "
+        "is deliberately NOT named for a residual. Residual volatility and idiosyncratic "
+        "volatility are one construct in the literature -- the dispersion of the part of a return "
+        "a market or factor model does not explain -- and neither is computable in this build: "
+        "the panel holds no index or market return series at all (its fifteen datasets are "
+        "prices, valuations, adjustment factors, statements, calendar, universe, industry, index "
+        "weights, suspensions, price limits and name history), and FactorWindow carries one "
+        "security's own rows, so an evaluator could not read a market series even if one were "
+        "stored. This is the total volatility a residual volatility reduces to when beta times "
+        "the market return cannot be subtracted, named for what it is rather than for what the "
+        "roadmap line asked for. The declared direction is the low-volatility anomaly's "
+        "conventional prior -- a lower recent dispersion is taken to be the better one -- and it "
+        "is a declaration this repository has measured nothing about; V2-P3-005 is where an IC "
+        "would say anything, and V2-P3's own gate records that most first-batch factors being "
+        "insignificant is the expected result."
+    ),
+)
+"""`RETURN_VOL_60`'s prose, out of `factor_id`. See `domain/factor.py::FactorNote`."""
+
+
+def _return_vol_60(window: FactorWindow) -> float | None:
+    """The sample standard deviation of the window's 60 session returns.
+
+    `None` -- hence `undefined_value` -- exactly when `_session_returns` has no answer, which is a
+    zero `pre_close`, or when the window holds fewer than two returns, which the engine's own
+    window formation makes unreachable at this factor's declared reach.
+    """
+    returns = _session_returns(window)
+    if returns is None:
+        return None
+    return _sample_stdev(returns)
+
+
+DOWNSIDE_VOL_60: Final[FactorDefinition] = FactorDefinition(
+    key="downside_vol_60",
+    version=1,
+    family="volatility_liquidity",
+    direction="lower_is_better",
+    required_fields=(
+        FactorField(dataset=DAILY_DATASET, column=CLOSE_COLUMN),
+        FactorField(dataset=DAILY_DATASET, column=PRE_CLOSE_COLUMN),
+    ),
+    lookback_sessions=VOLATILITY_LIQUIDITY_LOOKBACK_SESSIONS,
+    max_window_sessions=VOLATILITY_LIQUIDITY_MAX_WINDOW_SESSIONS,
+    lookback_periods=None,
+    max_window_periods=None,
+)
+"""The same quarter's *downside* dispersion. `V2-P3-013`'s "idiosyncratic volatility" slot."""
+
+DOWNSIDE_VOL_60_NOTE: Final[FactorNote] = FactorNote(
+    subject=DOWNSIDE_VOL_60.qualified_key,
+    summary=(
+        "The downside semi-deviation of the same 60 daily returns: the root mean square of the "
+        "negative ones, sqrt(sum of min(r, 0)^2 / 60). The divisor is the declared window length "
+        "and NOT the number of negative returns in it, so the sample size behind a value is the "
+        "one the definition declares rather than a function of the data -- a window with three "
+        "down days divides by 60, not by 3. There is no Bessel correction here and there is one "
+        "on return_vol_60, and that is a distinction rather than an inconsistency: a variance "
+        "around an estimated mean costs a degree of freedom and a second moment about the fixed "
+        "threshold zero estimates nothing. It occupies V2-P3-013's idiosyncratic-volatility slot "
+        "under exactly the disclosure return_vol_60 carries -- it is not the residual of any "
+        "regression, and no residual volatility is computable in this build. What it adds over "
+        "return_vol_60 is asymmetry rather than a second estimate of one number: a security whose "
+        "60 sessions were all up carries a positive return_vol_60 and a downside_vol_60 of "
+        "exactly zero, and the two are equal only by coincidence. The declared direction is the "
+        "conventional prior -- less downside dispersion is taken to be better -- and this "
+        "repository has measured nothing about it."
+    ),
+)
+"""`DOWNSIDE_VOL_60`'s prose, out of `factor_id`."""
+
+
+def _downside_vol_60(window: FactorWindow) -> float | None:
+    """`sqrt(sum over the window of min(r, 0)^2 / N)`, N being the window's own length.
+
+    Zero is a real answer and not a missing one: a security with no down session in the quarter
+    has no downside dispersion, and `FactorObservation` stores it as `computed` with `0.0`. That
+    is the case `undefined_value` must *not* be used for, which is why the only `None` here comes
+    from the return path itself and from an empty window.
+    """
+    returns = _session_returns(window)
+    if returns is None or not returns:
+        return None
+    squares = math.fsum(value * value for value in returns if value < 0.0)
+    return math.sqrt(squares / len(returns))
+
+
+TURNOVER_60: Final[FactorDefinition] = FactorDefinition(
+    key="turnover_60",
+    version=1,
+    family="volatility_liquidity",
+    direction="lower_is_better",
+    required_fields=(FactorField(dataset=DAILY_BASIC_DATASET, column=TURNOVER_RATE_COLUMN),),
+    lookback_sessions=VOLATILITY_LIQUIDITY_LOOKBACK_SESSIONS,
+    max_window_sessions=VOLATILITY_LIQUIDITY_MAX_WINDOW_SESSIONS,
+    lookback_periods=None,
+    max_window_periods=None,
+)
+"""Mean float-share turnover over the quarter, in percent. `V2-P3-013`'s turnover deliverable."""
+
+TURNOVER_60_NOTE: Final[FactorNote] = FactorNote(
+    subject=TURNOVER_60.qualified_key,
+    summary=(
+        "The arithmetic mean of daily_basic.turnover_rate over the 60 most recent sessions, in "
+        "percent -- the unit is measured on this repository's own stored rows rather than taken "
+        "from a field list: 000001.SZ on 2026-06-12 traded 2,032,355.46 lots against a "
+        "float_share of 1,940,560.0653 ten-thousand shares, which is 1.0473 percent and is "
+        "exactly the stored turnover_rate. It reads turnover_rate and not turnover_rate_f, and "
+        "that is a fail-closed choice with a measured consequence rather than a style preference. "
+        "domain/daily_prices.py records turnover_rate populated on every one of 51,708 rows "
+        "across eighteen sessions spanning 2001 to 2026, while turnover_rate_f sits in "
+        "DAILY_BASIC_NULLABLE_COLUMNS -- the writer accepts a null in it, measured at 17 rows "
+        "over four sessions between 2001 and 2008 -- and because the engine hands an evaluator "
+        "only complete windows, ONE null session is input_missing for every one of the 60 as_ofs "
+        "whose window contains it. Its sibling free_share is worse still: 300290.SZ carries a "
+        "null on 74 consecutive trading days. Reading turnover_rate_f here would also falsify "
+        "that module's own stated reason for the split, that nothing in P3 or P4 reads the "
+        "free-float pair, and which columns are fail-closed is V2-P1-007's decision rather than "
+        "this issue's. The cost is stated plainly: turnover against float shares understates "
+        "trading intensity for a name whose float carries a large strategic holding, and the two "
+        "columns are not interchangeable -- 1.0473 against 2.4905 for 000001.SZ and 0.4039 "
+        "against 0.9334 for 600519.SH, on the one session this repository stores both for. The "
+        "declared direction is the low-turnover prior and this repository has measured nothing "
+        "about it."
+    ),
+)
+"""`TURNOVER_60`'s prose, out of `factor_id`."""
+
+
+def _turnover_60(window: FactorWindow) -> float | None:
+    """The mean of `daily_basic.turnover_rate` over the window, in percent.
+
+    No guard on the values themselves: a turnover rate is a non-negative percentage and a zero one
+    is a real answer (a session with a bar and almost no trade), not a missing one. The only
+    `None` is the empty window, which the engine's window formation makes unreachable here.
+    """
+    rates = window.series(DAILY_BASIC_DATASET, TURNOVER_RATE_COLUMN)
+    if not rates:
+        return None
+    return math.fsum(rates) / len(rates)
+
+
+AMIHUD_60: Final[FactorDefinition] = FactorDefinition(
+    key="amihud_60",
+    version=1,
+    family="volatility_liquidity",
+    direction="higher_is_better",
+    required_fields=(
+        FactorField(dataset=DAILY_DATASET, column=CLOSE_COLUMN),
+        FactorField(dataset=DAILY_DATASET, column=PRE_CLOSE_COLUMN),
+        FactorField(dataset=DAILY_DATASET, column=AMOUNT_COLUMN),
+    ),
+    lookback_sessions=VOLATILITY_LIQUIDITY_LOOKBACK_SESSIONS,
+    max_window_sessions=VOLATILITY_LIQUIDITY_MAX_WINDOW_SESSIONS,
+    lookback_periods=None,
+    max_window_periods=None,
+)
+"""Amihud (2002)'s illiquidity ratio over the quarter, in `1/CNY`. `V2-P3-013`'s Amihud."""
+
+AMIHUD_60_NOTE: Final[FactorNote] = FactorNote(
+    subject=AMIHUD_60.qualified_key,
+    summary=(
+        "Amihud (2002)'s illiquidity ratio: the mean over the 60 most recent sessions of "
+        "|close / pre_close - 1| divided by that session's turnover in yuan. daily.amount is "
+        "published in THOUSANDS of yuan, which is measured rather than assumed -- across eleven "
+        "real rows this repository already stores, spanning 2001-01-02 to 2026-06-15, "
+        "amount * 1000 / (vol * 100) is the only reading of that column pair whose implied VWAP "
+        "falls inside the session's own low-to-high range, on all eleven, and each of the other "
+        "three readings falls outside it on all eleven -- so the denominator is "
+        "amount * CNY_PER_AMOUNT_UNIT and a stored value carries the unit 1/CNY. That unit is "
+        "load-bearing and invisible downstream: a rank IC and a z-score are both scale-free, so a "
+        "denominator wrong by a factor of 1,000 would reach every report that quotes the number "
+        "and no test that only ranks it. A session whose amount is zero or negative makes the "
+        "ratio undefined and the whole observation undefined_value, which is the code "
+        "FactorCoverage documents for a zero denominator; averaging over only the sessions that "
+        "do have turnover was considered and rejected, because it makes the sample size behind a "
+        "value a function of the data rather than the declared 60. Amihud's own paper averages "
+        "the daily ratio over a year; one quarter is this family's single declared horizon. The "
+        "declared direction is the illiquidity premium's conventional prior, higher_is_better, "
+        "which agrees in economics with turnover_60's lower_is_better while being its opposite in "
+        "sign; both are priors this repository has measured nothing about."
+    ),
+)
+"""`AMIHUD_60`'s prose, out of `factor_id`."""
+
+
+def _amihud_60(window: FactorWindow) -> float | None:
+    """`mean(|r| / (amount * CNY_PER_AMOUNT_UNIT))` over the window, in `1/CNY`.
+
+    `None` -- hence `undefined_value` -- on a zero `pre_close` and on any session whose `amount`
+    is not strictly positive. **Any** such session, not the offending one skipped: a mean taken
+    over whichever sessions happened to have turnover would be a value whose sample size is a
+    function of the data, and this repository has taken eight Critical findings on quantities
+    calibrated over a sample nobody declared.
+    """
+    returns = _session_returns(window)
+    if returns is None or not returns:
+        return None
+    amounts = window.series(DAILY_DATASET, AMOUNT_COLUMN)
+    if any(value <= 0.0 for value in amounts):
+        return None
+    return math.fsum(
+        abs(value) / (amount * CNY_PER_AMOUNT_UNIT)
+        for value, amount in zip(returns, amounts, strict=True)
+    ) / len(returns)
+
+
 FACTOR_DEFINITIONS: Final[FactorRegistry] = FactorRegistry(
     (
         REVERSAL_1D,
@@ -1264,6 +1684,10 @@ FACTOR_DEFINITIONS: Final[FactorRegistry] = FactorRegistry(
         MOMENTUM_60_SESSIONS,
         MOMENTUM_120_SESSIONS,
         REVERSAL_5_SESSIONS,
+        RETURN_VOL_60,
+        DOWNSIDE_VOL_60,
+        TURNOVER_60,
+        AMIHUD_60,
     ),
     notes=(
         REVERSAL_1D_NOTE,
@@ -1271,9 +1695,13 @@ FACTOR_DEFINITIONS: Final[FactorRegistry] = FactorRegistry(
         MOMENTUM_60_SESSIONS_NOTE,
         MOMENTUM_120_SESSIONS_NOTE,
         REVERSAL_5_SESSIONS_NOTE,
+        RETURN_VOL_60_NOTE,
+        DOWNSIDE_VOL_60_NOTE,
+        TURNOVER_60_NOTE,
+        AMIHUD_60_NOTE,
     ),
 )
-"""Every factor this build declares, and the prose about it. `V2-P3-009`..`013` extend both."""
+"""Every factor this build declares, and the prose about it. `V2-P3-009`..`011` extend both."""
 
 FACTOR_EVALUATORS: Final[Mapping[str, FactorEvaluator]] = MappingProxyType(
     {
@@ -1282,6 +1710,10 @@ FACTOR_EVALUATORS: Final[Mapping[str, FactorEvaluator]] = MappingProxyType(
         MOMENTUM_60_SESSIONS.qualified_key: _momentum_sessions,
         MOMENTUM_120_SESSIONS.qualified_key: _momentum_sessions,
         REVERSAL_5_SESSIONS.qualified_key: _reversal_5_sessions,
+        RETURN_VOL_60.qualified_key: _return_vol_60,
+        DOWNSIDE_VOL_60.qualified_key: _downside_vol_60,
+        TURNOVER_60.qualified_key: _turnover_60,
+        AMIHUD_60.qualified_key: _amihud_60,
     }
 )
 """Every factor this build can actually compute, keyed by `key/vN`.

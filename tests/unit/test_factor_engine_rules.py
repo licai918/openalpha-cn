@@ -101,10 +101,13 @@ def _window(*closes: float) -> FactorWindow:
 def test_the_shipped_registry_and_evaluator_table_name_exactly_the_same_factors() -> None:
     """The two tables agree, and the registry is exactly what this build has shipped so far.
 
-    Written out rather than counted, so that a factor arriving from `V2-P3-009`..`013` has to be
-    named here by whoever adds it. `reversal_1d` is the engine's verification factor and the four
-    that follow are `V2-P3-012`'s momentum-and-reversal family; the family's own declarations are
-    audited in `tests/unit/test_factor_momentum_reversal_rules.py`.
+    An exact tuple rather than a containment check, so a factor that arrives in one table and not
+    the other fails here as well as at import, and written out rather than counted, so that a
+    factor arriving from `V2-P3-009`..`011` has to be named here by whoever adds it. `reversal_1d`
+    is the engine's verification factor; the four after it are `V2-P3-012`'s momentum-and-reversal
+    family and the last four are `V2-P3-013`'s volatility-and-liquidity family, each family's own
+    declarations being audited in `tests/unit/test_factor_momentum_reversal_rules.py` and
+    `tests/unit/test_factor_volatility_liquidity.py`.
     """
     assert set(FACTOR_DEFINITIONS.qualified_keys) == set(FACTOR_EVALUATORS)
     assert FACTOR_DEFINITIONS.qualified_keys == (
@@ -113,6 +116,10 @@ def test_the_shipped_registry_and_evaluator_table_name_exactly_the_same_factors(
         "momentum_60_sessions/v1",
         "momentum_120_sessions/v1",
         "reversal_5_sessions/v1",
+        "return_vol_60/v1",
+        "downside_vol_60/v1",
+        "turnover_60/v1",
+        "amihud_60/v1",
     )
 
 
