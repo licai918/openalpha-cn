@@ -54,10 +54,13 @@ from openalpha_cn.panel_factors import (
     GROSS_MARGIN_PERIODS,
     GROSS_MARGIN_STABILITY,
     NET_PROFIT_COLUMN,
+    NET_PROFIT_YOY,
     OPERATING_CASH_FLOW_COLUMN,
     OPERATING_COST_COLUMN,
     RETURN_ON_CAPITAL_TTM,
     RETURN_ON_EQUITY_TTM,
+    REVENUE_YOY,
+    REVENUE_YOY_ACCELERATION,
     TOTAL_ASSETS_COLUMN,
     TOTAL_REVENUE_COLUMN,
     TRAILING_TWELVE_MONTH_PERIODS,
@@ -356,7 +359,7 @@ def test_the_four_definitions_declare_the_reaches_and_the_single_axis_the_family
     assert ACCRUALS_TTM.lookback_periods == CAPITAL_TURNOVER_PERIODS == 5
 
 
-def test_the_quality_family_is_the_first_shipped_factor_on_the_period_axis_alone() -> None:
+def test_the_quality_family_is_on_the_period_axis_alone() -> None:
     """The claim the family's own prose makes about the registry, held against the registry.
 
     Every factor shipped before `V2-P3-010` reads a session dataset: nine read only sessions and
@@ -365,6 +368,16 @@ def test_the_quality_family_is_the_first_shipped_factor_on_the_period_axis_alone
     for an axis the factor is not on, distinct from `None` for a security short of one it is --
     had no shipped factor exercising its first branch. It is a property of `FACTOR_DEFINITIONS`
     rather than of a docstring, so it is asserted there, in both directions.
+
+    **These four are not the whole of that partition, and the equality names the rest rather than
+    weakening to a containment.** `V2-P3-011`'s growth family reads `income` and no price either,
+    and it ships in the same build, so "period-only" is seven definitions and not four. The
+    exclusivity this test still buys is that *nothing else* is on the period axis alone: the four
+    named here plus the three named there, and every remaining factor declaring a session reach.
+    `tests/unit/test_factor_growth_family.py::test_the_growth_family_reads_a_filing_and_no_price_at_all`
+    asserts the same seven from that family's own side, and
+    `tests/unit/test_factor_value_family.py::
+    test_the_value_family_is_the_only_shipped_factor_on_both_axes_at_once` is the third partition.
     """
     period_only = {
         definition.qualified_key
@@ -377,6 +390,9 @@ def test_the_quality_family_is_the_first_shipped_factor_on_the_period_axis_alone
         RETURN_ON_CAPITAL_TTM.qualified_key,
         GROSS_MARGIN_STABILITY.qualified_key,
         ACCRUALS_TTM.qualified_key,
+        REVENUE_YOY.qualified_key,
+        NET_PROFIT_YOY.qualified_key,
+        REVENUE_YOY_ACCELERATION.qualified_key,
     }
     for definition in FACTOR_DEFINITIONS.definitions:
         if definition.qualified_key in period_only:

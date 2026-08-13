@@ -103,14 +103,16 @@ def test_the_shipped_registry_and_evaluator_table_name_exactly_the_same_factors(
 
     An exact tuple rather than a containment check, so a factor that arrives in one table and not
     the other fails here as well as at import, and written out rather than counted, so that a
-    factor arriving from `V2-P3-010`..`011` has to be named here by whoever adds it. `reversal_1d`
+    factor arriving from a later issue has to be named here by whoever adds it. `reversal_1d`
     is the engine's verification factor; the four after it are `V2-P3-012`'s momentum-and-reversal
     family, the next four are `V2-P3-013`'s volatility-and-liquidity family, the next three are
-    `V2-P3-009`'s value family and the last four are `V2-P3-010`'s quality family, each family's
-    own declarations being audited in `tests/unit/test_factor_momentum_reversal_rules.py`,
+    `V2-P3-009`'s value family, the next four are `V2-P3-010`'s quality family and the last three
+    are `V2-P3-011`'s growth family, each family's own declarations being audited in
+    `tests/unit/test_factor_momentum_reversal_rules.py`,
     `tests/unit/test_factor_volatility_liquidity.py`,
-    `tests/unit/test_factor_value_family.py` and
-    `tests/unit/test_factor_quality_family.py`.
+    `tests/unit/test_factor_value_family.py`,
+    `tests/unit/test_factor_quality_family.py` and
+    `tests/unit/test_factor_growth_family.py`.
     """
     assert set(FACTOR_DEFINITIONS.qualified_keys) == set(FACTOR_EVALUATORS)
     assert FACTOR_DEFINITIONS.qualified_keys == (
@@ -130,6 +132,9 @@ def test_the_shipped_registry_and_evaluator_table_name_exactly_the_same_factors(
         "return_on_capital_ttm/v1",
         "gross_margin_stability/v1",
         "accruals_ttm/v1",
+        "revenue_yoy/v1",
+        "net_profit_yoy/v1",
+        "revenue_yoy_acceleration/v1",
     )
 
 

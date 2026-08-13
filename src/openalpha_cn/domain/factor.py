@@ -55,10 +55,11 @@ session axis:
   `validate_each_axis_is_declared_exactly_when_it_is_read` makes the correspondence an
   equivalence in both directions. A statement-only factor declares no session reach, and a
   `lookback_sessions=1` on it would have been a field with no reader on that one definition.
-  `V2-P3-010`'s four are the shipped ones: its ROE reads `income` and `balancesheet` and no
-  session dataset -- the `fina_indicator.roe` this paragraph named until that issue argued it out
-  is a *cumulative-period* return that no arithmetic converts to a trailing one, so the family
-  computes the ratio instead of reading it.
+  `V2-P3-010`'s four and `V2-P3-011`'s three are the shipped ones: the quality family's ROE reads
+  `income` and `balancesheet` and no session dataset -- the `fina_indicator.roe` this paragraph
+  named until that issue argued it out is a *cumulative-period* return that no arithmetic converts
+  to a trailing one, so the family computes the ratio instead of reading it -- and the growth
+  family reads `income` alone.
 - **Year-on-year is not a third dimension.** A revenue YoY at period *P* needs *P* and *P-4*;
   the acceleration of it needs one more step back again. Those are the same two numbers with
   larger values -- `lookback_periods=5` hands the evaluator a window whose `[-5]` is the
@@ -465,9 +466,10 @@ class FactorDefinition(BaseModel):
     rather than a default: `validate_each_axis_is_declared_exactly_when_it_is_read` refuses
     `None` for a factor whose `required_fields` name any dataset outside
     `PERIOD_INDEXED_DATASETS`, and refuses a number for one whose fields are all filings.
-    `V2-P3-010`'s quality family is the shipped case -- `return_on_equity_ttm` reads `income` and
-    `balancesheet` and no price at all -- and a `lookback_sessions=1` on one of those four would be
-    a number in the content address that no branch of the engine could read.
+    `V2-P3-010`'s quality family and `V2-P3-011`'s growth family are the shipped cases --
+    `return_on_equity_ttm` reads `income` and `balancesheet` and no price at all, `revenue_yoy`
+    reads `income` and no price at all -- and a `lookback_sessions=1` on any of those seven would
+    be a number in the content address that no branch of the engine could read.
     """
     max_window_sessions: int | None = Field(ge=1, le=4000)
     """How many *panel* sessions the `lookback_sessions` window is allowed to span.

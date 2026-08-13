@@ -659,10 +659,95 @@ relative gap **8.9e-7**, and five of the six at machine precision -- and fails b
 which 净利润 was already net of minority interest. The assertion is therefore made on modern rows
 and states its own boundary.
 
+## The growth family (`V2-P3-011`), and the first factors that read a filing and nothing else
+
+Three definitions ship for it -- `revenue_yoy`, `net_profit_yoy` and `revenue_yoy_acceleration` --
+and six judgements are shared by all of them and stated here rather than three times over.
+
+**A year-on-year is a ratio of a cumulative figure to itself four quarters back, and no trailing
+twelve months is read anywhere in this family.** A-share statements accumulate within the calendar
+fiscal year, so `cumulative[P]` and `cumulative[P - 4 quarters]` cover the **same span of the same
+fiscal year** -- nine months against nine months at Q3, twelve against twelve at the annual. The
+seasonality `V2-P3-009`'s trailing sum exists to remove is already cancelled by the two sides
+covering the same months, so the value family's three-term identity has nothing to add here and is
+not called. What makes the offset twelve months is the same thing that made that identity legal:
+`max_window_periods == lookback_periods`, measured on the fiscal-quarter grid by `_period_span`.
+
+**That is not a simplification but a correctness requirement, and the reason is an alignment
+hazard the parallel `V2-P3-010` measured.** `_trailing_twelve_months` searches
+`window.periods[:-1]` for a fiscal year end, and how many that slice holds is a function of the
+reach **and of where the window ends**: `[:-1]` is `N - 1` consecutive quarters, and `K`
+consecutive quarters hold `K // 4` or `K // 4 + 1` year ends depending on the alignment. At
+`N = 5` it is four and therefore exactly one in all four alignments, which is what `V2-P3-009`
+rests on. At `N = 8` it is seven, which is **one or two** -- so a reader who reuses the helper at
+that reach gets `None` for three alignments and, for the fourth, a confident wrong number built
+from the previous year's December. At `N = 9` it is eight, exactly two years of quarters, so the
+helper answers `None` in all four -- but that is nine being odd about a four-cycle rather than a
+guard anybody wrote. This family does not rely on it: `_year_on_year` reads two cells at a fixed
+index offset and searches for nothing, which is why it has no alignment behaviour at all.
+`tests/unit/test_factor_growth_family.py::
+test_a_nine_period_window_holds_two_year_ends_in_every_alignment`
+drives all four and asserts the **count**, not only the `None`.
+
+**A year-earlier base that is not strictly positive is `undefined_value`, and this is the family's
+hardest judgement.** `-100` last year against `+50` this year has the arithmetic answer `-1.5`,
+and that answer is monotonically backwards: the derivative of `num / base - 1` in `num` is
+`1 / base`, so at a negative base the better this year's outcome the *lower* the factor value, and
+a `higher_is_better` cross section ranks the completed turnaround below the deepening loss -- on
+exactly the subset of the market a growth factor claims to find. `_market_capitalisation` refuses
+a non-positive denominator in this module for the same stated reason. Dividing by `abs(base)`
+instead is refused rather than adopted: it scores a swing from `-1` to `+1` at `+2.0`, the same as
+a rise from 100 to 300, and nothing measured here says those two belong at one rank.
+
+**The costs are measured on this repository's own live probe rather than estimated.** Two
+**disjoint** 60-security stride samples of the 5,543 listed securities, every `income` filing
+announced 2016-2026 (4,359 filings) resolved under this engine's own rules -- later announcement
+wins, same-day rows collapse when the projected cells agree and refuse per column when they do not
+-- and evaluated at two `as_of` days, 2024-06-30 and 2025-06-30, for 240 (security, `as_of`) pairs:
+
+| what it decides | measured |
+|---|---|
+| the reach, `1` / `5` / `9` contiguous periods | 240 / 240, **230 / 240**, **220 / 240** |
+| what `REVENUE_YOY_ACCELERATION` costs over `REVENUE_YOY` | 10 of the 230, **4.3%** |
+| year-earlier `n_income_attr_p` not strictly positive | 49 / 230, **21.3%** |
+| year-earlier `total_revenue` not strictly positive | 0 / 230, **0%** |
+| *either* base non-positive, so an acceleration is undefined -- profit | 61 / 220, **27.7%** |
+| the same on `total_revenue`, which is why the acceleration is on it | 0 / 220, **0%** |
+| `n_income` and `n_income_attr_p` giving a **different** year-on-year | 139 / 181, **76.8%** |
+| `total_revenue` and `revenue` giving a different year-on-year | 4 / 230, **1.7%** |
+| an acceleration that came out equal to its own recent rate | 0 / 220 |
+
+Three of those decide something no fixture can. The last two are the pair worth reading together:
+a growth rate divides a constant scale out, so the fact that `n_income` is 3.169 times
+`n_income_attr_p` on `600739.SH`'s 2024 annual settles nothing about the *rates* -- and it turns
+out the two profit columns disagree about the rate for three securities in four while the two
+revenue columns disagree for one in sixty. The column choice that matters most for a level is the
+one that matters least here, and the reverse.
+
+**The refusal rates measured for the two columns read are higher than this repository's record
+of them, and the record is not corrected here because it is a different measurement.**
+`total_revenue` refused **17 of 4,359 filings (0.390%)** and `n_income_attr_p` **20 of 4,359
+(0.459%)**, against the 0.123% and 0.189% `V2-P3-009`'s review recorded over its own two samples
+-- 3.2x and 2.4x. Both remain small and neither changes a decision here; what they change is the
+standing of any *quoted* rate for these columns, which `domain/financial_statements.py` already
+says in its own voice ("how little is a property of the sample and not of the dataset"). The
+concentration is confirmed rather than disturbed: `ebit` alone refuses 595 of the 599 ambiguous
+filings in the same corpus, 13.65% of it, and this family reads none of the pooled columns.
+
+**The horizon heterogeneity is disclosed rather than removed.** The ratio's span is whatever the
+security's newest filing is, so at one `as_of` a name whose latest period is Q1 reports a
+three-month growth and a name that has not filed Q1 yet reports a twelve-month one, and both are
+`computed` and ranked together. Removing it means a TTM-over-TTM year-on-year, which costs a
+nine-period reach for the plain rate and a thirteen-period one for the acceleration; the coverage
+that buys is the probe's first number, and it is why the trade is refused rather than ignored.
+`tests/integration/panel/test_growth_family.py::
+test_two_securities_with_different_newest_filings_grow_over_different_spans`
+is the heterogeneity on one partition, so the disclosure is falsifiable rather than prose.
+
 ## What is deliberately not here
 
-**One of the five factor families.** `V2-P3-011` owns growth. `V2-P3-009`'s value family,
-`V2-P3-010`'s quality family, `V2-P3-012`'s momentum and reversal family and `V2-P3-013`'s
+**None of the five factor families.** `V2-P3-009`'s value family, `V2-P3-010`'s quality family,
+`V2-P3-011`'s growth family, `V2-P3-012`'s momentum and reversal family and `V2-P3-013`'s
 volatility and liquidity family all ship here. `REVERSAL_1D` stays exactly where it is: it
 predates all of them and is the engine's own verification factor rather than a research
 deliverable -- see its own docstring for what it does and does not claim, and
@@ -1983,6 +2068,15 @@ the other nine, which bounded this column at 30 in 3,201 filings *on that sample
 quantity it was derived from did not (the non-`ebit` residue is 1.72% on the wider sample against
 the 0.94% recorded), which is why the measurement replaces it -- see this module's docstring
 section "The value family".
+
+**And that measurement does not travel either.** `V2-P3-011`'s live probe re-measured this column
+over two *different* disjoint 60-security samples -- 4,359 filings, sampled by stride over the
+whole listed universe rather than over one issue's corpus -- and got **20 of 4,359 (0.459%)**,
+**2.4x** the figure above. Neither number is wrong about its own sample and neither changes a
+decision; what they jointly establish is that a refusal rate quoted for one of these columns is a
+property of the sample it was taken on, which is `domain/financial_statements.py`'s own sentence
+landing for the third time. Any later issue that needs this number should measure it rather than
+cite either. See this module's docstring section "The growth family".
 """
 
 TOTAL_REVENUE_COLUMN: Final[str] = "total_revenue"
@@ -2027,6 +2121,21 @@ repository stores* does carry the two equal, but three of its four securities (`
 its `oper_cost` is null on both rows "because a bank publishes no cost of sales". So that corpus
 never had the power to decide this either way, which is this repository's own lesson about an
 assertion whose fixture cannot separate two answers, appearing for the sixth time.
+
+**Everything above is about the two columns' *levels*, and `V2-P3-011` needed the same question
+asked about their *rates*.** A growth rate divides a constant scale out, so "the two are 1.94%
+apart on every one of `600519.SH`'s periods" settles nothing about a year-on-year built from
+either. Measured on the same live probe that re-measured the refusal rate below -- 230
+(security, `as_of`) pairs -- the two columns give a **different** year-on-year on **4 of them,
+1.7%**, against 76.8% for the `n_income` / `n_income_attr_p` pair. So this is the column choice
+that separates most on a level and least on a rate, which is why `REVENUE_YOY` re-argues it rather
+than inheriting it.
+
+**The refusal rate below does not travel either.** `V2-P3-011`'s probe measured this column at
+**17 of 4,359 filings (0.390%)** over two disjoint 60-security stride samples of the whole listed
+universe, **3.2x** the 0.123% recorded here. Both are true of their own samples and neither
+changes a decision; see `NET_PROFIT_COLUMN` for the same finding on the other column and this
+module's docstring section "The growth family" for what it means for a quoted rate.
 """
 
 BOOK_EQUITY_COLUMN: Final[str] = "total_hldr_eqy_exc_min_int"
@@ -3208,6 +3317,465 @@ ACCRUALS_TTM_NOTE: Final[FactorNote] = FactorNote(
     ),
 )
 """`ACCRUALS_TTM`'s prose, out of `factor_id`."""
+# --- `V2-P3-011`: the growth family -------------------------------------------------------------
+#
+# See this module's docstring section "The growth family" for the judgements the three factors
+# share. `QUARTERS_PER_YEAR` carries the one piece of index arithmetic all of them rest on, and
+# `_year_on_year` is the whole of the arithmetic; nothing here calls `_trailing_twelve_months`,
+# and `YEAR_ON_YEAR_ACCELERATION_PERIODS` records what happens to a reader who tries.
+
+
+QUARTERS_PER_YEAR: Final[int] = 4
+"""How many fiscal quarters a year holds, which on this grid is an exact offset and not a ratio.
+
+`FISCAL_QUARTER_ENDS` has four members and a PRC listed company's accounting year is the calendar
+year, so "the same period one year earlier" is `window[index - 4]` on a **contiguous** window --
+an index subtraction, not a search for a matching month and not a date arithmetic this module
+would then have to agree with a calendar about. `_period_span` is what makes the window
+contiguous, and `_quarter_index` is the same fact stated on the other side: it is `year * 4 +
+month // 3 - 1`, so two periods four apart on the grid are twelve months apart on the calendar.
+"""
+
+YEAR_ON_YEAR_PERIODS: Final[int] = QUARTERS_PER_YEAR + 1
+"""How many contiguous filings a cumulative year-on-year needs: the latest and four back.
+
+`window[-1]` is the period being reported and `window[-5]` is the same period one fiscal year
+earlier, so the reach is the offset plus the point it is measured from. Five, which is
+`TRAILING_TWELVE_MONTH_PERIODS`' number **for a different reason and deliberately not the same
+constant**: that one is five because a trailing twelve months is a three-term identity whose
+middle term is a December the formula has to find inside the window, and this one is five because
+four is how far back a year is. Binding the two would make a later change to either move the
+other, and they are not one decision.
+
+**Nothing between the two ends is read.** `window[1:4]` exists only so that
+`max_window_periods == lookback_periods` can say the ends are four quarters apart; the arithmetic
+touches `[0]` and `[-1]` alone. That is the same cost `TRAILING_TWELVE_MONTH_PERIODS` prices for
+its own family -- a security holding both ends and missing one filing between them is
+`insufficient_history` rather than computed off the periods the formula names -- and it is the
+window model's price rather than the identity's, in exactly that constant's words.
+"""
+
+YEAR_ON_YEAR_ACCELERATION_PERIODS: Final[int] = 2 * QUARTERS_PER_YEAR + 1
+"""How many contiguous filings the change in a year-on-year rate needs: nine.
+
+Two year-on-year rates measured one year apart share their middle period, so the reach is two
+years of offset plus the point: `window[-1]` over `window[-5]`, less `window[-5]` over
+`window[-9]`. `domain/factor.py::lookback_periods` names nine as the widest reach in
+`V2-P3-009`..`013` and this is it.
+
+**No trailing twelve months is read anywhere in this family, and on a nine-period window that is
+a correctness requirement rather than a simplification.** `_trailing_twelve_months` finds its
+December by searching `window.periods[:-1]`, and how many year ends that slice holds is a
+function of **N and of where the window ends**, not of N alone: `[:-1]` is `N - 1` consecutive
+quarters, and `K` consecutive quarters hold `K // 4` or `K // 4 + 1` year ends depending on the
+alignment. At `N = 5` it is four quarters and therefore **exactly one** in all four alignments,
+which is what makes `V2-P3-009`'s identity legitimate. At `N = 8` it is seven, which is one or
+two -- so a helper reused there answers `None` for three alignments and, for the fourth, returns a
+confident wrong number built from the *previous* year's December. **At `N = 9` it is eight, which
+is exactly two years of quarters and therefore exactly two year ends in every alignment**, so the
+helper answers `None` for all four -- but that is a property of nine being odd about a four-cycle
+and not a guard anybody wrote, and a family that relied on it would be relying on an arithmetic
+coincidence. This one does not rely on it: it never calls the helper.
+`tests/unit/test_factor_growth_family.py::
+test_a_nine_period_window_holds_two_year_ends_in_every_alignment`
+drives all four alignments and asserts the year-end **count** rather than only the `None`, so the
+day somebody widens this reach to eight the test says why it broke.
+"""
+
+NEWEST_PERIOD: Final[int] = -1
+"""The index of the most recent report period knowable at `as_of`, per `FactorWindow`."""
+
+YEAR_EARLIER_PERIOD: Final[int] = NEWEST_PERIOD - QUARTERS_PER_YEAR
+"""`-5`: the index the acceleration's earlier year-on-year is measured at.
+
+Named rather than written twice, because it is the same offset `_year_on_year` applies to its own
+argument and a second literal `-5` would be two spellings of one decision.
+"""
+
+
+def _year_on_year(window: FactorWindow, *, dataset: str, column: str, index: int) -> float | None:
+    """`cumulative[index] / cumulative[index - 4] - 1`, or `None` when that base is not positive.
+
+    The A-share cumulative figure is the fiscal year to date, so the period four quarters back is
+    the **same span of the same fiscal year**: a Q3 figure is nine months against nine months, an
+    annual is twelve against twelve. That is what makes this ratio a year-on-year without any
+    accumulation -- the seasonality `V2-P3-009`'s trailing sum exists to remove is already
+    cancelled by the two sides covering the same months.
+
+    **What that does not buy is one horizon across the cross section, and the difference is stated
+    rather than run together with the one above.** `EARNINGS_YIELD_TTM` accumulates because a
+    *level* read at one `as_of` mixes three months of one issuer's profit with twelve of another's,
+    which is not a comparison at all. A ratio of two same-span figures is a comparison whichever
+    span it is -- but a three-month growth and a twelve-month growth are still two different
+    quantities being ranked together. A trailing twelve months over a trailing twelve months
+    removes that, at the cost of a nine-period reach for a plain rate and a thirteen-period one for
+    the acceleration; the trade is taken the other way here and its cost is disclosed, not denied.
+    See `_GROWTH_HORIZON_PROSE` and this module's docstring section "The growth family".
+
+    **Both ends are read at a fixed offset and neither is searched for**, which is why this
+    function has no alignment behaviour at all: `_period_span` refuses a window whose ends are
+    further apart on the fiscal-quarter grid than `max_window_periods`, so at
+    `max_window_periods == lookback_periods` the offset `QUARTERS_PER_YEAR` **is** twelve months
+    in every one of the four alignments.
+    `tests/unit/test_factor_growth_family.py::
+    test_the_year_on_year_reads_the_same_quarter_one_year_earlier_in_all_four_alignments` drives
+    the four rather than asserting this, and
+    `tests/unit/test_factor_growth_family.py::
+    test_a_gapped_window_handed_to_the_evaluator_returns_a_wrong_number`
+    pins the number this function produces when that guarantee is removed -- because it produces
+    one, quietly, rather than refusing.
+
+    **A base that is not strictly positive is `undefined_value` and that is the family's hardest
+    judgement.** `-100` last year against `+50` this year is the classic trap: the ratio has an
+    arithmetic answer, `50 / -100 - 1 = -1.5`, and that answer is **monotonically backwards**.
+    The derivative of `num / base - 1` in `num` is `1 / base`, so at a negative base the better
+    this year's outcome the *lower* the factor value -- and a `higher_is_better` cross section
+    would then rank the completed turnaround below the deepening loss, on exactly the subset of
+    the market a growth factor claims to find. `_market_capitalisation` refuses a non-positive
+    denominator in this module for the same stated reason and this is that rule on the other axis.
+    A zero base is the ordinary division and is refused with it.
+
+    The alternative -- dividing by `abs(base)`, which is what makes `-100 -> +50` read `+1.5` --
+    is refused rather than adopted, because it is a different function whose values are not
+    comparable with the ones beside them: it scores a swing from `-1` to `+1` at `+2.0`, the same
+    as a rise from 100 to 300, and this repository has measured nothing that would say those two
+    belong at one rank. Refusing costs coverage that is measured rather than guessed; see
+    `NET_PROFIT_YOY`.
+    """
+    cumulative = window.series(dataset, column)
+    base = cumulative[index - QUARTERS_PER_YEAR]
+    if base <= 0.0:
+        return None
+    return cumulative[index] / base - 1.0
+
+
+_GROWTH_DIRECTION_PROSE: Final[str] = (
+    " The declared direction is the growth premium's conventional prior -- the security whose "
+    "fundamental is rising faster is taken to be the better one -- and this repository has "
+    "measured nothing whatever about it, on this factor or on any other. A negative information "
+    "coefficient on it would therefore be a result rather than a bug, and nothing in this "
+    "repository licenses reading the sign either way before V2-P3-005 measures one. V2-P3-005 is "
+    "where an IC would say something, and V2-P3's own gate records that most first-batch factors "
+    "being insignificant is the expected result rather than a failure."
+)
+"""The direction sentence the three growth notes share, held to `REVERSAL_1D_NOTE`'s standard.
+
+Written once because it is one claim about three factors and a copy is a thing that drifts;
+`_VALUE_DIRECTION_PROSE` is the precedent and the reason is the same. It says one thing that
+family's does not, and the addition is a refusal rather than a claim: it declines to characterise
+the prior's strength at all. A sentence about what the literature finds for growth would be
+prose this repository cannot falsify, which is the one kind it has been burned by.
+"""
+
+_GROWTH_BASE_PROSE: Final[str] = (
+    " A cumulative figure four quarters back is the same span of the same fiscal year -- nine "
+    "months against nine months at Q3, twelve against twelve at the annual -- so the ratio is a "
+    "year-on-year without any accumulation, and no trailing twelve months is read anywhere in "
+    "this family. Both ends are read at a fixed index offset rather than searched for, which is "
+    "why the arithmetic is the same in all four quarter alignments; what makes that offset twelve "
+    "months is max_window_periods == lookback_periods, measured on the fiscal-quarter grid by "
+    "_period_span, and a window with a gap in it hands this arithmetic two periods that are not a "
+    "year apart and gets a number rather than a refusal. A year-earlier base that is not strictly "
+    "positive is undefined_value and not a number: 50 over a base of -100 has the arithmetic "
+    "answer -1.5, and that answer is monotonically backwards, since the derivative of num / base "
+    "in num is 1 / base and a higher_is_better cross section would then rank a completed "
+    "turnaround below a deepening loss. Dividing by the absolute base instead is refused rather "
+    "than adopted: it scores a swing from -1 to +1 at +2.0, the same as a rise from 100 to 300, "
+    "and nothing measured here says those two belong at one rank."
+)
+"""The arithmetic sentence all three notes share. One claim about three factors; see
+`_GROWTH_DIRECTION_PROSE`."""
+
+_GROWTH_HORIZON_PROSE: Final[str] = (
+    " The cost this family does not hide is that the ratio's horizon is whatever the security's "
+    "newest filing is: at one as_of a name whose latest period is Q1 reports a three-month "
+    "growth and a name that has not filed Q1 yet reports a twelve-month one, and both are "
+    "computed and ranked together. That is a real heterogeneity and it is the price of reading "
+    "the freshest disclosure rather than a trailing window -- a TTM-over-TTM year-on-year would "
+    "make every security's horizon twelve months and would cost a nine-period reach for the plain "
+    "rate and a thirteen-period one for the acceleration. The nine-against-five half of that trade "
+    "is measured on this repository's own live probe rather than argued; the thirteen-period half "
+    "is not measured and is stated as the arithmetic it is."
+)
+"""The disclosed cost all three notes share; see `REVENUE_YOY` for the measurement behind it."""
+
+
+REVENUE_YOY: Final[FactorDefinition] = FactorDefinition(
+    key="revenue_yoy",
+    version=1,
+    family="growth",
+    direction="higher_is_better",
+    required_fields=(FactorField(dataset=INCOME_DATASET, column=TOTAL_REVENUE_COLUMN),),
+    lookback_sessions=None,
+    max_window_sessions=None,
+    lookback_periods=YEAR_ON_YEAR_PERIODS,
+    max_window_periods=YEAR_ON_YEAR_PERIODS,
+)
+"""营收同比: `income.total_revenue` over the same period one fiscal year earlier, less one.
+
+**The first shipped factor that reads a filing and nothing else**, which is the other half of the
+report-period axis `V2-P3-009` opened. A growth rate is a ratio of one column to itself, so there
+is no price in it and `lookback_sessions is None` is the contract's own statement of that rather
+than an omission -- `FactorDefinition` refuses a session reach on a factor whose `required_fields`
+are all filings.
+
+`total_revenue` and not `revenue`, on `TOTAL_REVENUE_COLUMN`'s argument unchanged: the top line is
+the inclusive one, and `V2-P3-009`'s review measured where the two part -- all 42 of `600519.SH`'s
+stored periods, 1.94% at 2024Q3 -- so the choice lands somewhere else rather than on the same
+number. **That the same is true of the two columns' year-on-year *rates* does not follow from it
+and is measured separately**, because a growth rate divides a scale out: two columns in a constant
+ratio give the identical growth, and this family's own integration fixture would have hidden the
+choice entirely if it had copied the value family's constant multiples. `V2-P3-011`'s live probe
+measured it at **4 of 230** (security, `as_of`) pairs, 1.7% -- so this column choice moves a level
+by 1.94% on the securities it separates and a *rate* almost nowhere, which is the opposite of
+`NET_PROFIT_YOY`'s pair and is the reason each is measured rather than argued from the other. It is
+kept anyway: `total_revenue` is the column the level factor beside it reads, and a family whose
+growth and yield described two different revenue definitions would make `V2-P3-008`'s redundancy
+analysis compare two things.
+
+The reach is `5 / 5`, which is `TRAILING_TWELVE_MONTH_PERIODS`' number for a different reason --
+see `YEAR_ON_YEAR_PERIODS` -- so this factor and `sales_yield_ttm` are `insufficient_history` for
+the same securities, and `book_to_price` is not.
+"""
+
+REVENUE_YOY_NOTE: Final[FactorNote] = FactorNote(
+    subject=REVENUE_YOY.qualified_key,
+    summary=(
+        "Revenue year-on-year: income.total_revenue at the newest report period knowable at "
+        "as_of, divided by the same column four quarters earlier, less one -- read off a window "
+        "of five contiguous report periods whose max_window_periods equals its lookback_periods, "
+        "which is the contract's own statement that no filing is missing inside it. This is the "
+        "first shipped factor that reads a filing and NOTHING else: a growth rate is one column "
+        "over itself, so there is no price in it and no session reach is declared. total_revenue "
+        "and not revenue, on the top line's inclusiveness and on V2-P3-009's measurement that the "
+        "two part on all 42 of 600519.SH's stored periods (123,122,542,625 against "
+        "120,776,131,875 at 2024Q3, 1.94%) -- but a growth rate divides a constant scale out, so "
+        "that the two columns' RATES also differ is measured separately rather than inherited, "
+        "and this family's fixtures move the neighbouring columns by a changing ratio for exactly "
+        "that reason. V2-P3-011's live probe -- two disjoint 60-security stride samples of the "
+        "5,543 listed securities, 4,359 income filings announced 2016-2026, resolved under this "
+        "engine's own collapse and refusal rules and evaluated at two as_of days -- puts the two "
+        "revenue columns' rates apart on only 4 of 230 (security, as_of) pairs, 1.7%, against 139 "
+        "of 181 for the two PROFIT columns. So the column choice that moves a level most here "
+        "moves a rate least, which is why each is measured rather than argued from the other; "
+        "total_revenue is kept because it is the column sales_yield_ttm reads, and a family whose "
+        "growth and yield described two revenue definitions would make V2-P3-008's redundancy "
+        "analysis compare two things. The same probe measures this reach's own cost: 230 of 240 "
+        "pairs form a five-period window where 240 of 240 form a one-period one, and total_revenue "
+        "refused 17 of the 4,359 filings (0.390%) -- 3.2 times the 0.123% V2-P3-009's review "
+        "recorded on its own samples, which is a fact about how far a quoted refusal rate travels "
+        "rather than about this column. A negative growth is computed and negative: a shrinking "
+        "issuer is a real answer and the ratio is monotone through it as long as the base is "
+        "positive." + _GROWTH_BASE_PROSE + _GROWTH_HORIZON_PROSE + _GROWTH_DIRECTION_PROSE
+    ),
+)
+"""`REVENUE_YOY`'s prose, out of `factor_id`. See `domain/factor.py::FactorNote`."""
+
+
+def _revenue_yoy(window: FactorWindow) -> float | None:
+    """`REVENUE_YOY`: the newest cumulative top line over the same period a year earlier."""
+    return _year_on_year(
+        window, dataset=INCOME_DATASET, column=TOTAL_REVENUE_COLUMN, index=NEWEST_PERIOD
+    )
+
+
+NET_PROFIT_YOY: Final[FactorDefinition] = FactorDefinition(
+    key="net_profit_yoy",
+    version=1,
+    family="growth",
+    direction="higher_is_better",
+    required_fields=(FactorField(dataset=INCOME_DATASET, column=NET_PROFIT_COLUMN),),
+    lookback_sessions=None,
+    max_window_sessions=None,
+    lookback_periods=YEAR_ON_YEAR_PERIODS,
+    max_window_periods=YEAR_ON_YEAR_PERIODS,
+)
+"""净利同比: `income.n_income_attr_p` over the same period one fiscal year earlier, less one.
+
+**`n_income_attr_p` and not `n_income`, and `earnings_yield_ttm`'s argument for that pair does not
+reach here.** That one is about *pairing*: `total_mv` prices the parent's shares, so a numerator
+including the minority interest would be one claim over another. This factor has no price in it at
+all -- both sides are the same column -- so the pairing argument is silent and the choice has to
+be made again on its own evidence. Three things decide it:
+
+- **A partial acquisition moves the two columns by different amounts, in the direction that
+  flatters the wider one.** Consolidation is what the two columns are *defined* by: a newly bought
+  51% subsidiary contributes *all* of its profit to `n_income` and 51% of it to
+  `n_income_attr_p`, so a growth rate on the consolidated column reads an ownership event as
+  operating growth at roughly twice the size a holder of one listed share experienced. The reverse
+  event -- an issuer buying out a minority -- moves `n_income_attr_p` and not `n_income`. Which of
+  the two is commoner in this market is **not** measured here and no claim is made about it; what
+  is measured is that the two columns give different rates, below.
+- **The two are not a rescaling of each other, so this is not a choice a fixture can hide.**
+  `600739.SH`'s 2024 annual carries `n_income` 664,195,391.66 against `n_income_attr_p`
+  209,556,865.25, a factor of 3.169 -- two thirds of that consolidated profit belongs to somebody
+  else. **A constant factor would cancel out of a growth rate entirely**, so that level gap settles
+  nothing here; `V2-P3-011`'s live probe measured how often the two give a different *rate* and the
+  answer is **139 of the 181** (security, `as_of`) pairs that have a comparable pair, **76.8%**.
+  See `tests/unit/test_factor_growth_family.py::
+  test_the_two_profit_columns_are_two_different_growth_rates_on_real_rows`, which asserts three of
+  them by magnitude -- `002023.SZ`'s consolidated growth is 2.09 times its attributable one.
+- **`earnings_yield_ttm` already reads this column**, so the level factor and the growth factor
+  describe one series. `V2-P3-005`'s IC and `V2-P3-008`'s redundancy analysis then compare like
+  with like rather than two profit definitions that differ by a factor of three on a real filing.
+
+**This is the member of the family the non-positive base costs most, and the cost is measured.**
+A loss-making issuer has a negative year-earlier base, so this factor is `undefined_value` for it
+-- **49 of the 230** (security, `as_of`) pairs that form a five-period window on `V2-P3-011`'s two
+disjoint 60-security probe samples, **21.3%**, against **0 of 230** for `total_revenue`. That is
+the fifth of the market `earnings_yield_ttm` was deliberately built to score, and the asymmetry is
+stated rather than smoothed: `V2-P3-009` chose a signed **yield** precisely because `E/P` is
+monotone through zero, and a growth **rate** is not, because the zero is in its denominator rather
+than its numerator. So the family's own coverage census will show this factor answering for four
+securities in five where `revenue_yoy` answers for all of them, and that is the honest shape of a
+profit growth rate rather than a defect in this one.
+"""
+
+NET_PROFIT_YOY_NOTE: Final[FactorNote] = FactorNote(
+    subject=NET_PROFIT_YOY.qualified_key,
+    summary=(
+        "Net profit year-on-year: income.n_income_attr_p at the newest report period knowable at "
+        "as_of over the same column four quarters earlier, less one, on revenue_yoy's window and "
+        "terms throughout. n_income_attr_p and NOT n_income, argued here rather than inherited: "
+        "earnings_yield_ttm chooses the attributable column because total_mv prices the parent's "
+        "shares, and this factor has no price in it, so that argument is silent. What decides it "
+        "instead is that consolidating a newly bought 51% subsidiary adds all of its profit to "
+        "n_income and 51% to n_income_attr_p, so the consolidated column reads an ownership event "
+        "as operating growth at about twice the size a holder of one listed share experienced -- "
+        "which of consolidation and buying out a minority is commoner in this market is NOT "
+        "measured here and no claim is made about it; that the two are not a rescaling of each "
+        "other, since 600739.SH's "
+        "2024 annual carries 664,195,391.66 against 209,556,865.25, a factor of 3.169, where a "
+        "constant factor would cancel out of a growth rate entirely -- so what settles it is that "
+        "V2-P3-011's live probe puts the two columns' RATES apart on 139 of the 181 (security, "
+        "as_of) pairs that have a comparable pair, 76.8%, on two disjoint 60-security samples of "
+        "the listed universe; and that earnings_yield_ttm "
+        "already reads this column, so the level and the growth describe one series for "
+        "V2-P3-005's IC and V2-P3-008's redundancy analysis. This is the member of the family the "
+        "non-positive base costs most and the cost is measured rather than estimated: a "
+        "loss-making issuer has a negative year-earlier base and is undefined_value here, on 49 "
+        "of the 230 windows that form on that probe (21.3%) against 0 of 230 for total_revenue -- "
+        "which is precisely the fifth of the market earnings_yield_ttm was built to score. That "
+        "asymmetry is the point rather than an oversight -- a signed yield is monotone through "
+        "zero because the zero is in its numerator, and a growth rate is not because the zero is "
+        "in its denominator. This column's own refusal rate was measured on the same corpus at 20 "
+        "of 4,359 filings (0.459%), 2.4 times the 0.189% V2-P3-009's review recorded, so no quoted "
+        "rate for it is carried forward here without being re-measured."
+        + _GROWTH_BASE_PROSE
+        + _GROWTH_HORIZON_PROSE
+        + _GROWTH_DIRECTION_PROSE
+    ),
+)
+"""`NET_PROFIT_YOY`'s prose, out of `factor_id`."""
+
+
+def _net_profit_yoy(window: FactorWindow) -> float | None:
+    """`NET_PROFIT_YOY`: the newest cumulative attributable profit over the year-earlier one."""
+    return _year_on_year(
+        window, dataset=INCOME_DATASET, column=NET_PROFIT_COLUMN, index=NEWEST_PERIOD
+    )
+
+
+REVENUE_YOY_ACCELERATION: Final[FactorDefinition] = FactorDefinition(
+    key="revenue_yoy_acceleration",
+    version=1,
+    family="growth",
+    direction="higher_is_better",
+    required_fields=(FactorField(dataset=INCOME_DATASET, column=TOTAL_REVENUE_COLUMN),),
+    lookback_sessions=None,
+    max_window_sessions=None,
+    lookback_periods=YEAR_ON_YEAR_ACCELERATION_PERIODS,
+    max_window_periods=YEAR_ON_YEAR_ACCELERATION_PERIODS,
+)
+"""同比加速度: this year's revenue year-on-year less the same quarter's year-on-year a year ago.
+
+**A difference of two year-on-year rates, and not a year-on-year of a year-on-year.** The second
+reading is arithmetically available -- `(1 + g_now) / (1 + g_then) - 1` -- and is refused for the
+reason the base guard exists: `g_then` is a growth rate, so `1 + g_then` crosses zero at a 100%
+contraction and the quotient is sign-inverted on the other side of it. A difference of two rates
+is defined wherever both rates are, is in the units both are in (a rate per year), and is what
+"acceleration" means when the thing being differenced is already a rate.
+
+**The two rates are measured one year apart, and that is what makes nine periods the reach rather
+than six.** `YoY(P) - YoY(P-1)` is the cheaper construction and is wrong on cumulative figures:
+`YoY(Q3)` is a nine-month growth and `YoY(H1)` a six-month one, so their difference is part
+acceleration and part change of horizon. `YoY(P) - YoY(P-4)` differences two rates over the same
+season, so the horizon cancels along with the seasonality. It reads `window[-1]`, `window[-5]` and
+`window[-9]`, three periods of the nine the reach declares.
+
+**Revenue and not net profit, and the reason is the base guard compounding, measured.** This
+factor needs *two* positive bases where `NET_PROFIT_YOY` needs one, so a profit acceleration is
+`undefined_value` for every issuer that lost money in either year-earlier period: **61 of the 220**
+(security, `as_of`) pairs that form a nine-period window on `V2-P3-011`'s two disjoint probe
+samples, **27.7%**, against **0 of 220** on `total_revenue`. A revenue line is positive for almost
+every going concern, which is `SALES_YIELD_TTM`'s own observation, so the construction that
+compounds the guard is put on the column the guard never fired for in 220 windows.
+
+**Nine contiguous filings is two years and a quarter of unbroken disclosure and it is the widest
+reach in `V2-P3-009`..`013`.** `domain/factor.py::lookback_periods` names it as such. What it
+costs is measured rather than asserted and it is not the same cost `TRAILING_TWELVE_MONTH_PERIODS`
+prices: five filings excludes a recent listing, and nine excludes a recent listing *and* any name
+with a single missed filing anywhere in nine quarters. On the same probe the reach costs **10 of
+the 230** pairs the five-period rate scores, **4.3%** -- smaller than the shape of the requirement
+suggests, because an A-share issuer that files at all files every quarter, and larger at the
+earlier of the two `as_of` days (8 of 114) than at the later (2 of 116), which is what a reach
+measured against listing dates rather than against gaps looks like.
+`tests/integration/panel/test_growth_family.py::
+test_the_nine_period_reach_and_the_five_period_reach_answer_differently_for_the_same_security` is
+that difference on one partition, inside one family, rather than in prose.
+"""
+
+REVENUE_YOY_ACCELERATION_NOTE: Final[FactorNote] = FactorNote(
+    subject=REVENUE_YOY_ACCELERATION.qualified_key,
+    summary=(
+        "Revenue year-on-year acceleration: income.total_revenue's year-on-year at the newest "
+        "report period knowable at as_of, less the same column's year-on-year four quarters "
+        "earlier -- window[-1] over window[-5], less window[-5] over window[-9], off nine "
+        "contiguous report periods. A DIFFERENCE of two rates and not a year-on-year of a "
+        "year-on-year: the quotient reading (1 + g_now) / (1 + g_then) - 1 has 1 + g_then in its "
+        "denominator, which crosses zero at a 100% contraction and is sign-inverted past it, "
+        "while a difference is defined wherever both rates are and is in the units both are in. "
+        "The two rates are measured a YEAR apart rather than a quarter apart, which is what makes "
+        "the reach nine rather than six: on cumulative figures YoY(Q3) is a nine-month growth and "
+        "YoY(H1) a six-month one, so differencing adjacent periods mixes acceleration with a "
+        "change of horizon, and differencing the same season cancels both. Revenue and not net "
+        "profit, because this construction needs TWO positive bases where the plain year-on-year "
+        "needs one: on V2-P3-011's live probe -- two disjoint 60-security samples of the listed "
+        "universe at two as_of days -- a profit acceleration is undefined_value for 61 of the 220 "
+        "nine-period windows that form, 27.7%, against 0 of 220 on total_revenue. A revenue line "
+        "is positive for almost every going concern, which is sales_yield_ttm's own observation, "
+        "so the construction that compounds the guard is put on the column the guard never fired "
+        "for. Nine contiguous filings is two years "
+        "and a quarter of unbroken disclosure and is the widest reach in V2-P3-009..013; it "
+        "excludes a recent listing AND any name with one missed filing in nine quarters, where "
+        "the five-period reach beside it excludes only the first, and the same probe prices that "
+        "at 10 of the 230 pairs the five-period rate scores (4.3%) -- 2 of 116 at the later as_of "
+        "and 8 of 114 at the earlier one."
+        + _GROWTH_BASE_PROSE
+        + _GROWTH_HORIZON_PROSE
+        + _GROWTH_DIRECTION_PROSE
+    ),
+)
+"""`REVENUE_YOY_ACCELERATION`'s prose, out of `factor_id`."""
+
+
+def _revenue_yoy_acceleration(window: FactorWindow) -> float | None:
+    """`REVENUE_YOY_ACCELERATION`: the newest revenue year-on-year less the year-earlier one.
+
+    `None` -- hence `undefined_value` -- when **either** rate is, which is the guard compounding
+    this definition's docstring prices. Written as two calls to `_year_on_year` rather than as one
+    expression over four cells, so that the factor is visibly the difference of the two rates the
+    other two members of this family compute and cannot drift into being something else.
+    """
+    recent = _year_on_year(
+        window, dataset=INCOME_DATASET, column=TOTAL_REVENUE_COLUMN, index=NEWEST_PERIOD
+    )
+    earlier = _year_on_year(
+        window, dataset=INCOME_DATASET, column=TOTAL_REVENUE_COLUMN, index=YEAR_EARLIER_PERIOD
+    )
+    if recent is None or earlier is None:
+        return None
+    return recent - earlier
 
 
 FACTOR_DEFINITIONS: Final[FactorRegistry] = FactorRegistry(
@@ -3228,6 +3796,9 @@ FACTOR_DEFINITIONS: Final[FactorRegistry] = FactorRegistry(
         RETURN_ON_CAPITAL_TTM,
         GROSS_MARGIN_STABILITY,
         ACCRUALS_TTM,
+        REVENUE_YOY,
+        NET_PROFIT_YOY,
+        REVENUE_YOY_ACCELERATION,
     ),
     notes=(
         REVERSAL_1D_NOTE,
@@ -3246,9 +3817,12 @@ FACTOR_DEFINITIONS: Final[FactorRegistry] = FactorRegistry(
         RETURN_ON_CAPITAL_TTM_NOTE,
         GROSS_MARGIN_STABILITY_NOTE,
         ACCRUALS_TTM_NOTE,
+        REVENUE_YOY_NOTE,
+        NET_PROFIT_YOY_NOTE,
+        REVENUE_YOY_ACCELERATION_NOTE,
     ),
 )
-"""Every factor this build declares, and the prose about it. `V2-P3-011` extends both."""
+"""Every factor this build declares, and the prose about it. All five families are in it."""
 
 FACTOR_EVALUATORS: Final[Mapping[str, FactorEvaluator]] = MappingProxyType(
     {
@@ -3268,6 +3842,9 @@ FACTOR_EVALUATORS: Final[Mapping[str, FactorEvaluator]] = MappingProxyType(
         RETURN_ON_CAPITAL_TTM.qualified_key: _return_on_capital_ttm,
         GROSS_MARGIN_STABILITY.qualified_key: _gross_margin_stability,
         ACCRUALS_TTM.qualified_key: _accruals_ttm,
+        REVENUE_YOY.qualified_key: _revenue_yoy,
+        NET_PROFIT_YOY.qualified_key: _net_profit_yoy,
+        REVENUE_YOY_ACCELERATION.qualified_key: _revenue_yoy_acceleration,
     }
 )
 """Every factor this build can actually compute, keyed by `key/vN`.
