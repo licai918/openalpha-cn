@@ -327,3 +327,49 @@ both of them shapes this repository has paid for before:
 
 The manifest identity is byte-identical before and after both fixes, which is what makes them
 optimisations rather than changes.
+
+## Update, 2026-08-12 (`V2-P3-012`): the first factor whose per-security work grows with its reach
+
+`V2-P3-002`'s answer ("no matrix, one scalar call per security") was measured on `reversal_1d`,
+whose evaluator performs **one** division whatever its window holds. The momentum-and-reversal
+family breaks that assumption: `_compounded_session_return` multiplies one growth factor per
+session of the window, so a 120-session momentum does 120 multiplications per security where the
+5-session reversal does five. That is a different shape of arithmetic from the one the 2026-08-11
+section measured, which is why "the last one did not need numpy" is not an argument on its own,
+and it is re-measured here rather than inherited.
+
+### Measured, at ADR-0002's stated panel scale
+
+A synthetic `daily` partition of **5,534 securities × 130 sessions = 719,420 rows**, carrying both
+price columns (`close` and `pre_close`), written through the real store and read through
+`compute_factor` over the whole cross section at one `as_of`:
+
+| step | cold | warm |
+|---|---|---|
+| `compute_factor`, `momentum_120_sessions` (125-session reach, 120 multiplications/security) | **2.93 s** | 2.84 s |
+| `compute_factor`, `reversal_5_sessions` (5-session reach, 5 multiplications/security) | **2.50 s** | 2.48 s |
+| `write_panel_batch` for the same partition | **507.74 s** | — |
+
+All 5,534 observations were `computed` in every run, so these are the cost of a full cross section
+rather than of a census of refusals.
+
+### The difference between the two rows is the whole of the answer
+
+The two factors read the identical partition through the identical code path and differ only in
+how many terms their product has. The gap is **0.43 s** for `5,534 × 115 = 636,410` extra
+multiplications, about **0.7 µs each** — and that gap is the *entire* quantity a vectorised
+implementation could attack. Against the 507.74 s write that has to follow it, 0.08%; against the
+2.93 s build it sits in, 15%.
+
+So the trade is: remove part of 0.43 s, and take on two runtime dependencies plus every consequence
+this ADR lists (the `follow_imports=skip` mypy consequence, the thread-count pinning, the wheel
+size). The answer is `V2-P3-002`'s and for a sharper reason than "fast enough" — the term numpy
+would shrink is smaller than the run-to-run spread of the step that follows it.
+**Runtime dependencies remain nine.**
+
+### The honest bound
+
+This says nothing about `V2-P3-013`'s volatility and liquidity family, whose residual and
+idiosyncratic volatility are per-security regressions rather than products, and nothing about
+`V2-P3-005`'s rank correlation. Both are open questions that should be measured on their own
+workloads — which is the method this section follows rather than the conclusion it reached.
