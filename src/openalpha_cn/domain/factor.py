@@ -164,8 +164,9 @@ measured failure elsewhere in this repository: a table gained a key with no bran
 and the command exited 0 with an empty result.
 
 **No concrete factor family.** `V2-P3-009`..`013` own those. What ships here is the contract
-and the closed vocabularies; the one definition that exists today is `panel_factors`' own
-verification factor, and it says so in its own docstring.
+and the closed vocabularies; every definition lives in `panel_factors` beside the evaluator it is
+bound to, and each says in its own docstring what it does and does not claim -- the engine's
+verification factor and `V2-P3-012`'s momentum-and-reversal family alike.
 
 **No `ContractVersions` registration and no exported JSON Schema.** `domain/versioning.py`'s
 registry dispatches *stored JSON rows* back to a pydantic model, and a factor definition is

@@ -328,6 +328,18 @@ an argument, and the numbers are:
 | `observation_digest` alone (the canonical-JSON hash of the source cross section) | 2.8 ms |
 | `processed_observation_batch` + `transform_manifest_batch` for the same panel | 14.9 ms |
 
+**`V2-P3-012`'s family re-opened it a third time and is the first workload whose per-security
+cost grows with the factor's own reach**, so "the last one did not need numpy" is not an argument
+here either. `_compounded_session_return` multiplies one growth factor per session of the window,
+so a 120-session momentum does 120 multiplications per security where a 5-session reversal does
+five. Measured on 5,534 securities x 130 sessions (719,420 rows, both price columns), whole cross
+section, one `as_of`: `momentum_120_sessions` **2.93 s** cold / 2.84 s warm, `reversal_5_sessions`
+**2.50 s** / 2.48 s, and `write_panel_batch` for the same partition **507.74 s**. The difference
+between the two factors -- 0.43 s for 636,410 extra multiplications, about 0.7 us each -- is the
+whole of what a vectorised implementation could remove, and it is 0.08% of the write that follows
+it. ADR-0003's 2026-08-12 `V2-P3-012` update carries the table and the bound (`V2-P3-013`'s
+per-security regressions are a different shape again and are not covered by it).
+
 Against the 2.24 s `compute_factor` that has to run first, the whole transform is **1.6%**, and
 against the write path that follows it (56.7 s at the smallest of ADR-0003's five measurements)
 it is 0.06%. A numpy implementation of the same four steps could at best remove a number that is
@@ -336,11 +348,62 @@ exchange for the two runtime dependencies and every consequence ADR-0003 lists. 
 cross-sectional regression is still the issue that should re-open it, and it is still the first
 one with a matrix in it.
 
+## `V2-P3-012`'s family ships here, and the fifth deliverable is **not** a fifth definition
+
+The momentum-and-reversal family is four `FactorDefinition`s -- `MOMENTUM_20_SESSIONS`,
+`MOMENTUM_60_SESSIONS`, `MOMENTUM_120_SESSIONS` and `REVERSAL_5_SESSIONS` -- and the issue's fifth
+item, *industry-relative momentum*, is a **composition of machinery that already exists** rather
+than a definition beside them. The reason is structural and is checkable in three ways rather than
+argued:
+
+- **An evaluator has no cross section, by type.** `compute_factor` calls one `FactorEvaluator` per
+  security with a `FactorWindow` carrying that security's own series and nothing else. An
+  industry-relative value is `momentum` minus the mean momentum of the security's industry peers
+  *at the same `as_of`*, which is a statistic over other securities. There is no argument through
+  which an evaluator could see one, so this is not "the engine cannot reach the industry table"; it
+  is that the engine cannot reach the cross section at all. That is deliberate --
+  `apply_factor_transform` and `apply_factor_neutralization` are where a cross-sectional statistic
+  is allowed to live, and both take their cross section as a **value** so the look-ahead surface is
+  closed by arithmetic.
+- **An industry code could not be a `required_field` even if it helped.** `_numeric` refuses a
+  non-numeric cell outright, and `industry_classification`'s level columns are strings. So
+  `FactorField(dataset="index_member_all", column="l1_code")` constructs -- the field validator is
+  syntactic -- and `compute_factor` then raises rather than computing.
+  `tests/integration/panel/test_factor_momentum_reversal.py::
+  test_an_industry_code_is_declarable_as_a_factor_input_and_refused_at_the_read` drives exactly
+  that, so the claim is a measurement.
+- **The composition already produces the quantity.** `V2-P3-004`'s `INDUSTRY_AND_SIZE` regresses a
+  processed cross section on a complete set of SW2021 L1 dummies plus `log(total_mv)` and stores
+  the residual, which by Frisch-Waugh-Lovell is `(y - mean_y_g) - beta * (x - mean_x_g)`. The first
+  term **is** industry-relative momentum. So `V2-P3-012` delivers
+  `compute_factor(MOMENTUM_60_SESSIONS) -> apply_factor_transform(CROSS_SECTION_STANDARD) ->
+  apply_factor_neutralization(INDUSTRY_AND_SIZE)`, and
+  `tests/integration/panel/test_factor_momentum_reversal.py::
+  test_the_industry_relative_momentum_is_the_neutralised_residual_of_a_momentum_factor` runs the
+  three tiers over one corpus and holds every residual to a hand-computed number.
+
+**The difference between that residual and a pure industry demeaning is stated rather than
+elided.** It is exactly `beta * (x - mean_x_g)`: the shipped neutralisation removes industry *and*
+size, and no declarable `FactorNeutralizationSpec` removes industry alone (`market_cap_scale` has
+two members and neither is "none"). The two are different numbers on a real cross section, which
+is asserted with a floor rather than asserted to be small --
+`test_the_size_term_is_what_separates_the_residual_from_a_pure_industry_demeaning` measures the
+gap and refuses a fixture on which it vanishes.
+
+**And the composition is not wired into a schedule or a read path, deliberately.** Roadmap
+section 11 records that a neutralised row's four clocks are all the build `as_of`, and that
+`as_of` must be at or after the `daily_basic` year partition's `max_available_time` -- so residuals
+for any day of year Y are invisible to any read before Y ends. `V2-P4-026` is the fix and
+`V2-P4-013`'s hard prerequisite, and the roadmap's instruction to `V2-P3-005` and
+`V2-P3-009`..`013` is to stack no further code on the assumption that residuals are visible
+day by day. Nothing here does: the composition is three in-memory calls, none of which reads a
+stored residual back.
+
 ## What is deliberately not here
 
-**No concrete factor family.** `V2-P3-009`..`013` own those. One definition ships, `reversal_1d`,
-and it exists to exercise the engine end to end against a `daily`-only input -- see
-`REVERSAL_1D`'s own docstring for what it does and does not claim.
+**No `V2-P3-013` family.** Volatility and liquidity is its own issue. `REVERSAL_1D` also stays
+exactly where it is: it is the engine's verification factor rather than a research deliverable,
+and `REVERSAL_5_SESSIONS`' own docstring says why it is not that factor with a wider window.
 
 **No universe loading.** `compute_factor` takes the cross section as an argument rather than
 deriving it, because `stock_basic` has exactly the same mid-year readiness problem this module
@@ -362,6 +425,7 @@ from types import MappingProxyType
 from typing import Final, Literal, Protocol, cast
 from zoneinfo import ZoneInfo
 
+from openalpha_cn.domain.daily_prices import CLOSE_COLUMN, DAILY_DATASET, PRE_CLOSE_COLUMN
 from openalpha_cn.domain.factor import (
     FACTOR_DIRECTIONS,
     PERIOD_INDEXED_DATASETS,
@@ -821,13 +885,404 @@ def _reversal_1d(window: FactorWindow) -> float | None:
     return closes[-1] / previous - 1.0
 
 
+# --- V2-P3-012: the momentum and reversal family ----------------------------------------------
+
+
+SHORT_REVERSAL_SESSIONS: Final[int] = 5
+"""The short-horizon reversal's reach, **and** the sessions every momentum here declines to read.
+
+One constant with two readers, because the two are one decision. `REVERSAL_5_SESSIONS` compounds
+this many sessions; each of the three momentum factors declares this many sessions *more* than it
+compounds and then drops exactly these from the recent end of its window. What that buys is
+arithmetic rather than a hope: at any `as_of`, for any security, the sessions a momentum factor
+multiplies and the sessions the reversal factor multiplies are **disjoint** --
+`tests/integration/panel/test_factor_momentum_reversal.py::
+test_the_sessions_a_momentum_reads_and_the_sessions_the_reversal_reads_are_disjoint` measures it
+against two stores that differ only in the newest five sessions' returns. The stored window
+columns cannot show it and that is worth knowing: `input_session_first`/`input_session_last`
+record the **declared** 25-session window, whose newest session is the reversal's newest session
+too. The declared windows nest; the sessions actually multiplied do not overlap.
+
+**Disjointness is the reason the number is 5, and it is the half this repository can prove.**
+With no skip a 20-session momentum's window *contains* the 5-session reversal's, and the two
+values are then bound by an exact identity -- both are products of the same per-session growth
+factors, so `1 + m20 == (1 + m15) * (1 + r5)` to floating point. `V2-P3-008`'s redundancy analysis
+groups by family, and a family shipping a pair related by an identity would hand it a finding
+about arithmetic rather than about the market.
+`tests/unit/test_factor_momentum_reversal_rules.py::
+test_an_unskipped_momentum_is_its_reversal_times_the_rest_of_its_own_window` drives the identity,
+so the reason is measured rather than asserted in prose.
+
+**The conventional reason is named and is not claimed.** Momentum is customarily stated over a
+period ending before the short-term reversal window, so that the two do not measure one another.
+That is the family's prior; this repository has measured nothing about it, and `V2-P3-005` is the
+issue where an information coefficient would say anything at all.
+
+What the skip costs is stated rather than hidden: a 20-session momentum now needs **25** sessions
+of visible history, so a name that listed 22 sessions ago is `insufficient_history` for it where
+an unskipped definition would have answered. That is the price of the disjointness, paid in the
+coverage census where it is visible.
+"""
+
+MAX_HALTED_SESSIONS_IN_FIVE: Final[int] = 1
+"""How much of a **momentum** window may be halt: one session in five of its own reach.
+
+`max_window_sessions` is the number of panel sessions a window may reach across, and the excess
+over `lookback_sessions` is exactly the number of sessions the security did not trade inside it.
+So this constant is the whole of that judgement for the three momentum factors:
+`max_window_sessions == lookback_sessions + lookback_sessions * 1 // 5`.
+
+**Why not equality.** `max_window_sessions == lookback_sessions` is the strict setting and it is
+the right one for a five-session reversal (see `REVERSAL_5_SESSIONS`). It is the wrong one for a
+half-year momentum, and this repository has the measurement: `domain/daily_prices.py::
+MIN_SESSION_ROW_SHARE` records that 2015-07-09 served **1,363** bars against that year's median of
+2,359 -- 42% of the market with no row, with 07-08 at 1,489 and 07-10 at 1,425. Under equality
+every one of those names carries `insufficient_history` for the next 125 sessions, on a factor
+whose whole subject is the price path they do have.
+
+**Why one in five and not one in two.** The tolerance is what the value's *calendar* reach is
+allowed to become, and at one in two a "120-session momentum" may span 250 panel sessions --
+which is a year, not half of one, on the 242/243/244-session years `daily_prices.py` measured for
+2024/2018/2015. The bound therefore has to sit well under 1.0, and one in five keeps the widest
+reach of the 120-session factor at 150 sessions: about seven months against six nominal.
+
+**What makes the number auditable rather than free.** The three reaches form a ladder, and the
+tolerance is required to keep each rung out of the next one's nominal reach: 30 < 65 < 125, and
+78 < 125, so no momentum factor's worst-case window can cover the interval the next factor is
+*defined* over. `tests/unit/test_factor_momentum_reversal_rules.py::
+test_no_momentum_windows_worst_case_span_reaches_the_next_rungs_own_reach` asserts the ladder and
+`test_every_momentum_span_is_the_declared_halt_tolerance_of_its_own_reach` asserts the arithmetic,
+so widening this constant fails a test rather than merely changing a number.
+
+**What is not claimed.** There is no measured distribution of A-share halt *durations* in this
+repository -- the 2015 census above is a market-wide count on three days, not a per-security
+length -- so this is a declared judgement with a stated cost, not a calibration. The cost: a name
+that missed more than 25 of the 125 sessions behind its 120-session momentum gets
+`insufficient_history` rather than a value.
+"""
+
+MOMENTUM_20_SESSIONS: Final[FactorDefinition] = FactorDefinition(
+    key="momentum_20_sessions",
+    version=1,
+    family="momentum_reversal",
+    direction="higher_is_better",
+    required_fields=(
+        FactorField(dataset=DAILY_DATASET, column=CLOSE_COLUMN),
+        FactorField(dataset=DAILY_DATASET, column=PRE_CLOSE_COLUMN),
+    ),
+    lookback_sessions=25,
+    max_window_sessions=30,
+    lookback_periods=None,
+    max_window_periods=None,
+)
+"""Twenty sessions of compounded return, ending five sessions before `as_of`'s newest session.
+
+`25 = 20 + SHORT_REVERSAL_SESSIONS`: the reach is what the window has to *hold*, and the skip is
+what the evaluator declines to read off the recent end of it. `30 = 25 + 25 * 1 // 5` is
+`MAX_HALTED_SESSIONS_IN_FIVE` applied to that reach, and 30 is under `MOMENTUM_60_SESSIONS`' own
+reach of 65 -- so a halted name's 20-session momentum can never cover the interval the 60-session
+factor is defined over.
+
+**Both price columns are read and neither is optional**; see `_compounded_session_return` for the
+measurement that decides it. A momentum is a multi-period return, and the only per-session return
+this repository will compute is `close / pre_close - 1`.
+"""
+
+MOMENTUM_60_SESSIONS: Final[FactorDefinition] = FactorDefinition(
+    key="momentum_60_sessions",
+    version=1,
+    family="momentum_reversal",
+    direction="higher_is_better",
+    required_fields=(
+        FactorField(dataset=DAILY_DATASET, column=CLOSE_COLUMN),
+        FactorField(dataset=DAILY_DATASET, column=PRE_CLOSE_COLUMN),
+    ),
+    lookback_sessions=65,
+    max_window_sessions=78,
+    lookback_periods=None,
+    max_window_periods=None,
+)
+"""Sixty sessions of compounded return, ending five sessions before `as_of`'s newest session.
+
+`65 = 60 + SHORT_REVERSAL_SESSIONS` and `78 = 65 + 65 * 1 // 5`, which is under
+`MOMENTUM_120_SESSIONS`' reach of 125. See `MOMENTUM_20_SESSIONS` and
+`MAX_HALTED_SESSIONS_IN_FIVE`.
+"""
+
+MOMENTUM_120_SESSIONS: Final[FactorDefinition] = FactorDefinition(
+    key="momentum_120_sessions",
+    version=1,
+    family="momentum_reversal",
+    direction="higher_is_better",
+    required_fields=(
+        FactorField(dataset=DAILY_DATASET, column=CLOSE_COLUMN),
+        FactorField(dataset=DAILY_DATASET, column=PRE_CLOSE_COLUMN),
+    ),
+    lookback_sessions=125,
+    max_window_sessions=150,
+    lookback_periods=None,
+    max_window_periods=None,
+)
+"""A hundred and twenty sessions of compounded return, ending five sessions before the newest.
+
+`125 = 120 + SHORT_REVERSAL_SESSIONS` and `150 = 125 + 125 * 1 // 5`. There is no next rung, so
+the ladder check for this one is against the trading year rather than against another factor:
+150 is well under the 242 sessions of the shortest A-share year `domain/daily_prices.py` measured
+(2024: 242, 2018: 243, 2015: 244), so a name halted to the tolerance still has a half-year
+momentum rather than an annual one.
+
+**This is the definition `V2-P3-002`'s reach fields were built for**, and the consequence lands on
+its caller rather than here: a 125-session window evaluated in January reaches into the previous
+calendar year, so `requirement.years` must name that year too or
+`_refuse_a_panel_narrower_than_the_lookback` refuses the whole build.
+`tests/integration/panel/test_factor_momentum_reversal.py::
+test_a_january_as_of_needs_the_previous_year_named_and_says_so_when_it_is_not` drives both sides.
+"""
+
+REVERSAL_5_SESSIONS: Final[FactorDefinition] = FactorDefinition(
+    key="reversal_5_sessions",
+    version=1,
+    family="momentum_reversal",
+    direction="lower_is_better",
+    required_fields=(
+        FactorField(dataset=DAILY_DATASET, column=CLOSE_COLUMN),
+        FactorField(dataset=DAILY_DATASET, column=PRE_CLOSE_COLUMN),
+    ),
+    lookback_sessions=SHORT_REVERSAL_SESSIONS,
+    max_window_sessions=SHORT_REVERSAL_SESSIONS,
+    lookback_periods=None,
+    max_window_periods=None,
+)
+"""Five consecutive sessions of compounded return, the most recent ones knowable at `as_of`.
+
+**`max_window_sessions == lookback_sessions` is the strict setting and is chosen here**, which is
+the opposite of the three momentum factors and is the same judgement `REVERSAL_1D` makes: the
+whole content of a short-horizon reversal is that the interval is recent *and unbroken*. A
+five-session window spanning thirty panel sessions is a six-week return reported as a one-week
+one, and `insufficient_history` is the honest answer for a security that was halted through it.
+The cost is that a name halted for even one session in the last five has no value here, which is a
+strictly larger cost than the momentum factors pay and is the reason the two settings differ.
+
+**It is not `REVERSAL_1D` widened.** That factor is the engine's verification subject and computes
+`close[t] / close[t-1] - 1` -- the third of the three paths `domain/daily_prices.py` measured, the
+one that reads `-0.5310%` where the two correct paths read `+2.7422%` across an ex-rights morning.
+Its own note says `V2-P3-012` "will not be built on top of this", and this is what that means:
+this factor reads `pre_close` as well as `close`, so it is a product of published session returns
+rather than a ratio of two closes. On a window with no corporate action in it the two agree; the
+one this repository measured is the window where they do not.
+"""
+
+
+def _compounded_session_return(window: FactorWindow, *, skip: int) -> float | None:
+    """`prod(close[i] / pre_close[i]) - 1` over the window, less its `skip` newest sessions.
+
+    ## The return path, which is the one thing this family cannot get wrong
+
+    `domain/daily_prices.py` measured three ways to compute one session's return across
+    `000001.SZ`'s 2026-06-12 ex-dividend date and found that two agree and one is wrong in the
+    **sign**:
+
+        close / pre_close - 1, which is the endpoint's own pct_chg   +2.742230%
+        (close*f) / (prev_close*f_prev) - 1, the adj_factor path     +2.742251%
+        close / prev_close - 1                                       -0.530973%
+
+    A momentum is that quantity compounded, so the third path's error compounds with it. This
+    function takes the first: `pre_close` is the previous session's close **already restated for
+    whatever corporate action took effect that morning**, so the per-session growth factor
+    `close / pre_close` is corporate-action-correct on every session by construction, and their
+    product telescopes to the true multi-period return without this module owning one line of
+    adjustment arithmetic.
+
+    Two consequences worth stating because they are what make the choice load-bearing rather than
+    stylistic:
+
+    - **A halt inside the window costs nothing.** The window is the security's *own* sessions, and
+      the `pre_close` of the session on which it resumes is the pre-halt close restated. So the
+      product spans the halt correctly; what the halt does cost is span, which
+      `max_window_sessions` prices and `MAX_HALTED_SESSIONS_IN_FIVE` sets.
+    - **A limit-up or limit-down session is an ordinary session and is compounded as one.** The bar
+      exists, and `close / pre_close` on it is the return the security actually had -- clipped by
+      the band, which is a fact about the market rather than about the data. No coverage code is
+      spent on it and no session is masked.
+    - **The `adj_factor` path is not taken**, though it is equally correct, because it would make
+      every momentum factor read a second dataset -- and a two-dataset factor turns a missing
+      `adj_factor` row into `input_missing` on a security whose prices are all present.
+      `daily_prices.py` measured 49 such names on 2024-06-28, in the other direction.
+
+    **Neither `suspend_d` nor `stk_limit` is a `required_field` of anything in this family**, and
+    both absences are decisions rather than omissions. `suspend_d`'s own columns are text
+    (`suspend_type`, `suspend_timing`) and `_numeric` refuses a non-numeric cell, so a halt state
+    is not declarable as a factor input at all; a halt reaches these factors as the sessions the
+    security does not own, which is where `max_window_sessions` prices it. `stk_limit`'s two
+    columns *are* floats and could be declared, and are not: masking a limit session would be a
+    judgement about the market that nothing here has measured, it would make every value depend on
+    a second dataset's coverage, and that dataset carries the Beijing-board encoding where
+    `down_limit` is a fixed `0.0` (`domain/price_limits.py`: every row with `down_limit <= 0` over
+    235 sessions is a `.BJ` code with a sentinel `up_limit`). A factor whose window silently
+    dropped sessions on a sentinel it did not understand is the shape `V2-P2` already paid for.
+
+    **`pct_chg` is deliberately not read either**, though it is stored in the same rows and would
+    save a column. It is the *third witness*: `session_returns` reconciles it against
+    `close / pre_close - 1` to catch a `close` that arrived wrong, and a factor that consumed the
+    witness instead of the thing witnessed would be scoring the upstream's own arithmetic. It is
+    also published on two grids (`MAX_PUBLISHED_RETURN_DISAGREEMENT` is one tick of the coarse
+    one, `1e-4` in return space), and one tick per session compounded over 120 sessions is a
+    quantity nobody has bounded.
+
+    ## `None` is a zero denominator and nothing else
+
+    `DAILY_PRICE_COLUMNS` records that nineteen sessions spanning 2001-2026 (58,055 bars) carried
+    no null and no non-positive `pre_close`, and `daily_bars_from_panel_rows` refuses one, so this
+    branch is not reachable through this repository's own writers. It is here for `_reversal_1d`'s
+    stated reason -- `undefined_value` has to be a branch that runs -- and it is driven directly in
+    `tests/unit/test_factor_momentum_reversal_rules.py::
+    test_a_zero_pre_close_anywhere_in_the_window_is_undefined_rather_than_a_division`.
+
+    `skip` is subtracted from the *end* of the window, so the sessions read are the oldest
+    `len(window) - skip` of it; `SHORT_REVERSAL_SESSIONS` is what the momentum factors pass and
+    `0` is what the reversal passes. Every definition in this family declares a reach strictly
+    greater than the `skip` its evaluator uses, so the slice is never empty.
+    """
+    closes = window.series(DAILY_DATASET, CLOSE_COLUMN)
+    previous = window.series(DAILY_DATASET, PRE_CLOSE_COLUMN)
+    read = len(closes) - skip
+    growth = 1.0
+    for close, before in zip(closes[:read], previous[:read], strict=True):
+        if before == 0.0:
+            return None
+        growth *= close / before
+    return growth - 1.0
+
+
+def _momentum_sessions(window: FactorWindow) -> float | None:
+    """The evaluator all three momentum factors are bound to: skip five, compound the rest.
+
+    **One function for three keys, and that is a statement rather than a saving.** The three
+    momenta differ in exactly one thing -- the reach their definitions declare -- and the reach is
+    what forms the window before an evaluator is called. Three identical one-line functions would
+    have implied a difference that does not exist, and a mutation swapping any two of them would
+    have changed nothing while looking like it might. `FACTOR_EVALUATORS` maps three keys here;
+    `_refuse_table_drift` compares key sets and is indifferent to how many distinct callables the
+    table holds.
+    """
+    return _compounded_session_return(window, skip=SHORT_REVERSAL_SESSIONS)
+
+
+def _reversal_5_sessions(window: FactorWindow) -> float | None:
+    """`REVERSAL_5_SESSIONS`: all five sessions of its window, compounded. No skip.
+
+    A second function rather than a fourth key on `_momentum_sessions`, because the `skip` really
+    is different -- which is the whole of what separates the two halves of this family.
+    """
+    return _compounded_session_return(window, skip=0)
+
+
+_MOMENTUM_DIRECTION_PROSE: Final[str] = (
+    " The declared direction is the family's conventional prior -- a security that has risen "
+    "over the stated interval is taken to be the better one -- and this repository has measured "
+    "nothing whatever about it, on this factor or on any other. V2-P3-005 is where an "
+    "information coefficient would say something, and V2-P3's own gate records that most "
+    "first-batch factors being insignificant is the expected result rather than a failure."
+)
+"""The direction sentence the three momentum notes share, held to `REVERSAL_1D_NOTE`'s standard.
+
+Written once because it is one claim about three factors and a copy is a thing that drifts; it is
+a plain string concatenated into each note rather than a `FactorNote` of its own, because a note
+is keyed by the contract it is about and this sentence is about three of them.
+"""
+
+MOMENTUM_20_SESSIONS_NOTE: Final[FactorNote] = FactorNote(
+    subject=MOMENTUM_20_SESSIONS.qualified_key,
+    summary=(
+        "Twenty sessions of compounded published session return -- the product of "
+        "close / pre_close over the twenty sessions ending five sessions before the newest one "
+        "knowable at as_of -- so the declared reach is 25 sessions and the evaluator reads the "
+        "oldest 20 of them. The five it drops are exactly the five reversal_5_sessions reads, "
+        "which makes the two factors' windows disjoint instead of leaving them bound by the "
+        "identity a shared window forces. pre_close rather than the previous session's close "
+        "because pre_close is already restated for that morning's corporate action, which is the "
+        "difference domain/daily_prices.py measures as +2.7422% against -0.5310% on one real "
+        "ex-dividend date. A window may span 30 panel sessions, one halted session in five of its "
+        "own reach, which is under the 65 sessions momentum_60_sessions is defined over."
+        + _MOMENTUM_DIRECTION_PROSE
+    ),
+)
+
+MOMENTUM_60_SESSIONS_NOTE: Final[FactorNote] = FactorNote(
+    subject=MOMENTUM_60_SESSIONS.qualified_key,
+    summary=(
+        "Sixty sessions of compounded published session return, on momentum_20_sessions' terms "
+        "throughout: the product of close / pre_close over the sixty sessions ending five "
+        "sessions before the newest one knowable at as_of, a declared reach of 65 sessions, and "
+        "a span bound of 78 -- one halted session in five of its own reach, which stays under "
+        "the 125 sessions momentum_120_sessions is defined over so the two cannot become each "
+        "other on a heavily halted name. It is the horizon in this family that no other factor "
+        "here brackets from both sides, which is the only sense in which it is the middle one."
+        + _MOMENTUM_DIRECTION_PROSE
+    ),
+)
+
+MOMENTUM_120_SESSIONS_NOTE: Final[FactorNote] = FactorNote(
+    subject=MOMENTUM_120_SESSIONS.qualified_key,
+    summary=(
+        "A hundred and twenty sessions of compounded published session return, on "
+        "momentum_20_sessions' terms: a declared reach of 125 sessions, the oldest 120 of them "
+        "read, and a span bound of 150. There is no wider factor in this family to bracket it, "
+        "so the bound is checked against the trading year instead -- 150 is well under the 242 "
+        "sessions of the shortest A-share year domain/daily_prices.py measured, so even a name "
+        "halted to the tolerance still has a half-year momentum rather than an annual one. This "
+        "is the factor V2-P3-002's session reach fields were argued for: a name halted for three "
+        "months has a 120-session window spanning far more calendar than 120 sessions, and "
+        "max_window_sessions is what refuses it rather than reporting it as computed."
+        + _MOMENTUM_DIRECTION_PROSE
+    ),
+)
+
+REVERSAL_5_SESSIONS_NOTE: Final[FactorNote] = FactorNote(
+    subject=REVERSAL_5_SESSIONS.qualified_key,
+    summary=(
+        "Five consecutive sessions of compounded published session return: the product of "
+        "close / pre_close over the five most recent sessions knowable at as_of, with no skip. "
+        "Its span bound equals its reach, which is the strict setting and the opposite of the "
+        "three momentum factors' -- the whole content of a short-horizon reversal is that the "
+        "interval is recent and unbroken, so a name halted for even one session in the last five "
+        "is insufficient_history rather than a five-session return spread over six. It is not "
+        "reversal_1d widened: that factor divides two closes, which is the one of three return "
+        "paths domain/daily_prices.py measured as wrong across an ex-rights morning, and this "
+        "one multiplies published session returns. The declared direction is the family's "
+        "conventional prior -- a lower recent return is taken to be the better one -- and this "
+        "repository has measured nothing about it; V2-P3-005 is where an information coefficient "
+        "would say anything, and reversal_1d's own note makes the same disclaimer for the same "
+        "reason."
+    ),
+)
+
 FACTOR_DEFINITIONS: Final[FactorRegistry] = FactorRegistry(
-    (REVERSAL_1D,), notes=(REVERSAL_1D_NOTE,)
+    (
+        REVERSAL_1D,
+        MOMENTUM_20_SESSIONS,
+        MOMENTUM_60_SESSIONS,
+        MOMENTUM_120_SESSIONS,
+        REVERSAL_5_SESSIONS,
+    ),
+    notes=(
+        REVERSAL_1D_NOTE,
+        MOMENTUM_20_SESSIONS_NOTE,
+        MOMENTUM_60_SESSIONS_NOTE,
+        MOMENTUM_120_SESSIONS_NOTE,
+        REVERSAL_5_SESSIONS_NOTE,
+    ),
 )
 """Every factor this build declares, and the prose about it. `V2-P3-009`..`013` extend both."""
 
 FACTOR_EVALUATORS: Final[Mapping[str, FactorEvaluator]] = MappingProxyType(
-    {REVERSAL_1D.qualified_key: _reversal_1d}
+    {
+        REVERSAL_1D.qualified_key: _reversal_1d,
+        MOMENTUM_20_SESSIONS.qualified_key: _momentum_sessions,
+        MOMENTUM_60_SESSIONS.qualified_key: _momentum_sessions,
+        MOMENTUM_120_SESSIONS.qualified_key: _momentum_sessions,
+        REVERSAL_5_SESSIONS.qualified_key: _reversal_5_sessions,
+    }
 )
 """Every factor this build can actually compute, keyed by `key/vN`.
 

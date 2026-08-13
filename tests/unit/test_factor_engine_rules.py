@@ -99,8 +99,21 @@ def _window(*closes: float) -> FactorWindow:
 
 
 def test_the_shipped_registry_and_evaluator_table_name_exactly_the_same_factors() -> None:
+    """The two tables agree, and the registry is exactly what this build has shipped so far.
+
+    Written out rather than counted, so that a factor arriving from `V2-P3-009`..`013` has to be
+    named here by whoever adds it. `reversal_1d` is the engine's verification factor and the four
+    that follow are `V2-P3-012`'s momentum-and-reversal family; the family's own declarations are
+    audited in `tests/unit/test_factor_momentum_reversal_rules.py`.
+    """
     assert set(FACTOR_DEFINITIONS.qualified_keys) == set(FACTOR_EVALUATORS)
-    assert FACTOR_DEFINITIONS.qualified_keys == ("reversal_1d/v1",)
+    assert FACTOR_DEFINITIONS.qualified_keys == (
+        "reversal_1d/v1",
+        "momentum_20_sessions/v1",
+        "momentum_60_sessions/v1",
+        "momentum_120_sessions/v1",
+        "reversal_5_sessions/v1",
+    )
 
 
 def test_a_definition_with_no_evaluator_is_refused_rather_than_answered_emptily() -> None:
