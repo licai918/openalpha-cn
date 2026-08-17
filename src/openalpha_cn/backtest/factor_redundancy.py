@@ -694,8 +694,16 @@ class FactorIdentity:
         Both rather than either, and the asymmetry is the whole reading: an identity relating
         three factors explains the correlation of any two of them, and an identity naming one of
         a pair says nothing at all about that pair.
+
+        A pair of one key with itself relates to nothing, and the `!=` says so structurally
+        rather than by convention: `members` are distinct by validator, so no declared identity
+        can bind a factor to itself, and without the guard `relates(k, k)` collapses to
+        `k in members` -- true for *every* identity that names `k` alongside somebody else. That
+        is the cross-tier self-pair `correlate_cross_section` documents as a supported reading,
+        and it would have been handed an identity about two different factors with only one of
+        them supplied. Found by `V2-P3-014`, which reached for that reading and could not use it.
         """
-        return left_key in self.members and right_key in self.members
+        return left_key != right_key and left_key in self.members and right_key in self.members
 
 
 class IdentityCheck(BaseModel):
@@ -1509,18 +1517,30 @@ class RedundancyStudy:
         `right`'s own key under a *different* vector is refused, because two readings of one
         factor at one `as_of` would let the residual and the correlation be computed from
         different numbers.
+
+        That collection runs **only when an identity was declared for the pair**, and the scope
+        is what makes the cross-tier self-pair `correlate_cross_section` documents usable: one
+        factor's raw and neutralized readings are two different vectors under one key, which is
+        exactly the shape the refusal above describes, and it is also the shape that has no
+        residual for two readings to disagree about -- `relates` refuses a key against itself,
+        so `declared` is `None` and nothing is looked up by key at all. `V2-P3-014` reached for
+        that reading, hit the refusal, and worked around it; this is the fix rather than the
+        workaround.
         """
-        supplied = dict(vectors or {})
-        for side in (left, right):
-            existing = supplied.get(side.key)
-            if existing is not None and existing is not side:
-                raise FactorRedundancyError(
-                    f"a second vector was offered for {side.key}; the residual and the "
-                    "correlation would then be computed from two different readings of one factor"
-                )
-            supplied[side.key] = side
         declared = self.identity_for(left.key, right.key)
-        check = None if declared is None else verify_identity(declared, supplied)
+        check = None
+        if declared is not None:
+            supplied = dict(vectors or {})
+            for side in (left, right):
+                existing = supplied.get(side.key)
+                if existing is not None and existing is not side:
+                    raise FactorRedundancyError(
+                        f"a second vector was offered for {side.key}; the residual and the "
+                        "correlation would then be computed from two different readings of one "
+                        "factor"
+                    )
+                supplied[side.key] = side
+            check = verify_identity(declared, supplied)
         return correlate_cross_section(left=left, right=right, spec=self._spec, identity=check)
 
     def summarize(self, points: Iterable[RedundancyPoint]) -> RedundancySummary:

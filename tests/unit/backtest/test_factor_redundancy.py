@@ -1967,3 +1967,86 @@ def test_the_study_exposes_the_declaration_it_was_built_with() -> None:
     assert study.spec is SPEC
     assert study.identities == (COMPOUNDING_IDENTITY,)
     assert RedundancyStudy(SPEC, identities=[]).identities == ()
+
+
+# --- the cross-tier self-pair `V2-P3-014` reached for and could not use ------------------------
+
+
+def test_a_factor_is_related_to_nothing_by_an_identity_naming_it_beside_another() -> None:
+    """`relates` takes a *pair*, and a key against itself is not one.
+
+    Without the `!=`, `relates(k, k)` collapses to `k in members` -- true for every identity that
+    names `k` alongside anybody. `members` are distinct by validator, so no declared identity can
+    ever bind a factor to itself; the guard states that structurally instead of leaving it to be
+    inferred, and `identity_for` therefore answers `None` for a self-pair rather than handing back
+    an identity about two different factors with only one of them supplied.
+    """
+    assert COMPOUNDING_IDENTITY.relates("momentum_20_sessions", "reversal_5_sessions") is True
+    assert COMPOUNDING_IDENTITY.relates("momentum_20_sessions", "momentum_20_sessions") is False
+    assert COMPOUNDING_IDENTITY.relates("m15", "m15") is False
+
+    study = RedundancyStudy(SPEC, identities=[COMPOUNDING_IDENTITY])
+    assert study.identity_for("momentum_20_sessions", "reversal_5_sessions") is COMPOUNDING_IDENTITY
+    assert study.identity_for("momentum_20_sessions", "momentum_20_sessions") is None
+
+
+def test_one_factors_two_tiers_can_be_measured_against_each_other_under_a_live_identity() -> None:
+    """The reading `correlate_cross_section` documents, measured through `measure`.
+
+    One factor's raw and neutralized readings are two different vectors under one key -- exactly
+    the shape the "a second vector was offered" refusal describes, and exactly the shape that has
+    no residual for two readings to disagree about. The study here *does* declare an identity
+    naming this factor, so the test separates "no identity was declared" from "no identity binds
+    a factor to itself": the first would make the pass vacuous, the second is the property.
+
+    `V2-P3-014` needed this to report how much of a factor survived its own neutralisation, hit
+    the refusal, and routed around it through `correlate_cross_section`.
+    """
+    subjects = _subjects(4)
+    study = RedundancyStudy(SPEC, identities=[COMPOUNDING_IDENTITY])
+    definition = _definition("momentum_20_sessions")
+    raw = _vector(definition, dict(zip(subjects, (1.0, 2.0, 3.0, 4.0), strict=True)), tier="raw")
+    neutralized = _vector(
+        definition,
+        dict(zip(subjects, (4.0, 3.0, 2.0, 1.0), strict=True)),
+        tier="neutralized",
+    )
+
+    point = study.measure(left=raw, right=neutralized)
+
+    assert point.identity is None
+    assert point.verdict != "arithmetic"
+    assert point.raw_correlation == -1.0
+    assert point.oriented_correlation == -1.0
+    assert point.left_key == point.right_key == "momentum_20_sessions"
+    assert point.left_tier == "raw"
+    assert point.right_tier == "neutralized"
+
+
+def test_a_second_reading_of_one_factor_is_refused_where_an_identity_reads_it_by_key() -> None:
+    """The refusal the scoping above narrowed, still firing where it means something.
+
+    `test_a_study_refuses_a_repeated_identity_code_and_a_second_reading_of_one_factor` already
+    drove it; this one pins the half the narrowing could have taken away. The guard exists to
+    protect `verify_identity`, which looks members up *by key*, so it must survive exactly where
+    an identity is declared for the pair -- two vectors under one key would let the residual and
+    the correlation be computed from different numbers. Moving the collection inside the
+    `declared is not None` branch keeps that and drops it only where nothing reads `supplied`.
+    """
+    subjects = _subjects(4)
+    study = RedundancyStudy(SPEC, identities=[COMPOUNDING_IDENTITY])
+    m20 = _definition("momentum_20_sessions")
+    r5 = _definition("reversal_5_sessions")
+    m15 = _definition("m15")
+    values = dict(zip(subjects, (1.0, 2.0, 3.0, 4.0), strict=True))
+    other = dict(zip(subjects, (9.0, 8.0, 7.0, 6.0), strict=True))
+
+    with pytest.raises(FactorRedundancyError, match="a second vector was offered"):
+        study.measure(
+            left=_vector(m20, values),
+            right=_vector(r5, values),
+            vectors={
+                "m15": _vector(m15, values),
+                "momentum_20_sessions": _vector(m20, other),
+            },
+        )
