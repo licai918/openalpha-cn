@@ -46,6 +46,7 @@ from openalpha_cn.runtime.memory import ResearchMemory
 from openalpha_cn.runtime.recovery import RecoveryStore
 from openalpha_cn.runtime.repository import RunRepository
 from openalpha_cn.storage.batch import SQLiteBatchTaskStore
+from openalpha_cn.storage.factor_experiments import FileExperimentStore
 from openalpha_cn.storage.memory import SQLiteResearchMemory
 from openalpha_cn.storage.migrations import MigrationRunResult, run_migrations
 from openalpha_cn.storage.parquet import ParquetEvidenceStore
@@ -78,6 +79,17 @@ class StorageContainer:
     watchlist_store: WatchlistStore
     report_store: ReportStore
     validation_store: ValidationStore
+    experiment_store: FileExperimentStore
+    """`V2-P3-015`'s sealed factor experiment documents, under `runtime_dir / "experiments"`.
+
+    Concrete rather than Protocol-typed, and for `batch_store`'s reason rather than by omission:
+    the Protocol its consumer declares (`factor_view.ExperimentDocumentStore`) lives *above*
+    `openalpha_cn.storage`, so typing this field against it would give `openalpha_cn.runtime` an
+    import edge into `openalpha_cn.factor_view` -- and through it into `openalpha_cn.backtest`'s
+    five factor leaves -- for a field whose only job here is to be handed to a face that already
+    imports both. The structural match is what makes the injection work and
+    `tests/unit/test_factor_view_layering.py` is what pins that it still holds.
+    """
     migration_result: MigrationRunResult
 
 
@@ -114,6 +126,7 @@ def build_storage(*, runtime_dir: Path, clock: Callable[[], datetime]) -> Storag
     watchlist_store: WatchlistStore = SQLiteWatchlistStore(runtime_dir / "state.sqlite3")
     report_store: ReportStore = SQLiteReportStore(runtime_dir / "state.sqlite3")
     validation_store: ValidationStore = SQLiteValidationStore(runtime_dir / "state.sqlite3")
+    experiment_store = FileExperimentStore(runtime_dir / "experiments")
     batch_store.recover_interrupted(now=clock())
     logger.info(
         "storage_initialized",
@@ -132,5 +145,6 @@ def build_storage(*, runtime_dir: Path, clock: Callable[[], datetime]) -> Storag
         watchlist_store=watchlist_store,
         report_store=report_store,
         validation_store=validation_store,
+        experiment_store=experiment_store,
         migration_result=migration_result,
     )

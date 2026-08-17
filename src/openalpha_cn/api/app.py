@@ -2,6 +2,7 @@
 
 from collections.abc import Callable, Mapping, Sequence
 from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 from types import MappingProxyType
 from typing import Annotated, Any, Final
@@ -18,6 +19,8 @@ from openalpha_cn.agents.base import AgentResult
 from openalpha_cn.agents.committee import DeliberationCommittee, DeliberationOutcome
 from openalpha_cn.backtest.event_study import EventStudy, EventStudyReport, EventStudyRequest
 from openalpha_cn.backtest.execution import MarketBar
+from openalpha_cn.backtest.factor_experiment import FactorExperimentError, open_experiment
+from openalpha_cn.backtest.factor_ic import ICMethod
 from openalpha_cn.backtest.multi_day import (
     PortfolioBacktestReport,
     PortfolioBacktestRunner,
@@ -33,6 +36,7 @@ from openalpha_cn.backtest.portfolio import (
 from openalpha_cn.backtest.replay import ReplayCorpus, ReplayReport, ReplayRunner
 from openalpha_cn.backtest.validation import OutcomeObservation, OutcomeValidator
 from openalpha_cn.config import load_config
+from openalpha_cn.domain.factor import FactorError, FactorNote
 from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.domain.validation import ValidationResult
 from openalpha_cn.evidence.service import (
@@ -40,6 +44,12 @@ from openalpha_cn.evidence.service import (
     EvidenceBuildResponse,
     build_evidence,
     parse_serialized_evidence,
+)
+from openalpha_cn.factor_view import (
+    FactorViewError,
+    experiment_view,
+    factor_request,
+    run_factor_experiment,
 )
 from openalpha_cn.logging_setup import configure_logging
 from openalpha_cn.panel.store import PanelStore
@@ -69,6 +79,7 @@ from openalpha_cn.runtime.contracts import ResearchRunRequest, ResearchRunResult
 from openalpha_cn.runtime.engine import ResearchEngine
 from openalpha_cn.runtime.memory import MemoryEntry
 from openalpha_cn.runtime.provenance import compute_config_digest, resolve_code_commit
+from openalpha_cn.storage.factor_experiments import ExperimentStoreError
 from openalpha_cn.storage.recovery import RunRecoveryState
 
 
@@ -390,6 +401,131 @@ a cleared caller still sees them.
 """
 
 
+FACTOR_HTTP_STATUS: Final[Mapping[str, int]] = MappingProxyType(
+    {
+        "answered": 200,
+        "blocked": 409,
+        "panel_unreadable": 409,
+        "bad_request": 422,
+        "conflict": 409,
+        "not_found": 404,
+        "internal_error": 500,
+    }
+)
+"""What `POST /api/v1/factors/run` and the two `GET /api/v1/factors/experiments*` routes do about
+each situation, as one table.
+
+`PANEL_HTTP_STATUS`'s sibling and `cli.FactorExit`'s, and the reasoning is shared: a caller has
+different remedies available and only the envelope to pick between them, so collapsing them into
+"2xx and non-2xx" makes a refused run indistinguishable from a mistyped request.
+
+**The row that carries this issue is `blocked`, and it must not be a 2xx.** A run whose three
+stored tiers were not built at the same instants produces **no artifact**. An endpoint that
+answered `200` with an empty body, or with an experiment whose neutralised row measured nothing,
+would be the empty success `V2-P1-013` exists to make unavailable, one plane up -- and the
+neutralised row is the one `V2-P3-014`'s acceptance criterion is decided on, so a client that
+proceeded on it would report "the factor survives neutralisation" about a tier that was never
+built. `409` rather than `404` or `422`: nothing about the endpoint is missing and nothing about
+the request is malformed, it is a conflict with the current state of the panel, which is what RFC
+9110 reserves `409` for.
+
+- **`answered` (200)** -- the experiment was assembled and sealed. The body carries the whole
+  sealed document; see `factor_view.experiment_view`.
+- **`blocked` (409)** -- `FactorRunBlockedError`. The range holds no stored cross section, or a
+  tier is missing at instants the raw tier has, or a tier's studies refused the cross section
+  they were handed. Every one of them names what is missing, because a caller told `409` and
+  nothing else cannot act on it.
+- **`panel_unreadable` (409)** -- `FactorPanelUnreadableError`: a partition this run needs is
+  missing, damaged, stale or holds rows that were not knowable at the stated `as_of`. The same
+  class of fact one step earlier, which is why `/api/v1/panel/*` shares this arrangement.
+- **`bad_request` (422)** -- `FactorRequestError`: a factor no registry declares, a range that
+  runs backwards, an `--as-of` before `--end`, a floor outside `(0, 1]`. Distinct from `409` for
+  `PanelExit`'s reason -- no amount of building fixes it -- and `422` because that is already this
+  app's code for a well-formed request it cannot accept.
+- **`conflict` (409)** -- the document store refused: a second, different answer under a held
+  `experiment_id`, which `refuse_a_restated_experiment` says is a build that did not reproduce.
+  It shares `409` with the two rows above and is told apart by `detail.reason`, exactly as
+  `PANEL_HTTP_STATUS`' two `409`s are.
+- **`not_found` (404)** -- `GET /api/v1/factors/experiments/{experiment_id}` and nothing is held
+  under that key. The only `404` on this face: a *run* never answers it, because a run that found
+  nothing to read is a statement about the panel rather than about a missing resource.
+- **`internal_error` (500)** -- the endpoint itself broke. Not raised anywhere in this module;
+  the row records a code that is already spoken for, exactly as `cli.CLICK_USAGE_EXIT_CODE` does.
+
+**A refusal body is `{"detail": {"reason": ..., "message": ...}}`**, `_panel_detail`'s shape
+unchanged, and `message` is the fault's `disclosable` text rather than `str(error)`: the store's
+filesystem location is configuration of this process, and a refusal that echoed it would answer a
+question about the deployment to whoever could reach the port.
+"""
+
+
+def _factor_refusal(error: FactorViewError) -> HTTPException:
+    """One `FactorViewError`, enveloped by the row of `FACTOR_HTTP_STATUS` it names.
+
+    Looked up by `error.reason` rather than switched on by exception type, `_panel_refusal`'s rule
+    and its reason: a fault added to `factor_view.py` with no row here raises `KeyError` at this
+    boundary -- a `500` that says the table is incomplete -- instead of being quietly enveloped as
+    whichever branch an `isinstance` chain happened to end on.
+    `tests/unit/test_factor_view_layering.py::
+    test_every_factor_view_fault_has_a_row_in_both_channel_tables` asserts every subclass's
+    `reason` is a key of this table and of `cli.FACTOR_EXIT`, so that `KeyError` is unreachable in
+    practice.
+    """
+    return HTTPException(
+        status_code=FACTOR_HTTP_STATUS[error.reason],
+        detail=_panel_detail(error.reason, error.disclosable),
+    )
+
+
+class FactorRunApiRequest(BaseModel):
+    """Every declared parameter of one factor run, and not one of them has a default.
+
+    `factor_view.factor_request` refuses a default for each of these and this model does not
+    reinstate one: a browser that omitted `min_securities` would otherwise get a floor nobody
+    chose, and the four upstream specs each argue that a decision moving the answers is a decision
+    somebody records making. `note` is the single exception and it is prose -- out of every
+    content address, exactly as `FactorExperimentRecord.note` is.
+
+    The two `Decimal` fields arrive as JSON strings or numbers and pydantic coerces them; they are
+    `Decimal` rather than `float` because `QuantilePortfolioSpec.position_capital` and
+    `TradeabilitySpec.participation_cap` are, and money that round-trips through a binary float is
+    money that does not add up.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    factor: str
+    transform: str
+    neutralization: str
+    start: date
+    end: date
+    as_of: datetime
+    exchange: str
+    horizon: str
+    ic_method: ICMethod
+    min_securities: int
+    min_as_ofs: int
+    group_count: int
+    min_securities_per_group: int
+    position_capital: Decimal
+    min_periods: int
+    participation_cap: Decimal
+    min_rebalances: int
+    redundancy_threshold: float
+    retention_floor: float
+    code_commit: str | None = None
+    """The commit the studies ran at. `None` -- or omitted -- resolves server-side.
+
+    `_resolved_code_commit`'s argument unchanged and for its measured reason: a browser cannot
+    know the server's own git commit, so a face without this fallback gets
+    `code_commit: "web-development"` invented by the client, which is the critical finding task 17
+    closed. An explicitly supplied value passes through untouched, including an invalid one, so
+    `factor_request`'s own `min_length` reports it accurately instead of this hook discarding it.
+    """
+    note: str | None = None
+    """Prose about this experiment, carried on the record and out of every digest."""
+
+
 def _panel_detail(reason: str, message: str) -> dict[str, str]:
     """The body every panel refusal carries, whatever its status code.
 
@@ -542,6 +678,7 @@ def create_app(
     watchlist_store = storage.watchlist_store
     report_store = storage.report_store
     validation_store = storage.validation_store
+    experiment_store = storage.experiment_store
 
     def run_one(request: ResearchRunRequest) -> ResearchRunResult:
         return ResearchEngine(
@@ -1001,6 +1138,113 @@ def create_app(
                 else PANEL_HTTP_STATUS["answered"]
             ),
             content=clearance_payload(clearance),
+        )
+
+    @application.post("/api/v1/factors/run")
+    def factor_run(request: FactorRunApiRequest) -> JSONResponse:
+        """Run one factor experiment over a closed range of prediction days, and seal it.
+
+        The HTTP twin of `openalpha factor run` and of `OpenAlphaSDK.run_factor_experiment`. All
+        three resolve through `factor_view.factor_request` and run through
+        `factor_view.run_factor_experiment`, so they cannot come to ask three different questions
+        of one store -- which is what makes
+        `tests/integration/test_factor_interfaces.py::
+        test_the_three_faces_seal_one_experiment_from_one_request` a statement about one answer
+        rather than about three requests that happened to agree.
+
+        **A refused run answers `409`, never `200` with an empty body.** See `FACTOR_HTTP_STATUS`:
+        the neutralised row is the one the acceptance criterion is decided on, so a face that
+        reported a three-tier experiment whose third row was never built would be worse than one
+        that reported nothing.
+
+        The body is `factor_view.experiment_view`'s envelope: the two content addresses, what the
+        store did, and the sealed document itself. Nothing about the deployment travels in it --
+        no path, no runtime directory, no credential -- and
+        `test_no_factor_response_or_log_line_carries_a_token` drives that with a real token in the
+        environment.
+        """
+        try:
+            resolved = factor_request(
+                factor=request.factor,
+                transform=request.transform,
+                neutralization=request.neutralization,
+                start=request.start,
+                end=request.end,
+                as_of=request.as_of,
+                exchange=request.exchange,
+                horizon=request.horizon,
+                ic_method=request.ic_method,
+                min_securities=request.min_securities,
+                min_as_ofs=request.min_as_ofs,
+                group_count=request.group_count,
+                min_securities_per_group=request.min_securities_per_group,
+                position_capital=request.position_capital,
+                min_periods=request.min_periods,
+                participation_cap=request.participation_cap,
+                min_rebalances=request.min_rebalances,
+                redundancy_threshold=request.redundancy_threshold,
+                retention_floor=request.retention_floor,
+                code_commit=_resolved_code_commit(request.code_commit),
+            )
+            record, write = run_factor_experiment(
+                panel_store(root),
+                resolved,
+                built_at=clock(),
+                experiments=experiment_store,
+                note=(
+                    None
+                    if request.note is None
+                    else FactorNote(subject=resolved.definition.qualified_key, summary=request.note)
+                ),
+            )
+        except FactorViewError as error:
+            raise _factor_refusal(error) from error
+        except (ExperimentStoreError, FactorError) as error:
+            raise HTTPException(
+                status_code=FACTOR_HTTP_STATUS["conflict"],
+                detail=_panel_detail("conflict", str(error)),
+            ) from error
+        return JSONResponse(
+            status_code=FACTOR_HTTP_STATUS["answered"],
+            content=experiment_view(record, write=write),
+        )
+
+    @application.get("/api/v1/factors/experiments")
+    def factor_experiment_list() -> dict[str, list[str]]:
+        """Every sealed experiment this installation holds, by content address, ascending."""
+        return {"experiment_ids": list(experiment_store.list_ids())}
+
+    @application.get("/api/v1/factors/experiments/{experiment_id}")
+    def factor_experiment_get(experiment_id: str) -> JSONResponse:
+        """One sealed experiment, reopened and re-sealed on the way out.
+
+        Through `open_experiment`, so a stored document whose content no longer hashes to its own
+        seal does not come back as a record that merely differs -- it is refused. The envelope
+        reports `unchanged`, because reading held an artifact rather than writing one, and the
+        document is the one on disk.
+        """
+        try:
+            payload = experiment_store.get(experiment_id)
+        except ExperimentStoreError as error:
+            raise HTTPException(
+                status_code=FACTOR_HTTP_STATUS["bad_request"],
+                detail=_panel_detail("bad_request", str(error)),
+            ) from error
+        if payload is None:
+            raise HTTPException(
+                status_code=FACTOR_HTTP_STATUS["not_found"],
+                detail=_panel_detail("not_found", "No experiment is held under that id."),
+            )
+        try:
+            record = open_experiment(payload)
+        except FactorExperimentError as error:
+            raise HTTPException(
+                status_code=FACTOR_HTTP_STATUS["conflict"],
+                detail=_panel_detail("conflict", str(error)),
+            ) from error
+        return JSONResponse(
+            status_code=FACTOR_HTTP_STATUS["answered"],
+            content=experiment_view(record, write="unchanged"),
         )
 
     configured_web_dir = web_dir if web_dir is not None else config.web_dir

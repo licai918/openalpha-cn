@@ -2,6 +2,7 @@
 
 from collections.abc import Callable, Sequence
 from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 
 from openalpha_cn import __version__
@@ -9,6 +10,8 @@ from openalpha_cn.agents.base import AgentResult, ResearchAgent
 from openalpha_cn.agents.committee import DeliberationCommittee, DeliberationOutcome
 from openalpha_cn.backtest.event_study import EventStudy, EventStudyReport, EventStudyRequest
 from openalpha_cn.backtest.execution import MarketBar
+from openalpha_cn.backtest.factor_experiment import FactorExperimentRecord, open_experiment
+from openalpha_cn.backtest.factor_ic import ICMethod
 from openalpha_cn.backtest.multi_day import (
     PortfolioBacktestReport,
     PortfolioBacktestRunner,
@@ -24,9 +27,16 @@ from openalpha_cn.backtest.portfolio import (
 from openalpha_cn.backtest.replay import ReplayCorpus, ReplayReport, ReplayRunner
 from openalpha_cn.backtest.validation import OutcomeObservation, OutcomeValidator
 from openalpha_cn.domain.evidence import EvidenceSnapshot
+from openalpha_cn.domain.factor import FactorNote
 from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.domain.validation import ValidationResult
 from openalpha_cn.evidence.service import build_provider_evidence
+from openalpha_cn.factor_view import (
+    ExperimentWrite,
+    experiment_view,
+    factor_request,
+    run_factor_experiment,
+)
 from openalpha_cn.panel.catalog import DatasetReadiness
 from openalpha_cn.panel_doctor import PanelHealthReport, panel_health_report
 from openalpha_cn.panel_gate import DependencyClearance, require_datasets
@@ -73,6 +83,7 @@ class OpenAlphaSDK:
         self.watchlist_store = storage.watchlist_store
         self.report_store = storage.report_store
         self.validation_store = storage.validation_store
+        self.experiment_store = storage.experiment_store
 
     def health(self) -> dict[str, str]:
         """Return SDK and package readiness."""
@@ -342,6 +353,113 @@ class OpenAlphaSDK:
                 with_calendar=with_calendar,
             ),
         )
+
+    # --- the factor plane (V2-P3-015) -----------------------------------------------------------
+    #
+    # Three methods paired one-for-one with `POST /api/v1/factors/run`,
+    # `GET /api/v1/factors/experiments` and `GET /api/v1/factors/experiments/{id}`, and asserted
+    # against them in `tests/integration/test_factor_interfaces.py`.
+    #
+    # **Not one of the nineteen parameters below has a default, and that is the whole design of
+    # this signature.** Task 39's measured failure was an SDK that hardcoded `exchange` while the
+    # equivalence test fed the same literal to both faces: 1,815 tests stayed green and what was
+    # proved was that two paths agreed, not that either of them carried the caller's value to the
+    # judgement. Every parameter here is forwarded verbatim to `factor_view.factor_request`, which
+    # is the same call `POST /api/v1/factors/run` and `openalpha factor run` make, and
+    # `tests/integration/test_factor_interfaces.py::
+    # test_every_declared_run_parameter_reaches_the_answer` varies each one alone and requires
+    # the answer to move.
+
+    def run_factor_experiment(
+        self,
+        *,
+        factor: str,
+        transform: str,
+        neutralization: str,
+        start: date,
+        end: date,
+        as_of: datetime,
+        exchange: str,
+        horizon: str,
+        ic_method: ICMethod,
+        min_securities: int,
+        min_as_ofs: int,
+        group_count: int,
+        min_securities_per_group: int,
+        position_capital: Decimal,
+        min_periods: int,
+        participation_cap: Decimal,
+        min_rebalances: int,
+        redundancy_threshold: float,
+        retention_floor: float,
+        code_commit: str,
+        note: FactorNote | None = None,
+    ) -> tuple[FactorExperimentRecord, ExperimentWrite]:
+        """Run one factor experiment over a closed range of prediction days, and seal it.
+
+        Hands back the `FactorExperimentRecord` rather than a rendering of it -- that is what an
+        in-process API is for. `FactorExperimentArtifact.attribution(...)` raises for a cell the
+        declared grid does not contain and `tier_report(...)` raises for a tier the artifact does
+        not carry, which is a guarantee JSON cannot make; the HTTP face gets `experiment_view`'s
+        envelope instead, and `tests/integration/test_factor_interfaces.py::
+        test_the_three_faces_seal_one_experiment_from_one_request` asserts the three are one
+        document.
+
+        The second element is what the document store did -- `created` or `unchanged`. A second
+        identical run is a no-op rather than a duplicate, and a second *different* answer under
+        one `experiment_id` is refused; both are `refuse_a_restated_experiment`'s rule enforced at
+        the boundary that actually holds artifacts.
+        """
+        record, write = run_factor_experiment(
+            panel_store(self.runtime_dir),
+            factor_request(
+                factor=factor,
+                transform=transform,
+                neutralization=neutralization,
+                start=start,
+                end=end,
+                as_of=as_of,
+                exchange=exchange,
+                horizon=horizon,
+                ic_method=ic_method,
+                min_securities=min_securities,
+                min_as_ofs=min_as_ofs,
+                group_count=group_count,
+                min_securities_per_group=min_securities_per_group,
+                position_capital=position_capital,
+                min_periods=min_periods,
+                participation_cap=participation_cap,
+                min_rebalances=min_rebalances,
+                redundancy_threshold=redundancy_threshold,
+                retention_floor=retention_floor,
+                code_commit=code_commit,
+            ),
+            built_at=self.clock(),
+            experiments=self.experiment_store,
+            note=note,
+        )
+        return record, write
+
+    def get_factor_experiment(self, experiment_id: str) -> FactorExperimentRecord | None:
+        """Reopen one stored experiment, or `None` when nothing is held under that key.
+
+        Through `open_experiment`, so a document whose content no longer hashes to its own seal
+        does not come back as a record that merely differs -- it raises. That is the boundary
+        `V2-P3-014` built the seal for, and it is why this method returns a record rather than the
+        payload: a caller handed bytes would have to remember to check.
+        """
+        payload = self.experiment_store.get(experiment_id)
+        return None if payload is None else open_experiment(payload)
+
+    def list_factor_experiments(self) -> tuple[str, ...]:
+        """Every held `experiment_id`, ascending."""
+        return self.experiment_store.list_ids()
+
+    def factor_experiment_view(
+        self, record: FactorExperimentRecord, *, write: ExperimentWrite
+    ) -> dict[str, object]:
+        """The record as the HTTP face renders it, for a caller that wants the same bytes."""
+        return experiment_view(record, write=write)
 
     def execute_portfolio_order(
         self,

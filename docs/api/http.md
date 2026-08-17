@@ -138,6 +138,62 @@ The two panel bodies share no key at all. `detail.message` is a disclosable text
 names the exchange, the codes that stood in the way and the remedy, and never this
 service's filesystem layout.
 
+## Factor experiments
+
+`POST /api/v1/factors/run` runs one factor's three-tier experiment over a closed range
+of prediction days, seals it, and stores it. It is the HTTP twin of
+`openalpha factor run` and of `OpenAlphaSDK.run_factor_experiment`; all three resolve
+through `factor_view.factor_request` and run through `factor_view.run_factor_experiment`.
+
+**Nineteen body fields and not one of them has a default.** `factor`, `transform`,
+`neutralization`, `start`, `end`, `as_of`, `exchange`, `horizon`, `ic_method`,
+`min_securities`, `min_as_ofs`, `group_count`, `min_securities_per_group`,
+`position_capital`, `min_periods`, `participation_cap`, `min_rebalances`,
+`redundancy_threshold` and `retention_floor` are each a floor or a policy one of the four
+upstream studies refuses to choose for a caller. `code_commit` may be omitted and is then
+resolved server-side, for the reason `POST /api/v1/research/run` resolves it: a browser
+cannot know the server's own commit. `note` is optional prose and reaches no digest.
+
+`factor` is the **qualified key** (`reversal_1d/v1`) or the opaque `factor_id`
+(`fct_…`), told apart by the `/` separator. `start`/`end` bound **prediction days** — the
+days the stored cross sections were computed at — and `as_of` is the instant the panel is
+read at and the experiment is evaluated at. It must be at or after `end`, because a
+forward return is priced on sessions after its prediction day.
+
+`GET /api/v1/factors/experiments` lists every held `experiment_id`;
+`GET /api/v1/factors/experiments/{experiment_id}` serves one, reopened through the seal.
+
+The body of an answer is four keys plus the sealed document
+(`factor_view.experiment_view`): `schema_version`, `experiment_id`, `content_digest`,
+`write` (`created` or `unchanged`) and `document`. The document is byte-for-byte what the
+store holds, so a client can recompute its seal.
+
+Status codes are a seven-entry table (`api/app.py#FACTOR_HTTP_STATUS`):
+
+| Situation | Code |
+|---|---|
+| the experiment was assembled and sealed | `200` |
+| the stored tiers cannot answer as asked (no cross section in range; the three tiers were not built at the same instants) | `409` |
+| a partition this run needs is missing, damaged, stale, or holds rows that were not knowable at `as_of` | `409` |
+| the document store refused a second, different answer under a held `experiment_id` | `409` |
+| the request cannot be put at all (unknown factor, backwards range, `as_of` before `end`, floor outside `(0, 1]`) | `422` |
+| nothing is held under that `experiment_id` (the `GET` route only) | `404` |
+| the endpoint itself broke; nothing was judged | `500` |
+
+**A refused run answers `409`, never `200` with an empty body.** A run whose three stored
+tiers were not built at the same instants produces no artifact, and the neutralised row is
+the one a three-tier report's verdict is decided on — so an endpoint that answered `200`
+with a report whose third row measured nothing would let a client conclude "the factor
+survives neutralisation" about a tier that was never built. The three `409` rows share the
+code and are told apart by `detail.reason`, exactly as the panel plane's two are.
+
+`openalpha factor run` maps the same names onto exit codes (`cli.py#FACTOR_EXIT`) and
+reuses `PanelExit`: `0` answered, `1` for all three `409` rows, `3` for `422`, `5` for an
+unhandled defect. **Exit `0` includes an experiment whose grid says `removed` on every
+cell** — a `removed` verdict is the report succeeding at its job, and an exit code that
+treated it as failure would make every honest three-tier report look like a broken
+command.
+
 The portfolio endpoint is intentionally stateless: callers submit the immutable
 `PortfolioState`, `PortfolioOrder`, `MarketBar`, and optional `PortfolioLimits`,
 then persist the returned `PortfolioTransition` in their own workflow. It is a

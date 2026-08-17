@@ -8,6 +8,7 @@ import sys
 from collections.abc import Iterator, Mapping, Sequence, Set
 from contextlib import contextmanager
 from datetime import MAXYEAR, MINYEAR, UTC, date, datetime, time, timedelta
+from decimal import Decimal
 from enum import IntEnum, StrEnum
 from pathlib import Path
 from time import monotonic
@@ -19,6 +20,8 @@ import typer
 import uvicorn
 
 from openalpha_cn import __version__
+from openalpha_cn.backtest.factor_experiment import FactorExperimentRecord
+from openalpha_cn.backtest.factor_ic import ICMethod
 from openalpha_cn.backtest.replay import ReplayCorpus
 from openalpha_cn.config import ConfigError, load_config, load_dotenv, load_log_level
 from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET, AdjustmentError
@@ -28,6 +31,7 @@ from openalpha_cn.domain.daily_prices import (
     DAILY_DATASET,
     PriceDataError,
 )
+from openalpha_cn.domain.factor import FactorError, FactorNote
 from openalpha_cn.domain.financial_statements import (
     BALANCE_SHEET_DATASET,
     CASH_FLOW_DATASET,
@@ -62,6 +66,14 @@ from openalpha_cn.domain.trading_calendar import (
     TradingCalendarError,
 )
 from openalpha_cn.evidence.service import build_provider_evidence, parse_serialized_evidence
+from openalpha_cn.factor_view import (
+    FactorViewError,
+    attribution_rows,
+    experiment_view,
+    factor_request,
+    run_factor_experiment,
+    tier_rows,
+)
 from openalpha_cn.logging_setup import configure_logging
 from openalpha_cn.panel.catalog import DEFAULT_DATE_TIMEZONE, PanelStorageError
 from openalpha_cn.panel.store import PanelStore, PartitionRef
@@ -125,6 +137,7 @@ from openalpha_cn.runtime.composition import build_storage
 from openalpha_cn.runtime.contracts import ResearchRunRequest
 from openalpha_cn.runtime.provenance import compute_config_digest, resolve_code_commit
 from openalpha_cn.sdk import OpenAlphaSDK
+from openalpha_cn.storage.factor_experiments import ExperimentStoreError, FileExperimentStore
 from openalpha_cn.storage.migrations import MigrationFailedError, read_status
 from openalpha_cn.storage.parquet import read_parquet_records
 
@@ -156,6 +169,18 @@ it: `openalpha doctor` and `openalpha panel doctor` coexist, and each name says 
 `data-check` stays at the top level, where the roadmap names it, because it is not scoped to the
 panel plane the way the other two are -- it is the question a CI job or a scheduled research run
 asks before it reads anything at all.
+"""
+
+factor_app = typer.Typer(help="Run and seal three-tier factor experiments.")
+app.add_typer(factor_app, name="factor")
+"""`V2-P3-015`'s command is `openalpha factor run`, which is the spelling the roadmap names.
+
+A sub-app for `panel`'s reason rather than for symmetry: `run` on its own is already the shape
+`research run` and `replay run` take, so a top-level `run` would be a third meaning for a verb two
+sub-apps already own. `factor run` says which plane it is about, and it leaves room for the
+builder `nothing_in_this_repository_builds_a_factor_panel_from_a_command_line` records as missing
+-- `factor build` is the name that caller will want, and it is free only because this issue did
+not take the top level.
 """
 
 
@@ -3269,6 +3294,223 @@ def data_check(
             _echo_clearance(clearance)
         if clearance.is_blocked:
             raise typer.Exit(code=int(PanelExit.unhealthy))
+
+
+FACTOR_EXIT: Final[Mapping[str, PanelExit]] = MappingProxyType(
+    {
+        "answered": PanelExit.ok,
+        "blocked": PanelExit.unhealthy,
+        "panel_unreadable": PanelExit.unhealthy,
+        "bad_request": PanelExit.bad_request,
+        "conflict": PanelExit.unhealthy,
+        "internal_error": PanelExit.internal_error,
+    }
+)
+"""What `factor run` exits with for each `factor_view` fault, as one table.
+
+`api/app.py`'s `FACTOR_HTTP_STATUS` is the sibling of this and `PanelExit` is the vocabulary --
+this command reuses that enum rather than declaring a second one, because a CI job that already
+switches on 1/3/4/5 for `panel doctor` and `data-check` must not have to learn a fourth meaning
+for the same numbers on a fourth command. The rows say which existing meaning each fault has:
+
+- **`blocked` -> 1 (`unhealthy`)** -- the stored tiers could not answer. The *panel* is at fault:
+  the range holds no cross section, or the three tiers were not built at the same instants. A
+  re-fetch (or a build) is the remedy, which is exactly what `unhealthy` means on the other three
+  commands.
+- **`panel_unreadable` -> 1** -- a partition this run needs is missing, damaged, stale or holds
+  rows that were not knowable at the stated `as_of`. The same class of fact one step earlier, and
+  the code the hand-written calendar loader `_panel_request` replaced already used.
+- **`bad_request` -> 3** -- the request cannot be put: a factor no registry declares, a range that
+  runs backwards, an `--as-of` before `--end`. No amount of building fixes it.
+- **`conflict` -> 1** -- the document store refused a second, different answer under a held
+  `experiment_id`. `unhealthy` rather than a code of its own, and the choice is argued rather than
+  assumed: this is `refuse_a_restated_experiment` firing, which means *the numbers moved between
+  two runs of one declaration* -- a statement about what is stored, with "find out why" as its
+  remedy, which is the row `unhealthy` already is.
+- **`internal_error` -> 5** -- `_panel_command`'s row, unchanged: a defect in the command rather
+  than a verdict about anything.
+
+**There is no row for `answered`-with-a-bad-verdict, and that is deliberate.** `factor run` exits
+`0` for an experiment that assembled, *including* one whose grid says `removed` on every cell. A
+`removed` verdict is the report succeeding at its job -- it is the finding `V2-P3-014` exists to
+make visible -- and an exit code that treated it as a failure would make every honest three-tier
+report look like a broken command, which is `PanelExit`'s own measured argument about `notice`
+arriving on the factor plane. The verdicts are in the body, first-class and unmissable, and
+`--json` puts them in `document.artifact.attributions`.
+"""
+
+
+def _factor_fail(error: FactorViewError) -> typer.Exit:
+    """One `factor_view` fault, enveloped by the row of `FACTOR_EXIT` it names.
+
+    Looked up by `error.reason` rather than switched on by exception type, `_panel_refusal`'s rule
+    one channel over: a fault added to `factor_view.py` with no row here raises `KeyError`, which
+    `_panel_command` turns into exit 5 -- "the command is incomplete" -- instead of a silently
+    mis-enveloped refusal. `str(error)` rather than `error.disclosable`, because this channel is
+    inside the process that owns the store: naming it tells the operator nothing they did not
+    configure, and it is the actionable half of a missing-partition message.
+    """
+    return _panel_fail(FACTOR_EXIT[error.reason], str(error))
+
+
+_FACTOR_HELP: Final[str] = (
+    "The factor to run: a qualified key (`reversal_1d/v1`) or a factor_id (`fct_...`). The key is "
+    "the form for a human; the id is what a stored partition carries, and both resolve."
+)
+_FACTOR_START_HELP: Final[str] = (
+    "First prediction day of the closed range, ISO-8601. A prediction day is the day a stored "
+    "cross section was computed at -- not a session the forward return is priced on."
+)
+_FACTOR_END_HELP: Final[str] = "Last prediction day of the closed range, inclusive, ISO-8601."
+_FACTOR_AS_OF_HELP: Final[str] = (
+    "ISO-8601 instant every panel read is made at, and the instant the experiment is evaluated "
+    "at; defaults to now. Must be at or after --end, because a forward return is priced on "
+    "sessions after its prediction day."
+)
+
+
+@factor_app.command("run")
+def factor_run_command(
+    factor: Annotated[str, typer.Option("--factor", help=_FACTOR_HELP)],
+    start: Annotated[str, typer.Option("--start", help=_FACTOR_START_HELP)],
+    end: Annotated[str, typer.Option("--end", help=_FACTOR_END_HELP)],
+    transform: Annotated[str, typer.Option("--transform")],
+    neutralization: Annotated[str, typer.Option("--neutralization")],
+    horizon: Annotated[str, typer.Option("--horizon")],
+    ic_method: Annotated[str, typer.Option("--ic-method")],
+    min_securities: Annotated[int, typer.Option("--min-securities")],
+    min_as_ofs: Annotated[int, typer.Option("--min-as-ofs")],
+    group_count: Annotated[int, typer.Option("--group-count")],
+    min_securities_per_group: Annotated[int, typer.Option("--min-securities-per-group")],
+    position_capital: Annotated[str, typer.Option("--position-capital")],
+    min_periods: Annotated[int, typer.Option("--min-periods")],
+    participation_cap: Annotated[str, typer.Option("--participation-cap")],
+    min_rebalances: Annotated[int, typer.Option("--min-rebalances")],
+    redundancy_threshold: Annotated[float, typer.Option("--redundancy-threshold")],
+    retention_floor: Annotated[float, typer.Option("--retention-floor")],
+    runtime_dir: Annotated[Path, typer.Option("--runtime-dir")] = Path("./runtime"),
+    exchange: Annotated[str, typer.Option("--exchange")] = TRADING_CALENDAR_DEFAULT_EXCHANGE,
+    as_of: Annotated[str, typer.Option("--as-of", help=_FACTOR_AS_OF_HELP)] = "",
+    code_commit: Annotated[str, typer.Option("--code-commit", help=_CODE_COMMIT_HELP)] = "",
+    note: Annotated[str, typer.Option("--note")] = "",
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit the sealed experiment document as data.")
+    ] = False,
+) -> None:
+    """Run one factor's three-tier experiment over a closed range of prediction days.
+
+    Reads the stored raw, processed and neutralised tiers, labels the forward returns off the same
+    panel, drives `V2-P3-005`..`008` on each tier and seals the result into one immutable,
+    content-addressed record under `runtime-dir/experiments`.
+
+    **Fifteen of these options have no default, and that is the contract rather than an
+    oversight.** Each is a floor or a policy one of the four upstream studies refuses to choose
+    for a caller -- `MINIMUM_IC_SECURITIES` is 3 because two points always correlate perfectly,
+    `MINIMUM_REDUNDANCY_SECURITIES` is 4 because a threshold over three ranks decides nothing, and
+    the retention floor is the line the acceptance criterion's verdict is decided at. A default
+    here would be a decision nobody recorded making, on numbers that move every verdict this
+    command prints.
+
+    Exits 0 for an experiment that assembled, whatever its verdicts say; 1 when the stored tiers
+    could not answer; 3 when the request could not be put. See `FACTOR_EXIT`.
+    """
+    with _panel_command("factor run"):
+        instant = _panel_as_of(as_of)
+        try:
+            request = factor_request(
+                factor=factor,
+                transform=transform,
+                neutralization=neutralization,
+                start=_factor_day(start, flag="--start"),
+                end=_factor_day(end, flag="--end"),
+                as_of=instant,
+                exchange=exchange,
+                horizon=horizon,
+                ic_method=cast(ICMethod, ic_method),
+                min_securities=min_securities,
+                min_as_ofs=min_as_ofs,
+                group_count=group_count,
+                min_securities_per_group=min_securities_per_group,
+                position_capital=_factor_amount(position_capital, flag="--position-capital"),
+                min_periods=min_periods,
+                participation_cap=_factor_amount(participation_cap, flag="--participation-cap"),
+                min_rebalances=min_rebalances,
+                redundancy_threshold=redundancy_threshold,
+                retention_floor=retention_floor,
+                code_commit=_resolved_code_commit(code_commit or None),
+            )
+            record, write = run_factor_experiment(
+                _panel_store(runtime_dir),
+                request,
+                built_at=_panel_clock(),
+                experiments=FileExperimentStore(runtime_dir / "experiments"),
+                note=(
+                    None
+                    if not note.strip()
+                    else FactorNote(subject=request.definition.qualified_key, summary=note)
+                ),
+            )
+        except FactorViewError as error:
+            raise _factor_fail(error) from error
+        except (ExperimentStoreError, FactorError) as error:
+            raise _panel_fail(PanelExit.unhealthy, str(error)) from error
+
+        if json_output:
+            typer.echo(
+                json.dumps(experiment_view(record, write=write), ensure_ascii=False, sort_keys=True)
+            )
+        else:
+            _echo_experiment(record, write=write)
+
+
+def _factor_day(value: str, *, flag: str) -> date:
+    try:
+        return date.fromisoformat(value)
+    except ValueError as error:
+        raise _panel_fail(
+            PanelExit.bad_request,
+            f"{flag} expects an ISO-8601 date (YYYY-MM-DD); got {value!r}",
+        ) from error
+
+
+def _factor_amount(value: str, *, flag: str) -> Decimal:
+    """One money-or-fraction option as a `Decimal`, refusing anything a `Decimal` cannot hold.
+
+    A string option converted here rather than a `float` option converted later, because both of
+    these reach contracts that are `Decimal` on purpose -- `position_capital` is money and
+    `participation_cap` is a fraction of a day's traded value that money is compared against, and
+    a value that round-trips through a binary float is a budget that does not add up.
+    """
+    try:
+        return Decimal(value)
+    except ArithmeticError as error:
+        raise _panel_fail(
+            PanelExit.bad_request,
+            f"{flag} expects a decimal number; got {value!r}",
+        ) from error
+
+
+def _echo_experiment(record: FactorExperimentRecord, *, write: str) -> None:
+    """Print one sealed experiment: its identity, its three rows and its six cells.
+
+    Both content addresses, because a reader has to be able to tell "the same experiment, run
+    again" (`experiment_id` held, `content_digest` held) from "the same declaration, different
+    numbers" -- the second is refused by the store and the first is a no-op, and the two addresses
+    are what says which happened.
+
+    The grid is printed whole and in `ATTRIBUTION_CELL_ORDER`, so a `not_measured` cell occupies
+    its row rather than vanishing: a grid missing a cell and one whose cell has no number are two
+    different claims.
+    """
+    typer.echo(f"experiment {record.experiment_id} content {record.content_digest} ({write})")
+    typer.echo(f"factor     {record.artifact.spec.definition.qualified_key}")
+    typer.echo(f"as_ofs     {len(record.artifact.tiers[0].as_ofs)}")
+    typer.echo("tier            ic_coverage           mean_ic  mean_spread")
+    for tier, coverage, mean_ic, mean_spread in tier_rows(record):
+        typer.echo(f"{tier:<15} {coverage:<20} {mean_ic:>8}  {mean_spread}")
+    typer.echo("step                     statistic     retention  verdict")
+    for step, statistic, retention, verdict in attribution_rows(record):
+        typer.echo(f"{step:<24} {statistic:<13} {retention:>9}  {verdict}")
 
 
 def main() -> None:

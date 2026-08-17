@@ -15,7 +15,7 @@ inside a docstring, which is prose the runner never reads.
 ## Why the mechanism is not copied as it stands
 
 `007`'s form is "one test per entry, named after the entry". At three entries that is exactly
-right. Across the seventeen code-carrying registries there are **177** entries -- 64 in
+right. Across the eighteen code-carrying registries there are **182** entries -- 64 in
 `KNOWN_PANEL_LIMITATIONS` alone -- and it stops being right somewhere well before that, for
 three reasons and not one:
 
@@ -95,6 +95,7 @@ from openalpha_cn.domain.industry_classification import KNOWN_INDUSTRY_LIMITATIO
 from openalpha_cn.domain.labels import KNOWN_LABEL_LIMITATIONS
 from openalpha_cn.domain.price_limits import KNOWN_SUSPENSION_LIMITATIONS
 from openalpha_cn.domain.stock_universe import KNOWN_UNIVERSE_LIMITATIONS
+from openalpha_cn.factor_view import KNOWN_FACTOR_RUN_LIMITATIONS
 from openalpha_cn.panel.catalog import KNOWN_STORAGE_LIMITATIONS
 from openalpha_cn.panel_doctor import KNOWN_PANEL_LIMITATIONS
 
@@ -122,6 +123,7 @@ LIMITATION_REGISTRIES: Final[dict[str, Sequence[_Limitation]]] = {
     "KNOWN_IC_LIMITATIONS": KNOWN_IC_LIMITATIONS,
     "KNOWN_QUANTILE_PORTFOLIO_LIMITATIONS": KNOWN_QUANTILE_PORTFOLIO_LIMITATIONS,
     "KNOWN_EXPERIMENT_LIMITATIONS": KNOWN_EXPERIMENT_LIMITATIONS,
+    "KNOWN_FACTOR_RUN_LIMITATIONS": KNOWN_FACTOR_RUN_LIMITATIONS,
     "KNOWN_REDUNDANCY_LIMITATIONS": KNOWN_REDUNDANCY_LIMITATIONS,
     "KNOWN_TRADEABILITY_LIMITATIONS": KNOWN_TRADEABILITY_LIMITATIONS,
     "KNOWN_ADJUSTMENT_LIMITATIONS": KNOWN_ADJUSTMENT_LIMITATIONS,
@@ -136,19 +138,24 @@ LIMITATION_REGISTRIES: Final[dict[str, Sequence[_Limitation]]] = {
     "KNOWN_STORAGE_LIMITATIONS": KNOWN_STORAGE_LIMITATIONS,
     "KNOWN_PANEL_LIMITATIONS": KNOWN_PANEL_LIMITATIONS,
 }
-"""The seventeen registries whose entries are identified by a `code`, keyed by their own names.
+"""The eighteen registries whose entries are identified by a `code`, keyed by their own names.
 
 **None of `KNOWN_NEUTRALIZATION_LIMITATIONS`, `KNOWN_IC_LIMITATIONS`,
 `KNOWN_REDUNDANCY_LIMITATIONS`, `KNOWN_QUANTILE_PORTFOLIO_LIMITATIONS`,
-`KNOWN_TRADEABILITY_LIMITATIONS` or `KNOWN_EXPERIMENT_LIMITATIONS` is folded into
-`KNOWN_PANEL_LIMITATIONS`**, unlike the seven dataset registries below them. `panel_doctor` folds
-a registry when it bounds a *fetched* dataset, and all six of these bound derived planes -- no
-upstream, no `DATASET_CADENCE` entry and nothing for a health report to be fresh against. Folding
-any of them would put entries about a regression's, a correlation's, a simulated round trip's, a
-participation cap's or a sealed experiment report's own semantics into a report about ingest
-coverage, and would move
-`test_the_registries_together_carry_the_entry_count_the_report_folds`' arithmetic for registries
-the report cannot say anything about.
+`KNOWN_TRADEABILITY_LIMITATIONS`, `KNOWN_EXPERIMENT_LIMITATIONS` or
+`KNOWN_FACTOR_RUN_LIMITATIONS` is folded into `KNOWN_PANEL_LIMITATIONS`**, unlike the seven
+dataset registries below them. `panel_doctor` folds a registry when it bounds a *fetched* dataset,
+and all seven of these bound derived planes -- no upstream, no `DATASET_CADENCE` entry and nothing
+for a health report to be fresh against. Folding any of them would put entries about a
+regression's, a correlation's, a simulated round trip's, a participation cap's, a sealed
+experiment report's or a public face's own semantics into a report about ingest coverage, and
+would move `test_the_registries_together_carry_the_entry_count_the_report_folds`' arithmetic for
+registries the report cannot say anything about.
+
+`KNOWN_FACTOR_RUN_LIMITATIONS` (`V2-P3-015`) is the eighteenth and the first to live on a *face*
+rather than on a contract. It is here for the same reason as the rest: its five entries are what
+`openalpha factor run`, `POST /api/v1/factors/run` and `OpenAlphaSDK.run_factor_experiment` do not
+answer, and a code named only in prose is a code the suite has no opinion about.
 
 Imported and named rather than reached through `importlib`: a test may import every one of
 these directly, so a name-to-module indirection would buy nothing and would hide from the
@@ -269,7 +276,7 @@ def test_the_registry_table_is_every_known_registry_in_the_source_tree() -> None
     }
 
     assert found == set(LIMITATION_REGISTRIES) | set(CODELESS_REGISTRIES)
-    assert len(LIMITATION_REGISTRIES) == 17
+    assert len(LIMITATION_REGISTRIES) == 18
     assert set(LIMITATION_REGISTRIES) & set(CODELESS_REGISTRIES) == set()
 
 
@@ -372,5 +379,5 @@ def test_the_registries_together_carry_the_entry_count_the_report_folds() -> Non
 
     assert len(codes["KNOWN_PANEL_LIMITATIONS"]) == folded + plane_wide + 1
     assert all(codes[registry] for registry in codes)
-    assert sum(len(entries) for entries in codes.values()) >= 177
+    assert sum(len(entries) for entries in codes.values()) >= 182
     assert len(codes["KNOWN_PANEL_LIMITATIONS"]) >= 64
