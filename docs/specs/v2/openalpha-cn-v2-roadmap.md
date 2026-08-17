@@ -200,7 +200,7 @@ P3 结束即可独立使用（Jupyter 直连面板 + 因子）
 | `V2-P3-011` | 因子家族③成长：营收同比 / 净利同比 / 同比加速度 | 技 | 004 | 已交付 `revenue_yoy` / `net_profit_yoy` / `revenue_yoy_acceleration`（本仓库第一批**只读 filing、不读价格**的出厂因子）。同比是**累计对四季度前的累计**（`window[-1]/window[-5]-1`，正是本文件 M-2 论证的那条），加速度是**两条相隔一年的同比之差**（`5 / 5` 与 `9 / 9`）；**全家族不调用 `_trailing_twelve_months`** —— 它按窗口末端对齐找年末，在 `N=8` 上会自信答错，见下方小节 | S16 |
 | `V2-P3-012` | 因子家族④动量与反转：20/60/120 日 + 行业相对 + 5 日反转 | 技 | 004 | — | S16 |
 | `V2-P3-013` | 因子家族⑤波动与流动性：残差波动 / 特质波动 / 换手率 / Amihud | 技 | 004 | — | S16 |
-| `V2-P3-014` | 不可变因子实验制品 + raw/processed/neutralized 三档报告 | 技 | 005-008 | 否则分不清"因子有效"与"暴露没控住" | S24, D8 |
+| `V2-P3-014` | 不可变因子实验制品 + raw/processed/neutralized 三档报告 | 技 | 005-008 | 否则分不清"因子有效"与"暴露没控住"。已交付 `backtest/factor_experiment.py`（`005` 之后第五个纯 stdlib 叶子，消费前四个而不重造它们）。**三行不够，格子才是答案**：`TierAttribution` 是一等记录，跑在**声明的**格子上 —— 三个档位步（`raw→processed`、`processed→neutralized`、`raw→neutralized`）×两个**已被上游定过号**的统计量（`ICSummary.mean_ic`、`QuantilePortfolioSummary.mean_spread`），每格带两档自己的数、比值、以及一个六成员闭集判决，判在一条**无默认值的** `retention_floor` 上；`no_baseline` 与 `removed` 分开（前一档就没赚过钱的因子没有「被拿走」这回事）、`reversed` 与 `amplified` 分开。**不可变是两件事且两件都强制**：`experiment_id` = `stable_model_id`(四个上游 spec + 线 + `code_commit` + as_of 与三档来源 build 的 `set_digest`)，`content_digest` = 同一函数打整份文档，所以**同一个 `experiment_id` 下两个 `content_digest` 不是两个实验而是不可复现**，`refuse_a_restated_experiment` 照 `_refuse_to_drop_a_stored_build` 的形状拒绝它、但放行完全一致的重算；`open_experiment` 重算摘要，落盘后被改过一个字节的文档**读不回来**而不只是「不一样」。`built_at` 与 `note` 不进任何摘要，由一条读 `inspect.signature` 的审计与 `IDENTITY_EXEMPT_PARAMETERS` 对账 | S24, D8 |
 | `V2-P3-015` | 因子的 CLI + REST + SDK 面（`factor run --factor <id> --start --end`） | 产 | 014 | — | S83, S84 |
 | `V2-P3-016` | **指数点位序列数据集 + 面板可达的市场收益**（`V2-P3-013` 的残差/特质波动的硬前置，见下方小节） | 技 | P1 存储契约 | `013` 实测：15 个 descriptor 里**没有任何指数点位**（`index_weight` 是成分权重不是点位），且 `FactorWindow` 是单标的的 —— 求值器**按类型**够不到市场序列 | S16 |
 | `V2-P3-017` | **扣非净利列进入统计投影**（`V2-P3-009` 的 EPcut 的硬前置，见下方小节） | 技 | `V2-P1-011` 存储契约 | `009` 复审实测：四个投影的 10 / 7 / 5 / 11 列里**没有扣非净利**，而端点**直接服务 `profit_dedt` 本身**（把它加进投影就读得回来，101 只票）。代价是每个已存分区的 schema + 以真实行钉住字段列表的契约测试**都要重写**；**不是**折叠/拒绝口径的重新定价 —— 同一批原始行量两遍，折叠行数、歧义 filing 数、既有 11 列的逐列拒绝数**一字未变** | S16 |
@@ -1662,3 +1662,181 @@ horizon `h` 上相邻一个交易日的两个预测日共享 `h + 1` 个会话�
 - 本模块没有任何一处是数值数组上的归约：逐组是整数计数、漏斗是两个 census 的五个整数、
   换手是两次集合差、容量是 `Decimal` 上的一个 `min` 和一个 `sum`。
   **运行时依赖仍是九个。**
+### `V2-P3-014` 交付记录（2026-08-17）：制品的键是什么、三档怎么排、不可变靠什么强制
+
+已交付 `backtest/factor_experiment.py`（`005` 之后第**五**个纯 stdlib 叶子模块，
+吃 `005` 的 `ICSummary`、`006` 的 `QuantilePortfolioSummary`、`007` 的 `TurnoverSeries`、
+`008` 的 `RedundancySummary`，一个数都不重算）。
+这条 issue 的一句注解就是验收标准：**否则分不清「因子有效」与「暴露没控住」**。
+
+#### 六个必答问题
+
+1. **「不可变」是什么意思 —— 两个读法都要，因为它们堵的不是同一个洞。**
+   - **内容寻址**：`FactorExperimentSpec.experiment_id` 是 `stable_model_id` 打在**声明**上，
+     改任何一项不是改一份制品、是另铸一份；`FactorExperimentArtifact.content_digest`
+     是同一个函数打在**答案**上。
+   - **写一次**：`panel_factors._refuse_to_drop_a_stored_build` 是先例，
+     `refuse_a_restated_experiment` 抄的是它的形状 ——
+     `experiment_id` 撞上而 `content_digest` 不同的到达件**被拒**（错误里点名两个摘要），
+     而**完全一致的重算被放行**（`FactorInputRef` 丢过又找回来的那个方向：
+     身份为无事而移动 = 重建永远写不进去 + 前一版再也推不出来）。
+
+   两者不冗余：只有内容寻址，等于「改了就是另一份」而对「新的把旧的顶掉」一句话没有；
+   只有拒绝，等于让一个会为墙钟而移动的身份去当判据。合起来说的是
+   **同一份声明在同一批输入上只有一个答案，别的答案要么是另一个实验、要么是 bug**。
+   而**封条**是值对象唯一能在进程边界上拿到的强制手段：
+   `FactorExperimentRecord.sealed_digest` 是**存下来的字段**，
+   校验器要求它等于重算出来的 `content_digest`，
+   所以被改过的文档不是「和原件不同」而是**读不回来**。
+   `the_seal_detects_an_edit_and_does_not_authenticate_one` 说清它不是签名。
+
+2. **键是什么 —— 声明 + 输入，不含答案；变了必须换键的与不必的，用 `002` 那条签名审计答。**
+
+   ```
+   进 experiment_id：四个上游 spec（整个带进去）、retention_floor、code_commit、
+                     horizon_sessions、as_of_digest、三档各自的 source_digest
+   不进：            built_at（FactorBuildManifest.built_at 的理由）、
+                     note（FactorNote 的理由）
+   进 content_digest：整份文档，spec 也在内
+   ```
+
+   四个 spec **整个**带进去而不是抽出四个下限：四条下限的算术极小值是四个不同的数
+   （IC 的 3、冗余的 4、每组的 1、再平衡的 1），各由各自的契约定，
+   抽一个投影出来就是给四件事立第二个真相源。
+   **审计而不是列表**：`test_every_parameter_of_the_builder_moves_the_identity_or_is_exempted
+   _by_name` 读 `inspect.signature(build_factor_experiment).parameters`，
+   要求每个参数要么**实测**能移动 `experiment_id`、要么在
+   `IDENTITY_EXEMPT_PARAMETERS` 里带着理由具名豁免。**第十二个参数会红。**
+   反方向也钉：`test_a_measurement_that_changes_moves_the_content_and_not_the_identity`
+   改一档的数字，要求 `content_digest` 动而 `experiment_id` 不动。
+
+3. **三档报告的形状 —— 一份制品、三行、外加一张格子；三行不够。**
+   三行仍然把「这一跌够不够算数」留给读者，而这正是本 issue 说要消灭的那个动作。
+   所以 `attributions` 是**声明的六格**（`ATTRIBUTION_CELL_ORDER`，步长优先、统计量次之），
+   **永远六格全在**（`ICCensus.excluded_by_coverage` 那条规矩：
+   少一格和一格写着 `not_measured` 是两种说法）。每格：
+
+   ```
+   retention = to_value / from_value
+
+   not_measured  两档之一根本没有统计量
+   no_baseline   都有，但 from_value <= 0：前一档就没赚过钱，没有「被拿走」这回事
+   reversed      to_value < 0：这一步把赌注掉了个头
+   amplified     retention > 1
+   removed       retention < 声明的线      <-- 验收标准那一格
+   survives      其余
+   ```
+
+   两个统计量而不是一个：`mean_ic` 与 `mean_spread` 会**分家**（见下一节的实测），
+   「因子有效」本来就有两种读法。两者都是上游**已经定过号**的量，这里**不再定第二次**
+   （再定一次会把 `lower_is_better` 的因子负两遍，正是 `ICSeriesCorrelation` 点名的那个错）。
+   判决**写错就构造不出来**：`TierAttribution` 的校验器重算比值和整条阶梯（`ICPoint` 的先例）。
+   第四行是 `survival`：一个因子的 `raw` 对本档的横截面相关
+   —— `factor_redundancy` 自己说「跨档自配对是被支持的读法」，
+   而 `raw` 行必须是 `None`，因为同档自配对被那个模块拒。
+
+4. **四个上游模块怎么装订 —— 各带各的 spec、各带各的下限，本模块不立第五套。**
+   `TierReport` 原样携带四个上游对象，连同它们**自己的覆盖码**；
+   `TierReport.coverage_codes` 把四个码并排读出来，不合并。
+   跨对象的一致性是校验器的活：一档、一因子、一方向、一 horizon、一切法、**一份样本**。
+   最后一条是验收标准所依赖的那条 —— 两档在两串日子上测出来的落差不是归因
+   （`_refuse_rungs_over_different_samples` 的论证升一层）。
+
+5. **制品存哪 —— 不在面板平面，也不在证据平面，落成一份规范化 JSON 文档。**
+   - **不在面板平面**：`factor_*` 数据集的 `subject` 列已经有两个含义（证券、`manifest_id`），
+     按 `experiment_id` 键控的制品会是第三个含义。
+   - **`002` 那条 `ParquetEvidenceStore` 禁令对报告不成立**，这点必须说清：
+     那条禁令的论证是「`FactorObservation` 不是 `EvidenceSnapshot`、树里没有转换、没有 import 边」，
+     而 `EvidenceSnapshot(kind="factor_experiment", ...)` 是**能构造的**、store **会收**。
+     所以本模块不走那条路的真实理由是**分层**而不是类型：
+     `backtest/` 不许 import `storage/`，因子的对外面孔是 `V2-P3-015`。
+   - 因此制品交付为**文档**：`experiment_payload` 用 `stable_model_id` 自己那套规范化
+     （排序键、固定分隔符、`ensure_ascii=False`、`allow_nan=False`），任何字节存储都放得下。
+     计算字段被排除**不是风格选择**：本仓库每一个内容寻址模型都是 `extra="forbid"` +
+     `computed_field` 身份，带着计算字段的 dump **根本读不回来**
+     （`FactorDefinition.factor_id` 会被产生它的那个模型当成多余输入拒掉）。
+   - 代价具名：`nothing_in_this_module_stores_an_artifact_or_can_be_made_to`
+     —— 从没被交给拒绝函数的制品也就从没被它检查过，
+     正如从没被交给 `write_factor_panels` 的 build 从没被那条守卫检查过。
+
+6. **样本量不足时报告长什么样 —— 四套拒绝码并存，靠的是不去调和它们。**
+   本模块**不新增第五种「N/A」**。每一档的四个上游对象带着自己的码原样在那里，
+   唯一被综合的地方是格子，而那里只有一个码 `not_measured`，
+   旁边两档自己的码照样读得到。一个制品级的「insufficient」会把
+   「IC 序列差两个 as_of」（`insufficient_as_ofs`）和
+   「排程重叠所以持仓态不存在」（`overlapping_schedule`）变成一个发现一种补法，
+   而它们是两个发现两种补法 —— `FactorCoverage` 为此花了五个成员、`TurnoverCoverage` 三个。
+
+#### 验收标准的实测演示：raw 档 IC 高、neutralized 档归零，在报告里长这样
+
+`test_a_factor_whose_edge_is_its_exposure_reports_removed_on_the_neutralisation_step`：
+一个因子、四只票、两个 as_of，三档全部跑真实的四个上游 study。
+raw 与 processed 的秩序完美预测远期收益；neutralized 残差取的是那个
+**与恒等排列 Spearman 恰为 0** 的四元置换（`sum(d²) = 10`、`1 - 6×10/(4×15) = 0`），
+而这个 0 是**从 `ICSummary.mean_ic` 上用 `==` 读出来的**、不是从公式抄来的
+—— `factor_ic._pearson` 算的是**缩放过的**积矩相关而不是秩差公式，
+「这两个在最后一位上相等」是关于浮点的断言而不是关于代数的。
+
+制品里长这样（`retention_floor = 0.4`）：
+
+| 档 | `ic.mean_ic` | `portfolio.mean_spread` | `survival`（对 raw） |
+|---|---|---|---|
+| `raw` | `1.0` | `0.019977606941848025` | `None`（同档自配对被拒） |
+| `processed` | `1.0` | `0.019977606941848025` | `1.0`，`undeclared_lockstep` |
+| `neutralized` | **`0.0`** | `0.009988803470923902` | `0.0`，`distinct` |
+
+| 步 | 统计量 | `retention` | 判决 |
+|---|---|---|---|
+| `raw → processed` | `mean_ic` | `1.0` | `survives` |
+| `processed → neutralized` | `mean_ic` | **`0.0`** | **`removed`** |
+| `raw → neutralized` | `mean_ic` | `0.0` | `removed` |
+| `raw → processed` | `mean_spread` | `1.0` | `survives` |
+| `processed → neutralized` | `mean_spread` | `0.49999999999999445` | `survives` |
+| `raw → neutralized` | `mean_spread` | `0.49999999999999445` | `survives` |
+
+读者做的动作是**一次按名查表**，不是比较两个数：
+`artifact.attribution(from_tier="processed", to_tier="neutralized", statistic="mean_ic").verdict`
+返回 `"removed"`，而能让读者放过的两档（`survives`、`amplified`）是不同的字符串。
+
+**`survival` 行独立佐证同一件事**（`test_the_survival_row_corroborates_the_verdict_instead
+_of_repeating_it`）：processed 与 raw 处于**秩锁步**（幅值恰 `1.0`，判决
+`undeclared_lockstep` —— 单调标准化本来就必须这样），
+neutralized 与 raw 相关恰 `0.0`（`distinct`）。
+所以「赚的是暴露的钱」是同一份制品的**两个互不依赖的读数**，不是一个数戴两顶帽子。
+
+**两个统计量在同一个 fixture 上分家**，这正是它们都要报的理由：
+同一步里净多空价差保住了自己的 `0.49999999999999445`
+—— 二分位切法比排序**粗**，把四只票全部重排之后仍有两只高收益票留在多头组。
+声明的线取 `0.4` 而**故意躲开** `0.5`：一个由两个含费商末位决定的判决，
+会在 `CostSchedule` 的默认值变动时改口。
+
+#### 不可变性怎么强制的（实测）
+
+- **逐字段篡改**：`test_every_field_of_a_sealed_record_refuses_to_reopen_after_a_single_edit`
+  走遍序列化制品的**全部 335 个标量叶子**（`turnover` 75、`portfolio` 60、`survival` 51、
+  `attributions` 48、`ic` 48、`spec` 43、`source_manifest_ids` 6、`tier` 3、`schema_version` 1），
+  每次只扰动一个，要求**每一个**都让 `open_experiment` 拒绝。
+  这是把「每个字段都要有断言」从纪律变成性质：封条不知道是哪个叶子，
+  所以四个上游 summary 里新加的字段**落地当天**就被保护，不需要谁去扩一张表。
+- **封条的另一侧**：改摘要而不改内容，同样被拒。
+- **不会空过**：未被动过的文档必须读得回来、两个地址不变、**再序列化回同样的字节**。
+- **重述守卫**：同 `experiment_id` 不同 `content_digest` 被拒；
+  只差墙钟与散文的重算被放行；已经自相矛盾的 `held` 集合按**自己**报错而不是赖到来者头上。
+
+#### 年末快照那条约束写在哪
+
+`KNOWN_EXPERIMENT_LIMITATIONS.neutralised_residuals_are_read_at_a_year_end_snapshot`
+—— 与 `V2-P3-005`、`V2-P3-006` **同名同码**（同一件事，按模块改名就会变成三件事）。
+本模块的措辞比它们更进一步，因为 neutralized 正是验收标准所转的那一档：
+年内任何 `as_of` 经 `read_visible_at` 读回来的是**空而不是报错**，
+所以它在这里现形为「neutralized 档 `ICSummary` 的 `coverage` 是 `insufficient_as_ofs`、
+它参与的每一格都是 `not_measured`」，而不是一个异常。
+`V2-P4-026` 是修法，且是 `V2-P4-013` 的硬前置。
+`test_a_tier_that_never_cleared_its_floors_reports_not_measured_and_not_a_refusal` 驱动这一形态。
+
+#### 数值栈
+
+本模块没有任何数值数组归约：判决是两个浮点的一个商和四次比较，
+身份是一次 `json.dumps` 加一次 sha256。
+ADR-0003 因此**没有被重新打开**，也不需要第七条同类结论 —— 没有工作负载可谈。
+**运行时依赖仍是九个。**
