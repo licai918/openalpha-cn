@@ -578,3 +578,72 @@ need. A 19 x 19 symmetric eigensolve is a different shape of arithmetic -- itera
 sum -- and nothing measured here carries over to it. If `V2-P4` wants one it should be measured
 the same way rather than assumed to inherit this answer, which is now the third time this ADR has
 written that sentence and the third time it has been the right one.
+
+
+## Update, 2026-08-16 (`V2-P3-007`): the rolling portfolio this ADR named as unmeasured
+
+The Decision above stands unchanged and this section adds no new one. What it records is the one
+workload the `V2-P3-006` section put in its own "What is *not* claimed" list by name -- "a rolling
+portfolio with a holdings state (`V2-P3-007`) -- the last of which has a per-period cost that grows
+with the *previous* period's holdings rather than with the cross section, and is a different
+shape". It arrived, it was measured on its own terms, and the shape claim turns out to be right and
+to matter less than it sounds. The runtime dependency set is still the nine it was.
+
+`openalpha_cn.backtest.factor_tradeability` is a standard-library leaf over `factor_ic` and
+`factor_portfolio`. Per period it runs one `rank_groups` (a `sorted()`), one pass over the pairs
+and one `min` over the long group's held names; per rebalance it runs two set intersections over
+two groups' holdings and sums `Decimal` fee legs. Measured at ADR-0002's whole-market cross section
+of **5,534 securities** cut into ten deciles, best of 7 runs, with the two references re-measured
+in the same process so the ratios are internally consistent:
+
+| step, n = 5,534, 10 groups | time |
+|---|---|
+| `TradeabilityStudy.measure` (funnel + per-group + capacity) | **2.7 ms** |
+| the same with no liquidity offered (funnel + per-group only) | 2.1 ms |
+| `TradeabilityStudy.turnover` over two periods, 553 holdings each | **0.7 ms** |
+| *(reference, same process)* `QuantilePortfolioStudy.measure`, bars prebuilt | 58.2 ms |
+| *(reference, same process)* constructing 5,534 `MarketBar` pairs | 21.5 ms |
+
+**The whole report is 21x cheaper than the period it reports on.** That is the useful reading and
+it is why no further work was done here: a year of daily whole-market periods is 244 x 2.7 ms =
+0.66 s of coverage and capacity against 244 x 58.2 ms = 14.2 s of the quantile study that has to
+run first, which is itself 62x smaller than the `compute_factor` read before *that*. The absolute
+figures are on a different machine from the `V2-P3-006` section's 35.9 ms and are not comparable to
+it; the 58.2 ms row exists precisely so the ratio does not have to be.
+
+### The "different shape" claim, and what it actually costs
+
+It is true and it is bounded. A rebalance's cost is `O(|H(k-1)| + |H(k)|)` -- two set intersections
+over the two ends' holdings -- rather than linear in the cross section, so a study with a wide long
+group pays more per transition than one with a narrow one. At ten deciles of the whole market that
+is 553 names a side and the whole two-period series is 0.7 ms, which is **0.012x** one period of
+the quantile study it reads. The growth is linear in a quantity a declared `group_count` already
+bounds by `n / group_count`, so the worst case over this repository's own inputs is the two-group
+cut: 2,767 names a side, still one `set()` construction per end.
+
+### What numpy would buy, and it is less than in any previous section
+
+Nothing here is a reduction over a numeric array. The per-group decomposition is integer counting
+into `group_count` buckets; the funnel is five integers read off two censuses; the turnover is two
+set differences and a ratio; and the capacity is a `min` and a `sum` over `Decimal`. The `Decimal`
+argument the `V2-P3-006` section made applies unchanged and applies to the only money in the module
+-- numpy has no `Decimal` dtype, an array of them is an `object` array, and `float64` is the wrong
+type for a participation cap multiplied against a published turnover and then compared against a
+declared position capital.
+
+Consequence 6 binds on one line: `Rebalance.name_turnover` is an integer ratio and
+`tests/unit/backtest/test_factor_tradeability.py::
+test_the_resolution_is_the_unit_the_name_turnover_counts_in` divides it by `resolution` and
+requires exactly `2.0` back across four group widths. That holds because both sides are small
+integers in IEEE double; it is not a claim that would survive a reformulation into a floating
+reduction.
+
+### What is *not* claimed
+
+Nothing here says anything about `V2-P3-014`'s report over the whole factor set at once, and
+nothing says anything about a rolling portfolio that computes a **return**. This module publishes
+turnover and a cost bracket and deliberately no net asset value -- see
+`KNOWN_TRADEABILITY_LIMITATIONS.the_rolling_portfolio_is_a_turnover_and_cost_model_and_not_a
+_return_series` for the two contract-level reasons -- so the chained-arithmetic workload a net
+asset value would introduce has not been measured and does not inherit this answer. That is the
+fourth time this ADR has written that sentence.

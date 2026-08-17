@@ -193,7 +193,7 @@ P3 结束即可独立使用（Jupyter 直连面板 + 因子）
 | `V2-P3-004` | 中性化：行业 + 市值（横截面回归） | 技 | 003 | 依赖 `V2-P1-010`；行业分类实测可用（§6），做真实行业中性化 | S19, D8 |
 | `V2-P3-005` | IC / Rank IC / IC 衰减 / 稳定性 | 技 | 004 | 唯一先例是 `backtest/event_study.py`（纯 stdlib 叶子模块） | S20 |
 | `V2-P3-006` | 分组组合收益（含成本，复用 `AShareExecutionPolicy`） | 技 | 005 | 已交付 `backtest/factor_portfolio.py`（纯 stdlib 叶子，直接吃 `005` 的 `ICCrossSection`，所以 IC 与分组收益必然同一录取样本）。**权责分工**：毛收益取 `OutcomeLabel.realized_return`，**绝不**由两笔成交价反推（那正是 Task 30 实测 −0.5310% 对 +2.7422% 的那条路）；费用取 `AShareExecutionPolicy` 的两个 `ExecutionResult`；能否建仓由**两个契约共同**判定、标注在先。被拒成交**不记 0**，出组并按自身 `HoldingOutcome` 计数，`PortfolioCensus` 强制加总。分组按平均秩（并列同组）、组数与每组下限**均为声明值无默认**，空组是三个覆盖码而非修补。多空价差交付但**明确不是可执行组合**：策略无做空侧、无融券数据集，且空头往返正是 `KNOWN_EXECUTION_LIMITATIONS` 已实测两契约不一致的那对判定。不发累计曲线（重叠窗口），见下方小节 | S21 |
-| `V2-P3-007` | 换手 / 覆盖率 / 容量报告 | 技 | 006 | 让统计上好看但不可实施的信号显形 | S22 |
+| `V2-P3-007` | 换手 / 覆盖率 / 容量报告 | 技 | 006 | 让统计上好看但不可实施的信号显形。已交付 `backtest/factor_tradeability.py`（第三个纯 stdlib 叶子）。**换手**：对多头组维护持仓态，**再平衡频率不是新参数** —— 就是调用方那串 `as_of` 的间距，本模块测量它；窗口重叠时持仓态不存在，报 `overlapping_schedule`。换手报**名字**与**钱**两读（`006` 等预算 + 手数取整让两者必然不同）。`006` 的费用是上界、`round_trip_cost - avoided_cost` 是下界，省下的腿全部取自已有 `ExecutionResult`，不模拟任何一笔单。**不发滚动收益**（空隙会话不在任何标注窗口里，且连乘正是 `006` 拒绝的那件事）。**覆盖率**：四步漏斗 `universe → valued → admissible → scored → held`，四步分属因子引擎 / 该档准入 / 标注契约 / 撮合策略，两张档位表 `import` 且**两张都吃劲**。**逐组分解**是验收标准的仪器，且在 `unfillable_after_execution` 下**照样在**（由「切法重算 ∸ 拒绝名单」推出）。**容量**：一个声明的 `participation_cap`（无默认）+ 算术，是**约束不是冲击模型**；`min` 绑定被 `006` 的等预算逼出来、`capital_multiple < 1` 就是已超容（实测 `000569.SZ` 2001-01-02 给 0.658） | S22 |
 | `V2-P3-008` | 相关性与冗余分析 | 技 | 005 | 已交付 `backtest/factor_redundancy.py`（`005` 之后第二个纯 stdlib 叶子模块）：横截面值/秩相关、IC 序列相关三读，符号由**两个**因子的 `direction` 定向、冗余按**幅值**判定。**算术恒等式与实证相关分开**：`SharedInputs` 从 `required_fields` **算**出来（171 对里 42 对共列、72 对共数据集、16 对**声明完全相同**），`FactorIdentity` 则**声明后再对数据求值**，只有 `verified` 才配得上 `arithmetic` 判决；`V2-P3-012` 那条 `1 + m20 == (1 + m15)(1 + r5)` 在不跳的动量上实测残差 `4.4e-16`（verified），在**出厂**动量上 `1.7e-01`（refuted）。冗余阈值**无默认值**、由调用方声明；`undeclared_lockstep` 用 `round(abs(r), 15) == 1.0` 这条**舍入边界**（不是阈值）兜底。样本下界是 **4** 而非 IC 的 3：`n=3` 时秩相关只能取 `±0.5 / ±1`，任何阈值都判不出东西 | S23 |
 | `V2-P3-009` | 因子家族①价值：EP / BP / SP / EPcut | 技 | 004 | 已交付 EP / BP / SP（本仓库第一批双轴出厂因子）；**EPcut 未交付**，扣非净利不在任何一个统计投影里，硬前置是 `V2-P3-017`，见下方小节 | S16 |
 | `V2-P3-010` | 因子家族②质量：ROE / ROIC / 毛利率稳定性 / 应计项 | 技 | 004 | 已交付四个：`return_on_equity_ttm` / `return_on_capital_ttm` / `gross_margin_stability` / `accruals_ttm`，**本仓库第一批只在报告期轴上的出厂因子**；ROE **不读** `fina_indicator.roe`，理由与实测见下方小节 | S16 |
@@ -1520,3 +1520,145 @@ horizon `h` 上相邻一个交易日的两个预测日共享 `h + 1` 个会话�
   这正是 `position_capital` 必须声明并随报告一起存的理由。
 - 钱是 `Decimal` 不是 `float`，因为 `backtest/execution.py` 是；
   numpy 没有 `Decimal` dtype，所以本 issue 连「要不要向量化」这个问题都不成立。
+
+### `V2-P3-007` 交付记录（2026-08-16）：换手怎么定义、覆盖率是什么的覆盖率、容量假设在哪
+
+已交付 `backtest/factor_tradeability.py`（`005` 之后第三个纯 stdlib 叶子模块，
+吃 `006` 的 `PeriodPortfolio` + `005` 的 `ICCrossSection` + 一个调用方给的会话成交额）。
+这条 issue 的一句注解就是验收标准：**让统计上好看但不可实施的信号显形**，
+所以每一个报出的数都是按「能不能把两个 IC 相同的因子分开」挑的。
+
+#### 六个必答问题
+
+1. **换手怎么定义 —— 建了滚动组合，但再平衡频率不是新参数。**
+   `006` 的换手按构造是 100%/期，本模块就是它那条具名限制
+   （`every_period_is_an_independent_round_trip_so_turnover_is_total`）说的解：
+   对**多头组**（`top_group_index`，由因子自己的 `direction` 决定，不是参数）维护持仓态。
+   **再平衡频率就是调用方已经声明过的东西 —— 那串 `as_of` 的间距**，
+   本模块**测量**它而不是声明它（`006` 明确拒绝发明它，本模块也不发明）。
+   它拒绝的是「持仓态根本不存在」的排程：horizon `h` 上相邻两个预测日的窗口共享
+   `h + 1` 个会话中的 `h` 个，被「带过去」的票是**同时被持有两次**而不是一次，
+   所以相邻两个 measured 期间必须满足 `entry_day(k) >= exit_day(k-1)`，
+   否则是覆盖码 `overlapping_schedule`（不是异常 —— 按日测 IC 是对的、测换手是不可能的，
+   报告该说清是哪一个）。换手报**两读**：
+   `name_turnover = (进 + 出) / (前端数 + 后端数)`、
+   `money_turnover = (卖出市值 + 买入名义额) / (前端市值 + 后端名义额)`，
+   都取**对称**形式而不是 `进 / 后端数` —— 两端**不一样大**（市场每天掏空的量不同），
+   单边分母会把「组缩小了」读成「组换手了」。两者按构造都在 `[0, 1]`。
+2. **覆盖率是什么的覆盖率 —— 四步漏斗，四个不同的权责方。**
+   一个「覆盖率」在被分解之前是有歧义的，而分解本身就是发现：
+
+   ```
+   universe   -> valued       因子引擎              （FactorCoverage / 该档变换）
+   valued     -> admissible   该档自己的准入政策    （TIER_ADMITTED_CODES）
+   admissible -> scored       domain/labels.py      （停牌、涨跌停锁死、无公布区间、退市）
+   scored     -> held         AShareExecutionPolicy （停牌、手数、T+1、推导区间）
+   ```
+
+   `implementable_rate = held / universe` 是这四个的乘积（四次除法的舍入内）。
+   中间两步正是「报一个覆盖率数」会丢掉的：**「因子给全市场打了分但这些票标不了」
+   和「因子谁也没打分」是两个缺陷、两种补法**。两张档位表是 `import` 的不是重抄的，
+   而且**两张都吃劲**：`ICCensus.excluded_by_coverage` 按「该档不录取的码」建键，
+   要还原 `valued_count` 就得走该档整个词汇表、留下「带值且不录取」的格
+   —— 那正好是 `TIER_VALUE_CODES` 与 `TIER_ADMITTED_CODES`，
+   删掉前一个会把 `input_missing` 数进去、删掉后一个会在 `processed` 上 `KeyError`。
+   三档里两张表只差**一格**（`processed` 的 `imputed` 带值且不录取），
+   所以那一格是唯一可分辨的 fixture。
+3. **容量怎么量 —— 一个声明的参与率上限，其余全是算术。**
+   `participation_cap ∈ (0, 1]`，**无默认值**，是「本研究最多占一个会话成交额的多少」。
+   它是**约束不是冲击模型**：`CostSchedule` 没有任何随单量变化的项，
+   本仓库也没有任何能拟合冲击系数的数据集，所以这里不估、不用、也不隐含任何冲击系数。
+   成交额取 `daily.amount`，单位**千元**（实测：十一条真实行上
+   `amount * 1000 / (vol * 100)` 是唯一让隐含 VWAP 落在当日 `[low, high]` 内的读法，
+   **11/11**，另外三种读法 **0/11**）。日期必须**不晚于** `entry_day`，晚于则拒绝。
+   `min` 绑定是被 `006` 的等预算建仓**逼出来的而不是选出来的**：每个仓位同一笔声明资金，
+   所以整组能不能实施取决于**最不流动的那一只**，
+   `capital_multiple = binding_capacity / position_capital`，**小于 1 就是已经超容**。
+   同时报 `liquidity_weighted_capacity`（预算跟着流动性走的上界，本仓库不建那个组合）
+   与 `concentration = 等权 / 流动性加权`，后者说的是「一只票毁掉了多少容量」。
+4. **「让统计上好看但不可实施的信号显形」怎么显形 —— 实测演示见下一节。**
+5. **样本量与边界 —— 两个统计都会在窄组上退化，两个退化都没有藏。**
+   两组各 `n` 只的换手按 `1 / (前端数 + 后端数)` 计量，
+   三只对三只只有**七个可取值**，`Rebalance.resolution` 就是那个单位、报在比值旁边；
+   容量是 `min`，所以 `binding_capacity` 无论组里有几只都是**一只票的数**，
+   `binding_subject` 点名、`held_count` 并排、`concentration` 说它离其余有多远。
+   **不另立第二个下限**：`QuantilePortfolioSpec.min_securities_per_group` 已经是那个下限、
+   已经无默认值，多一个地方声明同一件事就是多一个地方让两者打架。
+6. **三档** —— 与 `005`/`006` 一致，`TIER_ADMITTED_CODES` 与 `TIER_VALUE_CODES`
+   都是 `import` 的。raw 与 neutralized 两张表相等，所以它们的 `admission_rate` 恒为 `1.0`；
+   `processed` 是唯一能观察到这一步的档。
+
+#### 验收标准的实测演示
+
+`test_the_same_ic_and_the_same_funnel_are_told_apart_by_the_top_groups_execution_rate`：
+**一个**横截面（十二只票、打分 1..12、远期收益 `rank/100`，秩相关
+`0.9999999999999998`），配**两个市场** —— 一个把打分最高的三只的入场会话停牌，
+另一个把最低的三只停牌。
+
+- **相关系数分不开**：`MarketBar` 根本不是它的输入，两边是同一个 `ICCrossSection`。
+- **期间级漏斗也分不开**：两边都拒了十二分之三，`execution_rate` 都是 `0.75`，
+  上面每一个计数都相同（断言 `bad.funnel == good.funnel`）。
+- **分开它们的是一张表的一行**：多头组自己的 `execution_rate` 是 `0.25` 对 `1.0`，
+  `top_group_execution_shortfall`（整体率减多头组率）是 **`+0.5` 对 `-0.25`**。
+
+这就是「为什么要出逐组分解而不是一个覆盖率数」的全部论证：发现活在聚合会抹掉的那一层。
+更狠的一档在 `test_a_long_group_the_market_refuses_entirely_is_a_shortfall_and_not_a_division`：
+多头组被拒到空，期间码正是 `006` 的 `unfillable_after_execution`
+（`groups == ()`），而逐组表**照样在**——
+因为逐组计数是「切法重算 ∸ 拒绝名单」推出来的，不是从 `PeriodPortfolio.groups` 读的。
+`006` 说第三个空组码是本 issue 要显形的读数，这就是它显形的样子。
+`shortfall` 取**差**而不是比，正是为了这一档：比要除以一个 `min_securities_per_group=1`
+能取到的零。
+
+#### 成本区间：`006` 的费用是上界，这里给下界
+
+每个被留住的票在 `006` 里付过前一期的卖出费和后一期的买入费，滚动组合两笔都不付。
+`avoided_cost` 就是这些腿的和，**全部取自已经存在的 `ExecutionResult`，
+本模块不模拟任何一笔单、不发明任何一个价**。每条腿在整串序列里最多被省一次
+（第 k 期的买入腿属于「进入 k」那次再平衡、卖出腿属于「离开 k」那次），
+所以 `avoided_cost <= round_trip_cost` 是 `TurnoverSeries` 的**校验**而不是论断。
+
+    round_trip_cost                    006 的费用，上界（100% 换手）
+    round_trip_cost - avoided_cost     rolling_cost，下界
+
+是**下界**而不是答案：被留住的仓位在 k 期的股数会按 k 的入场收盘价重算，
+真正的滚动组合要按声明资金**补/减那点差额**并为之付费，这里没收。
+方向已定号、已被它不做的那笔交易界住（差额最多一个仓位）。
+
+**本模块不发滚动收益，也发不了**：`exit_day(k-1)` 到 `entry_day(k)` 之间被留住的仓位
+跨过了任何标注窗口都没盖到的会话，那段收益不是本仓库任何契约持有的量；
+而就算排程没有空隙，把盖到的那些期间连乘也正是 `006` 已经拒绝的那件事。
+持仓态能诚实回答的是「它换掉了自己的多少」和「那省了多少钱」，净值不是。
+
+#### 容量的建模假设（逐条，哪些是声明的参数）
+
+| 假设 | 形态 |
+|---|---|
+| 参与率上限 | **声明的参数**，`TradeabilitySpec.participation_cap`，无默认，`(0, 1]` |
+| 每仓预算 | **声明的参数**，继承 `QuantilePortfolioSpec.position_capital`，不在本模块重声明 |
+| 会话成交额 | **调用方输入**，`SessionLiquidity`，单位在字段名里，`liquidity_from_amount` 换算 |
+| 流动性会话 | **调用方选**，必须 `<= entry_day` 且全期同一天，`liquidity_day` 与 `entry_day` 并排报 |
+| 千元 → 元 | **硬编码常量** `CNY_PER_TURNOVER_UNIT = 1000`，实测 11/11，对着 `panel_factors` 的同名常量钉住 |
+| 一个会话一笔成交 | **硬编码判断**（`AShareExecutionPolicy` 就是这样撮合的），不跨日拆单 |
+| `min` 绑定 | **被 `006` 的等预算逼出来的**，不是选的；`binding_subject` 点名 |
+| 只估入场腿 | **具名限制** `capacity_is_estimated_on_the_entry_leg_only`，**不声明偏差方向** —— 本仓库不测两腿成交额的联合分布，写一个「高估」或「低估」就是又一条没人测过的安全性声明 |
+| 无冲击模型 | **具名限制** `capacity_is_a_declared_participation_cap_and_not_a_market_impact_model` |
+
+真实数量级（本仓库已存的十一条真实行里的两条）：
+`000001.SZ` 2026-06-12 成交额 **2,263,042,930.57 元**、
+`000569.SZ` 2001-01-02 成交额 **6,579,577.80 元**，相差 **344 倍**。
+同时持有这两只的组，容量被后者定死；1% 上限下那只票只吃 **65,795.78 元**，
+所以一个声明 `006` 自己那笔 10 万元每仓的研究，`capital_multiple` 是 **0.658**
+—— 在数第一笔费用之前就已经超容了。
+
+#### 实测（ADR-0003 已加 Update 小节）
+
+- 全市场一期（5,534 只、十分位）报告：**2.7 ms**（七次取最好），
+  同进程内的参照 `QuantilePortfolioStudy.measure`（bar 预建）是 58.2 ms
+  —— **报告比它所报告的那一期便宜 21 倍**。
+- 两期滚动换手（每端 553 只持仓）：**0.7 ms**。
+  `006` 的 ADR 小节把「每期成本随**上一期持仓**增长」列为未测形状，
+  这条测了：成本是两端持仓的两次集合运算，被声明的 `group_count` 界成 `n / group_count`。
+- 本模块没有任何一处是数值数组上的归约：逐组是整数计数、漏斗是两个 census 的五个整数、
+  换手是两次集合差、容量是 `Decimal` 上的一个 `min` 和一个 `sum`。
+  **运行时依赖仍是九个。**
