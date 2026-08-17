@@ -781,11 +781,11 @@ an upstream's publication cadence, and `DATASET_CADENCE` has no honest entry for
 
 import bisect
 import math
-from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Collection, Mapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from types import MappingProxyType
-from typing import Final, Literal, Protocol, cast
+from typing import Final, Literal, Protocol, TypeVar, cast
 from zoneinfo import ZoneInfo
 
 from openalpha_cn.domain.daily_prices import (
@@ -810,6 +810,7 @@ from openalpha_cn.domain.factor import (
     set_digest,
     validate_factor_observation,
 )
+from openalpha_cn.domain.factor_neutralization import processed_observation_digest
 from openalpha_cn.domain.factor_transform import (
     MISSING_VALUE_ACTIONS,
     MISSING_VALUE_COVERAGE_ORDER,
@@ -1041,6 +1042,7 @@ FACTOR_MANIFEST_DATA_COLUMNS: Final[tuple[str, ...]] = (
     "subject_digest",
     "universe_count",
     "universe_digest",
+    "observation_digest",
     *FACTOR_CENSUS_COLUMNS,
     "input_dataset",
     "input_year",
@@ -1089,6 +1091,7 @@ _MANIFEST_COLUMN_KINDS: Final[Mapping[str, PanelColumnKind]] = MappingProxyType(
         "subject_digest": "string",
         "universe_count": "integer",
         "universe_digest": "string",
+        "observation_digest": "string",
         **_CENSUS_COLUMN_KINDS,
         "input_dataset": "string",
         "input_year": "integer",
@@ -1115,6 +1118,26 @@ class FactorEngineError(RuntimeError):
     of the store and of the wiring, not malformed values. `domain/factor.py`'s `FactorError`
     stays the `ValueError` for a malformed definition or observation.
     """
+
+
+_UNSEALED_MANIFEST_ID: Final[str] = "fmn_unsealed"
+"""What an observation carries between being classified and being sealed, inside `compute_factor`.
+
+`FactorBuildManifest.observation_digest` is a field, so the manifest cannot be constructed until
+the cross section exists -- and `FactorObservation.manifest_id` means the manifest cannot be left
+out of the cross section either. One of the two has to be provisional for the length of one
+function, and this is the half that is safe to make so: the digest is taken over
+`(subject, coverage, value)`, which never mentions an identity, so no placeholder can reach the
+address it is standing in for. `compute_factor` replaces every row before returning, and
+`tests/integration/panel/test_factor_engine.py::
+test_no_observation_of_a_computed_panel_carries_the_unsealed_placeholder` is what keeps that from
+being a promise -- it asserts on this constant rather than on the string, so renaming it cannot
+quietly retire the check.
+
+A named constant rather than `""` because an empty `manifest_id` is a value
+`validate_factor_observation` accepts and a stored partition could plausibly hold; this one could
+not have been written by any build, so a row carrying it anywhere is unambiguous.
+"""
 
 
 # --- the window an evaluator sees ------------------------------------------------------------
@@ -4049,10 +4072,17 @@ def compute_factor(
 
     The exemptions, stated rather than left implicit: `store` is a handle whose *content*
     reaches the identity through each input's `partition_content_hash`; `built_at` is the wall
-    clock, deliberately out (see `FactorPanel`); `evaluators` is a substitution seam for tests
-    whose production value is the module's own table, which `code_commit` stands for; and
-    `requirements` decides whether a read is *permitted* rather than what it returns -- the part
-    of it that does decide (`years`) arrives in the identity as `manifest.inputs`.
+    clock, deliberately out (see `FactorPanel`); and `requirements` decides whether a read is
+    *permitted* rather than what it returns -- the part of it that does decide (`years`) arrives
+    in the identity as `manifest.inputs`.
+
+    **`evaluators` was a fourth exemption until `V2-P3-019` and is now a determinant**, which is
+    worth recording because the exemption was true about the wrong noun. It read "a substitution
+    seam whose production value is this module's own table, which `code_commit` stands for. A
+    callable cannot be canonically hashed" -- all of which holds of the *callable* and none of
+    which ever held of its **output**. `manifest.observation_digest` addresses the answers, so an
+    evaluator that computes different numbers from the same rows moves `manifest_id`. That was the
+    last place in this contract where "decides the answers" and "reaches the identity" came apart.
     """
     table = FACTOR_EVALUATORS if evaluators is None else evaluators
     evaluator = _resolve_evaluator(definition, table)
@@ -4083,6 +4113,28 @@ def compute_factor(
         panel_periods=panel_periods,
         requirements=requirements,
     )
+    listed = set(universe)
+    # The answers are computed *before* the manifest, and the ordering is forced rather than
+    # stylistic: `observation_digest` is a field of `FactorBuildManifest`, so the manifest cannot
+    # exist until the cross section does -- while every observation carries the `manifest_id` the
+    # manifest does not have yet. `_UNSEALED_MANIFEST_ID` breaks that circle for exactly the
+    # length of this function: the digest is taken over `(subject, coverage, value)`, which is
+    # the one part of an observation that does not mention the identity, so the placeholder
+    # cannot reach it, and `_seal` then re-stamps every row with the real address. Nothing built
+    # under the placeholder escapes -- the tuple it produced is local and is replaced whole.
+    unsealed = tuple(
+        _classify(
+            definition,
+            subject=subject,
+            as_of=as_of,
+            in_universe=subject in listed,
+            readings=readings,
+            panel_sessions=panel_sessions,
+            evaluator=evaluator,
+            manifest_id=_UNSEALED_MANIFEST_ID,
+        )
+        for subject in ordered_subjects
+    )
     manifest = FactorBuildManifest(
         factor_id=definition.factor_id,
         factor_key=definition.key,
@@ -4099,9 +4151,9 @@ def compute_factor(
         subject_digest=set_digest(ordered_subjects),
         universe_count=len(set(universe)),
         universe_digest=set_digest(universe),
-        inputs=tuple(inputs),
+        observation_digest=observation_digest(unsealed),
+        inputs=_canonical_inputs(inputs),
     )
-    listed = set(universe)
     # Read once, outside the loop. `manifest_id` is a pydantic `computed_field`, and
     # `domain/panel_batch.py` measured what that means on a hot path: a computed field is *not*
     # cached, so `ProviderBatch.payload_digest` cost 10.5 ms on its first access and 10.2 ms on
@@ -4109,19 +4161,7 @@ def compute_factor(
     # and re-hash the whole manifest once per security -- 5,534 times for a whole-market cross
     # section, for a value that cannot change while this loop runs.
     manifest_id = manifest.manifest_id
-    observations = tuple(
-        _classify(
-            definition,
-            subject=subject,
-            as_of=as_of,
-            in_universe=subject in listed,
-            readings=readings,
-            panel_sessions=panel_sessions,
-            evaluator=evaluator,
-            manifest_id=manifest_id,
-        )
-        for subject in ordered_subjects
-    )
+    observations = tuple(replace(observation, manifest_id=manifest_id) for observation in unsealed)
     return FactorPanel(
         definition=definition,
         manifest=manifest,
@@ -4129,6 +4169,32 @@ def compute_factor(
         built_at=built_at,
         input_provenance=tuple(provenance),
     )
+
+
+def _canonical_inputs(refs: Sequence[FactorInputRef]) -> tuple[FactorInputRef, ...]:
+    """This build's input partitions in the one order both sides of the round trip agree on.
+
+    `FactorBuildManifest.inputs` is a **tuple**, so its order is inside `manifest_id`, and the two
+    ends of the round trip were producing two different orders. `compute_factor` collected refs in
+    `FactorDefinition.datasets` order -- income before balancesheet, because that is the order the
+    fields are declared in -- while `_manifest_from_rows` has always reassembled them sorted by
+    `(dataset, year)`, because a Parquet scan has no order to preserve. For a one-dataset factor
+    the two agree and nothing showed; for `V2-P3-009`..`011`'s statement factors they do not, and
+    the consequence was that **`load_factor_manifests` could not read back a multi-dataset build at
+    all** -- it reassembled a manifest whose ID was not the one the rows were filed under and
+    raised, on a partition it had just written itself.
+
+    It stayed invisible because nothing on a read path called `load_factor_manifests` for such a
+    factor: `write_factor_panels`' drop guard reads the catalog's subject list rather than
+    decoding, and no face read a build back. `V2-P3-019` put that read on
+    `load_factor_observations`, which is what surfaced it -- three integration tests over the
+    quality and value families went red on the first run.
+
+    Sorting here rather than un-sorting the decoder, because the decoder is the side that has no
+    choice. The key is `(dataset, year)` with an **integer** year on both sides, so the two
+    orderings are equal by construction rather than by every year happening to be four digits.
+    """
+    return tuple(sorted(refs, key=lambda ref: (ref.dataset, ref.year)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -5344,6 +5410,7 @@ def factor_manifest_batch(panel: FactorPanel) -> ColumnarPanelBatch:
         "subject_digest": [manifest.subject_digest] * len(inputs),
         "universe_count": [manifest.universe_count] * len(inputs),
         "universe_digest": [manifest.universe_digest] * len(inputs),
+        "observation_digest": [manifest.observation_digest] * len(inputs),
         **{
             f"{FACTOR_CENSUS_COLUMN_PREFIX}{code}": [census[code]] * len(inputs)
             for code in FACTOR_COVERAGE_ORDER
@@ -5648,6 +5715,24 @@ def load_factor_observations(
     read of one factor never opens another one's file at all. That is the same saving one layer
     down, and it is the read-side half of the write-side memory argument in this module's
     docstring.
+
+    ## Every build this read returns is checked against the manifest that describes it
+
+    `V2-P3-019`. The manifest partition is read too, and `_refuse_rows_that_are_not_the_answers_
+    their_manifest_addresses` holds the two against each other in both directions before a single
+    observation is handed back. Without it, `factor_obs_<key>_v<n>` was an ordinary Parquet file
+    that anything could edit -- a half-finished sync, an exploratory script writing to the wrong
+    path, silent disk corruption -- and the edit surfaced as *a factor report that looks normal*
+    rather than as an error: measured, sixteen flipped signs moved `mean_ic` from `+1.0` to
+    `-1.0` under a byte-identical `experiment_id` at exit code 0.
+
+    **The extra read is one partition per year and it is not optional.** The manifest partition
+    holds one row per `(build, input partition)` -- three orders of magnitude smaller than the
+    observations it describes -- and making it conditional would mean a store missing it read
+    faster than a store that has it, which is a fail-open with a performance argument in front of
+    it. A caller that wants the rows without the check does not exist: `read_visible_at` is what
+    the raw partition is for, and this function's whole contract is that what it returns is what
+    the build wrote.
     """
     requirement = factor_observation_requirement(definition, years=years, as_of=as_of)
     dataset = requirement.dataset
@@ -5664,7 +5749,86 @@ def load_factor_observations(
                 f"{as_of.isoformat()}: {[issue.code for issue in outcome.blocking_issues]}"
             )
         found.extend(_observation_from_row(row, dataset=dataset) for row in outcome.rows)
+    _refuse_rows_that_are_not_the_answers_their_manifest_addresses(
+        found,
+        dataset=dataset,
+        build_of=lambda row: row.manifest_id,
+        addressed={
+            manifest.manifest_id: manifest.observation_digest
+            for manifest in load_factor_manifests(store, definition, years=years, as_of=as_of)
+        },
+        digest_of=observation_digest,
+    )
     return tuple(found)
+
+
+_Row = TypeVar("_Row")
+
+
+def _refuse_rows_that_are_not_the_answers_their_manifest_addresses(
+    rows: Sequence[_Row],
+    *,
+    dataset: str,
+    build_of: Callable[[_Row], str],
+    addressed: Mapping[str, str],
+    digest_of: Callable[[Sequence[_Row]], str],
+) -> None:
+    """Hold a stored cross section against the build manifest that addresses it, both ways.
+
+    Three refusals, and each one is a state the store can actually be in rather than a defensive
+    triple. All three were measured on a real store in `V2-P3-019` before this function existed;
+    two of the five tampers tried there are caught one layer down by
+    `partition_row_count_mismatch` and `partition_file_unreadable`, and the three below are the
+    three that were not caught by anything at all.
+
+    - **A build whose rows do not hash to its `observation_digest`** is the flipped sign, the
+      edited cell and the restated coverage code. The digest is over `(subject, coverage, value)`
+      -- see `domain/factor.py::FactorBuildManifest.observation_digest` for what that does and
+      does not reach -- and it is a *hashed* manifest field, so editing the stored digest to
+      match a tampered partition moves `manifest_id` and is refused by `_manifest_from_rows`
+      instead.
+    - **A build the manifest partition describes and the observation partition does not hold** is
+      a whole cross section deleted. It is caught here rather than only by the storage plane's
+      row-count check, because that check compares the file against a catalog row and this one
+      compares it against the build's own account of itself.
+    - **Rows filed under a `manifest_id` no visible build claims** is the mirror image: an
+      `as_of`'s worth of answers with no build behind them. Nothing that reads this partition can
+      say what parameters produced them, which is the state `V2-P3-002`'s manifest exists to make
+      impossible.
+
+    The comparison is by build rather than over the whole read, and that is what makes it usable
+    at all: `read_visible_at` filters on `available_time`, every row of one build carries that
+    build's own `as_of` in all four clocks, so a build is either wholly visible or wholly absent
+    and its stored rows are exactly the cross section its digest was taken over. A read narrowed
+    to some years simply sees fewer builds; it never sees half of one.
+    """
+    by_build: dict[str, list[_Row]] = {}
+    for row in rows:
+        by_build.setdefault(build_of(row), []).append(row)
+    orphans = sorted(set(by_build) - set(addressed))
+    if orphans:
+        raise FactorEngineError(
+            f"{dataset} holds rows filed under build(s) {orphans[:5]}"
+            f"{'...' if len(orphans) > 5 else ''} that no visible manifest claims; the answers "
+            "are there and nothing stored says what computed them"
+        )
+    for build, declared in sorted(addressed.items()):
+        held = by_build.get(build)
+        if held is None:
+            raise FactorEngineError(
+                f"{dataset} is missing every observation of build {build}, which its manifest "
+                "partition still describes; a build is written with its cross section, and a "
+                "partition holding one without the other was changed behind the store"
+            )
+        stored = digest_of(held)
+        if stored != declared:
+            raise FactorEngineError(
+                f"{dataset} build {build} addresses the cross section {declared!r} and the "
+                f"stored rows hash to {stored!r}; these {len(held)} row(s) are not the answers "
+                "that build produced. A factor report computed from them would be a number "
+                "nothing in this store stands behind -- rebuild over this as_of rather than "
+                "reading it"
+            )
 
 
 def load_factor_manifests(
@@ -5768,6 +5932,7 @@ def _manifest_from_rows(
         subject_digest=str(head["subject_digest"]),
         universe_count=int(str(head["universe_count"])),
         universe_digest=str(head["universe_digest"]),
+        observation_digest=str(head["observation_digest"]),
         inputs=tuple(
             FactorInputRef(
                 dataset=str(item["input_dataset"]),
@@ -5777,7 +5942,8 @@ def _manifest_from_rows(
                 withheld_row_count=int(str(item["input_withheld_rows"])),
             )
             for item in sorted(
-                rows, key=lambda cells: (str(cells["input_dataset"]), str(cells["input_year"]))
+                rows,
+                key=lambda cells: (str(cells["input_dataset"]), int(str(cells["input_year"]))),
             )
         ),
     )
@@ -6035,6 +6201,7 @@ TRANSFORM_MANIFEST_DATA_COLUMNS: Final[tuple[str, ...]] = (
     "source_factor_version",
     "source_manifest_id",
     "source_observation_digest",
+    "processed_observation_digest",
     "as_of_time",
     "code_commit",
     "winsorization_method",
@@ -6056,7 +6223,7 @@ TRANSFORM_MANIFEST_DATA_COLUMNS: Final[tuple[str, ...]] = (
 )
 """One row per transform build. Three families, and only the first is in the content address.
 
-- **The ten head columns** are `FactorTransformManifest`'s own fields (minus `schema_version`),
+- **The eleven head columns** are `FactorTransformManifest`'s own fields (minus `schema_version`),
   so `_transform_manifest_from_row` reassembles a build from them and checks that the identity it
   reproduces is the one the row was stored under. "Head" is a description of this literal and not
   a requirement on it: that decoder addresses cells by column *name*, so moving a hashed field
@@ -6084,8 +6251,8 @@ TRANSFORM_MANIFEST_PANEL_COLUMNS: Final[tuple[str, ...]] = (
     *TRANSFORM_MANIFEST_DATA_COLUMNS,
 )
 
-_TRANSFORM_MANIFEST_HEAD_COLUMNS: Final[tuple[str, ...]] = TRANSFORM_MANIFEST_DATA_COLUMNS[:10]
-"""The ten columns `FactorTransformManifest` is reassembled from -- an audit handle, not a
+_TRANSFORM_MANIFEST_HEAD_COLUMNS: Final[tuple[str, ...]] = TRANSFORM_MANIFEST_DATA_COLUMNS[:11]
+"""The eleven columns `FactorTransformManifest` is reassembled from -- an audit handle, not a
 run-time one.
 
 **Nothing in `src/` reads this.** `_transform_manifest_from_row` zips
@@ -6093,10 +6260,11 @@ run-time one.
 hashed fields could sit anywhere in the tuple and the decoder would not notice. Its one consumer
 is `tests/unit/test_factor_transform_rules.py::
 test_the_stored_head_columns_are_exactly_the_hashed_manifests_own_fields`, which reconciles the
-slice against `FactorTransformManifest`'s own field set -- so an eleventh manifest field, or a
+slice against `FactorTransformManifest`'s own field set -- so a twelfth manifest field, or a
 hashed field that stopped being stored, fails there instead of at the first read-back. That is
-what keeps `10` from being a number somebody has to remember; it is not a claim that the column
-*order* is load-bearing.
+what keeps `11` from being a number somebody has to remember; it is not a claim that the column
+*order* is load-bearing. It has already earned its keep once: `V2-P3-019` added
+`processed_observation_digest` and this slice went red until the column list followed.
 
 A slice of the tuple above rather than a second list, so the two cannot drift.
 """
@@ -6123,6 +6291,7 @@ _TRANSFORM_MANIFEST_COLUMN_KINDS: Final[Mapping[str, PanelColumnKind]] = Mapping
         "source_factor_version": "integer",
         "source_manifest_id": "string",
         "source_observation_digest": "string",
+        "processed_observation_digest": "string",
         "as_of_time": "timestamp",
         "code_commit": "string",
         "winsorization_method": "string",
@@ -6838,6 +7007,7 @@ def apply_factor_transform(
         source_factor_version=panel.definition.version,
         source_manifest_id=panel.manifest.manifest_id,
         source_observation_digest=observation_digest(observations),
+        processed_observation_digest=_UNSEALED_PROCESSED_DIGEST,
         as_of=panel.as_of,
         code_commit=code_commit,
     )
@@ -6858,23 +7028,25 @@ def apply_factor_transform(
         )
 
     if len(participants) < spec.min_cross_section:
-        return _uniform_processed_panel(
-            panel,
-            spec,
-            manifest=manifest,
-            manifest_id=manifest_id,
-            coverage="insufficient_cross_section",
-            statistics=FactorTransformStatistics(
-                participant_count=len(participants),
-                winsorized_low_count=0,
-                winsorized_high_count=0,
-                imputed_count=0,
-                lower_bound=None,
-                upper_bound=None,
-                location=None,
-                scale=None,
-            ),
-            built_at=built_at,
+        return _seal_processed_panel(
+            _uniform_processed_panel(
+                panel,
+                spec,
+                manifest=manifest,
+                manifest_id=manifest_id,
+                coverage="insufficient_cross_section",
+                statistics=FactorTransformStatistics(
+                    participant_count=len(participants),
+                    winsorized_low_count=0,
+                    winsorized_high_count=0,
+                    imputed_count=0,
+                    lower_bound=None,
+                    upper_bound=None,
+                    location=None,
+                    scale=None,
+                ),
+                built_at=built_at,
+            )
         )
 
     ordered = sorted(raw)
@@ -6890,23 +7062,25 @@ def apply_factor_transform(
 
     standardized = _STANDARDIZERS[spec.standardization](winsorized)
     if standardized is None:
-        return _uniform_processed_panel(
-            panel,
-            spec,
-            manifest=manifest,
-            manifest_id=manifest_id,
-            coverage="degenerate_cross_section",
-            statistics=FactorTransformStatistics(
-                participant_count=len(participants),
-                winsorized_low_count=low_count,
-                winsorized_high_count=high_count,
-                imputed_count=0,
-                lower_bound=lower,
-                upper_bound=upper,
-                location=None,
-                scale=None,
-            ),
-            built_at=built_at,
+        return _seal_processed_panel(
+            _uniform_processed_panel(
+                panel,
+                spec,
+                manifest=manifest,
+                manifest_id=manifest_id,
+                coverage="degenerate_cross_section",
+                statistics=FactorTransformStatistics(
+                    participant_count=len(participants),
+                    winsorized_low_count=low_count,
+                    winsorized_high_count=high_count,
+                    imputed_count=0,
+                    lower_bound=lower,
+                    upper_bound=upper,
+                    location=None,
+                    scale=None,
+                ),
+                built_at=built_at,
+            )
         )
 
     processed = dict(zip((item.subject for item in participants), standardized.values, strict=True))
@@ -6941,22 +7115,71 @@ def apply_factor_transform(
                 coverage=imputation.coverage,
             )
         )
-    return ProcessedFactorPanel(
-        definition=panel.definition,
-        spec=spec,
-        manifest=manifest,
-        observations=tuple(rows),
-        statistics=FactorTransformStatistics(
-            participant_count=len(participants),
-            winsorized_low_count=low_count,
-            winsorized_high_count=high_count,
-            imputed_count=imputed,
-            lower_bound=lower,
-            upper_bound=upper,
-            location=standardized.location,
-            scale=standardized.scale,
+    return _seal_processed_panel(
+        ProcessedFactorPanel(
+            definition=panel.definition,
+            spec=spec,
+            manifest=manifest,
+            observations=tuple(rows),
+            statistics=FactorTransformStatistics(
+                participant_count=len(participants),
+                winsorized_low_count=low_count,
+                winsorized_high_count=high_count,
+                imputed_count=imputed,
+                lower_bound=lower,
+                upper_bound=upper,
+                location=standardized.location,
+                scale=standardized.scale,
+            ),
+            built_at=built_at,
+        )
+    )
+
+
+_UNSEALED_PROCESSED_DIGEST: Final[str] = "prc_unsealed"
+"""What a draft transform manifest carries until `_seal_processed_panel` addresses its output.
+
+`_UNSEALED_MANIFEST_ID`'s twin one tier up, for the identical circularity: `processed_
+observation_digest` is a field of `FactorTransformManifest`, every processed row carries the
+`transform_manifest_id` that field moves, and `apply_factor_transform` has three exits that each
+build a whole panel. Rather than restructure all three to compute their rows before their
+manifest, each returns a *draft* -- a real panel whose manifest addresses everything except its
+own answers -- and the single seal below closes it. A placeholder that no digest function can
+produce, so a draft that escaped would be recognisable rather than plausible.
+"""
+
+
+def _seal_processed_panel(draft: ProcessedFactorPanel) -> ProcessedFactorPanel:
+    """Close a draft transform: address its answers, then re-stamp its rows with that address.
+
+    The transform plane's half of `V2-P3-019`. `FactorTransformManifest` already hashed
+    `source_observation_digest` -- what the *raw* rows it consumed were -- and had nothing at all
+    to say about the rows it produced, so `factor_proc_<key>_v<n>` was in exactly the position
+    `factor_obs_<key>_v<n>` was measured in: an ordinary Parquet file whose values could be
+    edited without moving `transform_manifest_id`, `experiment_id`, or anything a reader sees.
+    The processed tier is one of the three `openalpha factor run` reports on, so an unsealed one
+    is a third of the answer that nothing stands behind.
+
+    Both halves are here rather than at the three exits because a seal applied in three places is
+    a seal that can be forgotten in one, which is the argument `write_factor_panels` makes about
+    running every guard before the first write.
+    """
+    # Reconstructed rather than `model_copy(update=...)`, which skips validation: the sealed
+    # manifest is what every downstream identity is derived from, so it goes through the same
+    # constructor a first build does.
+    manifest = FactorTransformManifest(
+        **draft.manifest.model_dump(
+            exclude={"transform_manifest_id", "processed_observation_digest"}
         ),
-        built_at=built_at,
+        processed_observation_digest=processed_observation_digest(draft.observations),
+    )
+    manifest_id = manifest.transform_manifest_id
+    return replace(
+        draft,
+        manifest=manifest,
+        observations=tuple(
+            replace(row, transform_manifest_id=manifest_id) for row in draft.observations
+        ),
     )
 
 
@@ -7317,6 +7540,7 @@ def transform_manifest_batch(panel: ProcessedFactorPanel) -> ColumnarPanelBatch:
         "source_factor_version": [manifest.source_factor_version],
         "source_manifest_id": [manifest.source_manifest_id],
         "source_observation_digest": [manifest.source_observation_digest],
+        "processed_observation_digest": [manifest.processed_observation_digest],
         "as_of_time": [manifest.as_of],
         "code_commit": [manifest.code_commit],
         "winsorization_method": [spec.winsorization.method],
@@ -7597,6 +7821,19 @@ def load_processed_factor_observations(
             )
             if row.transform_id == spec.transform_id
         )
+    _refuse_rows_that_are_not_the_answers_their_manifest_addresses(
+        found,
+        dataset=dataset,
+        build_of=lambda row: row.transform_manifest_id,
+        addressed={
+            manifest.transform_manifest_id: manifest.processed_observation_digest
+            for manifest in load_factor_transform_manifests(
+                store, definition, years=years, as_of=as_of
+            )
+            if manifest.transform_id == spec.transform_id
+        },
+        digest_of=processed_observation_digest,
+    )
     return tuple(found)
 
 
@@ -7746,6 +7983,7 @@ def _transform_manifest_from_row(row: Sequence[object], *, dataset: str) -> Fact
         source_factor_version=int(str(cells["source_factor_version"])),
         source_manifest_id=str(cells["source_manifest_id"]),
         source_observation_digest=str(cells["source_observation_digest"]),
+        processed_observation_digest=str(cells["processed_observation_digest"]),
         as_of=as_of,
         code_commit=str(cells["code_commit"]),
     )

@@ -899,10 +899,10 @@ def test_an_input_missing_hole_is_imputed_with_the_processed_median_and_stored_a
 # `MAD_RANK_PROBE`.
 
 
-_UNREASSEMBLED_MANIFEST_COLUMNS: Final[tuple[str, ...]] = TRANSFORM_MANIFEST_DATA_COLUMNS[10:]
+_UNREASSEMBLED_MANIFEST_COLUMNS: Final[tuple[str, ...]] = TRANSFORM_MANIFEST_DATA_COLUMNS[11:]
 """Every stored transform-manifest column that no read path rebuilds an object out of.
 
-The head ten are covered by `_transform_manifest_from_row`'s own identity self-check, which is
+The head eleven are covered by `_transform_manifest_from_row`'s own identity self-check, which is
 why they were the columns a falsification already failed on. These are the rest: the declared
 policy, the census and the statistics -- exactly the columns
 `TRANSFORM_MANIFEST_DATA_COLUMNS`, `PROCESSED_CENSUS_COLUMNS` and

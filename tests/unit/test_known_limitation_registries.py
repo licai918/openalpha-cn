@@ -88,6 +88,7 @@ from openalpha_cn.backtest.factor_redundancy import KNOWN_REDUNDANCY_LIMITATIONS
 from openalpha_cn.backtest.factor_tradeability import KNOWN_TRADEABILITY_LIMITATIONS
 from openalpha_cn.domain.adjustment import KNOWN_ADJUSTMENT_LIMITATIONS
 from openalpha_cn.domain.daily_prices import KNOWN_PRICE_LIMITATIONS
+from openalpha_cn.domain.factor import KNOWN_FACTOR_SEAL_LIMITATIONS
 from openalpha_cn.domain.factor_neutralization import KNOWN_NEUTRALIZATION_LIMITATIONS
 from openalpha_cn.domain.financial_statements import KNOWN_FINANCIAL_STATEMENT_LIMITATIONS
 from openalpha_cn.domain.index_membership import KNOWN_INDEX_MEMBERSHIP_LIMITATIONS
@@ -133,6 +134,7 @@ LIMITATION_REGISTRIES: Final[dict[str, Sequence[_Limitation]]] = {
     "KNOWN_INDUSTRY_LIMITATIONS": KNOWN_INDUSTRY_LIMITATIONS,
     "KNOWN_LABEL_LIMITATIONS": KNOWN_LABEL_LIMITATIONS,
     "KNOWN_NEUTRALIZATION_LIMITATIONS": KNOWN_NEUTRALIZATION_LIMITATIONS,
+    "KNOWN_FACTOR_SEAL_LIMITATIONS": KNOWN_FACTOR_SEAL_LIMITATIONS,
     "KNOWN_SUSPENSION_LIMITATIONS": KNOWN_SUSPENSION_LIMITATIONS,
     "KNOWN_UNIVERSE_LIMITATIONS": KNOWN_UNIVERSE_LIMITATIONS,
     "KNOWN_STORAGE_LIMITATIONS": KNOWN_STORAGE_LIMITATIONS,
@@ -276,7 +278,7 @@ def test_the_registry_table_is_every_known_registry_in_the_source_tree() -> None
     }
 
     assert found == set(LIMITATION_REGISTRIES) | set(CODELESS_REGISTRIES)
-    assert len(LIMITATION_REGISTRIES) == 18
+    assert len(LIMITATION_REGISTRIES) == 19
     assert set(LIMITATION_REGISTRIES) & set(CODELESS_REGISTRIES) == set()
 
 

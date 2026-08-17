@@ -70,7 +70,9 @@ SOURCE = ROOT / "src" / "openalpha_cn"
 FILTERED_READ = "read_visible_at"
 """The `PanelStore` method that answers with a deliberately short partition."""
 
-FILTERED_READ_CALLERS: frozenset[str] = frozenset({"panel_factors.py", "panel_neutralization.py"})
+FILTERED_READ_CALLERS: frozenset[str] = frozenset(
+    {"panel_factors.py", "panel_neutralization.py", "panel_doctor.py"}
+)
 """Every `src/` file allowed to call `read_visible_at`, relative to `src/openalpha_cn`.
 
 The first entry is the factor engine -- the caller `V2-P3-002` added the method for. Its inputs
@@ -101,6 +103,27 @@ memberships and the market caps are read through `panel_ingest.load_industry_his
 refuses a partition whose newest row post-dates `as_of` rather than filtering it. So the newly
 allowlisted module reads its foreign data at a *stricter* setting than the already-allowlisted
 one reads its own.
+
+**`panel_doctor.py` (`V2-P3-019`) is the third, and its answer is the sharpest of the three
+because it is the only caller here that is not reading a partition it wrote.** `_factor_seal_check`
+takes the filtered read over the six derived partitions -- three tiers of answers and the three
+manifest partitions that address them -- and holds each build's stored cross section against the
+digest its manifest declares. A hash over a *short* cross section would be the exact failure this
+allowlist exists to prevent, so the property that makes it sound is stated rather than assumed:
+**a factor build is either wholly visible or wholly withheld.** Every write path on all three
+tiers stamps all four clocks of every row with the build's own `as_of` (see
+`panel_factors.factor_observation_batch`), so one build's rows share one `available_time` and
+`read_visible_at` can never return a proper subset of one. A read at an earlier `as_of` sees fewer
+builds; it never sees half of one, and a build the answer partition drops is dropped from the
+manifest partition in the same breath. The report therefore has nothing to reassemble and no
+interval to leave open -- which is `panel_neutralization`'s answer with the reason stated one
+level deeper, because here a short read would produce a *false accusation* rather than a missing
+row.
+
+The un-filtered door was not an option: `read_if_ready` refuses a year partition whose newest
+`available_time` post-dates `as_of`, which for a year of daily cross sections is December, so a
+health report run at any instant inside the year would have been unable to look at the plane at
+all -- which is the state `V2-P3-019` found and is fixing.
 """
 
 

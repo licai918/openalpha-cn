@@ -63,6 +63,7 @@ from openalpha_cn.domain.factor import (
     FACTOR_COVERAGE_CODES,
     FACTOR_DIRECTIONS,
     FACTOR_FAMILIES,
+    KNOWN_FACTOR_SEAL_LIMITATIONS,
     MAX_FACTOR_KEY_LENGTH,
     PERIOD_INDEXED_DATASETS,
     FactorBuildManifest,
@@ -77,8 +78,14 @@ from openalpha_cn.domain.factor import (
     FactorNote,
     FactorObservation,
     FactorRegistry,
+    cross_section_digest,
     set_digest,
     validate_factor_observation,
+)
+from openalpha_cn.domain.factor_neutralization import processed_observation_digest
+from openalpha_cn.domain.factor_transform import (
+    ProcessedFactorObservation,
+    observation_digest,
 )
 from openalpha_cn.domain.financial_statements import FINANCIAL_STATEMENT_DATASETS
 
@@ -152,6 +159,10 @@ def _manifest(**overrides: Any) -> FactorBuildManifest:
         "subject_digest": set_digest(("000001.SZ", "000002.SZ")),
         "universe_count": 8,
         "universe_digest": set_digest(("000001.SZ", "000002.SZ")),
+        "observation_digest": cross_section_digest(
+            (("000001.SZ", "computed", 1.5), ("000002.SZ", "input_missing", None)),
+            prefix="obs",
+        ),
         "inputs": (_input_ref(),),
         **overrides,
     }
@@ -759,6 +770,13 @@ _MANIFEST_FIELD_VARIATIONS: Final[tuple[tuple[str, object], ...]] = (
     ("subject_digest", set_digest(("600000.SH", "600519.SH"))),
     ("universe_count", 7),
     ("universe_digest", set_digest(("600000.SH", "600519.SH"))),
+    (
+        "observation_digest",
+        cross_section_digest(
+            (("000001.SZ", "computed", -1.5), ("000002.SZ", "input_missing", None)),
+            prefix="obs",
+        ),
+    ),
     ("inputs", (_input_ref(visible_row_count=38),)),
 )
 
@@ -839,6 +857,7 @@ def test_the_wall_clock_is_not_a_manifest_field_so_a_rebuild_reproduces_the_iden
         "subject_digest",
         "universe_count",
         "universe_digest",
+        "observation_digest",
         "inputs",
     }
     assert set(payload["inputs"][0]) == {
@@ -860,6 +879,7 @@ def test_the_wall_clock_is_not_a_manifest_field_so_a_rebuild_reproduces_the_iden
         ({"subject_count": 0}, "greater than or equal to 1"),
         ({"subject_digest": ""}, "at least 1 character"),
         ({"universe_digest": ""}, "at least 1 character"),
+        ({"observation_digest": ""}, "at least 1 character"),
     ],
 )
 def test_a_manifest_needs_a_real_commit_two_real_digests_and_at_least_one_input(
@@ -1108,3 +1128,159 @@ def _observation(**overrides: Any) -> FactorObservation:
         **overrides,
     }
     return FactorObservation(**fields)
+
+
+# --- the shared cross-section address (`V2-P3-019`) -----------------------------------------------
+
+
+_CROSS_SECTION: Final[tuple[tuple[str, str, float | None], ...]] = (
+    ("000001.SZ", "computed", 0.5),
+    ("000002.SZ", "computed", -0.25),
+    ("000003.SZ", "input_missing", None),
+)
+
+
+def test_the_address_of_a_cross_section_is_free_of_the_order_it_arrives_in() -> None:
+    """The half that keeps a rebuild writable.
+
+    `compute_factor` produces one independent observation per security, so shuffling the cross
+    section produces the same answers; an address that moved for the order would make a build
+    recomputed from unchanged inputs unwritable past `write_factor_panels`' drop guard, which is
+    the trap `FactorInputRef` records paying for once already with `batch_digest`.
+    """
+    forwards = cross_section_digest(_CROSS_SECTION)
+    backwards = cross_section_digest(tuple(reversed(_CROSS_SECTION)))
+
+    assert forwards == backwards
+    assert forwards.startswith("xs_")
+
+
+@pytest.mark.parametrize(
+    ("altered", "what"),
+    [
+        ((("000001.SZ", "computed", -0.5), *_CROSS_SECTION[1:]), "a flipped sign"),
+        ((("000001.SZ", "computed", 0.5000001), *_CROSS_SECTION[1:]), "one bit of one value"),
+        ((("000009.SZ", "computed", 0.5), *_CROSS_SECTION[1:]), "a renamed security"),
+        (_CROSS_SECTION[1:], "a deleted row"),
+        (
+            (*_CROSS_SECTION[:2], ("000003.SZ", "not_in_universe", None)),
+            "a restated coverage code on a row that carries no value",
+        ),
+    ],
+)
+def test_the_address_moves_for_every_edit_a_row_level_tamper_can_make(
+    altered: tuple[tuple[str, str, float | None], ...], what: str
+) -> None:
+    """The half the whole of `V2-P3-019` rests on, one edit at a time.
+
+    The last row is the one worth naming: `computed` -> `input_missing` moves the value with the
+    code, so it would be caught by an address over values alone. `input_missing` ->
+    `not_in_universe` does **not** -- both carry `None` -- and it is the edit that turns "this
+    security had a hole in its data" into "this security was never in the cross section", which
+    is a different claim about the same silence. An address over the value alone cannot see it;
+    this one can, and that is why the coverage code is a position rather than a nicety.
+    """
+    assert cross_section_digest(altered) != cross_section_digest(_CROSS_SECTION), what
+
+
+def test_a_cross_section_with_two_answers_for_one_security_has_no_address() -> None:
+    with pytest.raises(FactorError, match="appears more than once in this cross section"):
+        cross_section_digest((*_CROSS_SECTION, ("000001.SZ", "computed", 9.0)))
+
+
+def test_a_non_finite_value_is_refused_rather_than_given_an_address() -> None:
+    """Unreachable through the write path -- `validate_factor_observation` refuses it at both of
+    its call sites -- and refused here anyway, because minting an address for a cross section
+    nobody can reproduce is worse than raising."""
+    with pytest.raises(FactorError, match="non-finite value"):
+        cross_section_digest((("000001.SZ", "computed", float("nan")),))
+
+
+def test_the_prefix_keeps_three_tiers_of_address_from_comparing_equal() -> None:
+    """Same cells, three tiers, three addresses.
+
+    Not decoration: the seal check compares a digest it computed against a digest a manifest
+    declares, and the three planes' manifests sit in three datasets whose columns have three
+    different names. A tier tag makes "compared the right column" visible in the value itself
+    rather than resting on the caller having picked the right one.
+    """
+    tagged = {cross_section_digest(_CROSS_SECTION, prefix=tier) for tier in ("obs", "prc", "nrs")}
+
+    assert len(tagged) == 3
+    assert {digest.split("_")[0] for digest in tagged} == {"obs", "prc", "nrs"}
+
+
+def test_the_seal_limitation_registry_is_this_set() -> None:
+    """`V2-P3-019`'s three disclosures, as an equality.
+
+    Equality rather than membership for `KNOWN_ADJUSTMENT_LIMITATIONS`' reason, which
+    `tests/unit/test_known_limitation_registries.py` states in full: a membership assertion can
+    see a code that was renamed and never one that was removed.
+    """
+    assert {item.code for item in KNOWN_FACTOR_SEAL_LIMITATIONS} == {
+        "a_sealed_cross_section_addresses_its_values_and_not_its_window_columns",
+        "a_seal_proves_the_rows_are_the_builds_own_and_not_that_the_build_was_right",
+        "the_seal_reaches_only_the_six_derived_partitions",
+    }
+    assert all(item.detail.strip() for item in KNOWN_FACTOR_SEAL_LIMITATIONS)
+
+
+def test_the_first_disclosure_is_measured_rather_than_asserted() -> None:
+    """The residue the registry declares, demonstrated rather than described.
+
+    A build's window columns and its `input_row_count` are outside the address, so two
+    observations that differ only in those hash the same. That is the boundary
+    `a_sealed_cross_section_addresses_its_values_and_not_its_window_columns` names, and a
+    disclosure nobody exercised is a sentence that can quietly stop being true in either
+    direction -- if the payload were widened this test goes red and the registry entry has to go
+    with it.
+    """
+    honest = _observation()
+    rewritten = _observation(input_row_count=99, input_session_first=date(2026, 1, 2))
+
+    assert honest.value == rewritten.value
+    assert cross_section_digest(
+        ((honest.subject, honest.coverage, honest.value),)
+    ) == cross_section_digest(((rewritten.subject, rewritten.coverage, rewritten.value),))
+
+
+def test_the_three_tier_digests_are_this_canonicalisation_under_their_own_prefixes() -> None:
+    """ "One canonicalisation" as a measurement, in both directions.
+
+    Forwards: each tier's digest function equals `cross_section_digest` over the same triples
+    under that tier's prefix, so extracting the primitive moved **no stored address** --
+    `source_observation_digest` values written before `V2-P3-019` still compare equal to the ones
+    written after it, which is what let the extraction be a refactor rather than a migration.
+    Backwards: the three disagree with each other on identical cells, which is
+    `test_the_prefix_keeps_three_tiers_of_address_from_comparing_equal` at the level the planes
+    actually call.
+    """
+    raw = FactorObservation(
+        subject="000001.SZ",
+        as_of=AS_OF,
+        value=0.5,
+        coverage="computed",
+        factor_id="fct_probe",
+        manifest_id="fmn_probe",
+        input_row_count=2,
+        input_session_first=date(2026, 1, 8),
+        input_session_last=date(2026, 1, 9),
+    )
+    processed = ProcessedFactorObservation(
+        subject="000001.SZ",
+        as_of=AS_OF,
+        value=0.5,
+        coverage="processed",
+        transform_id="ftx_probe",
+        transform_manifest_id="ftm_probe",
+        source_factor_id="fct_probe",
+        source_manifest_id="fmn_probe",
+        source_coverage="computed",
+    )
+    cells = (("000001.SZ", "computed", 0.5),)
+
+    assert observation_digest((raw,)) == cross_section_digest(cells, prefix="obs")
+    assert processed_observation_digest((processed,)) == cross_section_digest(
+        (("000001.SZ", "processed", 0.5),), prefix="prc"
+    )
+    assert observation_digest((raw,)) != cross_section_digest(cells, prefix="prc")

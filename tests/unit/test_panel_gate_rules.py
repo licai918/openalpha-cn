@@ -203,6 +203,11 @@ def test_the_gate_s_verdict_on_every_health_code_is_written_out() -> None:
         # horizon. A block would permanently refuse every panel reaching 2015-09-03/04 or
         # 2020-01-31; it rides on `notices` instead.
         "calendar_lookahead_in_horizon": False,
+        # The three derived factor tiers held to their own build manifests (`V2-P3-019`).
+        # Both block: a broken seal is a cleared read that succeeds and returns different
+        # numbers, which is one notch sharper than `domain_rebuild_refused`'s raise.
+        "factor_seal_broken": True,
+        "factor_build_unaddressed": True,
     }
 
 
@@ -237,6 +242,11 @@ def test_a_warning_blocks_this_gate_and_a_notice_does_not() -> None:
     refuses, or a row about an event that has not happened -- and a gate that let those through
     would clear precisely the panels Tasks 29 and 30 were about, the 2026 `suspend_d` partition
     the P1 acceptance found, and the `stock_basic` row P2's product acceptance injected.
+
+    The `blocking` count moved from 13 to 15 with `V2-P3-019`'s two derived-plane codes, which
+    are the first two this repository *concludes* at that severity rather than passing through
+    from `evaluate_readiness`; see `panel_doctor.HEALTH_CODE_SEVERITY` for why nothing weaker
+    than `blocking` would be honest about a read that succeeds and returns different numbers.
     """
     blocked_by_severity = {
         severity: {
@@ -247,7 +257,7 @@ def test_a_warning_blocks_this_gate_and_a_notice_does_not() -> None:
         for severity in HEALTH_SEVERITIES
     }
 
-    assert len(blocked_by_severity["blocking"]) == 13
+    assert len(blocked_by_severity["blocking"]) == 15
     assert blocked_by_severity["warning"] == {
         "subject_set_disagreement",
         "close_disagreement",
@@ -271,7 +281,7 @@ def test_the_gate_s_own_refusals_are_a_closed_set_disjoint_from_the_health_codes
 
 
 def test_every_code_this_gate_can_issue_files_under_one_of_the_report_s_headings() -> None:
-    """`HEALTH_CODE_CATEGORY` is total over the twenty-four health codes and silent about the one
+    """`HEALTH_CODE_CATEGORY` is total over the twenty-six health codes and silent about the one
     the gate invented, so a facet grouping blocks by category -- `V2-P1-016`'s REST surface --
     would have had to special-case `unverified_daily_coverage` or drop it. It is filed under
     `unanswerable`, the heading `panel_doctor` already gives to a question that could not be
@@ -299,7 +309,7 @@ def test_every_blocking_code_produces_a_block_and_every_notice_produces_none() -
     """One report carrying one finding of every declared code, driven through the selector.
 
     The totality of the table is proved here because a per-code injection into a real store is
-    a slow way to prove twenty-four entries; the injections prove separately that the codes reach it
+    a slow way to prove twenty-six entries; the injections prove separately that the codes reach it
     from a store. An earlier version of this docstring claimed `empty_requirement` was
     unreachable through `panel_health_report` "because the requirement builders never state an
     empty expectation". That is false and the review measured it: a price requirement built
@@ -314,7 +324,7 @@ def test_every_blocking_code_produces_a_block_and_every_notice_produces_none() -
     assert {block.code for block in blocks} == {
         code for code, blocks_it in GATE_CODE_BLOCKS.items() if blocks_it
     }
-    assert len(blocks) == 20
+    assert len(blocks) == 22
     assert {block.category for block in blocks} == {
         "missing",
         "stale",

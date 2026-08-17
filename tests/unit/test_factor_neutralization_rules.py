@@ -606,8 +606,10 @@ def test_the_stored_head_columns_are_exactly_the_hashed_manifests_own_fields() -
     """The audit handle `_NEUTRALIZATION_MANIFEST_HEAD_COLUMNS` exists for.
 
     Nothing in `src/` reads that slice -- the decoder addresses cells by name -- so its only
-    consumer is this reconciliation. A thirteenth manifest field, or a hashed field that stopped
-    being stored, fails here instead of at the first read-back.
+    consumer is this reconciliation. A fourteenth manifest field, or a hashed field that stopped
+    being stored, fails here instead of at the first read-back. It has already fired once:
+    `V2-P3-019` added `neutralized_observation_digest` and this test went red until the stored
+    column list followed it.
 
     `as_of` is stored as `as_of_time`, which is `FACTOR_MANIFEST_DATA_COLUMNS`' own convention
     and `TRANSFORM_MANIFEST_DATA_COLUMNS`' after it: a bare `as_of` in a panel partition reads
@@ -618,8 +620,8 @@ def test_the_stored_head_columns_are_exactly_the_hashed_manifests_own_fields() -
     }
 
     assert set(_NEUTRALIZATION_MANIFEST_HEAD_COLUMNS) == hashed
-    assert len(_NEUTRALIZATION_MANIFEST_HEAD_COLUMNS) == 12
-    assert NEUTRALIZATION_MANIFEST_DATA_COLUMNS[:12] == _NEUTRALIZATION_MANIFEST_HEAD_COLUMNS
+    assert len(_NEUTRALIZATION_MANIFEST_HEAD_COLUMNS) == 13
+    assert NEUTRALIZATION_MANIFEST_DATA_COLUMNS[:13] == _NEUTRALIZATION_MANIFEST_HEAD_COLUMNS
 
 
 def test_the_census_columns_are_derived_from_the_vocabulary_in_its_declared_order() -> None:

@@ -160,7 +160,7 @@ from typing import Final, Literal, Self, get_args
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
 from openalpha_cn.domain._identity import stable_model_id
-from openalpha_cn.domain.factor import FactorNote, validate_notes
+from openalpha_cn.domain.factor import FactorError, FactorNote, cross_section_digest, validate_notes
 from openalpha_cn.domain.factor_transform import (
     PROCESSED_COVERAGE_CODES,
     PROCESSED_VALUE_CODES,
@@ -1002,12 +1002,11 @@ def processed_observation_digest(observations: Sequence[ProcessedFactorObservati
             "is two answers to one question, and a digest that hashed both would give two "
             "different cross sections one address"
         )
-    payload = sorted([item.subject, item.coverage, item.value] for item in observations)
     try:
-        canonical = json.dumps(
-            payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False
-        ).encode()
-    except ValueError as error:
+        return cross_section_digest(
+            ((item.subject, item.coverage, item.value) for item in observations), prefix="prc"
+        )
+    except FactorError as error:
         offending = sorted(
             item.subject
             for item in observations
@@ -1020,7 +1019,6 @@ def processed_observation_digest(observations: Sequence[ProcessedFactorObservati
             "reproduce. validate_processed_factor_observation refuses such a row at both of its "
             "call sites, so it reached this panel through a subclass that overrode __post_init__"
         ) from error
-    return f"prc_{sha256(canonical).hexdigest()[:24]}"
 
 
 # --- what one neutralisation was made of ---------------------------------------------------------
@@ -1079,6 +1077,20 @@ class FactorNeutralizationManifest(BaseModel):
     """
     source_processed_digest: str = Field(min_length=1, max_length=64)
     characteristic_digest: str = Field(min_length=1, max_length=64)
+    neutralized_observation_digest: str = Field(min_length=1, max_length=64)
+    """`neutralized_observation_digest` of the residuals this application produced.
+
+    `FactorBuildManifest.observation_digest` and
+    `FactorTransformManifest.processed_observation_digest`, at the top of the chain. This contract
+    already addressed **both** of its inputs and, like the two below it, said nothing about its
+    output -- and here that gap was the widest of the three, because a neutralised residual is
+    what `openalpha factor run`'s acceptance verdict is computed from and no tier above exists to
+    address it by accident.
+
+    Hashed rather than recorded; see `FactorBuildManifest.observation_digest` for why a digest
+    outside the identity is a column a tamperer edits in the same pass as the values it describes.
+    `panel_neutralization._seal_neutralized_panel` computes it and
+    `panel_neutralization.load_neutralized_factor_observations` checks it."""
     as_of: datetime
     code_commit: str = Field(min_length=7, max_length=64)
 
@@ -1309,6 +1321,49 @@ def validate_neutralized_factor_observation(observation: NeutralizedFactorObserv
             f"{observation.subject} at {observation.as_of.isoformat()} carries industry_code "
             f"{observation.industry_code!r}; a blank group name is not a group"
         )
+
+
+def neutralized_observation_digest(observations: Sequence[NeutralizedFactorObservation]) -> str:
+    """A content address for the residual cross section a neutralisation produced.
+
+    `processed_observation_digest`'s twin one tier further up, and the tier it closes is the top
+    one: nothing consumes a neutralised panel inside this repository, so unlike the two below it
+    this cross section has no manifest above it that could have addressed it by accident.
+    `V2-P3-019` measured what that meant -- `factor_neut_<key>_v<n>` was a Parquet file whose
+    residuals could be edited with `neutralization_manifest_id` and the sealed `experiment_id`
+    both unmoved, and the neutralised tier is the one `openalpha factor run`'s acceptance verdict
+    is *read off*: it is the tier the attribution grid compares the other two against.
+
+    The `(subject, coverage, value)` triple rather than the whole row, matching its two siblings
+    exactly. `industry_code` is deliberately outside it for the reason the raw tier's window
+    columns are: it is a label on the regression a residual came out of rather than the residual,
+    and the same disclosure covers both.
+    """
+    subjects = [item.subject for item in observations]
+    if len(set(subjects)) != len(subjects):
+        duplicates = sorted({name for name in subjects if subjects.count(name) > 1})
+        raise FactorNeutralizationError(
+            f"{duplicates} appears more than once in the neutralised panel; a duplicated security "
+            "is two answers to one question, and a digest that hashed both would give two "
+            "different cross sections one address"
+        )
+    try:
+        return cross_section_digest(
+            ((item.subject, item.coverage, item.value) for item in observations), prefix="nrs"
+        )
+    except FactorError as error:
+        offending = sorted(
+            item.subject
+            for item in observations
+            if item.value is not None and not math.isfinite(item.value)
+        )
+        raise FactorNeutralizationError(
+            f"{offending} carry a non-finite residual, so this cross section has no content "
+            "address: the canonical form this digest hashes refuses one, and hashing a "
+            "substitute would mint an address for a cross section nobody can reproduce. "
+            "validate_neutralized_factor_observation refuses such a row at both of its call "
+            "sites, so it reached this panel through a subclass that overrode __post_init__"
+        ) from error
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

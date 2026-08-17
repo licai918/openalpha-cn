@@ -84,14 +84,17 @@ from openalpha_cn.domain.factor import (
     FactorField,
     FactorObservation,
 )
+from openalpha_cn.domain.factor_transform import observation_digest
 from openalpha_cn.domain.panel_batch import ColumnarPanelBatch, PanelColumn, TimelineColumns
 from openalpha_cn.panel.catalog import ReadinessRequirement
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import (
+    _UNSEALED_MANIFEST_ID,
     REVERSAL_1D,
     FactorEngineError,
     FactorPanel,
     FactorWindow,
+    _refuse_rows_that_are_not_the_answers_their_manifest_addresses,
     compute_factor,
     factor_manifest_dataset,
     factor_observation_dataset,
@@ -715,11 +718,6 @@ _IDENTITY_EXEMPT_ARGUMENTS: Final[dict[str, str]] = {
         "the wall clock, deliberately out of the content address so a rebuild of an unchanged "
         "factor reproduces its ID; recorded as the partition's fetched_at instead"
     ),
-    "evaluators": (
-        "a substitution seam whose production value is this module's own FACTOR_EVALUATORS, "
-        "which code_commit stands for. A callable cannot be canonically hashed, and a digest of "
-        "its name would be a hash that agrees for two different lambdas"
-    ),
     "requirements": (
         "decides whether a read is permitted rather than what it returns -- a difference that "
         "mattered blocks the read. The part that does decide the answers is `years`, which "
@@ -739,6 +737,17 @@ _OTHER_DEFINITION: Final[FactorDefinition] = _probe(
     key="probe_other_definition", lookback_sessions=3, max_window_sessions=3
 )
 
+_STUB_EVALUATORS: Final[dict[str, Any]] = {
+    REVERSAL_1D.qualified_key: lambda window: 1.0,
+    _OTHER_DEFINITION.qualified_key: lambda window: 1.0,
+}
+"""One evaluator table both sides of the determinant audit are built with.
+
+`_OTHER_DEFINITION` is a probe the shipped table has no evaluator for, which is why a substitution
+is needed at all; making it the *baseline's* table too is what keeps the audit from proving the
+evaluator swap instead of the argument under test. See the audit's own docstring."""
+
+
 _DETERMINANT_CASES: Final[tuple[tuple[str, dict[str, Any]], ...]] = (
     ("definition", {"definition": _OTHER_DEFINITION}),
     ("as_of", {"as_of": EARLY_WINDOW}),
@@ -746,8 +755,21 @@ _DETERMINANT_CASES: Final[tuple[tuple[str, dict[str, Any]], ...]] = (
     ("universe", {"universe": frozenset({"000001.SZ"})}),
     ("code_commit", {"code_commit": "0000000"}),
     ("date_timezone", {"date_timezone": "UTC"}),
+    ("evaluators", {"evaluators": {REVERSAL_1D.qualified_key: lambda window: 0.5}}),
 )
-"""Every `compute_factor` argument that **must** move `manifest_id`, and one way to move it."""
+"""Every `compute_factor` argument that **must** move `manifest_id`, and one way to move it.
+
+**`evaluators` moved out of the exemption table in `V2-P3-019`, and the move is the point rather
+than tidying.** Its written exemption was "a substitution seam whose production value is this
+module's own `FACTOR_EVALUATORS`, which `code_commit` stands for. A callable cannot be canonically
+hashed" -- every clause of which is still true about the *callable* and none of which was ever
+true about its **output**. `FactorBuildManifest.observation_digest` addresses the answers, so an
+evaluator that computes different numbers from the same rows now moves `manifest_id`, and the
+exemption was the last place in this audit where "decides the answers" and "reaches the identity"
+came apart. The substitution here is a constant, so every observation's value moves at once; the
+sharper version -- the shipped formula with its sign flipped, holding every coverage code and
+every window fixed -- is
+`test_the_manifest_addresses_the_answers_and_moves_when_one_of_them_moves`."""
 
 
 @pytest.mark.parametrize(("argument", "overrides"), _DETERMINANT_CASES)
@@ -759,17 +781,17 @@ def test_every_determinant_of_this_build_moves_the_manifest_id(
     Varying the fields a *model declares* cannot show that the model declares everything that
     decides the output; this varies the **function's own inputs** instead, which is the only
     place the missing determinant could have been seen.
+
+    **The baseline takes the same substituted evaluators as the varied build**, and since
+    `V2-P3-019` that is load-bearing rather than tidy. It used to build the baseline with the
+    shipped table and the varied one with the stubs -- harmless while `evaluators` reached no
+    identity, and *vacuous* the moment `observation_digest` put the answers inside `manifest_id`:
+    every case would then have moved the ID through the evaluator swap alone, so all seven would
+    pass against a manifest that had stopped covering the argument each is named after. One
+    substitution, both sides, and the `evaluators` row varies it deliberately on top.
     """
-    baseline = _compute(store, panel)
-    varied = _compute(
-        store,
-        panel,
-        evaluators={
-            REVERSAL_1D.qualified_key: lambda window: 1.0,
-            _OTHER_DEFINITION.qualified_key: lambda window: 1.0,
-        },
-        **overrides,
-    )
+    baseline = _compute(store, panel, evaluators=_STUB_EVALUATORS)
+    varied = _compute(store, panel, **{"evaluators": _STUB_EVALUATORS, **overrides})
 
     assert varied.manifest.manifest_id != baseline.manifest.manifest_id, argument
 
@@ -1632,3 +1654,92 @@ def test_the_stored_observation_partition_passes_the_stores_own_readiness_contra
     assert readiness.issues == ()
     assert readiness.checks_waived == ("required_dates", "required_subjects", "max_staleness")
     assert readiness.row_count == len(panel.securities)
+
+
+# --- the seal, and the placeholder that makes it constructible (`V2-P3-019`) ----------------------
+
+
+def test_no_observation_of_a_computed_panel_carries_the_unsealed_placeholder(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """`compute_factor`'s one provisional value must not survive the call that creates it.
+
+    `FactorBuildManifest.observation_digest` is a field, so the manifest cannot exist until the
+    cross section does -- and every observation carries the `manifest_id` that field moves. One of
+    the two has to be provisional for the length of the function, and the placeholder is the half
+    that cannot reach the address, because the digest is over `(subject, coverage, value)` and
+    never mentions an identity.
+
+    Asserted against the module constant rather than against the string, so renaming the constant
+    cannot quietly retire this check -- and asserted over *every* row rather than the first,
+    because the re-stamp is a comprehension and a comprehension can be wrong for one branch of the
+    classifier: the fixture's cross section carries `computed`, `not_in_universe` and
+    `insufficient_history` rows, and the three come out of different `return` statements.
+    """
+    built = _compute(store, panel, universe=frozenset(panel.securities[:-1]))
+    stamped = {observation.manifest_id for observation in built.observations}
+
+    assert stamped == {built.manifest.manifest_id}
+    assert _UNSEALED_MANIFEST_ID not in stamped
+    assert len({observation.coverage for observation in built.observations}) > 1
+
+
+def test_the_manifest_addresses_the_answers_and_moves_when_one_of_them_moves(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """The field the whole of `V2-P3-019` rests on, at the layer that mints it.
+
+    Two builds over the same partitions with the same parameters and *different answers* used to
+    share a `manifest_id`; the substitution seam `compute_factor` already has for tests is what
+    makes that reachable without editing a file. The evaluator is the only thing that differs, so
+    every other determinant -- the cross section, the universe, the inputs, the commit -- is held
+    fixed and the identity still has to move.
+
+    `code_commit` would also have moved it and is not what is being measured: the point is that
+    the *numbers* reach the address, not that a second determinant exists.
+    """
+    honest = _compute(store, panel)
+    negated = _compute(
+        store,
+        panel,
+        evaluators={REVERSAL_1D.qualified_key: lambda window: -_reversal(window)},
+    )
+
+    assert honest.manifest.observation_digest != negated.manifest.observation_digest
+    assert honest.manifest.manifest_id != negated.manifest.manifest_id
+    assert honest.manifest.subject_digest == negated.manifest.subject_digest
+    assert honest.manifest.inputs == negated.manifest.inputs
+
+
+def _reversal(window: Any) -> float:
+    """`reversal_1d`'s own arithmetic over the fixture's closes, so the negation above is a
+    changed *answer* rather than a changed shape: same coverage codes, same windows, opposite
+    sign."""
+    closes = window.series(DAILY_DATASET, "close")
+    return float(closes[-1] / closes[-2] - 1.0)
+
+
+def test_a_manifest_describing_a_build_whose_rows_are_gone_is_refused(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """The direction the loader cannot reach through a tampered file on a one-build store.
+
+    `_refuse_rows_that_are_not_the_answers_their_manifest_addresses` checks orphaned rows first,
+    so on a store holding a single build any tamper that empties the observation side also
+    orphans nothing and is caught by the row-count check one layer down instead. The rule still
+    has to hold -- a partition can hold two builds and lose one -- so it is exercised directly,
+    with the same inputs the loader would hand it.
+
+    Through the real helper rather than a re-implementation: a test that restated the comparison
+    would pass while the loader called something else.
+    """
+    built = _compute(store, panel)
+
+    with pytest.raises(FactorEngineError, match="is missing every observation of build"):
+        _refuse_rows_that_are_not_the_answers_their_manifest_addresses(
+            (),
+            dataset=OBSERVATIONS,
+            build_of=lambda row: row.manifest_id,
+            addressed={built.manifest.manifest_id: built.manifest.observation_digest},
+            digest_of=observation_digest,
+        )

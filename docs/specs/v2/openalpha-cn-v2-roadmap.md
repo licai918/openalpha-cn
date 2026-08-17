@@ -205,6 +205,7 @@ P3 结束即可独立使用（Jupyter 直连面板 + 因子）
 | `V2-P3-016` | **指数点位序列数据集 + 面板可达的市场收益**（`V2-P3-013` 的残差/特质波动的硬前置，见下方小节） | 技 | P1 存储契约 | `013` 实测：15 个 descriptor 里**没有任何指数点位**（`index_weight` 是成分权重不是点位），且 `FactorWindow` 是单标的的 —— 求值器**按类型**够不到市场序列 | S16 |
 | `V2-P3-017` | **扣非净利列进入统计投影**（`V2-P3-009` 的 EPcut 的硬前置，见下方小节） | 技 | `V2-P1-011` 存储契约 | `009` 复审实测：四个投影的 10 / 7 / 5 / 11 列里**没有扣非净利**，而端点**直接服务 `profit_dedt` 本身**（把它加进投影就读得回来，101 只票）。代价是每个已存分区的 schema + 以真实行钉住字段列表的契约测试**都要重写**；**不是**折叠/拒绝口径的重新定价 —— 同一批原始行量两遍，折叠行数、歧义 filing 数、既有 11 列的逐列拒绝数**一字未变** | S16 |
 | `V2-P3-018` | **`FactorCoverage` 第六个码：把「这只票的这次 filing 有歧义」变成单票覆盖码而不是整 build 拒绝**（`V2-P3-009`..`011` 共用的墙，见下方小节） | 技 | `V2-P3-002` 存储契约 | 已交付 `ambiguous_filing`，插在 `insufficient_history` 与 `input_missing` **之间**（该位置就是 `_classify` 的判定优先级，由一条读 AST 的审计对账）。标记按 `(subject, period)` 记在 `_DatasetReading` 上，只对**窗口真的覆盖到那一期**的票生效；会话轴一字未动，第二行照旧拒绝。**schema 迁移**：manifest 分区 27→28 列、transform manifest 34→35 列，旧分区在 readiness 上以 `field_missing` 拒读而不是错位解码 —— 因子分区是派生物、`manifest_id` 使其可重建，`storage/migrations.py` 只管 `state.sqlite3`。**身份**：`transform_id` 移动（覆盖码词表就是 `MissingValuePolicy` 的字段集，在 `FactorTransformSpec` 的哈希载荷里），19 个 `factor_id` 一个没动，两边都用 `04c45b8` 的字面量钉住 | S16 |
+| `V2-P3-019` | **给已存因子截面盖上它自己答案的内容地址**（P3 产品验收的 Critical-1，见下方小节） | 技 | `V2-P3-002`/`003`/`004` 存储契约 | 实测：把 `factor_obs_reversal_1d_v1/2026/data.parquet` 全部 16 行的值翻号、删掉 `runtime/experiments`、跑真的 `openalpha factor run` —— `mean_ic` 从 `+1.0` 变成 `-1.0`、`mean_spread` 跨过零，`experiment_id` **逐字节相同**，退出码 0，全链无拒绝。根因三条、各自封堵一条：① build manifest 对**输入**和**标的集合**取摘要、从不对**答案**取摘要 —— `FactorBuildManifest.observation_digest` 及其两个孪生 `processed_observation_digest` / `neutralized_observation_digest` 补上，且是**进身份的**字段而不是 `FactorInputProvenance` 那种「记录但不寻址」（后者会被篡改者与它描述的值一起改掉，进了 `manifest_id` 才由解码器已有的身份自检来守）；② 唯一可能开火的守卫「同 `experiment_id` 两个 `content_digest`」**是有状态的**，只在本机先跑过诚实版本时才生效 —— 面板上的封缄是无状态的；③ `panel doctor` 按**名字**拒绝因子数据集（无发布节奏），P2 建的 fail-closed 闸门止步于原始数据平面。**不给 `DATASET_CADENCE` 加条目**（派生名按因子铸造、不可枚举），改为一条 `derived` 节奏 + 谓词，并新增两个 **blocking** 码 `factor_seal_broken` / `factor_build_unaddressed`。**分层决定了设计**：`panel_doctor` 的兄弟集被等号钉死，不能 import 它审计的三个平面，所以 `cross_section_digest` 落在 `domain/`，`FACTOR_PLANE_SEALS` 以数据声明平面形状、由一条同时 import 两边的运行期审计对账 | S16, D8 |
 
 **闸门**：每个因子同时出三档报告；因子合同测试使用冻结股票池/日历/公司行动/修正，证明 PIT 可见性与确定性取值；P2 红队测试仍全绿。
 
@@ -1940,3 +1941,98 @@ neutralized 与 raw 相关恰 `0.0`（`distinct`）。
 身份是一次 `json.dumps` 加一次 sha256。
 ADR-0003 因此**没有被重新打开**，也不需要第七条同类结论 —— 没有工作负载可谈。
 **运行时依赖仍是九个。**
+
+### `V2-P3-019`（2026-08-17 立并交付）：一次行级 Parquet 篡改曾经变成一份看起来正常的因子报告
+
+P3 产品验收的 Critical-1，也是本项目第十四条「一条声明的安全性质被实测证伪」的记录 ——
+而这一条证伪的是**「不可变制品」这个词本身**。
+
+#### 实测
+
+翻转 `factor_obs_reversal_1d_v1/2026/data.parquet` 全部 16 行的值，删掉 `runtime/experiments`
+（这样没有任何已存答案能反驳新答案），再跑真的 `openalpha factor run`：
+
+| | 诚实 store | 篡改 store |
+|---|---|---|
+| `mean_ic`（raw） | `+1.0` | `-1.0` |
+| `mean_spread` | `+0.00812` | `-0.00794` |
+| `experiment_id` | 一个串 | **同一个串** |
+| 退出码 | 0 | 0 |
+| 有无拒绝 | — | **无** |
+
+`subject_digest`、`universe_digest`、`input_partition_hash`、五个 `census_*` 在两个 store 里
+**逐字节相同**，因为它们描述的都是这次 build **读了什么**，而不是它**说了什么**。
+
+#### 摘要盖在哪一层：进 `manifest_id`，不是记录在旁边
+
+这是一条判断而不是顺手。摘要若在 `manifest_id` 之外，它就是一列篡改者会与它所描述的值
+**在同一次改写里一起改掉**的列 —— 两个分区各自自洽、每个身份都不动，等于把同一个洞挪到隔壁表。
+进了 `manifest_id`，`panel_factors._manifest_from_rows` 已有的「重装出来的身份必须等于行被归档
+的那个身份」就顺带守住了摘要列本身。`FactorInputProvenance` 的 `batch_digest` 被移**出**身份是
+相反方向的同一条规则：**当且仅当一个字段是内容的性质时，它才属于内容地址** —— 而摘要就是内容。
+
+`V2-P3-015` 踩过的「按字节比较把内容相同的重跑判成冲突」在这里不成立：摘要打的是**内容**
+（标的、覆盖码、值），用 `set_digest` 与 `stable_model_id` 同一套规范化，没有墙钟、没有文件布局、
+没有 provider 批次。同样输入的重算逐字重现它，所以 `manifest_id` 仍可重现，
+`write_factor_panels` 的丢弃守卫仍有重建通路。
+
+#### 摘要覆盖什么
+
+`(subject, coverage, value)` 三元组 —— 值**与**覆盖码，因为把 `computed` 改成 `input_missing`
+必须被抓到（`validate_factor_observation` 强制非 `computed` 码带 `None`，所以这种改动同时动两个
+位置），而把 `input_missing` 改成 `not_in_universe` **只动覆盖码**，这正是覆盖码必须是一个位置
+而不是点缀的原因。窗口列与 `input_row_count` 在地址之外，且这一残留是**披露**而不是推断：
+`KNOWN_FACTOR_SEAL_LIMITATIONS` 三条分别说明它覆盖到哪、它只证明「行是那个 build 自己的」
+而不证明「那个 build 是对的」、以及它只够到六个派生分区。
+
+#### `panel doctor` 怎么延伸到因子平面：不给 `DATASET_CADENCE` 加条目
+
+`V2-P3-002` 当时说「派生数据集没有诚实的 cadence」，评审确认「洞是响亮的不是静默的」。
+到 `V2-P3-019` 这个洞不再响亮了：拒绝发生在**数据集名字**上，后面的一切从来没有跑过 ——
+够不到一个平面的闸门不是一个响亮的洞，是一个有借口的缺席闸门。
+
+两条出路只有一条诚实。**逐因子往 `DATASET_CADENCE` 里加条目写不出来** —— 那张表的全部价值在于
+一条测试断言「`panel_ingest` 写的每个数据集都在里面」，而派生名按 (因子 × 档位) 铸造、契约上无界，
+通配符会终结这张表存在的理由。所以是**一条 `derived` 节奏 + 谓词**：它不是假的排期，
+`Cadence` 另外五个成员各自蕴含一个界限，这一个蕴含界限的**不存在**，写在
+`FreshnessPolicy.basis` 上并在下游显示为 `checks_waived`。`event_driven` 是最接近的误选并被拒绝 ——
+它的意思是「没有排期，某一年没有行是正常的一年」，那是关于一个**不规律发布的上游**的断言，
+而派生分区根本没有上游。
+
+而因子平面真正需要这份报告做的**根本不是新鲜度判定**：报告其余每一项检查都是「取来的面板落后了」
+或「与兄弟数据集互相矛盾」，派生平面的故障模式在**种类**上不同 —— 一个已存的答案不再是它的
+manifest 所寻址的那个答案。所以它是**单独一条体检路径**（`_factor_seal_check`），
+因为它是一个单独的问题。
+
+#### 分层是设计的决定因素
+
+`tests/unit/test_panel_ingest_import_isolation.py::test_panel_doctor_joins_domain_panel_and_panel_ingest_and_nothing_else`
+以**等号**钉住 `panel_doctor` 的兄弟集，所以 doctor 不能 import 它要审计的三个平面 ——
+这不是需要绕开的障碍，正是 `panel_gate`、`panel_view` 乃至 HTTP app 能 import doctor 而不拖进
+三个因子平面的原因。于是：`cross_section_digest` 落在 `domain/`（写地址的引擎与重算地址的报告
+都可以看的地方），`FACTOR_PLANE_SEALS` 把平面形状声明成**数据**，再由一条**同时 import 两边**
+的运行期审计对账 —— 这正是本仓库对「表与实现漂移」的标准答案。
+
+`panel_doctor` 因此成为 `FILTERED_READ_CALLERS` 的第三个成员，它的理由也是三个里最锋利的：
+它是唯一一个读**不是自己写的**分区的调用者，而一个**短**截面的哈希会变成**冤枉**而不是缺行。
+使它成立的性质写死在写路径上 —— 三档的每一条写路径都把一行的四个时钟全部盖成该 build 自己的
+`as_of`，所以一个 build 要么整体可见、要么整体被挡，`read_visible_at` 永远不会返回它的真子集。
+
+#### 已存分区怎么办：拒读并重建
+
+与 `V2-P3-018` 同一个答案，早一列。manifest 分区 28→29 列、transform manifest 35→36 列、
+neutralisation manifest 各加一列，旧 build 写的分区在 readiness 上以 `field_missing` 拒读而不是
+错位解码。**这正是 `manifest_id` 的用途**：因子分区是派生物。
+
+#### 哪些身份移动了、哪些没有（实测）
+
+19 个 `factor_id` **一个没动**（`FactorDefinition` 的字段集一字未改）；
+`manifest_id`、`transform_manifest_id`、`neutralization_manifest_id`、`experiment_id` 全部移动 ——
+夹具上的 `experiment_id` 从 `fxp_d6b0c8465d4e5826700fdddf` 变成 `fxp_42ae1c6d22db08f5308402a6`。
+**抽出共用原语没有移动任何已存地址**：`observation_digest` 与 `processed_observation_digest`
+保留各自的 `obs_` / `prc_` 前缀并委托给 `cross_section_digest`，一条测试双向钉住这个逐字节等式。
+
+#### 数值栈
+
+没有任何数值数组归约：地址是一次 `json.dumps` 加一次 sha256，比较是字符串相等。
+ADR-0003 **没有被重新打开**。**运行时依赖仍是九个。**
