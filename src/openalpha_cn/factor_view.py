@@ -186,8 +186,11 @@ from openalpha_cn.backtest.factor_redundancy import (
 )
 from openalpha_cn.backtest.factor_tradeability import (
     FactorTradeabilityError,
+    PeriodTradeability,
+    SessionLiquidity,
     TradeabilitySpec,
     TradeabilityStudy,
+    liquidity_from_amount,
 )
 from openalpha_cn.domain.adjustment import AdjustmentHistory
 from openalpha_cn.domain.daily_prices import DailyBar
@@ -1140,6 +1143,7 @@ def _tier_report(
     survival_study = RedundancyStudy(request.survival, identities=())
     points: list[ICPoint] = []
     periods: list[PeriodPortfolio] = []
+    tradeability: list[PeriodTradeability] = []
     survival_points: list[RedundancyPoint] = []
     builds: set[str] = set()
     for instant in as_ofs:
@@ -1154,8 +1158,16 @@ def _tier_report(
         section = _cross_section(tier=tier, as_of=instant, rows=tier_rows, labels=labels)
         try:
             points.append(ic_study.measure(section))
-            periods.append(quantile_study.measure(section, bars=_bars_for(inputs, section, window)))
-        except (FactorICError, FactorPortfolioError) as error:
+            period = quantile_study.measure(section, bars=_bars_for(inputs, section, window))
+            periods.append(period)
+            tradeability.append(
+                turnover_study.measure(
+                    period,
+                    cross_section=section,
+                    liquidity=_liquidity_for(inputs, section, window),
+                )
+            )
+        except (FactorICError, FactorPortfolioError, FactorTradeabilityError) as error:
             raise FactorRunBlockedError(
                 f"the {tier} tier at {instant.isoformat()} could not be measured: {error}"
             ) from error
@@ -1170,6 +1182,7 @@ def _tier_report(
             ic=ic_study.summarize(points),
             portfolio=quantile_study.summarize(periods),
             turnover=turnover_study.turnover(periods),
+            tradeability=turnover_study.summarize(tradeability),
             survival=None if tier == "raw" else survival_study.summarize(survival_points),
         )
     except (
@@ -1276,6 +1289,42 @@ def _bars_for(
         if entry is not None and exit_bar is not None:
             bars[pair.subject] = (entry, exit_bar)
     return bars
+
+
+def _liquidity_for(
+    inputs: _PanelInputs, section: ICCrossSection, window: LabelWindow
+) -> dict[str, SessionLiquidity]:
+    """Each admitted name's traded value on the entry session, in yuan, keyed by the cross section.
+
+    **The entry session itself, which is one of the two readings the contract admits and is the
+    diagnostic one.** `the_liquidity_session_is_the_callers_and_may_be_the_entry_session_itself`
+    states the pair: the order fills at that session's close, so its turnover is realised by the
+    time of the fill and was not known when the position was sized, which makes this "could this
+    have been traded on that day" rather than "would we have believed it could". This face asks
+    the first because the second needs a session the range does not name, and
+    `TradeabilitySummary.sized_at_the_entry_session_count` carries which was asked so a reader of
+    the artifact can see it rather than infer it.
+
+    Keyed by `section.pairs` and not by the universe, which is `TradeabilityStudy.measure`'s own
+    rule: a key with no admitted pair is refused there rather than ignored.
+
+    A session whose stored `amount` is not positive is **left out** rather than offered as a zero.
+    `SessionLiquidity` refuses a non-positive turnover outright -- "a security that traded nothing
+    has no capacity rather than a capacity of zero" -- and its docstring says the caller declares
+    that by not offering the row, which arrives one plane up as `unpriced_holdings` if the name was
+    held and as nothing at all if it was not. Offering a zero would instead put a capacity of zero
+    on the whole group through the `min`.
+    """
+    liquidity: dict[str, SessionLiquidity] = {}
+    bars = inputs.bars_on(window.entry_day)
+    for pair in section.pairs:
+        bar = bars.get(pair.subject)
+        if bar is None or bar.amount <= 0.0:
+            continue
+        liquidity[pair.subject] = liquidity_from_amount(
+            subject=pair.subject, trade_date=window.entry_day, amount=bar.amount
+        )
+    return liquidity
 
 
 def _survival_point(

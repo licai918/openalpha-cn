@@ -6013,6 +6013,36 @@ these columns live in a different dataset from the raw census columns, so there 
 and one prefix is one fewer string for a reader to learn.
 """
 
+SOURCE_CENSUS_COLUMN_PREFIX: Final[str] = "source_census_"
+
+SOURCE_CENSUS_COLUMNS: Final[tuple[str, ...]] = tuple(
+    f"{SOURCE_CENSUS_COLUMN_PREFIX}{code}" for code in FACTOR_COVERAGE_ORDER
+)
+"""One stored count per **raw** coverage code the transform consumed, derived from the vocabulary.
+
+`PROCESSED_CENSUS_COLUMNS`' argument applied to the axis it does not cover. That tuple's own
+reason is that a transform whose cross section was too thin "is byte-indistinguishable in storage
+from one that ran and imputed nothing -- unless the counts are stored", and the same sentence is
+true one column over and was not acted on: `census_source_not_computed` is a single cell in front
+of five raw codes, so a partition written over a cross section in which one security's filing
+contradicted itself is byte-identical to one in which that security's arithmetic was undefined.
+`V2-P3-018`'s entire argument -- that an ambiguity is not a hole and that re-fetching does not
+repair it -- therefore survived on the raw plane and died on this one, and a reader of
+`factor_procmn_*` could not answer "how many securities here have no value because the publisher
+contradicted itself".
+
+**A separate prefix rather than `FACTOR_CENSUS_COLUMN_PREFIX`**, which is the one place this
+family departs from the two censuses above sharing one. Those two live in different *datasets*, so
+one prefix collides with nothing; these two live in the **same row**, and
+`census_input_missing` beside `source_census_input_missing` would be two different questions one
+substring apart. The prefix names the axis rather than the dataset, which is what a reader
+scanning one manifest row needs.
+
+Six columns and not the thirty of a cross-tab, because the missing-value policy is a function
+from raw code to action and `MISSING_VALUE_COLUMNS` already stores that function on the same row;
+see `ProcessedFactorPanel.source_coverage_census`.
+"""
+
 MISSING_VALUE_COLUMN_PREFIX: Final[str] = "missing_"
 
 MISSING_VALUE_COLUMNS: Final[tuple[str, ...]] = tuple(
@@ -6045,6 +6075,7 @@ TRANSFORM_MANIFEST_DATA_COLUMNS: Final[tuple[str, ...]] = (
     "min_cross_section",
     *MISSING_VALUE_COLUMNS,
     *PROCESSED_CENSUS_COLUMNS,
+    *SOURCE_CENSUS_COLUMNS,
     "participant_count",
     "winsorized_low_count",
     "winsorized_high_count",
@@ -6133,6 +6164,7 @@ _TRANSFORM_MANIFEST_COLUMN_KINDS: Final[Mapping[str, PanelColumnKind]] = Mapping
         "min_cross_section": "integer",
         **_kinds(MISSING_VALUE_COLUMNS, "string"),
         **_kinds(PROCESSED_CENSUS_COLUMNS, "integer"),
+        **_kinds(SOURCE_CENSUS_COLUMNS, "integer"),
         "participant_count": "integer",
         "winsorized_low_count": "integer",
         "winsorized_high_count": "integer",
@@ -6697,10 +6729,54 @@ class ProcessedFactorPanel:
 
         Every declared code is present with a count, `FactorPanel.coverage_census()`'s reason: a
         report reads "0 imputed" rather than inferring it from an absent key.
+
+        **This census alone cannot answer why a security has no processed value**, and that is not
+        a defect of the counting but of the axis: `source_not_computed` is one cell standing in
+        front of the *five* raw codes `FactorCoverage` spends five members drawing apart, so two
+        cross sections differing only in whether a security was `ambiguous_filing` or
+        `undefined_value` produce byte-identical counts here. `source_coverage_census()` is the
+        other axis and the two are reported side by side rather than crossed; see it for why.
         """
         census: dict[str, int] = dict.fromkeys(PROCESSED_COVERAGE_ORDER, 0)
         for observation in self.observations:
             census[observation.coverage] += 1
+        return MappingProxyType(census)
+
+    def source_coverage_census(self) -> Mapping[str, int]:
+        """How many rows came from each **raw** coverage code, including the zeros.
+
+        The second axis of one panel, and it exists because the first one loses the distinction
+        `V2-P3-018`'s whole argument rests on. `ambiguous_filing` is not a hole -- the publisher
+        stated the number and contradicted itself, so **re-fetching returns the same two rows** --
+        while `input_missing` is a hole a fetch repairs and `undefined_value` is a definition
+        question. `ProcessedFactorObservation.source_coverage` keeps all five on the row, and
+        `ProcessedCoverage.source_not_computed` is a single cell in front of them, so a census over
+        the processed vocabulary alone reports the three as one number. Measured: two cross
+        sections of five securities differing only in one security's raw code are identical across
+        every cell of `coverage_census()` and across every column of the stored transform manifest,
+        which is `PROCESSED_CENSUS_COLUMNS`' own stated failure -- "byte-indistinguishable in
+        storage ... unless the counts are stored" -- holding for this axis and not yet applied to
+        it.
+
+        **Two censuses of six and five cells rather than one cross-tab of thirty**, and the cross
+        product is recoverable rather than sacrificed: the missing-value policy is a *function*
+        from raw code to action, and `MISSING_VALUE_COLUMNS` stores that function beside these
+        counts on the same manifest row. So a reader holding one row knows both which raw codes
+        the cross section carried and what this build did with each, and the thirty-cell table is
+        an arithmetic away. What no pair of marginals can recover is the joint distribution under
+        a whole-panel code -- `insufficient_cross_section` and `degenerate_cross_section` are
+        decided for every security at once, so under either the processed census is a single cell
+        of `len(observations)` and this one is still the raw cross section's own shape, which is
+        exactly the reading a reader wants there.
+
+        Keyed by `FACTOR_COVERAGE_ORDER` and therefore including `computed`, which is not padding:
+        `census_processed` counts the rows that came through the pipeline and this counts the rows
+        that had a measurement to bring, and the two differ by exactly the measured rows a
+        whole-panel refusal swallowed.
+        """
+        census: dict[str, int] = dict.fromkeys(FACTOR_COVERAGE_ORDER, 0)
+        for observation in self.observations:
+            census[observation.source_coverage] += 1
         return MappingProxyType(census)
 
     def values(self) -> Mapping[str, float]:
@@ -7298,6 +7374,12 @@ def transform_manifest_batch(panel: ProcessedFactorPanel) -> ColumnarPanelBatch:
     processed nobody is otherwise indistinguishable in storage from one that standardized the
     whole market, and the objects that could say so speak only to a caller that thinks to ask.
 
+    **Two censuses and not one**, on two axes of the same rows: `PROCESSED_CENSUS_COLUMNS` counts
+    what this transform produced and `SOURCE_CENSUS_COLUMNS` counts what it was given. The second
+    is the same argument as the first applied where it had not been -- `source_not_computed` is
+    one cell in front of five raw codes, so without it a cross section narrowed by a
+    self-contradictory filing and one narrowed by an undefined arithmetic write identical rows.
+
     **The ten head columns come off `manifest` and the nine policy columns come off `spec`**, so
     `_refuse_a_processed_panel_that_does_not_own_its_rows` runs first: without it this function
     is the one that writes a row whose `transform_id` and whose `standardization_method` describe
@@ -7308,6 +7390,7 @@ def transform_manifest_batch(panel: ProcessedFactorPanel) -> ColumnarPanelBatch:
     spec = panel.spec
     statistics = panel.statistics
     census = panel.coverage_census()
+    source_census = panel.source_coverage_census()
     columns: dict[str, list[object]] = {
         "transform_id": [manifest.transform_id],
         "transform_key": [manifest.transform_key],
@@ -7332,6 +7415,10 @@ def transform_manifest_batch(panel: ProcessedFactorPanel) -> ColumnarPanelBatch:
         **{
             f"{FACTOR_CENSUS_COLUMN_PREFIX}{code}": [census[code]]
             for code in PROCESSED_COVERAGE_ORDER
+        },
+        **{
+            f"{SOURCE_CENSUS_COLUMN_PREFIX}{code}": [source_census[code]]
+            for code in FACTOR_COVERAGE_ORDER
         },
         "participant_count": [statistics.participant_count],
         "winsorized_low_count": [statistics.winsorized_low_count],

@@ -99,9 +99,12 @@ from openalpha_cn.backtest.factor_redundancy import (
     factor_vector,
 )
 from openalpha_cn.backtest.factor_tradeability import (
+    PeriodTradeability,
     TradeabilitySpec,
     TradeabilityStudy,
+    TradeabilitySummary,
     TurnoverSeries,
+    liquidity_from_amount,
 )
 from openalpha_cn.domain.adjustment import FactorObservation as AdjustmentFactor
 from openalpha_cn.domain.adjustment import build_adjustment_history
@@ -172,6 +175,17 @@ the long group or does not. A floor of `0.5` would therefore decide that cell by
 two fee-bearing quotients, and a test whose verdict turns on a rounding is a test that will change
 its answer when `CostSchedule`'s defaults do. `0.4` puts the line clear of it in one direction and
 `test_the_declared_floor_moves_the_verdict_and_nothing_else` drives it across in the other.
+"""
+
+SESSION_TURNOVER: Final[float] = 1_000_000.0
+"""Every admitted name's `daily.amount`, in **thousands** of yuan: ¥1,000,000,000 a session.
+
+Flat across the four securities on purpose: `GroupCapacity.binding_capacity` is a `min`, so a
+fixture whose turnovers differed would make every capital multiple below a property of whichever
+name happened to be cheapest rather than of the declared cap. At the declared 1% cap and
+`CAPITAL`, this gives a `capital_multiple` of exactly 100.0 --
+`test_the_declared_participation_cap_moves_a_number_in_the_sealed_artifact` moves the cap and
+takes the difference.
 """
 
 CODE_COMMIT: Final[str] = "abcdef1234567890"
@@ -430,8 +444,14 @@ def _summaries(
     tradeability_spec: TradeabilitySpec,
     as_ofs: tuple[datetime, ...] = AS_OFS,
     horizon: str = "1d",
-) -> tuple[ICSummary, QuantilePortfolioSummary, TurnoverSeries]:
-    """One tier's IC, quantile and turnover summaries, driven through the real four studies."""
+) -> tuple[ICSummary, QuantilePortfolioSummary, TurnoverSeries, TradeabilitySummary]:
+    """One tier's four upstream summaries, driven through the real studies.
+
+    `V2-P3-007` produces two of them and both are driven here: the rolling turnover and the
+    coverage-and-capacity summary. Every held name is offered a session turnover, so the capacity
+    statistics on the row below are real numbers rather than a refusal code -- which is what makes
+    `TradeabilitySpec.participation_cap` a determinant of this artifact's content.
+    """
     ic_study = FactorICStudy(ic_spec)
     quantile_study = QuantilePortfolioStudy(
         quantile_spec, execution=AShareExecutionPolicy(costs=CostSchedule())
@@ -439,14 +459,31 @@ def _summaries(
     turnover_study = TradeabilityStudy(tradeability_spec, portfolio=quantile_spec)
     periods: list[PeriodPortfolio] = []
     points: list[ICPoint] = []
+    reports: list[PeriodTradeability] = []
     for as_of in as_ofs:
         section, bars = _cross_section(tier, as_of, scores, horizon=horizon)
         points.append(ic_study.measure(section))
-        periods.append(quantile_study.measure(section, bars=bars))
+        period = quantile_study.measure(section, bars=bars)
+        periods.append(period)
+        reports.append(
+            turnover_study.measure(
+                period,
+                cross_section=section,
+                liquidity={
+                    pair.subject: liquidity_from_amount(
+                        subject=pair.subject,
+                        trade_date=period.entry_day,
+                        amount=SESSION_TURNOVER,
+                    )
+                    for pair in section.pairs
+                },
+            )
+        )
     return (
         ic_study.summarize(points),
         quantile_study.summarize(periods),
         turnover_study.turnover(periods),
+        turnover_study.summarize(reports),
     )
 
 
@@ -514,7 +551,7 @@ def _tier_report(
     trade = tradeability_spec if tradeability_spec is not None else _tradeability_spec()
     survive = survival_spec if survival_spec is not None else _survival_spec()
     values = scores if scores is not None else SCORES[tier]
-    ic_summary, quantile_summary, turnover_summary = _summaries(
+    ic_summary, quantile_summary, turnover_summary, tradeability_summary = _summaries(
         tier,
         values,
         ic_spec=ic,
@@ -530,6 +567,7 @@ def _tier_report(
         ic=ic_summary,
         portfolio=quantile_summary,
         turnover=turnover_summary,
+        tradeability=tradeability_summary,
         survival=(
             None
             if tier == "raw"
@@ -673,7 +711,7 @@ def test_the_neutralised_tiers_information_coefficient_is_exactly_zero() -> None
     acceptance test above rests on the retention being exactly `0.0` and a value of `1e-17` would
     make `removed` a verdict about a rounding.
     """
-    ic_summary, _quantile, _turnover = _summaries(
+    ic_summary, _quantile, _turnover, _tradeability = _summaries(
         "neutralized",
         NEUTRALIZED_SCORES,
         ic_spec=_ic_spec(),
@@ -1358,7 +1396,7 @@ def test_a_tier_report_whose_studies_are_at_two_horizons_is_refused() -> None:
     """An IC at one session beside a spread at five is two windows in one row, and the two are
     over the *same* `as_of`s -- so nothing but the horizon comparison can see it."""
     short = _tier_report("raw")
-    long_ic, long_portfolio, long_turnover = _summaries(
+    long_ic, long_portfolio, long_turnover, long_tradeability = _summaries(
         "raw",
         RAW_SCORES,
         ic_spec=_ic_spec(),
@@ -1376,6 +1414,7 @@ def test_a_tier_report_whose_studies_are_at_two_horizons_is_refused() -> None:
             ic=short.ic,
             portfolio=long_portfolio,
             turnover=long_turnover,
+            tradeability=long_tradeability,
             survival=None,
         )
 
@@ -1394,7 +1433,69 @@ def test_a_tier_report_carrying_another_tiers_study_is_refused() -> None:
             ic=raw.ic,
             portfolio=processed.portfolio,
             turnover=processed.turnover,
+            tradeability=processed.tradeability,
             survival=processed.survival,
+        )
+
+    # The fifth summary is held to the same rule as the other three: a raw coverage funnel filed
+    # under the processed heading would report the untransformed tier's admission rate as the
+    # transformed one's, and the two tiers' admitted vocabularies are exactly what differ.
+    with pytest.raises(ValidationError, match="a row that mixes tiers"):
+        TierReport(
+            tier="processed",
+            source_manifest_ids=SOURCE_BUILDS["processed"],
+            ic=processed.ic,
+            portfolio=processed.portfolio,
+            turnover=processed.turnover,
+            tradeability=raw.tradeability,
+            survival=processed.survival,
+        )
+
+
+def test_a_tier_report_whose_capacity_follows_another_group_than_its_churn_is_refused() -> None:
+    """Both `V2-P3-007` objects follow the long group the declared direction picks, so a row
+    carrying two of them is a capacity for one portfolio beside the churn of another.
+
+    The **turnover** series is the one doctored, and that is not arbitrary:
+    `TradeabilitySummary` refuses a group its own declared direction does not make long, so a
+    summary moved off the long group is not constructible at all and the disagreement has to be
+    built from the other side. `TurnoverSeries.group` has no such rule -- it takes the index it is
+    given -- which is exactly why this cross-check exists on the row rather than being left to the
+    two contracts.
+    """
+    row = _tier_report("raw")
+    thin = _tier_report("raw", tradeability_spec=_tradeability_spec(min_rebalances=5))
+
+    assert row.tradeability.group == row.turnover.group == 1
+    assert thin.turnover.coverage == "insufficient_rebalances"
+    with pytest.raises(ValidationError, match="beside the churn of another"):
+        TierReport(
+            tier="raw",
+            source_manifest_ids=SOURCE_BUILDS["raw"],
+            ic=row.ic,
+            portfolio=row.portfolio,
+            turnover=thin.turnover.model_copy(update={"group": 0}),
+            tradeability=row.tradeability,
+            survival=None,
+        )
+
+
+def test_a_tier_report_whose_tradeability_covers_other_days_is_refused() -> None:
+    """The sample rule reaches the fifth summary too: a coverage funnel pooled over other days
+    than the IC was measured on is a report about a market the row does not describe."""
+    honest = _tier_report("raw")
+    short = _tier_report("raw", as_ofs=(AS_OF,), ic_spec=_ic_spec(min_as_ofs=2))
+
+    assert short.tradeability.as_ofs != honest.tradeability.as_ofs
+    with pytest.raises(ValidationError, match="have to be asked about the same days"):
+        TierReport(
+            tier="raw",
+            source_manifest_ids=SOURCE_BUILDS["raw"],
+            ic=honest.ic,
+            portfolio=honest.portfolio,
+            turnover=honest.turnover,
+            tradeability=short.tradeability,
+            survival=None,
         )
 
 
@@ -1441,11 +1542,14 @@ def test_the_spec_digests_are_the_rows_own_builds_and_days() -> None:
 
 
 def test_the_four_upstream_coverage_codes_are_reported_side_by_side_and_not_collapsed() -> None:
-    """The answer to how four refusal vocabularies coexist: they are not reconciled.
+    """The answer to how five refusal vocabularies coexist: they are not reconciled.
 
-    Every code on a row is its own study's, and the raw row carries three cells rather than four
+    Every code on a row is its own study's, and the raw row carries four cells rather than five
     because `factor_redundancy` refuses one factor on one tier against itself -- an absence forced
-    by an upstream contract rather than chosen here.
+    by an upstream contract rather than chosen here. `V2-P3-007` contributes two of the five and
+    they are two cells rather than one: `TurnoverCoverage` says whether a holdings state exists at
+    all and `TradeabilityCoverage` says whether any period reached the cut, and a row that merged
+    them would need a fifth "N/A" of this module's own.
     """
     artifact = _record().artifact
 
@@ -1453,15 +1557,123 @@ def test_the_four_upstream_coverage_codes_are_reported_side_by_side_and_not_coll
         ("ic", "measured"),
         ("portfolio", "measured"),
         ("turnover", "measured"),
+        ("tradeability", "measured"),
     )
     assert artifact.tier_report("neutralized").coverage_codes == (
         ("ic", "measured"),
         ("portfolio", "measured"),
         ("turnover", "measured"),
+        ("tradeability", "measured"),
         ("survival", "measured"),
     )
     assert artifact.tier_report("raw").survival is None
     assert artifact.tier_report("processed").survival is not None
+
+
+def test_every_tier_row_carries_the_coverage_funnel_and_the_long_groups_capacity() -> None:
+    """`V2-P3-007`'s instrument, read out of the sealed document rather than out of a study.
+
+    Before `TierReport.tradeability` existed, `TradeabilityStudy.measure` had no caller anywhere
+    in `src/` and `CoverageFunnel`, `GroupCapacity`, `SessionLiquidity` and `liquidity_from_amount`
+    were referenced nowhere outside their own module -- so an artifact reader could not answer
+    "what fraction of the offered universe became a position" at any tier, and the roadmap's
+    annotation for that issue reached no face at all. Every number below is asserted on the
+    **reopened** document, so it is a statement about what a stored artifact carries rather than
+    about what an object in this process holds.
+    """
+    reopened = open_experiment(experiment_payload(_record()))
+    document = json.loads(experiment_payload(reopened))
+
+    for tier in FACTOR_TIER_ORDER:
+        row = reopened.artifact.tier_report(tier)
+        assert row.tradeability.coverage == "measured"
+        assert row.tradeability.funnel.universe_count == len(RANKS) * len(AS_OFS)
+        assert row.tradeability.funnel.implementable_rate == 1.0
+        assert row.tradeability.mean_top_group_execution_rate == 1.0
+        assert row.tradeability.mean_top_group_execution_shortfall == 0.0
+        assert row.tradeability.binding_capital_multiple == 100.0
+        assert row.tradeability.binding_subject in {code(rank) for rank in RANKS}
+        assert row.tradeability.sized_at_the_entry_session_count == len(AS_OFS)
+    rendered = document["artifact"]["tiers"][0]["tradeability"]
+    assert rendered["funnel"]["held_count"] == len(RANKS) * len(AS_OFS)
+    assert rendered["binding_capital_multiple"] == 100.0
+    assert [name for name, _count in rendered["capacity_coverage_counts"]] == [
+        "measured",
+        "no_holdings",
+        "unpriced_holdings",
+    ]
+    # The field is REQUIRED and not merely usually present. An optional one would let a caller
+    # assemble a sealed three-tier report with no funnel and no capacity in it -- which is the
+    # state this repository shipped in, and a default of `None` restores it without failing a
+    # single assertion about the runs that do supply one.
+    row = reopened.artifact.tier_report("raw")
+    without = {
+        name: getattr(row, name) for name in TierReport.model_fields if name != "tradeability"
+    }
+    with pytest.raises(ValidationError, match="tradeability"):
+        TierReport(**without)
+
+
+def test_the_declared_participation_cap_moves_a_number_in_the_sealed_artifact() -> None:
+    """**The falsification the acceptance test above needs beside it.**
+
+    `TradeabilitySpec.participation_cap` is a required declaration with no default and it is a
+    field of `FactorExperimentSpec`, so it has always moved `experiment_id` -- and moving an
+    identity is not the same as deciding an answer. Until the tradeability summary reached a tier
+    row, two runs at two caps differed in their two addresses and in **no measured quantity**,
+    which is this repository's own recorded shape for "only verified existence and not magnitude".
+
+    Two caps a factor of fifty apart are run here and the difference is taken leaf by leaf on the
+    two rendered documents: the capital multiples move by exactly fifty on all three tiers, and
+    the funnel, the group decomposition and every IC and spread stay equal. That the mean
+    concentration does **not** move is asserted too, because it is a ratio the cap scales alike
+    and a test that expected every capacity number to move would be asserting arithmetic that is
+    false.
+    """
+    cheap = _record(tradeability_spec=_tradeability_spec(participation_cap=Decimal("0.01")))
+    rich = _record(tradeability_spec=_tradeability_spec(participation_cap=Decimal("0.5")))
+
+    assert cheap.experiment_id != rich.experiment_id
+    assert cheap.content_digest != rich.content_digest
+    moved: list[str] = []
+    for tier in FACTOR_TIER_ORDER:
+        left = cheap.artifact.tier_report(tier).tradeability
+        right = rich.artifact.tier_report(tier).tradeability
+        assert left.binding_capital_multiple == 100.0
+        assert right.binding_capital_multiple == 5000.0
+        assert right.mean_capital_multiple == left.mean_capital_multiple * 50.0
+        assert left.mean_concentration == right.mean_concentration == 1.0
+        assert left.funnel == right.funnel
+        assert left.by_group == right.by_group
+        moved.append(tier)
+    assert moved == list(FACTOR_TIER_ORDER)
+    assert cheap.artifact.attributions == rich.artifact.attributions
+    differing = _differing_leaves(
+        json.loads(experiment_payload(cheap)), json.loads(experiment_payload(rich))
+    )
+    assert {path for path in differing if "capital_multiple" in path} == {
+        f"/artifact/tiers/{index}/tradeability/{name}"
+        for index in range(len(FACTOR_TIER_ORDER))
+        for name in ("binding_capital_multiple", "mean_capital_multiple")
+    }
+    assert not [path for path in differing if "/funnel/" in path or "/by_group/" in path]
+
+
+def _differing_leaves(left: Any, right: Any, trail: str = "") -> list[str]:
+    """Every JSON path at which two rendered documents carry different scalars."""
+    if isinstance(left, dict) and isinstance(right, dict) and set(left) == set(right):
+        return [
+            path
+            for key in left
+            for path in _differing_leaves(left[key], right[key], f"{trail}/{key}")
+        ]
+    if isinstance(left, list) and isinstance(right, list) and len(left) == len(right):
+        return [
+            path
+            for index, (one, other) in enumerate(zip(left, right, strict=True))
+            for path in _differing_leaves(one, other, f"{trail}/{index}")
+        ]
+    return [] if left == right else [trail]
 
 
 def test_a_tier_that_never_cleared_its_floors_reports_not_measured_and_not_a_refusal() -> None:
@@ -1551,6 +1763,7 @@ def test_a_tier_report_whose_studies_are_about_two_factors_is_refused() -> None:
             ic=other.ic,
             portfolio=honest.portfolio,
             turnover=honest.turnover,
+            tradeability=honest.tradeability,
             survival=None,
         )
 
@@ -1568,6 +1781,7 @@ def test_a_tier_report_whose_studies_are_over_two_samples_is_refused() -> None:
             ic=honest.ic,
             portfolio=short.portfolio,
             turnover=honest.turnover,
+            tradeability=honest.tradeability,
             survival=None,
         )
 
@@ -1584,6 +1798,7 @@ def test_the_raw_row_carries_no_survival_and_the_others_must() -> None:
             ic=processed.ic,
             portfolio=processed.portfolio,
             turnover=processed.turnover,
+            tradeability=processed.tradeability,
             survival=None,
         )
 
@@ -1595,6 +1810,7 @@ def test_the_raw_row_carries_no_survival_and_the_others_must() -> None:
             ic=raw.ic,
             portfolio=raw.portfolio,
             turnover=raw.turnover,
+            tradeability=raw.tradeability,
             survival=processed.survival,
         )
 
@@ -1612,6 +1828,7 @@ def test_a_survival_summary_of_another_pair_than_raw_against_this_tier_is_refuse
             ic=processed.ic,
             portfolio=processed.portfolio,
             turnover=processed.turnover,
+            tradeability=processed.tradeability,
             survival=neutralized.survival,
         )
 
@@ -1647,6 +1864,7 @@ def test_source_build_ids_are_distinct_and_ascending() -> None:
             ic=honest.ic,
             portfolio=honest.portfolio,
             turnover=honest.turnover,
+            tradeability=honest.tradeability,
             survival=None,
         )
 
@@ -1668,6 +1886,7 @@ def test_a_tier_report_whose_studies_declare_two_directions_is_refused() -> None
             ic=row.ic.model_copy(update={"direction": "lower_is_better"}),
             portfolio=row.portfolio,
             turnover=row.turnover,
+            tradeability=row.tradeability,
             survival=None,
         )
 
@@ -1685,6 +1904,7 @@ def test_a_tier_report_whose_quantile_and_turnover_studies_disagree_about_the_cu
             ic=row.ic,
             portfolio=row.portfolio,
             turnover=row.turnover.model_copy(update={"group_count": 3}),
+            tradeability=row.tradeability,
             survival=None,
         )
 
@@ -1697,6 +1917,7 @@ def test_a_tier_report_whose_quantile_and_turnover_studies_disagree_about_the_cu
             ic=row.ic,
             portfolio=row.portfolio,
             turnover=thin.turnover.model_copy(update={"group": 7}),
+            tradeability=thin.tradeability,
             survival=None,
         )
 
@@ -1722,6 +1943,7 @@ def test_a_survival_summary_over_other_days_or_another_factor_is_refused() -> No
             ic=row.ic,
             portfolio=row.portfolio,
             turnover=row.turnover,
+            tradeability=row.tradeability,
             survival=one_day,
         )
 
@@ -1732,6 +1954,7 @@ def test_a_survival_summary_over_other_days_or_another_factor_is_refused() -> No
             ic=row.ic,
             portfolio=row.portfolio,
             turnover=row.turnover,
+            tradeability=row.tradeability,
             survival=row.survival.model_copy(update={"left_factor_id": "fct_somebody_else"}),
         )
 
@@ -1748,6 +1971,7 @@ def test_a_blank_source_build_id_is_refused() -> None:
             ic=row.ic,
             portfolio=row.portfolio,
             turnover=row.turnover,
+            tradeability=row.tradeability,
             survival=None,
         )
 
@@ -1832,7 +2056,7 @@ def test_reading_a_tier_or_a_cell_the_artifact_does_not_carry_names_what_it_does
 # --- 6. the registry ------------------------------------------------------------------------
 
 
-def test_the_known_experiment_limitations_are_the_declared_five() -> None:
+def test_the_known_experiment_limitations_are_the_declared_six() -> None:
     """The registry is bound to this suite by an equality on its whole code set, which is the form
     `tests/unit/test_known_limitation_registries.py` requires: a membership assertion is additive
     and can see a rename but never a removal."""
@@ -1841,6 +2065,7 @@ def test_the_known_experiment_limitations_are_the_declared_five() -> None:
         "the_seal_detects_an_edit_and_does_not_authenticate_one",
         "an_attribution_is_a_difference_between_two_declared_tiers_and_not_a_controlled_test",
         "the_retention_ratio_carries_no_test_of_the_difference_between_two_means",
+        "the_attribution_grid_is_over_two_performance_statistics_and_not_over_tradeability",
         "nothing_in_this_module_stores_an_artifact_or_can_be_made_to",
     } == EXPERIMENT_LIMITATION_CODES
     assert len(KNOWN_EXPERIMENT_LIMITATIONS) == len(EXPERIMENT_LIMITATION_CODES)
