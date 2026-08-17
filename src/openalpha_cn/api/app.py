@@ -48,6 +48,8 @@ from openalpha_cn.evidence.service import (
 from openalpha_cn.factor_view import (
     FactorViewError,
     experiment_view,
+    factor_catalog,
+    factor_entry,
     factor_request,
     run_factor_experiment,
 )
@@ -1139,6 +1141,39 @@ def create_app(
             ),
             content=clearance_payload(clearance),
         )
+
+    @application.get("/api/v1/factors")
+    def factor_declarations(
+        factor: str | None = None,
+        transform: str | None = None,
+        neutralization: str | None = None,
+    ) -> JSONResponse:
+        """Every factor, transform and neutralisation this build declares -- or one of them.
+
+        The HTTP twin of `openalpha factor list` / `openalpha factor describe` and of
+        `OpenAlphaSDK.factor_catalog()` / `.describe_factor()`. With no query parameter it serves
+        `factor_view.factor_catalog()` whole; with exactly one it serves that one declaration and
+        its prose through `factor_view.factor_entry`.
+
+        **A query parameter rather than a path segment**, and the choice is forced rather than
+        stylistic: a handle is `key/vN` and contains a `/`, so `GET /api/v1/factors/{handle}` would
+        either need a `:path` converter -- which would shadow `/api/v1/factors/run` and
+        `/api/v1/factors/experiments` for every client that mistyped one -- or an escaping rule for
+        the one character the identity is defined by. `factor_entry`'s own refusal is what keeps
+        "none" and "more than one" from being resolved by precedence.
+
+        Reads no store, so it answers before `openalpha panel build` has ever run. That is the
+        point: it is the route a caller uses to find out what to build.
+        """
+        try:
+            body: dict[str, object] = (
+                factor_catalog()
+                if factor is None and transform is None and neutralization is None
+                else factor_entry(factor=factor, transform=transform, neutralization=neutralization)
+            )
+        except FactorViewError as error:
+            raise _factor_refusal(error) from error
+        return JSONResponse(status_code=FACTOR_HTTP_STATUS["answered"], content=body)
 
     @application.post("/api/v1/factors/run")
     def factor_run(request: FactorRunApiRequest) -> JSONResponse:

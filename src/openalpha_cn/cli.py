@@ -5,6 +5,7 @@ import logging
 import os
 import platform
 import sys
+import textwrap
 from collections.abc import Iterator, Mapping, Sequence, Set
 from contextlib import contextmanager
 from datetime import MAXYEAR, MINYEAR, UTC, date, datetime, time, timedelta
@@ -67,9 +68,20 @@ from openalpha_cn.domain.trading_calendar import (
 )
 from openalpha_cn.evidence.service import build_provider_evidence, parse_serialized_evidence
 from openalpha_cn.factor_view import (
+    ACCEPTANCE_STEP,
+    FactorBuildReport,
     FactorViewError,
+    acceptance_rows,
     attribution_rows,
+    build_factor_panels,
+    build_rows,
+    build_view,
+    catalog_rows,
+    everything_is_unmeasured,
     experiment_view,
+    factor_build_request,
+    factor_catalog,
+    factor_entry,
     factor_request,
     run_factor_experiment,
     tier_rows,
@@ -171,16 +183,36 @@ panel plane the way the other two are -- it is the question a CI job or a schedu
 asks before it reads anything at all.
 """
 
-factor_app = typer.Typer(help="Run and seal three-tier factor experiments.")
+factor_app = typer.Typer(
+    help=(
+        "List what this build declares, compute the three stored tiers, and run one sealed "
+        "three-tier experiment. Start with `openalpha factor list`."
+    )
+)
 app.add_typer(factor_app, name="factor")
 """`V2-P3-015`'s command is `openalpha factor run`, which is the spelling the roadmap names.
 
 A sub-app for `panel`'s reason rather than for symmetry: `run` on its own is already the shape
 `research run` and `replay run` take, so a top-level `run` would be a third meaning for a verb two
-sub-apps already own. `factor run` says which plane it is about, and it leaves room for the
-builder `nothing_in_this_repository_builds_a_factor_panel_from_a_command_line` records as missing
--- `factor build` is the name that caller will want, and it is free only because this issue did
-not take the top level.
+sub-apps already own. `factor run` says which plane it is about, and it left room for the builder
+`V2-P3-015` recorded as missing -- `factor build` was "the name that caller will want", deliberately
+kept free.
+
+`V2-P3-019` took it, and took two more beside it, because a run alone was unreachable and
+unreadable in a way that was measured rather than argued:
+
+- **`factor build`** is the caller `V2-P3-015` left free. Before it, `compute_factor`,
+  `apply_factor_transform` and `apply_factor_neutralization` had no operator-reachable caller in
+  the entire repository, so `factor run` against a store built by `openalpha panel build` was
+  refused by name and `openalpha panel build --dataset factor_obs_...` answered that the dataset is
+  not one of its thirteen build targets. There was no third door.
+- **`factor list`** and **`factor describe`** are what `--factor`, `--transform` and
+  `--neutralization` had no other source for. Nineteen factors are declared and the only way to
+  discover one was to mistype it -- which answered with nineteen content addresses, the one
+  spelling of the identity a human never types.
+
+The four commands are in the order an operator meets them: `list` (what can I ask for), `describe`
+(what does this one actually measure), `build` (put it in the store), `run` (score it).
 """
 
 
@@ -3355,7 +3387,8 @@ def _factor_fail(error: FactorViewError) -> typer.Exit:
 
 _FACTOR_HELP: Final[str] = (
     "The factor to run: a qualified key (`reversal_1d/v1`) or a factor_id (`fct_...`). The key is "
-    "the form for a human; the id is what a stored partition carries, and both resolve."
+    "the form for a human; the id is what a stored partition carries, and both resolve. "
+    "`openalpha factor list` prints every declared key."
 )
 _FACTOR_START_HELP: Final[str] = (
     "First prediction day of the closed range, ISO-8601. A prediction day is the day a stored "
@@ -3367,6 +3400,87 @@ _FACTOR_AS_OF_HELP: Final[str] = (
     "at; defaults to now. Must be at or after --end, because a forward return is priced on "
     "sessions after its prediction day."
 )
+_FACTOR_TRANSFORM_HELP: Final[str] = (
+    "Which stored processed tier to read, by qualified key (`cross_section_standard/v1`). It "
+    "selects a partition rather than computing one -- `openalpha factor build --tier processed` "
+    "is what writes it -- so a key this store never built is refused as an unreadable panel. "
+    "`openalpha factor list` prints the declared ones with the floors they impose."
+)
+_FACTOR_NEUTRALIZATION_HELP: Final[str] = (
+    "Which stored neutralised tier to read, by qualified key (`industry_and_size/v1`). This is "
+    "the tier the acceptance criterion is decided on, so a range whose residuals were built at "
+    "other instants is refused rather than reported as a row that measured nothing."
+)
+_FACTOR_HORIZON_HELP: Final[str] = (
+    "The forward window each prediction day is scored over, e.g. `1d`, `5d`, `20d`. Sessions of "
+    "the stored exchange calendar, not calendar days, so the panel must reach past --end."
+)
+_FACTOR_IC_METHOD_HELP: Final[str] = (
+    "`spearman` (rank IC) or `pearson`. It decides both the information coefficient and the "
+    "redundancy correlation, so the two cannot be computed under different definitions."
+)
+_FACTOR_MIN_SECURITIES_HELP: Final[str] = (
+    "Fewest admitted names a cross section may have and still be scored. Below it the day is "
+    "reported as thin rather than correlated: two points always correlate perfectly, which is why "
+    "the contract's own floor is 3 and why no default is offered here."
+)
+_FACTOR_MIN_AS_OFS_HELP: Final[str] = (
+    "Fewest scored prediction days the range must hold before a mean IC exists. Below it the tier "
+    "reports `insufficient_as_ofs` and every attribution cell reading it is `not_measured`."
+)
+_FACTOR_GROUP_COUNT_HELP: Final[str] = (
+    "How many quantile groups the cross section is cut into. The long-short spread is the top "
+    "group minus the bottom one, so this decides what `mean_spread` is a spread *of*."
+)
+_FACTOR_MIN_PER_GROUP_HELP: Final[str] = (
+    "Fewest names a quantile group may hold. A group thinner than this makes the period unscored "
+    "rather than scored on one name."
+)
+_FACTOR_POSITION_CAPITAL_HELP: Final[str] = (
+    "Cash allocated to each position, in yuan, as a decimal string. Real money against the real "
+    "A-share lot rule (200 shares on STAR, a multiple of 100 elsewhere), so it decides how much "
+    "of a thin name is actually buyable -- a `float` is refused because money that round-trips "
+    "through binary floating point does not add up."
+)
+_FACTOR_MIN_PERIODS_HELP: Final[str] = (
+    "Fewest scored rebalance periods before a mean spread exists. The portfolio twin of "
+    "--min-as-ofs, and separate from it because a day can be scored for IC and unscored for the "
+    "portfolio."
+)
+_FACTOR_PARTICIPATION_CAP_HELP: Final[str] = (
+    "The largest share of a session's own traded value one position may take, as a decimal "
+    "fraction (`0.01` is one percent). It is what turns a paper spread into a capacity statement: "
+    "above the cap the name is reported as untradeable at that size rather than filled."
+)
+_FACTOR_MIN_REBALANCES_HELP: Final[str] = (
+    "Fewest rebalances before a turnover figure exists. One rebalance is a portfolio that never "
+    "turned over, so a mean over it would be a number about nothing."
+)
+_FACTOR_REDUNDANCY_THRESHOLD_HELP: Final[str] = (
+    "Absolute correlation at or above which two vectors are called redundant, in (0, 1]. On this "
+    "command it decides the survival row -- how much of the raw ordering each derived tier still "
+    "carries -- which corroborates the attribution grid from a second direction."
+)
+_FACTOR_RETENTION_FLOOR_HELP: Final[str] = (
+    "The line a verdict is decided at, in (0, 1]. A step that keeps less than this share of a "
+    "statistic is `removed`; at or above it (and up to 1) it is `survives`. **This is the number "
+    "the acceptance criterion is read off**, on the processed->neutralized step. A floor of zero "
+    "would call every non-negative retention `survives` and is refused."
+)
+_FACTOR_NOTE_HELP: Final[str] = (
+    "Prose recorded on the sealed record and deliberately outside every content address, so "
+    "writing about an experiment cannot change its identity."
+)
+_RUNTIME_DIR_HELP: Final[str] = (
+    "One installation's whole state. The panel plane is `<runtime-dir>/panel` and sealed "
+    "experiments are `<runtime-dir>/experiments`, the same directory `openalpha panel build` "
+    "writes and the HTTP service reads."
+)
+_FACTOR_EXCHANGE_HELP: Final[str] = (
+    "Which stored exchange calendar the sessions are counted on. It decides the label windows and "
+    "the readiness dates, so a calendar this store never fetched is refused rather than "
+    "substituted."
+)
 
 
 @factor_app.command("run")
@@ -3374,25 +3488,45 @@ def factor_run_command(
     factor: Annotated[str, typer.Option("--factor", help=_FACTOR_HELP)],
     start: Annotated[str, typer.Option("--start", help=_FACTOR_START_HELP)],
     end: Annotated[str, typer.Option("--end", help=_FACTOR_END_HELP)],
-    transform: Annotated[str, typer.Option("--transform")],
-    neutralization: Annotated[str, typer.Option("--neutralization")],
-    horizon: Annotated[str, typer.Option("--horizon")],
-    ic_method: Annotated[str, typer.Option("--ic-method")],
-    min_securities: Annotated[int, typer.Option("--min-securities")],
-    min_as_ofs: Annotated[int, typer.Option("--min-as-ofs")],
-    group_count: Annotated[int, typer.Option("--group-count")],
-    min_securities_per_group: Annotated[int, typer.Option("--min-securities-per-group")],
-    position_capital: Annotated[str, typer.Option("--position-capital")],
-    min_periods: Annotated[int, typer.Option("--min-periods")],
-    participation_cap: Annotated[str, typer.Option("--participation-cap")],
-    min_rebalances: Annotated[int, typer.Option("--min-rebalances")],
-    redundancy_threshold: Annotated[float, typer.Option("--redundancy-threshold")],
-    retention_floor: Annotated[float, typer.Option("--retention-floor")],
-    runtime_dir: Annotated[Path, typer.Option("--runtime-dir")] = Path("./runtime"),
-    exchange: Annotated[str, typer.Option("--exchange")] = TRADING_CALENDAR_DEFAULT_EXCHANGE,
+    transform: Annotated[str, typer.Option("--transform", help=_FACTOR_TRANSFORM_HELP)],
+    neutralization: Annotated[
+        str, typer.Option("--neutralization", help=_FACTOR_NEUTRALIZATION_HELP)
+    ],
+    horizon: Annotated[str, typer.Option("--horizon", help=_FACTOR_HORIZON_HELP)],
+    ic_method: Annotated[str, typer.Option("--ic-method", help=_FACTOR_IC_METHOD_HELP)],
+    min_securities: Annotated[
+        int, typer.Option("--min-securities", help=_FACTOR_MIN_SECURITIES_HELP)
+    ],
+    min_as_ofs: Annotated[int, typer.Option("--min-as-ofs", help=_FACTOR_MIN_AS_OFS_HELP)],
+    group_count: Annotated[int, typer.Option("--group-count", help=_FACTOR_GROUP_COUNT_HELP)],
+    min_securities_per_group: Annotated[
+        int, typer.Option("--min-securities-per-group", help=_FACTOR_MIN_PER_GROUP_HELP)
+    ],
+    position_capital: Annotated[
+        str, typer.Option("--position-capital", help=_FACTOR_POSITION_CAPITAL_HELP)
+    ],
+    min_periods: Annotated[int, typer.Option("--min-periods", help=_FACTOR_MIN_PERIODS_HELP)],
+    participation_cap: Annotated[
+        str, typer.Option("--participation-cap", help=_FACTOR_PARTICIPATION_CAP_HELP)
+    ],
+    min_rebalances: Annotated[
+        int, typer.Option("--min-rebalances", help=_FACTOR_MIN_REBALANCES_HELP)
+    ],
+    redundancy_threshold: Annotated[
+        float, typer.Option("--redundancy-threshold", help=_FACTOR_REDUNDANCY_THRESHOLD_HELP)
+    ],
+    retention_floor: Annotated[
+        float, typer.Option("--retention-floor", help=_FACTOR_RETENTION_FLOOR_HELP)
+    ],
+    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
+        "./runtime"
+    ),
+    exchange: Annotated[
+        str, typer.Option("--exchange", help=_FACTOR_EXCHANGE_HELP)
+    ] = TRADING_CALENDAR_DEFAULT_EXCHANGE,
     as_of: Annotated[str, typer.Option("--as-of", help=_FACTOR_AS_OF_HELP)] = "",
     code_commit: Annotated[str, typer.Option("--code-commit", help=_CODE_COMMIT_HELP)] = "",
-    note: Annotated[str, typer.Option("--note")] = "",
+    note: Annotated[str, typer.Option("--note", help=_FACTOR_NOTE_HELP)] = "",
     json_output: Annotated[
         bool, typer.Option("--json", help="Emit the sealed experiment document as data.")
     ] = False,
@@ -3403,16 +3537,25 @@ def factor_run_command(
     panel, drives `V2-P3-005`..`008` on each tier and seals the result into one immutable,
     content-addressed record under `runtime-dir/experiments`.
 
+    **The tiers have to exist first.** `openalpha factor build` is what puts them there; a store
+    built only by `openalpha panel build` holds no factor partition and this command is refused by
+    name against it. `openalpha factor list` is what says which `--factor`, `--transform` and
+    `--neutralization` are legal.
+
     **Fifteen of these options have no default, and that is the contract rather than an
     oversight.** Each is a floor or a policy one of the four upstream studies refuses to choose
     for a caller -- `MINIMUM_IC_SECURITIES` is 3 because two points always correlate perfectly,
     `MINIMUM_REDUNDANCY_SECURITIES` is 4 because a threshold over three ranks decides nothing, and
     the retention floor is the line the acceptance criterion's verdict is decided at. A default
     here would be a decision nobody recorded making, on numbers that move every verdict this
-    command prints.
+    command prints. `V2-P3-019` gave each of them a `--help` line saying which: fourteen of the
+    seventeen showed a bare `[required]` and nothing else, on a command whose own docstring said
+    the numbers move every verdict.
 
     Exits 0 for an experiment that assembled, whatever its verdicts say; 1 when the stored tiers
-    could not answer; 3 when the request could not be put. See `FACTOR_EXIT`.
+    could not answer; 3 when the request could not be put. See `FACTOR_EXIT`, and
+    `factor_view.everything_is_unmeasured` for the one exit-0 answer this command prints a warning
+    beside.
     """
     with _panel_command("factor run"):
         instant = _panel_as_of(as_of)
@@ -3459,8 +3602,37 @@ def factor_run_command(
             typer.echo(
                 json.dumps(experiment_view(record, write=write), ensure_ascii=False, sort_keys=True)
             )
+            _warn_if_nothing_was_measured(record)
         else:
             _echo_experiment(record, write=write)
+
+
+UNMEASURED_WARNING: Final[str] = (
+    "WARNING every one of the six attribution cells is `not_measured`: this experiment assembled "
+    "and measured nothing. Two of the three tiers carry no statistic, so no verdict was reached "
+    "about anything -- reading the absence of a `removed` cell here as `the factor survived "
+    "neutralisation` is the one wrong conclusion this grid makes easy. Each tier's own coverage "
+    "code (above, and in --json under document.artifact.tiers[].ic.coverage) says why."
+)
+"""The line an all-`not_measured` grid is never printed without.
+
+`FACTOR_EXIT` argues at length that exit `0` covers an experiment whose grid says `removed` on
+every cell, because that is a finding. It said nothing about the grid that says `not_measured` on
+every cell, which also exits `0`, also answers `200`, and is the opposite -- no finding at all --
+while looking to a reader (or to a CI step grepping for `removed`) exactly like a clean pass. This
+is the sentence that was missing, and it is a warning rather than a fourth exit code for
+`factor_view.everything_is_unmeasured`'s stated reasons.
+
+**On stderr in both modes**, which is `_panel_fail`'s rule and its reason: `--json` output has to
+stay parseable on stdout, and a warning interleaved into the sealed envelope would corrupt exactly
+the callers most likely to automate on it.
+"""
+
+
+def _warn_if_nothing_was_measured(record: FactorExperimentRecord) -> None:
+    """Print `UNMEASURED_WARNING` on stderr when the grid measured nothing at all."""
+    if everything_is_unmeasured(record):
+        typer.echo(UNMEASURED_WARNING, err=True)
 
 
 def _factor_day(value: str, *, flag: str) -> date:
@@ -3490,8 +3662,20 @@ def _factor_amount(value: str, *, flag: str) -> Decimal:
         ) from error
 
 
+ACCEPTANCE_MARKER: Final[str] = "  <- the acceptance criterion is read off this row"
+"""What marks the two grid rows that carry the finding, on the one face a human reads.
+
+The grid is six rows of four columns and `factor_experiment.py` says in prose which step the
+roadmap's annotation is about -- `processed -> neutralized`, "a statistic that vanishes here was
+the exposure, and no transform setting recovers it". A terminal that printed six identical-looking
+rows left the reader to know that, and nothing in `docs/`, `README*` or `web/` said it: the six
+verdict words themselves had zero occurrences outside the source. `factor_view.ACCEPTANCE_STEP` is
+the declaration and this is the mark; `openalpha factor list` prints what each verdict means.
+"""
+
+
 def _echo_experiment(record: FactorExperimentRecord, *, write: str) -> None:
-    """Print one sealed experiment: its identity, its three rows and its six cells.
+    """Print one sealed experiment: its identity, its three rows, its six cells and the answer.
 
     Both content addresses, because a reader has to be able to tell "the same experiment, run
     again" (`experiment_id` held, `content_digest` held) from "the same declaration, different
@@ -3501,6 +3685,11 @@ def _echo_experiment(record: FactorExperimentRecord, *, write: str) -> None:
     The grid is printed whole and in `ATTRIBUTION_CELL_ORDER`, so a `not_measured` cell occupies
     its row rather than vanishing: a grid missing a cell and one whose cell has no number are two
     different claims.
+
+    **Two things `V2-P3-019` added, both because a correct grid was being read wrongly.** The rows
+    of `ACCEPTANCE_STEP` are marked, because six equal-looking rows do not say which one is the
+    answer; and an all-`not_measured` grid gets `UNMEASURED_WARNING` on stderr, because exit `0`
+    plus no `removed` cell reads as a pass and is not one.
     """
     typer.echo(f"experiment {record.experiment_id} content {record.content_digest} ({write})")
     typer.echo(f"factor     {record.artifact.spec.definition.qualified_key}")
@@ -3508,9 +3697,383 @@ def _echo_experiment(record: FactorExperimentRecord, *, write: str) -> None:
     typer.echo("tier            ic_coverage           mean_ic  mean_spread")
     for tier, coverage, mean_ic, mean_spread in tier_rows(record):
         typer.echo(f"{tier:<15} {coverage:<20} {mean_ic:>8}  {mean_spread}")
+    marked = f"{ACCEPTANCE_STEP[0]}->{ACCEPTANCE_STEP[1]}"
     typer.echo("step                     statistic     retention  verdict")
     for step, statistic, retention, verdict in attribution_rows(record):
-        typer.echo(f"{step:<24} {statistic:<13} {retention:>9}  {verdict}")
+        marker = ACCEPTANCE_MARKER if step == marked else ""
+        typer.echo(f"{step:<24} {statistic:<13} {retention:>9}  {verdict}{marker}")
+    answer = ", ".join(f"{statistic}={verdict}" for statistic, verdict in acceptance_rows(record))
+    typer.echo(f"answer     {marked} {answer}")
+    typer.echo("verdicts   `openalpha factor list` prints what each of the six verdicts means")
+    _warn_if_nothing_was_measured(record)
+
+
+# --- what this build declares, and how to put it in a store (V2-P3-019) -------------------------
+
+
+NOTE_WRAP_WIDTH: Final[int] = 96
+"""How wide `factor describe` wraps a note, in characters.
+
+The nineteen shipped notes run from 705 to 4,830 characters and are written as single paragraphs,
+so a terminal that printed them unwrapped would emit one line per note. 96 leaves room inside a
+100-column line for the two-space indent that marks the prose apart from the fields above it.
+"""
+
+
+@factor_app.command("list")
+def factor_list_command(
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit the whole catalog, notes included, as data.")
+    ] = False,
+) -> None:
+    """Print every factor, transform and neutralisation this build declares, and how to read a run.
+
+    **The command that had to exist before any of the others could be used.** `factor run` takes
+    `--factor`, `--transform` and `--neutralization`, and until this command there was no face, no
+    route and no document that listed a legal value for any of the three: the only way to discover
+    one was to mistype it, and the resulting refusal answered with nineteen `fct_` content
+    addresses -- the one spelling of the identity a human never types.
+
+    It also carries the two tables a `factor run` answer cannot be read without and which appeared
+    nowhere in `docs/`, `README*` or `web/`: what each of the six verdicts means, and which of the
+    six grid cells the acceptance criterion is decided on.
+
+    Reads no store and takes no `--runtime-dir`: a declaration is a property of the build, so this
+    answers the same on an empty machine. `--json` is `factor_view.factor_catalog()` verbatim,
+    which is byte-for-byte what `GET /api/v1/factors` serves and what
+    `OpenAlphaSDK.factor_catalog()` returns.
+    """
+    with _panel_command("factor list"):
+        catalog = factor_catalog()
+        if json_output:
+            typer.echo(json.dumps(catalog, ensure_ascii=False, sort_keys=True))
+            return
+        _echo_catalog(catalog)
+
+
+def _echo_catalog(catalog: Mapping[str, object]) -> None:
+    """Render the catalog for a terminal: two lines per declaration, then the two tables.
+
+    Two lines rather than one wide row, because the `decides` column runs to ninety characters on
+    a value factor and a table that wrapped mid-field is harder to read than one that does not try.
+    The note is a **size** here and the prose is `factor describe`'s; see `catalog_rows`.
+    """
+    counts = {
+        kind: len([row for row in catalog_rows(catalog) if row[0] == kind])
+        for kind in ("factor", "transform", "neutralization")
+    }
+    typer.echo(
+        f"declared   {counts['factor']} factors, {counts['transform']} transforms, "
+        f"{counts['neutralization']} neutralizations   (schema {catalog['schema_version']})"
+    )
+    typer.echo("kind            handle                                note")
+    for kind, handle, decides, note in catalog_rows(catalog):
+        typer.echo(f"{kind:<15} {handle:<37} {note}")
+        typer.echo(f"                {decides}")
+    typer.echo("")
+    typer.echo("verdict       what `factor run` puts in the grid's last column")
+    verdicts = catalog["verdicts"]
+    assert isinstance(verdicts, list)
+    for verdict in verdicts:
+        typer.echo(f"{verdict['code']:<13} {verdict['meaning']}")
+    typer.echo("")
+    cells = catalog["attribution_cells"]
+    assert isinstance(cells, list)
+    acceptance = sorted(
+        {str(cell["step"]) for cell in cells if cell["decides_the_acceptance_criterion"]}
+    )
+    typer.echo(f"acceptance  the criterion is read off {', '.join(acceptance)}")
+    typer.echo(
+        "next        `openalpha factor describe --factor <handle>` for one whole declaration"
+    )
+    typer.echo("            `openalpha factor build --factor <handle> --tier raw ...` to store it")
+
+
+@factor_app.command("describe")
+def factor_describe_command(
+    factor: Annotated[
+        str,
+        typer.Option(
+            "--factor",
+            help="A factor's qualified key (`reversal_1d/v1`) or its `fct_` content address.",
+        ),
+    ] = "",
+    transform: Annotated[
+        str,
+        typer.Option(
+            "--transform", help="A transform's qualified key, e.g. `cross_section_standard/v1`."
+        ),
+    ] = "",
+    neutralization: Annotated[
+        str,
+        typer.Option(
+            "--neutralization",
+            help="A neutralisation's qualified key, e.g. `industry_and_size/v1`.",
+        ),
+    ] = "",
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit the declaration and its note as data.")
+    ] = False,
+) -> None:
+    """Print one declaration whole, with the prose that says what it does *not* measure.
+
+    **The prose is the deliverable.** Every shipped contract carries a note over 100 characters
+    (`tests/unit/test_factor_engine_rules.py::test_every_shipped_contract_carries_its_prose`), and
+    the nineteen factor notes are unusually candid -- `return_vol_60`'s says in full that it
+    occupies `V2-P3-013`'s residual-volatility slot, is deliberately **not** named for a residual,
+    and that neither residual is computable in this build. None of that was on any face: nineteen
+    such disclosures existed in the source and reached no operator.
+
+    Exactly one of the three options, because they name three registries rather than three
+    spellings of one; a describe that guessed would answer about whichever it searched first.
+
+    Reads no store, for `factor list`'s reason.
+    """
+    with _panel_command("factor describe"):
+        try:
+            entry = factor_entry(
+                factor=factor or None,
+                transform=transform or None,
+                neutralization=neutralization or None,
+            )
+        except FactorViewError as error:
+            raise _factor_fail(error) from error
+        if json_output:
+            typer.echo(json.dumps(entry, ensure_ascii=False, sort_keys=True))
+            return
+        _echo_declaration(entry)
+
+
+def _echo_declaration(entry: Mapping[str, object]) -> None:
+    """Render one catalog entry for a terminal: three fields, the declaration, the prose.
+
+    The declaration is printed as **indented JSON of the whole `declaration` mapping** rather than
+    as a hand-picked list of fields, and that is the same argument `experiment_view` makes about
+    shipping the sealed document whole: a hand-written projection is a second rendering nothing
+    holds, and a field dropped from it would be invisible to every check here. Printing the mapping
+    means `tests/integration/test_factor_catalog.py::
+    test_the_terminal_declaration_parses_back_to_the_declaration_the_data_face_serves` can parse
+    the output and compare it for equality, so every key is asserted at once and by construction.
+    """
+    typer.echo(f"kind        {entry['kind']}")
+    typer.echo(f"handle      {entry['handle']}")
+    typer.echo(f"identity    {entry['identity']}")
+    typer.echo("declaration")
+    typer.echo(
+        textwrap.indent(
+            json.dumps(entry["declaration"], ensure_ascii=False, indent=2, sort_keys=True), "  "
+        )
+    )
+    note = entry["note"]
+    typer.echo("note")
+    if note is None:
+        typer.echo("  (this registry carries no prose about this contract)")
+        return
+    typer.echo(textwrap.indent(textwrap.fill(str(note), width=NOTE_WRAP_WIDTH), "  "))
+
+
+_BUILD_TIER_HELP: Final[str] = (
+    "The highest tier to store: `raw`, `processed` or `neutralized`. Every tier below it is stored "
+    "too, so `--tier neutralized` writes all three. `--transform` is required for the last two and "
+    "`--neutralization` for the last; naming one the tier does not use is refused rather than "
+    "ignored. `--tier neutralized` only succeeds at a prediction instant at or after the panel's "
+    "own stored horizon -- see this command's help text and the refusal it prints."
+)
+_BUILD_FACTOR_AS_OF_HELP: Final[str] = (
+    "A prediction instant to compute a cross section at, ISO-8601 with an offset, repeatable. An "
+    "instant rather than a date, because every one of a stored observation's four panel clocks is "
+    "stamped with it and `factor run` groups its sample by it; `factor run --start/--end` then "
+    "selects these by their Asia/Shanghai date. Every instant of one partition year has to be "
+    "given in ONE invocation: a partition is replaced whole, so a later build of the same year is "
+    "refused by the drop guard unless it names the builds it supersedes."
+)
+_BUILD_FACTOR_YEAR_HELP: Final[str] = (
+    "A partition year every read of this build is scoped to, repeatable, the same vocabulary "
+    "`openalpha panel build --year` writes with. Named `--year` and not `--start/--end` because "
+    "`factor run --start/--end` are prediction DAYS and these are partition YEARS. A session "
+    "factor with a 125-session lookback at the start of a year needs the year before it too; the "
+    "statement partitions are keyed by ANNOUNCEMENT year, so five report periods usually need two "
+    "of them; and the registry partitions are keyed by LIFECYCLE year, so a prefix of the stored "
+    "years silently shortens the universe rather than refusing."
+)
+_BUILD_STALENESS_HELP: Final[str] = (
+    "How many days old the newest row of a read partition may be. Every panel_ingest requirement "
+    "builder refuses to default this, so state it or waive it with --waive-max-staleness; there "
+    "is no third option, because a defaulted bound is silence about all six datasets at once."
+)
+_BUILD_WAIVE_STALENESS_HELP: Final[str] = (
+    "Read with no freshness bound at all, on the record. The waiver a fixed historical build "
+    "wants, and the wrong answer for a scheduled one: a price panel whose newest session is a "
+    "month old has missed a month of the market. Mutually exclusive with --max-staleness-days."
+)
+_BUILD_SUBJECT_FACTOR_HELP: Final[str] = (
+    "A ts_code to evaluate, repeatable. Without it the subjects are every code the stored registry "
+    "knows -- the whole membership rather than the day's listed cross section, so a delisted name "
+    "is evaluated and coded `not_in_universe` instead of quietly vanishing from the census."
+)
+_BUILD_SUPERSEDES_HELP: Final[str] = (
+    "A stored {tier} manifest_id this build deliberately replaces, repeatable. A partition is "
+    "replaced whole and the writers refuse a write that would drop a stored build, so a rebuild "
+    "under a different --code-commit has to name what it supersedes. Three separate options "
+    "because the three tiers keep three different manifest partitions, and each writer refuses a "
+    "name no partition it touches holds."
+)
+
+
+@factor_app.command("build")
+def factor_build_command(
+    factor: Annotated[str, typer.Option("--factor", help=_FACTOR_HELP)],
+    tier: Annotated[str, typer.Option("--tier", help=_BUILD_TIER_HELP)],
+    as_of: Annotated[list[str], typer.Option("--as-of", help=_BUILD_FACTOR_AS_OF_HELP)],
+    year: Annotated[list[int], typer.Option("--year", help=_BUILD_FACTOR_YEAR_HELP)],
+    transform: Annotated[str, typer.Option("--transform", help=_FACTOR_TRANSFORM_HELP)] = "",
+    neutralization: Annotated[
+        str, typer.Option("--neutralization", help=_FACTOR_NEUTRALIZATION_HELP)
+    ] = "",
+    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
+        "./runtime"
+    ),
+    exchange: Annotated[
+        str, typer.Option("--exchange", help=_FACTOR_EXCHANGE_HELP)
+    ] = TRADING_CALENDAR_DEFAULT_EXCHANGE,
+    max_staleness_days: Annotated[
+        int | None, typer.Option("--max-staleness-days", help=_BUILD_STALENESS_HELP)
+    ] = None,
+    waive_max_staleness: Annotated[
+        bool, typer.Option("--waive-max-staleness", help=_BUILD_WAIVE_STALENESS_HELP)
+    ] = False,
+    subject: Annotated[
+        list[str] | None, typer.Option("--subject", help=_BUILD_SUBJECT_FACTOR_HELP)
+    ] = None,
+    supersedes_raw: Annotated[
+        list[str] | None,
+        typer.Option("--supersedes-raw", help=_BUILD_SUPERSEDES_HELP.format(tier="raw")),
+    ] = None,
+    supersedes_processed: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--supersedes-processed", help=_BUILD_SUPERSEDES_HELP.format(tier="processed")
+        ),
+    ] = None,
+    supersedes_neutralized: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--supersedes-neutralized", help=_BUILD_SUPERSEDES_HELP.format(tier="neutralized")
+        ),
+    ] = None,
+    code_commit: Annotated[str, typer.Option("--code-commit", help=_CODE_COMMIT_HELP)] = "",
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit the build report as data.")
+    ] = False,
+) -> None:
+    """Compute one factor's stored tiers at the named instants and write them into the panel.
+
+    **The command that makes `factor run` reachable.** A store built by `openalpha panel build`
+    holds prices, filings, a registry, a calendar and an industry tree, and no factor partition at
+    all; `openalpha panel build --dataset factor_obs_...` refuses, because a factor observation is
+    derived rather than fetched and is no build target of that command. This is where it is
+    derived. Nothing here bypasses a guard: `compute_factor`, `apply_factor_transform` and
+    `apply_factor_neutralization` produce every number and the three `write_*_factor_panels`
+    functions run every write-time check.
+
+    The usual first invocation, against a panel `openalpha panel build --year 2026` wrote::
+
+        openalpha factor build --factor reversal_1d/v1 --tier processed \\
+          --transform cross_section_standard/v1 \\
+          --as-of 2026-01-08T09:00:00+00:00 --as-of 2026-01-09T09:00:00+00:00 \\
+          --year 2026 --waive-max-staleness --runtime-dir ./runtime
+
+    and then `openalpha factor run --factor reversal_1d/v1 --start 2026-01-08 --end 2026-01-09 ...`
+    reads what it stored.
+
+    **The third tier is the one that may refuse, and it refuses by name.** A residual can only be
+    computed at a prediction instant at or after the last stored session of every year the read
+    touches -- `load_industry_market_cap_cross_section` takes the unfiltered door and the residual
+    has to carry the processed panel's own instant, so the two cannot be satisfied earlier. The
+    refusal says that, names the remedies, and **writes nothing**: a build that stored two tiers
+    and gave up on the third would leave the exact store shape that makes `factor run` refuse one
+    command later, about a different thing. See
+    `the_builder_cannot_produce_a_residual_before_its_years_stored_horizon`, which
+    `openalpha factor list --json` also serves.
+
+    Exits 0 when everything asked for was stored; 1 when the panel could not answer; 3 when the
+    request could not be put. `FACTOR_EXIT`'s rows, unchanged.
+    """
+    with _panel_command("factor build"):
+        try:
+            request = factor_build_request(
+                factor=factor,
+                tier=tier,
+                transform=transform,
+                neutralization=neutralization,
+                as_ofs=[_factor_instant(value) for value in as_of],
+                years=year,
+                exchange=exchange,
+                max_staleness_days=max_staleness_days,
+                waive_max_staleness=waive_max_staleness,
+                subjects=subject or [],
+                supersedes_raw=supersedes_raw or [],
+                supersedes_processed=supersedes_processed or [],
+                supersedes_neutralized=supersedes_neutralized or [],
+                code_commit=_resolved_code_commit(code_commit or None),
+            )
+            report = build_factor_panels(
+                _panel_store(runtime_dir), request, built_at=_panel_clock()
+            )
+        except FactorViewError as error:
+            raise _factor_fail(error) from error
+
+        if json_output:
+            typer.echo(json.dumps(build_view(report), ensure_ascii=False, sort_keys=True))
+        else:
+            _echo_build(report)
+
+
+def _factor_instant(value: str) -> datetime:
+    """One `--as-of` of `factor build`, refusing what `_panel_as_of` refuses.
+
+    A separate function because `_panel_as_of` defaults an empty string to the wall clock, and a
+    *prediction* instant must never be defaulted: a build stamped at "now" is a cross section
+    nobody asked for at a day nobody named, and it would be stored under that instant forever.
+    """
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise _panel_fail(
+            PanelExit.bad_request,
+            f"--as-of expects an ISO-8601 instant with an offset, e.g. "
+            f"2026-01-08T09:00:00+00:00; got {value!r}",
+        ) from error
+    return parsed
+
+
+def _echo_build(report: FactorBuildReport) -> None:
+    """Print one build: what it wrote, and the census that says whether it wrote anything usable.
+
+    The coverage census is the load-bearing half rather than decoration. A build that stored five
+    thousand `input_missing` rows exits 0 and produced nothing, and the number of names that got a
+    value is the first thing a caller needs before running an experiment over them -- especially
+    against the shipped derived specs, whose `min_cross_section=100` turns a thinner market into a
+    coded row for every name (see `the_shipped_transform_and_neutralisation_floors_exceed_a_thin_
+    market`).
+
+    All three tier rows always, including the ones this build did not ask for; see `build_rows`.
+    """
+    typer.echo(f"factor     {report.factor} ({report.factor_id})")
+    typer.echo(f"tier       {report.tier}")
+    typer.echo(
+        f"as_ofs     {len(report.as_ofs)}: "
+        f"{', '.join(instant.isoformat() for instant in report.as_ofs)}"
+    )
+    typer.echo(
+        f"subjects   {report.subject_count} evaluated, universe "
+        f"{', '.join(str(count) for count in report.universe_counts)} listed per as_of"
+    )
+    typer.echo("tier            builds  rows  coverage")
+    for tier, builds, rows, coverage in build_rows(report):
+        typer.echo(f"{tier:<15} {builds:>6}  {rows:>4}  {coverage}")
+    typer.echo(f"partitions {len(report.partitions)}: {', '.join(report.partitions)}")
+    typer.echo("next       `openalpha factor run --factor ... --start ... --end ...`")
 
 
 def main() -> None:

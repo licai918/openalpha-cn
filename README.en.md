@@ -52,6 +52,41 @@ OpenAlpha CN competes on verifiability rather than the number of agent personas:
 
 The project accepts user-owned CSV, JSON, JSONL, and Parquet data, BYOT Tushare, and an optional constrained AKShare adapter. It does not redistribute commercial raw datasets or expose a hosted data resale proxy.
 
+## The factor plane
+
+Above the point-in-time panel sits a factor library — 19 declared factors (5 momentum/reversal, 4 volatility/liquidity, 3 value, 4 quality, 3 growth), one cross-sectional transform, one industry-and-size neutralisation — and a three-tier experiment that scores all three tiers and seals the result into an immutable, content-addressed record. Four commands, in the order you meet them:
+
+```bash
+uv run openalpha factor list                              # what this build declares
+uv run openalpha factor describe --factor return_vol_60/v1  # one declaration, whole, with its note
+uv run openalpha factor build --factor reversal_1d/v1 --tier processed \
+  --transform cross_section_standard/v1 \
+  --as-of 2026-01-08T09:00:00+00:00 --as-of 2026-01-09T09:00:00+00:00 \
+  --year 2026 --max-staleness-days 30                     # compute and store the tiers
+uv run openalpha factor run --factor reversal_1d/v1 --start 2026-01-08 --end 2026-01-09 ...
+```
+
+Three faces answer the same questions: `openalpha factor *`, `GET /api/v1/factors` plus
+`POST /api/v1/factors/run`, and `OpenAlphaSDK.factor_catalog()` /
+`.run_factor_experiment()`. `factor build` is on the command line and in the SDK only,
+matching `panel build`: it writes panel partitions and the service ships with no
+authentication of its own.
+
+`factor run` prints three tier rows and a six-cell attribution grid. **The six cells are
+not equals**: `processed->neutralized` is the step the acceptance criterion is read off —
+a statistic that vanishes there was the industry and size exposure. The six verdicts are
+`survives`, `removed`, `reversed`, `amplified`, `no_baseline` and `not_measured`;
+`openalpha factor list` prints what each one means.
+
+**Exit `0` covers a grid that is `removed` everywhere *and* one that is `not_measured`
+everywhere, and the second is the dangerous one** — it is no finding at all, because one
+tier in every cell computed nothing, yet it looks like a clean pass to anyone grepping for
+`removed`. `factor run` prints a named warning on stderr when that happens, and
+`document.artifact.tiers[].ic.coverage` is the per-tier truth. See
+[the HTTP contract](docs/api/http.md) for the full argument and for the named boundaries —
+including `V2-P4-026`, which is why the neutralised tier cannot be built at a mid-year
+prediction instant.
+
 ## Development gates
 
 ```bash
