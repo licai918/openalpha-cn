@@ -917,3 +917,159 @@ def test_feature_coverage_artifacts_are_reconciled() -> None:
     assert result.returncode == 0, result.stdout + result.stderr
     assert '"unreviewed": 0' in result.stdout
     assert '"unknown": 0' in result.stdout
+
+
+# --- ADR-0003's nine runtime dependencies (P3 acceptance) ------------------------------------
+
+RUNTIME_DEPENDENCIES = (
+    "duckdb>=1.5,<2",
+    "fastapi>=0.135,<1",
+    "pydantic>=2.12,<3",
+    "pydantic-settings>=2.15,<3",
+    "python-dotenv>=1.1,<2",
+    "pytz>=2025.2",
+    "typer>=0.21.0,<1",
+    "tzdata>=2025.2",
+    "uvicorn>=0.41,<1",
+)
+"""`[project].dependencies`, written out, because ADR-0003 says this file pins them.
+
+That ADR's whole decision is that this repository ships **no numerical stack**, argued over eight
+measured updates during P3, and it says: "The nine runtime dependencies are pinned by
+`tests/unit/test_repository_assets.py`, which is what would go red if this update were wrong."
+The P3 technical acceptance added a tenth dependency to `[project].dependencies` and ran this
+file together with `test_adr_consistency.py`: **34 passed**. Nothing in the repository read
+`[project].dependencies` at all -- `domain-purity` forbids `domain/` from importing numpy or
+pandas, which is a different claim about different code, and ruff's `NPY`/`PD` rule sets are not
+enabled.
+
+Full requirement strings rather than bare names, so a widened floor (`pydantic>=2.12` relaxed to
+`pydantic>=2.0`) is as visible as a new package. `[project.optional-dependencies]` and
+`[dependency-groups]` are deliberately outside this tuple;
+`test_the_optional_and_development_dependency_tables_are_not_a_way_around_the_nine` is why that
+is not a hole.
+"""
+
+NUMERICAL_STACK_PACKAGES = frozenset(
+    {"numpy", "pandas", "scipy", "scikit-learn", "sklearn", "polars", "pyarrow", "statsmodels"}
+)
+"""The distributions ADR-0003 exists to keep out of an install.
+
+Checked separately from the tuple equality above even though that equality already catches them,
+because the two fail with different messages: the equality says "the dependency list changed",
+and this one says which decision the change reverses.
+"""
+
+_REQUIREMENT_NAME = re.compile(r"[<>=!~\[;\s]")
+
+
+def _requirement_name(requirement: str) -> str:
+    """The distribution name at the head of a PEP 508 requirement string."""
+    return _REQUIREMENT_NAME.split(requirement, maxsplit=1)[0].strip().lower()
+
+
+def _pyproject_tables() -> dict[str, object]:
+    return tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+
+def test_the_nine_runtime_dependencies_are_exactly_what_adr_0003_says_they_are() -> None:
+    """The pin ADR-0003 claims exists. It did not until this test did.
+
+    An exact tuple equality rather than a set comparison or a count, because the three ways this
+    list goes wrong are different and a weaker assertion separates only some of them: a tenth
+    entry, a renamed entry (nine names, one of them different -- `Task 38`'s shape, where a table
+    and its implementation drift while the count still matches), and a relaxed specifier on one
+    of the nine.
+    """
+    project = _pyproject_tables()["project"]
+    assert isinstance(project, dict)
+
+    assert tuple(project["dependencies"]) == RUNTIME_DEPENDENCIES, (
+        "[project].dependencies is not what ADR-0003 says it is. If the change is deliberate, "
+        "update RUNTIME_DEPENDENCIES here and the ADR's own count with it -- that ADR argues "
+        "over eight measured updates that this repository ships no numerical stack, and this "
+        "list is the only place that claim can be falsified"
+    )
+    assert len(RUNTIME_DEPENDENCIES) == 9
+
+
+def test_no_numerical_stack_package_can_be_installed_by_default() -> None:
+    """ADR-0003's decision, stated as the thing it forbids rather than as the list it allows.
+
+    `domain-purity` forbids `domain/` from *importing* numpy, and the two `backtest` study
+    contracts forbid the study modules from importing it too. None of them stops it being
+    *installed*, and an installed numerical stack is what an ADR arguing about wheel size, BLAS
+    thread pinning and reproducibility is actually about.
+    """
+    project = _pyproject_tables()["project"]
+    assert isinstance(project, dict)
+    dependencies = project["dependencies"]
+    assert isinstance(dependencies, list)
+
+    numeric = sorted(
+        str(requirement)
+        for requirement in dependencies
+        if _requirement_name(str(requirement)) in NUMERICAL_STACK_PACKAGES
+    )
+
+    assert not numeric, (
+        f"{numeric} is a numerical-stack package in [project].dependencies. ADR-0003 decided "
+        "against exactly this and re-measured the decision eight times during P3; reversing it "
+        "is an ADR edit, not a dependency edit"
+    )
+
+
+def test_the_optional_and_development_dependency_tables_are_not_a_way_around_the_nine() -> None:
+    """The nine are a floor on what an install pulls in, so the other two tables need a rule too.
+
+    `[project.optional-dependencies]` ships to users behind an extra, so a numerical stack there
+    is the same install by another name and is forbidden outright. `[dependency-groups].dev`
+    never reaches a wheel, so it is pinned as a list instead: adding `numpy` there for one test
+    would not violate ADR-0003, but it would make `import numpy` succeed in CI and turn every
+    "this repository has no numpy" measurement into one about the developer's own environment --
+    `tests/unit/runtime/test_seeding.py` currently skips on exactly that import.
+    """
+    tables = _pyproject_tables()
+    project = tables["project"]
+    assert isinstance(project, dict)
+    optional = project.get("optional-dependencies", {})
+    assert isinstance(optional, dict)
+
+    for extra, requirements in sorted(optional.items()):
+        assert isinstance(requirements, list)
+        numeric = sorted(
+            str(requirement)
+            for requirement in requirements
+            if _requirement_name(str(requirement)) in NUMERICAL_STACK_PACKAGES
+        )
+        assert not numeric, f"extra {extra!r} would install {numeric}"
+
+    groups = tables["dependency-groups"]
+    assert isinstance(groups, dict)
+    assert tuple(groups["dev"]) == (
+        "httpx2>=2.9.0",
+        "import-linter>=2.13,<3",
+        "mypy>=1.19.0,<2",
+        "pytest>=9.0.0,<10",
+        "pytest-cov>=7.0.0,<8",
+        "ruff>=0.15.0,<1",
+    )
+
+
+def test_adr_0003_still_names_this_file_and_the_count_it_pins() -> None:
+    """The citation loop, closed in the direction that was open.
+
+    ADR-0003 named this file as the thing that would go red; this is the other half, so renaming
+    the pin or changing the count without touching the ADR fails here rather than leaving a
+    second sentence that a measurement disproves.
+    """
+    adr = (ROOT / "docs" / "architecture" / "ADR-0003-numerical-stack-boundary.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "tests/unit/test_repository_assets.py" in adr
+    assert "nine runtime dependencies" in adr, (
+        "ADR-0003 no longer says 'nine runtime dependencies'; if the count changed, "
+        "RUNTIME_DEPENDENCIES above and the ADR have to change together"
+    )
+    assert len(RUNTIME_DEPENDENCIES) == 9

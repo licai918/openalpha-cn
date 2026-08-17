@@ -33,9 +33,22 @@ rather than a second's."* The evidence arrived and it points the other way, on o
   `_ALLOWED_NEUTRALIZATION_DEPENDENCIES` as well, so a later edit that adds
   `load_daily_bars` or `load_index_weights` to *this* module widens its dataset reach with nothing
   going red. The audit sees **modules**, never datasets. So the honest claim is that the widening
-  was made visible **at the moment it happened**, not that it is policed from here on; the thing
-  that would police it is a dataset-level allowlist, which does not exist and is not proposed
-  here.
+  was made visible **at the moment it happened**, not that it is policed from here on.
+
+  **That gap is closed and the paragraph above is kept as the record of why.** The dataset-level
+  allowlist it says does not exist now does: `tests/unit/test_panel_ingest_import_isolation.py`'s
+  `PANEL_MODULE_SEAM_IMPORTS` records the eleven names this module takes across the seam so a
+  twelfth is a diff, and its `PANEL_MODULE_DATASETS` records that this module names **no** upstream
+  dataset in its own source and reaches exactly `daily_basic` and `index_member_all` through
+  `load_daily_valuations` and `load_industry_histories`. The widening this paragraph describes as
+  unpoliced is driven on a mutated copy of this file by
+  `tests/unit/test_panel_ingest_import_isolation.py::
+  test_a_loader_added_to_the_neutralisation_turns_both_tables_red`, and the difference between the
+  two fields -- which is this issue's entire claim -- by
+  `tests/unit/test_panel_ingest_import_isolation.py::
+  test_the_neutralisation_reaches_its_two_foreign_datasets_only_across_the_seam`. Nothing in this
+  module declares anything for that audit's benefit: it reads the `*_DATASET` constants `domain/`
+  already binds and the imports this file already writes.
 - **The size, which is now indefensible rather than merely large.** `panel_factors.py` is 3,912
   lines and already the largest module in `src/`; this issue is ~1,000 more. A 4,900-line module
   is not a seam anybody re-takes later.

@@ -3,10 +3,10 @@
     "agent": 9,
     "backtest": 14,
     "batch": 4,
-    "boundary": 5,
+    "boundary": 7,
     "decision": 8,
     "evidence": 9,
-    "factor": 16,
+    "factor": 17,
     "interface": 8,
     "model": 4,
     "operations": 31,
@@ -30,13 +30,13 @@
     "DEFERRED": 1,
     "ENHANCED_REPLACEMENT": 20,
     "EXCLUDED": 4,
-    "NATIVE_COMPLETE": 132
+    "NATIVE_COMPLETE": 135
   },
   "totals": {
-    "all_features": 158,
+    "all_features": 161,
     "legacy_acceptance_rows": 86,
-    "true_completed_features": 153,
-    "true_completion_rate_pct": 96.84,
+    "true_completed_features": 156,
+    "true_completion_rate_pct": 96.89,
     "unknown": 0,
     "unreviewed": 0
   }
