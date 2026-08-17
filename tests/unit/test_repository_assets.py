@@ -848,9 +848,17 @@ def test_publication_gate_survives_a_nested_checkout_and_says_it_skipped_it(
     are published by *its* repository and scanned by *its* run. Saying so is not optional: a
     scan that quietly declines to read something and still answers "ok" is the failure mode
     every registry in this repository exists to prevent.
+
+    The probe sits at the repository root and **not** under `.claude/`, which is where the
+    harness actually puts its worktrees. That directory is ignored now, so `git ls-files
+    --others --exclude-standard` never mentions it and there is nothing for this test to
+    observe -- it went red the moment the ignore landed, which is the correct signal and the
+    reason the probe moved rather than the assertion weakening. An ignored directory is not a
+    skip; it is not a candidate. What still has to hold is the case the ignore does not cover:
+    somebody clones a repository into the working tree, git lists that directory and nothing
+    else about it, and the scan must survive it and say so.
     """
-    nested = ROOT / ".claude" / "worktrees" / "publication-gate-probe"
-    nested.parent.mkdir(parents=True, exist_ok=True)
+    nested = ROOT / "publication-gate-probe"
     subprocess.run(["git", "init", "-q", str(nested)], check=True, capture_output=True)
     try:
         (nested / "decoy.parquet").write_bytes(b"a blocked suffix the outer scan must not see")
@@ -863,7 +871,7 @@ def test_publication_gate_survives_a_nested_checkout_and_says_it_skipped_it(
         )
         assert result.returncode == 0, result.stdout + result.stderr
         report = json.loads(result.stdout)
-        assert ".claude/worktrees/publication-gate-probe" in report["nested_checkouts"]
+        assert "publication-gate-probe" in report["nested_checkouts"]
         assert report["blockers"] == []
     finally:
         shutil.rmtree(nested, ignore_errors=True)
