@@ -33,10 +33,11 @@ Six properties this file exists to hold, and the first is the issue's acceptance
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Final
+from typing import Any, Final
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -69,11 +70,13 @@ from openalpha_cn.backtest.factor_portfolio import (
 )
 from openalpha_cn.backtest.factor_tradeability import (
     CAPACITY_COVERAGE_CODES,
+    CAPACITY_COVERAGE_ORDER,
     CNY_PER_TURNOVER_UNIT,
     EXCLUDED_OUTCOME_ORDER,
     KNOWN_TRADEABILITY_LIMITATIONS,
     MAXIMUM_REBALANCES,
     MINIMUM_REBALANCES,
+    TRADEABILITY_COVERAGE_CODES,
     TRADEABILITY_LIMITATION_CODES,
     TURNOVER_COVERAGE_CODES,
     TURNOVER_COVERAGE_ORDER,
@@ -81,10 +84,12 @@ from openalpha_cn.backtest.factor_tradeability import (
     FactorTradeabilityError,
     GroupCapacity,
     GroupCoverage,
+    PeriodTradeability,
     Rebalance,
     SessionLiquidity,
     TradeabilitySpec,
     TradeabilityStudy,
+    TradeabilitySummary,
     TurnoverSeries,
     liquidity_from_amount,
 )
@@ -1939,6 +1944,7 @@ def test_the_known_limitations_are_the_declared_set_and_each_is_bound_to_this_mo
         "turnover_is_counted_on_names_and_on_money_and_the_two_are_not_the_same_number",
         "a_turnover_over_a_short_series_is_the_schedule_rather_than_the_factor",
         "the_liquidity_session_is_the_callers_and_may_be_the_entry_session_itself",
+        "a_pooled_funnel_is_a_ratio_of_sums_and_a_mean_shortfall_is_a_mean_of_ratios",
         "every_rate_here_is_conditioned_on_the_universe_the_caller_offered",
     } == TRADEABILITY_LIMITATION_CODES
     assert len(KNOWN_TRADEABILITY_LIMITATIONS) == len(TRADEABILITY_LIMITATION_CODES)
@@ -2066,3 +2072,352 @@ def test_the_study_exposes_the_two_specs_it_was_built_with() -> None:
     assert study.spec is spec
     assert study.portfolio is portfolio
     assert study.portfolio.group_count == 5
+
+
+# --------------------------------------------------------------------------------------------
+# The series summary: the shape a report carries, and the reason this module had no consumer
+# --------------------------------------------------------------------------------------------
+
+
+def _reports(
+    study: TradeabilityStudy,
+    portfolio: QuantilePortfolioSpec,
+    sections: Sequence[tuple[ICCrossSection, dict[str, tuple[MarketBar, MarketBar]]]],
+    *,
+    liquidity: Sequence[dict[str, SessionLiquidity]] | None = None,
+) -> list[PeriodTradeability]:
+    """One `PeriodTradeability` per offered cross section, through the study's own two calls."""
+    return [
+        study.measure(
+            _period(section, bars, portfolio=portfolio),
+            cross_section=section,
+            liquidity=(liquidity[index] if liquidity is not None else _liquidity(section)),
+        )
+        for index, (section, bars) in enumerate(sections)
+    ]
+
+
+def _acceptance_summary(
+    refused: tuple[int, ...], *, cap: Decimal = CAP
+) -> tuple[PeriodTradeability, TradeabilitySummary]:
+    """One acceptance period and the one-period summary over it, under a declared cap."""
+    section, period = _acceptance(refused)
+    portfolio = _quantile_spec(min_securities_per_group=1)
+    study = _study(_spec(participation_cap=cap), portfolio=portfolio)
+    report = study.measure(period, cross_section=section, liquidity=_liquidity(section))
+    return report, study.summarize([report])
+
+
+def test_the_summary_carries_the_long_groups_execution_rate_the_funnel_averages_away() -> None:
+    """**The acceptance criterion, at the level a report is written on.**
+
+    `test_the_same_ic_and_the_same_funnel_are_told_apart_by_the_top_groups_execution_rate` drives
+    the same two markets one period at a time; this drives them through the object a `TierReport`
+    actually holds, which is the half the instrument was missing. The two summaries agree on the
+    whole pooled funnel -- five counts and four rates -- and disagree on one row of one table, and
+    both halves are asserted because a summary that dropped the decomposition would pass the first.
+    """
+    bad_report, bad = _acceptance_summary((10, 11, 12))
+    good_report, good = _acceptance_summary((1, 2, 3))
+
+    assert bad.coverage == good.coverage == "measured"
+    assert bad.funnel == good.funnel
+    assert bad.funnel.execution_rate == good.funnel.execution_rate == 0.75
+    assert bad.group == good.group == 2
+    assert bad.mean_top_group_execution_rate == 0.25
+    assert good.mean_top_group_execution_rate == 1.0
+    assert bad.mean_top_group_execution_shortfall == 0.5
+    assert good.mean_top_group_execution_shortfall == -0.25
+    assert [row.held_count for row in bad.by_group] == [4, 4, 1]
+    assert [row.held_count for row in good.by_group] == [1, 4, 4]
+    assert bad.by_group != good.by_group
+    # One period, so the pooled reading and the mean of one ratio agree here; the uneven fixture
+    # below is the one that separates them.
+    assert bad.pooled_top_group_execution_rate == bad.mean_top_group_execution_rate
+    assert (bad_report.funnel, good_report.funnel) == (bad.funnel, good.funnel)
+
+
+def test_the_participation_cap_moves_the_capital_multiple_and_leaves_the_concentration() -> None:
+    """**The declared cap, measured on the object a report carries.**
+
+    `participation_cap` is a required option with no default, and until this summary existed it
+    decided nothing that reached one: every capacity it scaled was computed inside a loop whose
+    output nothing consumed. Two caps a factor of fifty apart move `binding_capital_multiple` by
+    exactly fifty and `mean_concentration` not at all -- because a concentration is a ratio of two
+    capacities the cap scales alike, which is arithmetic `TradeabilitySummary.mean_concentration`
+    states and this is where it is driven. Both halves matter: the first says the declaration
+    reaches a number, the second says which number it does not reach.
+    """
+    _cheap_report, cheap = _acceptance_summary((10, 11, 12), cap=Decimal("0.01"))
+    _rich_report, rich = _acceptance_summary((10, 11, 12), cap=Decimal("0.5"))
+
+    assert cheap.binding_capital_multiple == 100.0
+    assert rich.binding_capital_multiple == 5000.0
+    assert rich.binding_capital_multiple == cheap.binding_capital_multiple * 50.0
+    assert cheap.mean_capital_multiple == 100.0
+    assert rich.mean_capital_multiple == 5000.0
+    assert cheap.mean_concentration == rich.mean_concentration == 1.0
+    assert cheap.funnel == rich.funnel
+    assert cheap.by_group == rich.by_group
+
+
+def test_a_pooled_rate_and_a_mean_of_rates_are_two_numbers_and_both_are_published() -> None:
+    """`a_pooled_funnel_is_a_ratio_of_sums_and_a_mean_shortfall_is_a_mean_of_ratios`, driven.
+
+    Twelve names at the first `as_of` with the top three refused and six at the second with none
+    refused, so the long group holds 1 of 4 and then 2 of 2. Pooled that is `3 / 6 = 0.5`; meaned
+    it is `(0.25 + 1.0) / 2 = 0.625`. Neither is derivable from the other, and a report publishing
+    one under a name that suggested the other would be quoting a weighting nobody declared -- so
+    both are on the summary with the counts under them. A fixture of two equal-width periods
+    cannot tell the two apart, which is the shape this repository has taken ten findings on.
+    """
+    portfolio = _quantile_spec(min_securities_per_group=1)
+    study = _study(portfolio=portfolio)
+    summary = study.summarize(
+        _reports(
+            study,
+            portfolio,
+            [
+                _inputs(ACCEPTANCE_RANKS, suspend_entry=(10, 11, 12)),
+                _inputs(as_of=AS_OF_2),
+            ],
+        )
+    )
+
+    assert summary.attempted_count == len(summary.as_ofs) == 2
+    assert summary.pooled_top_group_execution_rate == 0.5
+    assert summary.mean_top_group_execution_rate == 0.625
+    assert summary.pooled_top_group_execution_rate != summary.mean_top_group_execution_rate
+    top = summary.top_group
+    assert top is not None
+    assert (top.scored_count, top.held_count) == (6, 3)
+    assert summary.funnel.universe_count == 18
+    assert summary.funnel.held_count == sum(row.held_count for row in summary.by_group)
+
+
+def test_a_period_refused_before_the_cut_is_in_the_funnel_and_not_in_the_group_table() -> None:
+    """The two poolings run over two sets of periods, and the difference is visible.
+
+    A cross section the cut refused for thinness still valued, admitted and labelled securities,
+    so its four upper counts belong in the funnel; it never reached a group, so it cannot be in
+    the decomposition. `attempted_count` below `len(as_ofs)` is how a reader sees that the group
+    table is over a subset, which no pair of rates could say.
+
+    **The two long-group means are over the answering periods and not over the offered ones**, and
+    the first period is given a suspended long-group name so the two denominators separate: its
+    own shortfall is `5 / 6 - 1 / 2`, and a mean taken over the two offered periods would report
+    half of that about a period that had no long group at all.
+    """
+    portfolio = _quantile_spec(min_securities_per_group=1)
+    study = _study(portfolio=portfolio)
+    reports = _reports(
+        study, portfolio, [_inputs(suspend_entry=(5,)), _inputs((1, 2), as_of=AS_OF_2)]
+    )
+    summary = study.summarize(reports)
+
+    assert reports[1].period_coverage in PRE_EXECUTION_COVERAGE
+    assert reports[1].by_group == ()
+    assert summary.coverage == "measured"
+    assert summary.attempted_count == 1
+    assert len(summary.as_ofs) == 2
+    assert summary.funnel.universe_count == 8
+    assert summary.funnel.scored_count == 8
+    assert sum(row.scored_count for row in summary.by_group) == 6
+    assert summary.funnel.held_count == sum(row.held_count for row in summary.by_group) == 5
+    assert summary.mean_top_group_execution_rate == 0.5
+    assert summary.mean_top_group_execution_shortfall == 5 / 6 - 0.5
+
+
+def test_a_series_that_never_reached_the_cut_still_reports_its_funnel() -> None:
+    """The code that says the decomposition is missing rather than empty, and what survives it.
+
+    Every offered period is thinner than the cut, so no group was ever filled -- and the funnel is
+    still reported, because "the factor valued two of two names and nobody could cut them" is
+    exactly the finding a coverage report exists to carry. The long group's two means are `None`
+    under this code and the capacity table still accounts for both periods.
+    """
+    portfolio = _quantile_spec(min_securities_per_group=1)
+    study = _study(portfolio=portfolio)
+    summary = study.summarize(
+        _reports(study, portfolio, [_inputs((1, 2)), _inputs((1, 2), as_of=AS_OF_2)])
+    )
+
+    assert summary.coverage == "no_attempted_periods"
+    assert summary.attempted_count == 0
+    assert summary.by_group == ()
+    assert summary.top_group is None
+    assert summary.pooled_top_group_execution_rate is None
+    assert summary.mean_top_group_execution_rate is None
+    assert summary.mean_top_group_execution_shortfall is None
+    assert summary.funnel.universe_count == 4
+    assert summary.funnel.held_count == 0
+    assert dict(summary.capacity_coverage_counts)["no_holdings"] == 2
+    assert summary.sized_count == 0
+    assert summary.binding_capital_multiple is None
+
+
+def test_the_capacity_table_accounts_for_every_period_and_the_worst_session_binds() -> None:
+    """The `min` over sessions, its subject, its `as_of`, and the table beside it.
+
+    Three periods: one whose long group holds a thin name, one whose names are all liquid, and one
+    whose held names the caller offered no turnover for. `binding_capital_multiple` is the
+    **worst** of the two sized ones rather than their mean, for the reason `binding_capacity` is a
+    `min` within a period -- a study is implementable at the declared capital only if it was
+    implementable on every session it reports -- and `binding_subject` and `binding_as_of` make
+    the pair locatable rather than merely quoted. The two are 0.02 and 100.0 here, so a mean of
+    50.01 would call a study comfortable on the strength of the day it could not have traded.
+    """
+    portfolio = _quantile_spec(min_securities_per_group=1)
+    study = _study(portfolio=portfolio)
+    sections = [_inputs(as_of=stamp) for stamp in (AS_OF, AS_OF_2, AS_OF_3)]
+    summary = study.summarize(
+        _reports(
+            study,
+            portfolio,
+            sections,
+            liquidity=[
+                _liquidity(sections[0][0], amounts={6: 200.0}),
+                _liquidity(sections[1][0]),
+                _liquidity(sections[2][0], skip=(5, 6)),
+            ],
+        )
+    )
+
+    assert dict(summary.capacity_coverage_counts) == {
+        "measured": 2,
+        "no_holdings": 0,
+        "unpriced_holdings": 1,
+    }
+    assert tuple(name for name, _count in summary.capacity_coverage_counts) == (
+        CAPACITY_COVERAGE_ORDER
+    )
+    assert summary.sized_count == 2
+    assert summary.binding_capital_multiple == 0.02
+    assert summary.binding_subject == code(6)
+    assert summary.binding_as_of == AS_OF
+    assert summary.mean_capital_multiple == 50.01
+    assert summary.binding_capital_multiple < summary.mean_capital_multiple
+    assert summary.sized_at_the_entry_session_count == 2
+    assert summary.sized_before_the_entry_session_count == 0
+
+
+def test_the_summary_says_which_session_every_capacity_was_sized_on() -> None:
+    """`the_liquidity_session_is_the_callers_and_may_be_the_entry_session_itself`, pooled.
+
+    A `PeriodTradeability` shows it with a date; a summary over many periods has no one date to
+    show, so the two readings are carried as two counts. Without them a report would quote a
+    capital multiple without saying whether it was the diagnostic reading ("could this have been
+    traded on that day") or the point-in-time one ("would we have believed it could"), which that
+    limitation says outright is quoting a number whose meaning has not been shown.
+    """
+    portfolio = _quantile_spec(min_securities_per_group=1)
+    study = _study(portfolio=portfolio)
+    sections = [_inputs(as_of=stamp) for stamp in (AS_OF, AS_OF_2, AS_OF_3)]
+    reports = _reports(
+        study,
+        portfolio,
+        sections,
+        liquidity=[
+            _liquidity(sections[0][0]),
+            _liquidity(sections[1][0]),
+            _liquidity(sections[2][0], day=date(2026, 6, 11)),
+        ],
+    )
+    summary = study.summarize(reports)
+
+    # Two against one rather than one against one: a fixture whose two counts were equal could not
+    # tell the pair from the same pair swapped, which is the shape this repository has taken ten
+    # findings on.
+    assert reports[0].liquidity_day == reports[0].entry_day
+    assert reports[2].liquidity_day is not None and reports[2].liquidity_day < reports[2].entry_day
+    assert summary.sized_at_the_entry_session_count == 2
+    assert summary.sized_before_the_entry_session_count == 1
+    assert summary.sized_count == 3
+
+
+def test_a_summary_refuses_a_series_that_is_not_one_study() -> None:
+    """Four refusals, each with a narrow `match=` so a passing test says which rule caught it.
+
+    A funnel pooled over two horizons adds up two different label contracts' verdicts --
+    `scored_count` is what `domain/labels.py` could label over *this* window, so a `label_rate`
+    over a 1d and a 5d period is a rate about no window at all. The tier is the other pair a
+    quantile spec cannot see; a repeated `as_of` weights a day by how often a caller appended it;
+    and a report from another declared cut is a capacity against another study's capital.
+    """
+    portfolio = _quantile_spec(min_securities_per_group=1)
+    study = _study(portfolio=portfolio)
+    report = _reports(study, portfolio, [_inputs()])[0]
+    longer = _reports(study, portfolio, [_inputs(as_of=AS_OF_2, horizon="5d")])[0]
+
+    with pytest.raises(FactorTradeabilityError, match="needs at least one period"):
+        study.summarize([])
+    with pytest.raises(FactorTradeabilityError, match=r"horizon_sessions=5 against 1"):
+        study.summarize([report, longer])
+    with pytest.raises(FactorTradeabilityError, match=r"tier='processed' against 'raw'"):
+        study.summarize([report, replace(report, tier="processed", as_of=AS_OF_2)])
+    with pytest.raises(FactorTradeabilityError, match="appears more than once"):
+        study.summarize([report, report])
+    with pytest.raises(FactorTradeabilityError, match="two different declarations"):
+        _study(portfolio=_quantile_spec(group_count=4, min_securities_per_group=1)).summarize(
+            [report]
+        )
+    assert study.summarize([report]).horizon_sessions == 1
+
+
+def _fields(summary: TradeabilitySummary) -> dict[str, Any]:
+    """The summary's own field values, as objects rather than as a dump, so an override replaces
+    exactly one of them and every other one arrives at the validator unchanged."""
+    return {name: getattr(summary, name) for name in TradeabilitySummary.model_fields}
+
+
+def test_a_summary_that_contradicts_its_own_tables_is_not_constructible() -> None:
+    """The validator, in every direction a builder could get one wrong.
+
+    `TradeabilitySummary` re-derives none of the arithmetic -- `PeriodTradeability`'s precedent --
+    so what it enforces is the set of relationships between the coverage code, the two tables and
+    the capacity statistics. Each of these is a way a stored report could say something the
+    periods under it do not, which is the shape every Critical finding in this repository has had.
+    """
+    _report, honest = _acceptance_summary((10, 11, 12))
+
+    def broken(**overrides: Any) -> TradeabilitySummary:
+        return TradeabilitySummary(**{**_fields(honest), **overrides})
+
+    with pytest.raises(ValidationError, match="attempted period"):
+        broken(attempted_count=0)
+    with pytest.raises(ValidationError, match="one row per group in ascending order"):
+        broken(coverage="no_attempted_periods", attempted_count=0)
+    with pytest.raises(ValidationError, match="one row per group in ascending order"):
+        broken(by_group=honest.by_group[:-1])
+    with pytest.raises(ValidationError, match="the long group's statistics"):
+        broken(mean_top_group_execution_rate=None)
+    with pytest.raises(ValidationError, match="decides which group is held"):
+        broken(group=0)
+    with pytest.raises(ValidationError, match="the same positions counted two ways"):
+        broken(funnel=replace(honest.funnel, held_count=honest.funnel.held_count - 1))
+    with pytest.raises(ValidationError, match="a table missing a code"):
+        broken(capacity_coverage_counts=(("measured", 1),))
+    with pytest.raises(ValidationError, match="every offered period was sized or carries"):
+        broken(
+            capacity_coverage_counts=(
+                ("measured", 2),
+                ("no_holdings", 0),
+                ("unpriced_holdings", 0),
+            )
+        )
+    with pytest.raises(ValidationError, match="sized on one session or the other"):
+        broken(sized_at_the_entry_session_count=0)
+    with pytest.raises(ValidationError, match="exactly a series that sized something"):
+        broken(binding_subject=None)
+    with pytest.raises(ValidationError, match="cannot be above it"):
+        broken(mean_capital_multiple=1.0)
+    with pytest.raises(ValidationError, match="not a finite statistic"):
+        broken(mean_concentration=float("nan"))
+    assert broken().binding_capital_multiple == honest.binding_capital_multiple
+
+
+def test_the_series_coverage_vocabulary_is_closed_and_is_the_declared_two() -> None:
+    """A third spelling of "no decomposition" would silently become a group of one in
+    `V2-P3-014`'s report, which is `ICStabilityCoverage`'s reason for having two members."""
+    assert {"measured", "no_attempted_periods"} == TRADEABILITY_COVERAGE_CODES
+    assert CAPACITY_COVERAGE_ORDER == ("measured", "no_holdings", "unpriced_holdings")

@@ -249,6 +249,7 @@ from openalpha_cn.domain.factor_neutralization import (
     NeutralizedFactorObservation,
 )
 from openalpha_cn.domain.factor_transform import (
+    IMPUTING_PROCESSED_CODES,
     MISSING_VALUE_COVERAGE_ORDER,
     PROCESSED_COVERAGE_CODES,
     PROCESSED_COVERAGE_ORDER,
@@ -339,6 +340,36 @@ TIER_VALUE_CODES: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
 )
 """Which of each tier's codes carry a number at all. Not the same table as the one below."""
 
+TIER_IMPUTING_CODES: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
+    {
+        "raw": frozenset(),
+        "processed": IMPUTING_PROCESSED_CODES,
+        "neutralized": frozenset(),
+    }
+)
+"""Which of each tier's **value** codes carries a number no security produced.
+
+The table `TIER_ADMITTED_CODES` is `TIER_VALUE_CODES` minus, and it is here as data so that
+`_refuse_an_admitted_table_that_admits_a_number_nobody_measured` has something to derive the
+admitted table from at import instead of a literal nobody can see move. Two of the three cells are
+empty and each emptiness is a claim about its own contract rather than a default:
+
+- **`raw`** -- `FactorCoverage`'s invariant is "exactly `computed` carries a value" and the
+  vocabulary has no fill code at all, so every raw number is a measurement by construction. A
+  security the engine could not value gets one of five codes and never a substitute.
+- **`processed`** -- the one non-empty cell, and it is `domain/factor_transform.py`'s own
+  `IMPUTING_PROCESSED_CODES` rather than a restatement of it. That module derives the set by
+  driving `validate_processed_factor_observation` and refuses to load if the two disagree, so the
+  cell below moves when the row contract does.
+- **`neutralized`** -- a residual is a number the regression *produced*, and
+  `NEUTRALIZED_VALUE_CODES`' own docstring says the plane imputes nothing: a security that cannot
+  be regressed gets a code, never a substitute residual. This is emphatically **not** the claim
+  that a residual's input was measured -- under `participation="measured_and_imputed"` a residual
+  may be regressed off an imputed processed value, which `NeutralizedFactorObservation
+  .source_coverage` carries and which is a property of the declared neutralisation rather than of
+  this tier's vocabulary.
+"""
+
 TIER_ADMITTED_CODES: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
     {
         "raw": frozenset({"computed"}),
@@ -352,6 +383,13 @@ The two tables differ in exactly one cell -- `processed` carries a value under `
 one does not admit it -- and `_refuse_a_tier_table_that_disagrees_with_its_own_contract` asserts
 that at import in both directions, so a sixth processed code that carried a value would fail the
 module's load rather than being dropped from every IC with nothing able to say so.
+
+**That audit bounds this table and does not determine it**, which is the gap
+`_refuse_an_admitted_table_that_admits_a_number_nobody_measured` closes beside it: `admitted <=
+value` admits an empty row (a tier that admits nothing, so every cross section on it reports
+`insufficient_sample` and no census column says why) and admits `processed` taking `imputed` in
+(a made-up number inside every processed IC, spread and funnel). Both were reachable with the
+whole suite's import intact, and both are now import failures.
 """
 
 ICCoverage = Literal[
@@ -591,8 +629,84 @@ def _refuse_a_tier_table_that_disagrees_with_its_own_contract(
             )
 
 
+def _refuse_an_admitted_table_that_admits_a_number_nobody_measured(
+    tiers: Sequence[str],
+    value_codes: Mapping[str, frozenset[str]],
+    admitted_codes: Mapping[str, frozenset[str]],
+    imputing_codes: Mapping[str, frozenset[str]],
+) -> None:
+    """Refuse this module at **import** unless each tier admits exactly its measured value codes.
+
+    A second audit rather than two more branches inside the first, because the two answer
+    different questions and the first one's four properties are all *bounds*: they say the tables
+    are drawn from the right vocabularies. This one says the admitted table is the **right** one,
+    and it exists because the bound leaves two shapes reachable that the four do not catch. Both
+    were measured on this build with every module importing and the whole suite collecting:
+
+    1. **A tier that admits nothing.** `frozenset() <= anything`, so three empty rows satisfy the
+       first audit. Every cross section then reports `insufficient_sample` at every `as_of`, on
+       every tier, with `ICCensus.admitted_count` at zero and no code anywhere saying that the
+       *table* rather than the market emptied it.
+    2. **`processed` admitting `imputed`.** `{processed, imputed} <= {processed, imputed}`
+       satisfies the first audit too, and it puts a number this repository made up inside every
+       processed information coefficient, every quantile portfolio built on one, and
+       `CoverageFunnel.admission_rate` -- which is the one cell in which the two tier tables
+       differ and therefore the one number that would silently become `1.0` everywhere.
+
+    Neither is caught by pairwise disjointness of the three admitted sets, which is the assertion
+    an audit of this module first proposed: the three sets stay pairwise disjoint under both
+    mutations (∅ is disjoint from ∅, and `{processed, imputed}` is disjoint from `{computed}` and
+    from `{neutralized}`), and disjointness is in any case *already implied* by the first audit --
+    each tier's admitted set is inside its own value set, the only code two vocabularies share is
+    `insufficient_cross_section` (processed and neutralised), and that code carries a value in
+    neither. An assertion nothing can make fail is an assertion nobody has seen fail.
+
+    Three properties, in the order a reader needs them:
+
+    1. Every tier has a row in the imputing table and no row of it is not a tier.
+    2. A tier's imputing codes are among the codes it values. A code that imputes and carries no
+       value is a contradiction, and subtracting it below would silently do nothing.
+    3. **`admitted == value - imputing`.** Equality, in both directions: a tier that admits less
+       is dropping measured rows from every statistic, and a tier that admits more is admitting a
+       fill.
+
+    Takes its tables as arguments for `_refuse_a_tier_table_that_disagrees_with_its_own_contract`'s
+    reason, so every failure direction is drivable;
+    `tests/unit/backtest/test_factor_ic.py::
+    test_the_admitted_table_audit_refuses_an_empty_row_and_an_admitted_imputation` is where they
+    are driven.
+    """
+    declared = set(tiers)
+    if set(imputing_codes) != declared:
+        raise FactorICError(
+            f"TIER_IMPUTING_CODES is keyed by {sorted(imputing_codes)} and the declared tiers are "
+            f"{sorted(declared)}; a tier with no row would have nothing to subtract, and a row "
+            "that is no tier is a table nothing can reach"
+        )
+    for tier in sorted(declared):
+        if not imputing_codes[tier] <= value_codes[tier]:
+            raise FactorICError(
+                f"TIER_IMPUTING_CODES[{tier!r}] names "
+                f"{sorted(imputing_codes[tier] - value_codes[tier])}, which carries no value at "
+                "that tier; a code that imputes nothing to impute is a cell that subtracts nothing"
+            )
+        measured = value_codes[tier] - imputing_codes[tier]
+        if admitted_codes[tier] != measured:
+            raise FactorICError(
+                f"TIER_ADMITTED_CODES[{tier!r}] admits {sorted(admitted_codes[tier])} and the "
+                f"{tier} contract's measured value codes are {sorted(measured)}; a tier admits "
+                "exactly the codes whose number a security produced, so admitting fewer drops "
+                "measured rows out of every statistic and admitting more puts a number this "
+                "repository made up into one"
+            )
+
+
 _refuse_a_tier_table_that_disagrees_with_its_own_contract(
     FACTOR_TIER_ORDER, TIER_COVERAGE_ORDER, TIER_VALUE_CODES, TIER_ADMITTED_CODES
+)
+
+_refuse_an_admitted_table_that_admits_a_number_nobody_measured(
+    FACTOR_TIER_ORDER, TIER_VALUE_CODES, TIER_ADMITTED_CODES, TIER_IMPUTING_CODES
 )
 
 

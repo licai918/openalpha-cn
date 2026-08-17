@@ -53,6 +53,7 @@ from openalpha_cn.backtest.factor_ic import (
     RAW_COVERAGE_ORDER,
     TIER_ADMITTED_CODES,
     TIER_COVERAGE_ORDER,
+    TIER_IMPUTING_CODES,
     TIER_VALUE_CODES,
     FactorICError,
     FactorICSpec,
@@ -63,6 +64,7 @@ from openalpha_cn.backtest.factor_ic import (
     ICPoint,
     _pearson,
     _refuse_a_tier_table_that_disagrees_with_its_own_contract,
+    _refuse_an_admitted_table_that_admits_a_number_nobody_measured,
     average_ranks,
     neutralized_cross_section,
     processed_cross_section,
@@ -77,7 +79,10 @@ from openalpha_cn.domain.factor import (
     FactorObservation,
 )
 from openalpha_cn.domain.factor_neutralization import NeutralizedFactorObservation
-from openalpha_cn.domain.factor_transform import ProcessedFactorObservation
+from openalpha_cn.domain.factor_transform import (
+    IMPUTING_PROCESSED_CODES,
+    ProcessedFactorObservation,
+)
 from openalpha_cn.domain.horizon import parse_horizon
 from openalpha_cn.domain.labels import (
     LabelWindow,
@@ -1460,6 +1465,75 @@ def test_the_tier_table_audit_refuses_every_disagreement_it_exists_to_catch() ->
     _refuse_a_tier_table_that_disagrees_with_its_own_contract(
         FACTOR_TIER_ORDER, order, values, admitted
     )
+
+
+def test_the_admitted_table_audit_refuses_an_empty_row_and_an_admitted_imputation() -> None:
+    """The two shapes `admitted <= value` admits and this build must not, measured on both sides.
+
+    `_refuse_a_tier_table_that_disagrees_with_its_own_contract` is a **bound**: it says the
+    admitted codes are drawn from the value codes. Two wrong tables satisfy that bound and were
+    reachable with every module importing:
+
+    - **three empty rows.** `frozenset() <= anything`, so every cross section on every tier
+      reports `insufficient_sample` and no code says the *table* emptied it.
+    - **`processed` admitting `imputed`.** `{processed, imputed} <= {processed, imputed}`, so a
+      number this repository made up enters every processed IC and `admission_rate` -- the one
+      cell in which the two tier tables differ -- silently becomes 1.0.
+
+    Neither is caught by requiring the three admitted sets to be **pairwise disjoint**, which is
+    what an audit of this module proposed: ∅ is disjoint from ∅ and `{processed, imputed}` is
+    disjoint from `{computed}` and `{neutralized}`, so the proposed assertion passes on both. The
+    two halves of that are asserted here rather than argued, so a later reader can see that the
+    disjointness is a *consequence* of the bound above (each admitted set lies inside its own
+    tier's value set, and the one code two vocabularies share carries a value in neither) rather
+    than a property with any teeth of its own.
+    """
+    values = dict(TIER_VALUE_CODES)
+    admitted = dict(TIER_ADMITTED_CODES)
+    imputing = dict(TIER_IMPUTING_CODES)
+    empty = {tier: frozenset[str]() for tier in FACTOR_TIER_ORDER}
+    filled = {**admitted, "processed": frozenset({"processed", "imputed"})}
+
+    for wrong in (empty, filled, {**admitted, "processed": frozenset({"imputed"})}):
+        pairs = [
+            (left, right)
+            for index, left in enumerate(FACTOR_TIER_ORDER)
+            for right in FACTOR_TIER_ORDER[index + 1 :]
+        ]
+        assert all(not wrong[left] & wrong[right] for left, right in pairs)
+        with pytest.raises(FactorICError, match="a tier admits exactly the codes"):
+            _refuse_an_admitted_table_that_admits_a_number_nobody_measured(
+                FACTOR_TIER_ORDER, values, wrong, imputing
+            )
+
+    with pytest.raises(FactorICError, match="TIER_IMPUTING_CODES is keyed by"):
+        _refuse_an_admitted_table_that_admits_a_number_nobody_measured(
+            FACTOR_TIER_ORDER, values, admitted, {"raw": frozenset()}
+        )
+    with pytest.raises(FactorICError, match="which carries no value at that tier"):
+        _refuse_an_admitted_table_that_admits_a_number_nobody_measured(
+            FACTOR_TIER_ORDER, values, admitted, {**imputing, "raw": frozenset({"input_missing"})}
+        )
+    _refuse_an_admitted_table_that_admits_a_number_nobody_measured(
+        FACTOR_TIER_ORDER, values, admitted, imputing
+    )
+
+
+def test_the_imputing_table_is_the_transform_contracts_own_on_the_one_tier_that_has_one() -> None:
+    """`TIER_IMPUTING_CODES` against `domain/factor_transform.py`, not against a literal.
+
+    The processed cell is that module's `IMPUTING_PROCESSED_CODES`, which is itself derived from
+    `validate_processed_factor_observation` and reconciled at that module's import -- so the chain
+    from "an `imputed` row may not come from a `computed` source" to "a processed IC excludes
+    imputations" is held together at two boundaries rather than by three matching literals. The
+    other two cells are empty and that is a claim about their contracts: the raw vocabulary has no
+    fill code at all, and the neutralised plane imputes nothing.
+    """
+    assert TIER_IMPUTING_CODES["processed"] is IMPUTING_PROCESSED_CODES
+    assert TIER_IMPUTING_CODES["raw"] == TIER_IMPUTING_CODES["neutralized"] == frozenset()
+    assert {
+        tier: TIER_VALUE_CODES[tier] - TIER_IMPUTING_CODES[tier] for tier in FACTOR_TIER_ORDER
+    } == dict(TIER_ADMITTED_CODES)
 
 
 def test_the_known_ic_limitations_are_exactly_these_five_codes() -> None:

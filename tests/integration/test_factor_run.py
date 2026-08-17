@@ -37,7 +37,9 @@ would be coded. `test_factor_neutralizations.py` replaces the column for the sam
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final
 
@@ -51,6 +53,7 @@ from test_factor_interfaces import (
     store_three_tiers,
 )
 
+from openalpha_cn.backtest.factor_experiment import experiment_payload, open_experiment
 from openalpha_cn.domain.factor_neutralization import (
     FactorNeutralizationRegistry,
     FactorNeutralizationSpec,
@@ -413,3 +416,157 @@ def test_the_run_reads_the_panel_at_the_stated_instant_and_not_at_a_wall_clock(
     assert all(instant < RUN_AS_OF for instant in record.artifact.tiers[0].as_ofs)
     assert record.artifact.spec.ic.definition.qualified_key == "reversal_1d/v1"
     assert EXCHANGE == "SZSE"
+
+
+# --------------------------------------------------------------------------------------------
+# V2-P3-007's own acceptance criterion, off a stored panel and out of a sealed document
+# --------------------------------------------------------------------------------------------
+
+
+def _by_price(window: FactorWindow) -> float | None:
+    """A factor whose ordering is the last close, so the cut is a cut by price."""
+    return window.series("daily", "close")[-1]
+
+
+def _by_cheapness(window: FactorWindow) -> float | None:
+    """The same factor negated, so the same cut puts the other end of the price range long."""
+    closes = window.series("daily", "close")
+    return -closes[-1]
+
+
+SMALL_POSITION: Final[Decimal] = Decimal("2000")
+"""A declared position capital two of the sixteen `(security, as_of)` pairs cannot buy a lot at.
+
+`AShareExecutionPolicy` refuses a position whose declared budget does not reach one board lot's
+cost and codes it `below_board_minimum`, and this panel's closes span far enough that ¥2,000 buys
+a lot of most of its names and of neither of the two dearest. `BASELINE`'s own ¥100,000 refuses
+nobody, which is what every other test in this file runs at and is why this constant is declared
+here rather than moved into the baseline.
+"""
+
+
+def test_the_long_groups_execution_rate_is_readable_in_the_stored_document(tmp_path: Path) -> None:
+    """**`V2-P3-007`'s acceptance criterion, end to end.** *让统计上好看但不可实施的信号显形.*
+
+    One market, two orderings of it, at a declared position capital the two dearest names cannot
+    buy a lot at. Both runs report **the same funnel** -- 16 offered, 16 valued, 16 admissible, 15
+    scored, 13 held, an execution rate of `13 / 15` -- because the same two securities are refused
+    in both and a funnel does not know which quantile they landed in. What separates them is one
+    row of one table: the long group holds 5 of 7 where the signal loads on the names the study
+    cannot afford and 7 of 7 where it does not, so `mean_top_group_execution_shortfall` is
+    `+0.158` against `-0.134`.
+
+    **How this differs from the unit fixture, stated rather than glossed.**
+    `tests/unit/backtest/test_factor_tradeability.py::
+    test_the_same_ic_and_the_same_funnel_are_told_apart_by_the_top_groups_execution_rate` drives
+    two markets against *one* cross section, so the IC there is the same object's and cannot
+    separate them at all. Here the two runs share a market and differ in the ordering, so the IC
+    is `-1.0` against `+1.0` and does separate them. That is asserted below rather than left out,
+    because the claim this test makes is the narrower one: **the finding lives at a level the
+    period-level coverage report averages away, and it is readable out of a sealed artifact
+    produced by the real face.** Every number here is taken off the reopened document.
+    """
+    documents = {}
+    for name, evaluator in (("unimplementable", _by_cheapness), ("implementable", _by_price)):
+        runtime = tmp_path / name
+        runtime.mkdir()
+        store_three_tiers(
+            runtime,
+            evaluator=evaluator,
+            transform=PROBE_TRANSFORM,
+            neutralization=PROBE_NEUTRALIZATION,
+        )
+        record, _write = _run(runtime, position_capital=SMALL_POSITION)
+        documents[name] = open_experiment(experiment_payload(record))
+
+    bad = documents["unimplementable"].artifact.tier_report("raw")
+    good = documents["implementable"].artifact.tier_report("raw")
+
+    assert bad.tradeability.funnel == good.tradeability.funnel
+    assert bad.tradeability.funnel.scored_count == 15
+    assert bad.tradeability.funnel.held_count == 13
+    assert bad.tradeability.funnel.execution_rate == good.tradeability.funnel.execution_rate
+    assert bad.tradeability.group == good.tradeability.group == 0
+    assert [row.held_count for row in bad.tradeability.by_group] == [5, 8]
+    assert [row.held_count for row in good.tradeability.by_group] == [7, 6]
+    assert bad.tradeability.mean_top_group_execution_rate == 0.7083333333333333
+    assert good.tradeability.mean_top_group_execution_rate == 1.0
+    assert bad.tradeability.mean_top_group_execution_shortfall > 0.0
+    assert good.tradeability.mean_top_group_execution_shortfall < 0.0
+    # The refusal is named as well as counted, so a reader knows the remedy is a bigger position
+    # rather than a different universe.
+    assert dict(bad.tradeability.by_group[0].excluded_by_outcome)["below_board_minimum"] == 2
+    assert dict(good.tradeability.by_group[0].excluded_by_outcome)["below_board_minimum"] == 0
+    # Stated rather than glossed: on this fixture the IC separates them too. See the docstring.
+    assert (bad.ic.mean_ic, good.ic.mean_ic) == (-1.0, 1.0)
+
+
+def test_the_declared_participation_cap_moves_a_capacity_in_the_stored_document(
+    predictive: Path,
+) -> None:
+    """**The required option that decided nothing, measured on the document it now decides.**
+
+    `--participation-cap` has no default and its help text calls it a policy the four upstream
+    studies refuse to choose for the caller. Until the tradeability summary reached a tier row,
+    two runs at two caps differed in `experiment_id`, `content_digest`, `built_at` and the write
+    verdict -- four identity leaves -- and in **no measured quantity anywhere in the artifact**.
+
+    At the fixture's flat ¥10,000,000 of session turnover and `BASELINE`'s ¥100,000 position, a 1%
+    cap gives a `capital_multiple` of exactly `1.0` -- the boundary at which the declared capital
+    is exactly the capacity -- and a 50% cap gives `50.0`. The document diff is taken leaf by leaf
+    so the claim is "these leaves moved and no others" rather than "something moved": six capacity
+    leaves across three tiers, plus the four identity leaves that always move.
+    """
+    cheap, _one = _run(predictive, participation_cap=Decimal("0.01"))
+    rich, _two = _run(predictive, participation_cap=Decimal("0.5"))
+
+    for tier in ("raw", "processed", "neutralized"):
+        left = cheap.artifact.tier_report(tier).tradeability
+        right = rich.artifact.tier_report(tier).tradeability
+        assert left.binding_capital_multiple == 1.0
+        assert right.binding_capital_multiple == 50.0
+        assert right.mean_capital_multiple == left.mean_capital_multiple * 50.0
+        assert left.mean_concentration == right.mean_concentration == 1.0
+        assert left.funnel == right.funnel
+        # Which session the capacity was sized on is carried rather than assumed: this face asks
+        # the entry session, which is the diagnostic reading the contract admits and names.
+        assert left.sized_at_the_entry_session_count == len(left.as_ofs)
+        assert left.sized_before_the_entry_session_count == 0
+    differing = _differing_leaves(
+        json.loads(experiment_payload(cheap)), json.loads(experiment_payload(rich))
+    )
+    capacity = {path for path in differing if "capital_multiple" in path}
+    identity = {path for path in differing if "capital_multiple" not in path}
+    assert capacity == {
+        f"/artifact/tiers/{index}/tradeability/{name}"
+        for index in range(3)
+        for name in ("binding_capital_multiple", "mean_capital_multiple")
+    }
+    assert identity == {
+        "/artifact/spec/tradeability/participation_cap",
+        "/sealed_digest",
+    }
+    assert cheap.experiment_id != rich.experiment_id
+
+
+def _differing_leaves(left: Any, right: Any, trail: str = "") -> list[str]:
+    """Every JSON path at which two rendered documents carry different scalars.
+
+    Written here rather than imported from the unit suite because the two files are two
+    independent statements of the same audit -- `tests/unit/backtest/test_factor_experiment.py`
+    diffs two records built in one process and this diffs two documents produced by the face off a
+    stored panel, and a shared helper would make one failure hide the other.
+    """
+    if isinstance(left, dict) and isinstance(right, dict) and set(left) == set(right):
+        return [
+            path
+            for key in left
+            for path in _differing_leaves(left[key], right[key], f"{trail}/{key}")
+        ]
+    if isinstance(left, list) and isinstance(right, list) and len(left) == len(right):
+        return [
+            path
+            for index, (one, other) in enumerate(zip(left, right, strict=True))
+            for path in _differing_leaves(one, other, f"{trail}/{index}")
+        ]
+    return [] if left == right else [trail]

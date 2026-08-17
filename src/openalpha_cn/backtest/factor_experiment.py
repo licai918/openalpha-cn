@@ -93,12 +93,33 @@ statistics alone and requires `content_digest` to move and `experiment_id` to ho
 
 ## The shape of the report: three rows **and** a grid, because three rows are not enough
 
-`TierReport` is one tier's four upstream answers, whole:
+`TierReport` is one tier's upstream answers, whole -- five objects from four studies:
 
-    ic          ICSummary                mean IC, ICIR, sign consistency
-    portfolio   QuantilePortfolioSummary per-group net and gross means, the oriented spread
-    turnover    TurnoverSeries           the rolling portfolio's churn and its cost bracket
-    survival    RedundancySummary | None raw against this tier, cross-sectionally
+    ic            ICSummary                mean IC, ICIR, sign consistency
+    portfolio     QuantilePortfolioSummary per-group net and gross means, the oriented spread
+    turnover      TurnoverSeries           the rolling portfolio's churn and its cost bracket
+    tradeability  TradeabilitySummary      the coverage funnel, the per-group execution
+                                           decomposition and the long group's capacity
+    survival      RedundancySummary | None raw against this tier, cross-sectionally
+
+Five objects from four modules: `V2-P3-007` publishes two, and they answer two questions with two
+refusal vocabularies. **`tradeability` is the field `V2-P3-007`'s own annotation is delivered
+through** -- *让统计上好看但不可实施的信号显形* -- and it is a per-tier row rather than one
+per-`as_of` for `TradeabilitySummary`'s own stated reason: the other four fields are series-level,
+and a collection growing with the sample inside a *sealed* document grows the tamper audit with it.
+
+**The funnel and the capacity do not enter the attribution grid, and that is a decision rather
+than an omission.** `AttributionStatistic` is closed on the two *performance* readings -- did the
+ordering keep predicting, did the money survive -- and every rung of `AttributionVerdict` is built
+for a statistic whose sign and scale are a factor's edge. An execution rate is neither: it lives
+in `[0, 1]` where zero is a loud and legitimate answer rather than "there was nothing to keep", so
+`no_baseline` would fire on the sharpest finding this module has; and `amplified` on a ratio of
+two rates would say "the neutralisation made the factor easier to trade", which is a true sentence
+about a different question. The three tiers' funnels are nonetheless directly comparable -- they
+are three rows of one artifact over one sample -- so a reader who wants the step reads the two
+rows, which is exactly what a grid cell exists to spare them **when the ladder means something**
+and not otherwise. Carried as
+`the_attribution_grid_is_over_two_performance_statistics_and_not_over_tradeability`.
 
 `survival` is the fourth upstream module arriving where it belongs. `factor_redundancy` is a
 *pair* analysis, and `_refuse_a_pair_that_is_neither_two_factors_nor_two_tiers` says outright that
@@ -249,7 +270,11 @@ from openalpha_cn.backtest.factor_ic import (
 )
 from openalpha_cn.backtest.factor_portfolio import QuantilePortfolioSpec, QuantilePortfolioSummary
 from openalpha_cn.backtest.factor_redundancy import RedundancySpec, RedundancySummary
-from openalpha_cn.backtest.factor_tradeability import TradeabilitySpec, TurnoverSeries
+from openalpha_cn.backtest.factor_tradeability import (
+    TradeabilitySpec,
+    TradeabilitySummary,
+    TurnoverSeries,
+)
 from openalpha_cn.domain._identity import stable_model_id
 from openalpha_cn.domain.factor import FactorDefinition, FactorDirection, FactorNote, set_digest
 from openalpha_cn.domain.time import ensure_aware
@@ -398,6 +423,15 @@ validator makes membership here exactly the condition under which `retention` is
 that reported a ratio it could not have computed is not constructible.
 """
 
+_ROW_STUDIES: Final[tuple[str, ...]] = ("ic", "portfolio", "turnover", "tradeability")
+"""The four fields of a tier report that declare a tier, a factor, a direction and a horizon.
+
+A tuple rather than four literals repeated in four comprehensions, so that a fifth upstream
+summary joins every one of `TierReport`'s cross-checks at once. `survival` is deliberately absent:
+it names two factors and two tiers rather than one of each, and its own pair rule is
+`_validate_the_survival_pair`.
+"""
+
 MINIMUM_EXPERIMENT_TIERS: Final[int] = 3
 """How many tier reports an artifact carries, which is every declared tier and not a choice.
 
@@ -480,6 +514,27 @@ KNOWN_EXPERIMENT_LIMITATIONS: Final[tuple[ExperimentLimitation, ...]] = (
             "from 1.0 at any sample size, and the declared floor is a policy line rather than a "
             "test. De-overlapping needs a purge, a purge needs a train/test split, and nothing in "
             "this repository defines one yet."
+        ),
+    ),
+    ExperimentLimitation(
+        code="the_attribution_grid_is_over_two_performance_statistics_and_not_over_tradeability",
+        detail=(
+            "ATTRIBUTION_CELL_ORDER is three steps by the two members of AttributionStatistic, "
+            "and every tier report also carries a TradeabilitySummary whose funnel, per-group "
+            "execution rates and capital multiple are NOT attributed. That is a decision and the "
+            "grid would be wrong if they were. The verdict ladder is built for a statistic whose "
+            "sign is a factor's edge: no_baseline fires when from_value <= 0, which for an "
+            "execution rate is the sharpest finding this artifact can carry rather than 'there "
+            "was nothing to keep'; amplified fires above a retention of 1, which on a ratio of "
+            "two rates in [0, 1] says the neutralisation made the factor easier to trade -- a "
+            "true sentence about a question the acceptance criterion is not asking; and removed, "
+            "the criterion's own cell, would then mean two incompatible things depending on which "
+            "column a reader was in. What is delivered instead is three comparable rows over one "
+            "sample: raw, processed and neutralised funnels of the same factor over the same days, "
+            "with the counts under every rate, so the step is a subtraction the reader performs "
+            "deliberately rather than a verdict this module asserts. Nothing here says whether a "
+            "long-group execution rate that fell between two tiers fell by an amount that matters, "
+            "and no floor in FactorExperimentSpec governs it."
         ),
     ),
     ExperimentLimitation(
@@ -573,29 +628,33 @@ def _attribution_verdict(
 
 
 class TierReport(BaseModel):
-    """One tier's four upstream answers, whole, with nothing re-derived and nothing collapsed.
+    """One tier's upstream answers, whole, with nothing re-derived and nothing collapsed.
 
     A pydantic model rather than a dataclass, unlike the per-security carriers one plane down:
     there are three of these per experiment rather than one per `(security, as_of)`, so what is
-    wanted at that scale is the validator -- and the validator is most of the point. Four objects
-    that were produced by four separate studies can disagree about which factor, which tier, which
-    horizon and which days they are about, and a report that put four such objects in one row
-    would be four answers about four questions wearing one heading.
+    wanted at that scale is the validator -- and the validator is most of the point. Five objects
+    produced by four separate studies can disagree about which factor, which tier, which horizon
+    and which days they are about, and a report that put five such objects in one row would be
+    five answers to five questions wearing one heading.
 
-    Every cross-check below has a failure that was reachable before it:
+    Every cross-check below has a failure that was reachable before it, and `_ROW_STUDIES` is the
+    table the first four run over so a sixth summary joins all of them at once:
 
-    - **One tier.** `ic.tier`, `portfolio.tier` and `turnover.tier` are this report's own.
-    - **One factor.** All three `factor_id`s agree, and `survival` names that factor on both
+    - **One tier.** Every summary in `_ROW_STUDIES` reports this report's own.
+    - **One factor.** All four `factor_id`s agree, and `survival` names that factor on both
       sides -- it is a *cross-tier self-pair*, which is the one shape `factor_redundancy`
       supports for one factor.
-    - **One horizon.** `ic.horizon_sessions` and the two portfolio-side ones agree. An IC at five
-      sessions beside a spread at sixty is two windows in one row.
-    - **One sample.** All four carry `as_ofs`, and they must be the same tuple.
+    - **One horizon.** `ic.horizon_sessions` and the three portfolio-side ones agree. An IC at
+      five sessions beside a spread at sixty is two windows in one row, and a coverage funnel at a
+      third is a `label_rate` about a window neither of them measured.
+    - **One sample.** All five carry `as_ofs`, and they must be the same tuple.
       `_refuse_rungs_over_different_samples` is the precedent one plane down and the argument is
       unchanged: a statistic that fell between two tiers is a finding only if the two tiers were
       asked about the same days.
-    - **One cut.** `portfolio.group_count` and `turnover.group_count` agree, and the turnover
-      series follows a group index inside that cut.
+    - **One cut, and one long group inside it.** `portfolio.group_count`,
+      `turnover.group_count` and `tradeability.group_count` agree, the turnover series follows a
+      group index inside that cut, and the tradeability summary follows the same one -- a capacity
+      for one portfolio beside the churn of another is two trades in one row.
 
     `survival` is `None` on the raw tier and required on the other two, and that asymmetry is
     forced rather than chosen: `factor_redundancy._refuse_a_pair_that_is_neither_two_factors_nor
@@ -622,6 +681,24 @@ class TierReport(BaseModel):
     ic: ICSummary
     portfolio: QuantilePortfolioSummary
     turnover: TurnoverSeries
+    tradeability: TradeabilitySummary
+    """`V2-P3-007`'s other half: the coverage funnel, the per-group execution decomposition and
+    the long group's capacity, pooled over this tier's own periods.
+
+    Carried beside `turnover` rather than folded into it, because the two answer different
+    questions with different refusal vocabularies -- `TurnoverCoverage` is about whether a
+    holdings state exists at all and `TradeabilityCoverage` is about whether any period reached
+    the cut -- and a row that merged them would need a fifth "N/A" of this module's own, which is
+    the thing this module's docstring refuses to build.
+
+    **This is the field the roadmap's `V2-P3-007` annotation is delivered through.** Its brief --
+    *make the signals that are statistically attractive and not implementable visible* -- is a
+    statement about a report, and until this field existed the whole instrument was unreachable:
+    `TradeabilityStudy.measure` had no caller anywhere in `src/`, so `CoverageFunnel`,
+    `GroupCapacity` and `SessionLiquidity` reached no artifact and
+    `TradeabilitySpec.participation_cap` was a required option that moved an experiment's identity
+    and not one of its numbers.
+    """
     survival: RedundancySummary | None
     """`raw` against this tier, cross-sectionally: how much of the ordering the transform left.
 
@@ -634,7 +711,7 @@ class TierReport(BaseModel):
 
     @model_validator(mode="after")
     def validate_the_four_studies_are_about_one_thing(self) -> Self:
-        for name in ("ic", "portfolio", "turnover"):
+        for name in _ROW_STUDIES:
             reported: FactorTier = getattr(self, name).tier
             if reported != self.tier:
                 raise ValueError(
@@ -642,37 +719,44 @@ class TierReport(BaseModel):
                     f"reports {reported!r}; a row that mixes tiers is the one thing a three-tier "
                     "report exists to keep apart"
                 )
-        factor_ids = {getattr(self, name).factor_id for name in ("ic", "portfolio", "turnover")}
+        factor_ids = {getattr(self, name).factor_id for name in _ROW_STUDIES}
         if len(factor_ids) != 1:
             raise ValueError(
                 f"this tier report's studies name {sorted(factor_ids)}; one row is one factor, "
                 "and four studies of two factors in one row is a comparison wearing a heading"
             )
-        directions = {getattr(self, name).direction for name in ("ic", "portfolio", "turnover")}
+        directions = {getattr(self, name).direction for name in _ROW_STUDIES}
         if len(directions) != 1:
             raise ValueError(
                 f"this tier report's studies declare {sorted(directions)}; the direction decides "
                 "the sign of the IC and which group is long, so two of them in one row make the "
                 "row's numbers point in two ways"
             )
-        horizons = {
-            getattr(self, name).horizon_sessions for name in ("ic", "portfolio", "turnover")
-        }
+        horizons = {getattr(self, name).horizon_sessions for name in _ROW_STUDIES}
         if len(horizons) != 1:
             raise ValueError(
                 f"this tier report's studies are at {sorted(horizons)} session(s); an IC at one "
                 "horizon beside a spread at another is two windows in one row"
             )
-        if self.portfolio.group_count != self.turnover.group_count:
+        cuts = {self.portfolio.group_count, self.turnover.group_count}
+        if len(cuts | {self.tradeability.group_count}) != 1:
             raise ValueError(
-                f"the quantile summary cuts into {self.portfolio.group_count} group(s) and the "
-                f"turnover series into {self.turnover.group_count}; one row is one cut"
+                f"the quantile summary cuts into {self.portfolio.group_count} group(s), the "
+                f"turnover series into {self.turnover.group_count} and the tradeability summary "
+                f"into {self.tradeability.group_count}; one row is one cut"
             )
         if not 0 <= self.turnover.group < self.portfolio.group_count:
             raise ValueError(
                 f"the turnover series follows group {self.turnover.group} of a cut of "
                 f"{self.portfolio.group_count}; a rolling portfolio has to be one of the groups "
                 "the quantile study reports"
+            )
+        if self.tradeability.group != self.turnover.group:
+            raise ValueError(
+                f"the tradeability summary reports group {self.tradeability.group} and the "
+                f"turnover series follows {self.turnover.group}; both are the long group this "
+                "factor's declared direction picks, so two of them in one row is a capacity for "
+                "one portfolio beside the churn of another"
             )
         self._validate_one_sample()
         self._validate_the_survival_pair()
@@ -690,7 +774,7 @@ class TierReport(BaseModel):
     def _validate_one_sample(self) -> None:
         """Refuse a row whose four studies were asked about different days."""
         offered = self.ic.as_ofs
-        for name in ("portfolio", "turnover"):
+        for name in ("portfolio", "turnover", "tradeability"):
             other: tuple[datetime, ...] = getattr(self, name).as_ofs
             if other != offered:
                 raise ValueError(
@@ -765,6 +849,7 @@ class TierReport(BaseModel):
             ("ic", self.ic.coverage),
             ("portfolio", self.portfolio.coverage),
             ("turnover", self.turnover.coverage),
+            ("tradeability", self.tradeability.coverage),
         ]
         if self.survival is not None:
             codes.append(("survival", self.survival.coverage))

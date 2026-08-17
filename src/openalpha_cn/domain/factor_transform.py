@@ -130,7 +130,7 @@ are going to need must land before `V2-P3-014` writes the first immutable artifa
 import math
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Final, Literal, Self, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
@@ -351,6 +351,25 @@ PROCESSED_COVERAGE_ORDER: Final[tuple[ProcessedCoverage, ...]] = get_args(Proces
 PROCESSED_VALUE_CODES: Final[frozenset[str]] = frozenset({"processed", "imputed"})
 """The two codes that carry a value. `FactorCoverage`'s "exactly `computed`" has two members
 here, and `validate_processed_factor_observation` enforces the pair rather than the singleton."""
+
+IMPUTING_PROCESSED_CODES: Final[frozenset[str]] = frozenset({"imputed"})
+"""Which of the value codes carries a number **no security produced**.
+
+`PROCESSED_VALUE_CODES` says a stored row has a number; this says whether that number is a
+measurement. The two are different questions and the difference is the whole reason the
+missing-value policy exists, so it is named as data rather than left as a comparison every
+downstream consumer writes out: `backtest/factor_ic.py`'s `TIER_ADMITTED_CODES` is
+`TIER_VALUE_CODES` minus this set, and `CoverageFunnel.admission_rate` is the rate between the
+two counts that difference produces.
+
+**Reconciled at import against the row contract rather than trusted.**
+`_refuse_an_imputation_table_that_disagrees_with_the_row_contract` derives the set by *driving*
+`validate_processed_factor_observation` -- a value code is an imputing one exactly when a stored
+row may carry it over a source that measured nothing and may not carry it over a `computed` one,
+which is the pair of rules that function already enforces -- and refuses this module's load when
+the literal above disagrees. So a sixth processed code that imputed would arrive with the two
+ends held together instead of with a frozenset somebody remembered to extend.
+"""
 
 MAX_TRANSFORM_KEY_LENGTH: Final[int] = 40
 """How long a transform key may be, and -- unlike `MAX_FACTOR_KEY_LENGTH` -- this is **not** a
@@ -1094,3 +1113,84 @@ def validate_processed_factor_observation(observation: ProcessedFactorObservatio
             "'source_not_computed' with source_coverage 'computed'; the two statements are each "
             "other's negation"
         )
+
+
+def imputing_codes_the_row_contract_admits(
+    order: Sequence[ProcessedCoverage], value_codes: Collection[str]
+) -> frozenset[str]:
+    """Which value codes a stored row may carry **only** over a source that measured nothing.
+
+    Derived by driving `validate_processed_factor_observation` over the two source codes that
+    settle it, rather than by restating the two rules that function already enforces: a
+    `processed` row must come from a `computed` source and an `imputed` row must not, so a code
+    admitted over `input_missing` and refused over `computed` is one whose number stands in for a
+    measurement. Nothing here reads `IMPUTING_PROCESSED_CODES`, which is what lets the audit below
+    hold the declared table against a set the contract produced.
+
+    Public and taking its two inputs as arguments for `_refuse_a_policy_that_cannot_answer_every
+    _missing_code`'s reason: an audit whose only call site is the one that passes is an audit
+    nobody has seen fail, and both directions have to be drivable from a test.
+
+    Four constructions of a frozen dataclass at import, which is the cost of not writing the
+    answer down twice.
+    """
+    probe = datetime(2000, 1, 1, tzinfo=UTC)
+
+    def admits(coverage: ProcessedCoverage, source: FactorCoverage) -> bool:
+        try:
+            ProcessedFactorObservation(
+                subject="probe",
+                as_of=probe,
+                value=0.0,
+                coverage=coverage,
+                transform_id="ftx_probe",
+                transform_manifest_id="ftm_probe",
+                source_factor_id="fct_probe",
+                source_manifest_id="fmn_probe",
+                source_coverage=source,
+            )
+        except FactorTransformError:
+            return False
+        return True
+
+    return frozenset(
+        code
+        for code in order
+        if code in value_codes and admits(code, "input_missing") and not admits(code, "computed")
+    )
+
+
+def _refuse_an_imputation_table_that_disagrees_with_the_row_contract(
+    order: Sequence[ProcessedCoverage],
+    value_codes: Collection[str],
+    imputing_codes: Collection[str],
+) -> None:
+    """Refuse this module at **import** unless `IMPUTING_PROCESSED_CODES` is the contract's own.
+
+    `_refuse_a_policy_that_cannot_answer_every_missing_code`'s shape, pointed at the other half of
+    the vocabulary. That audit closes "a coverage code arrived with no policy behind it"; this one
+    closes "a value code arrived and nobody said whether its number is a measurement" -- and the
+    consequence of getting it wrong is one plane up rather than here:
+    `backtest/factor_ic.py::TIER_ADMITTED_CODES` is `TIER_VALUE_CODES` minus this set, so a code
+    wrongly named here reaches every information coefficient, every quantile portfolio and every
+    coverage funnel this repository computes, with the imputation rate inside the statistic and no
+    census column able to say so.
+
+    A module that refuses to load is a failure a caller cannot route around; a test is a failure
+    only if somebody runs it. `tests/unit/domain/test_factor_transform.py::
+    test_the_imputation_table_is_the_row_contracts_own_and_both_directions_are_refused` drives
+    both failure directions.
+    """
+    derived = imputing_codes_the_row_contract_admits(order, value_codes)
+    if derived != frozenset(imputing_codes):
+        raise FactorTransformError(
+            f"IMPUTING_PROCESSED_CODES declares {sorted(imputing_codes)} and the row contract "
+            f"admits {sorted(derived)} over a source that measured nothing; the two are the same "
+            "question asked twice, and a value code on the wrong side of this set is a made-up "
+            "number entering every statistic that admits it"
+        )
+
+
+_refuse_an_imputation_table_that_disagrees_with_the_row_contract(
+    PROCESSED_COVERAGE_ORDER, PROCESSED_VALUE_CODES, IMPUTING_PROCESSED_CODES
+)

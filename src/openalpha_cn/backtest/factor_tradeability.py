@@ -222,11 +222,14 @@ from openalpha_cn.domain.time import ensure_aware
 
 __all__ = [
     "CAPACITY_COVERAGE_CODES",
+    "CAPACITY_COVERAGE_ORDER",
     "CNY_PER_TURNOVER_UNIT",
     "EXCLUDED_OUTCOME_ORDER",
     "KNOWN_TRADEABILITY_LIMITATIONS",
     "MAXIMUM_REBALANCES",
     "MINIMUM_REBALANCES",
+    "TRADEABILITY_COVERAGE_CODES",
+    "TRADEABILITY_COVERAGE_ORDER",
     "TRADEABILITY_LIMITATION_CODES",
     "TURNOVER_COVERAGE_CODES",
     "TURNOVER_COVERAGE_ORDER",
@@ -238,9 +241,11 @@ __all__ = [
     "PeriodTradeability",
     "Rebalance",
     "SessionLiquidity",
+    "TradeabilityCoverage",
     "TradeabilityLimitation",
     "TradeabilitySpec",
     "TradeabilityStudy",
+    "TradeabilitySummary",
     "TurnoverCoverage",
     "TurnoverSeries",
     "liquidity_from_amount",
@@ -319,6 +324,35 @@ CapacityCoverage = Literal["measured", "no_holdings", "unpriced_holdings"]
 """
 
 CAPACITY_COVERAGE_CODES: Final[frozenset[str]] = frozenset(get_args(CapacityCoverage))
+
+CAPACITY_COVERAGE_ORDER: Final[tuple[CapacityCoverage, ...]] = get_args(CapacityCoverage)
+"""The declared order, which is the order `TradeabilitySummary.capacity_coverage_counts` is keyed
+by. A tuple and not the frozenset above for `ICCensus.excluded_by_coverage`' reason: a code
+missing from a table and a code present with a zero are different claims, and a set has no order
+to file them in."""
+
+TradeabilityCoverage = Literal["measured", "no_attempted_periods"]
+"""Whether a series of periods produced a per-group decomposition at all, and if not, why.
+
+Two members rather than five: every per-period refusal has already been decided one level down --
+by `PeriodCoverage` for the cut and by `CapacityCoverage` for the sizing -- and arrives here as a
+period that carries no group table. What is left is whether *any* of the offered periods reached
+the execution policy.
+
+- **`no_attempted_periods`** -- every offered period was refused before the cut (one of
+  `PRE_EXECUTION_COVERAGE`), so no security was ever offered to a group and there is nothing to
+  decompose. The **funnel is still reported**, because the four counts above `held_count` are
+  facts about every one of those periods and are exactly what a reader opens this report to see:
+  a study in which the factor valued nobody is the case the whole funnel exists to name.
+- **`measured`** -- at least one period placed orders, and only then does `by_group` carry rows
+  and the two long-group means carry numbers.
+"""
+
+TRADEABILITY_COVERAGE_CODES: Final[frozenset[str]] = frozenset(get_args(TradeabilityCoverage))
+
+TRADEABILITY_COVERAGE_ORDER: Final[tuple[TradeabilityCoverage, ...]] = get_args(
+    TradeabilityCoverage
+)
 
 CNY_PER_TURNOVER_UNIT: Final[Decimal] = Decimal(1000)
 """Yuan per unit of `daily.amount`, restated here because `backtest/` may not reach the panel.
@@ -516,6 +550,28 @@ KNOWN_TRADEABILITY_LIMITATIONS: Final[tuple[TradeabilityLimitation, ...]] = (
             "PeriodTradeability carries liquidity_day beside entry_day so a reader can see which "
             "was asked, and a report that quoted a capacity without the pair would be quoting a "
             "number whose meaning it had not shown."
+        ),
+    ),
+    TradeabilityLimitation(
+        code="a_pooled_funnel_is_a_ratio_of_sums_and_a_mean_shortfall_is_a_mean_of_ratios",
+        detail=(
+            "TradeabilitySummary publishes two readings of the same question and they are "
+            "different numbers as soon as the periods differ in width. funnel is the five counts "
+            "SUMMED over every offered period, so every rate on it is a ratio of two sums and "
+            "weights a day by how many securities it offered: a whole-market day and a day on "
+            "which the factor valued eleven names contribute in that proportion. "
+            "mean_top_group_execution_rate and mean_top_group_execution_shortfall are means over "
+            "the ATTEMPTED periods of each period's own ratio, so they weight every day alike. "
+            "Neither is 'the' rate and neither is derivable from the other; both are published "
+            "with the counts under them, and pooled_top_group_execution_rate is the first "
+            "reading of the statistic the second one means. The two are also pooled over "
+            "different sets of periods -- a period the cut refused has a funnel and has no groups "
+            "-- which is why attempted_count sits beside len(as_ofs) rather than being inferable "
+            "from either. What no reading here carries is a dispersion: this module publishes no "
+            "standard deviation of an execution rate and no interval around one, for "
+            "an_ic_series_over_overlapping_windows_is_autocorrelated's reason arriving at a "
+            "different statistic -- consecutive periods share h of the h + 1 sessions each spans, "
+            "so the funnels of a daily series are not independent draws either."
         ),
     ),
     TradeabilityLimitation(
@@ -851,6 +907,15 @@ class PeriodTradeability:
     factor_id: str
     direction: FactorDirection
     group_count: int
+    horizon_sessions: int
+    """The window this period's labels were measured over, carried rather than dropped.
+
+    A determinant of the funnel and not decoration: `scored_count` is the admissible names
+    `domain/labels.py` could label over *this* window, so two periods at two horizons produce two
+    different `label_rate`s about two different questions. `TurnoverSeries.horizon_sessions` is
+    the same field for the same reason one method along, and `TradeabilitySummary` refuses to pool
+    two of them for it.
+    """
     period_coverage: PeriodCoverage
     """`V2-P3-006`'s own code for this period, carried rather than re-derived.
 
@@ -884,6 +949,11 @@ class PeriodTradeability:
         if self.tier not in FACTOR_TIERS:
             raise FactorTradeabilityError(
                 f"{self.tier!r} is not a declared tier; expected one of {sorted(FACTOR_TIERS)}"
+            )
+        if self.horizon_sessions < 1:
+            raise FactorTradeabilityError(
+                f"this report is measured over {self.horizon_sessions} session(s); a forward "
+                "window spans at least one"
             )
         if self.capacity_coverage not in CAPACITY_COVERAGE_CODES:
             raise FactorTradeabilityError(
@@ -1106,6 +1176,267 @@ class TradeabilitySpec(BaseModel):
     """The fewest transitions a series needs before this study calls a turnover a summary."""
 
 
+class TradeabilitySummary(BaseModel):
+    """A series of periods' coverage funnel, per-group execution and long-group capacity.
+
+    **The instrument `V2-P3-007` built and nothing consumed.** `measure` produces one
+    `PeriodTradeability` per `as_of` and a study is a range of them; this is the shape a report
+    carries, so that `TierReport` can hold the funnel and the capacity beside the IC, the spread
+    and the churn rather than beside nothing. Without it the four-step funnel, the per-group
+    execution rates and every capacity this module computes were reachable only by a caller that
+    already held the periods -- which was no caller at all.
+
+    **One of these per tier, not one per `as_of`, and the choice is load-bearing.** The other
+    three fields of a tier report are series-level summaries; a tuple of per-period reports would
+    be the only collection in a *sealed* artifact whose size grows with the sample, and the
+    per-leaf tamper audit the seal is measured by would grow with it. The per-period object still
+    exists and is still public -- a caller holding the periods can read every one of them -- and
+    the acceptance demonstration is a single cross section, on which pooling loses nothing.
+
+    ## Two readings of one funnel, and they are different numbers
+
+    `funnel` is **pooled**: the five counts summed over every offered period, so its rates are
+    ratios of sums. `mean_top_group_execution_rate` and `mean_top_group_execution_shortfall` are
+    **means over the attempted periods** of the per-period ratios. On one period they agree and on
+    several they do not -- a pooled rate weights a day by how many securities it offered and a
+    mean of rates weights every day alike -- so both are published with the counts under them and
+    neither is called "the" rate. See
+    `a_pooled_funnel_is_a_ratio_of_sums_and_a_mean_shortfall_is_a_mean_of_ratios`.
+
+    The two are pooled over **different sets of periods**, which is deliberate and is why
+    `attempted_count` sits beside `len(as_ofs)`: a period the cut refused has a funnel (it valued,
+    admitted and labelled securities) and has no groups, so it belongs in the first and cannot be
+    in the second. The one identity that holds across the two -- `funnel.held_count` is the group
+    table's own total -- is required below, because a period that placed no order held nothing.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    tier: FactorTier
+    factor_id: str = Field(min_length=1, max_length=64)
+    direction: FactorDirection
+    group_count: int = Field(ge=MINIMUM_PORTFOLIO_GROUPS)
+    horizon_sessions: int = Field(ge=1)
+    group: int = Field(ge=0)
+    """The long group these statistics are about, decided by `direction` rather than by a
+    parameter -- `TurnoverSeries.group`'s rule, unchanged."""
+    coverage: TradeabilityCoverage
+    as_ofs: tuple[datetime, ...]
+    """Every `as_of` offered, ascending -- not only the attempted ones, for `ICSummary.as_ofs`'
+    reason: two series over disjoint years share a count and nothing else."""
+    attempted_count: int = Field(ge=0)
+    """How many of them reached the execution policy, which is how many contributed to
+    `by_group`. The rest were refused before the cut and contributed to `funnel` alone."""
+    funnel: CoverageFunnel
+    """The five counts summed over **every** offered period. See this class's docstring."""
+    by_group: tuple[GroupCoverage, ...]
+    """One pooled row per group over the **attempted** periods, ascending in the raw factor value,
+    or `()` under `no_attempted_periods`."""
+    mean_top_group_execution_rate: float | None
+    """The mean over the attempted periods of the long group's own `held / scored`."""
+    mean_top_group_execution_shortfall: float | None
+    """**The acceptance criterion in one number**, meaned over the attempted periods: each
+    period's overall execution rate less its long group's own.
+
+    Positive means the group this factor asks a portfolio to hold is harder to trade than the
+    cross section it was picked from. A period whose funnel has no execution rate at all (nothing
+    was scored) contributes nothing rather than a zero, so this is a mean over the periods on
+    which the question has an answer; `attempted_count` is how many were offered to it.
+    """
+    capacity_coverage_counts: tuple[tuple[str, int], ...]
+    """One cell per `CAPACITY_COVERAGE_ORDER` code, including the zeros, summing to the number of
+    offered periods. `ICCensus.excluded_by_coverage`' rule: a code missing from the table and a
+    code present with a zero are different claims, and "the caller supplied no turnover for a held
+    name" is a different finding from "the long group held nothing"."""
+    sized_at_the_entry_session_count: int = Field(ge=0)
+    """Of the sized periods, how many were sized on the entry session **itself** -- the diagnostic
+    reading, "could this have been traded on that day"."""
+    sized_before_the_entry_session_count: int = Field(ge=0)
+    """And how many on a strictly earlier session -- the point-in-time reading, "would we have
+    believed it could".
+
+    The pair is carried rather than pooled away because
+    `the_liquidity_session_is_the_callers_and_may_be_the_entry_session_itself` says outright that a
+    report quoting a capacity without saying which session it was sized on is quoting a number
+    whose meaning it has not shown. `PeriodTradeability` shows it with a date; a summary over many
+    periods has no one date to show, and two counts are what survives pooling.
+    """
+    binding_capital_multiple: float | None
+    """The **smallest** `GroupCapacity.capital_multiple` over the sized periods, and the headline.
+
+    A `min` for the reason `binding_capacity` is one within a period: the study is implementable
+    at the declared `position_capital` only if it was implementable on every session it reports,
+    so the worst session binds the series exactly as the least liquid name binds the group.
+    **Below `1.0` says the study as declared was already over capacity on at least one of its own
+    days**, and it moves linearly with `TradeabilitySpec.participation_cap`, which is the whole of
+    what declaring that cap buys.
+    """
+    binding_subject: str | None
+    """The security whose session turnover set `binding_capital_multiple`."""
+    binding_as_of: datetime | None
+    """The period it was set on, so the pair above is locatable rather than merely quoted."""
+    mean_capital_multiple: float | None
+    """The mean of the same statistic over the sized periods. Beside the `min` and not instead of
+    it: a series that is over capacity on one day of sixty has a comfortable mean."""
+    mean_concentration: float | None
+    """The mean of `GroupCapacity.concentration` over the sized periods -- how much of the group's
+    capacity the equal-budget constraint destroys.
+
+    **This one does not move with `participation_cap` and that is arithmetic rather than an
+    oversight**: it is a ratio of two capacities that the cap scales alike, so it cancels. It is
+    published beside a statistic that does move so a reader can see which half of a capacity is a
+    property of the declaration and which half is a property of the market.
+    """
+
+    @field_validator(
+        "mean_top_group_execution_rate",
+        "mean_top_group_execution_shortfall",
+        "binding_capital_multiple",
+        "mean_capital_multiple",
+        "mean_concentration",
+    )
+    @classmethod
+    def refuse_a_non_finite_statistic(cls, value: float | None) -> float | None:
+        if value is not None and not math.isfinite(value):
+            raise ValueError(f"{value!r} is not a finite statistic")
+        return value
+
+    @model_validator(mode="after")
+    def validate_the_tables_match_the_coverage(self) -> Self:
+        attempted = self.coverage == "measured"
+        if attempted != (self.attempted_count > 0):
+            raise ValueError(
+                f"coverage {self.coverage!r} carries {self.attempted_count} attempted period(s); "
+                "exactly the 'measured' code has one, because that code is the statement that "
+                "some period reached the execution policy"
+            )
+        if self.attempted_count > len(self.as_ofs):
+            raise ValueError(
+                f"{self.attempted_count} periods reached the cut and {len(self.as_ofs)} as_ofs "
+                "were offered; a series cannot attempt an as_of it was not given"
+            )
+        indices = tuple(row.group for row in self.by_group)
+        if attempted != (indices == tuple(range(self.group_count))):
+            raise ValueError(
+                f"coverage {self.coverage!r} carries groups {list(indices)} against a cut of "
+                f"{self.group_count}; exactly the 'measured' code carries one row per group in "
+                "ascending order, and a partial table would be a decomposition missing a quantile"
+            )
+        for name in ("mean_top_group_execution_rate", "mean_top_group_execution_shortfall"):
+            if (getattr(self, name) is None) == attempted:
+                raise ValueError(
+                    f"coverage {self.coverage!r} carries {name} {getattr(self, name)!r}; exactly "
+                    "the 'measured' code carries the long group's statistics"
+                )
+        if self.group != self.top_group_index:
+            raise ValueError(
+                f"this summary follows group {self.group} and a {self.direction!r} factor's long "
+                f"group in a cut of {self.group_count} is {self.top_group_index}; the direction "
+                "decides which group is held and a summary of another one is a capacity for a "
+                "trade nobody would place"
+            )
+        grouped = sum(row.held_count for row in self.by_group)
+        if self.by_group and grouped != self.funnel.held_count:
+            raise ValueError(
+                f"the group table holds {grouped} positions and the pooled funnel reports "
+                f"{self.funnel.held_count}; a period refused before the cut held nothing, so the "
+                "two totals are the same positions counted two ways however many periods each was "
+                "pooled over"
+            )
+        self._validate_the_capacity_table()
+        if len(set(self.as_ofs)) != len(self.as_ofs) or list(self.as_ofs) != sorted(self.as_ofs):
+            raise ValueError(
+                "as_ofs must be distinct and ascending; a repeated as_of is one period counted "
+                "twice, and an unordered tuple makes two identical summaries compare unequal"
+            )
+        return self
+
+    def _validate_the_capacity_table(self) -> None:
+        """Refuse a capacity table that does not account for every offered period, or statistics
+        that do not match the periods it says were sized."""
+        keys = tuple(code for code, _count in self.capacity_coverage_counts)
+        if keys != CAPACITY_COVERAGE_ORDER:
+            raise ValueError(
+                f"capacity_coverage_counts is keyed by {list(keys)} and the declared codes are "
+                f"{list(CAPACITY_COVERAGE_ORDER)} in that order; a table missing a code cannot be "
+                "told from one whose count is zero"
+            )
+        if any(count < 0 for _code, count in self.capacity_coverage_counts):
+            raise ValueError("a capacity-coverage count cannot be negative")
+        total = sum(count for _code, count in self.capacity_coverage_counts)
+        if total != len(self.as_ofs):
+            raise ValueError(
+                f"the capacity table accounts for {total} period(s) and {len(self.as_ofs)} as_ofs "
+                "were offered; every offered period was sized or carries the code that says why "
+                "it was not"
+            )
+        sized = self.sized_count
+        if self.sized_at_the_entry_session_count + self.sized_before_the_entry_session_count != (
+            sized
+        ):
+            raise ValueError(
+                f"{self.sized_at_the_entry_session_count} period(s) were sized on their entry "
+                f"session and {self.sized_before_the_entry_session_count} before it against "
+                f"{sized} sized in all; every sized period was sized on one session or the other"
+            )
+        for name in (
+            "binding_capital_multiple",
+            "binding_subject",
+            "binding_as_of",
+            "mean_capital_multiple",
+            "mean_concentration",
+        ):
+            if (getattr(self, name) is None) == (sized > 0):
+                raise ValueError(
+                    f"{sized} period(s) were sized and this summary carries {name} "
+                    f"{getattr(self, name)!r}; exactly a series that sized something carries a "
+                    "capacity, and a capacity beside no sized period is a size for a portfolio "
+                    "the report has just said it could not size"
+                )
+        if (
+            self.binding_capital_multiple is not None
+            and self.mean_capital_multiple is not None
+            and self.binding_capital_multiple > self.mean_capital_multiple
+        ):
+            raise ValueError(
+                f"the binding capital multiple is {self.binding_capital_multiple} and the mean "
+                f"is {self.mean_capital_multiple}; the binding one is a minimum over the same "
+                "periods the mean averages, so it cannot be above it"
+            )
+        if self.binding_subject is not None and not self.binding_subject.strip():
+            raise ValueError("a binding subject cannot be blank")
+
+    @property
+    def top_group_index(self) -> int:
+        """The group this factor's declaration says should perform best.
+        `PeriodTradeability.top_group_index`'s rule, unchanged."""
+        return self.group_count - 1 if self.direction == "higher_is_better" else 0
+
+    @property
+    def sized_count(self) -> int:
+        """How many offered periods produced a capacity, read off the table rather than stored
+        beside it -- `GroupReturn`'s argument: a stored count is a second source of truth for the
+        cells it came from."""
+        for code, count in self.capacity_coverage_counts:
+            if code == "measured":
+                return count
+        return 0
+
+    @property
+    def top_group(self) -> GroupCoverage | None:
+        """The long group's pooled row, or `None` when no period reached the cut."""
+        if not self.by_group:
+            return None
+        return self.by_group[self.group]
+
+    @property
+    def pooled_top_group_execution_rate(self) -> float | None:
+        """`held / scored` over the long group's **summed** counts: the other reading of the mean
+        above, and a different number as soon as the periods differ in width."""
+        row = self.top_group
+        return None if row is None else row.execution_rate
+
+
 class TurnoverSeries(BaseModel):
     """A rolling portfolio's holdings churn over a series of periods, and what it saved.
 
@@ -1300,6 +1631,7 @@ class TradeabilityStudy:
             factor_id=period.factor_id,
             direction=period.direction,
             group_count=period.group_count,
+            horizon_sessions=period.horizon_sessions,
             period_coverage=period.coverage,
             entry_day=period.entry_day,
             liquidity_day=liquidity_day,
@@ -1308,6 +1640,149 @@ class TradeabilityStudy:
             capacity_coverage=capacity_coverage,
             capacity=capacity,
         )
+
+    def summarize(self, reports: Iterable[PeriodTradeability]) -> TradeabilitySummary:
+        """A series of measured periods, reduced to the shape a report carries.
+
+        The method `V2-P3-007` was missing. `measure` answers one `as_of` and a study is a range
+        of them, so without this the funnel, the per-group execution rates and every capacity this
+        module computes had no consumer above the loop that produced them -- which is how a
+        `--participation-cap` came to be a required option that moved no number in any artifact.
+
+        Takes the reports rather than the periods, so the join to the cross sections and the
+        turnovers stays where `measure` already checks it and this method re-derives none of it.
+        Refuses a series that is not one study for `_refuse_periods_that_are_not_one_study`'s
+        reason and with one addition: a **horizon**, because a `label_rate` pooled over two
+        windows is two different label contracts' verdicts added together.
+
+        Never raises for a property of the market. A series in which every period was refused
+        before the cut is `no_attempted_periods`, and one in which no group could be sized carries
+        the capacity codes that say why.
+
+        **Both long-group means are over the periods that answer the question rather than over the
+        periods that were offered**, and the two denominators are different numbers as soon as one
+        period was refused before the cut. `None` when no period answers, which is exactly the
+        `no_attempted_periods` code -- so the filter below is the condition rather than a guard
+        beside one, and `TradeabilitySummary`'s validator refuses a `measured` summary that
+        reached it.
+        """
+        ordered = sorted(reports, key=lambda report: report.as_of)
+        if not ordered:
+            raise FactorTradeabilityError(
+                "a tradeability summary needs at least one period; an empty series satisfies "
+                "every per-period check vacuously and would report a coverage code about nothing"
+            )
+        head = self._refuse_reports_that_are_not_one_study(ordered)
+        attempted = [report for report in ordered if report.by_group]
+        sized = [
+            (report, capacity) for report in ordered if (capacity := report.capacity) is not None
+        ]
+        counts = dict.fromkeys(CAPACITY_COVERAGE_ORDER, 0)
+        for report in ordered:
+            counts[report.capacity_coverage] += 1
+        rates = [
+            value for report in attempted if (value := report.top_group_execution_rate) is not None
+        ]
+        shortfalls = [
+            value
+            for report in attempted
+            if (value := report.top_group_execution_shortfall) is not None
+        ]
+        multiples = [capacity.capital_multiple for _report, capacity in sized]
+        # The worst session binds, and the `as_of` breaks a tie so two runs over one series report
+        # one binding period rather than whichever `min` reached first.
+        binding = (
+            min(sized, key=lambda pair: (pair[1].capital_multiple, pair[0].as_of))
+            if sized
+            else None
+        )
+        return TradeabilitySummary(
+            tier=head.tier,
+            factor_id=head.factor_id,
+            direction=head.direction,
+            group_count=head.group_count,
+            horizon_sessions=head.horizon_sessions,
+            group=head.top_group_index,
+            coverage="measured" if attempted else "no_attempted_periods",
+            as_ofs=tuple(report.as_of for report in ordered),
+            attempted_count=len(attempted),
+            funnel=_pool_funnels([report.funnel for report in ordered]),
+            by_group=_pool_group_coverage(
+                [report.by_group for report in attempted], group_count=head.group_count
+            ),
+            mean_top_group_execution_rate=(None if not rates else math.fsum(rates) / len(rates)),
+            mean_top_group_execution_shortfall=(
+                None if not shortfalls else math.fsum(shortfalls) / len(shortfalls)
+            ),
+            capacity_coverage_counts=tuple(counts.items()),
+            sized_at_the_entry_session_count=sum(
+                1 for report, _capacity in sized if report.liquidity_day == report.entry_day
+            ),
+            sized_before_the_entry_session_count=sum(
+                1 for report, _capacity in sized if report.liquidity_day != report.entry_day
+            ),
+            binding_capital_multiple=(None if binding is None else binding[1].capital_multiple),
+            binding_subject=(None if binding is None else binding[1].binding_subject),
+            binding_as_of=None if binding is None else binding[0].as_of,
+            mean_capital_multiple=(
+                None if not multiples else math.fsum(multiples) / len(multiples)
+            ),
+            mean_concentration=(
+                None
+                if not sized
+                else math.fsum(capacity.concentration for _report, capacity in sized) / len(sized)
+            ),
+        )
+
+    def _refuse_reports_that_are_not_one_study(
+        self, ordered: Sequence[PeriodTradeability]
+    ) -> PeriodTradeability:
+        """Refuse a series mixing studies, tiers, horizons or `as_of`s, and return its head.
+
+        The declared spec's own three fields are checked first, so a report built under another
+        quantile spec is refused against the declaration rather than against whichever report
+        happened to sort first -- `_refuse_a_period_that_is_not_this_study`'s argument, and here it
+        is sharper because the capacity statistics below are ratios against
+        `QuantilePortfolioSpec.position_capital`.
+        """
+        for report in ordered:
+            mismatched = [
+                f"{name}={getattr(report, name)!r} against {expected!r}"
+                for name, expected in (
+                    ("factor_id", self._portfolio.factor_id),
+                    ("direction", self._portfolio.direction),
+                    ("group_count", self._portfolio.group_count),
+                )
+                if getattr(report, name) != expected
+            ]
+            if mismatched:
+                raise FactorTradeabilityError(
+                    f"the report at {report.as_of.isoformat()} reports {mismatched}; a "
+                    "tradeability summary is measured against the quantile spec that produced the "
+                    "periods, and a capacity compared against another study's declared capital is "
+                    "a ratio of two different declarations"
+                )
+        head = ordered[0]
+        for report in ordered:
+            mismatched = [
+                f"{name}={getattr(report, name)!r} against {getattr(head, name)!r}"
+                for name in ("tier", "horizon_sessions")
+                if getattr(report, name) != getattr(head, name)
+            ]
+            if mismatched:
+                raise FactorTradeabilityError(
+                    f"the report at {report.as_of.isoformat()} reports {mismatched}; a "
+                    "tradeability summary is one factor on one tier at one horizon, and a funnel "
+                    "pooled over two of either adds up two different label contracts' verdicts"
+                )
+        stamps = [report.as_of for report in ordered]
+        if len(set(stamps)) != len(stamps):
+            duplicates = sorted({stamp.isoformat() for stamp in stamps if stamps.count(stamp) > 1})
+            raise FactorTradeabilityError(
+                f"{duplicates} appears more than once in this series; one as_of is one period, "
+                "and counting it twice weights a day by how often a caller appended it"
+            )
+        return head
 
     def turnover(self, periods: Iterable[PeriodPortfolio]) -> TurnoverSeries:
         """The long group's rolling holdings churn across a series, or the code that says why not.
@@ -1629,6 +2104,52 @@ def _funnel(period: PeriodPortfolio) -> CoverageFunnel:
         admissible_count=admissible,
         scored_count=census.admitted_count,
         held_count=period.census.held_count,
+    )
+
+
+def _pool_funnels(funnels: Sequence[CoverageFunnel]) -> CoverageFunnel:
+    """Five elementwise sums, which is a funnel again because monotonicity survives addition.
+
+    Counts and not rates, which is what makes the pooling legal at all: `CoverageFunnel` stores
+    the five counts and derives the four rates, so summing the stored half and letting the
+    properties re-divide is the only reading that cannot disagree with itself. Averaging the rates
+    instead would produce a `value_rate` that no pair of counts in the series supports.
+    """
+    return CoverageFunnel(
+        universe_count=sum(item.universe_count for item in funnels),
+        valued_count=sum(item.valued_count for item in funnels),
+        admissible_count=sum(item.admissible_count for item in funnels),
+        scored_count=sum(item.scored_count for item in funnels),
+        held_count=sum(item.held_count for item in funnels),
+    )
+
+
+def _pool_group_coverage(
+    tables: Sequence[tuple[GroupCoverage, ...]], *, group_count: int
+) -> tuple[GroupCoverage, ...]:
+    """One row per group, summed over the periods that reached the cut.
+
+    `EXCLUDED_OUTCOME_ORDER` is walked rather than the rows' own keys, so the pooled table is
+    keyed by the declared tuple even when the series is empty -- and `GroupCoverage`'s own
+    constructor then refuses a table that lost a code, which is the check that makes this pooling
+    auditable rather than merely convenient.
+    """
+    if not tables:
+        return ()
+    return tuple(
+        GroupCoverage(
+            group=index,
+            scored_count=sum(table[index].scored_count for table in tables),
+            held_count=sum(table[index].held_count for table in tables),
+            excluded_by_outcome=tuple(
+                (
+                    code,
+                    sum(dict(table[index].excluded_by_outcome)[code] for table in tables),
+                )
+                for code in EXCLUDED_OUTCOME_ORDER
+            ),
+        )
+        for index in range(group_count)
     )
 
 

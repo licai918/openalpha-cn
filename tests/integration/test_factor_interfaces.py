@@ -222,14 +222,20 @@ row of both tables, and not the one this issue is about.
 
 _TOKEN: Final[str] = "tushare-token-that-must-never-be-echoed-0123456789"
 
-RENDERED_LEAF_COUNT: Final[int] = 309
+RENDERED_LEAF_COUNT: Final[int] = 421
 """How many scalar leaves the sealed document a face hands out actually has, on `BASELINE`.
 
 Pinned rather than bounded, and the reason is `panel_view.py`'s measurement: 54 rendered keys with
 100% line coverage, 19 of them never asserted. A `>=` bound here would let a key vanish from the
 transport and the per-key audit would go on passing on a narrower document. An exact count makes
-a key gained or lost a failure that says so -- and every one of these 309 is separately falsified
+a key gained or lost a failure that says so -- and every one of these 421 is separately falsified
 by `test_every_key_the_three_faces_render_is_held_by_the_seal`.
+
+**It was 309 until `TierReport` gained its `tradeability` summary**, and the count moving is this
+constant working rather than a nuisance to be re-pinned: `V2-P3-007`'s coverage funnel, per-group
+execution decomposition and long-group capacity are 112 new leaves across the three tier rows on
+this fixture, and before the change a reader of what the faces hand out could not find one of
+them. The pin is what makes that a decision somebody records rather than a diff nobody reads.
 """
 
 

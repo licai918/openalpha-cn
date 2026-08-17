@@ -41,6 +41,7 @@ from openalpha_cn.domain.factor import (
 )
 from openalpha_cn.domain.factor_transform import (
     FILL_ACTIONS,
+    IMPUTING_PROCESSED_CODES,
     MISSING_VALUE_ACTION_ORDER,
     MISSING_VALUE_ACTIONS,
     MISSING_VALUE_COVERAGE_ORDER,
@@ -59,6 +60,8 @@ from openalpha_cn.domain.factor_transform import (
     ProcessedFactorObservation,
     WinsorizationPolicy,
     _refuse_a_policy_that_cannot_answer_every_missing_code,
+    _refuse_an_imputation_table_that_disagrees_with_the_row_contract,
+    imputing_codes_the_row_contract_admits,
     observation_digest,
 )
 
@@ -654,6 +657,39 @@ def test_an_imputed_row_must_not_have_come_from_a_computed_source() -> None:
 def test_a_source_not_computed_row_over_a_computed_source_is_refused() -> None:
     with pytest.raises(FactorTransformError, match="each other's negation"):
         _processed(coverage="source_not_computed", value=None, source_coverage="computed")
+
+
+def test_the_imputation_table_is_the_row_contracts_own_and_both_directions_are_refused() -> None:
+    """`IMPUTING_PROCESSED_CODES` against the two rules that decide it, not against a literal.
+
+    The table matters one plane up rather than here: `backtest/factor_ic.py::TIER_ADMITTED_CODES`
+    is `TIER_VALUE_CODES` minus this set, so a value code on the wrong side of it reaches every
+    information coefficient, every quantile portfolio and every coverage funnel this repository
+    computes -- with an imputation rate inside the statistic and no census column able to say so.
+
+    The derivation is the assertion: `imputing_codes_the_row_contract_admits` builds
+    `ProcessedFactorObservation`s over both source codes and keeps the value codes a stored row may
+    carry only over a source that measured nothing, which is exactly the pair of rules the two
+    tests above drive one at a time. Both failure directions of the audit are driven here, because
+    an audit whose only call site is the one that passes is an audit nobody has seen fail.
+    """
+    derived = imputing_codes_the_row_contract_admits(
+        PROCESSED_COVERAGE_ORDER, PROCESSED_VALUE_CODES
+    )
+
+    assert derived == IMPUTING_PROCESSED_CODES == frozenset({"imputed"})
+    assert derived < PROCESSED_VALUE_CODES
+    with pytest.raises(FactorTransformError, match="a made-up number entering every statistic"):
+        _refuse_an_imputation_table_that_disagrees_with_the_row_contract(
+            PROCESSED_COVERAGE_ORDER, PROCESSED_VALUE_CODES, frozenset()
+        )
+    with pytest.raises(FactorTransformError, match="a made-up number entering every statistic"):
+        _refuse_an_imputation_table_that_disagrees_with_the_row_contract(
+            PROCESSED_COVERAGE_ORDER, PROCESSED_VALUE_CODES, PROCESSED_VALUE_CODES
+        )
+    _refuse_an_imputation_table_that_disagrees_with_the_row_contract(
+        PROCESSED_COVERAGE_ORDER, PROCESSED_VALUE_CODES, IMPUTING_PROCESSED_CODES
+    )
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])

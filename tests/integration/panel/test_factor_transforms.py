@@ -63,6 +63,7 @@ from openalpha_cn.panel.catalog import KNOWN_STORAGE_LIMITATIONS, ReadinessRequi
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import (
     CROSS_SECTION_STANDARD,
+    FACTOR_COVERAGE_ORDER,
     REVERSAL_1D,
     TRANSFORM_MANIFEST_DATA_COLUMNS,
     FactorEngineError,
@@ -907,7 +908,7 @@ why they were the columns a falsification already failed on. These are the rest:
 policy, the census and the statistics -- exactly the columns
 `TRANSFORM_MANIFEST_DATA_COLUMNS`, `PROCESSED_CENSUS_COLUMNS` and
 `test_the_stored_statistics_columns_make_a_declared_winsorization_falsifiable` justify at length
-and nothing read. Taken as a slice so that a twenty-fourth arriving with no expectation fails
+and nothing read. Taken as a slice so that a thirty-first arriving with no expectation fails
 `_assert_the_partition_says_what_the_transform_measured`'s first line rather than passing
 silently.
 """
@@ -921,13 +922,13 @@ def _assert_the_partition_says_what_the_transform_measured(
 ) -> None:
     """Read this build's manifest row off the partition and hold every column to a value.
 
-    Three bindings:
+    Four bindings:
 
-    1. **Every one of the twenty-four** columns above is held to an expected value, by an
-       equality on the key set rather than by a list somebody keeps in step -- a twenty-fifth
-       arriving with no expectation fails on the first line. It was twenty-three until
-       `V2-P3-018` gave the missing-value policy a fifth code and therefore a fifth stored
-       action column.
+    1. **Every one of the thirty** columns above is held to an expected value, by an equality
+       on the key set rather than by a list somebody keeps in step -- a thirty-first arriving with
+       no expectation fails on the first line. It was twenty-three until `V2-P3-018` gave the
+       missing-value policy a fifth code and therefore a fifth stored action column, and
+       twenty-four until the source census gave the raw vocabulary six columns of its own.
     2. **The processed rows' own `transform_manifest_id`** must be this build's. It is the one
        stored column no read path checks: `_processed_observation_from_row` decodes
        it with `str()`, so a wrong one round-trips cleanly and points every row at a manifest the
@@ -938,8 +939,12 @@ def _assert_the_partition_says_what_the_transform_measured(
        build that stored one and not the other -- `PROCESSED_CENSUS_COLUMNS`' whole argument --
        shows up as a disagreement between two partitions rather than as a number nobody compared
        to anything.
+    4. **And the source census is recounted the same way**, against the `source_coverage` column
+       of the same rows. That is the axis `census_source_not_computed` collapses -- one cell in
+       front of five raw codes -- so without these six a cross section narrowed by a
+       self-contradictory filing and one narrowed by an undefined arithmetic write identical rows.
     """
-    assert len(_UNREASSEMBLED_MANIFEST_COLUMNS) == 24
+    assert len(_UNREASSEMBLED_MANIFEST_COLUMNS) == 30
     assert set(expected) == set(_UNREASSEMBLED_MANIFEST_COLUMNS)
     manifest_id = result.manifest.transform_manifest_id
     rows = store.query(
@@ -968,6 +973,19 @@ def _assert_the_partition_says_what_the_transform_measured(
     for row in mine:
         census[str(row[2])] += 1
     assert census == {code: expected[f"census_{code}"] for code in PROCESSED_COVERAGE_ORDER}
+
+    sourced = store.query(
+        processed_factor_dataset(definition),
+        year=YEAR,
+        columns=["transform_id", "source_coverage"],
+    )
+    source_census = dict.fromkeys(FACTOR_COVERAGE_ORDER, 0)
+    for row in sourced:
+        if row[0] == result.spec.transform_id:
+            source_census[str(row[1])] += 1
+    assert source_census == {
+        code: expected[f"source_census_{code}"] for code in FACTOR_COVERAGE_ORDER
+    }
 
 
 def _wide_raw(
@@ -1072,6 +1090,12 @@ def test_the_stored_policy_census_and_statistics_are_the_ones_this_build_actuall
             "census_source_not_computed": 1,
             "census_insufficient_cross_section": 0,
             "census_degenerate_cross_section": 0,
+            "source_census_computed": 119,
+            "source_census_not_in_universe": 1,
+            "source_census_insufficient_history": 0,
+            "source_census_ambiguous_filing": 0,
+            "source_census_input_missing": 1,
+            "source_census_undefined_value": 0,
             "participant_count": 119,
             "winsorized_low_count": 2,
             "winsorized_high_count": 2,
@@ -1128,6 +1152,12 @@ def test_the_stored_policy_columns_are_the_declared_policy_and_not_a_default(
             "census_source_not_computed": 1,
             "census_insufficient_cross_section": 0,
             "census_degenerate_cross_section": 0,
+            "source_census_computed": 120,
+            "source_census_not_in_universe": 0,
+            "source_census_insufficient_history": 0,
+            "source_census_ambiguous_filing": 0,
+            "source_census_input_missing": 1,
+            "source_census_undefined_value": 0,
             "participant_count": WIDE_COUNT,
             "winsorized_low_count": 0,
             "winsorized_high_count": 1,
@@ -1181,6 +1211,12 @@ def test_a_degenerate_cross_section_stores_its_own_census_and_not_an_empty_one(
             "census_source_not_computed": 0,
             "census_insufficient_cross_section": 0,
             "census_degenerate_cross_section": WIDE_COUNT,
+            "source_census_computed": 120,
+            "source_census_not_in_universe": 0,
+            "source_census_insufficient_history": 0,
+            "source_census_ambiguous_filing": 0,
+            "source_census_input_missing": 0,
+            "source_census_undefined_value": 0,
             "participant_count": WIDE_COUNT,
             "winsorized_low_count": 0,
             "winsorized_high_count": 0,
@@ -1200,7 +1236,12 @@ def test_a_cross_section_below_the_floor_stores_the_count_that_says_so(
 
     `participant_count == 8` beside `census_insufficient_cross_section == 8` is the whole
     disclosure: the build saw eight securities, declined to standardize them, and said which of
-    the two whole-panel reasons it was. Every bound and both estimators are null, because there
+    the two whole-panel reasons it was. The source census is the sharpest reading of that pair on
+    this fixture -- `source_census_computed == 8` against a processed census of eight
+    `insufficient_cross_section` rows says the eight measurements arrived and the *floor* refused
+    them, which is a different finding from eight rows that had nothing to bring.
+
+    Every bound and both estimators are null, because there
     is no interval and nothing was estimated -- and a build that stored zeros there instead would
     read as a winsorization that clipped at 0.0.
     """
@@ -1231,6 +1272,12 @@ def test_a_cross_section_below_the_floor_stores_the_count_that_says_so(
             "census_source_not_computed": 0,
             "census_insufficient_cross_section": len(panel.securities),
             "census_degenerate_cross_section": 0,
+            "source_census_computed": 8,
+            "source_census_not_in_universe": 0,
+            "source_census_insufficient_history": 0,
+            "source_census_ambiguous_filing": 0,
+            "source_census_input_missing": 0,
+            "source_census_undefined_value": 0,
             "participant_count": len(panel.securities),
             "winsorized_low_count": 0,
             "winsorized_high_count": 0,

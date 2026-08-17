@@ -72,6 +72,7 @@ from openalpha_cn.panel_factors import (
     _TRANSFORM_MANIFEST_HEAD_COLUMNS,
     _WINSORIZERS,
     CROSS_SECTION_STANDARD,
+    FACTOR_COVERAGE_ORDER,
     FACTOR_DEFINITIONS,
     FACTOR_PROCESSED_DATASET_PREFIX,
     FACTOR_TRANSFORM_MANIFEST_DATASET_PREFIX,
@@ -82,6 +83,7 @@ from openalpha_cn.panel_factors import (
     PROCESSED_OBSERVATION_PANEL_COLUMNS,
     REFUSAL_ACTION,
     REVERSAL_1D,
+    SOURCE_CENSUS_COLUMNS,
     TRANSFORM_MANIFEST_DATA_COLUMNS,
     TRANSFORM_MANIFEST_PANEL_COLUMNS,
     FactorEngineError,
@@ -1251,6 +1253,74 @@ def test_the_stored_census_is_one_column_per_declared_processed_coverage_code() 
     assert len(PROCESSED_CENSUS_COLUMNS) == len(PROCESSED_COVERAGE_CODES)
 
 
+def test_the_stored_source_census_is_one_column_per_declared_raw_coverage_code() -> None:
+    """The second axis, derived from the raw vocabulary and stored beside the first.
+
+    Both directions, `PROCESSED_CENSUS_COLUMNS`' own treatment: a column that stopped being
+    derived from `FACTOR_COVERAGE_ORDER` is caught rather than a set that merely overlaps it. The
+    prefix is deliberately **not** shared with the processed census -- those two families live in
+    one row here rather than in two datasets, and `census_input_missing` beside
+    `source_census_input_missing` is two different questions one substring apart.
+    """
+    assert tuple(f"source_census_{code}" for code in FACTOR_COVERAGE_ORDER) == (
+        SOURCE_CENSUS_COLUMNS
+    )
+    assert set(SOURCE_CENSUS_COLUMNS) <= set(TRANSFORM_MANIFEST_DATA_COLUMNS)
+    assert len(SOURCE_CENSUS_COLUMNS) == len(FACTOR_COVERAGE_CODES)
+    assert not set(SOURCE_CENSUS_COLUMNS) & set(PROCESSED_CENSUS_COLUMNS)
+
+
+def test_an_ambiguous_filing_and_an_undefined_value_are_two_answers_in_the_stored_census() -> None:
+    """**`V2-P3-018`'s argument, surviving into the processed plane's storage.**
+
+    Two cross sections of five securities differing in exactly one thing: whether `000005.SZ`'s
+    raw code is `ambiguous_filing` (the publisher stated the number twice and contradicted itself,
+    so **re-fetching returns the same two rows**) or `undefined_value` (every input was present and
+    the arithmetic has no answer). The remedies are not the same and the raw plane spends two of
+    its six members saying so.
+
+    `ProcessedCoverage.source_not_computed` is one cell in front of both, so the processed census
+    reports them as one number -- which is asserted here rather than assumed, because it is the
+    reason the second census exists.
+
+    The stored manifest rows are then compared column by column, and the split in what moves is
+    the point. `source_observation_digest` moved before this change as well -- the raw coverage
+    code is inside `observation_digest`'s hashed triple -- so the build's **identity** already
+    told the two cross sections apart. An identity is opaque: it says "these are two builds" and
+    names nothing a reader can act on, and every *interpretable* cell of the row was equal. Two
+    counts now move beside it, so "how many securities here have no value because the publisher
+    contradicted itself" is answerable from the partition rather than only from a hash comparison
+    against a build nobody kept.
+    """
+    spec = _spec(missing_values=_policy(ambiguous_filing="exclude", undefined_value="exclude"))
+    values = {code: float(index) for index, code in enumerate(("a", "b", "c", "d"), start=1)}
+    rows = []
+    for mark in ("ambiguous_filing", "undefined_value"):
+        panel = _panel({**values, "e": None}, {"e": mark})
+        processed = _apply(panel, spec)
+        rows.append((processed, transform_manifest_batch(processed)))
+
+    ambiguous, undefined = (item[0] for item in rows)
+    assert dict(ambiguous.coverage_census()) == dict(undefined.coverage_census())
+    assert dict(ambiguous.coverage_census())["source_not_computed"] == 1
+    assert ambiguous.source_coverage_census()["ambiguous_filing"] == 1
+    assert ambiguous.source_coverage_census()["undefined_value"] == 0
+    assert undefined.source_coverage_census()["ambiguous_filing"] == 0
+    assert undefined.source_coverage_census()["undefined_value"] == 1
+    assert ambiguous.source_coverage_census()["computed"] == 4
+
+    left = {column.name: column.values for column in rows[0][1].columns}
+    right = {column.name: column.values for column in rows[1][1].columns}
+    assert set(left) == set(right) == set(TRANSFORM_MANIFEST_DATA_COLUMNS)
+    differing = sorted(name for name in left if left[name] != right[name])
+    assert differing == [
+        "source_census_ambiguous_filing",
+        "source_census_undefined_value",
+        "source_observation_digest",
+    ]
+    assert len(left) - len(differing) == 37
+
+
 def test_the_stored_policy_columns_are_one_per_non_computed_coverage_code() -> None:
     """A sixth `FactorCoverage` member brings a policy field (the domain's import audit) and a
     stored column (this), so the declared policy and what is recorded of it cannot drift."""
@@ -1440,6 +1510,7 @@ def _manifest_row(**overrides: object) -> tuple[object, ...]:
         "min_cross_section": 1,
         **dict.fromkeys(MISSING_VALUE_COLUMNS, "exclude"),
         **dict.fromkeys(PROCESSED_CENSUS_COLUMNS, 0),
+        **dict.fromkeys(SOURCE_CENSUS_COLUMNS, 0),
         "participant_count": 3,
         "winsorized_low_count": 0,
         "winsorized_high_count": 0,
@@ -1455,7 +1526,7 @@ def _manifest_row(**overrides: object) -> tuple[object, ...]:
 
 
 def test_a_stored_transform_manifest_row_of_the_wrong_width_is_refused() -> None:
-    with pytest.raises(FactorEngineError, match="expected 36"):
+    with pytest.raises(FactorEngineError, match="expected 42"):
         _transform_manifest_from_row(("too", "few"), dataset=TRANSFORM_MANIFESTS)
 
 
