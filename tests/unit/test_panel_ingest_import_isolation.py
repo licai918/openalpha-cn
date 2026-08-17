@@ -381,8 +381,17 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_factors.FACTOR_DEFINITIONS",
             "panel_factors.FACTOR_TRANSFORMS",
             "panel_factors.FactorEngineError",
+            "panel_factors.FactorPanel",
+            "panel_factors.ProcessedFactorPanel",
+            "panel_factors.apply_factor_transform",
+            "panel_factors.compute_factor",
             "panel_factors.load_factor_observations",
             "panel_factors.load_processed_factor_observations",
+            "panel_factors.write_factor_panels",
+            "panel_factors.write_processed_factor_panels",
+            "panel_ingest.daily_basic_requirement",
+            "panel_ingest.daily_requirement",
+            "panel_ingest.financial_statement_requirement",
             "panel_ingest.load_adjustment_histories",
             "panel_ingest.load_daily_bars",
             "panel_ingest.load_name_histories",
@@ -392,7 +401,11 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_ingest.load_trading_calendar",
             "panel_neutralization.FACTOR_NEUTRALIZATIONS",
             "panel_neutralization.NeutralizationEngineError",
+            "panel_neutralization.NeutralizedFactorPanel",
+            "panel_neutralization.apply_factor_neutralization",
+            "panel_neutralization.load_industry_market_cap_cross_section",
             "panel_neutralization.load_neutralized_factor_observations",
+            "panel_neutralization.write_neutralized_factor_panels",
             "panel_view.PANEL_STORE_PLACEHOLDER",
             "panel_view.panel_store",
         }
@@ -413,9 +426,17 @@ The seventh, `_refuse_rows_that_are_not_the_answers_their_manifest_addresses`, i
 seal check reused rather than re-written on the third tier, and it arrived here as a diff on this
 row -- which is what this table is for.
 
+`factor_view`'s row is the one that has already moved twice. `V2-P3-019` gave it
+`openalpha factor build`, so eleven of its names -- `compute_factor`,
+`apply_factor_transform`, `apply_factor_neutralization`, the three `write_*_panels` writers, the
+two panel types, `load_industry_market_cap_cross_section` and the two requirement builders --
+are ones a *renderer* would not have. That is a face that now writes the tiers it used to only
+read, and it arrived here as thirteen lines on this row rather than as a package edge nothing
+measured, which is the whole reason the table is at name granularity.
+
 The values are `"<sibling module stem>.<name>"` rather than fully qualified, because every
 importer and every import target in this table is a top-level `openalpha_cn.panel_*` module by
-construction and the prefix would be the same fifty-one times.
+construction and the prefix would be the same fifty-two times.
 """
 
 RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
@@ -442,7 +463,9 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
         reached=frozenset({"daily_basic", "index_member_all"}),
     ),
     "openalpha_cn.factor_view": DatasetReach(
-        named=frozenset(),
+        named=frozenset(
+            {"balancesheet", "cashflow", "daily", "daily_basic", "fina_indicator", "income"}
+        ),
         reached=frozenset(
             {
                 "adj_factor",
@@ -450,7 +473,9 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
                 "cashflow",
                 "daily",
                 "daily_basic",
+                "fina_indicator",
                 "income",
+                "index_member_all",
                 "namechange",
                 "stk_limit",
                 "stock_basic",
@@ -487,13 +512,18 @@ because this instrument counts every literal that equals a dataset name -- see t
 docstring, blind spot 2, for why the narrower rule is worse -- and it costs nothing here because
 the gate's `reached` already covers `daily` through `panel_health_report`.
 
-**`factor_view` names none and reaches eleven, and the four it does not reach are the row.**
-`fina_indicator`, `index_classify`, `index_member_all` and `index_weight` are absent, which says
-what that face actually does: it renders *stored* tiers -- `load_neutralized_factor_observations`
-reads a written partition rather than the industry corpus the neutralisation regressed against --
-and its eleven come from the seven `panel_ingest` loaders a tradeability label needs. It is
-covered here at all because `V2-P3-015` made `factor_*` a second top-level family and the glob
-above only knew about the first; see `RESEARCH_PLANE_PREFIXES`.
+**`factor_view` names six and reaches thirteen, and the two it does not reach are the row.**
+`index_classify` and `index_weight` are the only upstream datasets left, and the shape of this
+row is `V2-P3-019`'s doing: when this table was first written the face named *none* and reached
+*eleven*, because it rendered stored tiers and its reach came from the seven `panel_ingest`
+loaders a tradeability label needs. `openalpha factor build` made it a builder as well, so it now
+names the same six `panel_factors` does -- it imports `DAILY_DATASET`, `DAILY_BASIC_DATASET` and
+`FINANCIAL_STATEMENT_DATASETS` to state the requirements a build must clear -- and picks up
+`fina_indicator` and `index_member_all` in `reached`, the latter through
+`load_industry_market_cap_cross_section`, which is the industry corpus the neutralisation
+regresses against and which a renderer had no reason to touch. It is covered here at all because
+`V2-P3-015` made `factor_*` a second top-level family and the glob above only knew about the
+first; see `RESEARCH_PLANE_PREFIXES`.
 
 **`panel_ingest`, `panel_doctor`, `panel_gate` and `panel_view` reach all fifteen**, and their
 rows say `UPSTREAM_PANEL_DATASETS` rather than repeating it. That is a derived value in a table
