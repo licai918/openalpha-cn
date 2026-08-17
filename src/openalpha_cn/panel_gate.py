@@ -270,6 +270,16 @@ GATE_CODE_BLOCKS: Final[Mapping[str, bool]] = MappingProxyType(
         # for the full argument. It rides on `DependencyClearance.notices` instead, so a
         # cleared caller holds the dates rather than being told nothing.
         "calendar_lookahead_in_horizon": False,
+        # The three derived factor tiers held to their own build manifests (`V2-P3-019`). Both
+        # block, and they are the first two codes in this table that are about a partition this
+        # repository *computed* rather than fetched. The reason they block is the reason
+        # `domain_rebuild_refused` does, one notch sharper: that code fires when a cleared read
+        # would raise, and these fire when a cleared read would **succeed and return different
+        # numbers** -- measured moving a sealed experiment's mean_ic from +1.0 to -1.0 at exit
+        # code 0. There is no reading of "clear this dataset" that survives its own manifest
+        # saying the rows are not the ones that were written.
+        "factor_seal_broken": True,
+        "factor_build_unaddressed": True,
     }
 )
 """What this gate does about each of `PANEL_HEALTH_CODES`, as a table rather than as a branch.
@@ -283,7 +293,7 @@ entry, not a line inside a function nobody re-reads.
 """
 
 GATE_BLOCK_CODES: Final[frozenset[str]] = PANEL_HEALTH_CODES | GATE_REFUSAL_CODES
-"""Every code a `GateBlock` or a `ClearedDataset` caveat may carry: the twenty-four health codes
+"""Every code a `GateBlock` or a `ClearedDataset` caveat may carry: the twenty-six health codes
 plus the gate's own refusals. One closed set for both, because `unverified_daily_coverage` is
 the same question at two strengths -- a refusal when nothing corroborated the dataset at all,
 a caveat when something did but only over the sessions the request named."""

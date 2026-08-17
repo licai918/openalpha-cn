@@ -47,6 +47,7 @@ from openalpha_cn.domain.factor import (
     FactorInputProvenance,
     FactorInputRef,
     FactorRegistry,
+    cross_section_digest,
     set_digest,
 )
 from openalpha_cn.domain.panel_batch import MAX_IDENTIFIER_LENGTH, validate_panel_dataset
@@ -499,6 +500,9 @@ def _manifest_cells_from(**overrides: object) -> dict[str, object]:
         "subject_digest": set_digest(("000001.SZ", "000002.SZ")),
         "universe_count": 2,
         "universe_digest": set_digest(("000001.SZ", "000002.SZ")),
+        "observation_digest": cross_section_digest(
+            (("000001.SZ", "computed", 1.5), ("000002.SZ", "input_missing", None)), prefix="obs"
+        ),
         **dict.fromkeys(FACTOR_CENSUS_COLUMNS, 0),
         "input_dataset": "daily",
         "input_year": 2026,
@@ -527,7 +531,7 @@ def test_a_stored_manifest_row_of_the_wrong_width_is_refused() -> None:
     governs `state.sqlite3` alone and is built on `PRAGMA user_version`, which DuckDB does not
     have; see `panel/catalog.py::PANEL_CATALOG_SCHEMA_VERSION` for the same separation.
     """
-    with pytest.raises(FactorEngineError, match="expected 28"):
+    with pytest.raises(FactorEngineError, match="expected 29"):
         _manifest_cells(("too", "few"), dataset=MANIFESTS)
 
 
@@ -589,6 +593,7 @@ def test_a_panel_whose_provenance_does_not_cover_its_inputs_cannot_be_written() 
         subject_digest=set_digest(("000001.SZ",)),
         universe_count=1,
         universe_digest=set_digest(("000001.SZ",)),
+        observation_digest=cross_section_digest((("000001.SZ", "computed", 1.5),), prefix="obs"),
         inputs=(
             FactorInputRef(
                 dataset="daily",

@@ -94,6 +94,7 @@ from openalpha_cn.panel_factors import (
     FactorPanel,
     _sample_stdev,
     compute_factor,
+    load_factor_manifests,
     load_factor_observations,
     write_factor_panels,
 )
@@ -975,3 +976,31 @@ def test_the_engine_answers_a_column_the_duplicate_rows_agree_about_and_codes_on
         "return_on_capital_ttm": "ambiguous_filing",
         "accruals_ttm": "ambiguous_filing",
     }
+
+
+def test_a_multi_dataset_build_reads_its_own_manifest_back(store: PanelStore) -> None:
+    """The round trip that could not close, found by putting a manifest read on the value path.
+
+    `FactorBuildManifest.inputs` is a tuple, so its order is inside `manifest_id`. `compute_factor`
+    used to collect its refs in `FactorDefinition.datasets` order while `_manifest_from_rows` has
+    always reassembled them sorted by `(dataset, year)` -- a Parquet scan has no order to preserve
+    -- so for any factor reading **two** datasets the two ends produced two different identities
+    and `load_factor_manifests` raised on a partition it had just written. Every shipped statement
+    factor is in that class; the bug was invisible only because nothing on a read path decoded a
+    build until `V2-P3-019` put that read on `load_factor_observations`.
+
+    Asserted on a factor that reads `income` **and** `balancesheet`, in that declared order, so
+    the sorted order is genuinely different from the declared one -- on a one-dataset factor the
+    two agree and this test would pass against the defect.
+    """
+    definition = RETURN_ON_EQUITY_TTM
+    built = _compute(store, definition)
+    write_factor_panels(store, [built])
+
+    (stored,) = load_factor_manifests(store, definition, years=(AS_OF.year,), as_of=AS_OF)
+
+    assert len(definition.datasets) > 1
+    assert tuple(dict.fromkeys(definition.datasets)) != tuple(sorted(set(definition.datasets)))
+    assert stored.manifest_id == built.manifest.manifest_id
+    assert stored.inputs == built.manifest.inputs
+    assert [ref.dataset for ref in stored.inputs] == sorted(ref.dataset for ref in stored.inputs)

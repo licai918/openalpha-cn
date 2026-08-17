@@ -46,6 +46,7 @@ from openalpha_cn.domain.factor import (
     FactorField,
     FactorInputRef,
     FactorObservation,
+    cross_section_digest,
     set_digest,
 )
 from openalpha_cn.domain.factor_transform import (
@@ -179,6 +180,13 @@ def _panel(values: dict[str, float | None], codes: dict[str, str] | None = None)
         subject_digest=set_digest(subjects),
         universe_count=len(subjects),
         universe_digest=set_digest(subjects),
+        observation_digest=cross_section_digest(
+            (
+                (name, marks.get(name, "computed" if value is not None else "input_missing"), value)
+                for name, value in values.items()
+            ),
+            prefix="obs",
+        ),
         inputs=(
             FactorInputRef(
                 dataset="daily",
@@ -1407,6 +1415,7 @@ def _manifest_row(**overrides: object) -> tuple[object, ...]:
         source_factor_version=1,
         source_manifest_id="fmn_probe",
         source_observation_digest="obs_probe",
+        processed_observation_digest="prc_probe",
         as_of=AS_OF,
         code_commit=COMMIT,
     )
@@ -1420,6 +1429,7 @@ def _manifest_row(**overrides: object) -> tuple[object, ...]:
         "source_factor_version": manifest.source_factor_version,
         "source_manifest_id": manifest.source_manifest_id,
         "source_observation_digest": manifest.source_observation_digest,
+        "processed_observation_digest": manifest.processed_observation_digest,
         "as_of_time": manifest.as_of,
         "code_commit": manifest.code_commit,
         "winsorization_method": "none",
@@ -1445,7 +1455,7 @@ def _manifest_row(**overrides: object) -> tuple[object, ...]:
 
 
 def test_a_stored_transform_manifest_row_of_the_wrong_width_is_refused() -> None:
-    with pytest.raises(FactorEngineError, match="expected 35"):
+    with pytest.raises(FactorEngineError, match="expected 36"):
         _transform_manifest_from_row(("too", "few"), dataset=TRANSFORM_MANIFESTS)
 
 

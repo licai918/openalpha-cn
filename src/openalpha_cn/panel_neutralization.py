@@ -226,7 +226,7 @@ partition-granularity or day-bounded read of `daily_basic`, which is a `V2-P1` s
 
 import math
 from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from types import MappingProxyType
 from typing import Final, Protocol
@@ -255,6 +255,7 @@ from openalpha_cn.domain.factor_neutralization import (
     characteristic_digest,
     industry_code_of,
     industry_group_sizes,
+    neutralized_observation_digest,
     processed_observation_digest,
     validate_neutralized_factor_observation,
 )
@@ -288,6 +289,7 @@ from openalpha_cn.panel_factors import (
     FACTOR_PROVIDER_ID,
     FactorEngineError,
     ProcessedFactorPanel,
+    _refuse_rows_that_are_not_the_answers_their_manifest_addresses,
     _refuse_to_drop_a_stored_build,
 )
 from openalpha_cn.panel_ingest import (
@@ -441,6 +443,7 @@ NEUTRALIZATION_MANIFEST_DATA_COLUMNS: Final[tuple[str, ...]] = (
     "source_transform_manifest_id",
     "source_processed_digest",
     "characteristic_digest",
+    "neutralized_observation_digest",
     "as_of_time",
     "code_commit",
     "industry_level",
@@ -462,7 +465,7 @@ NEUTRALIZATION_MANIFEST_DATA_COLUMNS: Final[tuple[str, ...]] = (
 )
 """One row per neutralisation build. Three families, and only the first is in the content address.
 
-- **The twelve head columns** are `FactorNeutralizationManifest`'s own fields (minus
+- **The thirteen head columns** are `FactorNeutralizationManifest`'s own fields (minus
   `schema_version`), so `_neutralization_manifest_from_row` reassembles a build from them and
   checks that the identity it reproduces is the one the row was stored under. "Head" is a
   description of this literal rather than a requirement on it -- that decoder addresses cells by
@@ -493,17 +496,19 @@ NEUTRALIZATION_MANIFEST_PANEL_COLUMNS: Final[tuple[str, ...]] = (
 )
 
 _NEUTRALIZATION_MANIFEST_HEAD_COLUMNS: Final[tuple[str, ...]] = (
-    NEUTRALIZATION_MANIFEST_DATA_COLUMNS[:12]
+    NEUTRALIZATION_MANIFEST_DATA_COLUMNS[:13]
 )
-"""The twelve columns `FactorNeutralizationManifest` is reassembled from -- an audit handle.
+"""The thirteen columns `FactorNeutralizationManifest` is reassembled from -- an audit handle.
 
 **Nothing in `src/` reads this.** `_neutralization_manifest_from_row` zips
 `NEUTRALIZATION_MANIFEST_PANEL_COLUMNS` against the row and addresses every cell by name, so the
 hashed fields could sit anywhere in the tuple and the decoder would not notice. Its one consumer
 is `tests/unit/test_factor_neutralization_rules.py::
 test_the_stored_head_columns_are_exactly_the_hashed_manifests_own_fields`, which reconciles the
-slice against `FactorNeutralizationManifest`'s own field set -- so a thirteenth manifest field, or
-a hashed field that stopped being stored, fails there instead of at the first read-back.
+slice against `FactorNeutralizationManifest`'s own field set -- so a fourteenth manifest field,
+or a hashed field that stopped being stored, fails there instead of at the first read-back. It has
+already earned its keep once: `V2-P3-019` added `neutralized_observation_digest` and this slice
+went red until the column list followed.
 
 A slice of the tuple above rather than a second list, so the two cannot drift.
 """
@@ -532,6 +537,7 @@ _NEUTRALIZATION_MANIFEST_COLUMN_KINDS: Final[Mapping[str, PanelColumnKind]] = Ma
         "source_transform_manifest_id": "string",
         "source_processed_digest": "string",
         "characteristic_digest": "string",
+        "neutralized_observation_digest": "string",
         "as_of_time": "timestamp",
         "code_commit": "string",
         "industry_level": "string",
@@ -1035,6 +1041,7 @@ def apply_factor_neutralization(
         source_transform_manifest_id=panel.manifest.transform_manifest_id,
         source_processed_digest=processed_observation_digest(observations),
         characteristic_digest=characteristic_digest(characteristics),
+        neutralized_observation_digest=_UNSEALED_NEUTRALIZED_DIGEST,
         as_of=panel.as_of,
         code_commit=code_commit,
     )
@@ -1095,15 +1102,17 @@ def apply_factor_neutralization(
             coded[observation.subject] = "thin_industry"
 
     if len(admitted) < spec.min_cross_section:
-        return _uniform_neutralized_panel(
-            panel,
-            spec,
-            manifest=manifest,
-            manifest_id=manifest_id,
-            taxonomy=taxonomy,
-            coverage="insufficient_cross_section",
-            statistics=_empty_statistics(len(admitted)),
-            built_at=built_at,
+        return _seal_neutralized_panel(
+            _uniform_neutralized_panel(
+                panel,
+                spec,
+                manifest=manifest,
+                manifest_id=manifest_id,
+                taxonomy=taxonomy,
+                coverage="insufficient_cross_section",
+                statistics=_empty_statistics(len(admitted)),
+                built_at=built_at,
+            )
         )
 
     subjects = [observation.subject for observation, _ in admitted]
@@ -1123,15 +1132,17 @@ def apply_factor_neutralization(
 
     fit = _neutralize(subjects, groups, regressor, values)
     if fit is None:
-        return _uniform_neutralized_panel(
-            panel,
-            spec,
-            manifest=manifest,
-            manifest_id=manifest_id,
-            taxonomy=taxonomy,
-            coverage="degenerate_design",
-            statistics=_empty_statistics(len(admitted)),
-            built_at=built_at,
+        return _seal_neutralized_panel(
+            _uniform_neutralized_panel(
+                panel,
+                spec,
+                manifest=manifest,
+                manifest_id=manifest_id,
+                taxonomy=taxonomy,
+                coverage="degenerate_design",
+                statistics=_empty_statistics(len(admitted)),
+                built_at=built_at,
+            )
         )
 
     industries = dict(zip(subjects, groups, strict=True))
@@ -1147,23 +1158,60 @@ def apply_factor_neutralization(
         for observation in observations
     )
     admitted_sizes = industry_group_sizes(groups)
-    return NeutralizedFactorPanel(
-        definition=panel.definition,
-        spec=spec,
-        manifest=manifest,
-        observations=rows,
-        statistics=FactorNeutralizationStatistics(
-            participant_count=len(admitted),
-            industry_count=len(admitted_sizes),
-            smallest_industry_size=min(admitted_sizes.values()),
-            largest_industry_size=max(admitted_sizes.values()),
-            backfilled_industry_count=sum(1 for _, found in admitted if found.is_backfilled),
-            market_cap_slope=fit.slope,
-            market_cap_dispersion=fit.dispersion,
-            residual_dispersion=_population_stdev(list(fit.residuals.values())),
+    return _seal_neutralized_panel(
+        NeutralizedFactorPanel(
+            definition=panel.definition,
+            spec=spec,
+            manifest=manifest,
+            observations=rows,
+            statistics=FactorNeutralizationStatistics(
+                participant_count=len(admitted),
+                industry_count=len(admitted_sizes),
+                smallest_industry_size=min(admitted_sizes.values()),
+                largest_industry_size=max(admitted_sizes.values()),
+                backfilled_industry_count=sum(1 for _, found in admitted if found.is_backfilled),
+                market_cap_slope=fit.slope,
+                market_cap_dispersion=fit.dispersion,
+                residual_dispersion=_population_stdev(list(fit.residuals.values())),
+            ),
+            industry_taxonomy=taxonomy,
+            built_at=built_at,
+        )
+    )
+
+
+_UNSEALED_NEUTRALIZED_DIGEST: Final[str] = "nrs_unsealed"
+"""What a draft neutralisation manifest carries until `_seal_neutralized_panel` addresses it.
+
+`panel_factors._UNSEALED_PROCESSED_DIGEST` one tier up, for the identical circularity and with
+the identical remedy: `neutralized_observation_digest` is a field of
+`FactorNeutralizationManifest`, every residual row carries the `neutralization_manifest_id` that
+field moves, and `apply_factor_neutralization` has several exits that each build a whole panel.
+A placeholder no digest function can produce, so a draft that escaped would be recognisable.
+"""
+
+
+def _seal_neutralized_panel(draft: NeutralizedFactorPanel) -> NeutralizedFactorPanel:
+    """Close a draft neutralisation: address its residuals, then re-stamp its rows with that
+    address.
+
+    `panel_factors._seal_processed_panel` at the top of the chain. Reconstructed rather than
+    `model_copy(update=...)`, which skips validation: the sealed manifest is what every downstream
+    identity is derived from, so it goes through the same constructor a first build does.
+    """
+    manifest = FactorNeutralizationManifest(
+        **draft.manifest.model_dump(
+            exclude={"neutralization_manifest_id", "neutralized_observation_digest"}
         ),
-        industry_taxonomy=taxonomy,
-        built_at=built_at,
+        neutralized_observation_digest=neutralized_observation_digest(draft.observations),
+    )
+    manifest_id = manifest.neutralization_manifest_id
+    return replace(
+        draft,
+        manifest=manifest,
+        observations=tuple(
+            replace(row, neutralization_manifest_id=manifest_id) for row in draft.observations
+        ),
     )
 
 
@@ -1391,13 +1439,13 @@ def _refuse_a_neutralized_panel_that_does_not_own_its_rows(panel: NeutralizedFac
     The **output-side** mirror, and it exists because `V2-P3-003`'s review found the input-side
     guard alone was not enough one tier up -- a defect worth restating here because the shape is
     identical. The two batch builders below read one row's worth of facts off three different
-    fields: `neutralization_manifest_batch` takes its twelve head columns off `manifest` and its
+    fields: `neutralization_manifest_batch` takes its thirteen head columns off `manifest` and its
     seven policy columns off `spec`, `neutralized_observation_batch` takes
     `neutralization_key`/`neutralization_version` off `spec` and everything else off the rows, and
     both take the dataset name off `definition`. So `dataclasses.replace(result, spec=other)` is
     accepted by every other guard and stores a manifest row whose `neutralization_id` names one
     build and whose `market_cap_scale` names another -- over a partition of the first one's
-    residuals. `_neutralization_manifest_from_row`'s identity self-check cannot see it: the twelve
+    residuals. `_neutralization_manifest_from_row`'s identity self-check cannot see it: the thirteen
     head columns it reassembles are internally consistent, and the policy columns are not among
     them.
 
@@ -1563,6 +1611,7 @@ def neutralization_manifest_batch(panel: NeutralizedFactorPanel) -> ColumnarPane
         "source_transform_manifest_id": [manifest.source_transform_manifest_id],
         "source_processed_digest": [manifest.source_processed_digest],
         "characteristic_digest": [manifest.characteristic_digest],
+        "neutralized_observation_digest": [manifest.neutralized_observation_digest],
         "as_of_time": [manifest.as_of],
         "code_commit": [manifest.code_commit],
         "industry_level": [spec.industry_level],
@@ -1835,6 +1884,19 @@ def load_neutralized_factor_observations(
             )
             if row.neutralization_id == spec.neutralization_id
         )
+    _refuse_rows_that_are_not_the_answers_their_manifest_addresses(
+        found,
+        dataset=dataset,
+        build_of=lambda row: row.neutralization_manifest_id,
+        addressed={
+            manifest.neutralization_manifest_id: manifest.neutralized_observation_digest
+            for manifest in load_factor_neutralization_manifests(
+                store, definition, years=years, as_of=as_of
+            )
+            if manifest.neutralization_id == spec.neutralization_id
+        },
+        digest_of=neutralized_observation_digest,
+    )
     return tuple(found)
 
 
@@ -2012,6 +2074,7 @@ def _neutralization_manifest_from_row(
         source_transform_manifest_id=str(cells["source_transform_manifest_id"]),
         source_processed_digest=str(cells["source_processed_digest"]),
         characteristic_digest=str(cells["characteristic_digest"]),
+        neutralized_observation_digest=str(cells["neutralized_observation_digest"]),
         as_of=as_of,
         code_commit=str(cells["code_commit"]),
     )

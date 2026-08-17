@@ -202,7 +202,7 @@ observation it is about to turn into a column -- rather than two copies of one r
 
 import json
 import math
-from collections.abc import Collection
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 from datetime import date, datetime
 from hashlib import sha256
@@ -384,6 +384,138 @@ def set_digest(values: Collection[str]) -> str:
         sorted(set(values)), ensure_ascii=False, separators=(",", ":"), allow_nan=False
     ).encode()
     return f"set_{sha256(canonical).hexdigest()[:24]}"
+
+
+def cross_section_digest(
+    cells: Iterable[tuple[str, str, float | None]], *, prefix: str = "xs"
+) -> str:
+    """A content address for one cross section of answers: `(subject, coverage code, value)`.
+
+    **One canonicalisation, deliberately reachable from two places that must not import each
+    other.** The engine that writes a cross section (`panel_factors`) computes this to put on the
+    build manifest; the health report that audits a stored one (`panel_doctor`) computes it again
+    off the Parquet columns to check the manifest is still telling the truth. Those two modules
+    are pinned apart --
+    `tests/unit/test_panel_ingest_import_isolation.py::test_panel_doctor_joins_domain_panel_and_panel_ingest_and_nothing_else`
+    asserts the doctor's sibling set by **equality**, so an edge into `panel_factors` fails it --
+    and a second spelling of "canonical" is a second thing that can disagree about one, which is
+    the argument `set_digest` is already under. `domain/` is where both of them may look.
+
+    Taking bare cells rather than a `FactorObservation` is what makes that reachable at all: the
+    doctor reads three columns out of a partition and never builds the dataclass, and the tier
+    above the raw one stores its answers under a different row type entirely. What the address
+    covers is therefore stated as three positions rather than as a class -- **the security, the
+    coverage code and the value** -- which is the whole of what a downstream number is computed
+    from and, in `V2-P3-019`'s measured tampers, the whole of what a row-level edit moves.
+
+    Sorted and duplicate-**refused** rather than de-duplicated: a repeated subject is two answers
+    to one question, and a digest that silently kept one of them would give two different cross
+    sections one address. `observation_digest` already made that argument for the transform plane;
+    this is the same rule at the primitive all three planes now share.
+
+    `allow_nan=False` is load-bearing rather than inherited. A non-finite value cannot reach a
+    stored observation (`validate_factor_observation` refuses it at both of its call sites), and
+    if one ever did this refuses to hash it rather than minting an address for a cross section
+    nobody can reproduce. The refusal is translated by each caller into the vocabulary of its own
+    plane, because `json.dumps`' own `ValueError` names no security and no remedy.
+
+    `prefix` exists so that extracting this primitive moved **no stored address at all**:
+    `observation_digest` was already producing `obs_...` and `processed_observation_digest`
+    `prc_...` from byte-identical code, and both keep their own prefix while delegating the
+    canonicalisation here. `tests/unit/domain/test_factor.py` pins that equality in both
+    directions, which is what makes "one canonicalisation" a measurement rather than a claim.
+    """
+    rows = [[subject, coverage, value] for subject, coverage, value in cells]
+    subjects = [str(row[0]) for row in rows]
+    if len(set(subjects)) != len(subjects):
+        duplicates = sorted({name for name in subjects if subjects.count(name) > 1})
+        raise FactorError(
+            f"{duplicates} appears more than once in this cross section; a duplicated security "
+            "is two answers to one question, and a digest that hashed both would give two "
+            "different cross sections one address"
+        )
+    try:
+        canonical = json.dumps(
+            sorted(rows), ensure_ascii=False, separators=(",", ":"), allow_nan=False
+        ).encode()
+    except ValueError as error:
+        offending = sorted(
+            str(row[0]) for row in rows if isinstance(row[2], float) and not math.isfinite(row[2])
+        )
+        raise FactorError(
+            f"{offending} carry a non-finite value (nan or an infinity), so this cross section "
+            "has no content address: the canonical form this digest hashes refuses one, and "
+            "hashing a substitute would mint an address for a cross section nobody can reproduce"
+        ) from error
+    return f"{prefix}_{sha256(canonical).hexdigest()[:24]}"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class FactorSealLimitation:
+    """One named boundary of what a content-addressed cross section proves."""
+
+    code: str
+    detail: str
+
+
+KNOWN_FACTOR_SEAL_LIMITATIONS: Final[tuple[FactorSealLimitation, ...]] = (
+    FactorSealLimitation(
+        code="a_sealed_cross_section_addresses_its_values_and_not_its_window_columns",
+        detail=(
+            "cross_section_digest hashes (subject, coverage, value) and nothing else, so the "
+            "columns a stored row carries beside those three are outside every address built on "
+            "it: the raw tier's input_row_count and its four window ends, the processed tier's "
+            "source_factor_id / source_manifest_id / source_coverage, and the neutralised tier's "
+            "industry_code. An edit to one of those reads back cleanly, passes the seal and "
+            "passes panel doctor. What it cannot do is move a number -- none of those columns "
+            "feeds an information coefficient, a quantile spread, a tradeability haircut or a "
+            "redundancy score -- so what it can misrepresent is the *evidence* for an answer "
+            "rather than the answer. Widening the payload was considered and declined for a "
+            "stated reason rather than for cost: the three tiers share one canonicalisation and "
+            "the transform plane's source_observation_digest already meant exactly this triple "
+            "since V2-P3-003, and a second, wider spelling of 'the address of a cross section' "
+            "is the second thing that can disagree about one that set_digest exists to prevent."
+        ),
+    ),
+    FactorSealLimitation(
+        code="a_seal_proves_the_rows_are_the_builds_own_and_not_that_the_build_was_right",
+        detail=(
+            "the address answers one question -- are these the rows that build wrote -- and no "
+            "other. It does not say the build read the partitions it should have (that is "
+            "FactorInputRef.partition_content_hash, a different field answering a different "
+            "question), that the evaluator computes what its key claims, or that the numbers are "
+            "any good. A factor whose formula is wrong produces a cross section that seals "
+            "perfectly, and the attribution grid rather than the seal is what is supposed to say "
+            "so."
+        ),
+    ),
+    FactorSealLimitation(
+        code="the_seal_reaches_only_the_six_derived_partitions",
+        detail=(
+            "the three factor tiers can be held to their own answers because each already writes "
+            "a manifest partition beside them. No fetched dataset does, and panel/store.py "
+            "declines to re-hash one on every read on a measured cost -- re-serialising every "
+            "row of a 1.35e7-row partition per gate check. So a value edited in place is caught "
+            "in factor_obs_*, factor_proc_* and factor_neut_*, and remains invisible in daily, "
+            "daily_basic, adj_factor and the rest, where "
+            "KNOWN_STORAGE_LIMITATIONS.a_value_edited_in_place_leaves_the_census_intact is still "
+            "the whole of the story."
+        ),
+    ),
+)
+"""What a content-addressed factor cross section proves and what it does not (`V2-P3-019`).
+
+Declared beside `cross_section_digest` rather than on either plane, because the boundary is a
+property of the *address* and all three tiers share one. A registry rather than prose for this
+repository's standing reason: `tests/unit/test_known_limitation_registries.py` requires every
+declared code to appear as a string literal in executable test code, and a boundary named only in
+a docstring is one the suite has no opinion about -- which is the exact failure the P2 review
+measured when a renamed `KNOWN_UNIVERSE_LIMITATIONS` entry left the whole suite green.
+
+**Not folded into `KNOWN_PANEL_LIMITATIONS`.** `panel_doctor._limitations()` folds a registry
+when it bounds a *fetched* dataset, and this one bounds three derived planes -- the same reason
+`KNOWN_NEUTRALIZATION_LIMITATIONS` and the six study registries are not folded either.
+"""
 
 
 class FactorField(BaseModel):
@@ -1091,6 +1223,53 @@ class FactorBuildManifest(BaseModel):
     The universe decides `not_in_universe`, which decides whether a security is scored at all.
     Two builds over one cross section with disjoint universes of equal size produced completely
     disjoint sets of values and shared a `manifest_id`."""
+    observation_digest: str = Field(min_length=1, max_length=64)
+    """`cross_section_digest` of the answers this build produced: every `(subject, coverage,
+    value)` it wrote.
+
+    **The field this contract was missing, and the one the other two directions above could not
+    reach.** Everything else here addresses what the build was *made of* -- its parameters, its
+    cross section, its input partitions. None of it addresses what the build *said*, and
+    `V2-P3-019` measured what that costs: flipping the sign of all sixteen values in
+    `factor_obs_reversal_1d_v1/2026/data.parquet` behind the store's back moved `mean_ic` from
+    `+1.0` to `-1.0`, moved `mean_spread` across zero, and left `subject_digest`,
+    `universe_digest`, `input_partition_hash`, every `census_*` count, the `manifest_id` and the
+    sealed `experiment_id` **byte-for-byte identical**, at exit code 0 with no refusal anywhere.
+    An identity that cannot tell those two stores apart is not a content address of the build.
+
+    ## Why it is a hashed field and not a recorded one
+
+    `FactorInputProvenance` is this repository's precedent for "recorded but not addressed", and
+    it is the wrong precedent here -- which is the judgement rather than an oversight. A digest
+    that sat outside `manifest_id` would be a column a tamperer edits in the same pass as the
+    values it describes, leaving both stores agreeing with themselves and every identity still
+    equal: the same hole, one table over. Inside `manifest_id` it is tamper-evident by
+    construction, because `panel_factors._manifest_from_rows` already re-derives `manifest_id`
+    from the stored row and refuses a disagreement. `batch_digest` was moved *out* for the
+    opposite reason and the two decisions rest on one rule: **a field belongs in the address
+    exactly when it is a property of the content**, and this one is -- it is the content.
+
+    ## Why it does not break the other half of the contract
+
+    `V2-P3-015` measured that a byte-level comparison calls an identical re-run a conflict, and
+    `FactorInputRef` records the same lesson about `fetched_at`. This digest is over *content*:
+    the securities, the coverage codes and the values, canonicalised the way `set_digest` and
+    `stable_model_id` canonicalise. No wall clock, no file layout, no provider batch. A build
+    recomputed from unchanged partitions at the same `as_of` reproduces it exactly, so
+    `manifest_id` still reproduces and `write_factor_panels`' drop guard still has a rebuild path.
+
+    ## What it covers, and what it does not
+
+    The triple, not the whole row: `subject`, `coverage` and `value`. That is what every
+    downstream number is computed from, and it is deliberately enough to catch a `computed` row
+    restated as `input_missing` -- `validate_factor_observation` forces the value to `None` with
+    the code, so such an edit moves two of the three positions. The four window columns and
+    `input_row_count` are *evidence about* an answer rather than the answer, and are outside the
+    address; a partition whose window columns were edited still reads, and still yields exactly
+    the numbers its manifest addresses. `KNOWN_FACTOR_SEAL_LIMITATIONS`'
+    `a_sealed_cross_section_addresses_its_values_and_not_its_window_columns` carries that residue
+    as a disclosure rather than leaving it to be inferred from this paragraph, together with the
+    two other things an address of a cross section does not prove."""
     inputs: tuple[FactorInputRef, ...] = Field(min_length=1)
 
     @field_validator("as_of")

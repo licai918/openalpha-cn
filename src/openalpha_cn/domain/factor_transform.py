@@ -127,12 +127,10 @@ the partition's.
 are going to need must land before `V2-P3-014` writes the first immutable artifact.
 """
 
-import json
 import math
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from hashlib import sha256
 from typing import Final, Literal, Self, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
@@ -141,8 +139,10 @@ from openalpha_cn.domain._identity import stable_model_id
 from openalpha_cn.domain.factor import (
     FACTOR_COVERAGE_CODES,
     FactorCoverage,
+    FactorError,
     FactorNote,
     FactorObservation,
+    cross_section_digest,
     validate_notes,
 )
 from openalpha_cn.domain.panel_batch import PanelBatchError, validate_panel_identifier
@@ -812,12 +812,11 @@ def observation_digest(observations: Sequence[FactorObservation]) -> str:
             "two answers to one question, and a digest that hashed both would give two different "
             "cross sections one address"
         )
-    payload = sorted([item.subject, item.coverage, item.value] for item in observations)
     try:
-        canonical = json.dumps(
-            payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False
-        ).encode()
-    except ValueError as error:
+        return cross_section_digest(
+            ((item.subject, item.coverage, item.value) for item in observations), prefix="obs"
+        )
+    except FactorError as error:
         offending = sorted(
             item.subject
             for item in observations
@@ -832,7 +831,6 @@ def observation_digest(observations: Sequence[FactorObservation]) -> str:
             "of its call sites -- a row carrying one reached this panel through a "
             "FactorObservation subclass that overrode __post_init__"
         ) from error
-    return f"obs_{sha256(canonical).hexdigest()[:24]}"
 
 
 class FactorTransformManifest(BaseModel):
@@ -888,6 +886,22 @@ class FactorTransformManifest(BaseModel):
     join `tests/integration/panel/test_factor_transforms.py` performs rather than describes.
     """
     source_observation_digest: str = Field(min_length=1, max_length=64)
+    processed_observation_digest: str = Field(min_length=1, max_length=64)
+    """`processed_observation_digest` of the answers this application produced.
+
+    `FactorBuildManifest.observation_digest`'s twin one tier up, added for the same measured
+    reason and stated here because the asymmetry it removes was easy to miss: this contract
+    already addressed the cross section it *consumed* and said nothing about the one it
+    *produced*, so `factor_proc_<key>_v<n>` sat in exactly the position `V2-P3-019` measured
+    `factor_obs_<key>_v<n>` in -- values editable behind the store with `transform_manifest_id`,
+    `neutralization_manifest_id` and `experiment_id` all unmoved. The processed tier is one of the
+    three `openalpha factor run` reports on, and a seal on two of three tiers is a gate a tamperer
+    picks the third of.
+
+    Hashed rather than recorded, for the reason `FactorBuildManifest.observation_digest` gives in
+    full: a digest outside the identity is a column edited in the same pass as the values it
+    describes. `panel_factors._seal_processed_panel` computes it and
+    `panel_factors.load_processed_factor_observations` checks it."""
     as_of: datetime
     code_commit: str = Field(min_length=7, max_length=64)
 

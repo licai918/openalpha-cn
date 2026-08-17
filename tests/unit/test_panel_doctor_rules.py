@@ -17,6 +17,8 @@ import pytest
 
 from openalpha_cn.domain.adjustment import KNOWN_ADJUSTMENT_LIMITATIONS
 from openalpha_cn.domain.daily_prices import KNOWN_PRICE_LIMITATIONS
+from openalpha_cn.domain.factor import FactorObservation, cross_section_digest
+from openalpha_cn.domain.factor_transform import observation_digest
 from openalpha_cn.domain.financial_statements import KNOWN_FINANCIAL_STATEMENT_LIMITATIONS
 from openalpha_cn.domain.index_membership import KNOWN_INDEX_MEMBERSHIP_LIMITATIONS
 from openalpha_cn.domain.industry_classification import KNOWN_INDUSTRY_LIMITATIONS
@@ -38,6 +40,8 @@ from openalpha_cn.panel_doctor import (
     BLOCKS_A_READ,
     DATASET_CADENCE,
     DOCTOR_ISSUE_CODES,
+    FACTOR_PLANE_SEALS,
+    FACTOR_SEAL_OBSERVATION_FIELDS,
     FRESHNESS_PUBLICATION_SLACK,
     HEALTH_CATEGORIES,
     HEALTH_CODE_CATEGORY,
@@ -51,9 +55,26 @@ from openalpha_cn.panel_doctor import (
     calendar_lookahead_findings,
     findings_from_readiness,
     freshness_policy,
+    is_derived_factor_dataset,
     known_limitations,
     storage_limitations,
     subject_containment_findings,
+)
+from openalpha_cn.panel_factors import (
+    FACTOR_MANIFEST_DATASET_PREFIX,
+    FACTOR_MANIFEST_PANEL_COLUMNS,
+    FACTOR_OBSERVATION_DATASET_PREFIX,
+    FACTOR_OBSERVATION_PANEL_COLUMNS,
+    FACTOR_PROCESSED_DATASET_PREFIX,
+    FACTOR_TRANSFORM_MANIFEST_DATASET_PREFIX,
+    PROCESSED_OBSERVATION_PANEL_COLUMNS,
+    TRANSFORM_MANIFEST_PANEL_COLUMNS,
+)
+from openalpha_cn.panel_neutralization import (
+    FACTOR_NEUTRALIZATION_MANIFEST_DATASET_PREFIX,
+    FACTOR_NEUTRALIZED_DATASET_PREFIX,
+    NEUTRALIZATION_MANIFEST_PANEL_COLUMNS,
+    NEUTRALIZED_OBSERVATION_PANEL_COLUMNS,
 )
 
 AS_OF = datetime(2026, 1, 17, 4, 0, tzinfo=UTC)
@@ -770,6 +791,11 @@ def test_the_severity_of_every_declared_code_is_pinned_code_by_code() -> None:
         # An inherent limitation of `trade_cal` with no read-side remedy, made conditional on
         # the panel's own horizon. See `HEALTH_CODE_SEVERITY` for the three-part argument.
         "calendar_lookahead_in_horizon": "notice",
+        # `V2-P3-019`. The two derived-plane codes are the only ones this module concludes
+        # for itself at `blocking`, because a broken seal is a read that succeeds and
+        # returns different numbers rather than one that raises.
+        "factor_seal_broken": "blocking",
+        "factor_build_unaddressed": "blocking",
     }
 
 
@@ -855,3 +881,120 @@ def test_a_finding_names_the_dataset_it_is_primarily_about() -> None:
 
     assert finding.dataset == "daily"
     assert finding.datasets[0] == finding.dataset
+
+
+# --- the derived factor planes (`V2-P3-019`) ------------------------------------------------------
+
+
+def test_every_declared_factor_plane_seal_matches_the_plane_it_describes() -> None:
+    """The runtime audit that makes `FACTOR_PLANE_SEALS` a declaration rather than a copy.
+
+    `panel_doctor` may not import the three factor planes --
+    `tests/unit/test_panel_ingest_import_isolation.py::
+    test_panel_doctor_joins_domain_panel_and_panel_ingest_and_nothing_else` pins its sibling set
+    by equality -- so the shape of those planes is declared here as data. A declaration nobody
+    reconciles is exactly the "表与实现漂移" this repository has closed three times with a run-time
+    audit, and a *test* may import both sides, so this is where the two are held together.
+
+    Every field of every row is checked against the plane's own constant, and the *set* of rows
+    against the set of observation prefixes the three planes declare -- so a fourth derived tier
+    fails here rather than arriving unsealed.
+    """
+    declared = {seal.tier: seal for seal in FACTOR_PLANE_SEALS}
+
+    assert set(declared) == {"raw", "processed", "neutralized"}
+    assert declared["raw"].observation_prefix == FACTOR_OBSERVATION_DATASET_PREFIX
+    assert declared["raw"].manifest_prefix == FACTOR_MANIFEST_DATASET_PREFIX
+    assert declared["processed"].observation_prefix == FACTOR_PROCESSED_DATASET_PREFIX
+    assert declared["processed"].manifest_prefix == FACTOR_TRANSFORM_MANIFEST_DATASET_PREFIX
+    assert declared["neutralized"].observation_prefix == FACTOR_NEUTRALIZED_DATASET_PREFIX
+    assert declared["neutralized"].manifest_prefix == FACTOR_NEUTRALIZATION_MANIFEST_DATASET_PREFIX
+
+    # The two columns each row names have to be columns the plane actually stores, under those
+    # exact names, or the seal check would read `None` out of a partition and compare it to a
+    # digest -- which is the fail-open a hand-copied table is for.
+    assert declared["raw"].build_column in FACTOR_OBSERVATION_PANEL_COLUMNS
+    assert declared["raw"].digest_column in FACTOR_MANIFEST_PANEL_COLUMNS
+    assert declared["processed"].build_column in PROCESSED_OBSERVATION_PANEL_COLUMNS
+    assert declared["processed"].digest_column in TRANSFORM_MANIFEST_PANEL_COLUMNS
+    assert declared["neutralized"].build_column in NEUTRALIZED_OBSERVATION_PANEL_COLUMNS
+    assert declared["neutralized"].digest_column in NEUTRALIZATION_MANIFEST_PANEL_COLUMNS
+
+    # And the value column the seal hashes, which is shared by all three and is the one column
+    # `FACTOR_SEAL_OBSERVATION_FIELDS` names that no row above pins.
+    for columns in (
+        FACTOR_OBSERVATION_PANEL_COLUMNS,
+        PROCESSED_OBSERVATION_PANEL_COLUMNS,
+        NEUTRALIZED_OBSERVATION_PANEL_COLUMNS,
+    ):
+        assert set(FACTOR_SEAL_OBSERVATION_FIELDS) <= set(columns)
+
+
+def test_each_tier_is_addressed_under_the_prefix_its_own_digest_function_stamps() -> None:
+    """The third field of every seal row, against the function the plane writes the address with.
+
+    A tag that disagreed would make the check compare `obs_...` against `prc_...` for every build
+    of one tier, which reads as "every stored build is tampered" -- a report that cries wolf is
+    switched off, which is the failure mode this module argues about at length elsewhere.
+    """
+    raw = FactorObservation(
+        subject="000001.SZ",
+        as_of=datetime(2026, 1, 12, 4, 0, tzinfo=UTC),
+        value=1.0,
+        coverage="computed",
+        factor_id="fct_probe",
+        manifest_id="fmn_probe",
+        input_row_count=1,
+        input_session_first=None,
+        input_session_last=None,
+    )
+    cells = ((raw.subject, raw.coverage, raw.value),)
+    by_tier = {seal.tier: seal.digest_prefix for seal in FACTOR_PLANE_SEALS}
+
+    assert observation_digest((raw,)) == cross_section_digest(cells, prefix=by_tier["raw"])
+    assert len(set(by_tier.values())) == 3
+
+
+def test_a_derived_partition_gets_a_bound_of_none_on_the_record_rather_than_a_refusal() -> None:
+    """The `derived` cadence, and what it is a claim about.
+
+    `V2-P3-002` gave the factor datasets no cadence and `freshness_policy` refused them by name,
+    which meant `panel doctor --dataset factor_obs_reversal_1d_v1` never got past the first line.
+    The bound is still `None` -- nothing publishes into a derived partition, so no event-clock
+    bound can be right -- and the difference is that the absence is now *stated* and the rest of
+    the report runs.
+
+    `event_driven` is asserted to be a different answer because it was the near-miss: it means
+    "no schedule, and a year with no rows is an ordinary year", which is a claim about an upstream
+    that publishes irregularly rather than about having none.
+    """
+    for dataset in ("factor_obs_probe_v1", "factor_procmn_probe_v1", "factor_neut_probe_v1"):
+        policy = freshness_policy(dataset)
+
+        assert policy.cadence == "derived"
+        assert policy.max_staleness is None
+        assert "derived rather than fetched" in policy.basis
+
+    assert freshness_policy("suspend_d").cadence == "event_driven"
+
+
+def test_a_dataset_that_is_neither_fetched_nor_derived_is_still_refused_by_name() -> None:
+    """The fail-closed direction the `derived` branch must not have opened.
+
+    A predicate is a wider door than a table, so the refusal is measured rather than assumed: a
+    name that matches no cadence entry and none of the six derived prefixes still raises, and the
+    message still names both ways out.
+    """
+    with pytest.raises(PanelDoctorError, match="has no declared publication cadence"):
+        freshness_policy("factor_something_else_v1")
+
+
+def test_the_derived_prefixes_do_not_overlap_the_fetched_datasets() -> None:
+    """The two vocabularies are disjoint, so no dataset can be answered by both branches.
+
+    `freshness_policy` asks the predicate first, so an overlap would silently give a *fetched*
+    dataset a `derived` bound of `None` -- a freshness check switched off by a name collision,
+    which is precisely the silent default `DATASET_CADENCE` exists to prevent.
+    """
+    assert not any(is_derived_factor_dataset(name) for name in DATASET_CADENCE)
+    assert not any(name in DATASET_CADENCE for name in ("factor_obs_x_v1", "factor_neutmn_x_v1"))

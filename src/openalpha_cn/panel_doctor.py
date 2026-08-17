@@ -167,6 +167,7 @@ from openalpha_cn.domain.daily_prices import (
     priced_cross_section,
     session_returns,
 )
+from openalpha_cn.domain.factor import FactorError, cross_section_digest
 from openalpha_cn.domain.financial_statements import (
     FINANCIAL_STATEMENT_DATASETS,
     KNOWN_FINANCIAL_STATEMENT_LIMITATIONS,
@@ -186,7 +187,7 @@ from openalpha_cn.domain.industry_classification import (
     IndustryClassificationError,
 )
 from openalpha_cn.domain.name_history import NAMECHANGE_DATASET
-from openalpha_cn.domain.panel_batch import PanelBatchError
+from openalpha_cn.domain.panel_batch import SUBJECT_COLUMN_NAME, PanelBatchError
 from openalpha_cn.domain.price_limits import (
     KNOWN_SUSPENSION_LIMITATIONS,
     PRICE_LIMIT_DATASET,
@@ -250,7 +251,9 @@ class PanelDoctorError(RuntimeError):
 
 HealthCategory = Literal["missing", "stale", "duplicate", "revised", "inconsistent", "unanswerable"]
 HealthSeverity = Literal["blocking", "warning", "notice"]
-Cadence = Literal["daily", "monthly", "quarterly", "event_driven", "published_in_advance"]
+Cadence = Literal[
+    "daily", "monthly", "quarterly", "event_driven", "published_in_advance", "derived"
+]
 
 HEALTH_CATEGORIES: Final[frozenset[str]] = frozenset(
     {"missing", "stale", "duplicate", "revised", "inconsistent", "unanswerable"}
@@ -317,6 +320,8 @@ DOCTOR_ISSUE_CODES: Final[frozenset[str]] = frozenset(
         "domain_rebuild_refused",
         "event_after_as_of",
         "calendar_lookahead_in_horizon",
+        "factor_seal_broken",
+        "factor_build_unaddressed",
     }
 )
 """The codes this module adds -- one per gap the eight dataset issues left open.
@@ -358,7 +363,16 @@ ones a given window covers "so `V2-P1-013`'s gate can see them" -- and then had 
 `src/` at all. A real 2015 calendar partition (365 rows, covering 2015-09-03 with 132 days of
 look-ahead) therefore produced `is_clean: true, findings: []`, with the three dates appearing
 only as a sentence in `limitations` that reads the same whether or not the panel reaches them.
-See `_calendar_lookahead_check` for why the severity is `notice` and not `warning`."""
+See `_calendar_lookahead_check` for why the severity is `notice` and not `warning`.
+
+`factor_seal_broken` and `factor_build_unaddressed` are `V2-P3-019`'s, and they are the first two
+codes in this module that are about a **derived** plane. They are the report's half of the answer
+to "a row-level Parquet edit is invisible everywhere": the factor planes store, beside every
+partition of answers, a manifest that content-addresses those answers, and these two codes are
+what a stored cross section that is no longer the one its manifest addresses, and a stored build
+whose answers are simply gone, look like in a health report. See `_factor_seal_check` for what
+that check can reach without importing the plane it audits, and for why it is a *check* here
+rather than a cadence entry."""
 
 DOCTOR_CODE_CATEGORY: Final[Mapping[str, HealthCategory]] = MappingProxyType(
     {
@@ -373,6 +387,8 @@ DOCTOR_CODE_CATEGORY: Final[Mapping[str, HealthCategory]] = MappingProxyType(
         "domain_rebuild_refused": "inconsistent",
         "event_after_as_of": "unanswerable",
         "calendar_lookahead_in_horizon": "unanswerable",
+        "factor_seal_broken": "inconsistent",
+        "factor_build_unaddressed": "missing",
     }
 )
 """The heading each of this module's own codes files under.
@@ -402,6 +418,8 @@ HEALTH_CODE_SEVERITY: Final[Mapping[str, HealthSeverity]] = MappingProxyType(
         "check_unavailable": "warning",
         "domain_rebuild_refused": "warning",
         "event_after_as_of": "warning",
+        "factor_seal_broken": "blocking",
+        "factor_build_unaddressed": "blocking",
         "ambiguous_filing": "notice",
         "duplicate_versions": "notice",
         "revised_rows": "notice",
@@ -444,6 +462,19 @@ static prose it replaces is that it is *conditional*: it fires only when this pa
 actually covers one of those dates, it names which, and it rides on the clearance
 (`DependencyClearance.notices`) so a cleared caller holds it.
 
+**`factor_seal_broken` and `factor_build_unaddressed` are `blocking`, and they are the only two
+codes this module concludes for itself at that strength.** Every other doctor code is a
+`warning` at most, on the stated ground that the doctor "does not re-judge a verdict it did not
+make". These two are different in kind rather than in degree: they are not an opinion about a
+partition that might still be usable, they are the partition's own manifest saying that what is
+stored is not what was written. `domain_rebuild_refused` is the nearest neighbour and is a
+`warning` because a refused rebuild is a read that *raises* -- loud, and the caller finds out. A
+broken seal is a read that **succeeds and returns different numbers**, which is the one failure
+mode this whole report exists for; `V2-P3-019` measured it moving a sealed experiment's `mean_ic`
+from `+1.0` to `-1.0` at exit code 0. Nothing weaker than `blocking` would be honest, and
+`GATE_BLOCKING_SEVERITIES` counts `warning` anyway, so the strength is a statement to the reader
+rather than a change to what the gate does.
+
 Pinned entry by entry in `tests/unit/test_panel_doctor_rules.py`: severity is the field
 `V2-P1-013`'s gate branches on after `code`, and a silent demotion is the one change to this
 module that would make a sick panel report `is_clean`."""
@@ -474,6 +505,140 @@ DATASET_CADENCE: Final[Mapping[str, Cadence]] = MappingProxyType(
 here, pinned by a test, because a dataset with no declared cadence would otherwise be given
 whatever bound the report's default happened to be -- which for `suspend_d` (a corpus with no
 rows on a session where nothing was halted) would be a permanent false alarm."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class FactorPlaneSeal:
+    """One derived tier's pair of datasets, and the two columns that hold it to its own answers.
+
+    `V2-P3-019`. The factor planes write, beside every partition of answers, a manifest partition
+    whose subject is the build's content address and which carries a digest of the answers that
+    build produced. This is the shape of that arrangement, as **data the report can act on**.
+
+    ## Why the shape is declared here rather than imported
+
+    `tests/unit/test_panel_ingest_import_isolation.py::
+    test_panel_doctor_joins_domain_panel_and_panel_ingest_and_nothing_else` pins this module's
+    sibling set by **equality**: `{domain, panel, panel_ingest}` and nothing else. An edge into
+    `panel_factors` or `panel_neutralization` fails it, and that table is not an obstacle to route
+    around -- it is the reason `panel_doctor` can be imported by `panel_gate`, by `panel_view` and
+    through them by the HTTP app without dragging three factor planes behind it.
+
+    So the doctor declares the shape and a **runtime audit** reconciles the declaration against
+    the planes: `tests/unit/test_panel_doctor_rules.py::
+    test_every_declared_factor_plane_seal_matches_the_plane_it_describes` imports both sides --
+    which a test may do -- and asserts every prefix, every column name and every digest prefix
+    against the plane's own constants. That is this repository's standing answer to "表与实现漂移"
+    and the same instrument `KNOWN_*` codes are held by: two things that must not import each
+    other are kept honest by something that may import both.
+
+    ## What each field is
+
+    - `observation_prefix` / `manifest_prefix` -- the two dataset-name prefixes of one tier. A
+      dataset name is `<prefix><factor key>_v<n>`, so one is derived from the other by swapping
+      the prefix, which is what lets `panel doctor --dataset factor_obs_reversal_1d_v1` find the
+      manifest it has to be checked against without the caller naming it.
+    - `build_column` -- the column on an *answer* row naming the build that produced it.
+    - `digest_column` -- the column on a *manifest* row carrying the address of that build's
+      answers. Every manifest row of one build carries the same value (the raw tier stores one row
+      per input partition, so a build has several), and `_factor_seal_check` refuses rows of one
+      build that disagree rather than picking one.
+    - `digest_prefix` -- the tag `domain/factor.py::cross_section_digest` stamps on this tier's
+      addresses. Three distinct tags, so a digest computed for the wrong tier cannot silently
+      compare equal to one computed for the right one.
+    """
+
+    tier: str
+    observation_prefix: str
+    manifest_prefix: str
+    build_column: str
+    digest_column: str
+    digest_prefix: str
+
+    def manifest_dataset(self, observations: str) -> str:
+        """The manifest dataset that addresses `observations`, by swapping the prefix."""
+        return f"{self.manifest_prefix}{observations[len(self.observation_prefix) :]}"
+
+
+FACTOR_PLANE_SEALS: Final[tuple[FactorPlaneSeal, ...]] = (
+    FactorPlaneSeal(
+        tier="raw",
+        observation_prefix="factor_obs_",
+        manifest_prefix="factor_manifest_",
+        build_column="manifest_id",
+        digest_column="observation_digest",
+        digest_prefix="obs",
+    ),
+    FactorPlaneSeal(
+        tier="processed",
+        observation_prefix="factor_proc_",
+        manifest_prefix="factor_procmn_",
+        build_column="transform_manifest_id",
+        digest_column="processed_observation_digest",
+        digest_prefix="prc",
+    ),
+    FactorPlaneSeal(
+        tier="neutralized",
+        observation_prefix="factor_neut_",
+        manifest_prefix="factor_neutmn_",
+        build_column="neutralization_manifest_id",
+        digest_column="neutralized_observation_digest",
+        digest_prefix="nrs",
+    ),
+)
+"""All three derived tiers `openalpha factor run` reads, in the order it reads them.
+
+**All three, and the completeness is the point rather than thoroughness.** `V2-P3-019`'s finding
+was measured on the raw tier, and a seal installed only there would have moved the tamper one
+dataset over: the attribution grid's verdict is read off the *neutralised* tier, and the report
+compares it against the processed one. A gate that covers one of three tiers is the shape this
+repository has now met more than ten times -- an assertion that exists and cannot separate two
+answers on the fixture it runs against.
+"""
+
+
+def factor_plane_seal(dataset: str) -> FactorPlaneSeal | None:
+    """The tier `dataset` holds answers for, or `None` if it is not an answer partition.
+
+    A **manifest** dataset answers `None` on purpose: it is checked as the second half of its own
+    tier's pair, and a report that ran the seal check from both ends would report one broken seal
+    twice under two dataset names.
+    """
+    for seal in FACTOR_PLANE_SEALS:
+        if dataset.startswith(seal.observation_prefix):
+            return seal
+    return None
+
+
+def is_derived_factor_dataset(dataset: str) -> bool:
+    """Whether `dataset` is one of the six partitions the three derived factor tiers write.
+
+    The predicate `DATASET_CADENCE` cannot be. That mapping is an enumeration, pinned by a test
+    that asserts every dataset `panel_ingest` writes appears in it, and the factor planes' names
+    are **minted per factor** -- `factor_obs_<key>_v<n>`, one pair per registered factor per tier,
+    nineteen factors today and unbounded by contract. There is no set of keys to write down.
+    """
+    return any(
+        dataset.startswith(seal.observation_prefix) or dataset.startswith(seal.manifest_prefix)
+        for seal in FACTOR_PLANE_SEALS
+    )
+
+
+FACTOR_SEAL_OBSERVATION_FIELDS: Final[tuple[str, ...]] = (
+    SUBJECT_COLUMN_NAME,
+    "value",
+    "coverage",
+)
+"""The columns of an answer row this report requires and reads, beside the tier's `build_column`.
+
+Deliberately **not** the full stored column list of any tier. What this report checks is the
+seal, and the seal is over `(subject, coverage, value)`; requiring the other eight columns of the
+raw tier would be this module restating a contract it does not own, and would drift from it the
+first time a tier gained a column. The full contract belongs to each plane's own loader, which
+`openalpha factor run` goes through -- `panel doctor` narrows what it asks to what it can testify
+about, which is `ReadinessRequirement`'s own rule that a check nobody configured is not a check
+that passed.
+"""
 
 FRESHNESS_PUBLICATION_SLACK: Final[timedelta] = timedelta(days=1)
 """What the calendar-derived bounds add on top of the gap they measure.
@@ -572,12 +737,60 @@ def freshness_policy(dataset: str, *, calendar: TradingCalendar | None = None) -
     Raises `PanelDoctorError` for a dataset with no declared cadence rather than falling back
     to a default: a silent default here is exactly the shared threshold this module exists to
     replace.
+
+    ## The derived planes, and why they get a cadence *value* and not a `DATASET_CADENCE` entry
+
+    `V2-P3-002` declined to give the factor datasets a cadence, on the honest ground that a
+    derived dataset has no upstream and therefore no publication schedule, and the review at the
+    time accepted it because "the hole is loud rather than silent" -- `panel doctor --dataset
+    factor_obs_reversal_1d_v1` exited 3 saying so. `V2-P3-019` measured what that had become: the
+    hole stopped being loud the moment the factor plane grew something a health report needed to
+    check, because the refusal fired on the dataset *name* and nothing past it ever ran. A gate
+    that cannot reach a plane is not a loud hole; it is an absent gate with a good excuse.
+
+    Two ways out were available and only one of them is honest.
+
+    - **An entry per factor dataset in `DATASET_CADENCE`** cannot be written. That mapping is an
+      enumeration whose whole value is that a test asserts every dataset `panel_ingest` writes
+      appears in it; the derived names are minted per factor and per tier and are unbounded by
+      contract. A wildcard would end the property that makes the mapping worth having.
+    - **A `derived` cadence, resolved by predicate rather than by table**, which is what this
+      does. It is not a fake schedule: `Cadence`'s other five members each imply a bound, and this
+      one implies the *absence* of one, stated on the record in `FreshnessPolicy.basis` and
+      visible as `checks_waived` downstream. `event_driven` was the near-miss and was rejected
+      -- it means "no schedule, and a year with no rows is an ordinary year", which is a claim
+      about an upstream that publishes irregularly. A derived partition has no upstream at all,
+      and collapsing the two would make `DATASET_CADENCE`'s own reason for existing ("`suspend_d`
+      would otherwise get whatever bound the default happened to be") apply to a second, different
+      situation under one word.
+
+    What the factor plane actually needs from this report is not a freshness verdict at all --
+    every check the report otherwise makes is about a fetched panel falling behind or disagreeing
+    with a sibling, and the derived planes' failure mode is different in kind: a stored answer
+    that is no longer the answer its manifest addresses. That is `_factor_seal_check`, and it is a
+    separate path because it is a separate question.
     """
+    if is_derived_factor_dataset(dataset):
+        return FreshnessPolicy(
+            dataset=dataset,
+            cadence="derived",
+            max_staleness=None,
+            basis=(
+                "this dataset is derived rather than fetched: nothing upstream publishes into "
+                "it, so there is no schedule to be behind and no event-clock bound can be right. "
+                "A stored build that is three months old means nobody ran one, which is a fact "
+                "about a schedule this plane does not own. What *can* go wrong with a derived "
+                "partition is that its rows stop being the ones its build manifest addresses, "
+                "and that is a check (factor_seal_broken) rather than a bound"
+            ),
+        )
     cadence = DATASET_CADENCE.get(dataset)
     if cadence is None:
         raise PanelDoctorError(
             f"{dataset!r} has no declared publication cadence, so no freshness bound can be "
-            f"chosen for it; declare one in DATASET_CADENCE (known: {sorted(DATASET_CADENCE)})"
+            f"chosen for it; declare one in DATASET_CADENCE (known: {sorted(DATASET_CADENCE)}) "
+            "or, for a derived factor partition, name it with one of the six prefixes "
+            f"FACTOR_PLANE_SEALS declares"
         )
     if cadence == "daily":
         gap = _longest_closure(calendar) if calendar is not None else None
@@ -1152,6 +1365,32 @@ def _requirement_for(
                 max_staleness=max_staleness,
             ),
             "no calendar was supplied, so the exchange could not be required by name",
+        )
+    if is_derived_factor_dataset(dataset):
+        seal = factor_plane_seal(dataset)
+        return (
+            ReadinessRequirement(
+                dataset=dataset,
+                as_of=as_of,
+                years=years,
+                required_dates=None,
+                required_subjects=None,
+                required_fields=(
+                    (*FACTOR_SEAL_OBSERVATION_FIELDS, seal.build_column)
+                    if seal is not None
+                    else (SUBJECT_COLUMN_NAME, _manifest_digest_column(dataset))
+                ),
+                max_staleness=None,
+            ),
+            # No note, and the absence is the judgement rather than an omission. A note here
+            # becomes a `check_unavailable` warning -- "I could not look" -- and that would be
+            # false: nothing was unavailable. Three of the four checks are *deliberately* waived
+            # for a derived partition (its dates are the as_ofs somebody chose to build, its
+            # subjects are what the read is for, and it has no upstream to be stale against),
+            # and `DatasetReadiness.checks_waived` already says so on the record. What replaces
+            # them is `_factor_seal_check`, which is a check that runs rather than one that did
+            # not.
+            None,
         )
     if dataset == STOCK_BASIC_DATASET:
         return (
@@ -1910,6 +2149,241 @@ def _rebuild_check(
     )
 
 
+FACTOR_SEAL_CHECK: Final[str] = "factor_seal"
+"""The name `_factor_seal_check` records itself under in `cross_checks`."""
+
+
+def _manifest_digest_column(dataset: str) -> str:
+    """The digest column of a manifest dataset, or a refusal naming the six prefixes.
+
+    Reached only from `_requirement_for`, and only for a name `is_derived_factor_dataset` has
+    already accepted -- so the refusal is the "closed set with no branch" guard rather than a
+    reachable state, and it says which six names are the set.
+    """
+    for seal in FACTOR_PLANE_SEALS:
+        if dataset.startswith(seal.manifest_prefix):
+            return seal.digest_column
+    raise PanelDoctorError(  # pragma: no cover - unreachable behind is_derived_factor_dataset
+        f"{dataset!r} is not one of the six derived factor partitions"
+    )
+
+
+def _sealed_builds(
+    store: PanelStore,
+    *,
+    seal: FactorPlaneSeal,
+    dataset: str,
+    as_of: datetime,
+    years: Sequence[int],
+) -> dict[str, str]:
+    """Every visible build of `dataset`'s manifest partition, mapped to the address it declares.
+
+    The raw tier stores one manifest row per `(build, input partition)`, so a build has several
+    rows and they all carry one digest by construction. A build whose rows disagree is a manifest
+    partition edited behind the store, and it is refused here rather than resolved by taking the
+    first: picking one would decide, silently, which of two accounts of a build the report holds
+    the answers to.
+    """
+    manifest_dataset = seal.manifest_dataset(dataset)
+    requirement = ReadinessRequirement(
+        dataset=manifest_dataset,
+        as_of=as_of,
+        years=tuple(sorted(set(years))),
+        required_dates=None,
+        required_subjects=None,
+        required_fields=(SUBJECT_COLUMN_NAME, seal.digest_column),
+        max_staleness=None,
+    )
+    declared: dict[str, set[str]] = {}
+    for year in sorted(set(years)):
+        outcome = store.read_visible_at(
+            requirement, year=year, columns=(SUBJECT_COLUMN_NAME, seal.digest_column)
+        )
+        if outcome.is_blocked:
+            raise PanelDoctorError(
+                f"{manifest_dataset} year={year} cannot be read at {as_of.isoformat()}: "
+                f"{[issue.code for issue in outcome.blocking_issues]}; {dataset} cannot be held "
+                "to a manifest partition that will not open"
+            )
+        for build, digest in outcome.rows:
+            declared.setdefault(str(build), set()).add(str(digest))
+    split = sorted(build for build, digests in declared.items() if len(digests) > 1)
+    if split:
+        raise PanelDoctorError(
+            f"{manifest_dataset} files build(s) {split[:5]}{'...' if len(split) > 5 else ''} "
+            f"under more than one {seal.digest_column}; one build has one address, and a "
+            "partition holding two accounts of one build was changed behind the store"
+        )
+    return {build: digests.pop() for build, digests in declared.items()}
+
+
+def _held_cross_sections(
+    store: PanelStore,
+    *,
+    seal: FactorPlaneSeal,
+    dataset: str,
+    as_of: datetime,
+    years: Sequence[int],
+) -> dict[str, str]:
+    """Every build the answer partition holds rows for, mapped to the address those rows hash to.
+
+    Through `cross_section_digest` -- the same function the plane used to write the address --
+    rather than through a second spelling of it. `domain/` is where both may look; see that
+    function's docstring for why the layering makes that the only place it could live.
+    """
+    columns = (*FACTOR_SEAL_OBSERVATION_FIELDS, seal.build_column)
+    requirement = ReadinessRequirement(
+        dataset=dataset,
+        as_of=as_of,
+        years=tuple(sorted(set(years))),
+        required_dates=None,
+        required_subjects=None,
+        required_fields=columns,
+        max_staleness=None,
+    )
+    rows: dict[str, list[tuple[str, str, float | None]]] = {}
+    for year in sorted(set(years)):
+        outcome = store.read_visible_at(requirement, year=year, columns=columns)
+        if outcome.is_blocked:
+            raise PanelDoctorError(
+                f"{dataset} year={year} cannot be read at {as_of.isoformat()}: "
+                f"{[issue.code for issue in outcome.blocking_issues]}"
+            )
+        for subject, value, coverage, build in outcome.rows:
+            rows.setdefault(str(build), []).append(
+                (str(subject), str(coverage), None if value is None else float(str(value)))
+            )
+    return {
+        build: cross_section_digest(cells, prefix=seal.digest_prefix)
+        for build, cells in rows.items()
+    }
+
+
+def _seal_findings(
+    seal: FactorPlaneSeal,
+    *,
+    dataset: str,
+    declared: Mapping[str, str],
+    held: Mapping[str, str],
+) -> tuple[HealthFinding, ...]:
+    """The two codes, from the two directions the pair of partitions can disagree in."""
+    manifest_dataset = seal.manifest_dataset(dataset)
+    pair = (dataset, manifest_dataset)
+    broken = sorted(
+        build for build, digest in held.items() if build in declared and declared[build] != digest
+    )
+    unaddressed = sorted(
+        [*(build for build in held if build not in declared), *(set(declared) - set(held))]
+    )
+    findings: list[HealthFinding] = []
+    if broken:
+        findings.append(
+            _finding(
+                "factor_seal_broken",
+                datasets=pair,
+                detail=(
+                    f"{len(broken)} stored {seal.tier} build(s) in {dataset} no longer hash to "
+                    f"the {seal.digest_column} their manifest declares "
+                    f"({broken[:5]}{'...' if len(broken) > 5 else ''}); the rows read back "
+                    "cleanly and are not the answers those builds produced, so every number "
+                    "computed from them is one nothing in this store stands behind. Rebuild the "
+                    "affected as_ofs"
+                ),
+                count=len(broken),
+                items=tuple(broken),
+                related_limitations=(
+                    "a_sealed_cross_section_addresses_its_values_and_not_its_window_columns",
+                    "a_value_edited_in_place_leaves_the_census_intact",
+                ),
+            )
+        )
+    if unaddressed:
+        findings.append(
+            _finding(
+                "factor_build_unaddressed",
+                datasets=pair,
+                detail=(
+                    f"{len(unaddressed)} {seal.tier} build(s) appear in exactly one of "
+                    f"{dataset} and {manifest_dataset} "
+                    f"({unaddressed[:5]}{'...' if len(unaddressed) > 5 else ''}); the two are "
+                    "written together, so answers with no manifest are numbers nothing says the "
+                    "parameters of, and a manifest with no answers is a build whose cross "
+                    "section is gone"
+                ),
+                count=len(unaddressed),
+                items=tuple(unaddressed),
+            )
+        )
+    return tuple(findings)
+
+
+def _factor_seal_check(
+    store: PanelStore,
+    *,
+    healths: Sequence[DatasetHealth],
+    as_of: datetime,
+    years: Mapping[str, tuple[int, ...]],
+) -> tuple[tuple[HealthFinding, ...], CrossCheckOutcome]:
+    """Hold every ready derived partition against the build manifest that addresses its answers.
+
+    `V2-P3-019`'s check, and the report's whole reach into the three derived planes. It is a
+    *cross-dataset* check because the evidence is in two partitions -- the answers in one and the
+    address of those answers in the other -- which is exactly the shape `CrossCheckOutcome`
+    exists for, and it is why this is not a dimension of `dataset_health`.
+
+    ## What it can see that nothing else can
+
+    `evaluate_readiness` compares two catalog rows to each other and reads one fact off the file
+    (its row count). `panel/store.py` states precisely what that leaves: "an edit that changes
+    *values* in place leaves the count identical and is still invisible here", disclosed as
+    `KNOWN_STORAGE_LIMITATIONS.a_value_edited_in_place_leaves_the_census_intact`, and declined at
+    that layer on a measured cost -- re-hashing means re-serialising every row of a 1.35e7-row
+    partition on every gate check.
+
+    This check does not overturn that judgement; it exploits the fact that the derived planes
+    already paid a different price. Each of them writes, beside its answers, a manifest that
+    content-addresses those answers, so the report can re-hash **three columns** of a cross
+    section and compare against a value that is itself inside a content address. The residue the
+    storage plane discloses is therefore closed on the six derived partitions and open everywhere
+    else, which is a smaller claim than "the store detects tampering" and is the one that is true.
+
+    ## Only partitions readiness already called ready
+
+    `_rebuild_check`'s rule, unchanged and for its reason: a partition readiness has faulted is
+    skipped, because re-reporting the same defect in a second vocabulary double-counts one fault
+    and, worse, attaches a *seal* code to a partition that is merely absent. A tier whose answers
+    are present and whose manifest partition is missing is not silently skipped either -- reading
+    the manifest raises `PanelDoctorError`, which arrives as `check_unavailable`, because "I could
+    not look" must not read as "I looked and it was fine".
+    """
+    subjects = tuple(
+        health.dataset
+        for health in healths
+        if factor_plane_seal(health.dataset) is not None and health.is_ready
+    )
+    findings: list[HealthFinding] = []
+    for dataset in subjects:
+        seal = factor_plane_seal(dataset)
+        if seal is None:  # pragma: no cover - `subjects` is filtered on exactly this
+            continue
+        try:
+            declared = _sealed_builds(
+                store, seal=seal, dataset=dataset, as_of=as_of, years=years[dataset]
+            )
+            held = _held_cross_sections(
+                store, seal=seal, dataset=dataset, as_of=as_of, years=years[dataset]
+            )
+        except (PanelStorageError, PanelDoctorError, PanelBatchError, FactorError) as error:
+            return _unavailable(FACTOR_SEAL_CHECK, subjects, error)
+        findings.extend(_seal_findings(seal, dataset=dataset, declared=declared, held=held))
+    return tuple(findings), CrossCheckOutcome(
+        name=FACTOR_SEAL_CHECK,
+        datasets=subjects,
+        ran=True,
+        finding_count=len(findings),
+    )
+
+
 CALENDAR_LOOKAHEAD_CHECK: Final[str] = "calendar_lookahead"
 """The name `_calendar_lookahead_check` records itself under in `cross_checks`.
 
@@ -2120,6 +2594,10 @@ def panel_health_report(
     findings, outcome = _rebuild_check(
         store, healths=healths, as_of=as_of, years=years_for, bounds=bounds
     )
+    cross_findings.extend(findings)
+    checks.append(outcome)
+
+    findings, outcome = _factor_seal_check(store, healths=healths, as_of=as_of, years=years_for)
     cross_findings.extend(findings)
     checks.append(outcome)
 

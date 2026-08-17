@@ -102,6 +102,7 @@ def _manifest(**overrides: Any) -> FactorTransformManifest:
         "source_factor_version": 1,
         "source_manifest_id": "fmn_probe",
         "source_observation_digest": "obs_probe",
+        "processed_observation_digest": "prc_probe",
         "as_of": AS_OF,
         "code_commit": "a1b2c3d",
         **overrides,
@@ -277,6 +278,7 @@ _MANIFEST_VARIATIONS: Final[tuple[tuple[str, dict[str, Any]], ...]] = (
     ("source_factor_version", {"source_factor_version": 2}),
     ("source_manifest_id", {"source_manifest_id": "fmn_other"}),
     ("source_observation_digest", {"source_observation_digest": "obs_other"}),
+    ("processed_observation_digest", {"processed_observation_digest": "prc_other"}),
     ("as_of", {"as_of": datetime(2026, 1, 13, 4, 0, tzinfo=UTC)}),
     ("code_commit", {"code_commit": "0000000"}),
 )
@@ -291,7 +293,7 @@ def test_every_declared_manifest_field_reaches_the_identity(
     assert _manifest(**overrides).transform_manifest_id != baseline.transform_manifest_id, field
 
 
-def test_the_manifest_declares_exactly_the_ten_fields_the_variation_table_varies() -> None:
+def test_the_manifest_declares_exactly_the_eleven_fields_the_variation_table_varies() -> None:
     """A new manifest field fails here until somebody shows it moves the ID.
 
     The exact set rather than a subset, because both directions are faults: a field nobody varies
@@ -315,7 +317,12 @@ def test_the_manifest_carries_no_wall_clock_and_no_timezone() -> None:
 
     assert "built_at" not in fields
     assert "date_timezone" not in fields
-    assert {"as_of", "code_commit", "source_observation_digest"} <= fields
+    assert {
+        "as_of",
+        "code_commit",
+        "source_observation_digest",
+        "processed_observation_digest",
+    } <= fields
 
 
 # --- the winsorization policy's cross-field rules ------------------------------------------------

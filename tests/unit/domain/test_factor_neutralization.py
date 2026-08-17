@@ -48,6 +48,7 @@ from openalpha_cn.domain.factor_neutralization import (
     characteristic_digest,
     industry_code_of,
     industry_group_sizes,
+    neutralized_observation_digest,
     processed_observation_digest,
     validate_neutralized_factor_observation,
 )
@@ -88,6 +89,7 @@ def _manifest(**overrides: Any) -> FactorNeutralizationManifest:
         "source_transform_id": "ftx_one",
         "source_transform_manifest_id": "ftm_one",
         "source_processed_digest": "prc_one",
+        "neutralized_observation_digest": "nrs_one",
         "characteristic_digest": "chr_one",
         "as_of": AS_OF,
         "code_commit": "a1b2c3d",
@@ -683,6 +685,7 @@ def test_the_processed_digest_refuses_a_non_finite_value_by_name() -> None:
         ("source_transform_manifest_id", "ftm_two"),
         ("source_processed_digest", "prc_two"),
         ("characteristic_digest", "chr_two"),
+        ("neutralized_observation_digest", "nrs_two"),
         ("as_of", LATER),
         ("code_commit", "9999999"),
     ],
@@ -721,6 +724,7 @@ def test_the_manifest_carries_no_wall_clock_and_no_timezone_and_no_taxonomy() ->
         "source_transform_manifest_id",
         "source_processed_digest",
         "characteristic_digest",
+        "neutralized_observation_digest",
         "as_of",
         "code_commit",
     }
@@ -911,3 +915,63 @@ def test_the_neutralisation_limitations_are_the_five_this_issue_measured() -> No
     } == NEUTRALIZATION_LIMITATION_CODES
     assert len(KNOWN_NEUTRALIZATION_LIMITATIONS) == len(NEUTRALIZATION_LIMITATION_CODES)
     assert all(item.detail.strip() for item in KNOWN_NEUTRALIZATION_LIMITATIONS)
+
+
+def test_the_residual_digest_is_the_third_tier_of_the_same_address() -> None:
+    """`V2-P3-019`'s top tier, and the one with nothing above it to address it by accident.
+
+    The raw tier's answers are addressed by `FactorTransformManifest.source_observation_digest`
+    and the processed tier's by `FactorNeutralizationManifest.source_processed_digest` -- both by
+    the manifest of the tier that *consumed* them. Nothing consumes a neutralised panel inside
+    this repository, and it is the tier the attribution grid's verdict is read off, so its own
+    manifest is the only place its answers could be addressed from.
+
+    The same three positions as its two siblings and the same two exclusions: the provenance
+    pointers are constant on every row of one panel by a guard, and `industry_code` is a label on
+    the regression a residual came out of rather than the residual.
+    """
+    baseline = neutralized_observation_digest([_observation()])
+
+    assert neutralized_observation_digest([_observation(value=0.26)]) != baseline
+    assert neutralized_observation_digest([_observation(subject="600000.SH")]) != baseline
+    assert (
+        neutralized_observation_digest(
+            [_observation(coverage="industry_missing", value=None, industry_code=None)]
+        )
+        != baseline
+    )
+    assert neutralized_observation_digest([_observation(industry_code="801020.SI")]) == baseline
+    assert neutralized_observation_digest([_observation(neutralization_id="fnz_two")]) == baseline
+    assert baseline.startswith("nrs_")
+
+
+def test_the_residual_digest_refuses_a_duplicated_subject() -> None:
+    with pytest.raises(FactorNeutralizationError, match="appears more than once"):
+        neutralized_observation_digest([_observation(), _observation()])
+
+
+def test_the_residual_digest_refuses_a_non_finite_residual_by_name() -> None:
+    """`test_the_processed_digest_refuses_a_non_finite_value_by_name` one tier up, and built the
+    same way: through a subclass that overrode `__post_init__`, because that is the only door a
+    non-finite residual can reach a digest through and it is what the refusal tells its reader."""
+
+    class Bypassing(NeutralizedFactorObservation):
+        def __post_init__(self) -> None:  # pragma: no cover - the point is that it does nothing
+            return
+
+    poisoned = Bypassing(
+        subject="000001.SZ",
+        as_of=AS_OF,
+        value=float("inf"),
+        coverage="neutralized",
+        neutralization_id="fnz_one",
+        neutralization_manifest_id="fnm_one",
+        source_factor_id="fct_one",
+        source_transform_id="ftx_one",
+        source_transform_manifest_id="ftm_one",
+        source_coverage="processed",
+        industry_code="801010.SI",
+    )
+
+    with pytest.raises(FactorNeutralizationError, match="non-finite residual"):
+        neutralized_observation_digest([poisoned])
