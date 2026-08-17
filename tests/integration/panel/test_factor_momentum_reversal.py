@@ -708,6 +708,7 @@ def test_the_whole_census_is_the_shapes_this_corpus_declares(store: PanelStore) 
         "computed": 12,
         "not_in_universe": 1,
         "insufficient_history": 2,
+        "ambiguous_filing": 0,
         "input_missing": 1,
         "undefined_value": 0,
     }

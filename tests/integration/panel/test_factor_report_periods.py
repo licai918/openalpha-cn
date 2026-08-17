@@ -22,13 +22,15 @@ rather than as an argument about a version of the engine nobody can run any more
 
 ## What did **not** change, which is the half that matters more
 
-The multiplicity refusal is still fail-closed, and on the case that carries 81.7% of the real
+The multiplicity rule is still fail-closed, and on the case that carries 81.7% of the real
 duplication: two rows of one `(ts_code, end_date, ann_date)` key, which `fina_indicator` has no
 column to order (no `update_flag`, no `f_ann_date`) and which
 `providers/tushare.py::_announcement_timeline` deliberately gives byte-equal four-clock
 timelines. Those collided on `(subject, event_time)` before and collide on `(subject, period)`
-now, and `test_two_versions_of_one_filing_announced_on_one_day_still_refuse_the_whole_build`
-holds it.
+now, and `test_two_versions_of_one_filing_announced_on_one_day_are_that_securitys_own_answer`
+holds it. **`V2-P3-018` changed where the fail-closed lands and not whether it is closed**: the
+build used to raise, and now that security carries `ambiguous_filing` while everybody else in
+the cross section is scored. No version is chosen either way.
 
 What stopped raising is the case that was never a duplicate: two *different* periods disclosed on
 one day. And what is newly resolved rather than newly refused is the ordinary point-in-time
@@ -423,7 +425,7 @@ def test_two_periods_disclosed_on_one_day_are_two_rows_a_session_index_cannot_ho
     assert _coverage(panel)["000001.SZ"] == "computed"
 
 
-def test_two_versions_of_one_filing_announced_on_one_day_still_refuse_the_whole_build(
+def test_two_versions_of_one_filing_announced_on_one_day_are_that_securitys_own_answer(
     tmp_path: Path,
 ) -> None:
     """The fail-closed that must **not** have been weakened, on the shape that carries most of the
@@ -433,21 +435,36 @@ def test_two_versions_of_one_filing_announced_on_one_day_still_refuse_the_whole_
     keys, has neither `update_flag` nor `f_ann_date`, and `_announcement_timeline` gives such rows
     byte-equal four-clock timelines -- so nothing in the panel orders them. They collided on
     `(subject, event_time)` under a session index and collide on `(subject, period)` under this
-    one, and the message says which axis it is talking about.
+    one.
 
-    The two rows disagree about `revenue`, so a build that silently picked one would answer, and
-    the assertion below would be `computed` rather than a refusal.
+    The two rows disagree about `revenue`, so a build that silently picked one would answer with a
+    number: 100.0 is the corpus's own value for that period and 999.0 is the intruder, and the
+    assertion below is that **neither** is reported. That is what makes this the fail-closed test
+    rather than a coverage-code test -- `V2-P3-018` moved the verdict from the build to this
+    security and had to leave "no version is chosen" exactly where it was.
+
+    The two other securities in `CORPUS` are the control: they are untouched by the extra row and
+    must answer exactly what they answered without it, which is what says the ambiguity is scoped
+    to `000001.SZ` rather than to the partition.
     """
     duplicated = (
         *CORPUS,
         ("000001.SZ", date(2024, 9, 30), date(2024, 10, 25), 999.0),
     )
-    store = _written(tmp_path, dataset=INCOME_DATASET, rows=duplicated)
+    clean_store = _written(tmp_path / "clean", dataset=INCOME_DATASET, rows=CORPUS)
+    store = _written(tmp_path / "duplicated", dataset=INCOME_DATASET, rows=duplicated)
 
-    with pytest.raises(FactorEngineError, match=r"more than one row for 000001.SZ on 2024-09-30"):
-        _compute(store, _definition())
-    with pytest.raises(FactorEngineError, match="one row per security per period"):
-        _compute(store, _definition())
+    clean = _compute(clean_store, _definition())
+    panel = _compute(store, _definition())
+    others = tuple(name for name in SUBJECTS if name != "000001.SZ")
+
+    assert _coverage(clean)["000001.SZ"] == "computed"
+    assert _coverage(panel)["000001.SZ"] == "ambiguous_filing"
+    assert panel.values().get("000001.SZ") is None
+    assert panel.coverage_census()["ambiguous_filing"] == 1
+    assert {name: _coverage(panel)[name] for name in others} == {
+        name: _coverage(clean)[name] for name in others
+    }
 
 
 DUPLICATE_DAY: Final[date] = date(2024, 4, 20)
@@ -493,10 +510,10 @@ in production has at all.
 
 
 @pytest.mark.parametrize("order", sorted(ORDER_PROBE))
-def test_the_same_day_refusal_does_not_depend_on_the_order_the_partition_returns_its_rows(
+def test_the_same_day_verdict_does_not_depend_on_the_order_the_partition_returns_its_rows(
     tmp_path: Path, order: str
 ) -> None:
-    """The refusal above, asked three times of one corpus in three row orders.
+    """The verdict above, asked three times of one corpus in three row orders.
 
     The duplicate pair used to be compared only against whatever announcement had been seen for
     that period *so far*: an earlier announcement than the one already held was skipped before the
@@ -515,9 +532,16 @@ def test_the_same_day_refusal_does_not_depend_on_the_order_the_partition_returns
     decides which of the three orders a real build gets. `V2-P3-014`'s artifacts have to be
     reproducible, and a build whose success is drawn from the scan is not.
 
-    This is the "refusal" half of what
+    This is the "verdict" half of what
     `test_the_later_announcement_wins_whichever_order_the_partition_returns_them_in` already holds
     for the "value" half, and it is parametrised rather than looped so a failure names the order.
+
+    **`V2-P3-018` made this the harder half rather than the easier one.** The verdict used to be a
+    `FactorEngineError`, which a caller cannot miss; it is now a coverage code that reaches
+    Parquet, so a residual order-dependence would be a *stored value* that differs between two
+    runs over one partition rather than a build that fails on one run and not the other. Both the
+    code and the absence of a value are asserted, because "555.0 was reported on one order" is
+    exactly the answer this must not give.
     """
     store = PanelStore(tmp_path / "one_partition")
     write_panel_batch(store, _batch(INCOME_DATASET, ORDER_PROBE[order]), year=2024)
@@ -525,16 +549,19 @@ def test_the_same_day_refusal_does_not_depend_on_the_order_the_partition_returns
         dataset=INCOME_DATASET, years=(2024,), as_of=ONE_PERIOD_AS_OF, max_staleness=STALENESS
     )
 
-    with pytest.raises(FactorEngineError, match=r"more than one row for 000001.SZ on 2024-03-31"):
-        _compute(
-            store,
-            _definition(key="probe_one_period", lookback_periods=1, max_window_periods=1),
-            evaluator=lambda window: window.series(INCOME_DATASET, "revenue")[-1],
-            as_of=ONE_PERIOD_AS_OF,
-            subjects=("000001.SZ",),
-            universe=frozenset({"000001.SZ"}),
-            requirements={INCOME_DATASET: requirement},
-        )
+    panel = _compute(
+        store,
+        _definition(key="probe_one_period", lookback_periods=1, max_window_periods=1),
+        evaluator=lambda window: window.series(INCOME_DATASET, "revenue")[-1],
+        as_of=ONE_PERIOD_AS_OF,
+        subjects=("000001.SZ",),
+        universe=frozenset({"000001.SZ"}),
+        requirements={INCOME_DATASET: requirement},
+    )
+
+    assert _coverage(panel)["000001.SZ"] == "ambiguous_filing"
+    assert panel.observations[0].value is None
+    assert panel.values() == {}
 
 
 def test_the_engines_period_selection_is_the_domains_filing_for(store: PanelStore) -> None:

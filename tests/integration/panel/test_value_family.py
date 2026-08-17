@@ -14,21 +14,37 @@ report-period axis and was exercised only by definitions the tests declared; the
 first shipped factors that use it, so `test_the_three_factors_compute_off_two_axes_and_give_three
 _different_numbers` is where the claim becomes a measurement.
 
-## Per-field refusal, on two real rows
+## Per-field ambiguity, on two real rows
 
 `600739.SH`'s 2024 annual arrives as **two** rows that both carry `update_flag='1'`, disagree
 about `total_revenue` by 4.6% (11,289,276,631.83 against 10,769,999,495.94) and agree exactly
 about `n_income_attr_p` (209,556,865.25). `domain/financial_statements.py` says a refusal is per
 field; this file drives that through the engine on those numbers, and the answer is that
-`earnings_yield_ttm` computes off the same partition that `sales_yield_ttm` refuses.
+`earnings_yield_ttm` computes off the same partition on which `sales_yield_ttm` reports
+`ambiguous_filing`.
 
 That is only true because `V2-P3-009` changed `_read_dataset` to collapse duplicate rows whose
 projected cells agree, which is `build_statement_history`'s own rule. Before it, the engine
 refused on multiplicity alone -- so it refused 372 of `income`'s 633 duplicate keys, 1,166 of
 `balancesheet`'s 1,244 and 2,194 of `fina_indicator`'s 2,671 that say exactly the same thing
 twice, where `ReportFiling.value_of` answers every one of them.
-`test_the_engine_answers_a_column_the_duplicate_rows_agree_about_and_refuses_one_they_do_not`
+`test_the_engine_answers_a_column_the_duplicate_rows_agree_about_and_codes_one_they_do_not`
 holds both halves against the domain's own answer over one corpus.
+
+## `V2-P3-018`: the rows that really disagree cost one security, not the build
+
+Until `V2-P3-018` the second half of that sentence was a `FactorEngineError`, so a single
+contradictory filing anywhere in a cross section produced **no observation for anybody**. Six
+tests here are that change:
+`..._codes_one_they_do_not` (the code instead of the raise),
+`test_one_contradictory_filing_costs_that_security_and_leaves_the_cross_section_untouched` (the
+acceptance: every other name's value byte-identical to a clean build),
+`test_an_ambiguous_filing_outranks_a_null_cell_in_the_same_window` (the precedence),
+`test_an_ambiguous_filing_outside_the_window_this_factor_forms_is_not_this_factors_problem` (the
+window scope), `test_a_superseded_ambiguous_pair_still_codes_the_security_rather_than_taking_the
+_later_row` (the deliberate divergence from `filing_for`, kept), and
+`test_the_disagreement_code_does_not_depend_on_the_order_the_partition_returns_its_rows` (the
+property that had to survive the change).
 
 ## The three coverage codes a value factor reaches differently
 
@@ -755,7 +771,75 @@ def test_a_security_outside_the_universe_is_not_in_universe_on_every_factor(
         assert observation.input_session_first is None
 
 
-# --- the duplicate rows: collapsed when they agree, refused when they do not ----------------------
+# --- the duplicate rows: collapsed when they agree, coded when they do not ------------------------
+
+
+def test_one_contradictory_filing_costs_that_security_and_leaves_the_cross_section_untouched(
+    store: PanelStore, tmp_path: Path
+) -> None:
+    """`V2-P3-018`'s acceptance criterion, as a cross section rather than as a single security.
+
+    A second `income` row is added for `000001.SZ` at the newest period, disagreeing about
+    `total_revenue` and agreeing about everything else -- the shape 8.51% of `income`'s real
+    filings have. Before `V2-P3-018` this build raised `FactorEngineError` and **no security in
+    the cross section got an observation**, which is why none of `V2-P3-009`..`011`'s six factors
+    could be built over a real whole-market statement partition at all.
+
+    Three things are asserted and the third is the one with teeth:
+
+    1. the contradicting security is `ambiguous_filing` and carries no value;
+    2. the census counts exactly one of them, so the build's own manifest row says how much of the
+       market this cost;
+    3. **every other security's coverage code and value are byte-identical to the clean build's**
+       -- not merely "present", which a change that quietly re-read the partition differently
+       would also satisfy. `pytest.approx` is deliberately not used on the values: the two builds
+       read the same rows through the same arithmetic, so anything but equality is a difference
+       this test should see.
+
+    The clean panel is the same `store` fixture the rest of this file uses, so the comparison is
+    against nine securities spanning four of the other five codes at once -- `computed`,
+    `insufficient_history`, `undefined_value` and `not_in_universe`. `input_missing` is the fifth
+    and is `book_to_price`'s answer on this corpus rather than `sales_yield_ttm`'s (the null cell
+    is `balancesheet.total_hldr_eqy_exc_min_int`, which this factor does not read);
+    `test_an_ambiguous_filing_outranks_a_null_cell_in_the_same_window` is where the two meet.
+    """
+    contradicted = PanelStore(tmp_path / "one_bad_filing")
+    newest = TRAILING_WINDOW[-1]
+    rows = [
+        *_statement_rows(INCOME_DATASET),
+        (
+            FULL,
+            newest,
+            ANNOUNCED_ON[newest],
+            {**_income_values(FULL, newest), "total_revenue": DISPUTED_TOTAL_REVENUE[1]},
+        ),
+    ]
+    _write_statements(contradicted, INCOME_DATASET, tuple(rows))
+    _write_statements(contradicted, BALANCE_SHEET_DATASET, _statement_rows(BALANCE_SHEET_DATASET))
+    write_panel_batch(contradicted, _daily_basic_batch(), year=SESSION_YEAR)
+
+    clean = _compute(store, SALES_YIELD_TTM)
+    partial = _compute(contradicted, SALES_YIELD_TTM)
+    others = tuple(name for name in SUBJECTS if name != FULL)
+
+    assert _coverage(clean)[FULL] == "computed"
+    assert _coverage(partial)[FULL] == "ambiguous_filing"
+    assert partial.values().get(FULL) is None
+    assert partial.coverage_census()["ambiguous_filing"] == 1
+    assert clean.coverage_census()["ambiguous_filing"] == 0
+    assert {name: _coverage(partial)[name] for name in others} == {
+        name: _coverage(clean)[name] for name in others
+    }
+    assert {name: partial.values().get(name) for name in others} == {
+        name: clean.values().get(name) for name in others
+    }
+    assert set(_coverage(clean).values()) == {
+        "computed",
+        "insufficient_history",
+        "undefined_value",
+        "not_in_universe",
+    }
+    assert set(_coverage(partial).values()) == set(_coverage(clean).values()) | {"ambiguous_filing"}
 
 
 def test_two_income_rows_of_one_filing_that_agree_collapse_instead_of_refusing_the_build(
@@ -885,11 +969,14 @@ def _duplicated_rows(
     return tuple(rows)
 
 
-@pytest.fixture
-def disputed_store(tmp_path: Path) -> PanelStore:
-    """One partition holding the two rows `600739.SH`'s 2024 annual really arrives as."""
-    built = PanelStore(tmp_path / "disputed")
-    _write_statements(built, INCOME_DATASET, _duplicated_rows(DISPUTED_TOTAL_REVENUE))
+def _write_prices_for_the_duplicated_security(store: PanelStore) -> None:
+    """The three `daily_basic` sessions every store in this section needs, written once.
+
+    Extracted from `disputed_store` when `V2-P3-018` gave this section five more stores to build:
+    a factor on two axes needs the price partition even when the test is entirely about the
+    filing, and five copies of this batch would be five places for the session series to drift
+    from `MARKET_CAP_BASE`.
+    """
     subjects = tuple(DUPLICATED for _ in SESSIONS)
     instants = tuple(_session_instant(day) for day in SESSIONS)
     constant = tuple(1.0 for _ in SESSIONS)
@@ -900,7 +987,7 @@ def disputed_store(tmp_path: Path) -> PanelStore:
         "total_mv": PanelColumn("total_mv", "float", tuple(900.0 + 37.0 * i for i in range(3))),
     }
     write_panel_batch(
-        built,
+        store,
         ColumnarPanelBatch(
             provider_id="openalpha-cn/tests",
             dataset=DAILY_BASIC_DATASET,
@@ -922,13 +1009,35 @@ def disputed_store(tmp_path: Path) -> PanelStore:
         ),
         year=SESSION_YEAR,
     )
+
+
+@pytest.fixture
+def disputed_store(tmp_path: Path) -> PanelStore:
+    """One partition holding the two rows `600739.SH`'s 2024 annual really arrives as."""
+    built = PanelStore(tmp_path / "disputed")
+    _write_statements(built, INCOME_DATASET, _duplicated_rows(DISPUTED_TOTAL_REVENUE))
+    _write_prices_for_the_duplicated_security(built)
     return built
 
 
-def test_the_engine_answers_a_column_the_duplicate_rows_agree_about_and_refuses_one_they_do_not(
+def _compute_one(store: PanelStore, definition: FactorDefinition) -> FactorPanel:
+    """`_compute` narrowed to the duplicated security, which is the only name these stores hold."""
+    return compute_factor(
+        store,
+        definition,
+        as_of=AS_OF,
+        subjects=(DUPLICATED,),
+        universe=frozenset({DUPLICATED}),
+        requirements={name: _requirement(name) for name in definition.datasets},
+        code_commit=COMMIT,
+        built_at=BUILT_AT,
+    )
+
+
+def test_the_engine_answers_a_column_the_duplicate_rows_agree_about_and_codes_one_they_do_not(
     disputed_store: PanelStore,
 ) -> None:
-    """Per-field refusal, driven through the engine on two rows the endpoint really serves.
+    """Per-field ambiguity, driven through the engine on two rows the endpoint really serves.
 
     `600739.SH`'s 2024 annual is two rows that **both** carry `update_flag='1'` -- so there is
     nothing to rank even for a reader willing to rank the flag -- disagreeing about
@@ -936,45 +1045,166 @@ def test_the_engine_answers_a_column_the_duplicate_rows_agree_about_and_refuses_
     `domain/financial_statements.py` says the refusal is per field and `ReportFiling.value_of`
     implements it; this is that sentence as one pair of calls over one partition.
 
-    The refusal names the column, which is what makes it actionable: "these two rows disagree" is
-    a fact about the filing, and "they disagree about `total_revenue`" is a fact a caller can do
-    something with.
+    **`V2-P3-018` changed the second half from a build refusal into a coverage code, and this test
+    with it.** Before it the `sales_yield_ttm` call raised and no observation existed for any
+    security in the cross section; now it returns a panel in which this security carries
+    `ambiguous_filing` and `value is None`. The per-field half is unchanged and is what makes the
+    pair worth asserting together: one partition, two factors, two different answers, decided by
+    which column each one reads.
+
+    Asserted as a *mapping over the two factors* rather than as two independent lines, so the
+    failure mode a per-security code invites -- every factor answering `ambiguous_filing` -- cannot
+    pass by satisfying half of it.
     """
-    earnings = compute_factor(
-        disputed_store,
-        EARNINGS_YIELD_TTM,
-        as_of=AS_OF,
-        subjects=(DUPLICATED,),
-        universe=frozenset({DUPLICATED}),
-        requirements={name: _requirement(name) for name in EARNINGS_YIELD_TTM.datasets},
-        code_commit=COMMIT,
-        built_at=BUILT_AT,
+    answers = {
+        definition.key: _compute_one(disputed_store, definition)
+        for definition in (EARNINGS_YIELD_TTM, SALES_YIELD_TTM)
+    }
+    coverage = {key: _coverage(panel)[DUPLICATED] for key, panel in answers.items()}
+    sales = answers["sales_yield_ttm"]
+
+    assert coverage == {"earnings_yield_ttm": "computed", "sales_yield_ttm": "ambiguous_filing"}
+    assert sales.observations[0].value is None
+    assert sales.values() == {}
+    assert sales.coverage_census()["ambiguous_filing"] == 1
+    # The window the ambiguity sits in is still recorded, which is what keeps the filing
+    # locatable from the stored row: it is this observation's `input_period_last`.
+    assert sales.observations[0].input_period_last == TRAILING_WINDOW[-1]
+
+
+def test_an_ambiguous_filing_outranks_a_null_cell_in_the_same_window(tmp_path: Path) -> None:
+    """The precedence `FACTOR_COVERAGE_ORDER` declares, on the one pair where it is load-bearing.
+
+    A security whose window holds **both** a contradictory filing and a null cell could honestly
+    be called either. It is `ambiguous_filing`, because the two codes name different repairs and
+    only one of them works: a reader told `input_missing` re-fetches, and a re-fetch returns the
+    same two contradictory rows. `_classify` decides them in `FACTOR_COVERAGE_ORDER`'s order and
+    `tests/unit/test_factor_engine_rules.py::
+    test_the_census_order_is_the_order_classify_decides_the_codes_in` reads that order off the
+    source; this is the behaviour behind it.
+
+    The control is the same corpus with the duplicate row removed, and it must answer
+    `input_missing` -- without it, a `_classify` that returned `ambiguous_filing` for every
+    security with a null cell anywhere would pass this test.
+    """
+    nulled = tuple(
+        (item[0], item[1], item[2], {**item[3], "total_revenue": None})
+        if item[1] == TRAILING_WINDOW[0]
+        else item
+        for item in _duplicated_rows(DISPUTED_TOTAL_REVENUE)
     )
+    both = PanelStore(tmp_path / "both")
+    _write_statements(both, INCOME_DATASET, nulled)
+    _write_prices_for_the_duplicated_security(both)
+    null_only = PanelStore(tmp_path / "null_only")
+    _write_statements(null_only, INCOME_DATASET, nulled[:-1])
+    _write_prices_for_the_duplicated_security(null_only)
 
-    assert _coverage(earnings)[DUPLICATED] == "computed"
+    assert _coverage(_compute_one(both, SALES_YIELD_TTM))[DUPLICATED] == "ambiguous_filing"
+    assert _coverage(_compute_one(null_only, SALES_YIELD_TTM))[DUPLICATED] == "input_missing"
 
-    with pytest.raises(FactorEngineError, match=r"more than one row for 600739.SH on 2025-03-31"):
-        compute_factor(
-            disputed_store,
-            SALES_YIELD_TTM,
-            as_of=AS_OF,
-            subjects=(DUPLICATED,),
-            universe=frozenset({DUPLICATED}),
-            requirements={name: _requirement(name) for name in SALES_YIELD_TTM.datasets},
-            code_commit=COMMIT,
-            built_at=BUILT_AT,
-        )
-    with pytest.raises(FactorEngineError, match=r"do not agree about \['total_revenue'\]"):
-        compute_factor(
-            disputed_store,
-            SALES_YIELD_TTM,
-            as_of=AS_OF,
-            subjects=(DUPLICATED,),
-            universe=frozenset({DUPLICATED}),
-            requirements={name: _requirement(name) for name in SALES_YIELD_TTM.datasets},
-            code_commit=COMMIT,
-            built_at=BUILT_AT,
-        )
+
+def test_an_ambiguous_filing_outside_the_window_this_factor_forms_is_not_this_factors_problem(
+    tmp_path: Path,
+) -> None:
+    """The mark is scoped to the window, so an old contradiction does not condemn a fresh number.
+
+    `_classify` intersects the ambiguous periods with the window it actually formed. A filing the
+    publisher contradicted itself about in 2023 did not enter a trailing-twelve-month number taken
+    over 2024Q1..2025Q1, and coding the security for it would report a defect in an answer that
+    does not depend on it -- `not_in_universe`'s argument, one axis over.
+
+    2023-12-31 is the period this file already keeps out of every window (see
+    `PRIOR_YEAR_CUMULATIVE`), so the corpus separates "in the partition" from "in the window"
+    without inventing a second one. The control is the same disagreement on the newest period,
+    which must be coded -- otherwise a `_classify` that marked nothing at all would pass.
+    """
+    stale = PERIODS[0]
+    outside = PanelStore(tmp_path / "outside")
+    rows = [
+        *_duplicated_rows(DISPUTED_TOTAL_REVENUE)[:-1],
+        (DUPLICATED, stale, ANNOUNCED_ON[stale], _income_values(FULL, stale)),
+        (
+            DUPLICATED,
+            stale,
+            ANNOUNCED_ON[stale],
+            {**_income_values(FULL, stale), "total_revenue": DISPUTED_TOTAL_REVENUE[1]},
+        ),
+    ]
+    _write_statements(outside, INCOME_DATASET, tuple(rows))
+    _write_prices_for_the_duplicated_security(outside)
+    inside = PanelStore(tmp_path / "inside")
+    _write_statements(inside, INCOME_DATASET, _duplicated_rows(DISPUTED_TOTAL_REVENUE))
+    _write_prices_for_the_duplicated_security(inside)
+
+    panel = _compute_one(outside, SALES_YIELD_TTM)
+
+    assert _coverage(panel)[DUPLICATED] == "computed"
+    assert panel.observations[0].input_period_first == TRAILING_WINDOW[0]
+    assert _coverage(_compute_one(inside, SALES_YIELD_TTM))[DUPLICATED] == "ambiguous_filing"
+
+
+RESTATED_ON: Final[date] = date(2025, 5, 12)
+"""A later announcement of the newest period, inside `AS_OF`'s visibility and after the pair.
+
+Two weeks after `ANNOUNCED_ON[2025-03-31]` and eight days before `AS_OF`, so `filing_for`'s
+`max(announced_on)` really does prefer it and `read_visible_at` really does return it.
+"""
+
+RESTATED_TOTAL_REVENUE: Final[float] = 12_400_000_000.0
+"""What the restatement says, distinct from both members of the pair it supersedes so that a
+value computed off it is separable from one computed off either of them."""
+
+
+def test_a_superseded_ambiguous_pair_still_codes_the_security_rather_than_taking_the_later_row(
+    tmp_path: Path,
+) -> None:
+    """The one corner where this engine and `ReportFiling.filing_for` deliberately part.
+
+    Three rows for one period: two announced on the same day that disagree, and a **later**
+    restatement that supersedes both. `filing_for` takes `max(announced_on)` and never consults
+    the superseded pair, so the domain answers off the restatement; this engine marks the period
+    ambiguous anyway. `_columns_two_versions_disagree_about` argues why -- the same-day check sits
+    on the `(subject, period, announcement)` triple precisely so that whether the pair was
+    discarded cannot depend on the order DuckDB returned the rows in, which was measured to change
+    the answer on one corpus in three write orders.
+
+    What `V2-P3-018` changed is the *price* of that divergence and not the divergence: it used to
+    cost the whole cross section a build and now costs this security a coverage code. So the
+    declined answer is shown to exist and to be a specific number rather than merely unavailable:
+    two control stores compute off the restatement and off the superseded row, and their two
+    values differ -- which is what makes "the engine is declining an answer a later announcement
+    supplies" a measurement instead of a claim.
+    """
+    newest = TRAILING_WINDOW[-1]
+    base = list(_duplicated_rows(DISPUTED_TOTAL_REVENUE))
+    restatement = (
+        DUPLICATED,
+        newest,
+        RESTATED_ON,
+        {
+            **_income_values(FULL, newest),
+            "n_income_attr_p": AGREED_NET_PROFIT,
+            "total_revenue": RESTATED_TOTAL_REVENUE,
+        },
+    )
+    superseded = PanelStore(tmp_path / "superseded")
+    _write_statements(superseded, INCOME_DATASET, (*base, restatement))
+    _write_prices_for_the_duplicated_security(superseded)
+    later_only = PanelStore(tmp_path / "later_only")
+    _write_statements(later_only, INCOME_DATASET, (*base[:-2], restatement))
+    _write_prices_for_the_duplicated_security(later_only)
+    earlier_only = PanelStore(tmp_path / "earlier_only")
+    _write_statements(earlier_only, INCOME_DATASET, tuple(base[:-1]))
+    _write_prices_for_the_duplicated_security(earlier_only)
+
+    later = _compute_one(later_only, SALES_YIELD_TTM)
+    earlier = _compute_one(earlier_only, SALES_YIELD_TTM)
+
+    assert _coverage(_compute_one(superseded, SALES_YIELD_TTM))[DUPLICATED] == "ambiguous_filing"
+    assert _coverage(later)[DUPLICATED] == "computed"
+    assert _coverage(earlier)[DUPLICATED] == "computed"
+    assert _value(later, DUPLICATED) != pytest.approx(_value(earlier, DUPLICATED))
 
 
 def test_the_engines_collapse_is_the_domains_and_they_agree_on_the_same_duplicate_filing(
@@ -990,8 +1220,10 @@ def test_the_engines_collapse_is_the_domains_and_they_agree_on_the_same_duplicat
     implementations disagreed.
 
     Both directions are asserted here on one corpus. On `n_income_attr_p` the domain answers and
-    the engine now computes; on `total_revenue` the domain raises `AmbiguousReportError` and the
-    engine refuses the build.
+    the engine computes; on `total_revenue` the domain raises `AmbiguousReportError` and the
+    engine codes the security `ambiguous_filing`. Those are the same verdict at two granularities,
+    which is the whole of `V2-P3-018`: the domain declines *that field of that filing* and the
+    engine declines *that security's value*, where it used to decline the build.
     """
     rows = [
         (
@@ -1016,16 +1248,7 @@ def test_the_engines_collapse_is_the_domains_and_they_agree_on_the_same_duplicat
     assert filing.value_of(NET_PROFIT_COLUMN) == AGREED_NET_PROFIT
     assert filing.values_of(TOTAL_REVENUE_COLUMN) == DISPUTED_TOTAL_REVENUE
 
-    earnings = compute_factor(
-        disputed_store,
-        EARNINGS_YIELD_TTM,
-        as_of=AS_OF,
-        subjects=(DUPLICATED,),
-        universe=frozenset({DUPLICATED}),
-        requirements={name: _requirement(name) for name in EARNINGS_YIELD_TTM.datasets},
-        code_commit=COMMIT,
-        built_at=BUILT_AT,
-    )
+    earnings = _compute_one(disputed_store, EARNINGS_YIELD_TTM)
     observation = earnings.observations[0]
 
     assert observation.coverage == "computed"
@@ -1035,37 +1258,30 @@ def test_the_engines_collapse_is_the_domains_and_they_agree_on_the_same_duplicat
 
 
 @pytest.mark.parametrize("order", ["as_served", "reversed"])
-def test_the_disagreement_refusal_does_not_depend_on_the_order_the_partition_returns_its_rows(
+def test_the_disagreement_code_does_not_depend_on_the_order_the_partition_returns_its_rows(
     tmp_path: Path, order: str
 ) -> None:
-    """The property the collapse must not have cost: order independence.
+    """The property the per-security code must not have cost: order independence.
 
     `read_visible_at` issues its scan with no `ORDER BY` over a partition DuckDB may read in
     parallel row groups, so nothing downstream of the provider decides which of two duplicate
     rows arrives first. A comparison against "whatever was stored so far" is exactly the shape
     that was measured answering on one order and refusing on another, before the same-day check
-    was moved onto the triple. Collapsing on equality keeps that property -- equality is
-    symmetric -- and this drives it rather than arguing it.
+    was moved onto the triple. Comparing on equality keeps that property -- equality is symmetric
+    -- and `V2-P3-018` had to keep it while turning the verdict into a *stored value*, which is
+    the harder half: a refusal is a control-flow event a caller cannot miss, and a coverage code
+    reaches Parquet, so a residual order-dependence would now be silent rather than loud.
     """
     first, second = DISPUTED_TOTAL_REVENUE
     revenues = (first, second) if order == "as_served" else (second, first)
     built = PanelStore(tmp_path / order)
     _write_statements(built, INCOME_DATASET, _duplicated_rows(revenues))
+    _write_prices_for_the_duplicated_security(built)
 
-    with pytest.raises(FactorEngineError, match="one row per security per period"):
-        compute_factor(
-            built,
-            SALES_YIELD_TTM,
-            as_of=AS_OF,
-            subjects=(DUPLICATED,),
-            universe=frozenset({DUPLICATED}),
-            requirements={
-                INCOME_DATASET: _requirement(INCOME_DATASET),
-                DAILY_BASIC_DATASET: _requirement(DAILY_BASIC_DATASET),
-            },
-            code_commit=COMMIT,
-            built_at=BUILT_AT,
-        )
+    panel = _compute_one(built, SALES_YIELD_TTM)
+
+    assert _coverage(panel)[DUPLICATED] == "ambiguous_filing"
+    assert panel.observations[0].value is None
 
 
 # --- the round trip -------------------------------------------------------------------------------

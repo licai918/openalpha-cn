@@ -932,36 +932,30 @@ def disputed_store(tmp_path: Path) -> PanelStore:
     return built
 
 
-def test_the_engine_answers_a_column_the_duplicate_rows_agree_about_and_refuses_one_they_do_not(
+def test_the_engine_answers_a_column_the_duplicate_rows_agree_about_and_codes_one_they_do_not(
     disputed_store: PanelStore,
 ) -> None:
-    """Per-field refusal at this family's reaches, on the column two of its members share.
+    """Per-field ambiguity at this family's reaches, on the column two of its members share.
 
     The newest `balancesheet` filing arrives as two rows that agree about
     `total_hldr_eqy_exc_min_int` and disagree about `total_assets` by 24%. So
-    `return_on_equity_ttm`, which reads the equity, computes off the same partition that
-    `return_on_capital_ttm` and `accruals_ttm` refuse -- and the refusal names the column, which is
-    what makes it actionable.
+    `return_on_equity_ttm`, which reads the equity, computes off the same partition on which
+    `return_on_capital_ttm` and `accruals_ttm` report `ambiguous_filing` -- decided by which
+    column each factor reads, over one partition.
 
-    `V2-P3-018` is what this test is the small case of: the refusal is the whole build's rather than
-    this security's, so a whole-market cross section with one such filing anywhere answers for
-    nobody.
+    **`V2-P3-018` is what this test used to be the small case of, and now is the delivery of.**
+    The two refusing factors used to raise `FactorEngineError` and produce no observation for
+    anybody; they now produce a panel in which this security carries a code and every other one is
+    unaffected. This family is the sharper case for it than the value family:
+    `accruals_ttm` reads three statement datasets over five contiguous periods and
+    `gross_margin_stability` reads eight, so a build here meets more `(filing, column)` reads and
+    therefore more ambiguity than one that reads a filing and a price.
+
+    Asserted as a mapping over all three factors rather than as one positive and a loop of
+    raises, so a change that made every factor answer `ambiguous_filing` cannot pass.
     """
-    equity_side = compute_factor(
-        disputed_store,
-        RETURN_ON_EQUITY_TTM,
-        as_of=AS_OF,
-        subjects=(FULL,),
-        universe=frozenset({FULL}),
-        requirements={name: _requirement(name) for name in RETURN_ON_EQUITY_TTM.datasets},
-        code_commit=COMMIT,
-        built_at=BUILT_AT,
-    )
-
-    assert _coverage(equity_side)[FULL] == "computed"
-
-    for definition in (RETURN_ON_CAPITAL_TTM, ACCRUALS_TTM):
-        with pytest.raises(FactorEngineError, match=r"do not agree about \['total_assets'\]"):
+    answers = {
+        definition.key: _coverage(
             compute_factor(
                 disputed_store,
                 definition,
@@ -972,3 +966,12 @@ def test_the_engine_answers_a_column_the_duplicate_rows_agree_about_and_refuses_
                 code_commit=COMMIT,
                 built_at=BUILT_AT,
             )
+        )[FULL]
+        for definition in (RETURN_ON_EQUITY_TTM, RETURN_ON_CAPITAL_TTM, ACCRUALS_TTM)
+    }
+
+    assert answers == {
+        "return_on_equity_ttm": "computed",
+        "return_on_capital_ttm": "ambiguous_filing",
+        "accruals_ttm": "ambiguous_filing",
+    }

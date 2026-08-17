@@ -1811,6 +1811,7 @@ def test_a_period_refuses_a_broken_funnel_a_stray_tier_and_a_backwards_window() 
                 excluded_by_coverage=(
                     ("not_in_universe", 0),
                     ("insufficient_history", 0),
+                    ("ambiguous_filing", 0),
                     ("input_missing", 0),
                     ("undefined_value", 0),
                 ),

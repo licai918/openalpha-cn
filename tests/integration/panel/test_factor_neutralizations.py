@@ -216,6 +216,7 @@ def _transform_spec(**overrides: Any) -> FactorTransformSpec:
         "missing_values": MissingValuePolicy(
             not_in_universe="exclude",
             insufficient_history="exclude",
+            ambiguous_filing="exclude",
             input_missing="exclude",
             undefined_value="exclude",
         ),
@@ -771,6 +772,7 @@ def test_an_imputed_processed_value_enters_the_regression_only_when_the_rule_say
         missing_values=MissingValuePolicy(
             not_in_universe="exclude",
             insufficient_history="exclude",
+            ambiguous_filing="fill_cross_sectional_median",
             input_missing="fill_cross_sectional_median",
             undefined_value="fill_cross_sectional_median",
         ),

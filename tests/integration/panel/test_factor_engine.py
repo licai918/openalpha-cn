@@ -21,7 +21,7 @@ The `as_of`s used are the two that matter:
   exists for.
 - `AS_OF` (the fixture's own, after the last session), where nothing is withheld -- the control.
 
-## Four of the five coverage codes are provoked here, and the fifth says why not
+## Four of the six coverage codes are provoked here, and the other two say why not
 
 `computed`, `not_in_universe`, `insufficient_history` and `input_missing` are each produced by a
 real partition at a real `as_of`. `undefined_value` needs a zero denominator, which no writer in
@@ -30,6 +30,13 @@ this repository will store (`DAILY_PRICE_COLUMNS`: no null and no non-positive c
 `tests/unit/test_factor_engine_rules.py`, the engine's non-finite handling here through an
 injected evaluator. Splitting it is what keeps the code from being a table entry with nothing
 behind it.
+
+`ambiguous_filing` (`V2-P3-018`) is unreachable here for a structural reason rather than a
+fixture one: it can only be produced on the **report-period** axis, and every factor this file
+drives reads `daily` alone. It is provoked end to end in
+`tests/integration/panel/test_value_family.py` and
+`tests/integration/panel/test_quality_family.py`, on partitions built from the two rows real
+endpoints serve.
 
 ## The identity is measured in both directions here, and one of them needs a store
 
@@ -303,6 +310,7 @@ def test_a_security_outside_the_declared_universe_is_marked_and_not_scored(
         "computed": len(panel.securities) - 1,
         "not_in_universe": 1,
         "insufficient_history": 0,
+        "ambiguous_filing": 0,
         "input_missing": 0,
         "undefined_value": 0,
     }
@@ -342,6 +350,7 @@ def test_a_security_the_visible_panel_cannot_fill_a_window_for_is_insufficient_h
         "computed": len(panel.securities) - 1,
         "not_in_universe": 0,
         "insufficient_history": 1,
+        "ambiguous_filing": 0,
         "input_missing": 0,
         "undefined_value": 0,
     }
@@ -534,6 +543,7 @@ def test_the_census_reports_every_declared_code_including_the_ones_at_zero(
         "computed",
         "not_in_universe",
         "insufficient_history",
+        "ambiguous_filing",
         "input_missing",
         "undefined_value",
     }

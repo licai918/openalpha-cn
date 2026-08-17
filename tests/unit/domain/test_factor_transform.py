@@ -69,6 +69,7 @@ def _policy(**overrides: str) -> MissingValuePolicy:
     settings: dict[str, Any] = {
         "not_in_universe": "exclude",
         "insufficient_history": "exclude",
+        "ambiguous_filing": "exclude",
         "input_missing": "fill_cross_sectional_median",
         "undefined_value": "refuse",
         **overrides,
@@ -155,6 +156,10 @@ _SPEC_VARIATIONS: Final[tuple[tuple[str, dict[str, Any]], ...]] = (
     (
         "missing_values.insufficient_history",
         {"missing_values": _policy(insufficient_history="fill_neutral")},
+    ),
+    (
+        "missing_values.ambiguous_filing",
+        {"missing_values": _policy(ambiguous_filing="fill_cross_sectional_median")},
     ),
     ("missing_values.input_missing", {"missing_values": _policy(input_missing="exclude")}),
     ("missing_values.undefined_value", {"missing_values": _policy(undefined_value="exclude")}),
@@ -403,11 +408,16 @@ def test_a_filled_not_in_universe_is_refused(action: str) -> None:
         _policy(not_in_universe=action)
 
 
-@pytest.mark.parametrize("code", ["insufficient_history", "input_missing", "undefined_value"])
-def test_the_other_three_codes_may_be_filled(code: str) -> None:
-    """The asymmetry is the point: three of the four are the caller's declared judgement.
+@pytest.mark.parametrize(
+    "code", ["insufficient_history", "ambiguous_filing", "input_missing", "undefined_value"]
+)
+def test_the_other_four_codes_may_be_filled(code: str) -> None:
+    """The asymmetry is the point: four of the five are the caller's declared judgement.
 
     Without this, the refusal above would be indistinguishable from a blanket ban on filling.
+    `ambiguous_filing` is in the list on purpose even though the shipped spec excludes it: the
+    contract records a caller's judgement and does not make it, and `CROSS_SECTION_STANDARD` is
+    where the shipped judgement is argued.
     """
     policy = _policy(**{code: "fill_cross_sectional_median"})
 
@@ -419,7 +429,7 @@ def test_fill_neutral_beside_an_unstandardized_spec_is_refused() -> None:
 
     A factor whose raw values sit around 50 would have every missing name imputed at `0.0`, which
     is an extreme of the cross section rather than the middle of it. The refusal names the codes
-    that asked for it, because a spec with four actions gives four places to look.
+    that asked for it, because a spec with five actions gives five places to look.
     """
     with pytest.raises(ValidationError, match="has no neutral point"):
         _spec(standardization="none", missing_values=_policy(input_missing="fill_neutral"))
@@ -439,6 +449,7 @@ def test_the_policy_answers_every_non_computed_code_and_refuses_the_computed_one
     assert {code: policy.action_for(code) for code in MISSING_VALUE_COVERAGE_ORDER} == {
         "not_in_universe": "exclude",
         "insufficient_history": "exclude",
+        "ambiguous_filing": "exclude",
         "input_missing": "fill_cross_sectional_median",
         "undefined_value": "refuse",
     }
@@ -460,6 +471,7 @@ def test_a_policy_carrying_an_action_this_build_does_not_declare_is_refused_wher
     smuggled = MissingValuePolicy.model_construct(
         not_in_universe="exclude",
         insufficient_history="exclude",
+        ambiguous_filing="exclude",
         input_missing="interpolate",
         undefined_value="exclude",
     )
@@ -471,8 +483,10 @@ def test_a_policy_carrying_an_action_this_build_does_not_declare_is_refused_wher
 def test_the_policy_has_one_field_per_non_computed_coverage_code() -> None:
     """The import-time audit's passing case, run explicitly so it is a test and not a side effect.
 
-    A sixth `FactorCoverage` member arriving with no policy field would make `action_for` raise
-    at run time, in production, on the first cross section that carried one.
+    A seventh `FactorCoverage` member arriving with no policy field would make `action_for` raise
+    at run time, in production, on the first cross section that carried one. `V2-P3-018` is the
+    sixth and is the one occasion this audit has actually blocked a change: `domain/factor_
+    transform.py` would not import until `ambiguous_filing` had a field here.
     """
     assert set(MissingValuePolicy.model_fields) == set(FACTOR_COVERAGE_CODES) - {"computed"}
     assert (
@@ -495,7 +509,7 @@ def test_the_audit_fails_on_a_policy_that_is_missing_a_code_and_on_one_that_inve
         _refuse_a_policy_that_cannot_answer_every_missing_code(
             [*MISSING_VALUE_COVERAGE_ORDER, "invented_code"], MISSING_VALUE_COVERAGE_ORDER
         )
-    with pytest.raises(FactorTransformError, match="four stored column names"):
+    with pytest.raises(FactorTransformError, match="five stored column names"):
         _refuse_a_policy_that_cannot_answer_every_missing_code(
             MissingValuePolicy.model_fields, ("not_in_universe", "input_missing")
         )

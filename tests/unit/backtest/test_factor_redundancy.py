@@ -1200,6 +1200,7 @@ def test_a_vectors_census_adds_up_and_carries_every_excluded_code_including_the_
     extras += [(f"H{index}.SZ", None, "insufficient_history") for index in range(3)]
     extras += [(f"U{index}.SZ", None, "undefined_value") for index in range(4)]
     extras += [(f"N{index}.SZ", None, "not_in_universe") for index in range(5)]
+    extras += [(f"A{index}.SZ", None, "ambiguous_filing") for index in range(6)]
 
     vector = _vector(UP, admitted, extra_rows=extras)
 
@@ -1209,12 +1210,13 @@ def test_a_vectors_census_adds_up_and_carries_every_excluded_code_including_the_
     assert dict(vector.excluded_by_coverage) == {
         "not_in_universe": 5,
         "insufficient_history": 3,
+        "ambiguous_filing": 6,
         "input_missing": 2,
         "undefined_value": 4,
     }
-    assert vector.subject_count == 23
+    assert vector.subject_count == 29
     assert len(vector.values) == 9
-    assert len(vector.values) + sum(count for _c, count in vector.excluded_by_coverage) == 23
+    assert len(vector.values) + sum(count for _c, count in vector.excluded_by_coverage) == 29
     with pytest.raises(FactorRedundancyError, match="a census that does not add up"):
         FactorVector(
             as_of=AS_OF,
@@ -1222,7 +1224,7 @@ def test_a_vectors_census_adds_up_and_carries_every_excluded_code_including_the_
             definition=UP,
             values=MappingProxyType(dict(admitted)),
             excluded_by_coverage=vector.excluded_by_coverage,
-            subject_count=22,
+            subject_count=28,
         )
 
 

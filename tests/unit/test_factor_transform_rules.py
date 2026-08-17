@@ -39,6 +39,7 @@ from typing import Any, Final
 import pytest
 
 from openalpha_cn.domain.factor import (
+    FACTOR_COVERAGE_CODES,
     MAX_FACTOR_KEY_LENGTH,
     FactorBuildManifest,
     FactorDefinition,
@@ -127,6 +128,7 @@ def _spec(**overrides: Any) -> FactorTransformSpec:
         "missing_values": MissingValuePolicy(
             not_in_universe="exclude",
             insufficient_history="exclude",
+            ambiguous_filing="exclude",
             input_missing="exclude",
             undefined_value="exclude",
         ),
@@ -140,6 +142,7 @@ def _policy(**overrides: str) -> MissingValuePolicy:
     settings: dict[str, Any] = {
         "not_in_universe": "exclude",
         "insufficient_history": "exclude",
+        "ambiguous_filing": "exclude",
         "input_missing": "exclude",
         "undefined_value": "exclude",
         **overrides,
@@ -384,6 +387,115 @@ def test_the_shipped_transform_sets_its_floor_to_one_over_its_own_quantile() -> 
         CROSS_SECTION_STANDARD.missing_values.action_for("input_missing")
         == "fill_cross_sectional_median"
     )
+    assert CROSS_SECTION_STANDARD.missing_values.action_for("ambiguous_filing") == "exclude"
+
+
+PRE_V2_P3_018_TRANSFORM_ID: Final[str] = "ftx_b74cef3befc2e315b89bf901"
+"""`CROSS_SECTION_STANDARD.transform_id` as this build shipped it at commit `04c45b8`.
+
+A literal, which is the one form that can answer "did this move". Every other identity assertion
+in this repository re-derives the address from the model and therefore moves with it silently;
+the roadmap records "no golden ID assertion anywhere in the repository" as a gap, and this is one
+occasion where the gap is exactly the question -- `V2-P3-018` gave `MissingValuePolicy` a fifth
+field, and whether that moved the transform's content address is not something the new code can
+be asked.
+"""
+
+PRE_V2_P3_018_FACTOR_IDS: Final[dict[str, str]] = {
+    "reversal_1d/v1": "fct_49cfa6276c670a9726a4acc5",
+    "momentum_20_sessions/v1": "fct_62316228dc4bba083a172c3f",
+    "momentum_60_sessions/v1": "fct_22b99f6cbbae938cf9af0378",
+    "momentum_120_sessions/v1": "fct_9c055aa028a9611d9c4bf5b9",
+    "reversal_5_sessions/v1": "fct_61176665c7deaceeed67cc81",
+    "return_vol_60/v1": "fct_3a4d829e229168a99efa142f",
+    "downside_vol_60/v1": "fct_1bedda7dbbf4c3dd709662ce",
+    "turnover_60/v1": "fct_2a5fc5f1eb46bd5bf5605bfa",
+    "amihud_60/v1": "fct_a46982b318f1edc6c5871fa1",
+    "earnings_yield_ttm/v1": "fct_b1ea47df4fd8c99dd09a390d",
+    "book_to_price/v1": "fct_305cca3f0f4a3d21a9d8b88f",
+    "sales_yield_ttm/v1": "fct_93097ca7dc4047c6c5ddbc17",
+    "return_on_equity_ttm/v1": "fct_a026989b8598b754e2fe2f66",
+    "return_on_capital_ttm/v1": "fct_801a8e56e6b98a90f7d825f7",
+    "gross_margin_stability/v1": "fct_29b6bff58173709fcaedbe12",
+    "accruals_ttm/v1": "fct_5dcd1cc96b04ca5609651664",
+    "revenue_yoy/v1": "fct_01777efa0d2018eb108d49ff",
+    "net_profit_yoy/v1": "fct_dcf172ec6d951c8ef0641455",
+    "revenue_yoy_acceleration/v1": "fct_9fe32b090565be4ded03bb6d",
+}
+"""Every shipped `factor_id` as this build produced them at commit `04c45b8`, before the coverage
+vocabulary gained a sixth member. None of them may move for this reason."""
+
+
+def test_the_coverage_vocabulary_moves_transform_id_and_leaves_every_factor_id_where_it_was() -> (
+    None
+):
+    """`V2-P3-018`'s identity accounting, as a measurement rather than as a paragraph.
+
+    The coverage vocabulary is **not** a contract field set, and the difference decides which
+    stored partitions have to be rebuilt:
+
+    - `MissingValuePolicy` has one field per non-`computed` code, so the vocabulary is *inside*
+      `FactorTransformSpec`'s hashed payload. A sixth code is a fifth field is a different
+      declared policy, and `transform_id` moves -- taking `transform_manifest_id` and every
+      `experiment_id` that carries a transform spec with it. That is the contract working: a spec
+      that can express what to do with a self-contradictory filing is not the spec that could not,
+      and two builds sharing one address while treating such a security differently is exactly
+      what a content address exists to prevent.
+    - `FactorDefinition` names no coverage code in any field, so the vocabulary is *outside*
+      `factor_id`. Nineteen shipped definitions, nineteen unchanged addresses -- which is what
+      keeps every `factor_obs_*` partition readable and makes the migration a manifest-schema
+      change rather than a re-identification of every factor this repository has.
+
+    Both directions are pinned against literals captured before the change, because a
+    re-derivation cannot tell a reader whether an address moved -- it moves with the code. The
+    field-set assertions beside them are what makes the literals *explicable* rather than magic:
+    they say why one moved and the other did not.
+    """
+    current = {
+        key: FACTOR_DEFINITIONS.get(key).factor_id for key in FACTOR_DEFINITIONS.qualified_keys
+    }
+
+    assert current == PRE_V2_P3_018_FACTOR_IDS
+    assert CROSS_SECTION_STANDARD.transform_id != PRE_V2_P3_018_TRANSFORM_ID
+    assert set(FactorDefinition.model_fields) & FACTOR_COVERAGE_CODES == set()
+    assert set(MissingValuePolicy.model_fields) == FACTOR_COVERAGE_CODES - {"computed"}
+    assert "ambiguous_filing" in MissingValuePolicy.model_fields
+
+
+def test_the_shipped_policy_would_refuse_a_whole_cross_section_for_one_ambiguous_filing_if_it_said_so() -> (  # noqa: E501
+    None
+):
+    """The counterfactual behind `ambiguous_filing="exclude"`, driven rather than argued.
+
+    `V2-P3-018` made the raw engine answer per security instead of refusing the build. That gain
+    is undone one plane down if the transform declares `refuse` for the same code:
+    `apply_factor_transform` raises on the whole cross section for one such security, so at the
+    ambiguity rates `V2-P3-010`'s probe measured -- 8.51% of `income`'s filings, 17.11% of
+    `cashflow`'s -- essentially every real whole-market cross section would fail here instead.
+
+    Both halves are run over the **same** panel, so the difference is the declared action and
+    nothing else: `refuse` raises, and the shipped `exclude` produces a panel in which the
+    contradicting security is `source_not_computed` carrying `source_coverage="ambiguous_filing"`
+    and the hundred others are processed. The census is asserted rather than the length,
+    because a transform that dropped the row entirely would also leave a hundred.
+    """
+    cross_section = _cross_section(*(float(index) for index in range(100)))
+    cross_section["000101.SZ"] = None
+    panel = _panel(cross_section, codes={"000101.SZ": "ambiguous_filing"})
+
+    with pytest.raises(FactorTransformError, match="ambiguous_filing: 1 security"):
+        _apply(panel, _spec(missing_values=_policy(ambiguous_filing="refuse")))
+
+    shipped = _apply(panel, _spec(missing_values=CROSS_SECTION_STANDARD.missing_values))
+    census = shipped.coverage_census()
+    excluded = next(item for item in shipped.observations if item.subject == "000101.SZ")
+
+    assert excluded.coverage == "source_not_computed"
+    assert excluded.source_coverage == "ambiguous_filing"
+    assert excluded.value is None
+    assert census["processed"] == 100
+    assert census["source_not_computed"] == 1
+    assert census["imputed"] == 0
 
 
 def test_a_cross_section_thinner_than_the_declared_floor_produces_no_values_at_all() -> None:
@@ -1333,7 +1445,7 @@ def _manifest_row(**overrides: object) -> tuple[object, ...]:
 
 
 def test_a_stored_transform_manifest_row_of_the_wrong_width_is_refused() -> None:
-    with pytest.raises(FactorEngineError, match="expected 34"):
+    with pytest.raises(FactorEngineError, match="expected 35"):
         _transform_manifest_from_row(("too", "few"), dataset=TRANSFORM_MANIFESTS)
 
 

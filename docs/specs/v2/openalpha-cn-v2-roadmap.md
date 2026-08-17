@@ -204,7 +204,7 @@ P3 结束即可独立使用（Jupyter 直连面板 + 因子）
 | `V2-P3-015` | 因子的 CLI + REST + SDK 面（`factor run --factor <id> --start --end`） | 产 | 014 | — | S83, S84 |
 | `V2-P3-016` | **指数点位序列数据集 + 面板可达的市场收益**（`V2-P3-013` 的残差/特质波动的硬前置，见下方小节） | 技 | P1 存储契约 | `013` 实测：15 个 descriptor 里**没有任何指数点位**（`index_weight` 是成分权重不是点位），且 `FactorWindow` 是单标的的 —— 求值器**按类型**够不到市场序列 | S16 |
 | `V2-P3-017` | **扣非净利列进入统计投影**（`V2-P3-009` 的 EPcut 的硬前置，见下方小节） | 技 | `V2-P1-011` 存储契约 | `009` 复审实测：四个投影的 10 / 7 / 5 / 11 列里**没有扣非净利**，而端点**直接服务 `profit_dedt` 本身**（把它加进投影就读得回来，101 只票）。代价是每个已存分区的 schema + 以真实行钉住字段列表的契约测试**都要重写**；**不是**折叠/拒绝口径的重新定价 —— 同一批原始行量两遍，折叠行数、歧义 filing 数、既有 11 列的逐列拒绝数**一字未变** | S16 |
-| `V2-P3-018` | **`FactorCoverage` 第六个码：把「这只票的这次 filing 有歧义」变成单票覆盖码而不是整 build 拒绝**（`V2-P3-009`..`011` 共用的墙，见下方小节） | 技 | `V2-P3-002` 存储契约 | `009` 实测：`income` 歧义 filing 8.2% / 8.7%，`fina_indicator` 记录 13.7%，横截面里任意一只撞上就拒绝整个 build。`FACTOR_CENSUS_COLUMNS` 由 `FACTOR_COVERAGE_ORDER` 推导进 `FACTOR_MANIFEST_DATA_COLUMNS`，第六个码会改已存 manifest 分区的宽度（`test_a_stored_manifest_row_of_the_wrong_width_is_refused` 钉的 27 列）。复用现有五个码在语义上是错的 | S16 |
+| `V2-P3-018` | **`FactorCoverage` 第六个码：把「这只票的这次 filing 有歧义」变成单票覆盖码而不是整 build 拒绝**（`V2-P3-009`..`011` 共用的墙，见下方小节） | 技 | `V2-P3-002` 存储契约 | 已交付 `ambiguous_filing`，插在 `insufficient_history` 与 `input_missing` **之间**（该位置就是 `_classify` 的判定优先级，由一条读 AST 的审计对账）。标记按 `(subject, period)` 记在 `_DatasetReading` 上，只对**窗口真的覆盖到那一期**的票生效；会话轴一字未动，第二行照旧拒绝。**schema 迁移**：manifest 分区 27→28 列、transform manifest 34→35 列，旧分区在 readiness 上以 `field_missing` 拒读而不是错位解码 —— 因子分区是派生物、`manifest_id` 使其可重建，`storage/migrations.py` 只管 `state.sqlite3`。**身份**：`transform_id` 移动（覆盖码词表就是 `MissingValuePolicy` 的字段集，在 `FactorTransformSpec` 的哈希载荷里），19 个 `factor_id` 一个没动，两边都用 `04c45b8` 的字面量钉住 | S16 |
 
 **闸门**：每个因子同时出三档报告；因子合同测试使用冻结股票池/日历/公司行动/修正，证明 PIT 可见性与确定性取值；P2 红队测试仍全绿。
 
@@ -962,9 +962,11 @@ max **1.6738**，**跨两个数量级**。而它的来源是合成的 ——
 （`test_the_engines_period_selection_is_the_domains_filing_for`）。
 停止抛的只有「同日两个**不同期次**」，那本来就不是重复键，正是它让普通的 `income` 输入读不了。
 
-**没有第六个覆盖码**：期次数量不足与期次跨度超限都是 `insufficient_history`，
+**报告期轴不为自己新增覆盖码**：期次数量不足与期次跨度超限都是 `insufficient_history`，
 靠 `input_period_first/last` 在存储行上区分（前者无窗口，后者带着被拒的窗口）——
-`max_window_sessions` 的先例原样复用。
+`max_window_sessions` 的先例原样复用。（后来 `V2-P3-018` 确实加了第六个码 `ambiguous_filing`，
+但它回答的是另一个问题 —— 「发布方说了两遍且不一致」而不是「历史不够」——
+所以这一段的判断没有被推翻，见下方 `V2-P3-018` 小节。）
 **面板期次日历是可见读返回的 `report_period` 并集**，理由与 `max_window_sessions` 数面板会话一样：
 自造财季算术会是第二本与分区打架的日历，还得裁决非季末 `end_date` 属于哪一季。
 
@@ -1180,7 +1182,7 @@ widened_projection : rows 7686  filings 4423  collapsed_rows 2566  ambiguous 697
 从来没有能力判定这件事，无论朝哪个方向。
 
 
-### `V2-P3-018`（2026-08-13 立）：歧义 filing 现在拒绝整个 build，而不是给那只票一个覆盖码
+### `V2-P3-018`（2026-08-13 立，2026-08-17 交付）：歧义 filing 曾经拒绝整个 build，现在只给那只票一个覆盖码
 
 `V2-P3-009` 让引擎折叠了「可证是同一个事实」的重复行，但**证明是两个事实的那些还在**，
 且一只票撞上就拒绝整个横截面。这不是 `009` 能顺手修的，理由和 `016` / `017` 同规格：
@@ -1204,11 +1206,109 @@ widened_projection : rows 7686  filings 4423  collapsed_rows 2566  ambiguous 697
 **所以 `010` / `011` 比 `009` 更早、更频繁地撞上同一堵墙这句话仍然成立，只是理由从「读哪一列」
 换成了「读几列 × 几期」。**
 
-声明落在 `panel_factors._read_dataset`、该模块 docstring 的 "The value family" 与
-"The quality family" 两节，以及
-`tests/integration/panel/test_quality_family.py::
-test_the_engine_answers_a_column_the_duplicate_rows_agree_about_and_refuses_one_they_do_not`，
-都指向本条。
+声明曾落在 `panel_factors._read_dataset`、该模块 docstring 的 "The value family" 与
+"The quality family" 两节，以及两个家族各自的
+`test_the_engine_answers_a_column_the_duplicate_rows_agree_about_and_refuses_one_they_do_not`
+（交付时改名为 `..._and_codes_one_they_do_not`，因为它现在断言的是覆盖码而不是拒绝）。
+下面是交付记录。
+
+#### 交付（2026-08-17）：第六个码叫 `ambiguous_filing`，插在词表中间而不是末尾
+
+**语义边界是可测的，不靠命名。** 同一个分区、同一只票、同一期：
+删掉那个单元格 → `input_missing`；放回去 → `computed`；
+再加一行携带**相同**单元格 → 仍然 `computed`（一个事实说两遍会折叠）；
+让第二行**不同** → `ambiguous_filing`。分界是「**什么能修好它**」：
+重新 fetch 修得好第一个，对最后一个只会把同样的两行再取回来一次。
+所以两者同时成立时 `ambiguous_filing` **压过** `input_missing`
+（`test_an_ambiguous_filing_outranks_a_null_cell_in_the_same_window`，带控制组）。
+`undefined_value` 与两者都不同：它的输入齐全，修法是改因子自己的定义。
+
+**插在中间而不是追加在末尾**，因为 `FACTOR_COVERAGE_ORDER` 的 docstring 一直声称
+「`computed` 之后的顺序就是判定优先级」。追加是更小的 diff，但会让那句话变成假话。
+`tests/unit/test_factor_engine_rules.py::
+test_the_census_order_is_the_order_classify_decides_the_codes_in`
+直接读 `_classify` 的 AST 对账，所以这句声明现在是可执行的。
+
+**只对窗口覆盖到的那一期生效。** 标记按 `(subject, period)` 记在 `_DatasetReading` 上，
+`_classify` 拿它与自己形成的 `periods` 求交 —— 2023 年那次自相矛盾没有进入
+2024Q1..2025Q1 的 TTM，为它给这只票判一个码，就是对一个不依赖它的答案报缺陷。
+
+**会话轴一字未动。** `daily` / `daily_basic` 没有版本机制，第二行照旧拒绝整个 build，
+相等与否都拒。`test_two_identical_session_rows_still_refuse_the_build_because_the_axis_has_no_versions`
+仍然是 `pytest.raises`。
+
+**与 `filing_for` 那条有意分歧保留了，代价降级了。** 被更晚公告取代的同日矛盾对仍然被标记，
+因为把检查放在 `(subject, period, announcement)` 三元组上正是让判决不依赖 DuckDB 行序的原因
+（实测三种写序：raised / computed / computed）。现在它的代价是一只票一个码，而不是一个 build。
+`test_a_superseded_ambiguous_pair_still_codes_the_security_rather_than_taking_the_later_row`
+用两个控制 store 证明「被拒绝的那个答案确实存在且是一个具体的数」。
+
+#### schema 迁移：加一列，旧分区拒读而不是错位解码
+
+`FACTOR_CENSUS_COLUMNS` 由词表推导进 `FACTOR_MANIFEST_DATA_COLUMNS`，所以
+**manifest 分区 27 → 28 列**、**transform manifest 34 → 35 列**
+（`MISSING_VALUE_COLUMNS` 同样由词表推导）。三处宽度断言随之改：
+`expected 27` → `expected 28`、`expected 34` → `expected 35`、
+`_UNREASSEMBLED_MANIFEST_COLUMNS` 的 `23` → `24`。
+
+**已存分区怎么办：重建，而这条路是安全的，因为读会拒。**
+`factor_manifest_requirement` 的 `required_fields` 就是 `FACTOR_MANIFEST_PANEL_COLUMNS`，
+所以五码 build 写下的分区在 readiness 上直接 `field_missing`（阻断码，不可被行过滤修复），
+`load_factor_manifests` 拒读而不是按 27 列错位解码；即便绕过 readiness，
+`_manifest_cells` 的宽度检查也会拒。**本仓库没有面板层迁移先例，也不需要**：
+`storage/migrations.py` 建在 `PRAGMA user_version` 上、只管 `state.sqlite3`，DuckDB 没有那个东西
+（`panel/catalog.py::PANEL_CATALOG_SCHEMA_VERSION` 已经把这条分界写下来了）；
+而因子分区是**派生物** —— `manifest_id` 记着 definition、as_of、cross section digest 与每个输入
+分区的 `partition_content_hash`，重跑一次就是同一份数字。
+
+**哪些身份移动了、哪些没有。**
+`transform_id` **移动**（`ftx_b74cef3befc2e315b89bf901` → `ftx_87ea4f34d1e76e129076f967`），
+连带 `transform_manifest_id` 与任何携带 transform spec 的 `experiment_id`：覆盖码词表就是
+`MissingValuePolicy` 的字段集，而它在 `FactorTransformSpec` 的哈希载荷里。
+19 个 `factor_id` **一个没动** —— `FactorDefinition` 的字段集不含任何覆盖码，
+覆盖码是存储列能装的**值**，不是身份契约的**字段**。两边都用 `04c45b8` 的字面量钉住：
+`tests/unit/test_factor_transform_rules.py::
+test_the_coverage_vocabulary_moves_transform_id_and_leaves_every_factor_id_where_it_was`。
+
+#### 两处 import 期审计与一处不挡路的第三处
+
+- `domain/factor_transform.py::_refuse_a_policy_that_cannot_answer_every_missing_code`
+  **真的挡住了**：`MissingValuePolicy` 少一个字段该模块就不能 import。
+  出厂 `CROSS_SECTION_STANDARD` 声明 `ambiguous_filing="exclude"`。
+  **`refuse` 是被实测否掉的**：在 8.51%（`income`）到 17.11%（`cashflow`）的歧义率下，
+  它会把本 issue 刚拆掉的整 build 拒绝原样搬到下一层，
+  `test_the_shipped_policy_would_refuse_a_whole_cross_section_for_one_ambiguous_filing_if_it_said_so`
+  在同一个 panel 上把这个反事实跑出来。**填充**被否是因为两个候选值跨零
+  （`income.ebit` −7,579,086 对 +3,427,524），横截面中位数是发布方没说过的第三个数，
+  且落在数据本身定不了的符号边界的一侧。
+- `backtest/factor_ic.py::_refuse_a_tier_table_that_disagrees_with_its_own_contract`
+  **自愈**：`RAW_COVERAGE_ORDER` 由 `MISSING_VALUE_COVERAGE_ORDER` 推导，
+  raw 档词表就是 `FACTOR_COVERAGE_CODES`。
+- `domain/factor_neutralization.py::_refuse_a_participation_table_that_cannot_answer_every_valued_processed_code`
+  **不挡路**：它对的是 `ProcessedCoverage` 不是 `FactorCoverage`。新码只会作为
+  `source_not_computed` 行上的 `source_coverage` 到达中性化，`not_a_participant` 已经覆盖，
+  **不参与横截面回归**（它没有值，`PROCESSED_VALUE_CODES` 不含 `source_not_computed`）。
+
+#### 新码**不进** `TIER_ADMITTED_CODES`，但**在普查里可见**
+
+`TIER_ADMITTED_CODES["raw"]` 仍是 `frozenset({"computed"})`，而且这不是一次选择而是一条约束：
+同一个审计要求 `admitted <= valued`，`TIER_VALUE_CODES["raw"]` 也是 `{computed}`，
+所以一个不带值的码根本无法被录取。可见性是自动的 —— `RAW_COVERAGE_ORDER` 推导自词表，
+所以 `ICCensus.excluded_by_coverage`、`FactorVector.excluded_by_coverage`
+与 `factor_tradeability` 的漏斗各自都多了一格，
+「因为发布方自相矛盾而变窄的横截面」在每一档都是可数的。
+
+#### 验收：全市场能跑了
+
+`tests/integration/panel/test_value_family.py::
+test_one_contradictory_filing_costs_that_security_and_leaves_the_cross_section_untouched`
+给 `000001.SZ` 的最新一期加第二行 `income`（只在 `total_revenue` 上不一致，
+正是 `income` 里 8.51% 的 filing 的形状），与干净分区上的同一次构建对照：
+那一只票 `ambiguous_filing` 且无值、census 恰好记 1，
+**其余每一只票的覆盖码与数值与干净构建逐位相等**（用 `==` 不用 `approx`）。
+改动前同一次调用抛 `FactorEngineError`，横截面里**没有任何一只票**拿到观测。
+干净横截面本身跨 `computed` / `insufficient_history` / `undefined_value` / `not_in_universe`
+四个码，所以对照的不是一个只有一种答案的面板。
 
 
 ### `V2-P3-010` 交付记录（2026-08-13）：质量家族四个因子，ROE **不读** `fina_indicator.roe`
@@ -1765,7 +1865,7 @@ horizon `h` 上相邻一个交易日的两个预测日共享 `h + 1` 个会话�
    旁边两档自己的码照样读得到。一个制品级的「insufficient」会把
    「IC 序列差两个 as_of」（`insufficient_as_ofs`）和
    「排程重叠所以持仓态不存在」（`overlapping_schedule`）变成一个发现一种补法，
-   而它们是两个发现两种补法 —— `FactorCoverage` 为此花了五个成员、`TurnoverCoverage` 三个。
+   而它们是两个发现两种补法 —— `FactorCoverage` 为此花了六个成员、`TurnoverCoverage` 三个。
 
 #### 验收标准的实测演示：raw 档 IC 高、neutralized 档归零，在报告里长这样
 

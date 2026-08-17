@@ -209,22 +209,33 @@ overrun is `insufficient_history`, distinguishable on the stored row by the peri
 than by a sixth code.
 
 Two rows of one `(subject, period)` at one announcement -- the shape carrying 81.7% of
-`fina_indicator`'s real duplication -- raise when they **disagree in the columns the factor
-reads** and collapse when they agree, which is `build_statement_history`'s own rule and is what
-makes this engine's answer `ReportFiling.value_of`'s answer. `V2-P3-009` made that change and
-`_read_dataset` argues it; refusing on multiplicity alone had refused 372 of `income`'s 633
-duplicate keys that say exactly the same thing twice.
+`fina_indicator`'s real duplication -- **code that security `ambiguous_filing`** when they
+disagree in the columns the factor reads and collapse when they agree, which is
+`build_statement_history`'s own rule and is what makes this engine's answer
+`ReportFiling.value_of`'s answer. `V2-P3-009` made the collapse and `_read_dataset` argues it;
+refusing on multiplicity alone had refused 372 of `income`'s 633 duplicate keys that say exactly
+the same thing twice. `V2-P3-018` made the remainder a per-security code instead of a build
+refusal; see "Coverage is a code, never a bool" below.
 
 ## Coverage is a code, never a bool
 
-`FactorCoverage` has five members and `domain/factor.py` argues each one. The short version:
+`FactorCoverage` has six members and `domain/factor.py` argues each one. The short version:
 "could not compute" is not one fact. A security that had not listed yet (`not_in_universe`)
 should have no value and reporting a data fault for it would put a permanent false defect on
 every historical cross section; a security that listed nine sessions ago
-(`insufficient_history`) is a correct answer to a 120-session window; a null column
-(`input_missing`) is a fetch problem; a zero denominator (`undefined_value`) is a definition
-problem. `V2-P3-005` has to exclude all four from a correlation rather than treat them as
-zeros, and only a code set lets it.
+(`insufficient_history`) is a correct answer to a 120-session window; a filing the publisher
+stated twice and disagreed with itself about (`ambiguous_filing`) is a fault nobody can fetch
+their way out of; a null column (`input_missing`) is a fetch problem; a zero denominator
+(`undefined_value`) is a definition problem. `V2-P3-005` has to exclude all five from a
+correlation rather than treat them as zeros, and only a code set lets it.
+
+`ambiguous_filing` is `V2-P3-018`'s member and it is the one that made the statement families
+buildable at all. Before it, a single contradictory filing anywhere in a cross section refused
+the whole build, at measured rates of 8.51% of `income`'s filings, 0.95% of `balancesheet`'s,
+**17.11%** of `cashflow`'s and 11.80% of `fina_indicator`'s -- so none of `V2-P3-009`..`011`'s
+six factors could be built over a real whole-market partition. Reusing one of the five that
+existed would have been wrong on the meaning and the wrongness is directional rather than
+aesthetic: `input_missing` tells a reader to fetch, and a re-fetch returns the same two rows.
 
 ## The processed plane is a second pair of datasets, and the transform is a *column* in it
 
@@ -530,20 +541,24 @@ test separates the two behaviours and the whole tree stayed green through the ch
 exactly why it is recorded here rather than only in `_numeric`'s docstring. A fail-closed
 tightening that no suite can see is the kind that has to be written down.
 
-**Two things this family does not deliver and says so.** EPcut is not shipped, because no stored
+**One thing this family does not deliver and says so.** EPcut is not shipped, because no stored
 statement projection carries a deducted-profit column -- see `EARNINGS_YIELD_TTM`, which occupies
 the slot on `RETURN_VOL_60`'s terms, and `V2-P3-017` for what widening the projection actually
-costs. And a build over a *real whole-market* statement partition still refuses rather than
-answering: `_read_dataset` now collapses the duplicate rows that agree, which is most of them,
-but the ones that genuinely disagree (261 of `income`'s 3,201 filings, and 8.2% / 8.7% of the
-review's two samples) refuse the whole build rather than one security, and giving one security
-its own answer would need a sixth `FactorCoverage` member that the stored manifest schema is
-pinned against. That is `V2-P3-018`, filed rather than left in prose because `V2-P3-010` and
-`V2-P3-011` read more filings per observation than this family does, so they meet the wall sooner
-and harder. `V2-P3-009` expected `V2-P3-010`'s ROE to arrive on `fina_indicator.roe`, off the
+costs.
+
+**The second thing it did not deliver was a build over a real whole-market partition, and
+`V2-P3-018` delivered it.** `_read_dataset` collapses the duplicate rows that agree, which is
+most of them; the ones that genuinely disagree (261 of `income`'s 3,201 filings, and 8.2% / 8.7%
+of the review's two samples) used to refuse the whole build rather than one security, and now
+carry `ambiguous_filing` on the securities whose window reaches them. That was filed as
+`V2-P3-018` rather than done here because `FACTOR_CENSUS_COLUMNS` is derived from the coverage
+vocabulary and is part of `FACTOR_MANIFEST_DATA_COLUMNS`, so a sixth code changes the stored
+manifest partition's schema -- a change with a migration attached, which is what that issue
+carried out. `V2-P3-009` expected `V2-P3-010`'s ROE to arrive on `fina_indicator.roe`, off the
 dataset whose ambiguous-filing rate is 13.7%; it did not, and "The quality family" below is the
-argument for computing it instead. The wall is unmoved either way -- `accruals_ttm` reads three
-statement datasets over five contiguous periods and `gross_margin_stability` reads eight.
+argument for computing it instead. The wall was unmoved either way -- `accruals_ttm` reads three
+statement datasets over five contiguous periods and `gross_margin_stability` reads eight -- which
+is why it had to be taken down rather than routed around.
 
 ## The quality family (`V2-P3-010`), and the first factors that read no session at all
 
@@ -890,6 +905,7 @@ FACTOR_COVERAGE_ORDER: Final[tuple[FactorCoverage, ...]] = (
     "computed",
     "not_in_universe",
     "insufficient_history",
+    "ambiguous_filing",
     "input_missing",
     "undefined_value",
 )
@@ -898,6 +914,14 @@ FACTOR_COVERAGE_ORDER: Final[tuple[FactorCoverage, ...]] = (
 Reconciled against `domain/factor.py::FACTOR_COVERAGE_CODES` by
 `tests/unit/test_factor_engine_rules.py`, so the two copies cannot drift -- the same treatment
 `panel_fixtures.STATEMENT_DATASETS` gets against the domain's own tuple.
+
+**The order after `computed` is `_classify`'s own order of precedence**, and `V2-P3-018` put
+`ambiguous_filing` in the middle of the tuple rather than on the end for that reason: it is
+decided after the two history questions (a window that cannot be formed has no filing to be
+ambiguous about) and before `input_missing` (a re-fetch repairs a null cell and returns the same
+two contradictory rows for an ambiguous one, so reporting the repairable code would send a
+reader to a repair that does not work). `tests/unit/test_factor_engine_rules.py::
+test_the_census_order_is_the_order_classify_decides_the_codes_in` holds the two together.
 """
 
 
@@ -937,7 +961,7 @@ FACTOR_OBSERVATION_DATA_COLUMNS: Final[tuple[str, ...]] = (
 six the acceptance names land as: **subject** -> `subject`; **as-of** -> `event_time` /
 `available_time`, which for a derived row are both the `as_of` the build was made at;
 **value** -> `value`, null unless `coverage` is `computed`; **coverage marker** -> `coverage`,
-one of five codes; **input reference** -> `input_row_count` and the two window pairs for the
+one of six codes; **input reference** -> `input_row_count` and the two window pairs for the
 rows, and `manifest_id` for the partitions; **build manifest** -> `manifest_id`, resolvable in
 this factor's own `factor_manifest_<key>_v<n>`.
 
@@ -2802,8 +2826,9 @@ regime. Two things make four the number rather than a round one:
   `k = 2` would be a scaled absolute difference wearing a standard deviation's name. Four is the
   smallest count at which the estimator is doing what its own docstring says.
 - Each extra observation costs one more contiguous filing, and every one of them is a
-  `(filing, column)` read that can refuse the **whole build** rather than one security -- see
-  `V2-P3-018`. At `income`'s ambiguous-filing rate -- 8.15% recorded and **8.51%** on
+  `(filing, column)` read that can cost this security its value. It used to cost the **whole
+  build**; `V2-P3-018` made it `ambiguous_filing` for the one security, which changes the price
+  and not the direction. At `income`'s ambiguous-filing rate -- 8.15% recorded and **8.51%** on
   `V2-P3-010`'s own two-sample probe -- width is not free, and a reach that read three years of
   margins would be a coverage decision made for a smoother statistic.
 
@@ -3015,12 +3040,15 @@ survived a live probe, in the order of how much they decide; a fourth was writte
    make the published column the safer read, and this factor does not claim it does.
 
 **So what it costs is the fourth argument turned around, stated rather than absorbed.** Reading
-two datasets means a refusal in *either* refuses the read; the five-period reach means a security
-with fewer than five contiguous filings is `insufficient_history` here where one
-`fina_indicator.roe` row would have answered; and `V2-P3-018`'s wall is met sooner because the
-whole build refuses on any ambiguity anywhere in the cross section. All three are paid for
-arguments 1 to 3, and 1 is the one that cannot be bought off: a mixed-horizon quantity in a cross
-section is not a factor with a coverage cost, it is a different number per security.
+two datasets means an ambiguity in *either* costs the security its value; the five-period reach
+means a security with fewer than five contiguous filings is `insufficient_history` here where one
+`fina_indicator.roe` row would have answered; and the wider reach meets more ambiguous filings.
+The third of those was the sharpest of the three until `V2-P3-018`, because the cost of an
+ambiguity anywhere in the cross section was the **whole build**; it is now `ambiguous_filing` on
+the securities whose own window holds the contradictory filing, so the cost is a coverage rate
+rather than a wall. All three are paid for arguments 1 to 3, and 1 is the one that cannot be
+bought off: a mixed-horizon quantity in a cross section is not a factor with a coverage cost, it
+is a different number per security.
 """
 
 RETURN_ON_EQUITY_TTM_NOTE: Final[FactorNote] = FactorNote(
@@ -3050,10 +3078,12 @@ RETURN_ON_EQUITY_TTM_NOTE: Final[FactorNote] = FactorNote(
         "balancesheet.total_hldr_eqy_exc_min_int -- and this factor reads BOTH of the latter two "
         "over FIVE contiguous periods where the served column would have been one read at one "
         "period, about 0.56% against 0.27% per filing before the reach is counted. What it costs "
-        "is therefore paid rather than hidden: two datasets means a refusal "
-        "in EITHER refuses the read, five contiguous filings means a young issuer is "
-        "insufficient_history where one fina_indicator row would have answered, and V2-P3-018's "
-        "wall is met sooner. The denominator is the CLOSING equity and not "
+        "is therefore paid rather than hidden: two datasets means an ambiguity "
+        "in EITHER costs the security its value, five contiguous filings means a young issuer is "
+        "insufficient_history where one fina_indicator row would have answered, and a wider reach "
+        "meets more ambiguous filings -- which V2-P3-018 turned from a refusal of the whole cross "
+        "section into an ambiguous_filing code on that one security. The denominator is the "
+        "CLOSING equity and not "
         "the average of the window's ends, which departs from the textbook on purpose: "
         "earnings_yield_ttm and book_to_price already ship and divide this same trailing profit "
         "and this same closing equity by one market capitalisation, so EP / BP is exactly this "
@@ -3221,7 +3251,8 @@ GROSS_MARGIN_STABILITY_NOTE: Final[FactorNote] = FactorNote(
         "each slice's own periods[:-1] is four CONSECUTIVE quarters, of which exactly one ends a "
         "year at every alignment. Four is the fewest observations at which a Bessel-corrected "
         "estimator is doing what its name says, and each further one costs a contiguous filing "
-        "whose ambiguity refuses the whole build rather than one security (V2-P3-018). The four "
+        "whose ambiguity codes this security ambiguous_filing (V2-P3-018, which made that a "
+        "per-security answer rather than a refusal of the whole build). The four "
         "overlap by three quarters each, so this is a drift measure and not four independent "
         "draws. A standard deviation and not a coefficient of variation: a gross margin is "
         "already dimensionless, and dividing by a mean that can be near zero or negative would "
@@ -4109,12 +4140,24 @@ class _DatasetReading:
     has to consult a dataset name. One reading type rather than two, because everything after the
     read is the same arithmetic on a different index -- and two types would mean two copies of
     `_stored_rows`, `_complete_series` and the window formation.
+
+    `ambiguous_points_by_subject` is `V2-P3-018`'s carrier: the points at which this read found a
+    filing the publisher stated twice and disagreed with itself about, in the columns this factor
+    asked for. It is **always empty on the session axis** -- there is no collapse there and a
+    second row of one `(subject, session)` still raises in `_read_dataset` -- so it is a
+    period-axis fact travelling on the one reading type, rather than a second type.
+
+    Keyed by subject rather than held as a set of `(subject, point)` pairs so that `_classify`'s
+    lookup is one dictionary hit per security instead of a scan: that loop runs 5,534 times for a
+    whole-market cross section, and the ambiguous set on a real statement partition is not small
+    (8.51% of `income`'s filings and 17.11% of `cashflow`'s, measured in `V2-P3-010`'s probe).
     """
 
     points_by_subject: Mapping[str, tuple[date, ...]]
     values: Mapping[tuple[str, date], tuple[float | None, ...]]
     columns: tuple[str, ...]
     axis: FactorAxis
+    ambiguous_points_by_subject: Mapping[str, frozenset[date]]
 
 
 def _panel_axis_points(
@@ -4360,34 +4403,54 @@ def _read_dataset(
     calls "only what its corpus varies".
 
     So a second row of a `(subject, period, announcement)` triple whose **projected** cells equal
-    the first's is dropped, and one that differs raises with the disagreeing columns named. The
+    the first's is dropped, and one that differs marks that `(subject, period)` ambiguous. The
     projection is the factor's own `required_fields`, which is what makes this `value_of`'s
     answer on the filing a reader at `as_of` would read rather than an approximation of it:
     `value_of(field)` returns a value iff every surviving version agrees on that field, and the
     survivors are distinguished by the *whole* stored projection plus `f_ann_date` -- so "all
     rows agree about the columns this factor reads" is the same predicate, reached by a narrower
-    read. `_refuse_two_versions_that_disagree` states the one corner where the two still part,
+    read. `_columns_two_versions_disagree_about` states the one corner where the two still part,
     and why that corner is deliberate.
     `tests/integration/panel/test_value_family.py::
-    test_the_engine_answers_a_column_the_duplicate_rows_agree_about_and_refuses_one_they_do_not`
+    test_the_engine_answers_a_column_the_duplicate_rows_agree_about_and_codes_one_they_do_not`
     drives both halves over one partition built from two real rows.
 
-    **What this does not buy is a build over a real whole-market partition.** The rows that
-    genuinely disagree are still there -- 261 of `income`'s 3,201 filings (8.15%) and 41 of
-    `balancesheet`'s 3,170 (1.29%), and 8.2% / 8.7% of `income`'s filings on the two independent
-    samples `V2-P3-009`'s review measured -- and one of them anywhere in the cross section still
-    refuses the whole build rather than that one security. A per-security answer would need a
-    sixth `FactorCoverage` member, which is not a widening this issue may make:
-    `FACTOR_CENSUS_COLUMNS` is derived from the coverage vocabulary and is part of
-    `FACTOR_MANIFEST_DATA_COLUMNS`, so a sixth code changes the stored manifest partition's
-    schema, whose width `tests/unit/test_factor_engine_rules.py::
-    test_a_stored_manifest_row_of_the_wrong_width_is_refused` pins, and reusing one of the five
-    would be wrong on the meaning: `input_missing` says the row is not there and
-    `undefined_value` says the arithmetic has no answer, where this says the publisher stated the
-    number twice and disagreed with itself. **That is `V2-P3-018`**, filed on `V2-P3-016`'s and
-    `017`'s terms rather than left in prose, because `V2-P3-010` reads `fina_indicator` -- the
-    dataset whose ambiguous-filing rate is 13.7% -- and meets this wall sooner than the value
-    family does. See this module's docstring section "The value family".
+    ## The ambiguity is that security's answer and not the build's (`V2-P3-018`)
+
+    Until `V2-P3-018` the disagreement raised, so **one** ambiguous filing anywhere in the cross
+    section refused the whole build. That is not an edge: the rows that genuinely disagree are
+    8.15% of `income`'s 3,201 filings as recorded, 8.2% / 8.7% on `V2-P3-009`'s two independent
+    samples, 8.51% / 0.95% / **17.11%** / 11.80% on `V2-P3-010`'s 185-security probe of the four
+    endpoints -- and `accruals_ttm` reads three of them over five contiguous periods while
+    `gross_margin_stability` reads eight. So none of `V2-P3-009`..`011`'s six factors could be
+    built over a real whole-market statement partition at all.
+
+    Now the disagreement is recorded against `(subject, period)` in
+    `_DatasetReading.ambiguous_points_by_subject` and `_classify` turns it into
+    `ambiguous_filing` **for the securities whose window contains that period**, leaving every
+    other security in the cross section computed. The two properties the refusal had are kept
+    rather than traded away:
+
+    - **Order-independence.** The mark is decided by comparing the two projections, which is
+      symmetric, and it is recorded whichever of the pair the scan reaches first. `values[key]`
+      may still hold either row's cells, and nothing reads it: `_classify` returns the code
+      before `_complete_series` is called. `tests/integration/panel/test_value_family.py::
+      test_the_disagreement_code_does_not_depend_on_the_order_the_partition_returns_its_rows`
+      drives both write orders.
+    - **Fail-closed.** No version is chosen. `domain/financial_statements.py` measured what
+      choosing one costs: `income.ebit` comes back as -7,579,086 on one row and +3,427,524 on
+      the other, `cashflow.free_cashflow` as +316,026,934 against -294,173,456,
+      `fina_indicator.fcff` as +843,920,834 against -966,053,502 -- opposite signs, so a rule
+      that picked a row would invert this security's place in the cross section rather than
+      nudge it.
+
+    **What is lost and is not stored anywhere** is the *column list*: the refusal named the
+    columns the two rows disagreed about and an observation has no place to put them. A caller
+    who needs that detail has `statement_histories_from_panel_rows` and
+    `ReportFiling.disagreeing_fields` one plane down, over the same rows; the stored observation
+    carries the period window the ambiguity sits in (`input_period_first` / `input_period_last`)
+    and the factor's `required_fields` are resolvable from `factor_id`, so the filing is
+    locatable from the partition and the columns are not.
 
     The session axis keeps the strict rule and that asymmetry is deliberate. The period axis has
     a *measured* dataset property behind its collapse -- two versions of one filing under one
@@ -4396,15 +4459,15 @@ def _read_dataset(
     session, so a second one is a fault rather than a version and dropping it silently would hide
     the fault.
 
-    So the refusal that fired before this axis existed still fires wherever the rows really
-    disagree: under a session index the same-day duplicates collided on `(subject, event_time)`
-    and raised, and under a period index they collide on `(subject, period, announcement)` and
-    raise. What stopped raising is the case that was never a duplicate at all -- an annual and a
-    Q1 disclosed on one day, two periods under one `event_time` -- which is why an ordinary
-    `income` input could not be read before.
+    So the refusal that fired before this axis existed still fires **on the session axis**
+    wherever a second row appears at all, equal or not. What stopped raising on the period axis
+    is first the case that was never a duplicate -- an annual and a Q1 disclosed on one day, two
+    periods under one `event_time`, which is why an ordinary `income` input could not be read
+    before -- and then, in `V2-P3-018`, the genuine disagreement, which became that security's
+    coverage code instead.
     `tests/integration/panel/test_factor_report_periods.py` measures both directions.
 
-    **The refusal is decided on the triple and not on the row the scan happens to reach first**,
+    **The ambiguity is decided on the triple and not on the row the scan happens to reach first**,
     and that is the correction of a defect rather than a way of spelling it. The check used to sit
     behind the restatement branch -- `announcement < previous` continued, `announcement ==
     previous` raised -- so a same-day pair was only ever compared against whatever
@@ -4460,6 +4523,7 @@ def _read_dataset(
     announced: dict[tuple[str, date], date] = {}
     filed: set[tuple[str, date, date]] = set()
     stated: dict[tuple[str, date, date], tuple[float | None, ...]] = {}
+    ambiguous: dict[str, set[date]] = {}
     references: list[FactorInputRef] = []
     provenance: list[FactorInputProvenance] = []
     for year in sorted(set(requirement.years)):
@@ -4518,15 +4582,8 @@ def _read_dataset(
                 # whole-market `daily` year, which is the scale this loop is measured at.
                 previous = stated.get(filing)
                 if previous is not None:
-                    _refuse_two_versions_that_disagree(
-                        previous,
-                        cells,
-                        dataset=dataset,
-                        subject=subject,
-                        point=point,
-                        announcement=announcement,
-                        columns=columns,
-                    )
+                    if _columns_two_versions_disagree_about(previous, cells, columns=columns):
+                        ambiguous.setdefault(subject, set()).add(point)
                     continue
                 stated[filing] = cells
             elif filing in filed:
@@ -4552,23 +4609,23 @@ def _read_dataset(
             MappingProxyType(values),
             columns,
             axis,
+            MappingProxyType({name: frozenset(days) for name, days in ambiguous.items()}),
         ),
         tuple(references),
         tuple(provenance),
     )
 
 
-def _refuse_two_versions_that_disagree(
+def _columns_two_versions_disagree_about(
     stated: tuple[float | None, ...],
     cells: tuple[float | None, ...],
     *,
-    dataset: str,
-    subject: str,
-    point: date,
-    announcement: date,
     columns: tuple[str, ...],
-) -> None:
-    """The **period** axis's second-row rule: return if the two say the same thing, else refuse.
+) -> tuple[str, ...]:
+    """The **period** axis's second-row rule: `()` if the two say the same thing, else the columns.
+
+    An empty answer means the pair collapses; a non-empty one means this `(subject, period)` is
+    `ambiguous_filing` for every security whose window reaches it.
 
     `build_statement_history`'s rule reached through a narrower read. Two rows of one
     `(subject, period, announcement)` key whose *projected* cells are equal are one fact stated
@@ -4595,17 +4652,22 @@ def _refuse_two_versions_that_disagree(
 
     They part on a filing that reader would *not* read: a same-day pair that disagrees under an
     announcement some **later** announcement of the same period supersedes. `filing_for` takes the
-    later announcement and never consults the superseded one; this refuses the build. That is
-    deliberate and it predates this function -- the same-day check was moved onto the triple
-    precisely so a superseded pair could not be silently discarded, because whether it *was*
-    discarded depended on the order the scan returned the rows in. Measured then, on one corpus
-    of three rows in three write orders: raised, computed, computed. Fail-closed and
-    order-independent is the pair worth having; strictly-equal-to-`value_of` and
-    order-dependent is not.
+    later announcement and never consults the superseded one; this marks the period ambiguous
+    anyway. That is deliberate and it predates `V2-P3-018` -- the same-day check was moved onto
+    the triple precisely so a superseded pair could not be silently discarded, because whether it
+    *was* discarded depended on the order the scan returned the rows in. Measured then, on one
+    corpus of three rows in three write orders: raised, computed, computed. Fail-closed and
+    order-independent is the pair worth having; strictly-equal-to-`value_of` and order-dependent
+    is not. What `V2-P3-018` changed is the *price* of the divergence and not the divergence: it
+    costs one security a coverage code where it used to cost the whole cross section a build.
+    `tests/integration/panel/test_value_family.py::
+    test_a_superseded_ambiguous_pair_still_codes_the_security_rather_than_taking_the_later_row`
+    drives it.
 
     Comparison is on the tuple, so it is order-free in the other direction too: rows that all
-    agree collapse whichever order they arrive in, and a triple with any disagreement raises on
-    whichever pair is reached first.
+    agree collapse whichever order they arrive in, and a triple with any disagreement is marked
+    on whichever pair is reached first. The columns are returned in `columns`' own order rather
+    than in a set's, so two runs over one triple name them identically.
 
     `None` is compared like any other cell, deliberately: an upstream cell empty on both rows is
     an agreement about a non-answer, which is exactly what `value_of` returns `None` for. The
@@ -4615,17 +4677,9 @@ def _refuse_two_versions_that_disagree(
     non-finite floats on purpose, so a partition can hold one.
     """
     if stated == cells:
-        return
-    disagreeing = [
+        return ()
+    return tuple(
         name for name, before, after in zip(columns, stated, cells, strict=True) if before != after
-    ]
-    raise FactorEngineError(
-        f"{dataset} carries more than one row for {subject} on {point.isoformat()} announced "
-        f"{announcement.isoformat()}, and they do not agree about {disagreeing}; this engine "
-        "reads one row per security per period and no column of these datasets orders two "
-        "versions announced on one day, so a reducer has to be chosen for them before a factor "
-        "may read them. Rows agreeing in the columns this factor reads are one fact stated twice "
-        "and collapse; these are two facts, and ReportFiling.value_of refuses the same read"
     )
 
 
@@ -4822,9 +4876,19 @@ def _classify(
 
     The order of the checks is the order of `FactorCoverage`'s own argument and it is not
     arbitrary: universe before history, because a name that had not listed yet has no history
-    *and should not*; history before nullity, because a window that cannot be formed has no
-    cells to check; nullity before arithmetic, because an evaluator is only ever handed a
-    complete window.
+    *and should not*; history before ambiguity, because a window that cannot be formed has no
+    filing to be ambiguous about; ambiguity before nullity, because both are answers about the
+    inputs and only one of them is repaired by a fetch -- a reader told `input_missing` about a
+    security whose filing is *also* contradictory would re-fetch and get the same two rows back;
+    nullity before arithmetic, because an evaluator is only ever handed a complete window.
+
+    **`ambiguous_filing` is scoped to the window and not to the security** (`V2-P3-018`). A
+    filing the publisher contradicted itself about at a period this factor's window does not
+    reach did not enter this number, and coding the security for it would report a defect in an
+    answer that does not depend on it -- the same argument `not_in_universe` rests on, one axis
+    over. So the mark is `window & ambiguous`, pooled across the period-axis datasets exactly the
+    way `_points_held` pools their points: dataset A's ambiguity at period P and dataset B's row
+    at P are one window slot, and the slot is unanswerable if either side of it is.
 
     "History" is four questions rather than one and every one of them is `insufficient_history`:
     on each declared axis, whether the security has the reach's worth of its own points at all,
@@ -4895,6 +4959,17 @@ def _classify(
             input_row_count=row_count,
             **ends,
         )
+    if _ambiguous_points(subject, readings=readings).intersection(periods):
+        return FactorObservation(
+            subject=subject,
+            as_of=as_of,
+            value=None,
+            coverage="ambiguous_filing",
+            factor_id=definition.factor_id,
+            manifest_id=manifest_id,
+            input_row_count=row_count,
+            **ends,
+        )
     series = _complete_series(subject, sessions=sessions, periods=periods, readings=readings)
     if series is None:
         return FactorObservation(
@@ -4934,6 +5009,22 @@ def _points_held(
         if reading.axis == axis:
             held.update(reading.points_by_subject.get(subject, ()))
     return tuple(sorted(held))
+
+
+def _ambiguous_points(subject: str, *, readings: Mapping[str, _DatasetReading]) -> frozenset[date]:
+    """Every report period at which some dataset served this security two filings that disagree.
+
+    `_points_held`'s shape for `V2-P3-018`'s mark, and pooled across datasets for its reason: a
+    factor reading `income` and `balancesheet` over one period window has one window, so an
+    ambiguity in either endpoint at a period in it makes that slot unanswerable. No axis argument,
+    because `_read_dataset` only ever records these on the period axis -- the session axis still
+    refuses a second row outright -- and an argument that has one legal value is a parameter
+    nothing can vary.
+    """
+    marked: set[date] = set()
+    for reading in readings.values():
+        marked.update(reading.ambiguous_points_by_subject.get(subject, frozenset()))
+    return frozenset(marked)
 
 
 def _form_window(held: tuple[date, ...], lookback: int | None) -> tuple[date, ...] | None:
@@ -6065,12 +6156,34 @@ CROSS_SECTION_STANDARD: Final[FactorTransformSpec] = FactorTransformSpec(
     missing_values=MissingValuePolicy(
         not_in_universe="exclude",
         insufficient_history="exclude",
+        ambiguous_filing="exclude",
         input_missing="fill_cross_sectional_median",
         undefined_value="exclude",
     ),
     min_cross_section=100,
 )
 """The single registered transform, and every one of its settings is a stated judgement.
+
+**`ambiguous_filing="exclude"` is `V2-P3-018`'s declaration and the only one of the four legal
+actions this spec could take.** `fill_cross_sectional_median` is what the neighbouring
+`input_missing` declares and is right there: a null cell is a hole and the median of the peers is
+what a fill is for. This code is not a hole -- the publisher stated the number twice, and
+`domain/financial_statements.py` measured pairs whose two candidates straddle zero
+(`income.ebit` -7,579,086 against +3,427,524, `cashflow.free_cashflow` +316,026,934 against
+-294,173,456) -- so a median is a third number the publisher did not state, on one side of a sign
+boundary the data does not settle. `fill_neutral` is the same objection with the neutral point
+substituted for the median.
+
+`refuse` is the one that has to be ruled out by measurement rather than by argument, and it is:
+`apply_factor_transform` raises when the cross section contains a code declared `refuse`, so at
+the ambiguity rates `V2-P3-010`'s probe recorded -- 8.51% of `income`'s filings, 0.95% of
+`balancesheet`'s, **17.11%** of `cashflow`'s, 11.80% of `fina_indicator`'s -- a `refuse` here
+would reproduce the whole-build refusal `V2-P3-018` exists to remove, one plane down, on
+essentially every real whole-market cross section. The raw tier would answer per security and the
+processed tier would then throw the answer away.
+`tests/unit/test_factor_transform_rules.py::
+test_the_shipped_policy_would_refuse_a_whole_cross_section_for_one_ambiguous_filing_if_it_said_so`
+drives that counterfactual rather than leaving it as a claim about a number.
 
 It is not a default in the sense of "what you get if you say nothing": `apply_factor_transform`
 takes the spec as a mandatory argument, and this is the one this build ships so that the shipped
@@ -6098,7 +6211,12 @@ CROSS_SECTION_STANDARD_NOTE: Final[FactorNote] = FactorNote(
         "security that was not in the universe is excluded rather than filled -- it is not a "
         "hole, it is a name that should have no value. A security that was in the universe and "
         "too young for the lookback is excluded too, because imputing the median for it would "
-        "score a listing on data it does not have. A null input is filled with the median of "
+        "score a listing on data it does not have. A security whose filing the publisher stated "
+        "twice and disagreed with itself about is excluded rather than filled or refused: a "
+        "median is a third number nobody stated -- the measured pairs straddle zero -- and "
+        "refusing would put the whole-build refusal V2-P3-018 removed back one plane down, on "
+        "every cross section holding one of the 8.51% to 17.11% of filings that are ambiguous. A "
+        "null input is filled with the median of "
         "the processed cross section, which is the case a fill is actually for. An undefined "
         "arithmetic result is excluded rather than refused, because a zero denominator is a "
         "property of the factor's own definition and a whole build should not die of one "
@@ -6111,8 +6229,10 @@ CROSS_SECTION_STANDARD_NOTE: Final[FactorNote] = FactorNote(
 )
 """`CROSS_SECTION_STANDARD`'s prose, out of `transform_id`. See `domain/factor.py::FactorNote`.
 
-Word for word what the spec's own `summary` field carried until this change, so the diff shows a
-relocation rather than an edit.
+Word for word what the spec's own `summary` field carried when `V2-P3-014`'s prerequisite moved
+it here, so that diff showed a relocation rather than an edit. It has been edited once since, by
+`V2-P3-018`, which gave the policy a fifth field and therefore gave this prose a fifth sentence;
+a note that still described a four-field policy would be the drift `validate_notes` cannot see.
 """
 
 FACTOR_TRANSFORMS: Final[FactorTransformRegistry] = FactorTransformRegistry(

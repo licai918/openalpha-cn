@@ -40,7 +40,7 @@ Two properties of the window are checked here rather than assumed of the caller:
 
 ## Which observations enter a correlation, and what happens to the rest
 
-Coverage is not a boolean on any of the three tiers -- five codes raw, five processed, seven
+Coverage is not a boolean on any of the three tiers -- six codes raw, five processed, seven
 neutralised -- and the answer has to be a declaration rather than a filter written inline:
 
     raw          admits {computed}
@@ -88,7 +88,7 @@ two are different findings with different remedies. A factor that produced one v
 market is a defect in the factor; a market that moved by exactly the same amount for every name is
 a fact about the day (a whole-market halt, or a one-name cross section repeated). One
 `degenerate` code would make those two indistinguishable on a stored report, which is the shape
-`FactorCoverage` spent five members refusing.
+`FactorCoverage` spent six members refusing.
 
 ## The sample floor is declared, and its own lower bound is arithmetic
 

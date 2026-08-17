@@ -27,34 +27,61 @@ convention:
   value)` triples the build actually consumed -- so the identity moves when the numbers move,
   not merely when the *parameters* move.
 
-## Why the missing-value policy has four fields and not one
+## Why the missing-value policy has five fields and not one
 
-`FactorObservation` already distinguishes four reasons a security has no value, and they are
+`FactorObservation` already distinguishes five reasons a security has no value, and they are
 not one fact:
 
 | code | what it means | what filling it would do |
 | --- | --- | --- |
 | `not_in_universe` | the security was **not in the cross section** | invent a member |
 | `insufficient_history` | in the universe, too young | score a name on data it does not have |
+| `ambiguous_filing` | the publisher stated it twice, differently | settle a contradiction by fiat |
 | `input_missing` | a required cell is null or the row is absent | stand in for a fetch |
 | `undefined_value` | every input present, the arithmetic has none | stand in for a definition |
 
-A policy that treated the four alike would be wrong in a way that is easy to state: imputing a
+A policy that treated the five alike would be wrong in a way that is easy to state: imputing a
 cross-sectional median for `not_in_universe` puts a name that had not listed yet -- or had
 already delisted -- into the scored cross section, with a number derived from securities it was
 never comparable to. That one is therefore **refused at declaration time** rather than left to
-the caller's judgement (`MissingValuePolicy.refuse_a_filled_non_member`); the other three are
+the caller's judgement (`MissingValuePolicy.refuse_a_filled_non_member`); the other four are
 genuine choices and are declared per code, with no shared default and no field default, for the
 reason `ReadinessRequirement`'s four checks have none: a defaulted policy is a decision that was
 never taken reporting as one that was.
 
-`MISSING_VALUE_COVERAGE_ORDER` is the four codes as data, and
+**The `ambiguous_filing` row of that table is the one whose "what filling it would do" is not a
+paraphrase of the code.** `input_missing` is a hole and a median is what a fill is *for*: the
+publisher never stated the number, the imputation is stored under `imputed` where nobody can read
+it as a measurement, and this build's own `CROSS_SECTION_STANDARD` declares exactly that.
+`ambiguous_filing` is not a hole -- the publisher stated the number twice, and
+`domain/financial_statements.py` measured how far apart the two statements are: `income.ebit` as
+-7,579,086 against +3,427,524, `cashflow.free_cashflow` as +316,026,934 against -294,173,456,
+`fina_indicator.fcff` as +843,920,834 against -966,053,502. A cross-sectional median is not
+between two such candidates; it is a third number on one side of a sign boundary the data does
+not settle, standing in for a fact the publisher *did* state and contradicted itself about.
+
+`MISSING_VALUE_COVERAGE_ORDER` is the five codes as data, and
 `_refuse_a_policy_that_cannot_answer_every_missing_code` runs at import to check the policy's
-field names against `FACTOR_COVERAGE_CODES` minus `computed`. A sixth coverage code therefore
-cannot arrive without a policy field for it: the module refuses to import. That is the shape
-`panel build`'s `PANEL_BUILD_TARGETS` failure asks for -- a table that gained a key with no
+field names against `FACTOR_COVERAGE_CODES` minus `computed`. A **seventh** coverage code
+therefore cannot arrive without a policy field for it: the module refuses to import. That is the
+shape `panel build`'s `PANEL_BUILD_TARGETS` failure asks for -- a table that gained a key with no
 branch behind it and answered exit 0 with an empty result -- applied in the direction that
-matters here, which is a *vocabulary* gaining a member with no policy behind it.
+matters here, which is a *vocabulary* gaining a member with no policy behind it. It is also the
+audit that fired for real: `V2-P3-018` added `ambiguous_filing` to `domain/factor.py` and this
+module would not import until the field existed, which is the friction working rather than
+friction to be routed around.
+
+**What a new policy field moves and what it does not.** `MissingValuePolicy` is inside
+`FactorTransformSpec`, so `transform_id` is a content address over it and a sixth code moved
+every `transform_id`, every `transform_manifest_id` derived from one, and every `experiment_id`
+that carries a transform spec. It moved **no** `factor_id`: `FactorDefinition`'s field set does
+not name the coverage vocabulary, and a coverage code is a *value* a stored column can hold
+rather than a field of the identity contract. The two are different kinds of change and
+`tests/unit/test_factor_transform_rules.py::
+test_the_coverage_vocabulary_moves_transform_id_and_leaves_every_factor_id_where_it_was` is where
+the distinction is measured rather than asserted in prose -- against the literal identities this
+build shipped before `V2-P3-018`, because "did it move" is the one question a re-derivation
+cannot answer about itself.
 
 ## The processed coverage vocabulary, and why **two** of its codes carry a value
 
@@ -268,13 +295,14 @@ point. A membership test against a literal pair written twice is two things that
 MISSING_VALUE_COVERAGE_ORDER: Final[tuple[FactorCoverage, ...]] = (
     "not_in_universe",
     "insufficient_history",
+    "ambiguous_filing",
     "input_missing",
     "undefined_value",
 )
-"""The four non-`computed` coverage codes, in `FACTOR_COVERAGE_ORDER`'s own order.
+"""The five non-`computed` coverage codes, in `FACTOR_COVERAGE_ORDER`'s own order.
 
 Restated as a tuple rather than derived by subtracting from a frozenset, because a set has no
-order and this tuple decides the order of four stored manifest columns; a column order that
+order and this tuple decides the order of five stored manifest columns; a column order that
 changed with the hash seed would make two identical builds write two different partitions.
 Reconciled against `FACTOR_COVERAGE_CODES` at import by
 `_refuse_a_policy_that_cannot_answer_every_missing_code`, which is what keeps the restatement a
@@ -303,7 +331,7 @@ security is looked at:
   cross section for `rank`. Also whole-panel. `none` never produces it, because passing values
   through makes no ordering claim; see `STANDARDIZATION_NEUTRAL`.
 - **`source_not_computed`** -- the raw observation was not `computed` and the policy for its
-  code is `exclude`. `source_coverage` says which of the four it was, so this code does not
+  code is `exclude`. `source_coverage` says which of the five it was, so this code does not
   collapse the distinction the raw vocabulary spent five members drawing.
 - **`imputed`** -- the raw observation was not `computed` and the policy filled it. Carries a
   value that no security produced.
@@ -351,12 +379,13 @@ def _refuse_a_policy_that_cannot_answer_every_missing_code(
 ) -> None:
     """Refuse this module at import if the policy does not have one field per missing code.
 
-    The direction a per-field test cannot reach. `MissingValuePolicy` names four coverage codes;
-    `FactorCoverage` declares five. A sixth coverage code added to `domain/factor.py` -- which is
+    The direction a per-field test cannot reach. `MissingValuePolicy` names five coverage codes;
+    `FactorCoverage` declares six. A seventh coverage code added to `domain/factor.py` -- which is
     exactly what `V2-P3-007`'s coverage report or a later engine change might want -- would
     otherwise arrive with **no policy at all** for it, and `action_for` would raise at run time
     on the first cross section that contained one, in production, at whatever `as_of` first
-    produced it.
+    produced it. It is the audit that has now fired once for real: `V2-P3-018` widened the
+    vocabulary and this module refused to load until `ambiguous_filing` had a declared action.
 
     Checked against `FACTOR_COVERAGE_CODES` rather than against a restated list, and run at
     import rather than only in a test, for `panel_factors._refuse_table_drift`'s reason: a module
@@ -380,7 +409,7 @@ def _refuse_a_policy_that_cannot_answer_every_missing_code(
     if set(order) != expected or len(set(order)) != len(order):
         raise FactorTransformError(
             f"MISSING_VALUE_COVERAGE_ORDER is {list(order)} and the vocabulary's non-computed "
-            f"codes are {sorted(expected)}; the tuple decides four stored column names and must "
+            f"codes are {sorted(expected)}; the tuple decides five stored column names and must "
             "not drift from the set it restates"
         )
 
@@ -477,19 +506,28 @@ class WinsorizationPolicy(BaseModel):
 
 
 class MissingValuePolicy(BaseModel):
-    """One declared action per non-`computed` coverage code. Four fields, no defaults.
+    """One declared action per non-`computed` coverage code. Five fields, no defaults.
 
-    See this module's docstring for why the four are not one decision. The single rule enforced
+    See this module's docstring for why the five are not one decision. The single rule enforced
     here is the one whose violation is not a matter of taste: **a security that was not in the
     cross section may not be given a value.** Everything else is the caller's declared judgement,
     and the point of the contract is that the judgement is *stored* and *hashed* rather than
     living in whoever ran the build.
+
+    **`ambiguous_filing` is `V2-P3-018`'s field and adding it moved every `transform_id`.** That
+    is not a side effect to apologise for; it is the contract working. `transform_id` is
+    `stable_model_id` over this model among others, so a spec that now declares what to do with a
+    self-contradictory filing is a *different declared policy* from one that could not express the
+    question, and two builds under one identity that treated such a security differently would be
+    exactly the unreproducibility the address exists to stop. `FactorDefinition`'s field set is
+    untouched, so no `factor_id` moved; see this module's docstring.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     not_in_universe: MissingValueAction
     insufficient_history: MissingValueAction
+    ambiguous_filing: MissingValueAction
     input_missing: MissingValueAction
     undefined_value: MissingValueAction
 
@@ -510,7 +548,7 @@ class MissingValuePolicy(BaseModel):
         """The declared action for one non-`computed` coverage code.
 
         Resolved through `getattr` against the vocabulary rather than through a `match` over
-        four branches, so that the audit at import (one field per code) is the *only* place the
+        five branches, so that the audit at import (one field per code) is the *only* place the
         set of codes is enumerated. A branch table beside the field table is a second copy of a
         closed set, which is what `FACTOR_COVERAGE_ORDER` already carries a reconciliation test
         for.

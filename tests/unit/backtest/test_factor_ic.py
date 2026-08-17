@@ -559,13 +559,16 @@ def test_an_empty_label_set_is_refused_rather_than_reported_as_a_thin_sample() -
 
 
 def test_only_the_admitted_codes_reach_the_correlation_and_every_other_is_counted() -> None:
-    """The five-code raw vocabulary, with a distinct count on every cell of the census.
+    """The six-code raw vocabulary, with a distinct count on every cell of the census.
 
-    Seven numbers -- five admitted pairs, one unlabelled, two unmatched, three
-    `not_in_universe`, four `insufficient_history`, six `input_missing`, seven
-    `undefined_value` -- chosen pairwise distinct on purpose. `V2-P3-004`'s review found a column
-    whose assertion could not separate two answers because the fixture made them equal; a census
-    where two cells shared a value would let a transposition pass.
+    Eight numbers -- five admitted pairs, one unlabelled, two unmatched, three
+    `not_in_universe`, four `insufficient_history`, eight `ambiguous_filing`, six
+    `input_missing`, seven `undefined_value` -- chosen pairwise distinct on purpose.
+    `V2-P3-004`'s review found a column whose assertion could not separate two answers because
+    the fixture made them equal; a census where two cells shared a value would let a
+    transposition pass. `ambiguous_filing` is `V2-P3-018`'s member and is here at a count of
+    eight rather than appended at zero, for that same reason: a cell nothing ever populates is a
+    column this test cannot tell from a missing one.
 
     `sample_size` is asserted here rather than only on the thin and degenerate cross sections,
     and that is a repair rather than belt and braces: on those two fixtures every subject is
@@ -582,6 +585,9 @@ def test_only_the_admitted_codes_reach_the_correlation_and_every_other_is_counte
     ]
     observations += [
         _raw(code(20 + index), value=None, coverage="insufficient_history") for index in range(4)
+    ]
+    observations += [
+        _raw(code(50 + index), value=None, coverage="ambiguous_filing") for index in range(8)
     ]
     observations += [
         _raw(code(30 + index), value=None, coverage="input_missing") for index in range(6)
@@ -601,18 +607,19 @@ def test_only_the_admitted_codes_reach_the_correlation_and_every_other_is_counte
 
     assert point.sample_size == 5
     assert point.sample_size != section.census.subject_count
-    assert section.census.subject_count == 28
+    assert section.census.subject_count == 36
     assert section.census.admitted_count == 5
     assert section.census.unlabelled_count == 1
     assert section.census.unmatched_count == 2
     assert section.census.excluded_by_coverage == (
         ("not_in_universe", 3),
         ("insufficient_history", 4),
+        ("ambiguous_filing", 8),
         ("input_missing", 6),
         ("undefined_value", 7),
     )
     assert {pair.subject for pair in section.pairs} == {code(index) for index in range(1, 6)}
-    assert cells == [5, 1, 2, 3, 4, 6, 7]
+    assert cells == [5, 1, 2, 3, 4, 8, 6, 7]
     assert len(set(cells)) == len(cells), "two cells sharing a value would let a transposition pass"
     assert sum(cells) == section.census.subject_count
 
@@ -1277,6 +1284,7 @@ def test_a_census_that_does_not_add_up_is_refused() -> None:
         excluded_by_coverage=(
             ("not_in_universe", 1),
             ("insufficient_history", 2),
+            ("ambiguous_filing", 0),
             ("input_missing", 1),
             ("undefined_value", 0),
         ),
@@ -1361,6 +1369,7 @@ def test_a_census_cell_cannot_be_negative() -> None:
             excluded_by_coverage=(
                 ("not_in_universe", -1),
                 ("insufficient_history", 0),
+                ("ambiguous_filing", 0),
                 ("input_missing", 0),
                 ("undefined_value", 0),
             ),

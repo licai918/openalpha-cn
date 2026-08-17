@@ -82,6 +82,7 @@ PROBE_TRANSFORM: Final[FactorTransformSpec] = FactorTransformSpec(
     missing_values=MissingValuePolicy(
         not_in_universe="exclude",
         insufficient_history="exclude",
+        ambiguous_filing="exclude",
         input_missing="exclude",
         undefined_value="exclude",
     ),

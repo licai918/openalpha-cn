@@ -110,6 +110,7 @@ def _spec(**overrides: Any) -> FactorTransformSpec:
         "missing_values": MissingValuePolicy(
             not_in_universe="exclude",
             insufficient_history="exclude",
+            ambiguous_filing="exclude",
             input_missing="exclude",
             undefined_value="exclude",
         ),
@@ -922,11 +923,13 @@ def _assert_the_partition_says_what_the_transform_measured(
 
     Three bindings:
 
-    1. **Every one of the twenty-three** columns above is held to an expected value, by an
-       equality on the key set rather than by a list somebody keeps in step -- a twenty-fourth
-       arriving with no expectation fails on the first line.
-    2. **The processed rows' own `transform_manifest_id`** must be this build's. It is the
-       twenty-fourth stored column no read path checks: `_processed_observation_from_row` decodes
+    1. **Every one of the twenty-four** columns above is held to an expected value, by an
+       equality on the key set rather than by a list somebody keeps in step -- a twenty-fifth
+       arriving with no expectation fails on the first line. It was twenty-three until
+       `V2-P3-018` gave the missing-value policy a fifth code and therefore a fifth stored
+       action column.
+    2. **The processed rows' own `transform_manifest_id`** must be this build's. It is the one
+       stored column no read path checks: `_processed_observation_from_row` decodes
        it with `str()`, so a wrong one round-trips cleanly and points every row at a manifest the
        partition may not hold.
     3. **The census columns are recounted against the processed rows in the other partition.**
@@ -936,7 +939,7 @@ def _assert_the_partition_says_what_the_transform_measured(
        shows up as a disagreement between two partitions rather than as a number nobody compared
        to anything.
     """
-    assert len(_UNREASSEMBLED_MANIFEST_COLUMNS) == 23
+    assert len(_UNREASSEMBLED_MANIFEST_COLUMNS) == 24
     assert set(expected) == set(_UNREASSEMBLED_MANIFEST_COLUMNS)
     manifest_id = result.manifest.transform_manifest_id
     rows = store.query(
@@ -1004,21 +1007,28 @@ MAD_RANK_PROBE: Final[FactorTransformSpec] = FactorTransformSpec(
     missing_values=MissingValuePolicy(
         not_in_universe="refuse",
         insufficient_history="fill_neutral",
+        ambiguous_filing="refuse",
         input_missing="exclude",
         undefined_value="fill_cross_sectional_median",
     ),
     min_cross_section=50,
 )
 """A second shipped-shape transform that differs from `CROSS_SECTION_STANDARD` in **every**
-stored policy column, and whose four missing-value actions are four different actions.
+stored policy column, and whose five missing-value columns use all four declarable actions.
 
 Both properties are deliberate and are what makes the assertions below falsify a constant rather
 than only a perturbation. A column every test expects `"exclude"` in is one a build could write
 `"exclude"` into unconditionally; here `missing_not_in_universe` is `"refuse"`,
-`missing_insufficient_history` is `"fill_neutral"`, `missing_input_missing` is `"exclude"` and
-`missing_undefined_value` is `"fill_cross_sectional_median"`, so no single constant satisfies
-this row and `CROSS_SECTION_STANDARD`'s at once. Same for `mad` against `quantile`, `rank`
-against `zscore`, `mad_scale=3.0` against two quantiles, and `50` against `100`.
+`missing_insufficient_history` is `"fill_neutral"`, `missing_ambiguous_filing` is `"refuse"`,
+`missing_input_missing` is `"exclude"` and `missing_undefined_value` is
+`"fill_cross_sectional_median"`, so no single constant satisfies this row and
+`CROSS_SECTION_STANDARD`'s at once, and every one of the five differs from its counterpart there.
+Same for `mad` against `quantile`, `rank` against `zscore`, `mad_scale=3.0` against two
+quantiles, and `50` against `100`.
+
+`V2-P3-018` added the fifth column and `MissingValueAction` has only four members, so exactly one
+pair here must repeat -- it is `not_in_universe` and `ambiguous_filing`, at stored positions 0 and
+2, chosen non-adjacent so a transposition of neighbouring columns is still visible.
 """
 
 
@@ -1054,6 +1064,7 @@ def test_the_stored_policy_census_and_statistics_are_the_ones_this_build_actuall
             "min_cross_section": 100,
             "missing_not_in_universe": "exclude",
             "missing_insufficient_history": "exclude",
+            "missing_ambiguous_filing": "exclude",
             "missing_input_missing": "fill_cross_sectional_median",
             "missing_undefined_value": "exclude",
             "census_processed": 119,
@@ -1109,6 +1120,7 @@ def test_the_stored_policy_columns_are_the_declared_policy_and_not_a_default(
             "min_cross_section": 50,
             "missing_not_in_universe": "refuse",
             "missing_insufficient_history": "fill_neutral",
+            "missing_ambiguous_filing": "refuse",
             "missing_input_missing": "exclude",
             "missing_undefined_value": "fill_cross_sectional_median",
             "census_processed": WIDE_COUNT,
@@ -1161,6 +1173,7 @@ def test_a_degenerate_cross_section_stores_its_own_census_and_not_an_empty_one(
             "min_cross_section": 100,
             "missing_not_in_universe": "exclude",
             "missing_insufficient_history": "exclude",
+            "missing_ambiguous_filing": "exclude",
             "missing_input_missing": "fill_cross_sectional_median",
             "missing_undefined_value": "exclude",
             "census_processed": 0,
@@ -1210,6 +1223,7 @@ def test_a_cross_section_below_the_floor_stores_the_count_that_says_so(
             "min_cross_section": 100,
             "missing_not_in_universe": "exclude",
             "missing_insufficient_history": "exclude",
+            "missing_ambiguous_filing": "exclude",
             "missing_input_missing": "fill_cross_sectional_median",
             "missing_undefined_value": "exclude",
             "census_processed": 0,

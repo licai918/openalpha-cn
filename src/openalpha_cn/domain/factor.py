@@ -266,6 +266,7 @@ FactorCoverage = Literal[
     "computed",
     "not_in_universe",
     "insufficient_history",
+    "ambiguous_filing",
     "input_missing",
     "undefined_value",
 ]
@@ -288,6 +289,15 @@ Read in order of precedence, which is how `panel_factors._classify` applies them
   `lookback_sessions` sessions for it at or before `as_of`. This is the point-in-time
   consequence of the lookback window and it is a *first-class answer*, not an error: a name
   that listed nine sessions ago genuinely has no 120-session momentum.
+- **`ambiguous_filing`** (`V2-P3-018`) -- the row is there, it is there **more than once** under
+  one `(security, report period, announcement)` triple, and the versions disagree in a column
+  this factor reads. The publisher stated the number twice and contradicted itself; no column of
+  these four endpoints orders the versions, and `domain/financial_statements.py` measured that
+  no ordering rule can be invented from `update_flag` either -- "take the row with the higher
+  flag" fails in all three directions on a 53-security sample, and 81.7% of the duplication is
+  in `fina_indicator`, which has no such column at all. **Only the report-period axis can reach
+  this code**, because it is the only axis on which a second row of one key is a *version*
+  rather than a fault; a second row of one `(security, session)` still refuses the build.
 - **`input_missing`** -- enough sessions, but at least one required `(dataset, column)` is null
   on one of them, or the security has no row in one of the required datasets on a session the
   others cover. `daily_basic` omitting Beijing-board names on historical sessions
@@ -296,6 +306,15 @@ Read in order of precedence, which is how `panel_factors._classify` applies them
   zero denominator, or a result that is not finite. Kept separate from `input_missing` because
   the remedy is different -- one is a fetch, the other is the factor's own definition.
 - **`computed`** -- and only then is `value` not `None`.
+
+The three negative codes about *inputs* are separated by what would fix them, and that is what
+makes the boundary testable rather than a matter of naming. On one partition, one security, one
+report period: delete the cell and the answer is `input_missing`; restore it and the answer is
+`computed`; add a second row of that filing carrying the same cell and the answer is still
+`computed` (one fact stated twice collapses); make the second row disagree and the answer is
+`ambiguous_filing`. A **fetch** repairs the first and cannot repair the last -- re-fetching
+returns the same two rows -- and neither is `undefined_value`, whose inputs were all present and
+whose repair is a change to the factor's own definition.
 """
 
 FACTOR_COVERAGE_CODES: Final[frozenset[str]] = frozenset(get_args(FactorCoverage))

@@ -9,7 +9,7 @@ keys whose branches did not exist, and the command answered exit 0 with an empty
 audit, so it is exercised in both directions rather than trusted because it is called at import.
 
 **The evaluator's own arithmetic, including the branch that never fires in production.**
-`undefined_value` is one of five declared coverage codes, and a code that no branch can emit is
+`undefined_value` is one of six declared coverage codes, and a code that no branch can emit is
 a table entry with nothing behind it. `_reversal_1d`'s zero-denominator guard is unreachable
 through this repository's own writers (`daily_bars_from_panel_rows` refuses a non-positive
 close), so it is driven directly here -- which is the only honest way to have both the guard and
@@ -271,6 +271,66 @@ def test_the_census_order_is_every_declared_coverage_code_and_no_other() -> None
     assert set(FACTOR_COVERAGE_ORDER) == FACTOR_COVERAGE_CODES
     assert len(FACTOR_COVERAGE_ORDER) == len(FACTOR_COVERAGE_CODES)
     assert FACTOR_COVERAGE_ORDER[0] == "computed"
+    assert FACTOR_COVERAGE_ORDER == (
+        "computed",
+        "not_in_universe",
+        "insufficient_history",
+        "ambiguous_filing",
+        "input_missing",
+        "undefined_value",
+    )
+
+
+def test_the_census_order_is_the_order_classify_decides_the_codes_in() -> None:
+    """The tuple claims to be a precedence order; this reads `_classify` and checks that it is.
+
+    `FACTOR_COVERAGE_ORDER`'s docstring says the members after `computed` are the order the
+    engine decides them in, and `V2-P3-018` put `ambiguous_filing` in the middle of the tuple on
+    the strength of that claim rather than appending it -- which would have been the smaller
+    diff. A claim about the source is checkable against the source: every `coverage=` literal
+    `_classify` returns, in the order the function body reaches them, must be the tuple with
+    `computed` moved to the end, because `computed` is the only one decided last and the only one
+    that is not a refusal.
+
+    Read off the AST rather than provoked through six fixtures, because what is being asserted is
+    the *order of the branches* and a fixture can only ever show one branch winning over the one
+    other it was built to contest. `tests/integration/panel/test_value_family.py::
+    test_an_ambiguous_filing_outranks_a_null_cell_in_the_same_window` is the behavioural half,
+    over the one pair where the precedence is load-bearing.
+    """
+    source = ast.parse((SOURCE_ROOT / "panel_factors.py").read_text(encoding="utf-8"))
+    classify = next(
+        node
+        for node in ast.walk(source)
+        if isinstance(node, ast.FunctionDef) and node.name == "_classify"
+    )
+    keywords = [
+        node.value
+        for statement in ast.walk(classify)
+        if isinstance(statement, ast.Call)
+        for node in statement.keywords
+        if node.arg == "coverage"
+    ]
+    early = [node.value for node in keywords if isinstance(node, ast.Constant) and node.value != ""]
+    tail = [
+        branch.value
+        for node in keywords
+        if isinstance(node, ast.IfExp)
+        for branch in (node.body, node.orelse)
+        if isinstance(branch, ast.Constant)
+    ]
+    ordered: list[str] = [code for index, code in enumerate(early) if code not in early[:index]]
+
+    assert early == [
+        "not_in_universe",
+        "insufficient_history",
+        "insufficient_history",
+        "ambiguous_filing",
+        "input_missing",
+    ], "insufficient_history twice is the count shortfall and the span overrun, in that order"
+    assert tuple(ordered) == FACTOR_COVERAGE_ORDER[1:-1]
+    assert tail == ["computed", "undefined_value"]
+    assert set(ordered) | set(tail) == set(FACTOR_COVERAGE_ORDER)
 
 
 def test_the_stored_observation_columns_are_the_six_facts_the_acceptance_names() -> None:
@@ -454,8 +514,20 @@ def _manifest_cells_from(**overrides: object) -> dict[str, object]:
 
 def test_a_stored_manifest_row_of_the_wrong_width_is_refused() -> None:
     """`_observation_from_row`'s argument one dataset over: a partition written by a build with a
-    different column list would decode into plausible values in the wrong fields."""
-    with pytest.raises(FactorEngineError, match="expected 27"):
+    different column list would decode into plausible values in the wrong fields.
+
+    **The number moved from 27 to 28 in `V2-P3-018` and that is the migration, not a symptom of
+    it.** `FACTOR_CENSUS_COLUMNS` is derived from `FACTOR_COVERAGE_ORDER`, so a sixth coverage
+    code is a sixth census column and a twenty-eighth manifest column. A manifest partition
+    written by a five-code build therefore fails `field_missing` at readiness -- its column list
+    does not carry `census_ambiguous_filing`, which `factor_manifest_requirement` now requires --
+    and a partition that somehow reached this decoder with 27 cells fails here. Both are
+    refusals: the panel plane has no in-place migration and needs none, because a factor
+    partition is *derived* and `manifest_id` is what makes it rebuildable. `storage/migrations.py`
+    governs `state.sqlite3` alone and is built on `PRAGMA user_version`, which DuckDB does not
+    have; see `panel/catalog.py::PANEL_CATALOG_SCHEMA_VERSION` for the same separation.
+    """
+    with pytest.raises(FactorEngineError, match="expected 28"):
         _manifest_cells(("too", "few"), dataset=MANIFESTS)
 
 
