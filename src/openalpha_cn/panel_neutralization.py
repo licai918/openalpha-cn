@@ -37,9 +37,9 @@ rather than a second's."* The evidence arrived and it points the other way, on o
 
   **That gap is closed and the paragraph above is kept as the record of why.** The dataset-level
   allowlist it says does not exist now does: `tests/unit/test_panel_ingest_import_isolation.py`'s
-  `PANEL_MODULE_SEAM_IMPORTS` records the eleven names this module takes across the seam so a
-  twelfth is a diff, and its `PANEL_MODULE_DATASETS` records that this module names **no** upstream
-  dataset in its own source and reaches exactly `daily_basic` and `index_member_all` through
+  `RESEARCH_PLANE_SEAM_IMPORTS` records the twelve names this module takes across the seam so a
+  thirteenth is a diff, and its `RESEARCH_PLANE_DATASETS` records that this module names **no**
+  upstream dataset in its own source and reaches exactly `daily_basic` and `index_member_all` through
   `load_daily_valuations` and `load_industry_histories`. The widening this paragraph describes as
   unpoliced is driven on a mutated copy of this file by
   `tests/unit/test_panel_ingest_import_isolation.py::

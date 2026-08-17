@@ -15,7 +15,7 @@ inside a docstring, which is prose the runner never reads.
 ## Why the mechanism is not copied as it stands
 
 `007`'s form is "one test per entry, named after the entry". At three entries that is exactly
-right. Across the eighteen code-carrying registries there are **182** entries -- 64 in
+right. Across the nineteen code-carrying registries there are **187** entries -- 64 in
 `KNOWN_PANEL_LIMITATIONS` alone -- and it stops being right somewhere well before that, for
 three reasons and not one:
 
@@ -140,7 +140,7 @@ LIMITATION_REGISTRIES: Final[dict[str, Sequence[_Limitation]]] = {
     "KNOWN_STORAGE_LIMITATIONS": KNOWN_STORAGE_LIMITATIONS,
     "KNOWN_PANEL_LIMITATIONS": KNOWN_PANEL_LIMITATIONS,
 }
-"""The eighteen registries whose entries are identified by a `code`, keyed by their own names.
+"""The nineteen registries whose entries are identified by a `code`, keyed by their own names.
 
 **None of `KNOWN_NEUTRALIZATION_LIMITATIONS`, `KNOWN_IC_LIMITATIONS`,
 `KNOWN_REDUNDANCY_LIMITATIONS`, `KNOWN_QUANTILE_PORTFOLIO_LIMITATIONS`,
@@ -264,7 +264,7 @@ def _module_level_known_names(path: Path) -> Iterator[str]:
 
 
 def test_the_registry_table_is_every_known_registry_in_the_source_tree() -> None:
-    """The direction a hand-written list cannot cover: a *seventeenth* registry.
+    """The direction a hand-written list cannot cover: a *twentieth* registry.
 
     `V2-P2-007`'s binding is installed per module, so a new `KNOWN_*` tuple arrives with no
     binding and nothing notices -- which is how eleven of them got here. The table above is
@@ -283,7 +283,7 @@ def test_the_registry_table_is_every_known_registry_in_the_source_tree() -> None
 
 
 def test_every_declared_limitation_code_is_named_in_executable_test_code() -> None:
-    """The binding itself, over all seventeen code-carrying registries and all of their entries.
+    """The binding itself, over all nineteen code-carrying registries and all of their entries.
 
     A code that appears nowhere but in prose is a code the suite has no opinion about: rename
     it and everything stays green while every citation of it silently stops resolving. That is
@@ -381,5 +381,5 @@ def test_the_registries_together_carry_the_entry_count_the_report_folds() -> Non
 
     assert len(codes["KNOWN_PANEL_LIMITATIONS"]) == folded + plane_wide + 1
     assert all(codes[registry] for registry in codes)
-    assert sum(len(entries) for entries in codes.values()) >= 182
+    assert sum(len(entries) for entries in codes.values()) >= 187
     assert len(codes["KNOWN_PANEL_LIMITATIONS"]) >= 64
