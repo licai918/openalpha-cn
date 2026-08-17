@@ -197,3 +197,110 @@ type = "forbidden"
 source_modules = ["openalpha_cn.models"]
 forbidden_modules = ["duckdb", "sqlite3"]
 # V2-P0B-011 fixed the sole baseline entry (models.governance -> sqlite3); no exemptions remain.
+
+# The three contracts below were added by the P3 technical acceptance, which measured that
+# `openalpha_cn.backtest` appeared in the four contracts above only as a forbidden *target* and
+# never as a source. Eight of P3's nine new modules were in no contract's source set at all, and
+# a probe proved the consequence: a new `backtest/_probe.py` importing duckdb, `panel.store` and
+# `runtime.composition`, plus a `panel.store` import added to `factor_ic.py`, left lint-imports at
+# "4 kept, 0 broken", ruff clean, mypy clean and the layering tests at 39 passed. The sentence
+# "backtest may not import panel or storage" appears five times in P3 source, once inside a
+# KNOWN_EXPERIMENT_LIMITATIONS entry -- load-bearing, and until now enforced by nothing.
+# `tests/unit/test_import_layering.py` pins each contract's source list against the directory and
+# drives a probe file through each one, so a tenth `backtest/*.py` cannot arrive unguarded.
+
+[[tool.importlinter.contracts]]
+id = "backtest-no-numeric-stack-or-panel-plane"
+name = "backtest imports no numeric stack, nothing on the panel plane and no face"
+type = "forbidden"
+source_modules = ["openalpha_cn.backtest"]
+forbidden_modules = [
+  "pandas",
+  "scipy",
+  "sklearn",
+  "duckdb",
+  "openalpha_cn.panel",
+  "openalpha_cn.panel_doctor",
+  "openalpha_cn.panel_factors",
+  "openalpha_cn.panel_gate",
+  "openalpha_cn.panel_ingest",
+  "openalpha_cn.panel_neutralization",
+  "openalpha_cn.panel_view",
+  "openalpha_cn.factor_view",
+  "openalpha_cn.providers",
+  "openalpha_cn.api",
+  "openalpha_cn.product",
+  "openalpha_cn.models",
+  "openalpha_cn.evidence",
+  "openalpha_cn.cli",
+  "openalpha_cn.sdk",
+]
+# Whole-package source, no exemptions: nothing under backtest/ reaches any of these today, on
+# full transitive reachability. ADR-0003's decision is that this repository ships no numerical
+# stack, and `backtest/` is where the array-shaped work lives, so this is the contract that makes
+# that decision structural rather than a series of measurements. `numpy` is deliberately NOT here
+# and is in `backtest-studies-touch-no-store` instead: `backtest/replay.py` reaches
+# `runtime/seeding.py`, whose numpy import is a real, guarded optional-determinism hook, so a
+# whole-package numpy ban would be broken on arrival and would have to be relaxed to be added.
+
+[[tool.importlinter.contracts]]
+id = "backtest-studies-touch-no-store"
+name = "every backtest module except the replay harness reaches no store and no numpy"
+type = "forbidden"
+source_modules = [
+  "openalpha_cn.backtest.event_study",
+  "openalpha_cn.backtest.execution",
+  "openalpha_cn.backtest.factor_experiment",
+  "openalpha_cn.backtest.factor_ic",
+  "openalpha_cn.backtest.factor_portfolio",
+  "openalpha_cn.backtest.factor_redundancy",
+  "openalpha_cn.backtest.factor_tradeability",
+  "openalpha_cn.backtest.multi_day",
+  "openalpha_cn.backtest.portfolio",
+  "openalpha_cn.backtest.validation",
+]
+forbidden_modules = [
+  "numpy",
+  "sqlite3",
+  "openalpha_cn.storage",
+  "openalpha_cn.agents",
+  "openalpha_cn.decisions",
+]
+# `backtest/factor_experiment.py`'s KNOWN_EXPERIMENT_LIMITATIONS carries
+# `nothing_in_this_module_stores_an_artifact_or_can_be_made_to`; this contract is what makes that
+# sentence true, and the acceptance probe that added
+# `from openalpha_cn.storage.factor_experiments import FileExperimentStore` to that module now
+# fails here. `factor_view.ExperimentDocumentStore` is a Protocol declared beside the consumer
+# exactly so `storage/factor_experiments.py` satisfies it with no import in either direction, and
+# this contract is what keeps that design from being quietly abandoned.
+#
+# Two exemptions, and neither is a package: `openalpha_cn.backtest` itself (the `__init__`
+# re-exports `ReplayRunner`) and `openalpha_cn.backtest.replay`, which composes a real
+# `ResearchEngine` over `SQLiteRunRepository` and `SQLiteRecoveryStore` because replaying a run is
+# what it does. Both are named in
+# `tests/unit/test_import_layering.py::BACKTEST_MODULES_EXEMPT_FROM_THE_STORE_CONTRACT`, which
+# holds this source list plus those two against the real directory in both directions.
+
+[[tool.importlinter.contracts]]
+id = "backtest-studies-reach-no-composition-root"
+name = "every backtest module except the replay harness and the outcome validator reaches no composition root"
+type = "forbidden"
+source_modules = [
+  "openalpha_cn.backtest.event_study",
+  "openalpha_cn.backtest.execution",
+  "openalpha_cn.backtest.factor_experiment",
+  "openalpha_cn.backtest.factor_ic",
+  "openalpha_cn.backtest.factor_portfolio",
+  "openalpha_cn.backtest.factor_redundancy",
+  "openalpha_cn.backtest.factor_tradeability",
+  "openalpha_cn.backtest.multi_day",
+  "openalpha_cn.backtest.portfolio",
+]
+forbidden_modules = ["openalpha_cn.runtime"]
+# Split from the contract above rather than folded into it because the exemption is one module
+# wider and the two exemptions are not the same kind. `backtest/validation.py` imports
+# `runtime.contracts.ResearchRunResult`, a pydantic result model, and is already one of the four
+# CONTRACT_ONLY_CONSUMERS that `test_import_layering.py` proves never reach `runtime.engine` or
+# the storage modules it owns. Folding the two lists together would have meant either exempting
+# `validation.py` from the store contract it passes, or making `runtime` legal for all nine study
+# modules on the strength of one module's data-contract import.

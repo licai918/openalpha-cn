@@ -60,6 +60,20 @@ structurally with no import in either direction. An edge here would put `openalp
 hop from `openalpha_cn.backtest` on the reachability graph `storage-no-upward-deps` checks.
 """
 
+FACTOR_MODULE_DEPENDENCIES: Final[dict[str, set[str]]] = {
+    "openalpha_cn.factor_view": ALLOWED_FACTOR_VIEW_DEPENDENCIES,
+}
+"""Every top-level `factor_*` module and the sibling packages it may join.
+
+One row today, and the table exists for the reason `PANEL_MODULE_DEPENDENCIES` exists with six:
+the allowlist above is reached by a test that names `openalpha_cn.factor_view` by hand, so a
+**second** `factor_*.py` -- the obvious next step, since `V2-P3-015` made this a family -- would
+be guarded by nothing. `test_panel_ingest_import_isolation.py` closed exactly that gap for
+`panel_*` by discovering the modules from the directory; this is that, for the family that file
+could not see. `test_every_top_level_factor_module_is_in_this_table_and_stays_inside_its_row`
+discovers `src/openalpha_cn/factor_*.py` and requires a row for each.
+"""
+
 FORBIDDEN_FOR_A_FACE: Final[set[str]] = {
     "openalpha_cn.api",
     "openalpha_cn.agents",
@@ -102,6 +116,76 @@ def test_the_factor_face_joins_exactly_the_planes_it_renders() -> None:
     dependencies = _direct_internal_dependencies("openalpha_cn.factor_view", graph)
 
     assert dependencies == ALLOWED_FACTOR_VIEW_DEPENDENCIES
+
+
+def _top_level_factor_modules() -> list[str]:
+    """`src/openalpha_cn/factor_*.py`, discovered from the real directory structure.
+
+    `test_panel_ingest_import_isolation.py::_top_level_panel_modules` for the other family, and
+    for its reason: an enumeration written by hand is exactly the thing a later addition does not
+    update, and the guarantee a top-level module carries is one every one of them carries
+    individually.
+    """
+    return sorted(
+        f"openalpha_cn.{path.stem}"
+        for path in (ROOT / "src" / "openalpha_cn").glob("factor_*.py")
+        if not path.stem.startswith("__")
+    )
+
+
+def test_every_top_level_factor_module_is_in_this_table_and_stays_inside_its_row() -> None:
+    """The gap the technical acceptance found: this family's discovery mechanism was a person.
+
+    Every other test in this file names `openalpha_cn.factor_view` as a string, which was fine
+    for the one module `V2-P3-015` added and is not fine for a family. The panel plane hit the
+    same wall at four modules and answered it by globbing the directory; measured against this
+    tree, a second `factor_*.py` would have had a row in no table in this repository -- neither
+    here, because nothing globs, nor in `test_panel_ingest_import_isolation.py`, whose own glob
+    was `panel_*.py` alone.
+
+    The row is an equality rather than a subset, which is
+    `test_the_factor_face_joins_exactly_the_planes_it_renders`' argument applied through the
+    table: a module that stops importing one of the packages it exists to join has lost its
+    reason to be top-level.
+    """
+    discovered = _top_level_factor_modules()
+
+    assert discovered, "expected at least openalpha_cn.factor_view"
+    undeclared = sorted(set(discovered) - set(FACTOR_MODULE_DEPENDENCIES))
+    assert not undeclared, (
+        f"{undeclared} is a top-level factor module with no row in FACTOR_MODULE_DEPENDENCIES. "
+        "It sits outside openalpha_cn/panel/ so that package can keep its zero-sibling-edge "
+        "guarantee, which makes the set of packages it may join its entire justification for "
+        "existing -- add the row, and argue for it in the module's own docstring"
+    )
+    vanished = sorted(set(FACTOR_MODULE_DEPENDENCIES) - set(discovered))
+    assert not vanished, f"FACTOR_MODULE_DEPENDENCIES names {vanished}, which no longer exists"
+
+    graph = grimp.build_graph("openalpha_cn")
+    observed = {module: _direct_internal_dependencies(module, graph) for module in discovered}
+
+    assert observed == {module: FACTOR_MODULE_DEPENDENCIES[module] for module in discovered}
+
+
+def test_no_top_level_factor_module_reaches_a_composition_root_or_a_credential() -> None:
+    """The other half, stated once for the family rather than once for `factor_view`.
+
+    `test_the_factor_face_reaches_no_composition_root_and_no_credential` asks this of one named
+    module; this asks it of every one the directory holds, so the second `factor_*.py` is covered
+    by it on the day it is added rather than on the day somebody remembers to extend a list.
+    `test_panel_ingest_import_isolation.py::
+    test_no_top_level_panel_module_reaches_a_composition_root_or_a_credential` is the same
+    sentence for the other family, with `openalpha_cn.backtest` additionally forbidden -- the one
+    package the difference between the two families is about.
+    """
+    graph = grimp.build_graph("openalpha_cn")
+
+    leaked = {
+        module: sorted(_direct_internal_dependencies(module, graph) & FORBIDDEN_FOR_A_FACE)
+        for module in _top_level_factor_modules()
+    }
+
+    assert leaked == {module: [] for module in leaked}
 
 
 def test_the_factor_face_reaches_no_composition_root_and_no_credential() -> None:

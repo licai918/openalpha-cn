@@ -604,6 +604,300 @@ def test_storage_and_domain_have_zero_direct_edges_into_the_new_panel_package() 
         ), f"{importer} must not import openalpha_cn.panel"
 
 
+# --- backtest: a forbidden target in four contracts and a source in none (P3 acceptance) ----
+#
+# The P3 technical acceptance measured that `openalpha_cn.backtest` appeared in the four
+# contracts above only as a forbidden *target*, so eight of P3's nine new modules were in no
+# contract's source set at all. Its probe -- a new `backtest/_probe.py` importing `duckdb`,
+# `panel.store` and `runtime.composition`, plus a `panel.store` import added to `factor_ic.py` --
+# left lint-imports at "4 kept, 0 broken", ruff clean, mypy clean and the layering tests at
+# 39 passed. Meanwhile "backtest may not import panel or storage" appears five times in P3
+# source, once inside `factor_experiment.py`'s KNOWN_EXPERIMENT_LIMITATIONS entry
+# `nothing_in_this_module_stores_an_artifact_or_can_be_made_to`. Load-bearing, and enforced by
+# nothing.
+
+BACKTEST_PACKAGE_PATH = ROOT / "src" / "openalpha_cn" / "backtest"
+_BACKTEST_PROBE_PATH = BACKTEST_PACKAGE_PATH / "_layering_gate_probe.py"
+
+BACKTEST_MODULES_EXEMPT_FROM_THE_STORE_CONTRACT: dict[str, str] = {
+    "openalpha_cn.backtest": (
+        "the package `__init__` re-exports `ReplayRunner`, so its own import closure is the "
+        "replay harness's. Exempting the `__init__` rather than emptying it is deliberate: the "
+        "re-export is this package's public surface and moving it would be an API change made "
+        "for a contract's convenience."
+    ),
+    "openalpha_cn.backtest.replay": (
+        "the replay harness composes a real `ResearchEngine` over `SQLiteRunRepository` and "
+        "`SQLiteRecoveryStore`, because replaying a recorded run is what it does. It is the one "
+        "module under `backtest/` that is a composition root, and `tests/replay/` is its "
+        "acceptance."
+    ),
+}
+"""The two `backtest/*.py` modules `backtest-studies-touch-no-store` cannot cover, with reasons.
+
+Written as the *complement* of a directory glob rather than as the source list itself, which is
+the whole point: `test_the_two_backtest_study_contracts_cover_every_module_in_the_package` holds
+`source_modules + these` against the real directory in both directions, so a tenth
+`backtest/*.py` is red until somebody either puts it in the contract or argues for it here.
+"""
+
+BACKTEST_MODULES_EXEMPT_FROM_THE_RUNTIME_CONTRACT: dict[str, str] = {
+    **BACKTEST_MODULES_EXEMPT_FROM_THE_STORE_CONTRACT,
+    "openalpha_cn.backtest.validation": (
+        "imports `runtime.contracts.ResearchRunResult`, a pydantic result model, and is already "
+        "one of the four `CONTRACT_ONLY_CONSUMERS` this file proves never reach `runtime.engine` "
+        "or the storage modules it owns. It passes the store contract; only the composition-root "
+        "one has to let it through."
+    ),
+}
+"""One module wider, which is why the two contracts are two and not one.
+
+Folding them together would have meant either exempting `validation.py` from a store contract it
+passes, or making `openalpha_cn.runtime` legal for all nine remaining study modules on the
+strength of one module's data-contract import.
+"""
+
+
+def _contract_source_modules(contract_id: str) -> set[str]:
+    config = importlinter_api.read_configuration(str(ROOT / "pyproject.toml"))
+    contract = next(
+        options for options in config["contracts_options"] if options.get("id") == contract_id
+    )
+    sources = contract["source_modules"]
+    assert isinstance(sources, list)
+    return set(sources)
+
+
+def _contract_forbidden_modules(contract_id: str) -> set[str]:
+    config = importlinter_api.read_configuration(str(ROOT / "pyproject.toml"))
+    contract = next(
+        options for options in config["contracts_options"] if options.get("id") == contract_id
+    )
+    forbidden = contract["forbidden_modules"]
+    assert isinstance(forbidden, list)
+    return set(forbidden)
+
+
+def _backtest_modules_on_disk() -> set[str]:
+    """Every module `backtest/` holds, `__init__` included and named as the package itself."""
+    return {
+        "openalpha_cn.backtest" if path.stem == "__init__" else f"openalpha_cn.backtest.{path.stem}"
+        for path in BACKTEST_PACKAGE_PATH.glob("*.py")
+    }
+
+
+def test_the_two_backtest_study_contracts_cover_every_module_in_the_package() -> None:
+    """Each contract's source list plus its named exemptions is exactly what is on disk.
+
+    An explicit `source_modules` list is what makes these two contracts possible at all -- there
+    is no "package except these" form -- and it is also the thing a tenth `backtest/*.py` would
+    walk straight past. So the list is checked against the directory in both directions: a module
+    in neither the list nor the exemption table fails, and an exemption for a module that no
+    longer exists fails too.
+    """
+    on_disk = _backtest_modules_on_disk()
+
+    for contract_id, exempt in (
+        ("backtest-studies-touch-no-store", BACKTEST_MODULES_EXEMPT_FROM_THE_STORE_CONTRACT),
+        (
+            "backtest-studies-reach-no-composition-root",
+            BACKTEST_MODULES_EXEMPT_FROM_THE_RUNTIME_CONTRACT,
+        ),
+    ):
+        sources = _contract_source_modules(contract_id)
+        assert not sources & set(exempt), (
+            f"{contract_id} names {sorted(sources & set(exempt))} as both a source and an "
+            "exemption; the exemption is dead and would hide the source going missing"
+        )
+        uncovered = sorted(on_disk - sources - set(exempt))
+        assert not uncovered, (
+            f"{uncovered} is a module under backtest/ that {contract_id} does not cover and "
+            "that nothing exempts. Add it to source_modules in pyproject.toml, or add it to "
+            "the exemption table above with the sentence that says why it may reach a store "
+            "or a composition root"
+        )
+        vanished = sorted((sources | set(exempt)) - on_disk)
+        assert not vanished, f"{contract_id} names {vanished}, which is not on disk"
+
+
+def test_the_backtest_contracts_forbid_the_targets_the_acceptance_probe_reached() -> None:
+    """The three things the acceptance probe imported must each be forbidden somewhere.
+
+    `duckdb` and `openalpha_cn.panel` by the whole-package contract, `openalpha_cn.storage` and
+    `openalpha_cn.runtime` by the two study contracts. Asserted against the parsed configuration
+    rather than against the file's text, so reformatting the TOML cannot make this pass while the
+    contract says something else.
+    """
+    whole_package = _contract_forbidden_modules("backtest-no-numeric-stack-or-panel-plane")
+    store = _contract_forbidden_modules("backtest-studies-touch-no-store")
+    composition = _contract_forbidden_modules("backtest-studies-reach-no-composition-root")
+
+    assert {"duckdb", "pandas", "openalpha_cn.panel"} <= whole_package
+    assert "numpy" not in whole_package, (
+        "numpy cannot be forbidden package-wide: backtest/replay.py reaches runtime/seeding.py, "
+        "whose numpy import is a real guarded optional-determinism hook. It is forbidden for the "
+        "ten study modules instead, which is where ADR-0003's decision actually bites"
+    )
+    assert {"numpy", "openalpha_cn.storage"} <= store
+    assert composition == {"openalpha_cn.runtime"}
+    assert _contract_source_modules("backtest-no-numeric-stack-or-panel-plane") == {
+        "openalpha_cn.backtest"
+    }
+
+
+def test_the_backtest_gate_rejects_a_probe_that_reaches_duckdb_and_the_panel_store() -> None:
+    """The acceptance probe, reproduced: a new module under `backtest/` reaching both.
+
+    This is the exact file the P3 technical acceptance created to prove the gap, and the whole
+    package is the contract's source precisely so a *new* module is covered on arrival rather
+    than once somebody adds it to a list.
+    """
+    assert not _BACKTEST_PROBE_PATH.exists(), "probe file must not already exist"
+    _BACKTEST_PROBE_PATH.write_text(
+        '"""Temporary probe module for a layering test."""\n\n'
+        "import duckdb\n\n"
+        "from openalpha_cn.panel.store import PanelStore\n\n"
+        '__all__ = ["PanelStore", "duckdb"]\n',
+        encoding="utf-8",
+    )
+    try:
+        exit_code = _lint_imports(
+            config_filename=str(ROOT / "pyproject.toml"),
+            no_cache=True,
+            limit_to_contracts=("backtest-no-numeric-stack-or-panel-plane",),
+        )
+        assert exit_code == 1, (
+            "lint-imports should reject backtest/_layering_gate_probe.py -> duckdb and -> "
+            "openalpha_cn.panel.store; if this passes, backtest is a forbidden target again "
+            "and a source of nothing"
+        )
+    finally:
+        _BACKTEST_PROBE_PATH.unlink()
+
+    exit_code = _lint_imports(
+        config_filename=str(ROOT / "pyproject.toml"),
+        no_cache=True,
+        limit_to_contracts=("backtest-no-numeric-stack-or-panel-plane",),
+    )
+    assert exit_code == 0
+
+
+def test_the_experiment_module_can_no_longer_reach_the_document_store_it_says_it_cannot() -> None:
+    """`nothing_in_this_module_stores_an_artifact_or_can_be_made_to`, made true.
+
+    That is a `KNOWN_EXPERIMENT_LIMITATIONS` code in `backtest/factor_experiment.py`, and the P3
+    acceptance imported `storage.factor_experiments` into that module and watched 121 tests pass.
+    The import is added here to the real file and removed in `finally`, rather than to a fresh
+    probe module, because `backtest-studies-touch-no-store` lists its sources explicitly -- a new
+    file would not be one, so a probe module would prove nothing about this claim.
+
+    `factor_view.ExperimentDocumentStore` is a `Protocol` declared beside the consumer exactly so
+    `storage/factor_experiments.py` satisfies it with no import in either direction; this is what
+    keeps that design from being abandoned quietly.
+    """
+    module_path = BACKTEST_PACKAGE_PATH / "factor_experiment.py"
+    original = module_path.read_text(encoding="utf-8")
+    module_path.write_text(
+        original + "\n\nfrom openalpha_cn.storage.factor_experiments import FileExperimentStore\n\n"
+        '__all__ = ["FileExperimentStore"]\n',
+        encoding="utf-8",
+    )
+    try:
+        exit_code = _lint_imports(
+            config_filename=str(ROOT / "pyproject.toml"),
+            no_cache=True,
+            limit_to_contracts=("backtest-studies-touch-no-store",),
+        )
+        assert exit_code == 1, (
+            "backtest/factor_experiment.py importing storage.factor_experiments must break "
+            "backtest-studies-touch-no-store -- otherwise its own "
+            "nothing_in_this_module_stores_an_artifact_or_can_be_made_to is prose"
+        )
+    finally:
+        module_path.write_text(original, encoding="utf-8")
+
+    exit_code = _lint_imports(
+        config_filename=str(ROOT / "pyproject.toml"),
+        no_cache=True,
+        limit_to_contracts=("backtest-studies-touch-no-store",),
+    )
+    assert exit_code == 0
+
+
+def test_the_study_contracts_reject_numpy_and_a_composition_root_added_to_a_real_study() -> None:
+    """ADR-0003's decision and the composition-root rule, each driven on a listed source module.
+
+    Two separate probes on `factor_ic.py`, and each is checked against *both* study contracts so
+    that a contract going red for the wrong reason cannot pass for the right one: `import numpy`
+    breaks the store contract and leaves the composition-root one alone, and a
+    `runtime.contracts` import does the reverse.
+    """
+    module_path = BACKTEST_PACKAGE_PATH / "factor_ic.py"
+    original = module_path.read_text(encoding="utf-8")
+
+    for addition, broken, intact in (
+        (
+            '\n\nimport numpy\n\n__all__ = ["numpy"]\n',
+            "backtest-studies-touch-no-store",
+            "backtest-studies-reach-no-composition-root",
+        ),
+        (
+            "\n\nfrom openalpha_cn.runtime.contracts import ResearchRunResult\n\n"
+            '__all__ = ["ResearchRunResult"]\n',
+            "backtest-studies-reach-no-composition-root",
+            "backtest-studies-touch-no-store",
+        ),
+    ):
+        module_path.write_text(original + addition, encoding="utf-8")
+        try:
+            assert (
+                _lint_imports(
+                    config_filename=str(ROOT / "pyproject.toml"),
+                    no_cache=True,
+                    limit_to_contracts=(broken,),
+                )
+                == 1
+            ), f"{broken} should have rejected backtest/factor_ic.py{addition!r}"
+            assert (
+                _lint_imports(
+                    config_filename=str(ROOT / "pyproject.toml"),
+                    no_cache=True,
+                    limit_to_contracts=(intact,),
+                )
+                == 0
+            ), f"{intact} has nothing to say about {addition!r} and must stay green"
+        finally:
+            module_path.write_text(original, encoding="utf-8")
+
+    assert _lint_imports(config_filename=str(ROOT / "pyproject.toml"), no_cache=True) == 0, (
+        "every contract must be green again once both probes are removed"
+    )
+
+
+def test_the_replay_harness_and_the_outcome_validator_keep_the_imports_they_exist_for() -> None:
+    """The positive half: the two exempted modules' real edges are still there.
+
+    A contract that passed because the design it permits had quietly gone away would be a gate
+    measuring nothing, and these two exemptions are the only reason the study contracts cannot be
+    stated over the whole package. `replay.py` composing a SQLite-backed engine and
+    `validation.py` taking one pydantic result model are what the exemptions buy.
+    """
+    graph = grimp.build_graph("openalpha_cn")
+
+    for imported in (
+        "openalpha_cn.runtime.engine",
+        "openalpha_cn.storage.sqlite",
+        "openalpha_cn.storage.recovery",
+        "openalpha_cn.storage.migrations",
+    ):
+        assert graph.direct_import_exists(
+            importer="openalpha_cn.backtest.replay", imported=imported
+        ), f"sanity check: the replay harness is supposed to import {imported}"
+    assert graph.direct_import_exists(
+        importer="openalpha_cn.backtest.validation", imported="openalpha_cn.runtime.contracts"
+    ), "sanity check: the outcome validator is supposed to take ResearchRunResult"
+
+
 # --- the logging state `lint_imports` wrecks, and the guard that puts it back (P1 review) ---
 #
 # `importlinter.cli.lint_imports` reconfigures logging as a side effect, and its
