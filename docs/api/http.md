@@ -138,6 +138,49 @@ The two panel bodies share no key at all. `detail.message` is a disclosable text
 names the exchange, the codes that stood in the way and the remedy, and never this
 service's filesystem layout.
 
+## Factor declarations
+
+`GET /api/v1/factors` serves everything this build declares: every factor, transform and
+neutralisation, each with its full prose note, plus the three tables a `factor run`
+answer cannot be read without — the tier order, what each of the six verdicts means, and
+which of the six attribution cells the acceptance criterion is decided on. It reads no
+store, so it answers before any panel exists; it is how a caller finds out what to build.
+
+`GET /api/v1/factors?factor=reversal_1d/v1` (or `?transform=…`, or
+`?neutralization=…`) serves one declaration instead of all of them. Exactly one of the
+three query parameters, because they name three registries rather than three spellings of
+one; naming none serves the whole catalog, naming two is `422`. A **query parameter**
+rather than a path segment because a handle is `key/vN` and contains a `/`: a
+`GET /api/v1/factors/{handle}` route would need a `:path` converter, which would shadow
+`/api/v1/factors/run` and `/api/v1/factors/experiments`.
+
+`factor` also accepts a `fct_…` content address; the other two take their qualified key.
+The refusal for an unknown handle names the **declared handles**, never the content
+addresses — a caller holding an address already has it, and a caller who mistyped a key
+needs the keys.
+
+The body is `{"kind", "handle", "identity", "declaration", "note"}` per entry, where
+`declaration` is the contract's own model dump and `identity` is its content address over
+exactly those fields. Perturb any key of `declaration` and `identity` moves, which is what
+makes the whole body auditable key by key.
+
+The twins are `openalpha factor list` / `openalpha factor describe` and
+`OpenAlphaSDK.factor_catalog()` / `.describe_factor()`, all three through
+`factor_view.factor_catalog` and `factor_view.factor_entry`.
+
+## Building the tiers a run reads
+
+**There is no HTTP route that builds a factor panel, and that is deliberate.**
+`openalpha panel build` has no HTTP twin either: building writes panel partitions, a
+partition is replaced whole, and this service ships with no authentication of its own, so
+a `POST` that replaced a stored partition would hand that to whoever could reach the port.
+The builder is `openalpha factor build` and `OpenAlphaSDK.build_factor_panels(...)`.
+
+A store that only `openalpha panel build` ever wrote holds **no factor partition**, so
+`POST /api/v1/factors/run` against it answers `409` with `detail.reason =
+"panel_unreadable"` and `partition_missing` on the `factor_obs_…` dataset. That is not a
+defect in the request: run `openalpha factor build` first.
+
 ## Factor experiments
 
 `POST /api/v1/factors/run` runs one factor's three-tier experiment over a closed range
@@ -193,6 +236,50 @@ unhandled defect. **Exit `0` includes an experiment whose grid says `removed` on
 cell** — a `removed` verdict is the report succeeding at its job, and an exit code that
 treated it as failure would make every honest three-tier report look like a broken
 command.
+
+### Exit `0` and `200` also include a grid that says `not_measured` on every cell
+
+This is the sentence this document was missing, and it is the more dangerous of the two.
+A `removed` grid is a finding. A `not_measured` grid is **no finding at all**: one of the
+two tiers in every cell carries no statistic, because its own coverage code is not
+`measured`. It still assembles, so it still exits `0` and still answers `200` — and to a
+reader (or a CI step) that greps the body for `removed`, finds nothing and stops, it looks
+exactly like a clean pass. It is not. Two of the three tiers may never have computed a
+number.
+
+The shipped configuration reaches this state routinely: `cross_section_standard/v1` and
+`industry_and_size/v1` both declare `min_cross_section=100`, so on a market narrower than
+that both derived tiers store a coverage code for every name and no value.
+
+How to tell, in order of directness:
+
+- **`document.artifact.tiers[].ic.coverage`** — the per-tier truth. `measured` is the only
+  value that means a number exists; anything else (`insufficient_as_ofs`,
+  `insufficient_securities`, …) means that tier's cells are `not_measured` by construction.
+- **`document.artifact.attributions[].verdict`** — check for the *presence* of a verdict
+  you can act on, never for the absence of `removed`.
+- **`openalpha factor run`** prints a named `WARNING` line on **stderr** when every cell is
+  `not_measured`, in both `--json` and plain modes (stdout stays exactly the sealed
+  envelope). `factor_view.everything_is_unmeasured` is the predicate; there is no such
+  warning over HTTP, because a response body has no second channel.
+
+This is deliberately **not** a fourth exit code or a non-2xx status. An all-`not_measured`
+experiment did assemble, its record is sealed and worth keeping, and each tier already
+carries its own four coverage codes — a coarser signal on the envelope would be a fifth
+vocabulary for "not enough data", which the artifact contract refuses to add.
+
+### Which grid cell is the answer
+
+The grid has six cells: two statistics (`mean_ic`, `mean_spread`) over three steps
+(`raw->processed`, `processed->neutralized`, `raw->neutralized`). They are not equals.
+**`processed->neutralized` is the step the acceptance criterion is read off** — a statistic
+that vanishes there was the industry and size exposure, and no transform setting recovers
+it. `GET /api/v1/factors` flags it in `attribution_cells[].decides_the_acceptance_criterion`
+and `openalpha factor run` marks the row inline.
+
+The six verdicts (`survives`, `removed`, `reversed`, `amplified`, `no_baseline`,
+`not_measured`) are served with one sentence each in `GET /api/v1/factors` under
+`verdicts`, and printed by `openalpha factor list`.
 
 The portfolio endpoint is intentionally stateless: callers submit the immutable
 `PortfolioState`, `PortfolioOrder`, `MarketBar`, and optional `PortfolioLimits`,

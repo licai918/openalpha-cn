@@ -389,6 +389,99 @@ uv run openalpha data-check --dataset daily --dataset adj_factor --year 2026 \
 - 凭证不经过 CLI：`TushareProvider` 在自己的构造函数里解析 `TUSHARE_TOKEN`，
   `ProviderFailure` 的原始消息（可能带着 token 或整条 query string）永不打印、永不入日志。
 
+## 因子库与三档因子实验（P3）
+
+面板平面之上是**因子平面**：19 个声明因子（动量反转 5 / 波动流动性 4 / 价值 3 / 质量 4 /
+成长 3）、1 个截面变换、1 个行业与市值中性化，以及把三档拿去打分并密封成不可变产物的
+实验流程。四个命令，按操作者遇到它们的顺序：
+
+```bash
+# 1. 这个 build 声明了什么 —— 19 个因子的 handle、各自读哪些列、六个判决各是什么意思
+uv run openalpha factor list
+
+# 2. 一条声明的全文，含它自己承认不度量什么（每条注解 705～4830 字符，一字不删）
+uv run openalpha factor describe --factor return_vol_60/v1
+
+# 3. 计算并写入因子档（raw / processed / neutralized 三档，--tier 指到哪档就写到哪档）
+uv run openalpha factor build --factor reversal_1d/v1 --tier processed \
+  --transform cross_section_standard/v1 \
+  --as-of 2026-01-08T09:00:00+00:00 --as-of 2026-01-09T09:00:00+00:00 \
+  --year 2026 --max-staleness-days 30
+
+# 4. 三档实验：IC、分位组合、周转与容量、冗余，六格归因，密封成内容寻址的产物
+uv run openalpha factor run --factor reversal_1d/v1 \
+  --start 2026-01-08 --end 2026-01-09 \
+  --transform cross_section_standard/v1 --neutralization industry_and_size/v1 \
+  --horizon 1d --ic-method spearman --min-securities 4 --min-as-ofs 2 \
+  --group-count 2 --min-securities-per-group 2 --position-capital 100000 \
+  --min-periods 2 --participation-cap 0.01 --min-rebalances 1 \
+  --redundancy-threshold 0.8 --retention-floor 0.4
+```
+
+三个面等价：`openalpha factor *` ／ `GET /api/v1/factors` + `POST /api/v1/factors/run` ／
+`OpenAlphaSDK.factor_catalog()` + `.run_factor_experiment()`。`factor build` 只有命令行与
+SDK 两个面，与 `panel build` 一致——它写面板分区，而服务本身不带鉴权。
+
+### 怎么读那张六格网格
+
+`factor run` 打三行档位和六格归因。**六格不是平等的**：
+
+| 步骤 | 它回答什么 | 补救 |
+|---|---|---|
+| `raw->processed` | 缩尾、标准化与缺失值策略拿走了多少 | 换一个 `FactorTransformSpec` |
+| `processed->neutralized` | **回归掉行业与市值之后还剩多少 —— 验收判据读的就是这一行** | 没有变换设置能救回来 |
+| `raw->neutralized` | 端到端。单独carry是因为一环 `not_measured` 时两比之积不等于合成之比 | — |
+
+六个判决的含义（`openalpha factor list` 会打全，`GET /api/v1/factors` 的 `verdicts` 里有同一份）：
+
+| 判决 | 含义 |
+|---|---|
+| `survives` | 留存率在声明的 `--retention-floor` 与 1 之间：这一步保住了统计量 |
+| `removed` | 留存率低于声明下限。在 `processed->neutralized` 上就是验收判据触发：因子挣的是行业与规模暴露 |
+| `reversed` | 后一档统计量为负：这一步把方向掉了个个儿，与"缩水"是两种发现 |
+| `amplified` | 留存率大于 1：这一步把统计量放大了，说明暴露原本在拖后腿 |
+| `no_baseline` | 两档都度量了，但**前一档**统计量小于等于零：本来就没有东西可留 |
+| `not_measured` | 两档中有一档根本没有统计量。**这不是通过** |
+
+**`exit 0` 同时包含「六格全是 `removed`」和「六格全是 `not_measured`」，后者更危险。**
+前者是报告干成了它的活；后者是**什么发现都没有** —— 三档里可能有两档一个数都没算过，
+而 grep `removed` 没命中就收工的人（或 CI）会读成「这个因子扛过了中性化」。所以
+`factor run` 在这种情形下往 **stderr** 打一行具名 `WARNING`（`--json` 模式也打，stdout
+仍然只有密封信封），并且 `document.artifact.tiers[].ic.coverage` 是每一档的真相：
+只有 `measured` 才代表有数。它**不是**第四个退出码——这样的实验确实组装成功了，
+产物值得留存，每档自己的四个覆盖码已经说明了原因，再加一个更粗的信号就是第五套
+「数据不够」的词汇表。
+
+### 有名字的边界（不是遗漏）
+
+- **中性化档在覆盖年内建不出来**（`V2-P4-026` 要修的）。残差只能在「读到的每一年最后一个
+  已存会话」当天或之后的预测时刻上算出来，而分区是整块替换的——所以一个 store 无法同时
+  持有年中的 raw 观测和年末时刻的残差。`factor build --tier neutralized` 在更早的时刻上
+  **按名字拒绝**，并且什么都不写：写了两档、放弃第三档，正好留下让 `factor run` 在下一条
+  命令里以另一个理由拒绝的那种 store 形态。
+- **出厂变换与中性化的 `min_cross_section=100` 高于稀薄市场**：窄截面上两个派生档每个名字
+  只有覆盖码没有值，六格全 `not_measured`。这是那份配置的诚实答案，不是面的缺陷。
+- 完整清单在 `openalpha factor list --json` 的 `run_limitations`，或
+  `openalpha_cn/factor_view.py#KNOWN_FACTOR_RUN_LIMITATIONS`。
+
+### `factor build` 的几点语义
+
+- **`--as-of` 是预测时刻而不是日期，可重复。** 一条存储观测的四个面板时钟都打这个时刻，
+  `factor run` 也按它给样本分组；日期会把时分秒留给某个面去发明。`factor run --start/--end`
+  再按这些时刻的 Asia/Shanghai **日期**去选。
+- **一个分区年的全部时刻必须在一次调用里给全。** 分区是整体替换，所以同年的第二次构建会被
+  「不允许丢弃已存构建」的守卫拒绝，除非用 `--supersedes-raw` / `--supersedes-processed` /
+  `--supersedes-neutralized` 点名它要替换掉哪些 `manifest_id`。三个选项而不是一个，因为三档
+  是三份不同的 manifest 分区，每个 writer 都会拒绝一个「它触碰的分区都不持有」的名字。
+- **`--year` 是分区年，不是 `factor run` 的 `--start/--end`（那是预测日）。** 一年一年数：
+  125 个会话回看的因子在年初需要上一年；财报分区按**公告年**归档，五个报告期通常要两个公告年；
+  登记簿分区按**上市生命周期年**归档，只给一个前缀会静默缩小 universe。
+- **`--max-staleness-days N` 与 `--waive-max-staleness` 二选一，没有默认值。**
+  `panel_ingest` 的每个 requirement builder 都拒绝替调用者选这个界，理由写在各自的 docstring
+  里：一个最新会话是一个月前的行情面板，已经错过了一个月的市场。
+- 不给 `--subject` 时，主体是登记簿知道的**全部**代码（含已退市的），universe 是当天的上市
+  横截面 —— 于是退市名会被评估并落成 `not_in_universe`，而不是从普查里静默消失。
+
 ## 核心独特优势
 
 OpenAlpha CN 整合 TradingAgents 和 AI Hedge Fund 的优势，接入 A 股数据源，更适合 A 股涨停量化分析。OpenAlpha CN 的竞争重点不是复制更多“投资大师人格”，而是：

@@ -68,7 +68,9 @@ from openalpha_cn.factor_view import (
     FACTOR_RUN_LIMITATION_CODES,
     KNOWN_FACTOR_RUN_LIMITATIONS,
     FactorRunBlockedError,
+    acceptance_rows,
     attribution_rows,
+    everything_is_unmeasured,
     factor_request,
     panel_store,
     run_factor_experiment,
@@ -386,15 +388,47 @@ def test_the_declared_limitations_are_the_ones_this_face_carries() -> None:
     `tests/unit/test_known_limitation_registries.py` requires every declared code to appear as a
     string literal in executable test code; this is that literal for this registry, compared for
     equality rather than membership because a membership assertion cannot see a removal.
+
+    **One entry was replaced rather than edited, and this literal is how that was noticed.**
+    `V2-P3-015` declared `nothing_in_this_repository_builds_a_factor_panel_from_a_command_line`,
+    and `V2-P3-019` shipped `openalpha factor build`, which makes the sentence false. A false
+    disclosure is worse than no disclosure -- it is the shape this whole registry mechanism exists
+    to stop -- so the entry became
+    `the_builder_cannot_produce_a_residual_before_its_years_stored_horizon`, which is the part of
+    it that is *still* true: the builder reaches the raw and processed tiers at any instant and the
+    third only at or after its year's stored horizon. Nothing here was weakened to accommodate the
+    change; the equality went red, which is the mechanism working.
     """
     assert {
         "the_three_tiers_must_have_been_built_at_the_same_instants",
-        "nothing_in_this_repository_builds_a_factor_panel_from_a_command_line",
+        "the_builder_cannot_produce_a_residual_before_its_years_stored_horizon",
         "the_document_store_holds_bytes_and_re_derives_no_number",
         "a_run_is_evaluated_at_one_as_of_and_the_labels_are_read_at_it",
         "the_shipped_transform_and_neutralisation_floors_exceed_a_thin_market",
     } == FACTOR_RUN_LIMITATION_CODES
     assert all(limitation.detail.strip() for limitation in KNOWN_FACTOR_RUN_LIMITATIONS)
+
+
+def test_a_grid_with_a_real_verdict_is_not_reported_as_unmeasured(predictive: Path) -> None:
+    """`everything_is_unmeasured` is `False` on the one fixture that reaches a real verdict.
+
+    The other half of `tests/integration/test_factor_interfaces.py::
+    test_the_acceptance_row_is_marked_and_an_unmeasured_grid_is_warned_about`, and it is what stops
+    that test from passing on a predicate that returns `True` unconditionally. This file's probe
+    registry is the only configuration in the suite whose attribution grid carries a decided
+    verdict on an eight-name market, which makes it the only place this direction can be driven.
+
+    The `removed` cell is asserted beside it, so "not everything is unmeasured" is grounded in the
+    verdict the acceptance criterion is actually read off rather than in any non-`not_measured`
+    cell at all.
+    """
+    record, _ = _run(predictive)
+
+    assert not everything_is_unmeasured(record)
+    assert ("processed->neutralized", "mean_ic", repr(NEUTRALIZED_MEAN_IC), "removed") in (
+        attribution_rows(record)
+    )
+    assert acceptance_rows(record) == (("mean_ic", "removed"), ("mean_spread", "removed"))
 
 
 def test_the_run_reads_the_panel_at_the_stated_instant_and_not_at_a_wall_clock(

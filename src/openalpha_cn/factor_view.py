@@ -1,10 +1,26 @@
-"""One factor experiment run, resolved and rendered once, for all three faces (`V2-P3-015`).
+"""The factor plane's public face: build the tiers, list what is declared, run one experiment.
 
-`V2-P3-014` sealed the artifact and stored nothing. This module is the public face the roadmap
-names -- `factor run --factor <id> --start --end`, `POST /api/v1/factors/run`,
+`V2-P3-014` sealed the artifact and stored nothing. `V2-P3-015` made a run reachable --
+`factor run --factor <id> --start --end`, `POST /api/v1/factors/run`,
 `OpenAlphaSDK.run_factor_experiment` -- and it is one module for `panel_view.py`'s reason: three
 faces that resolve one request three ways answer three different questions, and every equivalence
 between them is then a coincidence.
+
+`V2-P3-019` added the two things a run was unreachable and unreadable without, and both were
+measured absences rather than conveniences:
+
+- **`factor build`** (see `build_factor_panels`). `V2-P3-015` recorded
+  `nothing_in_this_repository_builds_a_factor_panel_from_a_command_line` and left `factor build`
+  free "because this issue did not need it". The consequence was exact: a store built by
+  `openalpha panel build` held no factor partition, `openalpha factor run` against it was refused
+  by name, and `openalpha panel build --dataset factor_obs_...` answered that the dataset is not
+  one of its build targets. The whole surface was unreachable to anybody who had not read
+  `panel_factors.py`.
+- **`factor list` / `factor describe`** (see `factor_catalog` and `factor_entry`). Nineteen
+  factors, one transform and one neutralisation are declared, each with prose stating what it does
+  and does not measure, and none of it was on any face. The only discovery channel was a typo, and
+  a typo answered with nineteen content addresses -- the one form of the identity a human never
+  types.
 
 ## What a run is
 
@@ -126,10 +142,24 @@ refuses to add a sixth: every tier report carries its four upstream coverage cod
 only synthesis is the attribution grid's `not_measured`. What this module adds is a refusal for a
 question it cannot put at all, which is a different fact with a different remedy.
 
-**A freshness policy.** Every panel read here passes `max_staleness=None`. "Is this panel fresh
-enough to read" is `panel doctor`'s and `data-check`'s question, and answering it a second time
-here would be a second source of truth for it -- the same argument `panel_gate` makes for not
-building its own `ReadinessRequirement`.
+**A freshness policy for a *run*.** Every panel read `run_factor_experiment` makes passes
+`max_staleness=None`. "Is this panel fresh enough to read" is `panel doctor`'s and `data-check`'s
+question, and answering it a second time here would be a second source of truth for it -- the same
+argument `panel_gate` makes for not building its own `ReadinessRequirement`. A *build* is the one
+place that cannot follow the rule, because `compute_factor` takes the requirement rather than
+building one, and every requirement builder in `panel_ingest` refuses to default `max_staleness`;
+so `factor build` makes the caller state a bound or waive it on the record. See
+`factor_build_request`.
+
+## Layering, restated for the builder half
+
+The builder joins no package this module did not already join: `compute_factor`,
+`apply_factor_transform` and the three writers are `panel_factors`, `apply_factor_neutralization`
+and `load_industry_market_cap_cross_section` are `panel_neutralization`, and the six requirement
+builders are `panel_ingest`. `tests/unit/test_factor_view_layering.py::
+test_the_factor_face_joins_exactly_the_planes_it_renders` is an **equality**, so a builder that
+reached for a composition root or a credential to find a universe would fail there rather than
+being reviewed for.
 """
 
 from __future__ import annotations
@@ -137,8 +167,9 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
+from types import MappingProxyType
 from typing import ClassVar, Final, Literal, Protocol, TypeVar
 from zoneinfo import ZoneInfo
 
@@ -150,6 +181,8 @@ from openalpha_cn.backtest.execution import (
 )
 from openalpha_cn.backtest.factor_experiment import (
     ATTRIBUTION_CELL_ORDER,
+    ATTRIBUTION_VERDICT_ORDER,
+    AttributionVerdict,
     FactorExperimentError,
     FactorExperimentRecord,
     TierReport,
@@ -193,7 +226,7 @@ from openalpha_cn.backtest.factor_tradeability import (
     liquidity_from_amount,
 )
 from openalpha_cn.domain.adjustment import AdjustmentHistory
-from openalpha_cn.domain.daily_prices import DailyBar
+from openalpha_cn.domain.daily_prices import DAILY_BASIC_DATASET, DAILY_DATASET, DailyBar
 from openalpha_cn.domain.factor import (
     FactorDefinition,
     FactorError,
@@ -211,6 +244,7 @@ from openalpha_cn.domain.factor_transform import (
     FactorTransformSpec,
     ProcessedFactorObservation,
 )
+from openalpha_cn.domain.financial_statements import FINANCIAL_STATEMENT_DATASETS
 from openalpha_cn.domain.horizon import HorizonError, ResearchHorizon, parse_horizon
 from openalpha_cn.domain.labels import (
     HaltCorpus,
@@ -223,18 +257,31 @@ from openalpha_cn.domain.labels import (
 )
 from openalpha_cn.domain.name_history import NameHistory, RiskWarning
 from openalpha_cn.domain.price_limits import PriceLimit
-from openalpha_cn.domain.stock_universe import StockUniverse
+from openalpha_cn.domain.stock_universe import StockUniverse, StockUniverseError
 from openalpha_cn.domain.trading_calendar import TradingCalendar, TradingCalendarError
-from openalpha_cn.panel.catalog import DEFAULT_DATE_TIMEZONE, PanelStorageError
-from openalpha_cn.panel.store import PanelStore
+from openalpha_cn.panel.catalog import (
+    DEFAULT_DATE_TIMEZONE,
+    PanelStorageError,
+    ReadinessRequirement,
+)
+from openalpha_cn.panel.store import PanelStore, PartitionRef
 from openalpha_cn.panel_factors import (
     FACTOR_DEFINITIONS,
     FACTOR_TRANSFORMS,
     FactorEngineError,
+    FactorPanel,
+    ProcessedFactorPanel,
+    apply_factor_transform,
+    compute_factor,
     load_factor_observations,
     load_processed_factor_observations,
+    write_factor_panels,
+    write_processed_factor_panels,
 )
 from openalpha_cn.panel_ingest import (
+    daily_basic_requirement,
+    daily_requirement,
+    financial_statement_requirement,
     load_adjustment_histories,
     load_daily_bars,
     load_name_histories,
@@ -246,25 +293,44 @@ from openalpha_cn.panel_ingest import (
 from openalpha_cn.panel_neutralization import (
     FACTOR_NEUTRALIZATIONS,
     NeutralizationEngineError,
+    NeutralizedFactorPanel,
+    apply_factor_neutralization,
+    load_industry_market_cap_cross_section,
     load_neutralized_factor_observations,
+    write_neutralized_factor_panels,
 )
 from openalpha_cn.panel_view import PANEL_STORE_PLACEHOLDER, panel_store
 
 __all__ = [
+    "ACCEPTANCE_STEP",
+    "ATTRIBUTION_VERDICT_MEANINGS",
+    "CATALOG_SCHEMA_VERSION",
     "FACTOR_DATE_ZONE",
     "FACTOR_RUN_LIMITATION_CODES",
     "KNOWN_FACTOR_RUN_LIMITATIONS",
+    "REQUIREMENT_BUILDERS",
     "VIEW_SCHEMA_VERSION",
     "ExperimentDocumentStore",
     "ExperimentWrite",
+    "FactorBuildReport",
+    "FactorBuildRequest",
     "FactorPanelUnreadableError",
     "FactorRequestError",
     "FactorRunBlockedError",
     "FactorRunLimitation",
     "FactorRunRequest",
     "FactorViewError",
+    "acceptance_rows",
     "attribution_rows",
+    "build_factor_panels",
+    "build_rows",
+    "build_view",
+    "catalog_rows",
+    "everything_is_unmeasured",
     "experiment_view",
+    "factor_build_request",
+    "factor_catalog",
+    "factor_entry",
     "factor_request",
     "panel_store",
     "resolve_factor",
@@ -370,16 +436,21 @@ KNOWN_FACTOR_RUN_LIMITATIONS: Final[tuple[FactorRunLimitation, ...]] = (
         ),
     ),
     FactorRunLimitation(
-        code="nothing_in_this_repository_builds_a_factor_panel_from_a_command_line",
+        code="the_builder_cannot_produce_a_residual_before_its_years_stored_horizon",
         detail=(
-            "This face READS the three stored tiers; it computes none of them. Nothing in cli.py "
-            "or scripts/ imports panel_factors or panel_neutralization, so compute_factor, "
-            "apply_factor_transform and apply_factor_neutralization are libraries with no "
-            "operator-reachable caller -- panel_neutralization's own docstring says so of itself. "
-            "The consequence is exact and is not softened: `openalpha factor run` against a store "
-            "built only by `openalpha panel build` finds no factor partition and is refused by "
-            "name. Wiring a builder is V2-P3-002's missing caller rather than this issue's, and "
-            "it is the one thing standing between this surface and an operator."
+            "`openalpha factor build` (V2-P3-019) computes and stores the raw and processed tiers "
+            "at any prediction instant the panel covers, so a store built only by `openalpha "
+            "panel build` now reaches `factor run`. It cannot put the third tier at an arbitrary "
+            "instant, and the bound is arithmetic rather than a policy: "
+            "load_industry_market_cap_cross_section reads daily_basic through read_if_ready, "
+            "which refuses a partition whose newest row post-dates the as_of, and "
+            "_refuse_a_cross_section_that_is_not_this_panels requires the characteristic cross "
+            "section's as_of to equal the processed panel's exactly. The two together admit only "
+            "a prediction instant at or after the last stored session of every year the read "
+            "touches. `--tier neutralized` at an earlier instant is refused BY NAME and writes "
+            "nothing, rather than storing two tiers and leaving `factor run` to report the third "
+            "as an empty in-range read. V2-P4-026 (an as-of-sensitive session-level read of "
+            "daily_basic) is the fix and is a hard precondition of V2-P4-013."
         ),
     ),
     FactorRunLimitation(
@@ -546,19 +617,40 @@ def resolve_factor(
     observation has only the id.
 
     Refuses with `FactorRequestError` rather than letting `FactorError` out, because a face wants
-    one exception type for "this request cannot be put" whatever part of it was wrong. The
-    registry's own message names every declared factor, which is the actionable half.
+    one exception type for "this request cannot be put" whatever part of it was wrong.
+
+    **The two refusals do not carry the same list, and that is the correction `V2-P3-019` made.**
+    `FactorRegistry.get` names every declared `qualified_key`, which is the actionable half of a
+    mistyped key. `FactorRegistry.by_id` names every declared `factor_id`, which is the actionable
+    half for a reader holding a stored observation and is *useless* to the caller who reaches it
+    most often -- somebody who typed `--factor ep` and got nineteen opaque content addresses back
+    from a help text that had just told them "the key is the form for a human". So the
+    content-address branch is re-worded here rather than passed through: it keeps the registry's
+    own sentence, names the **keys**, and points at `openalpha factor list`, which is where both
+    spellings and every factor's prose actually live.
     """
     name = token.strip()
     if not name:
         raise FactorRequestError(
             "--factor names no factor; give a qualified key (`reversal_1d/v1`) or a factor_id "
-            "(`fct_...`) this build declares"
+            "(`fct_...`) this build declares. `openalpha factor list` prints every one of them"
         )
+    if "/" in name:
+        try:
+            return registry.get(name)
+        except FactorError as error:
+            raise FactorRequestError(str(error)) from error
     try:
-        return registry.get(name) if "/" in name else registry.by_id(name)
+        return registry.by_id(name)
     except FactorError as error:
-        raise FactorRequestError(str(error)) from error
+        raise FactorRequestError(
+            f"{name!r} is not a factor this build declares. A --factor is a qualified key -- this "
+            f"build knows {list(registry.qualified_keys)} -- or the fct_ content address a stored "
+            "partition carries. The keys are listed here and the addresses are not: a caller "
+            "holding an address already has it, and a caller who mistyped a key needs the keys. "
+            "`openalpha factor list` prints both, beside what each factor reads, and `openalpha "
+            "factor describe --factor <key>` prints what its note says it does not measure"
+        ) from error
 
 
 def factor_request(
@@ -1443,6 +1535,1109 @@ def tier_rows(record: FactorExperimentRecord) -> tuple[tuple[str, str, str, str]
                 report.ic.coverage,
                 "-" if report.ic.mean_ic is None else repr(report.ic.mean_ic),
                 "-" if report.portfolio.mean_spread is None else repr(report.portfolio.mean_spread),
+            )
+        )
+    return tuple(rows)
+
+
+def acceptance_rows(record: FactorExperimentRecord) -> tuple[tuple[str, str], ...]:
+    """The `(statistic, verdict)` pairs of the one step a three-tier report is decided on.
+
+    A projection of `attribution_rows`, and it exists because the grid is six rows of four columns
+    and **one** of the three steps carries the finding. `factor_experiment.py` says so in prose --
+    "this is the step the roadmap's annotation is about" -- and a face that printed six equal rows
+    left the reader to know which. `ACCEPTANCE_STEP` is the declaration; this is the read of it.
+    """
+    return tuple(
+        (statistic, cell.verdict)
+        for from_tier, to_tier, statistic in ATTRIBUTION_CELL_ORDER
+        if (from_tier, to_tier) == ACCEPTANCE_STEP
+        and (
+            cell := record.artifact.attribution(
+                from_tier=from_tier, to_tier=to_tier, statistic=statistic
+            )
+        )
+        is not None
+    )
+
+
+def everything_is_unmeasured(record: FactorExperimentRecord) -> bool:
+    """Whether **every** cell of the grid is `not_measured`, which is the quietest bad answer.
+
+    `docs/api/http.md` states that exit `0` includes an experiment whose grid says `removed` on
+    every cell, and that is a finding: the report succeeded at its job. It did not state the other
+    shape, and the acceptance review named it the most dangerous thing on this face -- a grid whose
+    every cell is `not_measured` also exits `0` and also answers `200`, and a reader (or a CI step)
+    that greps for `removed`, finds nothing and stops has concluded "this factor survived
+    neutralisation" about two tiers that never computed a number.
+
+    So it is a **declared property of the artifact rather than an exit code**, and both halves of
+    that are deliberate:
+
+    - Not an exit code, because `FACTOR_EXIT`'s row is "an experiment that assembled exits 0" and
+      an all-`not_measured` experiment did assemble. Its tier reports carry the real reason -- each
+      tier's own four coverage codes are on the record -- so a second, coarser signal on the
+      envelope would be a fifth vocabulary for "not enough data", which `V2-P3-014` and this
+      module both already refuse to add.
+    - Not silent either. `cli._echo_experiment` prints a named line when this is true, `factor
+      run --json` prints the same line on **stderr** so that stdout stays exactly the sealed
+      envelope, and `docs/api/http.md` now carries the sentence it was missing.
+
+    Read off `ATTRIBUTION_CELL_ORDER` rather than off `attribution_rows`, so a change to the
+    terminal rendering cannot move this answer.
+    """
+    verdicts: set[AttributionVerdict] = {
+        record.artifact.attribution(
+            from_tier=from_tier, to_tier=to_tier, statistic=statistic
+        ).verdict
+        for from_tier, to_tier, statistic in ATTRIBUTION_CELL_ORDER
+    }
+    return verdicts == {"not_measured"}
+
+
+# --- what this build declares: the catalog behind `--factor`, `--transform`, `--neutralization` ---
+
+
+CATALOG_SCHEMA_VERSION: Final[str] = "factor-catalog/v1"
+"""The version of the body `factor_catalog` and `factor_entry` hand out.
+
+Its own, and deliberately not any declaration's: each entry carries its contract's own
+`schema_version` inside `declaration`, and they version different things. A face that reused one
+of those would make a change to the transport look like a change to a factor.
+"""
+
+ACCEPTANCE_STEP: Final[tuple[FactorTier, FactorTier]] = ("processed", "neutralized")
+"""The one tier step a three-tier report's acceptance criterion is decided on.
+
+Declared here rather than in `backtest/factor_experiment.py` because it is a statement about what
+a *face* should point at, not about how a cell is computed -- that module owns
+`ATTRIBUTION_STEPS`, treats all three as equals on purpose (each has its own remedy), and says in
+prose which one the roadmap's annotation is about. This is that sentence as data, and
+`tests/integration/test_factor_catalog.py::
+test_the_acceptance_step_is_one_of_the_declared_steps_and_is_the_neutralisation_one` binds it back
+to the declaration so a fourth step cannot leave this pointing at a cell the grid no longer has.
+"""
+
+ATTRIBUTION_VERDICT_MEANINGS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "not_measured": (
+            "one of the two tiers carries no statistic at all, so nothing was compared. NOT a "
+            "pass: a grid that is not_measured everywhere reports no finding, and reading it as "
+            "`the factor survived` is the mistake this row exists to make impossible"
+        ),
+        "no_baseline": (
+            "both tiers measured and the EARLIER one's statistic is at or below zero, so there "
+            "was nothing for the later tier to keep. A factor that never worked, not one whose "
+            "edge was removed"
+        ),
+        "reversed": (
+            "the later tier's statistic is negative: the step turned the bet around, which is a "
+            "different finding from shrinking it"
+        ),
+        "amplified": (
+            "retention above 1: the step made the statistic larger, which is what a factor whose "
+            "exposure was working against it looks like"
+        ),
+        "removed": (
+            "retention below the declared --retention-floor. On the processed->neutralized step "
+            "this is the acceptance criterion firing: what the factor earned was the industry and "
+            "the size exposure"
+        ),
+        "survives": "retention between the declared floor and 1: the step kept the statistic",
+    }
+)
+"""One sentence per `AttributionVerdict`, for the faces that print or serve the grid.
+
+Six verdicts decided every `factor run`'s answer and **not one of them was written down anywhere a
+caller could reach** -- `grep -r survives docs/ README* web/` found nothing, so the vocabulary was
+readable only by opening `backtest/factor_experiment.py`. The prose is here rather than there
+because that module's own docstring is the normative statement and a second copy of it would be a
+second thing that can disagree; what these are is the *short* form a terminal and a JSON body can
+carry. `tests/integration/test_factor_catalog.py::
+test_every_declared_verdict_carries_a_meaning_and_no_meaning_is_invented` holds the key set equal
+to `ATTRIBUTION_VERDICT_CODES`, so a seventh verdict arrives here as a failure rather than as a
+cell nobody can read.
+"""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Declared:
+    """One declared contract, flattened to the three things every face needs of all three kinds."""
+
+    kind: Literal["factor", "transform", "neutralization"]
+    handle: str
+    identity: str
+    declaration: Mapping[str, object]
+    note: str | None
+
+
+def _declared_factors(registry: FactorRegistry) -> tuple[_Declared, ...]:
+    return tuple(
+        _Declared(
+            kind="factor",
+            handle=item.qualified_key,
+            identity=item.factor_id,
+            declaration=item.model_dump(mode="json"),
+            note=registry.note_for(item.qualified_key),
+        )
+        for item in registry.definitions
+    )
+
+
+def _declared_transforms(registry: FactorTransformRegistry) -> tuple[_Declared, ...]:
+    return tuple(
+        _Declared(
+            kind="transform",
+            handle=item.qualified_key,
+            identity=item.transform_id,
+            declaration=item.model_dump(mode="json"),
+            note=registry.note_for(item.qualified_key),
+        )
+        for item in registry.specs
+    )
+
+
+def _declared_neutralizations(registry: FactorNeutralizationRegistry) -> tuple[_Declared, ...]:
+    return tuple(
+        _Declared(
+            kind="neutralization",
+            handle=item.qualified_key,
+            identity=item.neutralization_id,
+            declaration=item.model_dump(mode="json"),
+            note=registry.note_for(item.qualified_key),
+        )
+        for item in registry.specs
+    )
+
+
+def _entry(item: _Declared) -> dict[str, object]:
+    """One declared contract as JSON-ready data: what it is called, what it is, what it says.
+
+    **`declaration` is `model_dump(mode="json")` and not a rendering of this module's devising**,
+    which is `experiment_view`'s argument arriving one plane over. Each of the three specs is
+    content-addressed by `stable_model_id` over exactly its declared fields, so every key inside
+    `declaration` is held by `identity`: perturb one and the address moves. A hand-written
+    projection would be a second rendering the address does not cover -- a key dropped from it
+    would be invisible to every check in this repository, which is precisely what `panel_view.py`
+    was measured on (54 rendered keys, 19 never asserted).
+
+    `handle` and `identity` are kind-agnostic projections of `declaration`'s own
+    `qualified_key` and `factor_id`/`transform_id`/`neutralization_id`, carried so a client can
+    key on one shape across all three kinds without knowing which field name each contract used.
+    `note` is `None` for a contract this registry carries no prose about, which is an answer
+    (`FactorRegistry.note_for`'s own rule) and not a fault.
+    """
+    return {
+        "kind": item.kind,
+        "handle": item.handle,
+        "identity": item.identity,
+        "declaration": dict(item.declaration),
+        "note": item.note,
+    }
+
+
+def factor_catalog(
+    *,
+    factors: FactorRegistry = FACTOR_DEFINITIONS,
+    transforms: FactorTransformRegistry = FACTOR_TRANSFORMS,
+    neutralizations: FactorNeutralizationRegistry = FACTOR_NEUTRALIZATIONS,
+) -> dict[str, object]:
+    """Everything a caller needs to fill in `factor run`'s options and read its answer.
+
+    `openalpha factor list --json`, `GET /api/v1/factors` and `OpenAlphaSDK.factor_catalog()` are
+    this function and nothing else, so the three faces cannot come to describe three builds. The
+    human table `openalpha factor list` prints is a *rendering* of this body (see `catalog_rows`);
+    the body itself is what the equivalence is asserted on.
+
+    Seven keys, each closing a hole the acceptance review measured:
+
+    - **`factors`**, **`transforms`**, **`neutralizations`** -- the legal values of `--factor`,
+      `--transform` and `--neutralization`. Before this there was no face, no route and no
+      document that listed any of them, and the only discovery channel was a typo.
+    - **`tiers`** -- `FACTOR_TIER_ORDER`, so a reader of a three-row report knows the order is
+      declared rather than incidental.
+    - **`verdicts`** -- `ATTRIBUTION_VERDICT_MEANINGS`, in `ATTRIBUTION_VERDICT_ORDER`. The six
+      words the grid's last column speaks appeared in no document at all.
+    - **`attribution_cells`** -- the six cells in `ATTRIBUTION_CELL_ORDER`, each flagged with
+      whether it is the step the acceptance criterion is decided on. A grid of six equal-looking
+      rows is what made "which row is the answer" unanswerable from the output.
+    - **`run_limitations`** -- `KNOWN_FACTOR_RUN_LIMITATIONS`, which were declared in the source
+      and reachable from no face.
+
+    The **whole prose** travels, not a truncation of it: the notes run from 705 to 4,830
+    characters and `tests/unit/test_factor_engine_rules.py::
+    test_every_shipped_contract_carries_its_prose` requires each to exceed 100, so a face that
+    clipped them would be the one thing a reader came for. What a *terminal* does about that is
+    `catalog_rows`' problem and it solves it by printing lengths and a pointer to `factor
+    describe`, not by shortening what the data carries.
+    """
+    return {
+        "schema_version": CATALOG_SCHEMA_VERSION,
+        "factors": [_entry(item) for item in _declared_factors(factors)],
+        "transforms": [_entry(item) for item in _declared_transforms(transforms)],
+        "neutralizations": [_entry(item) for item in _declared_neutralizations(neutralizations)],
+        "tiers": list(FACTOR_TIER_ORDER),
+        "verdicts": [
+            {"code": code, "meaning": ATTRIBUTION_VERDICT_MEANINGS[code]}
+            for code in ATTRIBUTION_VERDICT_ORDER
+        ],
+        "attribution_cells": [
+            {
+                "step": f"{from_tier}->{to_tier}",
+                "statistic": statistic,
+                "decides_the_acceptance_criterion": (from_tier, to_tier) == ACCEPTANCE_STEP,
+            }
+            for from_tier, to_tier, statistic in ATTRIBUTION_CELL_ORDER
+        ],
+        "run_limitations": [
+            {"code": limitation.code, "detail": limitation.detail}
+            for limitation in KNOWN_FACTOR_RUN_LIMITATIONS
+        ],
+    }
+
+
+def factor_entry(
+    *,
+    factor: str | None = None,
+    transform: str | None = None,
+    neutralization: str | None = None,
+    factors: FactorRegistry = FACTOR_DEFINITIONS,
+    transforms: FactorTransformRegistry = FACTOR_TRANSFORMS,
+    neutralizations: FactorNeutralizationRegistry = FACTOR_NEUTRALIZATIONS,
+) -> dict[str, object]:
+    """One declared contract, named by exactly one of the three handles.
+
+    Three parameters rather than one polymorphic token, and the choice is argued rather than
+    convenient: the three registries are three different contracts and a single `--handle` would
+    have to guess which one a caller meant, so a factor and a transform that ever came to share a
+    `qualified_key` would resolve arbitrarily. Naming the kind makes the question total, and it
+    makes the refusal say which registry was searched.
+
+    `--factor` accepts a `factor_id` as well, through `resolve_factor`, for that function's reason:
+    a reader holding a stored observation has only the address. The other two take their qualified
+    key alone, because no partition column carries a bare `transform_id` a human would be looking
+    one up from -- `factor_proc_*` carries the qualified key beside it.
+
+    Refuses `FactorRequestError` for none and for more than one, rather than picking a precedence:
+    a face that silently preferred `--factor` would answer a question the caller did not ask.
+    """
+    named = {
+        "factor": factor,
+        "transform": transform,
+        "neutralization": neutralization,
+    }
+    given = sorted(name for name, value in named.items() if value is not None and value.strip())
+    if len(given) != 1:
+        raise FactorRequestError(
+            f"name exactly one of --factor, --transform or --neutralization; got {given}. The "
+            "three are three registries rather than three spellings of one, so a describe that "
+            "guessed would answer about whichever it searched first"
+        )
+    kind = given[0]
+    if kind == "factor":
+        assert factor is not None
+        definition = resolve_factor(factor, registry=factors)
+        return _entry(
+            _Declared(
+                kind="factor",
+                handle=definition.qualified_key,
+                identity=definition.factor_id,
+                declaration=definition.model_dump(mode="json"),
+                note=factors.note_for(definition.qualified_key),
+            )
+        )
+    declared = (
+        _declared_transforms(transforms)
+        if kind == "transform"
+        else _declared_neutralizations(neutralizations)
+    )
+    wanted = ((transform if kind == "transform" else neutralization) or "").strip()
+    for item in declared:
+        if item.handle == wanted:
+            return _entry(item)
+    raise FactorRequestError(
+        f"{wanted!r} is not a {kind} this build declares; it knows "
+        f"{[item.handle for item in declared]}. `openalpha factor list` prints every one of them "
+        "with what it decides"
+    )
+
+
+def catalog_rows(catalog: Mapping[str, object]) -> tuple[tuple[str, str, str, str], ...]:
+    """The catalog as `(kind, handle, what it decides, note size)` strings, for a terminal.
+
+    A rendering and nothing more: `cli.py` prints these, every string is read off `catalog` rather
+    than off a registry, and the middle column is the one fact per kind that decides whether the
+    handle is the one a caller wants -- a factor's family and direction, a transform's
+    standardization and floor, a neutralisation's level and floor. The floors are on both derived
+    rows on purpose: `the_shipped_transform_and_neutralisation_floors_exceed_a_thin_market` is the
+    reason an eight-name market reports `not_measured` everywhere, and the number that decides it
+    is `min_cross_section`.
+
+    The **note is reported by size rather than printed**. Nineteen notes averaging 2,800
+    characters is 55 KB of prose in a terminal; a length beside a pointer to `factor describe` is
+    the shape that makes them findable, and `--json` carries every one of them whole.
+    """
+    rows: list[tuple[str, str, str, str]] = []
+    for key in ("factors", "transforms", "neutralizations"):
+        entries = catalog[key]
+        assert isinstance(entries, list)
+        for entry in entries:
+            declaration = entry["declaration"]
+            note = entry["note"]
+            rows.append(
+                (
+                    str(entry["kind"]),
+                    str(entry["handle"]),
+                    _decides(declaration),
+                    "-" if note is None else f"{len(str(note))} chars",
+                )
+            )
+    return tuple(rows)
+
+
+def _decides(declaration: Mapping[str, object]) -> str:
+    """The one line about a declaration that tells a caller whether it is the handle they want."""
+    if declaration["schema_version"] == "factor-definition/v1":
+        fields = declaration["required_fields"]
+        assert isinstance(fields, list)
+        reads = ", ".join(sorted({f"{item['dataset']}.{item['column']}" for item in fields}))
+        return f"{declaration['family']}, {declaration['direction']}, reads {reads}"
+    if declaration["schema_version"] == "factor-transform/v1":
+        winsorization = declaration["winsorization"]
+        assert isinstance(winsorization, dict)
+        return (
+            f"{winsorization['method']} winsorization, {declaration['standardization']} "
+            f"standardization, min_cross_section {declaration['min_cross_section']}"
+        )
+    return (
+        f"{declaration['industry_level']} industry, {declaration['market_cap_measure']} "
+        f"({declaration['market_cap_scale']}), min_cross_section {declaration['min_cross_section']}"
+    )
+
+
+# --- building the three stored tiers: `openalpha factor build` (V2-P3-019) ----------------------
+
+
+BuildTier = FactorTier
+"""What `--tier` names: the **highest** tier a build stores, in `FACTOR_TIER_ORDER`'s vocabulary.
+
+The same three words a report's rows are called by, deliberately reused rather than re-spelled:
+`--tier processed` stores the raw and processed partitions, `--tier neutralized` stores all three,
+and a caller who has read one report already knows what the third one is.
+"""
+
+REQUIREMENT_BUILDERS: Final[Mapping[str, Callable[..., ReadinessRequirement]]] = MappingProxyType(
+    {
+        DAILY_DATASET: daily_requirement,
+        DAILY_BASIC_DATASET: daily_basic_requirement,
+        **{dataset: financial_statement_requirement for dataset in FINANCIAL_STATEMENT_DATASETS},
+    }
+)
+"""Which `panel_ingest` builder states the readiness question for each dataset a factor can read.
+
+A **closed table**, and the closure is the point rather than the dispatch. `compute_factor` refuses
+to build its own `ReadinessRequirement` -- "a gate that built its own could ask a dataset a
+different question from the one its own reader asks, and the two verdicts would drift" -- so a
+builder has to supply one per dataset, and the only correct source is the module that also owns the
+reader. A dataset with no row here is refused **by name** in `_requirements` rather than defaulted
+to a weaker question: the six rows cover every dataset the nineteen shipped factors declare, and a
+twentieth factor reading a seventh dataset arrives as a refusal naming the dataset instead of a
+build whose coverage codes were decided by a requirement nobody wrote.
+
+`financial_statement_requirement` appears four times because the four statement endpoints share one
+builder that re-derives each dataset's own `required_fields` from the dataset name; `daily` and
+`daily_basic` have separate builders because each carries its own column projection.
+"""
+
+MAX_BUILD_YEAR: Final[int] = 2999
+"""The upper bound `--year` is refused past, so a typo cannot become a five-thousand-year read."""
+
+MIN_BUILD_YEAR: Final[int] = 1990
+"""The lower bound: the Shanghai exchange opened in 1990 and no panel partition predates it."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class FactorBuildRequest:
+    """One resolved factor build: which factor, at which instants, over which partition years.
+
+    Built only by `factor_build_request`, which is what makes the command line and the SDK ask one
+    question -- `FactorRunRequest`'s arrangement one plane over and for its reason.
+    """
+
+    definition: FactorDefinition
+    tier: BuildTier
+    transform: FactorTransformSpec | None
+    """`None` exactly when `tier == "raw"`. See `factor_build_request` for why an unused
+    `--transform` is refused rather than ignored."""
+    neutralization: FactorNeutralizationSpec | None
+    """`None` unless `tier == "neutralized"`."""
+    as_ofs: tuple[datetime, ...]
+    """The prediction instants to compute a cross section at, ascending and distinct.
+
+    **Instants and not dates**, which is the one place this surface declines to be convenient. A
+    stored observation's four panel clocks are all stamped with the `as_of` the build was made at,
+    `factor run` groups its sample by that instant, and a date would leave the time of day to be
+    invented by whichever face happened to run -- so two faces would build two different panels
+    from one command line. `factor run --start/--end` then selects these by their **date** in
+    `FACTOR_DATE_ZONE`, which is the human end of the same contract.
+    """
+    years: tuple[int, ...]
+    """Every partition year every read of this build is scoped to, ascending and distinct.
+
+    One year set for every dataset, and the consequences are stated rather than smoothed over,
+    because they are the two things that make a first build come back empty:
+
+    - The **statement** partitions are keyed by *announcement* year, not by report period. A factor
+      declaring `lookback_periods=5` needs five contiguous filings, which is at least two
+      announcement years, and a one-year `--year` gets `insufficient_history` for the whole cross
+      section rather than an error.
+    - The **registry** partitions are keyed by *lifecycle* year. `load_stock_universe` caps its
+      snapshot at the day before the first year the store holds and this read skipped, so naming a
+      prefix of the stored years silently shortens the universe -- which it reports through
+      `UniverseCompleteness` rather than by refusing.
+
+    The same vocabulary `openalpha panel build --year` writes with, so the two commands' year
+    arguments name the same partitions.
+    """
+    exchange: str
+    max_staleness: timedelta | None
+    """The freshness bound every read of this build carries, or `None` on the record.
+
+    `run_factor_experiment` passes `max_staleness=None` everywhere and argues that freshness is
+    `panel doctor`'s question. A build cannot do the same, because it does not *make* the reads --
+    it hands `compute_factor` a `ReadinessRequirement`, and every builder in `panel_ingest` refuses
+    to default this field ("the caller states a bound or states `None` on the record"). So the face
+    makes the caller do exactly that, and a waiver is a flag rather than an omission.
+    """
+    subjects: tuple[str, ...]
+    """The securities to evaluate, or `()` to take every code the stored registry knows.
+
+    `()` is not "no securities": it is the documented default source, and it is the registry's
+    **whole** membership rather than the day's listed cross section, so a delisted name is
+    evaluated and coded `not_in_universe` instead of vanishing. `compute_factor` requires the two
+    sets separately for exactly that reason -- `not_in_universe` is one of its five answers, and a
+    subject list that already equalled the universe would make it unreachable.
+    """
+    supersedes_raw: tuple[str, ...]
+    supersedes_processed: tuple[str, ...]
+    supersedes_neutralized: tuple[str, ...]
+    """Three lists and not one, because they name three contracts' fields.
+
+    A partition is replaced whole and `_refuse_to_drop_a_stored_build` refuses a write that would
+    drop a `manifest_id` the target partition holds; `supersedes` is how a rebuild says it means
+    to. The three writers hold three different manifest partitions, and each refuses a name **no
+    partition it touches holds** -- so one merged list would make every rebuild fail on the two
+    tiers the id did not belong to. `_source_build`'s argument arriving on the write side: three
+    names for one idea, not unified, because unifying them would let a plausible id from the wrong
+    column through.
+    """
+    code_commit: str
+
+
+def factor_build_request(
+    *,
+    factor: str,
+    tier: str,
+    transform: str,
+    neutralization: str,
+    as_ofs: Sequence[datetime],
+    years: Sequence[int],
+    exchange: str,
+    max_staleness_days: int | None,
+    waive_max_staleness: bool,
+    subjects: Sequence[str],
+    supersedes_raw: Sequence[str],
+    supersedes_processed: Sequence[str],
+    supersedes_neutralized: Sequence[str],
+    code_commit: str,
+    factors: FactorRegistry = FACTOR_DEFINITIONS,
+    transforms: FactorTransformRegistry = FACTOR_TRANSFORMS,
+    neutralizations: FactorNeutralizationRegistry = FACTOR_NEUTRALIZATIONS,
+) -> FactorBuildRequest:
+    """Resolve one face's parameters into the stated build both of them run.
+
+    `factor_request`'s sibling, with the three registries as parameters for its reason. Every fault
+    here is `FactorRequestError`: nothing in this function touches a store, so nothing it can say
+    is a statement about the panel.
+
+    **An option that decides nothing for the requested tier is refused rather than ignored**, in
+    both directions. `--tier raw` with a `--transform` is a caller who believes they asked for two
+    tiers and will get one; `--tier processed` without one cannot be resolved at all. This
+    repository refuses a no-op waiver everywhere else for the same reason --
+    `write_factor_panels` refuses a `supersedes` that matches nothing because "a typo would
+    silently turn the guard off for the write it accompanied" -- and a silently unused policy
+    option is that shape with the guard replaced by a spec.
+
+    **`--max-staleness-days` and `--waive-max-staleness` are exclusive and one is required.** Not a
+    default, because `daily_requirement`, `stock_universe_requirement` and
+    `financial_statement_requirement` each refuse to choose a bound for a caller and each says why:
+    a price panel whose newest session is a month old has missed a month of the market. A face that
+    defaulted it would be choosing silence on all six datasets at once.
+    """
+    definition = resolve_factor(factor, registry=factors)
+    resolved_tier = _build_tier(tier)
+    transform_spec = _tier_spec(
+        "--transform",
+        transform,
+        wanted=resolved_tier in ("processed", "neutralized"),
+        resolve=transforms.get,
+        tier=resolved_tier,
+    )
+    neutralization_spec = _tier_spec(
+        "--neutralization",
+        neutralization,
+        wanted=resolved_tier == "neutralized",
+        resolve=neutralizations.get,
+        tier=resolved_tier,
+    )
+    if type(exchange) is not str or not exchange or exchange != exchange.strip():
+        raise FactorRequestError(
+            f"exchange must be a non-empty name with no surrounding whitespace; got {exchange!r}"
+        )
+    if len(code_commit.strip()) < 7:
+        raise FactorRequestError(
+            f"--code-commit must be at least 7 characters; got {code_commit!r}. It is inside every "
+            "manifest_id this build stamps, because different code may compute a different number "
+            "from the same rows"
+        )
+    return FactorBuildRequest(
+        definition=definition,
+        tier=resolved_tier,
+        transform=transform_spec,
+        neutralization=neutralization_spec,
+        as_ofs=_build_instants(as_ofs),
+        years=_build_years(years),
+        exchange=exchange,
+        max_staleness=_build_staleness(max_staleness_days, waive_max_staleness),
+        subjects=_distinct("--subject", subjects),
+        supersedes_raw=_distinct("--supersedes-raw", supersedes_raw),
+        supersedes_processed=_distinct("--supersedes-processed", supersedes_processed),
+        supersedes_neutralized=_distinct("--supersedes-neutralized", supersedes_neutralized),
+        code_commit=code_commit.strip(),
+    )
+
+
+def _build_tier(tier: str) -> BuildTier:
+    """`--tier` as the declared `Literal`, resolved by search rather than widened by a cast.
+
+    A loop over `FACTOR_TIER_ORDER` rather than `cast(FactorTier, tier)`, so the static type is
+    narrowed by the same comparison that decides the refusal -- a fourth tier added upstream
+    reaches this function as a value it can return rather than as a string a cast waved through.
+    """
+    for declared in FACTOR_TIER_ORDER:
+        if declared == tier:
+            return declared
+    raise FactorRequestError(
+        f"--tier must be one of {list(FACTOR_TIER_ORDER)}; got {tier!r}. It names the highest tier "
+        "this build stores, and every tier below it is stored too"
+    )
+
+
+def _tier_spec(
+    flag: str,
+    handle: str,
+    *,
+    wanted: bool,
+    resolve: Callable[[str], _T],
+    tier: BuildTier,
+) -> _T | None:
+    """One tier-conditional spec option: required when the tier uses it, refused when it does not.
+
+    See `factor_build_request` for why the second half is a refusal rather than a shrug.
+    """
+    name = handle.strip()
+    if wanted and not name:
+        raise FactorRequestError(
+            f"{flag} is required for --tier {tier}, because that tier is computed from it and "
+            "there is no default a spec would be honest to have. `openalpha factor list` prints "
+            "every declared one"
+        )
+    if not wanted and name:
+        raise FactorRequestError(
+            f"{flag} {name!r} decides nothing for --tier {tier} and is refused rather than "
+            "ignored; an option that is accepted and unused is one a caller reads as having taken "
+            "effect"
+        )
+    if not name:
+        return None
+    try:
+        return resolve(name)
+    except ValueError as error:
+        raise FactorRequestError(str(error)) from error
+
+
+def _build_instants(as_ofs: Sequence[datetime]) -> tuple[datetime, ...]:
+    """The prediction instants, refusing an empty set, a naive one and a repeated one."""
+    if not as_ofs:
+        raise FactorRequestError(
+            "--as-of names no prediction instant; a build over no cross section at all would "
+            "report success and store nothing, which is the empty success this plane refuses"
+        )
+    for instant in as_ofs:
+        if instant.tzinfo is None or instant.utcoffset() is None:
+            raise FactorRequestError(
+                f"--as-of must be a timezone-aware instant; got {instant.isoformat()!r}. A "
+                "point-in-time build made in a guessed timezone reads a different day's rows"
+            )
+    ordered = tuple(sorted(set(as_ofs)))
+    if len(ordered) != len(as_ofs):
+        raise FactorRequestError(
+            "--as-of names the same instant twice; two builds of one factor at one as_of are two "
+            "answers to one question, and write_factor_panels refuses to store both"
+        )
+    return ordered
+
+
+def _build_years(years: Sequence[int]) -> tuple[int, ...]:
+    """The partition years, refusing an empty set, a repeat and a year no panel can hold."""
+    if not years:
+        raise FactorRequestError(
+            "--year names no partition year; every read this build makes is scoped to a year set, "
+            "and compute_factor's own lookback refusal is stated in terms of it"
+        )
+    ordered = tuple(sorted(set(years)))
+    if len(ordered) != len(years):
+        raise FactorRequestError(f"--year names a year twice: {sorted(years)}")
+    outside = [year for year in ordered if not MIN_BUILD_YEAR <= year <= MAX_BUILD_YEAR]
+    if outside:
+        raise FactorRequestError(
+            f"--year {outside} is outside [{MIN_BUILD_YEAR}, {MAX_BUILD_YEAR}]; no panel partition "
+            "predates the exchange, and a year past the bound is a typo that would be read as a "
+            "very long scan"
+        )
+    return ordered
+
+
+def _build_staleness(days: int | None, waived: bool) -> timedelta | None:
+    """The freshness bound, as the recorded decision it has to be. See `FactorBuildRequest`."""
+    if waived and days is not None:
+        raise FactorRequestError(
+            f"--waive-max-staleness and --max-staleness-days {days} state two different bounds; "
+            "give one"
+        )
+    if waived:
+        return None
+    if days is None:
+        raise FactorRequestError(
+            "state --max-staleness-days N or --waive-max-staleness. Every panel_ingest requirement "
+            "builder refuses to default this and says why: a price panel whose newest session is a "
+            "month old has missed a month of the market, so a defaulted bound is silence about all "
+            "six datasets at once"
+        )
+    if days < 1:
+        raise FactorRequestError(
+            f"--max-staleness-days must be at least 1; got {days}. Zero is not a tighter bound, it "
+            "is a bound no stored partition can satisfy -- waive it explicitly instead"
+        )
+    return timedelta(days=days)
+
+
+def _distinct(flag: str, values: Sequence[str]) -> tuple[str, ...]:
+    """A repeated string option, refusing blanks and duplicates."""
+    cleaned = [value.strip() for value in values]
+    if any(not value for value in cleaned):
+        raise FactorRequestError(f"{flag} was given an empty value")
+    if len(set(cleaned)) != len(cleaned):
+        raise FactorRequestError(f"{flag} names the same value twice: {sorted(cleaned)}")
+    return tuple(cleaned)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class FactorBuildReport:
+    """What one `factor build` computed and stored, tier by tier.
+
+    Carries counts and identities rather than the panels themselves: the panels are the store's
+    now, and a report that shipped them would be a second copy of the partition for a caller to
+    read numbers off instead of reading them back through `load_factor_observations` -- the
+    visibility-filtered door every reader is supposed to take.
+    """
+
+    factor: str
+    factor_id: str
+    tier: BuildTier
+    as_ofs: tuple[datetime, ...]
+    subject_count: int
+    universe_counts: tuple[int, ...]
+    """One listed-cross-section size per `as_ofs` entry, in the same order.
+
+    Reported because it is the number that most often explains an unusable build: both shipped
+    derived specs declare `min_cross_section=100`, so a market narrower than that stores a coverage
+    code for every name and no value, and a caller staring at an all-`not_measured` grid needs to
+    see the size the build actually had rather than infer it.
+    """
+    manifest_ids: Mapping[str, tuple[str, ...]]
+    """The stored build identities, keyed by tier. Empty for a tier this build did not store."""
+    coverage: Mapping[str, Mapping[str, int]]
+    """Per tier, how many observations each coverage code claimed.
+
+    The census the write already validated, projected for a human. It is the honest answer to "did
+    that work": a build that stored five thousand `input_missing` rows succeeded and produced
+    nothing, and this is where that is visible without a second query.
+    """
+    partitions: tuple[str, ...]
+    """Every partition written, as `dataset@year`, in write order."""
+
+
+def build_factor_panels(
+    store: PanelStore, request: FactorBuildRequest, *, built_at: datetime
+) -> FactorBuildReport:
+    """Compute the requested tiers at every requested instant, then store them.
+
+    The one entry point both faces call. It re-derives nothing: `compute_factor`,
+    `apply_factor_transform` and `apply_factor_neutralization` produce every number, and the three
+    `write_*_factor_panels` functions run every write-time guard.
+
+    **Every computation happens before the first write, and that ordering is the deliverable.**
+    `write_factor_panels` already argues it for its own partitions ("a refusal changes nothing at
+    all"); here it spans three writers, and the case it exists for is the one the acceptance review
+    named: a neutralised tier that cannot be assembled at a requested instant would otherwise leave
+    a raw and a processed partition on disk with no residual beside them -- which is exactly the
+    store shape `the_three_tiers_must_have_been_built_at_the_same_instants` makes `factor run`
+    refuse, reported one command too late and about a different thing.
+
+    So a build that cannot finish stores nothing and says why, by name. See
+    `the_builder_cannot_produce_a_residual_before_its_years_stored_horizon`.
+    """
+    computed = [
+        _computed(store, request, as_of=as_of, built_at=built_at) for as_of in request.as_ofs
+    ]
+    panels = [panel for panel, _count in computed]
+    processed: list[ProcessedFactorPanel] = []
+    neutralized: list[NeutralizedFactorPanel] = []
+    if request.transform is not None:
+        transform = request.transform
+        processed = [
+            apply_factor_transform(
+                panel, transform, code_commit=request.code_commit, built_at=built_at
+            )
+            for panel in panels
+        ]
+    if request.neutralization is not None:
+        neutralized = [
+            _neutralized(store, request, panel=panel, built_at=built_at) for panel in processed
+        ]
+    written = list(
+        _written(
+            lambda: write_factor_panels(store, panels, supersedes=request.supersedes_raw),
+            tier="raw",
+            flag="--supersedes-raw",
+        )
+    )
+    if processed:
+        written.extend(
+            _written(
+                lambda: write_processed_factor_panels(
+                    store, processed, supersedes=request.supersedes_processed
+                ),
+                tier="processed",
+                flag="--supersedes-processed",
+            )
+        )
+    if neutralized:
+        written.extend(
+            _written(
+                lambda: write_neutralized_factor_panels(
+                    store, neutralized, supersedes=request.supersedes_neutralized
+                ),
+                tier="neutralized",
+                flag="--supersedes-neutralized",
+            )
+        )
+    return FactorBuildReport(
+        factor=request.definition.qualified_key,
+        factor_id=request.definition.factor_id,
+        tier=request.tier,
+        as_ofs=request.as_ofs,
+        subject_count=len(panels[0].observations),
+        universe_counts=tuple(count for _panel, count in computed),
+        # Three names for one idea, and they are not unified here for `_source_build`'s reason:
+        # `manifest_id`, `transform_manifest_id` and `neutralization_manifest_id` are three
+        # different contracts' fields, and reading each off its own panel type is what stops a
+        # plausible id from the wrong column being reported under the wrong tier.
+        manifest_ids={
+            "raw": tuple(sorted({panel.manifest.manifest_id for panel in panels})),
+            "processed": tuple(
+                sorted({panel.manifest.transform_manifest_id for panel in processed})
+            ),
+            "neutralized": tuple(
+                sorted({panel.manifest.neutralization_manifest_id for panel in neutralized})
+            ),
+        },
+        coverage={
+            "raw": _census(
+                [observation.coverage for panel in panels for observation in panel.observations]
+            ),
+            "processed": _census(
+                [observation.coverage for panel in processed for observation in panel.observations]
+            ),
+            "neutralized": _census(
+                [
+                    observation.coverage
+                    for panel in neutralized
+                    for observation in panel.observations
+                ]
+            ),
+        },
+        partitions=tuple(f"{ref.dataset}@{ref.year}" for ref in written),
+    )
+
+
+def _written(
+    write: Callable[[], Sequence[PartitionRef]], *, tier: BuildTier, flag: str
+) -> Sequence[PartitionRef]:
+    """One tier's write, with a refused write turned into this module's own `blocked`.
+
+    The write-time guards raise the panel plane's own exception types, and every one of them here
+    is a statement about what the store already holds rather than about the request: a partition is
+    replaced whole, so `_refuse_to_drop_a_stored_build` refuses a call that would drop a stored
+    `manifest_id`. Enveloping them here rather than at each face is what keeps `cli.py` from
+    importing `panel_factors` to name them -- and it is what lets the refusal carry the **remedy**,
+    which the guard itself cannot know because `supersedes` is three different options one plane up.
+    """
+    try:
+        return write()
+    except (FactorEngineError, NeutralizationEngineError, PanelStorageError) as error:
+        raise FactorRunBlockedError(
+            f"the {tier} partitions were refused: {error}. A partition is replaced whole, so a "
+            f"rebuild that means to replace a stored build has to name it with {flag}, and every "
+            "instant of one partition year has to be built in one invocation. Nothing this "
+            "invocation computed after this point was written"
+        ) from error
+
+
+def _census(codes: Sequence[str]) -> dict[str, int]:
+    """How many observations claimed each coverage code, ascending by code."""
+    counts: dict[str, int] = {}
+    for code in codes:
+        counts[code] = counts.get(code, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _computed(
+    store: PanelStore, request: FactorBuildRequest, *, as_of: datetime, built_at: datetime
+) -> tuple[FactorPanel, int]:
+    """One raw cross section, and the size of the universe it was scored against.
+
+    The calendar and the registry are read **at this instant** rather than once for the whole
+    build, and that is not an economy foregone. Both loaders take an `as_of`; reading them once at
+    the latest instant would let an earlier cross section's `required_dates` be derived from
+    sessions that had not been published when it was stamped, which is look-ahead installed in the
+    readiness question itself. Reading once at the earliest would under-cover the later ones. Per
+    instant is the only setting that is right for every instant.
+
+    **How far that is measured, stated rather than implied.** The *registry* half is driven:
+    `tests/integration/test_factor_build.py::
+    test_the_registry_is_read_at_each_prediction_instant_and_not_once_for_the_build` puts two
+    instants eight days apart under a seven-day freshness bound, so a build that read the registry
+    once succeeds where this one must be refused. The *calendar* half is **not separable on any
+    fixture this suite has**, and the reason is a property of the fixture rather than of the code:
+    `tests/panel_fixtures.py::_calendar_batch` stamps every session row's `available_time` at
+    1 January, so the whole year's calendar is visible from the first instant and a read at any
+    later one returns the same value. Separating it would need a `trade_cal` partition with
+    staggered availability -- which is the real-world shape `KNOWN_CALENDAR_LOOKAHEAD` records and
+    which nothing here generates. A mutation retargeting this one read at `request.as_ofs[0]`
+    therefore survives; what is covered is the parameter, which every read in this function shares.
+    """
+    day = as_of.astimezone(FACTOR_DATE_ZONE).date()
+    calendar = _read(
+        lambda: load_trading_calendar(
+            store, exchange=request.exchange, years=request.years, as_of=as_of
+        ),
+        store=store,
+        what=f"the {request.exchange} trading calendar",
+    )
+    universe = _read(
+        lambda: load_stock_universe(
+            store, years=request.years, as_of=as_of, max_staleness=request.max_staleness
+        ),
+        store=store,
+        what="the security registry",
+    )
+    try:
+        listed = universe.listed_on(day)
+    except StockUniverseError as error:
+        raise FactorRunBlockedError(
+            f"the stored registry cannot say who was listed on {day.isoformat()}: {error}"
+        ) from error
+    subjects = request.subjects or tuple(entry.ts_code for entry in universe.securities)
+    requirements = _requirements(request, calendar=calendar, as_of=as_of)
+    panel = _read(
+        lambda: compute_factor(
+            store,
+            request.definition,
+            as_of=as_of,
+            subjects=subjects,
+            universe=listed,
+            requirements=requirements,
+            code_commit=request.code_commit,
+            built_at=built_at,
+        ),
+        store=store,
+        what=f"the {request.definition.qualified_key} cross section at {as_of.isoformat()}",
+    )
+    return panel, len(listed)
+
+
+def _requirements(
+    request: FactorBuildRequest, *, calendar: TradingCalendar, as_of: datetime
+) -> dict[str, ReadinessRequirement]:
+    """One `ReadinessRequirement` per dataset this factor reads, from `REQUIREMENT_BUILDERS`.
+
+    A dataset with no builder is refused by name. `compute_factor` cross-checks each requirement it
+    is handed -- the key, the `as_of` and the `required_fields` -- so a wrong one fails there
+    rather than several layers down; what it cannot check is a requirement nobody built, and that
+    is what this refusal is for.
+    """
+    missing = [name for name in request.definition.datasets if name not in REQUIREMENT_BUILDERS]
+    if missing:
+        raise FactorRequestError(
+            f"{request.definition.qualified_key} reads {missing}, which this command has no "
+            f"readiness builder for; it knows {sorted(REQUIREMENT_BUILDERS)}. A requirement "
+            "invented here would ask a weaker question than the reader asks, which is exactly what "
+            "compute_factor refuses to let a caller do"
+        )
+    built: dict[str, ReadinessRequirement] = {}
+    for name in request.definition.datasets:
+        builder = REQUIREMENT_BUILDERS[name]
+        try:
+            if name in (DAILY_DATASET, DAILY_BASIC_DATASET):
+                built[name] = builder(
+                    calendar, years=request.years, as_of=as_of, max_staleness=request.max_staleness
+                )
+            else:
+                built[name] = builder(
+                    dataset=name,
+                    years=request.years,
+                    as_of=as_of,
+                    max_staleness=request.max_staleness,
+                )
+        except (TradingCalendarError, ValueError) as error:
+            raise FactorRunBlockedError(
+                f"the readiness question for {name} at {as_of.isoformat()} cannot be stated over "
+                f"{list(request.years)}: {error}"
+            ) from error
+    return built
+
+
+def _neutralized(
+    store: PanelStore,
+    request: FactorBuildRequest,
+    *,
+    panel: ProcessedFactorPanel,
+    built_at: datetime,
+) -> NeutralizedFactorPanel:
+    """One residual cross section, or the named refusal that says why there cannot be one.
+
+    The whole of `the_builder_cannot_produce_a_residual_before_its_years_stored_horizon` lives
+    here. `load_industry_market_cap_cross_section` reads `daily_basic` and the industry memberships
+    through `read_if_ready`, the **unfiltered** door, which refuses a partition whose newest row
+    post-dates the `as_of` instead of filtering it; and `_refuse_a_cross_section_that_is_not_this_
+    panels` requires the returned cross section's `as_of` to equal this panel's exactly, so the
+    read cannot simply be made later. Those two together mean a residual exists only at a
+    prediction instant at or after the last stored session of every year this read touches.
+
+    The refusal is `blocked` rather than `bad_request` because it is a conflict with what the panel
+    currently holds -- extending the panel is one remedy and moving `--as-of` forward is the other
+    -- and it names both, plus the limitation code, so the message is actionable rather than a
+    class name.
+    """
+    neutralization = request.neutralization
+    if neutralization is None:  # pragma: no cover - `build_factor_panels` guards the call
+        raise FactorRequestError("no neutralisation was resolved for this build")
+    day = panel.as_of.astimezone(FACTOR_DATE_ZONE).date()
+    subjects = tuple(observation.subject for observation in panel.observations)
+    calendar = _read(
+        lambda: load_trading_calendar(
+            store, exchange=request.exchange, years=request.years, as_of=panel.as_of
+        ),
+        store=store,
+        what=f"the {request.exchange} trading calendar",
+    )
+    try:
+        section = load_industry_market_cap_cross_section(
+            store,
+            neutralization,
+            subjects=subjects,
+            day=day,
+            as_of=panel.as_of,
+            calendar=calendar,
+            membership_years=request.years,
+            max_staleness=request.max_staleness,
+        )
+    except _PANEL_FAULTS as error:
+        message = (
+            f"no {neutralization.qualified_key} cross section can be assembled at "
+            "{cause}. This is "
+            "the_builder_cannot_produce_a_residual_before_its_years_stored_horizon: the industry "
+            "and market-capitalisation reads take the unfiltered door, which refuses a partition "
+            "whose newest row post-dates the as_of, and the residual must carry the processed "
+            "panel's own instant -- so a residual exists only at a prediction instant at or after "
+            f"the last stored session of every year in {list(request.years)}. Build --tier "
+            "processed at this instant, or move --as-of to at or after the panel's horizon, or "
+            "fetch the later sessions first. Nothing was written"
+        )
+        prefix = f"{panel.as_of.isoformat()}: "
+        raise FactorRunBlockedError(
+            message.format(cause=prefix + str(error)),
+            disclosable=message.format(cause=prefix + _without_store_path(str(error), store)),
+        ) from error
+    try:
+        return apply_factor_neutralization(
+            panel, neutralization, section, code_commit=request.code_commit, built_at=built_at
+        )
+    except (FactorEngineError, NeutralizationEngineError, ValueError) as error:
+        raise FactorRunBlockedError(
+            f"the {neutralization.qualified_key} residuals at {panel.as_of.isoformat()} could not "
+            f"be computed: {error}"
+        ) from error
+
+
+BUILD_VIEW_SCHEMA_VERSION: Final[str] = "factor-build-view/v1"
+"""The version of the body `build_view` hands out. Its own; see `VIEW_SCHEMA_VERSION`."""
+
+
+def build_view(report: FactorBuildReport) -> dict[str, object]:
+    """One build report as JSON-ready data, for `--json` and for the SDK's own rendering.
+
+    Ten keys, every one a projection of `FactorBuildReport` and none of them recomputed. Unlike
+    `experiment_view` there is no seal to ship whole -- a build stores partitions rather than a
+    document -- so this **is** the rendering, which is why `tests/integration/test_factor_build.py::
+    test_every_key_the_build_faces_render_is_separately_falsifiable` perturbs one key at a time and
+    requires an assertion to notice each. That is `panel_view.py`'s measured lesson applied where
+    it actually bites: 54 rendered keys with 100% line coverage and 19 never asserted.
+    """
+    return {
+        "schema_version": BUILD_VIEW_SCHEMA_VERSION,
+        "factor": report.factor,
+        "factor_id": report.factor_id,
+        "tier": report.tier,
+        "as_ofs": [instant.isoformat() for instant in report.as_ofs],
+        "subject_count": report.subject_count,
+        "universe_counts": list(report.universe_counts),
+        "manifest_ids": {tier: list(ids) for tier, ids in report.manifest_ids.items()},
+        "coverage": {tier: dict(counts) for tier, counts in report.coverage.items()},
+        "partitions": list(report.partitions),
+    }
+
+
+def build_rows(report: FactorBuildReport) -> tuple[tuple[str, str, str, str], ...]:
+    """The build as `(tier, builds, observations, coverage)` strings, in `FACTOR_TIER_ORDER`.
+
+    All three tiers always, so a tier this build did not store occupies its row reading `-` rather
+    than vanishing: "the neutralised tier was not asked for" and "the neutralised tier is missing"
+    are two different states of a store, and a reader about to run `factor run` needs to tell them
+    apart. `attribution_rows`' rule, on the other command.
+    """
+    rows: list[tuple[str, str, str, str]] = []
+    for tier in FACTOR_TIER_ORDER:
+        builds = report.manifest_ids[tier]
+        counts = report.coverage[tier]
+        rows.append(
+            (
+                tier,
+                "-" if not builds else str(len(builds)),
+                "-" if not counts else str(sum(counts.values())),
+                "-" if not counts else ", ".join(f"{code} {n}" for code, n in counts.items()),
             )
         )
     return tuple(rows)

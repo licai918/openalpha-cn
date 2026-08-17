@@ -33,7 +33,13 @@ from openalpha_cn.domain.validation import ValidationResult
 from openalpha_cn.evidence.service import build_provider_evidence
 from openalpha_cn.factor_view import (
     ExperimentWrite,
+    FactorBuildReport,
+    build_factor_panels,
+    build_view,
     experiment_view,
+    factor_build_request,
+    factor_catalog,
+    factor_entry,
     factor_request,
     run_factor_experiment,
 )
@@ -460,6 +466,100 @@ class OpenAlphaSDK:
     ) -> dict[str, object]:
         """The record as the HTTP face renders it, for a caller that wants the same bytes."""
         return experiment_view(record, write=write)
+
+    def factor_catalog(self) -> dict[str, object]:
+        """Every factor, transform and neutralisation this build declares, with their prose.
+
+        `openalpha factor list --json` and `GET /api/v1/factors` are the same call, so the three
+        faces cannot come to describe three builds. Takes no `runtime_dir` and reads no store: a
+        declaration is a property of the build rather than of an installation.
+
+        The **whole** note travels on every entry -- 705 to 4,830 characters each -- because it is
+        what a caller came for. `return_vol_60`'s says in full that it occupies `V2-P3-013`'s
+        residual-volatility slot, is deliberately not named for a residual, and that neither
+        residual is computable in this build; nineteen disclosures of that kind existed in the
+        source and reached no face until `V2-P3-019`.
+        """
+        return factor_catalog()
+
+    def describe_factor(
+        self,
+        *,
+        factor: str | None = None,
+        transform: str | None = None,
+        neutralization: str | None = None,
+    ) -> dict[str, object]:
+        """One declaration and its note, named by exactly one of the three handles.
+
+        The twin of `openalpha factor describe` and of `GET /api/v1/factors?factor=...`. Raises
+        `FactorRequestError` for none, for more than one, and for a handle no registry declares --
+        the refusal names the declared handles rather than their content addresses.
+        """
+        return factor_entry(factor=factor, transform=transform, neutralization=neutralization)
+
+    def build_factor_panels(
+        self,
+        *,
+        factor: str,
+        tier: str,
+        as_ofs: Sequence[datetime],
+        years: Sequence[int],
+        exchange: str,
+        max_staleness_days: int | None,
+        waive_max_staleness: bool,
+        transform: str = "",
+        neutralization: str = "",
+        subjects: Sequence[str] = (),
+        supersedes_raw: Sequence[str] = (),
+        supersedes_processed: Sequence[str] = (),
+        supersedes_neutralized: Sequence[str] = (),
+        code_commit: str,
+    ) -> FactorBuildReport:
+        """Compute this factor's stored tiers at the named instants and write them into the panel.
+
+        The in-process twin of `openalpha factor build`, resolving through the same
+        `factor_view.factor_build_request` and running through the same
+        `factor_view.build_factor_panels`, so the two faces cannot come to build two panels from
+        one declaration. `tests/integration/test_factor_build.py::
+        test_the_two_build_faces_store_one_panel_from_one_request` drives both against one store
+        and requires byte-identical `manifest_id`s.
+
+        **There is deliberately no HTTP twin.** `openalpha panel build` has none either, and the
+        reason is the same one, sharpened: this writes panel partitions, a partition is replaced
+        whole, and the service ships with no authentication of its own ("local-first and has no
+        public multi-tenant authentication"). A `POST` that replaced a stored partition would hand
+        that to whoever could reach the port.
+        `tests/integration/test_factor_build.py::test_no_http_route_builds_a_factor_partition`
+        pins the absence, so it stays a decision rather than an oversight.
+
+        Every parameter has the meaning `openalpha factor build --help` gives it; the four with
+        defaults are the four the command also defaults, and `max_staleness_days` /
+        `waive_max_staleness` are exclusive and one is required -- see `factor_build_request`.
+        """
+        return build_factor_panels(
+            panel_store(self.runtime_dir),
+            factor_build_request(
+                factor=factor,
+                tier=tier,
+                transform=transform,
+                neutralization=neutralization,
+                as_ofs=as_ofs,
+                years=years,
+                exchange=exchange,
+                max_staleness_days=max_staleness_days,
+                waive_max_staleness=waive_max_staleness,
+                subjects=subjects,
+                supersedes_raw=supersedes_raw,
+                supersedes_processed=supersedes_processed,
+                supersedes_neutralized=supersedes_neutralized,
+                code_commit=code_commit,
+            ),
+            built_at=self.clock(),
+        )
+
+    def factor_build_view(self, report: FactorBuildReport) -> dict[str, object]:
+        """One build report as `openalpha factor build --json` renders it."""
+        return build_view(report)
 
     def execute_portfolio_order(
         self,

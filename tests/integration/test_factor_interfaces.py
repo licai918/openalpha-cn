@@ -75,7 +75,7 @@ from typer.testing import CliRunner
 
 from openalpha_cn.api.app import FACTOR_HTTP_STATUS, create_app
 from openalpha_cn.backtest.factor_experiment import experiment_payload, open_experiment
-from openalpha_cn.cli import FACTOR_EXIT, PanelExit, app
+from openalpha_cn.cli import ACCEPTANCE_MARKER, FACTOR_EXIT, UNMEASURED_WARNING, PanelExit, app
 from openalpha_cn.domain.panel_batch import PanelColumn
 from openalpha_cn.factor_view import (
     VIEW_SCHEMA_VERSION,
@@ -1033,6 +1033,49 @@ def test_a_bar_this_face_prices_carries_the_stored_band_the_halt_state_and_the_w
     assert not special.suspended
     assert _board("000001.BJ") == "bse"
     assert _board("300750.SZ") == "growth"
+
+
+def test_the_acceptance_row_is_marked_and_an_unmeasured_grid_is_warned_about(
+    runtime_dir: Path,
+) -> None:
+    """The two renderings `V2-P3-019` added, on the fixture that produces the dangerous answer.
+
+    This file's own configuration is the one the warning exists for. Both shipped derived specs
+    declare `min_cross_section=100` and this market has eight names, so **every** attribution cell
+    is `not_measured` -- and `test_the_raw_tier_is_measured_off_the_stored_panel_and_the_derived_
+    tiers_are_not` already pins that as the honest answer. The danger is what it looks like:
+    exit `0`, `200`, and no `removed` cell anywhere. A reader or a CI step that greps for `removed`
+    and stops has concluded "this factor survived neutralisation" about two tiers that never
+    computed a number.
+
+    Four claims, and the exit code is one of them: the warning is a **warning**, not a fourth exit
+    code, because the experiment did assemble and its record is worth keeping. See
+    `factor_view.everything_is_unmeasured` for why, and
+    `tests/integration/test_factor_run.py::
+    test_a_grid_with_a_real_verdict_is_not_reported_as_unmeasured` for the other direction --
+    without it, `everything_is_unmeasured` could return `True` unconditionally and this test would
+    still pass.
+
+    The marker is required on the acceptance step's rows and **absent everywhere else**, so a
+    rendering that marked all six would fail rather than satisfy this vacuously.
+    """
+    runner = CliRunner()
+    arguments = _cli_arguments(runtime_dir, BASELINE)
+    plain = runner.invoke(app, [flag for flag in arguments if flag != "--json"])
+    as_data = runner.invoke(app, arguments)
+
+    assert plain.exit_code == int(PanelExit.ok) == 0
+    assert as_data.exit_code == int(PanelExit.ok)
+    marked = [line for line in plain.stdout.splitlines() if ACCEPTANCE_MARKER in line]
+    assert len(marked) == 2
+    assert all(line.startswith("processed->neutralized") for line in marked)
+    assert "answer     processed->neutralized mean_ic=not_measured" in plain.stdout
+
+    assert UNMEASURED_WARNING in plain.stderr
+    assert UNMEASURED_WARNING in as_data.stderr
+    # `--json` stdout stays exactly the sealed envelope, so a caller piping it still parses.
+    assert json.loads(as_data.stdout)["schema_version"] == VIEW_SCHEMA_VERSION
+    assert "WARNING" not in as_data.stdout
 
 
 def test_a_refusal_body_names_no_filesystem_path(runtime_dir: Path) -> None:
