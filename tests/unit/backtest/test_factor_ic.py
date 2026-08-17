@@ -28,8 +28,10 @@ turns into something else:
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import random
+import statistics
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
@@ -520,6 +522,85 @@ def test_labels_over_two_windows_at_one_as_of_are_refused() -> None:
         )
 
 
+def test_a_cross_section_assembled_out_of_two_factors_rows_is_refused_on_every_tier() -> None:
+    """The last place the identity `ic_cross_section` drops is still visible.
+
+    `ICCrossSection` carries no `factor_id`: the projection into `(subject, value, coverage)` is
+    where it is lost, and `FactorICStudy.measure` then stamps `spec.factor_id` onto the point with
+    nothing in between saying the values came from that factor. The three wrappers still hold the
+    typed rows, so the half that needs no new contract field is closed here -- the rows offered
+    under one wrapper have to name one factor.
+
+    All three tiers are driven, because the field they carry it in is **not the same name**:
+    `FactorObservation.factor_id` against the other two's `source_factor_id`. A guard written over
+    one name would have covered one tier and read as though it covered three, which is the shape
+    the `KNOWN_*` and shipped-registry audits both exist to catch.
+    """
+    other = dataclasses.replace(_raw(code(5), value=5.0), factor_id="fct_another")
+    labels = _labels(NEARLY_MONOTONE_RETURNS)
+    scored = [_raw(name, value=value) for name, value in MONOTONE_SCORES.items()]
+    mixed = [*scored[:-1], other]
+
+    with pytest.raises(FactorICError, match="were computed by"):
+        raw_cross_section(as_of=AS_OF, observations=mixed, labels=labels)
+    with pytest.raises(FactorICError, match="were computed by"):
+        processed_cross_section(
+            as_of=AS_OF,
+            observations=[
+                _processed(code(1), value=1.0),
+                dataclasses.replace(_processed(code(2), value=2.0), source_factor_id="fct_another"),
+            ],
+            labels=labels,
+        )
+    with pytest.raises(FactorICError, match="were computed by"):
+        neutralized_cross_section(
+            as_of=AS_OF,
+            observations=[
+                _neutralized(code(1), value=1.0),
+                dataclasses.replace(
+                    _neutralized(code(2), value=2.0), source_factor_id="fct_another"
+                ),
+            ],
+            labels=labels,
+        )
+
+
+def test_labels_dated_in_two_zones_are_two_windows_rather_than_whichever_came_first() -> None:
+    """The field the agreement test left out, and it is not an inert one.
+
+    `zone` was kept out of the comparison key because a `tzinfo`'s equality is by identity for some
+    implementations, so two `ZoneInfo("Asia/Shanghai")` instances would have read as two windows.
+    The hazard is real; omission was the wrong answer to it, and `str(...)` is the right one.
+    `_refuse_a_window_that_is_not_forward_of` dates the `as_of` **in the window's own zone** to
+    decide whether the label prices a move that had already happened -- so with `zone` out of the
+    key, a cross section holding one Shanghai-dated label and one UTC-dated one was accepted, and
+    which zone governed that look-ahead check was settled by whichever label came first out of the
+    mapping.
+
+    The fixture changes the zone and **nothing else**: the same label object, with the same window
+    object, with one field replaced. The assertion above the refusal says so, so this cannot
+    quietly become a test about two horizons.
+    """
+    labels = _labels(NEARLY_MONOTONE_RETURNS)
+    shanghai = labels[code(5)].window
+    elsewhere = dataclasses.replace(shanghai, zone=UTC)
+    labels[code(5)] = dataclasses.replace(labels[code(5)], window=elsewhere)
+
+    assert (shanghai.prediction_day, shanghai.entry_day, shanghai.exit_day) == (
+        elsewhere.prediction_day,
+        elsewhere.entry_day,
+        elsewhere.exit_day,
+    )
+    assert shanghai.horizon.text == elsewhere.horizon.text
+    assert str(shanghai.zone) != str(elsewhere.zone)
+    with pytest.raises(FactorICError, match="span 2 different windows"):
+        raw_cross_section(
+            as_of=AS_OF,
+            observations=[_raw(name, value=value) for name, value in MONOTONE_SCORES.items()],
+            labels=labels,
+        )
+
+
 def test_a_label_for_a_security_the_cross_section_never_scored_is_refused() -> None:
     """The two sides read from two different universes, which a silent drop would hide."""
     labels = _labels({**NEARLY_MONOTONE_RETURNS, code(9): 0.07})
@@ -890,6 +971,50 @@ def test_a_correlation_whose_sums_of_squares_would_overflow_reports_the_right_nu
     assert -1.0 <= point.raw_ic <= 1.0
     assert point.raw_ic == pytest.approx(PEARSON_OF_THE_FIXTURE, abs=1e-12)
     assert math.sqrt(sys.float_info.max / 5534) == pytest.approx(1.8023e152, rel=1e-4)
+
+
+def test_pearson_returns_the_correlation_of_a_cross_section_too_wide_to_add_up() -> None:
+    """The half of the test above that the scaling never reached: the **mean**.
+
+    The test above proves the sums of squares are scaled. They were -- and the scaling ran three
+    lines after `statistics.fmean`, which is `math.fsum` underneath, and `math.fsum` **raises**
+    `OverflowError("intermediate overflow in fsum")` on a sum it cannot represent rather than
+    saturating the way the unscaled `sum` above does. So on a cross section whose values sum past
+    the double range, `_pearson` did not return a wrong number: it threw a bare builtin out of
+    `FactorICStudy.measure`, whose docstring is "Never raises for a property of the market" and
+    whose `ic_method` is a caller's parameter on all three faces.
+
+    **The expected value is not a literal, and that is the point.** A correlation is invariant
+    under a positive rescaling of either side, so the same cross section divided by `2**600` --
+    small enough that the old code adds it up without complaint -- has the same correlation by
+    definition. Asserting equality against *that* fixes the answer without anyone hand-computing a
+    number at `1e308`, and it fails in both directions: a `_pearson` that raises fails, and one
+    that returns some other finite number fails too. The equality is exact rather than approximate
+    because `_centred_unit` rescales by a power of two, which loses no bit.
+
+    Contrast `panel_factors._standardize_zscore`, which meets the identical `fsum` trap and answers
+    `degenerate_cross_section`: a z-score needs a location and a scale, and this cross section has
+    neither representably, while its correlation is perfectly ordinary.
+    """
+    wide = {code(1): 1.0, code(2): 2.0, code(3): 3.0, code(4): 1.7e308, code(5): 1.7e308}
+    section = _raw_section(wide)
+    scores, returns = list(section.scores), list(section.forward_returns)
+    halved = [math.ldexp(value, -600) for value in scores]
+
+    with pytest.raises(OverflowError, match="intermediate overflow in fsum"):
+        statistics.fmean(scores)
+
+    correlation = _pearson(scores, returns)
+    point = FactorICStudy(_spec(method="pearson")).measure(section)
+
+    # The halved copy is in the regime the pre-scaling code could add up, which is what makes it
+    # an independent statement of the answer rather than a second run of the same arithmetic.
+    assert math.isfinite(statistics.fmean(halved))
+    assert correlation == _pearson(halved, returns)
+    assert math.isfinite(correlation)
+    assert -1.0 <= correlation <= 1.0
+    assert point.coverage == "measured"
+    assert point.raw_ic == correlation
 
 
 # --------------------------------------------------------------------------------------------

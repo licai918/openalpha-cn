@@ -1432,6 +1432,22 @@ def build_factor_experiment(
             "readings of the same days, and three tiers over three samples produce a fall in a "
             "statistic that cannot be told from a sample that moved underneath it"
         )
+    # The horizon is checked here rather than only by the artifact's own validator, and the
+    # asymmetry it removes is the reason. `as_of_digest` above and `horizon_sessions` below are
+    # both read off `raw` alone, and both are only sound because the three tiers agree -- but only
+    # the sample had a check saying so. The horizon's agreement was left to
+    # `_validate_the_rows_are_one_factor`, three constructions later, so the value the spec is
+    # built from was a positional pick from an unchecked set: swapping `raw` for `processed` in the
+    # `horizon_sessions=` below changed nothing any test could see. Unpacked rather than indexed
+    # for that reason -- after this refusal there is no slot left to read the wrong one of.
+    horizons = {report.horizon_sessions for report in tiers}
+    if len(horizons) != 1:
+        raise FactorExperimentError(
+            f"the three tiers are at {sorted(horizons)} session(s); an attribution is a difference "
+            "between two readings of one forward window, and an IC at five sessions minus an IC "
+            "at sixty is not a difference the transform made"
+        )
+    (horizon_sessions,) = horizons
     spec = FactorExperimentSpec(
         ic=ic_spec,
         portfolio=portfolio_spec,
@@ -1439,7 +1455,7 @@ def build_factor_experiment(
         survival=survival_spec,
         retention_floor=retention_floor,
         code_commit=code_commit,
-        horizon_sessions=raw.horizon_sessions,
+        horizon_sessions=horizon_sessions,
         as_of_digest=set_digest([instant.isoformat() for instant in raw.as_ofs]),
         raw_source_digest=set_digest(raw.source_manifest_ids),
         processed_source_digest=set_digest(processed.source_manifest_ids),

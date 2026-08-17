@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import math
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -586,6 +587,54 @@ def test_a_z_score_whose_variance_overflows_is_degenerate_rather_than_infinite()
     result = _apply(_panel(_cross_section(1e308, -1e308)), _spec())
 
     assert {item.coverage for item in result.observations} == {"degenerate_cross_section"}
+
+
+@pytest.mark.parametrize(
+    ("values", "summed"),
+    [
+        ((1.7e308, 1.7e308, 1.0), lambda values: values),
+        ((1e154, -1e154, 1e154, -1e154), lambda values: [value * value for value in values]),
+    ],
+    ids=["the mean", "the variance"],
+)
+def test_a_z_score_whose_mean_overflows_is_degenerate_rather_than_an_overflowerror(
+    values: tuple[float, ...], summed: Callable[[tuple[float, ...]], list[float]]
+) -> None:
+    """The half of the test above that was missing, on both sums rather than on one.
+
+    The test above drives a variance that overflows **to `inf`** and is caught by the
+    `math.isfinite` guard. It does not reach the other shape: `math.fsum` is exact, keeps partial
+    sums, and **raises** `OverflowError("intermediate overflow in fsum")` when one of those leaves
+    the double range, rather than saturating the way `sum` would. So the guard could only ever see
+    the saturating shape, and the raising one left `apply_factor_transform` as a bare builtin --
+    past every `except FactorTransformError` a caller wrote from the docstring.
+
+    Both parameters are contract-admissible: `validate_factor_observation` admits any finite float
+    and `sys.float_info.max` is finite. The second is the one that shows `delta * delta` was never
+    the whole answer -- its mean is exactly zero, so it clears the first sum, and it overflows on
+    the *fourth* squared deviation, where the choice of `*` over `**` has no say because no single
+    product is infinite.
+
+    Asserted as the shipped code (`zscore` is what `cross_section_standard/v1` standardizes by) and
+    as the coverage rather than as "does not raise", so the test also states which of the two
+    answers is right: a cross section whose location and scale are not representable has no z-score
+    to report, which is what `degenerate_cross_section` means. `backtest/factor_ic._pearson` hit
+    the identical `fsum` trap and does **not** answer this way, because a correlation is
+    scale-invariant and therefore still has an ordinary value here.
+
+    `summed` is the sum each fixture is *for*, asserted to still overflow before the cross section
+    is transformed. Without it this is a test whose fixture can stop reaching the branch while
+    staying green -- the failure mode this repository has hit more than ten times in `P3` alone,
+    and the reason a `1e308` literal is not self-evidently still an overflow after an edit.
+    """
+    with pytest.raises(OverflowError, match="intermediate overflow in fsum"):
+        math.fsum(summed(values))
+
+    result = _apply(_panel(_cross_section(*values)), _spec())
+
+    assert {item.coverage for item in result.observations} == {"degenerate_cross_section"}
+    assert result.statistics.location is None
+    assert result.statistics.scale is None
 
 
 # --- the collapsed estimator ---------------------------------------------------------------------

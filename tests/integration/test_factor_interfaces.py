@@ -718,6 +718,35 @@ def test_a_range_whose_neutralised_tier_was_never_built_is_refused_the_same_way_
     assert sdk["message"] in cli["stderr"]
 
 
+def test_the_refusal_lists_the_missing_prediction_days_oldest_first(tmp_path: Path) -> None:
+    """The sample's order, which this message is the only place that shows.
+
+    `run_factor_experiment` sorts the raw tier's stored instants once, a hundred lines before
+    anything reads them, and **nothing downstream preserves that order**: `FactorICStudy.summarize`
+    re-sorts its points, `TradeabilityStudy.turnover` re-sorts its periods, and every identity is a
+    `set_digest`. So the one observable consequence of that `sorted` is the order this refusal
+    lists a caller's missing days in -- which means reversing it changed no number, broke no test,
+    and handed an operator a list to re-sort by hand.
+
+    Driven on the same store shape as the sibling above, where both prediction days in the range
+    lack a residual, so the message carries two instants rather than one and the order is a fact
+    rather than a coincidence. Asserted as the exact list, so a third day appearing later cannot
+    make this pass by accident.
+    """
+    store_three_tiers(
+        tmp_path,
+        prediction_days=(*PREDICTION_DAYS, LATER_PREDICTION_DAY),
+        neutralized_days=(LATER_PREDICTION_DAY,),
+    )
+
+    answer = sdk_answer(tmp_path, BASELINE)
+    listed = re.findall(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+\d{2}:\d{2}", answer["message"])
+
+    assert answer["reason"] == "blocked"
+    assert listed == ["2026-01-08T09:00:00+00:00", "2026-01-09T09:00:00+00:00"]
+    assert listed == sorted(listed)
+
+
 def test_a_refused_run_stores_nothing_at_all(tmp_path: Path) -> None:
     """A refusal is not a 2xx *and* it is not a write.
 

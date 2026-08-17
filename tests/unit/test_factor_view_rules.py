@@ -11,7 +11,9 @@ after the rule it was written for was deleted.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+import math
+import re
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final
@@ -22,10 +24,15 @@ from openalpha_cn.domain.factor import FactorRegistry
 from openalpha_cn.factor_view import (
     FACTOR_DATE_ZONE,
     MISSING_INSTANTS_SHOWN,
+    PANEL_STORE_PLACEHOLDER,
     FactorRequestError,
+    FactorRunBlockedError,
+    _refuse_tiers_over_different_instants,
+    _without_store_path,
     factor_request,
     resolve_factor,
 )
+from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import FACTOR_DEFINITIONS
 from openalpha_cn.storage.factor_experiments import (
     CONTENT_DIGEST_PATTERN,
@@ -294,6 +301,43 @@ def test_a_key_that_is_not_a_content_address_never_reaches_the_filesystem(tmp_pa
     assert list((tmp_path / "experiments").glob("*")) == []
 
 
+def test_a_key_with_a_trailing_newline_is_not_this_stores_key_space(tmp_path: Path) -> None:
+    """`$` matches before a final newline, so `^...$` with `.match` is not "and nothing else".
+
+    `EXPERIMENT_ID_PATTERN`'s docstring claims the key space is "exactly what `stable_model_id`
+    produces, and nothing else". Under `re.match` with a trailing `$` that claim was false in
+    exactly one direction, and it is the direction that reaches the filesystem: Python's `$` also
+    matches immediately *before* a final newline, so `"fxp_" + 24 hex + "\\n"` was accepted, written
+    as a filename component, and listed back with the newline still in it -- a key no caller can
+    retype and no operator can see in a directory listing.
+
+    `domain/panel_batch.py` records the identical bug being reproduced against `cb9e8f4` one plane
+    down, where `"close\\n"` became a Parquet column name, and states the rule this store now
+    follows: matched with `re.fullmatch`, never `match` with a trailing `$`.
+
+    Both filename components are driven, because both reach the filesystem by the same door, and
+    the directory is asserted empty afterwards -- the same closing assertion the sibling above
+    makes, and the one that says the refusal happened *before* the write rather than after it.
+    """
+    store = FileExperimentStore(tmp_path / "experiments")
+
+    with pytest.raises(ExperimentStoreError, match="is not an experiment_id"):
+        store.put(
+            experiment_id=f"{IDENTITY}\n", content_digest=DIGEST, built_at=BUILT_AT, payload="{}"
+        )
+    with pytest.raises(ExperimentStoreError, match="is not a content_digest"):
+        store.put(
+            experiment_id=IDENTITY, content_digest=f"{DIGEST}\n", built_at=BUILT_AT, payload="{}"
+        )
+    with pytest.raises(ExperimentStoreError, match="is not an experiment_id"):
+        store.get(f"{IDENTITY}\n")
+
+    assert EXPERIMENT_ID_PATTERN.fullmatch(f"{IDENTITY}\n") is None
+    assert CONTENT_DIGEST_PATTERN.fullmatch(f"{DIGEST}\n") is None
+    assert store.list_ids() == ()
+    assert list((tmp_path / "experiments").glob("*")) == []
+
+
 def test_an_empty_store_answers_rather_than_raising(tmp_path: Path) -> None:
     """A runtime directory with no experiments in it is a fresh install, not a fault."""
     store = FileExperimentStore(tmp_path / "experiments")
@@ -338,6 +382,104 @@ def test_two_documents_under_one_identity_are_reported_against_the_directory(
     assert store.list_ids() == (IDENTITY,)
     with pytest.raises(ExperimentStoreError, match="is held under 2 content digests"):
         store.get(IDENTITY)
+
+
+ISO_INSTANT: Final[re.Pattern[str]] = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+\d{2}:\d{2}"
+)
+"""Every aware instant a refusal message renders, so their order can be read off the message."""
+
+
+def test_a_retention_floor_of_exactly_one_is_the_strictest_declaration_and_is_accepted() -> None:
+    """The interval is `(0, 1]`, driven **at** `1.0` rather than at `1.5`.
+
+    The suite drove the upper bound from half a unit away, where `<=` and `<` agree, so a `<` --
+    which refuses the strictest declaration a caller can make -- survived. `1.0` is not a corner
+    case here but the most useful setting there is: it says "every ordering the transform touched
+    has to survive", which is the one declaration under which the acceptance criterion's cell
+    cannot be met by a partial improvement.
+
+    `math.nextafter` gives the smallest float above `1.0`, so the refusing half is the comparison
+    itself rather than a neighbourhood of it.
+    """
+    accepted = factor_request(**{**VALID, "retention_floor": 1.0})
+
+    assert accepted.retention_floor == 1.0
+    with pytest.raises(FactorRequestError, match=r"must be in \(0, 1\]"):
+        factor_request(**{**VALID, "retention_floor": math.nextafter(1.0, 2.0)})
+
+
+def test_the_blocked_message_lists_the_missing_instants_ascending_and_never_says_zero_more() -> (
+    None
+):
+    """The cap arithmetic, driven **at** the cap, and the order the instants are listed in.
+
+    `MISSING_INSTANTS_SHOWN` is a cap on a list a human reads, and both halves of the arithmetic
+    around it were undecidable by any fixture: the integration cases have one or two missing
+    instants, never five, so `rest <= 0` and `rest < 0` agreed on all of them -- and `rest < 0`
+    appends the words "(and 0 more)" to a message that has just listed *everything*, which reads as
+    "there are more and I am not telling you".
+
+    The order is asserted for the same reason it is a separate finding: the instants are listed in
+    the order `as_ofs` arrives in, that order is decided a hundred lines up by one `sorted`, and
+    nothing downstream of that call preserves it -- every study re-sorts and every digest is over a
+    set. This message is the only place the ordering is visible, and a refusal that lists a
+    caller's missing days newest-first is a refusal they have to re-sort by hand.
+    """
+    request = factor_request(**VALID)
+    start = datetime(2026, 1, 8, 9, 0, tzinfo=UTC)
+    instants = tuple(start + timedelta(days=index) for index in range(MISSING_INSTANTS_SHOWN + 2))
+    complete = dict.fromkeys(instants, object())
+
+    def _refusal(as_ofs: tuple[datetime, ...]) -> str:
+        with pytest.raises(FactorRunBlockedError) as blocked:
+            _refuse_tiers_over_different_instants(
+                request, as_ofs=as_ofs, processed=complete, neutralized={}
+            )
+        return str(blocked.value)
+
+    at_the_cap = _refusal(instants[:MISSING_INSTANTS_SHOWN])
+    over_the_cap = _refusal(instants)
+
+    assert ISO_INSTANT.findall(at_the_cap) == [
+        instant.isoformat() for instant in instants[:MISSING_INSTANTS_SHOWN]
+    ]
+    assert "more)" not in at_the_cap
+    assert ISO_INSTANT.findall(over_the_cap) == [
+        instant.isoformat() for instant in instants[:MISSING_INSTANTS_SHOWN]
+    ]
+    assert "(and 2 more)" in over_the_cap
+
+
+def test_a_redaction_replaces_the_longer_spelling_of_the_store_path_before_the_shorter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`reverse=True` is the whole function, driven on a store whose two spellings nest.
+
+    The rule this helper exists for is that `Path.resolve()` and the configured path are two
+    spellings of one directory and **one can contain the other** -- on macOS every
+    `/var/folders/...` temporary directory resolves to `/private/var/folders/...`, so the
+    configured string appears verbatim inside the resolved one. Replace the shorter first and the
+    longer one's prefix survives the substitution: `/private/var/.../panel` becomes
+    `/private<placeholder>`, and the response body a caller could reach the port for still names a
+    real directory on the host.
+
+    Reproduced with a **relative** store root instead of a symlink, because the nesting is the
+    property that matters and a symlink cannot produce it portably: `resolve()` prepends the
+    working directory, so `var/panel` is a substring of `/.../var/panel` by construction, on every
+    platform and with no `/private` in sight. The existing end-to-end assertion
+    (`test_factor_interfaces.py::test_a_refusal_body_names_no_filesystem_path`) only detects this
+    where the host actually symlinks its temporary directory, which is why it did not.
+    """
+    monkeypatch.chdir(tmp_path)
+    store = PanelStore(Path("var") / "panel")
+    spellings = (str(store.root), str(store.root.resolve()))
+
+    redacted = _without_store_path(f"could not open {store.root.resolve()}/catalog.duckdb", store)
+
+    assert spellings[0] in spellings[1] and spellings[0] != spellings[1]
+    assert redacted == f"could not open {PANEL_STORE_PLACEHOLDER}/catalog.duckdb"
+    assert str(tmp_path) not in redacted
 
 
 def test_the_two_filename_patterns_are_stable_model_ids_own_output() -> None:

@@ -90,7 +90,7 @@ __all__ = [
 
 EXPERIMENT_DOCUMENT_SUFFIX: Final[str] = ".json"
 
-EXPERIMENT_ID_PATTERN: Final[re.Pattern[str]] = re.compile(r"^fxp_[0-9a-f]{24}$")
+EXPERIMENT_ID_PATTERN: Final[re.Pattern[str]] = re.compile(r"fxp_[0-9a-f]{24}")
 """Exactly what `stable_model_id(prefix="fxp", ...)` produces, and nothing else.
 
 Held rather than assumed because this identifier becomes part of a filename.
@@ -99,10 +99,23 @@ the shape is closed and a token that does not match it did not come from the fun
 whole key space is defined by. Checking rather than sanitising is deliberate: sanitising turns a
 wrong key into a plausible one, and this store's only job is to keep two answers under one key
 apart.
+
+**Unanchored, and matched with `re.fullmatch` -- never `re.match` with a trailing `$`.**
+`domain/panel_batch.py` records this exact bug being *measured* one plane down: Python's `$` also
+matches immediately before a final newline, so under `.match` a `"$"`-anchored pattern accepts a
+token with a `\\n` on the end. That module reproduced it against `cb9e8f4`, where `"close\\n"` was
+accepted as a column name and written into Parquet. This store did not adopt the rule, and it is
+the worse place to miss it: the token here becomes a **filename component**, so
+`"fxp_" + 24 hex + "\\n"` was stored, listed back by `list_ids` with the newline in it, and is a
+key no caller can retype. "and nothing else" above is only true of `fullmatch`.
 """
 
-CONTENT_DIGEST_PATTERN: Final[re.Pattern[str]] = re.compile(r"^fxc_[0-9a-f]{24}$")
-"""`stable_model_id(prefix="fxc", ...)`'s output: the artifact's own content address."""
+CONTENT_DIGEST_PATTERN: Final[re.Pattern[str]] = re.compile(r"fxc_[0-9a-f]{24}")
+"""`stable_model_id(prefix="fxc", ...)`'s output: the artifact's own content address.
+
+Unanchored and `fullmatch`ed for `EXPERIMENT_ID_PATTERN`'s reason, which it shared: it is the
+*second* filename component, so it reached the filesystem by the same door.
+"""
 
 
 class ExperimentStoreError(RuntimeError):
@@ -220,8 +233,8 @@ def _is_a_document(entry: Path) -> bool:
         entry.is_file()
         and len(parts) == 3
         and f".{parts[2]}" == EXPERIMENT_DOCUMENT_SUFFIX
-        and EXPERIMENT_ID_PATTERN.match(parts[0]) is not None
-        and CONTENT_DIGEST_PATTERN.match(parts[1]) is not None
+        and EXPERIMENT_ID_PATTERN.fullmatch(parts[0]) is not None
+        and CONTENT_DIGEST_PATTERN.fullmatch(parts[1]) is not None
     )
 
 
@@ -234,7 +247,7 @@ def _refuse_an_unusable_id(experiment_id: str) -> None:
     outside this directory. Sanitising instead would turn `../../etc/passwd` into a plausible key
     and store a document under it.
     """
-    if not EXPERIMENT_ID_PATTERN.match(experiment_id):
+    if not EXPERIMENT_ID_PATTERN.fullmatch(experiment_id):
         raise ExperimentStoreError(
             f"{experiment_id!r} is not an experiment_id; this store is keyed by "
             "stable_model_id's own output (`fxp_` and 24 lowercase hex characters), and a key "
@@ -250,7 +263,7 @@ def _refuse_an_unusable_digest(content_digest: str) -> None:
     store that accepted an empty one could never tell a re-derivation that reproduced from one
     that did not.
     """
-    if not CONTENT_DIGEST_PATTERN.match(content_digest):
+    if not CONTENT_DIGEST_PATTERN.fullmatch(content_digest):
         raise ExperimentStoreError(
             f"{content_digest!r} is not a content_digest; an artifact's content address is "
             "`fxc_` and 24 lowercase hex characters, and it is what tells a re-derivation that "

@@ -847,6 +847,52 @@ def test_a_cross_section_at_another_level_or_measure_than_the_spec_declares_is_r
         _neutralize(processed, dataclasses.replace(cross, market_cap_measure="circ_mv"))
 
 
+def test_a_hand_built_capitalisation_of_zero_is_refused_by_name_under_both_scales(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """The path `_log_regressor` said had no domain error to have, driven in both directions.
+
+    `build_industry_market_cap_cross_section` refuses a capitalisation that is not finite and
+    strictly positive, and `_log_regressor`'s docstring used to conclude from that alone that a
+    guard beside `math.log` would be a branch nothing could enter. Two of this repository's own
+    sentences said otherwise -- `SecurityCharacteristic` is "a plain carrier with no validation of
+    its own" and `IndustryMarketCapCrossSection`'s constructor "is not a boundary and validates
+    nothing" -- and `characteristic_digest` already carried a refusal written for exactly this
+    path. Measured, `SecurityCharacteristic(..., market_cap=0.0)` constructs, and the engine then
+    raised a bare `ValueError("math domain error")` from inside a list comprehension, where a
+    caller's `except FactorEngineError` could not see it.
+
+    **Both scales, because the fault is the row and not the arithmetic.** Under `log` the old code
+    raised the wrong type; under `level` it raised nothing at all and regressed on the zero, which
+    is the worse of the two -- a slope and a dispersion stored as facts about a market. A guard
+    that fired only under `log` would make a row's admissibility depend on a knob about output
+    shape, which is the arrangement `_standardize_rank` rejects one plane down.
+
+    The subject is asserted in the message rather than only the phrase, because
+    `characteristic_digest`'s precedent is that the reader is holding thousands of rows and needs
+    the one.
+    """
+    processed = _process(_compute(store, panel))
+    cross = _cross_section(store, panel)
+    subject = cross.characteristics[-1].subject
+    zeroed = dataclasses.replace(
+        cross,
+        characteristics=(
+            *cross.characteristics[:-1],
+            dataclasses.replace(cross.characteristics[-1], market_cap=0.0),
+        ),
+    )
+
+    for scale in ("log", "level"):
+        with pytest.raises(FactorEngineError, match="not finite and strictly positive") as refusal:
+            _neutralize(processed, zeroed, _spec(market_cap_scale=scale))
+        assert subject in str(refusal.value)
+
+    # The same row with the capitalisation the store served is neutralised, so the refusal above is
+    # the zero and not the reshaping the test does to reach it.
+    assert _neutralize(processed, cross).statistics.participant_count > 0
+
+
 def test_a_processed_panel_that_does_not_own_its_rows_is_refused(
     store: PanelStore, panel: GeneratedPanel
 ) -> None:

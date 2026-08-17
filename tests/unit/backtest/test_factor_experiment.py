@@ -123,6 +123,7 @@ from openalpha_cn.domain.labels import (
 from openalpha_cn.domain.price_limits import PriceLimit
 from openalpha_cn.domain.stock_universe import SecurityLifecycle, StockUniverse
 from openalpha_cn.domain.trading_calendar import CalendarDay, build_trading_calendar
+from openalpha_cn.panel_factors import FACTOR_DEFINITIONS
 
 SHANGHAI: Final[ZoneInfo] = ZoneInfo("Asia/Shanghai")
 
@@ -1258,6 +1259,47 @@ def test_the_artifact_carries_every_declared_tier_once() -> None:
     assert len(artifact.tiers) == MINIMUM_EXPERIMENT_TIERS == len(FACTOR_TIER_ORDER)
 
 
+def test_every_shipped_factor_produces_all_three_tiers_under_an_identity_of_its_own() -> None:
+    """The phase gate says **every** factor gets a three-tier report; it was proved on one.
+
+    The gate's sentence is registry-wide and the evidence was `reversal_1d/v1` -- the one shipped
+    factor whose `lookback_sessions=2` fits the ten-session generated panel that
+    `tests/integration/test_factor_interfaces.py` builds. Nothing in the repository iterated
+    `FACTOR_DEFINITIONS.definitions` and built anything: the fifteen tests that do iterate it are
+    all metadata assertions about reaches and families. So "every factor" rested on one factor and
+    a family resemblance.
+
+    **What this proves and what it does not.** It drives the *report* half over all nineteen: the
+    four studies run for real on each definition, `build_factor_experiment` binds them, the
+    artifact carries `FACTOR_TIER_ORDER` once, and the nineteen identities are pairwise distinct --
+    which is the property a shared `experiment_id` would silently break, since a report is stored
+    under it. It does **not** prove the *panel* half, that each factor's evaluator can be computed
+    over a real store: that needs 120 sessions of prices for the momentum family and a filing axis
+    for the value, quality and growth families, and it is what
+    `tests/integration/panel/` covers family by family.
+
+    The scores are the same synthetic table for every definition, on purpose. A per-factor fixture
+    would make a failure here ambiguous between "this factor cannot be reported on" and "this
+    fixture did not suit it", and the question being asked is the first one.
+    """
+    records = {
+        definition.qualified_key: _record(definition=definition)
+        for definition in FACTOR_DEFINITIONS.definitions
+    }
+
+    assert len(records) == 19
+    assert len({record.experiment_id for record in records.values()}) == len(records)
+    for handle, record in records.items():
+        artifact = record.artifact
+        assert tuple(report.tier for report in artifact.tiers) == FACTOR_TIER_ORDER, handle
+        assert len(artifact.tiers) == MINIMUM_EXPERIMENT_TIERS, handle
+        assert tuple(cell.key for cell in artifact.attributions) == ATTRIBUTION_CELL_ORDER, handle
+        assert artifact.spec.factor_id == FACTOR_DEFINITIONS.get(handle).factor_id, handle
+        assert {report.direction for report in artifact.tiers} == {
+            FACTOR_DEFINITIONS.get(handle).direction
+        }, handle
+
+
 def test_the_grid_carries_every_declared_cell_in_the_declared_order() -> None:
     """`ICCensus.excluded_by_coverage`' rule one plane up: a cell missing from the tuple and a
     cell present with `not_measured` are different claims, so the whole grid is always there."""
@@ -1973,6 +2015,84 @@ def test_a_blank_source_build_id_is_refused() -> None:
             turnover=row.turnover,
             tradeability=row.tradeability,
             survival=None,
+        )
+
+
+def test_the_rolling_portfolio_may_follow_the_last_group_and_not_the_one_past_it() -> None:
+    """The upper bound is exclusive, driven **at** the bound rather than seven groups past it.
+
+    The rule is `0 <= group < group_count`, and the suite drove it with `group=7` against a cut of
+    two -- a value on which `<` and `<=` agree, so the boundary itself was undecidable and a `<=`
+    survived the whole suite. Off by one here is not cosmetic: `group_count - 1` is the *long*
+    group, the one the acceptance criterion's spread is measured on, so a bound that admitted
+    `group_count` would let a row declare a rolling portfolio over a group the quantile study never
+    cut and report its churn beside a spread it does not belong to.
+
+    Both sides are driven on one cut: the top legal group constructs, and the next integer does
+    not. The `match=` is this rule's own phrase, because a `group` past the cut also disagrees with
+    `tradeability.group` -- a bare `ValidationError` would pass on the neighbouring rule.
+
+    Built on the `insufficient_rebalances` row the sibling above uses, and for that test's unstated
+    reason: `TurnoverSeries` carries its own "a rebalance is filed under another group" validator,
+    which fires first on a series that actually has rebalances in it, so a row-level bound can only
+    be reached through a series with none.
+    """
+    thin = _tier_report("raw", tradeability_spec=_tradeability_spec(min_rebalances=5))
+    count = thin.portfolio.group_count
+
+    def _with_group(group: int) -> TierReport:
+        return TierReport(
+            tier="raw",
+            source_manifest_ids=SOURCE_BUILDS["raw"],
+            ic=thin.ic,
+            portfolio=thin.portfolio,
+            turnover=thin.turnover.model_copy(update={"group": group}),
+            tradeability=thin.tradeability,
+            survival=None,
+        )
+
+    assert count == 2
+    assert thin.turnover.coverage == "insufficient_rebalances"
+    assert _with_group(count - 1).turnover.group == count - 1
+    with pytest.raises(ValidationError, match="has to be one of the groups"):
+        _with_group(count)
+
+
+def test_the_builder_refuses_three_tiers_at_two_horizons_rather_than_reading_one_of_them() -> None:
+    """The builder's own refusal, and the reason the spec's horizon is unpacked rather than picked.
+
+    `build_factor_experiment` reads two values off `raw` alone -- `as_of_digest` and
+    `horizon_sessions` -- and only the first had a check saying the other two agree. The horizon's
+    agreement was left to the artifact validator three constructions later, so `raw.horizon_
+    sessions` was a positional pick out of an unchecked set and swapping it for `processed.horizon_
+    sessions` changed nothing any test could observe.
+
+    The refusal now comes from the builder, as a `FactorExperimentError` naming both horizons,
+    rather than from a pydantic validator saying the rows "disagree about horizon_sessions" -- the
+    same difference `as_ofs` already had. `model_copy` is used to move the horizon because it skips
+    validation, which is what lets a row that the row-level "two windows in one row" rule would
+    refuse reach the builder at all.
+    """
+    rows = {report.tier: report for report in _record().artifact.tiers}
+    moved = rows["processed"].model_copy(
+        update={"ic": rows["processed"].ic.model_copy(update={"horizon_sessions": 5})}
+    )
+
+    assert rows["raw"].horizon_sessions == 1
+    assert moved.horizon_sessions == 5
+    with pytest.raises(FactorExperimentError, match=r"the three tiers are at \[1, 5\] session"):
+        build_factor_experiment(
+            ic_spec=_ic_spec(),
+            portfolio_spec=_quantile_spec(),
+            tradeability_spec=_tradeability_spec(),
+            survival_spec=_survival_spec(),
+            retention_floor=RETENTION_FLOOR,
+            code_commit=CODE_COMMIT,
+            raw=rows["raw"],
+            processed=moved,
+            neutralized=rows["neutralized"],
+            built_at=BUILT_AT,
+            note=None,
         )
 
 

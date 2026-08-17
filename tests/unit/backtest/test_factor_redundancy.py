@@ -77,6 +77,7 @@ from openalpha_cn.backtest.factor_redundancy import (
     RedundancyPoint,
     RedundancySpec,
     RedundancyStudy,
+    RedundancySummary,
     SharedInputs,
     correlate_cross_section,
     factor_vector,
@@ -468,6 +469,110 @@ def test_an_unskipped_momentums_identity_is_verified_and_the_shipped_pair_refute
     assert abs(arithmetic.raw_correlation) > 0.2
     assert abs(empirical.raw_correlation) < 0.1
     assert arithmetic.shared_input_code == empirical.shared_input_code == "identical_inputs"
+
+
+DIVERGING_SUBJECT: Final[tuple[int, ...]] = (0, 1, 2)
+"""Which of three subjects carries the identity's only non-zero residual, as a parameter.
+
+The whole point of the parameter: a fixture in which the outlier is always last cannot tell
+`max(largest, ...)` from "the last one wins", and one in which every residual is equal cannot tell
+`max` from `min`. Three positions over three subjects is the smallest table that separates all
+three readings, and `verify_identity` sorts its subjects, so position here is position there.
+"""
+
+DIVERGENCE: Final[float] = 0.25
+"""The one non-zero residual, exact in binary so the assertion can be `==` rather than an interval.
+
+`0.25` is `2**-2`, and the residual is a plain subtraction of two exactly-representable values, so
+`max_abs_residual` is this number and not a neighbourhood of it. A magnitude rather than a bound is
+the whole lesson of the finding this test answers: the suite already asserted `1e-3 < residual <
+1.0`, which is true of the maximum, of the minimum and of the mean.
+"""
+
+
+def _difference_identity(tolerance: float) -> FactorIdentity:
+    """`a - b`, declared over two probe keys, with the tolerance the caller wants to test."""
+    return FactorIdentity(
+        code="the_two_probes_agree_exactly",
+        members=(UP.key, OTHER_UP.key),
+        tolerance=tolerance,
+        detail=(
+            "A probe identity whose residual is one subtraction, so the residual at each subject "
+            "is chosen by the fixture rather than emerging from an evaluator. Declared here and "
+            "not shipped: COMPOUNDING_IDENTITY is the real one, and its residuals are the ~1e-16 "
+            "noise of a compounding round-trip, which cannot place a known number at a known "
+            "subject."
+        ),
+        residual=lambda values: values[UP.key] - values[OTHER_UP.key],
+    )
+
+
+@pytest.mark.parametrize("diverging", DIVERGING_SUBJECT)
+def test_the_reported_residual_is_the_largest_one_and_not_whichever_came_last(
+    diverging: int,
+) -> None:
+    """`max_abs_residual` is a **maximum**, driven where the three plausible readings differ.
+
+    This module's whole defence against "a declared safety property that nothing measures" is
+    `verify_identity`, and the number it reports is the one a reader uses to tell "the declaration
+    is wrong" from "the declaration is wrong by 4e-4" -- `IdentityCheck`'s own docstring says so.
+    Until this test, no fixture in the suite produced two residuals that a reader could tell apart:
+    every assertion was an interval or a ratio over 40 independently-seeded securities, so an
+    identity that broke on **one** security could be stamped `verified` on the strength of the
+    other 39. Replacing the accumulator with `min` left the whole suite green.
+
+    Two subjects sit exactly on the identity and one is off it by `DIVERGENCE`, and the parameter
+    moves which. Under `min` the answer is `0.0` at every position; under "the last one wins" it is
+    right at position 2 and `0.0` at the other two; only a maximum is right at all three. The
+    coverage moves with it, so this is also the statement that a break at one security refutes the
+    identity for the cross section rather than being averaged away.
+    """
+    subjects = _subjects(3)
+    left = dict.fromkeys(subjects, 1.0)
+    right = {
+        name: 1.0 - (DIVERGENCE if index == diverging else 0.0)
+        for index, name in enumerate(subjects)
+    }
+
+    check = verify_identity(
+        _difference_identity(1e-9),
+        {UP.key: _vector(UP, left), OTHER_UP.key: _vector(OTHER_UP, right)},
+    )
+
+    assert check.subject_count == 3
+    assert check.max_abs_residual == DIVERGENCE
+    assert check.coverage == "refuted"
+
+
+def test_the_declared_tolerance_is_inclusive_at_exactly_the_residual_it_names() -> None:
+    """`<=` and not `<`, on a residual that lands **on** the tolerance rather than near it.
+
+    `FactorIdentity.__post_init__` refuses a tolerance of zero in these words: "a residual is
+    compared with `<=`, so a non-positive tolerance would refuse the exact case". That sentence
+    makes the inclusiveness load-bearing -- it is the reason a whole declaration shape is
+    unavailable -- and no fixture reached it: the suite's residuals are `1e-16` noise against a
+    `1e-12` tolerance, four orders of magnitude clear of the line in a direction both comparisons
+    agree on.
+
+    `DIVERGENCE` is exact in binary, so declaring it as the tolerance is a residual exactly equal
+    to it. `math.nextafter` towards zero is the smallest possible step to the other side, so the
+    pair of assertions is the comparison itself rather than a neighbourhood of it.
+
+    The `IdentityCheck` contract's own twin of the comparison is exercised by the same call: the
+    model refuses a `verified` code whose residual exceeds its tolerance, so a `<` there would make
+    the first branch raise instead of returning.
+    """
+    subjects = _subjects(3)
+    left = dict.fromkeys(subjects, 1.0)
+    right = {**dict.fromkeys(subjects, 1.0), subjects[1]: 1.0 - DIVERGENCE}
+    vectors = {UP.key: _vector(UP, left), OTHER_UP.key: _vector(OTHER_UP, right)}
+
+    exact = verify_identity(_difference_identity(DIVERGENCE), vectors)
+    inside = verify_identity(_difference_identity(math.nextafter(DIVERGENCE, 0.0)), vectors)
+
+    assert exact.max_abs_residual == inside.max_abs_residual == DIVERGENCE
+    assert exact.coverage == "verified"
+    assert inside.coverage == "refuted"
 
 
 def test_a_verdict_of_arithmetic_needs_an_identity_that_was_evaluated_and_held() -> None:
@@ -1688,6 +1793,34 @@ def test_correlate_ic_series_refuses_two_horizons_two_methods_and_a_series_again
         study.correlate_ic_series(base, [_ic_series(OTHER_UP, (0.1,))[0]] * 2)
 
 
+def test_an_ic_series_at_exactly_the_sample_floor_is_measured_rather_than_thin() -> None:
+    """The floor is a floor: `min_as_ofs` days are enough, and one fewer is not.
+
+    The suite drove this comparison from two away -- one measured pair against a floor of two --
+    so `<` and `<=` agreed on every fixture and the boundary was undecidable. The direction that
+    matters is this one: a `<=` would silently discard the smallest legal sample and report
+    `insufficient_sample` for a pair that had exactly the days the spec asked for, which reads
+    downstream as "these two factors could not be compared" rather than as "they were".
+
+    Both sides are asserted on one call each, and `sample_size` is asserted beside the coverage so
+    that the fixture cannot drift into a different number of pairs while the coverage assertion
+    keeps passing.
+    """
+    study = RedundancyStudy(SPEC, identities=[])
+    right = _ic_series(OTHER_UP, (0.06, 0.01, 0.02, 0.03))
+
+    at_the_floor = study.correlate_ic_series(_ic_series(UP, (0.05, -0.02, None, None)), right)
+    below = study.correlate_ic_series(_ic_series(UP, (0.05, None, None, None)), right)
+
+    assert SPEC.min_as_ofs == 2
+    assert at_the_floor.sample_size == 2
+    assert at_the_floor.coverage == "measured"
+    assert at_the_floor.correlation is not None
+    assert below.sample_size == 1
+    assert below.coverage == "insufficient_sample"
+    assert below.correlation is None
+
+
 def test_a_thin_or_flat_ic_series_pair_reports_a_code_and_cannot_be_arithmetic() -> None:
     """The three codes, and the one verdict an IC-series correlation may never carry.
 
@@ -1852,6 +1985,48 @@ def test_the_summary_verdict_is_decided_by_the_magnitude_and_not_by_the_signed_m
     assert summary.mean_abs_correlation >= SPEC.redundancy_threshold
     assert summary.verdict == "redundant"
     assert dict(summary.verdict_counts)["redundant"] == 3
+
+
+def test_the_summarys_threshold_is_inclusive_at_exactly_the_mean_magnitude_it_names() -> None:
+    """`test_the_declared_threshold_is_inclusive_at_exactly_the_correlation_it_names`, one scope up.
+
+    The same rule is written twice -- `magnitude >= threshold` per point and `mean_abs >=
+    threshold` per series -- and only the first was decidable by any fixture. The series-scope
+    tests all sit well inside the line (`0.964...` against `0.8`), so `>=` and `>` agree on every
+    one of them, and the sequence scope is the one a report actually shows: `TierReport.survival`
+    carries the summary, not the points.
+
+    Built on the pointwise test's own boundary rather than a new one, for the reason that test
+    states: `0.7999999999999998` is the float a five-name Spearman actually produces, and `0.8`
+    would sit a last bit below the line and pass either way. Two identical points make
+    `statistics.fmean` return that float back unchanged, so the *mean* lands on the line too.
+
+    The two points are also exactly `min_as_ofs`, which makes this the boundary test for the
+    sequence-scope sample floor as well: at the floor the series is summarised rather than coded
+    `insufficient_as_ofs`.
+    """
+    subjects = _subjects(5)
+    boundary = _pearson(average_ranks([0, 1, 2, 3, 4]), average_ranks([0, 2, 1, 4, 3]))
+    xs = dict(zip(subjects, (0.0, 1.0, 2.0, 3.0, 4.0), strict=True))
+    ys = dict(zip(subjects, (0.0, 2.0, 1.0, 4.0, 3.0), strict=True))
+    points = _series([(xs, ys), (xs, ys)])
+
+    def _summarize(threshold: float) -> RedundancySummary:
+        spec = RedundancySpec(
+            method="spearman", min_securities=4, min_as_ofs=2, redundancy_threshold=threshold
+        )
+        return RedundancyStudy(spec, identities=[]).summarize(points)
+
+    on_the_line = _summarize(boundary)
+    just_above = _summarize(math.nextafter(boundary, 1.0))
+
+    assert boundary == 0.7999999999999998
+    assert len(points) == SPEC.min_as_ofs == 2
+    assert on_the_line.coverage == "measured"
+    assert on_the_line.mean_abs_correlation == boundary
+    assert on_the_line.verdict == "redundant"
+    assert just_above.mean_abs_correlation == boundary
+    assert just_above.verdict == "distinct"
 
 
 def test_a_summary_over_days_that_all_cleared_the_line_is_redundant() -> None:

@@ -781,7 +781,7 @@ an upstream's publication cadence, and `DATASET_CADENCE` has no honest entry for
 
 import bisect
 import math
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from types import MappingProxyType
@@ -6531,9 +6531,10 @@ class _Standardizer(Protocol):
     `None` means **this method found nothing to order in this cross section**, and it becomes
     `degenerate_cross_section`. It is returned by the method rather than decided by the engine
     from a `min == max` test, which is the difference between a rule and a guess: a z-score's
-    degeneracy is `stdev == 0` or a `stdev` that is not finite, and floating-point overflow makes
-    the second reachable on values that are very much not equal -- `[1e308, -1e308]` sums a
-    variance to `inf`.
+    degeneracy is `stdev == 0`, a `stdev` that is not finite, or a cross section whose sums are
+    not representable at all, and floating-point overflow makes all three reachable on values that
+    are very much not equal -- `[1e308, -1e308]` sums a variance to `inf`, and
+    `[1.7e308, 1.7e308, 1.0]` cannot even be added up.
     """
 
     def __call__(self, values: Sequence[float]) -> _Standardized | None: ...
@@ -6549,6 +6550,41 @@ def _standardize_none(values: Sequence[float]) -> _Standardized | None:
     at declaration time.
     """
     return _Standardized(values=tuple(values), location=None, scale=None)
+
+
+def _fsum_or_none(values: Iterable[float]) -> float | None:
+    """`math.fsum`, with a sum that is not representable reported rather than raised.
+
+    **`math.fsum` raises where `sum` returns `inf`**, which is the same trap `delta * delta` is
+    chosen over `delta ** 2` to avoid one line down and, for four releases, the same trap only
+    half-avoided. `fsum` is exact: it keeps the partial sums it has not yet been able to fold, and
+    when one of *those* leaves the double range it raises `OverflowError("intermediate overflow in
+    fsum")` rather than saturating. `math.fsum([1e308, 1e308])` raises; `math.fsum([inf, inf])`
+    returns `inf`.
+
+    So the guard below it -- `not math.isfinite(scale)` -- could only ever catch the second shape,
+    and the first reached callers as a bare builtin out of an arithmetic helper. Both of these are
+    contract-admissible cross sections (`validate_factor_observation` admits any finite float, and
+    `sys.float_info.max` is finite), and both reach `_standardize_zscore` on the shipped
+    `cross_section_standard/v1`, which standardizes by `zscore`:
+
+    - `[1.7e308, 1.7e308, 1.0]` overflows on the **mean**, before any variance exists.
+    - `[1e154, -1e154, 1e154, -1e154]` has a mean of exactly zero and four squared deviations of
+      `1e308`, so it overflows on the **variance** -- past the `delta * delta` choice, which only
+      ever governed a single product.
+
+    `None` is the answer rather than an exception because a cross section too wide for a z-score is
+    the `degenerate_cross_section` this standardizer exists to report: `_Standardizer` already
+    defines `None` as "this method found nothing to order", and there is no reading under which the
+    other answer is better, because a z-score needs a location and a scale and neither one of these
+    cross sections has a representable pair. See
+    `tests/unit/test_factor_transform_rules.py::
+    test_a_z_score_whose_mean_overflows_is_degenerate_rather_than_an_overflowerror`.
+    """
+    try:
+        return math.fsum(values)
+    except OverflowError:
+        return None
 
 
 def _standardize_zscore(values: Sequence[float]) -> _Standardized | None:
@@ -6569,10 +6605,20 @@ def _standardize_zscore(values: Sequence[float]) -> _Standardized | None:
     turns an over-wide cross section into an exception from inside an arithmetic helper instead
     of into the `degenerate_cross_section` this function is supposed to report.
     `test_a_z_score_whose_variance_overflows_is_degenerate_rather_than_infinite` drives it.
+
+    **Both sums go through `_fsum_or_none` for that same sentence's sake**, because the
+    `delta * delta` choice governed one product and `math.fsum` raises on its own account -- see
+    that function for the two cross sections that escaped this one as bare `OverflowError`s.
     """
     count = len(values)
-    mean = math.fsum(values) / count
-    scale = math.sqrt(math.fsum((value - mean) * (value - mean) for value in values) / count)
+    total = _fsum_or_none(values)
+    if total is None:
+        return None
+    mean = total / count
+    squares = _fsum_or_none((value - mean) * (value - mean) for value in values)
+    if squares is None:
+        return None
+    scale = math.sqrt(squares / count)
     if scale <= 0.0 or not math.isfinite(scale):
         return None
     return _Standardized(

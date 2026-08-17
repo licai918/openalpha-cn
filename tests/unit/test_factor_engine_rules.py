@@ -761,3 +761,56 @@ def test_every_shipped_contract_carries_its_prose(
         assert note is not None, f"the shipped {role} {handle} carries no note"
         assert note.strip() == note
         assert len(note) > 100, f"the {role} note for {handle} says almost nothing"
+
+
+DIRECTION_DISCLOSURE: Final[tuple[str, ...]] = ("declared direction is", "measured nothing")
+"""What **every** factor's note has to say about the direction it declares.
+
+The first phrase is the declaration ("The declared direction is the family's conventional
+prior..."), the second is the caveat that this repository has measured nothing about it. Both are
+required, because either alone is the half that misleads: a note that states a prior without the
+caveat reads as a finding, and a note that says "measured nothing" about something else says
+nothing about the direction.
+
+Substring containment over a `FactorNote`, which is `test_factor_volatility_liquidity
+.REQUIRED_DISCLOSURES`' binding, generalised from four factors to nineteen. That table's own
+docstring argues against a `KNOWN_*` registry for the same obligation, and the argument carries:
+the note is where a factor's judgements already have to live, so a registry beside it would be a
+second place for one sentence to drift from.
+"""
+
+
+def test_every_shipped_factor_discloses_the_direction_it_declares_and_that_it_is_unmeasured() -> (
+    None
+):
+    """`direction` is a required *field* on all nineteen and a *sentence* on all nineteen too.
+
+    `FactorDefinition.direction` is mandatory, so the field cannot go missing -- but the field is
+    a `Literal`, and what makes it readable is the note saying that it is a conventional prior
+    rather than a result. Until this test, four of the nineteen had that sentence bound by an
+    executable assertion (`REQUIRED_DISCLOSURES`, the volatility and liquidity family's) and
+    fifteen had it bound by nothing: deleting the direction prose from
+    `MOMENTUM_20_SESSIONS_NOTE` left the whole suite green.
+
+    That is the exact shape this repository has been bitten by more than once -- a table and an
+    implementation drifting with only prose between them -- and the reason it is a *registry-wide*
+    loop rather than a table of nineteen names: a twentieth factor shipped without the disclosure
+    fails here on the day it is added, with no list for anybody to remember to extend.
+
+    Ten of the nineteen carry the sentence through a shared `_*_DIRECTION_PROSE` constant and nine
+    write it inline, so the assertion is on the assembled note rather than on any constant: a
+    family that stops concatenating its shared prose is exactly the regression this catches.
+
+    The failure names every factor that lost a phrase rather than the first, because a family-wide
+    edit drops it from three or four notes at once and one name would send a reader back around
+    the loop.
+    """
+    missing = {
+        handle: [phrase for phrase in DIRECTION_DISCLOSURE if phrase not in note]
+        for handle in FACTOR_DEFINITIONS.qualified_keys
+        if (note := FACTOR_DEFINITIONS.note_for(handle)) is not None
+        and any(phrase not in note for phrase in DIRECTION_DISCLOSURE)
+    }
+
+    assert len(FACTOR_DEFINITIONS.qualified_keys) == 19
+    assert missing == {}, "a shipped factor's note no longer discloses its declared direction"

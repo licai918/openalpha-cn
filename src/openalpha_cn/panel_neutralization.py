@@ -655,11 +655,21 @@ def _level_regressor(market_cap: float) -> float:
 def _log_regressor(market_cap: float) -> float:
     """The natural log of the capitalisation.
 
-    Total by construction, with no guard for a non-positive argument, and that absence is a claim
-    rather than an omission: `build_industry_market_cap_cross_section` refuses a capitalisation
-    that is not finite and strictly positive, so `math.log` here has no domain error to have. A
-    second check would be one whose failure branch nothing can reach, which is the shape a test
-    can only cover by constructing the contract's own refusal out of reach of the contract.
+    No guard for a non-positive argument, and the reason is now the true one rather than the one
+    this docstring used to give. It used to say that `build_industry_market_cap_cross_section`
+    refuses a capitalisation that is not finite and strictly positive, so `math.log` here has no
+    domain error to have, and that a second check would be a branch nothing can reach. The builder
+    does refuse one -- but it is not the only door. `SecurityCharacteristic` and
+    `IndustryMarketCapCrossSection` both say in their own docstrings that they validate nothing, so
+    a hand-assembled cross section reaches this function past the builder, and `math.log(0.0)`
+    raised `ValueError("math domain error")` from inside a list comprehension in
+    `apply_factor_neutralization` -- a bare builtin out of a public boundary.
+
+    The guard is `_refuse_a_capitalisation_that_is_not_one`, and it is at the engine rather than
+    here because *this* function has no subject to name and no reason to fire under
+    `market_cap_scale="level"`, where the same row is the same fault. See that function, and
+    `tests/integration/panel/test_factor_neutralizations.py::
+    test_a_hand_built_capitalisation_of_zero_is_refused_by_name_under_both_scales`.
     """
     return math.log(market_cap)
 
@@ -1030,6 +1040,7 @@ def apply_factor_neutralization(
         )
     _refuse_a_processed_panel_that_does_not_own_its_observations(panel)
     _refuse_a_cross_section_that_is_not_this_panels(panel, spec, characteristics)
+    _refuse_a_capitalisation_that_is_not_one(characteristics)
     manifest = FactorNeutralizationManifest(
         neutralization_id=spec.neutralization_id,
         neutralization_key=spec.key,
@@ -1427,6 +1438,51 @@ def _refuse_a_cross_section_that_is_not_this_panels(
             f"collections ({len(covered)} securities). A name it never heard of is "
             "indistinguishable from one it has no industry for, so a cross section assembled for "
             "a different universe would be stored as a market that was partly unclassified"
+        )
+
+
+def _refuse_a_capitalisation_that_is_not_one(
+    characteristics: IndustryMarketCapCrossSection,
+) -> None:
+    """Refuse a cross section carrying a capitalisation a listed company cannot have.
+
+    **This is the check `_log_regressor` said could not be reached, and two of this module's own
+    sentences said it could.** `_log_regressor` argued that `build_industry_market_cap_cross_
+    section` refuses a non-positive capitalisation, so `math.log` has no domain error to have and a
+    guard beside it would be a branch nothing can enter. The builder does refuse one. But
+    `SecurityCharacteristic` is "a plain carrier with no validation of its own" and
+    `IndustryMarketCapCrossSection`'s constructor "is not a boundary and validates nothing", both
+    by their own docstrings, and `characteristic_digest` already carries a refusal written for
+    exactly this path -- a hand-assembled cross section reaching the arithmetic past the builder.
+    Two claims about one path, and the measurement settled it: `SecurityCharacteristic(...,
+    market_cap=0.0)` constructs, and `_log_regressor(0.0)` raised a bare `ValueError("math domain
+    error")` out of a list comprehension in `apply_factor_neutralization`, where no caller's
+    `except FactorEngineError` could see it.
+
+    **The rule is the builder's, restated where a value can arrive without it, and it is checked
+    for both scales rather than only for `log`.** A guard that fired only under
+    `market_cap_scale="log"` would make the reachability of a fault depend on a knob that is about
+    output *shape*, which is the arrangement `_standardize_rank`'s docstring rejects one plane
+    down; and `level` regressing on a zero or a negative capitalisation is not saved by being
+    defined -- it is the same fault wearing a number, and it moves a slope and a dispersion that
+    the manifest then stores as facts.
+
+    Named subjects rather than a count, `characteristic_digest`'s precedent and for its stated
+    reason: the reader is holding thousands of rows and needs the one. Truncated at five, the
+    length rule the missing-participant refusal above already uses.
+    """
+    offending = sorted(
+        item.subject
+        for item in characteristics.characteristics
+        if not math.isfinite(item.market_cap) or item.market_cap <= 0.0
+    )
+    if offending:
+        raise FactorEngineError(
+            f"{offending[:5]}{'...' if len(offending) > 5 else ''} carry a market capitalisation "
+            "that is not finite and strictly positive; build_industry_market_cap_cross_section "
+            "refuses such a row, so this cross section was assembled around it, and the log scale "
+            "has no value at zero or below while the level scale would regress on a number that "
+            "is not a capitalisation"
         )
 
 

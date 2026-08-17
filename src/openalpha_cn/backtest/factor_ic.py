@@ -742,12 +742,49 @@ def average_ranks(values: Sequence[float]) -> tuple[float, ...]:
     return tuple(ranks)
 
 
+def _centred_unit(values: Sequence[float]) -> list[float]:
+    """The deviations from the mean, divided by the largest of them: a vector bounded by one.
+
+    **Two scalings, and the first one is why this is a function rather than four lines inline.**
+    The second -- dividing the deviations by their own largest -- is the one `_pearson`'s docstring
+    has always described. The first divides the *raw* values before the mean is taken, and it
+    exists because `statistics.fmean` is `math.fsum` underneath and `math.fsum` **raises**
+    `OverflowError("intermediate overflow in fsum")` on a sum it cannot represent rather than
+    returning `inf`. So `_pearson`'s "the result is finite for every finite input" was false on
+    exactly the input its own docstring names as the reason for the guard: five finite scores of
+    which two are `1.7e308` never reached the scaling, because the mean came first.
+
+    **The first scaling is by a power of two, and that is load-bearing rather than tidy.**
+    `math.frexp` reads the exponent and `math.ldexp` applies its negation, so every reduced value
+    is an exact rescaling of its original -- no bit is lost, the exactly-rounded `fsum` scales with
+    it, and the deviations come out exactly `2**-e` times the deviations the unscaled code
+    computed. Dividing by the largest *magnitude* instead would round, and would round worst on the
+    cross section this repository actually has: values that are large and close together, where
+    `_standardize_zscore`'s docstring records the naive form losing the whole signal. Measured over
+    4,000 random cross sections of 2 to 40 names spanning 1e-8 to 1e8, this returns the
+    bit-identical `float` the pre-scaling code returned on every one of them, and a finite
+    correlation on the vectors where that code raised.
+
+    `or 1.0` for the all-zero vector, so that a degenerate side still reaches the zero-dispersion
+    division `_pearson` documents as the caller's to have ruled out, rather than a new
+    `ZeroDivisionError` one line earlier that says something different about the same cross
+    section.
+    """
+    _, exponent = math.frexp(max(abs(value) for value in values) or 1.0)
+    reduced = [math.ldexp(value, -exponent) for value in values]
+    mean = statistics.fmean(reduced)
+    deviations = [value - mean for value in reduced]
+    scale = max(abs(value) for value in deviations)
+    return [value / scale for value in deviations]
+
+
 def _pearson(xs: Sequence[float], ys: Sequence[float]) -> float:
     """The product-moment correlation of two non-degenerate vectors, clamped to `[-1, 1]`.
 
-    Both deviation vectors are divided by their own largest absolute deviation before the sums of
-    squares are taken. The scaling cancels exactly out of a correlation and makes the sums `O(n)`
-    numbers of order one, so the result is finite for every finite input.
+    Both vectors are reduced to bounded deviations by `_centred_unit` before the sums of squares
+    are taken. The scaling cancels exactly out of a correlation and makes the sums `O(n)` numbers
+    of order one, so the result is finite for every finite input -- and since `V2-P3` that
+    sentence is true of the **mean** as well as of the sums, which is the half it was missing.
 
     **The failure it prevents is measured, and it is a wrong number rather than an error.**
     Unscaled, `sum(d * d)` reaches `inf` once a deviation passes `sqrt(float_info.max / n)`, which
@@ -765,20 +802,26 @@ def _pearson(xs: Sequence[float], ys: Sequence[float]) -> float:
     contract even though no provider has served one. `_standardize_zscore` made the same call for
     the same reason one plane down.
 
+    **And the two of them then made the same mistake for the same reason.** Both scaled the sums
+    of squares and left the mean unscaled, and `math.fsum` raises rather than saturating -- so on
+    `[1.7e308, 1.7e308, 1.0, 2.0, 3.0]` this function raised `OverflowError` out of
+    `statistics.fmean`, three lines before the guard that was written for it. The two planes then
+    part company, because their declared answers are not the same one: a z-score of an
+    unrepresentable cross section is a `degenerate_cross_section`, since the location and scale it
+    would divide by do not exist. A *correlation* is scale-invariant, so this cross section has an
+    ordinary answer and reporting it as degenerate would be a second wrong number in place of the
+    first. `FactorICStudy.measure`'s "never raises for a property of the market" is therefore met
+    by computing it -- see `tests/unit/backtest/test_factor_ic.py::
+    test_pearson_returns_the_correlation_of_a_cross_section_too_wide_to_add_up`.
+
     Clamped because rounding can put the last bit outside the range -- `1.0000000000000002` for
     two vectors that are exact affine images of each other -- and an IC of more than one is a
     number no reader can interpret and no bounded field can store. The caller has already ruled
     out a zero denominator on either side; this function is not the place that decides
     degeneracy, because "which side collapsed" is a coverage code and not an arithmetic result.
     """
-    mean_x = statistics.fmean(xs)
-    mean_y = statistics.fmean(ys)
-    dx = [value - mean_x for value in xs]
-    dy = [value - mean_y for value in ys]
-    scale_x = max(abs(value) for value in dx)
-    scale_y = max(abs(value) for value in dy)
-    ux = [value / scale_x for value in dx]
-    uy = [value / scale_y for value in dy]
+    ux = _centred_unit(xs)
+    uy = _centred_unit(ys)
     covariance = sum(a * b for a, b in zip(ux, uy, strict=True))
     dispersion = math.sqrt(sum(a * a for a in ux)) * math.sqrt(sum(b * b for b in uy))
     return max(-1.0, min(1.0, covariance / dispersion))
@@ -913,6 +956,15 @@ class ICCrossSection:
     The window facts travel with the pairs rather than beside them because they are what makes
     the number interpretable: an IC of 0.04 at 5 sessions and one at 60 are not comparable, and
     `horizon` is the axis `ICDecayCurve` lays them out on.
+
+    **It carries no factor identity, and that is a stated gap rather than an omission by design.**
+    `ic_cross_section` receives `(subject, value, coverage)` triples -- the three columns all three
+    observation contracts share -- so the `factor_id` those contracts carry is dropped at the
+    projection, and `FactorICStudy.measure` then stamps `spec.factor_id` onto the `ICPoint` with
+    nothing between the two saying the values came from that factor. The half that could be closed
+    without a field here is closed at the three wrappers, which still see the typed rows: see
+    `_refuse_observations_of_two_factors` for what each of them refuses and for why the other half
+    is left open.
     """
 
     as_of: datetime
@@ -1257,11 +1309,22 @@ def _refuse_labels_over_more_than_one_window(labels: Mapping[str, OutcomeLabel])
     labelled over five sessions and half over sixty is not a weak IC either -- the two halves are
     measuring different quantities and the correlation between them has no reading.
 
-    Compared on `(prediction_day, entry_day, exit_day, horizon)` rather than on the whole
-    `LabelWindow`, because `sessions` is derived from the three dates and the calendar, and
-    `zone` is a `tzinfo` whose equality is by identity for some implementations -- two labels
-    built with two `ZoneInfo("Asia/Shanghai")` instances are one window in every sense this rule
-    cares about.
+    Compared on `(prediction_day, entry_day, exit_day, horizon, zone)` rather than on the whole
+    `LabelWindow`, because `sessions` is derived from the three dates and the calendar and adds
+    nothing the three dates do not already say.
+
+    **`zone` is compared as its name, and it was left out of this key for four releases.** The
+    reasoning was that `zone` is a `tzinfo` whose equality is by identity for some implementations,
+    so two labels built with two `ZoneInfo("Asia/Shanghai")` instances would read as two windows.
+    That is a real hazard and `str(...)` is the answer to it -- not omission, because the zone is
+    not inert here: `_refuse_a_window_that_is_not_forward_of` dates the `as_of` **in the window's
+    own zone** to decide whether the label prices a move that had already happened. With the zone
+    out of the key, a cross section holding one Shanghai-dated label and one UTC-dated one was
+    *accepted*, and which of the two governed that look-ahead check was decided by whichever
+    happened to come first out of the mapping. A safety verdict settled by insertion order is the
+    shape this repository refuses on sight, and it is why the window is now unpacked rather than
+    indexed: there is no "first" to depend on. See `tests/unit/backtest/test_factor_ic.py::
+    test_labels_dated_in_two_zones_are_two_windows_rather_than_whichever_came_first`.
     """
     windows = [label.window for label in labels.values()]
     if not windows:
@@ -1269,27 +1332,30 @@ def _refuse_labels_over_more_than_one_window(labels: Mapping[str, OutcomeLabel])
             "no labels were offered, so there is no window to correlate against; an IC over an "
             "empty label set would be an insufficient_sample verdict about a question nobody asked"
         )
-    keys = {
+    by_key = {
         (
             window.prediction_day,
             window.entry_day,
             window.exit_day,
             window.horizon.text,
-        )
+            str(window.zone),
+        ): window
         for window in windows
     }
-    if len(keys) != 1:
+    if len(by_key) != 1:
         rendered = sorted(
-            f"{prediction.isoformat()}->{entry.isoformat()}..{exit_day.isoformat()} ({text})"
-            for prediction, entry, exit_day, text in keys
+            f"{prediction.isoformat()}->{entry.isoformat()}..{exit_day.isoformat()} "
+            f"({text} in {zone})"
+            for prediction, entry, exit_day, text, zone in by_key
         )
         raise FactorICError(
-            f"the labels offered at one as_of span {len(keys)} different windows ({rendered}); a "
+            f"the labels offered at one as_of span {len(by_key)} different windows ({rendered}); a "
             "cross-sectional correlation compares one quantity across securities, and half a "
             "cross section measured over five sessions against half measured over sixty is two "
-            "quantities"
+            "quantities -- and two zones are two answers to which session an as_of falls in"
         )
-    return windows[0]
+    (window,) = by_key.values()
+    return window
 
 
 def ic_cross_section(
@@ -1392,6 +1458,43 @@ def ic_cross_section(
     )
 
 
+def _refuse_observations_of_two_factors(identities: Iterable[str], *, tier: FactorTier) -> None:
+    """Refuse a cross section assembled out of two factors' rows.
+
+    Takes the identities rather than the rows, because the three contracts spell the same fact
+    under two names -- `FactorObservation.factor_id` and the other two's `source_factor_id` -- and
+    a `Protocol` over one of them would silently cover one tier of the three. Each wrapper names
+    its own field, which is a line a reader can check against that tier's contract.
+
+    **What this closes, and what it deliberately leaves open.** `ic_cross_section` takes
+    `(subject, value, coverage)` triples and `ICCrossSection` therefore carries no factor identity
+    at all, while `FactorICStudy.measure` stamps `self._spec.factor_id` onto every `ICPoint` it
+    returns. Nothing between the two checks that the values came from that factor: a section built
+    for A and measured by a study for B produces a point labelled B carrying A's numbers, and the
+    only structural defence is one plane up, in `FactorExperimentArtifact`, which merely checks the
+    three tier *rows* agree with each other.
+
+    The projection is where the identity is lost and these three wrappers are the last place that
+    still has it, so this is the half that can be closed without giving `ICCrossSection` a field:
+    the rows offered under one wrapper must at least name one factor. The residual -- that the
+    *study's* identity is still an assertion rather than a check -- is not closed here, because
+    closing it means a field on the cross section, which is a contract change, and because no path
+    in `src/` reaches either half: `factor_view._tier_report` builds the section and the study from
+    one request. Both are hand-assembled-caller territory, and this is the cheaper of the two.
+
+    An empty sequence names no factor and is not this function's refusal to make: `ic_cross_
+    section` and `FactorICStudy.measure` already have answers for a cross section with no rows.
+    """
+    named = sorted(set(identities))
+    if len(named) > 1:
+        raise FactorICError(
+            f"the {tier} observations offered at one as_of were computed by {named}; an IC "
+            "is one factor's ordering against one set of forward returns, and a cross section "
+            "assembled out of two factors' rows would be measured under whichever factor_id the "
+            "study happened to declare"
+        )
+
+
 def raw_cross_section(
     *,
     as_of: datetime,
@@ -1404,7 +1507,11 @@ def raw_cross_section(
     tiers all normalise `as_of` through `ensure_aware` in their own `__post_init__` -- a stored
     instant read back out of DuckDB arrives tagged with the session's timezone rather than UTC --
     so this comparison is between two normalised instants and not between two labels for one.
+
+    Refuses rows computed by two different factors for `_refuse_observations_of_two_factors`'
+    reason, which is where the identity this projection drops is last visible.
     """
+    _refuse_observations_of_two_factors((item.factor_id for item in observations), tier="raw")
     return ic_cross_section(
         as_of=as_of,
         tier="raw",
@@ -1427,7 +1534,12 @@ def processed_cross_section(
 
     `imputed` rows carry a number and are **not** admitted; they are counted under their own code
     in the census. See this module's docstring for why that is a rule rather than a knob.
+
+    Refuses rows computed by two different factors; see `_refuse_observations_of_two_factors`.
     """
+    _refuse_observations_of_two_factors(
+        (item.source_factor_id for item in observations), tier="processed"
+    )
     return ic_cross_section(
         as_of=as_of,
         tier="processed",
@@ -1451,7 +1563,12 @@ def neutralized_cross_section(
     Read `KNOWN_IC_LIMITATIONS`' `neutralised_residuals_are_read_at_a_year_end_snapshot` before
     reading a series built from these: the residuals' content is clean and their timestamps are
     not, so a neutralised IC series is not a point-in-time series the way the other two are.
+
+    Refuses rows computed by two different factors; see `_refuse_observations_of_two_factors`.
     """
+    _refuse_observations_of_two_factors(
+        (item.source_factor_id for item in observations), tier="neutralized"
+    )
     return ic_cross_section(
         as_of=as_of,
         tier="neutralized",
