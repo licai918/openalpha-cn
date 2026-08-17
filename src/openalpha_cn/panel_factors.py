@@ -451,10 +451,13 @@ per `(security, as_of)` rather than a series to take a deviation of -- and it al
 coverage year. A factor that depended on it would inherit that blocker; these four read raw panel
 columns and inherit nothing.
 
-## The value family (`V2-P3-009`), and the first factors on two axes at once
+## The value family (`V2-P3-009` and `V2-P3-017`), and the first factors on two axes at once
 
-Three definitions ship for it -- `earnings_yield_ttm`, `book_to_price` and `sales_yield_ttm` --
-and five judgements are shared by all of them and stated here rather than three times over.
+Four definitions ship for it -- `earnings_yield_ttm`, `book_to_price`, `sales_yield_ttm` and
+`deducted_earnings_yield_ttm` -- and five judgements are shared by all of them and stated here
+rather than four times over. The first three arrived with `V2-P3-009`; the fourth is EPcut and
+could not arrive with them, because its numerator was in none of the four stored projections.
+`V2-P3-017` put it there and `DEDUCTED_NET_PROFIT_COLUMN` carries what that took.
 
 **A value factor is a filing over a price, so it is on both axes, and the engine already
 supported that before any shipped factor used it.** `FactorDefinition` requires each reach to be
@@ -541,10 +544,20 @@ test separates the two behaviours and the whole tree stayed green through the ch
 exactly why it is recorded here rather than only in `_numeric`'s docstring. A fail-closed
 tightening that no suite can see is the kind that has to be written down.
 
-**One thing this family does not deliver and says so.** EPcut is not shipped, because no stored
-statement projection carries a deducted-profit column -- see `EARNINGS_YIELD_TTM`, which occupies
-the slot on `RETURN_VOL_60`'s terms, and `V2-P3-017` for what widening the projection actually
-costs.
+**The one thing `V2-P3-009` did not deliver was EPcut, and `V2-P3-017` delivered it by widening
+a projection rather than by finding a column.** For two issues `earnings_yield_ttm` occupied that
+slot on `RETURN_VOL_60`'s terms -- EP is what EPcut reduces to when the non-recurring term cannot
+be subtracted -- because none of the four stored projections carried a deducted-profit column,
+which was a boundary of the *projection* and not of the upstream. `fina_indicator` serves
+`profit_dedt` itself; `income` serves nothing of the family at all and drops the name silently
+when asked, so there was one place to put it and `V2-P3-017` put it there. What that cost, in
+order: a twelfth column on `fina_indicator`'s projection, every stored partition of that dataset
+re-read as `field_missing` until it is re-fetched, the contract test pinned to the field list,
+and this factor's own ambiguity -- 1.075% and 0.769% of filings on two disjoint samples against
+EP's measured 0.189% and 0.459%, because the number is published on the one endpoint with no
+version column. `DEDUCTED_NET_PROFIT_COLUMN` carries the measurements and
+`domain/financial_statements.py` carries why the eleven columns already there were not re-priced
+by it.
 
 **The second thing it did not deliver was a build over a real whole-market partition, and
 `V2-P3-018` delivered it.** `_read_dataset` collapses the duplicate rows that agree, which is
@@ -595,8 +608,8 @@ positive one, so the ordering the whole cross section is built on inverts for ex
 the worst condition. `_capital_denominator` is the one guard and `_market_capitalisation` is its
 precedent on the other axis.
 
-**Nothing here reads `fina_indicator`, and ROE is where that decision was made.** The full
-argument is `RETURN_ON_EQUITY_TTM`'s; the decisive half is that a published ROE is a
+**No factor of *this* family reads `fina_indicator`, and ROE is where that decision was made.**
+The full argument is `RETURN_ON_EQUITY_TTM`'s; the decisive half is that a published ROE is a
 *cumulative-period* return and no arithmetic converts it to a trailing one, because the
 cumulative-to-TTM identity is an identity about **sums** and a ratio is not a sum. Measured on the
 served rows rather than argued: `600519.SH`'s `roe` reads 10.5688 at 2024Q1, 19.2038 at H1, 26.833
@@ -605,8 +618,18 @@ number. And the formula behind it cannot be checked from inside this projection:
 closing-equity computation `n_income_attr_p / total_hldr_eqy_exc_min_int`, the published annual
 `roe` differs by 2.0%-9.5% over `600519.SH`'s eight most recent annuals, 2.3%-11.7% over
 `000001.SZ`'s and 1.4%-**36.7%** over `000002.SZ`'s, whose 2025 annual is a published `-55.4220`
-against a computed `-75.7507`. `fina_indicator` carries neither a profit column nor an equity
-column, so a reader holding only that endpoint has nothing to reconcile against.
+against a computed `-75.7507`. `fina_indicator` carries **no equity column at all**, so a reader
+holding only that endpoint has nothing to reconcile a return against.
+
+`V2-P3-017` moved half of that last sentence and left the argument standing, which is worth
+stating rather than quietly patching. That endpoint's projection now carries one profit column --
+`profit_dedt`, in yuan -- so "neither a profit column nor an equity column" is no longer true of
+it, and `deducted_earnings_yield_ttm` reads it. What the new column does **not** give ROE is a
+reconciliation: it is the *deducted* profit and the published `roe` is not computed from it, and
+there is still no equity to divide by. The distinction the ROE argument turns on is untouched in
+the other direction too -- `profit_dedt` is a cumulative **sum** and the identity applies to it,
+where `roe` is a rate and it does not; see `DEDUCTED_NET_PROFIT_COLUMN`, which measures both
+curves on the same security.
 
 **Two of the four are blind to financial issuers, by construction and measured.** A bank, insurer
 or broker publishes no cost of sales and no current / non-current balance-sheet split, so
@@ -837,6 +860,7 @@ from openalpha_cn.domain.factor_transform import (
 from openalpha_cn.domain.financial_statements import (
     BALANCE_SHEET_DATASET,
     CASH_FLOW_DATASET,
+    FINANCIAL_INDICATOR_DATASET,
     INCOME_DATASET,
     REPORT_PERIOD_COLUMN,
 )
@@ -2401,10 +2425,14 @@ _VALUE_DIRECTION_PROSE: Final[str] = (
     "records that most first-batch factors being insignificant is the expected result rather "
     "than a failure."
 )
-"""The direction sentence the three value notes share, held to `REVERSAL_1D_NOTE`'s standard.
+"""The direction sentence the four value notes share, held to `REVERSAL_1D_NOTE`'s standard.
 
-Written once because it is one claim about three factors and a copy is a thing that drifts;
-`_MOMENTUM_DIRECTION_PROSE` is the precedent and the reason is the same.
+Written once because it is one claim about four factors and a copy is a thing that drifts;
+`_MOMENTUM_DIRECTION_PROSE` is the precedent and the reason is the same. `V2-P3-017`'s EPcut
+concatenates it unchanged, which is the point of writing it once -- and
+`tests/unit/test_factor_engine_rules.py::
+test_every_shipped_factor_discloses_the_direction_it_declares_and_that_it_is_unmeasured` is the
+registry-wide loop that would have caught a twentieth factor shipped without it.
 """
 
 _VALUE_DENOMINATOR_PROSE: Final[str] = (
@@ -2422,7 +2450,7 @@ _VALUE_DENOMINATOR_PROSE: Final[str] = (
     "it is outside DAILY_PRICE_COLUMNS, so nothing requires it to be positive and a stored zero "
     "reads back."
 )
-"""The denominator sentence all three notes share. One claim about three factors; see
+"""The denominator sentence all four notes share. One claim about four factors; see
 `_VALUE_DIRECTION_PROSE`."""
 
 
@@ -2447,30 +2475,30 @@ filing at all. The reaches are `1 / 1` sessions and `5 / 5` periods, which is th
 contract's own docstring was written against -- see `TRAILING_TWELVE_MONTH_PERIODS` for why five
 and `MARKET_CAP_SESSIONS` for why one.
 
-**It occupies EPcut's slot as well as its own, and that is a disclosure rather than a rename.**
+**It occupied EPcut's slot for two issues and no longer does, and the handover is the disclosure.**
 扣非后盈利收益率 is this factor with the non-recurring gains and losses removed from its numerator,
-and no column of any of the four stored statement projections carries that number or anything it
-could be derived from: `income`'s ten are the two revenue lines, cost, operating and pre-tax
-profit, tax, net profit at both levels, published EPS and `ebit`, and `fina_indicator`'s eleven
-are ratios and per-share figures. The endpoint does serve the family, and `V2-P3-009`'s review
-measured that directly rather than by inference: `fina_indicator` **returns `profit_dedt`
-itself** -- the deducted net profit, not only the `dt_netprofit_yoy` growth rate
-`domain/financial_statements.py`'s all-fields probe had already recorded among the 97 fields the
-projection does not fetch. So this is a projection boundary and not an upstream absence, and the
-column EPcut needs is one `response_fields` entry away.
+and until `V2-P3-017` no column of any of the four stored statement projections carried that
+number or anything it could be derived from: `income`'s ten are the two revenue lines, cost,
+operating and pre-tax profit, tax, net profit at both levels, published EPS and `ebit`, and
+`fina_indicator`'s were eleven ratios and per-share figures. That was a boundary of the
+*projection* rather than of the upstream, which `V2-P3-009`'s review measured directly rather
+than inferring: `fina_indicator` **returns `profit_dedt` itself**. `V2-P3-017` added it as that
+projection's twelfth column and `DEDUCTED_EARNINGS_YIELD_TTM` is the factor that reads it, so
+this factor is no longer a stand-in for anything.
 
-**What that widening costs was measured too, and it is not what this docstring first said.** The
-same review added `profit_dedt` to `fina_indicator`'s projection and read one batch of served
-rows twice, 101 securities and 4,423 filings: the collapsed-row count, the ambiguous-filing count
-and every existing column's refusal count came back **identical**, and the 41 new refusals were
-all `profit_dedt`'s own. So the price is the schema migration and the contract tests pinned to
-the field list, not a re-pricing of the datasets already recorded -- see `V2-P3-017`, which is
-where that widening lives and is not this issue's to make. EP is therefore what EPcut reduces to
-when the non-recurring part cannot be subtracted, exactly as `RETURN_VOL_60` is what a residual
-volatility reduces to when the market return cannot be, and
+**What stays true is the reduction, and it is why both ship.** EP is what EPcut reduces to when
+the non-recurring part cannot be subtracted, exactly as `RETURN_VOL_60` is what a residual
+volatility reduces to when the market return cannot be -- and here the "cannot" is now a
+measured frequency rather than a permanent condition: `profit_dedt` lives on the endpoint with
+no `update_flag`, no `f_ann_date` and no `report_type`, where its versions disagree on 1.075%
+and 0.769% of filings over two disjoint 101-security samples against this column's own 0.189%
+and 0.459%. So the security EPcut codes `ambiguous_filing` is the security this factor still
+scores, several times as often as the reverse.
 `tests/unit/test_factor_value_family.py::
-test_no_stored_statement_projection_carries_a_deducted_profit_column` goes red the day a stored
-projection gains one.
+test_ep_is_what_epcut_reduces_to_and_the_two_are_not_the_same_number` holds the pair together,
+and `tests/integration/panel/test_value_family.py::
+test_a_contradiction_in_the_deducted_profit_codes_epcut_and_leaves_ep_computed`
+drives the asymmetry on one build.
 """
 
 EARNINGS_YIELD_TTM_NOTE: Final[FactorNote] = FactorNote(
@@ -2488,17 +2516,18 @@ EARNINGS_YIELD_TTM_NOTE: Final[FactorNote] = FactorNote(
         "period, a factor of 3.2. A negative trailing profit is computed and negative rather than "
         "undefined_value, which is the whole reason this is a yield and not a multiple: E/P is "
         "monotone through zero and P/E is not, which is why daily_basic.pe_ttm is simply null for "
-        "a loss-maker on 1,214 of 5,338 rows and why this factor does not invert it. It occupies "
-        "V2-P3-009's EPcut slot and is NOT EPcut: the deducted-profit number is in none of the "
-        "four stored statement projections, while the endpoint serves profit_dedt itself, so this "
-        "is a projection boundary and not an upstream absence. Widening the projection is a "
-        "V2-P1-011 contract change that moves every stored partition's schema and the contract "
-        "tests pinned to the field list -- and NOT, as measured on 101 securities and 4,423 "
-        "filings by adding profit_dedt and reading one batch of rows twice, a re-pricing of the "
-        "collapse: the folded rows, the ambiguous filings and every existing column's refusals "
-        "came back identical, and the 41 new refusals were profit_dedt's own. The cost of the "
-        "five-period reach is stated: a security with fewer than five contiguous filings is "
-        "insufficient_history here "
+        "a loss-maker on 1,214 of 5,338 rows and why this factor does not invert it. This is NOT "
+        "EPcut and it held EPcut's slot until V2-P3-017: the deducted-profit number was in none "
+        "of the four stored statement projections while fina_indicator served profit_dedt itself, "
+        "so that was a projection boundary and not an upstream absence, and V2-P3-017 added the "
+        "column and shipped deducted_earnings_yield_ttm on it. EP is what EPcut reduces to when "
+        "the non-recurring term cannot be subtracted, and how often that is has been measured "
+        "rather than assumed: profit_dedt is published only on the endpoint with no update_flag, "
+        "no f_ann_date and no report_type, where its versions disagree on 1.075% and 0.769% of "
+        "filings over two disjoint 101-security samples against 0.189% and 0.459% for this "
+        "factor's own column. So both ship, and the security EPcut cannot answer for is usually "
+        "one this factor can. The cost of the five-period reach is stated: a security with fewer "
+        "than five contiguous filings is insufficient_history here "
         "and computed for book_to_price." + _VALUE_DENOMINATOR_PROSE + _VALUE_DIRECTION_PROSE
     ),
 )
@@ -2637,6 +2666,154 @@ def _sales_yield_ttm(window: FactorWindow) -> float | None:
     """`SALES_YIELD_TTM`: trailing total revenue over capitalisation, both in yuan."""
     return _yield_on_market_capitalisation(
         window, dataset=INCOME_DATASET, column=TOTAL_REVENUE_COLUMN
+    )
+
+
+# --- `V2-P3-017`: the value family's fourth member, and the first read of `fina_indicator` -----
+#
+# See this module's docstring section "The value family" for the judgements this factor shares
+# with the three above it, and `DEDUCTED_NET_PROFIT_COLUMN` for the two that are its own.
+
+
+DEDUCTED_NET_PROFIT_COLUMN: Final[str] = "profit_dedt"
+"""EPcut's numerator: 扣除非经常性损益后的净利润, cumulative, in yuan, on `fina_indicator`.
+
+**Which endpoint is not a choice.** `income` does not serve this number, and `V2-P3-017`
+measured that on all four statement endpoints on 2026-08-17 rather than inferring it: asked for
+every field they have, `income` answers with 85 names, `balancesheet` 152, `cashflow` 97 and
+`fina_indicator` 108, and the deducted family appears in exactly one of those four lists. Naming
+it in `income`'s projection would not widen that read -- the endpoint answers a request for it
+with the columns it does serve and drops the name silently, so
+`providers/tushare.py::_response_rows` would refuse **every** `income` fetch by
+`checked_response_fields`. See `domain/financial_statements.FINANCIAL_INDICATOR_DATA_COLUMNS`.
+
+**The attributable level, and that is measured rather than read off a field name.** The question
+is the one `NET_PROFIT_COLUMN` answers for EP -- deducted profit *attributable to the parent's
+owners*, or deducted profit for the whole consolidated entity -- and the two are far apart on
+exactly the security this repository already uses to separate them. `600739.SH`'s 2024 annual
+gives `n_income` 664,195,391.66 against `n_income_attr_p` 209,556,865.25, a factor of 3.169; the
+same filing's `profit_dedt` is **218,927,918.51**, which is 1.045x the attributable figure and
+0.330x the consolidated one. Over six securities chosen for large minority interests --
+`600739.SH`, `000002.SZ`, `601318.SH`, `000001.SZ`, `600519.SH`, `600030.SH`, four periods each
+-- `profit_dedt / n_income_attr_p` stays in `[0.917, 1.120]` while `profit_dedt / n_income`
+tracks one minus the minority share (0.330 to 1.067). So the pair `(profit_dedt, total_mv)`
+covers one claim on both sides, which is `NET_PROFIT_COLUMN`'s rule reaching the same answer on
+a different endpoint. `tests/unit/test_factor_value_family.py::
+test_the_deducted_profit_is_the_attributable_level_and_not_the_consolidated_one` is that
+measurement.
+
+**It is a cumulative sum and not a ratio, which is what lets the TTM identity touch it.**
+`RETURN_ON_EQUITY_TTM` refuses `fina_indicator.roe` because the cumulative-to-TTM identity is an
+identity about *sums* and a published ratio is not a sum. That argument does not reach this
+column: it is denominated in yuan and it accumulates within the calendar fiscal year exactly as
+`income`'s flows do. `600519.SH`'s 2018 filings are 8,510,778,903.45 at Q1, 15,884,168,512.98 at
+H1, 24,929,011,158.67 at Q3 and 35,585,443,648.60 at the annual -- one accumulation curve, and
+the differences 7.37bn / 9.04bn / 10.66bn are the individual quarters. That is the same shape
+`TRAILING_TWELVE_MONTH_PERIODS` states and the opposite of `roe`'s 10.5688 / 19.2038 / 26.833 /
+38.4283, which is a *rate* rising with the same accumulation and cannot be differenced.
+
+**Its own refusal rate is measured and is several times EP's.** On two disjoint 101-security
+samples taken by stride over the whole listed universe on 2026-08-17, the surviving versions of a
+filing disagree about this column **66 of 6,138 filings (1.075%)** and **46 of 5,980 (0.769%)**
+-- combined **112 of 12,118, 0.924%**. `income.n_income_attr_p`, EP's numerator, has been
+measured at 0.189% and at 0.459% on two earlier samples. Neither pair of numbers travels (the two
+here differ by 1.4x between themselves, which is this repository's own sentence about a rate being
+a property of its sample landing again), but the ordering is the same on every one of them and
+the reason is structural rather than statistical: `fina_indicator` carries no `update_flag`, no
+`f_ann_date` and no `report_type`, 81.7% of its keys carry more than one row, and nothing in the
+response orders them. EPcut is therefore genuinely harder to read than EP, and both ship so a
+caller can see the difference rather than be told about it; see
+`KNOWN_FINANCIAL_STATEMENT_LIMITATIONS
+.the_deducted_profit_is_only_on_the_endpoint_with_no_version_column`.
+"""
+
+
+DEDUCTED_EARNINGS_YIELD_TTM: Final[FactorDefinition] = FactorDefinition(
+    key="deducted_earnings_yield_ttm",
+    version=1,
+    family="value",
+    direction="higher_is_better",
+    required_fields=(
+        FactorField(dataset=FINANCIAL_INDICATOR_DATASET, column=DEDUCTED_NET_PROFIT_COLUMN),
+        FactorField(dataset=DAILY_BASIC_DATASET, column=MARKET_CAP_COLUMN),
+    ),
+    lookback_sessions=MARKET_CAP_SESSIONS,
+    max_window_sessions=MARKET_CAP_SESSIONS,
+    lookback_periods=TRAILING_TWELVE_MONTH_PERIODS,
+    max_window_periods=TRAILING_TWELVE_MONTH_PERIODS,
+)
+"""EPcut: trailing-twelve-month deducted net profit attributable to the parent, over market cap.
+
+`EARNINGS_YIELD_TTM` with one `(dataset, column)` changed, which is the whole of the difference
+and is why the two share `_yield_on_market_capitalisation` -- the same identity over the same
+five contiguous report periods, the same denominator, the same sign convention. The reaches are
+`1 / 1` sessions and `5 / 5` periods for `TRAILING_TWELVE_MONTH_PERIODS`' and
+`MARKET_CAP_SESSIONS`' reasons, restated for no other factor and not restated here either.
+
+**The first shipped factor that reads `fina_indicator`, and that is the cost rather than an
+incidental.** The other three value factors read `income` and `balancesheet`, which carry
+`update_flag` and `f_ann_date`; this one reads the endpoint that carries neither. What that buys
+is the only stored column from which a deducted-profit yield can be computed at all
+(`DEDUCTED_NET_PROFIT_COLUMN` measures both halves of that sentence); what it costs is the
+ambiguity rate of that endpoint, which is why this factor and `earnings_yield_ttm` both ship
+instead of one replacing the other. `EARNINGS_YIELD_TTM` is what this factor reduces to when the
+non-recurring term cannot be subtracted, and until `V2-P3-017` it was the *only* thing this
+repository could offer for the slot.
+
+**It is not `earnings_yield_ttm` renamed, and a fixture proves that rather than a docstring.**
+The two share a denominator and differ in one numerator, which is precisely the shape in which
+an assertion stops discriminating -- this repository's own recurring lesson. So the value
+family's partition carries a `profit_dedt` series that is neither `n_income_attr_p` nor a
+multiple of it in the way any neighbouring column is, and
+`tests/integration/panel/test_value_family.py::
+test_the_four_factors_compute_off_two_axes_and_give_four_different_numbers` asserts all four
+values pairwise distinct on one build.
+"""
+
+DEDUCTED_EARNINGS_YIELD_TTM_NOTE: Final[FactorNote] = FactorNote(
+    subject=DEDUCTED_EARNINGS_YIELD_TTM.qualified_key,
+    summary=(
+        "EPcut: the trailing twelve months of fina_indicator.profit_dedt -- net profit after "
+        "non-recurring gains and losses are deducted -- divided by market capitalisation, on "
+        "earnings_yield_ttm's terms throughout: the same cumulative-to-TTM identity over the "
+        "same five contiguous report periods, the same denominator, the same sign convention, "
+        "and max_window_periods equal to lookback_periods so that no filing is missing inside "
+        "the window. The column lives on fina_indicator because income does not serve it: "
+        "measured on 2026-08-17 by asking all four statement endpoints for every field they "
+        "have, the deducted family appears in exactly one of the four lists (85 / 152 / 97 / "
+        "108 names), and an income request that names profit_dedt comes back silently without "
+        "it. It is the ATTRIBUTABLE level "
+        "and that is measured rather than taken from the field name -- 600739.SH's 2024 annual "
+        "gives n_income 664,195,391.66 against n_income_attr_p 209,556,865.25, a factor of "
+        "3.169, and profit_dedt for the same filing is 218,927,918.51, which is 1.045x the "
+        "attributable figure and 0.330x the consolidated one; over six securities with large "
+        "minority interests the ratio to n_income_attr_p stays inside [0.917, 1.120]. So this "
+        "numerator and total_mv cover one claim, which is the pair earnings_yield_ttm chooses "
+        "n_income_attr_p for. The TTM identity applies because profit_dedt is a cumulative SUM "
+        "in yuan and not a published ratio -- 600519.SH's 2018 filings run 8,510,778,903.45 at "
+        "Q1, 15,884,168,512.98 at H1, 24,929,011,158.67 at Q3 and 35,585,443,648.60 at the "
+        "annual -- which is exactly the property return_on_equity_ttm found fina_indicator.roe "
+        "lacks. THE COST IS THE ENDPOINT: fina_indicator carries no update_flag, no f_ann_date "
+        "and no report_type, 81.7% of its keys carry more than one row, and this column's own "
+        "measured disagreement rate is 66 of 6,138 filings (1.075%) on one 101-security sample "
+        "and 46 of 5,980 (0.769%) on a disjoint one, against 0.189% and 0.459% measured for "
+        "income.n_income_attr_p. So EPcut is ambiguous_filing where EP is computed, more often, "
+        "and earnings_yield_ttm ships beside it rather than being replaced by it: EP is what "
+        "this factor reduces to when the non-recurring term cannot be subtracted. A negative "
+        "trailing deducted profit is computed and negative, not undefined_value, for "
+        "earnings_yield_ttm's monotonicity reason; a security with fewer than five contiguous "
+        "fina_indicator filings is insufficient_history here and computed for book_to_price."
+        + _VALUE_DENOMINATOR_PROSE
+        + _VALUE_DIRECTION_PROSE
+    ),
+)
+"""`DEDUCTED_EARNINGS_YIELD_TTM`'s prose, out of `factor_id`."""
+
+
+def _deducted_earnings_yield_ttm(window: FactorWindow) -> float | None:
+    """`DEDUCTED_EARNINGS_YIELD_TTM`: trailing deducted profit over capitalisation, in yuan."""
+    return _yield_on_market_capitalisation(
+        window, dataset=FINANCIAL_INDICATOR_DATASET, column=DEDUCTED_NET_PROFIT_COLUMN
     )
 
 
@@ -3846,6 +4023,7 @@ FACTOR_DEFINITIONS: Final[FactorRegistry] = FactorRegistry(
         EARNINGS_YIELD_TTM,
         BOOK_TO_PRICE,
         SALES_YIELD_TTM,
+        DEDUCTED_EARNINGS_YIELD_TTM,
         RETURN_ON_EQUITY_TTM,
         RETURN_ON_CAPITAL_TTM,
         GROSS_MARGIN_STABILITY,
@@ -3867,6 +4045,7 @@ FACTOR_DEFINITIONS: Final[FactorRegistry] = FactorRegistry(
         EARNINGS_YIELD_TTM_NOTE,
         BOOK_TO_PRICE_NOTE,
         SALES_YIELD_TTM_NOTE,
+        DEDUCTED_EARNINGS_YIELD_TTM_NOTE,
         RETURN_ON_EQUITY_TTM_NOTE,
         RETURN_ON_CAPITAL_TTM_NOTE,
         GROSS_MARGIN_STABILITY_NOTE,
@@ -3892,6 +4071,7 @@ FACTOR_EVALUATORS: Final[Mapping[str, FactorEvaluator]] = MappingProxyType(
         EARNINGS_YIELD_TTM.qualified_key: _earnings_yield_ttm,
         BOOK_TO_PRICE.qualified_key: _book_to_price,
         SALES_YIELD_TTM.qualified_key: _sales_yield_ttm,
+        DEDUCTED_EARNINGS_YIELD_TTM.qualified_key: _deducted_earnings_yield_ttm,
         RETURN_ON_EQUITY_TTM.qualified_key: _return_on_equity_ttm,
         RETURN_ON_CAPITAL_TTM.qualified_key: _return_on_capital_ttm,
         GROSS_MARGIN_STABILITY.qualified_key: _gross_margin_stability,

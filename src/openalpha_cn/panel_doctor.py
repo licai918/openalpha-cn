@@ -616,7 +616,7 @@ def is_derived_factor_dataset(dataset: str) -> bool:
     The predicate `DATASET_CADENCE` cannot be. That mapping is an enumeration, pinned by a test
     that asserts every dataset `panel_ingest` writes appears in it, and the factor planes' names
     are **minted per factor** -- `factor_obs_<key>_v<n>`, one pair per registered factor per tier,
-    nineteen factors today and unbounded by contract. There is no set of keys to write down.
+    twenty factors today and unbounded by contract. There is no set of keys to write down.
     """
     return any(
         dataset.startswith(seal.observation_prefix) or dataset.startswith(seal.manifest_prefix)

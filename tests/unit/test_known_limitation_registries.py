@@ -15,7 +15,7 @@ inside a docstring, which is prose the runner never reads.
 ## Why the mechanism is not copied as it stands
 
 `007`'s form is "one test per entry, named after the entry". At three entries that is exactly
-right. Across the nineteen code-carrying registries there are **187** entries -- 64 in
+right. Across the nineteen code-carrying registries there are **189** entries -- 65 in
 `KNOWN_PANEL_LIMITATIONS` alone -- and it stops being right somewhere well before that, for
 three reasons and not one:
 
@@ -26,7 +26,7 @@ three reasons and not one:
    about the sentence rather than about the code, and a test that asserts about a sentence is
    the drift this whole idea exists to stop wearing the badge of the fix.
 2. **`KNOWN_PANEL_LIMITATIONS` is derived.** `panel_doctor._limitations()` folds seven dataset
-   registries one-for-one and `KNOWN_STORAGE_LIMITATIONS` plane-wide, so 63 of its 64 codes are
+   registries one-for-one and `KNOWN_STORAGE_LIMITATIONS` plane-wide, so 64 of its 65 codes are
    already somebody else's. Requiring a test named after each would mean writing every one of
    those tests twice, in a module that has nothing to say about them.
 3. **A per-entry test is only as strong as its body.** `007`'s three have real bodies because
@@ -37,11 +37,12 @@ three reasons and not one:
 `test_the_registries_together_carry_the_entry_count_the_report_folds` holds a floor under both,
 and a floor is the direction that can falsify the claim: entries only ever arrive, and "one test
 per entry does not scale" stops being true if the registries shrink back towards `007`'s three.
-The figures above were measured at the P3 merge, and they had already drifted twice before it --
-`128 entries -- 59 in KNOWN_PANEL_LIMITATIONS` was still written here when the counts were 134
-and 62, because the P2 merge that folded in an eleventh registry updated the arithmetic below
-and left the prose alone. That is the drift this module exists to stop, arriving in this module,
-which is why the number is now executable rather than quoted.
+The figures above are re-measured whenever a registry grows -- `V2-P3-017` added a twelfth
+financial-statement limitation and moved them from 187 / 64 -- and they had already drifted twice
+before the floor existed: `128 entries -- 59 in KNOWN_PANEL_LIMITATIONS` was still written here
+when the counts were 134 and 62, because the P2 merge that folded in an eleventh registry updated
+the arithmetic below and left the prose alone. That is the drift this module exists to stop,
+arriving in this module, which is why the number is now executable rather than quoted.
 
 ## The binding that is installed instead
 
@@ -381,5 +382,5 @@ def test_the_registries_together_carry_the_entry_count_the_report_folds() -> Non
 
     assert len(codes["KNOWN_PANEL_LIMITATIONS"]) == folded + plane_wide + 1
     assert all(codes[registry] for registry in codes)
-    assert sum(len(entries) for entries in codes.values()) >= 187
-    assert len(codes["KNOWN_PANEL_LIMITATIONS"]) >= 64
+    assert sum(len(entries) for entries in codes.values()) >= 189
+    assert len(codes["KNOWN_PANEL_LIMITATIONS"]) >= 65

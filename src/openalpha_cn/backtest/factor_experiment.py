@@ -987,7 +987,7 @@ class FactorExperimentSpec(BaseModel):
 
     **No default, and this module refuses to choose one.** `RedundancySpec.redundancy_threshold`
     is the precedent and the argument is the sharper one here: a floor chosen after seeing the
-    nineteen shipped factors is a floor chosen to make them look separable, and this repository
+    shipped factors is a floor chosen to make them look separable, and this repository
     has taken a Critical finding on exactly that shape. What is bounded is the *declaration* --
     `gt=0` because a floor of zero calls every non-negative retention `survives` and would make
     the acceptance criterion's cell unreachable, `le=1` because 1.0 is attainable and is the

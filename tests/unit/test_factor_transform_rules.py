@@ -433,8 +433,23 @@ PRE_V2_P3_018_FACTOR_IDS: Final[dict[str, str]] = {
     "net_profit_yoy/v1": "fct_dcf172ec6d951c8ef0641455",
     "revenue_yoy_acceleration/v1": "fct_9fe32b090565be4ded03bb6d",
 }
-"""Every shipped `factor_id` as this build produced them at commit `04c45b8`, before the coverage
-vocabulary gained a sixth member. None of them may move for this reason."""
+"""The nineteen `factor_id`s this build produced at commit `04c45b8`, before the coverage
+vocabulary gained a sixth member. None of them may move for this reason, nor for `V2-P3-017`'s.
+
+Deliberately **not** extended when `V2-P3-017` shipped a twentieth factor: the point of these
+literals is that they were captured before the changes they are held against, and appending a
+value produced *after* one of them would put an unpinned digest into a table whose whole purpose
+is to be older than the code. The twentieth is pinned separately, below.
+"""
+
+DEDUCTED_EARNINGS_YIELD_FACTOR_ID: Final[str] = "fct_1bb4ab44a031477643cc6c85"
+"""`V2-P3-017`'s twentieth factor, as this build produces it.
+
+A literal for `PRE_V2_P3_018_FACTOR_IDS`' reason one step behind it: this one *is* new, so it
+cannot be older than the code, and what it pins instead is that the twentieth factor's address
+is stable from here on -- the next change that moves it fails here rather than silently
+re-identifying a stored `factor_obs_deducted_earnings_yield_ttm_v1` partition.
+"""
 
 
 def test_the_coverage_vocabulary_moves_transform_id_and_leaves_every_factor_id_where_it_was() -> (
@@ -451,7 +466,8 @@ def test_the_coverage_vocabulary_moves_transform_id_and_leaves_every_factor_id_w
       `experiment_id` that carries a transform spec with it. That is the contract working: a spec
       that can express what to do with a self-contradictory filing is not the spec that could not,
       and two builds sharing one address while treating such a security differently is exactly
-      what a content address exists to prevent.
+      what a content address exists to prevent. `V2-P3-017` leaves this half alone: it adds no
+      coverage code, so `transform_id` does not move again.
     - `FactorDefinition` names no coverage code in any field, so the vocabulary is *outside*
       `factor_id`. Nineteen shipped definitions, nineteen unchanged addresses -- which is what
       keeps every `factor_obs_*` partition readable and makes the migration a manifest-schema
@@ -461,12 +477,26 @@ def test_the_coverage_vocabulary_moves_transform_id_and_leaves_every_factor_id_w
     re-derivation cannot tell a reader whether an address moved -- it moves with the code. The
     field-set assertions beside them are what makes the literals *explicable* rather than magic:
     they say why one moved and the other did not.
+
+    **`V2-P3-017` added a twentieth factor and this test had to change shape rather than
+    numbers.** A registry-wide equality against a nineteen-entry table cannot survive a
+    twentieth definition, and relaxing it to a subset check would drop exactly the property it
+    exists for -- a subset assertion cannot see a *deleted* key. So it is split: the nineteen are
+    compared by equality against the pinned table restricted to them, and the difference between
+    the registry and that table is asserted to be exactly the one new handle. Both halves have to
+    hold, so a renamed nineteenth fails the first and a silently added twenty-first fails the
+    second. The nineteen digests themselves are untouched, which is the substantive claim: adding
+    a definition does not re-identify the ones already stored, because `factor_id` addresses one
+    definition and not the registry.
     """
     current = {
         key: FACTOR_DEFINITIONS.get(key).factor_id for key in FACTOR_DEFINITIONS.qualified_keys
     }
+    inherited = {key: current[key] for key in PRE_V2_P3_018_FACTOR_IDS if key in current}
 
-    assert current == PRE_V2_P3_018_FACTOR_IDS
+    assert inherited == PRE_V2_P3_018_FACTOR_IDS
+    assert set(current) - set(PRE_V2_P3_018_FACTOR_IDS) == {"deducted_earnings_yield_ttm/v1"}
+    assert current["deducted_earnings_yield_ttm/v1"] == DEDUCTED_EARNINGS_YIELD_FACTOR_ID
     assert CROSS_SECTION_STANDARD.transform_id != PRE_V2_P3_018_TRANSFORM_ID
     assert set(FactorDefinition.model_fields) & FACTOR_COVERAGE_CODES == set()
     assert set(MissingValuePolicy.model_fields) == FACTOR_COVERAGE_CODES - {"computed"}

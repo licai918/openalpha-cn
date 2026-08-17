@@ -793,28 +793,36 @@ def test_a_study_refuses_a_repeated_identity_code_and_a_second_reading_of_one_fa
 # --- the structural half: what `required_fields` can and cannot say ---------------------------
 
 
-def test_the_shared_input_table_over_the_nineteen_shipped_definitions() -> None:
-    """The whole 171-pair structure, computed off the live registry rather than tabulated.
+def test_the_shared_input_table_over_the_twenty_shipped_definitions() -> None:
+    """The whole 190-pair structure, computed off the live registry rather than tabulated.
 
     This is the table-versus-implementation drift `V2-P3-002`'s lesson names: a hand-written list
     of "which factors share which columns" would go stale the first time a factor's
     `required_fields` moved, with nothing able to say so. Every number here is derived from
-    `FACTOR_DEFINITIONS`, so the twentieth factor changes them and this test is where that shows.
+    `FACTOR_DEFINITIONS`, so a twenty-first factor changes them and this test is where that shows
+    -- which is exactly what happened when `V2-P3-017` shipped the twentieth: 171 pairs became
+    190 and every count below moved with it.
 
-    The two totals are asserted together on purpose: 42 pairs share a **column** and 72 share a
-    **dataset**, so a dataset-granularity reading would report 71% more overlap than there is and
+    The two totals are asserted together on purpose: 45 pairs share a **column** and 76 share a
+    **dataset**, so a dataset-granularity reading would report 69% more overlap than there is and
     would call the value family and the quality family related by construction.
+
+    `identical_inputs` did **not** move, and that is the interesting half of the twentieth
+    factor's arrival: EPcut shares `daily_basic.total_mv` with the other three value factors and
+    shares its numerator column with nobody, so it adds three `overlapping_inputs` pairs and no
+    identical one. A factor that had merely been a rename of `earnings_yield_ttm` would have
+    raised the first count instead.
     """
     definitions = list(FACTOR_DEFINITIONS.definitions)
     pairs = list(itertools.combinations(definitions, 2))
     codes = [shared_inputs(left, right).code for left, right in pairs]
     counted = {code: codes.count(code) for code in SHARED_INPUT_ORDER}
 
-    assert len(definitions) == 19 and len(pairs) == 171
+    assert len(definitions) == 20 and len(pairs) == 190
     assert counted["identical_inputs"] == 16
-    assert counted["identical_inputs"] + counted["overlapping_inputs"] == 42
-    assert 171 - counted["disjoint_inputs"] == 72
-    assert sum(counted.values()) == 171
+    assert counted["identical_inputs"] + counted["overlapping_inputs"] == 45
+    assert 190 - counted["disjoint_inputs"] == 76
+    assert sum(counted.values()) == 190
     assert all(count > 0 for count in counted.values())
 
 
@@ -888,9 +896,11 @@ def test_two_factors_that_share_no_column_can_still_be_redundant() -> None:
 def test_the_shared_columns_a_pair_reports_are_the_columns_and_not_the_datasets() -> None:
     """The actionable half: *which* column, so a reader knows it is the denominator.
 
-    The three value factors are the case that makes this worth carrying -- they overlap in
-    `daily_basic.total_mv` and in nothing else, and the finding "these three share their
-    denominator" is a different sentence from "these three both read `daily_basic`".
+    The four value factors are the case that makes this worth carrying -- they overlap in
+    `daily_basic.total_mv` and in nothing else, and the finding "these four share their
+    denominator" is a different sentence from "these four both read `daily_basic`". `V2-P3-017`'s
+    EPcut sharpened it rather than diluted it: it reads a *third* statement dataset, so the
+    family's only common column is still the one this assertion names.
     """
     subjects = _subjects(8)
     value = shared_inputs(EARNINGS_YIELD_TTM, BOOK_TO_PRICE)

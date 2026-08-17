@@ -1,6 +1,7 @@
-"""The value family's declarations and arithmetic, as functions of a window (`V2-P3-009`).
+"""The value family's declarations and arithmetic, as functions of a window (`V2-P3-009`,
+`V2-P3-017`).
 
-`tests/integration/panel/test_value_family.py` drives the same three factors through the real
+`tests/integration/panel/test_value_family.py` drives the same four factors through the real
 engine against real partitions. This file measures the five things a partition is the wrong
 instrument for:
 
@@ -28,10 +29,16 @@ instrument for:
   written here: every stored `income` row carries them equal, and three of the four securities
   those rows belong to are `comp_type=1` names in the 97.5% that agree while the fourth is a
   bank. The rows that separate the two columns are recorded as constants and asserted directly.
-- **The declarations themselves**, including the two the family is *asked* about and answers
-  negatively: that no stored statement projection carries a deducted-profit column, which is why
-  EPcut is not a fourth definition, and that none of the four columns the measured refusals are
-  concentrated in is read here.
+- **Real rows that decide a caliber and an identity.** `V2-P3-017`'s EPcut reads a column on an
+  endpoint that publishes one deducted-profit level and does not say which it is, and a fixture
+  cannot answer that either -- so the answer is held against `income`'s two levels on real
+  filings where they are 3.169x apart, and the cumulative-versus-ratio question is held against
+  five real contiguous filings of one security.
+- **The declarations themselves**, including the one the family is *asked* about: which stored
+  statement projections carry a deducted-profit column. Until `V2-P3-017` the answer was "none"
+  and EPcut was a disclosure; it is now "exactly one", asserted in the same falsifiable shape so
+  that both widening it further and reverting it fail. And that none of the four columns the
+  measured refusals are concentrated in is read here.
 """
 
 from __future__ import annotations
@@ -50,6 +57,7 @@ from openalpha_cn.domain.daily_prices import (
 from openalpha_cn.domain.factor import FactorField
 from openalpha_cn.domain.financial_statements import (
     BALANCE_SHEET_DATASET,
+    FINANCIAL_INDICATOR_DATASET,
     INCOME_DATASET,
     KNOWN_FINANCIAL_STATEMENT_LIMITATIONS,
     STATEMENT_DATA_COLUMNS,
@@ -58,6 +66,8 @@ from openalpha_cn.panel_factors import (
     BOOK_EQUITY_COLUMN,
     BOOK_TO_PRICE,
     CNY_PER_MARKET_CAP_UNIT,
+    DEDUCTED_EARNINGS_YIELD_TTM,
+    DEDUCTED_NET_PROFIT_COLUMN,
     EARNINGS_YIELD_TTM,
     FACTOR_DEFINITIONS,
     MARKET_CAP_COLUMN,
@@ -69,6 +79,7 @@ from openalpha_cn.panel_factors import (
     FactorEngineError,
     FactorWindow,
     _book_to_price,
+    _deducted_earnings_yield_ttm,
     _earnings_yield_ttm,
     _market_capitalisation,
     _numeric,
@@ -206,20 +217,29 @@ def _period_window(
 # --- the declarations ----------------------------------------------------------------------------
 
 
-def test_the_three_definitions_declare_the_reaches_and_the_axes_the_family_argues_for() -> None:
+def test_the_four_definitions_declare_the_reaches_and_the_axes_the_family_argues_for() -> None:
     """Each declared property, and the two that separate the family's members from each other.
 
     The flow factors declare five report periods because a trailing twelve months is three sums
     of cumulative figures and needs the window to be contiguous to find them; the stock factor
-    declares one because a balance-sheet line is already the answer at its own date. All three
+    declares one because a balance-sheet line is already the answer at its own date. All four
     declare one session, because the denominator of a value ratio is the price now.
 
     Asserted by value rather than read off the definitions, and each reach against its own
     constant, so a definition that lost its period axis -- which `FactorDefinition` would still
     accept, by dropping the statement column -- fails here rather than silently becoming a
     session-only factor.
+
+    `V2-P3-017`'s EPcut is the fourth and the only one whose period dataset is not `income` or
+    `balancesheet`: it is the family's -- and the registry's -- first read of `fina_indicator`,
+    which is asserted here rather than left to the constant's prose.
     """
-    for definition in (EARNINGS_YIELD_TTM, BOOK_TO_PRICE, SALES_YIELD_TTM):
+    for definition in (
+        EARNINGS_YIELD_TTM,
+        BOOK_TO_PRICE,
+        SALES_YIELD_TTM,
+        DEDUCTED_EARNINGS_YIELD_TTM,
+    ):
         assert definition.family == "value"
         assert definition.direction == "higher_is_better"
         assert definition.version == 1
@@ -244,14 +264,32 @@ def test_the_three_definitions_declare_the_reaches_and_the_axes_the_family_argue
     assert BOOK_TO_PRICE.lookback_periods == 1
     assert BOOK_TO_PRICE.max_window_periods == 1
 
+    assert DEDUCTED_EARNINGS_YIELD_TTM.period_datasets == (FINANCIAL_INDICATOR_DATASET,)
+    assert DEDUCTED_EARNINGS_YIELD_TTM.columns_of(FINANCIAL_INDICATOR_DATASET) == (
+        DEDUCTED_NET_PROFIT_COLUMN,
+    )
+    assert DEDUCTED_EARNINGS_YIELD_TTM.lookback_periods == TRAILING_TWELVE_MONTH_PERIODS
+    assert DEDUCTED_EARNINGS_YIELD_TTM.max_window_periods == TRAILING_TWELVE_MONTH_PERIODS
+    assert {
+        dataset
+        for definition in FACTOR_DEFINITIONS.definitions
+        for dataset in definition.period_datasets
+    } & {FINANCIAL_INDICATOR_DATASET} == {FINANCIAL_INDICATOR_DATASET}
+    assert [
+        definition.qualified_key
+        for definition in FACTOR_DEFINITIONS.definitions
+        if FINANCIAL_INDICATOR_DATASET in definition.datasets
+    ] == [DEDUCTED_EARNINGS_YIELD_TTM.qualified_key]
+
 
 def test_the_value_family_is_the_only_shipped_factor_on_both_axes_at_once() -> None:
     """The claim the family's own prose makes about the registry, held against the registry.
 
     Every factor shipped before `V2-P3-009` reads sessions and no filing, so the report-period
-    reach fields had no production reader at all. That is what makes these three the first real
+    reach fields had no production reader at all. That is what makes these four the first real
     users of the second axis, and it is a property of `FACTOR_DEFINITIONS` rather than of a
-    docstring -- so it is asserted there, in both directions.
+    docstring -- so it is asserted there, in both directions. The fourth arrived with
+    `V2-P3-017`, and the set literal below is what made adding it a deliberate act.
 
     **The converse used to be "every other factor declares no period reach at all", and two
     families falsified it in the same build.** `V2-P3-010`'s quality family and `V2-P3-011`'s
@@ -276,6 +314,7 @@ def test_the_value_family_is_the_only_shipped_factor_on_both_axes_at_once() -> N
         EARNINGS_YIELD_TTM.qualified_key,
         BOOK_TO_PRICE.qualified_key,
         SALES_YIELD_TTM.qualified_key,
+        DEDUCTED_EARNINGS_YIELD_TTM.qualified_key,
     }
     for definition in FACTOR_DEFINITIONS.definitions:
         if definition.qualified_key in on_both:
@@ -335,7 +374,14 @@ def test_the_columns_this_family_reads_are_columns_the_stored_contracts_declare(
     assert NET_PROFIT_COLUMN in STATEMENT_DATA_COLUMNS[INCOME_DATASET]
     assert TOTAL_REVENUE_COLUMN in STATEMENT_DATA_COLUMNS[INCOME_DATASET]
     assert BOOK_EQUITY_COLUMN in STATEMENT_DATA_COLUMNS[BALANCE_SHEET_DATASET]
-    for definition in (EARNINGS_YIELD_TTM, BOOK_TO_PRICE, SALES_YIELD_TTM):
+    assert DEDUCTED_NET_PROFIT_COLUMN in STATEMENT_DATA_COLUMNS[FINANCIAL_INDICATOR_DATASET]
+    assert DEDUCTED_NET_PROFIT_COLUMN not in STATEMENT_DATA_COLUMNS[INCOME_DATASET]
+    for definition in (
+        EARNINGS_YIELD_TTM,
+        BOOK_TO_PRICE,
+        SALES_YIELD_TTM,
+        DEDUCTED_EARNINGS_YIELD_TTM,
+    ):
         assert FactorField(dataset=DAILY_BASIC_DATASET, column=MARKET_CAP_COLUMN) in (
             definition.required_fields
         )
@@ -372,7 +418,12 @@ def test_the_family_reads_none_of_the_columns_the_measured_refusals_are_concentr
     """
     read = {
         (item.dataset, item.column)
-        for definition in (EARNINGS_YIELD_TTM, BOOK_TO_PRICE, SALES_YIELD_TTM)
+        for definition in (
+            EARNINGS_YIELD_TTM,
+            BOOK_TO_PRICE,
+            SALES_YIELD_TTM,
+            DEDUCTED_EARNINGS_YIELD_TTM,
+        )
         for item in definition.required_fields
     }
 
@@ -381,48 +432,56 @@ def test_the_family_reads_none_of_the_columns_the_measured_refusals_are_concentr
         assert column in STATEMENT_DATA_COLUMNS[dataset], "the census names a projected column"
 
 
-DEDUCTED_PROFIT_FIELDS: Final[tuple[str, ...]] = (
+DEDUCTED_PROFIT_FIELDS_SERVED: Final[tuple[str, ...]] = (
     "profit_dedt",
     "dt_eps",
     "dt_netprofit_yoy",
-    "dt_profit_to_profit",
 )
-"""Tushare's deducted-non-recurring-profit family -- 扣除非经常性损益 -- as the endpoint names it.
+"""Tushare's deducted-non-recurring-profit family -- 扣除非经常性损益 -- as the endpoint serves it.
 
-**`profit_dedt` itself has been seen served**, which is the strongest form this claim has: EPcut's
-numerator is not a derivation from a growth rate but a field the endpoint returns, and
-`V2-P3-009`'s review read it back by adding the column to `fina_indicator`'s projection over 101
-securities. `dt_netprofit_yoy` is the weaker witness that came first and is still the recorded
-one: it is named in
-`KNOWN_FINANCIAL_STATEMENT_LIMITATIONS.the_merge_rule_is_agreement_in_the_projection`, which was
-measured by re-fetching **all** response fields for a 76-security sample. So the deducted-profit
-family exists upstream and the projection does not carry it, which is the whole of why EPcut is
-not a fourth definition here -- and `V2-P3-017`'s premise is a measurement rather than an
-expectation.
+`V2-P3-009`'s review listed four names and `V2-P3-017` measured them against the endpoint on
+2026-08-17: three are among `fina_indicator`'s 108 served field names and the fourth,
+`dt_profit_to_profit`, is not served at all -- an explicit request for it comes back without it,
+the same way `income` drops any of them. So the family this repository can reach is three names
+and it is one endpoint's, which is the whole of `DEDUCTED_NET_PROFIT_COLUMN`'s "which endpoint is
+not a choice" argument.
 """
 
+DEDUCTED_PROFIT_FIELDS_NOT_SERVED: Final[tuple[str, ...]] = ("dt_profit_to_profit",)
+"""The name from that list the endpoint does not serve. Kept as a literal so that a later reader
+who finds it in Tushare's own documentation has this repository's measurement to contradict."""
 
-def test_no_stored_statement_projection_carries_a_deducted_profit_column() -> None:
-    """Why EPcut is a disclosure rather than a factor, as an assertion that can go red.
 
-    EPcut is `earnings_yield_ttm` with the non-recurring gains and losses removed from its
-    numerator, and the removal term is in none of the 10 / 7 / 5 / 11 stored columns. That is a
-    boundary of the *projection* rather than of the upstream, and the difference is measured:
-    `dt_netprofit_yoy` appears in the limitation that counted what the projection cannot see,
-    which is a field the endpoint served and `providers/tushare.py` does not request.
+def test_exactly_one_stored_statement_projection_carries_a_deducted_profit_column() -> None:
+    """`V2-P3-017`'s widening, as the assertion that used to say the opposite.
 
-    Widening the projection is a `V2-P1-011` contract change whose price is the schema of every
-    stored partition and the contract tests pinned to the field list. It is **not** a re-pricing
-    of the collapse, which is what this docstring claimed until `V2-P3-009`'s review measured it:
-    adding `profit_dedt` to `fina_indicator`'s projection over 101 securities and 4,423 filings
-    left the folded rows, the ambiguous filings and every existing column's refusals identical,
-    and added 41 refusals that were all the new column's own. See `V2-P3-017`. This test is the
-    falsifiable form of the disclosure either way: the day a stored projection gains a
-    deducted-profit column, it goes red and EPcut has to be reconsidered.
+    Until this issue the claim here was that **no** stored projection carried a deducted-profit
+    column, and the disclosure it supported was that `earnings_yield_ttm` occupied EPcut's slot.
+    That test was written to go red "the day a stored projection gains one", and this is that day:
+    `fina_indicator` now projects `profit_dedt` and `deducted_earnings_yield_ttm` reads it. The
+    assertion is kept in the same falsifiable shape rather than deleted, pointing the other way --
+    it is **exactly one** projection and **exactly one** of the three served names, so both
+    widening it further and quietly reverting it fail here.
+
+    The three-way split is what makes this more than a spelling check: `income` carries none of
+    the family (it does not serve any of it), `fina_indicator` carries `profit_dedt` and not the
+    two beside it (`DEDUCTED_NET_PROFIT_COLUMN` measures why: `dt_eps` needs a share count and
+    `dt_netprofit_yoy` is a rate the TTM identity cannot touch -- and it is the one whose addition
+    moves four filings out of the collapse), and `dt_profit_to_profit` is not upstream at all.
     """
+    by_dataset = {
+        dataset: sorted(set(columns) & set(DEDUCTED_PROFIT_FIELDS_SERVED))
+        for dataset, columns in STATEMENT_DATA_COLUMNS.items()
+    }
     projected = {column for columns in STATEMENT_DATA_COLUMNS.values() for column in columns}
 
-    assert projected.isdisjoint(DEDUCTED_PROFIT_FIELDS)
+    assert by_dataset == {
+        INCOME_DATASET: [],
+        BALANCE_SHEET_DATASET: [],
+        "cashflow": [],
+        FINANCIAL_INDICATOR_DATASET: [DEDUCTED_NET_PROFIT_COLUMN],
+    }
+    assert projected.isdisjoint(DEDUCTED_PROFIT_FIELDS_NOT_SERVED)
     detail = next(
         item.detail
         for item in KNOWN_FINANCIAL_STATEMENT_LIMITATIONS
@@ -431,6 +490,207 @@ def test_no_stored_statement_projection_carries_a_deducted_profit_column() -> No
     assert "dt_netprofit_yoy" in detail
     note = FACTOR_DEFINITIONS.note_for(EARNINGS_YIELD_TTM.qualified_key)
     assert note is not None and "EPcut" in note
+
+
+# --- the deducted profit itself: the two things a field name would have to be trusted for --------
+
+DEDUCTED_PROFIT_AGAINST_INCOME: Final[tuple[tuple[str, str, float, float, float], ...]] = (
+    # (security, period, profit_dedt, income.n_income_attr_p, income.n_income)
+    ("600739.SH", "2024-12-31", 218_927_918.51, 209_556_865.25, 664_195_391.66),
+    ("601318.SH", "2025-03-31", 30_259_000_000.0, 27_016_000_000.0, 35_159_000_000.0),
+    ("600030.SH", "2025-09-30", 23_000_488_312.03, 23_158_914_572.54, 23_915_616_390.88),
+    ("000002.SZ", "2024-12-31", -45_393_719_289.83, -49_478_429_211.96, -48_703_934_402.33),
+)
+"""Real served rows, captured on 2026-08-17, chosen where the minority interest is large.
+
+Four of the twenty-four `(security, period)` pairs `V2-P3-017` probed -- six securities over
+four periods each -- and not an arbitrary four: `601318.SH` 2025Q1 and `000002.SZ`'s 2024 annual
+are the **extremes** of `profit_dedt / n_income_attr_p` over the whole probe (1.120 and 0.917),
+so the band asserted below is pinned at both ends by the rows that come closest to breaking it
+rather than by comfortable ones.
+
+The first is the decisive one and it is the security this repository already uses to separate
+`n_income` from `n_income_attr_p`: on `600739.SH`'s 2024 annual the two differ by a factor of
+3.169, so a `profit_dedt` that were the *consolidated* deducted profit would sit near the larger
+number. It sits on the smaller. `000002.SZ` is also a loss-maker, where the ordering of the three
+numbers reverses and the ratio test still has to come out the same way.
+"""
+
+MOUTAI_DEDUCTED_PROFIT: Final[tuple[tuple[str, float, float], ...]] = (
+    # (period, profit_dedt, the published roe on the same filing)
+    ("2017-09-30", 20_087_008_841.63, 25.4166),
+    ("2017-12-31", 27_224_083_628.17, 32.9542),
+    ("2018-03-31", 8_510_778_903.45, 8.8887),
+    ("2018-06-30", 15_884_168_512.98, 17.0563),
+    ("2018-09-30", 24_929_011_158.67, 25.5220),
+)
+"""`600519.SH`'s `profit_dedt` and `roe` on five contiguous filings, captured live 2026-08-17.
+
+Five contiguous quarter ends ending at 2018Q3, which is exactly the window shape
+`TRAILING_TWELVE_MONTH_PERIODS` describes: `window[:-1]` holds one December (2017-12-31) and
+`window[0]` is the same quarter one year before `window[-1]`. So the identity's three terms are
+all real numbers off one endpoint rather than a fixture's arithmetic, and the answer it produces
+is a quantity nothing in the response carries.
+
+The `roe` column rides along because it is the counter-example the quality family already argued
+for and this window is the first place both can be driven side by side: both series rise through
+the fiscal year, so monotonicity does not separate them, and the property that does is that one
+is a sum of yuan and the other is a quotient whose denominator moves.
+"""
+
+MOUTAI_2018Q3_TRAILING_DEDUCTED_PROFIT: Final[float] = 32_066_085_945.21
+"""`24,929,011,158.67 + 27,224,083,628.17 - 20,087,008,841.63`, computed by hand from the rows
+above rather than off a run -- the trailing twelve months of deducted profit ending 2018Q3.
+
+It is 28.6% above the latest stored cumulative (24.93bn), which is the whole reason the identity
+exists: a cross section read at one `as_of` that used the latest cumulative would be mixing a
+nine-month numerator with somebody else's twelve-month one.
+"""
+
+MOUTAI_2018_ANNUAL: Final[tuple[str, float, float]] = ("2018-12-31", 35_585_443_648.60, 34.4643)
+"""The filing that closes 2018, captured in the same probe.
+
+Outside the window above -- which ends at 2018Q3 by construction, so that `window[:-1]` holds
+exactly one December -- and needed beside it for the equity spread, which is a statement about a
+whole fiscal year.
+"""
+
+MOUTAI_IMPLIED_EQUITY_SPREAD: Final[float] = 0.10
+"""How far apart the equity implied by pairing this endpoint's own `roe` with its own
+`profit_dedt` gets across one fiscal year, as a floor on the measured figure.
+
+Measured on 2018's four filings: 95.748bn, 93.128bn, 97.677bn and 103.253bn, a spread of
+**10.87%** between the smallest and the largest. That is the falsifiable form of "a ratio is not
+a sum" -- differencing two cumulative `roe` figures would be differencing two quotients with
+different denominators, so the result is not any quarter's return. `profit_dedt` has no such
+problem because it has no denominator, which is the whole of why `V2-P3-017` could put a factor
+on this endpoint where `V2-P3-010` could not.
+"""
+
+
+def test_the_deducted_profit_is_the_attributable_level_and_not_the_consolidated_one() -> None:
+    """EPcut's numerator caliber, decided by measurement rather than by the field's name.
+
+    `NET_PROFIT_COLUMN` makes this choice for EP between two columns of one endpoint and can
+    point at both. EPcut cannot: `fina_indicator` serves one deducted-profit level and does not
+    say which it is, so the question is answered by holding it against `income`'s two on real
+    filings where they are far apart.
+
+    The bound is one-sided and both sides are asserted, because "closer to" is the shape of claim
+    that passes on any fixture: `profit_dedt / n_income_attr_p` is required to stay inside
+    `[0.90, 1.13]` on every row, and `profit_dedt / n_income` is required to leave it on the row
+    where the minority interest is large. On `600739.SH`'s 2024 annual those are 1.045 and 0.330,
+    a factor of 3.17 apart, which is the same 3.169 `NET_PROFIT_COLUMN` records between the two
+    `income` columns themselves -- so the deduction moves this number by 4.5% and the choice of
+    level moves it by 217%.
+    """
+    attributable_band = (0.90, 1.13)
+    ratios = {
+        security: (deducted / attributable, deducted / consolidated)
+        for security, _, deducted, attributable, consolidated in DEDUCTED_PROFIT_AGAINST_INCOME
+    }
+
+    for security, (to_attributable, _) in ratios.items():
+        assert attributable_band[0] <= to_attributable <= attributable_band[1], security
+    assert not attributable_band[0] <= ratios["600739.SH"][1] <= attributable_band[1]
+    assert round(ratios["600739.SH"][0], 3) == 1.045
+    assert round(ratios["600739.SH"][1], 3) == 0.330
+    assert 3.169 < 664_195_391.66 / 209_556_865.25 < 3.170
+    assert 3.16 < ratios["600739.SH"][0] / ratios["600739.SH"][1] < 3.17
+    assert DEDUCTED_EARNINGS_YIELD_TTM.columns_of(FINANCIAL_INDICATOR_DATASET) == (
+        DEDUCTED_NET_PROFIT_COLUMN,
+    )
+
+
+def test_the_deducted_profit_is_a_cumulative_sum_the_identity_reaches_and_the_roe_beside_it_is_not() -> (  # noqa: E501
+    None
+):
+    """Why the TTM identity may touch this `fina_indicator` column when it may not touch `roe`.
+
+    `RETURN_ON_EQUITY_TTM` refuses `fina_indicator.roe` on the ground that the cumulative-to-TTM
+    identity is an identity about **sums**. Monotonicity does not separate the two -- both series
+    rise through the fiscal year -- so both halves are measured on the same five real filings.
+
+    For `profit_dedt`: it resets at each Q1 and accumulates inside the year, and
+    `_trailing_twelve_months` over the contiguous window produces `MOUTAI_2018Q3_TRAILING
+    _DEDUCTED_PROFIT`, which is 28.6% away from the latest stored cumulative. So the identity is
+    doing arithmetic rather than passing a number through, and the number it produces is one the
+    endpoint does not serve.
+
+    For `roe`: pairing the endpoint's own `roe` with its own `profit_dedt` on each of 2018's four
+    filings implies four different equity bases spanning 10.87%, so differencing two cumulative
+    `roe` figures differences two quotients with different denominators. That is the falsifiable
+    content of "a ratio is not a sum", and it is why `deducted_earnings_yield_ttm` may read this
+    endpoint while `return_on_equity_ttm` may not.
+    """
+    periods = tuple(date.fromisoformat(day) for day, _, _ in MOUTAI_DEDUCTED_PROFIT)
+    deducted = tuple(value for _, value, _ in MOUTAI_DEDUCTED_PROFIT)
+    within_2018 = [
+        *(row for row in MOUTAI_DEDUCTED_PROFIT if row[0].startswith("2018")),
+        MOUTAI_2018_ANNUAL,
+    ]
+    implied = [value / (roe / 100.0) for _, value, roe in within_2018]
+
+    assert deducted[2] < deducted[0], "Q1 resets rather than continuing the previous year"
+    assert list(deducted[2:]) == sorted(deducted[2:]), "and accumulates from there"
+
+    window = FactorWindow(
+        subject="600519.SH",
+        as_of=AS_OF,
+        sessions=(),
+        periods=periods,
+        values=MappingProxyType(
+            {(FINANCIAL_INDICATOR_DATASET, DEDUCTED_NET_PROFIT_COLUMN): deducted}
+        ),
+    )
+    trailing = _trailing_twelve_months(
+        window, dataset=FINANCIAL_INDICATOR_DATASET, column=DEDUCTED_NET_PROFIT_COLUMN
+    )
+
+    assert trailing is not None
+    assert round(trailing, 2) == MOUTAI_2018Q3_TRAILING_DEDUCTED_PROFIT
+    assert abs(trailing / deducted[-1] - 1.0) > 0.28, "not the latest cumulative"
+    assert max(implied) / min(implied) - 1.0 > MOUTAI_IMPLIED_EQUITY_SPREAD
+
+
+def test_ep_is_what_epcut_reduces_to_and_the_two_are_not_the_same_number() -> None:
+    """The pair, held apart on one window rather than in two docstrings.
+
+    EP and EPcut share `_yield_on_market_capitalisation`, a denominator, a reach and a direction,
+    and differ in exactly one `(dataset, column)`. That is the shape in which an assertion stops
+    discriminating, so the two evaluators are driven over **one** window carrying both series and
+    the answers are required to differ -- and to differ by the fraction the numerators do, which
+    is what makes this a statement about the wiring rather than about the fixture's magnitudes.
+
+    The numerator series here are `600739.SH`'s two real 2024 figures scaled into a five-period
+    cumulative shape: the deducted profit is 1.0447 times the attributable one, so a wiring that
+    read `income.n_income_attr_p` for both would land 4.47% away rather than on a different
+    order of magnitude -- which is exactly the size of error a plausible-looking fixture hides.
+    """
+    attributable = tuple(_cumulative(index) for index in range(4, 9))
+    deducted = tuple(value * 1.0447 for value in attributable)
+    window = FactorWindow(
+        subject="600739.SH",
+        as_of=AS_OF,
+        sessions=(SESSION,),
+        periods=tuple(_period(index) for index in range(4, 9)),
+        values=MappingProxyType(
+            {
+                (INCOME_DATASET, NET_PROFIT_COLUMN): attributable,
+                (FINANCIAL_INDICATOR_DATASET, DEDUCTED_NET_PROFIT_COLUMN): deducted,
+                (DAILY_BASIC_DATASET, MARKET_CAP_COLUMN): (500.0,),
+            }
+        ),
+    )
+
+    ep = _earnings_yield_ttm(window)
+    epcut = _deducted_earnings_yield_ttm(window)
+
+    assert ep is not None and epcut is not None
+    assert ep != epcut
+    assert round(epcut / ep, 4) == 1.0447
+    assert EARNINGS_YIELD_TTM.factor_id != DEDUCTED_EARNINGS_YIELD_TTM.factor_id
+    assert EARNINGS_YIELD_TTM.required_fields != DEDUCTED_EARNINGS_YIELD_TTM.required_fields
 
 
 @pytest.mark.parametrize("stored", [float("nan"), float("inf"), float("-inf")])

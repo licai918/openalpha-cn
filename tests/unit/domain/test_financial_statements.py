@@ -155,8 +155,10 @@ LIAONING_2024_B = {
     "oper_cost": 9232237427.16,
 }
 
-# fina_indicator(603049.SH, period=20241231): ten of the eleven stored columns disagree, `bps`
-# by a factor of ten and `grossprofit_margin` by a change of sign.
+# fina_indicator(603049.SH, period=20241231): every one of the stored columns disagrees, `bps`
+# by a factor of ten and `grossprofit_margin` by a change of sign. Re-captured live on
+# 2026-08-17 with `V2-P3-017`'s twelfth column requested: one row carries `profit_dedt` and the
+# other carries nothing at all for it, so the widening lands on this filing too.
 DIMEI_2024_A = _indicator(
     bps=2.2206,
     roe=176.0751,
@@ -179,9 +181,11 @@ DIMEI_2024_B = _indicator(
     netprofit_yoy=43.5698,
     ocfps=3.86,
     fcff=2432515794.8604,
+    profit_dedt=3322191612.31,
 )
 
-# fina_indicator(600519.SH, period=20180331): one field, sign flipped.
+# fina_indicator(600519.SH, period=20180331): one field, sign flipped -- and `profit_dedt` is
+# byte-equal on both rows, which is what makes this pair the counterpart of the one above.
 MOUTAI_2018Q1_A = _indicator(
     eps=6.77,
     bps=79.5718,
@@ -194,10 +198,12 @@ MOUTAI_2018Q1_A = _indicator(
     netprofit_yoy=38.9309,
     ocfps=3.9289,
     fcff=-966053502.6718,
+    profit_dedt=8510778903.45,
 )
 MOUTAI_2018Q1_B = {**MOUTAI_2018Q1_A, "fcff": 843920834.0382}
 
-# fina_indicator(000001.SZ, period=20240630): one column absent on one row, one rounded.
+# fina_indicator(000001.SZ, period=20240630): one column absent on one row, one rounded, and --
+# since `V2-P3-017` requested it -- `profit_dedt` present on one row and absent on the other.
 PINGAN_IND_2024H1_A = _indicator(
     bps=21.2268,
     roe=5.4242,
@@ -207,7 +213,37 @@ PINGAN_IND_2024H1_A = _indicator(
     netprofit_yoy=1.938,
     ocfps=5.8602,
 )
-PINGAN_IND_2024H1_B = {**PINGAN_IND_2024H1_A, "eps": 1.23, "ocfps": 5.86}
+PINGAN_IND_2024H1_B = {
+    **PINGAN_IND_2024H1_A,
+    "eps": 1.23,
+    "ocfps": 5.86,
+    "profit_dedt": 25880000000.0,
+}
+
+# fina_indicator(000488.SZ, period=20161231, announced 20170218): the two rows are byte-equal in
+# all twelve stored columns and differ ONLY in `dt_netprofit_yoy`, which the projection does not
+# carry. Captured live 2026-08-17; it is the pair
+# `the_merge_rule_is_agreement_in_the_projection` already quotes.
+YATAI_2016_ANNUAL = _indicator(
+    eps=0.99,
+    bps=7.8282,
+    roe=10.5601,
+    roa=4.8322,
+    netprofit_margin=8.9627,
+    grossprofit_margin=30.0421,
+    debt_to_assets=72.5773,
+    or_yoy=11.4862,
+    netprofit_yoy=102.109,
+    ocfps=1.1119,
+    fcff=-4914356201.8511,
+    profit_dedt=1611533699.22,
+)
+YATAI_2016_UNPROJECTED_DISAGREEMENT: tuple[float, float] = (123.8579, -12.7401)
+"""What those two rows say for `dt_netprofit_yoy`, the column `V2-P3-017` did **not** take.
+
+Kept beside the row rather than inside it, because it is precisely a value the projection has no
+slot for -- which is the whole point of the filing.
+"""
 
 # balancesheet(000002.SZ, period=20230630): only the share count differs, by 2.5%.
 VANKE_2023H1_FLAG0 = _balance(
@@ -639,7 +675,15 @@ def test_a_column_absent_from_every_version_answers_none_rather_than_refusing() 
     assert filing.value_of("oper_cost") is None
 
 
-def test_ten_disagreeing_columns_are_all_named_and_the_eleventh_still_answers() -> None:
+def test_every_disagreeing_column_of_one_filing_is_named_rather_than_counted() -> None:
+    """`603049.SH`'s 2024 annual, which disagrees in every stored column it has.
+
+    Eleven names until `V2-P3-017`, twelve since: the widened projection asks the endpoint for
+    `profit_dedt` and this filing's two rows answer 3,322,191,612.31 and nothing at all, so the
+    new column joins the list rather than sitting quietly outside it. That is the *other* half of
+    the widening's price -- `MOUTAI_2018Q1_A` / `_B` is a filing where the new column agrees --
+    and both are real rows rather than a fixture's choice.
+    """
     history = build_statement_history(
         security="603049.SH",
         dataset=FINANCIAL_INDICATOR_DATASET,
@@ -660,11 +704,14 @@ def test_ten_disagreeing_columns_are_all_named_and_the_eleventh_still_answers() 
         "netprofit_yoy",
         "ocfps",
         "or_yoy",
+        "profit_dedt",
         "roa",
         "roe",
     )
     with pytest.raises(AmbiguousReportError, match=r"'bps' \(2.2206, 22.2055\)"):
         filing.value_of("bps")
+    with pytest.raises(AmbiguousReportError, match=r"'profit_dedt' \(None, 3322191612.31\)"):
+        filing.value_of("profit_dedt")
 
 
 def test_a_rounding_step_is_a_disagreement_and_is_not_tolerated_away() -> None:
@@ -681,7 +728,7 @@ def test_a_rounding_step_is_a_disagreement_and_is_not_tolerated_away() -> None:
     )
 
     (filing,) = history.filings
-    assert filing.disagreeing_fields == ("eps", "ocfps")
+    assert filing.disagreeing_fields == ("eps", "ocfps", "profit_dedt")
     assert filing.value_of("bps") == 21.2268
     # `value_of` has to refuse it too, not merely report it: a tolerance wide enough to pass
     # 5.86 against 5.8602 is a threshold nobody could defend, and it would sit on the same
@@ -1303,8 +1350,68 @@ def test_the_report_counts_every_field_a_filing_disagrees_on() -> None:
             )
         },
     )
-    assert sum(indicators.ambiguous_field_reads.values()) == 11
+    assert sum(indicators.ambiguous_field_reads.values()) == 12
     assert set(indicators.ambiguous_field_reads.values()) == {1}
+
+
+def test_the_deducted_column_taken_folds_a_filing_the_one_left_out_would_have_split() -> None:
+    """`V2-P3-017`'s column choice, on the filing this module's own limitation already names.
+
+    `the_merge_rule_is_agreement_in_the_projection` says the collapse is "equal in the
+    projection" and warns that widening `STATEMENT_DATA_COLUMNS` **would** move keys out of the
+    collapsed column and into the refused one. That is a conditional, and `V2-P3-017` measured it
+    firing for one candidate column and not for the one it took. This is that measurement as a
+    filing rather than as a rate.
+
+    `000488.SZ`'s 2016 annual, announced 2017-02-18, is served as two rows that are byte-equal in
+    **all twelve** stored columns -- `profit_dedt` included, at 1,611,533,699.22 on both -- and
+    differ only in `dt_netprofit_yoy`, 123.8579 against -12.7401. That is the same pair the
+    limitation quotes. So under the projection this issue shipped the filing folds into one
+    version and every column answers; under a projection that had taken `dt_netprofit_yoy`
+    instead it would have been two versions and `ambiguous_filing` for any factor whose window
+    reached it.
+
+    The second half is driven rather than asserted about, by putting the disagreement the
+    endpoint really served *inside* the projection: the same two rows with those two numbers in a
+    stored column do not fold. Without it this test would only be saying that two equal rows are
+    equal.
+    """
+    folded = build_statement_history(
+        security="000488.SZ",
+        dataset=FINANCIAL_INDICATOR_DATASET,
+        rows=[
+            ReportRow(period=date(2016, 12, 31), announced_on=date(2017, 2, 18), values=values)
+            for values in (YATAI_2016_ANNUAL, YATAI_2016_ANNUAL)
+        ],
+    )
+    split = build_statement_history(
+        security="000488.SZ",
+        dataset=FINANCIAL_INDICATOR_DATASET,
+        rows=[
+            ReportRow(
+                period=date(2016, 12, 31),
+                announced_on=date(2017, 2, 18),
+                values={**YATAI_2016_ANNUAL, "netprofit_yoy": served},
+            )
+            for served in YATAI_2016_UNPROJECTED_DISAGREEMENT
+        ],
+    )
+
+    (folded_filing,) = folded.filings
+    (split_filing,) = split.filings
+
+    assert folded_filing.row_count == 2
+    assert not folded_filing.is_ambiguous
+    assert folded_filing.disagreeing_fields == ()
+    assert folded_filing.value_of("profit_dedt") == 1_611_533_699.22
+    assert split_filing.is_ambiguous
+    assert split_filing.disagreeing_fields == ("netprofit_yoy",)
+    detail = next(
+        item.detail
+        for item in KNOWN_FINANCIAL_STATEMENT_LIMITATIONS
+        if item.code == "the_merge_rule_is_agreement_in_the_projection"
+    )
+    assert "123.8579" in detail and "-12.7401" in detail
 
 
 def test_a_corpus_whose_duplicates_all_collapse_reports_itself_clean() -> None:
@@ -1352,13 +1459,17 @@ def test_every_dataset_is_named_and_the_limitations_are_unique_and_specific() ->
 
 
 def test_the_known_limitations_are_named_rather_than_argued_away() -> None:
-    """All eleven, as a set literal, closing the six the memberships above never mention.
+    """All twelve, as a set literal, closing the seven the memberships above never mention.
 
-    The test above names three of the eleven and the one below names two more, which leaves six
+    The test above names three of the twelve and the one below names two more, which leaves seven
     entries whose existence no assertion depends on -- so deleting or renaming any of them was
     a green change. Membership assertions are additive and can never see what is missing; an
     equality can, in both directions, which is why every registry in this repository is asked
     for one by `tests/unit/test_known_limitation_registries.py`.
+
+    The twelfth arrived with `V2-P3-017` and is the one that says where the deducted profit is
+    published, which is the same fact as where it is *not*: on the endpoint with no
+    `update_flag`, no `f_ann_date` and no `report_type`.
     """
     assert {limitation.code for limitation in KNOWN_FINANCIAL_STATEMENT_LIMITATIONS} == {
         "a_correction_carries_no_instant_of_its_own",
@@ -1372,6 +1483,7 @@ def test_the_known_limitations_are_named_rather_than_argued_away() -> None:
         "the_corpus_starts_before_the_exchanges_did",
         "a_partial_year_read_answers_from_inside_its_window",
         "only_the_consolidated_report_is_served",
+        "the_deducted_profit_is_only_on_the_endpoint_with_no_version_column",
     }
 
 

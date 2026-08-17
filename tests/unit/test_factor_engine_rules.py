@@ -106,9 +106,11 @@ def test_the_shipped_registry_and_evaluator_table_name_exactly_the_same_factors(
     the other fails here as well as at import, and written out rather than counted, so that a
     factor arriving from a later issue has to be named here by whoever adds it. `reversal_1d`
     is the engine's verification factor; the four after it are `V2-P3-012`'s momentum-and-reversal
-    family, the next four are `V2-P3-013`'s volatility-and-liquidity family, the next three are
-    `V2-P3-009`'s value family, the next four are `V2-P3-010`'s quality family and the last three
-    are `V2-P3-011`'s growth family, each family's own declarations being audited in
+    family, the next four are `V2-P3-013`'s volatility-and-liquidity family, the next four are the
+    value family (three from `V2-P3-009` and `deducted_earnings_yield_ttm` from `V2-P3-017`, which
+    is where the projection gained the column it reads), the next four are `V2-P3-010`'s quality
+    family and the last three are `V2-P3-011`'s growth family, each family's own declarations being
+    audited in
     `tests/unit/test_factor_momentum_reversal_rules.py`,
     `tests/unit/test_factor_volatility_liquidity.py`,
     `tests/unit/test_factor_value_family.py`,
@@ -129,6 +131,7 @@ def test_the_shipped_registry_and_evaluator_table_name_exactly_the_same_factors(
         "earnings_yield_ttm/v1",
         "book_to_price/v1",
         "sales_yield_ttm/v1",
+        "deducted_earnings_yield_ttm/v1",
         "return_on_equity_ttm/v1",
         "return_on_capital_ttm/v1",
         "gross_margin_stability/v1",
@@ -773,7 +776,8 @@ caveat reads as a finding, and a note that says "measured nothing" about somethi
 nothing about the direction.
 
 Substring containment over a `FactorNote`, which is `test_factor_volatility_liquidity
-.REQUIRED_DISCLOSURES`' binding, generalised from four factors to nineteen. That table's own
+.REQUIRED_DISCLOSURES`' binding, generalised from four factors to the whole registry. That table's
+own
 docstring argues against a `KNOWN_*` registry for the same obligation, and the argument carries:
 the note is where a factor's judgements already have to live, so a registry beside it would be a
 second place for one sentence to drift from.
@@ -783,22 +787,25 @@ second place for one sentence to drift from.
 def test_every_shipped_factor_discloses_the_direction_it_declares_and_that_it_is_unmeasured() -> (
     None
 ):
-    """`direction` is a required *field* on all nineteen and a *sentence* on all nineteen too.
+    """`direction` is a required *field* on all twenty and a *sentence* on all twenty too.
 
     `FactorDefinition.direction` is mandatory, so the field cannot go missing -- but the field is
     a `Literal`, and what makes it readable is the note saying that it is a conventional prior
-    rather than a result. Until this test, four of the nineteen had that sentence bound by an
+    rather than a result. Until this test, four of the then nineteen had that sentence bound by an
     executable assertion (`REQUIRED_DISCLOSURES`, the volatility and liquidity family's) and
     fifteen had it bound by nothing: deleting the direction prose from
     `MOMENTUM_20_SESSIONS_NOTE` left the whole suite green.
 
     That is the exact shape this repository has been bitten by more than once -- a table and an
     implementation drifting with only prose between them -- and the reason it is a *registry-wide*
-    loop rather than a table of nineteen names: a twentieth factor shipped without the disclosure
-    fails here on the day it is added, with no list for anybody to remember to extend.
+    loop rather than a table of names: a twentieth factor shipped without the disclosure fails
+    here on the day it is added, with no list for anybody to remember to extend. **That case has
+    now happened**: `V2-P3-017`'s `deducted_earnings_yield_ttm` is the twentieth, it inherits the
+    sentence through `_VALUE_DIRECTION_PROSE`, and the only thing this loop needed was the count
+    below.
 
-    Ten of the nineteen carry the sentence through a shared `_*_DIRECTION_PROSE` constant and nine
-    write it inline, so the assertion is on the assembled note rather than on any constant: a
+    Eleven of the twenty carry the sentence through a shared `_*_DIRECTION_PROSE` constant and
+    nine write it inline, so the assertion is on the assembled note rather than on any constant: a
     family that stops concatenating its shared prose is exactly the regression this catches.
 
     The failure names every factor that lost a phrase rather than the first, because a family-wide
@@ -812,5 +819,5 @@ def test_every_shipped_factor_discloses_the_direction_it_declares_and_that_it_is
         and any(phrase not in note for phrase in DIRECTION_DISCLOSURE)
     }
 
-    assert len(FACTOR_DEFINITIONS.qualified_keys) == 19
+    assert len(FACTOR_DEFINITIONS.qualified_keys) == 20
     assert missing == {}, "a shipped factor's note no longer discloses its declared direction"

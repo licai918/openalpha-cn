@@ -195,7 +195,7 @@ P3 结束即可独立使用（Jupyter 直连面板 + 因子）
 | `V2-P3-006` | 分组组合收益（含成本，复用 `AShareExecutionPolicy`） | 技 | 005 | 已交付 `backtest/factor_portfolio.py`（纯 stdlib 叶子，直接吃 `005` 的 `ICCrossSection`，所以 IC 与分组收益必然同一录取样本）。**权责分工**：毛收益取 `OutcomeLabel.realized_return`，**绝不**由两笔成交价反推（那正是 Task 30 实测 −0.5310% 对 +2.7422% 的那条路）；费用取 `AShareExecutionPolicy` 的两个 `ExecutionResult`；能否建仓由**两个契约共同**判定、标注在先。被拒成交**不记 0**，出组并按自身 `HoldingOutcome` 计数，`PortfolioCensus` 强制加总。分组按平均秩（并列同组）、组数与每组下限**均为声明值无默认**，空组是三个覆盖码而非修补。多空价差交付但**明确不是可执行组合**：策略无做空侧、无融券数据集，且空头往返正是 `KNOWN_EXECUTION_LIMITATIONS` 已实测两契约不一致的那对判定。不发累计曲线（重叠窗口），见下方小节 | S21 |
 | `V2-P3-007` | 换手 / 覆盖率 / 容量报告 | 技 | 006 | 让统计上好看但不可实施的信号显形。已交付 `backtest/factor_tradeability.py`（第三个纯 stdlib 叶子）。**换手**：对多头组维护持仓态，**再平衡频率不是新参数** —— 就是调用方那串 `as_of` 的间距，本模块测量它；窗口重叠时持仓态不存在，报 `overlapping_schedule`。换手报**名字**与**钱**两读（`006` 等预算 + 手数取整让两者必然不同）。`006` 的费用是上界、`round_trip_cost - avoided_cost` 是下界，省下的腿全部取自已有 `ExecutionResult`，不模拟任何一笔单。**不发滚动收益**（空隙会话不在任何标注窗口里，且连乘正是 `006` 拒绝的那件事）。**覆盖率**：四步漏斗 `universe → valued → admissible → scored → held`，四步分属因子引擎 / 该档准入 / 标注契约 / 撮合策略，两张档位表 `import` 且**两张都吃劲**。**逐组分解**是验收标准的仪器，且在 `unfillable_after_execution` 下**照样在**（由「切法重算 ∸ 拒绝名单」推出）。**容量**：一个声明的 `participation_cap`（无默认）+ 算术，是**约束不是冲击模型**；`min` 绑定被 `006` 的等预算逼出来、`capital_multiple < 1` 就是已超容（实测 `000569.SZ` 2001-01-02 给 0.658） | S22 |
 | `V2-P3-008` | 相关性与冗余分析 | 技 | 005 | 已交付 `backtest/factor_redundancy.py`（`005` 之后第二个纯 stdlib 叶子模块）：横截面值/秩相关、IC 序列相关三读，符号由**两个**因子的 `direction` 定向、冗余按**幅值**判定。**算术恒等式与实证相关分开**：`SharedInputs` 从 `required_fields` **算**出来（171 对里 42 对共列、72 对共数据集、16 对**声明完全相同**），`FactorIdentity` 则**声明后再对数据求值**，只有 `verified` 才配得上 `arithmetic` 判决；`V2-P3-012` 那条 `1 + m20 == (1 + m15)(1 + r5)` 在不跳的动量上实测残差 `4.4e-16`（verified），在**出厂**动量上 `1.7e-01`（refuted）。冗余阈值**无默认值**、由调用方声明；`undeclared_lockstep` 用 `round(abs(r), 15) == 1.0` 这条**舍入边界**（不是阈值）兜底。样本下界是 **4** 而非 IC 的 3：`n=3` 时秩相关只能取 `±0.5 / ±1`，任何阈值都判不出东西 | S23 |
-| `V2-P3-009` | 因子家族①价值：EP / BP / SP / EPcut | 技 | 004 | 已交付 EP / BP / SP（本仓库第一批双轴出厂因子）；**EPcut 未交付**，扣非净利不在任何一个统计投影里，硬前置是 `V2-P3-017`，见下方小节 | S16 |
+| `V2-P3-009` | 因子家族①价值：EP / BP / SP / EPcut | 技 | 004 | 已交付 EP / BP / SP（本仓库第一批双轴出厂因子）；**EPcut 由 `V2-P3-017` 补齐**（`deducted_earnings_yield_ttm`，第 20 个出厂因子），当时未交付的原因——扣非净利不在任何一个统计投影里——是投影边界而不是上游缺失，见下方小节 | S16 |
 | `V2-P3-010` | 因子家族②质量：ROE / ROIC / 毛利率稳定性 / 应计项 | 技 | 004 | 已交付四个：`return_on_equity_ttm` / `return_on_capital_ttm` / `gross_margin_stability` / `accruals_ttm`，**本仓库第一批只在报告期轴上的出厂因子**；ROE **不读** `fina_indicator.roe`，理由与实测见下方小节 | S16 |
 | `V2-P3-011` | 因子家族③成长：营收同比 / 净利同比 / 同比加速度 | 技 | 004 | 已交付 `revenue_yoy` / `net_profit_yoy` / `revenue_yoy_acceleration`（本仓库第一批**只读 filing、不读价格**的出厂因子）。同比是**累计对四季度前的累计**（`window[-1]/window[-5]-1`，正是本文件 M-2 论证的那条），加速度是**两条相隔一年的同比之差**（`5 / 5` 与 `9 / 9`）；**全家族不调用 `_trailing_twelve_months`** —— 它按窗口末端对齐找年末，在 `N=8` 上会自信答错，见下方小节 | S16 |
 | `V2-P3-012` | 因子家族④动量与反转：20/60/120 日 + 行业相对 + 5 日反转 | 技 | 004 | — | S16 |
@@ -203,7 +203,7 @@ P3 结束即可独立使用（Jupyter 直连面板 + 因子）
 | `V2-P3-014` | 不可变因子实验制品 + raw/processed/neutralized 三档报告 | 技 | 005-008 | 否则分不清"因子有效"与"暴露没控住"。已交付 `backtest/factor_experiment.py`（`005` 之后第五个纯 stdlib 叶子，消费前四个而不重造它们）。**三行不够，格子才是答案**：`TierAttribution` 是一等记录，跑在**声明的**格子上 —— 三个档位步（`raw→processed`、`processed→neutralized`、`raw→neutralized`）×两个**已被上游定过号**的统计量（`ICSummary.mean_ic`、`QuantilePortfolioSummary.mean_spread`），每格带两档自己的数、比值、以及一个六成员闭集判决，判在一条**无默认值的** `retention_floor` 上；`no_baseline` 与 `removed` 分开（前一档就没赚过钱的因子没有「被拿走」这回事）、`reversed` 与 `amplified` 分开。**不可变是两件事且两件都强制**：`experiment_id` = `stable_model_id`(四个上游 spec + 线 + `code_commit` + as_of 与三档来源 build 的 `set_digest`)，`content_digest` = 同一函数打整份文档，所以**同一个 `experiment_id` 下两个 `content_digest` 不是两个实验而是不可复现**，`refuse_a_restated_experiment` 照 `_refuse_to_drop_a_stored_build` 的形状拒绝它、但放行完全一致的重算；`open_experiment` 重算摘要，落盘后被改过一个字节的文档**读不回来**而不只是「不一样」。`built_at` 与 `note` 不进任何摘要，由一条读 `inspect.signature` 的审计与 `IDENTITY_EXEMPT_PARAMETERS` 对账 | S24, D8 |
 | `V2-P3-015` | 因子的 CLI + REST + SDK 面（`factor run --factor <id> --start --end`） | 产 | 014 | — | S83, S84 |
 | `V2-P3-016` | **指数点位序列数据集 + 面板可达的市场收益**（`V2-P3-013` 的残差/特质波动的硬前置，见下方小节） | 技 | P1 存储契约 | `013` 实测：15 个 descriptor 里**没有任何指数点位**（`index_weight` 是成分权重不是点位），且 `FactorWindow` 是单标的的 —— 求值器**按类型**够不到市场序列 | S16 |
-| `V2-P3-017` | **扣非净利列进入统计投影**（`V2-P3-009` 的 EPcut 的硬前置，见下方小节） | 技 | `V2-P1-011` 存储契约 | `009` 复审实测：四个投影的 10 / 7 / 5 / 11 列里**没有扣非净利**，而端点**直接服务 `profit_dedt` 本身**（把它加进投影就读得回来，101 只票）。代价是每个已存分区的 schema + 以真实行钉住字段列表的契约测试**都要重写**；**不是**折叠/拒绝口径的重新定价 —— 同一批原始行量两遍，折叠行数、歧义 filing 数、既有 11 列的逐列拒绝数**一字未变** | S16 |
+| `V2-P3-017` | **扣非净利列进入统计投影 + EPcut**（`V2-P3-009` 的第四个因子，见下方小节） | 技 | `V2-P1-011` 存储契约 | 已交付：`fina_indicator` 的投影 11→12 列，新增 `profit_dedt`，并在其上出厂第 20 个因子 `deducted_earnings_yield_ttm`。**加哪一列不是偏好而是实测**——`income` 根本不服务这一族（85 个字段里一个都没有，且点名请求会被**静默丢弃**，放进 `income` 投影会让每一次 `income` fetch 都被 `checked_response_fields` 拒绝）；同一批原始行读五遍（101 票 / 6,138 filing，另一组不相交 101 票 / 5,980 filing）：加 `profit_dedt` 与 `dt_eps` 折叠行数与歧义 filing 数**一字未变**，加 `dt_netprofit_yoy` 则把 4 个（另一样本 1 个）filing 从折叠挪进歧义 —— **那条 limitation 的条件句对一列成立、对旁边一列不成立，只有实测能分开**；五种投影下既有 11 列的逐列拒绝数全部逐位相同。代价：每个已存 `fina_indicator` 分区以 `field_missing` 拒读并重取、以真实行钉住字段列表的契约测试同改、以及 `profit_dedt` 自己 1.075% / 0.769% 的拒绝率（EP 的列是 0.189% / 0.459%）| S16 |
 | `V2-P3-018` | **`FactorCoverage` 第六个码：把「这只票的这次 filing 有歧义」变成单票覆盖码而不是整 build 拒绝**（`V2-P3-009`..`011` 共用的墙，见下方小节） | 技 | `V2-P3-002` 存储契约 | 已交付 `ambiguous_filing`，插在 `insufficient_history` 与 `input_missing` **之间**（该位置就是 `_classify` 的判定优先级，由一条读 AST 的审计对账）。标记按 `(subject, period)` 记在 `_DatasetReading` 上，只对**窗口真的覆盖到那一期**的票生效；会话轴一字未动，第二行照旧拒绝。**schema 迁移**：manifest 分区 27→28 列、transform manifest 34→35 列，旧分区在 readiness 上以 `field_missing` 拒读而不是错位解码 —— 因子分区是派生物、`manifest_id` 使其可重建，`storage/migrations.py` 只管 `state.sqlite3`。**身份**：`transform_id` 移动（覆盖码词表就是 `MissingValuePolicy` 的字段集，在 `FactorTransformSpec` 的哈希载荷里），19 个 `factor_id` 一个没动，两边都用 `04c45b8` 的字面量钉住 | S16 |
 | `V2-P3-019` | **给已存因子截面盖上它自己答案的内容地址**（P3 产品验收的 Critical-1，见下方小节） | 技 | `V2-P3-002`/`003`/`004` 存储契约 | 实测：把 `factor_obs_reversal_1d_v1/2026/data.parquet` 全部 16 行的值翻号、删掉 `runtime/experiments`、跑真的 `openalpha factor run` —— `mean_ic` 从 `+1.0` 变成 `-1.0`、`mean_spread` 跨过零，`experiment_id` **逐字节相同**，退出码 0，全链无拒绝。根因三条、各自封堵一条：① build manifest 对**输入**和**标的集合**取摘要、从不对**答案**取摘要 —— `FactorBuildManifest.observation_digest` 及其两个孪生 `processed_observation_digest` / `neutralized_observation_digest` 补上，且是**进身份的**字段而不是 `FactorInputProvenance` 那种「记录但不寻址」（后者会被篡改者与它描述的值一起改掉，进了 `manifest_id` 才由解码器已有的身份自检来守）；② 唯一可能开火的守卫「同 `experiment_id` 两个 `content_digest`」**是有状态的**，只在本机先跑过诚实版本时才生效 —— 面板上的封缄是无状态的；③ `panel doctor` 按**名字**拒绝因子数据集（无发布节奏），P2 建的 fail-closed 闸门止步于原始数据平面。**不给 `DATASET_CADENCE` 加条目**（派生名按因子铸造、不可枚举），改为一条 `derived` 节奏 + 谓词，并新增两个 **blocking** 码 `factor_seal_broken` / `factor_build_unaddressed`。**分层决定了设计**：`panel_doctor` 的兄弟集被等号钉死，不能 import 它审计的三个平面，所以 `cross_section_digest` 落在 `domain/`，`FACTOR_PLANE_SEALS` 以数据声明平面形状、由一条同时 import 两边的运行期审计对账 | S16, D8 |
 
@@ -1110,7 +1110,7 @@ ADR-0003 的 `V2-P3-012` 小节原本把 013 描述成「per-security regression
 `016` 落地后才谈得上「残差波动/特质波动」。
 
 
-### `V2-P3-009` 复审记录（2026-08-13）：EPcut **未交付**，原因是投影边界而不是上游缺失
+### `V2-P3-009` 复审记录（2026-08-13 记，2026-08-17 由 `V2-P3-017` 结清）：EPcut 的阻塞是投影边界而不是上游缺失
 
 roadmap 给 `V2-P3-009` 写的四个因子是「EP / BP / SP / EPcut」。实际交付三个：
 `earnings_yield_ttm`、`book_to_price`、`sales_yield_ttm`，都是**同时落在两条轴上**的因子
@@ -1148,13 +1148,86 @@ widened_projection : rows 7686  filings 4423  collapsed_rows 2566  ambiguous 697
 字段列表也要一起改；外加 `profit_dedt` 自己在那个样本上就吃掉 41 条拒绝，
 即 EPcut 的可读性天然低于 EP。**已立为 `V2-P3-017`**。
 
-**`earnings_yield_ttm` 占住 EPcut 这个槽位，口径与 `RETURN_VOL_60` 相同**：EP 就是
+**`earnings_yield_ttm` 曾占住 EPcut 这个槽位，口径与 `RETURN_VOL_60` 相同**：EP 就是
 「非经常性损益那一项减不掉时，EPcut 退化成的东西」，因子自己的 note 显式说明它不是 EPcut。
 声明由 `tests/unit/test_factor_value_family.py::test_no_stored_statement_projection_carries_a_deducted_profit_column`
 钉住 —— **哪天有人把扣非列加进任一投影，那条测试就红，这个声明就必须重审**。
 
-**台账口径**：`V2-P3-009` 记为已交付的是它实际交付的三个因子（`OA-FACTOR-008`）；
-`017` 落地后才谈得上 EPcut。
+**那一天到了，是 `V2-P3-017`。** 那条测试按设计变红，改名为
+`test_exactly_one_stored_statement_projection_carries_a_deducted_profit_column` 并**反向**钉住
+（恰好一个投影、恰好三个被服务的扣非字段里的一个），所以再加宽一次和悄悄退回去都会红。
+下面是交付记录。
+
+#### 交付（2026-08-17）：加哪一列由实测决定，加进哪个投影根本不是选择
+
+**`income` 不服务这一族，而且失败方式比报错更坏。** 2026-08-17 对**四个**端点各要一次全字段：
+`income` 返回 85 个字段名、`balancesheet` 152、`cashflow` 97、`fina_indicator` 108，
+扣非族只出现在其中**一张**表里（`profit_dedt` / `dt_eps` / `dt_netprofit_yoy`）。
+向 `income` 点名请求 `profit_dedt` **不报错** —— 响应带回它确实服务的那十五列，
+把请求的名字**静默丢掉** —— 所以把这一列写进 `income` 的投影，会让
+`providers/tushare.py::_response_rows` 按 `checked_response_fields` 拒绝**每一次** `income` fetch。
+`009` 复审列的第四个名字 `dt_profit_to_profit` 四个端点都不服务。
+
+**加哪一列，靠把加宽本身量出来。** 同一批原始行读五遍（101 票按步长取自全市场，11,131 行 /
+6,138 filing；另一组不相交的 101 票 10,801 行 / 5,980 filing 在括号里）：
+
+| 投影 | 折叠行数 | 歧义 filing | 新增拒绝 |
+|---|---:|---:|---:|
+| 已存 11 列 | 4,255 (4,174) | 738 (647) | — |
+| `+ profit_dedt` | 4,255 (4,174) | 738 (647) | 66 (46)，全是它自己的 |
+| `+ dt_eps` | 4,255 (4,174) | 738 (647) | 58 (39)，全是它自己的 |
+| `+ dt_netprofit_yoy` | **4,251 (4,173)** | **742 (648)** | 72 (47)，全是它自己的 |
+| `+ 三列一起` | **4,251 (4,173)** | **742 (648)** | 196 (132) |
+
+**既有 11 列的逐列拒绝数在五种投影、两个样本下全部逐位相同**（`fcff` 698、`roe` 64、`roa` 64、
+`eps` 59、`bps` 31 …… `ocfps` 6），所以 `009` 复审「加宽不重新定价已记录的东西」这条结论
+在两个新样本上被复核为真。**但同一张表也让那条 limitation 的条件句真的开了火**：
+`dt_netprofit_yoy` 把 4 个（另一样本 1 个）filing 从折叠挪进歧义，`profit_dedt` 与 `dt_eps` 一个都不挪。
+**条件句对一列成立、对旁边一列不成立，只有实测能分开它们** —— 这正是
+`the_merge_rule_is_agreement_in_the_projection` 记录的、`fina_indicator` 把分歧藏起来的三列之一。
+`dt_eps` 与 `dt_netprofit_yoy` 因**形状**被排除而不是因代价：前者是每股数，本面板唯一的股数是
+`balancesheet.total_share`（本仓库最不一致的字段，`BOOK_EQUITY_COLUMN` 拒绝 `bps × 股数` 就是这个理由），
+后者是**比率**，而 `RETURN_ON_EQUITY_TTM` 已论证过 TTM 恒等式是关于**和**的恒等式。
+
+**分子口径是扣非归母，实测而不是读字段名。** 端点只服务一个扣非口径且不说是哪个，所以拿
+`income` 的两列去量：`600739.SH` 2024 年报 `n_income` 664,195,391.66 对 `n_income_attr_p`
+209,556,865.25（3.169 倍），同一份 filing 的 `profit_dedt` 是 **218,927,918.51** ——
+归母的 1.045 倍、合并的 0.330 倍。六只大少数股东权益的票 × 四期，
+`profit_dedt / n_income_attr_p` 落在 `[0.917, 1.120]`，`profit_dedt / n_income` 跟着少数股东占比走
+（0.330 到 1.067）。所以 `(profit_dedt, total_mv)` 两边覆盖同一个索取权，
+正是 `earnings_yield_ttm` 选 `n_income_attr_p` 的那条规则。
+
+**TTM 恒等式够得着这一列，因为它是和不是率。** `600519.SH` 2018 年四期 `profit_dedt` 读
+8,510,778,903.45 / 15,884,168,512.98 / 24,929,011,158.67 / 35,585,443,648.60 —— 一条以元计价、
+每年 Q1 归零的累计曲线；而把同一端点的 `roe` 与它自己的 `profit_dedt` 配对，
+四期隐含的权益基数跨度 **10.87%**（93.128bn 到 103.253bn），所以两个累计 `roe` 相减是
+两个分母不同的商相减。恒等式在真实五期连续窗口（止于 2018Q3）上给出 32,066,085,945.21，
+比最新累计高 28.6%。
+
+**代价是端点，而且是可驱动的。** `profit_dedt` 只发布在没有 `update_flag`、没有 `f_ann_date`、
+没有 `report_type` 的那个端点上，它 81.7% 的键带不止一行。这一列自己的拒绝率是
+**66 / 6,138（1.075%）与 46 / 5,980（0.769%）**（合计 112 / 12,118 = 0.924%），
+而 `income.n_income_attr_p` 已被量到 0.189% 与 0.459%。两组数都不通用（彼此差 1.4 倍，
+「率是样本的性质」第 N 次落地），但**次序在每一组上都一样**。
+`000488.SZ` 2015 年报把两边同时摆出来：`income` 的两行给出**相同**的
+`n_income_attr_p`（2,148,153,529.51，`update_flag` `'0'` 与 `'1'`）因而折叠，
+`fina_indicator` 的两行给出 `profit_dedt` 719,891,359.63 对 1,846,820,211.10（2.566 倍，
+分别是归母利润的 0.86 倍与 0.34 倍）因而不折叠 —— 同一次 build 里 EP 是 `computed`、
+EPcut 是 `ambiguous_filing`。**所以两个因子同时出厂**：EP 就是扣非项减不掉时 EPcut 退化成的东西，
+现在这句话后面挂着一个量出来的频率。
+
+**schema 迁移：拒读 + 重取，没有新代码。** `financial_statement_requirement` 早就把
+`required_fields` 声明为数据集自己的投影，所以每个在此之前写下的 `fina_indicator` 分区现在
+以 readiness 码 `field_missing` **拒读**，而不是给新列答 `None` —— 后者正是
+`ReportFiling.value_of` 赖以区分「上游真的空」的那条界线。财报分区是原始摄取物且可重取，
+所以修法是 `openalpha panel build --dataset fina_indicator` 而不是从 manifest 重建；
+`storage/migrations.py` 与 `018` 一样一字未动，它管的是 `state.sqlite3` 而不是 Parquet。
+
+**身份**：`FactorDefinition` 字段集未动，19 个既有 `factor_id` 与 `04c45b8` 的字面量逐字节相同，
+第 20 个是 `fct_1bb4ab44a031477643cc6c85`；不新增覆盖码，`transform_id` 不动。
+
+**台账口径**：`V2-P3-009` 记为已交付的仍是它实际交付的三个因子（`OA-FACTOR-008`）；
+EPcut 与这次加列记在 `OA-FACTOR-026`。
 
 
 ### `V2-P3-009` 复审更正（2026-08-13）：`total_revenue` vs `revenue` 的理由原本方向写反了

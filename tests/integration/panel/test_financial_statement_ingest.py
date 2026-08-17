@@ -82,7 +82,12 @@ INDICATOR_FIELDS = [
     "netprofit_yoy",
     "ocfps",
     "fcff",
+    "profit_dedt",
 ]
+"""Twelve value columns since `V2-P3-017`. The rows below were re-captured live on 2026-08-17
+with `profit_dedt` requested, and on both securities the duplicate rows carry it **equal** --
+000001.SZ's 2018 annual reads 24,700,000,000.0 on the row that has `fcff` and on the one that
+does not -- so nothing this file asserts about the split, the clock or the census changes."""
 DAILY_FIELDS = [
     "ts_code",
     "trade_date",
@@ -328,6 +333,7 @@ PINGAN_INDICATORS_2018_PERIODS = [
         7.0249,
         -3.34,
         None,
+        24700000000.0,
     ],
     [
         "000001.SZ",
@@ -344,6 +350,7 @@ PINGAN_INDICATORS_2018_PERIODS = [
         7.0249,
         -3.34,
         132987870528.3733,
+        24700000000.0,
     ],
     [
         "000001.SZ",
@@ -360,6 +367,7 @@ PINGAN_INDICATORS_2018_PERIODS = [
         6.8031,
         -0.66,
         None,
+        20347000000.0,
     ],
     [
         "000001.SZ",
@@ -376,6 +384,7 @@ PINGAN_INDICATORS_2018_PERIODS = [
         6.8031,
         -0.66,
         None,
+        20347000000.0,
     ],
     [
         "000001.SZ",
@@ -392,6 +401,7 @@ PINGAN_INDICATORS_2018_PERIODS = [
         6.5159,
         0.43,
         None,
+        13326000000.0,
     ],
     [
         "000001.SZ",
@@ -408,6 +418,7 @@ PINGAN_INDICATORS_2018_PERIODS = [
         6.5159,
         0.43,
         31659686704.6698,
+        13326000000.0,
     ],
     [
         "000001.SZ",
@@ -424,6 +435,7 @@ PINGAN_INDICATORS_2018_PERIODS = [
         6.1313,
         2.41,
         None,
+        6555000000.0,
     ],
     [
         "000001.SZ",
@@ -440,6 +452,7 @@ PINGAN_INDICATORS_2018_PERIODS = [
         6.1313,
         2.41,
         None,
+        6555000000.0,
     ],
 ]
 
@@ -460,6 +473,7 @@ YIYUAN_INDICATORS_2018_PERIODS = [
         16.397,
         1.79,
         -68487984.7221,
+        16225300.0,
     ],
     [
         "001278.SZ",
@@ -476,6 +490,7 @@ YIYUAN_INDICATORS_2018_PERIODS = [
         16.397,
         1.79,
         26218332.3989,
+        16225300.0,
     ],
 ]
 

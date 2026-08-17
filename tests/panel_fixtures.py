@@ -1147,7 +1147,7 @@ _SHAPES: Final[tuple[PanelShape, ...]] = (
         summary="a second statement endpoint with its own projection",
         measurement=(
             "the four endpoints are four separate partition sets with four different "
-            "projections (10 / 7 / 5 / 11 stored columns) and four different ambiguity rates "
+            "projections (10 / 7 / 5 / 12 stored columns) and four different ambiguity rates "
             "-- 8.15%, 1.29%, 15.80%, 13.70% of filings "
             "(domain/financial_statements.py). A single-dataset fixture cannot tell a loop "
             "over them from a read of the first one"

@@ -3714,7 +3714,7 @@ def _echo_experiment(record: FactorExperimentRecord, *, write: str) -> None:
 NOTE_WRAP_WIDTH: Final[int] = 96
 """How wide `factor describe` wraps a note, in characters.
 
-The nineteen shipped notes run from 705 to 4,830 characters and are written as single paragraphs,
+The twenty shipped notes run from 705 to 4,830 characters and are written as single paragraphs,
 so a terminal that printed them unwrapped would emit one line per note. 96 leaves room inside a
 100-column line for the two-space indent that marks the prose apart from the fields above it.
 """
@@ -3819,7 +3819,7 @@ def factor_describe_command(
 
     **The prose is the deliverable.** Every shipped contract carries a note over 100 characters
     (`tests/unit/test_factor_engine_rules.py::test_every_shipped_contract_carries_its_prose`), and
-    the nineteen factor notes are unusually candid -- `return_vol_60`'s says in full that it
+    the factor notes are unusually candid -- `return_vol_60`'s says in full that it
     occupies `V2-P3-013`'s residual-volatility slot, is deliberately **not** named for a residual,
     and that neither residual is computable in this build. None of that was on any face: nineteen
     such disclosures existed in the source and reached no operator.

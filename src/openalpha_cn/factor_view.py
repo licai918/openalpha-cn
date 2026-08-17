@@ -1940,9 +1940,11 @@ to build its own `ReadinessRequirement` -- "a gate that built its own could ask 
 different question from the one its own reader asks, and the two verdicts would drift" -- so a
 builder has to supply one per dataset, and the only correct source is the module that also owns the
 reader. A dataset with no row here is refused **by name** in `_requirements` rather than defaulted
-to a weaker question: the six rows cover every dataset the nineteen shipped factors declare, and a
-twentieth factor reading a seventh dataset arrives as a refusal naming the dataset instead of a
-build whose coverage codes were decided by a requirement nobody wrote.
+to a weaker question: the six rows cover every dataset the twenty shipped factors declare, and a
+factor reading a seventh dataset arrives as a refusal naming the dataset instead of a build whose
+coverage codes were decided by a requirement nobody wrote. `V2-P3-017`'s
+`deducted_earnings_yield_ttm` is the first factor to reach the `fina_indicator` row, which was
+written with the other three statement rows and had had no reader until then.
 
 `financial_statement_requirement` appears four times because the four statement endpoints share one
 builder that re-derives each dataset's own `required_fields` from the dataset name; `daily` and

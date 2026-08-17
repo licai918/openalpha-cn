@@ -489,16 +489,18 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
 
 Read the five rows that are worth reading:
 
-**`panel_factors` names six and the nineteen shipped factors declare five.** The module's reach
-is a proper superset of its registry's, and that is correct rather than slack: `required_fields`
-is what `compute_factor` iterates, so the five are what any *stored* build reads, while the sixth
--- `fina_indicator` -- is nameable because `domain/factor.py::PERIOD_INDEXED_DATASETS` is defined
-as the four statement endpoints and the module imports it to decide an axis. `panel_factors.py`'s
-own docstring says "Nothing here reads `fina_indicator`", and the gap between the two numbers is
-precisely that sentence made checkable;
-`test_the_nineteen_shipped_factors_declare_five_of_the_six_datasets_the_engine_can_name` asserts
-both sides and the one-element difference between them, so a factor that started reading
-`fina_indicator` would go red there rather than pass silently under a row that already allows it.
+**`panel_factors` names six and the twenty shipped factors now declare all six.** Until
+`V2-P3-017` the module's reach was a *proper* superset of its registry's, and that was correct
+rather than slack: `required_fields` is what `compute_factor` iterates, so the declared five were
+what any *stored* build read, while the sixth -- `fina_indicator` -- was nameable because
+`domain/factor.py::PERIOD_INDEXED_DATASETS` is defined as the four statement endpoints and the
+module imports it to decide an axis. The gap was `panel_factors.py`'s own "Nothing here reads
+`fina_indicator`" made checkable, and
+`test_the_twenty_shipped_factors_declare_every_one_of_the_six_datasets_the_engine_can_name`
+asserted it exactly so that a factor which started reading that endpoint would go red there
+rather than pass silently. `deducted_earnings_yield_ttm` did start reading it, the assertion is
+now an equality, and the row below never had to move -- which is what a reach table being a
+superset is for.
 
 **`panel_neutralization` names none and reaches two.** No dataset name appears anywhere in that
 module's 2,172 lines; `daily_basic` and `index_member_all` arrive entirely through
@@ -1525,20 +1527,27 @@ def test_a_seam_name_declared_that_nobody_imports_turns_this_audit_red() -> None
     ]
 
 
-def test_the_nineteen_shipped_factors_declare_five_of_the_six_datasets_the_engine_can_name() -> (
+def test_the_twenty_shipped_factors_declare_every_one_of_the_six_datasets_the_engine_can_name() -> (
     None
 ):
     """The relationship between what the registry declares and what the module could read.
 
-    They are not equal and should not be: `required_fields` is what `compute_factor` iterates,
-    so the five are what every stored build reads, while the module can *name* a sixth because
+    They were not equal and are now, and **the change of verdict is the finding this test was
+    written to produce**. `required_fields` is what `compute_factor` iterates, so the declared
+    set is what every stored build reads; the module could always *name* a sixth dataset because
     it imports `PERIOD_INDEXED_DATASETS` to decide which axis a dataset sits on and that set is
-    the four statement endpoints. `panel_factors.py`'s own docstring says "Nothing here reads
-    `fina_indicator`"; this is that sentence held against the tree.
+    the four statement endpoints. Until `V2-P3-017` no shipped factor read `fina_indicator`, so
+    the difference was exactly `{"fina_indicator"}` and this test asserted it -- with its own
+    docstring saying "a factor that started reading `fina_indicator` would fail here".
 
-    The superset is the honest direction and the difference is asserted exactly, not as an
-    inequality: a factor that started reading `fina_indicator` would pass under a row that
-    already allows it, and would fail here.
+    One did: `deducted_earnings_yield_ttm` reads `fina_indicator.profit_dedt`, because that is
+    the only endpoint of the four that serves the deducted profit at all. So the assertion is
+    inverted rather than relaxed -- equality now, and still exact -- and the sentence it was
+    holding `panel_factors.py` to has been narrowed there in the same change, from "Nothing here
+    reads `fina_indicator`" to the quality family's own claim about itself.
+
+    The row is unchanged: `RESEARCH_PLANE_DATASETS` already allowed the name, which is the point
+    of a reach table being a superset of a registry.
     """
     declared = frozenset(
         field.dataset
@@ -1547,10 +1556,16 @@ def test_the_nineteen_shipped_factors_declare_five_of_the_six_datasets_the_engin
     )
     engine = RESEARCH_PLANE_DATASETS["openalpha_cn.panel_factors"]
 
-    assert len(FACTOR_DEFINITIONS.definitions) == 19
-    assert declared == {"balancesheet", "cashflow", "daily", "daily_basic", "income"}
-    assert declared < engine.named, "the module must be able to name everything a factor declares"
-    assert engine.named - declared == {"fina_indicator"}
+    assert len(FACTOR_DEFINITIONS.definitions) == 20
+    assert declared == {
+        "balancesheet",
+        "cashflow",
+        "daily",
+        "daily_basic",
+        "fina_indicator",
+        "income",
+    }
+    assert declared == engine.named, "the module names exactly what its factors declare"
     assert declared <= UPSTREAM_PANEL_DATASETS
     assert engine.named == engine.reached, (
         "the factor engine takes three writer helpers across the seam and no reader, so "

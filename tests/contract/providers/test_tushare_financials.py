@@ -77,7 +77,17 @@ INDICATOR_FIELDS = [
     "netprofit_yoy",
     "ocfps",
     "fcff",
+    "profit_dedt",
 ]
+"""`fina_indicator`'s projection, twelve value columns since `V2-P3-017`.
+
+The last entry is the one that issue added and it is not a widening of this fixture's *claim*:
+the row below was re-captured from the live endpoint on 2026-08-17 with `profit_dedt` in
+`fields`, and the two versions of that filing carry the **same** deducted profit while still
+disagreeing about `fcff`. So the pair goes on saying exactly what it was captured to say -- one
+filing, two rows, one field flipped -- and it now also says that a per-field refusal is per
+field on a twelve-column projection.
+"""
 
 # income(000001.SZ, period=20180630): the two rows, verbatim. `oper_cost` is null on both
 # because a bank publishes no cost of sales; `ebit` is present on one row and absent on the
@@ -140,7 +150,8 @@ PINGAN_2005H1 = [
     2814098601.0,
 ]
 
-# fina_indicator(600519.SH, period=20180331): two rows, one field, sign flipped.
+# fina_indicator(600519.SH, period=20180331): two rows, one field, sign flipped. `profit_dedt`
+# is byte-equal on both, re-captured live on 2026-08-17 with the widened projection.
 MOUTAI_2018Q1_A = [
     "600519.SH",
     "20180331",
@@ -156,8 +167,9 @@ MOUTAI_2018Q1_A = [
     38.9309,
     3.9289,
     -966053502.6718,
+    8510778903.45,
 ]
-MOUTAI_2018Q1_B = [*MOUTAI_2018Q1_A[:13], 843920834.0382]
+MOUTAI_2018Q1_B = [*MOUTAI_2018Q1_A[:13], 843920834.0382, MOUTAI_2018Q1_A[14]]
 
 BALANCE_FIELDS = [
     "ts_code",

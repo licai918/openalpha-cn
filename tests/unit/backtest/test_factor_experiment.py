@@ -1269,9 +1269,9 @@ def test_every_shipped_factor_produces_all_three_tiers_under_an_identity_of_its_
     all metadata assertions about reaches and families. So "every factor" rested on one factor and
     a family resemblance.
 
-    **What this proves and what it does not.** It drives the *report* half over all nineteen: the
+    **What this proves and what it does not.** It drives the *report* half over all twenty: the
     four studies run for real on each definition, `build_factor_experiment` binds them, the
-    artifact carries `FACTOR_TIER_ORDER` once, and the nineteen identities are pairwise distinct --
+    artifact carries `FACTOR_TIER_ORDER` once, and the twenty identities are pairwise distinct --
     which is the property a shared `experiment_id` would silently break, since a report is stored
     under it. It does **not** prove the *panel* half, that each factor's evaluator can be computed
     over a real store: that needs 120 sessions of prices for the momentum family and a filing axis
@@ -1287,7 +1287,7 @@ def test_every_shipped_factor_produces_all_three_tiers_under_an_identity_of_its_
         for definition in FACTOR_DEFINITIONS.definitions
     }
 
-    assert len(records) == 19
+    assert len(records) == 20
     assert len({record.experiment_id for record in records.values()}) == len(records)
     for handle, record in records.items():
         artifact = record.artifact

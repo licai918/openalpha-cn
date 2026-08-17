@@ -60,10 +60,14 @@ What is left disagrees, and there `ReportFiling.value_of` **raises** rather than
 **"Equal" means equal in the projection, and the two tables here count two different things.**
 2,194 of `fina_indicator`'s 2,671 duplicate keys and 1,166 of `balancesheet`'s 1,244 carry rows
 that agree across **every** field the endpoint serves -- all 108 and all 152. The collapse does
-not read those fields: `providers/tushare.py` requests only the 10 / 7 / 5 / 11 stored columns,
+not read those fields: `providers/tushare.py` requests only the 10 / 7 / 5 / 12 stored columns,
 so the rule it actually applies is "equal in the projection", which is coarser and folds more.
 That is why the end-to-end table below reports 2,223 and 1,205 rather than 2,194 and 1,166: the
-gap is keys whose rows differ only outside the stored columns. Re-measured on its own, over a
+gap is keys whose rows differ only outside the stored columns. Those two figures were measured
+when `fina_indicator`'s projection was eleven columns wide rather than twelve; what `V2-P3-017`
+measured about the twelfth is that it moves neither the collapsed-row count nor the
+ambiguous-filing count on either of two disjoint 101-security samples, which is a statement about
+those samples and not a recomputation of these. Re-measured on its own, over a
 fresh 76-security sample on 2026-08-09, the gap is 133 keys across the four endpoints, and on
 `balancesheet` it is half of that endpoint's real disagreement. It is a named limitation and not
 a rounding: `KNOWN_FINANCIAL_STATEMENT_LIMITATIONS.the_merge_rule_is_agreement_in_the_projection`.
@@ -308,10 +312,65 @@ FINANCIAL_INDICATOR_DATA_COLUMNS: Final[tuple[str, ...]] = (
     "netprofit_yoy",
     "ocfps",
     "fcff",
+    "profit_dedt",
 )
-"""Eleven of `fina_indicator`'s 108, on the same rule: ten factor inputs plus `fcff`, which
+"""Twelve of `fina_indicator`'s 108, on the same rule: ten factor inputs, plus `fcff`, which
 carries 441 of the 477 differing pairs and would otherwise hide most of this dataset's
-ambiguity behind a projection."""
+ambiguity behind a projection, plus `profit_dedt`.
+
+`profit_dedt` -- 扣除非经常性损益后的净利润, the deducted net profit -- is `V2-P3-017`'s whole
+subject and it is here rather than on `income` because **`income` does not serve it**. Measured
+on 2026-08-17 by asking all four endpoints for every field they have: `income` returns 85 field
+names, `balancesheet` 152, `cashflow` 97 and `fina_indicator` 108, and the deducted family
+appears in exactly one of those four lists -- as `profit_dedt`, `dt_eps` and `dt_netprofit_yoy`.
+Asking `income` for `profit_dedt` by name is not an error either -- the endpoint answers with the
+fifteen columns it does serve and drops the request silently -- so a projection that named it
+there would make `providers/tushare.py::_response_rows` refuse **every** `income` fetch by
+`checked_response_fields`, which is a fail-closed break rather than a wider read. See
+`KNOWN_FINANCIAL_STATEMENT_LIMITATIONS.the_deducted_profit_is_only_on_the_endpoint_with_no_version_column`
+for what routing it through this endpoint costs.
+
+**Which of the deducted family, decided by measuring the widening rather than by taste.** One
+batch of served rows read several times -- 101 securities by stride over the listed universe,
+11,131 rows and 6,138 filings, paged to exhaustion on 2026-08-17 -- under five projections, with
+a disjoint 101-security sample (10,801 rows, 5,980 filings) in brackets:
+
+| projection | collapsed rows | ambiguous filings | new refusals |
+|---|---:|---:|---:|
+| the stored eleven | 4,255 (4,174) | 738 (647) | -- |
+| `+ profit_dedt` | 4,255 (4,174) | 738 (647) | 66 (46), all its own |
+| `+ dt_eps` | 4,255 (4,174) | 738 (647) | 58 (39), all its own |
+| `+ dt_netprofit_yoy` | **4,251 (4,173)** | **742 (648)** | 72 (47), all its own |
+| `+ all three` | **4,251 (4,173)** | **742 (648)** | 196 (132) |
+
+Every pre-existing column's refusal count is identical in all five and on both samples -- `fcff`
+698, `roe` 64, `roa` 64, `eps` 59, `bps` 31 and so on down to `ocfps` 6 on the first -- so the
+eleven recorded here are not re-priced by any of them. What the table separates is the *collapse*:
+adding `dt_netprofit_yoy` moves four filings (one on the second sample) out of the collapsed
+column and into the ambiguous one, which is exactly the mechanism
+`the_merge_rule_is_agreement_in_the_projection` states as a conditional, arriving. `profit_dedt`
+and `dt_eps` do not move it at all, on either sample. So the conditional is true of one candidate
+and false of another, and only a measurement tells them apart -- which is also why the two rates
+quoted for `profit_dedt` are quoted as two: 1.075% and 0.769% of filings, 1.4x apart, on samples
+drawn the same way.
+
+**One of those four filings is in the suite rather than only in this table.** `000488.SZ`'s 2016
+annual -- the pair `the_merge_rule_is_agreement_in_the_projection` already quotes for
+`dt_netprofit_yoy` -- is served as two rows that are byte-equal in all **twelve** stored columns,
+`profit_dedt` included at 1,611,533,699.22 on both, and differ only in the column this projection
+did not take. `tests/unit/domain/test_financial_statements.py::
+test_the_deducted_column_taken_folds_a_filing_the_one_left_out_would_have_split` drives both
+halves on those rows, so the column choice is falsifiable and not merely recorded.
+
+**`dt_eps` and `dt_netprofit_yoy` are left out on what they are, not on what they cost.**
+`dt_eps` is a per-share figure and the only share count in this panel is
+`balancesheet.total_share`, this repository's most-disagreed stored field -- the same reason
+`panel_factors.BOOK_EQUITY_COLUMN` refuses `bps` times a share count. `dt_netprofit_yoy` is a
+*rate*, and `panel_factors.RETURN_ON_EQUITY_TTM` already argues that the cumulative-to-TTM
+identity is an identity about sums and a ratio is not a sum. `dt_profit_to_profit`, the fourth
+name that review recorded, **is not served by this endpoint at all**: it is absent from the 108
+and an explicit request for it comes back dropped, like `income`'s.
+"""
 
 STATEMENT_DATA_COLUMNS: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
     {
@@ -419,8 +478,10 @@ KNOWN_FINANCIAL_STATEMENT_LIMITATIONS: Final[tuple[FinancialStatementLimitation,
             "update_flag, no f_ann_date, no report_type. Measured over a 53-security sample "
             "paged to exhaustion on 2026-08-09: 5,941 rows over 3,270 (security, period, "
             "announcement) keys, of which 2,671 (81.7%) carry more than one row. 2,194 of those "
-            "are byte-identical across all 108 fields; the collapse reads only the 11 stored "
-            "columns and so folds somewhat more than that (see "
+            "are byte-identical across all 108 fields; the collapse reads only the 12 stored "
+            "columns (11 when this was measured; V2-P3-017 added the twelfth and measured it "
+            "moving neither count on two disjoint 101-security samples) and so folds somewhat "
+            "more than that (see "
             "the_merge_rule_is_agreement_in_the_projection). The remaining 477 disagree inside "
             "the projection itself and NOTHING in the response orders them. Every one of its "
             "3,270 periods has "
@@ -434,9 +495,9 @@ KNOWN_FINANCIAL_STATEMENT_LIMITATIONS: Final[tuple[FinancialStatementLimitation,
         code="the_merge_rule_is_agreement_in_the_projection",
         detail=(
             "build_statement_history folds two rows of a key when the STORED columns agree -- "
-            "the 10 / 7 / 5 / 11 in STATEMENT_DATA_COLUMNS plus f_ann_date -- not when the "
+            "the 10 / 7 / 5 / 12 in STATEMENT_DATA_COLUMNS plus f_ann_date -- not when the "
             "upstream rows agree. providers/tushare.py names exactly those columns in "
-            "response_fields, so the other 75 / 145 / 92 / 97 are never fetched and the "
+            "response_fields, so the other 75 / 145 / 92 / 96 are never fetched and the "
             "collapse cannot consult them. Rows that disagree only outside the projection "
             "therefore become ONE version and answer without a warning. Measured by re-fetching "
             "all response fields for a 76-security sample on 2026-08-09 (25,091 rows, 17,665 "
@@ -451,10 +512,20 @@ KNOWN_FINANCIAL_STATEMENT_LIMITATIONS: Final[tuple[FinancialStatementLimitation,
             "other; on cashflow, others 14 and depr_fa_coga_dpba 7; on fina_indicator, "
             "assets_yoy 17, turn_days 15, eqt_yoy 14, and 000488.SZ's 2016 annual gives "
             "dt_netprofit_yoy as 123.8579 and as -12.7401. So the measured refusal rate is a "
-            "property of THIS projection: widening STATEMENT_DATA_COLUMNS would move keys out "
-            "of the collapsed column and into the refused one, and a caller must not read "
-            "'collapsed' as 'the publisher said one thing'. It means 'the publisher said one "
-            "thing about what is stored'."
+            "property of THIS projection, and a caller must not read 'collapsed' as 'the "
+            "publisher said one thing'. It means 'the publisher said one thing about what is "
+            "stored'. What this sentence used to add -- that widening STATEMENT_DATA_COLUMNS "
+            "WOULD move keys out of the collapsed column and into the refused one -- is a "
+            "conditional and was being read as a certainty, so V2-P3-017 measured both "
+            "directions on one batch of 101 securities, 11,131 fina_indicator rows and 6,138 "
+            "filings, and again on a disjoint 101-security sample of 5,980: adding "
+            "dt_netprofit_yoy moves 4 filings (1 on the second sample) out of collapsed (4,255 "
+            "to 4,251) and into ambiguous (738 to 742), while adding profit_dedt -- the column "
+            "this projection actually took -- moves NEITHER count on either sample, and adding "
+            "dt_eps moves neither either. In all three the eleven pre-existing columns' refusal "
+            "counts are identical to the digit. So the conditional does fire, on the column "
+            "named right here as one of the three this endpoint hides its disagreement in, and "
+            "it does not fire on the column beside it; only a measurement separates them."
         ),
     ),
     FinancialStatementLimitation(
@@ -593,6 +664,35 @@ KNOWN_FINANCIAL_STATEMENT_LIMITATIONS: Final[tuple[FinancialStatementLimitation,
             "000001.SZ), which is why a bank's rows populate a different subset of the 85/152/97 "
             "columns than an industrial's -- the projection here holds only columns every "
             "company type publishes."
+        ),
+    ),
+    FinancialStatementLimitation(
+        code="the_deducted_profit_is_only_on_the_endpoint_with_no_version_column",
+        detail=(
+            "profit_dedt -- 扣除非经常性损益后的净利润, the numerator of EPcut and the reason "
+            "V2-P3-017 widened this projection at all -- is served by fina_indicator and by "
+            "NOTHING else here, so the one number in this panel that a deducted-profit factor "
+            "can be built on lives on the one endpoint that carries no update_flag, no "
+            "f_ann_date and no report_type. Measured on 2026-08-17 against all four endpoints "
+            "with an unrestricted field request: income returns 85 field names, balancesheet "
+            "152, cashflow 97 and fina_indicator 108 -- the same counts recorded elsewhere in "
+            "this module -- and the deducted family appears in exactly one of those four lists, "
+            "as profit_dedt, dt_eps and dt_netprofit_yoy (the fourth name V2-P3-009's review "
+            "listed, dt_profit_to_profit, is served by none of them). Asking income for "
+            "profit_dedt "
+            "by name is not an error and is worse than one -- the response carries the fifteen "
+            "columns income does serve and drops the requested name silently, so a projection "
+            "that placed the column there would make providers/tushare.py refuse every income "
+            "fetch on checked_response_fields. The consequence a factor pays is measured rather "
+            "than argued: on two disjoint 101-security stride samples of the listed universe, "
+            "the surviving versions of a filing disagree about profit_dedt on 66 of 6,138 "
+            "filings (1.075%) and on 46 of 5,980 (0.769%), where income.n_income_attr_p -- the "
+            "same quantity before the deduction, on an endpoint with a revision label -- has "
+            "been measured at 0.189% and 0.459%. So panel_factors.DEDUCTED_EARNINGS_YIELD_TTM "
+            "is ambiguous_filing where EARNINGS_YIELD_TTM is computed, several times as often, "
+            "and this is a property of where the number is published rather than of the number: "
+            "81.7% of fina_indicator's keys carry more than one row and nothing in the response "
+            "orders them. Both factors ship for that reason."
         ),
     ),
 )

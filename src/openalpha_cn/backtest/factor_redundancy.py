@@ -11,7 +11,7 @@ pooled, because the remedy differs for each and a single number cannot tell them
 2. **Shared inputs.** The two read some of the same panel columns. That is a structural fact,
    computable from `FactorDefinition.required_fields` with no data whatsoever, and it is neither
    necessary nor sufficient for a correlation -- see below, where both directions are measured on
-   the shipped nineteen.
+   the shipped twenty.
 3. **The market.** Everything else. This is the only one of the three that is a finding.
 
 `backtest/event_study.py` is the shape and `backtest/factor_ic.py` is the neighbour: a
@@ -115,13 +115,18 @@ machinery.
 
 `SharedInputs` is computed from `FactorDefinition.required_fields` alone -- no data, no
 partition, no `as_of`. It reports the shared qualified columns, the shared datasets and one of
-four codes. The shipped nineteen, measured:
+four codes. The shipped twenty, measured:
 
-| over the 171 pairs | count |
+| over the 190 pairs | count |
 |---|---|
-| share at least one qualified column (`daily.close`, `daily_basic.total_mv`, ...) | **42** |
-| share at least one *dataset* and no column | 30 (72 share a dataset) |
+| share at least one qualified column (`daily.close`, `daily_basic.total_mv`, ...) | **45** |
+| share at least one *dataset* and no column | 31 (76 share a dataset) |
 | declare **identical** `required_fields` | **16** |
+
+`V2-P3-017`'s twentieth factor moved the first two and not the third, which is the reading worth
+keeping: EPcut shares `daily_basic.total_mv` with the rest of the value family and shares its
+numerator column with nobody, so it is three more `overlapping_inputs` pairs and no new identical
+one. A factor that had merely renamed `earnings_yield_ttm` would have shown up in the last row.
 
 Two of those figures decide how much weight a shared column can carry, and they run in opposite
 directions:
@@ -240,7 +245,8 @@ side.
 `backtest/` over `domain/`, standard library only, and ADR-0003's `V2-P3-005` section explicitly
 declined to let its measurement carry over to "a rolling covariance matrix across `V2-P3-008`'s
 whole factor set". So it was measured again, at ADR-0002's whole-market cross section of 5,534
-securities and the shipped 19 factors' 171 pairs: **0.860 s** for the whole matrix at `spearman`
+securities and the then-shipped 19 factors' 171 pairs: **0.860 s** for the whole matrix at
+`spearman`
 and 0.398 s at `pearson`, against one pair at 4.97 ms through this module and 3.49 ms of bare
 arithmetic (which reproduces that section's 3.56 ms).
 
@@ -508,8 +514,8 @@ KNOWN_REDUNDANCY_LIMITATIONS: Final[tuple[RedundancyLimitation, ...]] = (
         detail=(
             "SharedInputs is computed from FactorDefinition.required_fields and is a structural "
             "fact rather than a prediction, and both directions of its failure are measured on "
-            "the shipped nineteen. NOT SUFFICIENT: momentum_120_sessions and reversal_5_sessions "
-            "declare identical required_fields -- 16 of the 171 pairs do -- and V2-P3-012 built "
+            "the shipped twenty. NOT SUFFICIENT: momentum_120_sessions and reversal_5_sessions "
+            "declare identical required_fields -- 16 of the 190 pairs do -- and V2-P3-012 built "
             "them so the sessions each multiplies are disjoint. NOT NECESSARY: "
             "return_on_equity_ttm and accruals_ttm share no qualified column at all "
             "(income.n_income_attr_p against income.n_income), and V2-P3-011 measured those two "

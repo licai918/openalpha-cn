@@ -1,6 +1,6 @@
-"""The value family against real partitions on disk (`V2-P3-009`).
+"""The value family against real partitions on disk (`V2-P3-009`, `V2-P3-017`).
 
-`tests/unit/test_factor_value_family.py` measures the three evaluators as functions of a window.
+`tests/unit/test_factor_value_family.py` measures the four evaluators as functions of a window.
 This file measures what a function cannot answer, and every one of the five things it says is
 something no factor shipped before this one could have said:
 
@@ -10,9 +10,19 @@ something no factor shipped before this one could have said:
 `daily_basic.total_mv` on the session axis, in one build, off two partitions written by the real
 writers. The two series have different lengths and different indices -- five filings and one
 session -- and the evaluator divides `[-1]` by `[-1]`. That machinery landed with the
-report-period axis and was exercised only by definitions the tests declared; these three are the
-first shipped factors that use it, so `test_the_three_factors_compute_off_two_axes_and_give_three
+report-period axis and was exercised only by definitions the tests declared; these are the
+first shipped factors that use it, so `test_the_four_factors_compute_off_two_axes_and_give_four
 _different_numbers` is where the claim becomes a measurement.
+
+## `V2-P3-017`: a fourth member, on the endpoint with nothing that orders two rows
+
+`deducted_earnings_yield_ttm` is EPcut and reads `fina_indicator.profit_dedt`, so this corpus
+gained a fourth statement partition -- the first one any shipped factor binds a column of, and
+the only one written here without `f_ann_date` or `update_flag`, because that endpoint carries
+neither. `test_a_contradiction_in_the_deducted_profit_codes_epcut_and_leaves_ep_computed` is what
+that costs, on `000488.SZ`'s 2015 annual: `income` serves the two rows the same
+`n_income_attr_p` and they collapse, `fina_indicator` serves them `profit_dedt` 2.566x apart and
+they do not, so one build gives EP a number and EPcut a coverage code.
 
 ## Per-field ambiguity, on two real rows
 
@@ -65,14 +75,17 @@ short on the count and the second is inside the count and outside the span, so `
 and `max_window_periods` are separable from each other on this one partition rather than merely
 rendered into it.
 
-## Three factors sharing one denominator
+## Four factors sharing one denominator
 
 Every factor here divides by `daily_basic.total_mv`, which is exactly the shape in which a
 fixture stops discriminating: an evaluator wired to the wrong numerator column still produces a
-plausible number. So the partition carries a **different series in every column any of the three
+plausible number. So the partition carries a **different series in every column any of the four
 could have read** -- `revenue` is half of `total_revenue`, `n_income` is 1.7 times
-`n_income_attr_p`, `total_assets - total_liab` is 1.4 times `total_hldr_eqy_exc_min_int`, and
-`circ_mv` is 0.6 of `total_mv` -- and the three answers are asserted to be pairwise distinct.
+`n_income_attr_p`, `total_assets - total_liab` is 1.4 times `total_hldr_eqy_exc_min_int`,
+`profit_dedt` is 0.83 times `n_income_attr_p`, and `circ_mv` is 0.6 of `total_mv` -- and the four
+answers are asserted to be pairwise distinct. The last of those separations is the one this
+family most needed: EP and EPcut differ in one `(dataset, column)` and nothing else, so a wiring
+that pointed EPcut back at `income` would answer EP's number exactly.
 """
 
 from __future__ import annotations
@@ -92,6 +105,8 @@ from openalpha_cn.domain.factor import FactorDefinition
 from openalpha_cn.domain.financial_statements import (
     BALANCE_SHEET_DATA_COLUMNS,
     BALANCE_SHEET_DATASET,
+    FINANCIAL_INDICATOR_DATA_COLUMNS,
+    FINANCIAL_INDICATOR_DATASET,
     INCOME_DATA_COLUMNS,
     INCOME_DATASET,
     statement_histories_from_panel_rows,
@@ -108,6 +123,8 @@ from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import (
     BOOK_TO_PRICE,
     CNY_PER_MARKET_CAP_UNIT,
+    DEDUCTED_EARNINGS_YIELD_TTM,
+    DEDUCTED_NET_PROFIT_COLUMN,
     EARNINGS_YIELD_TTM,
     NET_PROFIT_COLUMN,
     SALES_YIELD_TTM,
@@ -182,8 +199,23 @@ REVENUE_INCREMENTS: Final[tuple[float, ...]] = (101.0, 211.0, 307.0, 419.0, 521.
 """The same, for the top line. Deliberately not a multiple of `PROFIT_INCREMENTS`, so
 `earnings_yield_ttm` and `sales_yield_ttm` cannot come out proportional on this partition."""
 
+DEDUCTED_PROFIT_MULTIPLE: Final[float] = 0.83
+"""What `fina_indicator.profit_dedt` is, per unit of `income.n_income_attr_p`, on this partition.
+
+Below one because a deduction takes something away, and **not** any of the other separations this
+file already uses (`REVENUE_SHARE` 0.5, `CIRC_MV_SHARE` 0.6, `CONSOLIDATED_PROFIT_MULTIPLE` 1.7)
+nor one: EPcut and EP share a denominator, a reach, a direction and an implementation, so the
+only thing that can make them two numbers on this partition is this constant, and a wiring that
+read `income.n_income_attr_p` for both would land exactly on EP's answer. Real filings put the
+ratio near here -- `600739.SH`'s 2024 annual is 1.045 and `600030.SH`'s 2025Q3 is 0.993 -- but
+the number is chosen to separate rather than to imitate.
+"""
+
 TRAILING_PROFIT: Final[float] = math.fsum(PROFIT_INCREMENTS[1:])
 TRAILING_REVENUE: Final[float] = math.fsum(REVENUE_INCREMENTS[1:])
+TRAILING_DEDUCTED_PROFIT: Final[float] = math.fsum(
+    value * DEDUCTED_PROFIT_MULTIPLE for value in PROFIT_INCREMENTS[1:]
+)
 
 PRIOR_YEAR_CUMULATIVE: Final[float] = 907.0
 """What a 2023-12-31 filing carries. Never inside a trailing window here -- the only security
@@ -341,14 +373,31 @@ def _statement_batch(
     All four clocks are the announcement instant, which is what
     `providers/tushare.py::_announcement_timeline` does for every statement row -- and is why two
     versions of one filing cannot be told apart by any of them.
+
+    `fina_indicator` gets neither `f_ann_date` nor `update_flag`, because that endpoint carries
+    neither. That is not a detail of this fixture: it is the whole reason `V2-P3-017` describes
+    EPcut's endpoint as the one with nothing that orders two rows, and writing the two columns
+    here anyway would make this partition wider than `statement_panel_columns` declares -- which
+    the assertion below refuses.
     """
-    data_columns = INCOME_DATA_COLUMNS if dataset == INCOME_DATASET else BALANCE_SHEET_DATA_COLUMNS
+    data_columns = {
+        INCOME_DATASET: INCOME_DATA_COLUMNS,
+        BALANCE_SHEET_DATASET: BALANCE_SHEET_DATA_COLUMNS,
+        FINANCIAL_INDICATOR_DATASET: FINANCIAL_INDICATOR_DATA_COLUMNS,
+    }[dataset]
     announced = tuple(_midnight(item[2]) for item in rows)
+    labelled = (
+        ()
+        if dataset == FINANCIAL_INDICATOR_DATASET
+        else (
+            PanelColumn("f_ann_date", "string", tuple(item[2].isoformat() for item in rows)),
+            PanelColumn("update_flag", "string", tuple("1" for _ in rows)),
+        )
+    )
     columns = (
         PanelColumn("report_period", "string", tuple(item[1].isoformat() for item in rows)),
         PanelColumn("ann_date", "string", tuple(item[2].isoformat() for item in rows)),
-        PanelColumn("f_ann_date", "string", tuple(item[2].isoformat() for item in rows)),
-        PanelColumn("update_flag", "string", tuple("1" for _ in rows)),
+        *labelled,
         *(
             PanelColumn(name, "float", tuple(item[3].get(name) for item in rows))
             for name in data_columns
@@ -414,11 +463,42 @@ def _balance_values(subject: str, period: date) -> dict[str, float | None]:
     }
 
 
+def _indicator_values(subject: str, period: date) -> dict[str, float | None]:
+    """One `fina_indicator` row. `profit_dedt` is the only moving column.
+
+    The eleven beside it are distinct constants for `_income_values`' reason: none of them is read
+    by any shipped factor, and a second moving series would be noise. `profit_dedt` is
+    `DEDUCTED_PROFIT_MULTIPLE` times the *attributable* profit `income` carries for the same
+    security and period, which is what makes EP and EPcut two numbers on this partition rather
+    than one -- and it carries the loss-maker's sign, because a deduction does not turn a loss
+    into a profit.
+    """
+    profit = _cumulative(PROFIT_INCREMENTS, period) * PROFIT_SCALE[subject]
+    return {
+        "eps": 0.31,
+        "bps": 2.9,
+        "roe": 5.9,
+        "roa": 6.1,
+        "netprofit_margin": 6.7,
+        "grossprofit_margin": 7.1,
+        "debt_to_assets": 7.3,
+        "or_yoy": 7.9,
+        "netprofit_yoy": 8.3,
+        "ocfps": 8.9,
+        "fcff": 9.7,
+        DEDUCTED_NET_PROFIT_COLUMN: profit * DEDUCTED_PROFIT_MULTIPLE,
+    }
+
+
 def _statement_rows(
     dataset: str,
 ) -> tuple[tuple[str, date, date, dict[str, float | None]], ...]:
     periods = _income_periods if dataset == INCOME_DATASET else _balance_periods
-    values = _income_values if dataset == INCOME_DATASET else _balance_values
+    values = {
+        INCOME_DATASET: _income_values,
+        BALANCE_SHEET_DATASET: _balance_values,
+        FINANCIAL_INDICATOR_DATASET: _indicator_values,
+    }[dataset]
     rows = [
         (subject, period, ANNOUNCED_ON[period], values(subject, period))
         for subject in SUBJECTS
@@ -492,6 +572,9 @@ def store(tmp_path: Path) -> PanelStore:
     built = PanelStore(tmp_path / "panel")
     _write_statements(built, INCOME_DATASET, _statement_rows(INCOME_DATASET))
     _write_statements(built, BALANCE_SHEET_DATASET, _statement_rows(BALANCE_SHEET_DATASET))
+    _write_statements(
+        built, FINANCIAL_INDICATOR_DATASET, _statement_rows(FINANCIAL_INDICATOR_DATASET)
+    )
     write_panel_batch(built, _daily_basic_batch(), year=SESSION_YEAR)
     return built
 
@@ -545,20 +628,28 @@ def _expected(subject: str, numerator: float) -> float:
     return numerator / capitalisation
 
 
-# --- the three values, off two axes ---------------------------------------------------------------
+# --- the four values, off two axes ----------------------------------------------------------------
 
 
-def test_the_three_factors_compute_off_two_axes_and_give_three_different_numbers(
+def test_the_four_factors_compute_off_two_axes_and_give_four_different_numbers(
     store: PanelStore,
 ) -> None:
     """The whole family through the real engine, each value pinned as a number.
 
     Every expectation is derived from the increment tables the partition was written from, so
-    these are restatements of the fixture rather than numbers copied out of a run. The three are
-    asserted pairwise distinct because three factors of one family sharing a denominator is
+    these are restatements of the fixture rather than numbers copied out of a run. The four are
+    asserted pairwise distinct because four factors of one family sharing a denominator is
     precisely where the `V2-P3-004` review's finding recurs -- and the partition carries a
     different series in every neighbouring column, so an evaluator pointed at `revenue`,
     `n_income`, `circ_mv` or the consolidated equity lands somewhere else rather than here.
+
+    **EPcut is the member that most needs this and it arrived last.** `V2-P3-017`'s
+    `deducted_earnings_yield_ttm` differs from `earnings_yield_ttm` in one `(dataset, column)`
+    and in nothing else, so a wiring that pointed it back at `income.n_income_attr_p` would
+    produce a plausible number that happens to be EP's exactly; `DEDUCTED_PROFIT_MULTIPLE` is
+    what makes that a visible failure. It is also the only member read off `fina_indicator`, so
+    this is the first assertion in the repository that a factor binds a column of that partition
+    at all.
 
     That the columns bind at all is the part only a partition can say: `FactorField` validates a
     column reference syntactically and says so, so `income.n_income_attr_p` and
@@ -567,7 +658,12 @@ def test_the_three_factors_compute_off_two_axes_and_give_three_different_numbers
     """
     answers = {
         definition.key: _value(_compute(store, definition), FULL)
-        for definition in (EARNINGS_YIELD_TTM, BOOK_TO_PRICE, SALES_YIELD_TTM)
+        for definition in (
+            EARNINGS_YIELD_TTM,
+            BOOK_TO_PRICE,
+            SALES_YIELD_TTM,
+            DEDUCTED_EARNINGS_YIELD_TTM,
+        )
     }
     newest_equity = _book_value(FULL, _balance_periods(FULL)[-1])
     assert newest_equity is not None
@@ -575,7 +671,10 @@ def test_the_three_factors_compute_off_two_axes_and_give_three_different_numbers
     assert answers["earnings_yield_ttm"] == pytest.approx(_expected(FULL, TRAILING_PROFIT))
     assert answers["sales_yield_ttm"] == pytest.approx(_expected(FULL, TRAILING_REVENUE))
     assert answers["book_to_price"] == pytest.approx(_expected(FULL, newest_equity))
-    assert len({round(value, 12) for value in answers.values()}) == 3
+    assert answers["deducted_earnings_yield_ttm"] == pytest.approx(
+        _expected(FULL, TRAILING_DEDUCTED_PROFIT)
+    )
+    assert len({round(value, 12) for value in answers.values()}) == 4
 
     # The neighbouring columns this partition separates. Each is a number a wrong reader would
     # have produced, and none of them is the answer.
@@ -587,6 +686,12 @@ def test_the_three_factors_compute_off_two_axes_and_give_three_different_numbers
     )
     assert answers["book_to_price"] != pytest.approx(
         _expected(FULL, newest_equity * (ASSET_MULTIPLE - LIABILITY_MULTIPLE))
+    )
+    assert answers["deducted_earnings_yield_ttm"] != pytest.approx(answers["earnings_yield_ttm"]), (
+        "EPcut wired to income.n_income_attr_p would land exactly here"
+    )
+    assert answers["deducted_earnings_yield_ttm"] / answers["earnings_yield_ttm"] == pytest.approx(
+        DEDUCTED_PROFIT_MULTIPLE
     )
 
 
@@ -969,15 +1074,18 @@ def _duplicated_rows(
     return tuple(rows)
 
 
-def _write_prices_for_the_duplicated_security(store: PanelStore) -> None:
+def _write_prices_for_the_duplicated_security(
+    store: PanelStore, *, subject: str = DUPLICATED
+) -> None:
     """The three `daily_basic` sessions every store in this section needs, written once.
 
     Extracted from `disputed_store` when `V2-P3-018` gave this section five more stores to build:
     a factor on two axes needs the price partition even when the test is entirely about the
     filing, and five copies of this batch would be five places for the session series to drift
-    from `MARKET_CAP_BASE`.
+    from `MARKET_CAP_BASE`. `subject` is a keyword with a default because `V2-P3-017` needed the
+    same three sessions under a second name and a copy would have been the sixth place.
     """
-    subjects = tuple(DUPLICATED for _ in SESSIONS)
+    subjects = tuple(subject for _ in SESSIONS)
     instants = tuple(_session_instant(day) for day in SESSIONS)
     constant = tuple(1.0 for _ in SESSIONS)
     moved = {
@@ -1020,14 +1128,16 @@ def disputed_store(tmp_path: Path) -> PanelStore:
     return built
 
 
-def _compute_one(store: PanelStore, definition: FactorDefinition) -> FactorPanel:
-    """`_compute` narrowed to the duplicated security, which is the only name these stores hold."""
+def _compute_one(
+    store: PanelStore, definition: FactorDefinition, *, subject: str = DUPLICATED
+) -> FactorPanel:
+    """`_compute` narrowed to one security, which is the only name these stores hold."""
     return compute_factor(
         store,
         definition,
         as_of=AS_OF,
-        subjects=(DUPLICATED,),
-        universe=frozenset({DUPLICATED}),
+        subjects=(subject,),
+        universe=frozenset({subject}),
         requirements={name: _requirement(name) for name in definition.datasets},
         code_commit=COMMIT,
         built_at=BUILT_AT,
@@ -1282,6 +1392,135 @@ def test_the_disagreement_code_does_not_depend_on_the_order_the_partition_return
 
     assert _coverage(panel)[DUPLICATED] == "ambiguous_filing"
     assert panel.observations[0].value is None
+
+
+# --- `V2-P3-017`: the endpoint EPcut had to be put on, and what that costs -----------------------
+
+DEDUCTED_DISPUTED: Final[str] = "000488.SZ"
+"""The security whose 2015 annual separates EP from EPcut on real rows served by two endpoints.
+
+Already named in `KNOWN_FINANCIAL_STATEMENT_LIMITATIONS
+.the_merge_rule_is_agreement_in_the_projection` for the `dt_netprofit_yoy` its two
+`fina_indicator` rows disagree about; `V2-P3-017` re-fetched the same filing with `profit_dedt`
+requested and found the disagreement reaching that column too.
+"""
+
+DISPUTED_DEDUCTED_PROFIT: Final[tuple[float, float]] = (719_891_359.63, 1_846_820_211.10)
+"""`000488.SZ` 2015 annual (`ann_date` 2016-03-31): the two `profit_dedt` figures, verbatim.
+
+A factor of **2.566**, both non-null, under one announcement on the endpoint with no
+`update_flag`, no `f_ann_date` and no `report_type`. Captured live 2026-08-17. It straddles the
+caliber band as well as the magnitude: against the `n_income_attr_p` the same issuer's `income`
+rows carry for that filing (2,148,153,529.51), the two versions are 0.86x and 0.34x -- so picking
+one is not a rounding decision, which is `domain/financial_statements.py`'s own sentence about
+this endpoint arriving on the column EPcut reads.
+"""
+
+AGREED_DISPUTED_NET_PROFIT: Final[float] = 2_148_153_529.51
+"""The same filing's `income.n_income_attr_p`, which its **two** `income` rows -- `update_flag`
+`'0'` and `'1'` -- carry identically. Captured in the same probe, and it is what makes the pair
+below an asymmetry between two endpoints rather than between two fixtures."""
+
+
+def _deducted_dispute_rows(
+    deducted: tuple[float, float],
+) -> tuple[tuple[str, date, date, dict[str, float | None]], ...]:
+    """`000488.SZ`'s five `fina_indicator` filings, the newest of which arrives as two rows."""
+    rows = [
+        (
+            DEDUCTED_DISPUTED,
+            period,
+            ANNOUNCED_ON[period],
+            {**_indicator_values(FULL, period), DEDUCTED_NET_PROFIT_COLUMN: deducted[0]},
+        )
+        for period in TRAILING_WINDOW
+    ]
+    newest = TRAILING_WINDOW[-1]
+    rows.append(
+        (
+            DEDUCTED_DISPUTED,
+            newest,
+            ANNOUNCED_ON[newest],
+            {**_indicator_values(FULL, newest), DEDUCTED_NET_PROFIT_COLUMN: deducted[1]},
+        )
+    )
+    return tuple(rows)
+
+
+def _agreed_income_rows() -> tuple[tuple[str, date, date, dict[str, float | None]], ...]:
+    """The same security's five `income` filings, the newest of which also arrives as two rows --
+    carrying the **same** `n_income_attr_p`, which is what that endpoint really served."""
+    rows = [
+        (
+            DEDUCTED_DISPUTED,
+            period,
+            ANNOUNCED_ON[period],
+            {**_income_values(FULL, period), "n_income_attr_p": AGREED_DISPUTED_NET_PROFIT},
+        )
+        for period in TRAILING_WINDOW
+    ]
+    return (*rows, rows[-1])
+
+
+def test_a_contradiction_in_the_deducted_profit_codes_epcut_and_leaves_ep_computed(
+    tmp_path: Path,
+) -> None:
+    """What putting a factor on `fina_indicator` costs, driven on one security's two endpoints.
+
+    `000488.SZ`'s 2015 annual is served twice by both endpoints. `income` gives the two rows the
+    **same** `n_income_attr_p` under `update_flag` `'0'` and `'1'`, so they collapse and
+    `earnings_yield_ttm` computes. `fina_indicator` gives them `profit_dedt` 719,891,359.63 and
+    1,846,820,211.10 -- 2.566x apart, with nothing in that endpoint to order them -- so they do
+    not collapse and `deducted_earnings_yield_ttm` is `ambiguous_filing`.
+
+    That asymmetry is the whole content of `DEDUCTED_NET_PROFIT_COLUMN`'s "the cost is the
+    endpoint", and it is one partition set rather than two arguments. The measured *frequency*
+    behind it is recorded there (1.075% and 0.769% of filings against 0.189% and 0.459%); what a
+    partition can add is that the two factors reach different verdicts on one build, so a reader
+    who sees EPcut refuse a security is not seeing a defect in the security.
+
+    The control is the second half: the same corpus with the two `fina_indicator` rows agreeing
+    computes both, so a `_classify` that coded `ambiguous_filing` for anything reading this
+    dataset would fail here.
+    """
+    contradicting = PanelStore(tmp_path / "contradicting")
+    _write_statements(contradicting, INCOME_DATASET, _agreed_income_rows())
+    _write_statements(
+        contradicting, FINANCIAL_INDICATOR_DATASET, _deducted_dispute_rows(DISPUTED_DEDUCTED_PROFIT)
+    )
+    _write_prices_for_the_duplicated_security(contradicting, subject=DEDUCTED_DISPUTED)
+
+    agreeing = PanelStore(tmp_path / "agreeing")
+    _write_statements(agreeing, INCOME_DATASET, _agreed_income_rows())
+    _write_statements(
+        agreeing,
+        FINANCIAL_INDICATOR_DATASET,
+        _deducted_dispute_rows((DISPUTED_DEDUCTED_PROFIT[0], DISPUTED_DEDUCTED_PROFIT[0])),
+    )
+    _write_prices_for_the_duplicated_security(agreeing, subject=DEDUCTED_DISPUTED)
+
+    split = {
+        definition.key: _coverage(
+            _compute_one(contradicting, definition, subject=DEDUCTED_DISPUTED)
+        )[DEDUCTED_DISPUTED]
+        for definition in (EARNINGS_YIELD_TTM, DEDUCTED_EARNINGS_YIELD_TTM)
+    }
+    control = {
+        definition.key: _coverage(_compute_one(agreeing, definition, subject=DEDUCTED_DISPUTED))[
+            DEDUCTED_DISPUTED
+        ]
+        for definition in (EARNINGS_YIELD_TTM, DEDUCTED_EARNINGS_YIELD_TTM)
+    }
+
+    assert split == {
+        "earnings_yield_ttm": "computed",
+        "deducted_earnings_yield_ttm": "ambiguous_filing",
+    }
+    assert control == {
+        "earnings_yield_ttm": "computed",
+        "deducted_earnings_yield_ttm": "computed",
+    }
+    assert round(DISPUTED_DEDUCTED_PROFIT[1] / DISPUTED_DEDUCTED_PROFIT[0], 3) == 2.565
 
 
 # --- the round trip -------------------------------------------------------------------------------
