@@ -367,6 +367,7 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_factors.FACTOR_PROVIDER_ID",
             "panel_factors.FactorEngineError",
             "panel_factors.ProcessedFactorPanel",
+            "panel_factors._refuse_rows_that_are_not_the_answers_their_manifest_addresses",
             "panel_factors._refuse_to_drop_a_stored_build",
             "panel_ingest.load_daily_valuations",
             "panel_ingest.load_industry_histories",
@@ -405,9 +406,12 @@ prose into a check. That docstring says the engine reaches `panel_ingest` "for t
 helpers ... not for a requirement builder, which is the edge it deliberately does not use", and
 until this table existed nothing measured the "not". A fourth name in that row is now a diff.
 
-`panel_neutralization`'s eleven are the row `V2-P3-004` argued for, unrolled. Two of them --
+`panel_neutralization`'s twelve are the row `V2-P3-004` argued for, unrolled. Two of them --
 `load_daily_valuations` and `load_industry_histories` -- are the whole of that issue's foreign
-reach, and six more are the shared vocabulary that made the split cheaper than a second copy.
+reach, and seven more are the shared vocabulary that made the split cheaper than a second copy.
+The seventh, `_refuse_rows_that_are_not_the_answers_their_manifest_addresses`, is `V2-P3-019`'s
+seal check reused rather than re-written on the third tier, and it arrived here as a diff on this
+row -- which is what this table is for.
 
 The values are `"<sibling module stem>.<name>"` rather than fully qualified, because every
 importer and every import target in this table is a top-level `openalpha_cn.panel_*` module by

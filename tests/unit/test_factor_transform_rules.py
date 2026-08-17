@@ -1286,11 +1286,12 @@ def test_an_ambiguous_filing_and_an_undefined_value_are_two_answers_in_the_store
     The stored manifest rows are then compared column by column, and the split in what moves is
     the point. `source_observation_digest` moved before this change as well -- the raw coverage
     code is inside `observation_digest`'s hashed triple -- so the build's **identity** already
-    told the two cross sections apart. An identity is opaque: it says "these are two builds" and
-    names nothing a reader can act on, and every *interpretable* cell of the row was equal. Two
-    counts now move beside it, so "how many securities here have no value because the publisher
-    contradicted itself" is answerable from the partition rather than only from a hash comparison
-    against a build nobody kept.
+    told the two cross sections apart, and `source_manifest_id` moves beside it now that
+    `V2-P3-019` put `observation_digest` inside `FactorBuildManifest`'s hashed field set. Both are
+    opaque: they say "these are two builds" and name nothing a reader can act on, and every
+    *interpretable* cell of the row was equal. Two counts now move beside them, so "how many
+    securities here have no value because the publisher contradicted itself" is answerable from
+    the partition rather than only from a hash comparison against a build nobody kept.
     """
     spec = _spec(missing_values=_policy(ambiguous_filing="exclude", undefined_value="exclude"))
     values = {code: float(index) for index, code in enumerate(("a", "b", "c", "d"), start=1)}
@@ -1316,6 +1317,7 @@ def test_an_ambiguous_filing_and_an_undefined_value_are_two_answers_in_the_store
     assert differing == [
         "source_census_ambiguous_filing",
         "source_census_undefined_value",
+        "source_manifest_id",
         "source_observation_digest",
     ]
     assert len(left) - len(differing) == 37
