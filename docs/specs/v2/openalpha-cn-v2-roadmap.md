@@ -241,7 +241,8 @@ P3 结束即可独立使用（Jupyter 直连面板 + 因子）
 | `V2-P4-021` | 排序与模型的 REST + SDK + CLI 面（`model-evaluate`、`daily-run`） | 产 | 005,017 | — | S83, S84 |
 | `V2-P4-022` | 已知信噪比合成数据集（含已知 alpha / 已知 null 对照） | 测 | 013 | 现有 `scripts/generate_replay_corpus.py:29-46` 是确定性算术，无噪声模型无已知 IC | T9 |
 | `V2-P4-023` | **榜单级 tradable-ratio + freshness 闸门**：整榜覆盖率或新鲜度不过线时拒绝出榜，而非出一份看似完整的清单 | 技 | 005 | 现有只有个股级过滤（`V2-P4-004`）与数据集级 fail-closed（`V2-P1-013`），榜单层无闸门 | 集成：不过线时返回显式阻塞态 | S14, S48 |
-| `V2-P4-026` | **`daily_basic` 的 as-of 敏感会话级读**（`V2-P4-013` 的硬前置，见 §11 的 `V2-P3-004` 复审小节） | 技 | P1 存储契约 | 中性化残差的四个时钟都盖构建 `as_of`，而该 `as_of` 必须 ≥ `daily_basic` 年分区的 `max_available_time`（该年最后一个会话）——于是**年 Y 任意交易日的残差在 Y 年内一律不可见**（行过滤，返回空而非报错）。`V2-P4-013` 的 walk-forward 因此只能做**年度**粒度；月度/日度做不了。不在 `V2-P3-004` 解决：修法要么给 `daily_basic` 换分区粒度，要么给 `load_daily_valuations` 一条「只读到 `day` 为止」的显式门，两条都动 `V2-P1` 的存储契约 | 集成：年内 `as_of` 能读到该日残差 | S27, S28 |
+| `V2-P4-026` | ~~**`daily_basic` 的 as-of 敏感会话级读**（`V2-P4-013` 的硬前置，见 §11 的 `V2-P3-004` 复审小节）~~ **已完成** | 技 | P1 存储契约 | 走的是第二条路（显式门），不是换分区粒度：`load_daily_valuations` 改走 `panel_ingest._read_visible_price_session`，即 `read_visible_at` + `filters={"trade_date": day}`。安全性来自实测的形状而非论证 —— `_daily_close_timeline` 把每一行的 `available_time` 定在该 `trade_date` 当天 16:30，故**一个会话的行共享同一个可得时刻**，会话读要么全可见要么全被扣住；「被扣住」与「不存在」是两组不同的数字，而且都被具名拒绝或如实作答。换粒度被实测否决：`_session_census` 的下界是 `date(year, 1, 1)`（其 docstring 明写「三月才开始的分区正是这个守卫存在的理由」），月分区会被它整块拒绝，而放宽它是放宽一条 fail-closed 守卫 | 集成：`tests/integration/panel/test_factor_neutralizations.py::test_a_residual_built_at_a_mid_year_as_of_is_visible_at_that_same_as_of` | S27, S28 |
+| `V2-P4-027` | **`index_member_all` 的 as-of 敏感读**（`V2-P4-026` 之后 walk-forward 剩下的唯一存储侧瓶颈） | 技 | 026 | `V2-P4-026` 落地后，中性化在年中 `as_of` 上唯一还会被整块拒绝的输入是 `index_member_all`：`load_industry_histories` 走 `read_if_ready`，判定读的是分区的 `max_available_time`，所以一个成员年分区在其最后一次调整生效之前一律不可读。真实语料上那是年度成分股调整（613 条 2021-07-30 起、255 条 2022-07-29 起），于是一个「今天抓取、回放历史」的 walk-forward 每年撞一次。**不能照抄 `026` 的解法**：`index_member_all` 事件驱动，分不出「被扣住的行」与「不存在的行」，`SecurityIndustryHistory.answerable_through` 就是为此存在，行过滤会把 fail-closed 的拒绝变成看似合理的短答案。可行方向是给 `load_industry_histories` 一条**区间感知**的门（读到 `day` 为止且能声明 `answerable_through`），或给该数据集换分区键。外层还有 SW2021 的 2021-12-13 可得性地板，它不是本条要解的，但它决定了任何解法的最早 `as_of` | 集成：年中 `as_of` 能在一个含年内调整的成员分区上装出 cross section，且分不出的情形仍具名拒绝 | S27, S28 |
 
 **闸门**：排序测试覆盖确定性排序、平局政策、弃权、缺失依赖、过期数据、风险/可交易性标记，且每个入选候选证据闭合；模型评估测试用已知信噪比数据验证 walk-forward 切分、purge/embargo、制品身份、前瞻预测落库；契约升版后从 v1 卷迁移的记录仍可读；新 agent 全部经 `run_cycle` 缝验收。
 
@@ -857,7 +858,7 @@ subjects 取并集），于是同一个 requirement 在两条路径上得到了�
 2. 而构建的 `as_of` **必须** ≥ 该年 `daily_basic` 分区的 `max_available_time` ——
    因为 `load_daily_valuations` 走 `read_if_ready`，年中任何 `as_of` 都被整块拒绝
    （`KNOWN_NEUTRALIZATION_LIMITATIONS`
-   `.the_two_foreign_inputs_are_read_whole_partition_so_a_mid_year_as_of_is_refused`）。
+   `.the_industry_input_is_read_whole_partition_so_a_mid_year_as_of_can_be_refused`）。
    而一年分区的 `max_available_time` 就是**该年最后一个会话**。
 
 合起来：**年 Y 中任意交易日的残差，其 `available_time` 都落在 Y 年最后一个 session 之后。**
@@ -892,6 +893,85 @@ subjects 取并集），于是同一个 requirement 在两条路径上得到了�
 **已立为 `V2-P4-026`，且是 `V2-P4-013` 的硬前置。**
 在它落地之前，**`V2-P3-005` 与 `V2-P3-009`..`013` 都不得在这条上再叠代码**
 （例如按「残差逐日可见」写调度或读路径），否则等 `P4` 发现做不了月度 walk-forward 时要改六个地方。
+
+#### `V2-P4-026` 结案（2026-08-17）：走了显式门，换粒度被实测否决，瓶颈搬到 `index_member_all`
+
+上面两条修法**实测比过了**，选了第二条。
+
+- **换分区粒度（年 → 月/日）被否决，理由是一条 fail-closed 守卫。**
+  `panel_ingest._session_census` 的下界写死 `date(year, 1, 1)`，其 docstring 自己解释了为什么：
+  「下界是该年自身的开始，不是批次的第一行 —— 一个三月才开始的分区正是这个守卫存在的理由，
+  按自身第一行截断会把这个洞定义掉」。所以一个只装六月的分区会被
+  `_refuse_missing_price_sessions` 以「缺 1..5 月每一个开市日」整块拒绝。
+  要换粒度就必须把这条下界从「年」改成「分区自身的跨度」，那是**放宽一条既有 fail-closed 守卫**。
+  代价还不止于此：`year` 是 `panel_partitions` / `panel_partition_coverage` /
+  `..._subjects` / `..._fields` / `..._dates` / `..._revisions` 六张表的列，
+  是 `ReadinessRequirement.years`、`read_if_ready(year=)`、`write_panel_batch(year=)` 的轴，
+  `src` 与 `tests` 合计 406 处 `year=`、22 个 requirement 构造器、16 个数据集全部要跟着动。
+- **显式门（选中）**：`load_daily_valuations` → `panel_ingest._read_visible_price_session` →
+  `store.read_visible_at(requirement, year=day.year, columns=..., filters={"trade_date": day})`。
+  这是 `src/` 里**第一个**给 `read_visible_at` 传 `filters` 的调用方，而这正是它安全的原因。
+
+**为什么行过滤对 `daily_basic` 安全、对 `index_member_all` 不安全 —— 这是形状差异，实测得到：**
+`providers/tushare.py::_daily_close_timeline` 把每一行的 `available_time` 定在其 `trade_date`
+当天的 16:30，所以**一个会话的所有行共享同一个可得时刻**；而 `_build_visible_census_sql`
+是在调用方自己的 `filters` 内部数被扣住的行。于是会话读是**全有或全无**：
+实测生成面板、`as_of = 2026-01-12T04:00Z` —— 2026-01-09 返回 7 行、`withheld_row_count == 0`
+（第八只当天停牌，**根本没有行**），而 2026-01-12 / 13 / 16 各返回 0 行、`withheld_row_count == 8`。
+「被扣住」与「不存在」是两组不同的数字。而且不是只看见差别就算数：
+0 行且有扣住 → **具名拒绝**；部分可见部分被扣住（全有或全无被打破）→ **具名拒绝**；
+`day` 自身的 16:30 还没到 → 碰分区之前就**具名拒绝**（`_sessions_published_through`，
+与 provider 和 `_price_requirement` 用的是同一个常量）。
+`index_member_all` 没有这个形状，所以那一半**没有**动。
+
+**第一版把 `max_staleness` 的语义悄悄换了，全量套件把它证伪，已改回来**：
+`read_visible_at` 会在它将要返回的行上重判 `stale`（`VISIBLE_SLICE_RECHECKS`），
+而这里的行只有一个会话，于是 `max_staleness` 的判据从「`as_of` − 分区最新事件」
+变成了「`as_of` − `day` 当天 15:00」—— 那不是 `daily_requirement` 让调用方上记录的那个界
+（它说的是「这个面板没有落后于市场」），而且会让一对孪生 loader 对同一个参数在两个尺度上作答。
+实测后果：`tests/integration/panel/test_panel_gate.py::test_naming_the_session_after_the_hole_still_blocks_and_the_window_is_two_sessions_wide`
+在 `panel doctor` 自己推导的 daily 界下，把 2026-01-12 这个会话在 `as_of=2026-01-17` 上判成
+`stale`，而同一个 store 上的 `load_daily_bars` 照答不误 —— 一条凭空造出来的 finding。
+
+**改法是两步而不是一步**：先用调用方自己的 requirement 跑 `assess_readiness`
+（同一个函数、同一张规则表、同一个分区尺度，即 `read_if_ready` 会给出的那个判决），
+`ROW_FILTERABLE_ISSUE_CODES` 以外的任何 code 一律拒；再把
+`replace(requirement, max_staleness=None)` 交给 `read_visible_at` 做行过滤。
+**在这里免掉那次重判不是 `V2-P3-002` 复审关掉的那种 fail-open**，理由是这个数据集特有的：
+`_price_requirement` 声明了 `required_dates` 并按同一个 16:30 截断，
+所以「分区落后于市场」由 `date_gap` 在分区尺度上、在任何 `as_of` 上（含年中）抓住，
+比一个时长界更锐利；
+`tests/integration/panel/test_daily_panel_ingest.py::test_a_partition_that_has_fallen_behind_the_market_is_refused_at_a_mid_year_as_of`
+驱动这一条，
+`test_the_declared_freshness_bound_is_decided_at_the_scope_the_other_door_decides_it`
+则在同一个 store 上让两扇门对 60 天 / 30 天两个界给出**一致**的答案。
+真正没有被守住的只剩「答案本身有多旧」，即 `as_of - day` —— 那是调用方自己传进来的两个参数的函数，
+不需要任何 store 就能算。
+
+**结果**：年中 `as_of` 上能端到端建出并读回中性化残差
+（`tests/integration/panel/test_factor_neutralizations.py::test_a_residual_built_at_a_mid_year_as_of_is_visible_at_that_same_as_of`），
+一个覆盖年内可以有**两个以上**独立的 `as_of` 点，`min_as_ofs = 2` 因此在**单个年份内**可满足
+（`test_two_in_year_builds_give_the_ic_floor_of_two_as_ofs_two_points_inside_one_year`）。
+
+**瓶颈搬家了，且是搬到了本条明确不解的那一半。** 实测：同一份生成面板，
+只要加一条 2026-01-14 起效的成员关系，`index_member_all` 的 2026 分区
+`max_available_time` 就变成 2026-01-13T16:00Z，`as_of = 2026-01-12T04:00Z` 依旧
+`not_yet_knowable` 整块拒绝 —— 此时 `daily_basic` 已经不再贡献任何拒绝。
+真实语料上那是年度成分股调整（613 条 2021-07-30 起、255 条 2022-07-29 起）。
+**已立 `V2-P4-027`。** SW2021 的 2021-12-13 可得性地板仍在，它现在是最外层的界
+（`KNOWN_NEUTRALIZATION_LIMITATIONS.no_cross_section_is_neutralisable_before_2021_12_13`），
+但**在该地板之内真正卡住月度/日度粒度的是上面那条分区级判定**，所以 `027` 覆盖两者。
+
+**受影响的声明已逐条处理**：四个注册表里的
+`neutralised_residuals_are_read_at_a_year_end_snapshot` 改名为
+`a_neutralised_series_is_only_as_point_in_time_as_its_build_schedule`（`KNOWN_IC_LIMITATIONS`、
+`KNOWN_QUANTILE_PORTFOLIO_LIMITATIONS`、`KNOWN_EXPERIMENT_LIMITATIONS` 各一条，
+`KNOWN_REDUNDANCY_LIMITATIONS` 的
+`a_cross_tier_pair_correlates_one_point_in_time_side_against_one_snapshot_side` 收窄），
+`KNOWN_NEUTRALIZATION_LIMITATIONS` 的
+`the_two_foreign_inputs_are_read_whole_partition_so_a_mid_year_as_of_is_refused` 改名为
+`the_industry_input_is_read_whole_partition_so_a_mid_year_as_of_can_be_refused`。
+每一条都保留了被撤回的原文，因为「哪句话被实测证伪」本身是记录的一部分。
 
 ### `V2-P3-004` 复审（2026-08-12）：三个被六处引用的「实测」数字复现不出，已撤回
 
@@ -2086,15 +2166,19 @@ neutralized 与 raw 相关恰 `0.0`（`distinct`）。
 - **重述守卫**：同 `experiment_id` 不同 `content_digest` 被拒；
   只差墙钟与散文的重算被放行；已经自相矛盾的 `held` 集合按**自己**报错而不是赖到来者头上。
 
-#### 年末快照那条约束写在哪
+#### 中性化时间戳那条约束写在哪
 
-`KNOWN_EXPERIMENT_LIMITATIONS.neutralised_residuals_are_read_at_a_year_end_snapshot`
+`KNOWN_EXPERIMENT_LIMITATIONS.a_neutralised_series_is_only_as_point_in_time_as_its_build_schedule`
 —— 与 `V2-P3-005`、`V2-P3-006` **同名同码**（同一件事，按模块改名就会变成三件事）。
-本模块的措辞比它们更进一步，因为 neutralized 正是验收标准所转的那一档：
-年内任何 `as_of` 经 `read_visible_at` 读回来的是**空而不是报错**，
+**该码原名 `neutralised_residuals_are_read_at_a_year_end_snapshot`，`V2-P4-026` 连同它的内容一起改了名**：
+「年末快照」那半句是存储契约逼出来的，而那个逼迫已经解除，
+剩下的是盖章规则本身 —— 残差带的是**其构建被运行的那一刻**，不多不少，
+所以一条中性化序列的 point-in-time 程度等于它的构建排期的 point-in-time 程度，
+而**存下来的行里没有任何东西说明是哪一种排期**。
+本模块的措辞比另外两处更进一步，因为 neutralized 正是验收标准所转的那一档：
+没有任何构建盖过的 `as_of` 经 `read_visible_at` 读回来的是**空而不是报错**，
 所以它在这里现形为「neutralized 档 `ICSummary` 的 `coverage` 是 `insufficient_as_ofs`、
-它参与的每一格都是 `not_measured`」，而不是一个异常。
-`V2-P4-026` 是修法，且是 `V2-P4-013` 的硬前置。
+它参与的每一格都是 `not_measured`」，而不是一个异常 —— 这正是 `factor_view` 具名拒绝的理由。
 `test_a_tier_that_never_cleared_its_floors_reports_not_measured_and_not_a_refusal` 驱动这一形态。
 
 #### 数值栈

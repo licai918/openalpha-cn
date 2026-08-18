@@ -2181,7 +2181,7 @@ def test_the_known_experiment_limitations_are_the_declared_six() -> None:
     `tests/unit/test_known_limitation_registries.py` requires: a membership assertion is additive
     and can see a rename but never a removal."""
     assert {
-        "neutralised_residuals_are_read_at_a_year_end_snapshot",
+        "a_neutralised_series_is_only_as_point_in_time_as_its_build_schedule",
         "the_seal_detects_an_edit_and_does_not_authenticate_one",
         "an_attribution_is_a_difference_between_two_declared_tiers_and_not_a_controlled_test",
         "the_retention_ratio_carries_no_test_of_the_difference_between_two_means",
@@ -2196,14 +2196,17 @@ def test_the_year_end_snapshot_constraint_is_the_code_the_two_upstream_modules_c
     """The same fact under the same name in three registries, because renaming it per module
     would make it three facts and a reader chasing one would find two.
 
-    The neutralised row is the one the acceptance criterion turns on, so the constraint that its
-    timestamps are a year-end snapshot has to be readable from this module's own registry rather
-    than only from the two it consumes.
+    The neutralised row is the one the acceptance criterion turns on, so the constraint on its
+    timestamps has to be readable from this module's own registry rather than only from the two
+    it consumes. That constraint used to be "they are a year-end snapshot" and `V2-P4-026`
+    narrowed it to "they are whatever the build schedule made them"; the *name* moved with it,
+    from `neutralised_residuals_are_read_at_a_year_end_snapshot` to the one below, in all three
+    registries at once -- which is the property this test exists to keep true.
     """
     from openalpha_cn.backtest.factor_ic import IC_LIMITATION_CODES
     from openalpha_cn.backtest.factor_portfolio import QUANTILE_PORTFOLIO_LIMITATION_CODES
 
-    code_name = "neutralised_residuals_are_read_at_a_year_end_snapshot"
+    code_name = "a_neutralised_series_is_only_as_point_in_time_as_its_build_schedule"
 
     assert code_name in EXPERIMENT_LIMITATION_CODES
     assert code_name in IC_LIMITATION_CODES

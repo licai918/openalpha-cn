@@ -197,22 +197,32 @@ definition whose sign convention produced it.
 
 ## The one product constraint a reader of a neutralised IC has to be told
 
-**A neutralised residual is read at a year-end snapshot, not at the `as_of` a caller asked for**,
-and this module cannot fix it. `panel_neutralization.neutralized_observation_batch` stamps all
-four clocks of every row with the build's own `as_of`, and that `as_of` is at or after the
-`max_available_time` of the year's `daily_basic` partition -- the year's last session. Reads go
-through `PanelStore.read_visible_at`, so any `as_of` inside the covered year returns **nothing**
-rather than raising, and the rows a caller does get back are the ones stamped at the year end.
+**This section said "a neutralised residual is read at a year-end snapshot, not at the `as_of` a
+caller asked for" and that sentence was retracted by `V2-P4-026`.** It was true of the storage
+contract when `V2-P3-005` was written: `load_daily_valuations` took `read_if_ready`, which
+refuses a `daily_basic` year at every `as_of` inside it, so a build's `as_of` could not be
+earlier than that year's last session -- and since
+`panel_neutralization.neutralized_observation_batch` stamps all four clocks of every row with the
+build's own `as_of`, every residual of year Y became visible at one instant in December. That
+forcing is gone. `panel_ingest._read_visible_price_session` gives `daily_basic` an
+as-of-sensitive session-level read, so a residual can be built at a mid-year `as_of` and is read
+back at it.
 
-`V2-P3-004`'s review measured this and judged it non-blocking for this issue, and the judgement
-is worth restating because it is narrower than it looks: the residuals' *content* is clean -- each
-was computed from the industry, the market capitalisation and the processed value **of its own
-day** -- so an IC or a decay curve built from them is not forward-contaminated. What was lost is
-the honesty of the timestamps, which means a neutralised IC series cannot claim to be a
-point-in-time series the way a raw or processed one can. `V2-P4-026` is the issue that gives
-`daily_basic` an as-of-sensitive session-level read, and it is a hard precondition of `V2-P4-013`.
-`KNOWN_IC_LIMITATIONS` carries it as
-`neutralised_residuals_are_read_at_a_year_end_snapshot`.
+**What survives is weaker and is still worth stating, because it is what a reader of a stored
+series actually meets.** The stamping rule is unchanged, so a neutralised series is exactly as
+point-in-time as the schedule it was built on: a tier built once at year end still reads as one
+December instant, and nothing in a stored artifact says which of the two it was. And one refusal
+still bounds the schedule from outside this module -- `index_member_all` is still read whole
+partition, so a build cannot be scheduled inside a membership year whose newest assignment
+post-dates the `as_of` (`V2-P4-027`), and no cross section at all is assemblable before the
+SW2021 availability floor of 2021-12-13.
+
+`V2-P3-004`'s review judged the original constraint non-blocking for this issue and that
+judgement is unchanged: the residuals' *content* was always clean -- each was computed from the
+industry, the market capitalisation and the processed value **of its own day** -- so an IC or a
+decay curve built from them is not forward-contaminated either way. `KNOWN_IC_LIMITATIONS`
+carries the surviving half as
+`a_neutralised_series_is_only_as_point_in_time_as_its_build_schedule`.
 
 ## Layering, and why there is no numpy here
 
@@ -474,20 +484,36 @@ class ICLimitation:
 
 KNOWN_IC_LIMITATIONS: Final[tuple[ICLimitation, ...]] = (
     ICLimitation(
-        code="neutralised_residuals_are_read_at_a_year_end_snapshot",
+        code="a_neutralised_series_is_only_as_point_in_time_as_its_build_schedule",
         detail=(
-            "A neutralised IC is not a point-in-time series the way a raw or processed one is. "
-            "panel_neutralization.neutralized_observation_batch stamps all four clocks of every "
-            "residual row with the build's own as_of, and that as_of is at or after the "
-            "max_available_time of the year's daily_basic partition -- the year's last session. "
-            "Reads go through PanelStore.read_visible_at, so an as_of inside the covered year "
-            "returns nothing rather than raising, and what a caller does read back was stamped "
-            "at the year end. V2-P3-004's review measured this and judged it non-blocking here "
-            "because the residuals' CONTENT is clean: each was regressed against the industry, "
-            "the market capitalisation and the processed value of its own day, so neither the IC "
-            "nor the decay curve is forward-contaminated. What is lost is the honesty of the "
-            "timestamps. V2-P4-026 (an as-of-sensitive session-level read of daily_basic) is the "
-            "fix and is a hard precondition of V2-P4-013."
+            "THIS ENTRY WAS NAMED neutralised_residuals_are_read_at_a_year_end_snapshot AND THE "
+            "RENAME IS THE RETRACTION. It used to state, as a property of this plane, that a "
+            "neutralised residual is stamped at the year end whatever as_of a caller asked for: "
+            "load_daily_valuations took read_if_ready, which refuses a daily_basic year at every "
+            "as_of inside it, so no build could be run earlier than the year's last session, and "
+            "neutralized_observation_batch stamps all four clocks of every row with the build's "
+            "own as_of. V2-P4-026 removed the forcing half: panel_ingest."
+            "_read_visible_price_session reads one session of daily_basic under a WHERE "
+            "available_time <= as_of predicate, so a residual CAN now be built at a mid-year "
+            "as_of and -- because load_neutralized_factor_observations reads through "
+            "PanelStore.read_visible_at, which filters rows rather than refusing partitions -- "
+            "is read back at that as_of. What survives is the stamping rule itself, "
+            "which is unchanged and is right for a derived row: a residual carries the instant "
+            "its build was run at and nothing else, so a series built once at year end is one "
+            "December instant and a series built daily is a daily series, and NOTHING IN A "
+            "STORED IC SAYS WHICH. A reader who wants a point-in-time neutralised IC has to know "
+            "the build schedule; this module cannot infer it, because the only evidence it sees "
+            "is the as_ofs the rows carry and both schedules produce well-formed ones. Two "
+            "refusals still bound the schedule from outside this module and are not this entry's "
+            "to fix: index_member_all is read whole partition (V2-P4-027, "
+            "KNOWN_NEUTRALIZATION_LIMITATIONS."
+            "the_industry_input_is_read_whole_partition_so_a_mid_year_as_of_can_be_refused) and "
+            "no cross section before 2021-12-13 is assemblable at all. The residuals' CONTENT "
+            "was clean before this change and is clean after it -- each is regressed against the "
+            "industry, the market capitalisation and the processed value of its own day -- which "
+            "is what V2-P3-004's review measured when it judged the original constraint "
+            "non-blocking here, and that judgement is unchanged: neither the IC nor the decay "
+            "curve was ever forward-contaminated by this."
         ),
     ),
     ICLimitation(
@@ -1560,9 +1586,11 @@ def neutralized_cross_section(
 ) -> ICCrossSection:
     """The neutralised tier's cross section: `factor_neut*` residuals, admitting `neutralized`.
 
-    Read `KNOWN_IC_LIMITATIONS`' `neutralised_residuals_are_read_at_a_year_end_snapshot` before
-    reading a series built from these: the residuals' content is clean and their timestamps are
-    not, so a neutralised IC series is not a point-in-time series the way the other two are.
+    Read `KNOWN_IC_LIMITATIONS`'
+    `a_neutralised_series_is_only_as_point_in_time_as_its_build_schedule` before reading a series
+    built from these: the residuals' content is clean and their timestamps carry the instant each
+    *build* was run at, so a neutralised IC series is a point-in-time series only to the extent
+    its build schedule was one -- and nothing in the stored rows says which schedule that was.
 
     Refuses rows computed by two different factors; see `_refuse_observations_of_two_factors`.
     """

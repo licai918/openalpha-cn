@@ -29,6 +29,7 @@ date census survives.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -48,7 +49,7 @@ from openalpha_cn.domain.daily_prices import (
     priced_cross_section,
     session_returns,
 )
-from openalpha_cn.domain.panel_batch import PanelBatchError
+from openalpha_cn.domain.panel_batch import PanelBatchError, TimelineColumns
 from openalpha_cn.domain.stock_universe import SecurityLifecycle, build_stock_universe
 from openalpha_cn.domain.trading_calendar import (
     CalendarDay,
@@ -64,8 +65,10 @@ from openalpha_cn.panel_ingest import (
     load_adjustment_histories,
     load_daily_bars,
     load_daily_valuations,
+    merge_panel_batches,
     write_adjustment_factors,
     write_daily_panel,
+    write_panel_batch,
 )
 from openalpha_cn.providers.base import ProviderRequest
 from openalpha_cn.providers.tushare import TUSHARE_RESPONSE_TRUNCATION_FLAG, TushareProvider
@@ -1219,3 +1222,332 @@ def test_two_sides_that_belong_to_different_years_are_refused(tmp_path: Path) ->
             calendar=_calendar(),
             halts=None,
         )
+
+
+# --- the as-of-sensitive session read (`V2-P4-026`) ----------------------------------------
+
+
+MID_WINDOW = datetime(2026, 6, 11, 9, 0, tzinfo=UTC)
+"""17:00 Asia/Shanghai on 2026-06-11: after the 11th's 16:30, before the 12th's.
+
+Inside the 2026 partition by five and a half months, so `read_if_ready` refuses the whole of it
+(`not_yet_knowable` compares `as_of` against the partition's newest `available_time`, which is
+2026-06-15T08:30Z). Two of the four stored sessions had published at this instant and two had
+not, which is what makes this one constant enough to drive both sides of the new door.
+"""
+
+BEFORE_ANY_PUBLICATION = datetime(2026, 6, 10, 2, 0, tzinfo=UTC)
+"""10:00 Asia/Shanghai on 2026-06-10: before that session's own 16:30 and after the 9th's."""
+
+LATE_INSTANT = datetime(2026, 6, 12, 8, 30, tzinfo=UTC)
+"""Two sessions after the 10th's own publication -- a clock the provider cannot produce."""
+
+
+def _stored_day(value: object) -> date:
+    return date.fromisoformat(str(value))
+
+
+def _retimed(batch: Any, moved: tuple[datetime, ...]) -> Any:
+    """`batch` with a new `available_time` column and every other column untouched.
+
+    `ingested_time` is raised to match rather than left, because `Timeline` forbids it preceding
+    `available_time`; `revision_time` moves with `available_time` for the same reason. Built by
+    replacing `TimelineColumns` on the real fetched batch, so the only thing these fixtures
+    differ from a real partition in is the clock under test.
+
+    The batch's own `as_of` is raised too, because `_check_visible_at_as_of` refuses a batch
+    carrying a row that post-dates its request -- which is the *fetch-side* half of the same
+    point-in-time rule and is not the one under test here. Raising it keeps the fixture legal at
+    the write boundary so the **read** boundary is what the assertion measures.
+    """
+    return dataclasses.replace(
+        batch,
+        as_of=max(batch.as_of, *moved),
+        timeline=TimelineColumns(
+            event_time=batch.timeline.event_time,
+            available_time=moved,
+            ingested_time=tuple(
+                max(instant, original)
+                for instant, original in zip(moved, batch.timeline.ingested_time, strict=True)
+            ),
+            revision_time=moved,
+        ),
+    )
+
+
+def _write_retimed_valuations(store: PanelStore, batches: Sequence[Any]) -> None:
+    """Store hand-retimed valuations through `write_panel_batch`.
+
+    Not `write_daily_panel`, because that cross-checks the two datasets and these fixtures make
+    them disagree about one clock and nothing else.
+    """
+    write_panel_batch(store, merge_panel_batches(list(batches)), year=2026)
+
+
+def test_the_valuations_answer_a_published_session_from_inside_the_year_the_bars_still_refuse(
+    tmp_path: Path,
+) -> None:
+    """`V2-P4-026`'s acceptance, and the asymmetry it deliberately creates, in one test.
+
+    At `MID_WINDOW` the 2026 `daily_basic` partition's newest `available_time` is
+    2026-06-15T08:30Z, so `read_if_ready` refuses the whole partition -- which is exactly what
+    `load_daily_bars` still does, on the identical store, at the identical instant, for the
+    identical session. `load_daily_valuations` answers, because it reads the session under a
+    `WHERE available_time <= as_of` predicate instead.
+
+    The valuations are held to their **values** and not merely to being non-empty: a door that
+    answered with an empty mapping would satisfy "did not raise", and an empty mapping is the
+    fail-open shape this whole issue exists to remove.
+    """
+    store = _seeded(tmp_path)
+
+    valuations = load_daily_valuations(
+        store, day=JUNE_10, calendar=_calendar(), as_of=MID_WINDOW, max_staleness=None
+    )
+
+    assert sorted(valuations) == sorted((PING_AN, MAOTAI))
+    assert valuations[PING_AN].total_mv == 21967499.4001
+    assert valuations[MAOTAI].total_mv == 159495411.3084
+    assert valuations[PING_AN].trade_date == JUNE_10
+
+    with pytest.raises(PanelStorageError, match="not_yet_knowable"):
+        load_daily_bars(
+            store, day=JUNE_10, calendar=_calendar(), as_of=MID_WINDOW, max_staleness=None
+        )
+
+
+def test_a_session_whose_own_publication_instant_has_not_arrived_is_refused_by_name(
+    tmp_path: Path,
+) -> None:
+    """The gate that runs before the partition is touched, and the fail-open it closes.
+
+    A `day` past `_sessions_published_through(as_of)` is not in the requirement's date census --
+    `_price_requirement` clamps at the same 16:30 -- so `date_gap` cannot see it, and the
+    availability predicate would answer it with no rows. That pair is "no rows, nothing
+    withheld", which is indistinguishable from a session the market was empty on. It is refused
+    instead, before any read.
+    """
+    store = _seeded(tmp_path)
+    with pytest.raises(PanelStorageError, match="that session had not published yet"):
+        load_daily_valuations(
+            store,
+            day=JUNE_10,
+            calendar=_calendar(),
+            as_of=BEFORE_ANY_PUBLICATION,
+            max_staleness=None,
+        )
+
+
+def test_a_session_the_store_holds_and_the_as_of_cannot_see_is_refused_rather_than_empty(
+    tmp_path: Path,
+) -> None:
+    """The backstop under the gate above, driven on a partition whose rows say something else.
+
+    The 10th's valuation rows are stamped available at 2026-06-12T08:30Z -- two sessions late,
+    which the provider's own clock cannot produce -- so the publication gate lets the read
+    through and the predicate then withholds every row of the session. `withheld_row_count` is 2
+    and the visible slice is empty, which is a *different pair of numbers* from a session that
+    simply has no rows, and the loader refuses on it by name instead of answering `{}`.
+    """
+    store = _seeded(tmp_path)
+    _write_retimed_valuations(
+        store,
+        [
+            _retimed(
+                batch,
+                tuple(
+                    LATE_INSTANT if _stored_day(value) == JUNE_10 else original
+                    for value, original in zip(
+                        next(c.values for c in batch.columns if c.name == "trade_date"),
+                        batch.timeline.available_time,
+                        strict=True,
+                    )
+                ),
+            )
+            for batch in _valuation_batches()
+        ],
+    )
+
+    with pytest.raises(PanelStorageError, match="none of them was knowable at"):
+        load_daily_valuations(
+            store, day=JUNE_10, calendar=_calendar(), as_of=MID_WINDOW, max_staleness=None
+        )
+
+
+def test_a_session_whose_rows_do_not_share_one_availability_instant_is_refused(
+    tmp_path: Path,
+) -> None:
+    """The property the whole door rests on, checked rather than assumed.
+
+    `_read_visible_price_session` is allowed past `test_visible_read_callers.py`'s objection only
+    because one session's rows carry one `available_time`, so a short answer is impossible. That
+    property lives in `providers/tushare.py`, one package away, and nothing in the store enforces
+    it -- so a partition that violates it is refused here rather than answered with the half of
+    the session that happened to be visible.
+
+    Built by moving **one security's** row on the 10th and leaving the other where the provider
+    put it, so the read finds 1 visible and 1 withheld.
+    """
+    store = _seeded(tmp_path)
+    _write_retimed_valuations(
+        store,
+        [
+            _retimed(
+                batch,
+                tuple(
+                    LATE_INSTANT
+                    if _stored_day(value) == JUNE_10 and subject == MAOTAI
+                    else original
+                    for value, subject, original in zip(
+                        next(c.values for c in batch.columns if c.name == "trade_date"),
+                        batch.subjects,
+                        batch.timeline.available_time,
+                        strict=True,
+                    )
+                ),
+            )
+            for batch in _valuation_batches()
+        ],
+    )
+
+    with pytest.raises(PanelStorageError, match="do not share one availability instant"):
+        load_daily_valuations(
+            store, day=JUNE_10, calendar=_calendar(), as_of=MID_WINDOW, max_staleness=None
+        )
+
+
+def test_a_security_with_no_row_and_a_session_with_none_visible_are_two_different_answers(
+    tmp_path: Path,
+) -> None:
+    """The question `test_visible_read_callers.py` makes every caller of the filtered door answer.
+
+    `daily_basic` legitimately omits a security a session traded -- 60 of 3,843 on 2020-03-02,
+    all Beijing-board -- and the whole objection to a row-filtered read is that a *withheld* row
+    looks like one of those. Both shapes are produced on one store here and shown to be
+    distinguishable: `MAOTAI` has no valuation row on the 10th at all and the read answers with
+    `PING_AN` alone, while the 12th is a session the store holds in full and `MID_WINDOW` cannot
+    see, which raises. One is a short cross section; the other is not an answer.
+
+    The 12th is refused by the publication gate rather than by the withheld-row count, because
+    on a partition carrying the provider's own clock the gate is reached first -- which is the
+    point of having it. `test_a_session_the_store_holds_and_the_as_of_cannot_see_is_refused_
+    rather_than_empty` drives the count-based backstop underneath it, on a partition whose rows
+    say something the gate cannot infer.
+    """
+    store = _store(tmp_path)
+    partial = [
+        _batch(
+            DAILY_BASIC_DATASET,
+            DAILY_BASIC_FIELDS,
+            [row for row in VALUATIONS[day] if day != "20260610" or row[0] == PING_AN],
+            day,
+            FETCHED_AT,
+        )
+        for day in SESSIONS
+    ]
+    write_daily_panel(
+        store, bars=_bar_batches(), fundamentals=partial, calendar=_calendar(), halts=None
+    )
+
+    absent = load_daily_valuations(
+        store, day=JUNE_10, calendar=_calendar(), as_of=MID_WINDOW, max_staleness=None
+    )
+    assert sorted(absent) == [PING_AN]
+
+    with pytest.raises(PanelStorageError, match="that session had not published yet"):
+        load_daily_valuations(
+            store, day=JUNE_12, calendar=_calendar(), as_of=MID_WINDOW, max_staleness=None
+        )
+
+
+def test_the_visible_door_answers_exactly_what_the_unfiltered_one_did_where_it_answered(
+    tmp_path: Path,
+) -> None:
+    """The change is an extension, not a replacement, and this is the half that says so.
+
+    At `AS_OF` the partition's newest `available_time` precedes the read, so `read_if_ready` was
+    ready and the predicate removes nothing. The valuations are compared against the bars' own
+    session -- the same securities, the same session, the same closes -- so this asserts the
+    answer rather than that two calls agreed with each other.
+    """
+    store = _seeded(tmp_path)
+    valuations = load_daily_valuations(
+        store, day=JUNE_12, calendar=_calendar(), as_of=AS_OF, max_staleness=None
+    )
+    bars = load_daily_bars(
+        store, day=JUNE_12, calendar=_calendar(), as_of=AS_OF, max_staleness=None
+    )
+
+    assert sorted(valuations) == sorted(bars) == sorted((PING_AN, MAOTAI))
+    assert close_disagreements(close_index(bars), close_index(valuations)) == ()
+    assert valuations[PING_AN].total_mv == 21812252.0568
+
+
+def test_the_declared_freshness_bound_is_decided_at_the_scope_the_other_door_decides_it(
+    tmp_path: Path,
+) -> None:
+    """The bound stays a statement about the **partition**, and the twins stay in step.
+
+    The first cut of `V2-P4-026` let `read_visible_at`'s `VISIBLE_SLICE_RECHECKS` re-decide
+    `stale` over the returned rows, which for a session read is `day`'s own close -- so a bound
+    declared about the panel's freshness silently became one about the age of the session asked
+    for, and `load_daily_bars` and `load_daily_valuations` began answering the same argument at
+    two scopes. `tests/integration/panel/test_panel_gate.py::
+    test_naming_the_session_after_the_hole_still_blocks_and_the_window_is_two_sessions_wide`
+    measured the consequence: a session blocking with `stale` inside `panel doctor`'s derived
+    daily bound, on a panel that was not behind anything.
+
+    Both directions are driven, on both doors, on one store: at `AS_OF` (2026-08-08) the
+    partition's newest event is 2026-06-15, so a 60-day bound clears and a 30-day bound refuses
+    -- **identically** on the two loaders. The session asked about is 2026-06-12, 57 days before
+    `AS_OF`, so a bound between the two would separate the scopes if they had diverged; 60 and 30
+    sit either side of the partition's own age and neither is sensitive to the session's.
+    """
+    store = _seeded(tmp_path)
+    wide, narrow = timedelta(days=60), timedelta(days=30)
+
+    assert (
+        load_daily_valuations(
+            store, day=JUNE_12, calendar=_calendar(), as_of=AS_OF, max_staleness=wide
+        )[PING_AN].total_mv
+        == 21812252.0568
+    )
+    assert sorted(
+        load_daily_bars(store, day=JUNE_12, calendar=_calendar(), as_of=AS_OF, max_staleness=wide)
+    ) == sorted((PING_AN, MAOTAI))
+    assert (AS_OF.date() - JUNE_12).days == 57
+    for loader in (load_daily_bars, load_daily_valuations):
+        with pytest.raises(PanelStorageError, match="'stale'"):
+            loader(store, day=JUNE_12, calendar=_calendar(), as_of=AS_OF, max_staleness=narrow)
+
+
+def test_a_partition_that_has_fallen_behind_the_market_is_refused_at_a_mid_year_as_of(
+    tmp_path: Path,
+) -> None:
+    """The guard that does the work `stale` cannot do mid-year, driven rather than argued.
+
+    `_read_visible_price_session` hands `read_visible_at` a requirement with `max_staleness`
+    waived, so the visible-slice recheck decides nothing. That would be a fail-open if `stale`
+    were the only thing watching reach -- and at a mid-year `as_of` it is structurally unable to
+    fire on either door, because the catalog's newest event post-dates the read.
+
+    `date_gap` is what watches it here. `_price_requirement` states `required_dates` and clamps
+    them at the same 16:30 the provider stamps, so a partition stored through 2026-06-11 and read
+    at 17:00 on 2026-06-12 is required to hold the 12th and does not. The refusal names
+    `date_gap`, arrives at partition scope, and is unaffected by any bound the caller states --
+    including none at all, which is the case this asserts.
+    """
+    store = _store(tmp_path)
+    stopped_early = datetime(2026, 6, 12, 4, 0, tzinfo=UTC)  # noon Asia/Shanghai on the 12th
+    write_daily_panel(
+        store,
+        bars=_bar_batches(days=SESSIONS[:2], fetched_at=stopped_early),
+        fundamentals=_valuation_batches(days=SESSIONS[:2], fetched_at=stopped_early),
+        calendar=_calendar(),
+        halts=None,
+    )
+    evening = datetime(2026, 6, 12, 9, 0, tzinfo=UTC)  # 17:00 Asia/Shanghai, after the 12th's
+
+    for loader in (load_daily_bars, load_daily_valuations):
+        with pytest.raises(PanelStorageError, match="'date_gap'"):
+            loader(store, day=JUNE_10, calendar=_calendar(), as_of=evening, max_staleness=None)

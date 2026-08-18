@@ -231,14 +231,14 @@ of one number does not exist, and a summary over one `as_of` would be a dispersi
 
 ## The neutralised tier's timestamps, restated because it is read here too
 
-A neutralised residual is stamped at a **year-end snapshot** and not at the `as_of` a caller
-asked for. `factor_ic` states the whole of it under
-`neutralised_residuals_are_read_at_a_year_end_snapshot` and nothing about it is different here,
-but a cross-tier correlation is *more* exposed to it than an IC is: the raw side of such a pair
-is point-in-time and the neutralised side is not, so the two sides of one number were stamped
-under two different rules. `KNOWN_REDUNDANCY_LIMITATIONS` carries that as its own entry rather
-than pointing at the neighbour's, because the finding is about the pairing and not about either
-side.
+A neutralised residual is stamped at the instant its **build** was run, which `V2-P4-026` freed
+from the year end without changing the rule itself. `factor_ic` states the whole of it under
+`a_neutralised_series_is_only_as_point_in_time_as_its_build_schedule` and nothing about it is
+different here, but a cross-tier correlation is *more* exposed to it than an IC is: the raw side
+of such a pair is stamped at its input session's publication and the neutralised side at its
+build, so wherever the two schedules differ the two sides of one number were stamped under two
+different rules. `KNOWN_REDUNDANCY_LIMITATIONS` carries that as its own entry rather than
+pointing at the neighbour's, because the finding is about the pairing and not about either side.
 
 ## Layering, and why there is no numpy here
 
@@ -495,18 +495,25 @@ KNOWN_REDUNDANCY_LIMITATIONS: Final[tuple[RedundancyLimitation, ...]] = (
     RedundancyLimitation(
         code="a_cross_tier_pair_correlates_one_point_in_time_side_against_one_snapshot_side",
         detail=(
-            "factor_ic's neutralised_residuals_are_read_at_a_year_end_snapshot records that "
+            "THE CLAUSE 'AT OR AFTER THE YEAR'S LAST SESSION' WAS RETRACTED BY V2-P4-026 AND THE "
+            "ENTRY IS NARROWER THAN IT WAS. factor_ic's "
+            "a_neutralised_series_is_only_as_point_in_time_as_its_build_schedule records that "
             "panel_neutralization.neutralized_observation_batch stamps all four clocks of every "
-            "residual with the build's own as_of, at or after the year's last session. A "
-            "single-tier correlation reads both sides under one rule and inherits that "
-            "disclosure unchanged. A CROSS-TIER pair does not: correlate_cross_section of a raw "
-            "vector against a neutralised one puts a point-in-time side and a year-end-snapshot "
-            "side into one number, so 'how much of this factor survived the neutralisation' is "
-            "answered at whatever as_of the residual partition happens to return rather than at "
-            "the one the caller asked for. The residuals' CONTENT is still clean -- each was "
-            "regressed against the industry, the market capitalisation and the processed value "
-            "of its own day -- so the number is not forward-contaminated; what is lost is the "
-            "reader's ability to date it. V2-P4-026 is the fix."
+            "residual with the BUILD's as_of; what it no longer records, because it is no longer "
+            "true, is that the build's as_of is forced to the year end. A single-tier "
+            "correlation reads both sides under one rule and inherits that disclosure unchanged. "
+            "A CROSS-TIER pair does not, and the exposure survives the retraction in a weaker "
+            "form: correlate_cross_section of a raw vector against a neutralised one puts a side "
+            "stamped at the instant its input session published against a side stamped at the "
+            "instant its BUILD was run, and those two are the same only if the neutralisation "
+            "was built on the same schedule the raw tier was. Where it was not -- a residual "
+            "series built once at year end, which is what every artifact predating V2-P4-026 "
+            "is -- 'how much of this factor survived the neutralisation' is answered at the "
+            "build instant rather than at the one the caller asked for, and nothing in the "
+            "stored rows distinguishes the two schedules. The residuals' CONTENT is clean either "
+            "way -- each was regressed against the industry, the market capitalisation and the "
+            "processed value of its own day -- so the number is not forward-contaminated; what "
+            "can be lost is the reader's ability to date it."
         ),
     ),
     RedundancyLimitation(

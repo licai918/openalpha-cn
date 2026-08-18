@@ -65,21 +65,25 @@ Three clocks, and collapsing any two of them would be wrong in a way that produc
   `FactorExperimentRecord`'s own arrangement, unchanged.
 
 **What a range that ends inside a covered year does, because this is the question the face has to
-be able to answer out loud.** The neutralised tier is not on the same schedule as the other two
-and cannot be: `panel_neutralization.load_industry_market_cap_cross_section` reads `daily_basic`
-through `read_if_ready`, the unfiltered door, which refuses a partition whose newest row
-post-dates the `as_of` -- so a residual for any day of year Y can only be *built* at an `as_of` at
-or after Y's last stored session, and every residual of that build is stamped there. Reading them
-back goes through `read_visible_at`, so an in-year read returns **empty rather than an error**,
-which is the shape that makes this dangerous: a face that shrugged would report a two-tier
-experiment, or a three-tier one whose neutralised row measured nothing, and the acceptance
-criterion `V2-P3-014` exists for is decided on exactly that row.
+be able to answer out loud.** The neutralised tier may or may not be on the same schedule as the
+other two, and this module cannot assume either. Until `V2-P4-026` it could not be:
+`panel_neutralization.load_industry_market_cap_cross_section` read `daily_basic` through
+`read_if_ready`, the unfiltered door, so a residual for any day of year Y could only be *built* at
+an `as_of` at or after Y's last stored session. That is retracted -- `daily_basic` now has an
+as-of-sensitive session-level read and a residual can be stamped at a mid-year instant -- and what
+survives is the *schedule* question rather than the arithmetic one: a neutralisation is stamped at
+the instants its builds were run at, whatever those were, and a store may hold a raw tier on one
+schedule beside a neutralised tier on another. Reading a tier back goes through `read_visible_at`,
+so an `as_of` no build was stamped at returns **empty rather than an error**, which is the shape
+that makes this dangerous: a face that shrugged would report a two-tier experiment, or a
+three-tier one whose neutralised row measured nothing, and the acceptance criterion `V2-P3-014`
+exists for is decided on exactly that row.
 
 So this module refuses. The `as_of`s are the **raw** tier's own stored cross sections inside the
 range, and every other tier must carry a cross section at each one of them; a tier that does not
-is `FactorRunBlockedError`, naming the missing instants and the tier. A mid-year `--start`/`--end`
-over a neutralisation built at year end therefore produces a refusal that says which instants have
-no residual, rather than an artifact whose loudest cell is `not_measured` for a reason nobody
+is `FactorRunBlockedError`, naming the missing instants and the tier. A `--start`/`--end` over
+days the neutralisation was never built for therefore produces a refusal that says which instants
+have no residual, rather than an artifact whose loudest cell is `not_measured` for a reason nobody
 stated. `the_three_tiers_must_have_been_built_at_the_same_instants` is the entry, and
 `tests/integration/test_factor_interfaces.py::
 test_a_range_whose_neutralised_tier_was_never_built_is_refused_the_same_way_on_all_three_faces`
@@ -424,17 +428,25 @@ KNOWN_FACTOR_RUN_LIMITATIONS: Final[tuple[FactorRunLimitation, ...]] = (
         detail=(
             "An attribution is a difference between two readings of the same days, so "
             "FactorExperimentArtifact requires the three tier reports to carry one as_of tuple. "
-            "The neutralised tier cannot be on the same schedule as the other two inside a "
-            "covered year: load_industry_market_cap_cross_section reads daily_basic through "
-            "read_if_ready, which refuses a partition whose newest row post-dates the as_of, so a "
-            "residual for any day of year Y can only be built at an as_of at or after Y's last "
-            "stored session and every residual of that build is stamped there. Reading them back "
-            "goes through read_visible_at, which filters rather than refuses, so an in-year read "
-            "is EMPTY rather than an error. This face refuses such a run by name instead of "
-            "reporting a three-tier artifact whose neutralised row measured nothing -- that row "
-            "is the one V2-P3-014's acceptance criterion is decided on. V2-P4-026 (an "
-            "as-of-sensitive session-level read of daily_basic) is the fix and is a hard "
-            "precondition of V2-P4-013."
+            "THE REASON THIS RULE HAD TO EXIST IS NOT THE REASON IT STILL EXISTS, AND V2-P4-026 "
+            "IS THE DIFFERENCE. It used to be arithmetic: load_industry_market_cap_cross_section "
+            "read daily_basic through read_if_ready, so a residual for any day of year Y could "
+            "only be built at an as_of at or after Y's last stored session, and the neutralised "
+            "tier COULD NOT be put on the other two's schedule inside a covered year. It can "
+            "now -- panel_ingest._read_visible_price_session reads one daily_basic session under "
+            "a WHERE available_time <= as_of predicate, and "
+            "tests/integration/panel/test_factor_neutralizations.py::"
+            "test_a_residual_built_at_a_mid_year_as_of_is_visible_at_that_same_as_of builds one. "
+            "So this is now a rule about SCHEDULES rather than a consequence of the storage "
+            "contract: whatever instants a neutralisation was in fact built at, a three-tier "
+            "report can only be assembled over instants all three tiers carry. The failure shape "
+            "is unchanged and is why the rule is a refusal rather than a shrug -- reading a tier "
+            "back goes through read_visible_at, which filters rather than refuses, so an as_of no "
+            "build was stamped at is EMPTY rather than an error, and a face that shrugged would "
+            "report a three-tier artifact whose neutralised row measured nothing. That row is the "
+            "one V2-P3-014's acceptance criterion is decided on. Two refusals outside this module "
+            "still bound which schedules are reachable at all: index_member_all is read whole "
+            "partition (V2-P4-027) and no cross section before 2021-12-13 is assemblable."
         ),
     ),
     FactorRunLimitation(
@@ -443,16 +455,22 @@ KNOWN_FACTOR_RUN_LIMITATIONS: Final[tuple[FactorRunLimitation, ...]] = (
             "`openalpha factor build` (V2-P3-019) computes and stores the raw and processed tiers "
             "at any prediction instant the panel covers, so a store built only by `openalpha "
             "panel build` now reaches `factor run`. It cannot put the third tier at an arbitrary "
-            "instant, and the bound is arithmetic rather than a policy: "
-            "load_industry_market_cap_cross_section reads daily_basic through read_if_ready, "
-            "which refuses a partition whose newest row post-dates the as_of, and "
-            "_refuse_a_cross_section_that_is_not_this_panels requires the characteristic cross "
-            "section's as_of to equal the processed panel's exactly. The two together admit only "
-            "a prediction instant at or after the last stored session of every year the read "
-            "touches. `--tier neutralized` at an earlier instant is refused BY NAME and writes "
-            "nothing, rather than storing two tiers and leaving `factor run` to report the third "
-            "as an empty in-range read. V2-P4-026 (an as-of-sensitive session-level read of "
-            "daily_basic) is the fix and is a hard precondition of V2-P4-013."
+            "instant either, and the bound is arithmetic rather than a policy -- but V2-P4-026 "
+            "moved WHICH dataset states it, and the entry is narrower than it was. It used to "
+            "name both foreign reads: daily_basic is now read one session at a time under a "
+            "WHERE available_time <= as_of predicate (panel_ingest._read_visible_price_session), "
+            "so it no longer bounds anything a caller can reach. What remains is "
+            "load_industry_histories, which still takes read_if_ready and refuses a membership "
+            "partition whose newest assignment post-dates the as_of, together with "
+            "_refuse_a_cross_section_that_is_not_this_panels requiring the characteristic cross "
+            "section's as_of to equal the processed panel's exactly. The two admit only a "
+            "prediction instant at or after the last stored ASSIGNMENT of every membership year "
+            "the read touches -- which for a whole-year corpus is the year's last "
+            "reclassification rather than its last session, and on a real corpus is the annual "
+            "constituent review. `--tier neutralized` at an earlier instant is refused BY NAME "
+            "and writes nothing, rather than storing two tiers and leaving `factor run` to report "
+            "the third as an empty in-range read. V2-P4-027 is where the remaining half is "
+            "solved."
         ),
     ),
     FactorRunLimitation(
@@ -1208,11 +1226,11 @@ def _refuse_tiers_over_different_instants(
             "difference between two readings of the same days, so a three-tier report cannot be "
             f"assembled over three schedules -- and reporting one whose {name} row measured "
             "nothing would put the acceptance criterion's cell on a row that was never built. A "
-            "neutralisation is the usual cause: its own build reads daily_basic through the "
-            "unfiltered door, so a residual for any day of a year can only be computed at an "
-            "as_of at or after that year's last stored session, and it is stamped there. Move "
-            "--start/--end onto the instants the tier was built at, or build the missing tier for "
-            "these days"
+            "neutralisation is the usual cause, because it is stamped at the instant its own "
+            "build was run and that build is scheduled separately from the other two; since "
+            "V2-P4-026 it CAN be run at a mid-year as_of, so this is a fact about the schedule "
+            "rather than about the storage contract. Move --start/--end onto the instants the "
+            "tier was built at, or build the missing tier for these days"
         )
 
 
@@ -2550,12 +2568,16 @@ def _neutralized(
     """One residual cross section, or the named refusal that says why there cannot be one.
 
     The whole of `the_builder_cannot_produce_a_residual_before_its_years_stored_horizon` lives
-    here. `load_industry_market_cap_cross_section` reads `daily_basic` and the industry memberships
-    through `read_if_ready`, the **unfiltered** door, which refuses a partition whose newest row
-    post-dates the `as_of` instead of filtering it; and `_refuse_a_cross_section_that_is_not_this_
-    panels` requires the returned cross section's `as_of` to equal this panel's exactly, so the
-    read cannot simply be made later. Those two together mean a residual exists only at a
-    prediction instant at or after the last stored session of every year this read touches.
+    here, and `V2-P4-026` halved it. `load_industry_market_cap_cross_section` reads the industry
+    memberships through `read_if_ready`, the **unfiltered** door, which refuses a partition whose
+    newest row post-dates the `as_of` instead of filtering it; and
+    `_refuse_a_cross_section_that_is_not_this_panels` requires the returned cross section's
+    `as_of` to equal this panel's exactly, so the read cannot simply be made later. Those two
+    together mean a residual exists only at a prediction instant at or after the last stored
+    *assignment* of every membership year this read touches. `daily_basic` used to state the same
+    bound one session tighter and no longer does: it is read one session at a time under an
+    availability predicate, so a price partition never blocks a build a membership partition
+    would have allowed.
 
     The refusal is `blocked` rather than `bad_request` because it is a conflict with what the panel
     currently holds -- extending the panel is one remedy and moving `--as-of` forward is the other
@@ -2590,12 +2612,14 @@ def _neutralized(
             f"no {neutralization.qualified_key} cross section can be assembled at "
             "{cause}. This is "
             "the_builder_cannot_produce_a_residual_before_its_years_stored_horizon: the industry "
-            "and market-capitalisation reads take the unfiltered door, which refuses a partition "
-            "whose newest row post-dates the as_of, and the residual must carry the processed "
-            "panel's own instant -- so a residual exists only at a prediction instant at or after "
-            f"the last stored session of every year in {list(request.years)}. Build --tier "
-            "processed at this instant, or move --as-of to at or after the panel's horizon, or "
-            "fetch the later sessions first. Nothing was written"
+            "membership read takes the unfiltered door, which refuses a partition whose newest "
+            "row post-dates the as_of, and the residual must carry the processed panel's own "
+            "instant -- so a residual exists only at a prediction instant at or after the last "
+            f"stored assignment of every year in {list(request.years)}. (The market-"
+            "capitalisation read no longer states a bound of its own: V2-P4-026 gave it an "
+            "as-of-sensitive session-level door.) Build --tier processed at this instant, or move "
+            "--as-of to at or after the panel's horizon, or fetch the later sessions first. "
+            "Nothing was written"
         )
         prefix = f"{panel.as_of.isoformat()}: "
         raise FactorRunBlockedError(

@@ -171,13 +171,15 @@ It is not broken here, and the shape is stated at the strength it has:
   section assembled for a different universe -- or a different day -- is a refusal rather than a
   silently narrower regression. That is the guard the coverage codes would otherwise hide: a name
   the second cross section never heard of would look exactly like a name it had no industry for.
-- **The store-side half opens no new door.** `load_industry_market_cap_cross_section` is the only
-  builder in `src/`, and it reads both foreign datasets through
-  `panel_ingest.load_industry_histories` and `panel_ingest.load_daily_valuations` -- which take
-  `PanelStore.read_if_ready`, the **unfiltered** door that refuses a partition whose newest row
-  post-dates `as_of` rather than filtering it. So the two foreign inputs are read at a *stricter*
-  setting than the factor's own were, and this module's `FILTERED_READ_CALLERS` entry is spent
-  entirely on reading its **own** output partitions back.
+- **The store-side half opens no new door of its own, and `V2-P4-026` moved one of the two it
+  uses.** `load_industry_market_cap_cross_section` is the only builder in `src/`, and it reads its
+  two foreign datasets through `panel_ingest.load_industry_histories` and
+  `panel_ingest.load_daily_valuations`. The first still takes `PanelStore.read_if_ready`, the
+  **unfiltered** door that refuses a partition whose newest row post-dates `as_of` rather than
+  filtering it; the second now takes the filtered door one session at a time, through
+  `panel_ingest._read_visible_price_session`, under `panel_ingest.py`'s own
+  `FILTERED_READ_CALLERS` grant. This module's entry is still spent entirely on reading its
+  **own** output partitions back.
 
 **What is not claimed.** A caller can hand-build an `IndustryMarketCapCrossSection`, stamp it with
 the right `as_of` and populate it from rows that were not knowable then -- exactly as a caller can
@@ -210,18 +212,26 @@ run one against `index_member_all` and `daily_basic` as they actually arrive.
 
 ## The one thing a reader of a stored residual has to know before using it
 
-**A residual is invisible for the whole of the year it covers.** Every clock on a stored row is
-the *build's* `as_of` (`neutralized_observation_batch`), and that `as_of` cannot precede the
-`daily_basic` partition's newest row, which is the year's last session. So a row about any day in
-year Y is only visible at an `as_of` after Y has closed -- and because
-`load_neutralized_factor_observations` filters rows rather than refusing partitions, an in-year
-read returns **empty rather than an error**. The residuals' *contents* are point-in-time correct
-(each uses its own day's industry and capitalisation); what is not honest is the timestamp. That
-costs `V2-P3-005` a disclosure and costs `V2-P4-013` sub-annual walk-forward outright. It is
+**This section said "a residual is invisible for the whole of the year it covers" and `V2-P4-026`
+retracted it.** Every clock on a stored row is still the *build's* `as_of`
+(`neutralized_observation_batch`) -- that is right for a derived row and is unchanged. What is no
+longer true is the second half: the build's `as_of` used to be unable to precede the `daily_basic`
+partition's newest row, which is the year's last session, so a row about any day in year Y was
+only visible at an `as_of` after Y had closed. `load_daily_valuations` now reads one session at a
+time through `panel_ingest._read_visible_price_session`, so a residual can be built at a mid-year
+`as_of` and `load_neutralized_factor_observations` returns it at that `as_of`.
+
+**What a reader still has to know is weaker and is about the schedule, not the storage.** A
+residual is visible from the instant its own build was run and not before -- that is the
+point-in-time rule, and an `as_of` earlier than any build still reads **empty rather than an
+error**, because this loader filters rows rather than refusing partitions. So a series built once
+at year end is still one December instant, and nothing in the stored rows says which schedule
+produced them. One refusal outside this module still bounds which schedules are reachable:
+`index_member_all` is read whole partition, so a build cannot be run inside a membership year
+whose newest assignment post-dates the `as_of`. That is
 `KNOWN_NEUTRALIZATION_LIMITATIONS
-.the_two_foreign_inputs_are_read_whole_partition_so_a_mid_year_as_of_is_refused` and roadmap
-section 11's `V2-P4` prerequisite, and it is not fixable from this module: the lever is a
-partition-granularity or day-bounded read of `daily_basic`, which is a `V2-P1` storage contract.
+.the_industry_input_is_read_whole_partition_so_a_mid_year_as_of_can_be_refused`, it is not
+fixable from this module, and it is filed as `V2-P4-027`.
 """
 
 import math
@@ -2166,18 +2176,28 @@ def load_industry_market_cap_cross_section(
     store-free.** `apply_factor_neutralization` takes the result as a value; this is where a store
     is touched, once, in a function that computes no residual.
 
-    ## Which door it takes, and why that is the strict one
+    ## Which door each read takes, and why they are no longer the same one
 
-    Both reads go through `panel_ingest` -- `load_industry_histories` and
-    `load_daily_valuations` -- and both of those take `PanelStore.read_if_ready`, the **unfiltered**
-    door. That refuses a partition whose newest row post-dates `as_of` (`not_yet_knowable` is
-    decided on a partition's `max_available_time`) rather than filtering the offending rows out,
-    which is strictly more conservative than the `read_visible_at` the factor engine's own inputs
-    take. So the neutralisation's two foreign inputs are read at a *stricter* setting than the
-    factor's own were, and this module's `FILTERED_READ_CALLERS` entry is spent entirely on
-    reading its own output partitions back.
+    Both reads go through `panel_ingest`, and **since `V2-P4-026` the two take different doors**.
 
-    Two consequences of that strictness are costs rather than benefits and are stated:
+    `load_industry_histories` still takes `PanelStore.read_if_ready`, the **unfiltered** door,
+    which refuses a partition whose newest row post-dates `as_of` (`not_yet_knowable` is decided
+    on a partition's `max_available_time`) rather than filtering the offending rows out. That is
+    not conservatism for its own sake: a row predicate over `index_member_all` cannot be told from
+    an absent row, which is the whole reason `SecurityIndustryHistory.answerable_through` exists,
+    and `tests/unit/panel/test_visible_read_callers.py` makes every caller of the filtered door
+    answer that question before taking it.
+
+    `load_daily_valuations` takes the filtered door, one session at a time, through
+    `panel_ingest._read_visible_price_session`. It can, because `daily_basic`'s shape answers the
+    same question the other way: every row of one session carries one `available_time`, so a
+    session read is all-or-nothing and a withheld session arrives as a **named refusal** rather
+    than as a short cross section. That is `V2-P4-026`, and it is why a mid-year `as_of` no longer
+    refuses this whole function. This module's own `FILTERED_READ_CALLERS` entry is still spent
+    entirely on reading its own output partitions back; the new grant is `panel_ingest.py`'s.
+
+    Two consequences of the industry read's strictness are costs rather than benefits and are
+    stated:
 
     - **A membership year whose latest assignment starts after `as_of` blocks the whole read.**
       `providers/tushare.py` dates a membership row's availability at the day it is about, so a
@@ -2191,6 +2211,10 @@ def load_industry_market_cap_cross_section(
       `available_time` is floored at the SW2021 taxonomy's effective date. That is a refusal of
       the whole build rather than a thinning of it, and it is
       `KNOWN_NEUTRALIZATION_LIMITATIONS.no_cross_section_is_neutralisable_before_2021_12_13`.
+      **It is the outermost of the two bounds and `V2-P4-026` made it the binding one**: with
+      `daily_basic` no longer refusing an in-year `as_of`, the earliest instant at which anything
+      here can answer is this floor, and the finest granularity reachable inside the era is what
+      the bullet above allows.
 
     ## What it does with a security it cannot answer for
 

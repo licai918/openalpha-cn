@@ -221,24 +221,27 @@ payload whose content no longer hashes to the seal it carries. Any byte store ca
 
 ## The one product constraint a reader of the neutralised tier has to be told
 
-**A neutralised residual is read at a year-end snapshot, not at the `as_of` a caller asked for**,
-and this artifact cannot fix it -- it can only refuse to hide it.
-`panel_neutralization.neutralized_observation_batch` stamps all four clocks of every residual row
-with the build's own `as_of`, and that `as_of` is at or after the `max_available_time` of the
-year's `daily_basic` partition, which is the year's last session. Reads go through
-`PanelStore.read_visible_at`, so **any `as_of` inside the covered year reads back nothing rather
-than raising**: a neutralised tier assembled at in-year as_ofs is not an error, it is an
-`ICSummary` whose `measured_count` is zero.
+**This section said "a neutralised residual is read at a year-end snapshot, not at the `as_of` a
+caller asked for" and `V2-P4-026` retracted it.** The forcing was
+`load_daily_valuations` taking `read_if_ready`, which refuses a `daily_basic` year at every
+`as_of` inside it; `panel_ingest._read_visible_price_session` replaced that with a session-level
+`WHERE available_time <= as_of` read, so the neutralised tier can now be built on the same
+schedule the raw and processed ones are.
 
-The residuals' *content* is clean -- each was regressed against the industry, the market
-capitalisation and the processed value of its own day -- so a neutralised IC is not
-forward-contaminated. What is lost is the honesty of the timestamps, so the neutralised row of
-this report cannot claim to be point-in-time the way the raw and processed rows can, and **the
-neutralised row is exactly the row the acceptance criterion turns on**. `V2-P4-026` (an
-as-of-sensitive session-level read of `daily_basic`) is the fix and is a hard precondition of
-`V2-P4-013`. Carried here as `neutralised_residuals_are_read_at_a_year_end_snapshot`, the same
-code `V2-P3-005` and `V2-P3-006` carry, because it is the same fact and renaming it per module
-would make it three.
+What is unchanged is the stamping rule:
+`panel_neutralization.neutralized_observation_batch` puts the build's own `as_of` on all four
+clocks of every residual row, so the tier is exactly as point-in-time as the schedule it was
+built on -- and **the neutralised row is exactly the row the acceptance criterion turns on**. A
+range naming instants the tier was never built at still arrives as an `ICSummary` whose
+`measured_count` is zero rather than as an error, which is why `factor_view` refuses such a range
+by name instead of reporting it.
+
+The residuals' *content* is clean either way -- each was regressed against the industry, the
+market capitalisation and the processed value of its own day -- so a neutralised IC was never
+forward-contaminated by this. Carried here as
+`a_neutralised_series_is_only_as_point_in_time_as_its_build_schedule`, the same code `V2-P3-005`
+and `V2-P3-006` carry, because it is the same fact and renaming it per module would make it
+three.
 
 ## Layering, and why there is no numpy here
 
@@ -454,22 +457,31 @@ class ExperimentLimitation:
 
 KNOWN_EXPERIMENT_LIMITATIONS: Final[tuple[ExperimentLimitation, ...]] = (
     ExperimentLimitation(
-        code="neutralised_residuals_are_read_at_a_year_end_snapshot",
+        code="a_neutralised_series_is_only_as_point_in_time_as_its_build_schedule",
         detail=(
-            "The neutralised row of this report is not a point-in-time series the way the raw and "
-            "processed rows are, and it is the row the acceptance criterion turns on. "
-            "panel_neutralization.neutralized_observation_batch stamps all four clocks of every "
-            "residual row with the build's own as_of, and that as_of is at or after the "
-            "max_available_time of the year's daily_basic partition -- the year's last session. "
-            "Reads go through PanelStore.read_visible_at, so an as_of inside the covered year "
-            "reads back nothing rather than raising, which arrives here as a neutralised tier "
-            "whose ICSummary coverage is insufficient_as_ofs and whose attribution cells are all "
-            "not_measured. The residuals' CONTENT is clean -- each was regressed against the "
+            "THIS ENTRY WAS NAMED neutralised_residuals_are_read_at_a_year_end_snapshot AND THE "
+            "RENAME IS THE RETRACTION. It used to say the neutralised row of this report cannot "
+            "be a point-in-time series at all, because load_daily_valuations took read_if_ready "
+            "and a build's as_of was therefore forced to be at or after the year's last session. "
+            "V2-P4-026 removed the forcing: panel_ingest._read_visible_price_session reads one "
+            "daily_basic session under a WHERE available_time <= as_of predicate, so the "
+            "neutralised tier CAN be built on the same schedule the other two are, and "
+            "PanelStore.read_visible_at hands its rows back at the as_of they were stamped at. "
+            "What survives "
+            "is the stamping rule, which is unchanged: "
+            "panel_neutralization.neutralized_observation_batch puts the BUILD's as_of on all "
+            "four clocks of every residual row, so the tier is exactly as point-in-time as the "
+            "schedule it was built on and a tier built once at year end still reads as one "
+            "December instant. That matters here more than anywhere else, because the "
+            "neutralised row is the row the acceptance criterion turns on: a range that names "
+            "instants the tier was not built at arrives as an ICSummary whose coverage is "
+            "insufficient_as_ofs and whose attribution cells are all not_measured -- which "
+            "factor_view refuses by name rather than reporting "
+            "(the_three_tiers_must_have_been_built_at_the_same_instants). The residuals' CONTENT "
+            "was clean before this change and after it -- each was regressed against the "
             "industry, the market capitalisation and the processed value of its own day -- so "
-            "nothing here is forward-contaminated; what is lost is the honesty of the timestamps. "
-            "V2-P4-026 (an as-of-sensitive session-level read of daily_basic) is the fix and is a "
-            "hard precondition of V2-P4-013. The same code V2-P3-005 and V2-P3-006 carry, because "
-            "it is the same fact."
+            "nothing here was ever forward-contaminated by it. The same code V2-P3-005 and "
+            "V2-P3-006 carry, because it is the same fact."
         ),
     ),
     ExperimentLimitation(

@@ -190,6 +190,16 @@ there. What `V2-P3-002` added is a *second*, differently named read on the same 
 issue it found is in `ROW_FILTERABLE_ISSUE_CODES` (that is: only `not_yet_knowable`), scans the
 partition with a `WHERE available_time <= as_of` predicate instead of refusing it.
 
+**`V2-P4-026` extended that to one ingested dataset, and the paragraph above about P4 is
+narrowed rather than retracted.** `panel_ingest.load_daily_valuations` now reads `daily_basic`
+through `read_visible_at` under a `trade_date` filter -- the first caller in `src/` to pass
+`filters` at all -- so a walk-forward *can* step an `as_of` through a `daily_basic` year. What
+made that admissible is a property of that dataset and not of this rule table: every row of one
+session carries one `available_time` (16:30 on its own `trade_date`), so a session read is
+all-or-nothing and "withheld" never arrives disguised as "absent". No other ingested dataset has
+that shape, `index_member_all` conspicuously does not (`V2-P4-027`), and nothing here changed:
+`read_if_ready` still refuses a whole partition, and the loaders that take it still are refused.
+
 ### The correction `V2-P3-002`'s review forced, and why it was not a wording change
 
 The first version of this section said the substitution left the rule table alone: "every other
