@@ -13,6 +13,7 @@ from openalpha_cn.storage.migrations import (
     CREATE_QUERY_PATH_INDEXES_VERSION,
     CREATE_VALIDATION_RESULTS_VERSION,
     DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
+    REWRITE_CONTRACT_IDENTITIES_VERSION,
     read_status,
 )
 
@@ -36,6 +37,7 @@ def test_build_storage_stamps_a_fresh_runtime_dir_past_baseline_without_crashing
     assert [m.version for m in status.pending] == [
         DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
         CREATE_QUERY_PATH_INDEXES_VERSION,
+        REWRITE_CONTRACT_IDENTITIES_VERSION,
     ]
     # `migration_result` (exposed for `cli.py::migrate_run`, which needs the
     # `from_version`/`to_version`/`applied`/`backup_path` this call already computed
@@ -60,13 +62,14 @@ def test_build_storage_catches_up_the_demo_migration_on_a_second_call(
     second = build_storage(runtime_dir=runtime_dir, clock=migration_clock)
 
     status = read_status(runtime_dir / "state.sqlite3")
-    assert status.current_version == CREATE_QUERY_PATH_INDEXES_VERSION
+    assert status.current_version == REWRITE_CONTRACT_IDENTITIES_VERSION
     assert status.pending == ()
     assert second.migration_result.from_version == CREATE_VALIDATION_RESULTS_VERSION
-    assert second.migration_result.to_version == CREATE_QUERY_PATH_INDEXES_VERSION
+    assert second.migration_result.to_version == REWRITE_CONTRACT_IDENTITIES_VERSION
     assert [m.version for m in second.migration_result.applied] == [
         DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
         CREATE_QUERY_PATH_INDEXES_VERSION,
+        REWRITE_CONTRACT_IDENTITIES_VERSION,
     ]
 
 

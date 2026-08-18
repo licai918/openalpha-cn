@@ -518,6 +518,15 @@ Task 12 建多版本读取时发现并经评审实测验证：**`schema_version`
 P4 必须写一次**显式的身份重写迁移**：读旧行 → 升版 → 重算 ID → 同事务内更新所有引用它的行。
 这不是 Task 12 的范围（Task 12 只建机制），但没有这条记录，P4 会踩。
 
+**已落地（2026-08-18，`V2-P4-001`）**：这条迁移是 `storage/migrations.py` 的第 5 号
+`rewrite_contract_identities`。三项升版里只有两项移动存储键（`decisions.decision_id`、
+`validation_results.validation_id`），`run-manifest/v1` 因为存储键是调用者给的 `run_id` 而**可以**
+读时透明升级 —— 这个不对称本身就是本节结论的用法。另外两项的 upgrade 按名拒绝
+（`domain/versioning.py::IdentityRewriteRequiredError`）。**本节没有点到的第四张表**是
+`research_reports`：它连 `schema_version` 都没有、形状一字未改，却因为 `report_id` 哈希的 payload
+里有 `decision_id` 而同样被重新标识 —— 「升版清单」和「重新标识清单」不是同一份清单。
+详见本文件末尾的 `V2-P4-001` + `V2-P4-025` 交付记录。
+
 **更正（2026-08，`V2-P1-017` 落地后）**：上面点名的「horizon 改动经 `SignalFrame`」这一项
 **没有**发生身份变更，因此不进入 P4 的重写迁移清单。`V2-P1-017` 把 `horizon` 从
 `Field(min_length=1, max_length=64)` **收窄**为 `Field(pattern=HORIZON_PATTERN)`
@@ -564,6 +573,14 @@ evidence_ids, signal_ids, code_commit, model_versions, prompt_versions` ——
 **待办（需新立 issue，建议排在 `V2-P4-001` 契约变更窗口内一并做）**：
 给 `RunManifest` 建立内容寻址身份，或把 `config_digest`/`random_seed` 纳入某个运行级 ID。
 这是破坏性契约变更，且会触发 roadmap §8 记录的身份重写迁移问题，两者应一起设计。
+
+**已结清（2026-08-18，`V2-P4-025`，与 `V2-P4-001` 同一窗口）**：`RunManifest` 得到
+`run_manifest_id`（`stable_model_id`，排除五个「记录但不寻址」的字段），`DecisionLedger` 携带
+这个地址。上表的四行在 `tests/integration/test_run_identity.py` 里按同样的方法重跑，后两行由
+「不变 ❌」变成「变 ✅」。**本节的方法论结论保留**并且被再次证实：`config_digest` 之所以到不了
+`decision_id`，不是哈希写漏了，而是它不是被哈希模型的字段 —— 修法因此是契约形状而不是哈希。
+`run_manifest_id` 派生时排除的五个字段（两个墙钟、`status`、`checkpoints`、`environment`）
+每一个都在 `RUN_MANIFEST_UNADDRESSED_FIELDS` 里写明理由，并由一条读 `model_fields` 的元审计守着。
 
 **这条错误的来源值得记下**：最初的技术审计断言「三者都是 `decision_id` 的输入」，
 该说法未经实测就被写进 PRD、审计文档与 Task 17 的 brief，直到评审用实验推翻。
@@ -2181,3 +2198,222 @@ neutralisation manifest 各加一列，旧 build 写的分区在 readiness 上�
 
 没有任何数值数组归约：地址是一次 `json.dumps` 加一次 sha256，比较是字符串相等。
 ADR-0003 **没有被重新打开**。**运行时依赖仍是九个。**
+
+---
+
+### `V2-P4-001` + `V2-P4-025` 交付记录（2026-08-18）：三项契约升版、一次身份重写、`V2-P4-003` 顺带结清
+
+两条一起设计，因为两条都撞上 §8 的身份重写迁移。下面按「必须显式回答的十个问题」逐条记。
+
+#### 一、`mode` 的三处重复：顺手做掉，而且是**构造性**地做掉
+
+`V2-P4-003` 记的三处（`domain/run.py`、`runtime/engine.py`（已随 `ResearchRunRequest`
+迁到 `domain/run_request.py`）、`cli.py`）**必须全改**，否则 `--mode paper` 会被 CLI 挡住而两个契约
+放行 —— 也就是那条 issue 描述的失败本身。既然三处都必须动，留给 `003` 只会让它维护三份清单。
+
+做法是**一个声明**：`domain/run_mode.py::RunMode`（`StrEnum`），两个契约与 CLI 都引用它。
+选 `StrEnum` 而不是 `Literal` 别名，是因为 Typer 需要真的 `Enum` 类来渲染 `--mode`，
+`Literal` 别名会留下第三处。代价为零并且**是实测的**：`model_dump(mode="json")` 输出成员的
+**值**，所以 `runs` 表的 payload 与 `ResearchEngine._load_or_start_recovery` 的 `request_digest`
+逐字节不变（`tests/unit/domain/test_run_mode.py::
+test_the_enum_serialises_to_the_bare_string_the_literal_did`）。
+唯一对外可见的变化是生成的 schema 里 `mode` 变成 `$defs` 的 `$ref`；`web/src/types.ts` 从未镜像
+`RunManifest.mode`。
+
+`003` 建议的「加一条断言三者一致的测试」在单一声明下是**空的**（自己跟自己比）。装的是另一条：
+`test_no_other_module_declares_the_mode_set` 读源码树，任何模块把三个以上模式名写成
+**可执行**字符串字面量就红（散文排除，否则在这个仓库里不可证伪）。**一条豁免，而且以等式给出**：
+`domain/run.py` 允许写 v1 的三个（`RunManifestV1` 必须说清它冻的是什么），
+且**只允许**那三个 —— 把今天的五个抄回 `run.py` 会红在它想援引的那条豁免上。
+
+#### 二、`attribution` 的形状：`model` 类目 + `unexplained_return`
+
+- `AttributionTerm.category` 加 `model`。它**不是** `agent` 的同义词：agent 是 LLM 审议步骤，
+  model 是拟合出的量化预测器（`V2-P4-011` 的 `AlphaModel`）。没有它，P4 由模型驱动的排名只能
+  记到另外三个类目之一，报告会说「某个 agent 赚了模型赚的钱」。
+- `ValidationResult` 加 `unexplained_return`，对账规则变成
+  `sum(terms) + unexplained_return == net_active_return`。
+
+**残差对谁而言**：对本条 `ValidationResult` 的 `net_active_return` 而言，是归因**自己没认领**
+的那部分。不是回归残差，**更不是** `domain/factor_neutralization.py` 的中性化残差（那是逐名逐日的
+截面量，这是一个决策一个窗口的一个数）。
+
+**为什么值得一个字段**：`backtest/validation.py` 的末项吸收让对账校验**按构造**永远通过 ——
+它永远不可能失败，因此从未测量过任何东西。残差独立成字段之后，加不起来的项集必须把差额说成一个
+报告能打印的数。**校验仍然是校验**：说错残差或不说，照样失败，两个方向都断言了。
+默认 `0.0` 而非必填，因为今天每个构造点的项集本来就恰好加到 `net_active_return`，`0.0` 是它们的
+**诚实值**；`V2-P5-005`/`006` 才开始产生非零的那一个。
+
+#### 三、`horizon` → 可比枚举：收窄到**可数**的那一个单位
+
+现状是 `V2-P1-017` 之后的 `str` + `HORIZON_PATTERN`（四单位）。「可比」需要两者共用的**一个度量**，
+而 `domain/horizon.py` 实测过四个单位里只有 `d` 有：日历跨度含多少个交易日是变的，
+**未来**那一段的数目根本不可知（`KNOWN_CALENDAR_LOOKAHEAD` 有一条 2020 年把已公告开市日改成休市的
+修订）。所以：
+
+- `SignalFrame.horizon` 收窄到 `COUNTABLE_HORIZON_PATTERN`（`^[1-9][0-9]{0,2}d$`）。
+- `ResearchHorizon` 变成 `@total_ordering`，序建立在 `sessions` 上。按 `(unit, count)` 字典序会把
+  `999d` 排在 `1w` 之下 —— 那是一个**错的**全序；跨单位比较改为按 `sessions` 已有的理由拒绝。
+  **等式仍对四个单位成立**（`parse_horizon(h.text) == h` 是把 horizon 写回字段的安全前提）。
+- `HORIZON_PATTERN` 本身不动：它是**标签窗口**的文法，`factor_view`/`labels`/`factor run --horizon`
+  在用，调用者可以要一个 `sessions` 随后拒绝去数的窗口；**信号**不行。
+
+**与 §8 的对齐是逐字的**：这是收窄**定义域**而不是换**类型**，仍是同一个 `str`，
+所以 `signal-frame` **不升版**，`signal_id` 一个没动 —— 实测把 `d703905` 的树 checkout 到
+scratch 目录跑出 `5d` = `sig_56c99d03db9841eb6da3fa18`、`10d` = `sig_ce51fb2fc77c9953f8560797`，
+在 `tests/unit/domain/test_contract_identity.py` 里钉成字面量。
+
+**这不只是省事**：一次运行产出的**聚合** `SignalFrame` 从不落库（落的只有它的 ID，在
+`decisions.signal_ids` 里），所以 `signal-frame` 升版会移动一个**数据库无法重算**的身份，
+迁移会按构造漏迁。这一条本身有测试
+（`tests/unit/domain/test_contract_identity.py::
+test_the_aggregate_signal_frame_is_referenced_but_never_stored`）。
+
+#### 四、`test_schema_export.py:19` 改成了什么
+
+那条 `endswith("/v1")` **在此之前就已经不在了**（`V2-P0B-005` 把它换成了从版本注册表读
+`current_version`）。留下的弱点是文件名：`CONTRACT_MODELS` 的键是手写的 `"<contract>-v1"`，
+升版后 `decision-ledger-v1.json` 会装着 `decision-ledger/v2` 的文档而全绿。
+
+所以本次把**文档名也派生掉**：`domain/schema.py::schema_document_name` 由注册表的
+`current_version` 生成文件名，`CONTRACT_MODELS` 走 `CONTRACT_REGISTRIES` 生成。测试里**没有任何
+版本字面量**，绑的是四件事互相一致：磁盘上的文件集合、文档里的 `schema_version.const`、
+注册表的 `current_version`、模型自己的 `schema_version` 默认值。再加一条
+`test_no_superseded_schema_document_is_left_behind`（升版会**改名**，旧文件留在旁边就是一份
+没有模型产出、没有测试重生成的已发布契约）。
+
+`docs/api/schemas/` 因此变成 `decision-ledger-v2.json` / `run-manifest-v2.json` /
+`validation-result-v2.json`（v1 三份删除，v1 形状由 `*V1` 快照类与 git 历史承载），
+`evidence-snapshot-v1.json` / `signal-frame-v1.json` 不动。`web/src/typesContractDrift.test.ts`
+的三个文件名同步。
+
+#### 五、迁移：哪些存量被重新标识（实测）
+
+`storage/migrations.py` 加第 5 号 `rewrite_contract_identities`，只管 `state.sqlite3`
+（`panel/catalog.py` 那条分界不动，因子平面没有一个契约在本次升版清单里）。逐表：
+
+| 表 | payload 升版 | 键移动 | 为什么 |
+|---|---|---|---|
+| `runs` | v1 → v2 | 否 | `run_id` 是调用者给的 |
+| `decisions` | v1 → v2 | **是** | `DecisionLedger` 多了 `run_manifest_id` |
+| `validation_results` | v1 → v2 | **是** | 多了 `unexplained_return`，且 `decision_id` 指向刚移动的键 |
+| `research_reports` | 无版本 | **是** | `report_id` 哈希的 payload 里有 `decision_id` |
+| `research_memory` | 无版本 | 否 | `decision_id` 是 `UNIQUE` 列 + payload 字段，重指 |
+| `batch_tasks` | 无版本 | 否 | `BatchResultRef.decision_id` 嵌在 payload 两层下，重指 |
+| `run_recovery` | 不动 | 否 | 只扫描：见下 |
+| `checkpoints` / `portfolio_transitions` / `watchlist` / `batch_events` | 不动 | 否 | 不含决策引用 |
+
+**读时透明 upcast 只给 `run-manifest/v1`**，因为它的存储键不是内容地址；
+`decision-ledger/v1` 与 `validation-result/v1` 的 upgrade **按名拒绝**
+（`IdentityRewriteRequiredError`）—— 这正是 §8 说的「不能靠读时透明 upcast」。
+决策那条另有一个算术理由：`run_manifest_id` 在 `runs` 表里，行级 reader 根本没有它。
+
+**收尾是一条运行期审计而不是一句 docstring**：`_audit_identity_rewrite` 在同一事务里重读整库，
+任何 payload 仍停在旧版本、任何内容地址键与旁边的 payload 对不上、任何被取代的 `decision_id`
+还活着，就整体回滚。完备性测试断言旧 ID 在**整库 SQL dump 里不存在**，而不只是新 ID 在。
+
+**唯一拒绝迁移的东西**：`run_recovery` 里存着完整 `SignalFrame`，若某条的 horizon 是日历单位
+（`3m`），它现在在契约外，而换算成会话数需要一个本仓从未测过的常数。所以整条迁移
+`UnmigratableHorizonError` 拒绝并回滚，消息点名 run 并给两条补救；`openalpha migrate run`
+把这条（且只有这条已知类型的）原因原文打出来。
+
+#### 六、`RunManifest` 的内容寻址身份：两条路都论证过，走的是「两条都走」
+
+- **只把 `config_digest`/`random_seed` 纳入某个既有运行级 ID**：本仓没有「既有运行级 ID」可纳入 ——
+  §9 实测过 `stable_model_id` 的使用者里没有 `RunManifest`。要么把两个字段抄进
+  `DecisionLedger`，那只修 §9 那两行，`RunManifest` 后来新增的输入还得再抄一次。
+- **给 `RunManifest` 建内容寻址身份**：`run_manifest_id` = `stable_model_id(prefix="run")`，
+  然后 `DecisionLedger` 携带**这个地址**。一个字段让**每一个**已声明运行输入一次性抵达
+  `decision_id`，包括以后新增的。
+
+走后者，并且把前者的目标也一并达成。**五个字段是「记录但不寻址」**，理由写在
+`RUN_MANIFEST_UNADDRESSED_FIELDS` 里（是 mapping 不是 set，因为理由才是承重的那一半）：
+
+- `started_at` / `finished_at` —— 墙钟。重跑同一份声明必须复现同一个地址，否则地址无法用来认出
+  同一次运行。这条本仓付过两次学费：`FactorBuildManifest` 的 `built_at` **刻意不是字段**；
+  `V2-P3-002` 的 `FactorInputRef` 因为 `batch_digest` 含 `fetched_at`，一次逐字节相同的重抓
+  移动了每一个 `manifest_id`，后来被移进不哈希的 `FactorInputProvenance`。
+- `status` —— 结果，不是声明。中断后重跑成功的是**同一份**声明。
+- `checkpoints` —— 运行中增长的恢复记账，寻址它会让地址在运行途中变、并取决于进程崩过几次。
+- `environment` —— 观测到的宿主事实。`platform.python_version()` 会随解释器补丁版本变，
+  那会在没有任何研究输入变化的情况下移动每一个已存 `decision_id`。
+
+`exclude` 是 `stable_model_id` 的一个**参数**而不是第二个哈希：全仓十四个身份派生点都走这一个
+helper，另造一个 sha256 正是本仓到处避免的事。默认值原样透传成 pydantic 自己的 `exclude=None`，
+所以**没有任何已存地址移动** —— 实测对 `d703905`，21 个 `factor_id` 加 1 个 `transform_id`
+加 1 个 `neutralization_id` 逐字节相同。
+
+#### 七、§9 的结论现在**不成立**了（实测）
+
+`tests/integration/test_run_identity.py` 把 §9 的实验按原样重跑（真 `run_cycle`、固定时钟与
+`run_id`、逐个变量单独变），每个变体自己的 `runtime_dir`：
+
+| 变更 | `run_manifest_id` | `decision_id` |
+|---|---|---|
+| 无变更，重复运行 | 不变 ✅ | 不变 ✅ |
+| 单独改 `code_commit` | **变** | **变** ✅ |
+| 单独改 `config_digest`（`a*64` → `b*64`） | **变** ✅ | **变** ✅ |
+| 单独改 `random_seed`（7 → 99999） | **变** ✅ | **变** ✅ |
+
+另记一条 §9 没记的：引擎**本来就**拒绝在同一个 `run_id` 下写入请求摘要不同的第二次运行
+（`RunConflictError`），所以那两个撞在一起的 `decision_id` 在**同一个库内**并不会真的相撞 ——
+它们相撞的地方是跨库、研究记忆、导出，以及任何把内容地址当内容地址用的引用。
+
+#### 八、`RunManifest` 里哪些是「记录但不寻址」的
+
+见第六条的五个字段与理由。测试形状是两个方向 + 一条元审计：
+
+- 九个被寻址字段**逐个单独变** → 地址必须变；
+- 五个不被寻址字段**逐个单独变**（含墙钟的**两个方向**）→ 地址必须不变；
+- `test_every_run_manifest_field_is_addressed_or_excluded_by_name` 把
+  `RunManifest.model_fields` 划成两组（`schema_version` 是唯一豁免，单成员 `Literal` 无从变，
+  改为断言它在被哈希的 payload 里），**第 n+1 个字段会红**；
+- `test_every_exclusion_states_a_reason_rather_than_being_a_bare_name` 给理由设了长度下界，
+  防 `"clock"` 这种把 mapping 变回 set 的写法；
+- `test_no_two_field_variations_produce_the_same_address` 断言产出的地址**两两不同** ——
+  P3 出现十次以上的「断言存在但在那个 fixture 上分不开两个答案」，在身份测试上风险最高。
+
+#### 九、身份漂移的补测形状：三种，各挡一类失败
+
+roadmap 说「全库无 golden ID 断言」。补的是**三种形状**而不是一种：
+
+1. **Golden 钉子**（新）：四个固定夹具的精确 ID 字符串。**只有它**能挡「后来某个不相干的改动
+   移动了某个没人想移动的地址」—— 两方向表做不到，它比的是两个 ID 而不是历史。
+   `signal_id` 的两个 golden 取自 `d703905` 的树，因此是历史答案而不是今天的答案。
+2. **两个方向 / 逐字段**（P3 的形状）。
+3. **元审计**读 `model_fields`（P3 的形状）。
+
+#### 十、升版之后哪些既有断言红了 —— 两类
+
+**A. 契约升版的必然后果**（改的是版本字面量、字段清单或迁移链长度，不是行为）：
+
+- `tests/unit/domain/test_records.py`：三处 `schema_version` 字面量；`DecisionLedger` 构造补
+  `run_manifest_id`。
+- `tests/integration/storage/test_versioned_reads.py`：两处「未知版本」探针原本用
+  `run-manifest/v2`/`decision-ledger/v2` 当「这个 build 不认识的版本」，现在这两个版本它认识了
+  → 改用 `/v3`；`test_registries_current_version_matches_each_model_default` 从比字面量改成
+  读模型自己的 `schema_version` 默认值（**下次升版不用再改**）；夹具的 `horizon="3m"` → `"10d"`。
+- `tests/integration/storage/test_migrations.py`、`tests/unit/runtime/test_composition_migrations.py`、
+  `tests/unit/backtest/test_replay.py`、`tests/integration/test_cli_migrate.py`：迁移链从 4 条变 5 条。
+- `tests/unit/domain/test_horizon.py`：`REPOSITORY_HORIZONS` 拆成「文法认的」与「信号认的」两个元组。
+- `tests/integration/storage/test_sqlite_repository.py`：`DecisionLedger` 构造补 `run_manifest_id`。
+- `web/src/types.ts` 的 `category` 联合加 `"model"`；`web/src/typesContractDrift.test.ts` 三个文件名。
+
+**B. 行为改变（我改变了行为，逐条说明）**：
+
+- `tests/integration/test_replay_persistence.py` 两处 `mode="live"` → `"replay"`。
+  原因：`mode` 是 `RunManifest` 的已声明输入，因此经 `run_manifest_id` 抵达 `decision_id`，
+  一次 live 运行与一次 replay 运行**不再共享** `decision_id`。这是**有意的读法** ——
+  replay 下得到的决策不是 live 下得到的同一个决策，此前没有任何东西能把两者分开 ——
+  而 `ReplayRunner` 的 case 就是以 `replay` 跑的，所以直接运行也应当用 `replay`。
+- `api/app.py::_parse_research_result` 现在也剥离并**校验** `manifest.run_manifest_id`。
+  不改会让 `POST /api/v1/backtests/validate` 对自己刚返回的 `research` 报 422
+  （`RunManifest` 是 `extra="forbid"`）。校验而不是只剥离，理由与 `signal_id`/`decision_id`
+  相同：能交回一个未校验的清单地址，就能交回一个与旁边的清单对不上的地址。
+- `cli.py::migrate_run` 在原因是 `UnmigratableHorizonError` 时把原文打出来（只这一个自有类型）。
+
+#### 数值栈与依赖
+
+没有任何数值数组归约；地址是一次 `json.dumps` 加一次 sha256。ADR-0003 未重新打开。
+**运行时依赖仍是九个。** `lint-imports` 7 kept / 0 broken（`storage/migrations.py` 新增的
+`domain.*` 与 `batch_contracts` 依赖都是向下的）。

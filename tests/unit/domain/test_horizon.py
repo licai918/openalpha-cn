@@ -26,11 +26,24 @@ from openalpha_cn.domain.horizon import (
 from openalpha_cn.domain.signal import SignalFrame
 
 REPOSITORY_HORIZONS = ("5d", "10d", "3m")
-"""Every `horizon` literal this repository writes today.
+"""Every `horizon` literal this repository has ever written, as `parse_horizon` sees them.
 
-`agents/baseline.py` writes `5d` and `10d`, `runtime/engine.py` writes `5d`, and
-`tests/integration/storage/test_versioned_reads.py` stores `3m`. The grammar has to accept all
-three unchanged or the `signal_id` of every one of them moves.
+`agents/baseline.py` writes `5d` and `10d`, `runtime/engine.py` writes `5d`, and `3m` was
+stored on a `SignalFrame` by `tests/integration/storage/test_versioned_reads.py` until
+`V2-P4-001`. `HORIZON_PATTERN` -- the *label window* grammar -- still has to accept all three
+unchanged: it is what `domain/labels.py`, `factor_view.py` and `openalpha factor run
+--horizon` parse, and a caller may legitimately ask for a window in a unit `sessions` then
+refuses to count.
+"""
+
+SIGNAL_HORIZONS = ("5d", "10d")
+"""The subset a `SignalFrame` still admits after `V2-P4-001` narrowed the field.
+
+`COUNTABLE_HORIZON_PATTERN` restricts the field to the one unit with a session count, so every
+horizon two signals carry is comparable and every one of them sizes a return window. Both of
+these are literals `agents/baseline.py` and `runtime/engine.py` write today, so the narrowing
+moved no stored `signal_id` -- measured in
+`tests/unit/domain/test_contract_identity.py::test_narrowing_the_signal_horizon_moved_no_stored_signal_id`.
 """
 
 
@@ -160,9 +173,24 @@ def _signal(horizon: str) -> SignalFrame:
     )
 
 
-@pytest.mark.parametrize("text", REPOSITORY_HORIZONS)
+@pytest.mark.parametrize("text", SIGNAL_HORIZONS)
 def test_signal_frame_still_accepts_every_horizon_this_repository_writes(text: str) -> None:
     assert _signal(text).horizon == text
+
+
+@pytest.mark.parametrize("text", ["3m", "2w", "1y"])
+def test_signal_frame_refuses_a_calendar_horizon_it_could_never_have_scored(text: str) -> None:
+    """`V2-P4-001`'s narrowing, from the refusing side.
+
+    A calendar horizon parses (the grammar keeps all four units) and is still a legal request
+    for a *label window*; what it can no longer be is a `SignalFrame`'s own horizon, because
+    `ResearchHorizon.sessions` refuses to turn it into a return window and a signal nothing
+    can score is the failure this repository keeps closing elsewhere.
+    """
+    with pytest.raises(ValidationError, match="String should match pattern"):
+        _signal(text)
+
+    assert parse_horizon(text).text == text
 
 
 def test_signal_frame_refuses_a_horizon_that_is_not_a_countable_span() -> None:
@@ -170,7 +198,7 @@ def test_signal_frame_refuses_a_horizon_that_is_not_a_countable_span() -> None:
         _signal("whenever")
 
 
-@pytest.mark.parametrize("text", REPOSITORY_HORIZONS)
+@pytest.mark.parametrize("text", SIGNAL_HORIZONS)
 def test_constraining_the_horizon_field_did_not_restate_any_accepted_value(text: str) -> None:
     """The identity guard. `signal_id` hashes the canonical JSON, so a validator that
     *normalised* the field -- lower-casing a unit, stripping a leading zero -- would silently
@@ -178,3 +206,48 @@ def test_constraining_the_horizon_field_did_not_restate_any_accepted_value(text:
     what serialises is the string that was passed in, byte for byte.
     """
     assert _signal(text).model_dump(mode="json")["horizon"] == text
+
+
+# --- V2-P4-001: the comparability half of PRD D36 --------------------------------------
+
+
+def test_two_signal_horizons_order_by_the_sessions_they_span() -> None:
+    """The property `COUNTABLE_HORIZON_PATTERN` exists to make true.
+
+    Sorting is asserted rather than a single `<`, because a comparison that is only correct
+    pairwise is not what a ranking needs, and `@total_ordering` deriving `>`/`<=`/`>=` from
+    one `__lt__` is exactly the kind of thing that is right until it is not.
+    """
+    horizons = [parse_horizon(text) for text in ("10d", "1d", "5d", "999d")]
+
+    assert [item.text for item in sorted(horizons)] == ["1d", "5d", "10d", "999d"]
+    assert parse_horizon("5d") < parse_horizon("10d")
+    assert parse_horizon("10d") > parse_horizon("5d")
+    assert parse_horizon("5d") <= parse_horizon("5d")
+
+
+def test_ordering_a_calendar_horizon_refuses_with_the_reason_sessions_gives() -> None:
+    """The refusal is `sessions`\' own, reused -- not a second, weaker story about units.
+
+    A lexicographic `(unit, count)` order would have ranked `999d` (about four years of
+    sessions) below `1w`, which is a total order that is wrong. Refusing is the honest answer
+    while the sessions-per-week constant stays unmeasured.
+    """
+    with pytest.raises(HorizonError, match="is not a whole number of trading sessions"):
+        _ = parse_horizon("1w") < parse_horizon("5d")
+
+    with pytest.raises(HorizonError, match="is not a whole number of trading sessions"):
+        _ = parse_horizon("5d") < parse_horizon("1w")
+
+
+def test_equality_still_answers_for_all_four_units_even_though_ordering_does_not() -> None:
+    """Two questions, two answers, neither guessed.
+
+    `1w == 5d` is `False` -- they are different horizons, and that is decidable without
+    knowing which is longer -- while `1w < 5d` refuses. Equality has to keep working for the
+    calendar units because `parse_horizon(h.text) == h` is what makes a horizon safe to write
+    back into a field, and `factor_view` still parses calendar horizons.
+    """
+    assert parse_horizon("1w") != parse_horizon("5d")
+    assert parse_horizon("3m") == ResearchHorizon(count=3, unit=HorizonUnit.months)
+    assert parse_horizon("3m") != parse_horizon("4m")

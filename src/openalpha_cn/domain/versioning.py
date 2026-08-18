@@ -39,11 +39,15 @@ deliberate: it means adding a real `schema_version` field to one of today's unve
 models later is a registry edit at its own definition, not an audit of every call site
 that reads it.
 
-No v2 of any real contract is defined here -- that is Phase P4's job. This module's own
-test suite (`tests/unit/domain/test_versioning.py`) proves the upgrade-chain machinery
-end to end with a synthetic, test-only "demo-widget" contract, exactly as
-`storage/migrations.py`'s demo migration proved the table-migration engine without being
-one of the three real breaking changes it exists to enable.
+No v2 of any real contract is defined *here*: this module's own test suite
+(`tests/unit/domain/test_versioning.py`) proves the upgrade-chain machinery end to end with
+a synthetic, test-only "demo-widget" contract, exactly as `storage/migrations.py`'s demo
+migration proved the table-migration engine without being one of the real breaking changes
+it exists to enable. The real ones arrived at `V2-P4-001` and each registry lives at its own
+contract's definition (`domain/run.py`, `domain/decision.py`, `domain/validation.py`), with a
+frozen `*V1` snapshot class beside it. Two of the three register a **refusing** upgrade --
+`IdentityRewriteRequiredError` below -- because their stored key is the model's own content
+address and a transparent upcast would move it while every reference kept the old value.
 """
 
 import json
@@ -84,6 +88,38 @@ class UnknownSchemaVersionError(ValueError):
         self.contract = contract
         self.found_version = found_version
         self.supported_versions = supported_versions
+
+
+class IdentityRewriteRequiredError(ValueError):
+    """Raised when a stored row's version can only be advanced by the storage migration.
+
+    Roadmap section 8's conclusion, made into a type. Two of the three contracts
+    `V2-P4-001` bumps carry a **content-derived** stored key -- `decisions.decision_id` and
+    `validation_results.validation_id` -- and a transparent read-time upcast of such a row
+    computes a *new* key while the table, and every column and payload that references it,
+    still holds the old one. The row would read back fine and every reference to it would
+    silently stop resolving, which is precisely the failure that section rules out: a P4
+    contract bump may not be absorbed by a transparent read-time upcast. `run-manifest/v1`
+    is the third and it upgrades on read, because `runs.run_id` is caller-supplied.
+
+    So the upgrade registered for those versions refuses, and
+    `storage/migrations.py::rewrite_contract_identities` -- which has the whole database in
+    one transaction, and can therefore recompute a key *and* update everything that names it
+    -- is the only path forward. A migrated database never raises this: every row is at the
+    current version by the time any store reads it. Seeing it means migrations have not been
+    run against this file, which is what the message says.
+    """
+
+    def __init__(self, *, contract: str, found_version: object) -> None:
+        super().__init__(
+            f"{contract}: stored schema_version {found_version!r} carries a content-derived "
+            "identity that a read-time upgrade would move without updating the rows that "
+            "reference it. Run `openalpha migrate run` against this database: "
+            "storage/migrations.py's identity rewrite recomputes the identity and every "
+            "reference to it in one transaction."
+        )
+        self.contract = contract
+        self.found_version = found_version
 
 
 @dataclass(frozen=True)

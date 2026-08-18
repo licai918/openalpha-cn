@@ -150,9 +150,14 @@
       "title": "Run Id",
       "type": "string"
     },
+    "run_manifest_id": {
+      "pattern": "^run_[0-9a-f]{24}$",
+      "title": "Run Manifest Id",
+      "type": "string"
+    },
     "schema_version": {
-      "const": "decision-ledger/v1",
-      "default": "decision-ledger/v1",
+      "const": "decision-ledger/v2",
+      "default": "decision-ledger/v2",
       "title": "Schema Version",
       "type": "string"
     },
@@ -167,6 +172,7 @@
   },
   "required": [
     "run_id",
+    "run_manifest_id",
     "created_at",
     "risk_decision",
     "final_action",

@@ -63,9 +63,10 @@ def _manifest(migration_now: datetime):
 
 @pytest.fixture
 def _decision(migration_now: datetime):
-    def _make(run_id: str) -> DecisionLedger:
+    def _make(run_id: str, run_manifest_id: str) -> DecisionLedger:
         return DecisionLedger(
             run_id=run_id,
+            run_manifest_id=run_manifest_id,
             created_at=migration_now,
             agent_outputs=(
                 AgentDecision(
@@ -95,7 +96,7 @@ def _signal(migration_now: datetime):
             direction="bullish",
             strength=0.4,
             confidence=0.6,
-            horizon="3m",
+            horizon="10d",
             evidence_ids=("ev_versioned_read",),
         )
 
@@ -126,7 +127,7 @@ def test_sqlite_run_repository_reads_existing_records_field_for_field(
     """A database built with today's normal write paths still reads back identical."""
     repository = SQLiteRunRepository(tmp_path / "state.sqlite3")
     manifest = _manifest()
-    decision = _decision(manifest.run_id)
+    decision = _decision(manifest.run_id, manifest.run_manifest_id)
     checkpoint = CheckpointRecord(name="risk-gate", recorded_at=migration_now, state_digest=DIGEST)
     repository.append_run(manifest)
     repository.append_decision(decision)
@@ -160,7 +161,7 @@ def test_sqlite_run_repository_get_run_fails_loudly_on_an_unknown_schema_version
 ) -> None:
     path = tmp_path / "state.sqlite3"
     SQLiteRunRepository(path)  # create the schema
-    future_payload = json.dumps({"schema_version": "run-manifest/v2", "run_id": "run_future"})
+    future_payload = json.dumps({"schema_version": "run-manifest/v3", "run_id": "run_future"})
     with closing(sqlite3.connect(path)) as connection, connection:
         connection.execute(
             "INSERT INTO runs (run_id, payload) VALUES (?, ?)",
@@ -173,9 +174,10 @@ def test_sqlite_run_repository_get_run_fails_loudly_on_an_unknown_schema_version
 
     error = exc_info.value
     assert error.contract == "run-manifest"
-    assert error.found_version == "run-manifest/v2"
+    assert error.found_version == "run-manifest/v3"
     assert "run-manifest/v1" in error.supported_versions
-    assert "run-manifest/v2" in str(error)
+    assert "run-manifest/v2" in error.supported_versions
+    assert "run-manifest/v3" in str(error)
 
 
 def test_sqlite_run_repository_get_decision_fails_loudly_on_an_unknown_schema_version(
@@ -186,7 +188,7 @@ def test_sqlite_run_repository_get_decision_fails_loudly_on_an_unknown_schema_ve
     repository = SQLiteRunRepository(path)
     repository.append_run(_manifest("run_decision_future"))
     future_payload = json.dumps(
-        {"schema_version": "decision-ledger/v2", "run_id": "run_decision_future"}
+        {"schema_version": "decision-ledger/v3", "run_id": "run_decision_future"}
     )
     with closing(sqlite3.connect(path)) as connection, connection:
         connection.execute(
@@ -199,8 +201,9 @@ def test_sqlite_run_repository_get_decision_fails_loudly_on_an_unknown_schema_ve
 
     error = exc_info.value
     assert error.contract == "decision-ledger"
-    assert error.found_version == "decision-ledger/v2"
+    assert error.found_version == "decision-ledger/v3"
     assert "decision-ledger/v1" in error.supported_versions
+    assert "decision-ledger/v2" in error.supported_versions
 
 
 def test_sqlite_recovery_store_get_fails_loudly_on_an_unknown_schema_version(
@@ -230,7 +233,16 @@ def test_sqlite_recovery_store_get_fails_loudly_on_an_unknown_schema_version(
 
 
 def test_registries_current_version_matches_each_model_default() -> None:
-    """Guard against the registry's current_version drifting from the model's own default."""
-    assert RUN_MANIFEST_VERSIONS.current_version == "run-manifest/v1"
-    assert DECISION_LEDGER_VERSIONS.current_version == "decision-ledger/v1"
-    assert RUN_RECOVERY_STATE_VERSIONS.current_version == "run-recovery/v1"
+    """Guard against the registry's current_version drifting from the model's own default.
+
+    Read off each model's own `schema_version` default rather than compared to a literal:
+    `V2-P4-001` moved two of these three and a literal would have to be edited at every bump,
+    which is the drift `tests/unit/domain/test_schema_export.py` documents at length.
+    """
+    for registry, model in (
+        (RUN_MANIFEST_VERSIONS, RunManifest),
+        (DECISION_LEDGER_VERSIONS, DecisionLedger),
+        (RUN_RECOVERY_STATE_VERSIONS, RunRecoveryState),
+    ):
+        assert registry.current_version == model.model_fields["schema_version"].default
+        assert registry.versions[registry.current_version] is model

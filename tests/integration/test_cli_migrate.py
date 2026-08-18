@@ -1,4 +1,6 @@
 import json
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -9,6 +11,7 @@ from openalpha_cn.storage.migrations import (
     CREATE_QUERY_PATH_INDEXES_VERSION,
     CREATE_VALIDATION_RESULTS_VERSION,
     DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
+    REWRITE_CONTRACT_IDENTITIES_VERSION,
 )
 
 runner = CliRunner()
@@ -28,6 +31,7 @@ def test_migrate_status_reports_pending_migrations_for_a_fresh_runtime_dir(tmp_p
         CREATE_VALIDATION_RESULTS_VERSION,
         DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
         CREATE_QUERY_PATH_INDEXES_VERSION,
+        REWRITE_CONTRACT_IDENTITIES_VERSION,
     ]
 
 
@@ -112,7 +116,7 @@ def test_migrate_run_converges_after_it_constructs_stores_then_reports_up_to_dat
     # so both migrations' preconditions are met by the time this second call's
     # run_migrations() runs.
     assert (
-        f"migrated {CREATE_VALIDATION_RESULTS_VERSION} -> {CREATE_QUERY_PATH_INDEXES_VERSION}"
+        f"migrated {CREATE_VALIDATION_RESULTS_VERSION} -> {REWRITE_CONTRACT_IDENTITIES_VERSION}"
         in second.output
     )
     assert "up to date" not in second.output
@@ -122,9 +126,82 @@ def test_migrate_run_converges_after_it_constructs_stores_then_reports_up_to_dat
         app, ["migrate", "status", "--runtime-dir", str(runtime_dir), "--json"]
     )
     status_after_second = json.loads(status_result.output)
-    assert status_after_second["current_version"] == CREATE_QUERY_PATH_INDEXES_VERSION
+    assert status_after_second["current_version"] == REWRITE_CONTRACT_IDENTITIES_VERSION
     assert status_after_second["pending"] == []
 
     third = runner.invoke(app, ["migrate", "run", "--runtime-dir", str(runtime_dir)])
     assert third.exit_code == 0, third.output
     assert "up to date" in third.output
+
+
+def test_migrate_run_reports_the_horizon_refusal_the_operator_has_to_act_on(
+    tmp_path: Path,
+) -> None:
+    """`V2-P4-001`'s one un-migratable case, through the surface an operator actually sees.
+
+    `MigrationFailedError`'s own message names the migration and the backup and stops there,
+    which is right for an arbitrary migration whose exception text is unvetted. It is wrong
+    for this one: `UnmigratableHorizonError` is a refusal this package makes on purpose, and
+    its message *is* the remedy -- which run carries a horizon `SignalFrame` no longer admits,
+    and the two things that can be done about it. Without this the operator gets "migration 5
+    failed" and no way to find the row.
+    """
+    runtime_dir = tmp_path / "runtime"
+    assert runner.invoke(app, ["migrate", "run", "--runtime-dir", str(runtime_dir)]).exit_code == 0
+    assert runner.invoke(app, ["migrate", "run", "--runtime-dir", str(runtime_dir)]).exit_code == 0
+
+    stranded = {
+        "schema_version": "run-recovery/v1",
+        "run_id": "run_calendar_horizon",
+        "request_digest": "a" * 64,
+        "graph_signature": "a" * 64,
+        "agent_ids": ["market-agent"],
+        "completed_results": [
+            {
+                "agent_id": "market-agent",
+                "signal": {
+                    "schema_version": "signal-frame/v1",
+                    "subject": "000001.SZ",
+                    "as_of": "2026-01-16T07:00:00+00:00",
+                    "direction": "bullish",
+                    "strength": 0.4,
+                    "confidence": 0.6,
+                    "horizon": "3m",
+                    "evidence_ids": ["ev_pre_p4"],
+                    "confirmation_conditions": [],
+                    "invalidation_conditions": [],
+                    "risk_flags": [],
+                    "abstention_reason": None,
+                },
+                "rationale": "ok",
+            }
+        ],
+        "next_agent_index": 1,
+        "attempt_count": 1,
+        "status": "running",
+        "started_at": "2026-01-16T07:00:00+00:00",
+        "updated_at": "2026-01-16T07:00:00+00:00",
+        "error_type": None,
+    }
+    path = runtime_dir / "state.sqlite3"
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.execute("PRAGMA user_version = 4")
+        connection.execute(
+            "DELETE FROM schema_migrations WHERE version = ?",
+            (REWRITE_CONTRACT_IDENTITIES_VERSION,),
+        )
+        connection.execute(
+            """
+            INSERT INTO run_recovery (run_id, request_digest, graph_signature, status, payload)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            ("run_calendar_horizon", "a" * 64, "a" * 64, "running", json.dumps(stranded)),
+        )
+
+    failed = runner.invoke(app, ["migrate", "run", "--runtime-dir", str(runtime_dir)])
+
+    assert failed.exit_code == 1
+    assert "rewrite_contract_identities" in failed.output
+    assert "run_calendar_horizon" in failed.output
+    assert "3m" in failed.output
+    assert "trading days" in failed.output

@@ -52,6 +52,18 @@
       "title": "CheckpointRecord",
       "type": "object"
     },
+    "RunMode": {
+      "description": "The declared modes of one shared research cycle.\n\nMembers are ordered oldest-first rather than alphabetically, so the two `V2-P4-001`\nadditions read as additions. Order is not semantic: nothing sorts or compares modes,\nand `RunMode` deliberately does not override `__bool__` or define an ordering, because\nno mode is an \"off\" value and no mode is greater than another.",
+      "enum": [
+        "live",
+        "replay",
+        "backtest",
+        "paper",
+        "daily"
+      ],
+      "title": "RunMode",
+      "type": "string"
+    },
     "VersionRef": {
       "additionalProperties": false,
       "description": "A named component version captured for reproduction.",
@@ -126,13 +138,7 @@
       "title": "Finished At"
     },
     "mode": {
-      "enum": [
-        "live",
-        "replay",
-        "backtest"
-      ],
-      "title": "Mode",
-      "type": "string"
+      "$ref": "#/$defs/RunMode"
     },
     "model_versions": {
       "default": [],
@@ -168,9 +174,15 @@
       "title": "Run Id",
       "type": "string"
     },
+    "run_manifest_id": {
+      "description": "Return the content address of this run's **declaration** (`V2-P4-025`).\n\n`stable_model_id` over every field except `RUN_MANIFEST_UNADDRESSED_FIELDS`, so two\nruns that declare the same inputs share an address however long they took and however\nthey ended, and two runs that declare anything different -- `config_digest` and\n`random_seed` included, which is section 9's whole point -- do not.\n\nThe split is `V2-P3-014`'s, reused: an `experiment_id` is stamped on the declaration\nand a `content_digest` on the answer, so that \"the same question, re-asked\" and \"a\ndifferent answer\" stay distinguishable. A manifest is the declaration half; the\ndecision ledger and the validation result are the answers, and they keep their own\naddresses.",
+      "readOnly": true,
+      "title": "Run Manifest Id",
+      "type": "string"
+    },
     "schema_version": {
-      "const": "run-manifest/v1",
-      "default": "run-manifest/v1",
+      "const": "run-manifest/v2",
+      "default": "run-manifest/v2",
       "title": "Schema Version",
       "type": "string"
     },
@@ -199,7 +211,8 @@
     "config_digest",
     "random_seed",
     "started_at",
-    "status"
+    "status",
+    "run_manifest_id"
   ],
   "title": "RunManifest",
   "type": "object"

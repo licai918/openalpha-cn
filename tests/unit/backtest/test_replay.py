@@ -58,6 +58,7 @@ from openalpha_cn.storage.migrations import (
     CREATE_QUERY_PATH_INDEXES_VERSION,
     CREATE_VALIDATION_RESULTS_VERSION,
     DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
+    REWRITE_CONTRACT_IDENTITIES_VERSION,
     read_status,
     run_migrations,
 )
@@ -368,6 +369,7 @@ def test_run_migrates_a_fresh_replay_database_before_constructing_any_store(
     assert [m.version for m in status.pending] == [
         DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
         CREATE_QUERY_PATH_INDEXES_VERSION,
+        REWRITE_CONTRACT_IDENTITIES_VERSION,
     ]
 
 
@@ -381,10 +383,14 @@ def test_run_catches_up_the_demo_migration_on_a_second_call_but_the_index_migrat
     nine stores (including `SQLitePortfolioLedger`/`SQLiteReportStore`), a replay-only
     database never constructs those two -- so `create_query_path_indexes` (V2-P0B-015),
     which requires `portfolio_transitions` and `research_reports` to exist, can never
-    satisfy its precondition here and stays pending forever. That is the deliberate,
-    documented consequence of routing this database through the same unmodified migration
-    engine everything else uses (see `ReplayRunner.run`'s docstring) instead of inventing a
-    replay-specific migration subset.
+    satisfy its precondition here and stays pending forever -- and so, transitively, does
+    everything ordered after it, which is now `rewrite_contract_identities` (`V2-P4-001`).
+    That is harmless here and is the reason `V2-P4-001` bumped no contract a replay database
+    writes without also being able to rewrite it: a replay database's `runs`/`decisions` rows
+    are written by this build, at the current version, so there is nothing for the identity
+    rewrite to do against one. That is the deliberate, documented consequence of routing this
+    database through the same unmodified migration engine everything else uses (see
+    `ReplayRunner.run`'s docstring) instead of inventing a replay-specific migration subset.
     """
     corpus = ReplayCorpus(schema_version="openalpha-replay-corpus/v1", trading_days=(), cases=())
     state_path = tmp_path / "replay.sqlite3"
@@ -407,7 +413,10 @@ def test_run_catches_up_the_demo_migration_on_a_second_call_but_the_index_migrat
     status = read_status(state_path)
     assert status.current_version == DEMO_ADD_RUNS_ARCHIVED_AT_VERSION
     assert status.current_version > BASELINE_VERSION
-    assert [m.version for m in status.pending] == [CREATE_QUERY_PATH_INDEXES_VERSION]
+    assert [m.version for m in status.pending] == [
+        CREATE_QUERY_PATH_INDEXES_VERSION,
+        REWRITE_CONTRACT_IDENTITIES_VERSION,
+    ]
 
 
 def test_run_persists_a_successful_cases_validation_result_and_it_is_retrievable(

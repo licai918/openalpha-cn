@@ -8,7 +8,8 @@
           "enum": [
             "rule",
             "factor",
-            "agent"
+            "agent",
+            "model"
           ],
           "title": "Category",
           "type": "string"
@@ -88,8 +89,8 @@
       "type": "number"
     },
     "schema_version": {
-      "const": "validation-result/v1",
-      "default": "validation-result/v1",
+      "const": "validation-result/v2",
+      "default": "validation-result/v2",
       "title": "Schema Version",
       "type": "string"
     },
@@ -102,6 +103,11 @@
     "transaction_cost": {
       "minimum": 0,
       "title": "Transaction Cost",
+      "type": "number"
+    },
+    "unexplained_return": {
+      "default": 0.0,
+      "title": "Unexplained Return",
       "type": "number"
     },
     "validation_id": {

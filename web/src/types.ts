@@ -68,7 +68,7 @@ export type ValidationResult = {
   net_active_return: number;
   confidence: number;
   attribution: Array<{
-    category: "rule" | "factor" | "agent";
+    category: "rule" | "factor" | "agent" | "model";
     name: string;
     contribution: number;
   }>;

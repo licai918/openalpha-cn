@@ -286,10 +286,20 @@ class SecurityHeadersMiddleware:
 
 
 def _parse_research_result(payload: dict[str, Any]) -> ResearchRunResult:
-    """Rebuild a strict result while verifying its content-derived identifiers."""
+    """Rebuild a strict result while verifying its content-derived identifiers.
+
+    Every computed identifier the response carried has to be stripped before validation and
+    re-derived afterwards, because each contract is `extra="forbid"` and would otherwise
+    reject its own serialized form. `V2-P4-025` adds a third such identifier --
+    `RunManifest.run_manifest_id` -- and it is verified rather than merely dropped, for the
+    same reason `signal_id` and `decision_id` are: a caller that could hand back an
+    unverified manifest address could hand back one that does not describe the manifest
+    beside it, which is the whole thing the address is for.
+    """
     clean = {**payload}
     claimed_signal_id = clean.get("signal", {}).get("signal_id")
     claimed_decision_id = clean.get("decision", {}).get("decision_id")
+    claimed_manifest_id = clean.get("manifest", {}).get("run_manifest_id")
 
     signal = {**clean["signal"]}
     signal.pop("signal_id", None)
@@ -298,6 +308,10 @@ def _parse_research_result(payload: dict[str, Any]) -> ResearchRunResult:
     decision = {**clean["decision"]}
     decision.pop("decision_id", None)
     clean["decision"] = decision
+
+    manifest = {**clean["manifest"]}
+    manifest.pop("run_manifest_id", None)
+    clean["manifest"] = manifest
 
     agent_results = []
     for item in clean.get("agent_results", []):
@@ -313,6 +327,8 @@ def _parse_research_result(payload: dict[str, Any]) -> ResearchRunResult:
         raise ValueError("research signal_id does not match its content")
     if claimed_decision_id != result.decision.decision_id:
         raise ValueError("research decision_id does not match its content")
+    if claimed_manifest_id != result.manifest.run_manifest_id:
+        raise ValueError("research run_manifest_id does not match its content")
     return result
 
 

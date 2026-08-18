@@ -29,6 +29,7 @@ from openalpha_cn.storage.migrations import (
     CREATE_VALIDATION_RESULTS_VERSION,
     DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
     MIGRATIONS,
+    REWRITE_CONTRACT_IDENTITIES_VERSION,
     Migration,
     MigrationFailedError,
     MigrationNotYetApplicable,
@@ -56,9 +57,12 @@ def _manifest(*, now: datetime, run_id: str = "run_v1_shape") -> RunManifest:
     )
 
 
-def _decision(*, now: datetime, run_id: str = "run_v1_shape") -> DecisionLedger:
+def _decision(
+    *, now: datetime, run_manifest_id: str, run_id: str = "run_v1_shape"
+) -> DecisionLedger:
     return DecisionLedger(
         run_id=run_id,
+        run_manifest_id=run_manifest_id,
         created_at=now,
         routing_path=("risk-gate",),
         risk_decision="block",
@@ -111,6 +115,12 @@ def _build_v1_shaped_database(
 ) -> tuple[RunManifest, DecisionLedger, MemoryEntry, PortfolioTransition, ResearchReport]:
     """Populate `path` using only the pre-existing stores -- exactly like a real v1 install.
 
+    "v1-shaped" here is about the *table* layout a pre-migration install left behind -- no
+    `schema_migrations`, no `validation_results` -- and not about payload contract versions:
+    the rows are written through today's stores, so they carry today's `schema_version`. The
+    payload-level v1 case, which is `V2-P4-001`'s identity rewrite, has its own database
+    builder in `tests/integration/storage/test_identity_rewrite.py`.
+
     All seven stores that predate the migration engine (V2-P0B-004) run here, not just
     `SQLiteRunRepository`/`SQLiteResearchMemory`: `SQLitePortfolioLedger` and
     `SQLiteReportStore` are added by task 21 (`V2-P0B-015`) so `checkpoints`,
@@ -128,7 +138,7 @@ def _build_v1_shaped_database(
     report_store = SQLiteReportStore(path)
     run = _manifest(now=now)
     repository.append_run(run)
-    decision = _decision(now=now)
+    decision = _decision(now=now, run_manifest_id=run.run_manifest_id)
     repository.append_decision(decision)
     entry = _memory_entry(run_id=run.run_id, decision_id=decision.decision_id, now=now)
     memory.append(entry)
@@ -177,7 +187,7 @@ def test_demo_migration_advances_version_and_preserves_v1_records(
     result = run_migrations(path, clock=migration_clock)
 
     assert result.from_version == 0
-    assert result.to_version == CREATE_QUERY_PATH_INDEXES_VERSION
+    assert result.to_version == REWRITE_CONTRACT_IDENTITIES_VERSION
     # `runs`, `checkpoints`, `portfolio_transitions`, and `research_reports` all already
     # exist (built above), so nothing defers: baseline, then create_validation_results
     # (V2-P0B-010, ordered before the demo migration -- see that migration's docstring for
@@ -189,18 +199,20 @@ def test_demo_migration_advances_version_and_preserves_v1_records(
         CREATE_VALIDATION_RESULTS_VERSION,
         DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
         CREATE_QUERY_PATH_INDEXES_VERSION,
+        REWRITE_CONTRACT_IDENTITIES_VERSION,
     ]
     assert result.backup_path is not None
     assert result.backup_path.exists()
     assert result.backup_path.parent == path.parent / "backups"
 
     status = read_status(path)
-    assert status.current_version == CREATE_QUERY_PATH_INDEXES_VERSION
+    assert status.current_version == REWRITE_CONTRACT_IDENTITIES_VERSION
     assert [(m.version, m.name) for m in status.applied] == [
         (BASELINE_VERSION, "baseline"),
         (CREATE_VALIDATION_RESULTS_VERSION, "create_validation_results"),
         (DEMO_ADD_RUNS_ARCHIVED_AT_VERSION, "demo_add_runs_archived_at"),
         (CREATE_QUERY_PATH_INDEXES_VERSION, "create_query_path_indexes"),
+        (REWRITE_CONTRACT_IDENTITIES_VERSION, "rewrite_contract_identities"),
     ]
     assert status.pending == ()
 
@@ -344,9 +356,9 @@ def test_running_migrations_again_is_idempotent(
     first = run_migrations(path, clock=migration_clock)
     second = run_migrations(path, clock=migration_clock)
 
-    assert first.to_version == CREATE_QUERY_PATH_INDEXES_VERSION
-    assert second.from_version == CREATE_QUERY_PATH_INDEXES_VERSION
-    assert second.to_version == CREATE_QUERY_PATH_INDEXES_VERSION
+    assert first.to_version == REWRITE_CONTRACT_IDENTITIES_VERSION
+    assert second.from_version == REWRITE_CONTRACT_IDENTITIES_VERSION
+    assert second.to_version == REWRITE_CONTRACT_IDENTITIES_VERSION
     assert second.applied == ()
     assert second.backup_path is None  # nothing pending, so no backup taken
 
@@ -356,6 +368,7 @@ def test_running_migrations_again_is_idempotent(
         CREATE_VALIDATION_RESULTS_VERSION,
         DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
         CREATE_QUERY_PATH_INDEXES_VERSION,
+        REWRITE_CONTRACT_IDENTITIES_VERSION,
     ]
 
 
@@ -376,7 +389,7 @@ def test_demo_migration_is_a_sql_level_no_op_when_the_column_already_exists(
 
     result = run_migrations(path, clock=migration_clock)
 
-    assert result.to_version == CREATE_QUERY_PATH_INDEXES_VERSION
+    assert result.to_version == REWRITE_CONTRACT_IDENTITIES_VERSION
     with sqlite3.connect(path) as connection:
         columns = [row[1] for row in connection.execute("PRAGMA table_info(runs)")]
     assert columns.count("archived_at") == 1
@@ -393,7 +406,7 @@ def test_failing_migration_rolls_back_leaves_version_unmoved_and_backup_intact(
     # Bring the database up to date first, exactly as a real upgrade would.
     run_migrations(path, clock=migration_clock)
     before = read_status(path)
-    assert before.current_version == CREATE_QUERY_PATH_INDEXES_VERSION
+    assert before.current_version == REWRITE_CONTRACT_IDENTITIES_VERSION
 
     # One past the real registry's own highest version, computed rather than hardcoded,
     # so this injected migration's version can never collide with a real one as the
@@ -414,12 +427,13 @@ def test_failing_migration_rolls_back_leaves_version_unmoved_and_backup_intact(
     assert error.backup_path.exists()
 
     after = read_status(path)
-    assert after.current_version == CREATE_QUERY_PATH_INDEXES_VERSION  # unmoved
+    assert after.current_version == REWRITE_CONTRACT_IDENTITIES_VERSION  # unmoved
     assert [m.version for m in after.applied] == [
         BASELINE_VERSION,
         CREATE_VALIDATION_RESULTS_VERSION,
         DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
         CREATE_QUERY_PATH_INDEXES_VERSION,
+        REWRITE_CONTRACT_IDENTITIES_VERSION,
     ]  # no row for doomed_version
 
     # Data is intact, and the DDL the doomed migration ran (before it raised) did not persist.
@@ -459,6 +473,7 @@ def test_run_migrations_logs_the_backup_path_and_each_applied_migration(
         (CREATE_VALIDATION_RESULTS_VERSION, "create_validation_results"),
         (DEMO_ADD_RUNS_ARCHIVED_AT_VERSION, "demo_add_runs_archived_at"),
         (CREATE_QUERY_PATH_INDEXES_VERSION, "create_query_path_indexes"),
+        (REWRITE_CONTRACT_IDENTITIES_VERSION, "rewrite_contract_identities"),
     ]
 
 
@@ -531,6 +546,7 @@ def test_new_database_applies_baseline_and_validation_results_then_defers_the_de
     assert [m.version for m in status.pending] == [
         DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
         CREATE_QUERY_PATH_INDEXES_VERSION,
+        REWRITE_CONTRACT_IDENTITIES_VERSION,
     ]
 
     # Once the owning store creates its table (independent of the migrator, by design),
@@ -544,14 +560,17 @@ def test_new_database_applies_baseline_and_validation_results_then_defers_the_de
     assert caught_up.from_version == CREATE_VALIDATION_RESULTS_VERSION
     assert caught_up.to_version == DEMO_ADD_RUNS_ARCHIVED_AT_VERSION
     still_pending = read_status(path)
-    assert [m.version for m in still_pending.pending] == [CREATE_QUERY_PATH_INDEXES_VERSION]
+    assert [m.version for m in still_pending.pending] == [
+        CREATE_QUERY_PATH_INDEXES_VERSION,
+        REWRITE_CONTRACT_IDENTITIES_VERSION,
+    ]
 
     # Constructing the last two owning stores lets the third call finish the job.
     SQLitePortfolioLedger(path)
     SQLiteReportStore(path)
     fully_caught_up = run_migrations(path, clock=migration_clock)
     assert fully_caught_up.from_version == DEMO_ADD_RUNS_ARCHIVED_AT_VERSION
-    assert fully_caught_up.to_version == CREATE_QUERY_PATH_INDEXES_VERSION
+    assert fully_caught_up.to_version == REWRITE_CONTRACT_IDENTITIES_VERSION
     assert read_status(path).pending == ()
 
 
@@ -570,6 +589,7 @@ def test_read_status_does_not_mutate_the_database(tmp_path: Path, migration_now:
         CREATE_VALIDATION_RESULTS_VERSION,
         DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
         CREATE_QUERY_PATH_INDEXES_VERSION,
+        REWRITE_CONTRACT_IDENTITIES_VERSION,
     ]
     assert "schema_migrations" not in _table_names(path)
 

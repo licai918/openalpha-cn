@@ -65,6 +65,7 @@ from openalpha_cn.domain.price_limits import (
     SUSPENSION_DATASET,
     SuspensionError,
 )
+from openalpha_cn.domain.run_mode import RunMode
 from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET, StockUniverseError
 from openalpha_cn.domain.trading_calendar import (
     TRADING_CALENDAR_DATASET,
@@ -156,7 +157,11 @@ from openalpha_cn.runtime.contracts import ResearchRunRequest
 from openalpha_cn.runtime.provenance import compute_config_digest, resolve_code_commit
 from openalpha_cn.sdk import OpenAlphaSDK
 from openalpha_cn.storage.factor_experiments import ExperimentStoreError, FileExperimentStore
-from openalpha_cn.storage.migrations import MigrationFailedError, read_status
+from openalpha_cn.storage.migrations import (
+    MigrationFailedError,
+    UnmigratableHorizonError,
+    read_status,
+)
 from openalpha_cn.storage.parquet import read_parquet_records
 
 logger = logging.getLogger(__name__)
@@ -228,14 +233,6 @@ class Redistribution(StrEnum):
     allowed = "allowed"
     restricted = "restricted"
     unknown = "unknown"
-
-
-class RunMode(StrEnum):
-    """Supported shared research-cycle modes."""
-
-    live = "live"
-    replay = "replay"
-    backtest = "backtest"
 
 
 @app.command()
@@ -650,7 +647,7 @@ def research_run(
     result = sdk.run_research(
         ResearchRunRequest(
             run_id=run_id,
-            mode=mode.value,
+            mode=mode,
             subject=subject,
             as_of=point_in_time,
             evidence=evidence,
@@ -754,6 +751,15 @@ def migrate_run(
             f"schema version unchanged; backup at {error.backup_path}",
             err=True,
         )
+        # One cause is reported verbatim and the rest are not, which is the same line
+        # `logging_setup.py` draws: a migration's `apply()` is arbitrary code and its message
+        # is unvetted, but `UnmigratableHorizonError` is a type this package owns and its
+        # message *is* the remedy -- which run carries a horizon this build cannot accept, and
+        # what to do about it. Without this the operator gets "migration 5 failed" and nothing
+        # actionable, for a refusal that is deliberate rather than a fault.
+        cause = error.__cause__
+        if isinstance(cause, UnmigratableHorizonError):
+            typer.echo(str(cause), err=True)
         raise typer.Exit(code=1) from error
     result = storage.migration_result
     status = read_status(path)

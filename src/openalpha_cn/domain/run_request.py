@@ -27,11 +27,12 @@ ResearchRunRequest` keeps working (same class object -- see the identity asserti
 """
 
 from datetime import datetime
-from typing import Literal, Self
+from typing import Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from openalpha_cn.domain.evidence import EvidenceSnapshot, LookAheadViolationError
+from openalpha_cn.domain.run_mode import RunMode
 from openalpha_cn.domain.time import ensure_aware
 
 
@@ -41,7 +42,15 @@ class ResearchRunRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
 
     run_id: str = Field(min_length=1, max_length=128)
-    mode: Literal["live", "replay", "backtest"]
+    mode: RunMode
+    """Which cycle this request asks for; declared once in `domain/run_mode.py`.
+
+    This is the second of the three places `V2-P4-003` found the mode set written out --
+    it moved here from `runtime/engine.py` with the class -- and it names the shared enum
+    now rather than repeating it. `RunManifest.mode` is the first and `cli.py`'s `--mode`
+    option the third; all three read the same declaration, so `paper` and `daily` arrived
+    at all three at once.
+    """
     subject: str = Field(min_length=1, max_length=128)
     as_of: datetime
     evidence: tuple[EvidenceSnapshot, ...]

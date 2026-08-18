@@ -102,6 +102,13 @@ class ResearchEngine:
         )
         decision = DecisionLedger(
             run_id=request.run_id,
+            # V2-P4-025: the manifest is built first precisely so its content address can be
+            # carried here. Roadmap section 9 measured `config_digest` and `random_seed`
+            # failing to reach `decision_id`; this one field is how they reach it now, and
+            # `tests/integration/test_run_identity.py::
+            # test_changing_config_digest_alone_moves_the_run_level_id_and_the_decision_id`
+            # is that experiment re-run against this line.
+            run_manifest_id=manifest.run_manifest_id,
             created_at=run_time,
             agent_outputs=tuple(
                 AgentDecision(

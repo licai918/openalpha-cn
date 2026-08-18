@@ -14,6 +14,7 @@ def test_decision_ledger_is_an_immutable_evidence_linked_record(plain_frozen_now
     NOW = plain_frozen_now
     ledger = DecisionLedger(
         run_id="run_20260724",
+        run_manifest_id="run_" + "0" * 24,
         created_at=NOW,
         agent_outputs=(
             AgentDecision(
@@ -33,7 +34,7 @@ def test_decision_ledger_is_an_immutable_evidence_linked_record(plain_frozen_now
         prompt_versions=(),
     )
 
-    assert ledger.schema_version == "decision-ledger/v1"
+    assert ledger.schema_version == "decision-ledger/v2"
     assert ledger.decision_id.startswith("dec_")
     assert ledger.model_copy().decision_id == ledger.decision_id
     with pytest.raises(ValidationError, match="Instance is frozen"):
@@ -47,6 +48,7 @@ def test_non_abstaining_decision_requires_evidence_and_signal_references(
     with pytest.raises(ValidationError, match="requires evidence_ids and signal_ids"):
         DecisionLedger(
             run_id="run_20260724",
+            run_manifest_id="run_" + "0" * 24,
             created_at=NOW,
             agent_outputs=(),
             routing_path=("risk-gate",),
@@ -85,7 +87,7 @@ def test_run_manifest_records_reproduction_inputs_and_terminal_state(
         ),
     )
 
-    assert manifest.schema_version == "run-manifest/v1"
+    assert manifest.schema_version == "run-manifest/v2"
     assert manifest.provider_payload_digests[0].sha256 == DIGEST
 
 
@@ -147,7 +149,7 @@ def test_validation_result_exposes_net_active_return_and_stable_id(
         data_quality_notes=("Synthetic fixture.",),
     )
 
-    assert result.schema_version == "validation-result/v1"
+    assert result.schema_version == "validation-result/v2"
     assert result.net_active_return == pytest.approx(0.075)
     assert result.validation_id.startswith("val_")
     assert result.model_copy().validation_id == result.validation_id

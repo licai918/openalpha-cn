@@ -29,9 +29,10 @@ def manifest(plain_frozen_now: datetime):
 
 @pytest.fixture
 def decision(plain_frozen_now: datetime):
-    def _make() -> DecisionLedger:
+    def _make(run_manifest_id: str = "run_" + "0" * 24) -> DecisionLedger:
         return DecisionLedger(
             run_id="run_20260724",
+            run_manifest_id=run_manifest_id,
             created_at=plain_frozen_now,
             routing_path=("risk-gate",),
             risk_decision="block",
@@ -47,7 +48,7 @@ def test_repository_round_trips_runs_decisions_and_checkpoints(
 ) -> None:
     repository = SQLiteRunRepository(tmp_path / "state.sqlite3")
     run = manifest()
-    ledger = decision()
+    ledger = decision(run.run_manifest_id)
     checkpoint = CheckpointRecord(
         name="evidence-ready",
         recorded_at=plain_frozen_now,

@@ -58,6 +58,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from enum import Enum
+from functools import total_ordering
 from typing import Final
 
 
@@ -108,7 +109,42 @@ second spelling is a second `signal_id` for one horizon.
 
 _HORIZON = re.compile(HORIZON_PATTERN)
 
+COUNTABLE_HORIZON_PATTERN: Final[str] = (
+    r"^[1-9][0-9]{0,2}[" + HorizonUnit.trading_days.value + r"]$"
+)
+"""`HORIZON_PATTERN` restricted to the one unit a session count exists for (`V2-P4-001`).
 
+PRD D36 asks for `SignalFrame.horizon` to be "规范化为可比较枚举" -- a comparable enumeration
+-- and this is the only spelling of that which invents nothing. Comparing two horizons needs
+one measure they are both in, and this module's own docstring records why three of the four
+units have none: a calendar span holds a variable number of sessions, a *future* one's count
+is not knowable at all, and `ResearchHorizon.sessions` therefore refuses rather than
+multiplying by a constant nobody measured. A total order over the full four-unit grammar
+would have to invent exactly that constant. A total order over this restriction is just
+integer order on the count, and `ResearchHorizon` is `@total_ordering` below because of it.
+
+**This narrows a domain and changes no representation, which is why it moves no identity.**
+Roadmap section 8 measured that distinction directly, on this very field: `V2-P1-017`
+replaced `min_length/max_length` with `HORIZON_PATTERN` and every accepted value serialised
+to the bytes it always had, so not one `signal_id` moved. The same holds here -- `5d` and
+`10d`, the only two horizons anything in this repository writes, are inside this pattern and
+their canonical JSON is unchanged. Replacing the field's *type* with a structured value
+would have been the other thing entirely: section 8 names it, and
+`tests/unit/domain/test_contract_identity.py::test_narrowing_the_signal_horizon_moved_no_stored_signal_id`
+measures that it did not happen.
+
+`HORIZON_PATTERN` itself is untouched and stays four-unit: `parse_horizon` is the grammar for
+a *label window* (`domain/labels.py`, `factor_view.py`, `openalpha factor run --horizon`),
+where a caller may legitimately state an intent this module then refuses to count. What
+narrows is what a `SignalFrame` -- the record that gets scored, ranked and validated -- is
+allowed to carry, because a signal whose horizon nothing can turn into a return window is a
+signal nothing can ever score.
+"""
+
+_COUNTABLE_HORIZON = re.compile(COUNTABLE_HORIZON_PATTERN)
+
+
+@total_ordering
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ResearchHorizon:
     """A parsed research horizon: how many of which unit.
@@ -170,13 +206,54 @@ class ResearchHorizon:
             )
         return self.count
 
+    def __lt__(self, other: ResearchHorizon) -> bool:
+        """Order two horizons by the sessions they span, or refuse by name.
+
+        The comparison PRD D36's "可比较" asks for, and it is deliberately built on
+        `sessions` rather than on `(unit, count)`. A lexicographic order over the four units
+        would rank `999d` below `1w` -- 999 sessions is roughly four years and a week is
+        five -- so it would be a total order that is wrong rather than a partial one that is
+        honest. Reusing `sessions` means the refusal for a calendar unit is stated once, in
+        the property that measured it, and a comparison involving one raises `HorizonError`
+        with that property's full explanation instead of a bare `TypeError`.
+
+        `@total_ordering` derives `>`, `<=` and `>=` from this and the dataclass's `__eq__`.
+        Equality is **not** routed through `sessions`: two horizons are equal when they are
+        the same count of the same unit, which is defined for all four units and is what
+        `parse_horizon(h.text) == h` relies on. So `1w == 5d` is `False` (they are different
+        horizons) while `1w < 5d` refuses (nothing here knows which is longer) -- the two
+        answers are about different questions and neither is guessed.
+
+        `COUNTABLE_HORIZON_PATTERN` is what keeps this from being a trap in practice: every
+        horizon a `SignalFrame` may carry is a trading-day horizon, so a list of them sorts.
+        """
+        if not isinstance(other, ResearchHorizon):
+            return NotImplemented
+        return self.sessions < other.sessions
+
+
+def is_countable_horizon(text: object) -> bool:
+    """Whether `text` is a horizon `SignalFrame` still admits at `V2-P4-001` (see the pattern).
+
+    Reads `COUNTABLE_HORIZON_PATTERN`, the same string the field's `pattern` is built from, so
+    a caller asking this question and pydantic answering it cannot disagree. Its one caller
+    outside the tests is `storage/migrations.py`'s identity rewrite, which has to say
+    *which* stored run carries a horizon this build no longer accepts before pydantic refuses
+    the row with a message about a regex.
+    """
+    return type(text) is str and _COUNTABLE_HORIZON.fullmatch(text) is not None
+
 
 def parse_horizon(text: str) -> ResearchHorizon:
-    """Parse a `SignalFrame.horizon` string, or refuse it by name.
+    """Parse a research horizon string, or refuse it by name.
 
-    The counterpart of the `pattern` on the field itself: the field refuses a malformed value at
-    construction, and this turns an accepted one into something a window can be sized from.
-    Both read `HORIZON_PATTERN`, so a value that constructs always parses.
+    The counterpart of the `pattern` on a horizon-carrying field: the field refuses a
+    malformed value at construction, and this turns an accepted one into something a window
+    can be sized from. Both read a pattern built from `HorizonUnit`, so a value that
+    constructs always parses -- note that `SignalFrame.horizon` constructs against the
+    narrower `COUNTABLE_HORIZON_PATTERN` while this accepts the whole four-unit
+    `HORIZON_PATTERN`, because a label window may be asked for in a unit a signal may not be
+    stated in.
     """
     if type(text) is not str or _HORIZON.fullmatch(text) is None:
         raise HorizonError(

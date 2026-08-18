@@ -115,8 +115,8 @@ const DRIFT_CHECKS: DriftCheckSpec[] = [
   },
   {
     coversType: "ValidationResult",
-    label: "ValidationResult matches validation-result-v1",
-    schemaFile: "validation-result-v1.json",
+    label: "ValidationResult matches validation-result-v2",
+    schemaFile: "validation-result-v2.json",
     resolve: (sourceFile, schema) => {
       const node = findTypeAlias(sourceFile, "ValidationResult");
       return {
@@ -128,8 +128,8 @@ const DRIFT_CHECKS: DriftCheckSpec[] = [
   },
   {
     coversType: "ValidationResult",
-    label: "ValidationResult.attribution items match validation-result-v1 $defs.AttributionTerm",
-    schemaFile: "validation-result-v1.json",
+    label: "ValidationResult.attribution items match validation-result-v2 $defs.AttributionTerm",
+    schemaFile: "validation-result-v2.json",
     resolve: (sourceFile, schema) => {
       const validationResult = findTypeAlias(sourceFile, "ValidationResult");
       const item = findArrayItemTypeLiteral(validationResult, sourceFile, "attribution");
@@ -156,8 +156,8 @@ const DRIFT_CHECKS: DriftCheckSpec[] = [
   },
   {
     coversType: "ResearchResult",
-    label: "ResearchResult.decision matches decision-ledger-v1",
-    schemaFile: "decision-ledger-v1.json",
+    label: "ResearchResult.decision matches decision-ledger-v2",
+    schemaFile: "decision-ledger-v2.json",
     resolve: (sourceFile, schema) => {
       const researchResult = findTypeAlias(sourceFile, "ResearchResult");
       const decision = findNestedTypeLiteral(researchResult, sourceFile, "decision");
@@ -170,8 +170,8 @@ const DRIFT_CHECKS: DriftCheckSpec[] = [
   },
   {
     coversType: "ResearchResult",
-    label: "ResearchResult.manifest matches run-manifest-v1",
-    schemaFile: "run-manifest-v1.json",
+    label: "ResearchResult.manifest matches run-manifest-v2",
+    schemaFile: "run-manifest-v2.json",
     resolve: (sourceFile, schema) => {
       const researchResult = findTypeAlias(sourceFile, "ResearchResult");
       const manifest = findNestedTypeLiteral(researchResult, sourceFile, "manifest");

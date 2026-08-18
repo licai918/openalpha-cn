@@ -43,12 +43,13 @@ OpenAlpha CN competes on verifiability rather than the number of agent personas:
 - durable node checkpoints that reject changed requests or graph signatures;
 - bounded concurrent batches with progress, cancellation, retry, and restart recovery;
 - classified model retry plus persistent token and configured-cost accounting;
-- one research core shared by live, replay, and backtest modes;
+- one research core shared by the live, replay, backtest, paper and daily modes;
 - A-share T+1, board lot, suspension, limit-lock, and transaction-cost constraints;
 - immutable cash/lot/mark/fee/PnL portfolio transitions with exposure clamps;
 - multi-day portfolio reports and event-study significance inference;
 - ablatable bull/bear and three-perspective risk committee;
-- evidence-linked decisions and reconciled rule/factor/agent attribution.
+- evidence-linked decisions and reconciled rule/factor/agent/model attribution with an
+  explicit unexplained residual.
 
 The project accepts user-owned CSV, JSON, JSONL, and Parquet data, BYOT Tushare, and an optional constrained AKShare adapter. It does not redistribute commercial raw datasets or expose a hosted data resale proxy.
 

@@ -50,6 +50,26 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Changed
 
+- **Three breaking contract versions cut at once, with the identity rewrite they require.**
+  `RunManifest.mode` gains `paper` and `daily` (`run-manifest/v2`), `AttributionTerm.category`
+  gains `model` and `ValidationResult` gains an explicit `unexplained_return`
+  (`validation-result/v2`), and `DecisionLedger` carries the run declaration's content address
+  (`decision-ledger/v2`). Two of those move a **stored key**, so reading an un-migrated row of
+  either raises `IdentityRewriteRequiredError` rather than upcasting it and stranding every
+  reference; `openalpha migrate run` applies `rewrite_contract_identities`, which recomputes
+  each identity and re-points `validation_results`, `research_memory`, `research_reports` and
+  `batch_tasks` in one transaction and refuses to commit an incomplete rewrite. Checked-in
+  schema documents are now named after the version they hold
+  (`docs/api/schemas/decision-ledger-v2.json` and two siblings).
+- **`SignalFrame.horizon` is a countable, comparable span.** It narrows from four units to
+  trading days -- the only unit with a session count, so any two horizons a signal carries can
+  be ordered and every one of them sizes the return window that scores it. A narrowing changes
+  no serialized value, so no `signal_id` moved and `signal-frame` stays at v1. A stored signal
+  carrying a calendar horizon is refused by name during migration rather than converted with a
+  constant this repository has never measured.
+- **The research-cycle modes are declared once.** `domain/run_mode.py` replaces the three
+  independent copies in the manifest contract, the request contract and the CLI, so
+  `--mode paper` and the two contracts could not disagree.
 - **`openalpha factor run` says which grid row is the answer, and warns when the grid
   measured nothing.** The `processed->neutralized` rows are marked inline, and an
   experiment whose six cells are all `not_measured` prints a named warning on stderr in

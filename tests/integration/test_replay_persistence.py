@@ -84,10 +84,17 @@ def test_sdk_replay_persists_validation_results_queryable_by_decision_and_signal
     # this does: `ResearchEngine.run_cycle` is deterministic, so this direct run and the
     # replay case below (identical run_id/subject/as_of/evidence/code_commit/config_digest/
     # random_seed) produce byte-identical manifests and decisions.
+    #
+    # `mode` joined that list at V2-P4-025 and is why this run is `replay` rather than
+    # `live`: `DecisionLedger.run_manifest_id` is the manifest's content address and `mode`
+    # is one of the declared inputs inside it, so a live run and a replayed one no longer
+    # share a `decision_id`. That is the intended reading -- a decision reached under replay
+    # is not the same decision reached live, and before this change nothing could tell them
+    # apart -- and `ReplayRunner` runs its cases as `replay`.
     research = sdk.run_research(
         ResearchRunRequest(
             run_id=run_id,
-            mode="live",
+            mode="replay",
             subject="000001.SZ",
             as_of=frozen_now,
             evidence=(_evidence(frozen_now),),
@@ -129,7 +136,9 @@ def test_rest_replay_persists_validation_results_retrievable_through_the_existin
         "/api/v1/research/run",
         json={
             "run_id": run_id,
-            "mode": "live",
+            # `replay`, not `live`: see the sibling SDK test above for why `mode` now reaches
+            # `decision_id` through `DecisionLedger.run_manifest_id` (V2-P4-025).
+            "mode": "replay",
             "subject": "000001.SZ",
             "as_of": frozen_now.isoformat(),
             "evidence": [item.model_dump(mode="json", exclude_computed_fields=True)],

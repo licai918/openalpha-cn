@@ -3,11 +3,13 @@
 Why this exists: the nine tables spread across the seven SQLite stores in this package are
 each created by their own store's `CREATE TABLE IF NOT EXISTS` -- table creation is a side
 effect of constructing a store, not a tracked, versioned event. Rows are opaque JSON payloads
-validated by pydantic models with `extra="forbid"` and a literal `.../v1` `schema_version` --
-any new field makes old rows unreadable to new code and new rows unreadable to old code, with
-no code path able to tell the two apart. A later phase (`V2-P4-001`) must make three breaking
-contract changes at once; without an explicit, auditable, reversible migration mechanism, that
-would silently destroy every research record a user has accumulated.
+validated by pydantic models with `extra="forbid"` and a literal `schema_version` -- any new
+field makes old rows unreadable to new code and new rows unreadable to old code, with no code
+path able to tell the two apart. `V2-P4-001` then made three breaking contract changes at once;
+without an explicit, auditable, reversible migration mechanism, that would have silently
+destroyed every research record a user had accumulated. `rewrite_contract_identities` (version
+5, below) is that change, and it is the one migration here that rewrites *identities* rather
+than shape: see its docstring for why a read-time upcast could not have done the job.
 
 Design, in one paragraph: `PRAGMA user_version` is the cheap, atomic source of truth for "what
 schema version is this database at"; a `schema_migrations` table is a human-readable audit trail
@@ -35,13 +37,27 @@ speculative -- `test_new_database_lands_on_baseline_and_defers_the_demo_migratio
 `test_build_storage_catches_up_the_demo_migration_on_a_second_call` exercise exactly this path.
 """
 
+import json
 import logging
 import os
 import sqlite3
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+
+from openalpha_cn.batch_contracts import BATCH_RESEARCH_TASK_VERSIONS, BatchResearchTask
+from openalpha_cn.domain.decision import DECISION_LEDGER_VERSIONS, DecisionLedger, DecisionLedgerV1
+from openalpha_cn.domain.horizon import is_countable_horizon
+from openalpha_cn.domain.memory import MEMORY_ENTRY_VERSIONS, MemoryEntry
+from openalpha_cn.domain.report import RESEARCH_REPORT_VERSIONS, ResearchReport
+from openalpha_cn.domain.run import RUN_MANIFEST_VERSIONS
+from openalpha_cn.domain.validation import (
+    VALIDATION_RESULT_VERSIONS,
+    ValidationResult,
+    ValidationResultV1,
+)
+from openalpha_cn.domain.versioning import read_versioned
 
 logger = logging.getLogger(__name__)
 
@@ -284,10 +300,390 @@ def _demo_add_runs_archived_at(connection: sqlite3.Connection) -> None:
     connection.execute("ALTER TABLE runs ADD COLUMN archived_at TEXT")
 
 
+class UnmigratableHorizonError(ValueError):
+    """A stored signal states a horizon `V2-P4-001` no longer admits, and cannot be converted.
+
+    `SignalFrame.horizon` narrowed from four units to the one with a session count (see
+    `domain/horizon.py::COUNTABLE_HORIZON_PATTERN`). Every value that stayed legal serialises
+    to the bytes it always did, so no `signal_id` moved and this migration has nothing to
+    rewrite -- but a stored frame carrying `3m` is now outside the contract, and turning it
+    into a session count would need the sessions-per-month constant this repository has
+    deliberately never measured.
+
+    So the migration refuses rather than inventing one, and it refuses *here* rather than
+    letting the row surface later as a regex `ValidationError` from whichever store happened
+    to read it first. The message names the runs, because the remedy is a judgement about
+    those specific runs -- restate the horizon in trading days, or drop the recovery row --
+    and not something a migration may decide.
+    """
+
+
+def _rows_if_present(
+    connection: sqlite3.Connection, query: str, table: str
+) -> Sequence[tuple[str, ...]]:
+    """Run `query` if `table` exists, and return no rows if it does not.
+
+    The identity rewrite's reference passes are bound to `runs`, `decisions` and
+    `validation_results` (see `_rewrite_contract_identities`) and merely *tolerant* of the
+    four optional tables it also updates. Tolerant rather than required, because through
+    `build_storage()` all of them are created together immediately after migrations run, and
+    a table that does not exist cannot hold a row referencing anything -- so skipping it
+    strands nothing, whereas requiring it would defer the whole rewrite forever against any
+    database (a test fixture, a hand-built file) that legitimately has only some stores.
+    """
+    if not _table_exists(connection, table):
+        return ()
+    rows: list[tuple[str, ...]] = connection.execute(query).fetchall()
+    return rows
+
+
+_UNCOUNTABLE_HORIZON_REMEDY = (
+    "Restate each of those signals with a horizon in trading days (the only unit with a "
+    "session count -- see domain/horizon.py), or delete the run_recovery rows for those "
+    "runs: they are operational recovery state, not research records. This migration will "
+    "not convert a calendar horizon into sessions, because the number of sessions in a "
+    "month is not a constant this repository has measured."
+)
+
+
+def _refuse_uncountable_stored_horizons(connection: sqlite3.Connection) -> None:
+    """Refuse the whole rewrite if any stored signal carries a now-inadmissible horizon.
+
+    `run_recovery.payload` is the only place in this database a whole `SignalFrame` is
+    stored; everywhere else a signal appears as an ID. Read as raw JSON rather than through
+    `read_versioned`, deliberately: validating the row is exactly what would fail, and the
+    point of this pass is to produce a message about horizons instead of one about a regex.
+    """
+    offenders: dict[str, set[str]] = {}
+    if not _table_exists(connection, "run_recovery"):
+        return
+    for run_id, payload in connection.execute("SELECT run_id, payload FROM run_recovery"):
+        document = json.loads(payload)
+        if not isinstance(document, dict):
+            continue
+        for result in document.get("completed_results") or ():
+            horizon = (result.get("signal") or {}).get("horizon") if result else None
+            if horizon is not None and not is_countable_horizon(horizon):
+                offenders.setdefault(str(run_id), set()).add(str(horizon))
+    if offenders:
+        listed = "; ".join(
+            f"{run_id}: {sorted(values)}" for run_id, values in sorted(offenders.items())
+        )
+        raise UnmigratableHorizonError(
+            f"stored signals carry horizons SignalFrame no longer admits ({listed}). "
+            f"{_UNCOUNTABLE_HORIZON_REMEDY}"
+        )
+
+
+def _rewrite_run_manifests(connection: sqlite3.Connection) -> dict[str, str]:
+    """Advance every `runs` payload to `run-manifest/v2` and return each run's content address.
+
+    `runs.run_id` is caller-supplied, so nothing about the row's key changes here; the manifest
+    is re-serialised so the stored payload states its own version honestly rather than relying
+    on every future reader upgrading it again. The returned map is what the decision rewrite
+    needs -- `DecisionLedger.run_manifest_id` is not derivable from a decision row.
+    """
+    addresses: dict[str, str] = {}
+    for run_id, payload in connection.execute("SELECT run_id, payload FROM runs").fetchall():
+        manifest = read_versioned(RUN_MANIFEST_VERSIONS, payload)
+        addresses[str(run_id)] = manifest.run_manifest_id
+        connection.execute(
+            "UPDATE runs SET payload = ? WHERE run_id = ?",
+            (manifest.model_dump_json(exclude_computed_fields=True), run_id),
+        )
+    return addresses
+
+
+def _rewrite_decision_ledgers(
+    connection: sqlite3.Connection, addresses: Mapping[str, str]
+) -> dict[str, str]:
+    """Advance every `decisions` row to v2, moving its primary key, and return the ID map.
+
+    This is the rewrite roadmap section 8 says P4 owes: read the old row, add the field, let
+    the identity move, and update the key -- with every reference to it updated in the same
+    transaction by this migration's later passes. `DecisionLedgerV1` validates the payload
+    first, so a corrupt row fails as a corrupt row rather than being re-keyed on a guess.
+    """
+    identities: dict[str, str] = {}
+    rows = connection.execute("SELECT decision_id, run_id, payload FROM decisions").fetchall()
+    for decision_id, run_id, payload in rows:
+        if json.loads(payload).get("schema_version") != "decision-ledger/v1":
+            continue
+        address = addresses.get(str(run_id))
+        if address is None:
+            raise ValueError(
+                f"decision {decision_id!r} references run {run_id!r}, which has no manifest "
+                "row; its run-level identity cannot be derived and it will not be re-keyed"
+            )
+        fields = DecisionLedgerV1.model_validate_json(payload).model_dump(
+            mode="python", exclude_computed_fields=True
+        )
+        fields["schema_version"] = "decision-ledger/v2"
+        fields["run_manifest_id"] = address
+        upgraded = DecisionLedger.model_validate(fields)
+        connection.execute(
+            "UPDATE decisions SET decision_id = ?, payload = ? WHERE decision_id = ?",
+            (
+                upgraded.decision_id,
+                upgraded.model_dump_json(exclude_computed_fields=True),
+                decision_id,
+            ),
+        )
+        identities[str(decision_id)] = upgraded.decision_id
+    return identities
+
+
+def _rewrite_validation_results(
+    connection: sqlite3.Connection, identities: Mapping[str, str]
+) -> None:
+    """Advance every `validation_results` row to v2, re-pointing and re-keying it.
+
+    Two things move at once and both have to, in one statement: the row's own
+    `validation_id` (its content address, and this table's unique key) and its `decision_id`
+    (a reference the decision pass just moved). `unexplained_return` starts at `0.0` for every
+    migrated row, which is the truth about it -- a v1 result's terms summed to
+    `net_active_return` by construction, so nothing was unexplained; `V2-P5-005`/`006` are
+    what start producing a non-zero one.
+    """
+    rows = connection.execute("SELECT validation_id, payload FROM validation_results").fetchall()
+    for validation_id, payload in rows:
+        if json.loads(payload).get("schema_version") != "validation-result/v1":
+            continue
+        old = ValidationResultV1.model_validate_json(payload)
+        fields = old.model_dump(mode="python", exclude_computed_fields=True)
+        fields["schema_version"] = "validation-result/v2"
+        fields["decision_id"] = identities.get(old.decision_id, old.decision_id)
+        upgraded = ValidationResult.model_validate(fields)
+        connection.execute(
+            """
+            UPDATE validation_results
+            SET validation_id = ?, decision_id = ?, signal_id = ?, payload = ?
+            WHERE validation_id = ?
+            """,
+            (
+                upgraded.validation_id,
+                upgraded.decision_id,
+                upgraded.signal_id,
+                upgraded.model_dump_json(exclude_computed_fields=True),
+                validation_id,
+            ),
+        )
+
+
+def _rewrite_research_reports(
+    connection: sqlite3.Connection, identities: Mapping[str, str]
+) -> None:
+    """Re-point and re-key every report that names a moved decision.
+
+    `ResearchReport` has no `schema_version` and its shape did not change -- but `report_id`
+    is `stable_model_id` over a payload containing `decision_id`, so a report is re-keyed by
+    a decision moving underneath it even though nothing about reports was versioned. This is
+    the pass that would be easiest to forget, and forgetting it leaves `research_reports`
+    keyed on an address that no longer describes its own contents.
+    """
+    if not _table_exists(connection, "research_reports"):
+        return
+    rows = connection.execute("SELECT report_id, payload FROM research_reports").fetchall()
+    for report_id, payload in rows:
+        report = read_versioned(RESEARCH_REPORT_VERSIONS, payload)
+        moved = identities.get(report.decision_id)
+        if moved is None:
+            continue
+        rewritten = ResearchReport.model_validate(
+            {
+                **report.model_dump(mode="python", exclude_computed_fields=True),
+                "decision_id": moved,
+            }
+        )
+        connection.execute(
+            "UPDATE research_reports SET report_id = ?, payload = ? WHERE report_id = ?",
+            (
+                rewritten.report_id,
+                rewritten.model_dump_json(exclude_computed_fields=True),
+                report_id,
+            ),
+        )
+
+
+def _rewrite_decision_references(
+    connection: sqlite3.Connection, identities: Mapping[str, str]
+) -> None:
+    """Re-point the two remaining tables that name a decision without owning an identity.
+
+    `research_memory` names one in a `UNIQUE` column *and* inside its payload;
+    `batch_tasks` names one inside `BatchResultRef`, nested two levels down its payload.
+    Neither row's own key is content-derived, so nothing is re-keyed here -- but a reference
+    left behind is a `research_memory` row that can never be joined back to its decision
+    again, which is the silent half of the failure section 8 warns about.
+    """
+    memory_rows = (
+        connection.execute("SELECT decision_id, payload FROM research_memory").fetchall()
+        if _table_exists(connection, "research_memory")
+        else ()
+    )
+    for decision_id, payload in memory_rows:
+        moved = identities.get(str(decision_id))
+        if moved is None:
+            continue
+        entry = read_versioned(MEMORY_ENTRY_VERSIONS, payload)
+        rewritten = MemoryEntry.model_validate(
+            {
+                **entry.model_dump(mode="python", exclude_computed_fields=True),
+                "decision_id": moved,
+            }
+        )
+        connection.execute(
+            "UPDATE research_memory SET decision_id = ?, payload = ? WHERE decision_id = ?",
+            (moved, rewritten.model_dump_json(), decision_id),
+        )
+    batch_rows = (
+        connection.execute("SELECT batch_id, payload FROM batch_tasks").fetchall()
+        if _table_exists(connection, "batch_tasks")
+        else ()
+    )
+    for batch_id, payload in batch_rows:
+        task = read_versioned(BATCH_RESEARCH_TASK_VERSIONS, payload)
+        items = [
+            item.model_dump(mode="python", exclude_computed_fields=True) for item in task.items
+        ]
+        touched = False
+        for item in items:
+            result = item.get("result")
+            if result is not None and result["decision_id"] in identities:
+                result["decision_id"] = identities[result["decision_id"]]
+                touched = True
+        if not touched:
+            continue
+        repointed = BatchResearchTask.model_validate(
+            {
+                **task.model_dump(mode="python", exclude_computed_fields=True),
+                "items": items,
+            }
+        )
+        connection.execute(
+            "UPDATE batch_tasks SET payload = ? WHERE batch_id = ?",
+            (repointed.model_dump_json(exclude_computed_fields=True), batch_id),
+        )
+
+
+def _audit_identity_rewrite(connection: sqlite3.Connection, identities: Mapping[str, str]) -> None:
+    """Re-read the whole database and refuse to commit an incomplete rewrite.
+
+    A run-time audit rather than a claim in a docstring, for this repository's most repeated
+    lesson: a hand-written list of the places an identity is referenced goes stale the moment
+    somebody adds a table, and "I updated all the references" is exactly the sentence nothing
+    checks. Three properties are read back, inside the same transaction, so a failure rolls
+    the whole migration back rather than leaving a half-re-keyed ledger:
+
+    1. Every payload of a bumped contract states the current version.
+    2. Every content-addressed key equals the address of the payload stored beside it --
+       which is what makes `decisions.decision_id` and `validation_results.validation_id`
+       usable as keys at all.
+    3. No superseded decision ID survives anywhere a decision is referenced.
+    """
+    superseded = set(identities)
+    for decision_id, payload in connection.execute(
+        "SELECT decision_id, payload FROM decisions"
+    ).fetchall():
+        ledger = read_versioned(DECISION_LEDGER_VERSIONS, payload)
+        if ledger.decision_id != decision_id:
+            raise ValueError(
+                f"decision row {decision_id!r} is keyed on an address its payload does not "
+                f"produce ({ledger.decision_id!r}); the identity rewrite is incomplete"
+            )
+    for validation_id, referenced, payload in connection.execute(
+        "SELECT validation_id, decision_id, payload FROM validation_results"
+    ).fetchall():
+        result = read_versioned(VALIDATION_RESULT_VERSIONS, payload)
+        if result.validation_id != validation_id or result.decision_id != referenced:
+            raise ValueError(
+                f"validation row {validation_id!r} disagrees with its own payload; the "
+                "identity rewrite is incomplete"
+            )
+        if result.decision_id in superseded:
+            raise ValueError(
+                f"validation row {validation_id!r} still references superseded decision "
+                f"{result.decision_id!r}"
+            )
+    for (value,) in _rows_if_present(
+        connection, "SELECT decision_id FROM research_memory", "research_memory"
+    ):
+        if value in superseded:
+            raise ValueError(
+                f"research_memory still references superseded decision {value!r}; the "
+                "identity rewrite is incomplete"
+            )
+    for (payload,) in _rows_if_present(
+        connection, "SELECT payload FROM batch_tasks", "batch_tasks"
+    ):
+        task = read_versioned(BATCH_RESEARCH_TASK_VERSIONS, payload)
+        for item in task.items:
+            if item.result is not None and item.result.decision_id in superseded:
+                raise ValueError(
+                    f"batch task {task.batch_id!r} still references superseded decision "
+                    f"{item.result.decision_id!r}"
+                )
+    for (payload,) in _rows_if_present(
+        connection, "SELECT payload FROM research_reports", "research_reports"
+    ):
+        report = read_versioned(RESEARCH_REPORT_VERSIONS, payload)
+        if report.decision_id in superseded:
+            raise ValueError(
+                f"research report {report.report_id!r} still references superseded decision "
+                f"{report.decision_id!r}"
+            )
+
+
+def _rewrite_contract_identities(connection: sqlite3.Connection) -> None:
+    """`V2-P4-001`/`V2-P4-025`'s identity rewrite: the migration roadmap section 8 requires.
+
+    That section's conclusion, in its own words: a contract version bump changes a
+    content-addressed identity, a transparent read-time upcast would therefore move a stored
+    primary key while every reference to it kept the old value, and so P4 owes one explicit
+    identity-rewrite migration -- read the old row, advance the version, recompute the ID, and
+    update every row that references it inside the same transaction. This is that migration,
+    and the passes below are that sentence in order.
+
+    Two of the three bumped contracts move a key: `decisions.decision_id` (because
+    `DecisionLedger` gains `run_manifest_id`) and `validation_results.validation_id` (because
+    `ValidationResult` gains `unexplained_return`, and because its `decision_id` field points
+    at a key the first pass moved). `runs` moves no key -- `run_id` is caller-supplied -- but
+    its payload is still re-versioned, and its content address is what the decision pass
+    needs. `research_reports` moves a key without being versioned at all, because `report_id`
+    hashes a payload containing `decision_id`; that pass exists entirely because nothing about
+    the reports contract changed and it is re-keyed anyway.
+
+    `SignalFrame` is deliberately **not** in the list. Its `V2-P4-001` change is a domain
+    narrowing that leaves every still-legal value byte-identical, so no `signal_id` moved --
+    section 8's own measured correction, applied rather than re-litigated. That is not only a
+    convenience: the aggregate `SignalFrame` a run produces is never persisted (only its ID
+    is, in `decisions.signal_ids`), so a `signal-frame` version bump would move an identity
+    this database cannot recompute, and the rewrite would be incomplete by construction.
+    `_refuse_uncountable_stored_horizons` handles the one thing the narrowing does strand.
+
+    Precondition-bound to `runs`, `decisions` and `validation_results` and merely tolerant of
+    the other four tables it updates -- see `_rows_if_present` for why that asymmetry is the
+    correct one. On a fresh install `runs` does not exist when migrations run (see the module
+    docstring), so this defers exactly like `_demo_add_runs_archived_at` and applies on the
+    next `build_storage()` call.
+    """
+    require_table(connection, "runs")
+    require_table(connection, "decisions")
+    require_table(connection, "validation_results")
+    _refuse_uncountable_stored_horizons(connection)
+    addresses = _rewrite_run_manifests(connection)
+    identities = _rewrite_decision_ledgers(connection, addresses)
+    _rewrite_validation_results(connection, identities)
+    _rewrite_research_reports(connection, identities)
+    _rewrite_decision_references(connection, identities)
+    _audit_identity_rewrite(connection, identities)
+
+
 BASELINE_VERSION = 1
 CREATE_VALIDATION_RESULTS_VERSION = 2
 DEMO_ADD_RUNS_ARCHIVED_AT_VERSION = 3
 CREATE_QUERY_PATH_INDEXES_VERSION = 4
+REWRITE_CONTRACT_IDENTITIES_VERSION = 5
 
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=BASELINE_VERSION, name="baseline", apply=_baseline_apply),
@@ -305,6 +701,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version=CREATE_QUERY_PATH_INDEXES_VERSION,
         name="create_query_path_indexes",
         apply=_create_query_path_indexes,
+    ),
+    Migration(
+        version=REWRITE_CONTRACT_IDENTITIES_VERSION,
+        name="rewrite_contract_identities",
+        apply=_rewrite_contract_identities,
     ),
 )
 

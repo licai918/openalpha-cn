@@ -17,6 +17,7 @@ from pydantic import (
 
 from openalpha_cn.backtest.validation import OutcomeObservation, OutcomeValidator, ValidationStore
 from openalpha_cn.domain.evidence import EvidenceSnapshot, LookAheadViolationError
+from openalpha_cn.domain.run_mode import RunMode
 from openalpha_cn.domain.time import ensure_aware
 from openalpha_cn.runtime.contracts import ResearchRunRequest
 from openalpha_cn.runtime.engine import ResearchEngine
@@ -193,7 +194,7 @@ class ReplayRunner:
                 )
                 request = ResearchRunRequest(
                     run_id=case.run_id,
-                    mode="replay",
+                    mode=RunMode.replay,
                     subject=case.subject,
                     as_of=case.as_of,
                     evidence=case.evidence,
