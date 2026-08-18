@@ -70,7 +70,10 @@ def test_tushare_metadata_declares_supported_datasets(fake_tushare_transport) ->
     # V2-P1-004's, `stock_basic` and `namechange` are V2-P1-005's, `adj_factor` is
     # V2-P1-006's, `daily_basic` is V2-P1-007's, `suspend_d` and `stk_limit` are V2-P1-008's,
     # `index_weight` is V2-P1-009's, `index_classify` and `index_member_all` are V2-P1-010's,
-    # and `income` / `balancesheet` / `cashflow` / `fina_indicator` are V2-P1-011's.
+    # `income` / `balancesheet` / `cashflow` / `fina_indicator` are V2-P1-011's, and
+    # `index_daily` is V2-P3-016's -- the sixteenth, and the first added by a P3
+    # issue rather than a P1 one, because it is the regressor V2-P3-013 measured
+    # the absence of.
     # Still spelled out in full rather than derived
     # from the table, so that adding a dataset has to be an intentional edit here too.
     #
@@ -88,6 +91,7 @@ def test_tushare_metadata_declares_supported_datasets(fake_tushare_transport) ->
         "suspend_d",
         "stk_limit",
         "index_weight",
+        "index_daily",
         "index_classify",
         "index_member_all",
         "income",

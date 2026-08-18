@@ -257,6 +257,7 @@ UPSTREAM_PANEL_DATASETS: frozenset[str] = frozenset(
         "fina_indicator",
         "income",
         "index_classify",
+        "index_daily",
         "index_member_all",
         "index_weight",
         "namechange",
@@ -266,7 +267,7 @@ UPSTREAM_PANEL_DATASETS: frozenset[str] = frozenset(
         "trade_cal",
     }
 )
-"""The fifteen dataset names the panel ingests from upstream, written out rather than derived.
+"""The sixteen dataset names the panel ingests from upstream, written out rather than derived.
 
 This is the vocabulary `RESEARCH_PLANE_DATASETS` is written against, and writing it here is what
 makes a sixteenth dataset a red rather than a silent widening of four rows at once:
@@ -310,6 +311,7 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_ingest.daily_basic_requirement",
             "panel_ingest.daily_requirement",
             "panel_ingest.financial_statement_requirement",
+            "panel_ingest.index_price_requirement",
             "panel_ingest.index_weight_requirement",
             "panel_ingest.industry_membership_requirement",
             "panel_ingest.industry_tree_requirement",
@@ -392,6 +394,7 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_ingest.daily_basic_requirement",
             "panel_ingest.daily_requirement",
             "panel_ingest.financial_statement_requirement",
+            "panel_ingest.index_price_requirement",
             "panel_ingest.load_adjustment_histories",
             "panel_ingest.load_daily_bars",
             "panel_ingest.load_name_histories",
@@ -452,10 +455,26 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
     "openalpha_cn.panel_view": DatasetReach(named=frozenset(), reached=UPSTREAM_PANEL_DATASETS),
     "openalpha_cn.panel_factors": DatasetReach(
         named=frozenset(
-            {"balancesheet", "cashflow", "daily", "daily_basic", "fina_indicator", "income"}
+            {
+                "balancesheet",
+                "cashflow",
+                "daily",
+                "daily_basic",
+                "fina_indicator",
+                "income",
+                "index_daily",
+            }
         ),
         reached=frozenset(
-            {"balancesheet", "cashflow", "daily", "daily_basic", "fina_indicator", "income"}
+            {
+                "balancesheet",
+                "cashflow",
+                "daily",
+                "daily_basic",
+                "fina_indicator",
+                "income",
+                "index_daily",
+            }
         ),
     ),
     "openalpha_cn.panel_neutralization": DatasetReach(
@@ -464,7 +483,15 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
     ),
     "openalpha_cn.factor_view": DatasetReach(
         named=frozenset(
-            {"balancesheet", "cashflow", "daily", "daily_basic", "fina_indicator", "income"}
+            {
+                "balancesheet",
+                "cashflow",
+                "daily",
+                "daily_basic",
+                "fina_indicator",
+                "income",
+                "index_daily",
+            }
         ),
         reached=frozenset(
             {
@@ -475,6 +502,7 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
                 "daily_basic",
                 "fina_indicator",
                 "income",
+                "index_daily",
                 "index_member_all",
                 "namechange",
                 "stk_limit",
@@ -1391,13 +1419,13 @@ def test_a_loader_added_to_the_neutralisation_turns_both_tables_red() -> None:
     ]
 
 
-def test_the_dataset_instrument_separates_six_datasets_from_eight() -> None:
-    """The separating question, asked directly: can it tell six datasets from eight?
+def test_the_dataset_instrument_separates_seven_datasets_from_nine() -> None:
+    """The separating question, asked directly: can it tell seven datasets from nine?
 
     An assertion that holds on the tree as it stands has not been shown to distinguish two
     answers. So two loaders for two datasets the factor engine does not read are added to it,
     and the measured reach is read back rather than only the verdict -- the count moves from
-    six to eight and names which two arrived.
+    seven to nine and names which two arrived.
 
     `load_index_membership` and `load_price_limits` are chosen because their datasets
     (`index_weight`, `stk_limit`) are in no factor's `required_fields` and in no other name
@@ -1410,8 +1438,8 @@ def test_the_dataset_instrument_separates_six_datasets_from_eight() -> None:
     before = _research_plane_dataset_reach(_research_plane_sources())["openalpha_cn.panel_factors"]
     after = _research_plane_dataset_reach(widened)["openalpha_cn.panel_factors"]
 
-    assert len(before.reached) == 6
-    assert len(after.reached) == 8
+    assert len(before.reached) == 7
+    assert len(after.reached) == 9
     assert after.reached - before.reached == {"index_weight", "stk_limit"}
     assert after.named == before.named, (
         "the two loaders are imported, not inlined, so what widened is the reach across the "
@@ -1527,9 +1555,7 @@ def test_a_seam_name_declared_that_nobody_imports_turns_this_audit_red() -> None
     ]
 
 
-def test_the_twenty_shipped_factors_declare_every_one_of_the_six_datasets_the_engine_can_name() -> (
-    None
-):
+def test_the_shipped_factors_declare_every_dataset_the_engine_can_name() -> None:
     """The relationship between what the registry declares and what the module could read.
 
     They were not equal and are now, and **the change of verdict is the finding this test was
@@ -1546,8 +1572,13 @@ def test_the_twenty_shipped_factors_declare_every_one_of_the_six_datasets_the_en
     holding `panel_factors.py` to has been narrowed there in the same change, from "Nothing here
     reads `fina_indicator`" to the quality family's own claim about itself.
 
-    The row is unchanged: `RESEARCH_PLANE_DATASETS` already allowed the name, which is the point
-    of a reach table being a superset of a registry.
+    `V2-P3-016` is the second occasion and it moved the row rather than only the count.
+    `residual_vol_60` reads `index_daily.close` and `index_daily.pre_close`, so the declared set
+    is seven and the module's own `named` is seven -- the equality is the same assertion, over a
+    wider set. The count is no longer in this test's name for the reason `V2-P3-017` gave for
+    inverting the set assertion: a name that says "twenty" is a name that has to be edited every
+    time a factor ships, which makes the edit routine, and the routine edit is how a table stops
+    being read. The number is still asserted below, where a diff shows it.
     """
     declared = frozenset(
         field.dataset
@@ -1556,7 +1587,7 @@ def test_the_twenty_shipped_factors_declare_every_one_of_the_six_datasets_the_en
     )
     engine = RESEARCH_PLANE_DATASETS["openalpha_cn.panel_factors"]
 
-    assert len(FACTOR_DEFINITIONS.definitions) == 20
+    assert len(FACTOR_DEFINITIONS.definitions) == 21
     assert declared == {
         "balancesheet",
         "cashflow",
@@ -1564,6 +1595,7 @@ def test_the_twenty_shipped_factors_declare_every_one_of_the_six_datasets_the_en
         "daily_basic",
         "fina_indicator",
         "income",
+        "index_daily",
     }
     assert declared == engine.named, "the module names exactly what its factors declare"
     assert declared <= UPSTREAM_PANEL_DATASETS

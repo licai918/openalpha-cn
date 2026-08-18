@@ -277,9 +277,9 @@ OpenAlpha CN 不把“多接几个行情 API”当作数据优势。优势落在
 
 ## 面板数据平面的三个命令
 
-面板数据平面（15 个数据集：trade_cal / stock_basic / adj_factor / daily / daily_basic /
-suspend_d / stk_limit / namechange / index_weight / index_classify / index_member_all /
-income / balancesheet / cashflow / fina_indicator）有三个命令：`openalpha panel build`
+面板数据平面（16 个数据集：trade_cal / stock_basic / adj_factor / daily / daily_basic /
+suspend_d / stk_limit / namechange / index_weight / index_daily / index_classify /
+index_member_all / income / balancesheet / cashflow / fina_indicator）有三个命令：`openalpha panel build`
 抓取并写入，`openalpha panel doctor` 体检已存数据，`openalpha data-check` 跑读取前的
 fail-closed 依赖门。
 
@@ -329,7 +329,7 @@ uv run openalpha data-check --dataset daily --dataset adj_factor --year 2026 \
   + `suspend_d` 一次会话循环取完，因为 `write_daily_panel` 必须同时收到前两者，且它的
   `halts` 参数没有默认值。所以 `--dataset daily` 会**按名字被拒**并告知原因，而不是被
   click 当作未知选项拒掉（后者读起来像「本仓库没有 daily 面板」，与事实相反）。
-- **十三个目标覆盖 `providers/tushare.py` 声明的全部 15 个数据集。** 早先只有五个，
+- **十四个目标覆盖 `providers/tushare.py` 声明的全部 16 个数据集。** 早先只有五个，
   `namechange`、`index_weight`、两个行业数据集和四个财报接口有 writer、有 loader、有体检
   检查，却没有抓取路径 —— `panel build --dataset income` 按名字被拒，`panel doctor
   --dataset income` 因此永远报 `partition_missing`。表里不存在的名字仍然**按名字被拒**，

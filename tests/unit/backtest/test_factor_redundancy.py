@@ -793,8 +793,8 @@ def test_a_study_refuses_a_repeated_identity_code_and_a_second_reading_of_one_fa
 # --- the structural half: what `required_fields` can and cannot say ---------------------------
 
 
-def test_the_shared_input_table_over_the_twenty_shipped_definitions() -> None:
-    """The whole 190-pair structure, computed off the live registry rather than tabulated.
+def test_the_shared_input_table_over_every_shipped_definition() -> None:
+    """The whole 210-pair structure, computed off the live registry rather than tabulated.
 
     This is the table-versus-implementation drift `V2-P3-002`'s lesson names: a hand-written list
     of "which factors share which columns" would go stale the first time a factor's
@@ -803,8 +803,8 @@ def test_the_shared_input_table_over_the_twenty_shipped_definitions() -> None:
     -- which is exactly what happened when `V2-P3-017` shipped the twentieth: 171 pairs became
     190 and every count below moved with it.
 
-    The two totals are asserted together on purpose: 45 pairs share a **column** and 76 share a
-    **dataset**, so a dataset-granularity reading would report 69% more overlap than there is and
+    The two totals are asserted together on purpose: 53 pairs share a **column** and 84 share a
+    **dataset**, so a dataset-granularity reading would report 58% more overlap than there is and
     would call the value family and the quality family related by construction.
 
     `identical_inputs` did **not** move, and that is the interesting half of the twentieth
@@ -812,17 +812,28 @@ def test_the_shared_input_table_over_the_twenty_shipped_definitions() -> None:
     shares its numerator column with nobody, so it adds three `overlapping_inputs` pairs and no
     identical one. A factor that had merely been a rename of `earnings_yield_ttm` would have
     raised the first count instead.
+
+    `V2-P3-016`'s twenty-first repeats that shape on a wider base and the arithmetic is worth
+    stating rather than left to be inferred. `residual_vol_60` shares `daily.close` and
+    `daily.pre_close` with the five momentum-and-reversal factors and with three of its own
+    family, so it adds **eight** `overlapping_inputs` pairs (45 -> 53, and 76 -> 84 non-disjoint)
+    while `identical_inputs` stays at 16 and `shared_dataset_only` stays at 31. It could not
+    have been identical to anything: `index_daily.close` and `index_daily.pre_close` are declared
+    by no other factor, which is what makes the market series a *new* input rather than a second
+    reading of one already here. The count is out of this test's name for the reason
+    `V2-P3-017` gave for inverting a set assertion elsewhere -- a name that has to be edited
+    every time a factor ships makes the edit routine.
     """
     definitions = list(FACTOR_DEFINITIONS.definitions)
     pairs = list(itertools.combinations(definitions, 2))
     codes = [shared_inputs(left, right).code for left, right in pairs]
     counted = {code: codes.count(code) for code in SHARED_INPUT_ORDER}
 
-    assert len(definitions) == 20 and len(pairs) == 190
+    assert len(definitions) == 21 and len(pairs) == 210
     assert counted["identical_inputs"] == 16
-    assert counted["identical_inputs"] + counted["overlapping_inputs"] == 45
-    assert 190 - counted["disjoint_inputs"] == 76
-    assert sum(counted.values()) == 190
+    assert counted["identical_inputs"] + counted["overlapping_inputs"] == 53
+    assert 210 - counted["disjoint_inputs"] == 84
+    assert sum(counted.values()) == 210
     assert all(count > 0 for count in counted.values())
 
 

@@ -83,9 +83,11 @@ annual disclosure deadlines).
 
 ## `checks_waived`: neither a pass nor a blanket refusal
 
-`DatasetReadiness.checks_waived` records the checks a requirement switched off. Of the fifteen
+`DatasetReadiness.checks_waived` records the checks a requirement switched off. Of the sixteen
 datasets `DATASET_CADENCE` declares, **twelve waive `required_dates`** -- measured, not
-estimated -- so a gate that blocked on a waiver would refuse twelve datasets permanently.
+estimated -- so a gate that blocked on a waiver would refuse twelve datasets permanently. The
+sixteenth (`V2-P3-016`'s `index_daily`) does not waive it: an index is quoted on every open
+session, so its requirement states the census `daily_requirement` does.
 Clearing on one, though, makes the gate weaker than it looks, which is how `V2-P1-006`'s
 Critical happened.
 

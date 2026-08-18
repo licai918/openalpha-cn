@@ -246,6 +246,7 @@ from openalpha_cn.domain.factor_transform import (
 )
 from openalpha_cn.domain.financial_statements import FINANCIAL_STATEMENT_DATASETS
 from openalpha_cn.domain.horizon import HorizonError, ResearchHorizon, parse_horizon
+from openalpha_cn.domain.index_prices import INDEX_DAILY_DATASET
 from openalpha_cn.domain.labels import (
     HaltCorpus,
     LabelError,
@@ -282,6 +283,7 @@ from openalpha_cn.panel_ingest import (
     daily_basic_requirement,
     daily_requirement,
     financial_statement_requirement,
+    index_price_requirement,
     load_adjustment_histories,
     load_daily_bars,
     load_name_histories,
@@ -1930,6 +1932,7 @@ REQUIREMENT_BUILDERS: Final[Mapping[str, Callable[..., ReadinessRequirement]]] =
     {
         DAILY_DATASET: daily_requirement,
         DAILY_BASIC_DATASET: daily_basic_requirement,
+        INDEX_DAILY_DATASET: index_price_requirement,
         **{dataset: financial_statement_requirement for dataset in FINANCIAL_STATEMENT_DATASETS},
     }
 )
@@ -1949,6 +1952,22 @@ written with the other three statement rows and had had no reader until then.
 `financial_statement_requirement` appears four times because the four statement endpoints share one
 builder that re-derives each dataset's own `required_fields` from the dataset name; `daily` and
 `daily_basic` have separate builders because each carries its own column projection.
+
+`V2-P3-016`'s `index_daily` is the seventh row and the third to take a calendar, which is what
+`_CALENDAR_SCOPED_REQUIREMENTS` says beside it: an index is quoted on every open session, so its
+requirement can state `required_dates` and a factor whose window silently skipped one would pair
+a security's return on day t with the market's on day t-1 for the rest of the window.
+"""
+
+_CALENDAR_SCOPED_REQUIREMENTS: Final[frozenset[str]] = frozenset(
+    {DAILY_DATASET, DAILY_BASIC_DATASET, INDEX_DAILY_DATASET}
+)
+"""Which of `REQUIREMENT_BUILDERS`' rows take a `TradingCalendar` as their first argument.
+
+A named set rather than a tuple literal inside the loop, because it grew: the condition used to
+be `name in (DAILY_DATASET, DAILY_BASIC_DATASET)` and the signature difference it encodes is
+"this dataset publishes on every open session, so its requirement can state a date census". The
+four statement builders take a `dataset=` keyword instead, because a filing has no calendar.
 """
 
 MAX_BUILD_YEAR: Final[int] = 2999
@@ -2502,7 +2521,7 @@ def _requirements(
     for name in request.definition.datasets:
         builder = REQUIREMENT_BUILDERS[name]
         try:
-            if name in (DAILY_DATASET, DAILY_BASIC_DATASET):
+            if name in _CALENDAR_SCOPED_REQUIREMENTS:
                 built[name] = builder(
                     calendar, years=request.years, as_of=as_of, max_staleness=request.max_staleness
                 )

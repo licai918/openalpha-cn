@@ -904,6 +904,13 @@ def test_exactly_one_declared_dataset_is_daily_and_waives_its_date_check(tmp_pat
     corroborated by accident, because `unpriced_explained` lists `stock_basic` and `suspend_d`
     among its datasets while checking neither one's session census. Both outcomes were silent;
     this assertion is what makes the second dataset arrive as a red test.
+
+    `V2-P3-016`'s `index_daily` is the first dataset to arrive since, and it is the case this
+    assertion was written for: it declares a `daily` cadence, which is half of the rule's
+    predicate. It does **not** waive `required_dates` -- `index_price_requirement` states them
+    from the calendar, `daily_requirement`'s shape -- so the set below stays at one member and
+    the count of waivers stays at twelve while the dataset count moves to sixteen. Had it waived
+    them, this test would have been the thing that said so.
     """
     report = panel_health_report(
         seed(tmp_path),
@@ -920,7 +927,7 @@ def test_exactly_one_declared_dataset_is_daily_and_waives_its_date_check(tmp_pat
         if "required_dates" in health.readiness.checks_waived
     }
 
-    assert len(report.datasets) == 15
+    assert len(report.datasets) == 16
     assert len(waiving) == 12
     assert {
         health.dataset
@@ -1408,7 +1415,7 @@ def test_a_hole_in_the_price_panel_takes_every_session_scoped_cross_check_down_w
 
 
 def test_a_cleared_clearance_still_names_the_checks_that_never_ran(tmp_path: Path) -> None:
-    """Cleared is not "everything was checked". Twelve of the fifteen datasets waive
+    """Cleared is not "everything was checked". Twelve of the sixteen datasets waive
     `required_dates` structurally, and the clearance says which -- measured here rather than
     asserted from the requirement builders' docstrings."""
     clearance = require_datasets(seed(tmp_path), request_for())

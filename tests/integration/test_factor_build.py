@@ -768,6 +768,10 @@ def test_a_factor_reading_a_dataset_with_no_requirement_builder_is_refused_by_na
     factor declaring a dataset outside the table is *declarable* (`FactorField`'s check is
     syntactic and says so), so this really is reachable, and the probe registry is how it is
     reached without adding a twentieth shipped factor.
+
+    `V2-P3-016` added the seventh row and it is the third that takes a `TradingCalendar` rather
+    than a `dataset=` keyword, which is why `_CALENDAR_SCOPED_REQUIREMENTS` is a named set beside
+    the table instead of a tuple literal inside the loop that dispatches on it.
     """
     declared = {dataset for item in FACTOR_DEFINITIONS.definitions for dataset in item.datasets}
 
@@ -775,6 +779,7 @@ def test_a_factor_reading_a_dataset_with_no_requirement_builder_is_refused_by_na
     assert set(REQUIREMENT_BUILDERS) == {
         "daily",
         "daily_basic",
+        "index_daily",
         "income",
         "balancesheet",
         "cashflow",

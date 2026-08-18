@@ -442,6 +442,19 @@ value produced *after* one of them would put an unpinned digest into a table who
 is to be older than the code. The twentieth is pinned separately, below.
 """
 
+RESIDUAL_VOL_FACTOR_ID: Final[str] = "fct_7e365e32825a3943c1467e74"
+"""`V2-P3-016`'s twenty-first factor, as this build produces it.
+
+`DEDUCTED_EARNINGS_YIELD_FACTOR_ID`'s reason, and it carries one more claim than that one did.
+`V2-P3-016` changed the shape of `FactorWindow` -- a sixth field, `shared` -- and considered and
+rejected the two designs that would have changed `FactorDefinition` or `FactorField` instead: a
+per-factor index would have been a new field on the model `factor_id` is the content address of,
+so all twenty already-shipped addresses would have moved for a field nineteen of them would
+leave at its default. `FactorWindow` is a plain frozen dataclass and is hashed by nothing, which
+is why widening it costs no address at all. The twenty literals above and beside this one are
+what turn that from an argument into a measurement.
+"""
+
 DEDUCTED_EARNINGS_YIELD_FACTOR_ID: Final[str] = "fct_1bb4ab44a031477643cc6c85"
 """`V2-P3-017`'s twentieth factor, as this build produces it.
 
@@ -488,6 +501,17 @@ def test_the_coverage_vocabulary_moves_transform_id_and_leaves_every_factor_id_w
     second. The nineteen digests themselves are untouched, which is the substantive claim: adding
     a definition does not re-identify the ones already stored, because `factor_id` addresses one
     definition and not the registry.
+
+    **`V2-P3-016` added a twenty-first and left the split alone**, which is the shape working
+    rather than a second special case: the new handle joins the difference set beside
+    `V2-P3-017`'s, its own digest is pinned beside that one's, and the nineteen literals are
+    untouched. What makes the addition worth re-asserting here rather than only counting is what
+    that issue *changed*: `FactorWindow` gained a field. Two other designs for reaching a market
+    series would have put it on `FactorDefinition` or on `FactorField` instead, and both of those
+    are inside `stable_model_id`'s payload -- so every one of the twenty addresses would have
+    moved, and every stored `factor_obs_*` partition would have been re-identified, for a field
+    nineteen definitions would leave at its default. `FactorWindow` is hashed by nothing. The
+    equality below is where that stops being an argument.
     """
     current = {
         key: FACTOR_DEFINITIONS.get(key).factor_id for key in FACTOR_DEFINITIONS.qualified_keys
@@ -495,8 +519,13 @@ def test_the_coverage_vocabulary_moves_transform_id_and_leaves_every_factor_id_w
     inherited = {key: current[key] for key in PRE_V2_P3_018_FACTOR_IDS if key in current}
 
     assert inherited == PRE_V2_P3_018_FACTOR_IDS
-    assert set(current) - set(PRE_V2_P3_018_FACTOR_IDS) == {"deducted_earnings_yield_ttm/v1"}
+    assert set(current) - set(PRE_V2_P3_018_FACTOR_IDS) == {
+        "deducted_earnings_yield_ttm/v1",
+        "residual_vol_60/v1",
+    }
     assert current["deducted_earnings_yield_ttm/v1"] == DEDUCTED_EARNINGS_YIELD_FACTOR_ID
+    assert current["residual_vol_60/v1"] == RESIDUAL_VOL_FACTOR_ID
+    assert len(set(current.values())) == len(current) == 21
     assert CROSS_SECTION_STANDARD.transform_id != PRE_V2_P3_018_TRANSFORM_ID
     assert set(FactorDefinition.model_fields) & FACTOR_COVERAGE_CODES == set()
     assert set(MissingValuePolicy.model_fields) == FACTOR_COVERAGE_CODES - {"computed"}

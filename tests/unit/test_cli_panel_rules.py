@@ -41,6 +41,7 @@ from openalpha_cn.domain.financial_statements import (
     FinancialStatementError,
 )
 from openalpha_cn.domain.index_membership import INDEX_WEIGHT_DATASET, IndexMembershipError
+from openalpha_cn.domain.index_prices import INDEX_DAILY_DATASET, IndexPriceError
 from openalpha_cn.domain.industry_classification import (
     INDUSTRY_MEMBERSHIP_DATASET,
     INDUSTRY_TREE_DATASET,
@@ -111,6 +112,7 @@ def test_the_build_targets_are_a_closed_table_in_dependency_order() -> None:
         "stk_limit": (PRICE_LIMIT_DATASET,),
         "namechange": (NAMECHANGE_DATASET,),
         "index_weight": (INDEX_WEIGHT_DATASET,),
+        "index_daily": (INDEX_DAILY_DATASET,),
         "income": (INCOME_DATASET,),
         "balancesheet": (BALANCE_SHEET_DATASET,),
         "cashflow": (CASH_FLOW_DATASET,),
@@ -126,6 +128,7 @@ def test_the_build_targets_are_a_closed_table_in_dependency_order() -> None:
         "stk_limit",
         "namechange",
         "index_weight",
+        "index_daily",
         "income",
         "balancesheet",
         "cashflow",
@@ -145,13 +148,16 @@ def test_every_dataset_the_tushare_table_declares_now_has_a_build_target() -> No
     for ever. Three independent acceptance passes reported the same hole.
 
     Read off the descriptor table rather than restated, so a sixteenth dataset added to the
-    provider fails this test instead of quietly joining the unbuildable set.
+    provider fails this test instead of quietly joining the unbuildable set. It did:
+    `V2-P3-016`'s `index_daily` arrived here as a failure of the count below, and both halves
+    of this assertion had to be satisfied in the same edit -- a descriptor with no target
+    would break the equality and a target with no descriptor would break it the other way.
     """
     declared = {descriptor.dataset for descriptor in TUSHARE_DATASETS}
     buildable = {name for datasets in PANEL_BUILD_TARGETS.values() for name in datasets}
 
     assert declared == buildable
-    assert len(declared) == 15
+    assert len(declared) == 16
 
 
 def test_the_span_targets_are_the_three_whose_requests_carry_no_usable_year() -> None:
@@ -350,6 +356,14 @@ def test_the_write_refusals_and_the_doctors_load_failures_are_one_set() -> None:
     have stopped a build as `internal_error` with the message withheld, which is precisely the
     defect this test was written for. The doctor learns it in the same edit, which is what this
     test demands and the reason it demands it.
+
+    `IndexPriceError` is the **eleventh** (`V2-P3-016`), and it arrives with a raiser rather
+    than as defence: `panel_ingest._refuse_unrebuildable_index_prices` runs the reader's own
+    reconstruction over every `index_daily` batch before it is stored, so a duplicated
+    session or a null level is a fact about the data. It matters more here than the tenth
+    did, because that dataset's rows are the regressor of every residual volatility in the
+    cross section -- a build stopped by it as `internal_error` would withhold the one
+    message naming which index and which session.
     """
     assert set(_PANEL_WRITE_REFUSALS) == set(_LOAD_FAILURES)
     assert len(_PANEL_WRITE_REFUSALS) == len(set(_PANEL_WRITE_REFUSALS))
@@ -361,6 +375,7 @@ def test_the_write_refusals_and_the_doctors_load_failures_are_one_set() -> None:
         SuspensionError,
         StockUniverseError,
         IndexMembershipError,
+        IndexPriceError,
         IndustryClassificationError,
         FinancialStatementError,
         TradingCalendarError,

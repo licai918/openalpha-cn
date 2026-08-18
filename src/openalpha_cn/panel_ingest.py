@@ -346,6 +346,14 @@ from openalpha_cn.domain.index_membership import (
     IndexMembershipError,
     index_memberships_from_panel_rows,
 )
+from openalpha_cn.domain.index_prices import (
+    INDEX_DAILY_DATA_COLUMNS,
+    INDEX_DAILY_DATASET,
+    INDEX_DAILY_PANEL_COLUMNS,
+    MARKET_INDEX_CODE,
+    IndexBar,
+    index_bars_from_panel_rows,
+)
 from openalpha_cn.domain.industry_classification import (
     INDUSTRY_MEMBERSHIP_DATASET,
     INDUSTRY_MEMBERSHIP_PANEL_COLUMNS,
@@ -2057,7 +2065,16 @@ def _price_requirement(
     as_of: datetime,
     max_staleness: timedelta | None,
     date_timezone: str,
+    required_subjects: tuple[str, ...] | None = None,
 ) -> ReadinessRequirement:
+    """The session-census requirement the three session-dated price datasets share.
+
+    `required_subjects` defaults to `None` because the two market-wide datasets cannot name
+    theirs -- the cross section is what the read is for. `index_daily` can and does: its
+    partition holds three series told apart by the subject column alone, so naming the one a
+    factor reads is what turns "this year holds 中证500 but not 沪深300" into a blocked read
+    with a `subject_missing` code rather than an empty market series.
+    """
     zone = _resolve_timezone(date_timezone)
     published_through = _sessions_published_through(as_of, zone)
     required: list[date] = []
@@ -2076,7 +2093,7 @@ def _price_requirement(
         as_of=as_of,
         years=tuple(sorted(set(years))),
         required_dates=tuple(required),
-        required_subjects=None,
+        required_subjects=required_subjects,
         required_fields=fields,
         max_staleness=max_staleness,
     )
@@ -2688,6 +2705,173 @@ def load_index_membership(
             "constituents"
         )
     return membership
+
+
+def _refuse_unrebuildable_index_prices(batch: ColumnarPanelBatch) -> None:
+    """Refuse an `index_daily` batch the reader's own reconstruction would refuse.
+
+    `_refuse_unrebuildable_suspensions`' shape and its argument, on a dataset where the residue
+    is larger rather than smaller. A `suspend_d` partition that cannot be rebuilt fails loudly
+    at the next read; an `index_daily` partition that cannot be rebuilt is the **regressor** of
+    every residual volatility in the cross section, and `compute_factor` does not rebuild it --
+    it reads two columns straight out of the partition. So a duplicated session, which
+    `index_bars_from_panel_rows` refuses and nothing downstream of the store would notice, would
+    put two market returns where the market had one and change the sample size of every
+    regression reading that window.
+
+    A `no_data` batch has nothing to rebuild and short-circuits, for the reason the suspension
+    guard does: a no-data batch is forbidden to carry columns, so asking `_column_values` for
+    one would fail on the shape rather than on the data.
+    """
+    if batch.status != "success":
+        return
+    columns = [_column_values(batch, name) for name in INDEX_DAILY_DATA_COLUMNS]
+    index_bars_from_panel_rows(zip(batch.subjects, *columns, strict=True))
+
+
+def write_index_prices(
+    store: PanelStore,
+    batches: Sequence[ColumnarPanelBatch],
+    *,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> PartitionRef:
+    """Write one year of index levels for every fetched index as a partition (`V2-P3-016`).
+
+    A sequence because one request is one `(index, year)` window and one partition is a year, so
+    the three series of `INDEX_PRICE_INDEX_CODES` arrive as three batches that have to be merged
+    before either of the guards below can see the whole year.
+
+    ## The subject guard, and why it is the same one `index_weight` needs
+
+    `PanelStore`'s key is `(dataset, year)` with no index dimension and `write_partition`
+    replaces a partition whole, so a `for code in codes: write_index_prices(store, [batch])`
+    backfill would leave the year holding whichever index went last.
+    `_refuse_to_drop_stored_subjects` is what refuses that, and it works here for exactly the
+    reason it works one dataset over: the subject column is the index, so a lost series is a
+    lost subject.
+
+    ## No calendar census, and this is the one dataset where that is a *narrowing*
+
+    `write_daily_panel` refuses a price year missing a session the calendar reports open. This
+    writer takes no calendar and makes no such check, and the reason is that the three series do
+    not begin together: `000300.SH` is published from 2002-01-04 while `000905.SH` and
+    `000852.SH` both begin at their common 2004-12-31 base point. A census over the union would
+    refuse every year from 2002 to 2004 for two indices that legitimately have no rows in it,
+    and a census per subject is a per-series calendar this function has no argument for.
+
+    What closes it instead is the **read**: `index_price_requirement` states `required_dates`
+    from the calendar and `required_subjects` as `MARKET_INDEX_CODE`, so a year missing a
+    session of the one series a factor reads is blocked at `read_visible_at` with a `date_gap`,
+    on every read, including of a partition written before this writer existed. That is the
+    fail-closed shape `index_weight_requirement` relies on, reached from the opposite direction:
+    there the census could not be *stated*, here it could not be stated *per subject*.
+    """
+    merged = merge_panel_batches(batches)
+    if merged.dataset != INDEX_DAILY_DATASET:
+        raise PanelBatchError(
+            f"expected the {INDEX_DAILY_DATASET!r} dataset, got {merged.dataset!r}"
+        )
+    _refuse_unrebuildable_index_prices(merged)
+    year = panel_partition_year(merged, date_timezone=date_timezone)
+    _refuse_to_drop_stored_subjects(
+        store,
+        merged,
+        year,
+        remedy=(
+            "A year's partition is replaced whole and its key has no index dimension, so every "
+            "index that year holds has to arrive in one call or not at all"
+        ),
+    )
+    return write_panel_batch(store, merged, year=year, date_timezone=date_timezone)
+
+
+def index_price_requirement(
+    calendar: TradingCalendar,
+    *,
+    years: Sequence[int],
+    as_of: datetime,
+    max_staleness: timedelta | None,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> ReadinessRequirement:
+    """What the index level panel must satisfy before a market return may be read from it.
+
+    `daily_requirement`'s shape with one field added, and the field is the point.
+
+    **`required_dates` is not waived**, for `daily_requirement`'s reason exactly: the index is
+    quoted on every open session, the partition is stored uncompressed, and a factor window that
+    silently skipped a session the market was open would pair a security's return on day `t`
+    with the market's on day `t-1` for the whole rest of the window.
+
+    **`required_subjects` is `(MARKET_INDEX_CODE,)`, which no other price requirement can
+    state.** `daily` and `daily_basic` waive it because naming the securities would be circular.
+    Here there are exactly three subjects, only one of them is reachable from an evaluator, and
+    a partition that holds 中证500 and 中证1000 but not 沪深300 is a complete-looking year with
+    every date present and no market series in it -- `date_gap` cannot see that and
+    `subject_missing` can.
+
+    **`max_staleness` has no default**, for `daily_requirement`'s reason: a market series whose
+    newest session is a month old will still answer a 60-session window, with a beta estimated
+    against a month-old market.
+    """
+    return _price_requirement(
+        INDEX_DAILY_DATASET,
+        INDEX_DAILY_PANEL_COLUMNS,
+        calendar,
+        years=years,
+        as_of=as_of,
+        max_staleness=max_staleness,
+        date_timezone=date_timezone,
+        required_subjects=(MARKET_INDEX_CODE,),
+    )
+
+
+def load_index_prices(
+    store: PanelStore,
+    calendar: TradingCalendar,
+    *,
+    years: Sequence[int],
+    as_of: datetime,
+    max_staleness: timedelta | None,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> Mapping[str, tuple[IndexBar, ...]]:
+    """Read the stored index levels back as one ascending bar series per index, or refuse to.
+
+    Whole years rather than one session, unlike `load_daily_bars` and for the reason a level
+    series exists at all: nobody wants the market on a day, they want the market *over a
+    window*. A single-session reader would make every caller reassemble the series itself and
+    would put the ordering rule -- which `index_bars_from_panel_rows` owns -- in as many places
+    as there are callers.
+
+    Every index the partitions hold, not only `MARKET_INDEX_CODE`. The requirement names the one
+    the factor engine can reach so that a partition without it is blocked, and the read then
+    returns what is there: a caller comparing 沪深300 against 中证1000 is doing something this
+    build's factors cannot, and refusing to *read* the other two would be a restriction with no
+    reason behind it.
+    """
+    requested = tuple(sorted(set(years)))
+    if not requested:
+        raise PanelBatchError(
+            "load_index_prices needs at least one year; a read of no years would answer 'the "
+            "market has no levels', which is indistinguishable from a failed read"
+        )
+    requirement = index_price_requirement(
+        calendar,
+        years=requested,
+        as_of=as_of,
+        max_staleness=max_staleness,
+        date_timezone=date_timezone,
+    )
+    rows: list[tuple[object, ...]] = []
+    for year in requested:
+        outcome = store.read_if_ready(requirement, year=year, columns=INDEX_DAILY_PANEL_COLUMNS)
+        if outcome.is_blocked:
+            raise PanelStorageError(
+                f"the {INDEX_DAILY_DATASET} panel cannot be read at {as_of.isoformat()}: "
+                f"{[issue.code for issue in outcome.readiness.issues]}; "
+                f"{'; '.join(issue.detail for issue in outcome.readiness.issues)}"
+            )
+        rows.extend(outcome.rows)
+    return index_bars_from_panel_rows(rows)
 
 
 def write_industry_memberships(

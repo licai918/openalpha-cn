@@ -33,6 +33,7 @@ import pytest
 from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET
 from openalpha_cn.domain.financial_statements import FINANCIAL_STATEMENT_DATASETS
 from openalpha_cn.domain.index_membership import INDEX_WEIGHT_DATASET
+from openalpha_cn.domain.index_prices import INDEX_DAILY_DATASET
 from openalpha_cn.domain.industry_classification import (
     INDUSTRY_MEMBERSHIP_DATASET,
     INDUSTRY_TREE_DATASET,
@@ -237,6 +238,19 @@ def test_every_descriptor_states_whether_its_response_cap_was_measured() -> None
     different long-history securities. Their cap is therefore above 127 and out of reach, since
     a security cannot file more reports than it has quarters -- `index_classify`'s situation,
     reached from the opposite direction.
+
+    `V2-P3-016` added `index_daily` at **8,000**, the highest here, measured 2026-08-17 --
+    and the only row whose cap is reachable on an axis this repository deliberately does
+    not use. A bare `index_daily(trade_date=20260630)` returns exactly 8,000 with
+    `has_more=True` across 8,000 distinct `ts_code`s, and `limit=8001` / `10000` / `12000`
+    all return the same 8,000 while `limit=100` returns 100, so `limit` narrows only --
+    `index_weight`'s finding on a second endpoint. The axis `_index_daily_params` builds is
+    one index-year: `000300.SH` returns **243** rows for 2025, 3% of the cap, and even its
+    whole 5,972-row published history comes back with `has_more=False`. The headroom is
+    therefore on the exchange's clock rather than the market's -- what would have to grow
+    is the number of sessions in a year -- and it does not generalise to every `ts_code`
+    the descriptor accepts: `000001.SH` is served from 1990 and its whole-history window is
+    already 8,000 rows with `has_more=True`.
     """
     caps = {entry.dataset: entry.max_rows_per_response for entry in TUSHARE_DATASETS}
     assert caps == {
@@ -255,6 +269,7 @@ def test_every_descriptor_states_whether_its_response_cap_was_measured() -> None
         "balancesheet": 100,
         "cashflow": None,
         "fina_indicator": 100,
+        "index_daily": 8000,
     }
 
 
@@ -323,6 +338,19 @@ def test_the_flag_is_demanded_exactly_where_it_is_the_only_witness_or_the_stakes
     the reason `providers/tushare.py`'s own docstring gives about the `daily` decision: a later
     task with a real reason to demand the flag "should change the test rather than read its
     redness as a verdict".
+
+    `V2-P3-016`'s `index_daily` is the eleventh, and its argument is `write_suspensions`'
+    rather than `adj_factor`'s -- which is worth stating because the first draft of this row
+    claimed `adj_factor`'s and measurement refuted it. `index_price_requirement` states
+    `required_dates` from the calendar, so a truncated year is **not** silently wrong: it is
+    unreadable, blocked with `date_gap` on every read --
+    `tests/integration/panel/test_market_return.py::
+    test_a_truncated_market_year_is_refused_at_the_read_and_not_answered_per_security`
+    drives exactly that, and drives the sibling factor still answering off the same store.
+    What the flag buys is *where* the failure surfaces: without it the fetch
+    succeeds, `panel build` reports success, and every later factor build refuses the
+    partition it wrote. The cap drops the *oldest* rows, so a truncated year is a
+    contiguous suffix and the census is the only witness -- a gap rule would see nothing.
     """
     demanded = {entry.dataset for entry in TUSHARE_DATASETS if entry.requires_truncation_flag}
     assert demanded == {
@@ -330,6 +358,7 @@ def test_the_flag_is_demanded_exactly_where_it_is_the_only_witness_or_the_stakes
         STOCK_BASIC_DATASET,
         PRICE_LIMIT_DATASET,
         INDEX_WEIGHT_DATASET,
+        INDEX_DAILY_DATASET,
         INDUSTRY_TREE_DATASET,
         INDUSTRY_MEMBERSHIP_DATASET,
         TRADING_CALENDAR_DATASET,

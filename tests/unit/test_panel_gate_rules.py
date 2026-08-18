@@ -360,7 +360,7 @@ def test_a_clean_report_produces_no_blocks_at_all() -> None:
 def test_a_daily_dataset_whose_sessions_were_never_required_is_refused_if_nothing_read_them() -> (
     None
 ):
-    """`adj_factor` is the measured instance: of this repository's fifteen datasets it is the
+    """`adj_factor` is the measured instance: of this repository's sixteen datasets it is the
     only one that is both on the `daily` cadence and waives `required_dates`, so readiness
     alone proves its partition exists, is readable and is recent -- and proves nothing about a
     hole inside it. That is exactly Task 29's shape, and a gate that cleared on readiness alone
@@ -444,7 +444,7 @@ def test_a_cross_check_that_ran_on_other_datasets_does_not_corroborate_this_one(
 
 
 def test_a_waived_date_check_on_a_dataset_that_is_not_daily_is_not_refused() -> None:
-    """Twelve of the fifteen datasets waive `required_dates` and eleven of them are right to:
+    """Twelve of the sixteen datasets waive `required_dates` and eleven of them are right to:
     a quarterly filing corpus has no session census to be missing sessions from, and a gate
     that blocked on the waiver itself would refuse every real panel and be switched off. The
     rule is scoped to the cadence that *has* a per-session expectation.

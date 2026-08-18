@@ -64,7 +64,9 @@ from openalpha_cn.panel_factors import (
     FACTOR_OBSERVATION_DATASET_PREFIX,
     FACTOR_OBSERVATION_PANEL_COLUMNS,
     FACTOR_TRANSFORMS,
+    NO_SHARED_SERIES,
     REVERSAL_1D,
+    SHARED_SUBJECT_DATASETS,
     FactorEngineError,
     FactorPanel,
     FactorWindow,
@@ -106,7 +108,9 @@ def test_the_shipped_registry_and_evaluator_table_name_exactly_the_same_factors(
     the other fails here as well as at import, and written out rather than counted, so that a
     factor arriving from a later issue has to be named here by whoever adds it. `reversal_1d`
     is the engine's verification factor; the four after it are `V2-P3-012`'s momentum-and-reversal
-    family, the next four are `V2-P3-013`'s volatility-and-liquidity family, the next four are the
+    family, the next **five** are the volatility-and-liquidity family (four from `V2-P3-013` and
+    `residual_vol_60` from `V2-P3-016`, which is where the panel gained the index level series it
+    regresses on and the window gained a channel that could reach one), the next four are the
     value family (three from `V2-P3-009` and `deducted_earnings_yield_ttm` from `V2-P3-017`, which
     is where the projection gained the column it reads), the next four are `V2-P3-010`'s quality
     family and the last three are `V2-P3-011`'s growth family, each family's own declarations being
@@ -128,6 +132,7 @@ def test_the_shipped_registry_and_evaluator_table_name_exactly_the_same_factors(
         "downside_vol_60/v1",
         "turnover_60/v1",
         "amihud_60/v1",
+        "residual_vol_60/v1",
         "earnings_yield_ttm/v1",
         "book_to_price/v1",
         "sales_yield_ttm/v1",
@@ -140,6 +145,52 @@ def test_the_shipped_registry_and_evaluator_table_name_exactly_the_same_factors(
         "net_profit_yoy/v1",
         "revenue_yoy_acceleration/v1",
     )
+
+
+def test_the_shared_channel_is_empty_for_every_factor_that_declares_no_shared_dataset() -> None:
+    """`FactorWindow.shared`'s default, and why it is not the kind of default this repo refuses.
+
+    `V2-P3-016` gave the window a sixth field and gave it a default. Everywhere else in this
+    repository a default on a load-bearing argument is refused -- `max_staleness` has none because
+    a default would be *choosing a bound* for the caller. This one chooses nothing: a factor that
+    declares no dataset in `SHARED_SUBJECT_DATASETS` has exactly one possible shared channel and
+    it is the empty one.
+
+    The risk a default carries here is the opposite one -- that a window built by the *engine*
+    silently arrives empty and an evaluator quietly reads nothing. Three things close it and all
+    three are asserted rather than described:
+
+    - `_classify` passes both channels explicitly on every call for every factor, so the
+      production path never reaches the default. That half is driven over a real partition in
+      `tests/integration/panel/test_market_return.py::
+      test_the_market_series_is_read_at_the_securitys_own_sessions_and_does_not_widen_its_window`.
+    - The two channels *partition* the declared datasets rather than overlapping, so a
+      shared-subject dataset is never also in `values` and vice versa.
+    - Reading the wrong channel raises rather than answering: `shared_series` on an ordinary
+      dataset and `series` on a shared one are both `FactorEngineError`, with different messages,
+      because they are different mistakes.
+    """
+    window = FactorWindow(
+        subject="000001.SZ",
+        as_of=AS_OF,
+        sessions=(date(2026, 6, 15),),
+        periods=(),
+        values=MappingProxyType({("daily", "close"): (11.0,)}),
+    )
+
+    assert window.shared == NO_SHARED_SERIES
+    assert dict(window.shared) == {}
+
+    for definition in FACTOR_DEFINITIONS.definitions:
+        shared = set(definition.datasets) & set(SHARED_SUBJECT_DATASETS)
+        own = set(definition.datasets) - set(SHARED_SUBJECT_DATASETS)
+        assert shared | own == set(definition.datasets)
+        assert not (shared & own)
+
+    with pytest.raises(FactorEngineError, match="is not a shared-subject dataset"):
+        window.shared_series("daily", "close")
+    with pytest.raises(FactorEngineError, match="shared_series"):
+        window.series(next(iter(SHARED_SUBJECT_DATASETS)), "close")
 
 
 def test_a_definition_with_no_evaluator_is_refused_rather_than_answered_emptily() -> None:
@@ -804,9 +855,11 @@ def test_every_shipped_factor_discloses_the_direction_it_declares_and_that_it_is
     sentence through `_VALUE_DIRECTION_PROSE`, and the only thing this loop needed was the count
     below.
 
-    Eleven of the twenty carry the sentence through a shared `_*_DIRECTION_PROSE` constant and
-    nine write it inline, so the assertion is on the assembled note rather than on any constant: a
-    family that stops concatenating its shared prose is exactly the regression this catches.
+    Eleven of the twenty-one carry the sentence through a shared `_*_DIRECTION_PROSE` constant
+    and ten write it inline, so the assertion is on the assembled note rather than on any
+    constant: a family that stops concatenating its shared prose is exactly the regression
+    this catches. `V2-P3-016`'s `residual_vol_60` is one of the ten, because the volatility
+    family has no shared constant -- each of its five states its own prior.
 
     The failure names every factor that lost a phrase rather than the first, because a family-wide
     edit drops it from three or four notes at once and one name would send a reader back around
@@ -819,5 +872,5 @@ def test_every_shipped_factor_discloses_the_direction_it_declares_and_that_it_is
         and any(phrase not in note for phrase in DIRECTION_DISCLOSURE)
     }
 
-    assert len(FACTOR_DEFINITIONS.qualified_keys) == 20
+    assert len(FACTOR_DEFINITIONS.qualified_keys) == 21
     assert missing == {}, "a shipped factor's note no longer discloses its declared direction"

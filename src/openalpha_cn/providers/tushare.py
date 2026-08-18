@@ -296,6 +296,12 @@ from openalpha_cn.domain.index_membership import (
     INDEX_WEIGHT_DATASET,
     TOTAL_PUBLISHED_WEIGHT,
 )
+from openalpha_cn.domain.index_prices import (
+    INDEX_DAILY_DATA_COLUMNS,
+    INDEX_DAILY_DATASET,
+    INDEX_DAILY_NULLABLE_COLUMNS,
+    INDEX_PRICE_COLUMNS,
+)
 from openalpha_cn.domain.industry_classification import (
     INDUSTRY_CODE_COLUMN,
     INDUSTRY_FROM_COLUMN,
@@ -834,6 +840,53 @@ def _index_weight_params(request: ProviderRequest) -> dict[str, str]:
         "index_code": request.subjects[0],
         "start_date": f"{first:%Y%m%d}",
         "end_date": f"{last:%Y%m%d}",
+    }
+
+
+def _index_daily_params(request: ProviderRequest) -> dict[str, str]:
+    """Request one index's whole calendar year of levels: `{ts_code, start_date, end_date}`.
+
+    Three measurements shape this, all from a live probe on 2026-08-17.
+
+    **One index per request, because the endpoint gives nothing else.**
+    `ts_code="000300.SH,000905.SH,000001.SH"` returns **zero** rows over a window that holds 63
+    -- not the union, and not an error. `_index_weight_params` measured the identical behaviour
+    on `index_code`, so this is the second endpoint on which comma-joining would turn a
+    three-index request into an empty `no_data` batch that reads as "the publisher published
+    nothing this year". A missing subject is refused too: a bare `index_daily` is not "the
+    market", it is whichever thousands of indices Tushare happens to serve.
+
+    **One calendar year per request, because that is one partition.** A year of one index is
+    **243 rows** (2025) or 150 year-to-date (2026-08-17) against a measured cap of **8,000**, so
+    the request unit and the storage unit are the same thing with two orders of magnitude of
+    headroom. The whole of `000300.SH`'s published history -- 5,972 rows back to 2002-01-04 --
+    also fits in one response with `has_more=False`, which is the *other* way to know the year
+    window is nowhere near the cap.
+
+    **The cross-section axis exists and is the wrong one.** `index_daily(trade_date=20260630)`
+    returns exactly 8,000 rows with `has_more=True` across 8,000 distinct `ts_code`s, because
+    Tushare serves thousands of indices and this panel wants three. Fetching by session would
+    therefore be truncated on the first request and would carry 7,997 series nothing reads.
+
+    The year is `as_of`'s year *in Asia/Shanghai*, for `_trade_cal_params`' reason: 2024-12-31
+    17:00Z is already 2025 in Shanghai and asking UTC would fetch the wrong year for every
+    late-evening request on the last day of a year.
+    """
+    if len(request.subjects) != 1:
+        raise ProviderFailure(
+            provider_id=_PROVIDER_ID,
+            category="configuration",
+            message=(
+                f"{INDEX_DAILY_DATASET} serves one index per request and the endpoint returns "
+                f"zero rows for a comma-joined ts_code; got {list(request.subjects)}"
+            ),
+            retryable=False,
+        )
+    year = request.as_of.astimezone(_CHINA_TZ).year
+    return {
+        "ts_code": request.subjects[0],
+        "start_date": f"{year}0101",
+        "end_date": f"{year}1231",
     }
 
 
@@ -1593,6 +1646,31 @@ for `932000.CSI` and 800 for `000906.SH`. The flag is the guard that survives ei
 """
 
 
+TUSHARE_INDEX_DAILY_ROW_CAP: Final[int] = 8000
+"""Rows per response for `index_daily`, measured on 2026-08-17. The highest cap in this table.
+
+Only one axis of this endpoint can reach it, and it is the one this panel does not use. A bare
+`index_daily(trade_date=20260630)` returns exactly **8,000** rows with `has_more=True` over
+8,000 distinct `ts_code`s; `limit=8001`, `10000` and `12000` all return the same 8,000, while
+`limit=100` returns 100 -- so `limit` narrows only, `index_weight`'s finding on a second
+endpoint.
+
+The `(ts_code, year)` axis `_index_daily_params` builds is nowhere near it: a full A-share year
+of one index is **243 rows** (`000300.SH`, 2025) and 150 year-to-date on the probe day. Even the
+whole published history of one index fits -- `000300.SH` returns 5,972 rows with
+`has_more=False` for `19900101..20261231`, and `limit=5972` on that same window flips the flag
+to `True` while `limit=100000` leaves it `False`, which is what proves the flag tracks this
+endpoint's truncation rather than being decoration.
+
+**The headroom is a property of the three indices in `INDEX_PRICE_INDEX_CODES` and not of the
+descriptor.** What would have to grow for a year window to bind is the number of sessions in a
+year, which the exchange calendar fixes at about 243. A caller who asked for a longer window on
+an older index can reach it: `000001.SH` 上证综指 is served from 1990 and its whole-history
+window returns 8,000 rows with `has_more=True` -- truncated, on the same request shape that is
+complete for all three of ours.
+"""
+
+
 TUSHARE_INDUSTRY_MEMBER_ROW_CAP: Final[int] = 3000
 """Rows per response for `index_member_all`, measured on 2026-08-09 -- **the lowest cap here**.
 
@@ -1702,6 +1780,54 @@ def _price_panel_column(name: str) -> TusharePanelColumn:
     return TusharePanelColumn(
         name=name, kind="float", source_field=name, parse=_named_parser(name, parse)
     )
+
+
+def _index_daily_panel_column(name: str) -> TusharePanelColumn:
+    """One `index_daily` column, with the parse its measured nullability and sign demand.
+
+    Built rather than written out nine times, `_price_panel_column`'s shape -- and deliberately
+    **not** that function, even though the nine column names are `daily`'s nine. The two
+    datasets disagree about nullability on seven of the nine, and reusing the price builder
+    would have applied `_positive_price` to columns this endpoint publishes as `None` on real
+    rows: `000300.SH` serves 721 back-computed bars (2002-01-04..2004-12-31) with no `open`,
+    `high` or `low` at all, and all three indices' synthetic 2004-12-31 base row carries a null
+    `pre_close`, `pct_chg`, `vol` and `amount`. A shared builder would have refused those
+    partitions outright.
+
+    `pct_chg` is the column where the two builders differ most sharply and most quietly: it is
+    signed, and 2,872 of `000300.SH`'s 5,972 bars are negative. `_price_panel_column` sends it
+    to `_finite_number` because it is not in `DAILY_PRICE_COLUMNS`; a builder that assumed
+    "an index column is a level" would have sent it to `_positive_price` and refused every down
+    day in the history.
+
+    See `domain/index_prices.py::INDEX_DAILY_NULLABLE_COLUMNS` for the whole measurement.
+    """
+    if name == PRICE_DATE_COLUMN:
+        return TusharePanelColumn(
+            name=name, kind="string", source_field=name, parse=_calendar_date_text
+        )
+    if name in INDEX_DAILY_NULLABLE_COLUMNS:
+        parse = _optional_positive_level if name in INDEX_PRICE_COLUMNS else _optional_number
+    else:
+        parse = _positive_price
+    return TusharePanelColumn(
+        name=name, kind="float", source_field=name, parse=_named_parser(name, parse)
+    )
+
+
+def _optional_positive_level(value: object) -> object:
+    """A level column that may be absent and must be strictly positive when it is present.
+
+    Neither `_optional_number` nor `_positive_price` says this, and the difference is the one
+    `domain/index_prices.py` measured: absent is ordinary here (`open`/`high`/`low` on a
+    close-only back-computed bar, `pre_close` on an index's first session) and non-positive is
+    not -- no level at or below zero appears in any of the 16,476 bars of the three indices'
+    whole histories. Folding it into `_optional_number` would accept a zero level, which is the
+    one value that makes `close / pre_close - 1` a division by zero rather than a number.
+    """
+    if value is None:
+        return None
+    return _positive_price(value)
 
 
 def _price_limit_panel_column(name: str) -> TusharePanelColumn:
@@ -2270,6 +2396,46 @@ TUSHARE_DATASETS: tuple[TushareDatasetDescriptor, ...] = (
                 parse=_constituent_weight,
             ),
         ),
+    ),
+    TushareDatasetDescriptor(
+        dataset=INDEX_DAILY_DATASET,
+        kind=INDEX_DAILY_DATASET,
+        # The index, `index_weight`'s choice and for its reason: `PanelStore`'s key is
+        # `(dataset, year)` with no index dimension, so the three series sharing a year are told
+        # apart by this column alone.
+        subject_field="ts_code",
+        date_field=PRICE_DATE_COLUMN,
+        # A level is computed from the session's own close, so `daily`'s clock is exactly right
+        # here and needs none of the hedging `index_weight`'s does: this row *describes* the
+        # session it is dated at rather than being a snapshot the following month's questions
+        # are answered from.
+        clock=ClockStrategy.daily_close,
+        params_builder=_index_daily_params,
+        # `""` asks for the endpoint's defaults, measured on 2026-08-17 to be exactly
+        # `ts_code, trade_date, close, open, high, low, pre_close, change, pct_chg, vol,
+        # amount`. `change` is the one this panel drops, `DAILY_DATA_COLUMNS`' reason: it is
+        # `close - pre_close` and carries nothing the two of them do not.
+        response_fields="",
+        # Every column the projection reads, pinned rather than left at the default
+        # `(trade_date,)`. `daily` cannot do this because `fetch()`'s oldest test drives it with
+        # a four-column response; this dataset is panel-first and has no such legacy, so the
+        # schema check can be about what the descriptor actually reads.
+        required_response_fields=("ts_code", *INDEX_DAILY_DATA_COLUMNS),
+        source_uri_template="tushare://{dataset}/{subject}/{date}",
+        max_rows_per_response=TUSHARE_INDEX_DAILY_ROW_CAP,
+        # Demanded, and the argument is `write_suspensions`' rather than `adj_factor`'s.
+        # `index_price_requirement` states `required_dates` from the calendar, so a truncated
+        # year is **not** silently wrong: it is unreadable, blocked with `date_gap` on every
+        # read, which `tests/integration/panel/test_market_return.py::
+        # test_a_truncated_market_year_is_refused_at_the_read_and_not_answered_per_security`
+        # drives. What the flag buys is *where* that surfaces. Without it the fetch succeeds,
+        # `panel build` reports success, and the partition it wrote is refused by every later
+        # factor build -- a store that accepts what it cannot return, which is the defect
+        # `_refuse_unrebuildable_suspensions` exists to stop one dataset over. The cap drops the
+        # *oldest* rows, so the truncated year is a contiguous suffix and the census is the only
+        # witness there is: a gap rule would see nothing.
+        requires_truncation_flag=True,
+        panel_columns=tuple(_index_daily_panel_column(name) for name in INDEX_DAILY_DATA_COLUMNS),
     ),
     TushareDatasetDescriptor(
         dataset=INDUSTRY_TREE_DATASET,
@@ -3343,12 +3509,20 @@ class TushareProvider:
         this account reach this endpoint at all", so the cheapest well-formed request is the
         right one.
 
+        `V2-P3-016`'s `index_daily` is the sixteenth and shares `index_weight`'s subject rather
+        than earning its own: `PROBE_INDEX_CODE` is `000300.SH`, which is `MARKET_INDEX_CODE`
+        and the one index every factor in this build regresses on, so the probe that says "this
+        account can reach index levels" is asking about exactly the series that matters. Its
+        request is one index-year (243 rows measured for 2025) because `_index_daily_params`
+        derives the window from `as_of` and takes no narrower unit -- a month would need a
+        second builder for no gain, since 243 rows is 3% of this endpoint's 8,000-row cap.
+
         The period year for `fina_indicator` is derived from the clock rather than pinned:
         `_financial_indicator_params` refuses anything but a four-digit year, and a literal
         would have to be revisited every January for no gain -- a probe cares that the request
         was *accepted*, and `no_data` is an accepted request.
         """
-        if dataset == INDEX_WEIGHT_DATASET:
+        if dataset in (INDEX_WEIGHT_DATASET, INDEX_DAILY_DATASET):
             return (PROBE_INDEX_CODE,)
         if dataset == INDUSTRY_TREE_DATASET:
             return (INDUSTRY_MEMBERSHIP_TAXONOMY,)

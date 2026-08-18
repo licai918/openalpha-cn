@@ -8,15 +8,21 @@ count -- is in `tests/integration/panel/test_volatility_liquidity_family.py`.
 
 ## The four claims this file exists to make executable
 
-**Why no factor here is named for a residual is a fact about the code, not a sentence in a note.**
-The roadmap line asks for residual and idiosyncratic volatility, which are one construct and need a
-market return series.
-`test_the_reason_no_residual_ships_is_a_property_of_the_panel_and_of_the_window` pins the two
-things that stand in the way -- none of the fifteen declared Tushare datasets carries an index's
-price, and `FactorWindow` carries one subject's rows -- so the day somebody ingests an index series
-this test says the disclosure needs revisiting. Neither obstacle is arithmetic: the univariate
-regression a residual volatility needs has a closed form and is `O(n)` in pure Python, so
-`ADR-0003`'s numerical-stack question is not the one that blocked this.
+**Why exactly one factor here is named for a residual is a fact about the code, not a sentence in
+a note, and this file used to say the opposite.** The roadmap line asks for residual and
+idiosyncratic volatility, which are one construct and need a market return series. Until
+`V2-P3-016` two things stood in the way -- none of the fifteen declared Tushare datasets carried
+an index's price, and `FactorWindow` carried one subject's rows -- and
+`test_the_reason_no_residual_ships_is_a_property_of_the_panel_and_of_the_window` pinned both,
+with its own docstring saying the day somebody ingested an index series was the day the
+disclosure needed revisiting. That day came, so the test is **inverted** rather than deleted:
+`test_exactly_one_dataset_carries_a_level_and_exactly_one_channel_reaches_it` now asserts that
+exactly one dataset is a level series, exactly one window channel reaches it, exactly one index
+is reachable through it and exactly one shipped factor declares it -- so widening once more and
+quietly reverting are both red. Neither obstacle was ever arithmetic: the univariate regression
+a residual volatility needs has a closed form and is `O(n)` in pure Python, so `ADR-0003`'s
+numerical-stack question was never the one that blocked this, which is what its own 2026-08-12
+correction says.
 
 **The unit of `daily.amount` is measured, not read off a field list.** `AMIHUD_60`'s value is a
 ratio whose denominator is money, so its unit is the column's unit, and a denominator wrong by a
@@ -64,6 +70,12 @@ from openalpha_cn.domain.daily_prices import (
     PRE_CLOSE_COLUMN,
 )
 from openalpha_cn.domain.factor import FactorField
+from openalpha_cn.domain.index_membership import INDEX_WEIGHT_DATASET
+from openalpha_cn.domain.index_prices import (
+    INDEX_DAILY_DATASET,
+    INDEX_PRICE_INDEX_CODES,
+    MARKET_INDEX_CODE,
+)
 from openalpha_cn.panel_factors import (
     AMIHUD_60,
     AMOUNT_COLUMN,
@@ -72,6 +84,7 @@ from openalpha_cn.panel_factors import (
     FACTOR_DEFINITIONS,
     FACTOR_EVALUATORS,
     RETURN_VOL_60,
+    SHARED_SUBJECT_DATASETS,
     TURNOVER_60,
     TURNOVER_RATE_COLUMN,
     VOLATILITY_LIQUIDITY_LOOKBACK_SESSIONS,
@@ -97,6 +110,24 @@ THE_FOUR: Final[tuple[str, ...]] = (
     "turnover_60/v1",
     "amihud_60/v1",
 )
+"""The four `V2-P3-013` shipped, kept as its own name after the family grew to five.
+
+Not folded into `THE_FAMILY`, because the difference between the two tuples is the whole of what
+`V2-P3-016` did: these four are the ones that were built without a market return series, and
+`RESIDUAL_VOL_60` is the one that could not be.
+"""
+
+THE_FAMILY: Final[tuple[str, ...]] = (*THE_FOUR, "residual_vol_60/v1")
+"""Every `volatility_liquidity` member this build ships, in registry order.
+
+`V2-P3-016` is the fifth and it is deliberately **one** factor rather than two. The roadmap line
+`V2-P3-013` could not satisfy names "residual volatility" and "idiosyncratic volatility"; those
+are one construct in the literature and are told apart by the right-hand side of the regression
+(CAPM against a three-factor model). This panel holds one explanatory series, so a second name
+would address the identical number computed by the identical evaluator --
+`test_only_one_residual_ships_because_the_panel_holds_one_explanatory_series` is that argument
+as an assertion rather than as a sentence in a note.
+"""
 
 # --- the real published rows the two unit measurements are taken on -------------------------------
 
@@ -327,20 +358,34 @@ def test_the_columns_this_family_reads_are_columns_the_daily_contract_declares()
 # --- the declared properties ----------------------------------------------------------------------
 
 
-def test_the_family_is_exactly_four_definitions_and_they_are_this_builds_only_members() -> None:
-    """Both directions: the four this issue owns are declared, and nothing else claims the family.
+def test_the_family_is_exactly_five_definitions_and_they_are_this_builds_only_members() -> None:
+    """Both directions: the five this family owns are declared, and nothing else claims it.
 
     The second half is what a per-factor test cannot cover. `FactorFamily` is a closed set because
-    `V2-P3-008` groups by it and `V2-P3-014` reports per family, so a fifth member arriving from
+    `V2-P3-008` groups by it and `V2-P3-014` reports per family, so a sixth member arriving from
     somewhere else -- a `V2-P3-012` momentum factor mis-labelled, say -- would silently join this
     family's redundancy group and its report tier.
+
+    The fifth arrived from `V2-P3-016` and joins on purpose rather than by omission: it shares
+    this family's declared horizon (`VOLATILITY_LIQUIDITY_LOOKBACK_SESSIONS` / `..._MAX_WINDOW_..`)
+    precisely so that `V2-P3-008`'s redundancy analysis compares it against `return_vol_60` as a
+    statement about content rather than about horizon. `THE_FOUR` is kept beside `THE_FAMILY` so
+    that the prefix relation -- the four that shipped without a market series, and the one that
+    could not -- is an assertion instead of an ordering nobody checks.
     """
     declared = tuple(
         item.qualified_key for item in FACTOR_DEFINITIONS.definitions if item.family == FAMILY
     )
 
-    assert declared == THE_FOUR
-    assert set(THE_FOUR) <= set(FACTOR_EVALUATORS)
+    assert declared == THE_FAMILY
+    assert THE_FAMILY[: len(THE_FOUR)] == THE_FOUR
+    assert set(THE_FAMILY) <= set(FACTOR_EVALUATORS)
+    assert {FACTOR_DEFINITIONS.get(handle).lookback_sessions for handle in THE_FAMILY} == {
+        VOLATILITY_LIQUIDITY_LOOKBACK_SESSIONS
+    }
+    assert {FACTOR_DEFINITIONS.get(handle).max_window_sessions for handle in THE_FAMILY} == {
+        VOLATILITY_LIQUIDITY_MAX_WINDOW_SESSIONS
+    }
 
 
 @pytest.mark.parametrize(
@@ -418,13 +463,22 @@ REQUIRED_DISCLOSURES: Final[dict[str, tuple[str, ...]]] = {
     "return_vol_60/v1": (
         "measured nothing about",
         "deliberately NOT named for a residual",
-        "the panel holds no index or market return series at all",
+        "The second stopped being true at V2-P3-016",
+        "it is TOTAL volatility",
         "close / pre_close - 1",
     ),
     "downside_vol_60/v1": (
         "measured nothing about",
-        "it is not the residual of any regression",
+        "it is not the residual of any",
+        "stopped being true at V2-P3-016",
         "NOT the number of negative returns",
+    ),
+    "residual_vol_60/v1": (
+        "measured nothing about",
+        "b = cov(r, r_m) / var(r_m)",
+        "ONE factor ships here and not two",
+        "N-2 rather than N-1",
+        "var(r_m) over the window is zero",
     ),
     "turnover_60/v1": (
         "measured nothing about",
@@ -439,6 +493,13 @@ REQUIRED_DISCLOSURES: Final[dict[str, tuple[str, ...]]] = {
 }
 """What each member's prose has to say, as a table the suite evaluates.
 
+**Two of these rows are corrections rather than additions**, and that is the point of asserting
+prose in executable code at all. `return_vol_60` and `downside_vol_60` both used to be required
+to say that no residual volatility was computable in this build; `V2-P3-016` made that false, so
+the required phrase is now the one that says *when* it stopped being true. A table that had only
+grown a fifth row would have left two shipped factors asserting a sentence the code had refuted
+-- which is the shape of every Critical finding this repository has taken.
+
 This is the same binding `KNOWN_*` registries get from
 `tests/unit/test_known_limitation_registries.py` -- a string literal asserted in *executable* test
 code -- applied to a `FactorNote` instead of to a `code`. A new `KNOWN_*` registry was considered
@@ -448,38 +509,94 @@ so a registry beside it would be a second place for the same sentence to drift f
 """
 
 
-def test_the_reason_no_residual_ships_is_a_property_of_the_panel_and_of_the_window() -> None:
-    """The blocker itself, as two structural facts rather than as a sentence in a note.
+def test_exactly_one_dataset_carries_a_level_and_exactly_one_channel_reaches_it() -> None:
+    """The two blockers `V2-P3-013` measured, pinned **inverted** now that both are gone.
 
-    A residual volatility is the deviation of `r - a - b*r_m`, so it needs a market return series
-    aligned to the security's own sessions. Two things stand between this build and one, and
-    neither is arithmetic -- the univariate regression has a closed form and is `O(n)` in pure
-    Python, so `ADR-0003`'s numerical-stack question is not the one being answered here:
+    This test used to be `test_the_reason_no_residual_ships_is_a_property_of_the_panel_and_of_the_
+    window` and it asserted the two absences: that none of the fifteen declared datasets carried
+    an index's level, and that `FactorWindow` had five fields of which none could hold a series
+    belonging to another subject. Its own docstring said "the day somebody ingests an index price
+    series is the day this family's disclosure needs revisiting". `V2-P3-016` is that day, so the
+    test goes red by design and is turned round rather than deleted -- `V2-P3-017`'s treatment of
+    `test_no_stored_statement_projection_carries_a_deducted_profit_column`, on the other blocker
+    of the same shape.
 
-    - **No dataset carries an index's price.** The fifteen `TUSHARE_DATASETS` descriptors are
-      prices, valuations, adjustment factors, four statement endpoints, calendar, universe,
-      industry tree and membership, index *weights*, suspensions, price limits and name history.
-      `index_weight` is a constituent weight, not a level.
-    - **A window is one subject's.** `FactorWindow.subject` is a single security and
-      `values` is keyed by `(dataset, column)` alone, so even a stored `000300.SH` series would be
-      unreachable from the evaluator that needed it -- `_classify` is called once per subject.
+    **Inverted means "exactly one", not "at least one".** Each half below names the thing that is
+    now served, the thing that is deliberately still *not* served, and the count between them, so
+    that widening once more and quietly reverting are both red:
 
-    Asserted rather than described because the day somebody ingests an index price series is the
-    day this family's disclosure needs revisiting, and the first assertion is what will say so.
+    - Sixteen datasets, of which **`index_daily` is the only level series** and `index_weight` is
+      still a constituent *weight* rather than a second one. A seventeenth `*_daily` dataset, or
+      `index_daily` being dropped again, fails the count and the membership respectively.
+    - `SHARED_SUBJECT_DATASETS` has **exactly one** entry, and its subject is **exactly one** of
+      the three index codes the build fetches. The other two are stored and are unreachable from
+      any evaluator, which is the scope choice `MARKET_INDEX_CODE` records: naming an index per
+      factor would need a field on `FactorDefinition`, and that is the model `factor_id` is the
+      content address of.
+    - `FactorWindow` has **six** fields, the sixth is `shared`, and `subject` is still a single
+      `str`. Folding the market series into `values` instead would have kept the field set at
+      five and made `subject` false about part of its own contents -- so the field set is checked
+      by equality rather than by containment, which is what makes that shortcut red too.
+    - **Exactly one shipped factor declares a shared-subject dataset.** A second one would be a
+      decision somebody has to write down here.
+
+    What is *not* asserted here is the arithmetic; `_residual_vol_60`'s own tests do that. What
+    is asserted is that the two structural obstacles are gone and that each is gone by exactly
+    one step, which is the claim `ADR-0003`'s 2026-08-12 correction hangs on: the blocker was the
+    data and the window's shape, never the numerical stack.
     """
     declared = {descriptor.dataset for descriptor in TUSHARE_DATASETS}
+    levels = {name for name in declared if name.endswith("_daily")}
 
-    assert len(declared) == 15
-    assert "index_daily" not in declared
-    assert not any(name.endswith("_daily") for name in declared)
-    assert "index_weight" in declared
+    assert len(declared) == 16
+    assert levels == {INDEX_DAILY_DATASET}
+    assert INDEX_WEIGHT_DATASET in declared and INDEX_WEIGHT_DATASET not in levels
+
+    assert dict(SHARED_SUBJECT_DATASETS) == {INDEX_DAILY_DATASET: MARKET_INDEX_CODE}
+    assert MARKET_INDEX_CODE in INDEX_PRICE_INDEX_CODES
+    unreachable = set(INDEX_PRICE_INDEX_CODES) - set(SHARED_SUBJECT_DATASETS.values())
+    assert len(unreachable) == 2 and MARKET_INDEX_CODE not in unreachable
 
     fields = {field.name for field in dataclasses.fields(FactorWindow)}
-    assert fields == {"subject", "as_of", "sessions", "periods", "values"}
+    assert fields == {"subject", "as_of", "sessions", "periods", "values", "shared"}
     assert isinstance(_window().subject, str)
 
+    reaching = {
+        definition.qualified_key
+        for definition in FACTOR_DEFINITIONS.definitions
+        if set(definition.datasets) & set(SHARED_SUBJECT_DATASETS)
+    }
+    assert reaching == {"residual_vol_60/v1"}
 
-@pytest.mark.parametrize("handle", THE_FOUR)
+
+def test_only_one_residual_ships_because_the_panel_holds_one_explanatory_series() -> None:
+    """Why the roadmap's two names became one factor, as an assertion rather than a paragraph.
+
+    `V2-P3-013`'s line asks for "residual volatility" and "idiosyncratic volatility". They are one
+    construct -- the dispersion of what a model does not explain -- and the literature tells them
+    apart by the model: CAPM for the first, a three-factor model for the second. The regressor set
+    this build can reach is a **singleton**, so the two would be the same number computed by the
+    same evaluator under two `factor_id`s.
+
+    That is the `V2-P3-004` review's finding in advance rather than after: a second definition
+    could be declared, would be given a distinct address, would produce an identical value on
+    every window, and no fixture in this repository could tell the two apart. So one ships, and
+    what this test pins is the premise -- one shared dataset, one reachable subject, one factor
+    reading it -- rather than the absence of a factor nobody wrote, which is unassertable.
+    """
+    reachable_series = {(dataset, subject) for dataset, subject in SHARED_SUBJECT_DATASETS.items()}
+
+    assert len(reachable_series) == 1
+    assert sum(1 for handle in THE_FAMILY if "residual" in handle) == 1
+    assert "idiosyncratic_vol_60/v1" not in FACTOR_DEFINITIONS.qualified_keys
+
+    note = FACTOR_DEFINITIONS.note_for("residual_vol_60/v1")
+    assert note is not None
+    assert "ONE factor ships here and not two" in note
+    assert "two factor_ids over one answer" in note
+
+
+@pytest.mark.parametrize("handle", THE_FAMILY)
 def test_every_member_discloses_what_it_is_and_is_not(handle: str) -> None:
     """The honesty standard `REVERSAL_1D_NOTE` set, required of all four rather than assumed.
 

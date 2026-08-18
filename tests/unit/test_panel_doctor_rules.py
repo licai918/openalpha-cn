@@ -21,6 +21,7 @@ from openalpha_cn.domain.factor import FactorObservation, cross_section_digest
 from openalpha_cn.domain.factor_transform import observation_digest
 from openalpha_cn.domain.financial_statements import KNOWN_FINANCIAL_STATEMENT_LIMITATIONS
 from openalpha_cn.domain.index_membership import KNOWN_INDEX_MEMBERSHIP_LIMITATIONS
+from openalpha_cn.domain.index_prices import KNOWN_INDEX_PRICE_LIMITATIONS
 from openalpha_cn.domain.industry_classification import KNOWN_INDUSTRY_LIMITATIONS
 from openalpha_cn.domain.price_limits import KNOWN_SUSPENSION_LIMITATIONS
 from openalpha_cn.domain.stock_universe import KNOWN_UNIVERSE_LIMITATIONS
@@ -203,6 +204,7 @@ def test_every_dataset_the_ingest_module_writes_has_a_declared_cadence() -> None
         panel_ingest.SUSPENSION_DATASET,
         panel_ingest.PRICE_LIMIT_DATASET,
         panel_ingest.INDEX_WEIGHT_DATASET,
+        panel_ingest.INDEX_DAILY_DATASET,
         panel_ingest.INDUSTRY_MEMBERSHIP_DATASET,
         panel_ingest.INDUSTRY_TREE_DATASET,
         *panel_ingest.FINANCIAL_STATEMENT_DATASETS,
@@ -323,10 +325,24 @@ def test_the_calendar_dataset_is_published_in_advance_so_an_event_clock_bound_is
     assert policy.max_staleness is None
 
 
-def test_the_four_price_shaped_datasets_share_the_daily_cadence() -> None:
+def test_the_five_price_shaped_datasets_share_the_daily_cadence() -> None:
+    """Four price datasets and, since `V2-P3-016`, the index level series.
+
+    `index_daily` is the fifth and it is the one that could plausibly have been given its
+    neighbour's cadence: it shares its three subjects with `index_weight`, which is `monthly`.
+    The two publish at different rates and the difference is measured -- `000300.SH` served
+    **243** `index_daily` rows for 2025 against twelve `index_weight` publications over the same
+    year -- so a `monthly` bound copied across would let a level series go three weeks stale
+    without a finding, which is three weeks of a 60-session regression window estimated against
+    a market that stopped moving. Asserted here rather than left to the closed-table test, which
+    only checks that every written dataset has *some* cadence.
+    """
     assert {
-        DATASET_CADENCE[name] for name in ("daily", "daily_basic", "adj_factor", "stk_limit")
+        DATASET_CADENCE[name]
+        for name in ("daily", "daily_basic", "adj_factor", "stk_limit", "index_daily")
     } == {"daily"}
+    assert DATASET_CADENCE["index_weight"] == "monthly"
+    assert DATASET_CADENCE["index_daily"] != DATASET_CADENCE["index_weight"]
 
 
 def test_every_statement_dataset_is_quarterly() -> None:
@@ -339,9 +355,11 @@ def test_every_statement_dataset_is_quarterly() -> None:
 
 
 def test_every_entry_of_every_known_registry_reaches_the_report() -> None:
-    """Nine registries, and the report must carry all of them: a limitation that is recorded
+    """Ten registries, and the report must carry all of them: a limitation that is recorded
     in the codebase but absent from the health report is one a reader of the report will
-    mistake for a defect of this fetch."""
+    mistake for a defect of this fetch. `V2-P3-016`'s `KNOWN_INDEX_PRICE_LIMITATIONS` is the
+    tenth, and it arrived as a failure of the arithmetic below rather than as an edit
+    somebody remembered to make."""
     registry_total = sum(
         len(registry)
         for registry in (
@@ -350,12 +368,13 @@ def test_every_entry_of_every_known_registry_reaches_the_report() -> None:
             KNOWN_PRICE_LIMITATIONS,
             KNOWN_SUSPENSION_LIMITATIONS,
             KNOWN_INDEX_MEMBERSHIP_LIMITATIONS,
+            KNOWN_INDEX_PRICE_LIMITATIONS,
             KNOWN_INDUSTRY_LIMITATIONS,
             KNOWN_FINANCIAL_STATEMENT_LIMITATIONS,
         )
     )
 
-    # The seven `(code, detail)` registries carry one entry each; the calendar's is a list of
+    # The eight `(code, detail)` registries carry one entry each; the calendar's is a list of
     # dated instances of one defect, so it folds into a single entry carrying those dates; and
     # the storage plane's fold in one for one, naming no dataset because they hold for all.
     assert len(KNOWN_PANEL_LIMITATIONS) == registry_total + 1 + len(KNOWN_STORAGE_LIMITATIONS)
@@ -508,9 +527,9 @@ def test_the_calendar_limitation_carries_its_proven_instances_as_dates() -> None
 
 
 def test_the_calendar_fold_is_the_one_panel_code_no_dataset_registry_declares() -> None:
-    """`_limitations()` folds eight registries and then appends a code of its own.
+    """`_limitations()` folds nine registries and then appends a code of its own.
 
-    Seven bound to the datasets they describe, `KNOWN_STORAGE_LIMITATIONS` bound to none
+    Eight bound to the datasets they describe, `KNOWN_STORAGE_LIMITATIONS` bound to none
     because a storage boundary holds for every dataset at once -- but a declared registry
     either way, pinned by a set literal in its own module's tests. That covers every
     `KNOWN_PANEL_LIMITATIONS` entry except this one: it is constructed here rather than
@@ -531,6 +550,7 @@ def test_the_calendar_fold_is_the_one_panel_code_no_dataset_registry_declares() 
             KNOWN_PRICE_LIMITATIONS,
             KNOWN_SUSPENSION_LIMITATIONS,
             KNOWN_INDEX_MEMBERSHIP_LIMITATIONS,
+            KNOWN_INDEX_PRICE_LIMITATIONS,
             KNOWN_INDUSTRY_LIMITATIONS,
             KNOWN_FINANCIAL_STATEMENT_LIMITATIONS,
             KNOWN_STORAGE_LIMITATIONS,

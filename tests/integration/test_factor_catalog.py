@@ -204,11 +204,13 @@ def test_the_whole_note_travels_and_is_the_registrys_own() -> None:
     """The prose is not summarised, clipped or re-worded on the way out.
 
     The measured shape this closes: nineteen disclosures existed in the source and reached no face.
-    `return_vol_60`'s is the one the acceptance review quoted -- it says the factor occupies
-    `V2-P3-013`'s residual-volatility slot, is deliberately not named for a residual, and that
-    neither residual is computable in this build -- so it is asserted here character for character
-    rather than by length, because a face that shipped the first sentence would pass a length
-    check and lose the disclosure.
+    `return_vol_60`'s is the one the acceptance review quoted -- it says the factor held
+    `V2-P3-013`'s residual-volatility slot until `V2-P3-016` filled it, is deliberately not named
+    for a residual, and that the half of its old disclosure claiming no residual was computable
+    stopped being true -- so it is asserted here character for character rather than by length,
+    because a face that shipped the first sentence would pass a length check and lose the
+    disclosure. The phrases below moved with the note when `V2-P3-016` corrected it, which is the
+    binding working: a note whose second half the code had refuted could not stay green here.
     """
     catalog = factor_catalog()
     notes = {str(entry["handle"]): entry["note"] for entry in catalog["factors"]}
@@ -220,7 +222,9 @@ def test_the_whole_note_travels_and_is_the_registrys_own() -> None:
     residual = notes["return_vol_60/v1"]
     assert residual is not None
     assert "deliberately NOT named for a residual" in residual
-    assert "neither is computable in this build" in residual
+    assert "The second stopped being true at V2-P3-016" in residual
+    assert "it is TOTAL volatility" in residual
+    assert "neither is computable in this build" not in residual
 
 
 # --- the per-key audits -------------------------------------------------------------------------

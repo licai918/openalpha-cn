@@ -46,6 +46,11 @@ from openalpha_cn.domain.index_membership import (
     INDEX_WEIGHT_INDEX_CODES,
     IndexMembershipError,
 )
+from openalpha_cn.domain.index_prices import (
+    INDEX_DAILY_DATASET,
+    INDEX_PRICE_INDEX_CODES,
+    IndexPriceError,
+)
 from openalpha_cn.domain.industry_classification import (
     INDUSTRY_MEMBERSHIP_DATASET,
     INDUSTRY_MEMBERSHIP_TAXONOMY,
@@ -110,6 +115,7 @@ from openalpha_cn.panel_ingest import (
     write_adjustment_factors,
     write_daily_panel,
     write_financial_statements,
+    write_index_prices,
     write_index_weights,
     write_industry_memberships,
     write_industry_tree,
@@ -903,6 +909,7 @@ PANEL_BUILD_TARGETS: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
         PRICE_LIMIT_DATASET: (PRICE_LIMIT_DATASET,),
         NAMECHANGE_DATASET: (NAMECHANGE_DATASET,),
         INDEX_WEIGHT_DATASET: (INDEX_WEIGHT_DATASET,),
+        INDEX_DAILY_DATASET: (INDEX_DAILY_DATASET,),
         INCOME_DATASET: (INCOME_DATASET,),
         BALANCE_SHEET_DATASET: (BALANCE_SHEET_DATASET,),
         CASH_FLOW_DATASET: (CASH_FLOW_DATASET,),
@@ -967,6 +974,14 @@ specified against. The eight are wired here, each with its measured request shap
 
 `PANEL_BUILD_SPAN_TARGETS` is why the last three say "for the whole invocation" rather than "per
 `--year`", and it is a fact about their requests rather than a convenience.
+
+**Fourteen targets since `V2-P3-016`, and the fourteenth is the cheapest per-year one here.**
+`index_daily` is one request per `(index, year)` -- `INDEX_PRICE_INDEX_CODES` x 1, **3 requests
+per `--year`**, measured 2026-08-17 -- against `index_weight`'s 36 over the same three indices,
+because a level series is dated by session and a composition is published monthly. It sits
+immediately after `index_weight` in this order for a reason that is legibility rather than
+dependency: neither reads the other, and a reader looking for "what does this build know about
+沪深300" should find its composition and its level next to each other.
 """
 
 PANEL_BUILD_COUPLED_DATASETS: Final[Mapping[str, str]] = MappingProxyType(
@@ -1105,6 +1120,7 @@ _PANEL_WRITE_REFUSALS: Final[tuple[type[Exception], ...]] = (
     SuspensionError,
     StockUniverseError,
     IndexMembershipError,
+    IndexPriceError,
     IndustryClassificationError,
     FinancialStatementError,
     TradingCalendarError,
@@ -1136,6 +1152,13 @@ withheld -- `SuspensionError`'s defect exactly, in a dataset that had not been b
 that one was found. `panel_doctor._LOAD_FAILURES` learns it in the same edit, as that test
 requires; no cross-check raises it today, and the set is one question's answer rather than two
 modules' separate inventories of what they happen to catch.
+
+**`IndexPriceError` is the eleventh** (`V2-P3-016`), and it arrives with a raiser rather than as
+defence: `panel_ingest._refuse_unrebuildable_index_prices` runs the reader's own reconstruction
+over every `index_daily` batch before it is stored, so a duplicated session or a null level is a
+fact about the data reported as `unhealthy`. Without this entry it would have been
+`internal_error` with the message withheld -- `SuspensionError`'s defect, on the dataset whose
+rows are the regressor of every residual volatility in the cross section.
 """
 
 _NEEDS_STORED_CALENDAR: Final[frozenset[str]] = frozenset(
@@ -2140,6 +2163,75 @@ def _build_index_weights(
     return [write_index_weights(store, batches)]
 
 
+def _build_index_prices(
+    store: PanelStore, provider: TushareProvider, *, year: int, now: datetime
+) -> list[PartitionRef]:
+    """Fetch one year of levels for every index and write them as one partition (`V2-P3-016`).
+
+    **Three requests per `--year`**, measured on 2026-08-17: one request is one index's whole
+    calendar year (`_index_daily_params`), and `INDEX_PRICE_INDEX_CODES` has three members. That
+    is the cheapest per-year target in this command -- `index_weight` covers the same three
+    indices in 36 -- and the difference is the two datasets' cadences rather than an
+    optimisation: a composition publishes monthly and a level publishes every session, so a
+    year's worth of levels is one window where a year's worth of compositions is twelve.
+
+    A year's partition has to arrive in **one** call for `_build_index_weights`' reason exactly:
+    `PanelStore` replaces a partition whole and its key has no index dimension, so a per-index
+    loop would leave the year holding whichever index went last.
+    `panel_ingest._refuse_to_drop_stored_subjects` is what refuses that, and it can only see it
+    because the subject column is the index.
+
+    ## Which indices are allowed to serve nothing, and which gap is refused
+
+    No interior-gap check, and that is the substantive difference from `_build_index_weights`.
+    There, a month with no publication inside an index's life is a hole a monthly cadence makes
+    visible and `build_index_membership` refuses on every read. Here the cadence is per session
+    and the census belongs to the calendar: `index_price_requirement` states `required_dates`
+    from the stored `trade_cal` and `required_subjects` as `MARKET_INDEX_CODE`, so a year missing
+    a session of the series a factor reads is blocked at every read with a `date_gap` and a year
+    missing the series entirely with a `subject_missing`. Re-deriving that here would be a second
+    calendar for this command to disagree with the partition it just wrote.
+
+    A year entirely before an index began is an empty response and not a fault -- `000905.SH` and
+    `000852.SH` are both published only from their common 2004-12-31 base point, and `000300.SH`
+    from 2002-01-04 -- but a year in which **none** of the three served a row has no partition to
+    write, and saying so is better than writing an empty one that every later read reports as a
+    date gap.
+
+    ## The three indices are the build's scope, and this command offers no way to widen it
+
+    `INDEX_PRICE_INDEX_CODES` is `INDEX_WEIGHT_INDEX_CODES` and the argument is that function's:
+    the cap, the nullability and the return-path reconciliation in `domain/index_prices.py` were
+    all measured on those three, and a fourth index would inherit the code without inheriting any
+    of it. Only one of the three is reachable from a factor at all; the other two are stored so
+    that a level and a composition are answerable for the same index or for neither.
+    """
+    _echo_budget(
+        f"{INDEX_DAILY_DATASET} year={year}",
+        len(INDEX_PRICE_INDEX_CODES),
+        "requests",
+        f"{len(INDEX_PRICE_INDEX_CODES)} indices x 1 whole-year window",
+    )
+    started = monotonic()
+    batches: list[ColumnarPanelBatch] = []
+    instant = _year_end_as_of(year, now)
+    for done, index_code in enumerate(INDEX_PRICE_INDEX_CODES, start=1):
+        batch = _fetch_panel(provider, INDEX_DAILY_DATASET, as_of=instant, subjects=(index_code,))
+        if batch.status == "success":
+            batches.append(batch)
+        _echo_progress(
+            (INDEX_DAILY_DATASET,), done, len(INDEX_PRICE_INDEX_CODES), started, unit="index-years"
+        )
+    if not batches:
+        raise _panel_fail(
+            PanelExit.unhealthy,
+            f"none of {list(INDEX_PRICE_INDEX_CODES)} served a level in {year}; the earliest of "
+            "the three is published from 2002-01-04 and the other two from their 2004-12-31 base "
+            "point, so a year before that has no partition to write rather than an empty one",
+        )
+    return [write_index_prices(store, batches)]
+
+
 def _build_industry_tree(
     store: PanelStore, provider: TushareProvider, *, now: datetime
 ) -> list[PartitionRef]:
@@ -2444,6 +2536,10 @@ def _build_panel(
     if INDEX_WEIGHT_DATASET in targets:
         written.setdefault(INDEX_WEIGHT_DATASET, []).extend(
             _build_index_weights(store, provider, year=year, now=now)
+        )
+    if INDEX_DAILY_DATASET in targets:
+        written.setdefault(INDEX_DAILY_DATASET, []).extend(
+            _build_index_prices(store, provider, year=year, now=now)
         )
     for dataset in (INCOME_DATASET, BALANCE_SHEET_DATASET, CASH_FLOW_DATASET):
         if dataset not in targets:

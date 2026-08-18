@@ -15,7 +15,7 @@ inside a docstring, which is prose the runner never reads.
 ## Why the mechanism is not copied as it stands
 
 `007`'s form is "one test per entry, named after the entry". At three entries that is exactly
-right. Across the nineteen code-carrying registries there are **189** entries -- 65 in
+right. Across the twenty code-carrying registries there are **193** entries -- 69 in
 `KNOWN_PANEL_LIMITATIONS` alone -- and it stops being right somewhere well before that, for
 three reasons and not one:
 
@@ -38,7 +38,9 @@ three reasons and not one:
 and a floor is the direction that can falsify the claim: entries only ever arrive, and "one test
 per entry does not scale" stops being true if the registries shrink back towards `007`'s three.
 The figures above are re-measured whenever a registry grows -- `V2-P3-017` added a twelfth
-financial-statement limitation and moved them from 187 / 64 -- and they had already drifted twice
+financial-statement limitation and moved them from 187 / 64, and `V2-P3-016` added a whole
+twentieth registry (`KNOWN_INDEX_PRICE_LIMITATIONS`, four entries) and moved them from 189 / 65
+-- and they had already drifted twice
 before the floor existed: `128 entries -- 59 in KNOWN_PANEL_LIMITATIONS` was still written here
 when the counts were 134 and 62, because the P2 merge that folded in an eleventh registry updated
 the arithmetic below and left the prose alone. That is the drift this module exists to stop,
@@ -93,6 +95,7 @@ from openalpha_cn.domain.factor import KNOWN_FACTOR_SEAL_LIMITATIONS
 from openalpha_cn.domain.factor_neutralization import KNOWN_NEUTRALIZATION_LIMITATIONS
 from openalpha_cn.domain.financial_statements import KNOWN_FINANCIAL_STATEMENT_LIMITATIONS
 from openalpha_cn.domain.index_membership import KNOWN_INDEX_MEMBERSHIP_LIMITATIONS
+from openalpha_cn.domain.index_prices import KNOWN_INDEX_PRICE_LIMITATIONS
 from openalpha_cn.domain.industry_classification import KNOWN_INDUSTRY_LIMITATIONS
 from openalpha_cn.domain.labels import KNOWN_LABEL_LIMITATIONS
 from openalpha_cn.domain.price_limits import KNOWN_SUSPENSION_LIMITATIONS
@@ -132,6 +135,7 @@ LIMITATION_REGISTRIES: Final[dict[str, Sequence[_Limitation]]] = {
     "KNOWN_PRICE_LIMITATIONS": KNOWN_PRICE_LIMITATIONS,
     "KNOWN_FINANCIAL_STATEMENT_LIMITATIONS": KNOWN_FINANCIAL_STATEMENT_LIMITATIONS,
     "KNOWN_INDEX_MEMBERSHIP_LIMITATIONS": KNOWN_INDEX_MEMBERSHIP_LIMITATIONS,
+    "KNOWN_INDEX_PRICE_LIMITATIONS": KNOWN_INDEX_PRICE_LIMITATIONS,
     "KNOWN_INDUSTRY_LIMITATIONS": KNOWN_INDUSTRY_LIMITATIONS,
     "KNOWN_LABEL_LIMITATIONS": KNOWN_LABEL_LIMITATIONS,
     "KNOWN_NEUTRALIZATION_LIMITATIONS": KNOWN_NEUTRALIZATION_LIMITATIONS,
@@ -141,7 +145,7 @@ LIMITATION_REGISTRIES: Final[dict[str, Sequence[_Limitation]]] = {
     "KNOWN_STORAGE_LIMITATIONS": KNOWN_STORAGE_LIMITATIONS,
     "KNOWN_PANEL_LIMITATIONS": KNOWN_PANEL_LIMITATIONS,
 }
-"""The nineteen registries whose entries are identified by a `code`, keyed by their own names.
+"""The twenty registries whose entries are identified by a `code`, keyed by their own names.
 
 **None of `KNOWN_NEUTRALIZATION_LIMITATIONS`, `KNOWN_IC_LIMITATIONS`,
 `KNOWN_REDUNDANCY_LIMITATIONS`, `KNOWN_QUANTILE_PORTFOLIO_LIMITATIONS`,
@@ -279,12 +283,12 @@ def test_the_registry_table_is_every_known_registry_in_the_source_tree() -> None
     }
 
     assert found == set(LIMITATION_REGISTRIES) | set(CODELESS_REGISTRIES)
-    assert len(LIMITATION_REGISTRIES) == 19
+    assert len(LIMITATION_REGISTRIES) == 20
     assert set(LIMITATION_REGISTRIES) & set(CODELESS_REGISTRIES) == set()
 
 
 def test_every_declared_limitation_code_is_named_in_executable_test_code() -> None:
-    """The binding itself, over all nineteen code-carrying registries and all of their entries.
+    """The binding itself, over all twenty code-carrying registries and all of their entries.
 
     A code that appears nowhere but in prose is a code the suite has no opinion about: rename
     it and everything stays green while every citation of it silently stops resolving. That is
@@ -360,8 +364,9 @@ def test_the_registries_together_carry_the_entry_count_the_report_folds() -> Non
 
     Every assertion above is per-entry and would be satisfied by a registry of length zero.
     `KNOWN_PANEL_LIMITATIONS` is a fold of two kinds of source, and they are counted apart
-    because they enter `_limitations()` differently: seven **dataset** registries fold in
-    one-for-one against the datasets they bound, `KNOWN_STORAGE_LIMITATIONS` folds in with an
+    because they enter `_limitations()` differently: **eight** dataset registries fold in
+    one-for-one against the datasets they bound (`V2-P3-016`'s `KNOWN_INDEX_PRICE_LIMITATIONS`
+    is the eighth), `KNOWN_STORAGE_LIMITATIONS` folds in with an
     empty `datasets` because a storage boundary holds for every dataset at once, and one
     calendar code is the report's own -- `KNOWN_CALENDAR_LOOKAHEAD` is three reproductions of a
     single defect and is folded to one entry rather than three."""
@@ -374,6 +379,7 @@ def test_the_registries_together_carry_the_entry_count_the_report_folds() -> Non
             "KNOWN_PRICE_LIMITATIONS",
             "KNOWN_SUSPENSION_LIMITATIONS",
             "KNOWN_INDEX_MEMBERSHIP_LIMITATIONS",
+            "KNOWN_INDEX_PRICE_LIMITATIONS",
             "KNOWN_INDUSTRY_LIMITATIONS",
             "KNOWN_FINANCIAL_STATEMENT_LIMITATIONS",
         )

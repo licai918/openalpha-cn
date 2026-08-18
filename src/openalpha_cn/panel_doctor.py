@@ -112,10 +112,11 @@ one -- a report given no calendar -- and it is exactly the case that must not re
 `cross_checks` is only that half. The **per-dataset** checks that did not run are on
 `DatasetHealth.readiness.checks_waived`, which is `panel/catalog.py`'s own contract
 (`READINESS_WAIVABLE_CHECKS`) carried through untouched, and reading it is not optional for
-anyone drawing a conclusion from an empty `findings`. It is not a rare case. Of the fifteen
-datasets `DATASET_CADENCE` declares, exactly **three** carry a `required_dates` --
-`daily`, `daily_basic` and `stk_limit`, all three derived from the supplied calendar -- and
-the other twelve waive it structurally, each for its own recorded reason (`adj_factor` stores
+anyone drawing a conclusion from an empty `findings`. It is not a rare case. Of the sixteen
+datasets `DATASET_CADENCE` declares, exactly **four** carry a `required_dates` --
+`daily`, `daily_basic`, `stk_limit` and (since `V2-P3-016`) `index_daily`, all four derived
+from the supplied calendar -- and the other twelve waive it structurally, each for its own
+recorded reason (`adj_factor` stores
 a compressed step function with no per-session expectation; the statement datasets would need
 the disclosure calendar of ~5,500 issuers; and so on). **`date_gap` can therefore only ever
 fire on those three.** A mid-corpus session missing from an `adj_factor` partition whose last
@@ -180,6 +181,11 @@ from openalpha_cn.domain.index_membership import (
     KNOWN_INDEX_MEMBERSHIP_LIMITATIONS,
     IndexMembershipError,
 )
+from openalpha_cn.domain.index_prices import (
+    INDEX_DAILY_DATASET,
+    KNOWN_INDEX_PRICE_LIMITATIONS,
+    IndexPriceError,
+)
 from openalpha_cn.domain.industry_classification import (
     INDUSTRY_MEMBERSHIP_DATASET,
     INDUSTRY_TREE_DATASET,
@@ -224,6 +230,7 @@ from openalpha_cn.panel_ingest import (
     daily_basic_requirement,
     daily_requirement,
     financial_statement_requirement,
+    index_price_requirement,
     index_weight_requirement,
     industry_membership_requirement,
     industry_tree_requirement,
@@ -493,6 +500,7 @@ DATASET_CADENCE: Final[Mapping[str, Cadence]] = MappingProxyType(
         SUSPENSION_DATASET: "event_driven",
         PRICE_LIMIT_DATASET: "daily",
         INDEX_WEIGHT_DATASET: "monthly",
+        INDEX_DAILY_DATASET: "daily",
         INDUSTRY_MEMBERSHIP_DATASET: "event_driven",
         INDUSTRY_TREE_DATASET: "event_driven",
         "income": "quarterly",
@@ -504,7 +512,16 @@ DATASET_CADENCE: Final[Mapping[str, Cadence]] = MappingProxyType(
 """How often each ingested dataset publishes. Every dataset `panel_ingest.py` writes appears
 here, pinned by a test, because a dataset with no declared cadence would otherwise be given
 whatever bound the report's default happened to be -- which for `suspend_d` (a corpus with no
-rows on a session where nothing was halted) would be a permanent false alarm."""
+rows on a session where nothing was halted) would be a permanent false alarm.
+
+`index_daily` is `daily` and not `monthly` even though it shares its three subjects with
+`index_weight`, and the pairing is exactly why the distinction is worth a sentence: a
+composition is published on the last open session of each month, a level on every open session.
+Measured 2026-08-17 -- `000300.SH` served **243** rows for 2025 against `index_weight`'s twelve
+publications over the same year. A `monthly` bound copied across from the neighbouring dataset
+would let a level series go three weeks stale without a finding, which is three weeks of a
+60-session regression window estimated against a market that stopped moving.
+"""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -917,6 +934,7 @@ def _limitations() -> tuple[KnownLimitation, ...]:
         ((DAILY_DATASET, DAILY_BASIC_DATASET), KNOWN_PRICE_LIMITATIONS),
         ((SUSPENSION_DATASET, PRICE_LIMIT_DATASET), KNOWN_SUSPENSION_LIMITATIONS),
         ((INDEX_WEIGHT_DATASET,), KNOWN_INDEX_MEMBERSHIP_LIMITATIONS),
+        ((INDEX_DAILY_DATASET,), KNOWN_INDEX_PRICE_LIMITATIONS),
         (
             (INDUSTRY_MEMBERSHIP_DATASET, INDUSTRY_TREE_DATASET),
             KNOWN_INDUSTRY_LIMITATIONS,
@@ -1446,6 +1464,7 @@ def _requirement_for(
         DAILY_DATASET: daily_requirement,
         DAILY_BASIC_DATASET: daily_basic_requirement,
         PRICE_LIMIT_DATASET: price_limit_requirement,
+        INDEX_DAILY_DATASET: index_price_requirement,
     }.get(dataset)
     if builder is None:
         raise PanelDoctorError(
@@ -1716,6 +1735,7 @@ _LOAD_FAILURES: Final[tuple[type[Exception], ...]] = (
     SuspensionError,
     StockUniverseError,
     IndexMembershipError,
+    IndexPriceError,
     IndustryClassificationError,
     FinancialStatementError,
     TradingCalendarError,

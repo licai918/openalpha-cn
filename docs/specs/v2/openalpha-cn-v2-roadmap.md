@@ -202,7 +202,7 @@ P3 结束即可独立使用（Jupyter 直连面板 + 因子）
 | `V2-P3-013` | 因子家族⑤波动与流动性：残差波动 / 特质波动 / 换手率 / Amihud | 技 | 004 | — | S16 |
 | `V2-P3-014` | 不可变因子实验制品 + raw/processed/neutralized 三档报告 | 技 | 005-008 | 否则分不清"因子有效"与"暴露没控住"。已交付 `backtest/factor_experiment.py`（`005` 之后第五个纯 stdlib 叶子，消费前四个而不重造它们）。**三行不够，格子才是答案**：`TierAttribution` 是一等记录，跑在**声明的**格子上 —— 三个档位步（`raw→processed`、`processed→neutralized`、`raw→neutralized`）×两个**已被上游定过号**的统计量（`ICSummary.mean_ic`、`QuantilePortfolioSummary.mean_spread`），每格带两档自己的数、比值、以及一个六成员闭集判决，判在一条**无默认值的** `retention_floor` 上；`no_baseline` 与 `removed` 分开（前一档就没赚过钱的因子没有「被拿走」这回事）、`reversed` 与 `amplified` 分开。**不可变是两件事且两件都强制**：`experiment_id` = `stable_model_id`(四个上游 spec + 线 + `code_commit` + as_of 与三档来源 build 的 `set_digest`)，`content_digest` = 同一函数打整份文档，所以**同一个 `experiment_id` 下两个 `content_digest` 不是两个实验而是不可复现**，`refuse_a_restated_experiment` 照 `_refuse_to_drop_a_stored_build` 的形状拒绝它、但放行完全一致的重算；`open_experiment` 重算摘要，落盘后被改过一个字节的文档**读不回来**而不只是「不一样」。`built_at` 与 `note` 不进任何摘要，由一条读 `inspect.signature` 的审计与 `IDENTITY_EXEMPT_PARAMETERS` 对账 | S24, D8 |
 | `V2-P3-015` | 因子的 CLI + REST + SDK 面（`factor run --factor <id> --start --end`） | 产 | 014 | — | S83, S84 |
-| `V2-P3-016` | **指数点位序列数据集 + 面板可达的市场收益**（`V2-P3-013` 的残差/特质波动的硬前置，见下方小节） | 技 | P1 存储契约 | `013` 实测：15 个 descriptor 里**没有任何指数点位**（`index_weight` 是成分权重不是点位），且 `FactorWindow` 是单标的的 —— 求值器**按类型**够不到市场序列 | S16 |
+| `V2-P3-016` | **指数点位序列数据集 + 面板可达的市场收益**（`V2-P3-013` 的残差/特质波动的硬前置，见下方小节） | 技 | P1 存储契约 | 已交付：`index_daily` 成为第 16 个摄取数据集（每 `--year` 三次请求、分区年份即 `--year`、cadence `daily`），`FactorWindow` 增加 `shared` 通道（`SHARED_SUBJECT_DATASETS`），并在其上出厂第 21 个因子 `residual_vol_60`；20 个旧 `factor_id` 逐位不变。特质波动**不单独出厂**：本面板只有一条解释序列，第二个名字会是两个 id 对一个数。立项理由（`013` 实测）：15 个 descriptor 里**没有任何指数点位**（`index_weight` 是成分权重不是点位），且 `FactorWindow` 是单标的的 —— 求值器**按类型**够不到市场序列 | S16 |
 | `V2-P3-017` | **扣非净利列进入统计投影 + EPcut**（`V2-P3-009` 的第四个因子，见下方小节） | 技 | `V2-P1-011` 存储契约 | 已交付：`fina_indicator` 的投影 11→12 列，新增 `profit_dedt`，并在其上出厂第 20 个因子 `deducted_earnings_yield_ttm`。**加哪一列不是偏好而是实测**——`income` 根本不服务这一族（85 个字段里一个都没有，且点名请求会被**静默丢弃**，放进 `income` 投影会让每一次 `income` fetch 都被 `checked_response_fields` 拒绝）；同一批原始行读五遍（101 票 / 6,138 filing，另一组不相交 101 票 / 5,980 filing）：加 `profit_dedt` 与 `dt_eps` 折叠行数与歧义 filing 数**一字未变**，加 `dt_netprofit_yoy` 则把 4 个（另一样本 1 个）filing 从折叠挪进歧义 —— **那条 limitation 的条件句对一列成立、对旁边一列不成立，只有实测能分开**；五种投影下既有 11 列的逐列拒绝数全部逐位相同。代价：每个已存 `fina_indicator` 分区以 `field_missing` 拒读并重取、以真实行钉住字段列表的契约测试同改、以及 `profit_dedt` 自己 1.075% / 0.769% 的拒绝率（EP 的列是 0.189% / 0.459%）| S16 |
 | `V2-P3-018` | **`FactorCoverage` 第六个码：把「这只票的这次 filing 有歧义」变成单票覆盖码而不是整 build 拒绝**（`V2-P3-009`..`011` 共用的墙，见下方小节） | 技 | `V2-P3-002` 存储契约 | 已交付 `ambiguous_filing`，插在 `insufficient_history` 与 `input_missing` **之间**（该位置就是 `_classify` 的判定优先级，由一条读 AST 的审计对账）。标记按 `(subject, period)` 记在 `_DatasetReading` 上，只对**窗口真的覆盖到那一期**的票生效；会话轴一字未动，第二行照旧拒绝。**schema 迁移**：manifest 分区 27→28 列、transform manifest 34→35 列，旧分区在 readiness 上以 `field_missing` 拒读而不是错位解码 —— 因子分区是派生物、`manifest_id` 使其可重建，`storage/migrations.py` 只管 `state.sqlite3`。**身份**：`transform_id` 移动（覆盖码词表就是 `MissingValuePolicy` 的字段集，在 `FactorTransformSpec` 的哈希载荷里），19 个 `factor_id` 一个没动，两边都用 `04c45b8` 的字面量钉住 | S16 |
 | `V2-P3-019` | **给已存因子截面盖上它自己答案的内容地址**（P3 产品验收的 Critical-1，见下方小节） | 技 | `V2-P3-002`/`003`/`004` 存储契约 | 实测：把 `factor_obs_reversal_1d_v1/2026/data.parquet` 全部 16 行的值翻号、删掉 `runtime/experiments`、跑真的 `openalpha factor run` —— `mean_ic` 从 `+1.0` 变成 `-1.0`、`mean_spread` 跨过零，`experiment_id` **逐字节相同**，退出码 0，全链无拒绝。根因三条、各自封堵一条：① build manifest 对**输入**和**标的集合**取摘要、从不对**答案**取摘要 —— `FactorBuildManifest.observation_digest` 及其两个孪生 `processed_observation_digest` / `neutralized_observation_digest` 补上，且是**进身份的**字段而不是 `FactorInputProvenance` 那种「记录但不寻址」（后者会被篡改者与它描述的值一起改掉，进了 `manifest_id` 才由解码器已有的身份自检来守）；② 唯一可能开火的守卫「同 `experiment_id` 两个 `content_digest`」**是有状态的**，只在本机先跑过诚实版本时才生效 —— 面板上的封缄是无状态的；③ `panel doctor` 按**名字**拒绝因子数据集（无发布节奏），P2 建的 fail-closed 闸门止步于原始数据平面。**不给 `DATASET_CADENCE` 加条目**（派生名按因子铸造、不可枚举），改为一条 `derived` 节奏 + 谓词，并新增两个 **blocking** 码 `factor_seal_broken` / `factor_build_unaddressed`。**分层决定了设计**：`panel_doctor` 的兄弟集被等号钉死，不能 import 它审计的三个平面，所以 `cross_section_digest` 落在 `domain/`，`FACTOR_PLANE_SEALS` 以数据声明平面形状、由一条同时 import 两边的运行期审计对账 | S16, D8 |
@@ -1103,8 +1103,80 @@ ADR-0003 的 `V2-P3-012` 小节原本把 013 描述成「per-security regression
 已在同日的更正段里改掉。
 
 **已立为 `V2-P3-016`**，是残差/特质波动的硬前置。两条障碍由
-`tests/integration/panel/test_volatility_liquidity_family.py::test_the_reason_no_residual_ships_is_a_property_of_the_panel_and_of_the_window`
+`tests/unit/test_factor_volatility_liquidity.py::test_the_reason_no_residual_ships_is_a_property_of_the_panel_and_of_the_window`
 钉住 —— **谁哪天接入了指数点位序列，那条测试就红，这个声明就必须重审**。
+
+**那一天到了，是 `V2-P3-016`。** 那条测试按设计变红，改名为
+`test_exactly_one_dataset_carries_a_level_and_exactly_one_channel_reaches_it` 并**反向**钉住
+（恰好一个点位数据集、恰好一条共享通道、恰好一个可达指数、恰好一个因子声明它），
+所以再加宽一次和悄悄退回去都会红。下面是交付记录。
+
+#### 交付（2026-08-17）：端点与抓取计划是实测的，可达性的设计由 `factor_id` 决定
+
+**端点是 `index_daily`，抓取计划是每个 `(指数, 年)` 一次请求 —— 一个 `--year` **三次**。**
+2026-08-17 实测：`{ts_code, start_date, end_date}` 一年一次，`000300.SH` 2025 年
+**243 行**、2026 年至今 150 行，对着 **8,000** 的行上限。整段发布史也放得下
+（`19900101..20261231` 返回 5,972 行、`has_more=False`）。
+**另一条轴是错的**：`index_daily(trade_date=20260630)` 返回**恰好 8,000 行且 `has_more=True`**，
+覆盖 8,000 个不同 `ts_code` —— Tushare 服务上千个指数，本面板要三个。
+`limit` **只能收窄**：`8001`/`10000`/`12000` 都回 8,000，`limit=100` 回 100（`index_weight` 的发现，第二个端点上复现）。
+逗号拼接**返回零行**而不是报错，也是 `index_weight` 的发现：
+`ts_code='000300.SH,000905.SH,000001.SH'` 在一个有 63 行的窗口上返回 0 行。
+对比：`index_weight` 同样三个指数要 **36** 次（成分按月发布，点位按会话发布）。
+**分区粒度**：一个指数年就是一个分区里一个 subject 的份额，所以分区年份**就是** `--year`，
+不进 `_UNPINNED_PARTITION_YEAR_TARGETS`；三个指数共用一年、只靠 subject 列区分，
+必须一次写入，`_refuse_to_drop_stored_subjects` 挡住逐指数循环。
+**cadence 是 `daily` 而不是邻居的 `monthly`**，实测：2025 年 243 行对 12 次成分发布。
+
+**八列里七列可为空，第八列不可 —— 这条决定了 parser 不能复用。** 三个指数都在上市前若干年就有
+回算序列（`000300.SH` 2005-04-08 上市、2002-01-04 起有值，5,972 行；另两个 2004-12-31 基点起，各 5,252 行）。
+`000300.SH` 2005 年前的 **721** 行只有 `close`，`open`/`high`/`low` **全为 `None`**；
+基点行没有 `pre_close`/`pct_chg`/`vol`/`amount`。`close` 在三段历史共 **16,476** 行里
+从不为空、从不非正，是唯一必填列。`pct_chg` **可空且有符号** —— `000300.SH` 5,972 行里
+**2,872 行为负** —— 所以 `_index_daily_panel_column` 单独存在而不是复用 `_price_panel_column`：
+后者会把这一列送进 `_positive_price`，拒掉历史上每一个下跌日。
+
+**指数的 `pre_close` 就是上一日收盘，个股的不是 —— 这是实测的，不是假设。**
+`domain/daily_prices.py` 的核心测量是个股 `pre_close` 被除权除息重述，
+所以 `close[t]/close[t-1]-1` 在除权日**符号都反**（`000001.SZ` 2026-06-12：+2.7422% 对 −0.5310%）。
+三个指数**全部发布史 15,753 个相邻对里，`pre_close[t] == close[t-1]` 无一例外**，两条路径差**恰好 0.0**。
+仍然走 `close/pre_close − 1`：残差回归的另一边走这条，两边定义不同就是在测量那个差。
+这一条作为 limitation 记录而不是当便利条件 —— 今天按朴素路径算的读者会对，靠的是本仓库不钉的性质。
+对账界是**推导出来再校验**的：`pct_chg` 发布到百分数四位小数，末位半个单位是 **5e-7**，
+16,476 行实测最大偏差 **4.99995e-7**，声明界 1e-6 —— 比 `daily_prices` 的 1e-4 紧两个数量级。
+
+**可达性选了「共享 subject 数据集表」而不是给 `FactorDefinition` 加字段，理由是 `factor_id`。**
+`factor_id` 是 `stable_model_id(model_dump(mode='json'))`，**任何**新字段都会移动全部 20 个已出厂地址，
+包括那 19 个会把它留在默认值的 —— 每个已存 `factor_obs_*` 分区都会被重新标识。给 `FactorField` 加字段同理。
+所以声明用**定义已有的词汇**做：`FactorField(dataset="index_daily", ...)`，
+`SHARED_SUBJECT_DATASETS` 给它第二重含义。`FactorWindow` 是普通 frozen dataclass、不被任何东西哈希，
+**加宽它一分钱地址都不花** —— 实测：20 个旧 `factor_id` 逐位不变。
+**代价明写**：整个 build 的市场就是 `000300.SH`，因子不能改选中证500，
+这是 `KNOWN_INDEX_PRICE_LIMITATIONS` 的一条而不是一句设计说明。
+通道是**第二条**而不是往 `values` 里加键：把 `000300.SH` 的序列塞进个股自己的行旁边，
+会让 dataclass 形状不变而 `subject` 对自己的一部分内容说谎。字段集按**相等**断言，所以这条捷径也是红的。
+**唯一的不对称就是正确性论证本身**：`_complete_series` 与 `_stored_rows` 替换共享 subject，
+`_points_held` **不替换** —— 窗口由个股自己的点构成，替换会让每只停牌票的窗口含有它没交易的会话，
+整个截面变 `input_missing`。用一只停牌五个会话的票驱动。
+
+**只交付一个因子，而且这是拒绝不是缺口。** roadmap 那行写的「残差波动」与「特质波动」
+在文献里是同一个构造，靠**回归右手边**区分（CAPM 对三因子）。本面板只有**一条**解释序列，
+所以第二个名字会是「两个 `factor_id` 对一个数」—— 而且是同一个求值器算出来的同一个数，
+本仓库没有任何 fixture 能把两者分开。这正是 `V2-P3-004` 复审的那条发现，提前避免而不是事后发现。
+`residual_vol_60` 与 `return_vol_60` 的分离用**下界**钉而不是指望：恒等式
+`residual² (N−2) = total² (N−1) (1−R²)` 在两者相等的 fixture 上也成立，所以旁边加一条下界 ——
+市场必须解释每只票方差的两成以上（实测 0.70 / 0.69 / 0.42），残差不到总量的 80%（实测 0.55 / 0.56 / 0.77）。
+`var(r_m) == 0` 是 `undefined_value` 而不是总波动：斜率在那里是 `0/0`，
+「没有可解释的所以残差等于总量」是另一个因子的答案，靠一次未定义的除法得到。
+**窗口与家族同为 60/80，且是论证过的**：这个估计量在 N=60 的相对标准误是
+`1/sqrt(2(N−2))` = 9.28%，对 `return_vol_60` 的 `1/sqrt(2(N−1))` = 9.21% ——
+回归多花的那一个自由度**没有跨过**家族当初选 60 时用的那条 10% 线。
+
+**两个旧因子的 note 有一半变成假话，是改而不是留。** `return_vol_60` 与 `downside_vol_60`
+原本都声明「本 build 里两个残差都算不出来」。前半句（两者是同一构造）仍真，后半句在 `V2-P3-016` 之后为假。
+两条 note 都改了，`REQUIRED_DISCLOSURES` 里要求的短语也从「算不出来」换成「什么时候不再算不出来」——
+只加第五行而不改前两行，会留下两个出厂因子在断言一句代码已经证伪的话。改 note **不移动 `factor_id`**（散文不在哈希载荷里），这一点也断言了。
+
 
 **台账口径**：`V2-P3-013` 记为已交付的是它实际交付的四个因子；
 `016` 落地后才谈得上「残差波动/特质波动」。

@@ -1287,7 +1287,7 @@ def test_every_shipped_factor_produces_all_three_tiers_under_an_identity_of_its_
         for definition in FACTOR_DEFINITIONS.definitions
     }
 
-    assert len(records) == 20
+    assert len(records) == 21
     assert len({record.experiment_id for record in records.values()}) == len(records)
     for handle, record in records.items():
         artifact = record.artifact

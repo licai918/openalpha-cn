@@ -886,7 +886,7 @@ def test_doctor_probe_exits_non_zero_when_the_credential_is_rejected(
     assert result.exit_code == 1
     payload = json.loads(result.stdout)
     assert set(payload["providers"]["tushare.pro"]["probe"].values()) == {"authentication"}
-    assert len(payload["probe_failures"]) == 15
+    assert len(payload["probe_failures"]) == 16
     assert payload["status"] == "error"
 
 

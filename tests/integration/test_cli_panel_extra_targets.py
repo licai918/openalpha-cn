@@ -43,6 +43,7 @@ from openalpha_cn.domain.financial_statements import (
     STATEMENT_DATA_COLUMNS,
 )
 from openalpha_cn.domain.index_membership import INDEX_WEIGHT_DATASET, INDEX_WEIGHT_INDEX_CODES
+from openalpha_cn.domain.index_prices import INDEX_DAILY_DATASET, INDEX_PRICE_INDEX_CODES
 from openalpha_cn.domain.industry_classification import (
     INDUSTRY_MEMBERSHIP_DATASET,
     INDUSTRY_TREE_DATASET,
@@ -152,8 +153,32 @@ def _annual_filing(period_year: int) -> tuple[str, str]:
     return (f"{period_year}1231", f"{period_year + 1}0315")
 
 
+INDEX_DAILY_FIELDS: tuple[str, ...] = (
+    "ts_code",
+    "trade_date",
+    "open",
+    "high",
+    "low",
+    "close",
+    "pre_close",
+    "change",
+    "pct_chg",
+    "vol",
+    "amount",
+)
+"""`index_daily`'s response field order, measured live on 2026-08-17.
+
+`change` is served and is the one column the panel projection drops (`INDEX_DAILY_DATA_COLUMNS`),
+so a transport that omitted it would make the projection's own selection unobservable here.
+"""
+
+INDEX_SESSIONS: tuple[str, ...] = ("0105", "0106", "0107")
+"""Three sessions per index-year. Enough that the partition holds a series rather than a point,
+and few enough that the assertion below is about the request shape rather than about volume."""
+
+
 class ExtraTargetTransport:
-    """A `TushareTransport` answering the eight targets this module drives, recording payloads.
+    """A `TushareTransport` answering the nine targets this module drives, recording payloads.
 
     Every branch honours the *request* -- the announcement-year window, the index-month window,
     the taxonomy vintage, the `(l1_code, is_new)` pair, the `ts_code` and the report-period year
@@ -170,6 +195,7 @@ class ExtraTargetTransport:
         superseded: bool = True,
         filing_securities: frozenset[str] | None = None,
         publishes_weights: bool = True,
+        publishes_levels: bool = True,
         classifies: bool = True,
         assigns: bool = True,
         assigned_securities: tuple[str, ...] = SECURITIES,
@@ -181,6 +207,7 @@ class ExtraTargetTransport:
         self._superseded = superseded
         self._filing_securities = filing_securities
         self._publishes_weights = publishes_weights
+        self._publishes_levels = publishes_levels
         self._classifies = classifies
         self._assigns = assigns
         self._vintage_override = vintage_override
@@ -253,6 +280,31 @@ class ExtraTargetTransport:
                 [
                     [params["index_code"], SECURITIES[0], day, 60.0],
                     [params["index_code"], SECURITIES[1], day, 40.0],
+                ],
+            )
+        if api_name == INDEX_DAILY_DATASET:
+            if not self._publishes_levels:
+                return _response(INDEX_DAILY_FIELDS, [])
+            year = str(params["start_date"])[:4]
+            code = str(params["ts_code"])
+            base = 4000.0 + 100.0 * INDEX_PRICE_INDEX_CODES.index(code)
+            return _response(
+                INDEX_DAILY_FIELDS,
+                [
+                    [
+                        code,
+                        f"{year}{day}",
+                        base + index,
+                        base + index + 5.0,
+                        base + index - 5.0,
+                        base + index + 1.0,
+                        base + index,
+                        1.0,
+                        round(1.0 / (base + index) * 100.0, 4),
+                        300000.0,
+                        900000.0,
+                    ]
+                    for index, day in enumerate(INDEX_SESSIONS)
                 ],
             )
         if api_name == INDUSTRY_TREE_DATASET:
@@ -364,6 +416,7 @@ EVERY_EXTRA_TARGET: tuple[str, ...] = (
     STOCK_BASIC_DATASET,
     NAMECHANGE_DATASET,
     INDEX_WEIGHT_DATASET,
+    INDEX_DAILY_DATASET,
     INCOME_DATASET,
     BALANCE_SHEET_DATASET,
     CASH_FLOW_DATASET,
@@ -379,7 +432,7 @@ EVERY_EXTRA_TARGET: tuple[str, ...] = (
 def test_every_new_target_writes_a_partition_through_the_real_writers(
     tmp_path: Path, extra_transport: ExtraTargetTransport
 ) -> None:
-    """If a complete, well-formed fetch of these eight could not be stored, every refusal test
+    """If a complete, well-formed fetch of these nine could not be stored, every refusal test
     below would pass for the wrong reason.
 
     This is the state three separate acceptance passes reported as missing: `providers/tushare.py`
@@ -396,6 +449,9 @@ def test_every_new_target_writes_a_partition_through_the_real_writers(
         STOCK_BASIC_DATASET: [2026],
         NAMECHANGE_DATASET: [EXTRA_YEAR],
         INDEX_WEIGHT_DATASET: [EXTRA_YEAR],
+        # One request per index for the whole year, so the partition year is `--year` with no
+        # exemption: `_index_daily_params` builds the window out of it.
+        INDEX_DAILY_DATASET: [EXTRA_YEAR],
         INCOME_DATASET: [EXTRA_YEAR],
         BALANCE_SHEET_DATASET: [EXTRA_YEAR],
         CASH_FLOW_DATASET: [EXTRA_YEAR],
@@ -517,6 +573,61 @@ def test_index_weight_refuses_a_year_in_which_no_index_published_at_all(
     assert result.exit_code == PanelExit.unhealthy
     assert "no partition to write rather than an empty one" in result.output
     assert PanelStore(tmp_path / "panel").registered_years(INDEX_WEIGHT_DATASET) == ()
+
+
+def test_index_daily_asks_for_one_whole_year_per_index_and_writes_one_partition(
+    tmp_path: Path, extra_transport: ExtraTargetTransport
+) -> None:
+    """`V2-P3-016`'s fetch plan: **three requests per `--year`**, one per index, whole-year window.
+
+    Measured on the live endpoint on 2026-08-17 and pinned here as the request shape the command
+    actually builds. Three things are asserted and each rules out a different wrong plan:
+
+    - **The count is `len(INDEX_PRICE_INDEX_CODES)` and not `12 x` it.** The neighbouring
+      `index_weight` target fetches the same three indices in 36 requests because a composition
+      publishes monthly; a level publishes every session, so a year is one window. A per-month
+      loop here would be twelve times the requests for the identical rows.
+    - **The window is the whole year, not a session.** The endpoint's other axis (`trade_date`)
+      returns 8,000 rows with `has_more=True` across 8,000 distinct `ts_code`s, so a per-session
+      plan would be truncated on its first request.
+    - **All three indices land in one partition.** `PanelStore` replaces a partition whole and
+      its key has no index dimension, so a per-index loop would leave the year holding whichever
+      index went last -- `index_weight`'s failure, on a second dataset. The stored coverage's
+      subject set is what says it did not happen.
+    """
+    result = build(tmp_path, INDEX_DAILY_DATASET, extra=["--json"])
+
+    requested = extra_transport.requests_for(INDEX_DAILY_DATASET)
+    assert result.exit_code == PanelExit.ok
+    assert len(requested) == len(INDEX_PRICE_INDEX_CODES) == 3
+    assert [str(entry["ts_code"]) for entry in requested] == list(INDEX_PRICE_INDEX_CODES)
+    assert {(str(entry["start_date"]), str(entry["end_date"])) for entry in requested} == {
+        (f"{EXTRA_YEAR}0101", f"{EXTRA_YEAR}1231")
+    }
+    assert _partitions(result) == {INDEX_DAILY_DATASET: [EXTRA_YEAR]}
+
+    stored = PanelStore(tmp_path / "panel")
+    coverage = stored.read_coverage(INDEX_DAILY_DATASET, EXTRA_YEAR)
+    assert coverage is not None
+    assert set(coverage.subjects) == set(INDEX_PRICE_INDEX_CODES)
+    assert coverage.row_count == len(INDEX_PRICE_INDEX_CODES) * len(INDEX_SESSIONS)
+
+
+def test_a_year_no_index_published_a_level_in_is_refused_rather_than_written_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A year before the earliest index has no partition to write, and says so.
+
+    The three indices are published from 2002-01-04 (`000300.SH`) and from their common
+    2004-12-31 base point (the other two), so a `--year 1999` is a real request with a real empty
+    answer. Writing an empty partition would register a year whose every later read reports a
+    `date_gap`, which reads as a hole in the data rather than as a year that predates the series.
+    """
+    _install(monkeypatch, ExtraTargetTransport(publishes_levels=False))
+    result = build(tmp_path, INDEX_DAILY_DATASET, extra=["--json"])
+
+    assert result.exit_code == PanelExit.unhealthy
+    assert "served a level" in result.output
 
 
 def test_index_weight_only_asks_for_the_months_that_have_begun(

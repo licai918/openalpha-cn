@@ -415,40 +415,49 @@ for any day of year Y are invisible to any read before Y ends. `V2-P4-026` is th
 day by day. Nothing here does: the composition is three in-memory calls, none of which reads a
 stored residual back.
 
-## The volatility and liquidity family (`V2-P3-013`), and the one thing it could not build
+## The volatility and liquidity family (`V2-P3-013`, `V2-P3-016`), and its one-time blocker
 
-Four definitions ship for it -- `return_vol_60`, `downside_vol_60`, `turnover_60` and
-`amihud_60` -- and two judgements are shared by all of them and stated here rather than four
-times in their notes.
+Five definitions ship for it -- `return_vol_60`, `downside_vol_60`, `turnover_60`, `amihud_60` and
+`residual_vol_60` -- and three judgements are shared by all of them and stated here rather than
+five times in their notes.
 
-**No factor in this family is named for a residual, because none of them is one.** The roadmap
-line asks for "residual volatility" and "idiosyncratic volatility", which are one construct in
-the literature: the dispersion of the part of a return that a market or factor model does not
-explain. Computing either needs a market return series aligned to the security's own sessions,
-and **this panel holds no index or market price series at all** -- the fifteen datasets
-`providers/tushare.py` declares are prices, valuations, adjustment factors, four statement
-endpoints, calendar, universe, industry tree and membership, index *weights*, suspensions, price
-limits and name history, and not one of them carries an index's close. The gap is not only a
-fetch away either: `FactorWindow` is one security's own rows, `_classify` is called once per
-subject, and an evaluator has no way to reach a different subject's series -- so even a stored
-`000300.SH` price row would be invisible to the formula that needed it.
+**Four of the five are not residuals, one is, and the difference is the whole of `V2-P3-016`.**
+The roadmap line for `V2-P3-013` asks for "residual volatility" and "idiosyncratic volatility",
+which are one construct in the literature: the dispersion of the part of a return that a market or
+factor model does not explain. Computing either needs a market return series aligned to the
+security's own sessions, and at `V2-P3-013` **this panel held no index or market price series at
+all** -- the fifteen datasets `providers/tushare.py` declared were prices, valuations, adjustment
+factors, four statement endpoints, calendar, universe, industry tree and membership, index
+*weights*, suspensions, price limits and name history, and not one of them carried an index's
+close. The gap was not only a fetch away either: `FactorWindow` was one security's own rows,
+`_classify` is called once per subject, and an evaluator had no way to reach a different subject's
+series -- so even a stored `000300.SH` price row would have been invisible to the formula that
+needed it.
 
-That makes the blocker a **data and engine-shape** one rather than the numerical-stack one
-`ADR-0003` warns about, and the distinction is worth recording because the ADR poses the wrong
-question for this issue. A single-factor time-series regression `r = a + b*r_m + e` is
-*univariate*: `b = cov(r, r_m) / var(r_m)`, the residual deviation is one more pass, the whole
-thing is `O(n)` in pure Python and would need neither numpy nor a new machine. It is `k`
-correlated continuous regressors that has no closed form, which is the case ADR-0003's own
-"honest bound" section names. So nothing here was blocked on arithmetic; what is missing is the
-regressor. `return_vol_60` is the total volatility such a residual reduces to when `b*r_m` cannot
-be subtracted, `downside_vol_60` adds asymmetry rather than a second estimate of one number, and
-both say so in their own notes.
+**`V2-P3-016` removed both obstacles and neither removal was arithmetic**, which is the point the
+ADR's own 2026-08-12 correction makes. `domain/index_prices.py` and a sixteenth Tushare descriptor
+answer the first; `SHARED_SUBJECT_DATASETS` and `FactorWindow.shared` answer the second. A
+single-factor time-series regression `r = a + b*r_m + e` is *univariate*: `b = cov(r, r_m) /
+var(r_m)`, the residual deviation is one more pass, the whole thing is `O(n)` in pure Python and
+needed neither numpy nor a new machine. It is `k` correlated continuous regressors that has no
+closed form, which is the case `ADR-0003`'s own "honest bound" section names. So nothing here was
+ever blocked on arithmetic; what was missing was the regressor, and it is a fetch and a channel.
+
+**One residual ships and not two, and that is a refusal rather than a gap.** The two names the
+roadmap line uses are told apart by the *right-hand side* of the regression -- CAPM for the first,
+a three-factor model for the second -- and this panel holds one explanatory series. A second
+definition would be declarable, would take a distinct `factor_id`, would return the identical value
+on every window, and no fixture here could tell the two apart: `V2-P3-004`'s review finding,
+avoided in advance rather than found afterwards. `return_vol_60` remains the total volatility a
+residual reduces to when `b*r_m` is not subtracted, `downside_vol_60` still adds asymmetry rather
+than a second estimate of one number, and both of their notes were **corrected** rather than left
+standing when the second half of their disclosure stopped being true.
 
 **Nothing in this family reads a neutralised or a processed observation.** `V2-P3-004`'s
 cross-sectional residual is a different object from a volatility model's residual -- one number
 per `(security, as_of)` rather than a series to take a deviation of -- and it also carries
 `V2-P4-026` as a hard precondition, because a neutralisation is not visible inside its own
-coverage year. A factor that depended on it would inherit that blocker; these four read raw panel
+coverage year. A factor that depended on it would inherit that blocker; these five read raw panel
 columns and inherit nothing.
 
 ## The value family (`V2-P3-009` and `V2-P3-017`), and the first factors on two axes at once
@@ -805,7 +814,7 @@ an upstream's publication cadence, and `DATASET_CADENCE` has no honest entry for
 import bisect
 import math
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from types import MappingProxyType
 from typing import Final, Literal, Protocol, TypeVar, cast
@@ -863,6 +872,10 @@ from openalpha_cn.domain.financial_statements import (
     FINANCIAL_INDICATOR_DATASET,
     INCOME_DATASET,
     REPORT_PERIOD_COLUMN,
+)
+from openalpha_cn.domain.index_prices import (
+    INDEX_DAILY_DATASET,
+    MARKET_INDEX_CODE,
 )
 from openalpha_cn.domain.panel_batch import (
     SUBJECT_COLUMN_NAME,
@@ -1167,6 +1180,73 @@ not have been written by any build, so a row carrying it anywhere is unambiguous
 # --- the window an evaluator sees ------------------------------------------------------------
 
 
+NO_SHARED_SERIES: Final[Mapping[tuple[str, str], tuple[float, ...]]] = MappingProxyType({})
+"""`FactorWindow.shared`'s default: what a factor declaring no shared-subject dataset receives.
+
+A default here and deliberately **not** the kind of default this repository refuses elsewhere.
+`max_staleness` has none because a default would be *choosing a bound* on the caller's behalf;
+this one chooses nothing, because a factor that declares no dataset in
+`SHARED_SUBJECT_DATASETS` has exactly one possible shared channel and it is the empty one. The
+production path is not defaulted either -- `_classify` splits the completed series and passes
+both channels explicitly on every call, for every factor -- so what the default serves is the
+test-local and doc-local windows that construct one directly, and
+`tests/unit/test_factor_engine_rules.py::
+test_the_shared_channel_is_empty_for_every_factor_that_declares_no_shared_dataset` is what stops
+it from meaning "the engine forgot".
+
+Reached through a `default_factory` rather than as a bare default because `MappingProxyType`
+sets `__hash__` to `None`, which `dataclasses` reads as "mutable" and refuses outright -- so the
+factory is what the language demands here rather than a defensive copy this field wants.
+"""
+
+SHARED_SUBJECT_DATASETS: Final[Mapping[str, str]] = MappingProxyType(
+    {INDEX_DAILY_DATASET: MARKET_INDEX_CODE}
+)
+"""Datasets read under **one** subject for the whole cross section, and which subject that is.
+
+`V2-P3-016`, and the second of the two blockers `V2-P3-013` measured. The first was that no
+dataset carried an index level; `domain/index_prices.py` answers that one. This answers the
+other: `_classify` is called once per security and `_points_held`, `_stored_rows` and
+`_complete_series` all key on the security being classified, so a stored `000300.SH` row was
+unreachable from the evaluator that needed it *by type* rather than by accident.
+
+## Why this is a table and not a field on `FactorDefinition`
+
+The obvious design is a field -- a factor says which index it regresses on -- and it is the one
+design that cannot be taken. `FactorDefinition` is the model `factor_id` is the content address
+of (`stable_model_id` hashes `model_dump(mode="json")`), so **any** new field moves every one of
+the already-shipped `factor_id`s, including the nineteen that would leave it at its default. The
+same argument rules out a field on `FactorField`, whose serialised form is part of that same
+payload. So the declaration has to be made out of the vocabulary a definition already has, and
+the only piece of that vocabulary with room in it is the **dataset name**:
+`FactorField(dataset="index_daily", column="close")` is a declaration a factor can already make,
+and this table is what gives it its second meaning.
+
+The price of that is stated rather than hidden: **the index is fixed for the whole build**. A
+factor cannot regress on 中证500, because the only place to say so is the field this table
+exists to avoid adding. `domain/index_prices.py::KNOWN_INDEX_PRICE_LIMITATIONS` records it as a
+limitation rather than as a design note, which is where a scope choice with a cost belongs.
+
+## The one asymmetry, and why it is the whole correctness argument
+
+Three of the four per-security helpers substitute the shared subject and **one does not**:
+
+- `_complete_series` and `_stored_rows` substitute it. They ask "what is in this dataset at this
+  point", and for a shared dataset the answer is the market's row.
+- `_points_held` does **not**, and must not. It asks "which sessions does this security have",
+  which is what forms the window. The index is quoted on every open session, so substituting
+  there would hand every halted security a window containing sessions it did not trade -- and
+  then `_complete_series` would find no `daily` row on them and code the whole cross section
+  `input_missing`. The window is the security's; the market is read *at* it.
+- `_ambiguous_points` does not either, and the reason is narrower: `_read_dataset` only records
+  ambiguity on the period axis, and no shared-subject dataset is period-indexed.
+
+`tests/integration/panel/test_market_return.py::
+test_the_market_series_is_read_at_the_securitys_own_sessions_and_does_not_widen_its_window`
+drives a halted security through both halves.
+"""
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class FactorWindow:
     """One security's complete, session-ordered inputs over the lookback window.
@@ -1196,6 +1276,25 @@ class FactorWindow:
     sessions: tuple[date, ...]
     periods: tuple[date, ...]
     values: Mapping[tuple[str, str], tuple[float, ...]]
+    shared: Mapping[tuple[str, str], tuple[float, ...]] = field(
+        default_factory=lambda: NO_SHARED_SERIES
+    )
+    """Series belonging to no security in the cross section, keyed the same way `values` is.
+
+    A **second** channel rather than more keys in `values`, and the field set is where the
+    difference has to be visible (`V2-P3-016`). `subject` names one security and `values` was
+    that security's own rows; folding a `000300.SH` series in beside them would have kept the
+    dataclass's shape and quietly made `subject` false about part of its own contents -- a
+    declared property this repository could not support, which is the shape of every Critical
+    finding it has taken. Reading one is spelled `shared_series` for the same reason: the call
+    site says which of the two it means.
+
+    Empty for nineteen of the twenty shipped factors and for every factor that declares no
+    dataset in `SHARED_SUBJECT_DATASETS`, which is a stronger statement than "usually empty":
+    `_classify` splits the completed series on that table alone, so a factor that declares no
+    such dataset cannot receive a non-empty `shared` and a factor that declares one cannot
+    receive that dataset in `values`.
+    """
 
     def series(self, dataset: str, column: str) -> tuple[float, ...]:
         """`dataset.column` over that dataset's own axis, aligned index for index.
@@ -1217,6 +1316,41 @@ class FactorWindow:
                 f"this factor did not declare {dataset}.{column} in required_fields, so the "
                 f"engine did not read it; this window carries "
                 f"{sorted(f'{name}.{item}' for name, item in self.values)}"
+                + (
+                    ""
+                    if dataset not in SHARED_SUBJECT_DATASETS
+                    else f". {dataset} is a shared-subject dataset; read it with shared_series"
+                )
+            ) from None
+
+    def shared_series(self, dataset: str, column: str) -> tuple[float, ...]:
+        """`dataset.column` over the shared subject, aligned to **this security's** sessions.
+
+        The alignment is the load-bearing half. The market has a row on every open session and
+        this security may not, so the returned tuple is the market restricted to the sessions
+        the security actually traded -- index for index with `sessions` and therefore with
+        anything `series` returns. A regression run over it pairs the security's return on a day
+        with the market's on the same day, which is the only pairing that is a regression at
+        all.
+
+        Raises `FactorEngineError` for a dataset that is not in `SHARED_SUBJECT_DATASETS` before
+        it raises for one the factor did not declare, because those are two different mistakes:
+        the first is reading a per-security dataset through the wrong door and the second is a
+        `required_fields` that is wrong.
+        """
+        if dataset not in SHARED_SUBJECT_DATASETS:
+            raise FactorEngineError(
+                f"{dataset} is not a shared-subject dataset, so it has no series that is not "
+                f"some security's own; shared_series serves {sorted(SHARED_SUBJECT_DATASETS)} "
+                "and every other dataset is read with series"
+            )
+        try:
+            return self.shared[(dataset, column)]
+        except KeyError:
+            raise FactorEngineError(
+                f"this factor did not declare {dataset}.{column} in required_fields, so the "
+                f"engine did not read it; this window's shared channel carries "
+                f"{sorted(f'{name}.{item}' for name, item in self.shared)}"
             ) from None
 
 
@@ -1861,17 +1995,22 @@ RETURN_VOL_60_NOTE: Final[FactorNote] = FactorNote(
         "close / pre_close - 1 computed inside its own session's row -- the path "
         "domain/daily_prices.py measures as correct, and not close[t] / close[t-1] - 1, which "
         "reverses the sign across an ex-rights morning and is wrong by up to 118.30 over the "
-        "37,602 rows that module measured. It occupies V2-P3-013's residual-volatility slot and "
-        "is deliberately NOT named for a residual. Residual volatility and idiosyncratic "
-        "volatility are one construct in the literature -- the dispersion of the part of a return "
-        "a market or factor model does not explain -- and neither is computable in this build: "
-        "the panel holds no index or market return series at all (its fifteen datasets are "
-        "prices, valuations, adjustment factors, statements, calendar, universe, industry, index "
-        "weights, suspensions, price limits and name history), and FactorWindow carries one "
-        "security's own rows, so an evaluator could not read a market series even if one were "
-        "stored. This is the total volatility a residual volatility reduces to when beta times "
-        "the market return cannot be subtracted, named for what it is rather than for what the "
-        "roadmap line asked for. The declared direction is the low-volatility anomaly's "
+        "37,602 rows that module measured. It held V2-P3-013's residual-volatility slot until "
+        "V2-P3-016 filled it, and is deliberately NOT named for a residual -- which is now a "
+        "statement about what this factor IS rather than about what this build could not "
+        "compute. The disclosure that stood here said residual volatility and idiosyncratic "
+        "volatility are one construct in the literature -- the dispersion of the part of a "
+        "return a market or factor model does not explain -- and that neither was computable, "
+        "because the panel held no index or market return series at all and FactorWindow "
+        "carried one security's own rows so an evaluator could not have read one if it did. "
+        "The first clause is still true. The second stopped being true at V2-P3-016, which "
+        "ingested index_daily and gave FactorWindow a shared channel; residual_vol_60 ships "
+        "beside this factor and is that regression's residual dispersion. What this factor is "
+        "has not changed: it is TOTAL volatility, the quantity a residual volatility reduces "
+        "to when beta times the market return is not subtracted, and the two are different "
+        "numbers on any window where the market moved -- equal only where beta is zero. This "
+        "note changing moved no factor_id, because prose is outside FactorDefinition's hashed "
+        "payload by construction. The declared direction is the low-volatility anomaly's "
         "conventional prior -- a lower recent dispersion is taken to be the better one -- and it "
         "is a declaration this repository has measured nothing about; V2-P3-005 is where an IC "
         "would say anything, and V2-P3's own gate records that most first-batch factors being "
@@ -1920,9 +2059,16 @@ DOWNSIDE_VOL_60_NOTE: Final[FactorNote] = FactorNote(
         "down days divides by 60, not by 3. There is no Bessel correction here and there is one "
         "on return_vol_60, and that is a distinction rather than an inconsistency: a variance "
         "around an estimated mean costs a degree of freedom and a second moment about the fixed "
-        "threshold zero estimates nothing. It occupies V2-P3-013's idiosyncratic-volatility slot "
-        "under exactly the disclosure return_vol_60 carries -- it is not the residual of any "
-        "regression, and no residual volatility is computable in this build. What it adds over "
+        "threshold zero estimates nothing. It held V2-P3-013's idiosyncratic-volatility slot "
+        "under exactly the disclosure return_vol_60 carried -- it is not the residual of any "
+        "regression -- and the second half of that disclosure, that no residual volatility was "
+        "computable in this build, stopped being true at V2-P3-016. What did not change is this "
+        "factor: it is still not a residual and still not what the roadmap's "
+        "idiosyncratic-volatility line asked for. residual_vol_60 fills that line and fills it "
+        "ONCE, because with one explanatory series in the panel a CAPM residual and an FF3 "
+        "residual would be the same number under two names. This note changing moved no "
+        "factor_id: prose is outside FactorDefinition's hashed payload by construction. What "
+        "this factor adds over "
         "return_vol_60 is asymmetry rather than a second estimate of one number: a security whose "
         "60 sessions were all up carries a positive return_vol_60 and a downside_vol_60 of "
         "exactly zero, and the two are equal only by coincidence. The declared direction is the "
@@ -2066,6 +2212,131 @@ def _amihud_60(window: FactorWindow) -> float | None:
         abs(value) / (amount * CNY_PER_AMOUNT_UNIT)
         for value, amount in zip(returns, amounts, strict=True)
     ) / len(returns)
+
+
+# --- `V2-P3-016`: the residual the family could not build ---------------------------------------
+#
+# See this module's docstring section "The volatility and liquidity family" for what changed and
+# what did not. One factor arrives here and not two, and the reason is in `RESIDUAL_VOL_60_NOTE`.
+
+
+RESIDUAL_VOL_60: Final[FactorDefinition] = FactorDefinition(
+    key="residual_vol_60",
+    version=1,
+    family="volatility_liquidity",
+    direction="lower_is_better",
+    required_fields=(
+        FactorField(dataset=DAILY_DATASET, column=CLOSE_COLUMN),
+        FactorField(dataset=DAILY_DATASET, column=PRE_CLOSE_COLUMN),
+        FactorField(dataset=INDEX_DAILY_DATASET, column=CLOSE_COLUMN),
+        FactorField(dataset=INDEX_DAILY_DATASET, column=PRE_CLOSE_COLUMN),
+    ),
+    lookback_sessions=VOLATILITY_LIQUIDITY_LOOKBACK_SESSIONS,
+    max_window_sessions=VOLATILITY_LIQUIDITY_MAX_WINDOW_SESSIONS,
+    lookback_periods=None,
+    max_window_periods=None,
+)
+"""The dispersion of what the market does not explain. `V2-P3-013`'s residual-volatility slot,
+filled by `V2-P3-016` -- and the first factor in this build to read a series that is not its own
+security's."""
+
+RESIDUAL_VOL_60_NOTE: Final[FactorNote] = FactorNote(
+    subject=RESIDUAL_VOL_60.qualified_key,
+    summary=(
+        "The sample standard deviation of the residuals of r = a + b*r_m over the 60 most recent "
+        "sessions, where r is the security's own close / pre_close - 1 and r_m is 000300.SH's, "
+        "read at the security's own sessions. The regression is univariate, so it is closed form "
+        "and O(n): b = cov(r, r_m) / var(r_m), a = mean(r) - b*mean(r_m), and the dispersion is "
+        "one more pass. ADR-0003's numerical-stack question is not the one this answers and "
+        "never was -- its 2026-08-12 correction says so -- and runtime dependencies remain nine. "
+        "It divides by N-2 rather than N-1 because two parameters were estimated from the same "
+        "60 returns, which is a real difference from return_vol_60 and not a convention: at "
+        "N=60 the relative standard error of this estimate is 1/sqrt(2(N-2)) = 9.28% against "
+        "return_vol_60's 1/sqrt(2(N-1)) = 9.21%, so the degree of freedom the regression costs "
+        "does not cross the ten-percent bar the family's 60-session horizon was chosen at, and "
+        "the horizon is the family's for that reason rather than re-derived. "
+        "ONE factor ships here and not two. Residual volatility and idiosyncratic volatility are "
+        "one construct in the literature -- the dispersion of the part of a return a model does "
+        "not explain -- and what separates the two names is the right-hand side of the "
+        "regression: CAPM for the first, a three-factor model for the second. This panel holds "
+        "ONE explanatory series, 000300.SH's level, so both names would address the identical "
+        "number computed by the identical evaluator; shipping the second would be two factor_ids "
+        "over one answer, which is exactly the finding V2-P3-004's review made about a column "
+        "asserted on a fixture that could not tell two answers apart. V2-P3-013's downside_vol_60 "
+        "took the honest way out of the same corner by being a different construct and saying so. "
+        "It is NOT the residual of V2-P3-004's cross-sectional neutralisation either: that is one "
+        "number per security per as_of, not a series to take a dispersion of. What this build can "
+        "regress on is 000300.SH and nothing else, because the only place to name another index "
+        "would be a new field on FactorDefinition and factor_id is the content address of that "
+        "model -- see domain/index_prices.py::KNOWN_INDEX_PRICE_LIMITATIONS. Undefined, and "
+        "stored as undefined_value, exactly when var(r_m) over the window is zero: a market that "
+        "did not move explains nothing and b is 0/0 rather than large. The declared direction is "
+        "the low-volatility anomaly's conventional prior -- less unexplained dispersion is taken "
+        "to be better -- and it is a declaration this repository has measured nothing about."
+    ),
+)
+"""`RESIDUAL_VOL_60`'s prose, out of `factor_id`. See `domain/factor.py::FactorNote`."""
+
+
+def _market_returns(window: FactorWindow) -> tuple[float, ...] | None:
+    """The market's session returns over this security's own window, or `None` on a zero level.
+
+    `_session_returns`' arithmetic against `shared_series` instead of `series`, and the pair is
+    written twice rather than factored into one function taking an accessor. The two are the two
+    *sides* of a regression and the call site is where a reader checks that both sides define a
+    session return the same way; a shared helper parameterised by which channel to read would put
+    that check one indirection away, on the argument rather than in the formula.
+
+    `domain/index_prices.py` measures that an index's `pre_close` is exactly the previous
+    session's close on all 15,753 adjacent pairs of the three published histories -- so unlike a
+    security, the naive close-to-close path would give the same answer here. The same path is
+    used anyway: a regression whose two sides defined a return differently would be measuring
+    part of that difference.
+    """
+    closes = window.shared_series(INDEX_DAILY_DATASET, CLOSE_COLUMN)
+    previous = window.shared_series(INDEX_DAILY_DATASET, PRE_CLOSE_COLUMN)
+    if any(value == 0.0 for value in previous):
+        return None
+    return tuple(close / prior - 1.0 for close, prior in zip(closes, previous, strict=True))
+
+
+def _residual_vol_60(window: FactorWindow) -> float | None:
+    """`stdev` of `r - a - b*r_m` over the window, with `N-2` in the denominator.
+
+    Three passes and no matrix. `b = cov(r, r_m) / var(r_m)` is the closed form of a univariate
+    least-squares slope, `a = mean(r) - b*mean(r_m)` follows from it, and the residual dispersion
+    is the third pass. `math.fsum` throughout, `_sample_stdev`'s reason: the two-pass form is
+    exact in a way `E[x^2] - E[x]^2` is not, and this quantity is a difference of two numbers
+    that are nearly equal whenever the market explains most of a return.
+
+    `None` -- hence `undefined_value` -- in three cases and each is a real one:
+
+    - a zero `pre_close` on either side, which `_session_returns` and `_market_returns` report;
+    - **`var(r_m) == 0`**, a market that did not move over the whole window. `b` is `0/0` there,
+      and the tempting reading -- "nothing to explain, so the residual is the total" -- is a
+      different factor's answer arrived at by an undefined division;
+    - fewer than three returns, so `N-2` is not a positive divisor. Unreachable at this factor's
+      declared reach of 60 and driven directly for `_session_returns`' reason.
+    """
+    returns = _session_returns(window)
+    market = _market_returns(window)
+    if returns is None or market is None or len(returns) < 3:
+        return None
+    count = len(returns)
+    mean_r = math.fsum(returns) / count
+    mean_m = math.fsum(market) / count
+    variance_m = math.fsum((value - mean_m) ** 2 for value in market)
+    if variance_m == 0.0:
+        return None
+    covariance = math.fsum(
+        (value - mean_r) * (other - mean_m) for value, other in zip(returns, market, strict=True)
+    )
+    beta = covariance / variance_m
+    intercept = mean_r - beta * mean_m
+    residuals = tuple(
+        value - intercept - beta * other for value, other in zip(returns, market, strict=True)
+    )
+    return math.sqrt(math.fsum(residual * residual for residual in residuals) / (count - 2))
 
 
 # --- `V2-P3-009`: the value family --------------------------------------------------------------
@@ -4020,6 +4291,7 @@ FACTOR_DEFINITIONS: Final[FactorRegistry] = FactorRegistry(
         DOWNSIDE_VOL_60,
         TURNOVER_60,
         AMIHUD_60,
+        RESIDUAL_VOL_60,
         EARNINGS_YIELD_TTM,
         BOOK_TO_PRICE,
         SALES_YIELD_TTM,
@@ -4042,6 +4314,7 @@ FACTOR_DEFINITIONS: Final[FactorRegistry] = FactorRegistry(
         DOWNSIDE_VOL_60_NOTE,
         TURNOVER_60_NOTE,
         AMIHUD_60_NOTE,
+        RESIDUAL_VOL_60_NOTE,
         EARNINGS_YIELD_TTM_NOTE,
         BOOK_TO_PRICE_NOTE,
         SALES_YIELD_TTM_NOTE,
@@ -4068,6 +4341,7 @@ FACTOR_EVALUATORS: Final[Mapping[str, FactorEvaluator]] = MappingProxyType(
         DOWNSIDE_VOL_60.qualified_key: _downside_vol_60,
         TURNOVER_60.qualified_key: _turnover_60,
         AMIHUD_60.qualified_key: _amihud_60,
+        RESIDUAL_VOL_60.qualified_key: _residual_vol_60,
         EARNINGS_YIELD_TTM.qualified_key: _earnings_yield_ttm,
         BOOK_TO_PRICE.qualified_key: _book_to_price,
         SALES_YIELD_TTM.qualified_key: _sales_yield_ttm,
@@ -5230,7 +5504,20 @@ def _classify(
         )
     computed = evaluator(
         FactorWindow(
-            subject=subject, as_of=as_of, sessions=sessions, periods=periods, values=series
+            subject=subject,
+            as_of=as_of,
+            sessions=sessions,
+            periods=periods,
+            values=MappingProxyType(
+                {
+                    key: cells
+                    for key, cells in series.items()
+                    if key[0] not in SHARED_SUBJECT_DATASETS
+                }
+            ),
+            shared=MappingProxyType(
+                {key: cells for key, cells in series.items() if key[0] in SHARED_SUBJECT_DATASETS}
+            ),
         )
     )
     usable = computed is not None and math.isfinite(computed)
@@ -5407,10 +5694,24 @@ def _stored_rows(
     windows: Mapping[FactorAxis, tuple[date, ...]] = {"session": sessions, "period": periods}
     return sum(
         1
-        for reading in readings.values()
+        for dataset, reading in readings.items()
         for point in windows[reading.axis]
-        if (subject, point) in reading.values
+        if (_reading_subject(dataset, subject), point) in reading.values
     )
+
+
+def _reading_subject(dataset: str, subject: str) -> str:
+    """Whose row this dataset is read under: the shared subject, or the security itself.
+
+    One function rather than two `if`s, so `_complete_series` and `_stored_rows` cannot drift
+    into disagreeing about which rows a window is made of -- a count that said four while the
+    series was built from three would make `input_row_count` a provenance field that is wrong
+    exactly on the observations a reader consults it for.
+
+    `_points_held` deliberately does **not** call this; see `SHARED_SUBJECT_DATASETS` for why
+    the window is the security's own even when what is read at it is not.
+    """
+    return SHARED_SUBJECT_DATASETS.get(dataset, subject)
 
 
 def _complete_series(
@@ -5449,10 +5750,11 @@ def _complete_series(
     windows: Mapping[FactorAxis, tuple[date, ...]] = {"session": sessions, "period": periods}
     series: dict[tuple[str, str], list[float]] = {}
     for dataset, reading in readings.items():
+        held = _reading_subject(dataset, subject)
         for column in reading.columns:
             series[(dataset, column)] = []
         for point in windows[reading.axis]:
-            cells = reading.values.get((subject, point))
+            cells = reading.values.get((held, point))
             if cells is None:
                 return None
             for column, cell in zip(reading.columns, cells, strict=True):
