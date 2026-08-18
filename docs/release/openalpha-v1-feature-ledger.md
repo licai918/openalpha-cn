@@ -4,8 +4,8 @@
 
 ## 对账结论
 
-- 功能总数: 169
-- 当前真实完成: 164 (97.04%)
+- 功能总数: 170
+- 当前真实完成: 165 (97.06%)
 - `UNREVIEWED=0`
 - `UNKNOWN=0`
 - `legacy_acceptance_rows=86` (历史散文验收、尚未绑定为可执行 pytest/CI 断言)
@@ -18,7 +18,7 @@
 | `DEFERRED` | 1 |
 | `ENHANCED_REPLACEMENT` | 20 |
 | `EXCLUDED` | 4 |
-| `NATIVE_COMPLETE` | 143 |
+| `NATIVE_COMPLETE` | 144 |
 
 ## 功能明细
 
@@ -193,6 +193,7 @@
 | `OA-BOUNDARY-007` | boundary | ADR-0003's nine runtime dependencies are pinned by the file the ADR names, and a numerical stack cannot be installed by default | `NATIVE_COMPLETE` | `pyproject.toml;docs/architecture/ADR-0003-numerical-stack-boundary.md;tests/unit/test_repository_assets.py#RUNTIME_DEPENDENCIES;tests/unit/test_repository_assets.py#NUMERICAL_STACK_PACKAGES;tests/unit/test_repository_assets.py#_requirement_name;tests/unit/test_repository_assets.py#_pyproject_tables` | `tests/unit/test_repository_assets.py;tests/unit/test_adr_consistency.py` | `pytest` | `tests/unit/test_repository_assets.py::test_the_nine_runtime_dependencies_are_exactly_what_adr_0003_says_they_are` |
 | `OA-PANEL-028` | panel | The index level series: a sixteenth ingested dataset, and the market return the panel had none of | `NATIVE_COMPLETE` | `src/openalpha_cn/domain/index_prices.py#INDEX_DAILY_DATASET;src/openalpha_cn/domain/index_prices.py#INDEX_DAILY_PANEL_COLUMNS;src/openalpha_cn/domain/index_prices.py#INDEX_DAILY_NULLABLE_COLUMNS;src/openalpha_cn/domain/index_prices.py#MAX_INDEX_PUBLISHED_RETURN_DISAGREEMENT;src/openalpha_cn/domain/index_prices.py#KNOWN_INDEX_PRICE_LIMITATIONS;src/openalpha_cn/domain/index_prices.py#index_bars_from_panel_rows;src/openalpha_cn/domain/index_prices.py#index_session_returns;src/openalpha_cn/providers/tushare.py#TUSHARE_INDEX_DAILY_ROW_CAP;src/openalpha_cn/providers/tushare.py#_index_daily_params;src/openalpha_cn/providers/tushare.py#_index_daily_panel_column;src/openalpha_cn/panel_ingest.py#write_index_prices;src/openalpha_cn/panel_ingest.py#index_price_requirement;src/openalpha_cn/panel_ingest.py#load_index_prices;src/openalpha_cn/cli.py#_build_index_prices;src/openalpha_cn/cli.py#PANEL_BUILD_TARGETS;src/openalpha_cn/panel_doctor.py#DATASET_CADENCE` | `tests/unit/domain/test_index_prices.py;tests/contract/providers/test_tushare_adj_factor.py;tests/contract/providers/test_tushare_provider.py;tests/integration/test_cli_panel_extra_targets.py;tests/unit/test_cli_panel_rules.py;tests/unit/test_panel_doctor_rules.py;tests/unit/test_panel_ingest_import_isolation.py` | `pytest` | `tests/integration/test_cli_panel_extra_targets.py::test_index_daily_asks_for_one_whole_year_per_index_and_writes_one_partition` |
 | `OA-FACTOR-027` | factor | The market return becomes reachable from an evaluator, and the residual volatility ships | `NATIVE_COMPLETE` | `src/openalpha_cn/panel_factors.py#RESIDUAL_VOL_60;src/openalpha_cn/panel_factors.py#RESIDUAL_VOL_60_NOTE;src/openalpha_cn/panel_factors.py#_residual_vol_60;src/openalpha_cn/panel_factors.py#_market_returns;src/openalpha_cn/panel_factors.py#SHARED_SUBJECT_DATASETS;src/openalpha_cn/panel_factors.py#NO_SHARED_SERIES;src/openalpha_cn/panel_factors.py#FactorWindow;src/openalpha_cn/panel_factors.py#_reading_subject;src/openalpha_cn/domain/index_prices.py#MARKET_INDEX_CODE;src/openalpha_cn/factor_view.py#REQUIREMENT_BUILDERS;src/openalpha_cn/factor_view.py#_CALENDAR_SCOPED_REQUIREMENTS` | `tests/integration/panel/test_market_return.py;tests/unit/test_factor_volatility_liquidity.py;tests/unit/test_factor_engine_rules.py;tests/unit/test_factor_transform_rules.py;tests/unit/backtest/test_factor_redundancy.py` | `pytest` | `tests/integration/panel/test_market_return.py::test_the_residual_and_the_total_are_different_numbers_and_the_gap_has_a_floor` |
+| `OA-PANEL-029` | panel | An as-of-sensitive session-level read of daily_basic, so a residual can be built inside the year it is about | `NATIVE_COMPLETE` | `src/openalpha_cn/panel_ingest.py#_read_visible_price_session;src/openalpha_cn/panel_ingest.py#load_daily_valuations;src/openalpha_cn/panel_ingest.py#_sessions_published_through;src/openalpha_cn/panel_ingest.py#daily_basic_requirement;src/openalpha_cn/panel_ingest.py#_read_price_session;src/openalpha_cn/panel_ingest.py#_session_census;src/openalpha_cn/panel/store.py#PanelStore;src/openalpha_cn/panel/catalog.py#ROW_FILTERABLE_ISSUE_CODES;src/openalpha_cn/panel/catalog.py#VISIBLE_SLICE_RECHECKS;src/openalpha_cn/domain/daily_prices.py#DAILY_AVAILABILITY_TIME;src/openalpha_cn/domain/factor_neutralization.py#KNOWN_NEUTRALIZATION_LIMITATIONS;src/openalpha_cn/panel_neutralization.py#load_industry_market_cap_cross_section;src/openalpha_cn/backtest/factor_ic.py#KNOWN_IC_LIMITATIONS;src/openalpha_cn/backtest/factor_experiment.py#KNOWN_EXPERIMENT_LIMITATIONS;src/openalpha_cn/backtest/factor_portfolio.py#KNOWN_QUANTILE_PORTFOLIO_LIMITATIONS;src/openalpha_cn/backtest/factor_redundancy.py#KNOWN_REDUNDANCY_LIMITATIONS;src/openalpha_cn/factor_view.py#KNOWN_FACTOR_RUN_LIMITATIONS` | `tests/integration/panel/test_daily_panel_ingest.py;tests/integration/panel/test_factor_neutralizations.py;tests/unit/panel/test_visible_read_callers.py;tests/unit/domain/test_factor_neutralization.py;tests/unit/test_known_limitation_registries.py` | `pytest` | `tests/integration/panel/test_factor_neutralizations.py::test_a_residual_built_at_a_mid_year_as_of_is_visible_at_that_same_as_of` |
 
 ## 边界
 

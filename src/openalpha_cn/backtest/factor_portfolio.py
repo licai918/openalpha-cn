@@ -203,17 +203,18 @@ spread and is a value this repository's own storage validators refuse one plane 
 
 ## The one product constraint a reader of a neutralised group return has to be told
 
-**A neutralised residual is read at a year-end snapshot, not at the `as_of` a caller asked for.**
-`panel_neutralization.neutralized_observation_batch` stamps all four clocks of every row with the
-build's own `as_of`, which is at or after the `max_available_time` of that year's `daily_basic`
-partition, and `PanelStore.read_visible_at` therefore returns nothing for an `as_of` inside the
-covered year. The residuals' *content* is clean -- each was regressed against the industry, the
-market capitalisation and the processed value of its own day -- so a neutralised group return is
-not forward-contaminated. What is lost is the honesty of the timestamps, so a neutralised series
-cannot claim to be point-in-time the way a raw or processed one can. `V2-P4-026` is the fix and is
-a hard precondition of `V2-P4-013`. Carried as
-`neutralised_residuals_are_read_at_a_year_end_snapshot`, the same code `V2-P3-005` carries,
-because it is the same fact and renaming it per module would make it two.
+**This section said "a neutralised residual is read at a year-end snapshot, not at the `as_of` a
+caller asked for" and `V2-P4-026` retracted it.** `load_daily_valuations` no longer takes
+`read_if_ready`, so a build is no longer forced to an `as_of` at or after its year's last
+session. What is unchanged is the stamping rule --
+`panel_neutralization.neutralized_observation_batch` puts the build's own `as_of` on all four
+clocks of every row -- so a neutralised quantile series is exactly as point-in-time as the
+schedule its residuals were built on, and a tier built once at year end still reads as one
+December instant. The residuals' *content* is clean either way: each was regressed against the
+industry, the market capitalisation and the processed value of its own day, so a neutralised
+group return was never forward-contaminated by this. Carried as
+`a_neutralised_series_is_only_as_point_in_time_as_its_build_schedule`, the same code `V2-P3-005`
+carries, because it is the same fact and renaming it per module would make it two.
 
 ## Layering, and why there is no numpy here
 
@@ -466,20 +467,27 @@ class QuantilePortfolioLimitation:
 
 KNOWN_QUANTILE_PORTFOLIO_LIMITATIONS: Final[tuple[QuantilePortfolioLimitation, ...]] = (
     QuantilePortfolioLimitation(
-        code="neutralised_residuals_are_read_at_a_year_end_snapshot",
+        code="a_neutralised_series_is_only_as_point_in_time_as_its_build_schedule",
         detail=(
-            "A neutralised group return is not a point-in-time series the way a raw or processed "
-            "one is. panel_neutralization.neutralized_observation_batch stamps all four clocks of "
-            "every residual row with the build's own as_of, and that as_of is at or after the "
-            "max_available_time of the year's daily_basic partition -- the year's last session. "
-            "Reads go through PanelStore.read_visible_at, so an as_of inside the covered year "
-            "returns nothing rather than raising, and what a caller does read back was stamped at "
-            "the year end. The residuals' CONTENT is clean: each was regressed against the "
-            "industry, the market capitalisation and the processed value of its own day, so the "
-            "returns are not forward-contaminated. What is lost is the honesty of the timestamps. "
-            "V2-P4-026 (an as-of-sensitive session-level read of daily_basic) is the fix and is a "
-            "hard precondition of V2-P4-013. KNOWN_IC_LIMITATIONS carries this same code for the "
-            "same fact; it is one limitation of the plane, not two of two modules."
+            "THIS ENTRY WAS NAMED neutralised_residuals_are_read_at_a_year_end_snapshot AND THE "
+            "RENAME IS THE RETRACTION. It used to say that a neutralised group return is stamped "
+            "at the year end whatever as_of a caller asked for, because load_daily_valuations "
+            "took read_if_ready and no build could therefore be run inside the year its "
+            "daily_basic partition covers. V2-P4-026 removed that: panel_ingest."
+            "_read_visible_price_session reads one session under a WHERE available_time <= as_of "
+            "predicate, so a residual can be built at a mid-year as_of and is read back at it. "
+            "What survives is the stamping rule -- neutralized_observation_batch still puts the "
+            "BUILD's as_of on all four clocks of every row, which is right for a derived row -- "
+            "so a quantile series over neutralised residuals is exactly as point-in-time as the "
+            "schedule those residuals were built on, and a tier built once at year end still "
+            "collapses to one December instant with nothing in the stored rows saying so. Two "
+            "refusals outside this module still bound the schedule: index_member_all is read "
+            "whole partition (V2-P4-027) and no cross section before 2021-12-13 is assemblable. "
+            "The residuals' CONTENT was clean before and after -- each was regressed against the "
+            "industry, the market capitalisation and the processed value of its own day -- so "
+            "the returns were never forward-contaminated by this. KNOWN_IC_LIMITATIONS carries "
+            "this same code for the same fact; it is one limitation of the plane, not two of two "
+            "modules."
         ),
     ),
     QuantilePortfolioLimitation(

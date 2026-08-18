@@ -910,7 +910,7 @@ def test_the_neutralisation_limitations_are_the_five_this_issue_measured() -> No
         "no_cross_section_is_neutralisable_before_2021_12_13",
         "an_industry_answer_inside_the_era_can_still_be_backfilled",
         "the_residual_is_orthogonal_to_the_design_and_not_to_size_itself",
-        "the_two_foreign_inputs_are_read_whole_partition_so_a_mid_year_as_of_is_refused",
+        "the_industry_input_is_read_whole_partition_so_a_mid_year_as_of_can_be_refused",
         "a_thin_industry_is_coded_rather_than_pooled",
     } == NEUTRALIZATION_LIMITATION_CODES
     assert len(KNOWN_NEUTRALIZATION_LIMITATIONS) == len(NEUTRALIZATION_LIMITATION_CODES)

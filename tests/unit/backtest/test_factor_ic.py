@@ -1665,11 +1665,13 @@ def test_the_known_ic_limitations_are_exactly_these_five_codes() -> None:
     """The set-literal binding `tests/unit/test_known_limitation_registries.py` requires.
 
     Equality rather than membership, for that module's stated reason: a membership assertion can
-    see a code that was renamed and never one that was removed. The year-end-snapshot entry is
-    the one `V2-P3-004`'s review required this issue to carry, and it is asserted by name.
+    see a code that was renamed and never one that was removed. The neutralised-timestamps entry
+    is the one `V2-P3-004`'s review required this issue to carry; `V2-P4-026` renamed it from
+    `neutralised_residuals_are_read_at_a_year_end_snapshot` when it retracted the year-end half,
+    and the equality below is what made that rename a visible diff rather than a silent one.
     """
     declared = {
-        "neutralised_residuals_are_read_at_a_year_end_snapshot",
+        "a_neutralised_series_is_only_as_point_in_time_as_its_build_schedule",
         "the_forward_return_is_cumulative_rather_than_marginal",
         "an_ic_series_over_overlapping_windows_is_autocorrelated",
         "a_declared_sample_floor_of_three_is_legal_and_is_almost_all_noise",
@@ -1680,7 +1682,7 @@ def test_the_known_ic_limitations_are_exactly_these_five_codes() -> None:
     snapshot = next(
         item
         for item in KNOWN_IC_LIMITATIONS
-        if item.code == "neutralised_residuals_are_read_at_a_year_end_snapshot"
+        if item.code == "a_neutralised_series_is_only_as_point_in_time_as_its_build_schedule"
     )
     assert "read_visible_at" in snapshot.detail
     assert "V2-P4-026" in snapshot.detail

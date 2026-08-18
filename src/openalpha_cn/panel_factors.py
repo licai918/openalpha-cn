@@ -139,7 +139,10 @@ Every loader in `panel_ingest` reads through `PanelStore.read_if_ready`, whose
 11 records what that costs here: a factor cannot be evaluated at a mid-year `as_of` at all,
 because the year's own December rows block the whole partition for every `as_of` inside it.
 This module therefore reads through `PanelStore.read_visible_at`, which runs the identical rule
-table and substitutes a row-level `available_time <= as_of` predicate for that one code. See
+table and substitutes a row-level `available_time <= as_of` predicate for that one code.
+(`V2-P4-026` made the first sentence one loader less than universal: `load_daily_valuations` now
+takes the filtered door too, one session at a time. Every *other* `panel_ingest` loader is
+unchanged, and so is everything this section says about this module.) See
 that method's docstring for the full argument, `panel/catalog.py::ROW_FILTERABLE_ISSUE_CODES`
 for why exactly one code is compensable, and `tests/unit/panel/test_visible_read_callers.py`
 for the allowlist that keeps the path from spreading silently.

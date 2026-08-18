@@ -4083,9 +4083,11 @@ def factor_build_command(
     reads what it stored.
 
     **The third tier is the one that may refuse, and it refuses by name.** A residual can only be
-    computed at a prediction instant at or after the last stored session of every year the read
-    touches -- `load_industry_market_cap_cross_section` takes the unfiltered door and the residual
-    has to carry the processed panel's own instant, so the two cannot be satisfied earlier. The
+    computed at a prediction instant at or after the last stored *assignment* of every membership
+    year the read touches -- `load_industry_market_cap_cross_section` takes the unfiltered door
+    for `index_member_all` and the residual has to carry the processed panel's own instant, so the
+    two cannot be satisfied earlier. `daily_basic` used to state a bound here too and no longer
+    does: `V2-P4-026` gave it an as-of-sensitive session-level read. The
     refusal says that, names the remedies, and **writes nothing**: a build that stored two tiers
     and gave up on the third would leave the exact store shape that makes `factor run` refuse one
     command later, about a different thing. See

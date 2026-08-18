@@ -20,12 +20,14 @@ closed_end_to_end` is that whole sequence, driven.
 ## The tier that still refuses, and why that is the honest answer
 
 The raw and processed tiers build at any prediction instant the panel covers. The neutralised tier
-does not, and the bound is arithmetic:
-`load_industry_market_cap_cross_section` reads `daily_basic` through `read_if_ready`, which refuses
-a partition whose newest row post-dates the `as_of`, while
-`_refuse_a_cross_section_that_is_not_this_panels` requires the returned section's `as_of` to equal
-the processed panel's exactly. A residual therefore exists only at a prediction instant at or after
-the last stored session of every year read. That is `V2-P4-026`'s issue, not this one's, so this
+does not, and the bound is arithmetic. It used to be stated by two reads and `V2-P4-026` retracted
+one of them: `daily_basic` is now read one session at a time under an availability predicate and
+no longer bounds anything here. What remains is `load_industry_histories`, which reads
+`index_member_all` through `read_if_ready` and refuses a partition whose newest assignment
+post-dates the `as_of`, while `_refuse_a_cross_section_that_is_not_this_panels` requires the
+returned section's `as_of` to equal the processed panel's exactly. A residual therefore exists
+only at a prediction instant at or after the last stored *assignment* of every membership year
+read -- on this generated panel, 2026-01-12. That is `V2-P4-027`'s issue, not this one's, so this
 command's job is to be **honest** about it: build what it can, refuse the rest by name, and write
 nothing when it refuses. Both halves are driven --
 `test_the_neutralised_tier_builds_at_or_after_the_panels_horizon_and_refuses_before_it` and
@@ -91,10 +93,18 @@ exactly that reason.
 HORIZON_INSTANT: Final[datetime] = datetime(2026, 1, 16, 9, 0, tzinfo=UTC)
 """A prediction instant at or after the generated panel's own stored horizon.
 
-The panel's last stored session is 2026-01-16 and its `daily_basic` rows become available during
-that day, so this is the earliest instant at which the neutralised tier is assemblable at all --
-17:00 Asia/Shanghai on a session, which is both a trading day (the industry read needs one) and
-past the partition's newest row. See this module's docstring.
+17:00 Asia/Shanghai on the panel's last stored session, which is both a trading day (the industry
+read needs one) and past every stored partition's newest row.
+
+**It was the earliest instant at which the neutralised tier was assemblable at all, and after
+`V2-P4-026` it is no longer the earliest.** `daily_basic` is now read one session at a time under
+an availability predicate, so the binding constraint is the membership partition, whose newest
+assignment on this generator becomes knowable 2026-01-11T16:00Z --
+`tests/integration/panel/test_factor_neutralizations.py::
+test_across_the_whole_window_only_the_industry_read_ever_refuses_an_in_year_as_of` measures that
+five of the ten sessions now admit a whole build. This constant stays at the horizon because what
+the test below it measures is that the builder answers *somewhere* and refuses *somewhere*, and
+the horizon is the instant that cannot stop working for a reason outside this file.
 """
 
 REGISTRY_SECURITIES: Final[int] = len(SECURITIES)
@@ -251,13 +261,13 @@ def test_the_dead_end_the_acceptance_review_found_is_closed_end_to_end(panel_onl
        nothing written.
 
     **Step five is the honest end of this issue's road and is asserted as such rather than papered
-    over.** A residual for any day of a covered year can only be built at or after that year's last
-    stored session, and a partition is replaced whole -- so a store cannot hold mid-year raw
-    observations *and* a horizon-instant residual at once, and a three-tier experiment over mid-year
-    prediction days stays unreachable until `V2-P4-026` gives `daily_basic` an as-of-sensitive
-    session-level read. What this issue changed is *which* refusal an operator gets: from "this
-    repository has no way to build this at all" to a named, stored boundary with an issue number on
-    it, reached after two of the three tiers really were built.
+    over.** The prediction days here are 2026-01-08 and 2026-01-09, and a residual for either can
+    only be built at or after the last stored *assignment* of the membership year they fall in --
+    2026-01-12 on this generator -- so the refusal stands and is still `not_yet_knowable`. What
+    changed under `V2-P4-026` is which dataset says so: `daily_basic` answers both days, and the
+    block is `index_member_all` alone (`V2-P4-027`). What `V2-P3-019` changed is *which* refusal an
+    operator gets: from "this repository has no way to build this at all" to a named, stored
+    boundary with an issue number on it, reached after two of the three tiers really were built.
 
     That the third tier is reachable **where the arithmetic allows** is a separate claim with its
     own test, on its own store:
@@ -512,6 +522,13 @@ def test_the_neutralised_tier_builds_at_or_after_the_panels_horizon_and_refuses_
     *every* neutralisation would pass a refusal-only test while being useless, so the succeeding
     instant is driven in the same test. The message is required to name the limitation code and
     both remedies, because a caller told only `blocked` cannot act.
+
+    `V2-P4-026` narrowed what the refused half proves, and the narrowing is stated because the
+    assertions cannot see it: the refused instants are 2026-01-08 and 2026-01-09, and what blocks
+    them is now the **membership** partition alone -- `daily_basic` answers both days.
+    `tests/integration/panel/test_factor_neutralizations.py::
+    test_across_the_whole_window_only_the_industry_read_ever_refuses_an_in_year_as_of` is the
+    census that separates the two datasets; this test is about the builder's envelope.
     """
     at_the_horizon = tmp_path_factory.mktemp("at-horizon")
     from panel_fixtures import write_generated_panel

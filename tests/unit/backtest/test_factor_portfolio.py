@@ -566,7 +566,7 @@ def test_the_neutralized_tier_travels_and_carries_the_year_end_snapshot_limitati
     assert period.tier == "neutralized"
     assert period.coverage == "measured"
     assert period.census.held_count == 6
-    assert "neutralised_residuals_are_read_at_a_year_end_snapshot" in (
+    assert "a_neutralised_series_is_only_as_point_in_time_as_its_build_schedule" in (
         QUANTILE_PORTFOLIO_LIMITATION_CODES
     )
 
@@ -1955,7 +1955,7 @@ def test_the_known_limitations_are_the_declared_set_and_each_is_bound_to_this_mo
     never one that was removed. `tests/unit/test_known_limitation_registries.py` requires every one
     of these to appear as a string literal in executable test code, which this set is."""
     assert {
-        "neutralised_residuals_are_read_at_a_year_end_snapshot",
+        "a_neutralised_series_is_only_as_point_in_time_as_its_build_schedule",
         "the_long_short_spread_is_not_a_shortable_portfolio",
         "a_group_return_is_conditioned_on_the_names_that_could_be_traded",
         "the_exit_leg_is_priced_on_the_entry_share_count",
@@ -1974,7 +1974,7 @@ def test_the_neutralised_snapshot_limitation_is_the_one_the_ic_module_already_ca
     were two of them to close."""
     from openalpha_cn.backtest.factor_ic import IC_LIMITATION_CODES
 
-    shared = "neutralised_residuals_are_read_at_a_year_end_snapshot"
+    shared = "a_neutralised_series_is_only_as_point_in_time_as_its_build_schedule"
 
     assert shared in IC_LIMITATION_CODES
     assert shared in QUANTILE_PORTFOLIO_LIMITATION_CODES

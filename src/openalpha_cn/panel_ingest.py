@@ -298,6 +298,7 @@ straddles a year boundary, is answered with an error instead of a silent choice.
 import operator
 from collections import Counter
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 from statistics import median
 from types import MappingProxyType
@@ -410,6 +411,7 @@ from openalpha_cn.domain.trading_calendar import (
 )
 from openalpha_cn.panel.catalog import (
     DEFAULT_DATE_TIMEZONE,
+    ROW_FILTERABLE_ISSUE_CODES,
     DateCoverage,
     FieldCoverage,
     PanelStorageError,
@@ -2244,6 +2246,162 @@ def load_daily_bars(
     return daily_bars_from_panel_rows(rows)
 
 
+def _read_visible_price_session(
+    store: PanelStore,
+    requirement: ReadinessRequirement,
+    columns: tuple[str, ...],
+    *,
+    day: date,
+    calendar: TradingCalendar,
+    as_of: datetime,
+    date_timezone: str,
+) -> tuple[tuple[object, ...], ...]:
+    """One session's rows as they were knowable at `as_of`, or a refusal (`V2-P4-026`).
+
+    `_read_price_session`'s as-of-sensitive twin, and the whole of `V2-P4-026`. It answers the
+    question that door cannot: *"what did this session hold, read from inside its own year?"*
+
+    ## The problem, in one number
+
+    `read_if_ready` decides `not_yet_knowable` on a partition's **max** `available_time`, and a
+    partition is a calendar year, so a complete `daily_basic` year is refused at every `as_of`
+    inside it for the sake of its December rows. Everything built on top inherits that: a
+    neutralised residual for any trading day of year Y could only be *built* at an `as_of` at or
+    after Y's last session, and since `neutralized_observation_batch` stamps every clock with the
+    build's `as_of`, every residual of year Y became visible at one instant. Roadmap section 11
+    records the consequence -- annual walk-forward and nothing finer.
+
+    ## Why a row predicate is safe here and is not safe for `index_member_all`
+
+    The objection `tests/unit/panel/test_visible_read_callers.py` makes every new caller of
+    `read_visible_at` answer is *can this caller tell a withheld row from an absent one*. For the
+    industry corpus the answer is no, which is why `SecurityIndustryHistory.answerable_through`
+    exists and why that half is deliberately left on the unfiltered door. For a **session-scoped**
+    `daily_basic` read the answer is yes, and it is a measured property of the dataset's shape
+    rather than an argument about it:
+
+    `providers/tushare.py::_daily_close_timeline` dates every price row's `available_time` at
+    `DAILY_AVAILABILITY_TIME` on its own `trade_date`, so **every row of one session carries one
+    and the same availability instant**. The caller's filter is `trade_date = day`, and
+    `_build_visible_census_sql` counts what the predicate removed *within that same filter*, so
+    the answer to a session read is all-or-nothing: either every row of the session is visible
+    and `withheld_row_count` is 0, or none is and `withheld_row_count` is the session's whole row
+    count. Measured on the generated fixture panel at `as_of` 2026-01-12T04:00Z: 2026-01-09
+    answers 7 rows with 0 withheld (the eighth security was halted and has no row at all -- an
+    **absent** row, and it reads as one), while 2026-01-12, 2026-01-13 and 2026-01-16 each answer
+    0 rows with 8 withheld. The two situations are two different pairs of numbers, and this
+    function turns the second into a refusal rather than into an empty cross section.
+
+    ## The three refusals, and why each one is a separate name
+
+    - **A session whose own publication instant has not arrived is refused before any read.**
+      `_sessions_published_through` is the same 16:30 the provider stamps and the same one
+      `_price_requirement` clamps its date census at, imported rather than restated. Without this
+      gate a `day` beyond the partition's coverage would answer `()` -- no rows, nothing withheld,
+      no issue -- which is the fail-open shape this whole plane is built against.
+    - **A session the store holds and `as_of` cannot see is refused by name**, not answered
+      empty. This is the backstop under the paragraph above: it is unreachable through the gate
+      for a partition whose rows carry the provider's own clock, and it fires on one whose rows
+      say something else.
+    - **A session whose rows do *not* share one availability instant is refused outright.** That
+      is the all-or-nothing property failing, and the moment it fails a short answer becomes
+      indistinguishable from a thin session -- exactly the objection this door is allowed past
+      only because it does not apply. Checked rather than assumed, because the property lives in
+      a provider one package away and nothing in the store enforces it.
+
+    ## The caller's `max_staleness` is decided where it was declared, and that took two calls
+
+    **The single-call version of this function was wrong about the freshness bound, measurably,
+    and the two-step below is the correction.** `read_visible_at` re-decides `stale` over the rows
+    it is about to return (`VISIBLE_SLICE_RECHECKS`); the rows here are **one session**, so
+    `visible_last_event_time` is `day`'s own close and the bound silently became
+    `as_of - (day at SESSION_CLOSE_TIME)`. That is not what `daily_requirement`'s record means --
+    it means "this panel has not fallen behind the market" -- and reading it the other way turns
+    an ordinary question into a false finding: `panel doctor`'s `daily` bound is the exchange's
+    longest closure plus a day, so on the fixture gate panel it made session 2026-01-12 block at
+    an `as_of` of 2026-01-17 with `stale`, while `load_daily_bars` on the identical store cleared
+    it (`tests/integration/panel/test_panel_gate.py::
+    test_naming_the_session_after_the_hole_still_blocks_and_the_window_is_two_sessions_wide`
+    caught it). Two twins answering one argument at two scopes is the defect, not a tightening.
+
+    So the bound is decided **once, at partition scope, through exactly the verdict
+    `read_if_ready` would have returned**: `assess_readiness` is run on the caller's own
+    requirement and anything outside `ROW_FILTERABLE_ISSUE_CODES` refuses the read. That is the
+    same function, the same rule table and the same scope as the unfiltered door, so
+    `load_daily_bars` and `load_daily_valuations` still answer the same question when asked the
+    same one. The requirement handed to `read_visible_at` then waives `max_staleness`, which is
+    what stops the recheck re-deciding it one scope smaller.
+
+    **Waiving it there is not the fail-open `V2-P3-002`'s review closed, and the reason is
+    specific to this dataset rather than general.** That review found a *factor* read accepting a
+    declared bound and structurally ignoring it, because `stale` cannot fire at a mid-year `as_of`
+    (the catalog's newest event post-dates the read, so the difference is negative) and nothing
+    else looked at reach. Here something else does: `_price_requirement` states `required_dates`
+    and clamps them at `_sessions_published_through`, so **every** session from 1 January through
+    the newest one that had published at `as_of` is required, and a partition that has fallen
+    behind the market fails `date_gap` -- at every `as_of`, mid-year included, and at partition
+    scope where the question belongs. That is a sharper guard than a duration bound, not a weaker
+    one, and it is the guard `daily_requirement`'s docstring already says is "the substantive
+    difference from `adjustment_requirement`".
+    `test_a_partition_that_has_fallen_behind_the_market_is_refused_at_a_mid_year_as_of` drives it.
+
+    What is left un-guarded is the age of the answer itself -- `as_of - day` -- and that is a
+    function of two arguments the caller supplied, needing no store to compute.
+    """
+    if not calendar.is_trading_day(day):
+        raise PriceDataError(
+            f"{day.isoformat()} is not an open session on the {calendar.exchange} calendar, so "
+            f"there are no {requirement.dataset} rows to read for it"
+        )
+    published_through = _sessions_published_through(as_of, _resolve_timezone(date_timezone))
+    if day > published_through:
+        raise PanelStorageError(
+            f"{requirement.dataset} cannot be read for {day.isoformat()} at "
+            f"{as_of.isoformat()}: that session had not published yet, because a session becomes "
+            f"knowable at {DAILY_AVAILABILITY_TIME.isoformat()} {date_timezone} and the newest "
+            f"one that had is {published_through.isoformat()}. Reading it would be a look-ahead, "
+            "and answering it with an empty cross section would be one dressed as thin data"
+        )
+    gate = store.assess_readiness(requirement)
+    if {issue.code for issue in gate.issues} - ROW_FILTERABLE_ISSUE_CODES:
+        raise PanelStorageError(
+            f"{requirement.dataset} cannot be read at {as_of.isoformat()}: "
+            f"{[issue.code for issue in gate.issues]}; "
+            f"{'; '.join(issue.detail for issue in gate.issues)}"
+        )
+    outcome = store.read_visible_at(
+        replace(requirement, max_staleness=None),
+        year=day.year,
+        columns=columns,
+        filters={PRICE_DATE_COLUMN: day.isoformat()},
+    )
+    if outcome.is_blocked:
+        raise PanelStorageError(
+            f"{requirement.dataset} cannot be read at {as_of.isoformat()}: "
+            f"{[issue.code for issue in outcome.blocking_issues]}; "
+            f"{'; '.join(issue.detail for issue in outcome.blocking_issues)}"
+        )
+    rows = outcome.rows
+    withheld = outcome.withheld_row_count
+    if withheld and rows:
+        raise PanelStorageError(
+            f"{requirement.dataset} year={day.year} carries {len(rows)} row(s) for "
+            f"{day.isoformat()} that were knowable at {as_of.isoformat()} and {withheld} that "
+            "were not, so this session's rows do not share one availability instant. A "
+            "session-level visible read is only sound because they do -- a partial session is "
+            "indistinguishable from a thin one once it is handed back -- so it is refused rather "
+            "than returned short"
+        )
+    if withheld:
+        raise PanelStorageError(
+            f"{requirement.dataset} year={day.year} holds {withheld} row(s) for "
+            f"{day.isoformat()} and none of them was knowable at {as_of.isoformat()}; the stored "
+            "availability instant of that session post-dates the read. An empty cross section "
+            "would say the market was empty that day, which is a different fact"
+        )
+    return rows
+
+
 def load_daily_valuations(
     store: PanelStore,
     *,
@@ -2260,6 +2418,20 @@ def load_daily_valuations(
     names on historical sessions -- 60 of 3,843 on 2020-03-02, all `.BJ` -- so a caller joining
     the two must expect a `total_mv` to be absent for a security that traded. The reverse never
     happened on any session probed and is refused at write time.
+
+    **It is no longer the twin on the door it takes, and that is `V2-P4-026`.** This one reads
+    through `_read_visible_price_session`, so a session that published before `as_of` is
+    answerable from inside its own year; `load_daily_bars` and `load_price_limits` still take
+    `read_if_ready` and are still refused whole. The asymmetry is deliberate and is scoped to what
+    was measured to need it: `panel_neutralization` reads exactly this dataset and
+    `index_member_all`, and the residual's clocks were the whole of roadmap section 11's
+    `V2-P3-004` finding. Widening it to the other two is a separate diff with its own callers to
+    re-argue -- `factor_view` prices label windows off `load_daily_bars` and `panel_doctor`'s
+    `_close_check` pairs the two on one session -- and nothing measured yet asks for it.
+
+    Where `read_if_ready` answered, this answers the identical rows: a partition with no issue
+    has `max_available_time <= as_of`, so the predicate removes nothing. What changes is only the
+    partitions that door refused whole.
     """
     requirement = daily_basic_requirement(
         calendar,
@@ -2268,8 +2440,14 @@ def load_daily_valuations(
         max_staleness=max_staleness,
         date_timezone=date_timezone,
     )
-    rows = _read_price_session(
-        store, requirement, DAILY_BASIC_PANEL_COLUMNS, day=day, calendar=calendar, as_of=as_of
+    rows = _read_visible_price_session(
+        store,
+        requirement,
+        DAILY_BASIC_PANEL_COLUMNS,
+        day=day,
+        calendar=calendar,
+        as_of=as_of,
+        date_timezone=date_timezone,
     )
     return daily_valuations_from_panel_rows(rows)
 

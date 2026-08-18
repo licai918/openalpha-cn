@@ -57,6 +57,7 @@ from panel_fixtures import (
     write_generated_panel,
 )
 
+from openalpha_cn.backtest.factor_ic import MINIMUM_IC_AS_OFS
 from openalpha_cn.domain.daily_prices import DAILY_DATASET
 from openalpha_cn.domain.factor_neutralization import (
     FactorNeutralizationError,
@@ -89,7 +90,7 @@ from openalpha_cn.panel_factors import (
     write_factor_panels,
     write_processed_factor_panels,
 )
-from openalpha_cn.panel_ingest import daily_requirement, write_panel_batch
+from openalpha_cn.panel_ingest import daily_requirement, load_daily_valuations, write_panel_batch
 from openalpha_cn.panel_neutralization import (
     INDUSTRY_AND_SIZE,
     NEUTRALIZATION_MANIFEST_DATA_COLUMNS,
@@ -107,19 +108,58 @@ from openalpha_cn.panel_neutralization import (
 AS_OF: Final[datetime] = datetime(2026, 1, 17, 4, 0, tzinfo=UTC)
 """The fixture panel's own `as_of`: after the last session's `daily_basic` became knowable.
 
-**Not a mid-window instant, and the reason is a measured refusal rather than convenience.** Both
-foreign inputs are read through `panel_ingest`'s loaders, which take `PanelStore.read_if_ready`,
-whose `not_yet_knowable` verdict is decided on a partition's **max** `available_time`. So a
-`daily_basic` year partition is unreadable at every `as_of` inside the year it covers -- roadmap
-section 11's problem, which `V2-P3-002` solved for the *factor's* own inputs by adding
-`read_visible_at` and which this issue deliberately does not solve for a foreign dataset.
-`test_a_mid_year_as_of_cannot_assemble_the_second_cross_section_at_all` drives it, and
-`KNOWN_NEUTRALIZATION_LIMITATIONS
-.the_two_foreign_inputs_are_read_whole_partition_so_a_mid_year_as_of_is_refused` records it.
+**It used to be the only instant that worked, and `V2-P4-026` changed that.** When this file was
+written both foreign inputs went through loaders taking `PanelStore.read_if_ready`, whose
+`not_yet_knowable` verdict is decided on a partition's **max** `available_time`, so a
+`daily_basic` year was unreadable at every `as_of` inside the year it covers.
+`load_daily_valuations` now reads one session at a time under an availability predicate, and
+`test_a_mid_year_as_of_assembles_the_cross_section_and_only_the_industry_read_can_refuse_it`
+drives the reversal. This constant stays what it is because every test below it was written
+against a year-end build and comparing them is the point; the in-year instants are
+`MID_YEAR_BUILD` and `LATER_BUILD`.
+
+What has *not* changed is the industry corpus: `index_member_all` is still read whole partition,
+which is what `KNOWN_NEUTRALIZATION_LIMITATIONS
+.the_industry_input_is_read_whole_partition_so_a_mid_year_as_of_can_be_refused` now records and
+what `wide_store` demonstrates at `MID_WINDOW`.
 """
 
 MID_WINDOW: Final[datetime] = datetime(2026, 1, 12, 4, 0, tzinfo=UTC)
-"""Noon Asia/Shanghai on the sixth of ten sessions. Used only to drive the refusal above."""
+"""Noon Asia/Shanghai on the sixth of ten sessions.
+
+Five sessions had published at this instant (through 2026-01-09) and five had not, including the
+12th's own. `V2-P4-026` turned this constant from "the instant that proves the whole build is
+refused" into the instant every mid-year test is taken at.
+"""
+
+MID_YEAR_BUILD: Final[datetime] = datetime(2026, 1, 12, 9, 0, tzinfo=UTC)
+"""17:00 Asia/Shanghai on 2026-01-12: after that session's own 16:30, four sessions before the
+window ends. The instant a whole three-tier build is run at, in the year the panel covers."""
+
+MID_YEAR_SESSION: Final[date] = date(2026, 1, 12)
+"""`MID_YEAR_BUILD`'s own session -- the day the residuals built at that instant are about."""
+
+LATER_BUILD: Final[datetime] = datetime(2026, 1, 13, 9, 0, tzinfo=UTC)
+LATER_SESSION: Final[date] = date(2026, 1, 13)
+"""A second in-year build instant and its session, so `min_as_ofs = 2` has two points to be
+satisfied by inside one covered year. See
+`test_two_in_year_builds_give_the_ic_floor_of_two_as_ofs_two_points_inside_one_year`.
+
+**The pair is 01-12/01-13 and not 01-09/01-12, and the reason is the constraint that survives.**
+`SHAPES` opens an assignment on 2026-01-12, so `index_member_all`'s 2026 partition has a
+`max_available_time` of 2026-01-11T16:00Z and every `as_of` before that is refused whole --
+measured, by moving this constant back and watching `load_industry_histories` raise
+`not_yet_knowable`. The earliest in-year build this fixture admits is therefore set by the
+*industry* corpus, which is `V2-P4-027`'s half and not this issue's.
+"""
+
+HALTED_ON_THE_NINTH: Final[tuple[str, ...]] = ("601318.SH",)
+"""The name the fixture halts on 2026-01-09, so `daily_basic` carries **no row** for it there.
+
+Named rather than inlined because it is the load-bearing half of this file's answer to
+`tests/unit/panel/test_visible_read_callers.py`'s objection: an absent row and a withheld session
+are two different answers, and this constant is the absent one.
+"""
 
 SESSION: Final[date] = date(2026, 1, 16)
 """The last session of the fixture's window, and the day the two foreign inputs are read for.
@@ -410,30 +450,88 @@ def test_the_market_caps_are_the_stored_ones_and_the_declared_measure_selects_th
     assert {item.market_cap for item in by_circ.characteristics} == {1.0}
 
 
-def test_a_mid_year_as_of_cannot_assemble_the_second_cross_section_at_all(
+def test_a_mid_year_as_of_assembles_the_cross_section_and_only_the_industry_read_can_refuse_it(
+    store: PanelStore, panel: GeneratedPanel, wide_store: PanelStore, wide_panel: GeneratedPanel
+) -> None:
+    """The reverse pin of `V2-P3-004`'s sharpest constraint, and the half of it that survives.
+
+    This test used to be
+    `test_a_mid_year_as_of_cannot_assemble_the_second_cross_section_at_all` and asserted a
+    `not_yet_knowable` refusal at `MID_WINDOW`, with a docstring saying "this test is what would
+    go red if that ever changed, which is the point of driving it rather than writing it down".
+    `V2-P4-026` changed it, so it is turned round rather than deleted -- the precedent
+    `V2-P3-016` and `V2-P3-017` set for a pin whose subject was solved.
+
+    **What changed.** `load_daily_valuations` reads one session under a
+    `WHERE available_time <= as_of` predicate, so the `daily_basic` year no longer refuses an
+    `as_of` inside itself. At `MID_WINDOW` -- noon Asia/Shanghai on the sixth of ten sessions --
+    the whole cross section for 2026-01-09 assembles, with every security carrying the industry
+    and the capitalisation that session's stored rows imply.
+
+    **What did not.** `index_member_all` is still read whole partition. `wide_store` is the same
+    fixture plus one assignment opening 2026-01-14, which puts that partition's newest
+    `available_time` at 2026-01-13T16:00Z -- after `MID_WINDOW` -- and the identical call on it is
+    still refused with `not_yet_knowable`. Both halves are driven here so the entry that names
+    them (`KNOWN_NEUTRALIZATION_LIMITATIONS
+    .the_industry_input_is_read_whole_partition_so_a_mid_year_as_of_can_be_refused`) has one test
+    holding both directions, and so a later change to *either* dataset's door is visible.
+    """
+    section = load_industry_market_cap_cross_section(
+        store,
+        _spec(),
+        subjects=panel.securities,
+        day=date(2026, 1, 9),
+        as_of=MID_WINDOW,
+        calendar=panel.calendar(),
+        membership_years=MEMBERSHIP_YEARS,
+        max_staleness=None,
+    )
+
+    assert section.as_of == MID_WINDOW
+    assert section.without_industry == ()
+    assert {item.subject: item.market_cap for item in section.characteristics} == {
+        subject: CAP_BASE + CAP_STEP * SECURITIES.index(subject)
+        for subject in panel.securities
+        if subject not in HALTED_ON_THE_NINTH
+    }
+
+    # The one name the read does *not* answer for is the one the fixture halts on that session,
+    # so `daily_basic` carries no row for it at all. That is the whole objection to a filtered
+    # read arriving as its own answer: an **absent** row lands in `without_market_cap` and a
+    # **withheld** session raises, and the two are not the same shape. The seven that are here
+    # are here with the values the stored partition holds, not merely present.
+    assert section.without_market_cap == HALTED_ON_THE_NINTH
+
+    with pytest.raises(PanelStorageError, match="not_yet_knowable"):
+        load_industry_market_cap_cross_section(
+            wide_store,
+            _spec(),
+            subjects=wide_panel.securities,
+            day=date(2026, 1, 9),
+            as_of=MID_WINDOW,
+            calendar=wide_panel.calendar(),
+            membership_years=MEMBERSHIP_YEARS,
+            max_staleness=None,
+        )
+
+
+def test_a_session_whose_own_close_has_not_published_is_refused_at_a_mid_year_as_of(
     store: PanelStore, panel: GeneratedPanel
 ) -> None:
-    """The measurement behind this issue's sharpest operational constraint.
+    """The new door's fail-closed direction, driven through the neutralisation's own builder.
 
-    `read_if_ready` decides `not_yet_knowable` on a partition's **max** `available_time`, so a
-    `daily_basic` year partition is unreadable at every `as_of` inside its own year -- here the
-    year's last session becomes available 2026-01-16T08:30Z and the read is taken at
-    2026-01-12T04:00Z. Nothing about that `as_of`'s own session is missing; the whole partition is
-    refused.
-
-    That is roadmap section 11's problem, which `V2-P3-002` solved for the *factor's* own inputs
-    by adding `read_visible_at`. It is deliberately not solved here for a foreign dataset, and
-    `KNOWN_NEUTRALIZATION_LIMITATIONS
-    .the_two_foreign_inputs_are_read_whole_partition_so_a_mid_year_as_of_is_refused` says why and
-    what the levers are. This test is what would go red if that ever changed, which is the point
-    of driving it rather than writing it down.
+    `MID_WINDOW` is noon Asia/Shanghai on 2026-01-12, so that session's own 16:30 has not
+    arrived. Asking for it is refused by name before any partition is touched, rather than
+    answered with a cross section in which every security lands in `without_market_cap` -- which
+    is what a bare row predicate would have produced and is indistinguishable from a session
+    `daily_basic` genuinely has no rows for.
     """
-    with pytest.raises(PanelStorageError, match="not_yet_knowable"):
+    with pytest.raises(PanelStorageError, match="that session had not published yet"):
         load_industry_market_cap_cross_section(
             store,
             _spec(),
             subjects=panel.securities,
-            day=date(2026, 1, 9),
+            day=date(2026, 1, 12),
             as_of=MID_WINDOW,
             calendar=panel.calendar(),
             membership_years=MEMBERSHIP_YEARS,
@@ -1458,6 +1556,184 @@ def test_the_read_requirement_waives_the_three_checks_a_derived_partition_cannot
     assert requirement is None
 
 
+def _build_at(
+    store: PanelStore, panel: GeneratedPanel, *, as_of: datetime, day: date
+) -> NeutralizedFactorPanel:
+    """A whole three-tier build run at one instant, with every read taken at that instant.
+
+    `_build`'s in-year twin. The only difference is that `as_of` and the session are arguments
+    rather than the fixture's own year-end pair, which is what makes a mid-year build expressible
+    at all -- before `V2-P4-026` no combination of the two below `AS_OF` reached the third tier.
+    """
+    source = _compute(
+        store,
+        panel,
+        as_of=as_of,
+        requirements={
+            DAILY_DATASET: daily_requirement(
+                panel.calendar(), years=(YEAR,), as_of=as_of, max_staleness=INPUT_STALENESS_BOUND
+            )
+        },
+    )
+    section = load_industry_market_cap_cross_section(
+        store,
+        _spec(),
+        subjects=panel.securities,
+        day=day,
+        as_of=as_of,
+        calendar=panel.calendar(),
+        membership_years=MEMBERSHIP_YEARS,
+        max_staleness=None,
+    )
+    return _neutralize(_process(source), section)
+
+
+def test_a_residual_built_at_a_mid_year_as_of_is_visible_at_that_same_as_of(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """`V2-P4-026`'s acceptance criterion, end to end on partitions on disk.
+
+    The roadmap states the acceptance as "an in-year `as_of` can read that day's residual".
+    Every step is taken at
+    `MID_YEAR_BUILD` -- 17:00 Asia/Shanghai on 2026-01-12, four sessions before the panel's window
+    ends and eleven and a half months before the year does: the raw cross section, the transform,
+    the industry-and-size read, the regression, the write, and the read back. The read back is the
+    step that used to answer `()`.
+
+    Three things are asserted rather than "not empty", because "not empty" is what an empty-shaped
+    defect also satisfies:
+
+    - every stored row carries `MID_YEAR_BUILD` as its own `as_of`, so the partition really was
+      stamped in-year rather than at the fixture's year-end instant;
+    - the stored residuals reproduce the in-memory ones the engine computed, to the value, so the
+      round trip is a round trip and not a coincidence of counts;
+    - a read one microsecond earlier still answers `()`. That is the point-in-time rule, and it
+      staying true is what says this issue moved the *build's* clock rather than weakening the
+      read's.
+    """
+    result = _build_at(store, panel, as_of=MID_YEAR_BUILD, day=MID_YEAR_SESSION)
+    write_neutralized_factor_panels(store, [result])
+
+    stored = load_neutralized_factor_observations(
+        store, REVERSAL_1D, _spec(), years=(YEAR,), as_of=MID_YEAR_BUILD
+    )
+    a_moment_earlier = load_neutralized_factor_observations(
+        store,
+        REVERSAL_1D,
+        _spec(),
+        years=(YEAR,),
+        as_of=MID_YEAR_BUILD - timedelta(microseconds=1),
+    )
+
+    assert MID_YEAR_BUILD < AS_OF
+    assert panel.sessions[-1] > MID_YEAR_SESSION
+    assert {row.as_of for row in stored} == {MID_YEAR_BUILD}
+    assert {row.subject: row.value for row in stored} == {
+        row.subject: row.value for row in result.observations
+    }
+    assert any(row.value is not None for row in stored)
+    assert a_moment_earlier == ()
+
+
+def test_two_in_year_builds_give_the_ic_floor_of_two_as_ofs_two_points_inside_one_year(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """What the fix is worth counted in the unit the IC floor is stated in.
+
+    `factor_ic.MINIMUM_IC_AS_OFS` is 2 -- a sample standard deviation of one number does not
+    exist -- and before `V2-P4-026` a covered year could contribute exactly **one** neutralised
+    `as_of`, because every build of that year had to be stamped at or after its last session. Two
+    points therefore needed two years, and the earliest assemblable year is 2021 (the SW2021
+    availability floor), so a series had at most one point per year since.
+
+    Here two builds are run at two consecutive in-year sessions and both are readable at the
+    later one -- two `as_ofs` inside a single covered year, and therefore a satisfiable
+    `min_as_ofs=2` at daily spacing rather than annual. The two are asserted to be *different*
+    cross sections, not merely two rows: they are about different sessions, so their residuals
+    differ. The earlier one is also shown to be invisible before its own instant, so "two points"
+    is two point-in-time answers rather than two rows that arrived together.
+    """
+    first = _build_at(store, panel, as_of=MID_YEAR_BUILD, day=MID_YEAR_SESSION)
+    second = _build_at(store, panel, as_of=LATER_BUILD, day=LATER_SESSION)
+    write_neutralized_factor_panels(store, [first, second])
+
+    stored = load_neutralized_factor_observations(
+        store, REVERSAL_1D, _spec(), years=(YEAR,), as_of=LATER_BUILD
+    )
+    only_the_first = load_neutralized_factor_observations(
+        store, REVERSAL_1D, _spec(), years=(YEAR,), as_of=MID_YEAR_BUILD
+    )
+
+    assert {row.as_of for row in stored} == {MID_YEAR_BUILD, LATER_BUILD}
+    assert {row.as_of for row in only_the_first} == {MID_YEAR_BUILD}
+    assert MID_YEAR_BUILD.year == LATER_BUILD.year == YEAR
+    assert LATER_BUILD < AS_OF
+    assert {row.subject: row.value for row in first.observations} != {
+        row.subject: row.value for row in second.observations
+    }
+
+
+def test_across_the_whole_window_only_the_industry_read_ever_refuses_an_in_year_as_of(
+    store: PanelStore, panel: GeneratedPanel, wide_store: PanelStore, wide_panel: GeneratedPanel
+) -> None:
+    """The census behind `V2-P4-026`'s two headline numbers, taken rather than argued.
+
+    Every session of the fixture's ten-session window is tried at 17:00 Asia/Shanghai on itself,
+    and for each one two questions are asked separately: does `daily_basic` answer, and does the
+    whole cross section assemble. The gap between the two answers is the remaining bottleneck,
+    and naming it as a *set of sessions* rather than as a count is what makes the test say which
+    dataset is responsible.
+
+    - `daily_basic` answers on **every** session of both fixtures. It contributes no refusal
+      anywhere in the window, which is the property this issue delivered.
+    - The cross section assembles on 5 of 10 sessions under `SHAPES` and 3 of 10 under
+      `WIDE_SHAPES`, and the missing prefix is exactly the sessions before the membership
+      partition's newest assignment became knowable (2026-01-12 and 2026-01-14 respectively).
+
+    Before this issue the count was **1** on both fixtures -- the year-end instant and nothing
+    else -- so this is also the measurement `min_as_ofs=2` is satisfiable by. A single covered
+    year now yields five point-in-time neutralised cross sections where it yielded one.
+    """
+    censuses = {}
+    for label, a_store, a_panel, first in (
+        ("SHAPES", store, panel, date(2026, 1, 12)),
+        ("WIDE_SHAPES", wide_store, wide_panel, date(2026, 1, 14)),
+    ):
+        answered, assembled = [], []
+        for session in a_panel.sessions:
+            as_of = datetime(session.year, session.month, session.day, 9, 0, tzinfo=UTC)
+            load_daily_valuations(
+                a_store, day=session, calendar=a_panel.calendar(), as_of=as_of, max_staleness=None
+            )
+            answered.append(session)
+            try:
+                load_industry_market_cap_cross_section(
+                    a_store,
+                    _spec(),
+                    subjects=a_panel.securities,
+                    day=session,
+                    as_of=as_of,
+                    calendar=a_panel.calendar(),
+                    membership_years=MEMBERSHIP_YEARS,
+                    max_staleness=None,
+                )
+            except PanelStorageError as error:
+                assert "not_yet_knowable" in str(error)
+                assert "index_member_all" in str(error)
+                continue
+            assembled.append(session)
+        censuses[label] = (tuple(answered), tuple(assembled), first)
+
+    for label, (answered, assembled, first) in censuses.items():
+        a_panel = panel if label == "SHAPES" else wide_panel
+        assert answered == tuple(a_panel.sessions), label
+        assert assembled == tuple(day for day in a_panel.sessions if day >= first), label
+        assert len(assembled) >= MINIMUM_IC_AS_OFS, label
+
+    assert len(censuses["SHAPES"][1]) == 5
+    assert len(censuses["WIDE_SHAPES"][1]) == 3
+
+
 def test_a_neutralised_row_is_invisible_before_the_as_of_it_was_computed_at(
     store: PanelStore, panel: GeneratedPanel
 ) -> None:
@@ -1484,25 +1760,26 @@ def test_a_neutralised_row_is_invisible_before_the_as_of_it_was_computed_at(
 def test_a_residual_about_a_session_is_invisible_at_that_sessions_own_close(
     store: PanelStore, panel: GeneratedPanel
 ) -> None:
-    """The second hop of the mid-year problem, which is the one a reader actually hits.
+    """A build's own schedule decides when its residuals become visible, and nothing else does.
 
-    `KNOWN_NEUTRALIZATION_LIMITATIONS
-    .the_two_foreign_inputs_are_read_whole_partition_so_a_mid_year_as_of_is_refused` used to record
-    only the first hop -- the two *foreign* inputs cannot be read at an in-year `as_of`. The
-    consequence that reaches a consumer is the second: because the build's `as_of` must therefore
-    sit at or after the `daily_basic` partition's newest row, and because
-    `neutralized_observation_batch` stamps **every** clock on **every** row with that `as_of`, a
-    residual about a given session is not visible at that session at all.
+    This test was written as "the second hop of the mid-year problem": the build's `as_of` had to
+    sit at or after the `daily_basic` partition's newest row, `neutralized_observation_batch`
+    stamps **every** clock on **every** row with that `as_of`, so a residual about a session was
+    invisible at that session. `V2-P4-026` removed the first clause; the assertions are unchanged
+    and still hold, because what they measure is the *stamping* rule and that is unchanged.
 
-    Driven here rather than written down: the last session of the fixture's window is `SESSION`,
-    the residuals are about it, and a read taken at the very end of that session's own calendar day
-    -- hours after the exchange closed and after every input row became knowable -- returns
-    **empty**. Not an error, which is the sharp part: `load_neutralized_factor_observations` filters
-    rows, so a caller asking "what did I hold on 2026-01-16" gets a plausible-looking short answer.
+    What they now say is the narrower and more useful thing. `_build` runs at `AS_OF`, the
+    fixture's year-end instant, so its residuals are visible from `AS_OF` and not before -- a read
+    taken at the very end of the session they are about returns **empty**, hours after every input
+    row became knowable. That is not a granularity defect any more; it is a build that was
+    scheduled late, and `test_a_residual_built_at_a_mid_year_as_of_is_visible_at_that_same_as_of`
+    runs the same chain earlier and gets the residuals back at the earlier instant. The pair is
+    what `KNOWN_IC_LIMITATIONS
+    .a_neutralised_series_is_only_as_point_in_time_as_its_build_schedule` names.
 
-    `V2-P3-005` may read this plane anyway (the residuals' contents are point-in-time correct) but
-    has to say it is reading a year-end snapshot; `V2-P4-013` cannot do sub-annual walk-forward
-    until `V2-P4-026` lands. Roadmap section 11 carries the decision.
+    The shape a reader has to watch for is unchanged and is the sharp part:
+    `load_neutralized_factor_observations` filters rows, so an `as_of` no build was stamped at is
+    a plausible-looking short answer rather than an error.
     """
     result = _build(store, panel)
     write_neutralized_factor_panels(store, [result])

@@ -71,7 +71,7 @@ FILTERED_READ = "read_visible_at"
 """The `PanelStore` method that answers with a deliberately short partition."""
 
 FILTERED_READ_CALLERS: frozenset[str] = frozenset(
-    {"panel_factors.py", "panel_neutralization.py", "panel_doctor.py"}
+    {"panel_factors.py", "panel_neutralization.py", "panel_doctor.py", "panel_ingest.py"}
 )
 """Every `src/` file allowed to call `read_visible_at`, relative to `src/openalpha_cn`.
 
@@ -104,6 +104,11 @@ refuses a partition whose newest row post-dates `as_of` rather than filtering it
 allowlisted module reads its foreign data at a *stricter* setting than the already-allowlisted
 one reads its own.
 
+**`V2-P4-026` moved one of those two, and only one.** `load_daily_valuations` now takes the
+filtered door through `panel_ingest._read_visible_price_session`; `load_industry_histories` does
+not and is not going to, for the reason the paragraph above gives. The fourth entry below is
+that grant, and this paragraph is the correction of the sentence above it.
+
 **`panel_doctor.py` (`V2-P3-019`) is the third, and its answer is the sharpest of the three
 because it is the only caller here that is not reading a partition it wrote.** `_factor_seal_check`
 takes the filtered read over the six derived partitions -- three tiers of answers and the three
@@ -124,6 +129,29 @@ The un-filtered door was not an option: `read_if_ready` refuses a year partition
 `available_time` post-dates `as_of`, which for a year of daily cross sections is December, so a
 health report run at any instant inside the year would have been unable to look at the plane at
 all -- which is the state `V2-P3-019` found and is fixing.
+
+**`panel_ingest.py` (`V2-P4-026`) is the fourth, and its answer is the strongest of the four,
+because for this caller the question has a measured answer rather than an argued one.** The
+single call site is `_read_visible_price_session`, reached only from `load_daily_valuations`,
+and it always passes `filters={"trade_date": <one session>}`. It is the first caller in `src/`
+to pass `filters` at all, and that is the whole of why it is sound:
+`providers/tushare.py::_daily_close_timeline` dates every price row's `available_time` at
+`DAILY_AVAILABILITY_TIME` on its own `trade_date`, so one session's rows carry one availability
+instant, and `_build_visible_census_sql` takes the withheld count inside the caller's own
+filters. **A session read is therefore all-or-nothing.** Measured on the generated fixture panel
+at `as_of` 2026-01-12T04:00Z: 2026-01-09 answers 7 rows with `withheld_row_count == 0` -- the
+eighth security was halted and has no row at all, so an *absent* row arrives as an absent row --
+while 2026-01-12, 2026-01-13 and 2026-01-16 each answer 0 rows with `withheld_row_count == 8`.
+"Withheld" and "absent" are two different pairs of numbers on this door, which is exactly what
+`build_index_membership`, `load_industry_histories` and `build_stock_universe` cannot say.
+
+The caller does not merely *observe* that difference, it **refuses on it**: a session with rows
+withheld and none visible raises rather than answering `{}`, and a session with some of each
+raises too, because that mixture is the all-or-nothing property failing and a partial session is
+what would be indistinguishable from a thin one. Both refusals are named separately from the
+readiness codes, and a session whose 16:30 has not arrived at `as_of` is refused before any
+partition is touched. `tests/integration/panel/test_daily_panel_ingest.py` drives all four
+doors.
 """
 
 

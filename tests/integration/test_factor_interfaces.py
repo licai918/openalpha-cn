@@ -684,10 +684,13 @@ def test_a_range_whose_neutralised_tier_was_never_built_is_refused_the_same_way_
     """The issue's own question: what does a range that ends before the neutralisation do?
 
     This store holds a raw and a processed cross section at all three prediction days and a
-    residual at the **latest** one alone -- which is the shape a real store has, because
-    `load_industry_market_cap_cross_section` reads `daily_basic` through the unfiltered door and
-    can therefore only be called at an instant at or after the last stored session, so a whole
-    year's residuals are stamped at one late instant. The run asks about the two earlier days.
+    residual at the **latest** one alone. Until `V2-P4-026` that was the *only* shape a real
+    store could have -- `load_industry_market_cap_cross_section` read `daily_basic` through the
+    unfiltered door, so a whole year's residuals had to be stamped at one late instant. It is now
+    one shape among several: a neutralisation may be built on any schedule, and a store whose
+    third tier was built less often than its first two has exactly this arrangement. The run asks
+    about the two earlier days either way, and what this test measures -- that the refusal is one
+    refusal on three faces -- is a property of the face rather than of the storage contract.
 
     The neutralised partition therefore **exists** and its rows are outside the range, so reading
     it back through `read_visible_at` comes back **empty rather than raising** -- the shape that
