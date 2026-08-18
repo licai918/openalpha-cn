@@ -13,6 +13,7 @@
     "panel": 29,
     "product": 3,
     "provider": 8,
+    "ranking": 2,
     "recovery": 2,
     "storage": 8,
     "temporal": 3
@@ -30,13 +31,13 @@
     "DEFERRED": 1,
     "ENHANCED_REPLACEMENT": 20,
     "EXCLUDED": 4,
-    "NATIVE_COMPLETE": 149
+    "NATIVE_COMPLETE": 151
   },
   "totals": {
-    "all_features": 175,
+    "all_features": 177,
     "legacy_acceptance_rows": 86,
-    "true_completed_features": 170,
-    "true_completion_rate_pct": 97.14,
+    "true_completed_features": 172,
+    "true_completion_rate_pct": 97.18,
     "unknown": 0,
     "unreviewed": 0
   }
