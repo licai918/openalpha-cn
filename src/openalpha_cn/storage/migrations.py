@@ -52,12 +52,19 @@ from openalpha_cn.domain.horizon import is_countable_horizon
 from openalpha_cn.domain.memory import MEMORY_ENTRY_VERSIONS, MemoryEntry
 from openalpha_cn.domain.report import RESEARCH_REPORT_VERSIONS, ResearchReport
 from openalpha_cn.domain.run import RUN_MANIFEST_VERSIONS
+from openalpha_cn.domain.run_mode import RUN_MODES
 from openalpha_cn.domain.validation import (
     VALIDATION_RESULT_VERSIONS,
     ValidationResult,
     ValidationResultV1,
 )
 from openalpha_cn.domain.versioning import read_versioned
+from openalpha_cn.storage.sqlite import (
+    RUNS_MODE_COLUMN,
+    RUNS_MODE_PAYLOAD_PATH,
+    RUNS_TABLE,
+    ensure_runs_mode_projection,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -679,11 +686,102 @@ def _rewrite_contract_identities(connection: sqlite3.Connection) -> None:
     _audit_identity_rewrite(connection, identities)
 
 
+class RunsModeProjectionError(ValueError):
+    """`runs.mode` does not reproduce the `mode` stated by the payload stored beside it.
+
+    Raised by `_audit_runs_mode_projection` inside the migration's own transaction, so the
+    whole migration rolls back rather than leaving a column that answers `WHERE mode = ?` with
+    something other than what the manifests say. The two ways this fires are the two ways a
+    derived column fails silently: the generating expression names a path the payload does not
+    have (every row projects `NULL`, every query returns nothing, and nothing else complains),
+    or a stored payload states a mode the current `RunMode` no longer admits.
+    """
+
+
+def _audit_runs_mode_projection(connection: sqlite3.Connection) -> None:
+    """Re-derive `runs.mode` in Python for every row and refuse to commit a column that lies.
+
+    `V2-P4-001`'s `_audit_identity_rewrite` is the model, deliberately, but the property is a
+    different one and the difference is worth stating: that audit reconciles *identities that
+    moved* against the references that spell them, because a hand-written list of reference
+    sites goes stale. This one reconciles a *derived projection* against the source it claims
+    to project, because a generated column whose expression is subtly wrong is invisible --
+    `json_extract(payload, '$.Mode')` is accepted by SQLite, yields `NULL` for every row,
+    builds a perfectly valid index over those NULLs, and turns `list_runs(mode=paper)` into a
+    confident, permanent, empty answer. No exception is raised anywhere on that path.
+
+    So the check does not ask SQLite what the column contains and compare it to itself: it
+    parses `payload` in Python, from `RUNS_MODE_PAYLOAD_PATH`, and requires the two independent
+    readings to agree on every row. It additionally requires the value to be a declared
+    `RunMode`, which is what makes `NULL` a failure rather than a tolerated absence.
+
+    The third property is structural rather than per-row: the column must still be a *generated*
+    one (`PRAGMA table_xinfo`'s hidden flag is 2 for `VIRTUAL`, 3 for `STORED`, 0 for an ordinary
+    column). A plain `TEXT` column backfilled with today's correct values would pass both row
+    checks on the day it was written and then be free to drift from the payload forever after,
+    which is the entire failure mode `RUNS_MODE_COLUMN_DDL` exists to make unreachable.
+    """
+    hidden = {row[1]: row[-1] for row in connection.execute(f"PRAGMA table_xinfo({RUNS_TABLE})")}
+    if hidden.get(RUNS_MODE_COLUMN) not in {2, 3}:
+        raise RunsModeProjectionError(
+            f"{RUNS_TABLE}.{RUNS_MODE_COLUMN} is not a generated column (PRAGMA table_xinfo "
+            f"hidden "
+            f"flag {hidden.get(RUNS_MODE_COLUMN)!r}); it would be a second, independently "
+            "writable copy of a fact the payload already states"
+        )
+    key = RUNS_MODE_PAYLOAD_PATH.removeprefix("$.")
+    declared = {mode.value for mode in RUN_MODES}
+    for run_id, payload, projected in connection.execute(
+        f"SELECT run_id, payload, {RUNS_MODE_COLUMN} FROM {RUNS_TABLE}"
+    ).fetchall():
+        stated = json.loads(payload).get(key)
+        if projected != stated:
+            raise RunsModeProjectionError(
+                f"run {run_id!r} projects mode {projected!r} but its payload states "
+                f"{stated!r}; the generating expression does not read the payload this "
+                "database actually holds"
+            )
+        if projected not in declared:
+            raise RunsModeProjectionError(
+                f"run {run_id!r} states mode {projected!r}, which is not a declared RunMode "
+                f"({sorted(declared)}); a run this database cannot classify would be invisible "
+                "to every mode-filtered listing"
+            )
+
+
+def _add_runs_mode_projection(connection: sqlite3.Connection) -> None:
+    """`V2-P4-002`: give `runs` the queryable `mode` column and index Finding F70 asked for.
+
+    The DDL is not written here: `storage/sqlite.py::ensure_runs_mode_projection` is the one
+    implementation, shared with `SQLiteRunRepository._initialize`, so "the migration and the
+    store agree on the schema" is true by construction rather than by a comparison somebody has
+    to remember to keep. What this migration adds on top of that call is everything the
+    migration engine is for and a constructor cannot give: a pre-migration backup, one
+    transaction, an audit row, a `PRAGMA user_version` bump, and the run-time audit below --
+    which is why it exists even though the store would have established the column anyway.
+
+    Ordered last, after `rewrite_contract_identities`, and that is the only correct place: that
+    migration rewrites every `runs.payload` in place, and this column is a projection of exactly
+    that payload. Running before it would index the pre-rewrite values and then quietly depend on
+    SQLite re-deriving them (it does -- `UPDATE runs SET payload = ?` recomputes the column and
+    maintains the index -- but "the audit ran against payloads that no longer exist" is not a
+    property worth relying on). Ordered after, the audit below reads the final bytes.
+
+    Not precondition-free: it alters `runs`, which `SQLiteRunRepository` owns and which does not
+    exist when migrations run on a fresh install, so it defers exactly like the three
+    table-altering migrations before it.
+    """
+    require_table(connection, RUNS_TABLE)
+    ensure_runs_mode_projection(connection)
+    _audit_runs_mode_projection(connection)
+
+
 BASELINE_VERSION = 1
 CREATE_VALIDATION_RESULTS_VERSION = 2
 DEMO_ADD_RUNS_ARCHIVED_AT_VERSION = 3
 CREATE_QUERY_PATH_INDEXES_VERSION = 4
 REWRITE_CONTRACT_IDENTITIES_VERSION = 5
+ADD_RUNS_MODE_PROJECTION_VERSION = 6
 
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=BASELINE_VERSION, name="baseline", apply=_baseline_apply),
@@ -706,6 +804,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version=REWRITE_CONTRACT_IDENTITIES_VERSION,
         name="rewrite_contract_identities",
         apply=_rewrite_contract_identities,
+    ),
+    Migration(
+        version=ADD_RUNS_MODE_PROJECTION_VERSION,
+        name="add_runs_mode_projection",
+        apply=_add_runs_mode_projection,
     ),
 )
 

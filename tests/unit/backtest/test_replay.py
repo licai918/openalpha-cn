@@ -54,6 +54,7 @@ from openalpha_cn.domain.time import Timeline
 from openalpha_cn.runtime.contracts import ResearchRunResult
 from openalpha_cn.runtime.engine import ResearchEngine
 from openalpha_cn.storage.migrations import (
+    ADD_RUNS_MODE_PROJECTION_VERSION,
     BASELINE_VERSION,
     CREATE_QUERY_PATH_INDEXES_VERSION,
     CREATE_VALIDATION_RESULTS_VERSION,
@@ -370,6 +371,7 @@ def test_run_migrates_a_fresh_replay_database_before_constructing_any_store(
         DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
         CREATE_QUERY_PATH_INDEXES_VERSION,
         REWRITE_CONTRACT_IDENTITIES_VERSION,
+        ADD_RUNS_MODE_PROJECTION_VERSION,
     ]
 
 
@@ -384,11 +386,16 @@ def test_run_catches_up_the_demo_migration_on_a_second_call_but_the_index_migrat
     database never constructs those two -- so `create_query_path_indexes` (V2-P0B-015),
     which requires `portfolio_transitions` and `research_reports` to exist, can never
     satisfy its precondition here and stays pending forever -- and so, transitively, does
-    everything ordered after it, which is now `rewrite_contract_identities` (`V2-P4-001`).
+    everything ordered after it, which is now `rewrite_contract_identities` (`V2-P4-001`) and
+    `add_runs_mode_projection` (`V2-P4-002`).
     That is harmless here and is the reason `V2-P4-001` bumped no contract a replay database
     writes without also being able to rewrite it: a replay database's `runs`/`decisions` rows
     are written by this build, at the current version, so there is nothing for the identity
-    rewrite to do against one. That is the deliberate, documented consequence of routing this
+    rewrite to do against one. `V2-P4-002` is harmless for the complementary reason: its
+    column and index are in `SQLiteRunRepository`'s own `CREATE TABLE`, so a replay database's
+    `runs` carries both from the moment the store creates it -- the pending migration has
+    nothing left to retrofit, only an audit row it never gets to write. That is the
+    deliberate, documented consequence of routing this
     database through the same unmodified migration engine everything else uses (see
     `ReplayRunner.run`'s docstring) instead of inventing a replay-specific migration subset.
     """
@@ -416,6 +423,7 @@ def test_run_catches_up_the_demo_migration_on_a_second_call_but_the_index_migrat
     assert [m.version for m in status.pending] == [
         CREATE_QUERY_PATH_INDEXES_VERSION,
         REWRITE_CONTRACT_IDENTITIES_VERSION,
+        ADD_RUNS_MODE_PROJECTION_VERSION,
     ]
 
 

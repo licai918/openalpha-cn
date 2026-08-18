@@ -7,6 +7,7 @@ from typer.testing import CliRunner
 
 from openalpha_cn.cli import app
 from openalpha_cn.storage.migrations import (
+    ADD_RUNS_MODE_PROJECTION_VERSION,
     BASELINE_VERSION,
     CREATE_QUERY_PATH_INDEXES_VERSION,
     CREATE_VALIDATION_RESULTS_VERSION,
@@ -32,6 +33,7 @@ def test_migrate_status_reports_pending_migrations_for_a_fresh_runtime_dir(tmp_p
         DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
         CREATE_QUERY_PATH_INDEXES_VERSION,
         REWRITE_CONTRACT_IDENTITIES_VERSION,
+        ADD_RUNS_MODE_PROJECTION_VERSION,
     ]
 
 
@@ -111,12 +113,13 @@ def test_migrate_run_converges_after_it_constructs_stores_then_reports_up_to_dat
 
     second = runner.invoke(app, ["migrate", "run", "--runtime-dir", str(runtime_dir)])
     assert second.exit_code == 0, second.output
-    # Both still-deferring migrations (demo, then create_query_path_indexes -- task 21)
-    # catch up together here: the first call's build_storage() constructed every store,
-    # so both migrations' preconditions are met by the time this second call's
+    # Every still-deferring migration (demo, create_query_path_indexes -- task 21,
+    # rewrite_contract_identities -- V2-P4-001, add_runs_mode_projection -- V2-P4-002)
+    # catches up together here: the first call's build_storage() constructed every store,
+    # so all of their preconditions are met by the time this second call's
     # run_migrations() runs.
     assert (
-        f"migrated {CREATE_VALIDATION_RESULTS_VERSION} -> {REWRITE_CONTRACT_IDENTITIES_VERSION}"
+        f"migrated {CREATE_VALIDATION_RESULTS_VERSION} -> {ADD_RUNS_MODE_PROJECTION_VERSION}"
         in second.output
     )
     assert "up to date" not in second.output
@@ -126,7 +129,7 @@ def test_migrate_run_converges_after_it_constructs_stores_then_reports_up_to_dat
         app, ["migrate", "status", "--runtime-dir", str(runtime_dir), "--json"]
     )
     status_after_second = json.loads(status_result.output)
-    assert status_after_second["current_version"] == REWRITE_CONTRACT_IDENTITIES_VERSION
+    assert status_after_second["current_version"] == ADD_RUNS_MODE_PROJECTION_VERSION
     assert status_after_second["pending"] == []
 
     third = runner.invoke(app, ["migrate", "run", "--runtime-dir", str(runtime_dir)])

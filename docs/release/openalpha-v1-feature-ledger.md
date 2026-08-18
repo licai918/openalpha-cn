@@ -4,8 +4,8 @@
 
 ## 对账结论
 
-- 功能总数: 175
-- 当前真实完成: 170 (97.14%)
+- 功能总数: 176
+- 当前真实完成: 171 (97.16%)
 - `UNREVIEWED=0`
 - `UNKNOWN=0`
 - `legacy_acceptance_rows=86` (历史散文验收、尚未绑定为可执行 pytest/CI 断言)
@@ -18,7 +18,7 @@
 | `DEFERRED` | 1 |
 | `ENHANCED_REPLACEMENT` | 20 |
 | `EXCLUDED` | 4 |
-| `NATIVE_COMPLETE` | 149 |
+| `NATIVE_COMPLETE` | 150 |
 
 ## 功能明细
 
@@ -199,6 +199,7 @@
 | `OA-RUN-001` | operations | RunManifest has a content-addressed identity, and the ledger carries it | `NATIVE_COMPLETE` | `src/openalpha_cn/domain/run.py#RunManifest;src/openalpha_cn/domain/run.py#RUN_MANIFEST_UNADDRESSED_FIELDS;src/openalpha_cn/domain/run.py#RUN_MANIFEST_ID_PATTERN;src/openalpha_cn/domain/decision.py#DecisionLedger;src/openalpha_cn/domain/_identity.py#stable_model_id` | `tests/integration/test_run_identity.py;tests/unit/domain/test_contract_identity.py` | `pytest` | `tests/integration/test_run_identity.py::test_changing_config_digest_alone_moves_the_run_level_id_and_the_decision_id` |
 | `OA-RUN-002` | storage | The contract bump rewrites stored identities and every reference to them | `NATIVE_COMPLETE` | `src/openalpha_cn/storage/migrations.py#_rewrite_contract_identities;src/openalpha_cn/storage/migrations.py#_audit_identity_rewrite;src/openalpha_cn/storage/migrations.py#UnmigratableHorizonError;src/openalpha_cn/domain/versioning.py#IdentityRewriteRequiredError;src/openalpha_cn/domain/run.py#RunManifestV1;src/openalpha_cn/domain/decision.py#DecisionLedgerV1` | `tests/integration/storage/test_identity_rewrite.py;tests/integration/storage/test_migrations.py;tests/integration/storage/test_versioned_reads.py` | `pytest` | `tests/integration/storage/test_identity_rewrite.py::test_every_reference_to_the_moved_decision_follows_it_in_the_same_transaction` |
 | `OA-PANEL-029` | panel | An as-of-sensitive session-level read of daily_basic, so a residual can be built inside the year it is about | `NATIVE_COMPLETE` | `src/openalpha_cn/panel_ingest.py#_read_visible_price_session;src/openalpha_cn/panel_ingest.py#load_daily_valuations;src/openalpha_cn/panel_ingest.py#_sessions_published_through;src/openalpha_cn/panel_ingest.py#daily_basic_requirement;src/openalpha_cn/panel_ingest.py#_read_price_session;src/openalpha_cn/panel_ingest.py#_session_census;src/openalpha_cn/panel/store.py#PanelStore;src/openalpha_cn/panel/catalog.py#ROW_FILTERABLE_ISSUE_CODES;src/openalpha_cn/panel/catalog.py#VISIBLE_SLICE_RECHECKS;src/openalpha_cn/domain/daily_prices.py#DAILY_AVAILABILITY_TIME;src/openalpha_cn/domain/factor_neutralization.py#KNOWN_NEUTRALIZATION_LIMITATIONS;src/openalpha_cn/panel_neutralization.py#load_industry_market_cap_cross_section;src/openalpha_cn/backtest/factor_ic.py#KNOWN_IC_LIMITATIONS;src/openalpha_cn/backtest/factor_experiment.py#KNOWN_EXPERIMENT_LIMITATIONS;src/openalpha_cn/backtest/factor_portfolio.py#KNOWN_QUANTILE_PORTFOLIO_LIMITATIONS;src/openalpha_cn/backtest/factor_redundancy.py#KNOWN_REDUNDANCY_LIMITATIONS;src/openalpha_cn/factor_view.py#KNOWN_FACTOR_RUN_LIMITATIONS` | `tests/integration/panel/test_daily_panel_ingest.py;tests/integration/panel/test_factor_neutralizations.py;tests/unit/panel/test_visible_read_callers.py;tests/unit/domain/test_factor_neutralization.py;tests/unit/test_known_limitation_registries.py` | `pytest` | `tests/integration/panel/test_factor_neutralizations.py::test_a_residual_built_at_a_mid_year_as_of_is_visible_at_that_same_as_of` |
+| `OA-STORAGE-001` | storage | Runs are listable by mode without parsing every payload | `NATIVE_COMPLETE` | `src/openalpha_cn/storage/sqlite.py#RUNS_MODE_COLUMN_DDL;src/openalpha_cn/storage/sqlite.py#RUNS_MODE_INDEX_DDL;src/openalpha_cn/storage/sqlite.py#ensure_runs_mode_projection;src/openalpha_cn/storage/sqlite.py#list_runs;src/openalpha_cn/storage/migrations.py#_add_runs_mode_projection;src/openalpha_cn/storage/migrations.py#_audit_runs_mode_projection;src/openalpha_cn/storage/migrations.py#RunsModeProjectionError` | `tests/integration/storage/test_runs_mode_column.py;tests/integration/storage/test_migrations.py;tests/unit/runtime/test_composition_migrations.py` | `pytest` | `tests/integration/storage/test_runs_mode_column.py::test_listing_one_mode_seeks_the_index_instead_of_scanning_the_table` |
 
 ## 边界
 

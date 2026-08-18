@@ -6,6 +6,21 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Added
 
+- **`runs.mode` is a queryable, indexed column, and the payload is still its only copy.**
+  Listing every `paper` run used to mean a full table scan plus one JSON parse per stored run,
+  because `mode` existed only inside the opaque `runs.payload`. It is now a `GENERATED ALWAYS
+  AS (json_extract(payload, '$.mode')) VIRTUAL` column with an index on `(mode, run_id)`, and
+  `SQLiteRunRepository.list_runs(mode=...)` is the query that uses it. A generated column
+  rather than a written one so there is no second copy to drift: SQLite derives it, refuses
+  every attempt to write it, and recomputes it whenever the payload changes. Measured through
+  `list_runs` on 100,000 stored runs: 461 ms → 106 ms for a one-in-five spread, 450 ms →
+  5.3 ms at one-in-a-hundred, 437 ms → 0.8 ms at one-in-a-thousand — the saving is rows *not*
+  parsed, so it scales with how rare the mode is rather than with the table. Most of the first
+  win is the column rather than the index, which is why both were measured separately.
+  Migration 6, `add_runs_mode_projection`, makes the same change a recorded, backed-up event on
+  an existing database and re-derives the projection in Python before committing, so a
+  generating expression that silently produced `NULL` for every row rolls the migration back
+  instead of turning every mode-filtered listing into a confident empty answer.
 - **A factor plane reachable from a command line.** `openalpha factor build` computes and
   stores the raw, processed and neutralised tiers through the real `compute_factor`,
   `apply_factor_transform` and `apply_factor_neutralization` and the three write-time

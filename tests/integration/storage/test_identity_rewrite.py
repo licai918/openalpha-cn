@@ -48,6 +48,7 @@ from openalpha_cn.runtime.composition import build_storage
 from openalpha_cn.storage.batch import SQLiteBatchTaskStore
 from openalpha_cn.storage.memory import SQLiteResearchMemory
 from openalpha_cn.storage.migrations import (
+    ADD_RUNS_MODE_PROJECTION_VERSION,
     REWRITE_CONTRACT_IDENTITIES_VERSION,
     MigrationFailedError,
     UnmigratableHorizonError,
@@ -254,7 +255,7 @@ def test_a_pre_p4_database_reads_back_at_the_current_version_after_migrating(
 
     run_migrations(path, clock=migration_clock)
 
-    assert read_status(path).current_version == REWRITE_CONTRACT_IDENTITIES_VERSION
+    assert read_status(path).current_version == ADD_RUNS_MODE_PROJECTION_VERSION
     repository = SQLiteRunRepository(path)
     manifest = repository.get_run(RUN_ID)
     assert manifest is not None
@@ -492,7 +493,7 @@ def test_build_storage_migrates_a_pre_p4_runtime_directory_end_to_end(
 
     storage = build_storage(runtime_dir=runtime_dir, clock=migration_clock)
 
-    assert storage.migration_result.to_version == REWRITE_CONTRACT_IDENTITIES_VERSION
+    assert storage.migration_result.to_version == ADD_RUNS_MODE_PROJECTION_VERSION
     decision = storage.repository.get_decision_for_run(RUN_ID)
     assert decision is not None
     assert decision.decision_id != before["decision_id"]
