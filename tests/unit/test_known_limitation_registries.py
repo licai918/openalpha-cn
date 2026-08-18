@@ -15,7 +15,7 @@ inside a docstring, which is prose the runner never reads.
 ## Why the mechanism is not copied as it stands
 
 `007`'s form is "one test per entry, named after the entry". At three entries that is exactly
-right. Across the twenty code-carrying registries there are **193** entries -- 69 in
+right. Across the twenty code-carrying registries there are **197** entries -- 69 in
 `KNOWN_PANEL_LIMITATIONS` alone -- and it stops being right somewhere well before that, for
 three reasons and not one:
 
@@ -388,5 +388,5 @@ def test_the_registries_together_carry_the_entry_count_the_report_folds() -> Non
 
     assert len(codes["KNOWN_PANEL_LIMITATIONS"]) == folded + plane_wide + 1
     assert all(codes[registry] for registry in codes)
-    assert sum(len(entries) for entries in codes.values()) >= 189
-    assert len(codes["KNOWN_PANEL_LIMITATIONS"]) >= 65
+    assert sum(len(entries) for entries in codes.values()) >= 197
+    assert len(codes["KNOWN_PANEL_LIMITATIONS"]) >= 69
