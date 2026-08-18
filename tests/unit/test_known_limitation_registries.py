@@ -15,7 +15,7 @@ inside a docstring, which is prose the runner never reads.
 ## Why the mechanism is not copied as it stands
 
 `007`'s form is "one test per entry, named after the entry". At three entries that is exactly
-right. Across the twenty-one code-carrying registries there are **204** entries -- 69 in
+right. Across the twenty-two code-carrying registries there are **211** entries -- 69 in
 `KNOWN_PANEL_LIMITATIONS` alone -- and it stops being right somewhere well before that, for
 three reasons and not one:
 
@@ -40,8 +40,9 @@ per entry does not scale" stops being true if the registries shrink back towards
 The figures above are re-measured whenever a registry grows -- `V2-P3-017` added a twelfth
 financial-statement limitation and moved them from 187 / 64, `V2-P3-016` added a whole
 twentieth registry (`KNOWN_INDEX_PRICE_LIMITATIONS`, four entries) and moved them from 189 / 65,
-and `V2-P4-004` added a twenty-first (`KNOWN_CROSS_SECTION_LIMITATIONS`, seven entries) and moved
-them from 197 / 69 -- and they had already drifted twice
+`V2-P4-004` added a twenty-first (`KNOWN_CROSS_SECTION_LIMITATIONS`, seven entries) and moved
+them from 197 / 69, and `V2-P4-005` added a twenty-second (`KNOWN_RANKING_LIMITATIONS`, seven
+entries) and moved them from 204 / 69 -- and they had already drifted twice
 before the floor existed: `128 entries -- 59 in KNOWN_PANEL_LIMITATIONS` was still written here
 when the counts were 134 and 62, because the P2 merge that folded in an eleventh registry updated
 the arithmetic below and left the prose alone. That is the drift this module exists to stop,
@@ -84,6 +85,7 @@ from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Final, Protocol
 
+from openalpha_cn.backtest.candidate_ranking import KNOWN_RANKING_LIMITATIONS
 from openalpha_cn.backtest.cross_section import KNOWN_CROSS_SECTION_LIMITATIONS
 from openalpha_cn.backtest.execution import KNOWN_EXECUTION_LIMITATIONS
 from openalpha_cn.backtest.factor_experiment import KNOWN_EXPERIMENT_LIMITATIONS
@@ -134,6 +136,7 @@ LIMITATION_REGISTRIES: Final[dict[str, Sequence[_Limitation]]] = {
     "KNOWN_REDUNDANCY_LIMITATIONS": KNOWN_REDUNDANCY_LIMITATIONS,
     "KNOWN_TRADEABILITY_LIMITATIONS": KNOWN_TRADEABILITY_LIMITATIONS,
     "KNOWN_CROSS_SECTION_LIMITATIONS": KNOWN_CROSS_SECTION_LIMITATIONS,
+    "KNOWN_RANKING_LIMITATIONS": KNOWN_RANKING_LIMITATIONS,
     "KNOWN_ADJUSTMENT_LIMITATIONS": KNOWN_ADJUSTMENT_LIMITATIONS,
     "KNOWN_PRICE_LIMITATIONS": KNOWN_PRICE_LIMITATIONS,
     "KNOWN_FINANCIAL_STATEMENT_LIMITATIONS": KNOWN_FINANCIAL_STATEMENT_LIMITATIONS,
@@ -153,14 +156,15 @@ LIMITATION_REGISTRIES: Final[dict[str, Sequence[_Limitation]]] = {
 **None of `KNOWN_NEUTRALIZATION_LIMITATIONS`, `KNOWN_IC_LIMITATIONS`,
 `KNOWN_REDUNDANCY_LIMITATIONS`, `KNOWN_QUANTILE_PORTFOLIO_LIMITATIONS`,
 `KNOWN_TRADEABILITY_LIMITATIONS`, `KNOWN_CROSS_SECTION_LIMITATIONS`,
-`KNOWN_EXPERIMENT_LIMITATIONS` or
+`KNOWN_RANKING_LIMITATIONS`, `KNOWN_EXPERIMENT_LIMITATIONS` or
 `KNOWN_FACTOR_RUN_LIMITATIONS` is folded into `KNOWN_PANEL_LIMITATIONS`**, unlike the eight
 dataset registries below them. `panel_doctor` folds a registry when it bounds a *fetched* dataset,
-and all eight of these bound derived planes -- no upstream, no `DATASET_CADENCE` entry and nothing
+and all nine of these bound derived planes -- no upstream, no `DATASET_CADENCE` entry and nothing
 for a health report to be fresh against. Folding any of them would put entries about a
 regression's, a correlation's, a simulated round trip's, a participation cap's, a shortlist's, a
-sealed experiment report's or a public face's own semantics into a report about ingest coverage,
-and would move `test_the_registries_together_carry_the_entry_count_the_report_folds`' arithmetic
+candidate list's, a sealed experiment report's or a public face's own semantics into a report
+about ingest coverage, and would move
+`test_the_registries_together_carry_the_entry_count_the_report_folds`' arithmetic
 for registries the report cannot say anything about.
 
 `KNOWN_FACTOR_RUN_LIMITATIONS` (`V2-P3-015`) is the eighteenth and the first to live on a *face*
@@ -172,6 +176,13 @@ answer, and a code named only in prose is a code the suite has no opinion about.
 197 / 69. Its seven entries bound a *selection* rather than a measurement -- what a shortlist is
 not, what the hard filter is worth (0.14% of an ordinary session, measured), and what the
 winsorization's clip block does to a top-N cut on each of the three tiers.
+
+`KNOWN_RANKING_LIMITATIONS` (`V2-P4-005`) is the twenty-second and moved the totals from 204 / 69.
+Its seven entries bound a *join*: a candidate ranking holds the panel plane's shortlist beside the
+evidence plane's conclusions, so its entries say what it inherits without repairing (every caveat
+on the funnel's order), what it cannot yet carry (a model prediction), what its 因子暴露 column is
+and is not (a characteristic, never a fitted loading), and why D16's `绝不直接创建组合订单` is four
+lint-imports contracts rather than a sentence.
 
 Imported and named rather than reached through `importlib`: a test may import every one of
 these directly, so a name-to-module indirection would buy nothing and would hide from the
@@ -292,7 +303,7 @@ def test_the_registry_table_is_every_known_registry_in_the_source_tree() -> None
     }
 
     assert found == set(LIMITATION_REGISTRIES) | set(CODELESS_REGISTRIES)
-    assert len(LIMITATION_REGISTRIES) == 21
+    assert len(LIMITATION_REGISTRIES) == 22
     assert set(LIMITATION_REGISTRIES) & set(CODELESS_REGISTRIES) == set()
 
 
@@ -397,5 +408,5 @@ def test_the_registries_together_carry_the_entry_count_the_report_folds() -> Non
 
     assert len(codes["KNOWN_PANEL_LIMITATIONS"]) == folded + plane_wide + 1
     assert all(codes[registry] for registry in codes)
-    assert sum(len(entries) for entries in codes.values()) >= 204
+    assert sum(len(entries) for entries in codes.values()) >= 211
     assert len(codes["KNOWN_PANEL_LIMITATIONS"]) >= 69
