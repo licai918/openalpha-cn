@@ -637,8 +637,9 @@ BACKTEST_MODULES_EXEMPT_FROM_THE_STORE_CONTRACT: dict[str, str] = {
 
 Written as the *complement* of a directory glob rather than as the source list itself, which is
 the whole point: `test_the_two_backtest_study_contracts_cover_every_module_in_the_package` holds
-`source_modules + these` against the real directory in both directions, so a tenth
+`source_modules + these` against the real directory in both directions, so an eleventh
 `backtest/*.py` is red until somebody either puts it in the contract or argues for it here.
+`V2-P4-004`'s `cross_section.py` was the tenth and this test is what made it join both.
 """
 
 BACKTEST_MODULES_EXEMPT_FROM_THE_RUNTIME_CONTRACT: dict[str, str] = {
@@ -653,7 +654,7 @@ BACKTEST_MODULES_EXEMPT_FROM_THE_RUNTIME_CONTRACT: dict[str, str] = {
 """One module wider, which is why the two contracts are two and not one.
 
 Folding them together would have meant either exempting `validation.py` from a store contract it
-passes, or making `openalpha_cn.runtime` legal for all nine remaining study modules on the
+passes, or making `openalpha_cn.runtime` legal for all ten remaining study modules on the
 strength of one module's data-contract import.
 """
 
@@ -690,7 +691,7 @@ def test_the_two_backtest_study_contracts_cover_every_module_in_the_package() ->
     """Each contract's source list plus its named exemptions is exactly what is on disk.
 
     An explicit `source_modules` list is what makes these two contracts possible at all -- there
-    is no "package except these" form -- and it is also the thing a tenth `backtest/*.py` would
+    is no "package except these" form -- and it is also the thing a new `backtest/*.py` would
     walk straight past. So the list is checked against the directory in both directions: a module
     in neither the list nor the exemption table fails, and an exemption for a module that no
     longer exists fails too.
@@ -736,7 +737,7 @@ def test_the_backtest_contracts_forbid_the_targets_the_acceptance_probe_reached(
     assert "numpy" not in whole_package, (
         "numpy cannot be forbidden package-wide: backtest/replay.py reaches runtime/seeding.py, "
         "whose numpy import is a real guarded optional-determinism hook. It is forbidden for the "
-        "ten study modules instead, which is where ADR-0003's decision actually bites"
+        "eleven study modules instead, which is where ADR-0003's decision actually bites"
     )
     assert {"numpy", "openalpha_cn.storage"} <= store
     assert composition == {"openalpha_cn.runtime"}

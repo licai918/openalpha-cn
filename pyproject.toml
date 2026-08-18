@@ -207,7 +207,9 @@ forbidden_modules = ["duckdb", "sqlite3"]
 # "backtest may not import panel or storage" appears five times in P3 source, once inside a
 # KNOWN_EXPERIMENT_LIMITATIONS entry -- load-bearing, and until now enforced by nothing.
 # `tests/unit/test_import_layering.py` pins each contract's source list against the directory and
-# drives a probe file through each one, so a tenth `backtest/*.py` cannot arrive unguarded.
+# drives a probe file through each one, so an eleventh `backtest/*.py` cannot arrive
+# unguarded. `V2-P4-004`'s `cross_section.py` is the tenth and joined both lists on arrival,
+# which is the property that test exists to create.
 
 [[tool.importlinter.contracts]]
 id = "backtest-no-numeric-stack-or-panel-plane"
@@ -248,6 +250,7 @@ id = "backtest-studies-touch-no-store"
 name = "every backtest module except the replay harness reaches no store and no numpy"
 type = "forbidden"
 source_modules = [
+  "openalpha_cn.backtest.cross_section",
   "openalpha_cn.backtest.event_study",
   "openalpha_cn.backtest.execution",
   "openalpha_cn.backtest.factor_experiment",
@@ -286,6 +289,7 @@ id = "backtest-studies-reach-no-composition-root"
 name = "every backtest module except the replay harness and the outcome validator reaches no composition root"
 type = "forbidden"
 source_modules = [
+  "openalpha_cn.backtest.cross_section",
   "openalpha_cn.backtest.event_study",
   "openalpha_cn.backtest.execution",
   "openalpha_cn.backtest.factor_experiment",
@@ -302,5 +306,5 @@ forbidden_modules = ["openalpha_cn.runtime"]
 # `runtime.contracts.ResearchRunResult`, a pydantic result model, and is already one of the four
 # CONTRACT_ONLY_CONSUMERS that `test_import_layering.py` proves never reach `runtime.engine` or
 # the storage modules it owns. Folding the two lists together would have meant either exempting
-# `validation.py` from the store contract it passes, or making `runtime` legal for all nine study
+# `validation.py` from the store contract it passes, or making `runtime` legal for all ten study
 # modules on the strength of one module's data-contract import.
