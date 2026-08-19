@@ -4026,10 +4026,13 @@ _BUILD_FACTOR_YEAR_HELP: Final[str] = (
     "A partition year every read of this build is scoped to, repeatable, the same vocabulary "
     "`openalpha panel build --year` writes with. Named `--year` and not `--start/--end` because "
     "`factor run --start/--end` are prediction DAYS and these are partition YEARS. A session "
-    "factor with a 125-session lookback at the start of a year needs the year before it too; the "
-    "statement partitions are keyed by ANNOUNCEMENT year, so five report periods usually need two "
-    "of them; and the registry partitions are keyed by LIFECYCLE year, so a prefix of the stored "
-    "years silently shortens the universe rather than refusing."
+    "factor with a 125-session lookback at the start of a year needs the year before it too; and "
+    "the statement partitions are keyed by ANNOUNCEMENT year, so five report periods usually need "
+    "two of them. The registry is the exception and does not have to be counted: its partitions "
+    "are keyed by LIFECYCLE year, so one year's partition is that year's listings rather than "
+    "that year's market, and load_stock_universe reads every lifecycle year the store holds "
+    "beneath this range on its own. Before V2-P4-059 it did not, and --year 2026 over a "
+    "5,545-security store scored eleven names and exited 0."
 )
 _BUILD_STALENESS_HELP: Final[str] = (
     "How many days old the newest row of a read partition may be. Every panel_ingest requirement "

@@ -211,6 +211,22 @@ def _seed_registry(tmp_path: Path) -> PanelStore:
     return store
 
 
+def _seed_registry_from(tmp_path: Path, first: int) -> PanelStore:
+    """Seed only the lifecycle years at or after `first`, the way a store backfilled from a
+    start year leaves one.
+
+    `V2-P4-059` made this the only way to get a read whose first year is not the store's own
+    first year: `load_stock_universe` now supplies every held year beneath the requested range,
+    so on a fully seeded store a short read cannot be asked for. The two guards below are about
+    what happens when there is genuinely no history to supply, which is this shape.
+    """
+    store = _store(tmp_path)
+    for year, yearly in split_panel_batch_by_year(_registry_batch(FETCHED_AT)):
+        if year >= first:
+            write_panel_batch(store, yearly, year=year)
+    return store
+
+
 def _seed_namechange(tmp_path: Path) -> PanelStore:
     store = _store(tmp_path)
     for year, items in NAMECHANGE_BY_YEAR.items():
@@ -326,6 +342,88 @@ def test_reading_fewer_years_than_as_of_covers_shrinks_the_horizon_not_the_answe
     assert universe.snapshot_date == date(2019, 12, 31)
     assert universe.status_on("000018.SZ", date(2023, 1, 3)) is ListingStatus.beyond_snapshot
     assert universe.is_listed("000018.SZ", date(2019, 12, 31)) is True
+
+
+# --- the history beneath the requested range (`V2-P4-059`/`V2-P4-060`) ---------------------
+
+
+def test_one_requested_year_still_reads_the_lifecycle_years_beneath_it(
+    tmp_path: Path,
+) -> None:
+    """The defect `V2-P4-059` closed, at the loader.
+
+    `stock_basic` is keyed by the year a security's life *changed*, so the newest partition is
+    that year's listings and terminations rather than that year's market. `factor build --year
+    2026` handed exactly that year to this read and got a universe the size of one year's
+    listings -- eleven securities scored out of a 5,545-security store, exit 0. The years the
+    caller did not name are the history underneath its window, and they are read whether it
+    named them or not.
+    """
+    store = _seed_registry(tmp_path)
+    newest = REGISTRY_YEARS[-1]
+
+    one_year = load_stock_universe(store, years=(newest,), as_of=FETCHED_AT, max_staleness=None)
+    every_year = load_stock_universe(
+        store, years=REGISTRY_YEARS, as_of=FETCHED_AT, max_staleness=None
+    )
+
+    assert one_year == every_year
+    assert one_year.security_count == len(REGISTRY_ITEMS)
+    assert one_year.completeness().years_read == REGISTRY_YEARS
+
+
+def test_a_delisting_whose_listing_year_the_caller_did_not_name_is_not_a_partial_read(
+    tmp_path: Path,
+) -> None:
+    """The defect `V2-P4-060` closed, and the reason it is the same defect.
+
+    A security's delisting row lives in the year it died and its listing row in the year it
+    listed, so naming only the newest year produces a delisting with no listing --
+    `stock_universe_from_panel_rows` refuses that, correctly, as a partial read. Reading the
+    listing years is what stops it being one. `000018.SZ` listed on 1992-06-16 and was
+    terminated on 2020-01-07 -- twenty-eight partitions apart in this fixture's own rows, which
+    are the ones a live probe captured on 2026-08-08.
+    """
+    store = _seed_registry(tmp_path)
+
+    universe = load_stock_universe(store, years=(2020,), as_of=FETCHED_AT, max_staleness=None)
+
+    assert universe.security("000018.SZ").listed_on == date(1992, 6, 16)
+    assert universe.security("000018.SZ").delisted_on == date(2020, 1, 7)
+    assert 1992 in universe.completeness().years_read
+
+
+def test_the_supplied_history_does_not_move_the_snapshot_horizon(tmp_path: Path) -> None:
+    """Widening downwards cannot install a look-ahead, and this is the property that says so.
+
+    The horizon is `as_of` pulled back to the day before the first year the store holds and the
+    read skipped -- which keys off the *newest* year read. Supplying earlier years does not move
+    it, so a prefix read still answers `beyond_snapshot` for a question past its window and
+    still refuses to report the securities that died after it as listed.
+    """
+    store = _seed_registry(tmp_path)
+
+    universe = load_stock_universe(store, years=(2019,), as_of=FETCHED_AT, max_staleness=None)
+
+    assert universe.snapshot_date == date(2019, 12, 31)
+    assert universe.status_on("000018.SZ", date(2023, 1, 3)) is ListingStatus.beyond_snapshot
+    assert universe.completeness().years_read == _upto(2019)
+
+
+def test_a_store_with_no_history_to_supply_still_refuses_the_partial_read_by_name(
+    tmp_path: Path,
+) -> None:
+    """The residue, kept reachable on purpose.
+
+    Widening removes the *cause* on a store the ingest wrote whole; it cannot invent partitions
+    that were never written. A store whose earliest lifecycle years are absent still yields a
+    delisting with no listing, and that must stay a named refusal rather than becoming an
+    answer -- it is what `factor_view._REGISTRY_FAULTS` reports instead of withholding.
+    """
+    store = _seed_registry_from(tmp_path, 2020)
+
+    with pytest.raises(StockUniverseError, match="has a delisting row and no listing row"):
+        load_stock_universe(store, years=(2020,), as_of=FETCHED_AT, max_staleness=None)
 
 
 def test_skipping_a_year_the_store_holds_is_refused_rather_than_silently_smaller(
@@ -854,8 +952,12 @@ def test_a_coverage_demand_names_the_years_the_read_stops_short_of(tmp_path: Pat
 
 def test_a_satisfied_coverage_demand_is_invisible(tmp_path: Path) -> None:
     """The demand is a precondition, not a filter: when it holds, the universe is the one the
-    same read produces without it."""
-    store = _seed_registry(tmp_path)
+    same read produces without it.
+
+    On a store seeded only from 2016, so the read really is the one year and the equality is
+    about the demand rather than about the history `V2-P4-059` now supplies underneath it.
+    """
+    store = _seed_registry_from(tmp_path, 2016)
     plain = load_stock_universe(store, years=(2016,), as_of=FETCHED_AT, max_staleness=None)
     demanded = load_stock_universe(
         store,
@@ -879,8 +981,12 @@ def test_a_day_before_the_first_year_read_is_refused_rather_than_answered_empty(
     read, not an empty market, and `years_read` is what lets the difference be seen. A universe
     built straight from `SecurityLifecycle` values has no window to check and keeps the empty
     answer.
+
+    Still reachable after `V2-P4-059`, and this is the shape that reaches it: the store's
+    earliest lifecycle partition *is* 2016, so there is no history to supply and the read is
+    genuinely short. On a fully seeded store the same call now reads from 1990 and answers.
     """
-    store = _seed_registry(tmp_path)
+    store = _seed_registry_from(tmp_path, 2016)
     universe = load_stock_universe(store, years=(2016,), as_of=FETCHED_AT, max_staleness=None)
 
     with pytest.raises(UniverseHorizonError, match="the first lifecycle year this universe"):

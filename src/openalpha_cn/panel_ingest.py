@@ -962,6 +962,44 @@ def load_stock_universe(
     inconsistent -- an orphan delisting row, a duplicated security -- is refused afterwards by
     `stock_universe_from_panel_rows`.
 
+    ## `years` is the top of the window; the history underneath it is not the caller's to name
+
+    Every lifecycle year the store holds **below the earliest requested year** is read whether
+    it was asked for or not, and that is the fix `V2-P4-059` and `V2-P4-060` share. The reason
+    is the partitioning: this dataset is keyed by the year a security's life *changed*, so the
+    2026 partition is "the securities that listed or died in 2026" and not "the market in 2026"
+    -- while `trade_cal` and `daily` are keyed by the year their data is *about*. One `--year`
+    over all three therefore asks three different questions, and the registry's answer to it was
+    the wrong one twice:
+
+    - **The universe came back the size of one year's listings.** `factor build --year 2026`
+      over a synthetic market of `V2-P4-004`'s measured 5,545 securities scored **eleven**,
+      wrote them, exited 0, and `shortlist run` published a list cut from those eleven. The
+      only trace was `universe_counts: [12]`, a count of the read rather than of the store.
+    - **A mid-window delisting made the read structurally invalid.** A security that listed in
+      1996 and died in 2026 has its listing row in the 1996 partition, so a 2026-only read is a
+      delisting with no listing -- which `stock_universe_from_panel_rows` refuses, correctly and
+      by name, as a partial read. Reading 1996 alongside 2026 is what stops it being one.
+
+    Widening **downwards** is the direction that cannot install a look-ahead, which is why it is
+    safe to do unasked: an earlier lifecycle event is strictly more knowable than a later one,
+    and every horizon rule below keys off `resolved[-1]`, which the widening does not move. What
+    the caller still states is the *top* of the window and which years it asserts must exist --
+    both unchanged, and both still refused when they cannot be satisfied.
+
+    The alternative was to widen the interior too, so that `years=(2020, 2026)` on a store
+    holding 1991..2026 filled in 2021..2025 instead of being refused by the gap rule below. It
+    is declined: those are years inside a range the caller *stated*, so a hole in them is a
+    claim about coverage that turned out to be false, and answering it silently would retire a
+    guard that is doing real work. Years beneath the range were never claimed either way.
+
+    Making the caller name the earlier years instead was measured and does not exist as a
+    remedy. `--year` is one scope over three datasets, so `--year 2026 --year 2010` asks the
+    calendar for a 2010 partition and the price panel for a 2010 year; on a store built the way
+    `README` builds one, neither is there, and putting them there is the ~282,000-request
+    backfill `panel build --help` prices at "days rather than hours" -- to run a **one-day**
+    reversal.
+
     ## The snapshot date stops at the first year the store holds and the caller did not read
 
     The universe's upper horizon is not `as_of` alone. A caller reading 1990..2019 at
@@ -1006,26 +1044,44 @@ def load_stock_universe(
     nothing; on one whose ingest is not, it is the difference between a refusal and a
     reconstruction that reports the dead as listed.
 
-    Starting the range after the first listing is not refused either, for the same reason, and
-    what catches it in practice is the orphan-delisting rule in
-    `stock_universe_from_panel_rows`: a security that listed in 1991 and died in 2020 has no
-    listing row inside 2015..2020, so that read raises rather than inventing one. What the
-    orphan rule does not catch -- a security that listed before the window and never died -- is
-    caught on the query side instead: `StockUniverse.listed_on` refuses a day earlier than the
-    first year read, because a read that never saw those partitions cannot answer "nobody was
-    listed" for them.
+    Starting the range after the first listing used to be the third fail-open here, left to be
+    caught downstream: a security that listed in 1991 and died in 2020 has no listing row inside
+    2015..2020, so `stock_universe_from_panel_rows` raised rather than inventing one, and a
+    security that listed before the window and never died was caught one layer further on by
+    `StockUniverse.listed_on` refusing a day earlier than the first year read. Both of those
+    guards remain and both are still reachable -- on a store whose earliest lifecycle partitions
+    were never ingested, there is no history to widen into. What changed in `V2-P4-059/060` is
+    that an *ordinary* store no longer produces the state they guard, because the read no longer
+    starts after the first listing when the store has the years to start at it.
 
-    ## Cost, stated rather than discovered
+    ## Cost, measured rather than estimated
 
-    Readiness is assessed once per requested year, because `read_if_ready()` vets the dataset
-    and reads one partition. `PanelStore.assess_readiness` evaluates the whole requirement each
-    time, so a full-history read re-evaluates all 37 years' catalog rows 37 times. That is the
-    same shape `load_trading_calendar` has, where it is invisible because a calendar load spans
-    a handful of years; here it is 37, and on the fixtures and the real catalog it is still
-    catalog metadata rather than Parquet, so it is milliseconds and not the reason a load is
-    slow. Making it one assessment plus N reads is a change to `read_if_ready`'s contract --
-    `V2-P1-003`'s readiness surface, shared with every other dataset -- and belongs with
-    whichever task first has a load that hurts, not with this one.
+    Readiness is assessed once per year read, because `read_if_ready()` vets the dataset and
+    reads one partition. `PanelStore.assess_readiness` evaluates the whole requirement each
+    time, so a full-history read re-evaluates every year's catalog rows once per year: N
+    partitions cost N**2 coverage lookups.
+
+    **This paragraph used to say that was milliseconds, and `V2-P4-059` measured it and it is
+    not.** On a 36-year registry over `V2-P4-004`'s 5,545-security market, one call is **4.0 s**,
+    of which 4.6 s of profiled time is 1,296 `_read_coverage` round trips and 0.21 s is the
+    Parquet the read actually wanted. The old claim was true of the fixtures it was written
+    against -- a handful of years -- and a whole history is 36, so the quadratic was invisible
+    until something read one.
+
+    Two things follow, and only the first is this function's to fix. The **shape** was already
+    being paid: `cli._stored_universe` and `panel_doctor` have always passed every registered
+    year, so `panel build` and `panel doctor` already spend it once per invocation. What the
+    widening above changes is that `factor build` and `shortlist run` now pay it too, and they
+    pay it **per prediction instant** rather than once. That is the price of the universe being
+    the market rather than one year's listings, and it is the right trade at this size; it would
+    stop being right on a walk-forward with hundreds of instants.
+
+    The remedy is one assessment plus N reads, which cannot be done here: the verdict is
+    identical across all 36 calls, but folding it into a single assessment is a change to
+    `read_if_ready`'s contract -- `V2-P1-003`'s readiness surface, shared with fourteen callers
+    and every other dataset -- and doing it locally would mean this one loader stepping around
+    the fail-closed door the others take, losing its damaged-partition wrapping with it. Filed
+    against `PanelStore` rather than worked around here.
     """
     requested = tuple(sorted(set(years)))
     if not requested:
@@ -1046,8 +1102,16 @@ def load_stock_universe(
                 "terminations are missing, and the universe reports those securities as still "
                 "listed with nothing to signal it"
             )
-    registered = set(store.registered_years(STOCK_BASIC_DATASET)) - set(requested)
-    skipped = sorted(year for year in registered if requested[0] < year < requested[-1])
+    held = store.registered_years(STOCK_BASIC_DATASET)
+    # `resolved` is the caller's window with the store's history underneath it. Everything
+    # added is strictly below `requested[0]`, so `resolved[-1] is requested[-1]` and the two
+    # rules below -- the gap refusal and the snapshot horizon -- judge the same span they
+    # judged before the widening. Both are written against `resolved` because it is the set
+    # this read actually covers; that they could equally be written against `requested` is the
+    # invariant, not a coincidence, and two mutation probes confirmed the equivalence.
+    resolved = tuple(year for year in held if year < requested[0]) + requested
+    registered = set(held) - set(resolved)
+    skipped = sorted(year for year in registered if resolved[0] < year < resolved[-1])
     if skipped:
         raise PanelBatchError(
             f"the requested {STOCK_BASIC_DATASET} years {requested[0]}..{requested[-1]} skip "
@@ -1055,10 +1119,10 @@ def load_stock_universe(
             "terminations and produces a smaller universe that looks entirely plausible"
         )
     requirement = stock_universe_requirement(
-        years=requested, as_of=as_of, max_staleness=max_staleness
+        years=resolved, as_of=as_of, max_staleness=max_staleness
     )
     rows: list[tuple[object, ...]] = []
-    for year in requested:
+    for year in resolved:
         outcome = store.read_if_ready(requirement, year=year, columns=UNIVERSE_PANEL_COLUMNS)
         if outcome.is_blocked:
             raise PanelStorageError(
@@ -1068,10 +1132,10 @@ def load_stock_universe(
             )
         rows.extend(outcome.rows)
     snapshot_date = as_of.astimezone(_resolve_timezone(date_timezone)).date()
-    unread_after = sorted(year for year in registered if year > requested[-1])
+    unread_after = sorted(year for year in registered if year > resolved[-1])
     if unread_after:
         snapshot_date = min(snapshot_date, date(unread_after[0], 1, 1) - timedelta(days=1))
-    return stock_universe_from_panel_rows(rows, snapshot_date=snapshot_date, years_read=requested)
+    return stock_universe_from_panel_rows(rows, snapshot_date=snapshot_date, years_read=resolved)
 
 
 def write_name_history(
