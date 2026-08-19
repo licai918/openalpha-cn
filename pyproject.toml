@@ -66,6 +66,17 @@ dev = [
 # for the tests that pin it.
 addopts = "-ra --strict-config --strict-markers -m \"not e2e\""
 testpaths = ["tests"]
+# Keep a test's `tmp_path` only when that test failed -- which is the only case anyone reads
+# one. Measured, not tuned: this suite writes **4.9 GB** of `tmp_path` per full run (3,790
+# tests; no single test is large, the biggest is 30 MB and the median is far under 1 MB), and
+# pytest's default `retention_policy = "all"` keeps every passing test's directory too. The
+# default `retention_count = 3` bounds that at roughly 15 GB only for runs that *exit* --
+# a run killed by SIGTERM (parallel suites competing for CPU) or by the OOM/ENOSPC killer
+# never prunes, and its numbered directory is orphaned. This machine reached **106 GB** of
+# `pytest-of-<user>/` that way and ran the volume to zero bytes free, which stops being a
+# test-suite problem the moment it happens in CI or on a research box mid-backtest.
+# `"failed"` makes a green run leave nothing behind, so an orphan costs kilobytes.
+tmp_path_retention_policy = "failed"
 markers = [
   "e2e: reaches the real Tushare endpoint with a real token. Deselected by default.",
 ]
@@ -80,7 +91,15 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
-packages = ["openalpha_cn"]
+# `files`, not `packages`. Under this repository's `src/` layout a bare `uv run mypy` with
+# `packages = ["openalpha_cn"]` never reads `src/` -- it resolves the *installed* distribution
+# in `.venv`, finds no `py.typed` marker, and exits 2 with "Package 'openalpha_cn' cannot be
+# type checked". CI stayed green because it never used this config: its step spells
+# `uv run mypy src scripts`, and an explicit path list overrides `files`/`packages` entirely.
+# So the strict type gate was live in CI and dead in the obvious command. These two paths are
+# now the same set, and `test_repository_assets.py::
+# test_a_bare_mypy_checks_exactly_what_ci_passes_on_the_command_line` holds them equal.
+files = ["src", "scripts"]
 
 [[tool.mypy.overrides]]
 # Optional AKShare transitive stubs may use the executing interpreter's syntax.

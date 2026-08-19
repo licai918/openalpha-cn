@@ -633,6 +633,86 @@ def test_quality_workflow_type_check_step_covers_scripts_as_well_as_src() -> Non
     )
 
 
+def _ci_mypy_paths() -> set[str]:
+    """The path arguments `quality.yml`'s type-check step passes to mypy.
+
+    Everything after the `mypy` word that is not a flag. Shared by the two tests below so
+    that "what CI checks" has one reading, not two that can drift apart.
+    """
+    workflow = (ROOT / ".github" / "workflows" / "quality.yml").read_text(encoding="utf-8")
+    command = _step_run_command(_workflow_job_block(workflow, "python"), "mypy")
+    assert command is not None, "quality.yml's python job has no step invoking mypy"
+    argv = shlex.split(command)
+    return {arg for arg in argv[argv.index("mypy") + 1 :] if not arg.startswith("-")}
+
+
+def test_a_bare_mypy_checks_exactly_what_ci_passes_on_the_command_line() -> None:
+    """`uv run mypy` with no arguments must type-check what `quality.yml` type-checks.
+
+    This was measured, not assumed. With `[tool.mypy] packages = ["openalpha_cn"]` and this
+    repository's `src/` layout, a bare `uv run mypy` does not read `src/` at all: it resolves
+    the *installed* distribution inside `.venv`, finds no `py.typed` marker there, and exits
+    **2** with "Package 'openalpha_cn' cannot be type checked due to missing py.typed marker".
+    Nothing gets checked and the command fails.
+
+    CI stayed green through all of it because CI never used that config -- its step spells
+    `uv run mypy src scripts`, and an explicit path list overrides `files`/`packages`
+    entirely. So the type gate was live in exactly one invocation and broken in the obvious
+    one, which is the shape this repository keeps finding: a declared safety property that
+    holds only on the path someone happened to test.
+
+    The two readings are pinned equal here rather than the config simply being fixed, because
+    a fix with no assertion is one edit away from returning -- and the edit that returns it
+    (`packages = [...]`, which is what mypy's own docs reach for first) looks correct.
+
+    Mutation: restore `packages = ["openalpha_cn"]` in place of `files`.
+    """
+    mypy_config = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["tool"][
+        "mypy"
+    ]
+
+    assert "packages" not in mypy_config, (
+        "[tool.mypy] declares `packages`, which resolves the installed distribution rather "
+        "than `src/` and exits 2 on this repository's layout; declare `files` instead"
+    )
+    assert set(mypy_config.get("files", ())) == _ci_mypy_paths(), (
+        f"a bare `uv run mypy` checks {mypy_config.get('files', ())!r} but CI checks "
+        f"{sorted(_ci_mypy_paths())!r}; the two must be the same set"
+    )
+
+
+def test_a_green_run_leaves_no_tmp_path_behind() -> None:
+    """`tmp_path` survives a run only for the tests that failed.
+
+    The number that motivates this is measured, not estimated: a full run writes **4.9 GB**
+    of `tmp_path` across 3,790 tests, and no single test is the problem -- the largest is
+    30 MB and the median is orders of magnitude smaller. pytest's default
+    `retention_policy = "all"` keeps the directory of every *passing* test as well, and the
+    companion default `retention_count = 3` only bounds that for runs that reach their own
+    exit path. A run killed part-way -- competing suites SIGTERMing each other, or the
+    kernel's ENOSPC/OOM killer -- prunes nothing and orphans its numbered directory forever.
+    On this machine those orphans reached **106 GB** and took the volume to zero bytes free,
+    at which point no test can run, `git` cannot write, and the failure presents as an
+    unrelated red build.
+
+    So this is a disk-shaped bug with a config-shaped fix, and the assertion is here rather
+    than nowhere because the fix is a single line whose absence is invisible for weeks: a
+    green suite looks identical either way until a volume fills.
+
+    Mutation: delete `tmp_path_retention_policy` from `[tool.pytest.ini_options]`, or set it
+    back to `"all"`.
+    """
+    ini_options = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["tool"][
+        "pytest"
+    ]["ini_options"]
+
+    assert ini_options.get("tmp_path_retention_policy") == "failed", (
+        '[tool.pytest.ini_options] must set tmp_path_retention_policy = "failed"; '
+        f"got {ini_options.get('tmp_path_retention_policy')!r}. pytest's default keeps every "
+        "passing test's tmp_path, which this suite grows by 4.9 GB per run."
+    )
+
+
 def test_quality_workflow_python_job_has_a_coverage_gate_step() -> None:
     """The `python` job must run pytest with coverage collection enabled.
 
