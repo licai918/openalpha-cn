@@ -1,157 +1,97 @@
-"""Stock screening, watchlist records, and evidence-linked report generation."""
+"""The product layer's one import surface, re-exporting the three contracts split out of it.
 
-from typing import Literal, Protocol
+`V2-P4-006` measured this file carrying three unrelated responsibilities across 157 lines --
+the screen, the watchlist storage Protocol, and the report Protocol plus its factory -- and
+moved each into a module of its own:
 
-from pydantic import BaseModel, ConfigDict, Field
+- `product/screening.py` -- `ScreeningCriteria`, `ScreeningItem`, `ScreeningExclusion`,
+  `ScreeningResult`, `ResearchScreener`, now governance-ordered.
+- `product/governance.py` -- what a risk flag is *worth*, asked of the two gates this build
+  already ships rather than restated as a fourth list of flag strings.
+- `product/watchlist.py` -- `WatchlistStore`.
+- `product/reporting.py` -- `ReportStore`, `ResearchReportFactory`.
 
-from openalpha_cn.domain.report import RESEARCH_REPORT_VERSIONS, ResearchReport
-from openalpha_cn.domain.watchlist import WATCHLIST_ENTRY_VERSIONS, WatchlistEntry
-from openalpha_cn.runtime.contracts import ResearchRunResult
+**Nothing moved for a caller.** Every name this module exported before is re-exported here as
+the same object, which is `runtime/contracts.py`'s arrangement for `ResearchRunRequest` and
+`domain/report.py`'s for `ResearchReport`, applied a third time and for the same reason: a
+split that renames the import path makes every consumer part of the change. Four places
+outside this issue's ownership import from here -- `sdk.py`, `api/app.py`,
+`runtime/composition.py`, and the probe module `tests/unit/test_import_layering.py::
+test_storage_no_upward_deps_contract_rejects_indirect_leak_via_neutral_module` writes to disk
+-- and none of them was touched.
+
+`tests/unit/product/test_governed_screening.py::
+test_the_facade_re_exports_the_same_objects_the_split_modules_declare` holds that identity --
+`is`, not equality -- so a re-export that quietly became a copy is red.
+
+This module is also named in `tests/unit/test_import_layering.py`'s `CONTRACT_ONLY_CONSUMERS`,
+which requires it to reach `ResearchRunResult` through `runtime.contracts` and never
+`runtime.engine`, and to reach no engine-owned storage module transitively. The re-exports
+below inherit that: `product/screening.py` and `product/reporting.py` import from
+`runtime.contracts`, and `product/governance.py`'s two gates (`decisions/risk.py`,
+`agents/committee.py`) have `domain`-only closures, measured with grimp.
+"""
+
+from __future__ import annotations
+
+from openalpha_cn.product.governance import (
+    SEVERITY_ORDER,
+    SEVERITY_RANK,
+    SHIPPED_RISK_GATES,
+    GovernanceSeverity,
+    GovernanceVerdict,
+    assess,
+    flag_severity,
+)
+from openalpha_cn.product.reporting import (
+    RESEARCH_REPORT_VERSIONS,
+    ReportStore,
+    ResearchReport,
+    ResearchReportFactory,
+)
+from openalpha_cn.product.screening import (
+    EXCLUSION_PRECEDENCE,
+    KNOWN_SCREENING_LIMITATIONS,
+    PER_RESULT_EXCLUSION_REASONS,
+    SCREENING_LIMITATION_CODES,
+    ResearchScreener,
+    ScreeningCriteria,
+    ScreeningExclusion,
+    ScreeningExclusionReason,
+    ScreeningItem,
+    ScreeningLimitation,
+    ScreeningResult,
+)
+from openalpha_cn.product.watchlist import (
+    WATCHLIST_ENTRY_VERSIONS,
+    WatchlistEntry,
+    WatchlistStore,
+)
 
 __all__ = [
+    "EXCLUSION_PRECEDENCE",
+    "KNOWN_SCREENING_LIMITATIONS",
+    "PER_RESULT_EXCLUSION_REASONS",
     "RESEARCH_REPORT_VERSIONS",
+    "SCREENING_LIMITATION_CODES",
+    "SEVERITY_ORDER",
+    "SEVERITY_RANK",
+    "SHIPPED_RISK_GATES",
     "WATCHLIST_ENTRY_VERSIONS",
+    "GovernanceSeverity",
+    "GovernanceVerdict",
     "ReportStore",
     "ResearchReport",
     "ResearchReportFactory",
     "ResearchScreener",
     "ScreeningCriteria",
+    "ScreeningExclusion",
+    "ScreeningExclusionReason",
     "ScreeningItem",
+    "ScreeningLimitation",
     "ScreeningResult",
     "WatchlistEntry",
     "WatchlistStore",
+    "assess",
+    "flag_severity",
 ]
-
-
-class ScreeningCriteria(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    min_confidence: float = Field(default=0, ge=0, le=1)
-    directions: tuple[Literal["bullish", "bearish", "neutral", "abstain"], ...] = ()
-    final_actions: tuple[Literal["watch", "avoid", "abstain"], ...] = ()
-    max_risk_flags: int | None = Field(default=None, ge=0)
-    limit: int = Field(default=100, ge=1, le=1000)
-
-
-class ScreeningItem(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    subject: str
-    run_id: str
-    signal_id: str
-    decision_id: str
-    direction: str
-    final_action: str
-    confidence: float
-    strength: float
-    risk_flags: tuple[str, ...]
-
-
-class ScreeningResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    criteria: ScreeningCriteria
-    items: tuple[ScreeningItem, ...]
-    reviewed: int
-
-
-class ResearchScreener:
-    def screen(
-        self,
-        *,
-        results: tuple[ResearchRunResult, ...],
-        criteria: ScreeningCriteria,
-    ) -> ScreeningResult:
-        items = [
-            ScreeningItem(
-                subject=result.signal.subject,
-                run_id=result.manifest.run_id,
-                signal_id=result.signal.signal_id,
-                decision_id=result.decision.decision_id,
-                direction=result.signal.direction,
-                final_action=result.decision.final_action,
-                confidence=result.signal.confidence,
-                strength=result.signal.strength,
-                risk_flags=result.signal.risk_flags,
-            )
-            for result in results
-            if result.signal.confidence >= criteria.min_confidence
-            and (not criteria.directions or result.signal.direction in criteria.directions)
-            and (
-                not criteria.final_actions or result.decision.final_action in criteria.final_actions
-            )
-            and (
-                criteria.max_risk_flags is None
-                or len(result.signal.risk_flags) <= criteria.max_risk_flags
-            )
-        ]
-        items.sort(key=lambda item: (-item.confidence, -item.strength, item.subject))
-        return ScreeningResult(
-            criteria=criteria,
-            items=tuple(items[: criteria.limit]),
-            reviewed=len(results),
-        )
-
-
-class WatchlistStore(Protocol):
-    """Extension contract for durable watchlist storage.
-
-    Mirrors the `runtime.memory.ResearchMemory` precedent: the Protocol lives in the
-    product layer (`product/`), not in `storage/`. (`WatchlistEntry` itself moved to
-    `domain.watchlist` in V2-P0B-012, re-exported here unchanged -- see that module's
-    docstring -- but this Protocol, being behavior rather than a stored data shape, stayed
-    put.) `SQLiteWatchlistStore`'s full public surface is exactly `put`/`list`/`remove`, so
-    this Protocol declares all three -- unlike the other storage Protocols in this task,
-    there was no wider surface to narrow.
-    """
-
-    def put(self, entry: WatchlistEntry) -> None:
-        """Create or intentionally update one local watchlist entry."""
-
-    def list(self) -> tuple[WatchlistEntry, ...]:
-        """List the local observation pool."""
-
-    def remove(self, subject: str) -> bool:
-        """Remove one watchlist entry; return whether it existed."""
-
-
-class ReportStore(Protocol):
-    """Extension contract for durable research-report storage.
-
-    Mirrors the `runtime.memory.ResearchMemory` precedent: the Protocol lives in the
-    product layer (`product/`), not in `storage/`. (`ResearchReport` itself moved to
-    `domain.report` in V2-P0B-012, re-exported here unchanged -- see that module's
-    docstring -- but this Protocol, being behavior rather than a stored data shape, stayed
-    put.) `SQLiteReportStore`'s full public surface is exactly `append`/`get`/`list`, so
-    this Protocol declares all three -- unlike the other storage Protocols in this task,
-    there was no wider surface to narrow.
-    """
-
-    def append(self, report: ResearchReport) -> None:
-        """Append one evidence-linked report, idempotent by report ID."""
-
-    def get(self, report_id: str) -> ResearchReport | None:
-        """Load a report by its content-derived ID."""
-
-    def list(self, *, subject: str | None = None) -> tuple[ResearchReport, ...]:
-        """List generated reports, optionally filtered by subject."""
-
-
-class ResearchReportFactory:
-    def build(self, result: ResearchRunResult) -> ResearchReport:
-        return ResearchReport(
-            run_id=result.manifest.run_id,
-            subject=result.signal.subject,
-            created_at=result.decision.created_at,
-            title=f"{result.signal.subject} evidence-linked research report",
-            summary=(
-                f"{result.decision.final_action}: {result.signal.direction}; "
-                f"confidence={result.signal.confidence:.2f}; "
-                f"evidence={len(result.signal.evidence_ids)}"
-            ),
-            decision_id=result.decision.decision_id,
-            signal_id=result.signal.signal_id,
-            final_action=result.decision.final_action,
-            evidence_ids=result.signal.evidence_ids,
-            risk_flags=result.signal.risk_flags,
-        )
