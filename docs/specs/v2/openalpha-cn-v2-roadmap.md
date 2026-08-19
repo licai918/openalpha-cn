@@ -17,9 +17,9 @@ Issue ID: `V2-<阶段>-<序号>`。类型标记：**结**结构 · **产**产品
 | **P1** | 面板数据平面 | 17 | 5–7 周 | 13–18 周 | 8 组数据集全部通过契约 + 未来数据 fail-closed |
 | **P2** | **PIT 红队闸门** | 9 | 2 周 | 5 周 | **必过，否则不得进 P3** |
 | **P3** | 因子层 | 19 | 5–6 周 | 13–15 周 | 首批因子出齐 raw/processed/neutralized 三档 |
-| **P4** | 候选排序与模型基线 | 29 | 6–7 周 | 15–18 周 | 契约升版一次完成 + 预测先落库 |
+| **P4** | 候选排序与模型基线 | 30 | 6–7 周 | 15–18 周 | 契约升版一次完成 + 预测先落库 |
 | **P5** | 组合、验证与工作台 | 24 | 6–8 周 | 15–20 周 | 归因对账 + 多重检验 + 4 页可用 |
-| | **合计** | **123** | **28–36 周** | **70–90 周** | |
+| | **合计** | **124** | **28–36 周** | **70–90 周** | |
 
 > **相对上一版的变化**：上一版估 18–25 周，假设 P0 为 1 周。审计发现 39 条必须在面板层之前关闭的前置 finding（无迁移机制、两个组装根、引擎四合一、无 conftest、look-ahead 靠字符串匹配、`.parquet` 被发布拦截、seed/commit/digest 全为占位），故新增 P0.B。上调的 10–11 周全部是**原先不可见的前置债**，不是范围膨胀。
 
@@ -246,6 +246,7 @@ P3 结束即可独立使用（Jupyter 直连面板 + 因子）
 | `V2-P4-028` | **把中性化的产品路径接到 `V2-P4-027` 的新门上**（存储侧已有区间感知门，调用方仍走旧门，故年中 `as_of` 的边界在用户站的地方没有变） | 技 | 027 | `panel_neutralization.load_industry_market_cap_cross_section` 约 2241 行仍调 `load_industry_histories`；改为 `load_industry_cross_section(store, day=day, ...)` 并把 `_industry_answer` 的 history 查找换成 `cross_section.get(subject)`（它已经在读 `IndustryAnswer` 的 `assignment`/`is_backfilled`）。两处连带：`tests/unit/test_panel_ingest_import_isolation.py::RESEARCH_PLANE_SEAM_IMPORTS` 需把 `load_industry_histories` 换成 `load_industry_cross_section`（`test_the_neutralisation_reaches_its_two_foreign_datasets_only_across_the_seam` 按旧名断言）；`_industry_answer` 第三折会从计数型 `industry_missing` 变成具名拒绝，属**行为变更**。**这条不做，`V2-P4-027` 就是 P3 验收那个根因的重演** —— 库调通了，用户站的地方没通 | 集成：中性化在年中 `as_of` 上能读到含年内调整的成员分区 | S27, S28 |
 | `V2-P4-029` | **`DeliberationCommittee.review` 对任何弃权信号必崩**（生产路径可达，非理论问题） | 技 | — | 已独立复现：`direction` 在 `agents/committee.py:68-72` 由 `adjusted_strength` 阈值重算为 `Literal["bullish","bearish","neutral"]`，**`abstain` 不在可能取值里**，于是一个合法弃权信号（无方向性证据 —— 这正是弃权的定义）被强行变成方向性信号，再被 `SignalFrame.validate_conclusion` 的「方向性信号必须有证据」打死：`ValidationError: directional signal requires evidence`。`POST /api/v1/research/deliberate`（`api/app.py:793`）与 `OpenAlphaSDK.deliberate`（`sdk.py:166`）都直接收调用方传入的信号，故是 500。`SignalFrame` 自己的 docstring 写着 *"a research conclusion **or abstention**"* —— 弃权是本领域模型的一等状态。**之所以一直全绿：`tests/unit/agents/test_committee.py` 从未喂过 `abstain`** | 单元：弃权信号进出委员会仍是弃权；集成：该端点对弃权信号不返回 5xx | D15 |
 | `V2-P4-030` | **把 `risk_flags` 的词表收敛为单一定义源的封闭枚举**（与 `V2-P4-001` 对 `mode` 做过的事同构） | 技 | 006 | `SignalFrame.risk_flags` 是开放 `tuple[str, ...]`，三个消费者互不相交：`RiskGate._blocking_flags` 两个、`_reducing_flags` 三个、`agents/committee.py:78` 方法体内字面量三个，**交集为空**；委员会自己加的 `committee-disagreement` 三处都不在。`V2-P4-006` 实测其代价：把 `future_data` 拼成 `future-data`，标记从 `blocked` 降为 `unrecognised`，候选反而**在榜单上升** —— 治理筛选建立在开放字符串集上，可靠性等同于生产者的拼写。`006` 已在 `product/` 层做到不引入第四个列表（登记闸门为可调用对象而非抄集合），但**根治必须在写入端**：委员会那三个是方法体内局部字面量，作为数据根本够不到。参照 `domain/run_mode.py` 与 `tests/unit/domain/test_run_mode.py::test_no_other_module_declares_the_mode_set` 的形状 | 单元：拼错的标记被具名拒绝而非静默降级；审计：无第二处模块声明该词表 | S48, D15 |
+| `V2-P4-031` | **`MAXIMUM_SHORTLIST` 跟上批量上限**（`V2-P4-019` 把批次从 1,000 抬到 10,000 后，挡住全市场的换成了榜单上限） | 技 | 019 | `backtest/cross_section.py:420` 的 `MAXIMUM_SHORTLIST: Final[int] = 1_000` 其 docstring 明写「restated from `BatchResearchTask.items`」，且配套测试的 docstring **点名 `V2-P4-019` 为必须回来重看此处的那次变更 —— 它响了**。现状**仍安全但不再充分**：1,000 ≤ 10,000 不越界，测试已改成 `<=` 断言；但想给全市场打分再把结果整体交给证据面的调用方，现在被榜单上限挡住而非被批量上限挡住。改动是那一个常量加上引用 `max_length=1000` 的 docstring。**注意这不是纯抬数**：`V2-P4-004` 实测出厂 winsorization 决定的截面下界是 **N ≥ 57**，上界该定在哪需要同样的实测依据，不能照抄 10,000 | 单元：常量与 `MAX_BATCH_ITEMS` 的关系由断言而非注释维持 | S43, S95 |
 
 **闸门**：排序测试覆盖确定性排序、平局政策、弃权、缺失依赖、过期数据、风险/可交易性标记，且每个入选候选证据闭合；模型评估测试用已知信噪比数据验证 walk-forward 切分、purge/embargo、制品身份、前瞻预测落库；契约升版后从 v1 卷迁移的记录仍可读；新 agent 全部经 `run_cycle` 缝验收。
 
