@@ -174,8 +174,10 @@ from openalpha_cn.domain.factor_transform import (
 from openalpha_cn.domain.horizon import COUNTABLE_HORIZON_PATTERN, is_countable_horizon
 from openalpha_cn.domain.labels import halt_corpus_for_years
 from openalpha_cn.domain.name_history import RiskWarning
+from openalpha_cn.domain.panel_batch import PanelBatchError
 from openalpha_cn.domain.run import RunManifest
 from openalpha_cn.domain.signal import SignalFrame
+from openalpha_cn.domain.stock_universe import StockUniverse, StockUniverseError
 from openalpha_cn.domain.trading_calendar import TradingCalendar, TradingCalendarError
 from openalpha_cn.panel.catalog import PanelStorageError
 from openalpha_cn.panel.store import PanelStore
@@ -1132,10 +1134,9 @@ def load_shortlist_cross_section(
     )
     session = _pricing_session(instant, calendar=calendar)
 
-    registry = _read(
+    registry = _read_registry(
         lambda: load_stock_universe(store, years=request.years, as_of=instant, max_staleness=None),
         store=store,
-        what="the security registry",
     )
     universe = tuple(sorted(registry.listed_on(session)))
     if not universe:
@@ -2154,27 +2155,66 @@ _PANEL_FAULTS: Final[tuple[type[Exception], ...]] = (
 )
 """The refusals a stored panel raises when it cannot answer a read.
 
-`factor_view._PANEL_FAULTS` restated, and the equality is pinned by
+`factor_view._PANEL_FAULTS` restated, `SHORTLIST_DATE_ZONE`'s arrangement: which exceptions are
+facts about data rather than defects in the code that read them is one question with one answer,
+and two faces that answered it differently would put the same broken partition under two
+different status codes on two channels.
+
+**The pin is on the reads and not on this tuple, and `V2-P4-070` is why.**
 `tests/unit/test_shortlist_view.py::
-test_this_face_calls_the_same_panel_faults_unreadable_as_the_factor_face` rather than left to
-agree by inspection: which exceptions are facts about data
-rather than defects in the code that read them is one question with one answer, and two faces that
-answered it differently would put the same broken partition under two different status codes.
+test_this_face_calls_the_same_panel_faults_unreadable_as_the_factor_face` used to assert
+`set(shortlist_view._PANEL_FAULTS) == set(factor_view._PANEL_FAULTS)`, and that assertion was true
+on the tree where this face exited `5` and answered `500` on a partition the factor face called
+`panel_unreadable`. It was true because `V2-P4-060` widened the factor face at the *read* -- it
+added `_REGISTRY_FAULTS` and passed it to `_read_registry` as a `faults=` argument -- and left the
+module constant the test compared exactly as it found it. Two constants can be equal while the two
+`except` clauses in force are not, so the equality was a statement about a name rather than about
+behaviour. It now drives both faces' read seams with each fault type in turn, which is the thing
+that diverged.
+"""
+
+_REGISTRY_FAULTS: Final[tuple[type[Exception], ...]] = (
+    *_PANEL_FAULTS,
+    StockUniverseError,
+    PanelBatchError,
+)
+"""The two further refusals the **registry** read can raise, `factor_view._REGISTRY_FAULTS`
+restated for the same reason the tuple above is.
+
+`load_stock_universe` is the one read this module makes that can fail with a statement about the
+stored registry's *shape* rather than about its partitions: `StockUniverseError` for an orphan
+delisting row, a duplicated `ts_code` or a security filed against two exchanges, and
+`PanelBatchError` for a lifecycle year the read was told to cover and does not.
+
+Narrower than adding the two to `_PANEL_FAULTS` for `factor_view`'s stated reason, which applies
+here unchanged: `_PANEL_FAULTS` also guards every factor-tier read on this face, and a
+`PanelBatchError` out of one of those is a defect in this repository's own batch assembly rather
+than a verdict about stored data. The read that can raise them is the read that catches them.
 """
 
 _T = TypeVar("_T")
 
 
-def _read(reader: Callable[[], _T], *, store: PanelStore, what: str) -> _T:
+def _read(
+    reader: Callable[[], _T],
+    *,
+    store: PanelStore,
+    what: str,
+    faults: tuple[type[Exception], ...] = _PANEL_FAULTS,
+) -> _T:
     """Run one panel read, turning its refusal into `ShortlistPanelUnreadableError`.
 
     The local message names the store and `disclosable` does not, `panel_view.stored_calendar`'s
     arrangement and for its reason: the CLI and the SDK are inside the process that owns the store,
     while a response body hands that path to whoever could reach the port.
+
+    `faults` is every read's answer by default and is widened by exactly one caller; see
+    `_REGISTRY_FAULTS` for why the registry's two extra refusals go to the read that raises them
+    rather than to all of them.
     """
     try:
         return reader()
-    except _PANEL_FAULTS as error:
+    except faults as error:
         raise ShortlistPanelUnreadableError(
             f"{what} could not be read out of {store.root}: {error}",
             disclosable=(
@@ -2182,6 +2222,18 @@ def _read(reader: Callable[[], _T], *, store: PanelStore, what: str) -> _T:
                 f"{_without_store_path(str(error), store)}"
             ),
         ) from error
+
+
+def _read_registry(reader: Callable[[], StockUniverse], *, store: PanelStore) -> StockUniverse:
+    """The registry read, in one place because that is what keeps `_REGISTRY_FAULTS` in force.
+
+    `factor_view._read_registry`'s arrangement and its measured reason, one face over: two sites
+    that duplicate the `what=` string and the fault list between them is how one of them comes to
+    catch a refusal the other lets escape. This face makes the read once, and it goes through here
+    so that a second site cannot be added that quietly takes the default tuple -- which is the
+    shape `V2-P4-070` was, with the second site in another module.
+    """
+    return _read(reader, store=store, what="the security registry", faults=_REGISTRY_FAULTS)
 
 
 def _without_store_path(message: str, store: PanelStore) -> str:

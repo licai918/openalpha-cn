@@ -1368,10 +1368,20 @@ def carry_stored_rows_forward(
     `_refuse_to_drop_stored_subjects` still run, still read the catalog's stored subject list, and
     still refuse a write that would lose one. What changes is their *relationship to the caller*:
     they stop being an instruction to go and recompute the year, and become the audit on this
-    merge. A `retain` with a hole in it -- one that mis-reads which build a row belongs to, or
-    that silently drops a clock column -- produces exactly the refusal it produced before, naming
-    the builds that went missing. That is the property worth having: the merge is the thing that
-    can be wrong, and the guard is what catches it being wrong.
+    merge. That is the property worth having: the merge is the thing that can be wrong, and the
+    guard is what catches it being wrong.
+
+    **The paragraph above used to end by claiming that property outright, and `V2-P4-073` measured
+    it half true.** It read: "A `retain` with a hole in it -- one that mis-reads which build a row
+    belongs to, or that silently drops a clock column -- produces exactly the refusal it produced
+    before, naming the builds that went missing." The catalog's stored subject list names *builds*
+    on a manifest partition and *securities* on an observation one, so on the plane where the
+    subjects are securities the drop guard could not express the claim and the writers did not run
+    it there at all. A hole confined to the observation merge therefore wrote and reported
+    success. `panel_factors._refuse_a_merge_that_lost_a_stored_build` is what makes the sentence
+    true now: it asks the same question of the merged batch's own build column, so it holds on
+    every plane, and it is why `appended_to_the_stored_year` returns an `AppendedYear` rather than
+    a bare batch.
 
     ## The read is un-gated, and it has to be
 

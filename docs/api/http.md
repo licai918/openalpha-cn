@@ -423,7 +423,7 @@ This is the property the route exists for.
 | the gate ran and **refused** it | `409` | `true` | `null` |
 | no component has a stored cross section at or before the `as_of`, or the declared components disagree about which instant they share | `409` | — | — |
 | a declared component's stored cross section admits no value at all — for instance a processed tier whose rows all read `insufficient_cross_section` | `409` | — | — |
-| a partition this screen needs is missing, damaged, stale, or holds rows that were not knowable at `as_of` | `409` | — | — |
+| a partition this screen needs is missing, damaged, stale, or holds rows that were not knowable at `as_of`, or the stored registry's own shape refuses the read (a delisting row whose listing year was never written, a duplicated code, a skipped lifecycle year) | `409` | — | — |
 | the request cannot be put at all (unknown factor, non-positive weight, processed tier with no `transform`, a `neutralization` on a tier that has none, a `position_capital` at or above `10**26`, naive `as_of`, or a retrieval address that is not one) | `422` | — | — |
 | a retrieval address nothing is held under, or a held document that no longer hashes to it | `404` | — | — |
 | the endpoint itself broke; nothing was judged | `500` | — | — |
@@ -474,6 +474,17 @@ handled by Starlette rather than by this route, so it arrives as `text/plain` `I
 Server Error`. Nothing a caller can put in the body should produce one — a caller-supplied
 `position_capital` used to, and now does not — so a `500` here is a defect to report, not a
 request to change.
+
+**Nor should anything in the store produce one, and until `V2-P4-070` something did.** A
+registry whose lifecycle backfill was interrupted — a security's delisting row stored and
+its listing row in a year partition that was never written — made this route answer `500`
+`text/plain` while `openalpha factor build` on the same store answered `1` and named the
+security. It was a verdict about the panel filed as a defect in the service, and the
+remedy was to finish the backfill rather than to report a bug. It is a `409`
+`panel_unreadable` now, with the refusal's own sentence in `detail.message`; both faces
+read the registry through the same fault list, and
+`tests/integration/test_partial_registry_faces.py` drives one such store at this route, at
+`shortlist run` and at `factor build`.
 
 `openalpha shortlist run` maps the same names onto exit codes
 (`cli.py#SHORTLIST_EXIT`) and reuses `PanelExit`: `0` admitted, `1` for every `409` row —

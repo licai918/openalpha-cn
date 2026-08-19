@@ -6014,12 +6014,16 @@ def write_factor_panels(
     # the first drop is refused, or a typo would be reported as whichever partition happened to
     # be judged first rather than as the typo it is.
     stored: list[tuple[ColumnarPanelBatch, int, frozenset[str]]] = []
-    for year, yearly in planned:
-        if yearly.kind != FACTOR_MANIFEST_KIND:
+    for year, appended in planned:
+        if appended.batch.kind != FACTOR_MANIFEST_KIND:
             continue
-        existing = store.read_coverage(yearly.dataset, year)
+        existing = store.read_coverage(appended.batch.dataset, year)
         stored.append(
-            (yearly, year, frozenset() if existing is None else frozenset(existing.subjects))
+            (
+                appended.batch,
+                year,
+                frozenset() if existing is None else frozenset(existing.subjects),
+            )
         )
     unmatched = sorted(superseded - {build for _, _, builds in stored for build in builds})
     if unmatched:
@@ -6030,9 +6034,11 @@ def write_factor_panels(
         )
     for yearly, year, builds in stored:
         _refuse_to_drop_a_stored_build(yearly, year, builds=builds, superseded=superseded)
+    for year, appended in planned:
+        _refuse_a_merge_that_lost_a_stored_build(appended, year)
     return tuple(
-        write_panel_batch(store, yearly, year=year, date_timezone=date_timezone)
-        for year, yearly in planned
+        write_panel_batch(store, appended.batch, year=year, date_timezone=date_timezone)
+        for year, appended in planned
     )
 
 
@@ -6073,6 +6079,30 @@ def _refuse_two_builds_of_one_factor_at_one_as_of(panels: Sequence[FactorPanel])
         )
 
 
+@dataclass(frozen=True, slots=True)
+class AppendedYear:
+    """One partition's merged batch, and what the merge that produced it did not carry.
+
+    Two fields rather than a bare batch because the merge and the *refusal* belong in different
+    places: the merge is where the stored rows are in hand and the loss can be measured for
+    nothing, and the refusal has to wait until the catalog-side guard has had its say. See
+    `_refuse_a_merge_that_lost_a_stored_build`.
+    """
+
+    batch: ColumnarPanelBatch
+    """What `write_panel_batch` is to be handed: the arriving rows with the carried ones in
+    front."""
+
+    lost: tuple[str, ...]
+    """Every build the stored partition held that `batch` neither carries nor supersedes, sorted.
+
+    Empty on every correct merge, including the ones that legitimately remove a build: a
+    superseded build is subtracted by name, and a build this write re-answers is in `batch`
+    already. A non-empty value is either a rebuild that has not said what it replaces or a hole in
+    the merge, and both are refusals rather than warnings.
+    """
+
+
 def appended_to_the_stored_year(
     store: PanelStore,
     batch: ColumnarPanelBatch,
@@ -6081,9 +6111,9 @@ def appended_to_the_stored_year(
     build_column: str,
     identity_columns: Sequence[str],
     superseded: Collection[str],
-) -> ColumnarPanelBatch:
+) -> AppendedYear:
     """`batch` with every stored build of its partition that this write neither answers nor
-    replaces, carried forward verbatim (`V2-P4-071`).
+    replaces, carried forward verbatim (`V2-P4-071`), and an account of any that went missing.
 
     ## The decision this function is, stated rather than implied
 
@@ -6105,18 +6135,42 @@ def appended_to_the_stored_year(
     one call or to erase yesterday's with `supersedes`. Neither is a rebuild; both are the
     workflow this product exists for being unavailable.
 
-    ## What is not weakened
+    ## What is not weakened, and the half of that sentence `V2-P4-073` had to buy back
 
-    The drop guard is untouched and still runs, on the **merged** batch, immediately below every
-    call to this function. That is the arrangement rather than an accident: a `retain` rule with a
-    hole in it -- one that mis-reads `build_column`, or that drops a build it meant to keep --
-    produces exactly the refusal it produced before, naming the builds that went missing. The
-    guard stops being an instruction to the caller and becomes the audit on this merge, which is
-    the only relationship in which both can be right.
+    This docstring used to say: "The drop guard is untouched and still runs, on the **merged**
+    batch, immediately below every call to this function ... a `retain` rule with a hole in it --
+    one that mis-reads `build_column`, or that drops a build it meant to keep -- produces exactly
+    the refusal it produced before, naming the builds that went missing."
+
+    **It ran below the manifest calls only.** `_refuse_to_drop_a_stored_build` reads the stored
+    build list off the *catalog*, where a manifest partition's subjects are `manifest_id`s and an
+    observation partition's are securities -- so the writers ran it for `kind ==
+    FACTOR_MANIFEST_KIND` and skipped the observation merge, on the argument that "a write
+    carrying every stored build carries every stored security by construction". That argument was
+    sound while the arriving batch *was* the whole partition and both datasets came out of one
+    `panels` sequence, and this function is what ended it: the two partitions are now assembled by
+    two independent calls, and one can lose a build while the other does not. Probed by confining
+    a hole to the observation plane: the second build **succeeded, exit 0, silently**, the
+    manifest partition held both builds and the observation partition had lost day one's whole
+    cross section, and it surfaced only on the next read.
+
+    So the merge now audits itself, on every plane and both kinds. `lost` on the returned
+    `AppendedYear` is every build the stored partition held that this merge neither carried,
+    answered, nor superseded -- read back off the **merged batch's own `build_column`** rather
+    than off `retain`'s verdicts, which is what makes it an audit of the result rather than a
+    restatement of the rule. The writers refuse on it, immediately after the catalog-side guard;
+    see `_refuse_a_merge_that_lost_a_stored_build` for why that order and not the other.
 
     `superseded` keeps its meaning exactly: a named build is not carried, so the merged batch
-    genuinely drops it and the guard's own `superseded` subtraction is what lets that through. A
+    genuinely drops it and both guards' `superseded` subtraction is what lets that through. A
     `supersedes` naming nothing is still refused by the caller, one call down.
+
+    **The hole this audit still has** is a partition with no coverage record: `carry_stored_rows
+    _forward` returns the arriving batch untouched without consulting `retain` at all, so no
+    census is taken and nothing is protected. That is `_refuse_to_drop_stored_subjects`' own rule
+    and its reason -- there is nothing to read the stored shape from, readiness already blocks
+    that state as `coverage_missing`, and refusing the overwrite would leave the store with no way
+    back.
 
     ## `identity_columns`, and the invariant it preserves across calls
 
@@ -6140,13 +6194,75 @@ def appended_to_the_stored_year(
     builds = {str(row[build_column]) for row in arriving}
     occupied = {tuple(row[name] for name in identity_columns) for row in arriving}
     replaced = set(superseded)
+    held: set[str] = set()
 
     def retain(row: Mapping[str, object]) -> bool:
+        """One stored row's verdict, with a census of the partition taken on the way past.
+
+        `carry_stored_rows_forward` calls this exactly once per stored row, and that call is the
+        only walk this write makes over the partition's stored bytes. Taking the census here
+        rather than reading the partition a second time is what keeps the audit below to one
+        in-memory column scan and a set difference, with no extra I/O at all.
+        """
+        held.add(str(row[build_column]))
         if str(row[build_column]) in builds or str(row[build_column]) in replaced:
             return False
         return tuple(row[name] for name in identity_columns) not in occupied
 
-    return carry_stored_rows_forward(store, batch, year=year, retain=retain)
+    merged = carry_stored_rows_forward(store, batch, year=year, retain=retain)
+    carried = {
+        str(value)
+        for column in merged.storage_columns()
+        if column.name == build_column
+        for value in column.values
+    }
+    return AppendedYear(batch=merged, lost=tuple(sorted(held - carried - replaced)))
+
+
+def _refuse_a_merge_that_lost_a_stored_build(appended: AppendedYear, year: int) -> None:
+    """Block a write whose merge did not carry a build the partition already held (`V2-P4-073`).
+
+    `_refuse_to_drop_a_stored_build`'s question asked of the *rows* rather than of the catalog,
+    which is what lets it be asked on every plane. A manifest partition's subjects are
+    `manifest_id`s, so the catalog row is that partition's build list and the guard below is a
+    complete audit of its merge; an observation partition's subjects are securities, so the same
+    catalog row cannot name a build at all and its merge had no audit whatsoever until this one.
+
+    It costs no I/O. `appended_to_the_stored_year` takes the stored partition's build census on
+    the walk `carry_stored_rows_forward` already makes, scans the merged batch's own
+    `build_column` in memory -- one column, not a transpose -- and hands the difference here as
+    `lost`. Reading the merged **batch** rather than `retain`'s verdicts is what makes this an
+    audit of the result: a rule that returns "keep" for a row that then fails to arrive is still
+    caught.
+
+    ## Why the writers run this *after* the catalog guard and not instead of it
+
+    Both refuse a restatement -- a rebuild at a stored `as_of` under a different declaration,
+    whose stored counterpart collides on `identity_columns` and is therefore not carried. That
+    refusal is one a caller meets in ordinary use, its remedy is `supersedes`, and it has named
+    the **manifest** partition since `V2-P3-002`, which is the partition whose subjects are the
+    thing `supersedes` addresses. Running this first would have re-filed it against the
+    observation dataset for no gain to the reader. So the order is: the catalog guard speaks for
+    what it can see, and this speaks for what it cannot -- an observation merge that lost a build
+    while the manifest merge kept it, which is exactly the state a hole in `retain` produces and
+    exactly the one that used to be written silently.
+
+    The two are not redundant in the other direction either. This one reads the partition's rows
+    and that one reads the catalog, so a store whose catalog and partition disagree about which
+    builds are held is still refused -- by whichever of them can see the discrepancy.
+    """
+    if not appended.lost:
+        return
+    lost = appended.lost
+    raise FactorEngineError(
+        f"the merge for {appended.batch.dataset} year={year} would drop {list(lost[:5])}"
+        f"{'...' if len(lost) > 5 else ''}: {len(lost)} stored build(s) it neither carries "
+        "forward, answers, nor supersedes. A partition is replaced whole, so a build that is not "
+        "in the batch is a cross section somebody computed and no longer has. If this write is a "
+        "rebuild, name what it replaces in `supersedes` -- `load_factor_manifests` is how to read "
+        "what the year already holds; otherwise `appended_to_the_stored_year` failed to carry a "
+        "build it meant to keep, which is a defect in this repository rather than in the call"
+    )
 
 
 def _refuse_to_drop_a_stored_build(
@@ -6174,12 +6290,29 @@ def _refuse_to_drop_a_stored_build(
     - **It permits incorrect ones.** A write that dropped a whole `as_of` while keeping the same
       names passes it, because the subject set is unchanged.
 
-    The build reading has neither fault, and it is *complete* for observations as well:
-    `manifest_id` now covers `subject_digest`, so a write carrying every stored build carries
-    every stored security by construction, and a write that drops a security necessarily changes
-    a build's identity and is caught here. What a caller loses is a message naming the securities
+    The build reading has neither fault. What a caller loses is a message naming the securities
     rather than the build; what it gains is a unit of work -- the build -- that `supersedes` and
     `load_factor_manifests` can both address.
+
+    ## "Complete for observations as well" was true once and `V2-P4-073` measured it false
+
+    The sentence this docstring used to carry was: "`manifest_id` now covers `subject_digest`, so
+    a write carrying every stored build carries every stored security **by construction**, and a
+    write that drops a security necessarily changes a build's identity and is caught here."
+
+    By construction of *what* is where it stopped being true. It held while the arriving batch was
+    the whole partition and the observation and manifest datasets were assembled from one `panels`
+    sequence in one pass -- then a manifest partition carrying every build really did imply an
+    observation partition carrying every security. `V2-P4-071` replaced that pass with two
+    independent `appended_to_the_stored_year` calls, one per dataset, and the implication went
+    with it: a hole confined to the observation merge left this guard reading an intact manifest
+    partition and reporting nothing, while day one's whole cross section went missing and the
+    write exited 0.
+
+    So the observation partition is now guarded, by `_refuse_a_merge_that_lost_a_stored_build`
+    rather than by a second securities-level check -- the two faults above are still both real and
+    the unit is still the build. This function is unchanged and still runs first; see that one for
+    the division of labour.
 
     **Shared verbatim with `write_processed_factor_panels`** (`V2-P3-003`), because the fact it
     enforces -- a partition is replaced whole -- is the same one on the processed plane, and the
@@ -8313,14 +8446,22 @@ def write_processed_factor_panels(
     ignored, because a typo would silently turn the drop guard off for the write it arrived with;
     and every guard runs before the first write, so a refusal changes nothing at all.
 
-    **The unit of the drop guard is a transform build**, which is what makes it complete here.
-    `_refuse_to_drop_a_stored_build` reads the target manifest partition's stored subjects off
-    the catalog -- one row, no partition scan -- and a `transform_manifest_id` covers
+    **The unit of both drop guards is a transform build.** `_refuse_to_drop_a_stored_build` reads
+    the target manifest partition's stored subjects off the catalog -- one row, no partition scan
+    -- and refuses a write that would lose one of them.
+
+    This paragraph used to continue: "a `transform_manifest_id` covers
     `source_observation_digest`, so a write carrying every stored build carries every stored
     security *and every stored transform of them* by construction. The processed observation
-    partition is covered by that rather than by a guard of its own, for the reason the raw one is:
-    a securities-level guard both refuses correct writes (a rebuild over a narrower cross section)
-    and permits incorrect ones (a write that drops a whole `as_of` while keeping the names).
+    partition is covered by that rather than by a guard of its own." `V2-P4-073` measured that
+    false on this plane as well as on the raw one, and for the same reason: the implication held
+    while both datasets were assembled in one pass, and `V2-P4-071` made them two independent
+    merges. So the processed observation partition has a guard of its own now --
+    `_refuse_a_merge_that_lost_a_stored_build`, which reads the merged batch's own
+    `transform_manifest_id` column and therefore keeps the unit a build. What is still declined is
+    a *securities-level* guard, for the reason the raw plane declines one: it both refuses correct
+    writes (a rebuild over a narrower cross section) and permits incorrect ones (a write that
+    drops a whole `as_of` while keeping the names).
 
     **One partition holds every transform of one factor**, so the call that writes a year has to
     carry every `(transform, as_of)` pair belonging to it -- not just every `as_of` of one
@@ -8358,12 +8499,16 @@ def write_processed_factor_panels(
     ]
     superseded = set(supersedes)
     stored: list[tuple[ColumnarPanelBatch, int, frozenset[str]]] = []
-    for year, yearly in planned:
-        if yearly.kind != FACTOR_TRANSFORM_MANIFEST_KIND:
+    for year, appended in planned:
+        if appended.batch.kind != FACTOR_TRANSFORM_MANIFEST_KIND:
             continue
-        existing = store.read_coverage(yearly.dataset, year)
+        existing = store.read_coverage(appended.batch.dataset, year)
         stored.append(
-            (yearly, year, frozenset() if existing is None else frozenset(existing.subjects))
+            (
+                appended.batch,
+                year,
+                frozenset() if existing is None else frozenset(existing.subjects),
+            )
         )
     unmatched = sorted(superseded - {build for _, _, builds in stored for build in builds})
     if unmatched:
@@ -8374,9 +8519,11 @@ def write_processed_factor_panels(
         )
     for yearly, year, builds in stored:
         _refuse_to_drop_a_stored_build(yearly, year, builds=builds, superseded=superseded)
+    for year, appended in planned:
+        _refuse_a_merge_that_lost_a_stored_build(appended, year)
     return tuple(
-        write_panel_batch(store, yearly, year=year, date_timezone=date_timezone)
-        for year, yearly in planned
+        write_panel_batch(store, appended.batch, year=year, date_timezone=date_timezone)
+        for year, appended in planned
     )
 
 

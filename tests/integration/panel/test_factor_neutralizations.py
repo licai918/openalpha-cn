@@ -57,6 +57,7 @@ from panel_fixtures import (
     write_generated_panel,
 )
 
+from openalpha_cn import panel_factors, panel_neutralization
 from openalpha_cn.backtest.factor_ic import MINIMUM_IC_AS_OFS
 from openalpha_cn.domain.daily_prices import DAILY_DATASET
 from openalpha_cn.domain.factor_neutralization import (
@@ -73,7 +74,11 @@ from openalpha_cn.domain.factor_transform import (
     WinsorizationPolicy,
 )
 from openalpha_cn.domain.industry_classification import INDUSTRY_MEMBERSHIP_TAXONOMY
-from openalpha_cn.domain.panel_batch import ColumnarPanelBatch, PanelColumn
+from openalpha_cn.domain.panel_batch import (
+    SUBJECT_COLUMN_NAME,
+    ColumnarPanelBatch,
+    PanelColumn,
+)
 from openalpha_cn.panel.catalog import PanelStorageError, ReadinessRequirement
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import (
@@ -1367,6 +1372,46 @@ def test_a_second_neutralisation_of_one_factor_shares_the_partition_and_reads_ap
     assert {row.neutralization_id for row in log_rows} == {_spec().neutralization_id}
     assert {row.neutralization_id for row in level_rows} == {level_spec.neutralization_id}
     assert by_log.values() != by_level.values()
+
+
+def test_a_merge_that_loses_a_stored_build_is_refused_on_this_plane_too(
+    store: PanelStore, panel: GeneratedPanel, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`V2-P4-073` on the third plane, which shares the writer's shape and shared its hole.
+
+    `write_neutralized_factor_panels` ran the catalog-side drop guard for `kind ==
+    FACTOR_NEUTRALIZATION_MANIFEST_KIND` alone, so the neutralised observation merge -- whose
+    subjects are securities and whose builds live in a `neutralization_manifest_id` column -- was
+    audited by nothing. The probe over-matches `identity_columns` on that plane only; before the
+    audit the write reported success over a partition that had lost the first policy's whole cross
+    section.
+    """
+    processed = _process(_compute(store, panel))
+    cross = _cross_section(store, panel)
+    first = _neutralize(processed, cross)
+    write_neutralized_factor_panels(store, [first])
+    real = panel_factors.appended_to_the_stored_year
+    monkeypatch.setattr(
+        panel_neutralization,
+        "appended_to_the_stored_year",
+        lambda store, batch, year, *, build_column, identity_columns, superseded: real(
+            store,
+            batch,
+            year,
+            build_column=build_column,
+            identity_columns=(
+                identity_columns if build_column == SUBJECT_COLUMN_NAME else (SUBJECT_COLUMN_NAME,)
+            ),
+            superseded=superseded,
+        ),
+    )
+    second = _neutralize(processed, cross, _spec(key="probe_level", market_cap_scale="level"))
+
+    with pytest.raises(FactorEngineError, match="would drop") as raised:
+        write_neutralized_factor_panels(store, [second])
+
+    assert first.manifest.neutralization_manifest_id in str(raised.value)
+    assert NEUTRALIZED in str(raised.value)
 
 
 def test_a_second_neutralisation_is_added_and_a_restatement_is_still_refused(

@@ -883,6 +883,20 @@ class PanelExit(IntEnum):
       that failed its check, so a scheduled job would report "the data is bad" for a defect in
       this file. The remedy is a bug report, not a re-fetch.
 
+      **That last sentence has been measured false twice, and both times by the same shape.** A
+      refusal that is a verdict about stored data, raised by a read no `except` in the command's
+      path anticipated, arrives here -- and then this row tells a user to file a bug when the
+      remedy was to fix their panel. `V2-P4-060` was `factor build` meeting an ordinary
+      mid-window delisting; `V2-P4-070` was `shortlist run` meeting an interrupted registry
+      backfill, on a store where `factor build` already answered `unhealthy` with the sentence
+      naming the security. Neither was a defect in this file. What keeps the sentence true is
+      that every such refusal is anticipated at the read that raises it -- see
+      `factor_view._REGISTRY_FAULTS` and `shortlist_view._REGISTRY_FAULTS`, which are the same
+      tuple on the two faces that make that read, and `tests/integration/
+      test_partial_registry_faces.py`, which drives one broken registry at both of them and at
+      the HTTP route. The withholding of an unanticipated exception's own message stays right;
+      being unanticipated is what was wrong.
+
     **2 is deliberately absent.** Click raises its own `UsageError` with exit code 2 for a
     misspelled flag or a missing required option, and that is not a code this module can take
     back. Reusing it would make "you typed the command wrong" and "the gate refused you" the
