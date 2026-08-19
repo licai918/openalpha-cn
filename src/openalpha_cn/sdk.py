@@ -65,6 +65,7 @@ from openalpha_cn.runtime.memory import MemoryEntry
 from openalpha_cn.shortlist_view import (
     ShortlistEvidence,
     ShortlistRunResult,
+    held_shortlist,
     shortlist_components,
     shortlist_request,
     shortlist_view,
@@ -98,6 +99,7 @@ class OpenAlphaSDK:
         self.report_store = storage.report_store
         self.validation_store = storage.validation_store
         self.experiment_store = storage.experiment_store
+        self.shortlist_store = storage.shortlist_store
 
     def health(self) -> dict[str, str]:
         """Return SDK and package readiness."""
@@ -633,11 +635,31 @@ class OpenAlphaSDK:
                 evidence=evidence,
             ),
             built_at=self.clock(),
+            runs=self.repository,
+            shortlists=self.shortlist_store,
         )
 
     def shortlist_view(self, result: ShortlistRunResult) -> dict[str, object]:
         """One shortlist run as `openalpha shortlist run --json` and HTTP render it."""
         return shortlist_view(result)
+
+    def held_shortlist(self, shortlist_id: str) -> dict[str, object]:
+        """One stored shortlist answer, by the `shortlist_id` its own body carried.
+
+        `V2-P4-062`'s in-process read, through the same `shortlist_view.held_shortlist` as
+        `openalpha shortlist get` and `GET /api/v1/shortlists/{shortlist_id}`. Raises
+        `ShortlistNotHeldError` when nothing is held rather than answering `None`, which is the
+        opposite of `get_factor_experiment` one plane over and is that method's own distinction
+        applied: an experiment is looked up by a key a caller composed from a declaration and
+        may legitimately not exist yet, while a `shortlist_id` is an address that was **printed
+        on an answer**, so nothing held under one is a fact about this runtime directory and not
+        about the question.
+        """
+        return held_shortlist(self.shortlist_store, shortlist_id)
+
+    def list_shortlists(self) -> tuple[str, ...]:
+        """Every held `shortlist_id`, ascending."""
+        return self.shortlist_store.list_ids()
 
     def execute_portfolio_order(
         self,

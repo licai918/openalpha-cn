@@ -89,6 +89,7 @@ from openalpha_cn.runtime.memory import MemoryEntry
 from openalpha_cn.runtime.provenance import compute_config_digest, resolve_code_commit
 from openalpha_cn.shortlist_view import (
     ShortlistViewError,
+    held_shortlist,
     run_shortlist,
     shortlist_components,
     shortlist_evidence,
@@ -564,6 +565,7 @@ SHORTLIST_HTTP_STATUS: Final[Mapping[str, int]] = MappingProxyType(
         "refused": 409,
         "blocked": 409,
         "panel_unreadable": 409,
+        "not_held": 404,
         "bad_request": 422,
         "internal_error": 500,
     }
@@ -600,10 +602,16 @@ them collapsed into one (`{"items":[],"excluded":[],"reviewed":0}` for both), wh
   the funnel did not shortlist. A refusal body.
 - **`panel_unreadable` (409)** -- `ShortlistPanelUnreadableError`: a partition this screen needs is
   missing, damaged, stale or holds rows that were not knowable at the stated `as_of`.
+- **`not_held` (404)** -- `ShortlistNotHeldError` on `GET /api/v1/shortlists/{shortlist_id}`:
+  the address is well formed and this runtime directory holds no answer under it, or holds one
+  that no longer hashes to it. `404` and not `409`, because there is no conflict with anything --
+  the resource does not exist here. A *malformed* address is `bad_request` below and never this,
+  so "that is not an address" and "nothing is filed under that address" stay two answers rather
+  than one 404 covering both.
 - **`bad_request` (422)** -- `ShortlistRequestError`: a factor no registry declares, a weight that
   is not positive, a processed-tier screen with no transform, a `neutralization` on a tier that has
   none, a `position_capital` at or above `shortlist_view.POSITION_CAPITAL_CEILING`, a naive
-  `as_of`.
+  `as_of`, or a retrieval address that is not `stable_answer_digest`'s own output.
 - **`internal_error` (500)** -- the endpoint itself broke. **Nothing in this module raises it, and
   nothing that does reach it wears this table's body**: an exception no branch here anticipates is
   caught by Starlette, not by `_shortlist_refusal`, and the caller gets `text/plain` `Internal
@@ -867,6 +875,7 @@ def create_app(
     storage = build_storage(runtime_dir=root, clock=clock)
     evidence_store = storage.evidence_store
     run_repository = storage.repository
+    shortlist_store = storage.shortlist_store
     memory = storage.memory
     recovery_store = storage.recovery_store
     batch_store = storage.batch_store
@@ -1479,7 +1488,13 @@ def create_app(
                 neutralization=request.neutralization,
                 evidence=shortlist_evidence(request.evidence),
             )
-            result = run_shortlist(panel_store(root), resolved, built_at=clock())
+            result = run_shortlist(
+                panel_store(root),
+                resolved,
+                built_at=clock(),
+                runs=run_repository,
+                shortlists=shortlist_store,
+            )
         except ShortlistViewError as error:
             raise _shortlist_refusal(error) from error
         return JSONResponse(
@@ -1490,6 +1505,40 @@ def create_app(
             ),
             content=shortlist_view(result),
         )
+
+    @application.get("/api/v1/shortlists")
+    def shortlist_list() -> dict[str, list[str]]:
+        """Every shortlist answer this installation holds, by content address, ascending.
+
+        `GET /api/v1/factors/experiments`' twin, and its shape: a listing of keys rather than of
+        bodies, because a shortlist answer is kilobytes and the caller almost always wants one.
+        """
+        return {"shortlist_ids": list(shortlist_store.list_ids())}
+
+    @application.get("/api/v1/shortlists/{shortlist_id}")
+    def shortlist_get(shortlist_id: str) -> JSONResponse:
+        """One stored shortlist answer, by the `shortlist_id` its own body carried.
+
+        `V2-P4-062`'s missing route. The three content addresses on a run's answer addressed
+        nothing: `runtime/` held no shortlist artifact, this API had no `GET`, and a caller who
+        wanted to compare today's list with yesterday's had to have saved `--json` themselves.
+
+        **The body is the stored answer and not a re-run**, which is the whole point: it is what
+        was published, byte for byte, and `shortlist_view.open_shortlist` re-derives the address
+        from the content before handing it back, so a document edited on disk is a `404` rather
+        than a shortlist somebody reads names off.
+
+        Registered **after** `POST /api/v1/shortlists/run` and beside `GET /api/v1/shortlists`,
+        which do not collide with it: the run route is a different method, and the listing route
+        is a different path. FastAPI matches in declaration order, so `/api/v1/shortlists` cannot
+        be swallowed by `{shortlist_id}` -- and a request for a literal `run` would be a `422`
+        naming the address shape rather than a mis-routed run.
+        """
+        try:
+            answer = held_shortlist(shortlist_store, shortlist_id)
+        except ShortlistViewError as error:
+            raise _shortlist_refusal(error) from error
+        return JSONResponse(status_code=SHORTLIST_HTTP_STATUS["answered"], content=answer)
 
     @application.get("/api/v1/factors/experiments")
     def factor_experiment_list() -> dict[str, list[str]]:

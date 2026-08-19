@@ -94,6 +94,7 @@ from openalpha_cn.panel_factors import (
 from openalpha_cn.panel_ingest import daily_requirement
 from openalpha_cn.sdk import OpenAlphaSDK
 from openalpha_cn.shortlist_view import ShortlistEvidence, ShortlistRequestError
+from openalpha_cn.storage.sqlite import SQLiteRunRepository
 
 ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 """The repository root, for the two tests below that hold a *document* to what this face does."""
@@ -210,9 +211,20 @@ def _signal(subject: str, *, as_of: datetime) -> SignalFrame:
     )
 
 
-def _run_manifest_id(subject: str, *, as_of: datetime) -> str:
+def _run_manifest(subject: str, *, as_of: datetime) -> RunManifest:
+    """The research run one supplied answer claims to have come out of.
+
+    A whole `RunManifest` rather than only its address since `V2-P4-049`: the address is no longer
+    self-attesting, so a fixture that wants its evidence *counted* has to put the run in the store
+    the face resolves against. `_seed_runs` below is where that happens, and
+    `tests/integration/test_shortlist_workflow.py` is where the negative half -- an address nothing
+    is stored under -- is driven.
+
+    `run_id` carries the instant as well as the subject because `append_run` refuses a second run
+    under one id, and this fixture stores the same securities at three different `as_of`s.
+    """
     return RunManifest(
-        run_id=f"run-{subject}",
+        run_id=f"run-{subject}-{as_of.isoformat()}",
         mode="backtest",
         as_of=as_of,
         code_commit=COMMIT,
@@ -221,7 +233,26 @@ def _run_manifest_id(subject: str, *, as_of: datetime) -> str:
         started_at=as_of,
         finished_at=as_of,
         status="succeeded",
-    ).run_manifest_id
+    )
+
+
+def _run_manifest_id(subject: str, *, as_of: datetime) -> str:
+    return _run_manifest(subject, as_of=as_of).run_manifest_id
+
+
+def _seed_runs(runtime_dir: Path) -> None:
+    """Store a run for every `(security, as_of)` pair any test here files evidence under.
+
+    `V2-P4-049` made `run_manifest_id` resolve against the stored runs, so evidence naming a run
+    this runtime directory never made is dropped and its name counted `unresearched`. Every test
+    below that wants its evidence *counted* needs the runs to exist; the one that wants a signal
+    refused for being stamped at another instant needs them too, because a dropped answer never
+    reaches `rank_candidates` to be refused by it.
+    """
+    repository = SQLiteRunRepository(runtime_dir / "state.sqlite3")
+    for as_of in (EARLY_AS_OF, LATE_AS_OF, MUCH_LATER_AS_OF):
+        for subject in SECURITIES:
+            repository.append_run(_run_manifest(subject, as_of=as_of))
 
 
 def _evidence(subjects: tuple[str, ...], *, as_of: datetime) -> dict[str, ShortlistEvidence]:
@@ -292,7 +323,10 @@ def runtime_dir(raw_panel: tuple[Path, tuple[FactorPanel, ...]]) -> Path:
 
     Module-scoped because no test here mutates it, and the real `compute_factor` /
     `write_factor_panels` over a generated ten-session panel is the expensive half.
+
+    The runs every supplied answer claims to have come from are seeded here; see `_seed_runs`.
     """
+    _seed_runs(raw_panel[0])
     return raw_panel[0]
 
 

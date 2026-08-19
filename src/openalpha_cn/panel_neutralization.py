@@ -301,6 +301,7 @@ from openalpha_cn.panel_factors import (
     ProcessedFactorPanel,
     _refuse_rows_that_are_not_the_answers_their_manifest_addresses,
     _refuse_to_drop_a_stored_build,
+    appended_to_the_stored_year,
 )
 from openalpha_cn.panel_ingest import (
     load_daily_valuations,
@@ -1764,7 +1765,21 @@ def write_neutralized_factor_panels(
         )
     _refuse_two_neutralizations_of_one_build_at_one_as_of(panels)
     planned = [
-        (year, yearly)
+        (
+            year,
+            appended_to_the_stored_year(
+                store,
+                yearly,
+                year,
+                build_column=(
+                    SUBJECT_COLUMN_NAME
+                    if yearly.kind == FACTOR_NEUTRALIZATION_MANIFEST_KIND
+                    else "neutralization_manifest_id"
+                ),
+                identity_columns=("neutralization_id", EVENT_TIME_COLUMN),
+                superseded=supersedes,
+            ),
+        )
         for batches in _neutralized_batches_by_dataset(panels)
         for year, yearly in split_panel_batch_by_year(
             merge_panel_batches(batches), date_timezone=date_timezone

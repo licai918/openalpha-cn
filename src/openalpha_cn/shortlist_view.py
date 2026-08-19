@@ -93,16 +93,40 @@ inventing. So the rule is stated rather than guessed:
 over-reports in the safe direction: a tie that a winsorization did not cause is read as a clip
 block, which makes `cut_inside_the_clip_block` fire on a screen it need not have, and never the
 reverse.
+
+## What the run keeps, and what it checks (`V2-P4-062`, `V2-P4-049`)
+
+The two rows that turned this from a command into a workflow, and both are here rather than in
+`backtest/` for the same reason the adapter above is: those contracts may reach no store, so the
+funnel, the ranking and the gate cannot persist their own answers or resolve anything against a
+stored run, and this is where a public face for them lives.
+
+- **The answer is stored, by its own content address.** `shortlist_view` now mints
+  `shortlist_id` -- `stable_answer_digest` over the whole rendered body, less the one key derived
+  from a wall clock -- and `run_shortlist` hands the document to a `ShortlistDocumentStore` as the
+  last thing it does. `factor_view.ExperimentDocumentStore` is the precedent for the Protocol and
+  `storage/shortlists.py` is what satisfies it, with no import in either direction. Why the three
+  addresses this body already carried could not be the key is measured there, not argued.
+- **The evidence is resolved.** A supplied `run_manifest_id` used to be format-checked and nothing
+  more, so an invented conclusion beside a well-formed literal cleared a `1.0` floor and was
+  published with a provenance pointer that resolved to nothing. `stored_run_manifest_ids` is the
+  set this deployment holds, evidence outside it is dropped before the ranking is built, and the
+  names it was filed under are reported on `evidence_without_a_stored_run`. What that proves is
+  bounded and the bound is written down:
+  `a_resolved_run_manifest_is_not_a_resolved_signal`.
 """
 
 from __future__ import annotations
 
+import json
 import math
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, DecimalException
-from typing import ClassVar, Final, Literal, TypeVar
+from hashlib import sha256
+from typing import ClassVar, Final, Literal, Protocol, TypeVar
 from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
@@ -150,6 +174,7 @@ from openalpha_cn.domain.factor_transform import (
 from openalpha_cn.domain.horizon import COUNTABLE_HORIZON_PATTERN, is_countable_horizon
 from openalpha_cn.domain.labels import halt_corpus_for_years
 from openalpha_cn.domain.name_history import RiskWarning
+from openalpha_cn.domain.run import RunManifest
 from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.domain.trading_calendar import TradingCalendar, TradingCalendarError
 from openalpha_cn.panel.catalog import PanelStorageError
@@ -178,10 +203,15 @@ from openalpha_cn.panel_view import PANEL_STORE_PLACEHOLDER, panel_store
 
 __all__ = [
     "KNOWN_SHORTLIST_VIEW_LIMITATIONS",
+    "SHORTLIST_ANSWER_UNADDRESSED_KEYS",
+    "SHORTLIST_DOCUMENT_SCHEMA_VERSION",
     "SHORTLIST_VIEW_LIMITATION_CODES",
     "SHORTLIST_VIEW_SCHEMA_VERSION",
+    "ResearchRunStore",
     "ShortlistCrossSection",
+    "ShortlistDocumentStore",
     "ShortlistEvidence",
+    "ShortlistNotHeldError",
     "ShortlistPanelUnreadableError",
     "ShortlistRequestError",
     "ShortlistRunBlockedError",
@@ -189,15 +219,21 @@ __all__ = [
     "ShortlistRunResult",
     "ShortlistViewError",
     "ShortlistViewLimitation",
+    "ShortlistWrite",
     "clipped_from_the_tie_at_the_top",
+    "held_shortlist",
     "load_shortlist_cross_section",
+    "open_shortlist",
     "panel_store",
     "run_shortlist",
     "shortlist_components",
+    "shortlist_document",
     "shortlist_evidence",
     "shortlist_request",
     "shortlist_rows",
     "shortlist_view",
+    "stable_answer_digest",
+    "stored_run_manifest_ids",
 ]
 
 SHORTLIST_VIEW_SCHEMA_VERSION: Final[str] = "shortlist-view/v1"
@@ -346,6 +382,24 @@ class ShortlistRunBlockedError(ShortlistViewError):
     reason: ClassVar[str] = "blocked"
 
 
+class ShortlistNotHeldError(ShortlistViewError):
+    """Nothing is held under the content address a caller asked to retrieve, or it will not open.
+
+    `V2-P4-062`. A separate row from `bad_request` because the remedy is different in kind: the
+    address is well formed and this store has never seen it, which a caller fixes by running the
+    shortlist rather than by editing the question. A malformed address -- one that is not
+    `stable_answer_digest`'s own output -- is `bad_request` and is refused before this store is
+    touched at all, so "we looked and there is nothing" and "that is not an address" stay two
+    answers.
+
+    It also covers a held document that does not reopen: `open_shortlist` recomputes the digest
+    from the content and compares it against the key the document was filed under, so a payload
+    edited on disk is a refusal here rather than an answer a caller reads names off.
+    """
+
+    reason: ClassVar[str] = "not_held"
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ShortlistViewLimitation:
     """One named boundary on what a shortlist run can be trusted to mean."""
@@ -399,9 +453,51 @@ KNOWN_SHORTLIST_VIEW_LIMITATIONS: Final[tuple[ShortlistViewLimitation, ...]] = (
             "all is therefore the ordinary first answer -- the shortlist is 'which names are worth "
             "spending an evidence run on today' -- and the gate refuses to publish it as "
             "conclusions under any `minimum_researched_ratio` above zero. Nothing here calls "
-            "`run_cycle`: a face that ran the evidence plane for every shortlisted name would "
-            "make `researched_ratio` unable to be anything but 1.0, and the bar it exists to "
-            "measure would be unreachable from a surface."
+            "`run_cycle`, and the reason first given for that has lapsed: it said a face that "
+            "researched every shortlisted name would make `researched_ratio` unable to be "
+            "anything but 1.0, which held only because `V2-P4-029` makes an abstaining run raise "
+            "rather than leave a name unresearched. `V2-P4-049` retired it a second way -- since "
+            "the `run_manifest_id` is resolved against the stored runs, evidence that resolves to "
+            "nothing leaves its name unresearched and the ratio is reachable below 1.0 whether or "
+            "not `029` is fixed. What still keeps `run_cycle` out is a layering fact rather than "
+            "an arithmetic one: this is a panel-plane face and running the evidence plane would "
+            "make a screen of the stored cross section also an agent invocation, which is a "
+            "second command wearing one name."
+        ),
+    ),
+    ShortlistViewLimitation(
+        code="a_resolved_run_manifest_is_not_a_resolved_signal",
+        detail=(
+            "KNOWN_SHORTLIST_VIEW_RESOLUTION: `V2-P4-049` made the supplied `run_manifest_id` "
+            "resolve against the stored runs, so evidence pointing at a run this deployment never "
+            "made no longer counts toward `researched_ratio` and is reported as "
+            "`evidence_without_a_stored_run`. What is resolved is the **run**, and not the "
+            "`SignalFrame` beside it: this repository stores no signal (see "
+            "`the_evidence_plane_is_supplied_rather_than_run_by_this_module`), so there is nothing "
+            "to resolve one against, and a caller who holds a real `run_manifest_id` can still "
+            "file an invented conclusion under it. The frame is checked for internal consistency "
+            "-- `shortlist_evidence` verifies its `signal_id` against its own content and "
+            "`shortlist_request` refuses one keyed by one security and about another -- and that "
+            "is a statement about the document rather than about who produced it. The property "
+            "delivered is that a published `run_manifest_id` resolves to a run this deployment "
+            "holds; it is not that the conclusion beside it came out of that run."
+        ),
+    ),
+    ShortlistViewLimitation(
+        code="the_stored_answer_is_addressed_by_content_and_not_by_when_it_was_run",
+        detail=(
+            "KNOWN_SHORTLIST_VIEW_STORE: `V2-P4-062`'s store is keyed by `shortlist_id`, which is "
+            "`stable_answer_digest` over the rendered answer less "
+            "`SHORTLIST_ANSWER_UNADDRESSED_KEYS`. Two runs producing one answer therefore produce "
+            "one document and the second is `unchanged`, which is what makes a re-run cost "
+            "nothing and a reader's copy stable -- and it means the store cannot say **how many "
+            "times** an answer was reached or **when**, because a wall clock in the key would "
+            "mint a new document for every repetition of one answer. The one rendered value left "
+            "out of the address, `measurement.ranking_age_days`, is left out for that: it is "
+            "`built_at - as_of`, so it moves every day the same shortlist is re-run. A caller who "
+            "needs a run log wants the `RunManifest` plane, not this one; what this holds is the "
+            "set of distinct answers this deployment has produced, each retrievable by the "
+            "address its own answer carries."
         ),
     ),
     ShortlistViewLimitation(
@@ -425,6 +521,153 @@ KNOWN_SHORTLIST_VIEW_LIMITATIONS: Final[tuple[ShortlistViewLimitation, ...]] = (
 SHORTLIST_VIEW_LIMITATION_CODES: Final[frozenset[str]] = frozenset(
     limitation.code for limitation in KNOWN_SHORTLIST_VIEW_LIMITATIONS
 )
+
+
+SHORTLIST_DOCUMENT_SCHEMA_VERSION: Final[str] = "shortlist-document/v1"
+"""The version of the envelope a stored shortlist answer is wrapped in.
+
+A version of its own beside `SHORTLIST_VIEW_SCHEMA_VERSION` rather than reusing it, because the
+two can move independently: the answer's shape is what three faces agreed to hand out, and this is
+what a *document* on disk looks like around it. `FactorExperimentRecord` carries the same pair for
+the same reason one plane over.
+"""
+
+SHORTLIST_ANSWER_UNADDRESSED_KEYS: Final[frozenset[str]] = frozenset({"ranking_age_days"})
+"""The rendered `measurement` keys that are recorded and **not** addressed by `shortlist_id`.
+
+One member, and it is here for `RUN_MANIFEST_UNADDRESSED_FIELDS`' stated reason:
+`ranking_age_days` is `built_at - as_of`, so it is a wall clock in disguise, and an identity that
+moved for it would mint a new document every day the same shortlist was re-run --
+`FactorInputRef`'s own defect, which had to be given back: "an identity that moves for nothing
+makes a rebuild unwritable and its predecessor unreproducible."
+
+It is a `frozenset` audited against the rendered body rather than a literal deleted inline, which
+is this repository's shape for every such exclusion: `tests/integration/test_shortlist_workflow.py`
+partitions `measurement`'s own keys against it, so a key added to the rendering is red until it is
+either measured to move the address or given a reason here.
+"""
+
+
+def stable_answer_digest(answer: Mapping[str, object]) -> str:
+    """`sla_...`: the content address of one rendered shortlist answer.
+
+    The fourth address on this body, and the only one that names *this answer* -- see
+    `storage/shortlists.py` for the three that were tried first and the case each one loses.
+    Briefly: `ranking_manifest_id` addresses the question, `gate_manifest_id` addresses the
+    question and the bars but not the supplied evidence, and `ranking_content_digest` addresses
+    the researched candidates only, so two unrelated shortlists with no evidence share it.
+
+    A free function over a mapping rather than `stable_model_id` over a model, which is the form
+    this repository already uses wherever the thing addressed is not a pydantic model --
+    `set_digest`, `characteristic_digest` and `ranking_content_digest` are the three precedents,
+    and `candidate_ranking.py`'s docstring names that split explicitly. **The canonicalisation is
+    `stable_model_id`'s own** -- sorted keys, fixed separators, `ensure_ascii=False`,
+    `allow_nan=False`, sha256, first 24 hex characters -- because a second spelling of "canonical"
+    is a second thing that can disagree about one.
+
+    `SHORTLIST_ANSWER_UNADDRESSED_KEYS` is removed from `measurement` before hashing and from
+    nowhere else; the key stays in the rendered body, which is the difference between *recorded*
+    and *addressed*.
+    """
+    measurement = answer.get("measurement")
+    if not isinstance(measurement, Mapping):
+        raise ShortlistRequestError(
+            "a shortlist answer carries a `measurement` object; this one carries "
+            f"{type(measurement).__name__}, so there is nothing to address"
+        )
+    addressed = {
+        **answer,
+        "measurement": {
+            key: value
+            for key, value in measurement.items()
+            if key not in SHORTLIST_ANSWER_UNADDRESSED_KEYS
+        },
+    }
+    canonical = json.dumps(
+        addressed, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode()
+    return f"sla_{sha256(canonical).hexdigest()[:24]}"
+
+
+ShortlistWrite = Literal["created", "unchanged"]
+"""What the document store did with an arriving answer.
+
+Two members and **no third**, and the missing one is the difference between this store and
+`ExperimentDocumentStore`'s. There, "refused" is a real outcome: an `experiment_id` is the address
+of a *declaration* and a second answer under one is a build that did not reproduce. Here the key
+is the address of the answer itself, so two answers that differ have two keys and the refusal has
+nothing to refuse.
+"""
+
+
+class ShortlistDocumentStore(Protocol):
+    """The byte store one rendered shortlist answer is handed to.
+
+    A `Protocol` so this module imports no store: `storage/shortlists.py` satisfies it
+    structurally, and the import graph stays `shortlist_view -> {backtest, panel_*, domain}` with
+    no edge into `openalpha_cn.storage`. `factor_view.ExperimentDocumentStore` is the precedent --
+    declared beside the consumer, naming exactly the methods that consumer calls -- and it is the
+    precedent that made this row solvable at all: `backtest/` may not reach a store, so the funnel,
+    the ranking and the gate cannot persist their own answers, and this module is where a face for
+    them lives.
+
+    Every parameter is a string. Nothing here has an opinion about what a payload means, which is
+    what keeps the store below `openalpha_cn.backtest` rather than above it.
+    """
+
+    def put(self, *, shortlist_id: str, payload: str) -> ShortlistWrite:
+        """Hold `payload` under `shortlist_id`, keeping held bytes if something is there."""
+
+    def get(self, shortlist_id: str) -> str | None:
+        """The held payload for `shortlist_id`, or `None`."""
+
+    def list_ids(self) -> tuple[str, ...]:
+        """Every held `shortlist_id`, ascending."""
+
+
+class ResearchRunStore(Protocol):
+    """The stored runs a supplied `run_manifest_id` is resolved against (`V2-P4-049`).
+
+    `ShortlistDocumentStore`'s arrangement and its reason, and one method rather than two: this
+    module needs the set of `run_manifest_id`s a deployment holds and nothing else about a run.
+    `runtime/repository.py::RunRepository` is the sibling Protocol on the same store and declares
+    `get_run(run_id)`, which is the wrong key here -- `run_id` is the caller's name for a run and
+    `run_manifest_id` is `stable_model_id`'s address of its whole declaration, and it is the second
+    that a published candidate carries.
+
+    **`list_runs` and not a lookup, because the store has no index on the address.**
+    `SQLiteRunRepository` files a run under `run_id` with the manifest as an opaque payload;
+    `run_manifest_id` is a `computed_field`, so there is no column to select on and the honest
+    signature is the one that says so. See `stored_run_manifest_ids` for what that costs and the
+    one call per shortlist run it costs it at.
+    """
+
+    def list_runs(self) -> tuple[RunManifest, ...]:
+        """Every stored run manifest."""
+
+
+def stored_run_manifest_ids(runs: ResearchRunStore) -> frozenset[str]:
+    """Every `run_manifest_id` this deployment holds a run for.
+
+    `V2-P4-049`, which the P4 re-acceptance measured like this: `run_manifest_id` was only
+    format-checked and a supplied `SignalFrame` only had to hash to its own address, so an invented
+    signal beside the literal `run_000000000000000000000000` cleared a `--min-researched-ratio 1.0`
+    floor and published 25 candidates carrying `researched_ratio: 1.0`. The declared limitation
+    said the evidence was *supplied rather than run*; it did not say it was unverifiable, and the
+    published answer carried a provenance pointer that resolved to nothing.
+
+    **Cost, stated rather than discovered.** `RunManifest.run_manifest_id` is a `computed_field`
+    over the run's whole declaration and no column carries it, so this reads every stored run and
+    recomputes the address. That is one pass per shortlist run and not one per shortlisted name --
+    the set is built once in `run_shortlist` and the evidence is a membership test against it --
+    and `list_runs` already validates every payload it returns, so the added work is the digest
+    rather than the parse. Measured shape on the `runs` table: `SQLiteRunRepository.list_runs`
+    over 100,000 stored runs is ~450 ms, which is what a deployment with 100,000 research runs
+    would add to one shortlist. Giving the address a column and an index is the repair when that
+    bites -- `V2-P4-002` did exactly that for `mode`, and its docstring is the template -- and it
+    is a migration rather than this row's work.
+    """
+    return frozenset(manifest.run_manifest_id for manifest in runs.list_runs())
 
 
 # --- the request, which touches no store --------------------------------------------------------
@@ -1303,6 +1546,21 @@ class ShortlistRunResult:
     silently was the first version and a mutation proved it invisible: the caller's evidence
     vanished into a `researched_ratio` nobody could reconcile against what they had sent.
     """
+    unresolvable_evidence: tuple[str, ...]
+    """Subjects whose supplied `run_manifest_id` names no run this deployment holds, ascending.
+
+    `V2-P4-049`. These names are **not** researched: their evidence is dropped before
+    `rank_candidates` sees it, so each falls into `CandidateRanking.unresearched` and leaves
+    `researched_ratio` exactly where a name with no evidence at all would leave it. That is the
+    whole of the issue -- a well-formed address that resolves to nothing used to count.
+
+    Carried beside `unused_evidence` rather than merged into it for that field's own reason: the
+    two have different remedies. An answer about a name the cut did not reach is *correct evidence
+    about a different question*; an answer pointing at a run nobody made is a provenance claim this
+    deployment cannot stand behind, and the remedy is to run the research rather than to re-cut the
+    list. Merging them would have made "you researched more names than I shortlisted" and "your
+    provenance does not resolve" one line in a report.
+    """
     cross_section_as_of: datetime
     pricing_session: date
     universe: tuple[str, ...]
@@ -1321,6 +1579,8 @@ def run_shortlist(
     request: ShortlistRunRequest,
     *,
     built_at: datetime,
+    runs: ResearchRunStore,
+    shortlists: ShortlistDocumentStore,
     execution: AShareExecutionPolicy | None = None,
 ) -> ShortlistRunResult:
     """Read the panel, cut the funnel, join the evidence plane, and gate the result.
@@ -1347,10 +1607,22 @@ def run_shortlist(
     rendered answer for that reason. `rank_candidates` requires the two to agree, so this is one
     decision rather than two that could drift.
 
-    **Nothing here runs the evidence plane.** See
-    `the_evidence_plane_is_supplied_rather_than_run_by_this_module`: a face that researched every
-    shortlisted name would make `researched_ratio` unable to be anything but `1.0`, and the bar
-    `V2-P4-023` exists to measure would be unreachable from a surface.
+    **Nothing here runs the evidence plane, and it does resolve one.** See
+    `the_evidence_plane_is_supplied_rather_than_run_by_this_module` for why `run_cycle` is not
+    called, and `a_resolved_run_manifest_is_not_a_resolved_signal` for how far the resolution
+    goes. `V2-P4-049`: evidence whose `run_manifest_id` names no stored run is dropped **before**
+    `rank_candidates` sees it, so the name it was filed under is `unresearched` and contributes to
+    `researched_ratio` exactly as a name with no evidence does. Dropped rather than refused,
+    because a caller looping over a year of `as_of`s has to be able to keep going past it -- the
+    reason `CandidateRankingError` is not what an unresearched name raises either -- and reported
+    on `unresolvable_evidence` rather than silently, which is `unused_evidence`'s own measured
+    lesson.
+
+    **The answer is stored, here and not at each face**, which is `run_factor_experiment`'s rule:
+    three write paths are three chances to write a different document under one key. It is the
+    last thing that happens, so a run that could not be gated stores nothing, and the key is the
+    answer's own `shortlist_id` so a re-run that reproduces an answer is a no-op rather than a
+    second copy.
     """
     if request.tier == "neutralized":
         raise ShortlistRequestError(
@@ -1380,8 +1652,21 @@ def run_shortlist(
     _refuse_a_component_the_panel_never_valued(request, section=section, funnel=funnel)
 
     shortlisted = {entry.subject for entry in funnel.shortlist}
-    joined = {subject: item for subject, item in request.evidence.items() if subject in shortlisted}
-    unused = tuple(sorted(set(request.evidence) - shortlisted))
+    resolvable = stored_run_manifest_ids(runs)
+    unresolvable = tuple(
+        sorted(
+            subject
+            for subject, item in request.evidence.items()
+            if item.run_manifest_id not in resolvable
+        )
+    )
+    supplied = {
+        subject: item
+        for subject, item in request.evidence.items()
+        if item.run_manifest_id in resolvable
+    }
+    joined = {subject: item for subject, item in supplied.items() if subject in shortlisted}
+    unused = tuple(sorted(set(supplied) - shortlisted))
     try:
         manifest = build_ranking_manifest(
             as_of=request.as_of,
@@ -1413,9 +1698,10 @@ def run_shortlist(
             f"the candidate list at {request.as_of.isoformat()} could not be gated: {error}"
         ) from error
 
-    return ShortlistRunResult(
+    result = ShortlistRunResult(
         request=request,
         unused_evidence=unused,
+        unresolvable_evidence=unresolvable,
         cross_section_as_of=section.as_of,
         pricing_session=section.session,
         universe=section.universe,
@@ -1424,6 +1710,9 @@ def run_shortlist(
         ranking=ranking,
         clearance=clearance,
     )
+    answer = shortlist_view(result)
+    shortlists.put(shortlist_id=str(answer["shortlist_id"]), payload=shortlist_document(answer))
+    return result
 
 
 def _stored_coverage(component: ComponentCrossSection) -> dict[str, int]:
@@ -1598,6 +1887,16 @@ def shortlist_view(result: ShortlistRunResult) -> dict[str, object]:
     nothing is refused by `_refuse_a_component_the_panel_never_valued` before the gate runs, so
     the caller is told about `insufficient_cross_section` rather than about a researched ratio.
 
+    ## `shortlist_id`, the address that made the other three retrievable (`V2-P4-062`)
+
+    The body carried three content addresses and there was nothing to address: no store held a
+    shortlist and no route served one. None of the three could be the key -- `ranking_manifest_id`
+    names the question, `gate_manifest_id` names the question and the bars but not the supplied
+    evidence, and `ranking_content_digest` names the researched candidates only, so two unrelated
+    shortlists with no evidence at all share it. `shortlist_id` is `stable_answer_digest` over
+    everything above it, and it is computed **last**, over the finished body, so a key added to
+    this rendering moves it without anyone having to remember to.
+
     This reads `admitted_or_none` and `is_blocked` and never `bool()`, `len()` or iteration, all
     three of which raise on a `ShortlistClearance` *even when it cleared*.
     """
@@ -1608,7 +1907,7 @@ def shortlist_view(result: ShortlistRunResult) -> dict[str, object]:
     admitted_by_component = {
         census.factor_id: census.admitted_count for census in result.funnel.scores.components
     }
-    return {
+    answer: dict[str, object] = {
         "schema_version": SHORTLIST_VIEW_SCHEMA_VERSION,
         "is_blocked": clearance.is_blocked,
         "gate_manifest_id": clearance.manifest.gate_manifest_id,
@@ -1698,7 +1997,126 @@ def shortlist_view(result: ShortlistRunResult) -> dict[str, object]:
         ),
         "unresearched": list(result.ranking.unresearched),
         "evidence_not_shortlisted": list(result.unused_evidence),
+        "evidence_without_a_stored_run": list(result.unresolvable_evidence),
     }
+    return {**answer, "shortlist_id": stable_answer_digest(answer)}
+
+
+def shortlist_document(answer: Mapping[str, object]) -> str:
+    """One rendered answer as the bytes a `ShortlistDocumentStore` holds.
+
+    An envelope around the answer rather than the answer itself, so the document says what it is
+    and what it is filed under without either fact having to be recovered from a filename --
+    `FileShortlistStore` names the file after the key and carries no second component, which is
+    only safe because the key is inside the bytes as well.
+
+    The canonicalisation is `stable_answer_digest`'s, which is `stable_model_id`'s, for that
+    function's stated reason: a second spelling of "canonical" is a second thing that can disagree
+    about one. `open_shortlist` re-derives the digest from `answer` and compares, so a payload
+    edited on disk does not merely differ from the original -- it does not open.
+    """
+    return json.dumps(
+        {
+            "schema_version": SHORTLIST_DOCUMENT_SCHEMA_VERSION,
+            "shortlist_id": answer["shortlist_id"],
+            "answer": answer,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def open_shortlist(payload: str) -> dict[str, object]:
+    """Reopen a stored document, refusing one whose answer no longer hashes to its own key.
+
+    `open_experiment`'s boundary, one plane over: the point at which immutability stops being a
+    property of an object in one process and becomes an enforcement across two. The document
+    carries the answer and the address it was filed under; this recomputes the address from the
+    answer and refuses the pair if they disagree, so a document with one number edited does not
+    parse rather than parsing into a shortlist somebody would read names off.
+
+    What the seal is and is not is `factor_view`'s
+    `the_seal_detects_an_edit_and_does_not_authenticate_one`, unchanged: it is integrity against a
+    partial write and against a clobber, and never against an author who recomputed it.
+    """
+    try:
+        document = json.loads(payload)
+    except ValueError as error:
+        raise ShortlistNotHeldError(f"a held shortlist document is not JSON: {error}") from error
+    if not isinstance(document, Mapping) or not isinstance(document.get("answer"), Mapping):
+        raise ShortlistNotHeldError(
+            "a held shortlist document is an object carrying an `answer` object; this one is "
+            f"{type(document).__name__}"
+        )
+    answer = dict(document["answer"])
+    claimed = document.get("shortlist_id")
+    stated = answer.get("shortlist_id")
+    recomputed = stable_answer_digest(
+        {key: value for key, value in answer.items() if key != "shortlist_id"}
+    )
+    if claimed != recomputed or stated != recomputed:
+        raise ShortlistNotHeldError(
+            f"a held shortlist document is filed under {claimed!r}, states {stated!r} and its "
+            f"answer hashes to {recomputed!r}; a content address that does not describe the "
+            "answer beside it is the one thing an address exists to make impossible"
+        )
+    return answer
+
+
+def held_shortlist(shortlists: ShortlistDocumentStore, shortlist_id: str) -> dict[str, object]:
+    """The answer held under `shortlist_id`, reopened, or `ShortlistNotHeldError`.
+
+    `V2-P4-062`'s read half, shared by `openalpha shortlist get`, `GET
+    /api/v1/shortlists/{shortlist_id}` and `OpenAlphaSDK.held_shortlist` so the three cannot come
+    to serve three shapes -- `shortlist_view`'s own argument for existing at all.
+
+    A malformed address is `bad_request` and never `not_held`, and the order of the two checks is
+    what makes that true: the shape is refused here, before the store is asked, so "that is not an
+    address" and "nothing is held under it" are two answers rather than one 404 covering both.
+    The shape is stated here rather than imported from `storage/shortlists.py`, which this module
+    may not import; `stable_answer_digest` is what defines it and the two are held equal by
+    `tests/integration/test_shortlist_workflow.py`.
+
+    **Three things are checked and not two.** `open_shortlist` proves the document is internally
+    consistent -- its answer hashes to the address it carries -- and that is not the same as the
+    document being the one asked for: a file *renamed* on disk is self-consistent under its old
+    address and served under its new one. `FileShortlistStore.put` cannot produce that state,
+    because it derives the filename from the payload it is handed; a hand on the filesystem can,
+    which is the clobber half of what the seal is for. So the reopened answer's own
+    `shortlist_id` is required to equal the key it was fetched by.
+    """
+    if not _SHORTLIST_ID.fullmatch(shortlist_id):
+        raise ShortlistRequestError(
+            f"{shortlist_id!r} is not a shortlist address; a stored answer is filed under the "
+            "`shortlist_id` its own body carries (`sla_` and 24 lowercase hex characters). Run "
+            "the shortlist and read `shortlist_id` off the answer, or list what is held"
+        )
+    payload = shortlists.get(shortlist_id)
+    if payload is None:
+        raise ShortlistNotHeldError(
+            f"nothing is held under {shortlist_id}; this deployment has never produced that "
+            "answer, or its runtime directory is not the one that did"
+        )
+    answer = open_shortlist(payload)
+    if answer.get("shortlist_id") != shortlist_id:
+        raise ShortlistNotHeldError(
+            f"the document held under {shortlist_id} is a self-consistent answer addressed "
+            f"{answer.get('shortlist_id')!r}; the store filed it under a key its own content does "
+            "not carry, which is what a renamed document looks like from here"
+        )
+    return answer
+
+
+_SHORTLIST_ID: Final[re.Pattern[str]] = re.compile(r"sla_[0-9a-f]{24}")
+"""`stable_answer_digest`'s own output, as a shape a retrieval can refuse before touching a store.
+
+`re.fullmatch` and never `re.match` with a trailing `$`, which is `storage/shortlists.py`'s
+measured rule: Python's `$` also matches immediately before a final newline, so a `"$"`-anchored
+pattern under `.match` accepts a token with a `\\n` on the end -- and this token is about to be
+handed to a store that turns it into a filename.
+"""
 
 
 def shortlist_rows(result: ShortlistRunResult) -> tuple[tuple[str, str, str, str], ...]:

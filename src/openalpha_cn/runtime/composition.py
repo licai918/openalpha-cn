@@ -9,12 +9,14 @@ is now the only place either module constructs a store; both call it and hold th
 v2 adds five more storage layers (panel, factor, model, ranking, portfolio). Without a
 composition root, each one would need wiring twice, by hand, forever.
 
-Field types mirror the storage-Protocol layer Task 9 (V2-P0B-003) built: seven of nine
-fields are typed against the narrowest Protocol their consumers need (`RunRepository`,
-`ResearchMemory`, `RecoveryStore`, `EvidenceStore`, `WatchlistStore`, `ReportStore`,
+Field types mirror the storage-Protocol layer Task 9 (V2-P0B-003) built: six of eleven
+fields are typed against the narrowest Protocol their consumers need (`ResearchMemory`,
+`RecoveryStore`, `EvidenceStore`, `WatchlistStore`, `ReportStore`,
 `ValidationStore`) -- because `sdk.py`/`api/app.py` only ever call the methods those
-Protocols declare on these seven, routing them through this container does not widen
-what a consumer can do. `ValidationStore` (`backtest/validation.py`, V2-P0B-010) follows
+Protocols declare on these six, routing them through this container does not widen
+what a consumer can do. `repository` was a seventh until `V2-P4-049` and is now concrete
+for `batch_store`'s reason; see its own field docstring.
+`ValidationStore` (`backtest/validation.py`, V2-P0B-010) follows
 the same narrowing as `WatchlistStore`/`ReportStore`: `sdk.py`/`api/app.py` call
 `append`/`list_by_decision`/`list_by_signal` on it directly (there is no engine-layer
 consumer the way `RunRepository`/`RecoveryStore` have `ResearchEngine`), so that Protocol
@@ -44,7 +46,6 @@ from openalpha_cn.evidence.service import EvidenceStore
 from openalpha_cn.product.research import ReportStore, WatchlistStore
 from openalpha_cn.runtime.memory import ResearchMemory
 from openalpha_cn.runtime.recovery import RecoveryStore
-from openalpha_cn.runtime.repository import RunRepository
 from openalpha_cn.storage.batch import SQLiteBatchTaskStore
 from openalpha_cn.storage.factor_experiments import FileExperimentStore
 from openalpha_cn.storage.memory import SQLiteResearchMemory
@@ -53,6 +54,7 @@ from openalpha_cn.storage.parquet import ParquetEvidenceStore
 from openalpha_cn.storage.portfolio import SQLitePortfolioLedger
 from openalpha_cn.storage.product import SQLiteReportStore, SQLiteWatchlistStore
 from openalpha_cn.storage.recovery import SQLiteRecoveryStore
+from openalpha_cn.storage.shortlists import FileShortlistStore
 from openalpha_cn.storage.sqlite import SQLiteRunRepository
 from openalpha_cn.storage.validation import SQLiteValidationStore
 
@@ -61,7 +63,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class StorageContainer:
-    """All nine storage components assembled for one shared `runtime_dir`.
+    """All eleven storage components assembled for one shared `runtime_dir`.
 
     `migration_result` is the outcome of the `run_migrations()` call this function makes
     before constructing any store below -- exposed so a caller that needs to report on
@@ -71,7 +73,18 @@ class StorageContainer:
     """
 
     evidence_store: EvidenceStore
-    repository: RunRepository
+    repository: SQLiteRunRepository
+    """The `runs` and `decisions` store, concrete rather than `RunRepository`-typed.
+
+    It joined `batch_store` and `portfolio_ledger` for their reason and by their route
+    (`V2-P4-049`): `shortlist_view.stored_run_manifest_ids` resolves a supplied
+    `run_manifest_id` against what this deployment holds, and the only way to answer that is
+    `list_runs()`, which `RunRepository` does not declare and must not -- that Protocol names
+    exactly the four methods `ResearchEngine` calls, and widening it would hand every
+    service-layer consumer a listing it has no business asking for. `ResearchEngine` still takes
+    this field as a `RunRepository`, because a concrete class satisfies its own Protocol; what
+    changed is only what the two faces above may call on it.
+    """
     memory: ResearchMemory
     recovery_store: RecoveryStore
     batch_store: SQLiteBatchTaskStore
@@ -90,15 +103,27 @@ class StorageContainer:
     imports both. The structural match is what makes the injection work and
     `tests/unit/test_factor_view_layering.py` is what pins that it still holds.
     """
+    shortlist_store: FileShortlistStore
+    """`V2-P4-062`'s stored shortlist answers, under `runtime_dir / "shortlists"`.
+
+    Concrete for `experiment_store`'s reason exactly: the Protocol its consumer declares
+    (`shortlist_view.ShortlistDocumentStore`) lives *above* `openalpha_cn.storage`, so typing this
+    field against it would give `openalpha_cn.runtime` an import edge into
+    `openalpha_cn.shortlist_view` -- and through it into `openalpha_cn.backtest`'s funnel, ranking
+    and gate leaves -- for a field whose only job here is to be handed to a face that already
+    imports both.
+    """
     migration_result: MigrationRunResult
 
 
 def build_storage(*, runtime_dir: Path, clock: Callable[[], datetime]) -> StorageContainer:
     """Run pending schema migrations, then assemble every storage component once.
 
-    All nine stores share one `runtime_dir`: eight at its root-level `state.sqlite3`
+    All eleven stores share one `runtime_dir`: eight at its root-level `state.sqlite3`
     (matching the pre-existing per-store convention), plus the Parquet evidence store
-    under `runtime_dir / "evidence"`. Interrupted-batch recovery runs here, using the
+    under `runtime_dir / "evidence"`, the sealed experiment documents under
+    `runtime_dir / "experiments"` and `V2-P4-062`'s shortlist answers under
+    `runtime_dir / "shortlists"`. Interrupted-batch recovery runs here, using the
     caller-supplied `clock`, instead of being duplicated (and, in `api/app.py`'s case,
     hardcoded) at each call site.
 
@@ -118,7 +143,7 @@ def build_storage(*, runtime_dir: Path, clock: Callable[[], datetime]) -> Storag
     runtime_dir.mkdir(parents=True, exist_ok=True)
     migration_result = run_migrations(runtime_dir / "state.sqlite3", clock=clock)
     evidence_store: EvidenceStore = ParquetEvidenceStore(runtime_dir / "evidence")
-    repository: RunRepository = SQLiteRunRepository(runtime_dir / "state.sqlite3")
+    repository = SQLiteRunRepository(runtime_dir / "state.sqlite3")
     memory: ResearchMemory = SQLiteResearchMemory(runtime_dir / "state.sqlite3")
     recovery_store: RecoveryStore = SQLiteRecoveryStore(runtime_dir / "state.sqlite3")
     batch_store = SQLiteBatchTaskStore(runtime_dir / "state.sqlite3")
@@ -127,6 +152,7 @@ def build_storage(*, runtime_dir: Path, clock: Callable[[], datetime]) -> Storag
     report_store: ReportStore = SQLiteReportStore(runtime_dir / "state.sqlite3")
     validation_store: ValidationStore = SQLiteValidationStore(runtime_dir / "state.sqlite3")
     experiment_store = FileExperimentStore(runtime_dir / "experiments")
+    shortlist_store = FileShortlistStore(runtime_dir / "shortlists")
     batch_store.recover_interrupted(now=clock())
     logger.info(
         "storage_initialized",
@@ -146,5 +172,6 @@ def build_storage(*, runtime_dir: Path, clock: Callable[[], datetime]) -> Storag
         report_store=report_store,
         validation_store=validation_store,
         experiment_store=experiment_store,
+        shortlist_store=shortlist_store,
         migration_result=migration_result,
     )
