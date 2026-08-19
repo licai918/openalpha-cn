@@ -1,80 +1,146 @@
-"""`V2-P4-047`. Neither ranking source fills an order -- however the import is written.
+"""`V2-P4-053`/`054`/`055`. Neither ranking source makes or fills an order -- and what still gets
+past that.
 
-`V2-P4-035` disclosed a residual gap it could not close with `lint-imports`:
-`openalpha_cn.backtest.execution` declares `ExecutionRequest` ("A simplified cash-equity order
-intent") and fills it in `AShareExecutionPolicy.execute`, both ranking sources reach that module
-through `cross_section`, and the module cannot be forbidden because `cross_section.py:227` needs
-the fill policy for `V2-P4-004`'s tradeability filter -- measured at 7 kept / 1 broken when
-tried. What `V2-P4-035` put in its place was a **file-scoped pin on each source's own import
-list**, and that pin was inoperative in two independent ways:
+`ranking-creates-no-portfolio-order` forbids `PortfolioOrder`, the `PortfolioSimulator` and the
+multi-day runner to `candidate_ranking.py` and `shortlist_gate.py`, and four `lint-imports`
+contracts carry it. The half no contract can carry is the **single-security** one:
+`backtest/execution.py` declares `ExecutionRequest` -- "A simplified cash-equity order intent" --
+and `AShareExecutionPolicy.execute` simulates a fill, and `cross_section.py:227` imports both for
+`V2-P4-004`'s tradeability filter. Forbidding that module measures 7 kept / 1 broken, so it
+cannot be forbidden, and `cross_section` re-exports all three names besides -- as does
+`backtest/__init__.py` -- so a source can reach the fill policy through a module already on its
+allowlist and **add no edge to the import graph at all**. This file is what stands in for the
+contract there.
 
-**(a) It only saw column-zero imports.** Both pins filtered with
-`line.startswith(("import ", "from "))`, so a *function-local*
-`from openalpha_cn.backtest.execution import AShareExecutionPolicy` -- indented, and therefore
-invisible to `str.startswith` -- slipped past. That import creates a real `grimp` edge; the
-probe's sat at `candidate_ranking.py:1264`. It filled a real order from each source
-(`filled buy 100 10.20 5.01` from the ranking, `filled sell 200 10.20 6.04` from the gate) with
-`lint-imports` at 8 kept / 0 broken and this directory at 103 passed.
+## The claim, which is exactly what is measured below and no wider
 
-**(b) No new import is needed at all.** `cross_section` binds `AShareExecutionPolicy`,
-`ExecutionRequest` and `MarketBar` in its own namespace, so it re-exports them; and
-`cross_section` is *already first* on the ranking's allowlist. Adding those three names to the
-existing `from openalpha_cn.backtest.cross_section import (...)` block leaves the pin's
-`line.split()[1]` byte-identical and creates **no `grimp` edge whatsoever** -- measured:
-`direct_import_exists(candidate_ranking, backtest.execution)` stays `False`. The gate then
-reaches the same objects through `candidate_ranking`, which is first on *its* allowlist. Orders
-filled from both sources, 8 kept / 0 broken, 103 passed.
+Within one Python process, with the hooks in `_watched` installed:
 
-Form (b) is why this file is not another import rule. **No import-graph contract can catch it,
-because it adds no edge to the graph.** So the binding here is four layers, each of which covers
-what the ones beside it cannot, and each of which was driven red by a probe that really did fill
-an order before it was written:
+1. Neither source was **running, on any thread**, at the moment an `ExecutionRequest` was
+   constructed or an order filled, across a real screen -> ranking -> gate run
+   (`test_no_order_..._had_either_source_running`, two axes).
+2. Neither source made or filled an order **while its own module body ran**
+   (`test_neither_source_makes_or_fills_an_order_while_its_own_module_body_runs`).
+3. Neither source **binds, names or resolves to** any object `backtest/execution.py` defines,
+   private names included (layers 2-4).
 
-1. `test_no_fill_during_a_real_ranking_and_gate_is_made_by_either_source` -- **behavioural**. The
-   real fill policy is wrapped for the length of a real screen -> ranking -> gate run, and every
-   fill is asked which files are on its call stack. Catches any spelling at all, including a name
-   assembled at runtime, because it never looks at a name -- but only on code the pipeline runs.
-2. `test_neither_source_holds_an_order_machinery_object_in_its_namespace` -- **identity**. Alias-
-   and re-export-proof, because it compares objects rather than names, and it does not care
-   whether the code that binds them is ever called. This is the layer form (b) fails.
-3. `test_no_code_object_in_either_source_names_the_order_machinery` -- **names, in bytecode**.
-   Every code object in each file, module level and function body alike, so indentation is not a
-   hiding place. This is the layer form (a) fails.
-4. `test_every_import_in_either_source_resolves_away_from_the_order_machinery` -- **resolution**.
-   Layer 3 reads the names an import mentions; this one follows them to the objects they bind, so
-   `from ...cross_section import AShareExecutionPolicy` is judged on what it hands back rather
-   than on the module it names. Both forms fail here, which is deliberate: the two forms differ
-   only in where the import sits, and one assertion that sees both is the one a reader trusts.
+Not claimed: that no code in either file can be made to fill an order. Two shapes measured below
+do exactly that and are not caught; they are in the table.
 
-Layers 2-4 all catch form (b) today and only layer 1 catches a runtime-assembled name; the
-overlap is the point, because each covers a different escape and the cheapest of them is the one
-most likely to be edited away.
+## The three defects this replaces, each reproduced before it was closed
 
-The order machinery is **discovered** off `openalpha_cn.backtest.execution` rather than listed
-here, so a class added to that module is banned from both sources on the day it lands and no
-table has to be remembered. `V2-P4-035`'s own defect was a table asserting it was exhaustive
-while nothing measured it.
+- **`053`, the dispatch hop.** The previous version walked `sys._getframe()` -- one thread. A
+  probe using a runtime-assembled name and `pool.submit(policy.execute, intent, bar).result()`
+  filled `filled buy 100 10.20 5.01` from `candidate_ranking.py` with `6 passed`, lint-imports at
+  8 kept / 0 broken, `tests/unit` at 2373 passed. The isolating control -- same names, same fill,
+  called synchronously -- went red and named the file, so the defeated thing was the walk. The
+  walk is now `sys._current_frames()`: the submitter's frame is alive, blocked in `.result()`, on
+  the thread that submitted. `test_the_witness_sees_a_submitter_that_is_blocked_on_another_thread`
+  computes both walks on that shape every run, so the difference stays a measurement.
+- **`053`, import time.** The same fill written at module level of `candidate_ranking.py` was
+  recorded nowhere: pytest imports the module at collection, long before any hook exists. `6
+  passed`, 8 kept / 0 broken. Each source file is now executed again from its own path under a
+  throwaway module name **with the hooks already installed**, which needs no attribution at all --
+  everything inside that window belongs to the file whose body is running.
+- **`054`, the visibility rule.** `_order_machinery` kept `not name.startswith("_")` and layer 1
+  wrapped `AShareExecutionPolicy.execute` alone, so a `class _SweepExecutionPolicy(
+  AShareExecutionPolicy)` overriding `execute`, re-exported through `cross_section` and imported
+  at column zero, was in no ban set and under no wrapper: `filled sell 200 10.20 5.00`, everything
+  green. The ban set now has **no visibility rule** -- measured as adding `_price_band` and
+  `_board_limit`, which neither source touches -- and the wrapper covers every class carrying an
+  `execute`, transitively. Both halves are pinned by their own tests.
+- **`055`, the vacuous sentinel.** `fills.append(...)` ran before `original(...)` and never read
+  `result.status`, so it counted **calls**. Flipping `_bar()` to `suspended=True` gave 12 calls,
+  0 fills, and the guard passed. The sentinel is now `status == "filled"`; flipping the same
+  fixture makes it red, and `test_the_sentinel_separates_a_filled_order_from_a_refused_one` runs
+  that mutation on every pass.
 
-**The residual, stated rather than papered over**: a source could reach the policy through a name
-built from string fragments at runtime (`getattr(cross_section, "AShare" + "ExecutionPolicy")`),
-which layers 2 and 3 cannot see. Layer 1 sees it the moment the pipeline runs that code, and code
-the pipeline never runs fills no order in production. That is the honest boundary, and it is
-narrower than "a direct import, at column zero, spelled the obvious way", which is what
-`V2-P4-035` actually had.
+## Two axes, because they fail to different things
+
+`_watched` hooks `ExecutionRequest.__init__` -- **who made the order** -- and `execute` on every
+policy class -- **who was running when it filled, and whether it filled**. The first is captured
+where the intent is constructed, so it survives whatever the intent is handed to afterwards, and
+it is the axis a policy subclass cannot dodge, since an override that never delegates still needs
+an intent. The second is what catches an intent built elsewhere and filled from here.
+
+## The nine falsifications, run against this guard
+
+Each patched the real tree and ran this file. `filled` below is the probe's own printed status.
+
+| falsification                                    | outcome                                     |
+| ------------------------------------------------ | ------------------------------------------ |
+| a bare `threading.Thread`, joined                 | caught -- fill axis + intent axis          |
+| a `ThreadPoolExecutor`, the `053` probe           | caught -- fill axis + intent axis          |
+| a fill at import time, the `053` probe            | caught -- import-time window               |
+| a `functools.partial` bound here, called there    | **not caught by either axis** -- see below |
+| a generator consumed by another module            | caught -- its frame carries this file      |
+| a callback registered here, invoked there         | caught -- its frame carries this file      |
+| a private subclass overriding `execute`           | caught -- five layers                      |
+| a fill through `__init_subclass__`                | caught -- import-time window + identity    |
+| a `subprocess`                                    | **not caught** -- `12 passed`              |
+
+**The `subprocess` is another interpreter.** Its fill printed `filled` and this file reported
+`12 passed`. Nothing in-process can see it, and nothing here pretends to.
+
+**The `partial` is the sharper one.** A `functools.partial` has no code object of its own, so a
+partial over a helper declared in `execution.py`, registered at import time into a list an
+unguarded module iterates, puts no guarded frame on any stack at fill time and constructs no
+intent in either the guarded file's frames or its module body. Neither axis sees it. It went red
+here only incidentally -- the injected fill also fires on the suspended-bar fixture, so the `055`
+mutation test noticed a fill that should not have happened -- and an attacker who respected the
+bar would have been green. Two things bound it rather than excuse it: the callable must carry no
+code object of the guarded file (a `lambda` or a nested `def` does, and both are caught above),
+and it needs an accomplice, because no module in `backtest/` has a callback registry today --
+arranging this one meant adding `_SWEEP_HOOKS` to `cross_section.py`.
+
+Smaller residuals, stated: `model_construct`, `model_validate` and `model_copy` bypass
+`__init__`, so the intent axis sees 1 of those 4 construction paths and such an intent is caught
+on the fill axis instead; `__new__` is the hook all four share and is **not** used, because it
+cannot be removed again -- `del ExecutionRequest.__new__` leaves the class raising
+`TypeError: object.__new__() takes exactly one argument` for the rest of the session, measured.
+Discovery keeps only objects carrying `__module__`, so a module-level constant like `_CENT` is
+not in the ban set. A name assembled at runtime
+(`getattr(cross_section, "AShare" + "ExecutionPolicy")`) is still invisible to layers 2-4 by
+construction; the behavioural layers see it, which is how the `053` probes were caught.
+
+## What was rejected, and why
+
+- **Ending `cross_section`'s re-export.** It would not remove the class of bypass it targets:
+  `backtest/__init__.py` re-exports `AShareExecutionPolicy`, `ExecutionRequest`, `MarketBar` and
+  `ExecutionResult` too, so `from openalpha_cn.backtest import ExecutionRequest` is a second route
+  that likewise leaves `direct_import_exists(candidate_ranking, backtest.execution)` false, since
+  `grimp` resolves `from X import name` to `X` when `name` is not a submodule. That one has to be
+  written function-local rather than at column zero -- the package `__init__` imports both sources
+  (lines 15 and 41) before it imports `execution` (line 26), so at module level the name is not
+  bound yet -- but layers 3 and 4 are what refuse it either way, not the namespace. And
+  `sys.modules` is a third door no namespace change can shut. The cost is real besides:
+  `ExecutionResult` is a field type on `cross_section`'s own pydantic models, so private aliases
+  would have to appear in annotations pydantic resolves.
+- **A production audit field or origin census on `ExecutionRequest`.** It buys nothing the
+  import-time window does not already give -- that window is bounded rather than attributed, so it
+  is strictly stronger for import time -- and it would put `sys._getframe` on the path of every
+  order intent for a property only a test reads, on a frozen model whose `__new__` cannot be
+  restored.
+- **`sys.setprofile` plus `threading.setprofile`.** Measured against the table above it catches
+  nothing the all-thread walk misses, because both attribute through frames: the `partial` case
+  has no guarded frame for either to find, and the `subprocess` case is not in this interpreter.
+  A heavier mechanism that closes neither of the two open shapes is not worth its failure modes.
 """
 
 from __future__ import annotations
 
 import dis
 import importlib
+import importlib.util
 import sys
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
-from types import CodeType, ModuleType
+from types import CodeType, FrameType, ModuleType
 from typing import Any, Final
-
-import pytest
 
 from openalpha_cn.backtest import execution as execution_module
 from openalpha_cn.backtest.candidate_ranking import (
@@ -87,7 +153,11 @@ from openalpha_cn.backtest.cross_section import (
     ScoreComponent,
     ShortlistSpec,
 )
-from openalpha_cn.backtest.execution import AShareExecutionPolicy, MarketBar
+from openalpha_cn.backtest.execution import (
+    AShareExecutionPolicy,
+    ExecutionRequest,
+    MarketBar,
+)
 from openalpha_cn.backtest.shortlist_gate import (
     ShortlistClearance,
     ShortlistGateSpec,
@@ -112,29 +182,199 @@ Held against the contract itself in `test_the_two_files_guarded_here_are_the_con
 _source_modules`, so widening the contract's source list without widening this one is red.
 """
 
+GUARDED: Final[frozenset[Path]] = frozenset(SOURCE_PATHS.values())
+
 MACHINERY_MODULE: Final[str] = "openalpha_cn.backtest.execution"
 
 
-def _order_machinery() -> dict[str, object]:
-    """Every public object `openalpha_cn.backtest.execution` **defines**, discovered not listed.
+# --------------------------------------------------------------------------------------------
+# What counts as the order machinery -- discovered, and with no visibility rule (`V2-P4-054`)
+# --------------------------------------------------------------------------------------------
 
-    Filtered on `__module__` so the names that module merely imports -- `ExecutionResult` lives in
-    `domain/execution.py` and is a plain result record both ranking sources legitimately read --
-    are not swept in. Discovery rather than a literal table is the whole point: `V2-P4-035`'s
-    defect was a comment claiming three modules "are the whole of where an order intent is
-    declared or simulated" with nothing measuring the claim.
+
+def _machinery_names(namespace: Mapping[str, object]) -> dict[str, object]:
+    """Every object in `namespace` that `backtest/execution.py` itself **defines**.
+
+    Two filters and deliberately not three. `__module__` is what keeps the names that module
+    merely imports out -- `ExecutionResult` lives in `domain/execution.py` and is a plain result
+    record both ranking sources legitimately read. There is **no filter on the leading
+    underscore**, which is what `V2-P4-054` measured as a hole: the previous version kept only
+    `not name.startswith("_")`, so a `class _SweepExecutionPolicy(AShareExecutionPolicy)`
+    overriding `execute`, re-exported through `cross_section` and imported at column zero, was
+    absent from every ban set below and filled `filled sell 200 10.20 5.00` with the whole gate
+    green.
+
+    Taking a `Mapping` rather than reading the module directly is what lets
+    `test_the_ban_set_has_no_visibility_rule_in_it` drive a private class through this function
+    on every run, instead of trusting that the filter that is not there stays not there.
     """
-    found = {
+    return {
         name: obj
-        for name, obj in vars(execution_module).items()
-        if not name.startswith("_") and getattr(obj, "__module__", None) == MACHINERY_MODULE
+        for name, obj in namespace.items()
+        if getattr(obj, "__module__", None) == MACHINERY_MODULE
     }
+
+
+def _order_machinery() -> dict[str, object]:
+    """`_machinery_names` over the real module, with the sanity check that it found something."""
+    found = _machinery_names(vars(execution_module))
     assert {"AShareExecutionPolicy", "ExecutionRequest", "MarketBar"} <= set(found), (
         f"{MACHINERY_MODULE} no longer defines the policy, the order intent and the bar that "
         f"together make a fill; found {sorted(found)}. If they moved, this guard is pointing at "
         "an empty module and every assertion below would pass on nothing"
     )
     return found
+
+
+def _policy_classes() -> tuple[type, ...]:
+    """Every class that can turn an order intent into a fill, private and inherited alike.
+
+    The machinery module's own classes that carry an `execute`, plus every transitive subclass of
+    them wherever it is declared, keeping only those that define `execute` in their **own**
+    `__dict__` -- an inheritor that does not override it is already covered by the base.
+
+    This is the set `_watched` wraps, and it exists because wrapping `AShareExecutionPolicy
+    .execute` alone is what `V2-P4-054` defeated: a subclass's override shadows the base
+    attribute, so the wrapper on the base is never reached and the fill is unobserved.
+    """
+    roots = [
+        obj
+        for obj in _order_machinery().values()
+        if isinstance(obj, type) and callable(getattr(obj, "execute", None))
+    ]
+    reached: dict[int, type] = {}
+    queue: list[type] = list(roots)
+    while queue:
+        cls = queue.pop()
+        if id(cls) in reached:
+            continue
+        reached[id(cls)] = cls
+        queue.extend(cls.__subclasses__())
+    return tuple(cls for cls in reached.values() if "execute" in vars(cls))
+
+
+# --------------------------------------------------------------------------------------------
+# The ledger: who was running when an order intent was made, and when one filled
+# --------------------------------------------------------------------------------------------
+
+
+def _live_files() -> frozenset[str]:
+    """Every file with a live frame on **any** thread, right now.
+
+    `sys._current_frames()` rather than `sys._getframe()`, which is the whole of `V2-P4-053`'s
+    first half: `pool.submit(policy.execute, intent, bar).result()` runs the fill on a worker
+    thread whose stack is `ThreadPoolExecutor` internals all the way down, so the submitting file
+    is on no frame the fill can walk backwards to -- while its frame is still very much alive,
+    blocked in `.result()`, on the thread that submitted. One dispatch hop defeated the
+    single-thread walk; it does not defeat this one, and
+    `test_the_witness_sees_a_submitter_that_is_blocked_on_another_thread` drives exactly that
+    shape through both to keep the difference measured rather than asserted.
+    """
+    found: set[str] = set()
+    for frame in sys._current_frames().values():
+        cursor: FrameType | None = frame
+        while cursor is not None:
+            found.add(cursor.f_code.co_filename)
+            cursor = cursor.f_back
+    return frozenset(found)
+
+
+def _guarded_among(running: frozenset[str]) -> set[Path]:
+    return {
+        resolved for resolved in (Path(name).resolve() for name in running) if resolved in GUARDED
+    }
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _OrderEvent:
+    """One order intent coming into existence, or one order being decided by a policy."""
+
+    kind: str
+    status: str | None
+    running: frozenset[str]
+
+    @property
+    def culprits(self) -> set[Path]:
+        return _guarded_among(self.running)
+
+
+@dataclass(slots=True)
+class _Ledger:
+    events: list[_OrderEvent] = field(default_factory=list)
+
+    @property
+    def intents(self) -> list[_OrderEvent]:
+        return [event for event in self.events if event.kind == "intent"]
+
+    @property
+    def decisions(self) -> list[_OrderEvent]:
+        return [event for event in self.events if event.kind == "decision"]
+
+    @property
+    def fills(self) -> list[_OrderEvent]:
+        """Only the decisions that actually **filled** (`V2-P4-055`).
+
+        `decisions` counts calls. A call that returned `rejected` bought this guard nothing, and
+        a sentinel written on `decisions` is green on a fixture where every bar is suspended --
+        measured at 12 calls, 0 fills, with the whole file passing.
+        """
+        return [event for event in self.decisions if event.status == "filled"]
+
+
+@contextmanager
+def _watched() -> Iterator[_Ledger]:
+    """Record every order intent made and every order decided, for the length of a block.
+
+    Two hooks on two different objects, because they fail to different things:
+
+    - `ExecutionRequest.__init__` -- **who made the order**. Captured where the intent is
+      constructed, so it is indifferent to which thread, executor, partial or callback later
+      turns it into a fill. Direct construction only; `model_construct`, `model_validate` and
+      `model_copy` all bypass `__init__` and are not seen here (measured: 1 of those 4 paths).
+      `__new__` is the one hook all four pass through and it is **not** used: it cannot be
+      removed again afterwards -- `del ExecutionRequest.__new__` leaves the class with
+      `slot_tp_new` and every later `ExecutionRequest(...)` in the session raises
+      `TypeError: object.__new__() takes exactly one argument`, measured. A guard that corrupts a
+      shared pydantic class for the rest of the suite is not a guard.
+    - `execute` on **every** policy class -- **who was running when it filled**, plus the status
+      that says whether it filled at all.
+    """
+    ledger = _Ledger()
+    originals: dict[type, Any] = {cls: vars(cls)["execute"] for cls in _policy_classes()}
+    had_own_init = "__init__" in vars(ExecutionRequest)
+    original_init = ExecutionRequest.__init__
+
+    def recording_execute(original: Callable[..., Any]) -> Callable[..., Any]:
+        def recorded(policy: Any, request: Any, market: Any) -> Any:
+            running = _live_files()
+            result = original(policy, request, market)
+            ledger.events.append(
+                _OrderEvent(
+                    kind="decision",
+                    status=getattr(result, "status", None),
+                    running=running,
+                )
+            )
+            return result
+
+        return recorded
+
+    def recorded_init(intent: Any, **data: Any) -> None:
+        ledger.events.append(_OrderEvent(kind="intent", status=None, running=_live_files()))
+        original_init(intent, **data)
+
+    for cls, original in originals.items():
+        setattr(cls, "execute", recording_execute(original))  # noqa: B010
+    setattr(ExecutionRequest, "__init__", recorded_init)  # noqa: B010
+    try:
+        yield ledger
+    finally:
+        if had_own_init:
+            setattr(ExecutionRequest, "__init__", original_init)  # noqa: B010
+        else:
+            delattr(ExecutionRequest, "__init__")
+        for cls, original in originals.items():
+            setattr(cls, "execute", original)  # noqa: B010
 
 
 # --------------------------------------------------------------------------------------------
@@ -161,7 +401,7 @@ ALPHA: Final[FactorDefinition] = FactorDefinition(
 )
 
 
-def _bar(subject: str) -> MarketBar:
+def _bar(subject: str, *, suspended: bool = False) -> MarketBar:
     price = Decimal("10.00")
     return MarketBar(
         subject=subject,
@@ -172,7 +412,7 @@ def _bar(subject: str) -> MarketBar:
         high=price,
         low=price,
         close=price,
-        suspended=False,
+        suspended=suspended,
         is_st=False,
         up_limit=Decimal("11.0"),
         down_limit=Decimal("9.0"),
@@ -205,8 +445,13 @@ def _run_manifest_id(subject: str) -> str:
     ).run_manifest_id
 
 
-def _clearance() -> ShortlistClearance:
-    """One real screen -> ranking -> gate run. Every buy below goes through the real policy."""
+def _clearance(*, suspended: bool = False) -> ShortlistClearance:
+    """One real screen -> ranking -> gate run. Every buy below goes through the real policy.
+
+    `suspended` is not decoration and is not a variant anybody ships: it is the fixture mutation
+    `test_the_sentinel_separates_a_filled_order_from_a_refused_one` needs, and it is a parameter
+    rather than an edit so that the mutation runs on every pass.
+    """
     spec = ShortlistSpec(
         components=(ScoreComponent(definition=ALPHA, weight=1.0),),
         tier="processed",
@@ -225,7 +470,7 @@ def _clearance() -> ShortlistClearance:
                 clipped_subjects=frozenset(),
             )
         ],
-        bars={subject: _bar(subject) for subject in UNIVERSE},
+        bars={subject: _bar(subject, suspended=suspended) for subject in UNIVERSE},
     )
     chosen = tuple(entry.subject for entry in funnel.shortlist)
     ranking = rank_candidates(
@@ -255,64 +500,122 @@ def _clearance() -> ShortlistClearance:
 
 
 # --------------------------------------------------------------------------------------------
-# Layer 1 -- behavioural. No name is inspected; a fill is asked who made it.
+# Layer 1 -- behavioural, on two axes. No name is inspected.
 # --------------------------------------------------------------------------------------------
 
 
-def test_no_fill_during_a_real_ranking_and_gate_is_made_by_either_source(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The claim `V2-P4-035` wanted and could not enforce, as behaviour rather than as a name.
+def test_no_order_filled_during_a_real_ranking_and_gate_run_had_either_source_running() -> None:
+    """Who was executing, on any thread, at the moment an order actually filled.
 
-    `AShareExecutionPolicy.execute` is wrapped for the length of one real
-    screen -> ranking -> gate run, and each call walks its own stack for the two source files.
-    Nothing here reads an import line, an alias or a module name, so **every** spelling of the
-    bypass is covered at once -- the function-local import of form (a), the re-export of form
-    (b), and a name assembled at runtime, which no static rule can see.
-
-    The count assertion is the sentinel and is not decoration. Fills **do** happen on this run --
-    that is `V2-P4-004`'s tradeability filter doing its job inside `cross_section` -- so a
-    version of this test whose pipeline quietly stopped filling would be asserting nothing at
-    all, which is this repository's recurring defect: the assertion exists but on that fixture it
-    cannot separate the two answers.
+    Three things separate this from what `V2-P4-053` defeated: the walk is over
+    `sys._current_frames()` rather than one thread's stack, the wrapper is on every policy class
+    rather than on `AShareExecutionPolicy` alone, and the sentinel counts `status == "filled"`
+    rather than counting calls.
     """
-    fills: list[tuple[str, ...]] = []
-    guarded = set(SOURCE_PATHS.values())
-    original = AShareExecutionPolicy.execute
+    with _watched() as ledger:
+        _clearance()
 
-    def recording(self: AShareExecutionPolicy, request: Any, market: Any) -> Any:
-        stack: list[str] = []
-        frame = sys._getframe().f_back
-        while frame is not None:
-            stack.append(frame.f_code.co_filename)
-            frame = frame.f_back
-        fills.append(tuple(stack))
-        return original(self, request, market)
-
-    monkeypatch.setattr(AShareExecutionPolicy, "execute", recording)
-    _clearance()
-
-    assert fills, (
-        "sentinel: no order was filled at all on a real screen -> ranking -> gate run, so this "
-        "test cannot tell a source that fills orders from one that does not. Either the wrapper "
-        "is not on the policy the screen uses, or the fixture stopped exercising the "
-        "tradeability filter"
+    assert ledger.fills, (
+        "sentinel: no order **filled** on a real screen -> ranking -> gate run, so this test "
+        "cannot tell a source that fills orders from one that does not. Note that a count of "
+        "calls would not have caught this: with every bar suspended the same fixture makes 12 "
+        "calls and 0 fills, which is V2-P4-055's defect exactly"
     )
 
-    culprits = {
-        Path(filename).resolve()
-        for stack in fills
-        for filename in stack
-        if Path(filename).resolve() in guarded
-    }
+    culprits = sorted(str(path) for fill in ledger.fills for path in fill.culprits)
     assert not culprits, (
-        f"{sorted(str(path) for path in culprits)} is on the call stack of a filled order. "
-        "Neither ranking source may fill one: `ranking-creates-no-portfolio-order` cannot "
-        "forbid openalpha_cn.backtest.execution -- cross_section.py needs the policy for "
-        "V2-P4-004's tradeability filter, measured at 7 kept / 1 broken when forbidden -- so "
-        "this is the assertion that carries the claim, and it does not care how the import was "
-        "spelled"
+        f"{culprits} was running when an order filled. Neither ranking source may fill one: "
+        "`ranking-creates-no-portfolio-order` cannot forbid openalpha_cn.backtest.execution -- "
+        "cross_section.py needs the policy for V2-P4-004's tradeability filter, measured at "
+        "7 kept / 1 broken when forbidden -- so this is one of the two assertions that carry the "
+        "claim, and it does not care how the import was spelled or which thread ran the fill"
     )
+
+
+def test_no_order_intent_made_during_a_real_ranking_and_gate_run_had_either_source_running() -> (
+    None
+):
+    """Who **made** the order, which is a different question from who was running when it filled.
+
+    Captured at `ExecutionRequest.__init__`, so it holds wherever the intent goes **afterwards**:
+    a thread, a pool, a `functools.partial` handed to another module, a generator resumed
+    elsewhere, a callback another module invokes. Those are the shapes where the fill-side
+    assertion above can lose the trail, because by the time the fill happens the source's frame
+    may have returned -- and this one never had a trail to lose, because it asked at
+    construction.
+
+    What it does **not** reach is an intent constructed somewhere else on the source's behalf --
+    a helper in `execution.py` that builds its own. There the fill-side assertion is what
+    remains, and the module docstring's `partial` row is the measured case where both are silent.
+
+    It is also the axis a policy subclass cannot dodge. An override of `execute` that never
+    delegates is invisible to a wrapper on `execute`; it is not invisible here, because it still
+    needs an `ExecutionRequest` to have an order at all.
+    """
+    with _watched() as ledger:
+        _clearance()
+
+    assert ledger.intents, (
+        "sentinel: no order intent was constructed at all on a real screen -> ranking -> gate "
+        "run, so this assertion is being made about an empty list. Either the hook is not on "
+        "ExecutionRequest or the fixture stopped exercising V2-P4-004's tradeability filter"
+    )
+
+    culprits = sorted(str(path) for intent in ledger.intents for path in intent.culprits)
+    assert not culprits, (
+        f"{culprits} was running when an ExecutionRequest -- 'a simplified cash-equity order "
+        "intent' -- was constructed. D16's 绝不直接创建组合订单 is about creating orders, and "
+        "creating one is exactly this: a source that never constructs an intent cannot fill an "
+        "order however it dispatches the fill"
+    )
+
+
+def test_neither_source_makes_or_fills_an_order_while_its_own_module_body_runs() -> None:
+    """`V2-P4-053`'s second half: import-time code is code, and it runs in production.
+
+    The two assertions above install their hooks and then call the pipeline -- but by then both
+    source modules were imported long ago, at collection, so a fill written at **module level**
+    happens before any hook exists and is recorded nowhere. A probe that did exactly that filled
+    `filled buy 100 10.20 5.01` at import of `candidate_ranking.py` with all six tests passing.
+
+    So each source file is executed again, from its own path, under a throwaway module name, with
+    the hooks already installed. That makes this the one assertion here that needs no attribution
+    at all: everything recorded inside the window belongs to the file whose body is running, so
+    no thread, executor or dispatch hop can point the finger somewhere else.
+    """
+    for module_name, path in SOURCE_PATHS.items():
+        probe_name = f"_import_time_probe_{path.stem}"
+        spec = importlib.util.spec_from_file_location(probe_name, path)
+        assert spec is not None and spec.loader is not None, (
+            f"{path} cannot be loaded from its own path, so the import-time window below would "
+            "not run and this assertion would pass on nothing"
+        )
+        module = importlib.util.module_from_spec(spec)
+        with _watched() as ledger:
+            sys.modules[probe_name] = module
+            try:
+                spec.loader.exec_module(module)
+            finally:
+                sys.modules.pop(probe_name, None)
+
+        # Sentinel. `ledger.events` is empty both when the body made no order and when the body
+        # never ran, and those are the two answers this assertion exists to separate -- so the
+        # re-execution is required to have produced the same public surface as the real module
+        # before its silence is allowed to mean anything.
+        real = importlib.import_module(module_name)
+        assert getattr(module, "__all__", None) == real.__all__, (
+            f"re-executing {path} did not reproduce {module_name}'s __all__, so its module body "
+            "did not run to completion and the emptiness asserted below would mean 'nothing "
+            "happened here' when it means 'nothing happened at all'"
+        )
+
+        assert not ledger.events, (
+            f"{module_name} made {len(ledger.intents)} order intent(s) and decided "
+            f"{len(ledger.decisions)} order(s) while its own module body was running. Import-time "
+            "code runs in production on every import, so a fill there is a fill; and it is "
+            "invisible to any hook installed by a test, because the module was already imported "
+            "at collection when the test began"
+        )
 
 
 # --------------------------------------------------------------------------------------------
@@ -321,14 +624,14 @@ def test_no_fill_during_a_real_ranking_and_gate_is_made_by_either_source(
 
 
 def test_neither_source_holds_an_order_machinery_object_in_its_namespace() -> None:
-    """Form (b), which adds no `grimp` edge, fails here and can fail nowhere else structurally.
+    """The re-export form, which adds no `grimp` edge, fails here and can fail nowhere else.
 
-    Compared by `is` against the objects `backtest/execution.py` defines, so it makes no
+    Compared by identity against the objects `backtest/execution.py` defines, so it makes no
     difference whether the source wrote `from openalpha_cn.backtest.execution import
     AShareExecutionPolicy`, `from openalpha_cn.backtest.cross_section import
-    AShareExecutionPolicy` (which is what the probe did, adding no edge), or
-    `... import AShareExecutionPolicy as _policy`. All three bind the same object, and this sees
-    the object.
+    AShareExecutionPolicy` (which adds no edge at all, because `cross_section` is already on the
+    allowlist), `from openalpha_cn.backtest import ExecutionRequest` (the package's own
+    `__init__` re-exports the same three names), or any of those with `as _alias`.
     """
     machinery = _order_machinery()
     banned = {id(obj): name for name, obj in machinery.items()}
@@ -372,7 +675,7 @@ def _code_objects(code: CodeType) -> list[CodeType]:
 
 
 def test_no_code_object_in_either_source_names_the_order_machinery() -> None:
-    """Form (a) -- the indented import -- fails here, at any nesting depth.
+    """The indented function-local import fails here, at any nesting depth.
 
     Every name each code object touches, which is `co_names` plus the free and local variables an
     `import` inside a function writes to. The pin this replaces filtered source lines with
@@ -398,7 +701,8 @@ def test_no_code_object_in_either_source_names_the_order_machinery() -> None:
             "lint-imports contract will stop it -- openalpha_cn.backtest.execution cannot be "
             "forbidden, because cross_section.py needs it for V2-P4-004's tradeability filter. "
             "This assertion reads every code object in the file, so an import indented inside a "
-            "function is caught exactly like one at column zero"
+            "function is caught exactly like one at column zero, and the ban set carries the "
+            "module's private names too"
         )
 
 
@@ -472,16 +776,21 @@ def test_the_two_files_guarded_here_are_the_contracts_own_source_modules() -> No
     for module_name, path in SOURCE_PATHS.items():
         assert path.is_file(), f"{module_name} is guarded by path and {path} does not exist"
         assert importlib.import_module(module_name).__file__ == str(path), (
-            f"{module_name} does not live at {path}, so the stack check above guards nothing"
+            f"{module_name} does not live at {path}, so the checks above guard nothing"
         )
+
+
+# --------------------------------------------------------------------------------------------
+# The failing branches, exercised. Each of these is one of the three defeats, kept as a test.
+# --------------------------------------------------------------------------------------------
 
 
 def test_a_function_local_import_of_the_fill_policy_is_caught() -> None:
     """The mutation that made the pin this file replaces go red, kept as a test.
 
-    Form (a) written into a copy of the module rather than the module itself, so the assertion
-    that catches it is exercised on every run instead of being trusted. A guard whose failing
-    branch nothing ever takes is the other half of this repository's recurring defect.
+    The indented function-local import written into a copy of the module rather than the module
+    itself, so the assertion that catches it is exercised on every run instead of being trusted.
+    A guard whose failing branch nothing ever takes is half of this repository's recurring defect.
     """
     probe = (
         "def fill():\n"
@@ -498,4 +807,147 @@ def test_a_function_local_import_of_the_fill_policy_is_caught() -> None:
     assert "AShareExecutionPolicy" in touched, (
         "the bytecode walk cannot see a function-local import, which is the exact step "
         "V2-P4-035's probe took and the exact step its str.startswith pin could not see"
+    )
+
+
+def test_the_ban_set_has_no_visibility_rule_in_it() -> None:
+    """`V2-P4-054`, as the mutation rather than as a promise.
+
+    A private class whose `__module__` is the machinery module is driven through the real
+    discovery function. The version this replaces filtered on `not name.startswith("_")` and
+    dropped it, which is why `_SweepExecutionPolicy` was in no ban set and in no wrapper.
+    """
+
+    class _SweepExecutionPolicy:
+        pass
+
+    _SweepExecutionPolicy.__module__ = MACHINERY_MODULE
+    found = _machinery_names({"_SweepExecutionPolicy": _SweepExecutionPolicy, "re": sys})
+
+    assert "_SweepExecutionPolicy" in found, (
+        "the discovery dropped a private class the machinery module defines, so an underscore is "
+        "again a hiding place -- which is the whole of V2-P4-054"
+    )
+    assert "re" not in found, (
+        "the discovery kept a name the machinery module merely imports, which would sweep in "
+        "ExecutionResult and make both ranking sources red for reading a plain result record"
+    )
+
+
+def test_the_policy_sweep_wraps_a_private_subclass_that_overrides_execute() -> None:
+    """The other half of `V2-P4-054`: the ban set is static, and this one is behavioural.
+
+    A subclass's own `execute` shadows the base attribute, so a wrapper installed on
+    `AShareExecutionPolicy.execute` alone never runs. The subclass below is declared here, not in
+    the machinery module, which is the harder case: it is reached only through
+    `__subclasses__`, and it is private, so both of `V2-P4-054`'s halves are exercised at once.
+    """
+
+    unpatched = vars(AShareExecutionPolicy)["execute"]
+
+    class _SweepExecutionPolicy(AShareExecutionPolicy):
+        def execute(self, request: ExecutionRequest, market: MarketBar) -> Any:
+            # Refuses to delegate, exactly as the probe's did: it holds the function from before
+            # any wrap, so a wrapper reached through `super()` would not see this fill either.
+            return unpatched(self, request, market)
+
+    assert _SweepExecutionPolicy in _policy_classes(), (
+        "a private subclass overriding execute is outside the set of classes the witness wraps, "
+        "so its fills are unobserved -- which is how V2-P4-054's probe filled "
+        "'filled sell 200 10.20 5.00' with every assertion green"
+    )
+    assert AShareExecutionPolicy in _policy_classes(), (
+        "the base policy dropped out of the wrapped set, so the ordinary path is unobserved"
+    )
+
+    with _watched() as ledger:
+        outcome = _SweepExecutionPolicy().execute(
+            ExecutionRequest(side="sell", quantity=200), _bar("000001.SZ")
+        )
+
+    assert outcome.status == "filled", (
+        "the private subclass did not fill, so the observation below is not about a real fill"
+    )
+    assert len(ledger.fills) == 1, (
+        f"the private subclass's own execute filled an order and the witness recorded "
+        f"{len(ledger.fills)} fill(s). Wrapping AShareExecutionPolicy.execute alone leaves this "
+        "at 0, because the override shadows the base attribute and never delegates to it"
+    )
+
+
+def test_the_witness_sees_a_submitter_that_is_blocked_on_another_thread() -> None:
+    """`V2-P4-053`'s first half, as the mutation: one dispatch hop, measured both ways.
+
+    The fill below is submitted to a worker thread by a function in **this** file and waited on.
+    The single-thread walk the previous version used cannot see this file, because the worker's
+    stack is `ThreadPoolExecutor` internals down to the bottom; the all-thread walk can, because
+    the submitting frame is alive and blocked in `.result()`. Both are computed here, so the
+    difference is a measurement on every run rather than a sentence in a docstring.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    policy = AShareExecutionPolicy()
+    bar = _bar("000001.SZ")
+    intent = ExecutionRequest(side="buy", quantity=100)
+    single: list[frozenset[str]] = []
+
+    with _watched() as ledger:
+        original = vars(AShareExecutionPolicy)["execute"]
+
+        def also_one_thread(self: Any, request: Any, market: Any) -> Any:
+            # Byte-for-byte the walk the version this replaces did: this frame's caller, then
+            # backwards, on this thread only.
+            found: set[str] = set()
+            cursor: FrameType | None = sys._getframe().f_back
+            while cursor is not None:
+                found.add(cursor.f_code.co_filename)
+                cursor = cursor.f_back
+            single.append(frozenset(found))
+            return original(self, request, market)
+
+        setattr(AShareExecutionPolicy, "execute", also_one_thread)  # noqa: B010
+        try:
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                outcome = pool.submit(policy.execute, intent, bar).result()
+        finally:
+            setattr(AShareExecutionPolicy, "execute", original)  # noqa: B010
+
+    assert outcome.status == "filled", (
+        "the probe below did not fill, so neither walk is being asked about a real fill"
+    )
+    assert single and __file__ not in single[0], (
+        "the single-thread walk saw this file across a ThreadPoolExecutor hop, so the defeat "
+        "V2-P4-053 measured no longer reproduces and the assertion below proves nothing"
+    )
+    assert ledger.fills, "the witness recorded no fill at all across the executor hop"
+    assert any(__file__ in fill.running for fill in ledger.fills), (
+        "the all-thread walk lost the submitter too, so `pool.submit(policy.execute, ...)` is "
+        "still a way to fill an order from a guarded file without being seen"
+    )
+
+
+def test_the_sentinel_separates_a_filled_order_from_a_refused_one() -> None:
+    """`V2-P4-055`, as the mutation: the fixture that makes calls and no fills.
+
+    Every bar suspended, so the real policy is called exactly as often and rejects every time.
+    The previous sentinel was `assert fills` over a list appended to **before** the call, so it
+    was green here -- 12 calls, 0 fills, and a guard that could no longer tell a source that
+    fills orders from one that does not. This is the repository's recurring defect named in this
+    file's own docstring, and it had it.
+    """
+    with _watched() as ledger:
+        _clearance(suspended=True)
+
+    assert ledger.decisions, (
+        "the suspended fixture stopped reaching the policy at all, so it no longer reproduces "
+        "the shape V2-P4-055 measured and the separation below is untested"
+    )
+    assert not ledger.fills, (
+        f"{len(ledger.fills)} order(s) filled on a fixture where every bar is suspended, so the "
+        "fixture no longer separates a call from a fill"
+    )
+    assert len(ledger.decisions) == 12, (
+        f"the suspended fixture made {len(ledger.decisions)} calls, not the 12 V2-P4-055 "
+        "measured; if the funnel stopped offering every name a buy, this mutation is no longer "
+        "the one that defeated the old sentinel"
     )
