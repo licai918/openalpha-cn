@@ -934,12 +934,22 @@ def test_this_gate_cannot_measure_dataset_freshness_because_it_cannot_reach_the_
     name does not appear at all: a gate that imported `panel_gate` to "double check" would be
     restating a verdict it has no inputs for, and `backtest-no-numeric-stack-or-panel-plane`
     would refuse it one line later.
+
+    `V2-P4-035` also leaned on this list as the gate's half of the order-machinery pin, and
+    `V2-P4-047` measured that it could not carry the weight: the filter read
+    `line.startswith(("import ", "from "))` and therefore saw only column-zero imports, so an
+    indented `from openalpha_cn.backtest.execution import AShareExecutionPolicy` inside a
+    function filled a real order here (`filled sell 200 10.20 6.04`) with `lint-imports` at
+    8 kept / 0 broken. The filter is indentation-blind now. The order claim itself has moved to
+    `tests/unit/backtest/test_ranking_sources_fill_no_order.py`, which binds it behaviourally,
+    because a second bypass -- adding the re-exported names to the `candidate_ranking` block
+    below -- keeps every line here byte-identical and adds no import-graph edge at all.
     """
     source = MODULE_PATH.read_text(encoding="utf-8")
     imports = [
-        line
+        stripped
         for line in source.splitlines()
-        if line.startswith(("import ", "from ")) and " import " in line
+        if (stripped := line.strip()).startswith(("import ", "from ")) and " import " in stripped
     ]
 
     assert not any("openalpha_cn.panel" in line for line in imports)

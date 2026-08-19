@@ -483,15 +483,30 @@ def test_this_ranking_grows_no_import_of_its_own_into_the_order_machinery() -> N
 
     This is deliberately weaker than a `lint-imports` contract and says so: it constrains the
     import lines of one file, not reachability, and it cannot stop a caller reaching
-    `AShareExecutionPolicy` through `cross_section` -- that edge is the feature. What it does
-    stop is this module quietly growing an edge of its own into the order machinery, which is the
-    step the probe actually took.
+    `AShareExecutionPolicy` through `cross_section` -- that edge is the feature.
+
+    **`V2-P4-047` measured what it also could not stop, and the answer was "the step the probe
+    actually took".** The filter below read `line.startswith(("import ", "from "))`, so it saw
+    only column-zero imports; a *function-local*
+    `from openalpha_cn.backtest.execution import AShareExecutionPolicy` -- indented, and so
+    invisible to `str.startswith` -- filled a real order from this module while `lint-imports`
+    reported 8 kept / 0 broken and this directory reported 103 passed. Worse, the probe needed no
+    new import at all: `cross_section` re-exports the fill policy and is already first on the
+    list below, so adding three names to that block left `line.split()[1]` byte-identical and
+    created **no `grimp` edge whatsoever**.
+
+    The filter is now indentation-blind, which closes the first form. The second form cannot be
+    closed by any rule over import lines or over the import graph, and is not claimed here:
+    `tests/unit/backtest/test_ranking_sources_fill_no_order.py` is what carries the claim that
+    neither source fills an order, by wrapping the real policy during a real run and by comparing
+    objects rather than names. What this list still does, and does well, is say out loud which
+    first-party modules this file depends on, so a new one has to be argued for.
     """
     source = MODULE_PATH.read_text(encoding="utf-8")
     imports = [
-        line
+        stripped
         for line in source.splitlines()
-        if line.startswith(("import ", "from ")) and " import " in line
+        if (stripped := line.strip()).startswith(("import ", "from ")) and " import " in stripped
     ]
 
     assert sorted(line.split()[1] for line in imports if line.startswith("from openalpha_cn")) == [
