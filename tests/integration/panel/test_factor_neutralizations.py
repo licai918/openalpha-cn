@@ -1369,21 +1369,46 @@ def test_a_second_neutralisation_of_one_factor_shares_the_partition_and_reads_ap
     assert by_log.values() != by_level.values()
 
 
-def test_a_write_that_would_drop_a_stored_build_is_refused(
+def test_a_second_neutralisation_is_added_and_a_restatement_is_still_refused(
     store: PanelStore, panel: GeneratedPanel
 ) -> None:
-    """The shared drop guard, reached through this plane's writer."""
+    """`V2-P4-071` on this plane, and the shared drop guard where it still fires.
+
+    This asserted that re-writing one of two stored neutralisations on its own is refused, which
+    was true of the whole-partition replace and is no longer what happens: `carry_stored_rows
+    _forward` puts the other one back, so the write adds nothing and destroys nothing. See
+    `test_factor_transforms.py::test_a_second_transform_written_on_its_own_is_added_and_a
+    _restatement_is_still_refused` for the full argument -- the refusal protected against loss, it
+    was never a rule that a partition may hold one policy.
+
+    The guard's own case is unchanged and is what the second half drives: a **restatement** --
+    the same neutralisation of the same processed build at the same instant under a different
+    `code_commit` -- collides on `(neutralization_id, event_time)`, is therefore not carried, and
+    is refused by name. `supersedes` still repairs it.
+    """
     processed = _process(_compute(store, panel))
     cross = _cross_section(store, panel)
     first = _neutralize(processed, cross)
     second = _neutralize(processed, cross, _spec(key="probe_level", market_cap_scale="level"))
     write_neutralized_factor_panels(store, [first, second])
 
+    # Re-writing one of them alone now keeps the other rather than dropping it.
+    write_neutralized_factor_panels(store, [first])
+    held = load_factor_neutralization_manifests(store, REVERSAL_1D, years=(YEAR,), as_of=AS_OF)
+    assert {item.neutralization_manifest_id for item in held} == {
+        first.manifest.neutralization_manifest_id,
+        second.manifest.neutralization_manifest_id,
+    }
+
+    restated = apply_factor_neutralization(
+        processed, _spec(), cross, code_commit="9876543210fedcba", built_at=BUILT_AT
+    )
+    assert restated.manifest.neutralization_manifest_id != first.manifest.neutralization_manifest_id
     with pytest.raises(FactorEngineError, match="would drop"):
-        write_neutralized_factor_panels(store, [first])
+        write_neutralized_factor_panels(store, [restated])
 
     assert write_neutralized_factor_panels(
-        store, [first], supersedes=[second.manifest.neutralization_manifest_id]
+        store, [restated], supersedes=[first.manifest.neutralization_manifest_id]
     )
 
 

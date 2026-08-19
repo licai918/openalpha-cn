@@ -50,19 +50,35 @@ the same rows by the same route and belongs to the same allowlist -- an exemptio
 be an exemption for the read.
 """
 
-QUERY_CALLERS: frozenset[str] = frozenset({"panel/store.py"})
+QUERY_CALLERS: frozenset[str] = frozenset({"panel/store.py", "panel_ingest.py"})
 """Every `src/` file allowed to call one of `UNGATED_READS`, relative to `src/openalpha_cn`.
 
-One entry today, and it is `PanelStore` itself: `read_if_ready()` calls `query()` *after*
-`assess_readiness()` has answered, which is the whole point of the method. Every other reader
-in the tree -- all fourteen `panel_ingest` loaders, `panel_doctor`'s cross-checks,
-`panel_gate`, `panel_view`, the CLI, the HTTP app and the SDK -- reaches rows through
-`read_if_ready()`.
+The first is `PanelStore` itself: `read_if_ready()` calls `query()` *after* `assess_readiness()`
+has answered, which is the whole point of the method. Every reader in the tree -- all fourteen
+`panel_ingest` loaders, `panel_doctor`'s cross-checks, `panel_gate`, `panel_view`, the CLI, the
+HTTP app and the SDK -- reaches rows through `read_if_ready()`, and
+`test_the_gated_read_is_what_the_rest_of_the_tree_uses` below is what keeps that from being
+vacuously true.
+
+The second is `panel_ingest.carry_stored_rows_forward` (`V2-P4-071`), and it is granted on the
+opposite argument from the one this file was built to refuse. **Nothing it reads is answered
+with.** A derived partition is written whole and has no append, so a build that adds one instant
+to a year has to put the year's existing rows back in front of its own or destroy them; that
+function reads them and hands them straight to `write_partition`. A point-in-time read there
+would be the fail-open rather than the safe choice: filtering by `available_time` would carry
+only the rows knowable at some instant and would commit a partition **missing** the withheld
+ones, which is data destruction with a safety argument in front of it. The guarantee this file
+protects is about what a caller may *learn*; a byte put back where it was found teaches nobody
+anything.
+
+What enforces the guarantee for the write is the drop guard rather than the read:
+`panel_factors._refuse_to_drop_a_stored_build` runs on the merged batch immediately after each
+carry-forward, so a merge that lost a build is refused by name. The residue -- a `retain` rule
+that carried a row it should have replaced -- is caught one plane up by
+`_refuse_two_builds_of_one_factor_at_one_as_of`'s stored-side twin, `identity_columns`.
 
 Adding a name here is a deliberate act with a review attached, which is the property this test
-exists to create. If a P3 factor engine needs the un-gated read, the diff that grants it must
-say so here and must say what it does about the point-in-time guarantee it has just taken
-responsibility for.
+exists to create.
 """
 
 

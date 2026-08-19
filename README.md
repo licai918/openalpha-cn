@@ -556,6 +556,56 @@ uv run openalpha shortlist run --component reversal_1d/v1=1.0 --tier raw \
 `{subject: {"signal": <SignalFrame>, "run_manifest_id": "..."}}` 提供证据平面的答案；没进榜的
 那些不会被静默丢掉，而是回在 `evidence_not_shortlisted` 里。
 
+**证据里的 `run_manifest_id` 会被对到本地已存的运行上（`V2-P4-049`）。** 以前它只做格式校验，
+`SignalFrame` 也只需要哈希到它自己的地址——于是一个杜撰的结论配上字面量
+`run_000000000000000000000000` 就能清掉 `--min-researched-ratio 1.0` 的门槛，并且带着一个解析
+不到任何东西的出处记录被发布出去。现在，`run_manifest_id` 在这个 runtime 目录里找不到对应运行
+的那条证据，会在建榜单之前就被丢掉：它的名字算作 `unresearched`，对 `researched_ratio` 的贡献
+和「压根没给证据」完全一样，并且会具名回在 `evidence_without_a_stored_run` 里。是丢掉而不是报错，
+因为一个在一整年 `as_of` 上循环的调用者必须能越过它继续跑。
+
+**这条性质证明了什么、没证明什么：被解析的是那次运行，不是它旁边的信号。** 本仓库不存
+`SignalFrame`，没有东西可以拿来对信号；一个手里有真实 `run_manifest_id` 的调用者，仍然可以在它
+名下填一个杜撰的结论。交付的性质是「发出去的 `run_manifest_id` 能解析到本部署持有的一次运行」，
+不是「它旁边的结论是那次运行跑出来的」。
+
+### 同一年里再建一个时刻，以及把跑出来的榜留下来
+
+```bash
+# 昨天：建一个横截面，跑一张榜，记下它的 shortlist_id
+uv run openalpha factor build --factor reversal_1d/v1 --tier raw \
+  --as-of 2026-01-15T09:00:00+00:00 --year 2026 --max-staleness-days 30
+
+# 今天：同一年里追加第二个时刻。既不用重算昨天，也不用抹掉它
+uv run openalpha factor build --factor reversal_1d/v1 --tier raw \
+  --as-of 2026-01-16T09:00:00+00:00 --year 2026 --max-staleness-days 30
+
+# 把昨天那张榜按它自己的内容地址取回来，和今天的对比
+uv run openalpha shortlist get sla_0123456789abcdef01234567
+uv run openalpha shortlist list
+```
+
+**第二条命令在 `V2-P4-071` 之前是逐字被拒的**：`factor_manifest_reversal_1d_v1 year=2026
+already holds 1 subject(s) and this write carries 1; it would drop ['fmn_…']`。一个分区是整
+个替换的、没有追加，所以当时只有两个选择——把这一年建过的所有时刻在一次调用里重算，或者用
+`--supersedes-raw` 抹掉昨天那次。分区的粒度没有变（一个 `(dataset, year)` 分区本来就能装任意多
+个时刻），变的是写路径：写之前先把这一年已存的、本次既不作答也不声明取代的行读回来放在前面，于
+是「整分区替换」就是一次追加。**掉档闸没有被放松**：它照旧在合并后的批次上跑，一次漏掉了某个
+build 的合并会被它逐字拒掉——它从「让调用者去重算」变成了「审计这次合并」。在一个已存 `as_of`
+上换个 `--code-commit` 重建，仍然是被拒的，仍然指向 `--supersedes-raw`：一年里对同一个横截面问题
+存两个答案，是这条闸一开始就在挡的东西。
+
+**每个答案都带 `shortlist_id`，那就是它被存起来的地址（`V2-P4-062`）。** 以前答案上有三个内容
+地址（`gate_manifest_id`／`ranking_manifest_id`／`ranking_content_digest`），却没有任何东西可供
+寻址：`runtime/` 下没有榜单产物，也没有 GET 路由。三个都不能当键——`ranking_manifest_id` 只寻址
+「问题」，两套闸门门槛共享它；`gate_manifest_id` 寻址问题加门槛，但**证据**不在其中；
+`ranking_content_digest` 只寻址已研究的候选，一次没有证据的运行候选为零，两张完全不同的榜共享
+一个摘要。`shortlist_id` 是整个答案的摘要（只排除 `measurement.ranking_age_days`，它是
+`built_at - as_of`，本质是一个墙钟）。所以这是一个纯内容寻址的存储：同一个答案跑两次只有一份文档，
+第二次写是空操作；两个不同的答案有两个地址。它因此**说不出**一个答案被跑过几次、什么时候跑的——
+那是 `RunManifest` 平面的问题。三个面等价：`openalpha shortlist get|list`、
+`GET /api/v1/shortlists[/{shortlist_id}]`、`OpenAlphaSDK.held_shortlist()/list_shortlists()`。
+
 ## 核心独特优势
 
 OpenAlpha CN 整合 TradingAgents 和 AI Hedge Fund 的优势，接入 A 股数据源，更适合 A 股涨停量化分析。OpenAlpha CN 的竞争重点不是复制更多“投资大师人格”，而是：

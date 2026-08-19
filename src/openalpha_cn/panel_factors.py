@@ -894,6 +894,7 @@ from openalpha_cn.panel.catalog import (
 )
 from openalpha_cn.panel.store import PanelStore, PartitionRef
 from openalpha_cn.panel_ingest import (
+    carry_stored_rows_forward,
     merge_panel_batches,
     split_panel_batch_by_year,
     write_panel_batch,
@@ -5987,7 +5988,19 @@ def write_factor_panels(
         )
     _refuse_two_builds_of_one_factor_at_one_as_of(panels)
     planned = [
-        (year, yearly)
+        (
+            year,
+            appended_to_the_stored_year(
+                store,
+                yearly,
+                year,
+                build_column=(
+                    SUBJECT_COLUMN_NAME if yearly.kind == FACTOR_MANIFEST_KIND else "manifest_id"
+                ),
+                identity_columns=(EVENT_TIME_COLUMN,),
+                superseded=supersedes,
+            ),
+        )
         for batches in _batches_by_dataset(panels)
         for year, yearly in split_panel_batch_by_year(
             merge_panel_batches(batches), date_timezone=date_timezone
@@ -6060,6 +6073,82 @@ def _refuse_two_builds_of_one_factor_at_one_as_of(panels: Sequence[FactorPanel])
         )
 
 
+def appended_to_the_stored_year(
+    store: PanelStore,
+    batch: ColumnarPanelBatch,
+    year: int,
+    *,
+    build_column: str,
+    identity_columns: Sequence[str],
+    superseded: Collection[str],
+) -> ColumnarPanelBatch:
+    """`batch` with every stored build of its partition that this write neither answers nor
+    replaces, carried forward verbatim (`V2-P4-071`).
+
+    ## The decision this function is, stated rather than implied
+
+    The question `V2-P4-071` asks is whether the `(dataset, year)` partition granularity is
+    right, or whether a year-partition should be able to carry more than one instant. **The
+    granularity is right and a year-partition already carries as many instants as somebody built**
+    -- `write_factor_panels` takes a *sequence* of panels and merges them, `load_factor_manifests`
+    folds them back apart, and a read of a year opens one file whatever it holds. Splitting the
+    partition per instant was considered and rejected on three measurements rather than on taste:
+    `PanelStore` keys **every** dataset in this plane by `(dataset, year)`, so factors would
+    become the one exception; `PartitionCoverage` and `assess_readiness` are per partition, so a
+    year of daily cross sections would become 244 catalog rows and 244 readiness verdicts to
+    reconcile; and `read_visible_at`'s whole economy is that a point-in-time read of a factor year
+    is one scan.
+
+    What was actually missing is a write that can say *add*. `write_partition` replaces a
+    partition whole and has no append, so the arriving batch had to be the entire year -- and the
+    only two things a caller could do about that were to recompute every instant of the year into
+    one call or to erase yesterday's with `supersedes`. Neither is a rebuild; both are the
+    workflow this product exists for being unavailable.
+
+    ## What is not weakened
+
+    The drop guard is untouched and still runs, on the **merged** batch, immediately below every
+    call to this function. That is the arrangement rather than an accident: a `retain` rule with a
+    hole in it -- one that mis-reads `build_column`, or that drops a build it meant to keep --
+    produces exactly the refusal it produced before, naming the builds that went missing. The
+    guard stops being an instruction to the caller and becomes the audit on this merge, which is
+    the only relationship in which both can be right.
+
+    `superseded` keeps its meaning exactly: a named build is not carried, so the merged batch
+    genuinely drops it and the guard's own `superseded` subtraction is what lets that through. A
+    `supersedes` naming nothing is still refused by the caller, one call down.
+
+    ## `identity_columns`, and the invariant it preserves across calls
+
+    `_refuse_two_builds_of_one_factor_at_one_as_of` refuses two answers to one cross-section
+    question **within one call**. Carrying forward blindly would have let the same pair be
+    assembled across two calls -- a rebuild at a stored `as_of` under a different `--code-commit`
+    mints a different `manifest_id`, so both would have been kept and the partition would hold two
+    rows for every `(subject, as_of)` with nothing saying which is the answer. So a stored build
+    whose `identity_columns` collide with an arriving row's is **not** carried, and the drop guard
+    below then refuses the write and names the remedy, which is the behaviour that existed before
+    this function and which `test_a_rebuild_that_would_drop_a_stored_build_is_refused_and_names
+    _the_remedy` pins.
+
+    The columns are the caller's because the question differs by plane and by nothing else: the
+    raw partition is per factor, so `(event_time,)` identifies the question; the processed and
+    neutralised partitions hold **every** policy of one factor, so the policy's own id column
+    joins it.
+    """
+    names = tuple(column.name for column in batch.storage_columns())
+    arriving = [dict(zip(names, row, strict=True)) for row in batch.to_rows()]
+    builds = {str(row[build_column]) for row in arriving}
+    occupied = {tuple(row[name] for name in identity_columns) for row in arriving}
+    replaced = set(superseded)
+
+    def retain(row: Mapping[str, object]) -> bool:
+        if str(row[build_column]) in builds or str(row[build_column]) in replaced:
+            return False
+        return tuple(row[name] for name in identity_columns) not in occupied
+
+    return carry_stored_rows_forward(store, batch, year=year, retain=retain)
+
+
 def _refuse_to_drop_a_stored_build(
     batch: ColumnarPanelBatch,
     year: int,
@@ -6110,10 +6199,12 @@ def _refuse_to_drop_a_stored_build(
         raise FactorEngineError(
             f"{batch.dataset} year={year} already holds {len(set(builds))} subject(s) and "
             f"this write carries {len(set(batch.subjects))}; it would drop {dropped[:5]}"
-            f"{'...' if len(dropped) > 5 else ''}. A partition is replaced whole, so everything "
-            "belonging to this year has to be written in one call -- read the stored builds with "
-            "load_factor_manifests and either recompute them into this call or name the ones "
-            "this rebuild replaces in write_factor_panels' `supersedes`"
+            f"{'...' if len(dropped) > 5 else ''}. A partition is replaced whole, and "
+            "`appended_to_the_stored_year` carries every stored build this write neither answers "
+            "nor supersedes back into it -- so reaching here means an arriving build answers a "
+            "question a dropped one already answered: the same policy at the same as_of, under a "
+            "different declaration. Name the ones this rebuild replaces in `supersedes`; "
+            "load_factor_manifests is how to read what the year already holds"
         )
 
 
@@ -8245,7 +8336,21 @@ def write_processed_factor_panels(
         )
     _refuse_two_applications_of_one_transform_at_one_as_of(panels)
     planned = [
-        (year, yearly)
+        (
+            year,
+            appended_to_the_stored_year(
+                store,
+                yearly,
+                year,
+                build_column=(
+                    SUBJECT_COLUMN_NAME
+                    if yearly.kind == FACTOR_TRANSFORM_MANIFEST_KIND
+                    else "transform_manifest_id"
+                ),
+                identity_columns=("transform_id", EVENT_TIME_COLUMN),
+                superseded=supersedes,
+            ),
+        )
         for batches in _processed_batches_by_dataset(panels)
         for year, yearly in split_panel_batch_by_year(
             merge_panel_batches(batches), date_timezone=date_timezone

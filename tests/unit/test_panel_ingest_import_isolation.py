@@ -357,6 +357,7 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
     ),
     "openalpha_cn.panel_factors": frozenset(
         {
+            "panel_ingest.carry_stored_rows_forward",
             "panel_ingest.merge_panel_batches",
             "panel_ingest.split_panel_batch_by_year",
             "panel_ingest.write_panel_batch",
@@ -371,6 +372,7 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_factors.ProcessedFactorPanel",
             "panel_factors._refuse_rows_that_are_not_the_answers_their_manifest_addresses",
             "panel_factors._refuse_to_drop_a_stored_build",
+            "panel_factors.appended_to_the_stored_year",
             "panel_ingest.load_daily_valuations",
             "panel_ingest.load_industry_histories",
             "panel_ingest.merge_panel_batches",

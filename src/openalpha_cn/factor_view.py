@@ -2494,15 +2494,23 @@ def _written(
     `manifest_id`. Enveloping them here rather than at each face is what keeps `cli.py` from
     importing `panel_factors` to name them -- and it is what lets the refusal carry the **remedy**,
     which the guard itself cannot know because `supersedes` is three different options one plane up.
+
+    **The remedy narrowed with `V2-P4-071` and the sentence had to narrow with it.** It used to
+    say "every instant of one partition year has to be built in one invocation", which was the
+    honest reading while the write was a whole-partition replace with nothing carried forward. Now
+    `appended_to_the_stored_year` puts the stored builds back, so a *new* instant never reaches
+    this branch at all and what does is a second answer to a question the year already answered.
+    Telling a caller to rebuild the year would send them to do work that is no longer theirs.
     """
     try:
         return write()
     except (FactorEngineError, NeutralizationEngineError, PanelStorageError) as error:
         raise FactorRunBlockedError(
-            f"the {tier} partitions were refused: {error}. A partition is replaced whole, so a "
-            f"rebuild that means to replace a stored build has to name it with {flag}, and every "
-            "instant of one partition year has to be built in one invocation. Nothing this "
-            "invocation computed after this point was written"
+            f"the {tier} partitions were refused: {error}. Adding an instant to a partition year "
+            "no longer needs the year rebuilt -- the write carries the stored builds forward "
+            "(`V2-P4-071`) -- so what is left here is a build that answers a question the "
+            f"partition already has an answer to, and a rebuild that means to replace one names "
+            f"it with {flag}. Nothing this invocation computed after this point was written"
         ) from error
 
 

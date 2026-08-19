@@ -160,6 +160,7 @@ from openalpha_cn.shortlist_view import (
     ShortlistEvidence,
     ShortlistRunResult,
     ShortlistViewError,
+    held_shortlist,
     run_shortlist,
     shortlist_evidence,
     shortlist_request,
@@ -173,6 +174,8 @@ from openalpha_cn.storage.migrations import (
     read_status,
 )
 from openalpha_cn.storage.parquet import read_parquet_records
+from openalpha_cn.storage.shortlists import FileShortlistStore, ShortlistStoreError
+from openalpha_cn.storage.sqlite import SQLiteRunRepository
 
 logger = logging.getLogger(__name__)
 
@@ -4018,9 +4021,11 @@ _BUILD_FACTOR_AS_OF_HELP: Final[str] = (
     "A prediction instant to compute a cross section at, ISO-8601 with an offset, repeatable. An "
     "instant rather than a date, because every one of a stored observation's four panel clocks is "
     "stamped with it and `factor run` groups its sample by it; `factor run --start/--end` then "
-    "selects these by their Asia/Shanghai date. Every instant of one partition year has to be "
-    "given in ONE invocation: a partition is replaced whole, so a later build of the same year is "
-    "refused by the drop guard unless it names the builds it supersedes."
+    "selects these by their Asia/Shanghai date. A later invocation may ADD an instant to a "
+    "partition year it already holds (`V2-P4-071`): the write carries the stored builds forward, "
+    "so nothing has to be recomputed and nothing is erased. What is still refused is a *second "
+    "answer to one question* -- the same tier's policy at an as_of the year already holds, under "
+    "a different declaration -- and that names what it replaces with --supersedes-<tier>."
 )
 _BUILD_FACTOR_YEAR_HELP: Final[str] = (
     "A partition year every read of this build is scoped to, repeatable, the same vocabulary "
@@ -4050,9 +4055,11 @@ _BUILD_SUBJECT_FACTOR_HELP: Final[str] = (
     "is evaluated and coded `not_in_universe` instead of quietly vanishing from the census."
 )
 _BUILD_SUPERSEDES_HELP: Final[str] = (
-    "A stored {tier} manifest_id this build deliberately replaces, repeatable. A partition is "
-    "replaced whole and the writers refuse a write that would drop a stored build, so a rebuild "
-    "under a different --code-commit has to name what it supersedes. Three separate options "
+    "A stored {tier} manifest_id this build deliberately replaces, repeatable. It does two "
+    "things: a rebuild under a different --code-commit at an as_of the year already holds has to "
+    "name what it supersedes, because two answers to one cross-section question may not sit side "
+    "by side; and naming a build this call does NOT re-answer removes it, which is how a bad one "
+    "leaves a year. Adding a new instant needs neither -- see --as-of. Three separate options "
     "because the three tiers keep three different manifest partitions, and each writer refuses a "
     "name no partition it touches holds."
 )
@@ -4225,6 +4232,7 @@ SHORTLIST_EXIT: Final[Mapping[str, PanelExit]] = MappingProxyType(
         "refused": PanelExit.unhealthy,
         "blocked": PanelExit.unhealthy,
         "panel_unreadable": PanelExit.unhealthy,
+        "not_held": PanelExit.unhealthy,
         "bad_request": PanelExit.bad_request,
         "internal_error": PanelExit.internal_error,
     }
@@ -4420,9 +4428,17 @@ def shortlist_run_command(
                 neutralization=neutralization or None,
                 evidence=_shortlist_evidence(evidence),
             )
-            result = run_shortlist(_panel_store(runtime_dir), request, built_at=_panel_clock())
+            result = run_shortlist(
+                _panel_store(runtime_dir),
+                request,
+                built_at=_panel_clock(),
+                runs=SQLiteRunRepository(runtime_dir / "state.sqlite3"),
+                shortlists=FileShortlistStore(runtime_dir / "shortlists"),
+            )
         except ShortlistViewError as error:
             raise _shortlist_fail(error) from error
+        except ShortlistStoreError as error:
+            raise _panel_fail(PanelExit.unhealthy, str(error)) from error
 
         if json_output:
             typer.echo(json.dumps(shortlist_view(result), ensure_ascii=False, sort_keys=True))
@@ -4430,6 +4446,73 @@ def shortlist_run_command(
             _echo_shortlist(result)
         if result.is_blocked:
             raise typer.Exit(code=int(SHORTLIST_EXIT["refused"]))
+
+
+_SHORTLIST_ADDRESS_HELP: Final[str] = (
+    "The `shortlist_id` a run's own answer carried (`sla_` and 24 lowercase hex characters). It "
+    "is on every `--json` body and in the last line of the terminal rendering; `openalpha "
+    "shortlist list` prints every one this runtime directory holds."
+)
+
+
+@shortlist_app.command("get")
+def shortlist_get_command(
+    shortlist_id: Annotated[str, typer.Argument(help=_SHORTLIST_ADDRESS_HELP)],
+    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
+        "./runtime"
+    ),
+) -> None:
+    """Print one stored shortlist answer, by the content address its own body carried.
+
+    `V2-P4-062`'s missing command. A run produced three content addresses and nothing held an
+    answer under any of them, so "run it, run it again tomorrow, and compare the two" ended at
+    the first step for anybody who had not thought to redirect `--json` into a file.
+
+    What comes back is **what was published**, not a re-run: the bytes the store holds, with the
+    address re-derived from the content before they are handed over, so a document edited on disk
+    exits `1` rather than printing a shortlist somebody reads names off. It is therefore also the
+    answer to "what did we say yesterday" on a panel that has since moved.
+
+        openalpha shortlist get sla_0123456789abcdef01234567 --runtime-dir ./runtime
+
+    Always JSON: a stored answer is a document rather than a verdict this command is making, and
+    a terminal rendering of it would be a second shape for the same bytes. Exits 0 when the answer
+    is held, 1 when it is not, 3 when the address is not one.
+    """
+    with _panel_command("shortlist get"):
+        try:
+            answer = held_shortlist(FileShortlistStore(runtime_dir / "shortlists"), shortlist_id)
+        except ShortlistViewError as error:
+            raise _shortlist_fail(error) from error
+        except ShortlistStoreError as error:
+            raise _panel_fail(PanelExit.unhealthy, str(error)) from error
+        typer.echo(json.dumps(answer, ensure_ascii=False, sort_keys=True))
+
+
+@shortlist_app.command("list")
+def shortlist_list_command(
+    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
+        "./runtime"
+    ),
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit the addresses as data.")
+    ] = False,
+) -> None:
+    """Every shortlist answer this runtime directory holds, by content address, ascending.
+
+    Addresses rather than bodies, `openalpha factor list`'s shape: an answer is kilobytes and a
+    caller listing them wants to pick one. `openalpha shortlist get <id>` is the other half.
+
+    A directory with nothing in it prints nothing and exits 0, which is the ordinary state of a
+    fresh install rather than a fault.
+    """
+    with _panel_command("shortlist list"):
+        held = FileShortlistStore(runtime_dir / "shortlists").list_ids()
+        if json_output:
+            typer.echo(json.dumps({"shortlist_ids": list(held)}, ensure_ascii=False))
+        else:
+            for shortlist_id in held:
+                typer.echo(shortlist_id)
 
 
 def _shortlist_component_pairs(declared: Sequence[str]) -> tuple[tuple[str, float], ...]:
@@ -4545,8 +4628,15 @@ def _echo_shortlist(result: ShortlistRunResult) -> None:
     typer.echo("rank  subject        score        evidence")
     for rank, subject, score, evidence in shortlist_rows(result):
         typer.echo(f"{rank:<5} {subject:<14} {score:<12} {evidence}")
+    if result.unresolvable_evidence:
+        typer.echo(
+            f"unresolved {list(result.unresolvable_evidence)} supplied a run_manifest_id this "
+            "runtime directory holds no run for; each is counted unresearched",
+            err=True,
+        )
     for block in clearance.blocks:
         typer.echo(f"blocked    {block.code}: {block.detail}", err=True)
+    typer.echo(f"held       {shortlist_view(result)['shortlist_id']}")
 
 
 def main() -> None:

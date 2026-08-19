@@ -1431,18 +1431,52 @@ def test_a_second_as_of_written_alongside_the_first_keeps_both(
     assert len(at_mid) == 2 * len(panel.securities)
 
 
-def test_a_write_that_would_drop_a_stored_build_is_refused(
+def test_a_later_call_adds_an_as_of_and_the_guard_still_refuses_a_restatement(
     store: PanelStore, panel: GeneratedPanel
 ) -> None:
-    """The guard on overwrite-per-partition, and the reason the manifest dataset's subject is a
-    `manifest_id`: the stored build list is `PartitionCoverage.subjects`, so the refusal costs
-    one catalog row and no partition scan."""
+    """`V2-P4-071`: a second call **adds** an instant, and the guard keeps its own case.
+
+    ## What this asserted before, and why it changed
+
+    It required `write_factor_panels(store, [late])` -- one of two stored builds, re-supplied on
+    its own -- to be refused, because the whole-partition replace would have dropped `early`. The
+    refusal was real and it was the cost of a missing primitive rather than a rule anybody wanted:
+    the only way to keep two instants in a year was to hand both to every write, forever.
+
+    `panel_ingest.carry_stored_rows_forward` reads the partition's stored rows back and puts them
+    in front of the arriving batch, so that call now keeps both and recomputes nothing. The
+    product consequence is `tests/integration/test_shortlist_workflow.py`'s whole reason for
+    existing: yesterday's cross section survives today's build, so two days' shortlists can be
+    compared.
+
+    ## What the guard still refuses
+
+    A **restatement** -- the same `as_of` under a different `--code-commit`, which mints a
+    different `manifest_id` and answers a question the year already has an answer to. That build
+    collides on `event_time`, the stored one is therefore not carried, and
+    `_refuse_to_drop_a_stored_build` refuses by name. The guard is unchanged; what changed is that
+    it now audits the merge instead of instructing the caller to rebuild the year. The two tests
+    below drive the rest of its surface: `supersedes` repairing a narrowed rebuild, and a
+    `supersedes` naming nothing being a typo.
+    """
     early = _compute(store, panel, as_of=EARLY_WINDOW)
     late = _compute(store, panel)
     write_factor_panels(store, [early, late])
 
+    # The write this test used to require a refusal for. It keeps both.
+    write_factor_panels(store, [late])
+    assert {
+        item.manifest_id
+        for item in load_factor_manifests(store, REVERSAL_1D, years=(YEAR,), as_of=MID_WINDOW)
+    } == {early.manifest.manifest_id, late.manifest.manifest_id}
+    assert len(
+        load_factor_observations(store, REVERSAL_1D, years=(YEAR,), as_of=MID_WINDOW)
+    ) == 2 * len(panel.securities)
+
+    restated = _compute(store, panel, code_commit="9876543210fedcba")
+    assert restated.manifest.manifest_id != late.manifest.manifest_id
     with pytest.raises(FactorEngineError, match="would drop"):
-        write_factor_panels(store, [late])
+        write_factor_panels(store, [restated])
     assert len(
         load_factor_observations(store, REVERSAL_1D, years=(YEAR,), as_of=MID_WINDOW)
     ) == 2 * len(panel.securities)

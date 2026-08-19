@@ -421,31 +421,83 @@ def test_a_rebuild_from_an_unchanged_source_reproduces_its_identity_and_writes_a
     assert stored.transform_manifest_id == first.manifest.transform_manifest_id
 
 
-def test_a_write_that_would_drop_a_stored_transform_build_is_refused_and_supersedes_names_one(
+def test_a_second_transform_written_on_its_own_is_added_and_a_restatement_is_still_refused(
     store: PanelStore, panel: GeneratedPanel
 ) -> None:
-    """A partition is replaced whole, so a second transform written on its own destroys the first.
+    """`V2-P4-071` here: the write **adds**, and the drop guard still refuses a restatement.
 
-    The refusal is the enforcement of "one partition holds every transform of one factor" -- and
-    `supersedes` is the only way past it, refusing a name no partition holds so a typo cannot
-    turn the guard off for the write it arrived with.
+    ## What this test asserted before, and why it changed
+
+    It asserted that a second transform written on its own is *refused*, and called that refusal
+    "the enforcement of `one partition holds every transform of one factor`". The refusal was real
+    and the reading was backwards: a partition holding every transform is the state we want, and
+    the only way to reach it was to write every transform of the year in one call. The refusal
+    protected against the whole-partition replace losing the first transform -- it was never a
+    rule that a partition may hold one.
+
+    `panel_ingest.carry_stored_rows_forward` removes the loss, so the write that used to be
+    refused now produces exactly the state the sentence describes: both transforms stored, neither
+    recomputed, nothing named on `supersedes`. This is the same fix as "build tomorrow's instant"
+    one axis over -- there the second build differs in `as_of`, here in `transform_id`, and
+    `identity_columns` is `(transform_id, event_time)` for exactly that reason.
+
+    ## What the guard still refuses, which is the half that must not have moved
+
+    A **restatement**: the same transform of the same source build at the same instant, under a
+    different `code_commit`. That mints a different `transform_manifest_id` and answers a question
+    the partition already has an answer to, so the arriving build collides on
+    `(transform_id, event_time)`, the stored one is not carried, and the guard refuses by name.
+    `supersedes` is still how a rebuild says it means to replace one, and a `supersedes` naming a
+    build no partition holds is still refused so a typo cannot turn the guard off for the write it
+    arrived with.
     """
     raw = _compute(store, panel)
     zscored = _apply(raw)
     ranked = _apply(raw, RANK_SPEC)
     write_processed_factor_panels(store, [zscored])
 
+    # The write this test used to require a refusal for. It now adds.
+    write_processed_factor_panels(store, [ranked])
+    both = load_factor_transform_manifests(store, REVERSAL_1D, years=(YEAR,), as_of=MID_WINDOW)
+    assert {item.transform_id for item in both} == {
+        _spec().transform_id,
+        RANK_SPEC.transform_id,
+    }
+    assert (
+        len(
+            load_processed_factor_observations(
+                store, REVERSAL_1D, _spec(), years=(YEAR,), as_of=MID_WINDOW
+            )
+        )
+        == 8
+    )
+    assert (
+        len(
+            load_processed_factor_observations(
+                store, REVERSAL_1D, RANK_SPEC, years=(YEAR,), as_of=MID_WINDOW
+            )
+        )
+        == 8
+    )
+
+    restated = apply_factor_transform(
+        raw, RANK_SPEC, code_commit="9876543210fedcba", built_at=BUILT_AT
+    )
+    assert restated.manifest.transform_manifest_id != ranked.manifest.transform_manifest_id
     with pytest.raises(FactorEngineError, match="it would drop"):
-        write_processed_factor_panels(store, [ranked])
+        write_processed_factor_panels(store, [restated])
     with pytest.raises(FactorEngineError, match="which no partition this write touches holds"):
-        write_processed_factor_panels(store, [ranked], supersedes=("ftm_not_a_build",))
+        write_processed_factor_panels(store, [restated], supersedes=("ftm_not_a_build",))
 
     write_processed_factor_panels(
-        store, [ranked], supersedes=(zscored.manifest.transform_manifest_id,)
+        store, [restated], supersedes=(ranked.manifest.transform_manifest_id,)
     )
     manifests = load_factor_transform_manifests(store, REVERSAL_1D, years=(YEAR,), as_of=MID_WINDOW)
 
-    assert {item.transform_id for item in manifests} == {RANK_SPEC.transform_id}
+    assert {item.transform_manifest_id for item in manifests} == {
+        zscored.manifest.transform_manifest_id,
+        restated.manifest.transform_manifest_id,
+    }
 
 
 def test_a_superseded_raw_build_leaves_its_processed_rows_pointing_at_nothing(

@@ -299,12 +299,29 @@ produce needs the industry-and-size cross section its scores were neutralised ag
 this face does not load one.
 
 `evidence` maps each researched subject to `{"signal": <SignalFrame>, "run_manifest_id":
-"rmf_…"}` and is **empty by default**, which is the ordinary first answer: the shortlist
+"run_…"}` and is **empty by default**, which is the ordinary first answer: the shortlist
 says which names are worth an evidence run, and nothing has been researched yet. A signal
 may carry its own `signal_id` — the field this service puts on every frame it hands out —
 and it is stripped before validation and then verified against the frame's content.
 Answers about names the cut did not reach are not an error; they come back under
 `evidence_not_shortlisted`.
+
+**The `run_manifest_id` is resolved against the runs this deployment holds (`V2-P4-049`).**
+It used to be format-checked and nothing else, and a `SignalFrame` only had to hash to its
+own address — so an invented conclusion beside the literal
+`run_000000000000000000000000` cleared a `minimum_researched_ratio` of `1.0` and was
+published with `researched_ratio: 1.0` and a provenance pointer that resolved to nothing.
+An entry whose `run_manifest_id` names no stored run is now **dropped before the ranking is
+built**: its subject is `unresearched`, it counts against `researched_ratio` exactly as a
+name with no evidence does, and it is named on the answer under
+`evidence_without_a_stored_run`. Dropped rather than refused, so a caller looping over a
+year of `as_of`s can keep going past it.
+
+What that proves and what it does not: the run is resolved, the **signal** is not. This
+repository stores no `SignalFrame`, so there is nothing to resolve one against, and a
+caller holding a real `run_manifest_id` can still file an invented conclusion under it. The
+property delivered is that a published `run_manifest_id` resolves to a run this deployment
+holds — not that the conclusion beside it came out of that run.
 
 `neutralization` addresses the neutralized partition and **is refused on any other tier**,
 exactly as `transform` is refused on `raw`: a flag that would move no security and no value
@@ -357,6 +374,45 @@ refused as a `date_gap` against the exchange calendar's own census. And a sessio
 stored rows do not all share one availability instant — the property that makes a session
 read sound at all — is refused outright rather than returned short.
 
+### Keeping an answer, and fetching it back
+
+Every answer carries **`shortlist_id`**, and that is the address the run is stored under.
+`GET /api/v1/shortlists/{shortlist_id}` returns it; `GET /api/v1/shortlists` lists every
+address this runtime directory holds. `openalpha shortlist get`/`list` and
+`OpenAlphaSDK.held_shortlist`/`list_shortlists` are the other two faces, and all three
+serve one document.
+
+Before `V2-P4-062` the answer carried three content addresses — `gate_manifest_id`,
+`ranking_manifest_id`, `ranking_content_digest` — and nothing held anything under any of
+them: `runtime/` had no shortlist artifact and this API had no `GET`. Two runs of one
+command produced byte-identical addresses, so the identities were sound; they simply had
+nothing behind them, and a caller who wanted to compare today's list against yesterday's
+had to have saved `--json` themselves.
+
+None of the three could be the key, and each fails a case this repository's own fixtures
+reach. `ranking_manifest_id` addresses the **question** — as-of, horizon, universe, scoring
+policy, code commit, config digest — so two runs under two different gate bars share it.
+`gate_manifest_id` addresses the question *and* the bars, and the **evidence** is in
+neither, so the same run with and without a supplied signal shares it and produces two
+different `admitted` lists. `ranking_content_digest` addresses `(subject, rank, score,
+signal_id, run_manifest_id)` per **candidate**, so a first run with no evidence has zero
+candidates and two entirely different shortlists share one digest.
+
+`shortlist_id` is the digest of the whole rendered answer, less
+`measurement.ranking_age_days` — which is `built_at - as_of` and therefore a wall clock, so
+addressing it would mint a new document every day the same shortlist was re-run. So the
+store is purely content-addressed: two runs that produce one answer produce one document
+and the second write is a no-op, and two answers that differ have two addresses. What it
+therefore cannot tell you is **how many times** or **when** an answer was reached; that is
+the `RunManifest` plane's question, not this one's.
+
+Retrieval has two refusals and they are deliberately different. A token that is not an
+address (`sla_` and 24 lowercase hex characters) is **`422`** with
+`{"detail": {"reason": "bad_request", …}}` — checked before the store is asked. A
+well-formed address this runtime directory holds nothing under, or holds a document whose
+answer no longer hashes to it, is **`404`** with `reason: "not_held"`. One code covering
+both would tell a caller who mistyped an address that their answer had been lost.
+
 ### A refused list and an empty one are two different answers
 
 This is the property the route exists for.
@@ -368,7 +424,8 @@ This is the property the route exists for.
 | no component has a stored cross section at or before the `as_of`, or the declared components disagree about which instant they share | `409` | — | — |
 | a declared component's stored cross section admits no value at all — for instance a processed tier whose rows all read `insufficient_cross_section` | `409` | — | — |
 | a partition this screen needs is missing, damaged, stale, or holds rows that were not knowable at `as_of` | `409` | — | — |
-| the request cannot be put at all (unknown factor, non-positive weight, processed tier with no `transform`, a `neutralization` on a tier that has none, a `position_capital` at or above `10**26`, naive `as_of`) | `422` | — | — |
+| the request cannot be put at all (unknown factor, non-positive weight, processed tier with no `transform`, a `neutralization` on a tier that has none, a `position_capital` at or above `10**26`, naive `as_of`, or a retrieval address that is not one) | `422` | — | — |
+| a retrieval address nothing is held under, or a held document that no longer hashes to it | `404` | — | — |
 | the endpoint itself broke; nothing was judged | `500` | — | — |
 
 `admitted: []` means the gate cleared a list every name of which came back unresearched,
@@ -379,7 +436,7 @@ scored, tradeable, shortlist and candidate counts, both ratios and the ranking's
 on **both** verdicts, so a list that scraped over a bar is distinguishable from one that
 sailed over it.
 
-The four refusal rows carry `{"detail": {"reason", "message"}}` and no `is_blocked`; the
+The five refusal rows carry `{"detail": {"reason", "message"}}` and no `is_blocked`; the
 two verdict rows carry `is_blocked` and no `detail`. The `500` row is neither — see below.
 `api/app.py#SHORTLIST_HTTP_STATUS` is the table.
 
@@ -420,9 +477,11 @@ request to change.
 
 `openalpha shortlist run` maps the same names onto exit codes
 (`cli.py#SHORTLIST_EXIT`) and reuses `PanelExit`: `0` admitted, `1` for every `409` row —
-**including a refused list** — `3` for `422`, `5` for an unhandled defect, and `2` for
-Click's own usage errors (a missing or misspelled flag), which this table does not own. A
-scheduled job that cut a shortlist, had it refused and exited `0` would be no gate at all.
+**including a refused list** — and for the `404` one, `3` for `422`, `5` for an unhandled
+defect, and `2` for Click's own usage errors (a missing or misspelled flag), which this
+table does not own. A scheduled job that cut a shortlist, had it refused and exited `0`
+would be no gate at all. `openalpha shortlist get` uses the same two: `1` when nothing is
+held under the address, `3` when the token is not an address.
 
 The portfolio endpoint is intentionally stateless: callers submit the immutable
 `PortfolioState`, `PortfolioOrder`, `MarketBar`, and optional `PortfolioLimits`,

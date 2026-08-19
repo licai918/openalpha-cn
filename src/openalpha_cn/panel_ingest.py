@@ -193,6 +193,17 @@ session.
 than a partition, the other needs the merge because its request is narrower.
 `V2-P1-007`'s `daily` has `adj_factor`'s shape and will use the same pair.
 
+`carry_stored_rows_forward()` is the third of the set and it answers the case neither of the
+other two can (`V2-P4-071`). A *fetched* dataset has every row of a year in hand at once, so
+the merge is enough. A **derived** one does not: `openalpha factor build` computes one cross
+section at one instant, a year holds as many of them as somebody chose to build, and
+tomorrow's invocation does not have yesterday's -- so a whole-partition replace either
+recomputed the year or destroyed it. That function reads the partition's own stored rows back
+and puts them in front of the arriving batch, which makes the replace an append. It is the
+only caller in this module of the un-gated `PanelStore.query`, and the reason it may take it
+is the opposite of the usual one: nothing it reads is answered with, and a point-in-time read
+there would commit a partition missing the withheld rows.
+
 `compress_adjustment_batch()` then applies `domain/adjustment.py`'s piecewise-constant rule
 before anything is written, which is why the factor partition is two orders of magnitude
 smaller than the price panel it exists to correct. The visible consequence is on the read
@@ -297,7 +308,7 @@ straddles a year boundary, is answered with an error instead of a silent choice.
 
 import operator
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 from statistics import median
@@ -377,6 +388,7 @@ from openalpha_cn.domain.name_history import (
     name_histories_from_panel_rows,
 )
 from openalpha_cn.domain.panel_batch import (
+    CLOCK_COLUMN_NAMES,
     RESERVED_COLUMN_NAMES,
     SUBJECT_COLUMN_NAME,
     ColumnarPanelBatch,
@@ -1321,6 +1333,104 @@ def merge_panel_batches(batches: Sequence[ColumnarPanelBatch]) -> ColumnarPanelB
         ),
         source_uri=source_uris.pop() if len(source_uris) == 1 else None,
     )
+
+
+def carry_stored_rows_forward(
+    store: PanelStore,
+    batch: ColumnarPanelBatch,
+    *,
+    year: int,
+    retain: Callable[[Mapping[str, object]], bool],
+) -> ColumnarPanelBatch:
+    """`batch` with the stored partition's own rows in front of it, wherever `retain` says so.
+
+    `V2-P4-071`. `merge_panel_batches` above is the answer for a dataset whose *fetches* are
+    narrower than its partition, and it works because every fetch of one year is in hand at once.
+    A **derived** partition is not like that: `openalpha factor build` computes one cross section
+    at one instant, a year holds as many of them as somebody chose to build, and tomorrow's
+    invocation does not have yesterday's in hand. `PanelStore.write_partition` replaces a
+    partition whole, so tomorrow's write either recomputed every instant of the year or destroyed
+    them -- which is the wall the product acceptance measured, verbatim::
+
+        $ openalpha factor build --factor reversal_1d/v1 --as-of <day one>    # exit 0
+        $ openalpha factor build --factor reversal_1d/v1 --as-of <day two>    # exit 1
+        factor_manifest_reversal_1d_v1 year=2026 already holds 1 subject(s) and this write
+        carries 1; it would drop ['fmn_...']
+
+    This is the third primitive beside those two: the partition's own stored bytes, read back and
+    put in front of the arriving batch, so that a whole-partition replace **is** an append. The
+    caller decides what survives with `retain`, which is handed one stored row as a mapping keyed
+    by the batch's own storage columns (`subject`, the four clocks, then the data columns).
+
+    ## What this does and deliberately does not weaken
+
+    Nothing here touches a drop guard. `panel_factors._refuse_to_drop_a_stored_build` and
+    `_refuse_to_drop_stored_subjects` still run, still read the catalog's stored subject list, and
+    still refuse a write that would lose one. What changes is their *relationship to the caller*:
+    they stop being an instruction to go and recompute the year, and become the audit on this
+    merge. A `retain` with a hole in it -- one that mis-reads which build a row belongs to, or
+    that silently drops a clock column -- produces exactly the refusal it produced before, naming
+    the builds that went missing. That is the property worth having: the merge is the thing that
+    can be wrong, and the guard is what catches it being wrong.
+
+    ## The read is un-gated, and it has to be
+
+    `PanelStore.query` takes no `as_of` and filters no row by availability, and this is one of the
+    two callers in `src/` allowed to take it (`tests/unit/panel/test_query_callers.py` is the
+    allowlist). A point-in-time read here would be the fail-open, not the safe choice: a carry-
+    forward that filtered by `available_time` would carry only the rows knowable at some instant
+    and would then hand the store a partition **missing** the withheld ones -- which
+    `write_partition` would commit, destroying exactly the data this function exists to preserve.
+    The rows are not being *answered with*; they are being put back where they were found.
+
+    `as_of` and `fetched_at` come off the stored partition's own coverage record rather than being
+    invented, because the carried rows may be newer than the arriving batch: building an *earlier*
+    instant after a later one is an ordinary backfill, and a batch claiming an `as_of` before its
+    own newest `available_time` is one `ColumnarPanelBatch` refuses. `merge_panel_batches` then
+    takes the later of the two, which is the merged partition's honest answer either way.
+
+    A partition with no coverage record is carried forward not at all, which is
+    `_refuse_to_drop_stored_subjects`' own rule and its reason: that state is an interrupted write,
+    readiness already blocks it as `coverage_missing`, and there is nothing to read the stored
+    shape from. Returns `batch` unchanged in that case, and whenever `retain` admits no row.
+
+    **A stored partition whose columns are not the arriving batch's is refused rather than
+    appended to**, and it is refused by the read: the columns are `batch.storage_columns()`' own
+    names, so a partition written by a build with a different column list raises out of
+    `PanelStore.query` before anything is merged. That is fail-closed and it is the right way
+    round -- `_manifest_cells`' "refusing the wrong width" one plane over, for the same reason.
+    Two column lists in one partition have no aligned row block, and the remedy is the one the
+    drop guard already names: supersede the builds written under the old shape.
+    """
+    coverage = store.read_coverage(batch.dataset, year)
+    if coverage is None:
+        return batch
+    names = tuple(column.name for column in batch.storage_columns())
+    stored = store.query(batch.dataset, year=year, columns=names)
+    kept = [row for row in stored if retain(dict(zip(names, row, strict=True)))]
+    if not kept:
+        return batch
+    held = {name: tuple(row[index] for row in kept) for index, name in enumerate(names)}
+    carried = ColumnarPanelBatch(
+        provider_id=batch.provider_id,
+        dataset=batch.dataset,
+        kind=batch.kind,
+        as_of=coverage.as_of,
+        fetched_at=coverage.fetched_at,
+        status="success",
+        subjects=tuple(str(value) for value in held[SUBJECT_COLUMN_NAME]),
+        timeline=TimelineColumns(
+            **{
+                name: tuple(cast(datetime, value) for value in held[name])
+                for name in CLOCK_COLUMN_NAMES
+            }
+        ),
+        columns=tuple(
+            PanelColumn(column.name, column.kind, held[column.name]) for column in batch.columns
+        ),
+        source_uri=None,
+    )
+    return merge_panel_batches((carried, batch))
 
 
 def compress_adjustment_batch(batch: ColumnarPanelBatch) -> ColumnarPanelBatch:

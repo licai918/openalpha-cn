@@ -29,6 +29,7 @@ from openalpha_cn.shortlist_view import (
     KNOWN_SHORTLIST_VIEW_LIMITATIONS,
     SHORTLIST_VIEW_LIMITATION_CODES,
     ShortlistEvidence,
+    ShortlistNotHeldError,
     ShortlistPanelUnreadableError,
     ShortlistRequestError,
     ShortlistRunBlockedError,
@@ -75,20 +76,23 @@ def test_every_shortlist_view_fault_has_a_row_in_both_channel_tables() -> None:
     code up the same way -- `_factor_refusal`'s rule, which is what keeps a fault from being
     enveloped as whichever branch an `isinstance` chain happened to end on. The price is that a
     subclass added with no row raises `KeyError` at that boundary; this is what makes the
-    `KeyError` unreachable in practice, and it reads the live class hierarchy so a fourth subclass
-    arrives red rather than unguarded.
+    `KeyError` unreachable in practice, and it reads the live class hierarchy so a fifth subclass
+    arrives red rather than unguarded. `not_held` is `V2-P4-062`'s, and it is `404`/exit `1` rather
+    than a shade of `bad_request` because a well-formed address nothing is held under and a token
+    that is not an address at all have different remedies.
 
     The base class's own `reason` deliberately has no row: it is never raised, and giving it one
     would invite a future subclass to inherit an envelope instead of choosing one.
     """
     subclasses = {subclass.reason for subclass in ShortlistViewError.__subclasses__()}
 
-    assert subclasses == {"bad_request", "panel_unreadable", "blocked"}
+    assert subclasses == {"bad_request", "panel_unreadable", "blocked", "not_held"}
     assert subclasses <= set(SHORTLIST_HTTP_STATUS)
     assert subclasses <= set(SHORTLIST_EXIT)
     assert ShortlistRequestError.reason == "bad_request"
     assert ShortlistPanelUnreadableError.reason == "panel_unreadable"
     assert ShortlistRunBlockedError.reason == "blocked"
+    assert ShortlistNotHeldError.reason == "not_held"
     assert ShortlistViewError.reason not in SHORTLIST_HTTP_STATUS
     assert ShortlistViewError.reason not in SHORTLIST_EXIT
 
@@ -130,16 +134,23 @@ def test_this_face_calls_the_same_panel_faults_unreadable_as_the_factor_face() -
     assert set(SHORTLIST_PANEL_FAULTS) == set(FACTOR_PANEL_FAULTS)
 
 
-def test_the_known_shortlist_view_limitations_are_the_four_this_face_declares() -> None:
+def test_the_known_shortlist_view_limitations_are_the_six_this_face_declares() -> None:
     """Equality rather than membership: a membership assertion can see a code that was renamed and
-    never one that was removed. `KNOWN_ADJUSTMENT_LIMITATIONS`' form since `V2-P1-005`."""
+    never one that was removed. `KNOWN_ADJUSTMENT_LIMITATIONS`' form since `V2-P1-005`.
+
+    Four until `V2-P4-049` and `V2-P4-062` added one each: what a resolved `run_manifest_id` does
+    and does not prove about the conclusion beside it, and what a content-addressed answer store
+    can and cannot say about when an answer was reached.
+    """
     assert {
         "the_clip_block_is_recovered_from_a_tie_and_may_over_report",
         "the_cross_section_may_be_older_than_the_as_of_that_was_asked_for",
         "the_evidence_plane_is_supplied_rather_than_run_by_this_module",
         "a_neutralized_tier_screen_needs_exposures_this_face_does_not_load",
+        "a_resolved_run_manifest_is_not_a_resolved_signal",
+        "the_stored_answer_is_addressed_by_content_and_not_by_when_it_was_run",
     } == SHORTLIST_VIEW_LIMITATION_CODES
-    assert len(KNOWN_SHORTLIST_VIEW_LIMITATIONS) == 4
+    assert len(KNOWN_SHORTLIST_VIEW_LIMITATIONS) == 6
     assert all(limitation.detail.strip() for limitation in KNOWN_SHORTLIST_VIEW_LIMITATIONS)
 
 
