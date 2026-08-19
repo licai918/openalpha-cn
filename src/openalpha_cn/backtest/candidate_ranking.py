@@ -209,13 +209,25 @@ reaches no store", and that sentence is true about *storing* and not about *crea
 
 So `ranking-creates-no-portfolio-order` is an eighth `lint-imports` contract, scoped to this module
 alone, forbidding `openalpha_cn.domain.portfolio`, `openalpha_cn.backtest.portfolio` and
-`openalpha_cn.backtest.multi_day` -- the three modules in this repository where an order intent is
-declared or simulated. It is added rather than folded into the two study contracts because folding
-would forbid `domain.portfolio` to `backtest/portfolio.py`, which *is* the simulator, and a
-contract that has to be relaxed to be added is not a contract.
+`openalpha_cn.backtest.multi_day` -- the three modules where a **portfolio** order, a
+`PortfolioOrder`, is declared or simulated. It is added rather than folded into the two study
+contracts because folding would forbid `domain.portfolio` to `backtest/portfolio.py`, which *is*
+the simulator, and a contract that has to be relaxed to be added is not a contract.
 `tests/unit/backtest/test_candidate_ranking.py::
 test_the_ranking_contract_cannot_reach_the_three_modules_that_make_an_order` drives a probe
 through it in both directions.
+
+**Those three are not every order intent in the repository, and `V2-P4-035` corrected this
+paragraph for saying so.** `backtest/execution.py` declares `ExecutionRequest` -- "a simplified
+cash-equity order intent" -- and simulates a fill, and this module *reaches* it, through
+`cross_section` and on purpose: that is `V2-P4-004`'s hard tradeability filter, so the edge is a
+feature and the module cannot be forbidden without removing one. What D16's
+`绝不直接创建组合订单` buys here is therefore precise rather than total: no `PortfolioOrder` can
+be constructed here, no simulator or multi-day runner reached, nothing persisted and no engine
+touched. A single-security `ExecutionRequest` is reachable and is not barred by any contract --
+only by `tests/unit/backtest/test_candidate_ranking.py::
+test_this_ranking_grows_no_import_of_its_own_into_the_order_machinery`, which pins this module's
+own import list and so catches a direct import rather than a transitive reach.
 
 The three imports this leaves are the ones D16 permits and D17 requires: `ExecutionResult` is a
 verdict about a *hypothetical* buy, which is what `V2-P3-006` has produced since it was written;
@@ -419,7 +431,16 @@ KNOWN_RANKING_LIMITATIONS: Final[tuple[RankingLimitation, ...]] = (
             "module every backtest study may import. What is NOT claimed is that no caller can "
             "build an order FROM a ranking: a caller holding this record and PortfolioSimulator "
             "can do exactly that, which is V2-P4-006 and the construction issues, and D17 says "
-            "that is a separate step on purpose."
+            "that is a separate step on purpose. Nor -- V2-P4-035 -- is it claimed that no order "
+            "intent of ANY kind is reachable: openalpha_cn.backtest.execution declares "
+            "ExecutionRequest, 'a simplified cash-equity order intent', and simulates a fill in "
+            "AShareExecutionPolicy.execute, and this module reaches it through "
+            "backtest/cross_section.py, which imports that policy for V2-P4-004's tradeability "
+            "filter. That module is deliberately NOT forbidden, because forbidding it would "
+            "delete the filter. So the ban is the portfolio-order ban exactly, and the "
+            "single-security order intent one step below it is guarded only by a file-scoped pin "
+            "on this module's own import list, which catches a direct import and not a "
+            "transitive reach."
         ),
     ),
 )

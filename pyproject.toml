@@ -335,7 +335,7 @@ forbidden_modules = ["openalpha_cn.runtime"]
 
 [[tool.importlinter.contracts]]
 id = "ranking-creates-no-portfolio-order"
-name = "the candidate ranking contracts reach no module that declares or simulates an order"
+name = "the candidate ranking contracts reach no module that declares or simulates a portfolio order"
 type = "forbidden"
 source_modules = [
   "openalpha_cn.backtest.candidate_ranking",
@@ -353,8 +353,36 @@ forbidden_modules = [
 # sentence is true about storing and not about creating: `domain/portfolio.py` declares
 # `PortfolioOrder` and is a plain data module every `backtest/` study may import, and
 # `backtest/portfolio.py`'s `PortfolioSimulator` and `backtest/multi_day.py`'s runner sit in the
-# same package. Those three are the whole of where an order intent is declared or simulated in
-# this repository.
+# same package. Those three are the whole of where a **portfolio** order -- a `PortfolioOrder` --
+# is declared or simulated.
+#
+# `V2-P4-035` narrowed the `name` above to say `portfolio order`, because it said `an order` and
+# that was false. `openalpha_cn.backtest.execution` declares `ExecutionRequest`, whose own
+# docstring is "A simplified cash-equity order intent", and simulates a fill in
+# `AShareExecutionPolicy.execute` ("Simulate a close-price fill after enforcing explicit
+# constraints"). It is **not** forbidden here and **both source modules reach it today**, by
+# `shortlist_gate -> candidate_ranking -> cross_section -> execution`. That is deliberate and
+# cannot be undone: `backtest/cross_section.py` imports the execution policy to decide
+# tradeability, which is `V2-P4-004`'s hard tradeability filter and a shipped feature, so adding
+# `openalpha_cn.backtest.execution` to the list below would have to break a feature to become
+# true -- the same objection that kept this contract out of `backtest-studies-touch-no-store`.
+#
+# So what this contract guarantees is exactly: neither source can construct a `PortfolioOrder`,
+# reach the `PortfolioSimulator`, or reach the multi-day runner. Together with the two study
+# contracts it also cannot persist an order or reach the engine that would place one. **What it
+# does not guarantee** is that a source declares or fills no *single-security* order intent:
+# `ExecutionRequest` is reachable, and a function added to either source could build one and
+# call `.execute(...)` on it without tripping any `lint-imports` contract. That is a real
+# residual gap, stated rather than papered over. What guards it instead is a weaker, file-scoped
+# pin on each source's own import list -- `tests/unit/backtest/test_candidate_ranking.py::
+# test_this_ranking_grows_no_import_of_its_own_into_the_order_machinery` and
+# `tests/unit/backtest/test_shortlist_gate.py::
+# test_this_gate_cannot_measure_dataset_freshness_because_it_cannot_reach_the_panel` -- which
+# catch a *direct* import and not a transitive reach. `tests/unit/test_import_layering.py::
+# test_every_order_intent_is_forbidden_to_the_ranking_or_disclosed_as_reachable` is what keeps
+# this comment and the list below from drifting apart again: it discovers every order intent in
+# the tree off the AST and requires each to be either forbidden and unreachable, or named in
+# this comment and measurably reachable.
 #
 # A fourth contract rather than three names added to `backtest-studies-touch-no-store`, because
 # that contract's sources include `backtest/portfolio.py` itself -- the simulator -- so folding

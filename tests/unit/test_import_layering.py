@@ -61,6 +61,7 @@ enumeration that a new sibling does not automatically join.
 
 from __future__ import annotations
 
+import ast
 import logging
 import re
 import tomllib
@@ -961,4 +962,152 @@ def test_no_test_in_this_module_calls_lint_imports_without_restoring_logging() -
         f"expected exactly 2 bare `lint_imports(` calls (one inside _lint_imports, one in "
         f"test_running_the_import_linter_leaves_an_existing_logger_enabled); found "
         f"{len(bare_calls)}. Every other call site must go through `_lint_imports`"
+    )
+
+
+# --------------------------------------------------------------------------------------------
+# V2-P4-035: the order contract's claim, held to its enforcement
+# --------------------------------------------------------------------------------------------
+
+ORDER_CONTRACT_ID = "ranking-creates-no-portfolio-order"
+ORDER_INTENT_MARKER = "order intent"
+
+# Every class in `src/` whose own docstring calls itself an order intent. Discovered off the AST
+# by `_order_intent_declarations` and asserted *equal* to this table rather than merely covered
+# by it, so a third declaration cannot arrive unnoticed and a renamed one cannot go missing.
+#
+# `V2-P4-035` is the reason this table exists. `ranking-creates-no-portfolio-order` was named
+# "the candidate ranking contracts reach no module that declares or simulates an order" and its
+# comment asserted that its three `forbidden_modules` "are the whole of where an order intent is
+# declared or simulated in this repository". Both sentences were false and neither was checked:
+# `backtest/execution.py` declares `ExecutionRequest`, "a simplified cash-equity order intent",
+# and simulates a fill through `AShareExecutionPolicy.execute`, and **both contract sources
+# reach it** -- `shortlist_gate -> candidate_ranking -> cross_section -> execution`. A probe
+# placed in `candidate_ranking.py` filled an order (`status=filled qty=100 filled_price=10.20
+# total_cost=5.01`) while the import linter reported 8 kept / 0 broken.
+ORDER_INTENT_DECLARATIONS = {
+    "openalpha_cn.domain.portfolio": "PortfolioOrder",
+    "openalpha_cn.backtest.execution": "ExecutionRequest",
+}
+
+
+def _order_intent_declarations() -> dict[str, str]:
+    """Every order intent declared under `src/openalpha_cn`, as {module: class name}."""
+    package_root = ROOT / "src" / "openalpha_cn"
+    found: dict[str, str] = {}
+    for path in sorted(package_root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            if ORDER_INTENT_MARKER in (ast.get_docstring(node) or "").lower():
+                parts = path.relative_to(package_root).with_suffix("").parts
+                found[".".join(("openalpha_cn", *parts))] = node.name
+    return found
+
+
+def _order_contract() -> dict[str, object]:
+    config = importlinter_api.read_configuration(str(ROOT / "pyproject.toml"))
+    return next(
+        contract
+        for contract in config["contracts_options"]
+        if contract.get("id") == ORDER_CONTRACT_ID
+    )
+
+
+def _order_contract_block() -> str:
+    """The contract's own TOML stanza and the comment under it, as raw text.
+
+    Read off the file rather than the parsed configuration because the disclosure this checks
+    for lives in a `#` comment, which `tomllib` throws away.
+    """
+    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    tail = text[text.index(f'id = "{ORDER_CONTRACT_ID}"') :]
+    end = tail.find("[[tool.importlinter.contracts]]")
+    return tail if end == -1 else tail[:end]
+
+
+def test_every_order_intent_is_forbidden_to_the_ranking_or_disclosed_as_reachable() -> None:
+    """`V2-P4-035`. The contract's claim and its enforcement, forced to agree by measurement.
+
+    The defect this closes was not a missing prohibition -- it was a name and a comment that
+    described a prohibition nobody had. The repair could not be "forbid
+    `openalpha_cn.backtest.execution`" either: `backtest/cross_section.py` imports
+    `AShareExecutionPolicy` to decide tradeability, which is `V2-P4-004`'s hard filter and a
+    shipped feature, so that addition would have had to break a feature to become true.
+
+    So the binding is a partition, and both halves are measured off `grimp` rather than
+    asserted. Every order intent in the tree is either **forbidden** to both contract sources
+    (and then no chain may exist) or **disclosed by name** in the contract's own comment as
+    deliberately reachable (and then a chain must exist, from every source, or the disclosure is
+    describing a risk that is not there). A third order intent added anywhere under `src/` fails
+    the equality below; a disclosure quietly deleted fails the membership; and "fixing" this by
+    forbidding `execution` fails the reachability assertion *and* the tradeability filter, which
+    is the outcome that should be hard.
+    """
+    declared = _order_intent_declarations()
+    assert declared == ORDER_INTENT_DECLARATIONS, (
+        f"the set of classes documenting themselves as an {ORDER_INTENT_MARKER!r} changed: "
+        f"expected {ORDER_INTENT_DECLARATIONS}, found {declared}. Every one of them has to be "
+        f"either in {ORDER_CONTRACT_ID}'s forbidden_modules or disclosed by name in its comment "
+        "as deliberately reachable -- update this table and pick the side in the same commit"
+    )
+
+    contract = _order_contract()
+    forbidden = set(contract["forbidden_modules"])  # type: ignore[call-overload]
+    sources = set(contract["source_modules"])  # type: ignore[call-overload]
+    disclosure = _order_contract_block()
+    graph = grimp.build_graph("openalpha_cn")
+
+    for module in declared:
+        reaching = {
+            source
+            for source in sources
+            if graph.chain_exists(importer=source, imported=module, as_packages=False)
+        }
+        if module in forbidden:
+            assert not reaching, (
+                f"{ORDER_CONTRACT_ID} forbids {module}, and {sorted(reaching)} reaches it anyway"
+            )
+            continue
+        assert reaching == sources, (
+            f"{module} declares an order intent and {ORDER_CONTRACT_ID} does not forbid it, so "
+            f"the comment discloses it as deliberately reachable -- but only {sorted(reaching)} "
+            f"of {sorted(sources)} actually reaches it. Either the disclosure is stale or the "
+            "module could have been forbidden after all"
+        )
+        assert module in disclosure, (
+            f"{module} declares an order intent ({declared[module]}), is NOT in "
+            f"{ORDER_CONTRACT_ID}'s forbidden_modules, and IS reachable from {sorted(sources)}. "
+            "That combination is exactly the V2-P4-035 defect, and it is only honest if the "
+            "contract's comment names the module and says why it cannot be forbidden. It does "
+            "not."
+        )
+
+
+def test_the_order_contracts_name_claims_only_what_its_forbidden_modules_enforce() -> None:
+    """The other half of `V2-P4-035`: the sentence a reader sees when the linter passes.
+
+    `lint-imports` prints the contract's `name`, not its `id` or its `forbidden_modules`, so the
+    name is the claim almost everybody reads. Its three forbidden modules are the three where a
+    **portfolio** order is declared or simulated, which is exactly D16's `绝不直接创建组合订单`;
+    the unqualified word "order" covers `ExecutionRequest` too and was therefore false.
+
+    Checked as "every occurrence of `order` in the name is part of `portfolio order`" rather than
+    against a fixed string, so the name may still be reworded -- it may not be rewidened. The
+    first assertion stops the cheap way out of the second, which is to delete the word.
+    """
+    name = str(_order_contract()["name"]).lower()
+
+    assert "portfolio order" in name, (
+        f"{ORDER_CONTRACT_ID}'s name no longer says what it forbids: {name!r}. It must still "
+        "claim the portfolio-order ban -- narrowing the claim to nothing is not narrowing it"
+    )
+    unqualified = re.sub(r"portfolio orders?", "", name)
+    assert "order" not in unqualified, (
+        f"{ORDER_CONTRACT_ID}'s name claims more than its forbidden_modules enforce: {name!r}. "
+        "An unqualified 'order' covers openalpha_cn.backtest.execution's ExecutionRequest -- "
+        "'a simplified cash-equity order intent' -- which this contract does not forbid and "
+        "cannot forbid, because backtest/cross_section.py imports the execution policy for "
+        "V2-P4-004's tradeability filter. Say 'portfolio order', which is what is enforced"
     )
