@@ -17,9 +17,9 @@ Issue ID: `V2-<阶段>-<序号>`。类型标记：**结**结构 · **产**产品
 | **P1** | 面板数据平面 | 17 | 5–7 周 | 13–18 周 | 8 组数据集全部通过契约 + 未来数据 fail-closed |
 | **P2** | **PIT 红队闸门** | 9 | 2 周 | 5 周 | **必过，否则不得进 P3** |
 | **P3** | 因子层 | 19 | 5–6 周 | 13–15 周 | 首批因子出齐 raw/processed/neutralized 三档 |
-| **P4** | 候选排序与模型基线 | 70 | 6–7 周 | 15–18 周 | 契约升版一次完成 + 预测先落库 |
+| **P4** | 候选排序与模型基线 | 71 | 6–7 周 | 15–18 周 | 契约升版一次完成 + 预测先落库 |
 | **P5** | 组合、验证与工作台 | 24 | 6–8 周 | 15–20 周 | 归因对账 + 多重检验 + 4 页可用 |
-| | **合计** | **164** | **28–36 周** | **70–90 周** | |
+| | **合计** | **165** | **28–36 周** | **70–90 周** | |
 
 > **相对上一版的变化**：上一版估 18–25 周，假设 P0 为 1 周。审计发现 39 条必须在面板层之前关闭的前置 finding（无迁移机制、两个组装根、引擎四合一、无 conftest、look-ahead 靠字符串匹配、`.parquet` 被发布拦截、seed/commit/digest 全为占位），故新增 P0.B。上调的 10–11 周全部是**原先不可见的前置债**，不是范围膨胀。
 
@@ -287,6 +287,7 @@ P3 结束即可独立使用（Jupyter 直连面板 + 因子）
 | `V2-P4-069` | **`PanelStore.read_if_ready` 的逐年就绪重评估是 O(N²)，且其 docstring 把代价说小了三个数量级** | 技 | 059 | **`V2-P4-059` 修复时实测**：`load_stock_universe` 的 docstring 声称逐年重评估是「milliseconds」，36 个生命周期分区上实测 **4.0 秒** —— cProfile 显示 `assess_readiness` 累计 **4.59s**（1,296 次 `_read_coverage`），而真正的 Parquet 读只占 **0.21s**。`panel build`/`panel doctor` 本来就在付这笔；`V2-P4-059` 让注册簿向下加宽之后，**`factor build` 与 `shortlist run` 现在每个时刻都要付一次**。修法是「一次评估加 N 次读」，但那会改动 `read_if_ready` 的契约，而该契约由 **14 个调用方**共享；`059` 的实施者刻意**没有**在本地绕过（绕过会丢掉受损分区的包装）。docstring 已按实测更正 | 单元：读路径的就绪评估次数不随分区数平方增长 | S5 |
 | `V2-P4-070` | **`shortlist_view` 仍缺 `_REGISTRY_FAULTS`，残缺注册簿在出榜面上仍是 exit 5 且消息被吞** | 产 | 060 | **`V2-P4-060` 修复时的受阻依赖**：`factor_view` 加了 `_REGISTRY_FAULTS`（把注册簿读会抛的两个故障码补进去，`_PANEL_FAULTS` 原有四个而 `cli._PANEL_WRITE_REFUSALS` 有十一个、且与 `panel_doctor._LOAD_FAILURES` 钉成相等），故 `factor build` 现在给 exit 1 与可执行的诊断。**`shortlist run` 没有** —— 该文件由同轮另一个 agent 拥有，未能编辑。用户在出榜面上遇到中断的回补，仍看到「命令有缺陷、消息因可能携带凭据而被withheld」 | 集成：出榜面对残缺注册簿给具名拒绝 | S48 |
 | `V2-P4-071` | **同一年里建第二个时刻会被拒，这是「明天再跑一次并比较」路上仅存的一堵墙** | 产 | 061 | **`V2-P4-061` 修复后由其实施者标出**：`openalpha factor build` 在更晚一天用第二个 `as_of` 仍被逐字拒绝 —— `factor_manifest_reversal_1d_v1 year=2026 already holds 1 subject(s) and this write carries 1; it would drop ['fmn_…']`。那是 `write_factor_panels` 的**写侧契约**（`write_partition` 整分区替换、不追加），由 `_refuse_to_drop_a_stored_build` 守卫，具名逃生口是 `--supersedes-raw`；读路径没有任何东西碰它，故 `061` 未受影响也未改善它。**为什么现在它变关键**：`V2-P4-061` 之前，「两天的榜无法比较」有两堵墙（历史横截面不可筛 + 第二个时刻建不出来）；`061` 拆掉了第一堵，**这是仅存的一堵**。用户今天的选择仍是二选一：把该年建过的所有时刻在一次调用里重算，或用 `--supersedes-raw` 抹掉昨天那次。**与 `V2-P4-062`（出榜结果不落库、无 GET 路由）合起来，「跑两次、比较、解释变化」仍然做不到** | 集成：同年内追加一个新时刻不得要求重算或抹除既有时刻 | S44, S49 |
+| `V2-P4-072` | **P4 交付的整条出货面在 e2e 上零覆盖** | 测 | 032, 033, 061 | **2026-08-19 实测**：e2e 套件在 `6400679` 上跑真实 Tushare 端点得 **33 passed / 1:44:21**，而在 `d703905`（约两百个提交之前）同样是 **33 passed** —— 中间落地了 `shortlist_view.py`、`backtest/{cross_section,candidate_ranking,shortlist_gate}.py`、CLI/REST/SDK 三个出货面、面板→截面适配器与 `V2-P4-061` 的可见时刻定价读，**e2e 一条都没长**。`grep -rn "shortlist\|CandidateRanking\|cross_section" tests/e2e/` **无输出**：现有 33 条全部在 `test_panel_chain_online.py`（23 条）与 `test_pit_injection_online.py`（10 条），即面板摄入与 PIT 注入，**没有一条从用户站的地方走到候选榜**。**这正是 P3 验收那句根因在 e2e 层的复现**：单元与集成层已经被三轮验收逼着从 `CliRunner`/`TestClient`/SDK 出发，而唯一打真实数据的那一层仍然只测面板。一个「可进生产」的判断若建立在这 33 条上，它证明的是面板链路可用，不是产品可用 | e2e：真实语料上从 `panel build` 走到 `shortlist run` 并出榜或具名拒绝 | T9 |
 
 **闸门**：排序测试覆盖确定性排序、平局政策、弃权、缺失依赖、过期数据、风险/可交易性标记，且每个入选候选证据闭合；模型评估测试用已知信噪比数据验证 walk-forward 切分、purge/embargo、制品身份、前瞻预测落库；契约升版后从 v1 卷迁移的记录仍可读；新 agent 全部经 `run_cycle` 缝验收。
 
