@@ -299,6 +299,7 @@ from openalpha_cn.panel_factors import (
     FACTOR_PROVIDER_ID,
     FactorEngineError,
     ProcessedFactorPanel,
+    _refuse_a_merge_that_lost_a_stored_build,
     _refuse_rows_that_are_not_the_answers_their_manifest_addresses,
     _refuse_to_drop_a_stored_build,
     appended_to_the_stored_year,
@@ -1739,18 +1740,20 @@ def write_neutralized_factor_panels(
     ignored, because a typo would silently turn the drop guard off for the write it arrived with;
     and every guard runs before the first write, so a refusal changes nothing at all.
 
-    **The drop guard is `panel_factors._refuse_to_drop_a_stored_build`, imported rather than
-    restated**, and that import is the one place this module reaches for a private name in another
-    one. The alternative was a second guard that differs from the first in nothing but the file it
-    lives in, and this repository's own rule against two copies of a closed set applies at least
-    as strongly to two copies of a refusal: they would drift, and the direction they drift in is
-    that one plane stops protecting a partition.
+    **Both drop guards are `panel_factors`' own, imported rather than restated**:
+    `_refuse_to_drop_a_stored_build` for the catalog's stored build list, and
+    `_refuse_a_merge_that_lost_a_stored_build` for the merge that `appended_to_the_stored_year`
+    performed, which is the one that reaches the *observation* partition on this plane as on the
+    other two (`V2-P4-073`). The alternative was a second copy of each that differs from the first
+    in nothing but the file it lives in, and this repository's own rule against two copies of a
+    closed set applies at least as strongly to two copies of a refusal: they would drift, and the
+    direction they drift in is that one plane stops protecting a partition.
     `tests/unit/test_factor_neutralization_rules.py::
-    test_the_drop_guard_is_the_same_object_the_factor_plane_uses` asserts object identity, so a
-    later rename cannot fork them silently. What makes the sharing correct rather than merely
-    convenient is that the fact enforced is identical -- a manifest partition's subject is a build
-    id on all three planes -- which `_refuse_to_drop_a_stored_build`'s own docstring already says
-    about the first two.
+    test_the_drop_guard_is_the_same_object_the_factor_plane_uses` asserts object identity for
+    both, so a later rename cannot fork them silently. What makes the sharing correct rather than
+    merely convenient is that the facts enforced are identical -- a manifest partition's subject
+    is a build id on all three planes, and an observation partition's builds are in its own
+    `*_manifest_id` column on all three -- which those functions' own docstrings say.
 
     **One partition holds every neutralisation of one factor**, so the call that writes a year has
     to carry every `(neutralisation, as_of)` pair belonging to it. That follows from the
@@ -1787,12 +1790,16 @@ def write_neutralized_factor_panels(
     ]
     superseded = set(supersedes)
     stored: list[tuple[ColumnarPanelBatch, int, frozenset[str]]] = []
-    for year, yearly in planned:
-        if yearly.kind != FACTOR_NEUTRALIZATION_MANIFEST_KIND:
+    for year, appended in planned:
+        if appended.batch.kind != FACTOR_NEUTRALIZATION_MANIFEST_KIND:
             continue
-        existing = store.read_coverage(yearly.dataset, year)
+        existing = store.read_coverage(appended.batch.dataset, year)
         stored.append(
-            (yearly, year, frozenset() if existing is None else frozenset(existing.subjects))
+            (
+                appended.batch,
+                year,
+                frozenset() if existing is None else frozenset(existing.subjects),
+            )
         )
     unmatched = sorted(superseded - {build for _, _, builds in stored for build in builds})
     if unmatched:
@@ -1803,9 +1810,11 @@ def write_neutralized_factor_panels(
         )
     for yearly, year, builds in stored:
         _refuse_to_drop_a_stored_build(yearly, year, builds=builds, superseded=superseded)
+    for year, appended in planned:
+        _refuse_a_merge_that_lost_a_stored_build(appended, year)
     return tuple(
-        write_panel_batch(store, yearly, year=year, date_timezone=date_timezone)
-        for year, yearly in planned
+        write_panel_batch(store, appended.batch, year=year, date_timezone=date_timezone)
+        for year, appended in planned
     )
 
 

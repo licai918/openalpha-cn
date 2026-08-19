@@ -71,11 +71,21 @@ ones, which is data destruction with a safety argument in front of it. The guara
 protects is about what a caller may *learn*; a byte put back where it was found teaches nobody
 anything.
 
-What enforces the guarantee for the write is the drop guard rather than the read:
-`panel_factors._refuse_to_drop_a_stored_build` runs on the merged batch immediately after each
-carry-forward, so a merge that lost a build is refused by name. The residue -- a `retain` rule
-that carried a row it should have replaced -- is caught one plane up by
-`_refuse_two_builds_of_one_factor_at_one_as_of`'s stored-side twin, `identity_columns`.
+What enforces the guarantee for the write is a drop guard rather than the read, and **this
+paragraph named the wrong one until `V2-P4-073`**. It said `panel_factors._refuse_to_drop_a
+_stored_build` "runs on the merged batch immediately after each carry-forward, so a merge that
+lost a build is refused by name". It ran after the *manifest* carry-forwards only -- it reads the
+catalog's stored subject list, which is a build list on a manifest partition and a securities list
+on an observation one -- so the observation merge, which is the larger half of every write this
+function serves, was audited by nothing at all. A hole confined to it wrote and exited 0, and the
+loss surfaced on the next read.
+
+`panel_factors._refuse_a_merge_that_lost_a_stored_build` is the guard that makes the sentence
+true. It asks the same question of the merged batch's own build column rather than of the catalog,
+so it holds on both kinds and on all three planes, and every writer runs it immediately after the
+catalog-side guard. The residue -- a `retain` rule that carried a row it should have replaced --
+is caught one plane up by `_refuse_two_builds_of_one_factor_at_one_as_of`'s stored-side twin,
+`identity_columns`.
 
 Adding a name here is a deliberate act with a review attached, which is the property this test
 exists to create.

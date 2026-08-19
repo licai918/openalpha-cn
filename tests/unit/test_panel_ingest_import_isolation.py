@@ -192,9 +192,11 @@ _ALLOWED_NEUTRALIZATION_DEPENDENCIES = _ALLOWED_INTERNAL_DEPENDENCIES | {
 **It is the first row in this table with an edge to another top-level `panel_*` module, and that
 edge is the point of the row rather than an awkwardness in it.** A neutralisation consumes a
 `ProcessedFactorPanel`, which `panel_factors` owns, and shares that module's `FactorEngineError`,
-its `EVENT_TIME_COLUMN`, its `FACTOR_PROVIDER_ID`, its census-column prefix and its
-`_refuse_to_drop_a_stored_build` -- so the alternative to the edge was either a second copy of
-each or keeping the code inside a module that would then be 4,900 lines.
+its `EVENT_TIME_COLUMN`, its `FACTOR_PROVIDER_ID`, its census-column prefix and **both** of its
+write-side drop guards -- `_refuse_to_drop_a_stored_build` on the catalog's stored build list and
+`_refuse_a_merge_that_lost_a_stored_build` on the merge itself (`V2-P4-073`) -- so the alternative
+to the edge was either a second copy of each or keeping the code inside a module that would then
+be 4,900 lines.
 
 **What the edge buys the audit is the reason `V2-P3-004` split the file at all.** This module
 reaches `panel_ingest` for two things `panel_factors` deliberately does not:
@@ -370,6 +372,7 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_factors.FACTOR_PROVIDER_ID",
             "panel_factors.FactorEngineError",
             "panel_factors.ProcessedFactorPanel",
+            "panel_factors._refuse_a_merge_that_lost_a_stored_build",
             "panel_factors._refuse_rows_that_are_not_the_answers_their_manifest_addresses",
             "panel_factors._refuse_to_drop_a_stored_build",
             "panel_factors.appended_to_the_stored_year",

@@ -44,6 +44,7 @@ from typing import Any, Final
 import pytest
 from panel_fixtures import YEAR, GeneratedPanel, generate_panel, write_generated_panel
 
+from openalpha_cn import panel_factors
 from openalpha_cn.domain.daily_prices import DAILY_DATASET
 from openalpha_cn.domain.factor import FactorDefinition, FactorField
 from openalpha_cn.domain.factor_transform import (
@@ -395,6 +396,48 @@ def test_a_stored_transform_manifest_reassembles_to_the_identity_it_was_written_
     assert stored == processed.manifest
     assert stored.transform_manifest_id == processed.manifest.transform_manifest_id
     assert stored.source_manifest_id == processed.manifest.source_manifest_id
+
+
+def test_a_merge_that_loses_a_stored_build_is_refused_on_this_plane_too(
+    store: PanelStore, panel: GeneratedPanel, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`V2-P4-073` on the processed plane, which had the identical exemption and the same hole.
+
+    `write_processed_factor_panels` ran `_refuse_to_drop_a_stored_build` for `kind ==
+    FACTOR_TRANSFORM_MANIFEST_KIND` alone, on the same argument -- "a `transform_manifest_id`
+    covers `source_observation_digest`, so a write carrying every stored build carries every
+    stored security *and every stored transform of them* by construction". By construction of one
+    pass over one `panels` sequence, which `V2-P4-071` replaced with two independent merges.
+
+    The probe puts a hole in the observation merge only, by over-matching `identity_columns` so
+    that every stored row whose subject the arriving batch also carries is treated as displaced.
+    Before the audit this wrote and reported success, leaving a transform manifest partition
+    describing two builds over an observation partition holding one.
+    """
+    raw = _compute(store, panel)
+    zscored = _apply(raw)
+    write_processed_factor_panels(store, [zscored])
+    real = panel_factors.appended_to_the_stored_year
+    monkeypatch.setattr(
+        panel_factors,
+        "appended_to_the_stored_year",
+        lambda store, batch, year, *, build_column, identity_columns, superseded: real(
+            store,
+            batch,
+            year,
+            build_column=build_column,
+            identity_columns=(
+                identity_columns if build_column == SUBJECT_COLUMN_NAME else (SUBJECT_COLUMN_NAME,)
+            ),
+            superseded=superseded,
+        ),
+    )
+
+    with pytest.raises(FactorEngineError, match="would drop") as raised:
+        write_processed_factor_panels(store, [_apply(raw, RANK_SPEC)])
+
+    assert zscored.manifest.transform_manifest_id in str(raised.value)
+    assert processed_factor_dataset(REVERSAL_1D) in str(raised.value)
 
 
 def test_a_rebuild_from_an_unchanged_source_reproduces_its_identity_and_writes_as_a_no_op(

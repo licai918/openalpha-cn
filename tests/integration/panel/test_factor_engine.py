@@ -67,7 +67,7 @@ from __future__ import annotations
 
 import dataclasses
 import inspect
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -76,6 +76,7 @@ from typing import Any, Final
 import pytest
 from panel_fixtures import AS_OF, YEAR, GeneratedPanel, generate_panel, write_generated_panel
 
+from openalpha_cn import panel_factors
 from openalpha_cn.domain.daily_prices import DAILY_BASIC_DATASET, DAILY_DATASET
 from openalpha_cn.domain.factor import (
     FactorBuildManifest,
@@ -85,7 +86,12 @@ from openalpha_cn.domain.factor import (
     FactorObservation,
 )
 from openalpha_cn.domain.factor_transform import observation_digest
-from openalpha_cn.domain.panel_batch import ColumnarPanelBatch, PanelColumn, TimelineColumns
+from openalpha_cn.domain.panel_batch import (
+    SUBJECT_COLUMN_NAME,
+    ColumnarPanelBatch,
+    PanelColumn,
+    TimelineColumns,
+)
 from openalpha_cn.panel.catalog import ReadinessRequirement
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import (
@@ -1556,6 +1562,123 @@ def test_dropping_a_security_is_refused_by_the_build_guard_rather_than_a_second_
 
     assert OBSERVATIONS not in str(raised.value)
     assert "supersedes" in str(raised.value)
+
+
+def _holed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Put a hole in the merge, on the **observation** plane and nowhere else (`V2-P4-073`).
+
+    `appended_to_the_stored_year`'s claim is that a `retain` rule with a hole in it -- "one that
+    mis-reads `build_column`, or that drops a build it meant to keep" -- produces exactly the
+    refusal it produced before, naming the builds that went missing. The probe that measured it
+    false is this: the caller passes an `identity_columns` that over-matches, so every stored row
+    whose *subject* appears in the arriving batch is treated as displaced and is not carried.
+
+    Expressed through the function's own parameters rather than by rewriting its body, so what is
+    under test is the audit and not a re-implementation of the rule. The manifest plane is left
+    exactly as the writer built it, which is what makes the two partitions disagree: the manifest
+    partition ends up holding both builds and the observation partition holding one.
+    """
+    real = panel_factors.appended_to_the_stored_year
+
+    def holed(
+        store: PanelStore,
+        batch: ColumnarPanelBatch,
+        year: int,
+        *,
+        build_column: str,
+        identity_columns: Sequence[str],
+        superseded: Collection[str],
+    ) -> object:
+        return real(
+            store,
+            batch,
+            year,
+            build_column=build_column,
+            identity_columns=(
+                identity_columns if build_column == SUBJECT_COLUMN_NAME else (SUBJECT_COLUMN_NAME,)
+            ),
+            superseded=superseded,
+        )
+
+    monkeypatch.setattr(panel_factors, "appended_to_the_stored_year", holed)
+
+
+def test_a_merge_that_loses_a_stored_build_is_refused_at_write_time_and_names_it(
+    store: PanelStore, panel: GeneratedPanel, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`V2-P4-073`: the drop guard used to audit the manifest merge and only the manifest merge.
+
+    `write_factor_panels` ran `_refuse_to_drop_a_stored_build` for `kind == FACTOR_MANIFEST_KIND`
+    and for nothing else, so the observation merge was unaudited. Measured with the probe above:
+    the second build **succeeded, exit 0, silently**; the manifest partition held both builds and
+    the observation partition had lost day one's entire eight-row cross section. It surfaced only
+    on the next read, from `_refuse_rows_that_are_not_the_answers_their_manifest_addresses`.
+
+    That exemption was argued from "a write carrying every stored build carries every stored
+    security **by construction**", which was true while the arriving batch *was* the whole
+    partition and both datasets came out of one `panels` sequence. `V2-P4-071` ended that: the two
+    partitions are assembled by independent `appended_to_the_stored_year` calls, so one can lose a
+    build while the other does not.
+    """
+    early = _compute(store, panel, as_of=EARLY_WINDOW)
+    write_factor_panels(store, [early])
+    _holed(monkeypatch)
+
+    with pytest.raises(FactorEngineError, match="would drop") as raised:
+        write_factor_panels(store, [_compute(store, panel)])
+
+    assert early.manifest.manifest_id in str(raised.value)
+    assert OBSERVATIONS in str(raised.value)
+
+
+def test_the_refused_merge_leaves_the_partition_exactly_as_it_found_it(
+    store: PanelStore, panel: GeneratedPanel, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refusal changes nothing at all -- `write_factor_panels`' "every guard runs before the
+    first write", inherited by this one because the audit runs where the old guard runs.
+
+    Asserted through the read rather than through a row count: the state the old arrangement left
+    was a manifest partition and an observation partition that disagreed, and the read is what
+    reports that. A store this refusal had half-written would come back with a `FactorEngineError`
+    of its own here.
+    """
+    early = _compute(store, panel, as_of=EARLY_WINDOW)
+    write_factor_panels(store, [early])
+    _holed(monkeypatch)
+
+    with pytest.raises(FactorEngineError):
+        write_factor_panels(store, [_compute(store, panel)])
+
+    monkeypatch.undo()
+    observations = load_factor_observations(store, REVERSAL_1D, years=(YEAR,), as_of=MID_WINDOW)
+    assert {item.subject for item in observations} == set(panel.securities)
+    assert [
+        item.manifest_id
+        for item in load_factor_manifests(store, REVERSAL_1D, years=(YEAR,), as_of=MID_WINDOW)
+    ] == [early.manifest.manifest_id]
+
+
+def test_a_merge_that_loses_nothing_is_not_refused_by_the_new_audit(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """The direction a fail-closed audit reaches for on its own, pinned against it.
+
+    Three writes that legitimately drop nothing, or drop only what they named: a first write into
+    an empty year, a second instant appended beside the first, and a rebuild that supersedes.
+    `V2-P4-071`'s whole product consequence is the middle one, and an audit that refused it would
+    have taken the append back out while reporting a fix.
+    """
+    early = _compute(store, panel, as_of=EARLY_WINDOW)
+    write_factor_panels(store, [early])
+    late = _compute(store, panel)
+    write_factor_panels(store, [late])
+    narrowed = _compute(store, panel, subjects=("000001.SZ", "000002.SZ"))
+    write_factor_panels(store, [narrowed], supersedes=(late.manifest.manifest_id,))
+
+    assert {
+        item.manifest_id
+        for item in load_factor_manifests(store, REVERSAL_1D, years=(YEAR,), as_of=MID_WINDOW)
+    } == {early.manifest.manifest_id, narrowed.manifest.manifest_id}
 
 
 def test_each_factor_writes_its_own_partitions_and_does_not_disturb_another_factors(

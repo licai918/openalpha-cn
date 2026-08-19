@@ -44,6 +44,9 @@ from openalpha_cn.panel_factors import (
     FactorEngineError,
 )
 from openalpha_cn.panel_factors import (
+    _refuse_a_merge_that_lost_a_stored_build as _factor_plane_merge_audit,
+)
+from openalpha_cn.panel_factors import (
     _refuse_to_drop_a_stored_build as _factor_plane_drop_guard,
 )
 from openalpha_cn.panel_neutralization import (
@@ -65,6 +68,7 @@ from openalpha_cn.panel_neutralization import (
     _neutralized_observation_from_row,
     _population_stdev,
     _processed_code,
+    _refuse_a_merge_that_lost_a_stored_build,
     _refuse_neutralization_table_drift,
     _refuse_to_drop_a_stored_build,
     factor_neutralization_manifest_dataset,
@@ -543,11 +547,18 @@ def test_the_drop_guard_is_the_same_object_the_factor_plane_uses() -> None:
     """Object identity, so a later rename cannot fork one refusal into two that drift.
 
     "A partition is replaced whole" is the same fact on the raw, processed and neutralised planes,
-    and the unit has the same shape on all three: a manifest partition's subject is a build id. A
-    second copy of the guard would differ only in the file it lives in, and the direction it would
-    drift is that one plane stops protecting a partition.
+    and the unit has the same shape on all three: a manifest partition's subject is a build id,
+    and an observation partition's builds are in its own `*_manifest_id` column. A second copy of
+    either guard would differ only in the file it lives in, and the direction it would drift is
+    that one plane stops protecting a partition.
+
+    **Both guards, since `V2-P4-073`.** The catalog-side one alone was what this asserted, and it
+    is also the one that could not see an observation merge at all -- so pinning it and not its
+    partner would have left the newer half free to be restated here and diverge, which is the
+    whole failure this test exists to make impossible.
     """
     assert _refuse_to_drop_a_stored_build is _factor_plane_drop_guard
+    assert _refuse_a_merge_that_lost_a_stored_build is _factor_plane_merge_audit
 
 
 # --- the datasets ---------------------------------------------------------------------------------
