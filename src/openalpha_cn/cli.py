@@ -4270,8 +4270,12 @@ _SHORTLIST_COMPONENT_HELP: Final[str] = (
 _SHORTLIST_TIER_HELP: Final[str] = (
     "Which stored tier to screen on: `raw`, `processed` or `neutralized`. `processed` and "
     "`neutralized` need a --transform, because those partitions hold every transform of the "
-    "factor and are narrowed by the one you name. `neutralized` is refused by this command; see "
-    "shortlist_view's KNOWN_SHORTLIST_VIEW_LIMITATIONS."
+    "factor and are narrowed by the one you name; `raw` takes neither --transform nor "
+    "--neutralization, and both are refused rather than ignored on a tier that has no use for "
+    "them. `neutralized` is refused by this command; see shortlist_view's "
+    "KNOWN_SHORTLIST_VIEW_LIMITATIONS. A processed screen over a market thinner than the "
+    "transform's min_cross_section is refused by name: the stored rows all read "
+    "`insufficient_cross_section` and there is nothing to order."
 )
 _SHORTLIST_SIZE_HELP: Final[str] = (
     "How many names reach the evidence plane. No default: it is the cut, and a cut nobody chose "
@@ -4280,7 +4284,9 @@ _SHORTLIST_SIZE_HELP: Final[str] = (
 _SHORTLIST_CAPITAL_HELP: Final[str] = (
     "The notional budget stage two sizes one buy against, in yuan. It decides "
     "`below_board_minimum` -- a name at 300 yuan a share does not sell a 100-share lot for 10,000 "
-    "yuan -- and it is not a portfolio weight: nothing here allocates."
+    "yuan -- and it is not a portfolio weight: nothing here allocates. Must be below 10**26, "
+    "which is the first budget whose own fill this build cannot price rather than a policy "
+    "limit; see shortlist_view.POSITION_CAPITAL_CEILING."
 )
 _SHORTLIST_HORIZON_HELP: Final[str] = (
     "The one span every conclusion in this list is over, as a count of trading sessions (`5d`). "
@@ -4343,10 +4349,12 @@ def shortlist_run_command(
         str, typer.Option("--exchange", help=_FACTOR_EXCHANGE_HELP)
     ] = TRADING_CALENDAR_DEFAULT_EXCHANGE,
     as_of: Annotated[str, typer.Option("--as-of", help=_FACTOR_AS_OF_HELP)] = "",
-    code_commit: Annotated[str, typer.Option("--code-commit", help=_CODE_COMMIT_HELP)] = "",
+    code_commit: Annotated[
+        str | None, typer.Option("--code-commit", help=_CODE_COMMIT_HELP)
+    ] = None,
     config_digest: Annotated[
-        str, typer.Option("--config-digest", help=_SHORTLIST_CONFIG_DIGEST_HELP)
-    ] = "",
+        str | None, typer.Option("--config-digest", help=_SHORTLIST_CONFIG_DIGEST_HELP)
+    ] = None,
     evidence: Annotated[
         Path | None, typer.Option("--evidence", help=_SHORTLIST_EVIDENCE_HELP)
     ] = None,
@@ -4372,6 +4380,15 @@ def shortlist_run_command(
     refused by name against it. `openalpha factor list` says which `--component` and `--transform`
     are legal.
 
+    **`--code-commit ""` is not the same as omitting `--code-commit`, and `V2-P4-046` is what
+    happens when they are.** Both flags default to `None` -- *unset* -- rather than to `""`, which
+    is what `openalpha run` and `openalpha replay` already do and what this command did not. With
+    an empty-string default there was no value the parser could hand back that meant "the caller
+    typed an empty one", so `code_commit or None` resolved it from git: over HTTP `""` was a `422`
+    naming the seven-character rule, and here the same literal published a shortlist stamped with a
+    commit the caller never declared. Omitting the flag still resolves server-side; declaring it
+    empty is now refused on all three faces, which is what README means by calling them equivalent.
+
     **Exit `0` is not "the list shipped".** It is "the gate ran and did not refuse". A list of two
     names that nobody has researched, under `--min-researched-ratio 0`, is *admitted* and exits
     `0` with an empty `admitted` array -- while the same list under `--min-researched-ratio 0.5`
@@ -4394,8 +4411,8 @@ def shortlist_run_command(
                 minimum_tradable_ratio=min_tradable_ratio,
                 minimum_researched_ratio=min_researched_ratio,
                 maximum_ranking_age_days=max_ranking_age_days,
-                code_commit=_resolved_code_commit(code_commit or None),
-                config_digest=_resolved_config_digest(config_digest or None),
+                code_commit=_resolved_code_commit(code_commit),
+                config_digest=_resolved_config_digest(config_digest),
                 transform=transform or None,
                 neutralization=neutralization or None,
                 evidence=_shortlist_evidence(evidence),
@@ -4484,6 +4501,12 @@ def _echo_shortlist(result: ShortlistRunResult) -> None:
     thing a reader must not have to infer is which of the two this is -- an empty table under a
     silent header reads identically for a refused list and for one nobody has researched, which is
     the defect this whole issue is about.
+
+    **`unscored` is printed only when stage one dropped somebody**, and it is here because the
+    `--json` face grew `funnel.excluded_by_coverage` for `V2-P4-044`. `listed -> scored` is a
+    subtraction with no explanation beside it, and a human reading a refused list off a terminal
+    needs that explanation more than a program does, not less. Omitted when every cell is zero, so
+    a clean screen does not print a line of noughts -- the same rule the block lines follow.
     """
     clearance = result.clearance
     measurement = clearance.measurement
@@ -4502,6 +4525,11 @@ def _echo_shortlist(result: ShortlistRunResult) -> None:
         f"{measurement.tradeable_count} tradeable -> {measurement.shortlist_count} shortlisted "
         f"({result.funnel.coverage})"
     )
+    unscored = {
+        code: count for code, count in result.funnel.scores.excluded_by_coverage if count > 0
+    }
+    if unscored:
+        typer.echo(f"unscored   {unscored}")
     researched = (
         "not measurable"
         if measurement.researched_ratio is None
