@@ -595,20 +595,41 @@ them collapsed into one (`{"items":[],"excluded":[],"reviewed":0}` for both), wh
   panel and of this run's evidence, which is what RFC 9110 reserves `409` for. Not an error, and
   the body is a verdict rather than a `detail`.
 - **`blocked` (409)** -- `ShortlistRunBlockedError`: no component has a stored cross section at or
-  before the `as_of`, or the declared components disagree about which instant they share, or a
-  supplied signal names a security the funnel did not shortlist. A refusal body.
+  before the `as_of`, the declared components disagree about which instant they share, a declared
+  component's stored cross section admits no value at all, or a supplied signal names a security
+  the funnel did not shortlist. A refusal body.
 - **`panel_unreadable` (409)** -- `ShortlistPanelUnreadableError`: a partition this screen needs is
   missing, damaged, stale or holds rows that were not knowable at the stated `as_of`.
 - **`bad_request` (422)** -- `ShortlistRequestError`: a factor no registry declares, a weight that
-  is not positive, a processed-tier screen with no transform, a naive `as_of`.
-- **`internal_error` (500)** -- the endpoint itself broke. Not raised anywhere in this module; the
-  row records a code that is already spoken for, exactly as `cli.CLICK_USAGE_EXIT_CODE` does.
+  is not positive, a processed-tier screen with no transform, a `neutralization` on a tier that has
+  none, a `position_capital` at or above `shortlist_view.POSITION_CAPITAL_CEILING`, a naive
+  `as_of`.
+- **`internal_error` (500)** -- the endpoint itself broke. **Nothing in this module raises it, and
+  nothing that does reach it wears this table's body**: an exception no branch here anticipates is
+  caught by Starlette, not by `_shortlist_refusal`, and the caller gets `text/plain` `Internal
+  Server Error` with no `reason` at all. The row records a code that is already spoken for,
+  exactly as `cli.CLICK_USAGE_EXIT_CODE` does.
+
+  This is not hypothetical and the docstring used to say only the first half. `V2-P4-045` measured
+  `position_capital=1e26` arriving exactly that way: `decimal.InvalidOperation` is an
+  `ArithmeticError`, so it passed every `except ShortlistViewError` on all three faces.
+  `shortlist_request` now refuses that value by name, which is where a *caller-supplied* number
+  has to be stopped -- a `500` here means a defect in this repository, and the remedy is a bug
+  report rather than a different request.
 
 **`409` therefore carries two body schemas here, and `detail` is the discriminator** --
 `PANEL_HTTP_STATUS`' own arrangement, unchanged: a verdict body has `is_blocked` and no `detail`
 key, and a refusal body is `{"detail": {"reason": ..., "message": ...}}`. A client that read
 `json()["blocks"]` on every `409` would raise `KeyError` on the second, so it switches on
 `"detail" in body` first.
+
+**`422` also carries two body schemas, and there `"detail" in body` is not enough** -- `V2-P4-051`.
+This module's refusal is that same `{"reason", "message"}` **object**, while a body FastAPI itself
+rejected (an unparseable `as_of`, a misspelled field, a non-numeric `position_capital`, a wrong
+`Content-Type`, malformed JSON) comes back as `{"detail": [...]}` -- a **list** of field errors.
+Both have the key, so a client has to branch on `isinstance(detail, dict)`; `docs/api/http.md`
+says so and `tests/integration/test_shortlist_interfaces.py` holds both shapes to it. The two are
+deliberately not merged: the list names the offending field, which a flattened message would lose.
 """
 
 

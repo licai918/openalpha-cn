@@ -306,6 +306,30 @@ and it is stripped before validation and then verified against the frame's conte
 Answers about names the cut did not reach are not an error; they come back under
 `evidence_not_shortlisted`.
 
+`neutralization` addresses the neutralized partition and **is refused on any other tier**,
+exactly as `transform` is refused on `raw`: a flag that would move no security and no value
+in the answer is a question this route cannot honour, and accepting it silently returned a
+raw screen to a caller who asked for a neutralised one.
+
+`position_capital` is a notional **per name** and not a fund size — nothing here allocates.
+It must be below `10**26`, which is not a policy limit but the first budget whose own fill
+this build cannot price: stage two quantizes a notional to cents, and a larger one needs
+more significant digits than `decimal`'s context carries.
+
+### What the answer records about itself
+
+`declaration` carries the whole resolved question — `tier`, `transform`, `neutralization`,
+`exchange`, `years` and each component's `factor_id`, qualified key and weight. Without it a
+published answer said `tier: "processed"` and never which transform chose the numbers, so
+two runs of one factor under two transforms were indistinguishable after the fact.
+
+`cross_section.components[]` reports `row_count` and, beside it, `admitted_count` — how many
+of those rows carried a value this tier admits — and `stored_coverage`, the panel's own
+coverage codes with their counts. `funnel.excluded_by_coverage` is the other half: how many
+securities stage one dropped, keyed by `incomplete_components`, `not_admissible` and
+`not_valued`. Together they separate "the rows carried no value" from "the components did
+not overlap", which a `row_count` beside a `scored_count` of zero could not.
+
 The factor tier is read at your `as_of`. **Everything the screen prices with — the
 calendar, the registry, the bars, the published bands, the halts and the name histories —
 is read at the resolved cross section's own instant**, which is at or before it. So a
@@ -323,8 +347,9 @@ This is the property the route exists for.
 | the gate ran and admitted the list | `200` | `false` | an array, possibly `[]` |
 | the gate ran and **refused** it | `409` | `true` | `null` |
 | no component has a stored cross section at or before the `as_of`, or the declared components disagree about which instant they share | `409` | — | — |
+| a declared component's stored cross section admits no value at all — for instance a processed tier whose rows all read `insufficient_cross_section` | `409` | — | — |
 | a partition this screen needs is missing, damaged, stale, or holds rows that were not knowable at `as_of` | `409` | — | — |
-| the request cannot be put at all (unknown factor, non-positive weight, processed tier with no transform, naive `as_of`) | `422` | — | — |
+| the request cannot be put at all (unknown factor, non-positive weight, processed tier with no `transform`, a `neutralization` on a tier that has none, a `position_capital` at or above `10**26`, naive `as_of`) | `422` | — | — |
 | the endpoint itself broke; nothing was judged | `500` | — | — |
 
 `admitted: []` means the gate cleared a list every name of which came back unresearched,
@@ -335,15 +360,50 @@ scored, tradeable, shortlist and candidate counts, both ratios and the ranking's
 on **both** verdicts, so a list that scraped over a bar is distinguishable from one that
 sailed over it.
 
-The three refusal rows carry `{"detail": {"reason", "message"}}` and no `is_blocked`; the
-two verdict rows carry `is_blocked` and no `detail`. A client switches on
-`"detail" in body` first, exactly as it does for the panel plane's two `409`s.
+The four refusal rows carry `{"detail": {"reason", "message"}}` and no `is_blocked`; the
+two verdict rows carry `is_blocked` and no `detail`. The `500` row is neither — see below.
 `api/app.py#SHORTLIST_HTTP_STATUS` is the table.
+
+#### Telling the body shapes apart
+
+**Branch on the *shape* of `detail`, not on whether the key is present.** `422` carries two
+different bodies and both have a `detail` key, so `"detail" in body` selects the wrong one
+half the time — which is what this reference used to say, and a client that followed it
+raised `TypeError: list indices must be integers` on an unparseable `as_of`, a misspelled
+field, a non-numeric `position_capital`, a wrong `Content-Type` and malformed JSON.
+
+| `body["detail"]` | who wrote it | what it holds |
+|---|---|---|
+| absent | this route | a verdict — read `is_blocked` and `admitted` |
+| **an object** | this route | `{"reason", "message"}` — `reason` is the row of `SHORTLIST_HTTP_STATUS` |
+| **a list** | FastAPI's request validation | one entry per offending field, each with `loc`, `msg` and `type` |
+
+```python
+detail = body.get("detail")
+if detail is None:
+    ...  # a verdict: body["is_blocked"] says which
+elif isinstance(detail, dict):
+    ...  # this service refused: detail["reason"], detail["message"]
+else:
+    ...  # the request never parsed: detail is a list of field errors
+```
+
+The two `422`s are genuinely different findings and are deliberately not merged. The object
+is *this module's* refusal — the request parsed, and `shortlist_view.shortlist_request`
+judged it unanswerable. The list is FastAPI's own report that the body never became a
+request at all, and it names the offending field, which a flattened message would lose.
+
+The `500` row has **no `detail` of either shape**: an exception no branch anticipated is
+handled by Starlette rather than by this route, so it arrives as `text/plain` `Internal
+Server Error`. Nothing a caller can put in the body should produce one — a caller-supplied
+`position_capital` used to, and now does not — so a `500` here is a defect to report, not a
+request to change.
 
 `openalpha shortlist run` maps the same names onto exit codes
 (`cli.py#SHORTLIST_EXIT`) and reuses `PanelExit`: `0` admitted, `1` for every `409` row —
-**including a refused list** — `3` for `422`, `5` for an unhandled defect. A scheduled job
-that cut a shortlist, had it refused and exited `0` would be no gate at all.
+**including a refused list** — `3` for `422`, `5` for an unhandled defect, and `2` for
+Click's own usage errors (a missing or misspelled flag), which this table does not own. A
+scheduled job that cut a shortlist, had it refused and exited `0` would be no gate at all.
 
 The portfolio endpoint is intentionally stateless: callers submit the immutable
 `PortfolioState`, `PortfolioOrder`, `MarketBar`, and optional `PortfolioLimits`,

@@ -498,6 +498,11 @@ uv run openalpha shortlist run --component reversal_1d/v1=1.0 --tier raw \
 因子档必须先存在：`openalpha factor build` 是放它进去的那条命令。三个面等价：
 `openalpha shortlist run` ／ `POST /api/v1/shortlists/run` ／ `OpenAlphaSDK.run_shortlist()`。
 
+**「等价」是逐字面量成立的，不只是「大体一样」。** 同一个字面输入在三个面上必须得到同一个
+判决：`--code-commit ""` 是显式声明了一个空值，三个面都拒；把这个旗标**整个省掉**才是「由
+进程自己解析」，只有命令行和 HTTP 有这条回退，而它和「显式给空」是两件事。这条以前不成立
+——命令行把 `""` 当成「没给」，于是发出去的榜盖着一个调用者从没声明过的 commit。
+
 **读的是哪个横截面，什么时候读的。** 因子档按你给的 `--as-of` 读，`read_visible_at` 会把
 `available_time` 晚于它的行滤掉；而**打分之后用来定价的一切**——日历、登记簿、K 线、涨跌停
 带、停牌、名称历史——按解析出来的那个横截面**自己的时刻**读。所以一个两周前建的横截面，是拿
@@ -511,8 +516,11 @@ uv run openalpha shortlist run --component reversal_1d/v1=1.0 --tier raw \
 | 开闸放行 | `0` / `200` | `false` | 一个数组，可以是 `[]` |
 | 开闸**拒绝** | `1` / `409` | `true` | `null` |
 | 声明的成分在 `--as-of` 之前没有任何已存横截面，或几个成分的最新时刻不一致 | `1` / `409` | — | — |
+| 某个声明的成分横截面里没有任何一行带着这一档认的值（比如 processed 档整片写着 `insufficient_cross_section`） | `1` / `409` | — | — |
 | 需要的分区缺失、损坏、过期，或持有在 `--as-of` 时还不可知的行 | `1` / `409` | — | — |
-| 这个问题根本提不出来（未声明的因子、非正权重、processed 档没给 `--transform`、无时区 `--as-of`） | `3` / `422` | — | — |
+| 这个问题根本提不出来（未声明的因子、非正权重、processed 档没给 `--transform`、非 neutralized 档却给了 `--neutralization`、`--position-capital` 到了 `10**26`、无时区 `--as-of`） | `3` / `422` | — | — |
+| 命令行本身就写错了：漏了 `--component`、拼错了旗标 —— Click 自己的用法错误，不归这张表管 | `2` / — | — | — |
+| 命令自己崩了，什么都没判 | `5` / `500` | — | — |
 
 `admitted: []` 是「一张榜上每个名字都还没被研究过，而调用者声明的
 `--min-researched-ratio` 是 0，所以它通过了」；`admitted: null` 配 `409` 才是被拒绝，

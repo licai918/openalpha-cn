@@ -208,6 +208,37 @@ sealed records underneath already carry their own `schema_version`, and this say
 the three faces agreed to hand out around them.
 """
 
+POSITION_CAPITAL_CEILING: Final[Decimal] = Decimal(10) ** 26
+"""The first budget whose own fill this build cannot price. Exclusive: a capital must be below it.
+
+`V2-P4-045`. `ShortlistSpec.position_capital` is `Field(gt=0)` and bounded nowhere above, while
+every sibling numeric on this request is bounded on both sides -- `shortlist_size` at 1000, each
+weight at 1000, both ratios at 1. Measured through `TestClient` before this constant existed:
+`1e25` answered `200`, `1e26` answered a bare `500` with `text/plain` `Internal Server Error`, and
+so did `1e400`.
+
+**The number is read off the execution policy rather than chosen.** Stage two sizes a buy with
+`position_quantity`, which floors the lot count, so the notional it hands
+`AShareExecutionPolicy.execute` is never above the capital itself. That policy's first act is
+`(market.close * quantity).quantize(_CENT)`, and a value quantized to cents carries two digits
+after the point -- so a notional at or above `10**26` needs more than the 28 significant digits
+`decimal`'s default context holds, and `quantize` raises `InvalidOperation`. It is an
+`ArithmeticError`, so it passed every `except TwoStageFunnelError` and `except ShortlistViewError`
+on all three faces and arrived as an unhandled defect.
+
+The ceiling is therefore the same at every close price, which was measured across `0.01` to
+`10000.00` rather than assumed: `notional <= capital` makes the bound a fact about the budget
+alone. `tests/integration/test_shortlist_interfaces.py::
+test_the_largest_representable_capital_is_still_answered` drives `10**26 - 1` and requires `200`,
+so a later "fix" that refused every large budget would fail rather than pass.
+
+**This is the wrong file for it and that is a reported dependency, not a preference.** The bound
+belongs on `ShortlistSpec.position_capital` in `backtest/cross_section.py`, beside the three
+siblings that already carry one, where no face could route around it. It is stated here because
+this module owns none of `backtest/`, and because `shortlist_request` is the one funnel all three
+faces resolve through -- so every *shipped* surface is covered either way.
+"""
+
 SHORTLIST_DATE_ZONE: Final[ZoneInfo] = ZoneInfo("Asia/Shanghai")
 """The zone a cross-section instant is resolved into a **session** in.
 
@@ -572,10 +603,8 @@ def shortlist_request(
     transform_spec = _resolve_transform(
         transform, tier=resolved_tier, registry=transforms, kind="transform"
     )
-    neutralization_spec = (
-        None
-        if resolved_tier != "neutralized"
-        else _resolve_neutralization(neutralization, registry=neutralizations)
+    neutralization_spec = _resolve_neutralization(
+        neutralization, tier=resolved_tier, registry=neutralizations
     )
 
     if as_of.tzinfo is None or as_of.utcoffset() is None:
@@ -600,6 +629,15 @@ def shortlist_request(
             "one's count is not knowable at all. Refused here rather than by "
             "`build_ranking_manifest`, which raises the same objection after a store has already "
             "been read and would therefore report a mistyped flag as a fact about the panel"
+        )
+    if not position_capital.is_finite() or position_capital >= POSITION_CAPITAL_CEILING:
+        raise ShortlistRequestError(
+            f"--position-capital {position_capital} is at or above "
+            f"{POSITION_CAPITAL_CEILING}, which is the first budget whose own fill this build "
+            "cannot price: stage two quantizes a notional to cents, and a notional that large "
+            "needs more significant digits than decimal's context carries, so the screen would "
+            "raise rather than answer. Declare a budget below it -- it is a notional per name "
+            "and not a fund size, and nothing here allocates"
         )
     if len(code_commit.strip()) < 7:
         raise ShortlistRequestError(
@@ -699,8 +737,30 @@ def _resolve_transform(
 
 
 def _resolve_neutralization(
-    token: str | None, *, registry: FactorNeutralizationRegistry
-) -> FactorNeutralizationSpec:
+    token: str | None, *, tier: FactorTier, registry: FactorNeutralizationRegistry
+) -> FactorNeutralizationSpec | None:
+    """The neutralisation a residual read is addressed by; `_resolve_transform`'s exact twin.
+
+    **`tier` is a parameter for `V2-P4-050`'s reason.** This used to be reached only from the
+    `neutralized` branch of `shortlist_request`, so a `--neutralization` declared beside `--tier
+    raw` or `--tier processed` was accepted, never read and never mentioned: the caller asked for
+    a neutralised screen, got a raw one, and the two answers were byte-identical. `--transform`
+    on the raw tier has been refused by name since this module was written; a flag that moves
+    nothing is the same defect whichever flag it is, and the asymmetry was the whole of it.
+
+    Refused rather than honoured, because honouring it would mean loading the industry-and-size
+    cross section this face deliberately does not load -- see
+    `a_neutralized_tier_screen_needs_exposures_this_face_does_not_load`.
+    """
+    if tier != "neutralized":
+        if token is not None and token.strip():
+            raise ShortlistRequestError(
+                f"--neutralization {token!r} was given for a {tier}-tier screen, which reads no "
+                "residual and subtracts nothing. A neutralisation addresses the neutralized "
+                "partition only, so this flag would have moved no security on this tier and no "
+                "value in this answer. Drop it, or screen on the neutralized tier"
+            )
+        return None
     if token is None or not token.strip():
         raise ShortlistRequestError(
             "a neutralized-tier screen needs a --neutralization: that partition holds every "
@@ -1272,6 +1332,8 @@ def run_shortlist(
             f"{error}"
         ) from error
 
+    _refuse_a_component_the_panel_never_valued(request, section=section, funnel=funnel)
+
     shortlisted = {entry.subject for entry in funnel.shortlist}
     joined = {subject: item for subject, item in request.evidence.items() if subject in shortlisted}
     unused = tuple(sorted(set(request.evidence) - shortlisted))
@@ -1319,6 +1381,128 @@ def run_shortlist(
     )
 
 
+def _stored_coverage(component: ComponentCrossSection) -> dict[str, int]:
+    """How many of one component's stored rows carry each coverage code. Sums to `row_count`.
+
+    **Not narrowed to the registry**, and that is the correction a surviving mutant forced rather
+    than the first thing written. The first version filtered on the universe, on the reasoning that
+    `CrossSectionScreen._read_components` does; deleting that filter turned nothing red, and the
+    reason it could not is the reason it was wrong. `row_count` beside it is
+    `len(component.values)`, unfiltered -- so a filtered breakdown would not have summed to the
+    total it sits next to, and two adjacent numbers in one object would have been counting two
+    different populations with nothing saying so.
+
+    It is also the duplicated rule `_component_cross_section` already refused once, for the same
+    reason: the registry filter lives in the screen, and a second copy here is a second place it
+    can disagree. What the caller gets is the stored cross section **as it was found**, broken
+    down; `admitted_count` beside it is the funnel's own count of how much of it the screen used,
+    and the gap between the two is the reading, not an inconsistency.
+    """
+    counted: dict[str, int] = {}
+    for _subject, _value, coverage in component.values:
+        counted[coverage] = counted.get(coverage, 0) + 1
+    return dict(sorted(counted.items()))
+
+
+def _refuse_a_component_the_panel_never_valued(
+    request: ShortlistRunRequest,
+    *,
+    section: ShortlistCrossSection,
+    funnel: CrossSectionFunnel,
+) -> None:
+    """`V2-P4-044`: a component with no admitted value at all is a refusal, not a verdict.
+
+    ## What the caller was told before this existed
+
+    The **declared** configuration -- `compute_factor -> apply_factor_transform(
+    cross_section_standard/v1) -> write_processed_factor_panels` -- over the shipped eight-security
+    panel, asked through `TestClient`, answered `409` whose only block was
+    `researched_ratio_not_measurable`: a bar on the *evidence plane*, whose implied remedy is to
+    go and research names that do not exist. The stored rows all carried
+    `insufficient_cross_section` and the census recorded `('not_valued', 8)`; neither that code nor
+    `min_cross_section` appeared anywhere in the answer, and the real remedy -- screen a wider
+    market, or declare a transform with a lower floor -- was stated nowhere.
+
+    ## Why this is `blocked` rather than a richer verdict
+
+    `ShortlistRunBlockedError` already owns exactly this territory: "the stored rows are not a
+    cross section a screen can read ... every one is a conflict with the current state of the
+    **panel** rather than a malformed question, and every one has a build as its remedy." A
+    transform that declined the whole cross section wrote no value for anybody, so there is nothing
+    to gate and the gate's own sentence is true but unactionable. The measurement a verdict body
+    would have carried is all zeros here, so nothing is lost by refusing.
+
+    **This is also what stops `researched_ratio_not_measurable` serving this cause.** That code is
+    raised for every one of the five `FunnelCoverage`s that shortlists nobody, and it stays right
+    for the four that are genuinely about a cut. This run never reaches it.
+
+    ## Why `admitted_count` and not a rule of this module's own
+
+    Read off `ScoreCensus.components`, which `CrossSectionScreen` computed with the tier tables
+    `TIER_VALUE_CODES` and `TIER_ADMITTED_CODES`. Re-deciding "which stored codes carry a value"
+    here would be that table's third copy, and the one cell the three tiers differ in (`processed`'s
+    `imputed`) is exactly where a second copy would drift.
+
+    **The trigger is one empty component and not an empty shortlist**, which is the distinction
+    that keeps this narrow. A composite needs an admitted value on *every* declared component, so
+    one empty component means nobody can be scored whatever the others hold. Two components that
+    each valued somebody and share no subject is a different finding -- both factors did produce a
+    cross section -- and it stays a verdict, readable through the `excluded_by_coverage` census
+    `shortlist_view` now renders.
+    """
+    censuses = {census.factor_id: census for census in funnel.scores.components}
+    sections = {component.factor_id: component for component in section.components}
+    for declared in request.spec.components:
+        factor_id = declared.definition.factor_id
+        census = censuses.get(factor_id)
+        if census is None or census.admitted_count > 0:
+            continue
+        codes = _stored_coverage(sections[factor_id])
+        raise ShortlistRunBlockedError(
+            f"the stored {request.tier} cross section of {declared.definition.qualified_key} at "
+            f"{section.as_of.isoformat()} admits no value this screen can order: its "
+            f"{sum(codes.values())} stored rows are coded {codes}, and the registry lists "
+            f"{len(section.universe)} securities on that session. "
+            f"{_why_nothing_was_valued(request, definition=declared.definition, codes=codes)}"
+        )
+
+
+def _why_nothing_was_valued(
+    request: ShortlistRunRequest, *, definition: FactorDefinition, codes: Mapping[str, int]
+) -> str:
+    """The sentence that says what to do about an unvalued component, per stored code.
+
+    Separate from the refusal above so the remedy is chosen by the code the *panel* wrote rather
+    than by the tier that was asked for: `insufficient_cross_section` is
+    `apply_factor_transform`'s whole-panel refusal and its remedy is the declared floor, while a
+    partition of per-security misses is a factor-build question and has a different one.
+
+    `definition` is the component that actually came back empty and not `request.definitions[0]`,
+    which is the same thing only for a single-factor composite -- and the rebuild command this
+    prints would otherwise name whichever factor happened to be declared first.
+    """
+    transform = request.transform
+    if "insufficient_cross_section" in codes and transform is not None:
+        floor = transform.min_cross_section
+        return (
+            "`insufficient_cross_section` is the whole-panel refusal apply_factor_transform "
+            "writes when a session's cross section is thinner than the declared "
+            f"min_cross_section: {transform.qualified_key} declares min_cross_section={floor} and "
+            f"this session offered {codes['insufficient_cross_section']} -- so the transform "
+            "standardized nobody and stored that code for every security, which is a fact about "
+            f"the market's width rather than about any one name. Screen a market of at least "
+            f"{floor} securities, declare a transform whose min_cross_section this market clears, "
+            "or screen on the raw tier, which applies no cross-sectional statistic and therefore "
+            "has no floor"
+        )
+    return (
+        "Every stored row carries a code this tier does not admit a value from, so stage one had "
+        f"nothing to order. `openalpha factor build --factor {definition.qualified_key} --tier "
+        f"{request.tier} --year <year>` is what rebuilds it; `openalpha factor list` says what "
+        "each code means"
+    )
+
+
 # --- the rendering the three faces share --------------------------------------------------------
 
 
@@ -1334,8 +1518,40 @@ def shortlist_view(result: ShortlistRunResult) -> dict[str, object]:
     for a refused list and a JSON array -- possibly empty -- for an admitted one, so `null` and
     `[]` are the two answers the product acceptance found collapsed into one, and they are now
     two. `blocks` carries the bar, both sides of the comparison and the sentence that says what to
-    do; `measurement` carries the numbers the verdict was read against on **both** verdicts,
-    because a list that scraped over a bar and one that sailed over it are different facts.
+    do about **that bar**; `measurement` carries the numbers the verdict was read against on
+    **both** verdicts, because a list that scraped over a bar and one that sailed over it are
+    different facts.
+
+    ## `declaration`, and why `tier` alone was not a content address (`V2-P4-050`)
+
+    The answer recorded `tier` and nothing else about the question it answered -- not the
+    transform, the neutralisation, the exchange, the years or the components. On the processed
+    tier the transform is what *chose the numbers*, and `CandidateRankingManifest.scoring_policy`
+    is a `ShortlistSpec`, which carries none either: so the transform that produced a published
+    shortlist was in neither content address, and two runs of one factor under two transforms were
+    indistinguishable after the fact. `declaration` is the whole resolved question, rendered once.
+
+    **`declaration.neutralization` is always `null` here and no test pins it otherwise, which is a
+    fact about this face rather than a gap.** `run_shortlist` refuses `tier == "neutralized"` by
+    name before anything is read, so a request that carries a neutralisation never reaches a
+    rendering -- and on the other two tiers `_resolve_neutralization` now refuses one outright.
+    Hardcoding this key to `None` is therefore an equivalent mutant, and it is written out rather
+    than left as a hole for a later reader to close with an assertion that cannot be made. The key
+    is rendered anyway so the envelope does not change shape on the day that limitation lifts.
+
+    ## `excluded_by_coverage` and `stored_coverage` (`V2-P4-044`)
+
+    A body that printed `row_count: 8` beside `scored_count: 0` said that six of the eight names
+    went missing between two lines and never said where. `ScoreCensus.excluded_by_coverage` is the
+    funnel's own answer -- `incomplete_components`, `not_admissible`, `not_valued` -- and each
+    component now reports the `admitted_count` the tier tables gave it beside the panel's own
+    `stored_coverage` codes. Together they separate "these rows carried no value this tier admits"
+    from "these components valued different securities", which have different remedies and were
+    one observation.
+
+    The emptiest case of all does not reach here at all: a component whose cross section admits
+    nothing is refused by `_refuse_a_component_the_panel_never_valued` before the gate runs, so
+    the caller is told about `insufficient_cross_section` rather than about a researched ratio.
 
     This reads `admitted_or_none` and `is_blocked` and never `bool()`, `len()` or iteration, all
     three of which raise on a `ShortlistClearance` *even when it cleared*.
@@ -1343,15 +1559,36 @@ def shortlist_view(result: ShortlistRunResult) -> dict[str, object]:
     clearance = result.clearance
     measurement = clearance.measurement
     admitted = clearance.admitted_or_none
+    request = result.request
+    admitted_by_component = {
+        census.factor_id: census.admitted_count for census in result.funnel.scores.components
+    }
     return {
         "schema_version": SHORTLIST_VIEW_SCHEMA_VERSION,
         "is_blocked": clearance.is_blocked,
         "gate_manifest_id": clearance.manifest.gate_manifest_id,
         "ranking_manifest_id": result.ranking.manifest.ranking_manifest_id,
         "ranking_content_digest": clearance.ranking_content_digest,
-        "as_of": result.request.as_of.isoformat(),
-        "horizon": result.request.horizon,
-        "tier": result.request.tier,
+        "as_of": request.as_of.isoformat(),
+        "horizon": request.horizon,
+        "tier": request.tier,
+        "declaration": {
+            "tier": request.tier,
+            "transform": None if request.transform is None else request.transform.qualified_key,
+            "neutralization": (
+                None if request.neutralization is None else request.neutralization.qualified_key
+            ),
+            "exchange": request.exchange,
+            "years": list(request.years),
+            "components": [
+                {
+                    "factor_id": component.definition.factor_id,
+                    "factor": component.definition.qualified_key,
+                    "weight": component.weight,
+                }
+                for component in request.spec.components
+            ],
+        },
         "cross_section": {
             "as_of": result.cross_section_as_of.isoformat(),
             "pricing_session": result.pricing_session.isoformat(),
@@ -1361,6 +1598,8 @@ def shortlist_view(result: ShortlistRunResult) -> dict[str, object]:
                     "factor_id": component.factor_id,
                     "row_count": len(component.values),
                     "clipped_count": len(component.clipped_subjects),
+                    "admitted_count": admitted_by_component.get(component.factor_id, 0),
+                    "stored_coverage": _stored_coverage(component),
                 }
                 for component in result.components
             ],
@@ -1368,6 +1607,7 @@ def shortlist_view(result: ShortlistRunResult) -> dict[str, object]:
         "funnel": {
             "coverage": result.funnel.coverage,
             "scored_count": result.funnel.scores.scored_count,
+            "excluded_by_coverage": dict(result.funnel.scores.excluded_by_coverage),
             "tradeable_count": result.funnel.tradeability.tradeable_count,
             "clip_block": result.funnel.clip_block,
             "tied_at_the_cut": result.funnel.tied_at_the_cut,
