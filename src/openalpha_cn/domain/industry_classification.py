@@ -213,6 +213,15 @@ The subject is the **security**, not the industry: a read groups by security to 
 this one's industry on day D", the same shape `namechange` stores. `panel_ingest`'s subject guard
 then protects against a partial re-fetch dropping securities from a year, which is the failure a
 per-`l1_code` backfill loop can produce.
+
+**No clock column is here, and `V2-P4-034` deliberately did not add one.** That defect's fix needs
+every visible row's `event_time` to reconcile a filtered read against its partition's date census,
+and the reader takes it by *prepending* the clock to this tuple at its own call site and stripping
+it off the rows again -- `panel_ingest._read_visible_membership_rows`, the idiom
+`panel_factors.load_factor_observations` already uses on the same method. Widening this tuple was
+the other option and was rejected on what it moves: `industry_histories_from_panel_rows` checks a
+row's width against it and then unpacks positionally, so every consumer of the row shape shifts to
+give one reader a column that is a property of *that read* rather than of what the domain decodes.
 """
 
 INDUSTRY_CODE_COLUMN: Final[str] = "industry_code"
