@@ -226,10 +226,10 @@ forbidden_modules = ["duckdb", "sqlite3"]
 # "backtest may not import panel or storage" appears five times in P3 source, once inside a
 # KNOWN_EXPERIMENT_LIMITATIONS entry -- load-bearing, and until now enforced by nothing.
 # `tests/unit/test_import_layering.py` pins each contract's source list against the directory and
-# drives a probe file through each one, so a twelfth `backtest/*.py` cannot arrive
-# unguarded. `V2-P4-004`'s `cross_section.py` was the tenth and `V2-P4-005`'s
-# `candidate_ranking.py` is the eleventh; both joined these lists on arrival, which is the
-# property that test exists to create.
+# drives a probe file through each one, so a thirteenth `backtest/*.py` cannot arrive
+# unguarded. `V2-P4-004`'s `cross_section.py` was the tenth, `V2-P4-005`'s
+# `candidate_ranking.py` the eleventh and `V2-P4-023`'s `shortlist_gate.py` is the twelfth; all
+# three joined these lists on arrival, which is the property that test exists to create.
 
 [[tool.importlinter.contracts]]
 id = "backtest-no-numeric-stack-or-panel-plane"
@@ -281,6 +281,7 @@ source_modules = [
   "openalpha_cn.backtest.factor_tradeability",
   "openalpha_cn.backtest.multi_day",
   "openalpha_cn.backtest.portfolio",
+  "openalpha_cn.backtest.shortlist_gate",
   "openalpha_cn.backtest.validation",
 ]
 forbidden_modules = [
@@ -321,6 +322,7 @@ source_modules = [
   "openalpha_cn.backtest.factor_tradeability",
   "openalpha_cn.backtest.multi_day",
   "openalpha_cn.backtest.portfolio",
+  "openalpha_cn.backtest.shortlist_gate",
 ]
 forbidden_modules = ["openalpha_cn.runtime"]
 # Split from the contract above rather than folded into it because the exemption is one module
@@ -333,9 +335,12 @@ forbidden_modules = ["openalpha_cn.runtime"]
 
 [[tool.importlinter.contracts]]
 id = "ranking-creates-no-portfolio-order"
-name = "the candidate ranking contract reaches no module that declares or simulates an order"
+name = "the candidate ranking contracts reach no module that declares or simulates an order"
 type = "forbidden"
-source_modules = ["openalpha_cn.backtest.candidate_ranking"]
+source_modules = [
+  "openalpha_cn.backtest.candidate_ranking",
+  "openalpha_cn.backtest.shortlist_gate",
+]
 forbidden_modules = [
   "openalpha_cn.domain.portfolio",
   "openalpha_cn.backtest.portfolio",
@@ -358,3 +363,12 @@ forbidden_modules = [
 # test_the_ranking_contract_cannot_reach_the_three_modules_that_make_an_order` drives a probe
 # through this in both directions: the real module passes, and the same file with one
 # `PortfolioOrder` import added fails.
+#
+# `V2-P4-023` widened the source list to `backtest/shortlist_gate.py` and left the `id` alone,
+# because `tests/unit/backtest/test_candidate_ranking.py` reads that `id` by name. The gate is
+# the module that decides whether a candidate list may be published at all, so a gate able to
+# construct a `PortfolioOrder` would be one module in which "this list was refused" and "an
+# order was made from it" could both be true -- the same gap this contract was added to close
+# for the ranking itself, one step further down the same path. `tests/unit/backtest/
+# test_shortlist_gate.py::test_the_gate_cannot_reach_the_three_modules_that_make_an_order`
+# drives the same both-directions probe over the new source.
