@@ -14,9 +14,11 @@ rather than against whatever a fixture happened to contain.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Final
+from pathlib import Path
+from typing import Final, NoReturn
 
 import pytest
 
@@ -24,7 +26,13 @@ from openalpha_cn.api.app import SHORTLIST_HTTP_STATUS
 from openalpha_cn.cli import SHORTLIST_EXIT, PanelExit
 from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.factor_view import _PANEL_FAULTS as FACTOR_PANEL_FAULTS
+from openalpha_cn.factor_view import _REGISTRY_FAULTS as FACTOR_REGISTRY_FAULTS
+from openalpha_cn.factor_view import FactorPanelUnreadableError
+from openalpha_cn.factor_view import _read as factor_read
+from openalpha_cn.factor_view import _read_registry as factor_read_registry
+from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.shortlist_view import _PANEL_FAULTS as SHORTLIST_PANEL_FAULTS
+from openalpha_cn.shortlist_view import _REGISTRY_FAULTS as SHORTLIST_REGISTRY_FAULTS
 from openalpha_cn.shortlist_view import (
     KNOWN_SHORTLIST_VIEW_LIMITATIONS,
     SHORTLIST_VIEW_LIMITATION_CODES,
@@ -40,6 +48,8 @@ from openalpha_cn.shortlist_view import (
     shortlist_evidence,
     shortlist_request,
 )
+from openalpha_cn.shortlist_view import _read as shortlist_read
+from openalpha_cn.shortlist_view import _read_registry as shortlist_read_registry
 
 AS_OF: Final[datetime] = datetime(2026, 1, 16, 12, 0, tzinfo=UTC)
 FIRST: Final[datetime] = datetime(2026, 1, 16, 9, 0, tzinfo=UTC)
@@ -64,6 +74,21 @@ BASELINE: Final[dict[str, object]] = {
 
 def _request(**overrides: object) -> object:
     return shortlist_request(**{**BASELINE, **overrides})  # type: ignore[arg-type]
+
+
+def _raising(fault: type[Exception]) -> Callable[[], NoReturn]:
+    """A stored read that refuses with `fault`, which is all either face's `_read` sees of one.
+
+    The refusal is what is under test, not the loader that raises it: `_read` and `_read_registry`
+    take a nullary callable and their whole content is which exception types they turn into their
+    face's `panel_unreadable`. Driving them with a store on disk would mean building six broken
+    partitions to provoke six exception types and would test `panel_ingest` on the way past.
+    """
+
+    def refuse() -> NoReturn:
+        raise fault("a stored partition refused this read")
+
+    return refuse
 
 
 # --- the taxonomy, and the two tables it has to line up with ------------------------------------
@@ -124,14 +149,72 @@ def test_the_refused_row_is_the_one_no_fault_can_reach_and_it_is_not_a_success()
     assert set(SHORTLIST_HTTP_STATUS) == set(SHORTLIST_EXIT)
 
 
-def test_this_face_calls_the_same_panel_faults_unreadable_as_the_factor_face() -> None:
+def test_this_face_calls_the_same_panel_faults_unreadable_as_the_factor_face(
+    tmp_path: Path,
+) -> None:
     """Which exceptions are facts about data rather than defects is one question with one answer.
 
     Pinned rather than left to agree by inspection: two faces that answered it differently would
     put the same broken partition under two different status codes on two channels, and nothing
     would say so.
+
+    ## This assertion used to be `set(SHORTLIST_PANEL_FAULTS) == set(FACTOR_PANEL_FAULTS)`
+
+    It was, and it passed for the whole of `V2-P4-070`'s life -- during which one store holding an
+    interrupted registry backfill got `exit 1` and a named sentence out of `factor build`, `exit 5`
+    and "an unhandled StockUniverseError ... the message is withheld" out of `shortlist run`, and
+    `500 text/plain Internal Server Error` out of `POST /api/v1/shortlists/run`. Both constants
+    were the same four members throughout, because `V2-P4-060` widened the factor face at the
+    **read** -- a second tuple handed to `_read` as `faults=` at the one site that needs it -- and
+    correctly left `_PANEL_FAULTS` alone. A constant-to-constant equality cannot see the tuple that
+    is actually in force inside an `except`, so it was a statement about two names.
+
+    So the pin is now on the seams. Each fault type is raised through both faces' `_read` and both
+    faces' `_read_registry`, and each has to come back as that face's `panel_unreadable`. The
+    vocabulary is the **union** of the two faces' tuples rather than either one, which is what
+    makes it fail in both directions: narrowing either face leaves a type its own tuple no longer
+    catches, and widening either face alone leaves a type the other does not.
+
+    Mutation-checked in both directions and on both seams; deleting any single member of either
+    module's `_PANEL_FAULTS` or `_REGISTRY_FAULTS`, and reverting the registry read to the plain
+    `_read`, each turns this red.
     """
-    assert set(SHORTLIST_PANEL_FAULTS) == set(FACTOR_PANEL_FAULTS)
+    store = PanelStore(tmp_path / "panel")
+    panel_faults = set(SHORTLIST_PANEL_FAULTS) | set(FACTOR_PANEL_FAULTS)
+    registry_faults = set(SHORTLIST_REGISTRY_FAULTS) | set(FACTOR_REGISTRY_FAULTS)
+
+    assert panel_faults < registry_faults
+    for fault in panel_faults:
+        with pytest.raises(ShortlistPanelUnreadableError):
+            shortlist_read(_raising(fault), store=store, what="a partition")
+        with pytest.raises(FactorPanelUnreadableError):
+            factor_read(_raising(fault), store=store, what="a partition")
+    for fault in registry_faults:
+        with pytest.raises(ShortlistPanelUnreadableError):
+            shortlist_read_registry(_raising(fault), store=store)
+        with pytest.raises(FactorPanelUnreadableError):
+            factor_read_registry(_raising(fault), store=store)
+
+
+def test_the_registry_read_is_the_only_site_either_face_widens_for(tmp_path: Path) -> None:
+    """The other half of the pin: `_read`'s default tuple stays narrow on both faces.
+
+    Widening `_PANEL_FAULTS` itself would be the same fix pointing the wrong way. That tuple also
+    guards every factor-tier read on both faces, and a `PanelBatchError` out of one of those is a
+    defect in this repository's own batch assembly rather than a verdict about stored data --
+    laundering it into "the panel could not be read" would hide a bug behind a data verdict. So
+    the two registry refusals must reach `panel_unreadable` through the registry read and must
+    **not** be caught by a plain one.
+    """
+    store = PanelStore(tmp_path / "panel")
+    registry_only = set(SHORTLIST_REGISTRY_FAULTS) - set(SHORTLIST_PANEL_FAULTS)
+
+    assert {fault.__name__ for fault in registry_only} == {"StockUniverseError", "PanelBatchError"}
+    for fault in registry_only:
+        with pytest.raises(fault):
+            shortlist_read(_raising(fault), store=store, what="a factor tier")
+        with pytest.raises(fault):
+            factor_read(_raising(fault), store=store, what="a factor tier")
 
 
 def test_the_known_shortlist_view_limitations_are_the_six_this_face_declares() -> None:

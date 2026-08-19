@@ -849,9 +849,22 @@ was unanticipated.
 than a verdict about stored data. Laundering it into "the panel could not be read" would be the
 same mistake pointing the other way. The read that can raise them is the read that catches them.
 
-That is also what leaves `shortlist_view._PANEL_FAULTS` alone, which
+**The sentence that used to end this docstring was false, and `V2-P4-070` is what it cost.** It
+read: "That is also what leaves `shortlist_view._PANEL_FAULTS` alone, which
 `tests/unit/test_shortlist_view.py` pins equal to `_PANEL_FAULTS` so two faces cannot file one
-broken partition under two status codes. The equality is still true and still says what it said.
+broken partition under two status codes. The equality is still true and still says what it said."
+The equality was true and it said nothing. Widening at the read rather than at the constant is the
+right call and stands -- but it is exactly what a constant-to-constant assertion cannot see, so
+what the pin actually held was that two names had four members each, while the shortlist face went
+on reading the registry through its own four and letting these two escape. One store carrying an
+interrupted registry backfill therefore reached a user as `exit 1` and a named sentence here,
+`exit 5` and "an unhandled StockUniverseError ... the message is withheld" from `shortlist run`,
+and `500 text/plain` from `POST /api/v1/shortlists/run`.
+
+`shortlist_view` now restates `_REGISTRY_FAULTS` beside its own `_PANEL_FAULTS` and reads the
+registry through its own `_read_registry`, and the pin drives **both faces' read seams** with each
+fault type in turn rather than comparing the tuples. See
+`tests/integration/test_partial_registry_faces.py` for the same store met from all three surfaces.
 """
 
 
