@@ -422,7 +422,7 @@ from openalpha_cn.panel.catalog import (
     ReadinessRequirement,
     RevisionCoverage,
 )
-from openalpha_cn.panel.store import ColumnSpec, PanelStore, PartitionRef
+from openalpha_cn.panel.store import EVENT_TIME_COLUMN, ColumnSpec, PanelStore, PartitionRef
 
 PANEL_DUCKDB_TYPES: Final[Mapping[PanelColumnKind, str]] = MappingProxyType(
     {
@@ -3320,12 +3320,19 @@ def load_industry_cross_section(
     each event date (`DateCoverage`), and `providers/tushare.py::_taxonomy_backfill_timeline`
     dates a row's availability at its own event, floored at the taxonomy's effective date. So
     once the floor is behind `as_of`, "visible" and "event date at or before `as_of`" are the
-    same set, and the census says **exactly** how many rows that is. This read compares the two
-    counts per year and refuses on any difference. A withheld row is one the census counted and
-    the predicate removed; an absent row is one the census never counted. That is a stronger
-    answer than `V2-P4-026`'s, because it is an equality rather than a partition of the row set
-    into two allowed shapes: a partition whose clocks are not the provider's is refused however
-    it is wrong.
+    same set, and the census says **exactly** how many rows carry each of those days. This read
+    counts the visible rows by their own event date and refuses on any disagreement with the
+    census, one date at a time. A withheld row is one the census counted and the predicate
+    removed; an absent row is one the census never counted. That is a stronger answer than
+    `V2-P4-026`'s, because it is an equality rather than a partition of the row set into two
+    allowed shapes: a partition whose clocks are not the provider's is refused however it is
+    wrong.
+
+    **Per date, not per year, and `V2-P4-034` is why.** `V2-P4-027` wrote this as one comparison
+    of two whole-year totals, which two errors in opposite directions cancel in exactly -- a
+    withheld row traded against a look-ahead row leaves both totals equal and the read admitted.
+    See `_read_visible_membership_rows` for the probe that measures it and for what the admitted
+    cross section then contained.
 
     **Second, by refusing to hand back a history at all.** The fail-open this dataset invites is
     not a short row set, it is an *interval with no end in it*: an assignment whose closing row is
@@ -3338,7 +3345,7 @@ def load_industry_cross_section(
     argument, resolves it inside, and returns the cross section -- and the day it will not
     resolve is refused rather than answered.
 
-    ## The five refusals, and why each one is a separate name
+    ## The six refusals, and why each one is a separate name
 
     - **A `day` later than the newest event `as_of` could see is refused before any read.** A
       membership event becomes knowable at midnight (`date_timezone`) on the day it takes effect,
@@ -3355,9 +3362,14 @@ def load_industry_cross_section(
       refused.** `answerable_through`'s rule, asked about a day instead of about a year: an
       assignment's close is filed in its own year, so an unread year at or before `day` can hold
       the close that ends an interval this cross section is about to report as current.
-    - **A partition whose visible row count disagrees with its own date census is refused.** The
-      equality above, checked rather than assumed, because the clock it rests on lives in a
-      provider one package away and nothing in the store enforces it.
+    - **A partition holding fewer visible rows on an event date than its own census counts there
+      is refused.** The equality above, checked rather than assumed, because the clock it rests on
+      lives in a provider one package away and nothing in the store enforces it.
+    - **A partition answering with a visible row whose event date `as_of` cannot see is refused**,
+      separately and first. That row's availability precedes its own event, which
+      `_taxonomy_backfill_timeline` cannot produce at all, and it is a look-ahead rather than a
+      shortfall. `V2-P4-034` split it out of the bullet above, where the two were one number that
+      could be traded against each other.
     - **Anything the readiness rule table finds outside `ROW_FILTERABLE_ISSUE_CODES` refuses the
       read**, at partition scope, through the same `assess_readiness` call `read_if_ready` makes.
 
@@ -3473,14 +3485,43 @@ def _read_visible_membership_rows(
     argument. The partition's coverage record counts rows per event date, and a membership row's
     `available_time` is its own event floored at the taxonomy's effective date, so with that floor
     already behind `as_of` the rows the predicate keeps are exactly the rows the census places at
-    or before `as_of`'s own day. The two counts are compared and any difference refuses the read:
-    a row the census counted and the predicate removed is **withheld**, a row the census never
-    counted is **absent**, and a cross section short by the first is indistinguishable from one
-    honestly missing the second.
+    or before `as_of`'s own day. Any difference refuses the read: a row the census counted and the
+    predicate removed is **withheld**, a row the census never counted is **absent**, and a cross
+    section short by the first is indistinguishable from one honestly missing the second.
 
-    The census's own `date_timezone` is what `as_of` is converted in, not the caller's: the
-    census's dates were resolved in that zone, and comparing them against a day computed in
-    another would be comparing two different calendars.
+    ## Why the reconciliation is per event date and not per year (`V2-P4-034`)
+
+    `V2-P4-027` wrote step three as one equality between two whole-year totals, and **a sum cannot
+    hold a claim about a set of days**: two errors in opposite directions cancel exactly, and the
+    read is then admitted with no measurement having taken place. Measured on a five-row 2024
+    probe at 12:00 Asia/Shanghai on 2024-06-15 (`tests/integration/panel/test_industry_ingest.py`,
+    `PROBE_ROWS`): withhold one row dated 2024-02-01 and reveal one dated 2024-09-01, and the
+    census still counts three rows as having happened while three rows still come back. The cross
+    section that read admits has a security missing whose assignment began four and a half months
+    earlier, and dates another security's assignment as ending 2024-09-01 -- a close two and a half
+    months *after* the instant the read stands at, which is the look-ahead this whole plane exists
+    to prevent. The one-sided halves of the same corpus were refused correctly, which is why
+    nothing saw it: the check was live and failed only where the two faults met.
+
+    So the visible rows' own event dates are counted and held against the census entry by entry,
+    which needs `event_time` in the projection. It is **prepended to
+    `INDUSTRY_MEMBERSHIP_PANEL_COLUMNS` and stripped before the rows are returned** rather than
+    added to that tuple, which is `panel_factors.load_factor_observations` and
+    `panel_neutralization.load_neutralized_factor_observations`' idiom on this same method. That
+    constant documents itself as "the positional contract of the rows back", and
+    `industry_histories_from_panel_rows` both checks its width and unpacks it positionally; the
+    clock this reconciliation needs is a property of *this read*, not of the row shape the domain
+    decodes, and widening the contract for one caller's benefit would move every consumer of it.
+
+    The two faults are named separately, because they are two different statements about the
+    corpus and one message that could only say the totals differed was what let them be traded
+    against each other. **The look-ahead is reported first** where both are present: a row visible
+    before its own event date has an availability earlier than its event, which the panel's model
+    forbids outright, whereas a withheld row is at worst an embargo this read cannot see.
+
+    The census's own `date_timezone` is what `as_of` and every visible row's `event_time` are
+    converted in, not the caller's: the census's dates were resolved in that zone, and comparing
+    them against days computed in another would be comparing two different calendars.
     """
     gate = store.assess_readiness(requirement)
     if {issue.code for issue in gate.issues} - ROW_FILTERABLE_ISSUE_CODES:
@@ -3493,7 +3534,9 @@ def _read_visible_membership_rows(
     rows: list[tuple[object, ...]] = []
     for year in requirement.years:
         outcome = store.read_visible_at(
-            filtered, year=year, columns=INDUSTRY_MEMBERSHIP_PANEL_COLUMNS
+            filtered,
+            year=year,
+            columns=(EVENT_TIME_COLUMN, *INDUSTRY_MEMBERSHIP_PANEL_COLUMNS),
         )
         if outcome.is_blocked:
             raise PanelStorageError(
@@ -3507,23 +3550,99 @@ def _read_visible_membership_rows(
                 f"{requirement.dataset} year={year} passed readiness with no coverage record, so "
                 "the row census this read checks the visible slice against does not exist"
             )
-        census_day = as_of.astimezone(_resolve_timezone(coverage.date_timezone)).date()
-        happened = sum(
-            entry.row_count for entry in coverage.dates if entry.event_date <= census_day
+        zone = _resolve_timezone(coverage.date_timezone)
+        census_day = as_of.astimezone(zone).date()
+        visible: Counter[date] = Counter(
+            _membership_event_date(row[0], dataset=requirement.dataset, year=year, zone=zone)
+            for row in outcome.rows
         )
-        if len(outcome.rows) != happened:
-            raise PanelStorageError(
-                f"{requirement.dataset} year={year} holds {happened} row(s) whose event had "
-                f"already happened at {as_of.isoformat()} and {len(outcome.rows)} of them were "
-                f"visible ({outcome.withheld_row_count} row(s) withheld in all). A membership "
-                "row's availability is its own event floored at the taxonomy's effective date, so "
-                "those two numbers are the same number on a partition this read may answer from; "
-                "where they differ, a row is being withheld for a reason this read cannot see and "
-                "a cross section short by it is indistinguishable from one where the row does not "
-                "exist"
-            )
-        rows.extend(outcome.rows)
+        happened = Counter(
+            {
+                entry.event_date: entry.row_count
+                for entry in coverage.dates
+                if entry.event_date <= census_day
+            }
+        )
+        _refuse_a_membership_slice_the_census_disagrees_with(
+            visible,
+            happened,
+            dataset=requirement.dataset,
+            year=year,
+            as_of=as_of,
+            census_day=census_day,
+            withheld_row_count=outcome.withheld_row_count,
+        )
+        rows.extend(tuple(row[1:]) for row in outcome.rows)
     return tuple(rows)
+
+
+def _membership_event_date(value: object, *, dataset: str, year: int, zone: ZoneInfo) -> date:
+    """One visible row's `event_time` as the day the partition's census filed it under.
+
+    The same conversion `_date_census` performs at write time, in the same zone, so the two sides
+    of the reconciliation are the same function of the same column rather than two spellings of
+    one intention.
+
+    Per row rather than per distinct instant, which is the one place it departs from that helper.
+    `_date_census` folds first because a year of daily prices is millions of rows over a couple of
+    hundred instants; the whole membership corpus is 7,893 rows over every year it has, so folding
+    would trade a measurable nothing for a `Counter` keyed on values this function has not yet
+    established are even hashable.
+    """
+    if not isinstance(value, datetime):
+        raise PanelStorageError(
+            f"{dataset} year={year} read back {type(value).__name__} for {EVENT_TIME_COLUMN}, not "
+            "a datetime; the row census this read reconciles against is keyed by the event date "
+            "resolved from that column and cannot be resolved from anything else"
+        )
+    return value.astimezone(zone).date()
+
+
+def _refuse_a_membership_slice_the_census_disagrees_with(
+    visible: Counter[date],
+    happened: Counter[date],
+    *,
+    dataset: str,
+    year: int,
+    as_of: datetime,
+    census_day: date,
+    withheld_row_count: int,
+) -> None:
+    """Hold the visible rows' event dates against the partition's census, date by date.
+
+    Two refusals rather than one, because a **look-ahead** and a **withheld** row are two
+    different statements and `V2-P4-034` is what a single message about two totals cost. The
+    look-ahead is decided first: it says a row was visible before its own event, which the
+    availability rule this dataset is stored under cannot produce at all, while a shortfall says
+    only that a row this read should have seen was held back.
+    """
+    ahead = sorted(day for day in visible if day > census_day)
+    if ahead:
+        day = ahead[0]
+        raise PanelStorageError(
+            f"{dataset} year={year} answered {visible[day]} visible row(s) dated "
+            f"{day.isoformat()}, whose event had not happened at {as_of.isoformat()} -- the "
+            f"partition's date census places it after the {census_day.isoformat()} this read can "
+            "see. A membership row's availability is its own event floored at the taxonomy's "
+            "effective date, so it is never earlier than the event, and a row visible before its "
+            "own event carries an availability this panel's model does not allow. The cross "
+            "section it feeds would name an industry from after the instant the read stands at"
+        )
+    disagreed = sorted(day for day in set(visible) | set(happened) if visible[day] != happened[day])
+    if not disagreed:
+        return
+    day = disagreed[0]
+    raise PanelStorageError(
+        f"{dataset} year={year} cannot be read at {as_of.isoformat()}: its date census counts "
+        f"{happened[day]} row(s) dated {day.isoformat()}, whose event had already happened, and "
+        f"the visible slice carries {visible[day]} of them ({withheld_row_count} row(s) withheld "
+        "in all). A membership row's availability is its own event floored at the taxonomy's "
+        "effective date, so on a partition this read may answer from those two numbers are equal "
+        "on every event date one at a time -- not merely in sum, which two errors in opposite "
+        "directions cancel in. Where they differ, a row is being withheld for a reason this read "
+        "cannot see and a cross section short by it is indistinguishable from one where the row "
+        "does not exist"
+    )
 
 
 def load_industry_trees(

@@ -22,13 +22,20 @@ for are refused by name rather than answered from an interval with no end in it.
 securities that block uses were chosen so that at 2024-06-30 one of them is open because its
 closing row is *withheld* and the other because no closing row *exists* -- the two shapes this
 dataset cannot tell apart from its rows alone.
+
+`V2-P4-034` adds a seventh, in the block after it: **the census that guards the sixth is
+reconciled per event date, because as a sum over the year two errors in opposite directions
+cancelled and admitted a look-ahead.** That block's corpus is the one purpose-built fixture in
+this file -- the captured corpus cannot express the failure, and `PROBE_ROWS` records why it
+cannot and what was measured instead.
 """
 
 from __future__ import annotations
 
 import dataclasses
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -41,7 +48,12 @@ from openalpha_cn.domain.industry_classification import (
     IndustryClassificationError,
     IndustryHorizonError,
 )
-from openalpha_cn.domain.panel_batch import PanelBatchError, TimelineColumns
+from openalpha_cn.domain.panel_batch import (
+    ColumnarPanelBatch,
+    PanelBatchError,
+    PanelColumn,
+    TimelineColumns,
+)
 from openalpha_cn.panel.store import PanelStorageError, PanelStore
 from openalpha_cn.panel_ingest import (
     load_industry_cross_section,
@@ -932,3 +944,202 @@ def test_the_declared_freshness_bound_is_decided_where_the_unfiltered_door_decid
             as_of=AS_OF,
             max_staleness=timedelta(days=1),
         )
+
+
+# --- `V2-P4-034`: the census equality was a sum, and two errors could cancel ----------------
+
+PROBE_AS_OF = datetime(2024, 6, 15, 4, 0, tzinfo=UTC)
+"""12:00 Asia/Shanghai on 2024-06-15, the instant P4 technical acceptance read the probe at."""
+
+PROBE_DAY = date(2024, 6, 15)
+"""`PROBE_AS_OF`'s own day -- the newest day it may be asked about, so a look-ahead that reaches
+the answer has to arrive through a row rather than through the question."""
+
+SHANGHAI = ZoneInfo("Asia/Shanghai")
+
+PROBE_LATE = datetime(2024, 9, 1, tzinfo=SHANGHAI)
+"""Where a row's availability is moved to make it **withheld**: past `PROBE_AS_OF`, on a row
+whose own event the census counts at or before it."""
+
+PROBE_EARLY = datetime(2024, 3, 1, tzinfo=SHANGHAI)
+"""Where a row's availability is moved to make it a **look-ahead**: before `PROBE_AS_OF`, on a
+row whose own event the census places after it. `_taxonomy_backfill_timeline` cannot produce
+this -- a membership row's availability is its own event floored at 2021-12-13, so it is never
+earlier than the event -- which is exactly the property the census check exists to measure
+rather than to assume."""
+
+_SHARE_BANKS = ("801780.SI", "801783.SI", "857831.SI")
+_STATE_BANKS = ("801780.SI", "801782.SI", "857821.SI")
+_POWER_CODES = ("801160.SI", "801161.SI", "851611.SI")
+_AGROCHEMICAL_CODES = ("801030.SI", "801038.SI", "850331.SI")
+
+PROBE_ROWS: tuple[tuple[str, tuple[str, str, str], date, date | None, date], ...] = (
+    # `(subject, (l1, l2, l3), industry_from, industry_through, event_date)`.
+    ("600000.SH", _SHARE_BANKS, date(2024, 1, 5), None, date(2024, 1, 5)),
+    ("600000.SH", _SHARE_BANKS, date(2024, 1, 5), date(2024, 9, 1), date(2024, 9, 1)),
+    ("601398.SH", _STATE_BANKS, date(2024, 2, 1), None, date(2024, 2, 1)),
+    ("600021.SH", _POWER_CODES, date(2024, 2, 1), None, date(2024, 2, 1)),
+    ("600141.SH", _AGROCHEMICAL_CODES, date(2024, 9, 1), None, date(2024, 9, 1)),
+)
+"""One 2024 partition, five rows, four securities, built to hold the three shapes at once.
+
+**Purpose-built rather than captured, and the reason is measured.** The captured corpus's only
+partition later than SW2021's effective date is 2024's, and its two rows are the two halves of
+*one* security's reclassification (600423.SH, 2024-07-29 and 2024-07-30). Swapping those two
+rows' availability does make a compensating pair -- and the read is still not admitted, because
+600423.SH then reassembles as a 2003 assignment and a 2024 one that are both open, which
+`build_security_industry_history` refuses by name before any verdict from the census check is
+observable. On that corpus the census check and the overlap rule therefore cannot be told apart,
+which is the same fixture hazard `V2-P4-034` itself is an instance of. Here every security
+carries exactly one assignment, so nothing downstream can stand in for the check under test.
+
+The census this writes is `{2024-01-05: 1, 2024-02-01: 2, 2024-09-01: 2}`, and at `PROBE_AS_OF`
+three of the five rows had happened.
+"""
+
+PROBE_WITHHELD_ROW = 2
+"""601398.SH's opening row: its event is 2024-02-01, which the census counts at `PROBE_AS_OF`.
+Move its availability to `PROBE_LATE` and it is **withheld** -- a row this read must see and does
+not, whose absence from the cross section is indistinguishable from a security nobody ever
+classified."""
+
+PROBE_LOOK_AHEAD_ROW = 1
+"""600000.SH's closing row: its event is 2024-09-01, which the census places after `PROBE_AS_OF`.
+Move its availability to `PROBE_EARLY` and it is a **look-ahead** -- and because it is the *close*
+of an assignment whose opening row is honestly visible, it reaches the answer rather than only the
+row set: the returned assignment ends on a day two and a half months after the read."""
+
+
+def _probe_midnight(day: date) -> datetime:
+    return datetime.combine(day, time(0, 0), tzinfo=SHANGHAI)
+
+
+def _probe_batch(moved: dict[int, datetime]) -> Any:
+    """`PROBE_ROWS` as one batch, with the availability of the named rows moved and nothing else.
+
+    `_retimed`'s doctoring at row scale. That helper moves a whole partition's clock, which can
+    only ever produce a one-sided error; a compensating pair needs two rows of one partition to
+    move in opposite directions across the same `as_of`.
+    """
+    available = tuple(
+        moved.get(index, _probe_midnight(row[4])) for index, row in enumerate(PROBE_ROWS)
+    )
+    fetched = max((*available, PROBE_AS_OF))
+    return ColumnarPanelBatch(
+        provider_id="openalpha-cn/p4-034-probe",
+        dataset=INDUSTRY_MEMBERSHIP_DATASET,
+        kind="industry_membership",
+        as_of=fetched,
+        fetched_at=fetched,
+        status="success",
+        subjects=tuple(row[0] for row in PROBE_ROWS),
+        timeline=TimelineColumns(
+            event_time=tuple(_probe_midnight(row[4]) for row in PROBE_ROWS),
+            available_time=available,
+            ingested_time=tuple(fetched for _ in PROBE_ROWS),
+            revision_time=available,
+        ),
+        columns=(
+            PanelColumn("industry_from", "string", tuple(row[2].isoformat() for row in PROBE_ROWS)),
+            PanelColumn(
+                "industry_through",
+                "string",
+                tuple(None if row[3] is None else row[3].isoformat() for row in PROBE_ROWS),
+            ),
+            PanelColumn("l1_code", "string", tuple(row[1][0] for row in PROBE_ROWS)),
+            PanelColumn("l2_code", "string", tuple(row[1][1] for row in PROBE_ROWS)),
+            PanelColumn("l3_code", "string", tuple(row[1][2] for row in PROBE_ROWS)),
+        ),
+    )
+
+
+def _probe_store(root: Any, name: str, moved: dict[int, datetime]) -> PanelStore:
+    """The probe corpus in its own store, written through the **public** writer.
+
+    Through `write_industry_memberships` rather than `write_panel_batch`, because the defect this
+    fixture reproduces is reachable by a caller who only ever uses the published door.
+    """
+    store = PanelStore(root / name / "panel")
+    write_industry_memberships(store, [_probe_batch(moved)])
+    return store
+
+
+def _probe_read(store: PanelStore) -> Any:
+    return load_industry_cross_section(
+        store, day=PROBE_DAY, years=(2024,), as_of=PROBE_AS_OF, max_staleness=None
+    )
+
+
+def test_the_probe_corpus_answers_when_every_row_carries_the_availability_its_event_implies(
+    tmp_path,
+) -> None:
+    """The sentinel under the three refusals below: on an honest corpus this read answers.
+
+    Two of the five rows are **absent** at `PROBE_AS_OF` -- 600141.SH's whole assignment and
+    600000.SH's close, both dated 2024-09-01 -- and absence is not a refusal. It is the ordinary
+    shape of a mid-year read: the census never counted those rows, the predicate never returned
+    them, and the two agree that nothing is missing. So 600141.SH is simply not in the cross
+    section, and 600000.SH's assignment reads as open, because on 2024-06-15 it was.
+    """
+    answered = _probe_read(_probe_store(tmp_path, "honest", {}))
+
+    assert sorted(answered) == ["600000.SH", "600021.SH", "601398.SH"]
+    assert answered["600000.SH"].assignment.effective_through is None
+    assert answered["601398.SH"].l2_code == "801782.SI"
+
+
+def test_a_compensating_pair_of_census_errors_is_refused_rather_than_cancelling_out(
+    tmp_path,
+) -> None:
+    """`V2-P4-034`: the defect P4 technical acceptance found, and the reason it was invisible.
+
+    `V2-P4-027` compared two whole-year totals -- how many rows the census places at or before
+    `as_of` against how many rows came back -- and two errors in opposite directions cancel
+    exactly. Measured on this corpus at 824ebff: the census counts three rows as having happened
+    and three rows come back, the equality holds, and the read is **admitted**. What it admits is
+    a cross section with 601398.SH missing although its event was four and a half months old,
+    and with 600000.SH's assignment dated as ending on 2024-09-01 -- a close two and a half
+    months *after* the instant the read claims to stand at.
+
+    The refusal is asserted to name the look-ahead's own event date and not the withheld one's,
+    because the whole of this defect is that the two are separate facts about separate days: a
+    check that can only say "the totals differ" is a check the days can be traded against each
+    other under.
+    """
+    store = _probe_store(
+        tmp_path,
+        "compensating",
+        {PROBE_WITHHELD_ROW: PROBE_LATE, PROBE_LOOK_AHEAD_ROW: PROBE_EARLY},
+    )
+
+    with pytest.raises(PanelStorageError, match="2024-09-01") as refusal:
+        _probe_read(store)
+
+    assert "2024-02-01" not in str(refusal.value)
+
+
+def test_each_one_sided_census_error_keeps_being_refused_and_is_named_for_what_it_is(
+    tmp_path,
+) -> None:
+    """The two faults the sum could see, still seen, and now told apart from each other.
+
+    A **withheld** row and a **look-ahead** row are not the same failure, and one message that
+    could only say the two totals differed reported them as if they were. They are separated
+    here, and the withheld half keeps the wording `V2-P4-027` gave it, so the test that holds it
+    still holds it.
+
+    The look-ahead half is the one the sum described backwards: it used to read "year=2024 holds
+    3 row(s) whose event had already happened ... and 4 of them were visible", which says the
+    partition is short by minus one row. What is actually wrong is that a visible row's event had
+    *not* happened, so its availability precedes its own event -- a shape
+    `_taxonomy_backfill_timeline` cannot produce and this read must not answer from.
+    """
+    withheld = _probe_store(tmp_path, "withheld", {PROBE_WITHHELD_ROW: PROBE_LATE})
+    with pytest.raises(PanelStorageError, match="whose event had already happened") as short:
+        _probe_read(withheld)
+    assert "2024-02-01" in str(short.value)
+
+    ahead = _probe_store(tmp_path, "ahead", {PROBE_LOOK_AHEAD_ROW: PROBE_EARLY})
+    with pytest.raises(PanelStorageError, match="had not happened at") as early:
+        _probe_read(ahead)
+    assert "2024-09-01" in str(early.value)
