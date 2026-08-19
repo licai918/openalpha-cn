@@ -17,9 +17,9 @@ Issue ID: `V2-<阶段>-<序号>`。类型标记：**结**结构 · **产**产品
 | **P1** | 面板数据平面 | 17 | 5–7 周 | 13–18 周 | 8 组数据集全部通过契约 + 未来数据 fail-closed |
 | **P2** | **PIT 红队闸门** | 9 | 2 周 | 5 周 | **必过，否则不得进 P3** |
 | **P3** | 因子层 | 19 | 5–6 周 | 13–15 周 | 首批因子出齐 raw/processed/neutralized 三档 |
-| **P4** | 候选排序与模型基线 | 67 | 6–7 周 | 15–18 周 | 契约升版一次完成 + 预测先落库 |
+| **P4** | 候选排序与模型基线 | 69 | 6–7 周 | 15–18 周 | 契约升版一次完成 + 预测先落库 |
 | **P5** | 组合、验证与工作台 | 24 | 6–8 周 | 15–20 周 | 归因对账 + 多重检验 + 4 页可用 |
-| | **合计** | **161** | **28–36 周** | **70–90 周** | |
+| | **合计** | **163** | **28–36 周** | **70–90 周** | |
 
 > **相对上一版的变化**：上一版估 18–25 周，假设 P0 为 1 周。审计发现 39 条必须在面板层之前关闭的前置 finding（无迁移机制、两个组装根、引擎四合一、无 conftest、look-ahead 靠字符串匹配、`.parquet` 被发布拦截、seed/commit/digest 全为占位），故新增 P0.B。上调的 10–11 周全部是**原先不可见的前置债**，不是范围膨胀。
 
@@ -284,6 +284,8 @@ P3 结束即可独立使用（Jupyter 直连面板 + 因子）
 | `V2-P4-066` | **可交易那一档一个名字都不点** | 产 | 023, 033 | **P4 第三轮产品验收实测**：`funnel 5545 listed -> 5542 scored -> 5533 tradeable -> 25 shortlisted`、`measured tradable=0.9978`。验收人核对过当日停牌恰好 9 只、被丢掉的恰好 9 只、且这 9 只在因子分区里 `coverage=computed`（即**第二档剔除逻辑是对的**）。但答案里 `funnel` 只有 `clip_block/coverage/excluded_by_coverage/scored_count/shortlist/tied_at_the_cut/tradeable_count`，而 `excluded_by_coverage` 只覆盖**第一档**；全文搜不到 `halted`/`below_board_minimum`/`up_limit`/`not_tradable` 任何一个字。`--min-tradable-ratio` 这道闸测的就是这个比率，一旦跌破门槛把榜拒掉，**用户无从知道是谁、为什么** | 集成：可交易档的剔除按原因分类并具名 | S48 |
 | `V2-P4-067` | **HTTP 参考文档里的 `run_manifest_id` 前缀是错的；拒绝语从不点名能修好它的那条命令** | 产 | — | **P4 第三轮产品验收实测**。(a) `docs/api/http.md:302` 写 `"run_manifest_id": "rmf_…"`，照抄被拒：`carries run_manifest_id 'rmf_…', which is not stable_model_id(prefix='run', ...)'s own output` —— 正确前缀是 `run_`。(b) `factor_obs_reversal_1d_v1 year=2026 … ['partition_missing','field_missing']` 不说「去跑 `openalpha factor build`」；`namechange` 缺分区也不说「去跑 `openalpha panel build --dataset namechange`」，而 `shortlist run` **需要** `namechange` 且 README 的候选榜示例未提。这些提示都在 `--help` 里，唯独不在用户真正撞上的那行错误里 —— 与面板闸门那条被全仓引为范本的拒绝语正好相反 | 文档 + 集成：修正前缀；缺分区的拒绝点名补救命令 | S48 |
 | `V2-P4-068` | **一条测试的通过依赖于选择顺序**（ 与  同时被选中时， 失败） | 测 | — | **wave 4 审计 agent 在干净的 `ce70d07` 上用 stash 复核过，与其改动无关**。全量套件里**不触发**，故是收集顺序 / logging 交互。本仓已有同类前科：`test_import_layering.py` 里那次刻意的裸 `lint_imports` 调用同样只靠收集顺序才不互相污染（可复现为 2 failed）。两者应一起看 —— 一个只在特定选择下红的测试，等于在 CI 之外不可信 | 单元：任意子集选择下结果一致 | — |
+| `V2-P4-069` | **`PanelStore.read_if_ready` 的逐年就绪重评估是 O(N²)，且其 docstring 把代价说小了三个数量级** | 技 | 059 | **`V2-P4-059` 修复时实测**：`load_stock_universe` 的 docstring 声称逐年重评估是「milliseconds」，36 个生命周期分区上实测 **4.0 秒** —— cProfile 显示 `assess_readiness` 累计 **4.59s**（1,296 次 `_read_coverage`），而真正的 Parquet 读只占 **0.21s**。`panel build`/`panel doctor` 本来就在付这笔；`V2-P4-059` 让注册簿向下加宽之后，**`factor build` 与 `shortlist run` 现在每个时刻都要付一次**。修法是「一次评估加 N 次读」，但那会改动 `read_if_ready` 的契约，而该契约由 **14 个调用方**共享；`059` 的实施者刻意**没有**在本地绕过（绕过会丢掉受损分区的包装）。docstring 已按实测更正 | 单元：读路径的就绪评估次数不随分区数平方增长 | S5 |
+| `V2-P4-070` | **`shortlist_view` 仍缺 `_REGISTRY_FAULTS`，残缺注册簿在出榜面上仍是 exit 5 且消息被吞** | 产 | 060 | **`V2-P4-060` 修复时的受阻依赖**：`factor_view` 加了 `_REGISTRY_FAULTS`（把注册簿读会抛的两个故障码补进去，`_PANEL_FAULTS` 原有四个而 `cli._PANEL_WRITE_REFUSALS` 有十一个、且与 `panel_doctor._LOAD_FAILURES` 钉成相等），故 `factor build` 现在给 exit 1 与可执行的诊断。**`shortlist run` 没有** —— 该文件由同轮另一个 agent 拥有，未能编辑。用户在出榜面上遇到中断的回补，仍看到「命令有缺陷、消息因可能携带凭据而被withheld」 | 集成：出榜面对残缺注册簿给具名拒绝 | S48 |
 
 **闸门**：排序测试覆盖确定性排序、平局政策、弃权、缺失依赖、过期数据、风险/可交易性标记，且每个入选候选证据闭合；模型评估测试用已知信噪比数据验证 walk-forward 切分、purge/embargo、制品身份、前瞻预测落库；契约升版后从 v1 卷迁移的记录仍可读；新 agent 全部经 `run_cycle` 缝验收。
 
