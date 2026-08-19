@@ -261,6 +261,7 @@ from openalpha_cn.domain.labels import (
     label_outcome,
 )
 from openalpha_cn.domain.name_history import NameHistory, RiskWarning
+from openalpha_cn.domain.panel_batch import PanelBatchError
 from openalpha_cn.domain.price_limits import PriceLimit
 from openalpha_cn.domain.stock_universe import StockUniverse, StockUniverseError
 from openalpha_cn.domain.trading_calendar import TradingCalendar, TradingCalendarError
@@ -817,18 +818,64 @@ equality it is pinned under is the same idea -- which exceptions are facts about
 defects in the code that read it is one question with one answer.
 """
 
+_REGISTRY_FAULTS: Final[tuple[type[Exception], ...]] = (
+    *_PANEL_FAULTS,
+    StockUniverseError,
+    PanelBatchError,
+)
+"""The two further refusals the **registry** read can raise, and why they are not in the tuple
+above.
 
-def _read(reader: Callable[[], _T], *, store: PanelStore, what: str) -> _T:
+`load_stock_universe` is the one read in this module that can fail with a statement about the
+stored registry's *shape* rather than about its partitions: `StockUniverseError` for an orphan
+delisting row, a duplicated `ts_code` or a security filed against two exchanges, and
+`PanelBatchError` for a lifecycle year the read was told to cover and does not. Both are facts
+about data, so both belong under `panel_unreadable` -- which is the answer
+`cli._PANEL_WRITE_REFUSALS` and `panel_doctor._LOAD_FAILURES` have given for eleven error types,
+pinned equal to each other, and which `_PANEL_FAULTS` cites as its precedent while listing
+neither.
+
+`V2-P4-060` is what that omission cost. A market carrying an ordinary mid-window delisting
+reached `cli._panel_command` as an *unanticipated* `StockUniverseError`, so `factor build` exited
+5 -- "a defect in the command, not a verdict about the panel ... nothing was checked" -- and the
+exception's own message, the sentence naming the security and saying "this is a partial read, not
+a security that appeared already delisted", was withheld because an unanticipated frame can be
+holding the credential. The withholding is right and stays. What was wrong is that this failure
+was unanticipated.
+
+**Narrower than adding the two to `_PANEL_FAULTS`, deliberately.** That tuple also guards
+`compute_factor`, the transform and neutralisation engines and every factor-partition read, and a
+`PanelBatchError` out of one of those is a defect in this repository's own batch assembly rather
+than a verdict about stored data. Laundering it into "the panel could not be read" would be the
+same mistake pointing the other way. The read that can raise them is the read that catches them.
+
+That is also what leaves `shortlist_view._PANEL_FAULTS` alone, which
+`tests/unit/test_shortlist_view.py` pins equal to `_PANEL_FAULTS` so two faces cannot file one
+broken partition under two status codes. The equality is still true and still says what it said.
+"""
+
+
+def _read(
+    reader: Callable[[], _T],
+    *,
+    store: PanelStore,
+    what: str,
+    faults: tuple[type[Exception], ...] = _PANEL_FAULTS,
+) -> _T:
     """Run one panel read, turning its refusal into `FactorPanelUnreadableError`.
 
     The local message names the store and `disclosable` does not, `panel_view.stored_calendar`'s
     arrangement and for its reason: the CLI and the SDK are inside the process that owns the store
     and a message naming it tells them nothing they did not configure, while a response body hands
     that path to whoever could reach the port.
+
+    `faults` is every read's answer by default and is widened by exactly one caller; see
+    `_REGISTRY_FAULTS` for why the registry's two extra refusals go to the read that raises them
+    rather than to all fourteen.
     """
     try:
         return reader()
-    except _PANEL_FAULTS as error:
+    except faults as error:
         raise FactorPanelUnreadableError(
             f"{what} could not be read out of {store.root}: {error}",
             disclosable=(
@@ -836,6 +883,17 @@ def _read(reader: Callable[[], _T], *, store: PanelStore, what: str) -> _T:
                 f"{_without_store_path(str(error), store)}"
             ),
         ) from error
+
+
+def _read_registry(reader: Callable[[], StockUniverse], *, store: PanelStore) -> StockUniverse:
+    """The registry read, in one place because it is one read made twice.
+
+    `factor build` makes it per prediction instant and `factor run` once per run, and before
+    `V2-P4-060` the two sites duplicated the `what=` string and the fault list between them --
+    which is how one of them can come to catch a refusal the other lets escape. Both go through
+    here now, so `_REGISTRY_FAULTS` is stated once and applies to whichever face made the call.
+    """
+    return _read(reader, store=store, what="the security registry", faults=_REGISTRY_FAULTS)
 
 
 def _without_store_path(message: str, store: PanelStore) -> str:
@@ -876,10 +934,9 @@ class _PanelInputs:
             store=store,
             what=f"the {request.exchange} trading calendar",
         )
-        self.universe: StockUniverse = _read(
+        self.universe: StockUniverse = _read_registry(
             lambda: load_stock_universe(store, years=years, as_of=as_of, max_staleness=None),
             store=store,
-            what="the security registry",
         )
         self.adjustments: Mapping[str, AdjustmentHistory] = _read(
             lambda: load_adjustment_histories(store, years=years, as_of=as_of, max_staleness=None),
@@ -2030,10 +2087,15 @@ class FactorBuildRequest:
       declaring `lookback_periods=5` needs five contiguous filings, which is at least two
       announcement years, and a one-year `--year` gets `insufficient_history` for the whole cross
       section rather than an error.
-    - The **registry** partitions are keyed by *lifecycle* year. `load_stock_universe` caps its
-      snapshot at the day before the first year the store holds and this read skipped, so naming a
-      prefix of the stored years silently shortens the universe -- which it reports through
-      `UniverseCompleteness` rather than by refusing.
+    - The **registry** partitions are keyed by *lifecycle* year, and this year set is therefore
+      the one dataset it is **not** the whole scope of. A security's row lives in the year it
+      listed, so the newest partition is that year's listings rather than that year's market, and
+      `load_stock_universe` reads every lifecycle year the store holds beneath the range asked for
+      here. This paragraph used to say the opposite -- that naming a prefix "silently shortens the
+      universe, which it reports through `UniverseCompleteness` rather than by refusing" -- and
+      `V2-P4-059` measured what that cost: `--year 2026` over a 5,545-security store scored
+      **eleven** names and exited 0. The horizon rule it describes is unchanged and still caps the
+      snapshot at the newest year read; what changed is that the years below it are supplied.
 
     The same vocabulary `openalpha panel build --year` writes with, so the two commands' year
     arguments name the same partitions.
@@ -2485,12 +2547,11 @@ def _computed(
         store=store,
         what=f"the {request.exchange} trading calendar",
     )
-    universe = _read(
+    universe = _read_registry(
         lambda: load_stock_universe(
             store, years=request.years, as_of=as_of, max_staleness=request.max_staleness
         ),
         store=store,
-        what="the security registry",
     )
     try:
         listed = universe.listed_on(day)
