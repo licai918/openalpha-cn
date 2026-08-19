@@ -854,6 +854,26 @@ def load_shortlist_cross_section(
 
     The session itself is the cross section's own day in `SHORTLIST_DATE_ZONE`: a build stamped
     2026-01-16T09:00Z is 17:00 in Shanghai, after that session's close and therefore about it.
+
+    ## The sentence above was written before the panel could keep it (`V2-P4-061`)
+
+    "Offered to the market of its own session" describes what this function *asks for*, and until
+    `V2-P4-061` the panel could not answer for any session but the newest. `load_daily_bars` and
+    `load_price_limits` read through `read_if_ready`, which judges `not_yet_knowable` on the
+    newest `available_time` anywhere in the **year partition** -- so a store advancing a single
+    session made every earlier cross section in that year unscreenable, and the offer this
+    docstring, `docs/api/http.md` and `README.md` all describe was never made. Reproduced from the
+    surface: two cross sections written into one store, the newest screening cleanly and the
+    earlier one exiting `1` with `daily cannot be read at ...: ['not_yet_knowable']`. What it cost
+    is the product's stated purpose -- two days' shortlists could not be compared, yesterday's
+    could not be re-run, and a published list could not be audited after the fact.
+
+    Both loaders now take `panel_ingest._read_visible_price_session`, the as-of-sensitive session
+    read `V2-P4-026` built and wired to `load_daily_valuations` alone. **Both** had to move: the
+    two are read together three lines apart in `_bars_on`, and moving the bars alone relocated the
+    same refusal onto `stk_limit` rather than removing it.
+    `tests/integration/test_shortlist_earlier_sessions.py` drives the pair from all three faces,
+    and holds the withheld/absent separation the session read rests on.
     """
     by_component = {
         component.factor_id: _rows_for(store, component.definition, request)

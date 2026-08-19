@@ -196,9 +196,22 @@ through `read_visible_at` under a `trade_date` filter -- the first caller in `sr
 `filters` at all -- so a walk-forward *can* step an `as_of` through a `daily_basic` year. What
 made that admissible is a property of that dataset and not of this rule table: every row of one
 session carries one `available_time` (16:30 on its own `trade_date`), so a session read is
-all-or-nothing and "withheld" never arrives disguised as "absent". No other ingested dataset has
-that shape, `index_member_all` conspicuously does not (`V2-P4-027`), and nothing here changed:
-`read_if_ready` still refuses a whole partition, and the loaders that take it still are refused.
+all-or-nothing and "withheld" never arrives disguised as "absent". `index_member_all`
+conspicuously does not have that shape (`V2-P4-027`), and nothing here changed: `read_if_ready`
+still refuses a whole partition, and the loaders that take it still are refused.
+
+**`V2-P4-061` widened it from one ingested dataset to three, and the sentence this paragraph
+used to carry -- "no other ingested dataset has that shape" -- was wrong rather than cautious.**
+`daily` and `stk_limit` declare the same `ClockStrategy.daily_close` as `daily_basic` and are
+stamped by the same `_daily_close_timeline`; measured on the generated fixture panel, 10 of 10
+stored sessions in each of the three carry exactly one distinct `available_time`, at 16:30
+Asia/Shanghai on their own `trade_date`. What that sentence cost was a Critical found by product
+acceptance: `openalpha shortlist run` prices a stored cross section on the session it is about,
+and with the bars and the bands on the whole-partition door a store holding two cross sections in
+one year could screen only the newest. `load_daily_bars` and `load_price_limits` now take
+`_read_visible_price_session` alongside `load_daily_valuations`. The P4 paragraph above is
+narrowed once more and still not retracted: a walk-forward can now step an `as_of` through a
+price year, and every other ingested dataset is still read whole.
 
 ### The correction `V2-P3-002`'s review forced, and why it was not a wording change
 

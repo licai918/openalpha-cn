@@ -1284,24 +1284,34 @@ def _write_retimed_valuations(store: PanelStore, batches: Sequence[Any]) -> None
     write_panel_batch(store, merge_panel_batches(list(batches)), year=2026)
 
 
-def test_the_valuations_answer_a_published_session_from_inside_the_year_the_bars_still_refuse(
+def test_all_three_price_loaders_answer_a_published_session_from_inside_the_year(
     tmp_path: Path,
 ) -> None:
-    """`V2-P4-026`'s acceptance, and the asymmetry it deliberately creates, in one test.
+    """`V2-P4-026`'s acceptance, widened to the bars and the bands by `V2-P4-061`.
 
-    At `MID_WINDOW` the 2026 `daily_basic` partition's newest `available_time` is
-    2026-06-15T08:30Z, so `read_if_ready` refuses the whole partition -- which is exactly what
-    `load_daily_bars` still does, on the identical store, at the identical instant, for the
-    identical session. `load_daily_valuations` answers, because it reads the session under a
-    `WHERE available_time <= as_of` predicate instead.
+    At `MID_WINDOW` each 2026 price partition's newest `available_time` is 2026-06-15T08:30Z, so
+    `read_if_ready` refuses the whole of it -- and the 10th's own rows published five days
+    earlier. All three loaders read the session under a `WHERE available_time <= as_of` predicate
+    instead, so all three answer.
 
-    The valuations are held to their **values** and not merely to being non-empty: a door that
-    answered with an empty mapping would satisfy "did not raise", and an empty mapping is the
-    fail-open shape this whole issue exists to remove.
+    **This test used to assert the opposite half.** It read
+    `the_valuations_answer_a_published_session_from_inside_the_year_the_bars_still_refuse`, and
+    the asymmetry it pinned was `V2-P4-026`'s deliberate scoping: only `daily_basic` had a
+    measured caller asking for it. `V2-P4-061` is the measurement for the other two -- with the
+    bars on the whole-partition door, `openalpha shortlist run` could screen only the newest cross
+    section in a year, which contradicts three shipped sentences. The asymmetry is gone rather
+    than inverted, and what is asserted is that the three answer **one** session.
+
+    Every loader is held to its **values** and not merely to not raising: an empty mapping
+    satisfies "did not raise", and an empty mapping is the fail-open shape this whole door exists
+    to remove.
     """
     store = _seeded(tmp_path)
 
     valuations = load_daily_valuations(
+        store, day=JUNE_10, calendar=_calendar(), as_of=MID_WINDOW, max_staleness=None
+    )
+    bars = load_daily_bars(
         store, day=JUNE_10, calendar=_calendar(), as_of=MID_WINDOW, max_staleness=None
     )
 
@@ -1310,9 +1320,32 @@ def test_the_valuations_answer_a_published_session_from_inside_the_year_the_bars
     assert valuations[MAOTAI].total_mv == 159495411.3084
     assert valuations[PING_AN].trade_date == JUNE_10
 
-    with pytest.raises(PanelStorageError, match="not_yet_knowable"):
+    assert sorted(bars) == sorted((PING_AN, MAOTAI))
+    assert bars[PING_AN].close == 11.32
+    assert bars[MAOTAI].close == 1275.88
+    assert bars[PING_AN].trade_date == JUNE_10
+    assert {code: bar.close for code, bar in bars.items()} == {
+        code: valuation.close for code, valuation in valuations.items()
+    }
+
+
+def test_the_bars_still_refuse_the_session_after_the_one_that_published(tmp_path: Path) -> None:
+    """Widening the door did not widen what it answers: the 12th stays unreadable at the 11th.
+
+    `MID_WINDOW` is 17:00 Asia/Shanghai on 2026-06-11, so the 12th's own 16:30 has not arrived.
+    The store *holds* that session -- it is one of the four written -- and the refusal is about
+    publication rather than about absence, which is the distinction the fail-open shape would
+    collapse: `date_gap` cannot see the 12th at this `as_of` because `_price_requirement` clamps
+    its census at the same 16:30, and the availability predicate alone would answer `()`.
+
+    Paired with the test above on one store and one instant, because either alone is passed by a
+    loader that answers everything or by one that refuses everything.
+    """
+    store = _seeded(tmp_path)
+
+    with pytest.raises(PanelStorageError, match="that session had not published yet"):
         load_daily_bars(
-            store, day=JUNE_10, calendar=_calendar(), as_of=MID_WINDOW, max_staleness=None
+            store, day=JUNE_12, calendar=_calendar(), as_of=MID_WINDOW, max_staleness=None
         )
 
 

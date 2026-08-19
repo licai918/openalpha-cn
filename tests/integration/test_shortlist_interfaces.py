@@ -33,12 +33,22 @@ Two properties are needed that the shared three-tier fixture does not have, and 
 before this file chose to build its own:
 
 - **Two factor builds an `as_of` can sit between.** `store_three_tiers` stamps its builds at
-  09:00Z on 2026-01-08 and 2026-01-09, and the generated price panel does not become readable
-  until 2026-01-16T08:30Z (`load_daily_bars` goes through `read_if_ready`, which refuses a
-  partition whose newest row post-dates the `as_of`). So at every instant where a shortlist can be
-  priced at all, *both* of those builds are already visible and no `as_of` separates them. The two
-  builds here are at 09:00Z and 13:00Z on 2026-01-16 -- after the panel is readable, four hours
-  apart -- so `EARLY_AS_OF` sits between them with the market fully priceable on both sides.
+  09:00Z on 2026-01-08 and 2026-01-09, four hours short of a day apart, so an `as_of` between them
+  is one that has to fall on the 8th's evening -- and the two builds here are at 09:00Z and 13:00Z
+  on 2026-01-16, four hours apart on one session, so `EARLY_AS_OF` sits between them with nothing
+  else changing across it. The two lists differ; see `EARLY_SHORTLIST` and `LATE_SHORTLIST`.
+
+  **The reason originally given for this choice was a defect rather than a property, and
+  `V2-P4-061` removed it.** It read: "the generated price panel does not become readable until
+  2026-01-16T08:30Z (`load_daily_bars` goes through `read_if_ready`, which refuses a partition
+  whose newest row post-dates the `as_of`), so at every instant where a shortlist can be priced at
+  all, both of those builds are already visible and no `as_of` separates them". That was true of
+  the tree and false of the product: the bars now take the as-of-sensitive session read, so a
+  cross section from any published session of the year is priceable on its own session and the
+  8th/9th pair would work. The fixture is kept because two builds on **one** session isolate the
+  visibility filter from the pricing session, which is what this file is about;
+  `tests/integration/test_shortlist_earlier_sessions.py` is where two builds on two sessions are
+  driven.
 - **A tier that actually carries values.** On this generated eight-security panel every processed
   row comes back `insufficient_cross_section`, so a processed-tier screen has nothing to order at
   all. The raw tier carries a value for all eight, which is why the baseline screens on it.

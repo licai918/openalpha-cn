@@ -338,6 +338,25 @@ one its factor values never saw. `cross_section.as_of` and `cross_section.pricin
 are on every answer, because the cross section may legitimately be older than the `as_of`
 you asked about.
 
+**That sentence did not hold until `V2-P4-061`, and it is worth knowing why if you are
+reading answers this service gave before it.** The bars and the published bands were read
+through a whole-partition gate that decides "not yet knowable" from the newest row
+*anywhere in the calendar year*. So a panel that had advanced by one session refused every
+**earlier** cross section in that year — `daily cannot be read at …: ['not_yet_knowable']`
+— and only the newest one could be screened at all. Two days' shortlists could not be
+compared, yesterday's could not be re-run, and a published list could not be audited after
+the fact. Both reads now go through the same as-of-sensitive session read the valuation
+panel already used.
+
+Nothing about the look-ahead guard moved with them, and each refusal still has its own
+name. A session whose own 16:30 Asia/Shanghai has not arrived at the read's instant is
+refused before the partition is touched, because answering it with an empty cross section
+would be a look-ahead dressed as thin data. A session the store holds and the instant
+cannot see is refused rather than answered empty. A session the panel never stored is
+refused as a `date_gap` against the exchange calendar's own census. And a session whose
+stored rows do not all share one availability instant — the property that makes a session
+read sound at all — is refused outright rather than returned short.
+
 ### A refused list and an empty one are two different answers
 
 This is the property the route exists for.
