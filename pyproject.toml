@@ -393,12 +393,26 @@ forbidden_modules = [
 # names to the existing `from openalpha_cn.backtest.cross_section import (...)` block leaves every
 # pinned line byte-identical and **adds no edge to the import graph at all**. Both forms filled
 # real orders from both sources at 8 kept / 0 broken. Because the second form adds no edge, no
-# `lint-imports` contract and no `grimp` assertion can ever refuse it; the replacement wraps the
-# real `AShareExecutionPolicy.execute` for the length of a real screen -> ranking -> gate run and
-# asks each filled order which files are on its call stack, so it reads no name and no import
-# line, and it is backed by identity- and bytecode-level checks that also catch code the pipeline
-# never runs. The two import-list pins remain, now indentation-blind, but they document each
-# module's dependencies rather than carrying the order claim.
+# `lint-imports` contract and no `grimp` assertion can ever refuse it, so the replacement is
+# behavioural, and it is backed by identity- and bytecode-level checks that also catch code the
+# pipeline never runs. The two import-list pins remain, now indentation-blind, but they document
+# each module's dependencies rather than carrying the order claim.
+#
+# `V2-P4-053`/`054`/`055` then measured that the first behavioural version claimed more than it
+# checked, and the replacement is narrower on purpose. It asked each fill which files were on
+# **its own thread's** stack, which one `ThreadPoolExecutor` hop defeated; it wrapped
+# `AShareExecutionPolicy.execute` only, which a private subclass's override shadowed; it
+# discovered the machinery with a `not name.startswith("_")` filter, which dropped that subclass
+# from every ban set; its sentinel counted calls rather than fills, so a fixture of suspended bars
+# left it green on 12 calls and 0 fills; and it installed its hooks after collection had already
+# imported both modules, so a fill at **import time** was recorded nowhere. All five are closed
+# and each is pinned by a test that takes the failing branch on every run. What the guard's own
+# docstring now states, rather than claims away, is what still gets past it: a fill in a
+# **subprocess** is in another interpreter and is seen by nothing here, measured; and a callable
+# carrying no code object of the guarded file -- a `functools.partial` over a helper declared
+# elsewhere -- handed at import time to a module the pipeline later calls is seen by neither
+# attribution axis, which needed a callback registry added to `cross_section.py` to arrange
+# because this package has none.
 #
 # `tests/unit/test_import_layering.py::
 # test_every_order_intent_is_forbidden_to_the_ranking_or_disclosed_as_reachable` is what keeps
