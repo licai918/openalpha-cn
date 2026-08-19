@@ -413,6 +413,26 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_view.panel_store",
         }
     ),
+    "openalpha_cn.shortlist_view": frozenset(
+        {
+            "panel_factors.FACTOR_DEFINITIONS",
+            "panel_factors.FACTOR_TRANSFORMS",
+            "panel_factors.FactorEngineError",
+            "panel_factors.load_factor_observations",
+            "panel_factors.load_processed_factor_observations",
+            "panel_ingest.load_daily_bars",
+            "panel_ingest.load_name_histories",
+            "panel_ingest.load_price_limits",
+            "panel_ingest.load_stock_universe",
+            "panel_ingest.load_suspensions",
+            "panel_ingest.load_trading_calendar",
+            "panel_neutralization.FACTOR_NEUTRALIZATIONS",
+            "panel_neutralization.NeutralizationEngineError",
+            "panel_neutralization.load_neutralized_factor_observations",
+            "panel_view.PANEL_STORE_PLACEHOLDER",
+            "panel_view.panel_store",
+        }
+    ),
 }
 """`PANEL_MODULE_DEPENDENCIES` at the granularity the rows are actually about.
 
@@ -512,6 +532,25 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
             }
         ),
     ),
+    "openalpha_cn.shortlist_view": DatasetReach(
+        named=frozenset(),
+        reached=frozenset(
+            {
+                "balancesheet",
+                "cashflow",
+                "daily",
+                "daily_basic",
+                "fina_indicator",
+                "income",
+                "index_daily",
+                "namechange",
+                "stk_limit",
+                "stock_basic",
+                "suspend_d",
+                "trade_cal",
+            }
+        ),
+    ),
 }
 """Which of the fifteen upstream datasets each top-level research-plane module can touch.
 
@@ -597,7 +636,7 @@ def _top_level_panel_modules() -> list[str]:
     )
 
 
-RESEARCH_PLANE_PREFIXES = ("panel_", "factor_")
+RESEARCH_PLANE_PREFIXES = ("panel_", "factor_", "shortlist_")
 """The two top-level module families the research plane is built out of.
 
 `_top_level_panel_modules()` above globs `panel_*.py` alone, which was the whole plane when it
@@ -608,6 +647,14 @@ same discovery. It is covered today only because `test_factor_view_layering.py` 
 guarded by nothing at all. The two instruments below discover from both prefixes, and
 `test_every_top_level_module_is_a_declared_leaf_or_a_member_of_a_discovered_family` refuses a
 top-level module that belongs to neither family and has not been declared a leaf.
+
+**`shortlist_` is the third family, and it arrived exactly the way that test predicted it would.**
+`TOP_LEVEL_MODULES_OUTSIDE_EVERY_PLANE_FAMILY`'s docstring names the shape in advance -- "a third
+family -- `signal_view.py`, say -- which is exactly the shape `V2-P3-015` was, one issue earlier"
+-- and `V2-P4-032` wrote `shortlist_view.py`, a research-plane module reading the stored factor
+tiers back into the two-stage funnel's input. It went red on arrival, with a message saying which
+of the two remedies to take, and this is the one it took: it is a research-plane module, so it
+joins the discovered set and takes the rows below rather than a sentence excusing it from them.
 """
 
 

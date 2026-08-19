@@ -87,6 +87,14 @@ from openalpha_cn.runtime.contracts import ResearchRunRequest, ResearchRunResult
 from openalpha_cn.runtime.engine import ResearchEngine
 from openalpha_cn.runtime.memory import MemoryEntry
 from openalpha_cn.runtime.provenance import compute_config_digest, resolve_code_commit
+from openalpha_cn.shortlist_view import (
+    ShortlistViewError,
+    run_shortlist,
+    shortlist_components,
+    shortlist_evidence,
+    shortlist_request,
+    shortlist_view,
+)
 from openalpha_cn.storage.factor_experiments import ExperimentStoreError
 from openalpha_cn.storage.recovery import RunRecoveryState
 
@@ -548,6 +556,149 @@ class FactorRunApiRequest(BaseModel):
     """
     note: str | None = None
     """Prose about this experiment, carried on the record and out of every digest."""
+
+
+SHORTLIST_HTTP_STATUS: Final[Mapping[str, int]] = MappingProxyType(
+    {
+        "answered": 200,
+        "refused": 409,
+        "blocked": 409,
+        "panel_unreadable": 409,
+        "bad_request": 422,
+        "internal_error": 500,
+    }
+)
+"""What `POST /api/v1/shortlists/run` does about each situation, as one table.
+
+`PANEL_HTTP_STATUS`' and `FACTOR_HTTP_STATUS`' sibling, and the reasoning is shared: a caller has
+different remedies available and only the envelope to pick between them.
+
+**The row this issue exists for is `refused`, and it is the only row here with no `factor_view`
+counterpart.** It is *not* a fault -- nothing went wrong, the gate ran and said no -- and it
+carries the **verdict** body rather than a `detail` object, exactly as `GET /api/v1/panel/gate`'s
+`blocked` row does one plane over. `V2-P4-023`'s gate tells "this list was refused" from "this
+list is legitimately empty" inside the library by making `bool()` raise on a `ShortlistClearance`;
+at this boundary there is only JSON, so the distinction is re-made in two keys:
+
+- a **refused** list answers `409` with `"is_blocked": true` and `"admitted": null`, and every
+  bar it missed under `blocks` with both sides of the comparison;
+- an **admitted** list answers `200` with `"is_blocked": false` and `"admitted": [...]`, and that
+  array may be **empty** -- a shortlist every name of which came back unresearched, under a
+  `minimum_researched_ratio` this caller declared it could live with.
+
+`null` and `[]` are therefore two different answers on this route. The product acceptance measured
+them collapsed into one (`{"items":[],"excluded":[],"reviewed":0}` for both), which is the defect
+`V2-P4-033` was filed for.
+
+- **`answered` (200)** -- the gate ran and admitted the list. `shortlist_view`'s envelope.
+- **`refused` (409)** -- the gate ran and refused it. A conflict with the current state of the
+  panel and of this run's evidence, which is what RFC 9110 reserves `409` for. Not an error, and
+  the body is a verdict rather than a `detail`.
+- **`blocked` (409)** -- `ShortlistRunBlockedError`: no component has a stored cross section at or
+  before the `as_of`, or the declared components disagree about which instant they share, or a
+  supplied signal names a security the funnel did not shortlist. A refusal body.
+- **`panel_unreadable` (409)** -- `ShortlistPanelUnreadableError`: a partition this screen needs is
+  missing, damaged, stale or holds rows that were not knowable at the stated `as_of`.
+- **`bad_request` (422)** -- `ShortlistRequestError`: a factor no registry declares, a weight that
+  is not positive, a processed-tier screen with no transform, a naive `as_of`.
+- **`internal_error` (500)** -- the endpoint itself broke. Not raised anywhere in this module; the
+  row records a code that is already spoken for, exactly as `cli.CLICK_USAGE_EXIT_CODE` does.
+
+**`409` therefore carries two body schemas here, and `detail` is the discriminator** --
+`PANEL_HTTP_STATUS`' own arrangement, unchanged: a verdict body has `is_blocked` and no `detail`
+key, and a refusal body is `{"detail": {"reason": ..., "message": ...}}`. A client that read
+`json()["blocks"]` on every `409` would raise `KeyError` on the second, so it switches on
+`"detail" in body` first.
+"""
+
+
+def _shortlist_refusal(error: ShortlistViewError) -> HTTPException:
+    """One `shortlist_view` fault, enveloped by the row of `SHORTLIST_HTTP_STATUS` it names.
+
+    Looked up by `error.reason` rather than switched on by exception type, `_factor_refusal`'s rule
+    and its reason: a fault added to `shortlist_view.py` with no row here raises `KeyError` at this
+    boundary -- a `500` that says the table is incomplete -- instead of being quietly enveloped as
+    whichever branch an `isinstance` chain happened to end on.
+    """
+    return HTTPException(
+        status_code=SHORTLIST_HTTP_STATUS[error.reason],
+        detail=_panel_detail(error.reason, error.disclosable),
+    )
+
+
+class ShortlistComponentApiRequest(BaseModel):
+    """One factor's contribution to the declared composite: the handle, and a weight.
+
+    A model rather than a free-form object so that a body naming `weights` or `factor_id` is
+    refused by FastAPI's own `422` with the offending key, rather than reaching
+    `shortlist_components` and being reported as a missing one.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    factor: str
+    weight: float
+
+
+class ShortlistRunApiRequest(BaseModel):
+    """Every declared parameter of one shortlist run, and only two of them have a default.
+
+    `shortlist_view.shortlist_request` refuses a default for each of the rest and this model does
+    not reinstate one: a browser that omitted `minimum_researched_ratio` would otherwise get a bar
+    nobody chose on the one question this route exists to answer.
+
+    The two with defaults are the two that are genuinely absent rather than unstated: `transform`
+    and `neutralization` are `None` for a raw-tier screen (which reads the factor's own stored
+    values and applies nothing), and `evidence` is empty for the ordinary first run, where the
+    shortlist says which names are worth researching and nothing has been researched yet.
+
+    `position_capital` arrives as a JSON string or number and pydantic coerces it; it is `Decimal`
+    rather than `float` because `ShortlistSpec.position_capital` is -- it decides
+    `below_board_minimum`, and money that round-trips through a binary float is money that does not
+    add up.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    components: tuple[ShortlistComponentApiRequest, ...]
+    tier: str
+    shortlist_size: int
+    position_capital: Decimal
+    as_of: datetime
+    years: tuple[int, ...]
+    exchange: str
+    horizon: str
+    minimum_tradable_ratio: float
+    minimum_researched_ratio: float
+    maximum_ranking_age_days: int
+    code_commit: str | None = None
+    """The commit this screen ran at. `None` -- or omitted -- resolves server-side.
+
+    `FactorRunApiRequest.code_commit`'s argument unchanged and for its measured reason: a browser
+    cannot know the server's own git commit, so a face without this fallback gets one invented by
+    the client. An explicitly supplied value passes through untouched, including an invalid one,
+    so `shortlist_request`'s own length check reports it accurately.
+    """
+    config_digest: str | None = None
+    """The configuration this screen ran under. `None` resolves server-side.
+
+    `code_commit`'s rule and its reason, one field over.
+    """
+    transform: str | None = None
+    neutralization: str | None = None
+    evidence: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    """The evidence plane's answers about the shortlisted names, keyed by subject.
+
+    `dict[str, Any]` rather than a typed `SignalFrame`, which is `OutcomeApiRequest.research`'s own
+    shape and its measured reason: `SignalFrame` is `extra="forbid"` with a computed `signal_id`,
+    so a typed field here would **reject the serialized form this service itself hands out**.
+    `shortlist_view.shortlist_evidence` strips that identifier and verifies it against the frame's
+    own content, which is `_parse_research_result`'s rule applied to the one contract this route
+    receives.
+
+    Empty by default, which is the ordinary first run: the shortlist says which names are worth an
+    evidence run, and nothing has been researched yet.
+    """
 
 
 def _panel_detail(reason: str, message: str) -> dict[str, str]:
@@ -1264,6 +1415,59 @@ def create_app(
         return JSONResponse(
             status_code=FACTOR_HTTP_STATUS["answered"],
             content=experiment_view(record, write=write),
+        )
+
+    @application.post("/api/v1/shortlists/run")
+    def shortlist_run(request: ShortlistRunApiRequest) -> JSONResponse:
+        """Cut a shortlist out of the stored panel, join the evidence plane, and gate it.
+
+        `V2-P4-033`'s HTTP face, and the twin of `openalpha shortlist run` and of
+        `OpenAlphaSDK.run_shortlist`. All three resolve through `shortlist_view.shortlist_request`
+        and run through `shortlist_view.run_shortlist`, so they cannot come to cut three lists
+        from one declaration.
+
+        **A refused list answers `409` with `"admitted": null`, never `200` with `[]`.** That is
+        the whole deliverable: `GET /api/v1/panel/gate`'s arrangement one plane over, where the
+        status code is what says the gate refused and the body still carries every block, the
+        measurement each was read against, and the funnel's own coverage code. A caller told `409`
+        and nothing else cannot act on it, and a caller told `200` with an empty array cannot tell
+        a refusal from a market that offered nothing. See `SHORTLIST_HTTP_STATUS`.
+
+        A clearance is a verdict rather than a collection, and this endpoint treats it as one: it
+        asks `is_blocked` and the serialiser reads `admitted_or_none`, never `bool()`, `len()` or
+        iteration -- all three of which raise **even when the list cleared**.
+        """
+        try:
+            resolved = shortlist_request(
+                components=shortlist_components(
+                    [component.model_dump() for component in request.components]
+                ),
+                tier=request.tier,
+                shortlist_size=request.shortlist_size,
+                position_capital=request.position_capital,
+                as_of=request.as_of,
+                years=request.years,
+                exchange=request.exchange,
+                horizon=request.horizon,
+                minimum_tradable_ratio=request.minimum_tradable_ratio,
+                minimum_researched_ratio=request.minimum_researched_ratio,
+                maximum_ranking_age_days=request.maximum_ranking_age_days,
+                code_commit=_resolved_code_commit(request.code_commit),
+                config_digest=_resolved_config_digest(request.config_digest),
+                transform=request.transform,
+                neutralization=request.neutralization,
+                evidence=shortlist_evidence(request.evidence),
+            )
+            result = run_shortlist(panel_store(root), resolved, built_at=clock())
+        except ShortlistViewError as error:
+            raise _shortlist_refusal(error) from error
+        return JSONResponse(
+            status_code=(
+                SHORTLIST_HTTP_STATUS["refused"]
+                if result.is_blocked
+                else SHORTLIST_HTTP_STATUS["answered"]
+            ),
+            content=shortlist_view(result),
         )
 
     @application.get("/api/v1/factors/experiments")

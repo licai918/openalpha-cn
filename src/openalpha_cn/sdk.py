@@ -1,6 +1,6 @@
 """Local-first Python SDK for OpenAlpha CN's complete research flow."""
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -62,6 +62,14 @@ from openalpha_cn.runtime.composition import build_storage
 from openalpha_cn.runtime.contracts import ResearchRunRequest, ResearchRunResult
 from openalpha_cn.runtime.engine import ResearchEngine
 from openalpha_cn.runtime.memory import MemoryEntry
+from openalpha_cn.shortlist_view import (
+    ShortlistEvidence,
+    ShortlistRunResult,
+    shortlist_components,
+    shortlist_request,
+    shortlist_view,
+)
+from openalpha_cn.shortlist_view import run_shortlist as run_shortlist_run
 from openalpha_cn.storage.parquet import read_parquet_records
 from openalpha_cn.storage.recovery import RunRecoveryState
 
@@ -560,6 +568,76 @@ class OpenAlphaSDK:
     def factor_build_view(self, report: FactorBuildReport) -> dict[str, object]:
         """One build report as `openalpha factor build --json` renders it."""
         return build_view(report)
+
+    def run_shortlist(
+        self,
+        *,
+        components: Sequence[Mapping[str, object]],
+        tier: str,
+        shortlist_size: int,
+        position_capital: Decimal | str,
+        as_of: datetime,
+        years: Sequence[int],
+        exchange: str,
+        horizon: str,
+        minimum_tradable_ratio: float,
+        minimum_researched_ratio: float,
+        maximum_ranking_age_days: int,
+        code_commit: str,
+        config_digest: str,
+        transform: str | None = None,
+        neutralization: str | None = None,
+        evidence: Mapping[str, ShortlistEvidence] | None = None,
+    ) -> ShortlistRunResult:
+        """Cut a shortlist out of the stored panel, join the evidence plane, and gate it.
+
+        `V2-P4-033`'s in-process face, resolving through the same `shortlist_view.
+        shortlist_request` and running through the same `shortlist_view.run_shortlist` as
+        `openalpha shortlist run` and `POST /api/v1/shortlists/run`, so the three cannot come to
+        cut three lists from one declaration.
+
+        **Hands back the `ShortlistRunResult` rather than a rendering of it**, which is what an
+        in-process API is for and is the strongest form the blocked/empty distinction takes
+        anywhere in this repository: `result.clearance` is a `ShortlistClearance`, and
+        `bool(clearance)`, `len(clearance)` and iterating it all **raise** -- including when the
+        list cleared. A caller cannot write `if not clearance:` and quietly treat a refusal as an
+        empty list, which is a guarantee JSON cannot make. `shortlist_view(result)` is the HTTP
+        face's bytes for a caller that wants those instead.
+
+        `evidence` is the evidence plane's answers about the shortlisted names, keyed by subject,
+        and is empty by default -- see `the_evidence_plane_is_supplied_rather_than_run_by_this
+        _module` for why this face does not run `run_cycle` itself. With none supplied,
+        `researched_ratio` is `0.0` and any `minimum_researched_ratio` above zero refuses the
+        list, which is the ordinary first answer: the shortlist says which names are worth
+        spending an evidence run on, and the gate refuses to publish them as conclusions until
+        those runs have happened.
+        """
+        return run_shortlist_run(
+            panel_store(self.runtime_dir),
+            shortlist_request(
+                components=shortlist_components(components),
+                tier=tier,
+                shortlist_size=shortlist_size,
+                position_capital=Decimal(str(position_capital)),
+                as_of=as_of,
+                years=years,
+                exchange=exchange,
+                horizon=horizon,
+                minimum_tradable_ratio=minimum_tradable_ratio,
+                minimum_researched_ratio=minimum_researched_ratio,
+                maximum_ranking_age_days=maximum_ranking_age_days,
+                code_commit=code_commit,
+                config_digest=config_digest,
+                transform=transform,
+                neutralization=neutralization,
+                evidence=evidence,
+            ),
+            built_at=self.clock(),
+        )
+
+    def shortlist_view(self, result: ShortlistRunResult) -> dict[str, object]:
+        """One shortlist run as `openalpha shortlist run --json` and HTTP render it."""
+        return shortlist_view(result)
 
     def execute_portfolio_order(
         self,

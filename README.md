@@ -482,6 +482,49 @@ SDK 两个面，与 `panel build` 一致——它写面板分区，而服务本�
 - 不给 `--subject` 时，主体是登记簿知道的**全部**代码（含已退市的），universe 是当天的上市
   横截面 —— 于是退市名会被评估并落成 `not_in_universe`，而不是从普查里静默消失。
 
+## 从整个市场到一张可发布的候选榜（P4）
+
+因子平面之上是**候选榜平面**。PRD §3.2 把两条路画成两条：整个市场（约 5,000 只）在面板平面
+上打分、过滤，**不进 `run_cycle`**；只有切出来的 N 只才值得花一次证据运行。
+
+```bash
+# 从已建好的因子档切一张榜，并对它开闸
+uv run openalpha shortlist run --component reversal_1d/v1=1.0 --tier raw \
+  --shortlist-size 50 --position-capital 100000 --year 2026 --horizon 5d \
+  --min-tradable-ratio 0.30 --min-researched-ratio 0.50 --max-ranking-age-days 1 \
+  --as-of 2026-01-16T09:00:00+00:00
+```
+
+因子档必须先存在：`openalpha factor build` 是放它进去的那条命令。三个面等价：
+`openalpha shortlist run` ／ `POST /api/v1/shortlists/run` ／ `OpenAlphaSDK.run_shortlist()`。
+
+**读的是哪个横截面，什么时候读的。** 因子档按你给的 `--as-of` 读，`read_visible_at` 会把
+`available_time` 晚于它的行滤掉；而**打分之后用来定价的一切**——日历、登记簿、K 线、涨跌停
+带、停牌、名称历史——按解析出来的那个横截面**自己的时刻**读。所以一个两周前建的横截面，是拿
+它自己那个交易日的市场去撮合的，绝不会被丢到一个它的因子值从没见过的更晚的会话上。
+`cross_section.as_of` 与 `cross_section.pricing_session` 出现在每一个答案里。
+
+**“被拒绝的榜”和“本来就空的榜”是两个答案。** 这是这条命令存在的理由：
+
+| 情况 | 退出码 / HTTP | `is_blocked` | `admitted` |
+|---|---|---|---|
+| 开闸放行 | `0` / `200` | `false` | 一个数组，可以是 `[]` |
+| 开闸**拒绝** | `1` / `409` | `true` | `null` |
+| 声明的成分在 `--as-of` 之前没有任何已存横截面，或几个成分的最新时刻不一致 | `1` / `409` | — | — |
+| 需要的分区缺失、损坏、过期，或持有在 `--as-of` 时还不可知的行 | `1` / `409` | — | — |
+| 这个问题根本提不出来（未声明的因子、非正权重、processed 档没给 `--transform`、无时区 `--as-of`） | `3` / `422` | — | — |
+
+`admitted: []` 是「一张榜上每个名字都还没被研究过，而调用者声明的
+`--min-researched-ratio` 是 0，所以它通过了」；`admitted: null` 配 `409` 才是被拒绝，
+`blocks[]` 里每条都带 `code`、`detail`、实测值 `measured` 与声明的门槛 `required`。
+`measurement`（universe / scored / tradeable / shortlist / candidate 五个计数、两个比率、
+榜的天数）**两种判决上都有**，所以「险险过线」和「远远过线」是能分开的。
+
+不给 `--evidence` 就是「还没有任何名字被研究过」，这是最常见的第一个答案：榜说的是哪些名字
+值得花一次证据运行，闸口在那些运行发生之前拒绝把它们当结论发布。`--evidence <file.json>` 按
+`{subject: {"signal": <SignalFrame>, "run_manifest_id": "..."}}` 提供证据平面的答案；没进榜的
+那些不会被静默丢掉，而是回在 `evidence_not_shortlisted` 里。
+
 ## 核心独特优势
 
 OpenAlpha CN 整合 TradingAgents 和 AI Hedge Fund 的优势，接入 A 股数据源，更适合 A 股涨停量化分析。OpenAlpha CN 的竞争重点不是复制更多“投资大师人格”，而是：
