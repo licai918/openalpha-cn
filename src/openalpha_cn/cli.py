@@ -156,6 +156,16 @@ from openalpha_cn.runtime.composition import build_storage
 from openalpha_cn.runtime.contracts import ResearchRunRequest
 from openalpha_cn.runtime.provenance import compute_config_digest, resolve_code_commit
 from openalpha_cn.sdk import OpenAlphaSDK
+from openalpha_cn.shortlist_view import (
+    ShortlistEvidence,
+    ShortlistRunResult,
+    ShortlistViewError,
+    run_shortlist,
+    shortlist_evidence,
+    shortlist_request,
+    shortlist_rows,
+    shortlist_view,
+)
 from openalpha_cn.storage.factor_experiments import ExperimentStoreError, FileExperimentStore
 from openalpha_cn.storage.migrations import (
     MigrationFailedError,
@@ -224,6 +234,29 @@ unreadable in a way that was measured rather than argued:
 
 The four commands are in the order an operator meets them: `list` (what can I ask for), `describe`
 (what does this one actually measure), `build` (put it in the store), `run` (score it).
+"""
+
+
+shortlist_app = typer.Typer(
+    help=(
+        "Cut the stored panel down to the names worth spending an evidence run on, and refuse to "
+        "publish the list when it does not clear its declared bars. Start with `openalpha "
+        "shortlist run --help`."
+    )
+)
+app.add_typer(shortlist_app, name="shortlist")
+"""`V2-P4-033`'s command is `openalpha shortlist run`, and it is a sub-app for `factor`'s reason.
+
+`run` on its own is already the shape `research run`, `replay run` and `factor run` take, so a
+top-level `run` would be a fourth meaning for a verb three sub-apps own. `shortlist run` says which
+plane it is about.
+
+It is `shortlist` rather than `screen`, and the distinction is load-bearing rather than
+stylistic: `POST /api/v1/screen` already exists and ranks *verified research results* by explicit
+criteria -- the evidence plane's own answers, after the fact. This is the other direction, and
+PRD §3.2 draws it as two planes: the whole market is scored and filtered **without** `run_cycle`,
+and the shortlist is what earns an evidence run. Naming both `screen` would have made "rank what
+I have researched" and "decide what to research" one word.
 """
 
 
@@ -4178,6 +4211,311 @@ def _echo_build(report: FactorBuildReport) -> None:
         typer.echo(f"{tier:<15} {builds:>6}  {rows:>4}  {coverage}")
     typer.echo(f"partitions {len(report.partitions)}: {', '.join(report.partitions)}")
     typer.echo("next       `openalpha factor run --factor ... --start ... --end ...`")
+
+
+# --- the shortlist, from the stored panel to a gated list (V2-P4-032 / V2-P4-033) ----------------
+
+
+SHORTLIST_EXIT: Final[Mapping[str, PanelExit]] = MappingProxyType(
+    {
+        "answered": PanelExit.ok,
+        "refused": PanelExit.unhealthy,
+        "blocked": PanelExit.unhealthy,
+        "panel_unreadable": PanelExit.unhealthy,
+        "bad_request": PanelExit.bad_request,
+        "internal_error": PanelExit.internal_error,
+    }
+)
+"""What `shortlist run` exits with for each situation, as one table.
+
+`api/app.py`'s `SHORTLIST_HTTP_STATUS` is the sibling of this and `PanelExit` is the vocabulary --
+`FACTOR_EXIT`'s arrangement and its reason: a CI job that already switches on 1/3/4/5 for `panel
+doctor`, `data-check` and `factor run` must not have to learn a fifth meaning for the same numbers
+on a fifth command.
+
+**`refused` is the row this command exists for, and it must not be `ok`.** A scheduled job that
+cut a shortlist, had it refused by the gate and exited `0` would be no gate at all -- the "empty
+success" `V2-P1-013` exists to make unavailable, arriving on the plane the product acceptance
+measured it on. `unhealthy` rather than a code of its own, because the remedy is the one that code
+already names: research the names the list is missing, or rebuild the panel the coverage was
+measured on.
+
+**Exit `0` with an empty `admitted` list is a real answer and is deliberately not an error.** A
+shortlist every name of which came back unresearched, under a `--min-researched-ratio 0` the caller
+declared, was *admitted*: nothing refused it. The two are told apart on stdout by `is_blocked` and
+by `admitted` being `null` rather than `[]`, and here by the exit code -- which is the whole point
+of the pair, and the defect the acceptance filed was that at no surface could they be told apart at
+all.
+"""
+
+
+def _shortlist_fail(error: ShortlistViewError) -> typer.Exit:
+    """One `shortlist_view` fault, enveloped by the row of `SHORTLIST_EXIT` it names.
+
+    Looked up by `error.reason` rather than switched on by exception type, `_factor_fail`'s rule:
+    a fault added to `shortlist_view.py` with no row here raises `KeyError` inside
+    `_panel_command`, which reports `internal_error` and says the table is incomplete, instead of
+    being quietly enveloped as whichever branch an `isinstance` chain happened to end on.
+    """
+    return _panel_fail(SHORTLIST_EXIT[error.reason], error.disclosable)
+
+
+_SHORTLIST_COMPONENT_HELP: Final[str] = (
+    "One factor's contribution to the composite, as `<qualified key>=<weight>` "
+    "(`reversal_1d/v1=1.0`). Repeatable. Both halves are required and neither has a default: the "
+    "factor decides which column is read and the weight decides how much of the ordering it "
+    "owns. A raw-tier screen may declare exactly one, because raw values carry each factor's own "
+    "units and summing two of them adds quantities that share no scale."
+)
+_SHORTLIST_TIER_HELP: Final[str] = (
+    "Which stored tier to screen on: `raw`, `processed` or `neutralized`. `processed` and "
+    "`neutralized` need a --transform, because those partitions hold every transform of the "
+    "factor and are narrowed by the one you name. `neutralized` is refused by this command; see "
+    "shortlist_view's KNOWN_SHORTLIST_VIEW_LIMITATIONS."
+)
+_SHORTLIST_SIZE_HELP: Final[str] = (
+    "How many names reach the evidence plane. No default: it is the cut, and a cut nobody chose "
+    "is a list nobody can defend."
+)
+_SHORTLIST_CAPITAL_HELP: Final[str] = (
+    "The notional budget stage two sizes one buy against, in yuan. It decides "
+    "`below_board_minimum` -- a name at 300 yuan a share does not sell a 100-share lot for 10,000 "
+    "yuan -- and it is not a portfolio weight: nothing here allocates."
+)
+_SHORTLIST_HORIZON_HELP: Final[str] = (
+    "The one span every conclusion in this list is over, as a count of trading sessions (`5d`). "
+    "`SignalFrame.horizon` accepts exactly this grammar, so a list declaring a calendar span "
+    "could never be satisfied."
+)
+_SHORTLIST_TRADABLE_HELP: Final[str] = (
+    "The floor under `tradeable / universe`. Divided by the universe rather than by the scored "
+    "count, because a name with no price is dropped before stage two and would otherwise relieve "
+    "the bar it exists to trip."
+)
+_SHORTLIST_RESEARCHED_HELP: Final[str] = (
+    "The floor under `candidates / shortlisted`. With no --evidence supplied this is 0.0, so any "
+    "floor above zero refuses the list by name -- which is the ordinary first answer: the "
+    "shortlist says which names are worth an evidence run, and the gate refuses to publish them "
+    "as conclusions until those runs have happened."
+)
+_SHORTLIST_AGE_HELP: Final[str] = (
+    "The ceiling over `built_at - as_of`, in whole calendar days. 0 means `assembled the same day "
+    "it is about`."
+)
+_SHORTLIST_EVIDENCE_HELP: Final[str] = (
+    "Path to a JSON object mapping each researched subject to "
+    '`{"signal": <SignalFrame>, "run_manifest_id": "..."}`. Omitted means nothing has been '
+    "researched, which is a state this list reports rather than hides."
+)
+_SHORTLIST_CONFIG_DIGEST_HELP: Final[str] = (
+    "The configuration this screen ran under, as a 64-character hex digest. Resolved from the "
+    "process's own configuration when omitted."
+)
+
+
+@shortlist_app.command("run")
+def shortlist_run_command(
+    component: Annotated[list[str], typer.Option("--component", help=_SHORTLIST_COMPONENT_HELP)],
+    tier: Annotated[str, typer.Option("--tier", help=_SHORTLIST_TIER_HELP)],
+    shortlist_size: Annotated[int, typer.Option("--shortlist-size", help=_SHORTLIST_SIZE_HELP)],
+    position_capital: Annotated[
+        str, typer.Option("--position-capital", help=_SHORTLIST_CAPITAL_HELP)
+    ],
+    year: Annotated[list[int], typer.Option("--year", help=_BUILD_FACTOR_YEAR_HELP)],
+    horizon: Annotated[str, typer.Option("--horizon", help=_SHORTLIST_HORIZON_HELP)],
+    min_tradable_ratio: Annotated[
+        float, typer.Option("--min-tradable-ratio", help=_SHORTLIST_TRADABLE_HELP)
+    ],
+    min_researched_ratio: Annotated[
+        float, typer.Option("--min-researched-ratio", help=_SHORTLIST_RESEARCHED_HELP)
+    ],
+    max_ranking_age_days: Annotated[
+        int, typer.Option("--max-ranking-age-days", help=_SHORTLIST_AGE_HELP)
+    ],
+    transform: Annotated[str, typer.Option("--transform", help=_FACTOR_TRANSFORM_HELP)] = "",
+    neutralization: Annotated[
+        str, typer.Option("--neutralization", help=_FACTOR_NEUTRALIZATION_HELP)
+    ] = "",
+    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
+        "./runtime"
+    ),
+    exchange: Annotated[
+        str, typer.Option("--exchange", help=_FACTOR_EXCHANGE_HELP)
+    ] = TRADING_CALENDAR_DEFAULT_EXCHANGE,
+    as_of: Annotated[str, typer.Option("--as-of", help=_FACTOR_AS_OF_HELP)] = "",
+    code_commit: Annotated[str, typer.Option("--code-commit", help=_CODE_COMMIT_HELP)] = "",
+    config_digest: Annotated[
+        str, typer.Option("--config-digest", help=_SHORTLIST_CONFIG_DIGEST_HELP)
+    ] = "",
+    evidence: Annotated[
+        Path | None, typer.Option("--evidence", help=_SHORTLIST_EVIDENCE_HELP)
+    ] = None,
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit the whole verdict as data.")
+    ] = False,
+) -> None:
+    """Cut a shortlist out of the stored panel, join what has been researched, and gate it.
+
+    **The command that makes `V2-P4-004`, `V2-P4-005` and `V2-P4-023` reachable at all.** Before
+    it, the two-stage funnel's required input -- `ComponentCrossSection` -- was constructed
+    nowhere in `src/`, and the whole chain could be driven only by importing six modules by hand.
+
+    The usual invocation, against a panel `openalpha factor build` has written a tier into::
+
+        openalpha shortlist run --component reversal_1d/v1=1.0 --tier raw \\
+          --shortlist-size 50 --position-capital 100000 --year 2026 --horizon 5d \\
+          --min-tradable-ratio 0.30 --min-researched-ratio 0.50 --max-ranking-age-days 1 \\
+          --as-of 2026-01-16T09:00:00+00:00 --runtime-dir ./runtime
+
+    **The factor tier has to exist first.** `openalpha factor build` is what puts it there; a
+    store built only by `openalpha panel build` holds no factor partition and this command is
+    refused by name against it. `openalpha factor list` says which `--component` and `--transform`
+    are legal.
+
+    **Exit `0` is not "the list shipped".** It is "the gate ran and did not refuse". A list of two
+    names that nobody has researched, under `--min-researched-ratio 0`, is *admitted* and exits
+    `0` with an empty `admitted` array -- while the same list under `--min-researched-ratio 0.5`
+    is *refused* and exits `1` with `admitted: null` and the bar it missed. Those are two
+    different answers and telling them apart is what this command was written for; see
+    `SHORTLIST_EXIT`.
+    """
+    with _panel_command("shortlist run"):
+        instant = _panel_as_of(as_of)
+        try:
+            request = shortlist_request(
+                components=_shortlist_component_pairs(component),
+                tier=tier,
+                shortlist_size=shortlist_size,
+                position_capital=_factor_amount(position_capital, flag="--position-capital"),
+                as_of=instant,
+                years=year,
+                exchange=exchange,
+                horizon=horizon,
+                minimum_tradable_ratio=min_tradable_ratio,
+                minimum_researched_ratio=min_researched_ratio,
+                maximum_ranking_age_days=max_ranking_age_days,
+                code_commit=_resolved_code_commit(code_commit or None),
+                config_digest=_resolved_config_digest(config_digest or None),
+                transform=transform or None,
+                neutralization=neutralization or None,
+                evidence=_shortlist_evidence(evidence),
+            )
+            result = run_shortlist(_panel_store(runtime_dir), request, built_at=_panel_clock())
+        except ShortlistViewError as error:
+            raise _shortlist_fail(error) from error
+
+        if json_output:
+            typer.echo(json.dumps(shortlist_view(result), ensure_ascii=False, sort_keys=True))
+        else:
+            _echo_shortlist(result)
+        if result.is_blocked:
+            raise typer.Exit(code=int(SHORTLIST_EXIT["refused"]))
+
+
+def _shortlist_component_pairs(declared: Sequence[str]) -> tuple[tuple[str, float], ...]:
+    """`--component <key>=<weight>` as the pairs `shortlist_request` takes.
+
+    Parsed here rather than as two parallel `--factor`/`--weight` lists, which was the obvious
+    spelling and is the one that can silently go out of step: two lists of different lengths are a
+    weight attached to the wrong factor, and there is no arrangement of `typer.Option` that makes
+    that unconstructible. One token per component cannot.
+
+    `rsplit` on the last `=`, because a `factor_id` cannot contain one and a qualified key cannot
+    either -- so the split is unambiguous and a token with two of them is refused by the float
+    conversion rather than silently truncated.
+    """
+    pairs: list[tuple[str, float]] = []
+    for token in declared:
+        head, separator, tail = token.rpartition("=")
+        if not separator or not head.strip():
+            raise _panel_fail(
+                PanelExit.bad_request,
+                f"--component {token!r} is not `<factor>=<weight>`; each component names a factor "
+                "this build declares and the weight it carries in the composite, and neither has "
+                "a default. `openalpha factor list` prints every factor",
+            )
+        try:
+            pairs.append((head.strip(), float(tail)))
+        except ValueError as error:
+            raise _panel_fail(
+                PanelExit.bad_request,
+                f"--component {token!r} carries the weight {tail!r}, which is not a number",
+            ) from error
+    return tuple(pairs)
+
+
+def _shortlist_evidence(path: Path | None) -> dict[str, ShortlistEvidence]:
+    """`--evidence <file>` as the evidence-plane answers `rank_candidates` joins.
+
+    A file rather than a repeatable flag, because the value is a whole `SignalFrame` per subject --
+    a direction, a strength, a confidence, a horizon and its evidence ids -- and a command line
+    that took those as flags would be a serialisation format invented at a terminal.
+
+    Parsed by `shortlist_view.shortlist_evidence`, which is the same function the HTTP face's
+    `evidence` field goes through, so one document drives either channel and neither can come to
+    accept a shape the other refuses. This function's whole job is turning a *path* into the
+    object that parser takes.
+    """
+    if path is None:
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as error:
+        raise _panel_fail(
+            PanelExit.bad_request, f"--evidence {path} could not be read: {error}"
+        ) from error
+    except json.JSONDecodeError as error:
+        raise _panel_fail(
+            PanelExit.bad_request, f"--evidence {path} is not valid JSON: {error}"
+        ) from error
+    if not isinstance(payload, dict):
+        raise _panel_fail(
+            PanelExit.bad_request,
+            f"--evidence {path} holds a {type(payload).__name__}; it is a JSON object keyed by "
+            'subject, each value `{"signal": <SignalFrame>, "run_manifest_id": "..."}`',
+        )
+    return shortlist_evidence(payload)
+
+
+def _echo_shortlist(result: ShortlistRunResult) -> None:
+    """Print one shortlist verdict: what was read, what was cut, and whether it may ship.
+
+    The verdict line comes **first** and says `REFUSED` or `admitted` in words, because the one
+    thing a reader must not have to infer is which of the two this is -- an empty table under a
+    silent header reads identically for a refused list and for one nobody has researched, which is
+    the defect this whole issue is about.
+    """
+    clearance = result.clearance
+    measurement = clearance.measurement
+    if clearance.is_blocked:
+        typer.echo(f"verdict    REFUSED by {[block.code for block in clearance.blocks]}")
+    else:
+        admitted = clearance.admitted
+        typer.echo(f"verdict    admitted, {len(admitted)} candidate(s) may be published")
+    typer.echo(f"gate       {clearance.manifest.gate_manifest_id}")
+    typer.echo(
+        f"cross      {result.cross_section_as_of.isoformat()} on session "
+        f"{result.pricing_session.isoformat()} ({result.request.tier} tier)"
+    )
+    typer.echo(
+        f"funnel     {measurement.universe_count} listed -> {measurement.scored_count} scored -> "
+        f"{measurement.tradeable_count} tradeable -> {measurement.shortlist_count} shortlisted "
+        f"({result.funnel.coverage})"
+    )
+    researched = (
+        "not measurable"
+        if measurement.researched_ratio is None
+        else f"{measurement.researched_ratio:.4f}"
+    )
+    typer.echo(
+        f"measured   tradable={measurement.tradable_ratio:.4f} researched={researched} "
+        f"age={measurement.ranking_age_days}d"
+    )
+    typer.echo("rank  subject        score        evidence")
+    for rank, subject, score, evidence in shortlist_rows(result):
+        typer.echo(f"{rank:<5} {subject:<14} {score:<12} {evidence}")
+    for block in clearance.blocks:
+        typer.echo(f"blocked    {block.code}: {block.detail}", err=True)
 
 
 def main() -> None:

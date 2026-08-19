@@ -116,6 +116,7 @@ from openalpha_cn.factor_view import KNOWN_FACTOR_RUN_LIMITATIONS
 from openalpha_cn.panel.catalog import KNOWN_STORAGE_LIMITATIONS
 from openalpha_cn.panel_doctor import KNOWN_PANEL_LIMITATIONS
 from openalpha_cn.product.screening import KNOWN_SCREENING_LIMITATIONS
+from openalpha_cn.shortlist_view import KNOWN_SHORTLIST_VIEW_LIMITATIONS
 
 ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 SOURCE_ROOT: Final[Path] = ROOT / "src" / "openalpha_cn"
@@ -148,6 +149,7 @@ LIMITATION_REGISTRIES: Final[dict[str, Sequence[_Limitation]]] = {
     "KNOWN_RANKING_LIMITATIONS": KNOWN_RANKING_LIMITATIONS,
     "KNOWN_SHORTLIST_GATE_LIMITATIONS": KNOWN_SHORTLIST_GATE_LIMITATIONS,
     "KNOWN_SCREENING_LIMITATIONS": KNOWN_SCREENING_LIMITATIONS,
+    "KNOWN_SHORTLIST_VIEW_LIMITATIONS": KNOWN_SHORTLIST_VIEW_LIMITATIONS,
     "KNOWN_ADJUSTMENT_LIMITATIONS": KNOWN_ADJUSTMENT_LIMITATIONS,
     "KNOWN_PRICE_LIMITATIONS": KNOWN_PRICE_LIMITATIONS,
     "KNOWN_FINANCIAL_STATEMENT_LIMITATIONS": KNOWN_FINANCIAL_STATEMENT_LIMITATIONS,
@@ -162,7 +164,7 @@ LIMITATION_REGISTRIES: Final[dict[str, Sequence[_Limitation]]] = {
     "KNOWN_STORAGE_LIMITATIONS": KNOWN_STORAGE_LIMITATIONS,
     "KNOWN_PANEL_LIMITATIONS": KNOWN_PANEL_LIMITATIONS,
 }
-"""The twenty-four registries whose entries are identified by a `code`, keyed by their own names.
+"""The twenty-five registries whose entries are identified by a `code`, keyed by their own names.
 
 **None of `KNOWN_NEUTRALIZATION_LIMITATIONS`, `KNOWN_IC_LIMITATIONS`,
 `KNOWN_REDUNDANCY_LIMITATIONS`, `KNOWN_QUANTILE_PORTFOLIO_LIMITATIONS`,
@@ -212,6 +214,17 @@ reaches no trading calendar, and -- the one a reader is most likely to need -- t
 a coverage and age verdict and never a quality one.
 
 Together the two moved the totals from 211 / 69 to 225 / 69.
+
+`KNOWN_SHORTLIST_VIEW_LIMITATIONS` (`V2-P4-032` / `V2-P4-033`) is the twenty-fifth, and it is
+the first that bounds an **adapter** rather than a study, a verdict or a dataset. Its four
+entries say what the join between the panel plane and the two-stage funnel cannot recover:
+that the winsorizer's clip block is reconstructed from a tie at the maximum and therefore
+over-reports in the safe direction, that the cross section it screens is the newest one
+*visible* at the `as_of` and may be older than it, that the evidence plane's answers are
+supplied rather than run (this repository stores no `SignalFrame`, so a face that researched
+every shortlisted name would make `researched_ratio` unable to be anything but `1.0`), and
+that a neutralized-tier screen needs an exposure cross section this face does not load. It
+moved the totals from 225 / 69 to 229 / 69.
 
 Imported and named rather than reached through `importlib`: a test may import every one of
 these directly, so a name-to-module indirection would buy nothing and would hide from the
@@ -332,12 +345,12 @@ def test_the_registry_table_is_every_known_registry_in_the_source_tree() -> None
     }
 
     assert found == set(LIMITATION_REGISTRIES) | set(CODELESS_REGISTRIES)
-    assert len(LIMITATION_REGISTRIES) == 24
+    assert len(LIMITATION_REGISTRIES) == 25
     assert set(LIMITATION_REGISTRIES) & set(CODELESS_REGISTRIES) == set()
 
 
 def test_every_declared_limitation_code_is_named_in_executable_test_code() -> None:
-    """The binding itself, over all twenty-four code-carrying registries and all their entries.
+    """The binding itself, over all twenty-five code-carrying registries and all their entries.
 
     A code that appears nowhere but in prose is a code the suite has no opinion about: rename
     it and everything stays green while every citation of it silently stops resolving. That is
@@ -437,5 +450,5 @@ def test_the_registries_together_carry_the_entry_count_the_report_folds() -> Non
 
     assert len(codes["KNOWN_PANEL_LIMITATIONS"]) == folded + plane_wide + 1
     assert all(codes[registry] for registry in codes)
-    assert sum(len(entries) for entries in codes.values()) >= 225
+    assert sum(len(entries) for entries in codes.values()) >= 229
     assert len(codes["KNOWN_PANEL_LIMITATIONS"]) >= 69

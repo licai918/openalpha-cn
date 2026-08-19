@@ -4,8 +4,8 @@
 
 ## 对账结论
 
-- 功能总数: 180
-- 当前真实完成: 175 (97.22%)
+- 功能总数: 181
+- 当前真实完成: 176 (97.24%)
 - `UNREVIEWED=0`
 - `UNKNOWN=0`
 - `legacy_acceptance_rows=85` (历史散文验收、尚未绑定为可执行 pytest/CI 断言)
@@ -18,7 +18,7 @@
 | `DEFERRED` | 1 |
 | `ENHANCED_REPLACEMENT` | 20 |
 | `EXCLUDED` | 4 |
-| `NATIVE_COMPLETE` | 154 |
+| `NATIVE_COMPLETE` | 155 |
 
 ## 功能明细
 
@@ -204,6 +204,7 @@
 | `OA-RANK-002` | ranking | N calibrated against the winsorization's clip block, measured on both derived tiers | `NATIVE_COMPLETE` | `src/openalpha_cn/backtest/cross_section.py#upper_clip_block;src/openalpha_cn/backtest/cross_section.py#MAXIMUM_SHORTLIST;src/openalpha_cn/backtest/cross_section.py#MINIMUM_SHORTLIST;src/openalpha_cn/backtest/cross_section.py#_refusal_before_stage_two;src/openalpha_cn/panel_factors.py#CROSS_SECTION_STANDARD;src/openalpha_cn/panel_neutralization.py#INDUSTRY_AND_SIZE` | `tests/unit/backtest/test_cross_section.py` | `pytest` | `tests/unit/backtest/test_cross_section.py::test_the_shipped_transform_ties_the_top_and_the_neutralisation_hides_the_same_block` |
 | `OA-RANK-003` | ranking | CandidateRanking: the panel plane's shortlist joined to the evidence plane's conclusions | `NATIVE_COMPLETE` | `src/openalpha_cn/backtest/candidate_ranking.py#CandidateRanking;src/openalpha_cn/backtest/candidate_ranking.py#CandidateRankingManifest;src/openalpha_cn/backtest/candidate_ranking.py#RankedCandidate;src/openalpha_cn/backtest/candidate_ranking.py#CandidateExposure;src/openalpha_cn/backtest/candidate_ranking.py#CandidatePrediction;src/openalpha_cn/backtest/candidate_ranking.py#rank_candidates;src/openalpha_cn/backtest/candidate_ranking.py#build_ranking_manifest;src/openalpha_cn/backtest/candidate_ranking.py#ranking_content_digest;src/openalpha_cn/backtest/candidate_ranking.py#RankingRiskFlag;src/openalpha_cn/backtest/candidate_ranking.py#RANKING_RISK_FLAG_ORDER;src/openalpha_cn/backtest/candidate_ranking.py#RANKING_MANIFEST_UNADDRESSED_FIELDS;src/openalpha_cn/backtest/candidate_ranking.py#KNOWN_RANKING_LIMITATIONS` | `tests/unit/backtest/test_candidate_ranking.py;tests/unit/test_import_layering.py;tests/unit/test_known_limitation_registries.py` | `pytest` | `tests/unit/backtest/test_candidate_ranking.py::test_the_ranking_contract_cannot_reach_the_three_modules_that_make_an_order` |
 | `OA-RANK-004` | ranking | 因子暴露 is a characteristic and not a fitted loading; 风险标记 is closed where the signal's is open | `NATIVE_COMPLETE` | `src/openalpha_cn/backtest/candidate_ranking.py#CandidateExposure;src/openalpha_cn/backtest/candidate_ranking.py#_exposure_of;src/openalpha_cn/backtest/candidate_ranking.py#_risk_flags_of;src/openalpha_cn/backtest/candidate_ranking.py#RANKING_RISK_FLAG_CODES;src/openalpha_cn/backtest/candidate_ranking.py#RANKING_LIMITATION_CODES;src/openalpha_cn/domain/factor_neutralization.py#SecurityCharacteristic;src/openalpha_cn/domain/factor_neutralization.py#FactorNeutralizationStatistics;src/openalpha_cn/backtest/cross_section.py#ComponentScore` | `tests/unit/backtest/test_candidate_ranking.py` | `pytest` | `tests/unit/backtest/test_candidate_ranking.py::test_a_neutralised_top_rank_is_an_industry_and_size_ordering_the_exposure_makes_readable` |
+| `OA-RANK-005` | ranking | The stored panel reaches the two-stage funnel, and the funnel reaches a user: one adapter and three faces | `NATIVE_COMPLETE` | `src/openalpha_cn/shortlist_view.py#load_shortlist_cross_section;src/openalpha_cn/shortlist_view.py#run_shortlist;src/openalpha_cn/shortlist_view.py#shortlist_request;src/openalpha_cn/shortlist_view.py#shortlist_view;src/openalpha_cn/shortlist_view.py#clipped_from_the_tie_at_the_top;src/openalpha_cn/shortlist_view.py#SHORTLIST_VIEW_LIMITATION_CODES;src/openalpha_cn/cli.py#shortlist_run_command;src/openalpha_cn/cli.py#SHORTLIST_EXIT;src/openalpha_cn/api/app.py#SHORTLIST_HTTP_STATUS;src/openalpha_cn/sdk.py#run_shortlist` | `tests/integration/test_shortlist_interfaces.py;tests/unit/test_shortlist_view.py` | `pytest` | `tests/integration/test_shortlist_interfaces.py::test_a_blocked_shortlist_and_a_legitimately_empty_one_are_two_different_answers` |
 
 ## 边界
 

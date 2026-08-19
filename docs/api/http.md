@@ -281,6 +281,70 @@ The six verdicts (`survives`, `removed`, `reversed`, `amplified`, `no_baseline`,
 `not_measured`) are served with one sentence each in `GET /api/v1/factors` under
 `verdicts`, and printed by `openalpha factor list`.
 
+## Shortlists
+
+`POST /api/v1/shortlists/run` cuts the stored panel down to the names worth spending an
+evidence run on, joins whatever the evidence plane has already answered about them, and
+runs the shortlist gate over the result. It is the HTTP twin of `openalpha shortlist run`
+and of `OpenAlphaSDK.run_shortlist`; all three resolve through
+`shortlist_view.shortlist_request` and run through `shortlist_view.run_shortlist`.
+
+`components` is `[{"factor": "<qualified key or fct_ address>", "weight": <number>}]`, and
+`tier` is `raw`, `processed` or `neutralized`. A **raw**-tier screen takes no `transform`
+and may declare exactly one component — raw values carry each factor's own units, so
+summing two of them adds quantities that share no scale. A **processed** screen requires a
+`transform`, because that partition holds every transform of the factor and is narrowed by
+the one you name. A **neutralized** screen is refused by this route: the ranking it would
+produce needs the industry-and-size cross section its scores were neutralised against, and
+this face does not load one.
+
+`evidence` maps each researched subject to `{"signal": <SignalFrame>, "run_manifest_id":
+"rmf_…"}` and is **empty by default**, which is the ordinary first answer: the shortlist
+says which names are worth an evidence run, and nothing has been researched yet. A signal
+may carry its own `signal_id` — the field this service puts on every frame it hands out —
+and it is stripped before validation and then verified against the frame's content.
+Answers about names the cut did not reach are not an error; they come back under
+`evidence_not_shortlisted`.
+
+The factor tier is read at your `as_of`. **Everything the screen prices with — the
+calendar, the registry, the bars, the published bands, the halts and the name histories —
+is read at the resolved cross section's own instant**, which is at or before it. So a
+fortnight-old cross section is offered to the market of *its* session and never to a later
+one its factor values never saw. `cross_section.as_of` and `cross_section.pricing_session`
+are on every answer, because the cross section may legitimately be older than the `as_of`
+you asked about.
+
+### A refused list and an empty one are two different answers
+
+This is the property the route exists for.
+
+| Situation | Code | `is_blocked` | `admitted` |
+|---|---|---|---|
+| the gate ran and admitted the list | `200` | `false` | an array, possibly `[]` |
+| the gate ran and **refused** it | `409` | `true` | `null` |
+| no component has a stored cross section at or before the `as_of`, or the declared components disagree about which instant they share | `409` | — | — |
+| a partition this screen needs is missing, damaged, stale, or holds rows that were not knowable at `as_of` | `409` | — | — |
+| the request cannot be put at all (unknown factor, non-positive weight, processed tier with no transform, naive `as_of`) | `422` | — | — |
+| the endpoint itself broke; nothing was judged | `500` | — | — |
+
+`admitted: []` means the gate cleared a list every name of which came back unresearched,
+under a `minimum_researched_ratio` the caller declared they could live with. `admitted:
+null` with `409` means the gate refused, and `blocks[]` carries each bar with its `code`,
+its `detail`, the value `measured` and the value `required`. `measurement` — the universe,
+scored, tradeable, shortlist and candidate counts, both ratios and the ranking's age — is
+on **both** verdicts, so a list that scraped over a bar is distinguishable from one that
+sailed over it.
+
+The three refusal rows carry `{"detail": {"reason", "message"}}` and no `is_blocked`; the
+two verdict rows carry `is_blocked` and no `detail`. A client switches on
+`"detail" in body` first, exactly as it does for the panel plane's two `409`s.
+`api/app.py#SHORTLIST_HTTP_STATUS` is the table.
+
+`openalpha shortlist run` maps the same names onto exit codes
+(`cli.py#SHORTLIST_EXIT`) and reuses `PanelExit`: `0` admitted, `1` for every `409` row —
+**including a refused list** — `3` for `422`, `5` for an unhandled defect. A scheduled job
+that cut a shortlist, had it refused and exited `0` would be no gate at all.
+
 The portfolio endpoint is intentionally stateless: callers submit the immutable
 `PortfolioState`, `PortfolioOrder`, `MarketBar`, and optional `PortfolioLimits`,
 then persist the returned `PortfolioTransition` in their own workflow. It is a
