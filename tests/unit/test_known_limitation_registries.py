@@ -15,7 +15,7 @@ inside a docstring, which is prose the runner never reads.
 ## Why the mechanism is not copied as it stands
 
 `007`'s form is "one test per entry, named after the entry". At three entries that is exactly
-right. Across the twenty-three code-carrying registries there are **218** entries -- 69 in
+right. Across the twenty-four code-carrying registries there are **225** entries -- 69 in
 `KNOWN_PANEL_LIMITATIONS` alone -- and it stops being right somewhere well before that, for
 three reasons and not one:
 
@@ -41,10 +41,15 @@ The figures above are re-measured whenever a registry grows -- `V2-P3-017` added
 financial-statement limitation and moved them from 187 / 64, `V2-P3-016` added a whole
 twentieth registry (`KNOWN_INDEX_PRICE_LIMITATIONS`, four entries) and moved them from 189 / 65,
 `V2-P4-004` added a twenty-first (`KNOWN_CROSS_SECTION_LIMITATIONS`, seven entries) and moved
-them from 197 / 69, `V2-P4-005` added a twenty-second (`KNOWN_RANKING_LIMITATIONS`, seven
-entries) and moved them from 204 / 69, and `V2-P4-023` added a twenty-third
-(`KNOWN_SHORTLIST_GATE_LIMITATIONS`, seven entries) and moved them from 211 / 69 -- and they had
-already drifted twice before the floor existed:
+them from 197 / 69, and `V2-P4-005` added a twenty-second (`KNOWN_RANKING_LIMITATIONS`, seven
+entries) and moved them from 204 / 69. `V2-P4-006` and `V2-P4-023` then arrived together in one
+parallel wave, adding the twenty-third and twenty-fourth (`KNOWN_SCREENING_LIMITATIONS` and
+`KNOWN_SHORTLIST_GATE_LIMITATIONS`, seven entries each) and moving them from 211 / 69 to
+225 / 69. That pair is worth reading twice: neither knew about the other, **each wrote
+`== 23` and `>= 218`**, and because the two edits were textually identical git merged them
+without a conflict -- so the arithmetic below said twenty-three when twenty-four registries
+were present, and only this module's own assertion, computed off the live table, said so. The
+counts had already drifted twice before the floor existed:
 `128 entries -- 59 in KNOWN_PANEL_LIMITATIONS` was still written here
 when the counts were 134 and 62, because the P2 merge that folded in an eleventh registry updated
 the arithmetic below and left the prose alone. That is the drift this module exists to stop,
@@ -110,6 +115,7 @@ from openalpha_cn.domain.stock_universe import KNOWN_UNIVERSE_LIMITATIONS
 from openalpha_cn.factor_view import KNOWN_FACTOR_RUN_LIMITATIONS
 from openalpha_cn.panel.catalog import KNOWN_STORAGE_LIMITATIONS
 from openalpha_cn.panel_doctor import KNOWN_PANEL_LIMITATIONS
+from openalpha_cn.product.screening import KNOWN_SCREENING_LIMITATIONS
 
 ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 SOURCE_ROOT: Final[Path] = ROOT / "src" / "openalpha_cn"
@@ -141,6 +147,7 @@ LIMITATION_REGISTRIES: Final[dict[str, Sequence[_Limitation]]] = {
     "KNOWN_CROSS_SECTION_LIMITATIONS": KNOWN_CROSS_SECTION_LIMITATIONS,
     "KNOWN_RANKING_LIMITATIONS": KNOWN_RANKING_LIMITATIONS,
     "KNOWN_SHORTLIST_GATE_LIMITATIONS": KNOWN_SHORTLIST_GATE_LIMITATIONS,
+    "KNOWN_SCREENING_LIMITATIONS": KNOWN_SCREENING_LIMITATIONS,
     "KNOWN_ADJUSTMENT_LIMITATIONS": KNOWN_ADJUSTMENT_LIMITATIONS,
     "KNOWN_PRICE_LIMITATIONS": KNOWN_PRICE_LIMITATIONS,
     "KNOWN_FINANCIAL_STATEMENT_LIMITATIONS": KNOWN_FINANCIAL_STATEMENT_LIMITATIONS,
@@ -155,7 +162,7 @@ LIMITATION_REGISTRIES: Final[dict[str, Sequence[_Limitation]]] = {
     "KNOWN_STORAGE_LIMITATIONS": KNOWN_STORAGE_LIMITATIONS,
     "KNOWN_PANEL_LIMITATIONS": KNOWN_PANEL_LIMITATIONS,
 }
-"""The twenty-one registries whose entries are identified by a `code`, keyed by their own names.
+"""The twenty-four registries whose entries are identified by a `code`, keyed by their own names.
 
 **None of `KNOWN_NEUTRALIZATION_LIMITATIONS`, `KNOWN_IC_LIMITATIONS`,
 `KNOWN_REDUNDANCY_LIMITATIONS`, `KNOWN_QUANTILE_PORTFOLIO_LIMITATIONS`,
@@ -189,13 +196,22 @@ on the funnel's order), what it cannot yet carry (a model prediction), what its 
 and is not (a characteristic, never a fitted loading), and why D16's `绝不直接创建组合订单` is four
 lint-imports contracts rather than a sentence.
 
-`KNOWN_SHORTLIST_GATE_LIMITATIONS` (`V2-P4-023`) is the twenty-third and moved the totals from
-211 / 69. Its seven entries bound a *verdict*: the third gate between a market and a published
-candidate list, sitting above `V2-P4-004`'s per-security filter and below nothing. They say which
-denominator its coverage bar divides by and the 3/7-against-3/8 measurement that chose it, that
-its freshness clock is the one field the ranking's own identity excludes, that the clock counts
-calendar days because this leaf reaches no trading calendar, and -- the one a reader is most
-likely to need -- that clearing it is a coverage and age verdict and never a quality one.
+`KNOWN_SCREENING_LIMITATIONS` (`V2-P4-006`) is the twenty-third. Its seven entries bound a
+*reading*: a governed screen re-orders completed runs and writes nothing, so its entries say
+what the ordering is not (an enforcement -- no ledger and no runtime gate verdict moves), what
+its severity source cannot do (reconcile two shipped gates that still read disjoint subsets of
+an open flag set, or tell an unrecognised flag from a misspelled one), and why the committee
+half of that source is read through a probe.
+
+`KNOWN_SHORTLIST_GATE_LIMITATIONS` (`V2-P4-023`) is the twenty-fourth. Its seven entries bound a
+*verdict*: the third gate between a market and a published candidate list, sitting above
+`V2-P4-004`'s per-security filter and below nothing. They say which denominator its coverage bar
+divides by and the 3/7-against-3/8 measurement that chose it, that its freshness clock is the one
+field the ranking's own identity excludes, that the clock counts calendar days because this leaf
+reaches no trading calendar, and -- the one a reader is most likely to need -- that clearing it is
+a coverage and age verdict and never a quality one.
+
+Together the two moved the totals from 211 / 69 to 225 / 69.
 
 Imported and named rather than reached through `importlib`: a test may import every one of
 these directly, so a name-to-module indirection would buy nothing and would hide from the
@@ -316,12 +332,12 @@ def test_the_registry_table_is_every_known_registry_in_the_source_tree() -> None
     }
 
     assert found == set(LIMITATION_REGISTRIES) | set(CODELESS_REGISTRIES)
-    assert len(LIMITATION_REGISTRIES) == 23
+    assert len(LIMITATION_REGISTRIES) == 24
     assert set(LIMITATION_REGISTRIES) & set(CODELESS_REGISTRIES) == set()
 
 
 def test_every_declared_limitation_code_is_named_in_executable_test_code() -> None:
-    """The binding itself, over all twenty-one code-carrying registries and all their entries.
+    """The binding itself, over all twenty-four code-carrying registries and all their entries.
 
     A code that appears nowhere but in prose is a code the suite has no opinion about: rename
     it and everything stays green while every citation of it silently stops resolving. That is
@@ -421,5 +437,5 @@ def test_the_registries_together_carry_the_entry_count_the_report_folds() -> Non
 
     assert len(codes["KNOWN_PANEL_LIMITATIONS"]) == folded + plane_wide + 1
     assert all(codes[registry] for registry in codes)
-    assert sum(len(entries) for entries in codes.values()) >= 218
+    assert sum(len(entries) for entries in codes.values()) >= 225
     assert len(codes["KNOWN_PANEL_LIMITATIONS"]) >= 69
