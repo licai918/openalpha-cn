@@ -109,6 +109,22 @@ filtered door through `panel_ingest._read_visible_price_session`; `load_industry
 not and is not going to, for the reason the paragraph above gives. The fourth entry below is
 that grant, and this paragraph is the correction of the sentence above it.
 
+**`V2-P4-027` then falsified the second half of that sentence's *reason*, and this paragraph is
+that correction.** `load_industry_histories` is indeed still on the un-gated door and is staying
+there -- but "the industry corpus cannot tell a withheld row from an absent one" turned out to be
+a claim about *that signature* rather than about the dataset. It returns histories, whose only
+bound is `SecurityIndustryHistory.answerable_through`, a **year**; a mid-year `as_of` has no
+honest year to name, so on that door the objection really is unanswerable.
+`panel_ingest.load_industry_cross_section` answers it two ways at once: it takes the **day** as an
+argument and resolves it inside, so no interval with a withheld close escapes unbounded; and it
+compares each partition's visible row count against that partition's own **date census**
+(`PartitionCoverage.dates` counts rows per event date, and a membership row's `available_time` is
+its own event floored at 2021-12-13), so a row the census counted and the predicate removed --
+**withheld** -- and a row the census never counted -- **absent** -- are two different numbers and
+any difference between them is a named refusal. That is an equality rather than
+`_read_visible_price_session`'s pair of permitted shapes, and it is checked per year on every
+read.
+
 **`panel_doctor.py` (`V2-P3-019`) is the third, and its answer is the sharpest of the three
 because it is the only caller here that is not reading a partition it wrote.** `_factor_seal_check`
 takes the filtered read over the six derived partitions -- three tiers of answers and the three
@@ -130,10 +146,14 @@ The un-filtered door was not an option: `read_if_ready` refuses a year partition
 health report run at any instant inside the year would have been unable to look at the plane at
 all -- which is the state `V2-P3-019` found and is fixing.
 
-**`panel_ingest.py` (`V2-P4-026`) is the fourth, and its answer is the strongest of the four,
-because for this caller the question has a measured answer rather than an argued one.** The
-single call site is `_read_visible_price_session`, reached only from `load_daily_valuations`,
-and it always passes `filters={"trade_date": <one session>}`. It is the first caller in `src/`
+**`panel_ingest.py` (`V2-P4-026`, widened by `V2-P4-027`) is the fourth, and its answer is the
+strongest of the four, because for this caller the question has a measured answer rather than an
+argued one.** It has **two** call sites, one per dataset, and each answers the objection with a
+different measurement -- which is the whole shape of this grant and the reason a single sentence
+cannot cover it.
+
+The first is `_read_visible_price_session`, reached only from `load_daily_valuations`,
+and it always passes `filters={"trade_date": <one session>}`. It was the first caller in `src/`
 to pass `filters` at all, and that is the whole of why it is sound:
 `providers/tushare.py::_daily_close_timeline` dates every price row's `available_time` at
 `DAILY_AVAILABILITY_TIME` on its own `trade_date`, so one session's rows carry one availability
@@ -152,6 +172,28 @@ what would be indistinguishable from a thin one. Both refusals are named separat
 readiness codes, and a session whose 16:30 has not arrived at `as_of` is refused before any
 partition is touched. `tests/integration/panel/test_daily_panel_ingest.py` drives all four
 doors.
+
+The second is `_read_visible_membership_rows`, reached only from
+`load_industry_cross_section`, and it passes **no** `filters` at all -- there is no filter that
+would make `index_member_all` all-or-nothing, because the dataset is event-driven and a partial
+partition is what an honest mid-year read of it returns. Its measurement is the partition's own
+**date census** instead: `panel_coverage` records how many rows carry each event date, and
+`providers/tushare.py::_taxonomy_backfill_timeline` dates a row's availability at its own event
+floored at 2021-12-13, so once that floor is behind `as_of` the rows the predicate keeps are
+*exactly* the rows the census places at or before `as_of`'s day. The read compares the two counts
+per year and refuses on any difference -- an **equality**, not a pair of permitted shapes.
+Measured on the four-partition fixture at `as_of` 2024-06-30T04:00Z: 1993, 2003 and 2017 each
+answer census-count rows with 0 withheld, and 2024 answers 0 rows with 2 withheld against a census
+count of 0, because both of its events fall on 2024-07-29 and 2024-07-30.
+
+Being able to *see* the difference is not the whole grant here, because for this dataset the
+dangerous shortness is not a short row set at all -- it is an **interval with no end in it**. So
+the second half of the answer is that the caller returns no history: it takes the `day` as an
+argument, resolves it inside, and refuses a `day` later than the newest event `as_of` could see,
+a `day` whose year has a stored partition the read did not name, and an `as_of` before the
+taxonomy existed. `tests/integration/panel/test_industry_ingest.py` drives all of them, and holds
+the refused day against the answer the same day gives once the revision has taken effect, so that
+the refusal is shown to be protecting a real difference rather than being cautious about nothing.
 """
 
 

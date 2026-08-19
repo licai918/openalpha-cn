@@ -299,7 +299,7 @@ import operator
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from statistics import median
 from types import MappingProxyType
 from typing import Final, cast
@@ -359,9 +359,12 @@ from openalpha_cn.domain.industry_classification import (
     INDUSTRY_MEMBERSHIP_DATASET,
     INDUSTRY_MEMBERSHIP_PANEL_COLUMNS,
     INDUSTRY_MEMBERSHIP_TAXONOMY,
+    INDUSTRY_TAXONOMY_EFFECTIVE_FROM,
     INDUSTRY_TREE_DATASET,
     INDUSTRY_TREE_PANEL_COLUMNS,
+    IndustryAnswer,
     IndustryClassificationError,
+    IndustryHorizonError,
     IndustryTree,
     SecurityIndustryHistory,
     industry_histories_from_panel_rows,
@@ -2271,14 +2274,12 @@ def _read_visible_price_session(
     build's `as_of`, every residual of year Y became visible at one instant. Roadmap section 11
     records the consequence -- annual walk-forward and nothing finer.
 
-    ## Why a row predicate is safe here and is not safe for `index_member_all`
+    ## Why a row predicate is safe here, and how `index_member_all` had to answer it differently
 
     The objection `tests/unit/panel/test_visible_read_callers.py` makes every new caller of
-    `read_visible_at` answer is *can this caller tell a withheld row from an absent one*. For the
-    industry corpus the answer is no, which is why `SecurityIndustryHistory.answerable_through`
-    exists and why that half is deliberately left on the unfiltered door. For a **session-scoped**
-    `daily_basic` read the answer is yes, and it is a measured property of the dataset's shape
-    rather than an argument about it:
+    `read_visible_at` answer is *can this caller tell a withheld row from an absent one*. For a
+    **session-scoped** `daily_basic` read the answer is yes, and it is a measured property of the
+    dataset's shape rather than an argument about it:
 
     `providers/tushare.py::_daily_close_timeline` dates every price row's `available_time` at
     `DAILY_AVAILABILITY_TIME` on its own `trade_date`, so **every row of one session carries one
@@ -2291,6 +2292,18 @@ def _read_visible_price_session(
     **absent** row, and it reads as one), while 2026-01-12, 2026-01-13 and 2026-01-16 each answer
     0 rows with 8 withheld. The two situations are two different pairs of numbers, and this
     function turns the second into a refusal rather than into an empty cross section.
+
+    **This docstring's claim about the other dataset was too strong and `V2-P4-027` corrected
+    it.** It read "for the industry corpus the answer is no, which is why
+    `SecurityIndustryHistory.answerable_through` exists and why that half is deliberately left on
+    the unfiltered door". The premise is right and the conclusion was wrong. `index_member_all`
+    genuinely has no all-or-nothing shape and never will -- it is event-driven and a partial
+    partition is what an honest mid-year read of it returns -- but that is not the only way to
+    tell a withheld row from an absent one. `load_industry_cross_section` tells them apart from
+    the partition's own **date census**, which counts rows per event date and therefore says
+    exactly how many rows an `as_of` must see; and it declines to hand back a history at all, so
+    the interval-with-no-end that `answerable_through` exists for cannot escape. What stayed true
+    is that `load_industry_histories` itself does not take the filtered door.
 
     ## The three refusals, and why each one is a separate name
 
@@ -3225,6 +3238,16 @@ def load_industry_histories(
     a later day with an industry the security had already left. A read covering every stored year
     gets no bound. See
     `KNOWN_INDUSTRY_LIMITATIONS.a_partial_year_read_cannot_see_an_interval_close`.
+
+    **This door stays on `read_if_ready` and `V2-P4-027` did not move it.** A membership year is
+    unreadable here until its last adjustment takes effect, which on the real corpus is the annual
+    review, so a mid-year `as_of` inside a year that holds one is refused whole. That is not a
+    defect to be filtered away at this signature: the value this returns is a *history*, and its
+    only bound is `answerable_through`, a **year** -- so a mid-year read could either be bounded
+    at the year before (refusing the day the caller asked about) or at the year itself (permitting
+    a December question a June `as_of` cannot answer). Neither is the honest bound, which is
+    `as_of`'s own day. `load_industry_cross_section` is the door that takes that day as an
+    argument and can therefore be as-of-sensitive without an interval escaping unbounded.
     """
     requested = tuple(sorted(set(years)))
     if not requested:
@@ -3254,6 +3277,253 @@ def load_industry_histories(
         taxonomy=INDUSTRY_MEMBERSHIP_TAXONOMY,
         answerable_through=(skipped[0] - 1) if skipped else None,
     )
+
+
+def load_industry_cross_section(
+    store: PanelStore,
+    *,
+    day: date,
+    years: Sequence[int],
+    as_of: datetime,
+    max_staleness: timedelta | None,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> Mapping[str, IndustryAnswer]:
+    """Every security's industry on `day` as it was knowable at `as_of`, or a refusal
+    (`V2-P4-027`).
+
+    `load_industry_histories`' as-of-sensitive twin, and the whole of `V2-P4-027`. It answers the
+    question that door cannot: *"which industry was each security in on this day, read from
+    inside a membership year that has not finished happening?"*
+
+    ## The problem, in two numbers
+
+    `read_if_ready` decides `not_yet_knowable` on a partition's **max** `available_time`, and a
+    membership partition is the events of one calendar year, so a year is unreadable until its
+    last adjustment takes effect. On the real corpus that last adjustment is the annual
+    constituent review -- 613 rows effective 2021-07-30 and 255 effective 2022-07-29 -- so a
+    walk-forward that fetches today and replays history is refused once a year, every year.
+    `V2-P4-026` removed the same bottleneck from `daily_basic`; after it this dataset was the only
+    input still refusing a mid-year `as_of` outright.
+
+    ## Why this is not `V2-P4-026`'s solution with the dataset name changed
+
+    `daily_basic`'s safety is an **all-or-nothing** shape: every row of one session carries one
+    `available_time`, so a session read is either wholly visible or wholly withheld, and the two
+    are two different pairs of numbers. `index_member_all` has no such shape and cannot be given
+    one -- it is event-driven, its rows carry as many availability instants as there are event
+    days, and a partial partition is exactly what an honest mid-year read *should* return. The
+    objection `tests/unit/panel/test_visible_read_callers.py` makes every caller answer -- can
+    this one tell a withheld row from an absent one? -- therefore has to be answered a different
+    way, and it is answered twice over:
+
+    **First, by the partition's own date census.** `panel_coverage` records how many rows carry
+    each event date (`DateCoverage`), and `providers/tushare.py::_taxonomy_backfill_timeline`
+    dates a row's availability at its own event, floored at the taxonomy's effective date. So
+    once the floor is behind `as_of`, "visible" and "event date at or before `as_of`" are the
+    same set, and the census says **exactly** how many rows that is. This read compares the two
+    counts per year and refuses on any difference. A withheld row is one the census counted and
+    the predicate removed; an absent row is one the census never counted. That is a stronger
+    answer than `V2-P4-026`'s, because it is an equality rather than a partition of the row set
+    into two allowed shapes: a partition whose clocks are not the provider's is refused however
+    it is wrong.
+
+    **Second, by refusing to hand back a history at all.** The fail-open this dataset invites is
+    not a short row set, it is an *interval with no end in it*: an assignment whose closing row is
+    withheld reassembles as one that never closed, and answering a later day from it names an
+    industry the security had already left. `SecurityIndustryHistory.answerable_through` closes
+    that at year granularity, which is exactly the granularity a mid-year `as_of` needs and does
+    not have -- the honest bound at `as_of` 2024-06-30 is *2024-06-30*, and `answerable_through`
+    can only say 2023 (refusing the day the caller asked about) or 2024 (permitting 2024-12-31,
+    which is the fail-open). So this door does not return histories. It takes the day as an
+    argument, resolves it inside, and returns the cross section -- and the day it will not
+    resolve is refused rather than answered.
+
+    ## The five refusals, and why each one is a separate name
+
+    - **A `day` later than the newest event `as_of` could see is refused before any read.** A
+      membership event becomes knowable at midnight (`date_timezone`) on the day it takes effect,
+      so `as_of`'s own day in that zone is the last day this read can speak for. Beyond it, an
+      open interval and a withheld close are the same rows, which is the one situation this whole
+      issue exists to keep out of an answer.
+    - **An `as_of` before the taxonomy's effective date is refused before any read.** Every
+      membership row's availability is floored there (`INDUSTRY_TAXONOMY_EFFECTIVE_FROM`), so the
+      predicate would withhold the entire corpus and hand back an empty mapping -- a market with
+      no industries in it, which is a different fact from a classification that did not exist yet.
+      This is the outer bound `V2-P4-027` explicitly does **not** move, and it is what makes
+      2021-12-13 the earliest `as_of` anything here can serve.
+    - **A stored membership year at or before `day`'s year that this read did not name is
+      refused.** `answerable_through`'s rule, asked about a day instead of about a year: an
+      assignment's close is filed in its own year, so an unread year at or before `day` can hold
+      the close that ends an interval this cross section is about to report as current.
+    - **A partition whose visible row count disagrees with its own date census is refused.** The
+      equality above, checked rather than assumed, because the clock it rests on lives in a
+      provider one package away and nothing in the store enforces it.
+    - **Anything the readiness rule table finds outside `ROW_FILTERABLE_ISSUE_CODES` refuses the
+      read**, at partition scope, through the same `assess_readiness` call `read_if_ready` makes.
+
+    ## `max_staleness` is decided at partition scope, which is `V2-P4-026`'s correction inherited
+
+    `read_visible_at` re-decides `stale` over the rows it is about to return, and the rows here
+    are a whole dataset's history. Reclassifications happen in bursts around an annual review --
+    2016 carries 4 of the corpus's 2,004 transitions -- so a bound re-decided against the newest
+    *visible* event would refuse nearly every honest read for a reason that has nothing to do with
+    whether the panel has fallen behind. So the caller's bound is decided once, at partition
+    scope, through exactly the verdict `read_if_ready` would have returned, and the requirement
+    handed to the filtered read waives it. Same function, same rule table, same scope as the
+    unfiltered door.
+
+    ## What it does not promise
+
+    Everything `read_visible_at`'s own "what it does not promise" says, plus one thing specific to
+    this dataset: `KNOWN_INDUSTRY_LIMITATIONS.every_pre_2021_answer_is_a_backfill` is untouched
+    here. A cross section for a 2015 day read at a 2022 `as_of` is SW2021's opinion about 2015,
+    which `IndustryAnswer.is_backfilled` says on every row and this function neither hides nor
+    fixes. A security with no assignment covering `day` -- including one of the 49 measured
+    coverage holes -- is **absent from the mapping** rather than raising, which is
+    `SecurityIndustryHistory.is_classified_on`'s distinction and the same fold
+    `panel_neutralization._industry_answer` already makes; what is no longer folded in with it is
+    "this read cannot speak for that day", which is now one of the refusals above.
+    """
+    requested = tuple(sorted(set(years)))
+    if not requested:
+        raise IndustryClassificationError(
+            "load_industry_cross_section needs at least one assignment year; a read of no years "
+            "would produce a cross section with no securities in it, which is indistinguishable "
+            "from a market nobody has ever classified"
+        )
+    zone = _resolve_timezone(date_timezone)
+    knowable_through = as_of.astimezone(zone).date()
+    if day > knowable_through:
+        raise PanelStorageError(
+            f"{INDUSTRY_MEMBERSHIP_DATASET} cannot be read for {day.isoformat()} at "
+            f"{as_of.isoformat()}: a membership event becomes knowable at midnight "
+            f"{date_timezone} on the day it takes effect, so the newest one this read can see is "
+            f"{knowable_through.isoformat()}. On a later day an assignment that is open only "
+            "because its closing row had not happened yet is indistinguishable from one that "
+            "genuinely never ended, and answering it would name an industry the security may "
+            "already have left"
+        )
+    floor = datetime.combine(
+        INDUSTRY_TAXONOMY_EFFECTIVE_FROM[INDUSTRY_MEMBERSHIP_TAXONOMY], time(0, 0), tzinfo=zone
+    )
+    if as_of < floor:
+        raise PanelStorageError(
+            f"{INDUSTRY_MEMBERSHIP_DATASET} cannot be read at {as_of.isoformat()}: every "
+            f"membership row's availability is floored at {floor.isoformat()}, the instant "
+            f"{INDUSTRY_MEMBERSHIP_TAXONOMY} came into force, so no row of any partition was "
+            "knowable then. A visibility-filtered read would withhold the whole corpus and hand "
+            "back an empty cross section, which says the market had no industries rather than "
+            "that this classification did not exist yet"
+        )
+    stored = sorted(set(store.registered_years(INDUSTRY_MEMBERSHIP_DATASET)))
+    skipped = [year for year in stored if year not in set(requested)]
+    if skipped and skipped[0] <= day.year:
+        raise PanelStorageError(
+            f"{INDUSTRY_MEMBERSHIP_DATASET} cannot answer {day.isoformat()}: the store holds a "
+            f"{skipped[0]} partition this read did not name, and an assignment's close is stored "
+            "as its own row in its own year, so an interval that ended there is indistinguishable "
+            "here from one still open. Name every stored year at or before "
+            f"{day.year} in `years`, or ask about a day before {skipped[0]}"
+        )
+    requirement = industry_membership_requirement(
+        years=requested, as_of=as_of, max_staleness=max_staleness
+    )
+    rows = _read_visible_membership_rows(store, requirement, as_of=as_of)
+    histories = industry_histories_from_panel_rows(
+        rows,
+        taxonomy=INDUSTRY_MEMBERSHIP_TAXONOMY,
+        answerable_through=(skipped[0] - 1) if skipped else None,
+    )
+    answers: dict[str, IndustryAnswer] = {}
+    for ts_code, history in histories.items():
+        try:
+            answers[ts_code] = history.industry_on(day)
+        except IndustryHorizonError:
+            # No assignment covers `day` in what this read could see. Absent from the cross
+            # section rather than raised, for `is_classified_on`'s reason: an unclassified day is
+            # ordinary data -- 3% of a 2015 cross section -- and the day this read is *not
+            # allowed* to speak for was refused above, so the two can no longer arrive here as
+            # one exception.
+            continue
+    return MappingProxyType(answers)
+
+
+def _read_visible_membership_rows(
+    store: PanelStore,
+    requirement: ReadinessRequirement,
+    *,
+    as_of: datetime,
+) -> tuple[tuple[object, ...], ...]:
+    """Every membership row of `requirement.years` that was knowable at `as_of`, or a refusal.
+
+    The two-step `_read_visible_price_session` established, with the third step this dataset needs
+    in place of the all-or-nothing check that dataset gets for free.
+
+    **Step one** runs `assess_readiness` on the caller's own requirement -- the same function, the
+    same rule table and the same partition scope as `read_if_ready` -- and refuses on anything
+    outside `ROW_FILTERABLE_ISSUE_CODES`. That is where `max_staleness` is decided, and deciding
+    it here is what stops `read_visible_at`'s slice-scope recheck from re-deciding it against the
+    newest *reclassification*, which is an annual event and not a measure of whether the panel has
+    fallen behind.
+
+    **Step two** takes the filtered read per year with the bound waived.
+
+    **Step three** is the check that makes this caller's answer to
+    `tests/unit/panel/test_visible_read_callers.py`'s objection a measurement rather than an
+    argument. The partition's coverage record counts rows per event date, and a membership row's
+    `available_time` is its own event floored at the taxonomy's effective date, so with that floor
+    already behind `as_of` the rows the predicate keeps are exactly the rows the census places at
+    or before `as_of`'s own day. The two counts are compared and any difference refuses the read:
+    a row the census counted and the predicate removed is **withheld**, a row the census never
+    counted is **absent**, and a cross section short by the first is indistinguishable from one
+    honestly missing the second.
+
+    The census's own `date_timezone` is what `as_of` is converted in, not the caller's: the
+    census's dates were resolved in that zone, and comparing them against a day computed in
+    another would be comparing two different calendars.
+    """
+    gate = store.assess_readiness(requirement)
+    if {issue.code for issue in gate.issues} - ROW_FILTERABLE_ISSUE_CODES:
+        raise PanelStorageError(
+            f"the industry classification cannot be read at {as_of.isoformat()}: "
+            f"{[issue.code for issue in gate.issues]}; "
+            f"{'; '.join(issue.detail for issue in gate.issues)}"
+        )
+    filtered = replace(requirement, max_staleness=None)
+    rows: list[tuple[object, ...]] = []
+    for year in requirement.years:
+        outcome = store.read_visible_at(
+            filtered, year=year, columns=INDUSTRY_MEMBERSHIP_PANEL_COLUMNS
+        )
+        if outcome.is_blocked:
+            raise PanelStorageError(
+                f"the industry classification cannot be read at {as_of.isoformat()}: "
+                f"{[issue.code for issue in outcome.blocking_issues]}; "
+                f"{'; '.join(issue.detail for issue in outcome.blocking_issues)}"
+            )
+        coverage = store.read_coverage(requirement.dataset, year)
+        if coverage is None:
+            raise PanelStorageError(
+                f"{requirement.dataset} year={year} passed readiness with no coverage record, so "
+                "the row census this read checks the visible slice against does not exist"
+            )
+        census_day = as_of.astimezone(_resolve_timezone(coverage.date_timezone)).date()
+        happened = sum(
+            entry.row_count for entry in coverage.dates if entry.event_date <= census_day
+        )
+        if len(outcome.rows) != happened:
+            raise PanelStorageError(
+                f"{requirement.dataset} year={year} holds {happened} row(s) whose event had "
+                f"already happened at {as_of.isoformat()} and {len(outcome.rows)} of them were "
+                f"visible ({outcome.withheld_row_count} row(s) withheld in all). A membership "
+                "row's availability is its own event floored at the taxonomy's effective date, so "
+                "those two numbers are the same number on a partition this read may answer from; "
+                "where they differ, a row is being withheld for a reason this read cannot see and "
+                "a cross section short by it is indistinguishable from one where the row does not "
+                "exist"
+            )
+        rows.extend(outcome.rows)
+    return tuple(rows)
 
 
 def load_industry_trees(
