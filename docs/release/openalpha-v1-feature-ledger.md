@@ -8,7 +8,7 @@
 - 当前真实完成: 175 (97.22%)
 - `UNREVIEWED=0`
 - `UNKNOWN=0`
-- `legacy_acceptance_rows=86` (历史散文验收、尚未绑定为可执行 pytest/CI 断言)
+- `legacy_acceptance_rows=85` (历史散文验收、尚未绑定为可执行 pytest/CI 断言)
 
 ## 状态分布
 
@@ -100,7 +100,7 @@
 | `OA-BOUND-004` | boundary | No embedded provider secrets | `EXCLUDED` | `SECURITY.md#Credential-handling` | `tests/unit/test_repository_assets.py` | `legacy-prose` | `Tracked-file scan finds no secret value.` |
 | `OA-BOUND-005` | boundary | Graphical agent flow builder | `DEFERRED` | `docs/specs/openalpha-cn-v1-spec.md#Out-of-scope` | `docs/specs/openalpha-cn-v1-spec.md` | `not-applicable` | `Future version requires schema-safe graph validation.` |
 | `OA-BATCH-001` | batch | Durable batch task queue | `NATIVE_COMPLETE` | `src/openalpha_cn/batch_contracts.py#BatchResearchTask;src/openalpha_cn/storage/batch.py#SQLiteBatchTaskStore` | `tests/integration/test_batch_research.py` | `legacy-prose` | `Submitted tasks and item results survive store reopen.` |
-| `OA-BATCH-002` | batch | Bounded batch concurrency | `NATIVE_COMPLETE` | `src/openalpha_cn/runtime/batch.py#BatchResearchService` | `tests/integration/test_batch_research.py` | `legacy-prose` | `Worker count is validated between 1 and 32.` |
+| `OA-BATCH-002` | batch | Bounded batch concurrency | `NATIVE_COMPLETE` | `src/openalpha_cn/runtime/batch.py#BatchResearchService;src/openalpha_cn/batch_contracts.py#MAX_BATCH_WORKERS` | `tests/integration/test_batch_research.py;tests/integration/test_batch_concurrency_ceiling.py` | `pytest` | `tests/integration/test_batch_concurrency_ceiling.py::test_the_api_refuses_a_concurrency_above_the_declared_ceiling` |
 | `OA-BATCH-003` | batch | Batch progress and cancellation | `NATIVE_COMPLETE` | `src/openalpha_cn/batch_contracts.py#BatchProgressEvent` | `tests/integration/test_batch_research.py` | `legacy-prose` | `Progress is append ordered and queued items cancel explicitly.` |
 | `OA-BATCH-004` | batch | Interrupted batch recovery | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/storage/batch.py#SQLiteBatchTaskStore` | `tests/integration/test_batch_research.py` | `legacy-prose` | `Restart requeues only running items.` |
 | `OA-MODEL-002` | model | Model capability registry | `NATIVE_COMPLETE` | `src/openalpha_cn/models/governance.py#ModelRegistry` | `tests/unit/models/test_model_governance.py` | `legacy-prose` | `Duplicate registrations fail and secrets are absent.` |

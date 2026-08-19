@@ -75,7 +75,13 @@ from openalpha_cn.product.research import (
     WatchlistEntry,
 )
 from openalpha_cn.providers.base import utc_now
-from openalpha_cn.runtime.batch import BatchProgressEvent, BatchResearchService, BatchResearchTask
+from openalpha_cn.runtime.batch import (
+    MAX_BATCH_ITEMS,
+    MAX_BATCH_WORKERS,
+    BatchProgressEvent,
+    BatchResearchService,
+    BatchResearchTask,
+)
 from openalpha_cn.runtime.composition import build_storage
 from openalpha_cn.runtime.contracts import ResearchRunRequest, ResearchRunResult
 from openalpha_cn.runtime.engine import ResearchEngine
@@ -189,8 +195,8 @@ class BatchSubmitRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     batch_id: str = Field(min_length=1, max_length=128)
-    requests: tuple[ResearchApiRequest, ...] = Field(min_length=1, max_length=1000)
-    max_concurrency: int = Field(default=4, ge=1, le=32)
+    requests: tuple[ResearchApiRequest, ...] = Field(min_length=1, max_length=MAX_BATCH_ITEMS)
+    max_concurrency: int = Field(default=4, ge=1, le=MAX_BATCH_WORKERS)
 
 
 class PortfolioBacktestRequest(BaseModel):

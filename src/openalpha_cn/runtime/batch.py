@@ -12,6 +12,8 @@ from typing import Protocol
 from openalpha_cn.batch_contracts import (
     BATCH_PROGRESS_EVENT_VERSIONS,
     BATCH_RESEARCH_TASK_VERSIONS,
+    MAX_BATCH_ITEMS,
+    MAX_BATCH_WORKERS,
     BatchProgressEvent,
     BatchResearchTask,
     BatchResultRef,
@@ -24,6 +26,8 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "BATCH_PROGRESS_EVENT_VERSIONS",
     "BATCH_RESEARCH_TASK_VERSIONS",
+    "MAX_BATCH_ITEMS",
+    "MAX_BATCH_WORKERS",
     "BatchProgressEvent",
     "BatchResearchService",
     "BatchResearchTask",
@@ -37,11 +41,19 @@ class BatchTaskStore(Protocol):
     """Extension contract for durable batch-task storage consumed by BatchResearchService.
 
     Mirrors the `runtime.memory.ResearchMemory` precedent: the Protocol lives on the
-    consumer side (`runtime/`), not in `storage/`. Its method set is exactly the three
-    methods `BatchResearchService` calls on `self.store` -- not `SQLiteBatchTaskStore`'s
-    full public surface, which also includes `list`, `list_events`, and
-    `recover_interrupted` for callers (`sdk.py`, `api/app.py`) that hold the concrete
-    store directly and never go through this service.
+    consumer side (`runtime/`), not in `storage/`. Its method set is exactly the methods
+    `BatchResearchService` calls on `self.store` -- not `SQLiteBatchTaskStore`'s full public
+    surface, which also includes `list`, `list_events`, and `recover_interrupted` for callers
+    (`sdk.py`, `api/app.py`) that hold the concrete store directly and never go through this
+    service.
+
+    It grew from three methods to seven at `V2-P4-019`, and the four new ones all say the
+    same thing: the per-item hot path must not be able to express O(N) work. `get`/`save`
+    read and write every item and stay, because `run`, `cancel` and `_finish` genuinely act
+    on the whole task; `get_item`/`update_item`/`update_status`/`is_cancellation_requested`
+    are what the 2N item transitions use, and every one of them is O(1). Before the split,
+    the only way to record one item's transition was `get()` + `save()` -- which is exactly
+    how a batch came to cost O(N^2); see `storage/batch.py`'s module docstring.
     """
 
     def get(self, batch_id: str) -> BatchResearchTask | None:
@@ -49,6 +61,25 @@ class BatchTaskStore(Protocol):
 
     def save(self, task: BatchResearchTask) -> None:
         """Insert or atomically replace the latest state of one batch."""
+
+    def get_item(self, *, batch_id: str, index: int) -> BatchTaskItem | None:
+        """Return one item's latest state."""
+
+    def update_item(
+        self,
+        *,
+        batch_id: str,
+        index: int,
+        item: BatchTaskItem,
+        updated_at: datetime,
+    ) -> None:
+        """Persist one item's transition without touching the other N-1."""
+
+    def update_status(self, *, batch_id: str, status: str, updated_at: datetime) -> None:
+        """Move one batch's aggregate status without rewriting its items."""
+
+    def is_cancellation_requested(self, batch_id: str) -> bool:
+        """Return whether cooperative cancellation was requested for this batch."""
 
     def append_event(
         self,
@@ -117,18 +148,19 @@ class BatchResearchService:
         # definition, a retry -- `run()` has no separate entry point for it (see
         # `api/app.py`'s `batch_retry` route, which just calls this same method).
         is_retry = task.status in {"failed", "partial"}
-        self._replace(task.model_copy(update={"status": "running", "updated_at": self.clock()}))
+        self.store.update_status(batch_id=batch_id, status="running", updated_at=self.clock())
         self.store.append_event(batch_id=batch_id, kind="started", occurred_at=self.clock())
         logger.info("batch_run_started", extra={"batch_id": batch_id, "retry": is_retry})
+        # Read from the `task` already in hand rather than re-reading. `update_status` moved
+        # only the header, and no worker exists yet to move an item, so a second full read
+        # here could not observe anything this one did not -- it would only pay O(N) again.
         indexes = [
-            index
-            for index, item in enumerate(self._required(batch_id).items)
-            if item.status in {"queued", "failed"}
+            index for index, item in enumerate(task.items) if item.status in {"queued", "failed"}
         ]
         # Python executor contract:
         # https://docs.python.org/3.11/library/concurrent.futures.html#threadpoolexecutor
         with ThreadPoolExecutor(
-            max_workers=self._required(batch_id).max_concurrency,
+            max_workers=task.max_concurrency,
             thread_name_prefix="openalpha-batch",
         ) as executor:
             tuple(executor.map(lambda index: self._run_item(batch_id, index), indexes))
@@ -162,12 +194,28 @@ class BatchResearchService:
             return updated
 
     def _run_item(self, batch_id: str, index: int) -> None:
+        """Run one item, persisting each of its transitions in O(1).
+
+        Every store call here reads or writes exactly this item, or one boolean off the
+        header -- never the whole task. That is the entire difference between a batch that
+        costs O(N) and one that costs O(N^2), and it is why `is_cancellation_requested`
+        exists instead of the `get()` this used to do just to read one flag.
+
+        `self._lock` still wraps each transition, so an item's read-modify-write and the
+        progress event that announces it cannot interleave with `cancel()`'s whole-task
+        rewrite. It is now held for a fraction of a millisecond instead of for a full
+        serialize-and-reparse of every item in the batch, which is what makes
+        `max_concurrency` mean something at all.
+        """
         with self._lock:
-            task = self._required(batch_id)
-            if task.cancellation_requested:
+            if self.store.is_cancellation_requested(batch_id):
                 return
-            item = task.items[index].model_copy(update={"status": "running", "error_type": None})
-            self._set_item(task, index, item)
+            item = self._required_item(batch_id, index).model_copy(
+                update={"status": "running", "error_type": None}
+            )
+            self.store.update_item(
+                batch_id=batch_id, index=index, item=item, updated_at=self.clock()
+            )
             self.store.append_event(
                 batch_id=batch_id,
                 kind="item_started",
@@ -178,11 +226,12 @@ class BatchResearchService:
             result = self.runner(item.request)
         except Exception as error:
             with self._lock:
-                task = self._required(batch_id)
-                failed = task.items[index].model_copy(
+                failed = self._required_item(batch_id, index).model_copy(
                     update={"status": "failed", "error_type": type(error).__name__}
                 )
-                self._set_item(task, index, failed)
+                self.store.update_item(
+                    batch_id=batch_id, index=index, item=failed, updated_at=self.clock()
+                )
                 self.store.append_event(
                     batch_id=batch_id,
                     kind="item_failed",
@@ -192,8 +241,7 @@ class BatchResearchService:
                 )
             return
         with self._lock:
-            task = self._required(batch_id)
-            completed = task.items[index].model_copy(
+            completed = self._required_item(batch_id, index).model_copy(
                 update={
                     "status": "succeeded",
                     "result": BatchResultRef(
@@ -203,7 +251,9 @@ class BatchResearchService:
                     ),
                 }
             )
-            self._set_item(task, index, completed)
+            self.store.update_item(
+                batch_id=batch_id, index=index, item=completed, updated_at=self.clock()
+            )
             self.store.append_event(
                 batch_id=batch_id,
                 kind="item_succeeded",
@@ -224,7 +274,11 @@ class BatchResearchService:
             else:
                 status = "partial"
             completed = task.model_copy(update={"status": status, "updated_at": self.clock()})
-            self.store.save(completed)
+            # Only the aggregate status moved. `save()` here would rewrite all N item rows
+            # with the values this `get()` just read back out of them.
+            self.store.update_status(
+                batch_id=batch_id, status=status, updated_at=completed.updated_at
+            )
             self.store.append_event(
                 batch_id=batch_id,
                 kind="finished",
@@ -234,16 +288,14 @@ class BatchResearchService:
             logger.info("batch_finished", extra={"batch_id": batch_id, "status": status})
             return completed
 
-    def _set_item(self, task: BatchResearchTask, index: int, item: BatchTaskItem) -> None:
-        items = list(task.items)
-        items[index] = item
-        self._replace(task.model_copy(update={"items": tuple(items), "updated_at": self.clock()}))
-
-    def _replace(self, task: BatchResearchTask) -> None:
-        self.store.save(task)
-
     def _required(self, batch_id: str) -> BatchResearchTask:
         task = self.store.get(batch_id)
         if task is None:
             raise KeyError(f"unknown batch: {batch_id}")
         return task
+
+    def _required_item(self, batch_id: str, index: int) -> BatchTaskItem:
+        item = self.store.get_item(batch_id=batch_id, index=index)
+        if item is None:
+            raise KeyError(f"unknown batch item: {batch_id}[{index}]")
+        return item

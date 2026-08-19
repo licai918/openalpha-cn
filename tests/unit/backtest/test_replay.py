@@ -60,6 +60,7 @@ from openalpha_cn.storage.migrations import (
     CREATE_VALIDATION_RESULTS_VERSION,
     DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
     REWRITE_CONTRACT_IDENTITIES_VERSION,
+    SPLIT_BATCH_TASK_ITEMS_VERSION,
     read_status,
     run_migrations,
 )
@@ -372,6 +373,7 @@ def test_run_migrates_a_fresh_replay_database_before_constructing_any_store(
         CREATE_QUERY_PATH_INDEXES_VERSION,
         REWRITE_CONTRACT_IDENTITIES_VERSION,
         ADD_RUNS_MODE_PROJECTION_VERSION,
+        SPLIT_BATCH_TASK_ITEMS_VERSION,
     ]
 
 
@@ -386,8 +388,11 @@ def test_run_catches_up_the_demo_migration_on_a_second_call_but_the_index_migrat
     database never constructs those two -- so `create_query_path_indexes` (V2-P0B-015),
     which requires `portfolio_transitions` and `research_reports` to exist, can never
     satisfy its precondition here and stays pending forever -- and so, transitively, does
-    everything ordered after it, which is now `rewrite_contract_identities` (`V2-P4-001`) and
-    `add_runs_mode_projection` (`V2-P4-002`).
+    everything ordered after it, which is now `rewrite_contract_identities` (`V2-P4-001`),
+    `add_runs_mode_projection` (`V2-P4-002`) and `split_batch_task_items` (`V2-P4-019`). The
+    last of those would defer here on its own account anyway: a replay database never
+    constructs `SQLiteBatchTaskStore` either, so it has no `batch_tasks` to split, and no
+    batch rows that would need splitting if it did.
     That is harmless here and is the reason `V2-P4-001` bumped no contract a replay database
     writes without also being able to rewrite it: a replay database's `runs`/`decisions` rows
     are written by this build, at the current version, so there is nothing for the identity
@@ -424,6 +429,7 @@ def test_run_catches_up_the_demo_migration_on_a_second_call_but_the_index_migrat
         CREATE_QUERY_PATH_INDEXES_VERSION,
         REWRITE_CONTRACT_IDENTITIES_VERSION,
         ADD_RUNS_MODE_PROJECTION_VERSION,
+        SPLIT_BATCH_TASK_ITEMS_VERSION,
     ]
 
 

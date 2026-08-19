@@ -21,6 +21,7 @@ from openalpha_cn.domain.portfolio import PortfolioOrder, PortfolioState, Portfo
 from openalpha_cn.domain.report import ResearchReport
 from openalpha_cn.domain.run import RunManifest
 from openalpha_cn.runtime.memory import MemoryEntry
+from openalpha_cn.storage.batch import SQLiteBatchTaskStore
 from openalpha_cn.storage.memory import SQLiteResearchMemory
 from openalpha_cn.storage.migrations import (
     _SCHEMA_MIGRATIONS_DDL,
@@ -31,6 +32,7 @@ from openalpha_cn.storage.migrations import (
     DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
     MIGRATIONS,
     REWRITE_CONTRACT_IDENTITIES_VERSION,
+    SPLIT_BATCH_TASK_ITEMS_VERSION,
     Migration,
     MigrationFailedError,
     MigrationNotYetApplicable,
@@ -132,11 +134,21 @@ def _build_v1_shaped_database(
     would never exist), permanently stranding it behind an unmet precondition in every test
     that reuses this fixture -- itself indistinguishable, from inside a single
     `run_migrations()` call, from a database that will never converge.
+
+    `SQLiteBatchTaskStore` joins them at `V2-P4-019` for exactly that reason: its
+    `split_batch_task_items` migration requires `batch_tasks`, which every real install has
+    (the store's constructor creates it) and which this fixture did not, so without this line
+    the head version would be unreachable here and every "fully caught up" assertion below
+    would be asserting something no database in production ever looks like. It writes no
+    rows -- the split's behaviour on a batch that actually has items is
+    `test_batch_item_split_migration.py`, which builds the genuinely pre-split payload shape
+    this fixture's constructor no longer produces.
     """
     repository = SQLiteRunRepository(path)
     memory = SQLiteResearchMemory(path)
     portfolio_ledger = SQLitePortfolioLedger(path)
     report_store = SQLiteReportStore(path)
+    SQLiteBatchTaskStore(path)
     run = _manifest(now=now)
     repository.append_run(run)
     decision = _decision(now=now, run_manifest_id=run.run_manifest_id)
@@ -188,7 +200,7 @@ def test_demo_migration_advances_version_and_preserves_v1_records(
     result = run_migrations(path, clock=migration_clock)
 
     assert result.from_version == 0
-    assert result.to_version == ADD_RUNS_MODE_PROJECTION_VERSION
+    assert result.to_version == SPLIT_BATCH_TASK_ITEMS_VERSION
     # `runs`, `checkpoints`, `portfolio_transitions`, and `research_reports` all already
     # exist (built above), so nothing defers: baseline, then create_validation_results
     # (V2-P0B-010, ordered before the demo migration -- see that migration's docstring for
@@ -202,13 +214,14 @@ def test_demo_migration_advances_version_and_preserves_v1_records(
         CREATE_QUERY_PATH_INDEXES_VERSION,
         REWRITE_CONTRACT_IDENTITIES_VERSION,
         ADD_RUNS_MODE_PROJECTION_VERSION,
+        SPLIT_BATCH_TASK_ITEMS_VERSION,
     ]
     assert result.backup_path is not None
     assert result.backup_path.exists()
     assert result.backup_path.parent == path.parent / "backups"
 
     status = read_status(path)
-    assert status.current_version == ADD_RUNS_MODE_PROJECTION_VERSION
+    assert status.current_version == SPLIT_BATCH_TASK_ITEMS_VERSION
     assert [(m.version, m.name) for m in status.applied] == [
         (BASELINE_VERSION, "baseline"),
         (CREATE_VALIDATION_RESULTS_VERSION, "create_validation_results"),
@@ -216,6 +229,7 @@ def test_demo_migration_advances_version_and_preserves_v1_records(
         (CREATE_QUERY_PATH_INDEXES_VERSION, "create_query_path_indexes"),
         (REWRITE_CONTRACT_IDENTITIES_VERSION, "rewrite_contract_identities"),
         (ADD_RUNS_MODE_PROJECTION_VERSION, "add_runs_mode_projection"),
+        (SPLIT_BATCH_TASK_ITEMS_VERSION, "split_batch_task_items"),
     ]
     assert status.pending == ()
 
@@ -359,9 +373,9 @@ def test_running_migrations_again_is_idempotent(
     first = run_migrations(path, clock=migration_clock)
     second = run_migrations(path, clock=migration_clock)
 
-    assert first.to_version == ADD_RUNS_MODE_PROJECTION_VERSION
-    assert second.from_version == ADD_RUNS_MODE_PROJECTION_VERSION
-    assert second.to_version == ADD_RUNS_MODE_PROJECTION_VERSION
+    assert first.to_version == SPLIT_BATCH_TASK_ITEMS_VERSION
+    assert second.from_version == SPLIT_BATCH_TASK_ITEMS_VERSION
+    assert second.to_version == SPLIT_BATCH_TASK_ITEMS_VERSION
     assert second.applied == ()
     assert second.backup_path is None  # nothing pending, so no backup taken
 
@@ -373,6 +387,7 @@ def test_running_migrations_again_is_idempotent(
         CREATE_QUERY_PATH_INDEXES_VERSION,
         REWRITE_CONTRACT_IDENTITIES_VERSION,
         ADD_RUNS_MODE_PROJECTION_VERSION,
+        SPLIT_BATCH_TASK_ITEMS_VERSION,
     ]
 
 
@@ -393,7 +408,7 @@ def test_demo_migration_is_a_sql_level_no_op_when_the_column_already_exists(
 
     result = run_migrations(path, clock=migration_clock)
 
-    assert result.to_version == ADD_RUNS_MODE_PROJECTION_VERSION
+    assert result.to_version == SPLIT_BATCH_TASK_ITEMS_VERSION
     with sqlite3.connect(path) as connection:
         columns = [row[1] for row in connection.execute("PRAGMA table_info(runs)")]
     assert columns.count("archived_at") == 1
@@ -410,7 +425,7 @@ def test_failing_migration_rolls_back_leaves_version_unmoved_and_backup_intact(
     # Bring the database up to date first, exactly as a real upgrade would.
     run_migrations(path, clock=migration_clock)
     before = read_status(path)
-    assert before.current_version == ADD_RUNS_MODE_PROJECTION_VERSION
+    assert before.current_version == SPLIT_BATCH_TASK_ITEMS_VERSION
 
     # One past the real registry's own highest version, computed rather than hardcoded,
     # so this injected migration's version can never collide with a real one as the
@@ -431,7 +446,7 @@ def test_failing_migration_rolls_back_leaves_version_unmoved_and_backup_intact(
     assert error.backup_path.exists()
 
     after = read_status(path)
-    assert after.current_version == ADD_RUNS_MODE_PROJECTION_VERSION  # unmoved
+    assert after.current_version == SPLIT_BATCH_TASK_ITEMS_VERSION  # unmoved
     assert [m.version for m in after.applied] == [
         BASELINE_VERSION,
         CREATE_VALIDATION_RESULTS_VERSION,
@@ -439,6 +454,7 @@ def test_failing_migration_rolls_back_leaves_version_unmoved_and_backup_intact(
         CREATE_QUERY_PATH_INDEXES_VERSION,
         REWRITE_CONTRACT_IDENTITIES_VERSION,
         ADD_RUNS_MODE_PROJECTION_VERSION,
+        SPLIT_BATCH_TASK_ITEMS_VERSION,
     ]  # no row for doomed_version
 
     # Data is intact, and the DDL the doomed migration ran (before it raised) did not persist.
@@ -480,6 +496,7 @@ def test_run_migrations_logs_the_backup_path_and_each_applied_migration(
         (CREATE_QUERY_PATH_INDEXES_VERSION, "create_query_path_indexes"),
         (REWRITE_CONTRACT_IDENTITIES_VERSION, "rewrite_contract_identities"),
         (ADD_RUNS_MODE_PROJECTION_VERSION, "add_runs_mode_projection"),
+        (SPLIT_BATCH_TASK_ITEMS_VERSION, "split_batch_task_items"),
     ]
 
 
@@ -554,6 +571,7 @@ def test_new_database_applies_baseline_and_validation_results_then_defers_the_de
         CREATE_QUERY_PATH_INDEXES_VERSION,
         REWRITE_CONTRACT_IDENTITIES_VERSION,
         ADD_RUNS_MODE_PROJECTION_VERSION,
+        SPLIT_BATCH_TASK_ITEMS_VERSION,
     ]
 
     # Once the owning store creates its table (independent of the migrator, by design),
@@ -571,14 +589,20 @@ def test_new_database_applies_baseline_and_validation_results_then_defers_the_de
         CREATE_QUERY_PATH_INDEXES_VERSION,
         REWRITE_CONTRACT_IDENTITIES_VERSION,
         ADD_RUNS_MODE_PROJECTION_VERSION,
+        SPLIT_BATCH_TASK_ITEMS_VERSION,
     ]
 
-    # Constructing the last two owning stores lets the third call finish the job.
+    # Constructing the last three owning stores lets the fourth call finish the job.
+    # `SQLiteBatchTaskStore` is the one `split_batch_task_items` (V2-P4-019) waits on, and
+    # it is added here rather than earlier deliberately: it demonstrates the same
+    # store-creates-the-table-then-the-migration-catches-up handshake one migration later,
+    # against a table no earlier store creates.
     SQLitePortfolioLedger(path)
     SQLiteReportStore(path)
+    SQLiteBatchTaskStore(path)
     fully_caught_up = run_migrations(path, clock=migration_clock)
     assert fully_caught_up.from_version == DEMO_ADD_RUNS_ARCHIVED_AT_VERSION
-    assert fully_caught_up.to_version == ADD_RUNS_MODE_PROJECTION_VERSION
+    assert fully_caught_up.to_version == SPLIT_BATCH_TASK_ITEMS_VERSION
     assert read_status(path).pending == ()
 
 
@@ -599,6 +623,7 @@ def test_read_status_does_not_mutate_the_database(tmp_path: Path, migration_now:
         CREATE_QUERY_PATH_INDEXES_VERSION,
         REWRITE_CONTRACT_IDENTITIES_VERSION,
         ADD_RUNS_MODE_PROJECTION_VERSION,
+        SPLIT_BATCH_TASK_ITEMS_VERSION,
     ]
     assert "schema_migrations" not in _table_names(path)
 
