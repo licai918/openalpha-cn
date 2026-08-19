@@ -3,11 +3,15 @@
 Six properties this file exists to hold, each of which is a place a candidate list silently
 becomes a list of something else:
 
-1. **The ban is structural.** `test_the_ranking_contract_cannot_reach_the_three_modules_that_make
-   _an_order` drives `lint-imports` over the real module and then over a copy of it carrying one
-   `PortfolioOrder` import, and requires the second to be refused -- so "绝不直接创建订单" is a
-   gate rather than a sentence, and the assertion cannot pass because nothing in the repository
-   makes an order.
+1. **The ban is structural, and it is the portfolio-order ban and not a wider one.**
+   `test_the_ranking_contract_cannot_reach_the_three_modules_that_make_an_order` drives
+   `lint-imports` over the real module and then over a copy of it carrying one `PortfolioOrder`
+   import, and requires the second to be refused -- so "绝不直接创建组合订单" is a gate rather
+   than a sentence. `V2-P4-035` measured what that gate does *not* cover:
+   `backtest/execution.py`'s `ExecutionRequest` is an order intent too, this module reaches it
+   through `cross_section`, and no contract forbids that because the edge is `V2-P4-004`'s
+   tradeability filter. `test_this_ranking_grows_no_import_of_its_own_into_the_order_machinery`
+   is the weaker, file-scoped guard that covers the step the acceptance probe actually took.
 2. **The two addresses are split and each moves for exactly what it addresses.** The manifest's
    moves for every declared input and not for the wall clock; the content digest moves for a
    candidate and not for the manifest. Both directions on both, plus a `model_fields` meta-audit,
@@ -456,6 +460,57 @@ def test_the_ranking_contract_cannot_reach_the_three_modules_that_make_an_order(
         MODULE_PATH.write_text(original, encoding="utf-8")
 
     assert _lint("ranking-creates-no-portfolio-order") == 0
+
+
+def test_this_ranking_grows_no_import_of_its_own_into_the_order_machinery() -> None:
+    """`V2-P4-035`. The pin `shortlist_gate.py` had incidentally and this module had not at all.
+
+    `ranking-creates-no-portfolio-order` forbids the three modules where a **portfolio** order is
+    declared or simulated, and that is all it forbids. It does not forbid
+    `openalpha_cn.backtest.execution`, which declares `ExecutionRequest` -- "a simplified
+    cash-equity order intent" -- and simulates a fill in `AShareExecutionPolicy.execute`; and it
+    cannot, because `backtest/cross_section.py` imports that policy to decide tradeability, which
+    is `V2-P4-004`'s hard filter and a shipped feature. This module therefore reaches an order
+    intent transitively today, on purpose, by
+    `candidate_ranking -> cross_section -> execution`.
+
+    `V2-P4-035`'s acceptance probe added a *direct* import of that policy here plus a function
+    calling `.execute(...)`, filled an order, and neither `lint-imports` (8 kept, 0 broken) nor
+    this file noticed. The identical probe in `shortlist_gate.py` was caught -- but by
+    `test_this_gate_cannot_measure_dataset_freshness_because_it_cannot_reach_the_panel`, whose
+    three-name import list catches it incidentally, and not by the order contract. This module
+    had no such list, so it was the one contract source with nothing pinning its import surface.
+
+    This is deliberately weaker than a `lint-imports` contract and says so: it constrains the
+    import lines of one file, not reachability, and it cannot stop a caller reaching
+    `AShareExecutionPolicy` through `cross_section` -- that edge is the feature. What it does
+    stop is this module quietly growing an edge of its own into the order machinery, which is the
+    step the probe actually took.
+    """
+    source = MODULE_PATH.read_text(encoding="utf-8")
+    imports = [
+        line
+        for line in source.splitlines()
+        if line.startswith(("import ", "from ")) and " import " in line
+    ]
+
+    assert sorted(line.split()[1] for line in imports if line.startswith("from openalpha_cn")) == [
+        "openalpha_cn.backtest.cross_section",
+        "openalpha_cn.backtest.factor_ic",
+        "openalpha_cn.domain._identity",
+        "openalpha_cn.domain.execution",
+        "openalpha_cn.domain.factor",
+        "openalpha_cn.domain.factor_neutralization",
+        "openalpha_cn.domain.horizon",
+        "openalpha_cn.domain.run",
+        "openalpha_cn.domain.signal",
+        "openalpha_cn.domain.time",
+    ], (
+        "candidate_ranking.py's first-party import list changed. If the new name is a route into "
+        "the order machinery -- openalpha_cn.backtest.execution declares an order intent and "
+        "this contract does not forbid it -- that is the V2-P4-035 defect arriving again. If it "
+        "is not, add it to this list and say why in the same commit"
+    )
 
 
 def test_the_ranking_contract_reaches_neither_a_store_nor_the_root_that_owns_run_cycle() -> None:
