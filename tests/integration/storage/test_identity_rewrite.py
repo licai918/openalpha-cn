@@ -48,8 +48,8 @@ from openalpha_cn.runtime.composition import build_storage
 from openalpha_cn.storage.batch import SQLiteBatchTaskStore
 from openalpha_cn.storage.memory import SQLiteResearchMemory
 from openalpha_cn.storage.migrations import (
-    ADD_RUNS_MODE_PROJECTION_VERSION,
     REWRITE_CONTRACT_IDENTITIES_VERSION,
+    SPLIT_BATCH_TASK_ITEMS_VERSION,
     MigrationFailedError,
     UnmigratableHorizonError,
     _rewrite_contract_identities,
@@ -255,7 +255,7 @@ def test_a_pre_p4_database_reads_back_at_the_current_version_after_migrating(
 
     run_migrations(path, clock=migration_clock)
 
-    assert read_status(path).current_version == ADD_RUNS_MODE_PROJECTION_VERSION
+    assert read_status(path).current_version == SPLIT_BATCH_TASK_ITEMS_VERSION
     repository = SQLiteRunRepository(path)
     manifest = repository.get_run(RUN_ID)
     assert manifest is not None
@@ -318,9 +318,14 @@ def test_every_reference_to_the_moved_decision_follows_it_in_the_same_transactio
     assert _column(path, "SELECT report_id FROM research_reports") == [report.report_id]
     assert report.report_id != before["report_id"]
 
-    task = BatchResearchTask.model_validate_json(
-        _column(path, "SELECT payload FROM batch_tasks")[0]
-    )
+    # Read through the store, not off `batch_tasks.payload` directly: since `V2-P4-019` the
+    # items live in `batch_task_items` and the payload column holds the header alone, so a
+    # raw read of that one column no longer validates as a whole task. What is asserted is
+    # unchanged -- the `BatchResultRef` nested in item 0 followed the decision -- and it now
+    # additionally proves the rewrite survived the split, because `_build_pre_p4_database`
+    # writes the *pre-split* payload shape and `run_migrations` above had to move it.
+    task = SQLiteBatchTaskStore(path).get("batch_pre_p4")
+    assert task is not None
     assert task.items[0].result is not None
     assert task.items[0].result.decision_id == moved
 
@@ -493,7 +498,7 @@ def test_build_storage_migrates_a_pre_p4_runtime_directory_end_to_end(
 
     storage = build_storage(runtime_dir=runtime_dir, clock=migration_clock)
 
-    assert storage.migration_result.to_version == ADD_RUNS_MODE_PROJECTION_VERSION
+    assert storage.migration_result.to_version == SPLIT_BATCH_TASK_ITEMS_VERSION
     decision = storage.repository.get_decision_for_run(RUN_ID)
     assert decision is not None
     assert decision.decision_id != before["decision_id"]

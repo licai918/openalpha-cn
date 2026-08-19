@@ -54,6 +54,7 @@ from openalpha_cn.runtime.composition import build_storage
 from openalpha_cn.storage.migrations import (
     ADD_RUNS_MODE_PROJECTION_VERSION,
     REWRITE_CONTRACT_IDENTITIES_VERSION,
+    SPLIT_BATCH_TASK_ITEMS_VERSION,
     MigrationFailedError,
     RunsModeProjectionError,
     _add_runs_mode_projection,
@@ -516,7 +517,7 @@ def test_the_second_build_storage_call_applies_migration_six_over_the_stores_own
 
     second = build_storage(runtime_dir=runtime_dir, clock=migration_clock)
 
-    assert second.migration_result.to_version == ADD_RUNS_MODE_PROJECTION_VERSION
+    assert second.migration_result.to_version == SPLIT_BATCH_TASK_ITEMS_VERSION
     assert "add_runs_mode_projection" in [m.name for m in second.migration_result.applied]
     assert read_status(runtime_dir / "state.sqlite3").pending == ()
 
@@ -634,6 +635,9 @@ def test_an_audit_refusal_rolls_the_whole_migration_back_and_names_the_backup(
 
     status = read_status(path)
     assert status.current_version == REWRITE_CONTRACT_IDENTITIES_VERSION
-    assert [migration.version for migration in status.pending] == [ADD_RUNS_MODE_PROJECTION_VERSION]
+    assert [migration.version for migration in status.pending] == [
+        ADD_RUNS_MODE_PROJECTION_VERSION,
+        SPLIT_BATCH_TASK_ITEMS_VERSION,
+    ]
     assert [migration.version for migration in status.applied] == [1, 2, 3, 4, 5]
     assert RUNS_MODE_INDEX_NAME not in _index_sql(path)

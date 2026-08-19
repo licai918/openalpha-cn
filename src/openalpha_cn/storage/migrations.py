@@ -59,6 +59,12 @@ from openalpha_cn.domain.validation import (
     ValidationResultV1,
 )
 from openalpha_cn.domain.versioning import read_versioned
+from openalpha_cn.storage.batch import (
+    BATCH_TASK_ITEMS_DDL,
+    load_task_row,
+    split_task_payload,
+    store_task_row,
+)
 from openalpha_cn.storage.sqlite import (
     RUNS_MODE_COLUMN,
     RUNS_MODE_PAYLOAD_PATH,
@@ -549,7 +555,11 @@ def _rewrite_decision_references(
         else ()
     )
     for batch_id, payload in batch_rows:
-        task = read_versioned(BATCH_RESEARCH_TASK_VERSIONS, payload)
+        # Either row shape, because this migration is ordered *before*
+        # `split_batch_task_items` and so must keep working when re-run against a database
+        # that has already been through it -- see `storage/batch.py::load_task_row`.
+        split = "items" not in json.loads(payload)
+        task = load_task_row(connection, batch_id=str(batch_id), header=payload)
         items = [
             item.model_dump(mode="python", exclude_computed_fields=True) for item in task.items
         ]
@@ -567,10 +577,7 @@ def _rewrite_decision_references(
                 "items": items,
             }
         )
-        connection.execute(
-            "UPDATE batch_tasks SET payload = ? WHERE batch_id = ?",
-            (repointed.model_dump_json(exclude_computed_fields=True), batch_id),
-        )
+        store_task_row(connection, repointed, split=split)
 
 
 def _audit_identity_rewrite(connection: sqlite3.Connection, identities: Mapping[str, str]) -> None:
@@ -620,10 +627,12 @@ def _audit_identity_rewrite(connection: sqlite3.Connection, identities: Mapping[
                 f"research_memory still references superseded decision {value!r}; the "
                 "identity rewrite is incomplete"
             )
-    for (payload,) in _rows_if_present(
-        connection, "SELECT payload FROM batch_tasks", "batch_tasks"
+    for batch_id, payload in _rows_if_present(
+        connection, "SELECT batch_id, payload FROM batch_tasks", "batch_tasks"
     ):
-        task = read_versioned(BATCH_RESEARCH_TASK_VERSIONS, payload)
+        # Shape-tolerant for `_rewrite_decision_references`' reason: this audit runs inside
+        # the version-5 migration, which may be re-run against an already-split database.
+        task = load_task_row(connection, batch_id=str(batch_id), header=payload)
         for item in task.items:
             if item.result is not None and item.result.decision_id in superseded:
                 raise ValueError(
@@ -776,12 +785,102 @@ def _add_runs_mode_projection(connection: sqlite3.Connection) -> None:
     _audit_runs_mode_projection(connection)
 
 
+class BatchItemSplitError(ValueError):
+    """A stored batch did not survive being split into a header and its item rows.
+
+    The split moves data between two tables and rewrites the row it moved it out of, which
+    is the shape of change that loses records quietly: a batch whose items ended up in the
+    wrong order, or short by one, still reads back as a perfectly valid `BatchResearchTask`
+    and simply reports the wrong work as done. So `_split_batch_task_items` re-reads every
+    batch it touched, through the same reassembly `SQLiteBatchTaskStore.get()` uses, and
+    requires the result to equal the task it started from -- not merely to parse.
+    """
+
+
+def _split_batch_task_items(connection: sqlite3.Connection) -> None:
+    """`V2-P4-019`: move each batch's items out of its blob and into `batch_task_items`.
+
+    Why the table shape had to change at all is `storage/batch.py`'s module docstring: with
+    every item inside one JSON payload, recording one item's transition cost a full
+    serialize-and-reparse of every item in the batch, so a batch cost O(N^2) and
+    `V2-P4-004`'s measured 5,545-name market extrapolated to ~33 minutes of bookkeeping
+    doing no research at all.
+
+    Registered last, and that ordering is load-bearing in one direction:
+    `_rewrite_decision_references` (version 5) reads `batch_tasks.payload` and rewrites the
+    `BatchResultRef`s *nested inside its items*. It must therefore run while the items are
+    still in the payload. Running before this migration, it does. Any future migration that
+    wants to read a batch's items must go through `SQLiteBatchTaskStore` instead, because
+    after this version the payload no longer has an `items` key.
+
+    Idempotent in both of the ways this engine needs. A payload that has already been split
+    has no `items` key and is skipped, so a database that reached this shape through
+    `SQLiteBatchTaskStore.__init__` on a fresh install (where this migration defers, the
+    table not existing yet, and applies as a no-op on the next open) is left alone. And the
+    DDL is `CREATE TABLE IF NOT EXISTS`, shared verbatim with the constructor.
+    """
+    require_table(connection, "batch_tasks")
+    connection.execute(BATCH_TASK_ITEMS_DDL)
+    rows = connection.execute("SELECT batch_id, payload FROM batch_tasks").fetchall()
+    split: dict[str, BatchResearchTask] = {}
+    for batch_id, payload in rows:
+        if "items" not in json.loads(payload):
+            continue
+        task = read_versioned(BATCH_RESEARCH_TASK_VERSIONS, payload)
+        header, items = split_task_payload(task)
+        connection.execute(
+            "UPDATE batch_tasks SET payload = ? WHERE batch_id = ?", (header, batch_id)
+        )
+        connection.execute("DELETE FROM batch_task_items WHERE batch_id = ?", (batch_id,))
+        connection.executemany(
+            "INSERT INTO batch_task_items (batch_id, position, payload) VALUES (?, ?, ?)",
+            [(batch_id, position, item) for position, item in enumerate(items)],
+        )
+        split[batch_id] = task
+    _audit_batch_item_split(connection, split)
+
+
+def _audit_batch_item_split(
+    connection: sqlite3.Connection, split: Mapping[str, BatchResearchTask]
+) -> None:
+    """Re-read every batch this migration rewrote and require it to be unchanged.
+
+    Reassembles from the two tables exactly as `SQLiteBatchTaskStore.get()` does -- header
+    payload, item payloads in `position` order, spliced back together and validated as one
+    task -- and compares against the task read before the split. Equality of the whole model
+    is the check, rather than a count: a batch whose 5,545 items came back in a different
+    order, or with one item's `result` dropped, has the right count and the wrong answer.
+    """
+    for batch_id, before in split.items():
+        header = connection.execute(
+            "SELECT payload FROM batch_tasks WHERE batch_id = ?", (batch_id,)
+        ).fetchone()
+        items = connection.execute(
+            "SELECT payload FROM batch_task_items WHERE batch_id = ? ORDER BY position",
+            (batch_id,),
+        ).fetchall()
+        document = json.loads(header[0])
+        if "items" in document:
+            raise BatchItemSplitError(
+                f"batch {batch_id!r} still carries an 'items' key in its header payload; "
+                "the items would then exist in two places and the store reads only one"
+            )
+        document["items"] = [json.loads(item[0]) for item in items]
+        after = read_versioned(BATCH_RESEARCH_TASK_VERSIONS, json.dumps(document))
+        if after != before:
+            raise BatchItemSplitError(
+                f"batch {batch_id!r} does not read back as the task that was split: "
+                f"{len(before.items)} items in, {len(after.items)} items out"
+            )
+
+
 BASELINE_VERSION = 1
 CREATE_VALIDATION_RESULTS_VERSION = 2
 DEMO_ADD_RUNS_ARCHIVED_AT_VERSION = 3
 CREATE_QUERY_PATH_INDEXES_VERSION = 4
 REWRITE_CONTRACT_IDENTITIES_VERSION = 5
 ADD_RUNS_MODE_PROJECTION_VERSION = 6
+SPLIT_BATCH_TASK_ITEMS_VERSION = 7
 
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=BASELINE_VERSION, name="baseline", apply=_baseline_apply),
@@ -809,6 +908,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version=ADD_RUNS_MODE_PROJECTION_VERSION,
         name="add_runs_mode_projection",
         apply=_add_runs_mode_projection,
+    ),
+    Migration(
+        version=SPLIT_BATCH_TASK_ITEMS_VERSION,
+        name="split_batch_task_items",
+        apply=_split_batch_task_items,
     ),
 )
 
