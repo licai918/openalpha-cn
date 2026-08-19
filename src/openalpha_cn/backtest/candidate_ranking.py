@@ -222,12 +222,25 @@ paragraph for saying so.** `backtest/execution.py` declares `ExecutionRequest` -
 cash-equity order intent" -- and simulates a fill, and this module *reaches* it, through
 `cross_section` and on purpose: that is `V2-P4-004`'s hard tradeability filter, so the edge is a
 feature and the module cannot be forbidden without removing one. What D16's
-`绝不直接创建组合订单` buys here is therefore precise rather than total: no `PortfolioOrder` can
-be constructed here, no simulator or multi-day runner reached, nothing persisted and no engine
-touched. A single-security `ExecutionRequest` is reachable and is not barred by any contract --
-only by `tests/unit/backtest/test_candidate_ranking.py::
-test_this_ranking_grows_no_import_of_its_own_into_the_order_machinery`, which pins this module's
-own import list and so catches a direct import rather than a transitive reach.
+`绝不直接创建组合订单` buys here is therefore precise rather than total: `PortfolioOrder`, the
+simulator and the multi-day runner cannot be **statically imported** here, nothing is persisted
+and no engine is touched.
+
+"Statically imported" and not "constructed", which is what this paragraph used to say.
+`V2-P4-047` measured the difference: `importlib.import_module("openalpha_cn." + "domain." +
+"portfolio")` builds a real `PortfolioOrder` in this file with `lint-imports` at 8 kept /
+0 broken, because an import-graph linter cannot see a module name assembled at run time. The ban
+is unchanged and is worth having; the sentence describing it is now the true one.
+
+A single-security `ExecutionRequest` is reachable and is barred by no contract -- it cannot be,
+since `backtest/cross_section.py` re-exports the fill policy that `V2-P4-004` needs. What stands
+in for the contract is `tests/unit/backtest/test_ranking_sources_fill_no_order.py`, which is
+**behavioural**: it wraps the real `AShareExecutionPolicy.execute` for a real screen -> ranking
+-> gate run and asks each filled order whose code is on its call stack, so no spelling of the
+import matters. `V2-P4-035` guarded this with a pin on this module's own import list instead, and
+`V2-P4-047` measured that pin as inoperative twice -- it read only column-zero lines, so an
+indented import inside a function escaped it, and a caller needed no new import at all, because
+`cross_section` re-exports `AShareExecutionPolicy` and is already first on the pinned list.
 
 The three imports this leaves are the ones D16 permits and D17 requires: `ExecutionResult` is a
 verdict about a *hypothetical* buy, which is what `V2-P3-006` has produced since it was written;
@@ -437,10 +450,16 @@ KNOWN_RANKING_LIMITATIONS: Final[tuple[RankingLimitation, ...]] = (
             "AShareExecutionPolicy.execute, and this module reaches it through "
             "backtest/cross_section.py, which imports that policy for V2-P4-004's tradeability "
             "filter. That module is deliberately NOT forbidden, because forbidding it would "
-            "delete the filter. So the ban is the portfolio-order ban exactly, and the "
-            "single-security order intent one step below it is guarded only by a file-scoped pin "
-            "on this module's own import list, which catches a direct import and not a "
-            "transitive reach."
+            "delete the filter. So the ban is the portfolio-order ban exactly, and what it bans "
+            "is the STATIC IMPORT of those three modules rather than construction as such: "
+            "V2-P4-047 built a real PortfolioOrder here through importlib with every contract "
+            "green, because an import-graph linter cannot see a name assembled at run time. The "
+            "single-security order intent one step below it is guarded behaviourally, by "
+            "tests/unit/backtest/test_ranking_sources_fill_no_order.py, which wraps the real "
+            "execution policy during a real run rather than reading import lines -- V2-P4-035's "
+            "file-scoped pin on this module's import list could see neither an indented "
+            "function-local import nor the re-export of the fill policy through cross_section, "
+            "which is already on that pin's own allowlist."
         ),
     ),
 )

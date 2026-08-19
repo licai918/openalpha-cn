@@ -368,22 +368,52 @@ forbidden_modules = [
 # `openalpha_cn.backtest.execution` to the list below would have to break a feature to become
 # true -- the same objection that kept this contract out of `backtest-studies-touch-no-store`.
 #
-# So what this contract guarantees is exactly: neither source can construct a `PortfolioOrder`,
-# reach the `PortfolioSimulator`, or reach the multi-day runner. Together with the two study
-# contracts it also cannot persist an order or reach the engine that would place one. **What it
-# does not guarantee** is that a source declares or fills no *single-security* order intent:
-# `ExecutionRequest` is reachable, and a function added to either source could build one and
-# call `.execute(...)` on it without tripping any `lint-imports` contract. That is a real
-# residual gap, stated rather than papered over. What guards it instead is a weaker, file-scoped
-# pin on each source's own import list -- `tests/unit/backtest/test_candidate_ranking.py::
-# test_this_ranking_grows_no_import_of_its_own_into_the_order_machinery` and
-# `tests/unit/backtest/test_shortlist_gate.py::
-# test_this_gate_cannot_measure_dataset_freshness_because_it_cannot_reach_the_panel` -- which
-# catch a *direct* import and not a transitive reach. `tests/unit/test_import_layering.py::
+# So what this contract guarantees is exactly: neither source can **statically import**
+# `PortfolioOrder`, the `PortfolioSimulator`, or the multi-day runner. Together with the two
+# study contracts it also cannot persist an order or reach the engine that would place one.
+#
+# "Statically import" and not "construct", because `V2-P4-047` measured the difference:
+# `importlib.import_module("openalpha_cn." + "domain." + "portfolio")` inside
+# `candidate_ranking.py` built a real `PortfolioOrder` with `lint-imports` at 8 kept / 0 broken.
+# `lint-imports` reads an import graph, so a name assembled at run time is outside what any
+# contract here can see. The narrower sentence is the true one; the ban itself is unchanged.
+#
+# **What this contract does not guarantee** is that a source declares or fills no
+# *single-security* order intent: `ExecutionRequest` is reachable, and a function added to either
+# source could build one and call `.execute(...)` on it without tripping any `lint-imports`
+# contract. That is a real residual gap, stated rather than papered over.
+#
+# What guards it instead is `tests/unit/backtest/test_ranking_sources_fill_no_order.py`, and it
+# is **behavioural** because `V2-P4-047` proved nothing else can be. `V2-P4-035` guarded it with
+# a file-scoped pin on each source's own import list, and that pin was inoperative twice over:
+# it filtered with `line.startswith(("import ", "from "))`, so an indented function-local import
+# of the fill policy was invisible to it while still creating a real `grimp` edge; and, worse,
+# no new import is needed at all -- `backtest/cross_section.py` re-exports `AShareExecutionPolicy`,
+# `ExecutionRequest` and `MarketBar`, and is already first on that allowlist, so adding the three
+# names to the existing `from openalpha_cn.backtest.cross_section import (...)` block leaves every
+# pinned line byte-identical and **adds no edge to the import graph at all**. Both forms filled
+# real orders from both sources at 8 kept / 0 broken. Because the second form adds no edge, no
+# `lint-imports` contract and no `grimp` assertion can ever refuse it; the replacement wraps the
+# real `AShareExecutionPolicy.execute` for the length of a real screen -> ranking -> gate run and
+# asks each filled order which files are on its call stack, so it reads no name and no import
+# line, and it is backed by identity- and bytecode-level checks that also catch code the pipeline
+# never runs. The two import-list pins remain, now indentation-blind, but they document each
+# module's dependencies rather than carrying the order claim.
+#
+# `tests/unit/test_import_layering.py::
 # test_every_order_intent_is_forbidden_to_the_ranking_or_disclosed_as_reachable` is what keeps
 # this comment and the list below from drifting apart again: it discovers every order intent in
 # the tree off the AST and requires each to be either forbidden and unreachable, or named in
-# this comment and measurably reachable.
+# this comment and measurably reachable. `V2-P4-048` fixed two defects in that audit -- it kept
+# its census in a dict keyed by module, so a second intent in an already-listed file was dropped
+# and the verdict depended on where in the source file it sat, and its matcher saw only
+# `ClassDef` nodes with literal docstrings under `*.py`, so seven order intents added to
+# `cross_section.py` (a function, a `.pyi`, an assigned `__doc__`, an f-string docstring, and
+# three synonyms) left it reporting a match. The census is now a set of (module, qualified name)
+# pairs and reads functions, `.pyi` files, f-string docstrings and assigned `__doc__`s; its claim
+# is narrowed to the exact words "order intent", which is a naming convention rather than a
+# detector for the concept, because a synonym hunt in a repository this heavily documented cannot
+# be falsified. The concept is bound behaviourally at the two sources instead.
 #
 # A fourth contract rather than three names added to `backtest-studies-touch-no-store`, because
 # that contract's sources include `backtest/portfolio.py` itself -- the simulator -- so folding

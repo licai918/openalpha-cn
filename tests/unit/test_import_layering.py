@@ -947,6 +947,35 @@ def test_running_the_import_linter_leaves_an_existing_logger_enabled() -> None:
     assert not logger.disabled
 
 
+def test_ci_runs_the_import_linter_through_the_form_that_is_not_a_silent_no_op() -> None:
+    """`V2-P4-047`. `python -m importlinter.cli lint-imports` exits 0 and prints nothing.
+
+    Measured on this install: that invocation returns exit code 0 with no output **even on a
+    flagrant break**, because `importlinter.cli` is a `click` group with no `__main__` guard, so
+    `-m` loads the module and runs nothing. It looks exactly like a clean run. Every contract in
+    this file could be broken and a pipeline using that form would stay green.
+
+    Nothing in the repository depends on it today -- `.github/workflows/quality.yml` uses the
+    console script -- and this test is what keeps that true, because the two spellings are
+    indistinguishable by their output and a "portability" edit from one to the other would look
+    harmless in review.
+    """
+    workflow = (ROOT / ".github" / "workflows" / "quality.yml").read_text(encoding="utf-8")
+    invocations = [line.strip() for line in workflow.splitlines() if "lint-imports" in line]
+
+    assert invocations, (
+        "no step in .github/workflows/quality.yml runs lint-imports at all, so every contract in "
+        "pyproject.toml is enforced only on developer machines"
+    )
+    for line in invocations:
+        assert "python -m importlinter" not in line and "-m importlinter.cli" not in line, (
+            f"{line!r} runs the import linter through `python -m importlinter.cli`, which on this "
+            "install exits 0 with no output even when a contract is broken -- it is a silent "
+            "no-op, not a check. Use the `lint-imports` console script"
+        )
+        assert "lint-imports" in line, line
+
+
 def test_no_test_in_this_module_calls_lint_imports_without_restoring_logging() -> None:
     """One bare `lint_imports(` added later would reintroduce the order dependence for the
     whole suite, and it would show up as two unrelated tests failing in another directory --
@@ -972,9 +1001,9 @@ def test_no_test_in_this_module_calls_lint_imports_without_restoring_logging() -
 ORDER_CONTRACT_ID = "ranking-creates-no-portfolio-order"
 ORDER_INTENT_MARKER = "order intent"
 
-# Every class in `src/` whose own docstring calls itself an order intent. Discovered off the AST
-# by `_order_intent_declarations` and asserted *equal* to this table rather than merely covered
-# by it, so a third declaration cannot arrive unnoticed and a renamed one cannot go missing.
+# Every definition under `src/` whose own docstring calls itself an order intent **in those two
+# English words**. Discovered off the AST by `_order_intent_declarations` and asserted *equal* to
+# this table rather than merely covered by it, so a renamed declaration cannot go missing.
 #
 # `V2-P4-035` is the reason this table exists. `ranking-creates-no-portfolio-order` was named
 # "the candidate ranking contracts reach no module that declares or simulates an order" and its
@@ -985,24 +1014,113 @@ ORDER_INTENT_MARKER = "order intent"
 # reach it** -- `shortlist_gate -> candidate_ranking -> cross_section -> execution`. A probe
 # placed in `candidate_ranking.py` filled an order (`status=filled qty=100 filled_price=10.20
 # total_cost=5.01`) while the import linter reported 8 kept / 0 broken.
+#
+# `V2-P4-048` made this a set of (module, qualified name) pairs rather than a `dict` keyed by
+# module. Keyed by module, a second intent in an already-listed file **overwrote or was
+# overwritten depending on where it sat in the source**: the identical class inserted above
+# `ExecutionRequest` passed the audit and the same class appended below it failed. A table whose
+# verdict depends on line order is not a census.
 ORDER_INTENT_DECLARATIONS = {
-    "openalpha_cn.domain.portfolio": "PortfolioOrder",
-    "openalpha_cn.backtest.execution": "ExecutionRequest",
+    ("openalpha_cn.domain.portfolio", "PortfolioOrder"),
+    ("openalpha_cn.backtest.execution", "ExecutionRequest"),
 }
 
+ORDER_INTENT_SUFFIXES = ("*.py", "*.pyi")
+"""Both Python source forms. `V2-P4-048`: `*.py` alone could not see a `.pyi` declaration."""
 
-def _order_intent_declarations() -> dict[str, str]:
-    """Every order intent declared under `src/openalpha_cn`, as {module: class name}."""
+
+def _docstring_of(node: ast.AST) -> str:
+    """The node's docstring in **any** literal form, including an f-string.
+
+    `ast.get_docstring` returns `None` for an f-string docstring, because `JoinedStr` is not
+    `Constant`. `V2-P4-048`'s probe used exactly that to hide an order intent in plain sight, so
+    the literal parts of a `JoinedStr` are joined and read here too. What is deliberately *not*
+    reconstructed is the interpolated part -- a docstring whose marker only appears after
+    substitution is not readable in the source either, and chasing it would mean evaluating
+    arbitrary expressions at audit time.
+    """
+    body = getattr(node, "body", None)
+    if not body or not isinstance(body[0], ast.Expr):
+        return ""
+    value = body[0].value
+    if isinstance(value, ast.Constant) and isinstance(value.value, str):
+        return value.value
+    if isinstance(value, ast.JoinedStr):
+        return "".join(
+            part.value
+            for part in value.values
+            if isinstance(part, ast.Constant) and isinstance(part.value, str)
+        )
+    return ""
+
+
+def _qualified_names(tree: ast.Module) -> list[tuple[str, str]]:
+    """Every class and function in the tree, as (qualified name, docstring).
+
+    Walked with a parent trail rather than `ast.walk`, so a nested declaration is reported as
+    `Outer.Inner` and cannot silently collide with a top-level one of the same name.
+    """
+    found: list[tuple[str, str]] = []
+
+    def visit(node: ast.AST, trail: tuple[str, ...]) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+                name = (*trail, child.name)
+                found.append((".".join(name), _docstring_of(child)))
+                visit(child, name)
+            else:
+                visit(child, trail)
+
+    visit(tree, ())
+    return found
+
+
+def _assigned_docstrings(tree: ast.Module) -> list[tuple[str, str]]:
+    """Every `X.__doc__ = "..."` and bare `__doc__ = "..."`, as (target, docstring).
+
+    A docstring does not have to be the first statement to be a docstring: assigning `__doc__`
+    after the class body produces exactly the same `help()` output and exactly the same intent,
+    and `ast.get_docstring` cannot see it. `V2-P4-048`'s probe used this too.
+    """
+    found: list[tuple[str, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Constant):
+            continue
+        if not isinstance(node.value.value, str):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Attribute) and target.attr == "__doc__":
+                owner = target.value.id if isinstance(target.value, ast.Name) else "<expr>"
+                found.append((f"{owner}.__doc__", node.value.value))
+            elif isinstance(target, ast.Name) and target.id == "__doc__":
+                found.append(("__doc__", node.value.value))
+    return found
+
+
+def _order_intent_declarations() -> set[tuple[str, str]]:
+    """Every order intent declared under `src/openalpha_cn`, as {(module, qualified name)}.
+
+    A **set of pairs**, not a dict keyed by module: see `ORDER_INTENT_DECLARATIONS`.
+
+    Widened by `V2-P4-048` along every axis that can be widened without guessing -- node kind
+    (functions as well as classes, at any nesting depth), docstring form (literal, f-string, and
+    assigned `__doc__`), and file extension (`.pyi` as well as `.py`). Each of those is a
+    **closed** set, so widening to cover it is a finite, checkable change. The marker vocabulary
+    is the one axis that is *not* closed, and the claim is narrowed to match rather than the
+    matcher widened to guess -- see
+    `test_every_order_intent_is_forbidden_to_the_ranking_or_disclosed_as_reachable`.
+    """
     package_root = ROOT / "src" / "openalpha_cn"
-    found: dict[str, str] = {}
-    for path in sorted(package_root.rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.ClassDef):
-                continue
-            if ORDER_INTENT_MARKER in (ast.get_docstring(node) or "").lower():
-                parts = path.relative_to(package_root).with_suffix("").parts
-                found[".".join(("openalpha_cn", *parts))] = node.name
+    found: set[tuple[str, str]] = set()
+    for suffix in ORDER_INTENT_SUFFIXES:
+        for path in sorted(package_root.rglob(suffix)):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            parts = path.relative_to(package_root).with_suffix("").parts
+            module = ".".join(("openalpha_cn", *parts))
+            declarations = _qualified_names(tree) + _assigned_docstrings(tree)
+            found |= {
+                (module, name) for name, doc in declarations if ORDER_INTENT_MARKER in doc.lower()
+            }
     return found
 
 
@@ -1016,15 +1134,30 @@ def _order_contract() -> dict[str, object]:
 
 
 def _order_contract_block() -> str:
-    """The contract's own TOML stanza and the comment under it, as raw text.
+    """The contract's own comment lines, and nothing else. `V2-P4-048` narrowed this hard.
 
     Read off the file rather than the parsed configuration because the disclosure this checks
     for lives in a `#` comment, which `tomllib` throws away.
+
+    Two defects, both of which made `assert module in disclosure` satisfiable without a
+    disclosure. First, the slice ended at the next `[[tool.importlinter.contracts]]` -- and this
+    is the **last** contract in `pyproject.toml`, so it ran to EOF and swallowed every section
+    appended after it. Measured: the entire `V2-P4-035` rationale deleted and the module name
+    re-added under a `[tool.probe_unrelated]` section left the audit at 29 passed and
+    `lint-imports` at 8 kept / 0 broken. The slice now stops at the next table header of any
+    kind, `[` at column zero. Second, it returned the TOML values too, so a module name in
+    `forbidden_modules` or `source_modules` counted as prose about it; only `#` lines survive
+    now, which is what "the contract's comment names the module" actually meant.
     """
     text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     tail = text[text.index(f'id = "{ORDER_CONTRACT_ID}"') :]
-    end = tail.find("[[tool.importlinter.contracts]]")
-    return tail if end == -1 else tail[:end]
+    lines: list[str] = []
+    for index, line in enumerate(tail.splitlines()):
+        if index and line.startswith("["):
+            break
+        if line.startswith("#"):
+            lines.append(line)
+    return "\n".join(lines)
 
 
 def test_every_order_intent_is_forbidden_to_the_ranking_or_disclosed_as_reachable() -> None:
@@ -1040,17 +1173,53 @@ def test_every_order_intent_is_forbidden_to_the_ranking_or_disclosed_as_reachabl
     asserted. Every order intent in the tree is either **forbidden** to both contract sources
     (and then no chain may exist) or **disclosed by name** in the contract's own comment as
     deliberately reachable (and then a chain must exist, from every source, or the disclosure is
-    describing a risk that is not there). A third order intent added anywhere under `src/` fails
-    the equality below; a disclosure quietly deleted fails the membership; and "fixing" this by
-    forbidding `execution` fails the reachability assertion *and* the tradeability filter, which
-    is the outcome that should be hard.
+    describing a risk that is not there). "Fixing" this by forbidding `execution` fails the
+    reachability assertion *and* the tradeability filter, which is the outcome that should be
+    hard.
+
+    **`V2-P4-048`: what "order intent" means here, and the claim this test does not make.**
+    The previous wording was that "a third order intent added anywhere under `src/` fails the
+    equality below". That was false as written. The matcher requires a `ClassDef` with a literal
+    first-statement docstring containing the ASCII substring `order intent`, under
+    `src/openalpha_cn/**/*.py`; the re-acceptance added **seven** order intents to
+    `backtest/cross_section.py` -- a module both sources reach -- as a function, a `.pyi` class,
+    an assigned `__doc__`, an f-string docstring, `一个简化的现金股票订单意图`, a "buy
+    instruction" and a "trade ticket", and this audit reported `MATCHES THE DECLARED TABLE: True`
+    with the whole file at 29 passed.
+
+    The choice was widen the matcher or narrow the claim, and **the axes split cleanly, so this
+    does both -- to different axes**:
+
+    * **Widened, because the axis is closed and enumerable.** Node kind (class, function, async
+      function, at any nesting depth), docstring form (literal, f-string, assigned `__doc__`) and
+      file extension (`.py`, `.pyi`). Each is a finite set defined by the language, so covering
+      it is a change that can be finished and checked. Measured on the clean tree, the widened
+      matcher finds **exactly the same two** declarations, so this cost no false positives.
+    * **Narrowed, because the axis is open and a wider claim would be unfalsifiable.** The
+      *marker vocabulary*. Hunting synonyms -- "buy instruction", "trade ticket", "sell order",
+      `订单意图`, `委托` -- across a repository this heavily documented is the trap
+      `test_known_limitation_registries.py`'s docstring names: the synonym set cannot be
+      enumerated, so a green run would prove nothing, and the false positives would be constant
+      (`cross_section.py`'s own module docstring says "Every scored name is offered as a real
+      buy"). So the claim is now exactly: **every definition whose docstring uses the two English
+      words `order intent`**. That is a naming *convention*, and this test enforces the
+      convention rather than pretending to detect the concept.
+
+    What the narrowing gives up is real, and is covered elsewhere rather than waved away: an
+    order intent declared under another name is invisible here. What makes it discoverable is
+    that it cannot be *used* from either contract source without going red --
+    `tests/unit/backtest/test_ranking_sources_fill_no_order.py` wraps the real fill policy during
+    a real run and asks each fill which files are on its stack, so it never reads a name at all.
+    A class nobody can call an order from is a documentation defect; a class somebody can is a
+    contract defect, and the contract defect is the one that is bound.
     """
     declared = _order_intent_declarations()
     assert declared == ORDER_INTENT_DECLARATIONS, (
-        f"the set of classes documenting themselves as an {ORDER_INTENT_MARKER!r} changed: "
-        f"expected {ORDER_INTENT_DECLARATIONS}, found {declared}. Every one of them has to be "
-        f"either in {ORDER_CONTRACT_ID}'s forbidden_modules or disclosed by name in its comment "
-        "as deliberately reachable -- update this table and pick the side in the same commit"
+        f"the set of definitions documenting themselves with the words {ORDER_INTENT_MARKER!r} "
+        f"changed: expected {sorted(ORDER_INTENT_DECLARATIONS)}, found {sorted(declared)}. Every "
+        f"one of them has to be either in {ORDER_CONTRACT_ID}'s forbidden_modules or disclosed "
+        "by name in its comment as deliberately reachable -- update this table and pick the side "
+        "in the same commit"
     )
 
     contract = _order_contract()
@@ -1059,7 +1228,7 @@ def test_every_order_intent_is_forbidden_to_the_ranking_or_disclosed_as_reachabl
     disclosure = _order_contract_block()
     graph = grimp.build_graph("openalpha_cn")
 
-    for module in declared:
+    for module, name in sorted(declared):
         reaching = {
             source
             for source in sources
@@ -1071,18 +1240,71 @@ def test_every_order_intent_is_forbidden_to_the_ranking_or_disclosed_as_reachabl
             )
             continue
         assert reaching == sources, (
-            f"{module} declares an order intent and {ORDER_CONTRACT_ID} does not forbid it, so "
-            f"the comment discloses it as deliberately reachable -- but only {sorted(reaching)} "
-            f"of {sorted(sources)} actually reaches it. Either the disclosure is stale or the "
-            "module could have been forbidden after all"
+            f"{module} declares an order intent ({name}) and {ORDER_CONTRACT_ID} does not forbid "
+            f"it, so the comment discloses it as deliberately reachable -- but only "
+            f"{sorted(reaching)} of {sorted(sources)} actually reaches it. Either the disclosure "
+            "is stale or the module could have been forbidden after all"
         )
         assert module in disclosure, (
-            f"{module} declares an order intent ({declared[module]}), is NOT in "
+            f"{module} declares an order intent ({name}), is NOT in "
             f"{ORDER_CONTRACT_ID}'s forbidden_modules, and IS reachable from {sorted(sources)}. "
             "That combination is exactly the V2-P4-035 defect, and it is only honest if the "
             "contract's comment names the module and says why it cannot be forbidden. It does "
             "not."
         )
+
+
+def test_the_disclosure_is_a_rationale_and_a_live_pointer_not_a_bare_name() -> None:
+    """`V2-P4-048`. What `assert module in disclosure` above cannot tell on its own.
+
+    A substring test is satisfied by the module name on a line by itself, so the check it
+    performs is "somebody typed this string", not "somebody explained this". The three facts
+    below are what make the disclosure *actionable*, and each is checked as a thing that exists
+    rather than as prose:
+
+    1. **Why it cannot be forbidden.** The disclosure must name `backtest/cross_section.py`, the
+       module whose import of the fill policy is the reason -- and the reason is measured, not
+       recited: adding `openalpha_cn.backtest.execution` to `forbidden_modules` yields
+       7 kept / 1 broken, breaking `V2-P4-004`'s tradeability filter.
+    2. **What guards the gap instead.** The disclosure must point at a test file, and that file
+       must **exist on disk**. A disclosure whose named guard was deleted or renamed is worse
+       than none: it tells a reader a risk is covered when it is not. This is the assertion that
+       would have caught `V2-P4-035`'s pin being replaced without the comment following.
+    3. **That the gap is stated at all.** The disclosure must say the residual is a single-
+       security order intent, in the contract's own vocabulary.
+    """
+    disclosure = _order_contract_block()
+
+    assert "cross_section" in disclosure, (
+        f"{ORDER_CONTRACT_ID}'s comment discloses openalpha_cn.backtest.execution as reachable "
+        "but no longer says why it cannot be forbidden. The reason is backtest/cross_section.py, "
+        "which imports the execution policy for V2-P4-004's tradeability filter -- measured at "
+        "7 kept / 1 broken when the module is forbidden. Without that, the disclosure reads as "
+        "an unexplained exemption"
+    )
+    assert "ExecutionRequest" in disclosure, (
+        f"{ORDER_CONTRACT_ID}'s comment no longer names the order intent it exempts. The "
+        "residual gap this contract discloses is that a source could build and fill an "
+        "ExecutionRequest -- a single-security order intent -- and no contract would refuse it"
+    )
+
+    pointers = {
+        match
+        for match in re.findall(r"tests/[\w/\n#\s.]*?\.py", disclosure.replace("#", ""))
+        if "test_" in match
+    }
+    resolved = {ROOT / "".join(pointer.split()) for pointer in pointers}
+    assert resolved, (
+        f"{ORDER_CONTRACT_ID}'s comment names no test file. Its own text says the residual gap "
+        "is guarded by a file-scoped test rather than by the contract, so deleting the pointer "
+        "leaves a reader no way to check whether anything guards it at all"
+    )
+    missing = sorted(str(path) for path in resolved if not path.is_file())
+    assert not missing, (
+        f"{ORDER_CONTRACT_ID}'s comment points at {missing}, which does not exist. A disclosure "
+        "naming a guard that was deleted or renamed says a risk is covered when it is not, "
+        "which is strictly worse than disclosing nothing"
+    )
 
 
 def test_the_order_contracts_name_claims_only_what_its_forbidden_modules_enforce() -> None:
