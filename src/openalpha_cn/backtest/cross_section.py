@@ -669,7 +669,7 @@ class ShortlistSpec(BaseModel):
     shortlist_size: int = Field(ge=MINIMUM_SHORTLIST, le=MAXIMUM_SHORTLIST)
     """How many names reach the evidence plane. See this module's docstring for the measurement
     that bounds it below and `MAXIMUM_SHORTLIST` for the one that bounds it above."""
-    position_capital: Decimal = Field(gt=0)
+    position_capital: Decimal = Field(gt=0, lt=Decimal(10) ** 26)
     """The notional budget stage two sizes one buy against, in yuan.
 
     It is here because `below_board_minimum` cannot be decided without it -- a name at 300 yuan a
