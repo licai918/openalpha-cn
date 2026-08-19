@@ -127,8 +127,22 @@ def cli_workspace(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def served(built_panel: BuiltPanel, cli_workspace: Path) -> Iterator[str]:
-    """A real `openalpha serve` process over the built panel, and its base URL.
+def serve_runtime_dir(built_panel: BuiltPanel) -> Path:
+    """Which runtime directory `served` puts an HTTP face over. The built panel, by default.
+
+    A seam rather than a second server fixture. `tests/e2e/test_shortlist_workflow_online.py`
+    writes derived factor partitions and stored shortlist answers, so it screens a private view of
+    the panel rather than the shared one, and it needs an HTTP face over *that* -- and a second
+    copy of `served` would be a second thing to keep in step with a fixture that resolves a port,
+    spawns a child process and polls it. Overriding one path in the module that needs it is the
+    whole of the difference; see that module's `serve_runtime_dir`.
+    """
+    return built_panel.runtime_dir
+
+
+@pytest.fixture
+def served(serve_runtime_dir: Path, cli_workspace: Path) -> Iterator[str]:
+    """A real `openalpha serve` process over `serve_runtime_dir`, and its base URL.
 
     A subprocess rather than `TestClient`: `serve` resolves its own configuration, binds a
     socket and runs uvicorn, and none of that is exercised by an ASGI transport. The port is
@@ -136,15 +150,17 @@ def served(built_panel: BuiltPanel, cli_workspace: Path) -> Iterator[str]:
     small race; a bind failure surfaces as the readiness poll timing out with the child's own
     stderr attached.
 
-    In `conftest.py` rather than beside the tests that first used it because two modules now
-    need one HTTP face over one panel -- the chain's and `test_pit_injection_online.py`'s --
-    and a second copy of a fixture that spawns a server is a second thing to keep in step.
+    In `conftest.py` rather than beside the tests that first used it because three modules now
+    need one HTTP face -- `test_panel_chain_online.py`, `test_pit_injection_online.py` and
+    `test_shortlist_workflow_online.py` -- and a second copy of a fixture that spawns a server is
+    a second thing to keep in step. Which directory it faces is the one thing they disagree on,
+    and that is `serve_runtime_dir`'s whole job.
     """
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
     environment = os.environ.copy()
-    environment["OPENALPHA_RUNTIME_DIR"] = str(built_panel.runtime_dir)
+    environment["OPENALPHA_RUNTIME_DIR"] = str(serve_runtime_dir)
     # uvicorn's own log goes to a file rather than to a pipe nobody drains: a `PIPE` that fills
     # its 64 KiB buffer blocks the writing process, so an access log long enough to fill it
     # would wedge the very server this fixture is waiting on.
