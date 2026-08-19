@@ -7,8 +7,11 @@ them ship clean that this gate refuses. This file is the contract underneath it.
 1. **Every declared bar is in the identity.** `test_the_gate_manifest_address_moves_for_every
    _declared_threshold` varies each field of `ShortlistGateSpec` and requires `gate_manifest_id`
    to move, and `test_two_gate_runs_of_one_declaration_share_an_address` requires the other
-   direction -- a one-directional identity test passes on a constant. The `model_fields`
-   meta-audit is what makes bar *n+1* red until somebody argues for it.
+   direction -- a one-directional identity test passes on a constant. Bar *n+1* is red at
+   `GATE_SPEC_THRESHOLDS`, which that test checks against `ShortlistGateSpec.model_fields`
+   before it varies anything. `V2-P4-058` corrected this sentence: it used to credit "the
+   `model_fields` meta-audit", which pins `ShortlistGateManifest` and not the spec, so a fourth
+   bar arrived unaudited at 35 passed.
 2. **Every block code separates.** Four codes, four fixtures, each of which raises exactly one --
    because a fixture that failed two bars at once could not tell a gate that reads one of them
    from a gate that reads neither.
@@ -31,9 +34,11 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Mapping
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Final
 
 import pytest
@@ -250,6 +255,33 @@ def _bars(*, tradable: float = 0.0, researched: float = 0.0, age: int = 3_650) -
     )
 
 
+GATE_SPEC_THRESHOLDS: Final[Mapping[str, tuple[object, object]]] = MappingProxyType(
+    {
+        "minimum_tradable_ratio": (0.1, 0.2),
+        "minimum_researched_ratio": (0.1, 0.2),
+        "maximum_ranking_age_days": (30, 31),
+    }
+)
+"""Every declared bar on `ShortlistGateSpec`, with a legal value and a different legal value.
+
+The pair is what `test_the_gate_manifest_address_moves_for_every_declared_threshold` varies. It
+is a mapping the audit reads rather than three names the audit recites, and it is checked against
+`ShortlistGateSpec.model_fields` before it is used, so bar *n+1* is red until somebody adds a
+value for it here -- which is the point at which they have to decide what "a different value of
+this bar" even means.
+
+`V2-P4-058` is why it exists. The module docstring above claimed "the `model_fields` meta-audit
+is what makes bar *n+1* red until somebody argues for it", and that was false: the meta-audit
+pins `ShortlistGateManifest`, not `ShortlistGateSpec`, and the threshold test varied three
+hard-coded names. Measured: a fourth bar, `minimum_probe_ratio: float = Field(default=0.0,
+ge=0.0, le=1.0)`, added to `ShortlistGateSpec` left this file at **35 passed**. It does move
+`gate_manifest_id` -- `stable_model_id` dumps the whole model, so a new field reaches the
+address for free -- which is exactly why nothing went red and exactly why that is not evidence:
+the property held automatically, so no test measured it, and a bar whose identity contribution
+is accidental is one nobody has argued for.
+"""
+
+
 # --------------------------------------------------------------------------------------------
 # The registry, and the codes the suite has to agree on
 # --------------------------------------------------------------------------------------------
@@ -328,20 +360,36 @@ def test_the_gate_manifest_address_moves_for_every_declared_threshold() -> None:
     Each bar is varied **alone**, so a manifest that hashed only one of them -- or that hashed
     the ranking id and nothing else -- fails on the two it ignored rather than passing on the one
     it happened to read.
-    """
-    ranking = _rank()
-    base = gate_shortlist(ranking=ranking, spec=_bars(tradable=0.1, researched=0.1, age=30))
-    baseline = base.manifest.gate_manifest_id
 
-    moved = {
-        "tradable": _bars(tradable=0.2, researched=0.1, age=30),
-        "researched": _bars(tradable=0.1, researched=0.2, age=30),
-        "age": _bars(tradable=0.1, researched=0.1, age=31),
-    }
-    addresses = {
-        name: gate_shortlist(ranking=ranking, spec=spec).manifest.gate_manifest_id
-        for name, spec in moved.items()
-    }
+    **`V2-P4-058`: the bars are discovered off `ShortlistGateSpec.model_fields`, not listed.**
+    They used to be three names written into this function, so a fourth declared bar was varied
+    by nothing and this file stayed at 35 passed. The first assertion below is the one that
+    makes bar *n+1* red, and it is red at the useful moment -- before anything is measured --
+    with a message saying what the author has to supply. A new bar cannot be auto-varied,
+    because "a different value of this bar" is a question about the bar's meaning and not about
+    its type, so the audit asks rather than guesses.
+    """
+    declared = set(ShortlistGateSpec.model_fields) - {"schema_version"}
+
+    assert declared == set(GATE_SPEC_THRESHOLDS), (
+        f"ShortlistGateSpec declares {sorted(declared)} and GATE_SPEC_THRESHOLDS varies "
+        f"{sorted(GATE_SPEC_THRESHOLDS)}. Every declared bar has to be varied here, because "
+        "V2-P4-023's whole property is that two runs under different bars are different runs -- "
+        "give the new bar two legal values in GATE_SPEC_THRESHOLDS and this test will measure "
+        "it. A bar that moves the address only because stable_model_id dumps the whole model is "
+        "not a bar anybody has argued for; that is V2-P4-058"
+    )
+
+    ranking = _rank()
+    base = {name: pair[0] for name, pair in GATE_SPEC_THRESHOLDS.items()}
+    baseline = gate_shortlist(
+        ranking=ranking, spec=ShortlistGateSpec(**base)
+    ).manifest.gate_manifest_id
+
+    addresses = {}
+    for name, (_, varied) in GATE_SPEC_THRESHOLDS.items():
+        spec = ShortlistGateSpec(**{**base, name: varied})
+        addresses[name] = gate_shortlist(ranking=ranking, spec=spec).manifest.gate_manifest_id
 
     for name, address in addresses.items():
         assert address != baseline, (
@@ -349,7 +397,10 @@ def test_the_gate_manifest_address_moves_for_every_declared_threshold() -> None:
             "reach the address is a module constant wearing a field's name, which is exactly "
             "what V2-P4-023 asks this contract not to be"
         )
-    assert len(set(addresses.values()) | {baseline}) == 4
+    assert len(set(addresses.values()) | {baseline}) == len(GATE_SPEC_THRESHOLDS) + 1, (
+        "two different bars produced the same gate_manifest_id, so the address cannot tell the "
+        "two runs apart even though it moved for each of them separately"
+    )
 
 
 def test_two_gate_runs_of_one_declaration_share_an_address() -> None:
@@ -386,6 +437,14 @@ def test_every_gate_manifest_field_is_addressed_or_excluded_by_name() -> None:
     `GATE_MANIFEST_UNADDRESSED_FIELDS` is empty on purpose -- this manifest records no wall clock
     and observes no host -- so the partition says every field reaches the address. A field added
     later is red here until it is either measured to move the address or given a reason there.
+
+    **`V2-P4-058`: this pins the manifest, and the manifest is not where the bars live.** The
+    file's own docstring credited it with making bar *n+1* red; a fourth field on
+    `ShortlistGateSpec` is not a field on `ShortlistGateManifest`, whose three fields are
+    unchanged by it, so this test was green through the whole probe. The spec's field set is
+    pinned by `test_the_gate_manifest_address_moves_for_every_declared_threshold` against
+    `GATE_SPEC_THRESHOLDS`, which is where a bar can actually be varied; the two halves are
+    named here so the next reader does not have to rediscover which model each covers.
     """
     fields = set(ShortlistGateManifest.model_fields)
 
