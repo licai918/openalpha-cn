@@ -226,17 +226,42 @@ after the point -- so a notional at or above `10**26` needs more than the 28 sig
 `ArithmeticError`, so it passed every `except TwoStageFunnelError` and `except ShortlistViewError`
 on all three faces and arrived as an unhandled defect.
 
-The ceiling is therefore the same at every close price, which was measured across `0.01` to
-`10000.00` rather than assumed: `notional <= capital` makes the bound a fact about the budget
-alone. `tests/integration/test_shortlist_interfaces.py::
+The ceiling is therefore the same at every close price **a price feed produces** -- measured
+across `0.01` to `10000.00` rather than assumed, because `notional <= capital` makes *that*
+bound a fact about the budget alone. `tests/integration/test_shortlist_interfaces.py::
 test_the_largest_representable_capital_is_still_answered` drives `10**26 - 1` and requires `200`,
 so a later "fix" that refused every large budget would fail rather than pass.
 
-**This is the wrong file for it and that is a reported dependency, not a preference.** The bound
-belongs on `ShortlistSpec.position_capital` in `backtest/cross_section.py`, beside the three
-siblings that already carry one, where no face could route around it. It is stated here because
-this module owns none of `backtest/`, and because `shortlist_request` is the one funnel all three
-faces resolve through -- so every *shipped* surface is covered either way.
+**`V2-P4-058` narrowed the sentence above, which said "the same at every close price" without
+the qualifier.** The `notional <= capital` half is sound and re-measured. What it does not cover
+is the *other* arithmetic on the path: `position_quantity` computes
+`int(capital // (market.close * SHARE_LOT))`, and a **quotient**'s digit count grows as `close`
+falls, while `MarketBar.close` is `Field(gt=0)` with no lower bound. Measured: `close=1e-12` with
+`capital=1e20` -- four orders of magnitude *below* this ceiling, satisfying both bounds -- still
+raises `InvalidOperation: [DivisionImpossible]`. Both halves are pinned in
+`tests/unit/test_position_capital_ceiling.py`: `test_the_capital_ceiling_holds_across_the_price
+_range_it_was_measured_over` for the true one, and `test_a_close_price_below_the_feeds_own
+_resolution_still_overflows_under_the_ceiling` for the limit.
+
+Neither a lower bound on `close` nor a `try/except InvalidOperation` was added, and the reason is
+this repository's own standard rather than effort. A two-decimal price feed cannot reach it, so
+there is no shipped defect here -- only a sentence that claimed more than was measured. A price
+floor would be a number nobody can measure (this constant's own first line refuses that) and a
+new refusal on rows that price correctly today; a catch would be a branch no input reaches, which
+`position_quantity`'s docstring declines to write for exactly this reason, one call below. The
+honest repair to a claim wider than its measurement is to narrow the claim.
+
+**The bound is now on `ShortlistSpec.position_capital` as well, and this is the second of two
+literals.** Commit `3e83587` applied the reported dependency: the field carries
+`lt=Decimal(10) ** 26` in `backtest/cross_section.py`, beside the three siblings that already had
+one, so a directly-constructed spec is bounded and not only one arriving through the three faces.
+That leaves the number written twice, in two files, with nothing making them agree --
+`V2-P4-058`, which also found `grep -rn POSITION_CAPITAL_CEILING tests/` returning nothing at
+all. `tests/unit/test_position_capital_ceiling.py` reads the field's own metadata and requires
+the two to be equal, so the pair cannot drift; the duplication itself stays, because
+`backtest/cross_section.py` may not import this module -- `backtest-no-numeric-stack-or-panel
+-plane` lists `openalpha_cn.shortlist_view` among its `forbidden_modules` -- so de-duplicating
+would mean moving the constant under `domain/`, which is a relocation and not this row's work.
 """
 
 SHORTLIST_DATE_ZONE: Final[ZoneInfo] = ZoneInfo("Asia/Shanghai")

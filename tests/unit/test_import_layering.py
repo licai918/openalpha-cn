@@ -62,10 +62,12 @@ enumeration that a new sibling does not automatically join.
 from __future__ import annotations
 
 import ast
+import itertools
 import logging
 import re
 import tomllib
 from pathlib import Path
+from typing import Final
 
 import grimp
 from importlinter import api as importlinter_api
@@ -1001,6 +1003,22 @@ def test_no_test_in_this_module_calls_lint_imports_without_restoring_logging() -
 ORDER_CONTRACT_ID = "ranking-creates-no-portfolio-order"
 ORDER_INTENT_MARKER = "order intent"
 
+ORDER_GUARD_POINTER: Final[str] = "tests/unit/backtest/test_ranking_sources_fill_no_order.py"
+"""The one guard `ranking-creates-no-portfolio-order`'s comment promises, named by path.
+
+The contract cannot forbid `openalpha_cn.backtest.execution` -- `backtest/cross_section.py`
+imports the fill policy for `V2-P4-004`'s tradeability filter -- so its comment discloses the
+residual gap and points at this file as what guards it behaviourally instead. That sentence is
+the whole of the reader's assurance, so the path in it is bound here rather than left to a
+pattern that any test file would satisfy.
+
+`V2-P4-057`: the check that was supposed to enforce this collected *any* `tests/**/test_*.py`
+substring from the block and asserted each resolved. Three other pointers live in the same
+block, so the assertion stayed green with this sentence gutted and this file deleted -- measured
+at 31 passed, `lint-imports` 8 kept / 0 broken, with `ls tests/unit/backtest/ | grep -c
+ranking_sources` reporting `0`.
+"""
+
 # Every definition under `src/` whose own docstring calls itself an order intent **in those two
 # English words**. Discovered off the AST by `_order_intent_declarations` and asserted *equal* to
 # this table rather than merely covered by it, so a renamed declaration cannot go missing.
@@ -1029,8 +1047,28 @@ ORDER_INTENT_SUFFIXES = ("*.py", "*.pyi")
 """Both Python source forms. `V2-P4-048`: `*.py` alone could not see a `.pyi` declaration."""
 
 
-def _docstring_of(node: ast.AST) -> str:
-    """The node's docstring in **any** literal form, including an f-string.
+def _marker_in(docstring: str) -> bool:
+    """Whether the docstring uses the two words `ORDER_INTENT_MARKER`, however it is laid out.
+
+    Runs of whitespace are collapsed to one space before matching, so the words still read as
+    the marker when a line break or a double space falls between them. `V2-P4-056`: this is a
+    **layout** normalisation and not a vocabulary widening -- it still matches exactly the two
+    ASCII words `order intent` and nothing else. The reason it has to exist is that the author
+    does not control where the break lands: this repository's `line-length` is 100 and the
+    formatter reflows prose to it, so a docstring whose words the author typed adjacent can be
+    split by a later unrelated edit. Without this, the naming convention the census enforces
+    would really be "type these two words and hope they do not get wrapped", which is not a
+    convention anybody can follow -- and the `V2-P4-056` probe was a class docstring wrapped at
+    exactly the repository's own limit, which the census read as clean.
+
+    Measured on the clean tree: collapsing whitespace finds the same **two** declarations the
+    unnormalised match finds, so it cost zero false positives.
+    """
+    return ORDER_INTENT_MARKER in re.sub(r"\s+", " ", docstring).lower()
+
+
+def _string_literal(node: ast.AST) -> str:
+    """A string expression's text in **any** literal form, including an f-string.
 
     `ast.get_docstring` returns `None` for an f-string docstring, because `JoinedStr` is not
     `Constant`. `V2-P4-048`'s probe used exactly that to hide an order intent in plain sight, so
@@ -1039,19 +1077,23 @@ def _docstring_of(node: ast.AST) -> str:
     substitution is not readable in the source either, and chasing it would mean evaluating
     arbitrary expressions at audit time.
     """
-    body = getattr(node, "body", None)
-    if not body or not isinstance(body[0], ast.Expr):
-        return ""
-    value = body[0].value
-    if isinstance(value, ast.Constant) and isinstance(value.value, str):
-        return value.value
-    if isinstance(value, ast.JoinedStr):
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
         return "".join(
             part.value
-            for part in value.values
+            for part in node.values
             if isinstance(part, ast.Constant) and isinstance(part.value, str)
         )
     return ""
+
+
+def _docstring_of(node: ast.AST) -> str:
+    """The node's own docstring: its first statement, when that is a string expression."""
+    body = getattr(node, "body", None)
+    if not body or not isinstance(body[0], ast.Expr):
+        return ""
+    return _string_literal(body[0].value)
 
 
 def _qualified_names(tree: ast.Module) -> list[tuple[str, str]]:
@@ -1076,25 +1118,107 @@ def _qualified_names(tree: ast.Module) -> list[tuple[str, str]]:
 
 
 def _assigned_docstrings(tree: ast.Module) -> list[tuple[str, str]]:
-    """Every `X.__doc__ = "..."` and bare `__doc__ = "..."`, as (target, docstring).
+    """Every `X.__doc__ = "..."` and every in-scope bare `__doc__ = "..."`, as (target, doc).
 
     A docstring does not have to be the first statement to be a docstring: assigning `__doc__`
     after the class body produces exactly the same `help()` output and exactly the same intent,
     and `ast.get_docstring` cannot see it. `V2-P4-048`'s probe used this too.
+
+    The **module's own** `__doc__ = "..."` is the one form deliberately skipped, and skipping it
+    is `V2-P4-056`'s repair rather than a hole: see `_order_intent_declarations` for the
+    measurement. A bare `__doc__` inside a class body is *not* skipped -- there it is that
+    class's docstring, and it declares a named thing -- so the exclusion is written against the
+    module body specifically rather than against the syntax.
     """
     found: list[tuple[str, str]] = []
+    module_level = set(tree.body)
+
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Constant):
+        if not isinstance(node, ast.Assign):
             continue
-        if not isinstance(node.value.value, str):
+        doc = _string_literal(node.value)
+        if not doc:
             continue
         for target in node.targets:
             if isinstance(target, ast.Attribute) and target.attr == "__doc__":
                 owner = target.value.id if isinstance(target.value, ast.Name) else "<expr>"
-                found.append((f"{owner}.__doc__", node.value.value))
+                found.append((f"{owner}.__doc__", doc))
             elif isinstance(target, ast.Name) and target.id == "__doc__":
-                found.append(("__doc__", node.value.value))
+                if node in module_level:
+                    continue
+                found.append(("__doc__", doc))
     return found
+
+
+def _attribute_docstrings(tree: ast.Module) -> list[tuple[str, str]]:
+    """Every PEP-258 attribute docstring, as (qualified attribute name, docstring).
+
+    The form is an assignment immediately followed by a bare string expression in the same
+    suite -- `NAME: Final[...] = ...` then `\"\"\"...\"\"\"` -- which is how this repository
+    documents most of its constants, and how `tools`, `help()` and every documentation
+    generator read them. It is a **closed**, purely syntactic form, which is why covering it is
+    a finite change rather than a guess.
+
+    `V2-P4-056` is why it is here. The census enumerated the docstring-form axis as "literal,
+    f-string, assigned `__doc__`" and called the axis closed; that enumeration simply omitted
+    this one. Measured in the audited tree at the time: **715** attribute docstrings across the
+    124 files under `src/openalpha_cn`, none of which the census could read. The probe was
+    `PROBE_ATTRIBUTE_TICKET: Final[...] = {...}` followed by `\"\"\"A single-security order
+    intent...\"\"\"`, which `grep -n \"order intent\"` finds on one line and the census reported
+    as clean.
+
+    Scanned in every suite, not just class and module bodies, so an attribute documented inside
+    `if TYPE_CHECKING:` or inside `__init__` is read too. Measured on the clean tree: adding
+    this form finds the same **two** declarations, so it cost zero false positives.
+    """
+    found: list[tuple[str, str]] = []
+
+    def named(node: ast.Assign | ast.AnnAssign) -> str:
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        for target in targets:
+            if isinstance(target, ast.Name):
+                return target.id
+            if isinstance(target, ast.Attribute):
+                return target.attr
+        return "<expr>"
+
+    def scan(scope: ast.AST, trail: tuple[str, ...]) -> None:
+        body = getattr(scope, "body", None)
+        if not isinstance(body, list):
+            return
+        for previous, node in itertools.pairwise(body):
+            if not isinstance(previous, ast.Assign | ast.AnnAssign):
+                continue
+            if not isinstance(node, ast.Expr):
+                continue
+            doc = _string_literal(node.value)
+            if doc:
+                found.append((".".join((*trail, named(previous))), doc))
+
+    def visit(node: ast.AST, trail: tuple[str, ...]) -> None:
+        scan(node, trail)
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+                visit(child, (*trail, child.name))
+            else:
+                visit(child, trail)
+
+    visit(tree, ())
+    return found
+
+
+def _documented_declarations(tree: ast.Module) -> list[tuple[str, str]]:
+    """Every named declaration in the tree that carries a docstring, in any form this repository
+    uses, as (qualified name, docstring).
+
+    The **one** place the three readers are composed. `V2-P4-056` had them composed twice --
+    once in `_order_intent_declarations` and once in the test that pins which forms are covered
+    -- and a mutation dropping `_attribute_docstrings` from the census survived, because the
+    test called the reader directly and never went through the census. Two call sites meant the
+    coverage test was testing the readers rather than the audit. Now there is one, so the test
+    and the census cannot disagree about what "every docstring form" means.
+    """
+    return _qualified_names(tree) + _assigned_docstrings(tree) + _attribute_docstrings(tree)
 
 
 def _order_intent_declarations() -> set[tuple[str, str]]:
@@ -1103,12 +1227,41 @@ def _order_intent_declarations() -> set[tuple[str, str]]:
     A **set of pairs**, not a dict keyed by module: see `ORDER_INTENT_DECLARATIONS`.
 
     Widened by `V2-P4-048` along every axis that can be widened without guessing -- node kind
-    (functions as well as classes, at any nesting depth), docstring form (literal, f-string, and
-    assigned `__doc__`), and file extension (`.pyi` as well as `.py`). Each of those is a
-    **closed** set, so widening to cover it is a finite, checkable change. The marker vocabulary
-    is the one axis that is *not* closed, and the claim is narrowed to match rather than the
-    matcher widened to guess -- see
+    (functions as well as classes, at any nesting depth), docstring form, and file extension
+    (`.pyi` as well as `.py`). The marker vocabulary is the one axis that is *not* closed, and
+    the claim is narrowed to match rather than the matcher widened to guess -- see
     `test_every_order_intent_is_forbidden_to_the_ranking_or_disclosed_as_reachable`.
+
+    **`V2-P4-056`: the docstring-form axis was called closed while enumerated wrong.** The
+    enumeration was "literal, f-string, assigned `__doc__`", and two forms this repository uses
+    constantly were outside it. Both were demonstrated in `backtest/cross_section.py`, a module
+    both contract sources reach, each carrying the literal ASCII words, and the census reported
+    `MATCHES DECLARED TABLE: True` at 31 passed:
+
+    * a class docstring **wrapped at this repository's own 100-column limit**, so the two words
+      straddled the line break -- now read by `_marker_in`;
+    * a **PEP-258 attribute docstring**, which `grep -n \"order intent\"` finds on a single line
+      -- now read by `_attribute_docstrings`, and there are 715 of them under `src/`.
+
+    An isolated matcher probe found five misses in all, every one with both words present.
+
+    **The module docstring is the form deliberately left out, and that is measured too.** The
+    census had an inconsistency worth naming: an *assigned* module `__doc__` was read while the
+    *literal* module docstring was not. Resolving it by reading module docstrings was tried
+    and rejected on the number. On the clean tree that form finds exactly one site beyond the
+    declared two -- `openalpha_cn.backtest.candidate_ranking`'s module docstring, which says
+    \"Those three are not every order intent in the repository\". That is prose *about* order
+    intents, not a module declaring itself one, and it is a **false positive with teeth**:
+    `candidate_ranking` is one of this contract's own `source_modules`, so the partition below
+    would demand it be disclosed as a deliberately reachable order intent, which is false, and
+    a clean tree would go red until somebody wrote that falsehood into `pyproject.toml`. So the
+    rule is uniform in the other direction and stated rather than left as an accident: **the
+    census reads the docstring of a named definition -- class, function, or attribute -- and
+    never a module's own docstring, in either form.** A module docstring declares nothing that
+    can be constructed or filled; a class, function or attribute does.
+
+    False positives for the two forms that *were* added, measured on the clean tree rather than
+    assumed: **zero**. The census finds the same two declarations it found before.
     """
     package_root = ROOT / "src" / "openalpha_cn"
     found: set[tuple[str, str]] = set()
@@ -1117,10 +1270,8 @@ def _order_intent_declarations() -> set[tuple[str, str]]:
             tree = ast.parse(path.read_text(encoding="utf-8"))
             parts = path.relative_to(package_root).with_suffix("").parts
             module = ".".join(("openalpha_cn", *parts))
-            declarations = _qualified_names(tree) + _assigned_docstrings(tree)
-            found |= {
-                (module, name) for name, doc in declarations if ORDER_INTENT_MARKER in doc.lower()
-            }
+            declarations = _documented_declarations(tree)
+            found |= {(module, name) for name, doc in declarations if _marker_in(doc)}
     return found
 
 
@@ -1191,10 +1342,21 @@ def test_every_order_intent_is_forbidden_to_the_ranking_or_disclosed_as_reachabl
     does both -- to different axes**:
 
     * **Widened, because the axis is closed and enumerable.** Node kind (class, function, async
-      function, at any nesting depth), docstring form (literal, f-string, assigned `__doc__`) and
-      file extension (`.py`, `.pyi`). Each is a finite set defined by the language, so covering
-      it is a change that can be finished and checked. Measured on the clean tree, the widened
-      matcher finds **exactly the same two** declarations, so this cost no false positives.
+      function, at any nesting depth), docstring form and file extension (`.py`, `.pyi`). Each
+      is a finite set defined by the language, so covering it is a change that can be finished
+      and checked. Measured on the clean tree, the widened matcher finds **exactly the same
+      two** declarations, so this cost no false positives.
+
+      `V2-P4-056` is the correction that this bullet needed and the reason its enumeration is
+      no longer written out here. "Closed" was true; the enumeration `V2-P4-048` gave for the
+      docstring-form axis -- "literal, f-string, assigned `__doc__`" -- was not the whole of it,
+      and calling an axis closed is a claim about the enumeration rather than about the concept.
+      Two forms this repository uses everywhere were missing, and a declaration in either was
+      invisible: a docstring **wrapped at the repository's own 100-column limit**, and a
+      **PEP-258 attribute docstring** (715 of them under `src/`). Both are read now. The form
+      the census does **not** read is the module's own docstring, in either form -- which is a
+      measured exclusion and not a fourth omission; `_order_intent_declarations` carries the
+      number and the reason.
     * **Narrowed, because the axis is open and a wider claim would be unfalsifiable.** The
       *marker vocabulary*. Hunting synonyms -- "buy instruction", "trade ticket", "sell order",
       `订单意图`, `委托` -- across a repository this heavily documented is the trap
@@ -1254,6 +1416,114 @@ def test_every_order_intent_is_forbidden_to_the_ranking_or_disclosed_as_reachabl
         )
 
 
+ORDER_INTENT_DOCSTRING_FORMS: Final[tuple[tuple[str, bool, str], ...]] = (
+    (
+        "literal class docstring",
+        True,
+        'class Plain:\n    """A simplified cash-equity order intent."""\n',
+    ),
+    (
+        "literal function docstring",
+        True,
+        'def build():\n    """Build an order intent."""\n',
+    ),
+    (
+        "f-string docstring",
+        True,
+        'class Interpolated:\n    f"""A simplified cash-equity order intent for {SUBJECT}."""\n',
+    ),
+    (
+        "assigned __doc__ on a class",
+        True,
+        'class Assigned:\n    pass\n\n\nAssigned.__doc__ = "A cash-equity order intent."\n',
+    ),
+    (
+        "bare __doc__ inside a class body",
+        True,
+        'class Inner:\n    __doc__ = "A cash-equity order intent."\n',
+    ),
+    (
+        "class docstring wrapped at the 100-column limit",
+        True,
+        'class Wrapped:\n    """A simplified cash-equity settlement ticket built as a real order\n'
+        '    intent against the session bar.\n    """\n',
+    ),
+    (
+        "docstring separated by a double space",
+        True,
+        'class Spaced:\n    """A simplified cash-equity order  intent."""\n',
+    ),
+    (
+        "PEP-258 attribute docstring at module level",
+        True,
+        'TICKET: Final[dict[str, str]] = {"side": "buy"}\n'
+        '"""A single-security order intent, held as a plain mapping."""\n',
+    ),
+    (
+        "PEP-258 attribute docstring on a class attribute",
+        True,
+        'class Holder:\n    """Holder."""\n\n    ticket = {"side": "buy"}\n'
+        '    """A single-security order intent."""\n',
+    ),
+    (
+        "PEP-258 attribute docstring inside a function body",
+        True,
+        'def build():\n    """Build."""\n\n    ticket = {"side": "buy"}\n'
+        '    """A single-security order intent."""\n    return ticket\n',
+    ),
+    (
+        "literal module docstring",
+        False,
+        '"""Those three are not every order intent in the repository."""\n\nX = 1\n',
+    ),
+    (
+        "assigned module __doc__",
+        False,
+        '__doc__ = "Those three are not every order intent in the repository."\n\nX = 1\n',
+    ),
+)
+"""Each docstring form the census is claimed to read or claimed to skip, and which it is.
+
+`V2-P4-056`'s guard against its own repair. The forms the census covers can only be
+demonstrated end-to-end by putting a declaration in `src/`, which no committed test may do, so
+the coverage is pinned here against synthetic sources instead: a later simplification of
+`_marker_in` back to a plain substring test, or a census that stops calling
+`_attribute_docstrings`, goes red here rather than silently narrowing.
+
+Every sample carries the two words `order intent`; the flag is whether it is a **declaration**
+of one. The last two are the deliberate exclusion, and they use `candidate_ranking`'s own real
+sentence -- the single false positive measured on the clean tree -- so the exclusion is pinned
+by the case that motivated it.
+"""
+
+
+def test_the_census_reads_every_docstring_form_it_claims_and_skips_the_one_it_excludes() -> None:
+    """The docstring-form axis, held to its enumeration instead of to its adjective.
+
+    `V2-P4-048` called this axis closed and enumerated it "literal, f-string, assigned
+    `__doc__`". Calling an axis closed is a claim about the enumeration, and that one was two
+    forms short: `V2-P4-056` added a class docstring wrapped at this repository's own 100-column
+    limit and a PEP-258 attribute docstring to `backtest/cross_section.py`, both carrying the
+    literal ASCII words, and the census reported `MATCHES DECLARED TABLE: True` at 31 passed.
+
+    So the enumeration is a table now, checked in both directions, because a matcher that reads
+    everything is as useless as one that reads nothing: the two skipped forms are asserted
+    **skipped**, and they are the module docstring, whose exclusion
+    `_order_intent_declarations` measures rather than assumes.
+    """
+    for label, is_declaration, source in ORDER_INTENT_DOCSTRING_FORMS:
+        tree = ast.parse(source)
+        seen = {name for name, doc in _documented_declarations(tree) if _marker_in(doc)}
+
+        assert bool(seen) is is_declaration, (
+            f"{label}: the census {'missed' if is_declaration else 'read'} it, and the two words "
+            f"{ORDER_INTENT_MARKER!r} are present either way. Every form here is either a "
+            "declaration the census must read or a module docstring it must skip -- if this "
+            "table is what changed, the measurement in _order_intent_declarations has to change "
+            "with it"
+        )
+
+
 def test_the_disclosure_is_a_rationale_and_a_live_pointer_not_a_bare_name() -> None:
     """`V2-P4-048`. What `assert module in disclosure` above cannot tell on its own.
 
@@ -1266,12 +1536,26 @@ def test_the_disclosure_is_a_rationale_and_a_live_pointer_not_a_bare_name() -> N
        module whose import of the fill policy is the reason -- and the reason is measured, not
        recited: adding `openalpha_cn.backtest.execution` to `forbidden_modules` yields
        7 kept / 1 broken, breaking `V2-P4-004`'s tradeability filter.
-    2. **What guards the gap instead.** The disclosure must point at a test file, and that file
-       must **exist on disk**. A disclosure whose named guard was deleted or renamed is worse
-       than none: it tells a reader a risk is covered when it is not. This is the assertion that
-       would have caught `V2-P4-035`'s pin being replaced without the comment following.
+    2. **What guards the gap instead.** The disclosure must point at `ORDER_GUARD_POINTER` **by
+       that path**, and the file must exist on disk. A disclosure whose named guard was deleted
+       or renamed is worse than none: it tells a reader a risk is covered when it is not.
     3. **That the gap is stated at all.** The disclosure must say the residual is a single-
        security order intent, in the contract's own vocabulary.
+
+    **`V2-P4-057`: point 2 did not bind its own pointer, and the docstring claimed it did.** The
+    check collected *any* `tests/**/test_*.py` substring and required each to resolve. The block
+    already carries three other pointers, so the guard's own was redundant to the assertion and
+    the sentence about it was free to become false. Measured: one line of `pyproject.toml`
+    edited so the sentence no longer names the guard, **and the guard file moved out of the tree
+    entirely** -- `ls tests/unit/backtest/ | grep -c ranking_sources` at `0` -- left this test at
+    31 passed and `lint-imports` at 8 kept / 0 broken. The old wording said it "is the assertion
+    that would have caught `V2-P4-035`'s pin being replaced without the comment following"; it
+    would not have, and that sentence is gone rather than reworded.
+
+    The named pointer is asserted **and** the sweep over every other pointer is kept, because
+    they fail differently: the sweep catches the three unrelated pointers going stale, and the
+    named assertion catches the one the sentence promises. Neither implies the other -- that was
+    the defect.
     """
     disclosure = _order_contract_block()
 
@@ -1293,13 +1577,38 @@ def test_the_disclosure_is_a_rationale_and_a_live_pointer_not_a_bare_name() -> N
         for match in re.findall(r"tests/[\w/\n#\s.]*?\.py", disclosure.replace("#", ""))
         if "test_" in match
     }
-    resolved = {ROOT / "".join(pointer.split()) for pointer in pointers}
-    assert resolved, (
+    # Joined before comparing: a pointer long enough to wrap carries the line break and the
+    # continuation `#` inside the match, and `test_shortlist_gate.py`'s does today. Comparing
+    # raw would make this assertion a check on where the comment happens to wrap.
+    named = {"".join(pointer.split()) for pointer in pointers}
+    assert named, (
         f"{ORDER_CONTRACT_ID}'s comment names no test file. Its own text says the residual gap "
         "is guarded by a file-scoped test rather than by the contract, so deleting the pointer "
         "leaves a reader no way to check whether anything guards it at all"
     )
-    missing = sorted(str(path) for path in resolved if not path.is_file())
+
+    # Partitioned, so neither half is implied by the other. The guard's own pointer is asserted
+    # named and asserted to exist; the sweep below covers every *other* pointer. Written as
+    # `named - {guard}` rather than as a sweep over all of them because a sweep over all of them
+    # makes the guard's existence check unfalsifiable -- which is the shape of the V2-P4-057
+    # defect this test is being repaired for, and a mutation run caught it here too.
+    assert ORDER_GUARD_POINTER in named, (
+        f"{ORDER_CONTRACT_ID}'s comment no longer names {ORDER_GUARD_POINTER} as what guards the "
+        f"residual gap; it points at {sorted(named)}. The three other pointers in the block "
+        "are about the census and the probe that drives the contract, not about the fill -- so "
+        "'some test file is named and every named file exists' stays true with the one guard "
+        "that matters unnamed, which is V2-P4-057. Name the guard, or change this constant in "
+        "the same commit as whatever replaced it"
+    )
+    assert (ROOT / ORDER_GUARD_POINTER).is_file(), (
+        f"{ORDER_CONTRACT_ID}'s comment names {ORDER_GUARD_POINTER} as the behavioural guard on "
+        "the one gap this contract cannot close, and there is no such file. This is the "
+        "assertion the disclosure's own sentence is worth: the sentence and the file have to be "
+        "deleted or renamed together"
+    )
+
+    others = sorted(named - {ORDER_GUARD_POINTER})
+    missing = sorted(pointer for pointer in others if not (ROOT / pointer).is_file())
     assert not missing, (
         f"{ORDER_CONTRACT_ID}'s comment points at {missing}, which does not exist. A disclosure "
         "naming a guard that was deleted or renamed says a risk is covered when it is not, "
