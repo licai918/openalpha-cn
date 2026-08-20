@@ -523,6 +523,86 @@ def test_dockerfile_pins_blas_and_openmp_thread_counts_for_deterministic_reducti
         assert env_var in dockerfile
 
 
+def test_the_containers_working_directory_is_the_one_filesystem_it_can_write_to() -> None:
+    """`V2-P4-015`: `read_only: true` plus a cwd on the image layer is a live spill failure.
+
+    DuckDB defaults an in-memory connection's `temp_directory` to the **relative** path
+    `.tmp`, and `panel/store.py` opens `duckdb.connect(":memory:")` on every
+    `write_panel_batch`. Reproduced in the shipped image at one 200 MB memory limit: with the
+    working directory on the read-only layer the query dies with
+    `IO Error: Failed to create directory ".tmp": Read-only file system`, and with it on the
+    runtime volume the query completes.
+
+    The assertion is ordered rather than a pair of `in` checks, because the fix is entirely
+    about *which* `WORKDIR` is last: the builder-side `WORKDIR /app` is still needed for the
+    two `COPY` targets, and a change that added `/data` above it would read as done and be
+    exactly as broken.
+    """
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    compose = (ROOT / "deploy" / "compose.yml").read_text(encoding="utf-8")
+
+    runtime_stage = dockerfile.split("AS runtime", 1)[1]
+    working_dirs = re.findall(r"^WORKDIR (\S+)$", runtime_stage, re.MULTILINE)
+
+    assert working_dirs[-1] == "/data", (
+        "the runtime stage's last WORKDIR is what the process inherits, and a DuckDB spill "
+        "resolves its default temp_directory against it"
+    )
+    assert "openalpha-runtime:/data" in compose
+
+
+def test_the_duckdb_spill_directory_default_is_relative_and_that_is_why_the_workdir_moved() -> None:
+    """The executable half of the argument above, held against the library rather than prose.
+
+    The whole reason a working directory is load-bearing is that DuckDB's default is a
+    *relative* path. If a future DuckDB resolved it to an absolute one -- a temp dir, the
+    database's directory, anything -- the `WORKDIR /data` above would stop being the fix and
+    would be left standing as a change nobody could explain. This goes red on that day.
+    """
+    import duckdb
+
+    with duckdb.connect(":memory:") as connection:
+        row = connection.execute("SELECT current_setting('temp_directory')").fetchone()
+
+    assert row is not None
+    assert not Path(str(row[0])).is_absolute(), (
+        f"duckdb {duckdb.__version__} resolves an in-memory temp_directory to {row[0]!r}, "
+        "which is absolute; the Dockerfile's WORKDIR /data was chosen because it was relative"
+    )
+
+
+def test_the_container_does_not_put_its_writable_volume_on_the_import_path() -> None:
+    """`PYTHONSAFEPATH` is what makes the working directory above safe rather than worse.
+
+    `python -m uvicorn` prepends the process's cwd to `sys.path`, ahead of site-packages, so
+    a working directory that is a user-writable volume is a module-shadowing surface. Measured
+    in the shipped image: `python -m site` under `-w /data` prints `/data` as `sys.path[0]`
+    without this variable and starts at the stdlib with it.
+
+    Read out of the `ENV` block rather than as a substring of the whole file, because the
+    substring version was a mutant's meal: this Dockerfile explains `PYTHONSAFEPATH` in a comment
+    directly above the block, so deleting the actual `ENV` line left the name in the file and the
+    check green. That is `test_known_limitation_registries.py`'s "prose does not satisfy the
+    binding" arriving in a Dockerfile.
+    """
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+
+    runtime_stage = dockerfile.split("AS runtime", 1)[1]
+    settings = [
+        line.strip().removeprefix("ENV ").strip()
+        for line in runtime_stage.splitlines()
+        if not line.lstrip().startswith("#")
+    ]
+    declared = {
+        setting.split("=", 1)[0] for setting in settings if re.match(r"^[A-Z][A-Z0-9_]*=", setting)
+    }
+
+    assert "PYTHONSAFEPATH" in declared, (
+        "the runtime stage's ENV block does not declare PYTHONSAFEPATH; a mention in a comment "
+        "is not a setting"
+    )
+
+
 def _env_example_section_vars(env_example: str, header: str) -> list[str]:
     """Return the `NAME=` variables declared directly under a `# <header>` comment.
 
@@ -1110,6 +1190,16 @@ def test_no_numerical_stack_package_can_be_installed_by_default() -> None:
 def test_the_optional_and_development_dependency_tables_are_not_a_way_around_the_nine() -> None:
     """The nine are a floor on what an install pulls in, so the other two tables need a rule too.
 
+    **Correction, `V2-P4-015`: the first sentence below overstates what this test does, and the
+    correction is measured.** This is a check over *declared names*, and the eight names it knows
+    are `NUMERICAL_STACK_PACKAGES`. The `akshare` extra has been in this table the whole time and
+    reaches `pandas` and therefore `numpy`, and this test has always passed -- so "forbidden
+    outright" was true of the four names and false of the install.
+    `test_a_numerical_stack_cannot_arrive_through_an_extra_that_only_names_its_wheel` is the check
+    over the resolved graph, and `EXTRAS_THAT_CARRY_A_NUMERICAL_STACK` is where `akshare` is
+    written down rather than exempted. This test is kept as it stands because it fails with a
+    different message -- the direct one, naming the decision reversed.
+
     `[project.optional-dependencies]` ships to users behind an extra, so a numerical stack there
     is the same install by another name and is forbidden outright. `[dependency-groups].dev`
     never reaches a wheel, so it is pinned as a list instead: adding `numpy` there for one test
@@ -1141,6 +1231,93 @@ def test_the_optional_and_development_dependency_tables_are_not_a_way_around_the
         "pytest>=9.0.0,<10",
         "pytest-cov>=7.0.0,<8",
         "ruff>=0.15.0,<1",
+    )
+
+
+EXTRAS_THAT_CARRY_A_NUMERICAL_STACK = {"akshare": ("numpy", "pandas")}
+"""Which extras pull a numerical stack **transitively**, and what each pulls.
+
+`V2-P4-015` measured that the guard above is a **name** check and that it was already false.
+`test_the_optional_and_development_dependency_tables_are_not_a_way_around_the_nine`'s own
+docstring says an extra shipping a numerical stack "is the same install by another name and is
+forbidden outright" -- and `akshare` has been in that table the whole time, requiring `pandas`,
+which requires `numpy`. Neither name is in `NUMERICAL_STACK_PACKAGES`, so the guard passed. It
+would have passed a `lightgbm` extra for exactly the same reason: `lightgbm` is not one of the
+eight names either, and its wheel requires `numpy` and `scipy`.
+
+This mapping is therefore a pin over the **resolved** graph rather than over the declared names,
+and `akshare` is written into it rather than exempted from it. The distinction it draws is the one
+ADR-0003 actually argues: `akshare` is an optional *data provider* whose pandas dependency is the
+provider's own, reached by `providers/`, and ADR-0003's Context item 2 already records that CI
+installs both because of it. A model that needed a numerical stack would be this repository's own
+code depending on one, which is the decision that ADR requires an ADR edit to reverse.
+"""
+
+
+def _locked_packages() -> dict[str, dict[str, object]]:
+    lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
+    packages = lock["package"]
+    assert isinstance(packages, list)
+    return {str(entry["name"]): entry for entry in packages}
+
+
+def _reachable(names: list[str], packages: dict[str, dict[str, object]]) -> set[str]:
+    """Every distribution an install of `names` would pull in, per the lock file."""
+    seen: set[str] = set()
+    stack = list(names)
+    while stack:
+        current = stack.pop()
+        if current in seen or current not in packages:
+            continue
+        seen.add(current)
+        dependencies = packages[current].get("dependencies", [])
+        assert isinstance(dependencies, list)
+        stack.extend(str(dependency["name"]) for dependency in dependencies)
+    return seen
+
+
+def test_a_numerical_stack_cannot_arrive_through_an_extra_that_only_names_its_wheel() -> None:
+    """The hole `V2-P4-015` found in the guard above, closed over the resolved graph.
+
+    Two assertions and they are different claims. The first is the one ADR-0003 has re-argued
+    nine times and has never actually measured: that a **default** install reaches no numerical
+    stack at all -- 25 distributions in the lock, none of them numeric. The nine-name pin cannot
+    say that, because a numerical stack can arrive as somebody else's dependency.
+
+    The second pins which extras carry one and what each carries, so an extra named after a
+    wheel this repository has never heard of -- `lightgbm`, `xgboost`, anything -- fails here
+    instead of passing a check that only knows eight distribution names.
+    """
+    packages = _locked_packages()
+    root = packages["openalpha-cn"]
+
+    dependencies = root.get("dependencies", [])
+    assert isinstance(dependencies, list)
+    default = _reachable([str(entry["name"]) for entry in dependencies], packages)
+
+    assert sorted(default & NUMERICAL_STACK_PACKAGES) == [], (
+        "a default `uv sync` would install a numerical stack transitively. ADR-0003's decision "
+        "is about what an install pulls in, not about what nine strings say"
+    )
+
+    optional = root.get("optional-dependencies", {})
+    assert isinstance(optional, dict)
+    measured = {
+        extra: tuple(
+            sorted(
+                _reachable([str(entry["name"]) for entry in requirements], packages)
+                & NUMERICAL_STACK_PACKAGES
+            )
+        )
+        for extra, requirements in optional.items()
+    }
+    carriers = {extra: names for extra, names in measured.items() if names}
+
+    assert carriers == EXTRAS_THAT_CARRY_A_NUMERICAL_STACK, (
+        f"the extras table's transitive numerical carry is {carriers} and this file pins "
+        f"{EXTRAS_THAT_CARRY_A_NUMERICAL_STACK}. Adding an extra that reaches numpy, pandas, "
+        "scipy or scikit-learn is ADR-0003's decision being reversed one indirection out, "
+        "which is exactly how it would arrive"
     )
 
 
