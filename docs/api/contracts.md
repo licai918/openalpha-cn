@@ -9,7 +9,7 @@ out (`domain/schema.py::schema_document_name`), so a document called `-v2` is a
 - `evidence-snapshot-v1.json`
 - `signal-frame-v1.json`
 - `decision-ledger-v2.json`
-- `run-manifest-v2.json`
+- `run-manifest-v3.json`
 - `validation-result-v2.json`
 
 Regenerate them after an intentional contract change:
@@ -27,12 +27,23 @@ in `domain/run.py`, `domain/decision.py` and `domain/validation.py` are what
 read it) until `storage/migrations.py`'s `rewrite_contract_identities` has
 advanced every stored row.
 
-`V2-P4-001` cut the three v2 documents above in one window. Two of those bumps
+`V2-P4-001` cut three v2 documents in one window. Two of those bumps
 move a content-addressed identity, so they are **not** upgraded transparently on
 read: `decisions.decision_id` and `validation_results.validation_id` are stored
 keys, and recomputing one at read time would leave every reference to it
 pointing at the old value. Reading an un-migrated row of either contract raises
 `IdentityRewriteRequiredError` and names the migration to run.
+
+`V2-P4-010` cut `run-manifest/v3`, and it is the case that shows the rule is
+about *references* rather than about a row's own key. `runs.run_id` is
+caller-supplied and does not move, which is why `run-manifest/v1` upgrades
+transparently on read to this day. But `V2-P4-025` put the manifest's content
+address into `DecisionLedger.run_manifest_id` in between, so a v2 manifest
+advanced at read time hands back an address no stored decision names -- and
+nothing raises, because the reference is a pattern-checked string rather than a
+foreign key. `run-manifest/v2` therefore refuses, and migration 8
+(`rewrite_manifest_component_planes`) advances the run rows and re-keys the
+decisions, validation results and reports behind them in one transaction.
 
 ## Runtime records
 

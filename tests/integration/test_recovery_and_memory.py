@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from openalpha_cn.agents.base import AgentContext, AgentResult
+from openalpha_cn.agents.base import AgentContext, AgentProvenance, AgentResult
 from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.runtime.contracts import ResearchRunRequest, RunConflictError
 from openalpha_cn.runtime.engine import ResearchEngine
@@ -18,6 +18,12 @@ DIGEST = "b" * 64
 
 class RecoverableAgent:
     evidence_families = frozenset({"market_event"})
+    provenance = AgentProvenance(kind="deterministic")
+    """`V2-P4-010`: `ResearchAgent` now requires an agent to say what kind of thing it is,
+    because the manifest records it (S40) and nothing else can know. This double is
+    deterministic, and the interrupted-then-resumed run below is the one path where the
+    engine assembles its results from two sources -- so it is also where a manifest built by
+    zipping declarations against results positionally would go wrong."""
 
     def __init__(self, agent_id: str, *, fail_once: bool = False) -> None:
         self.agent_id = agent_id

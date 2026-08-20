@@ -35,10 +35,14 @@ from openalpha_cn.domain._identity import stable_model_id
 from openalpha_cn.domain.decision import AgentDecision, DecisionLedger, DecisionLedgerV1
 from openalpha_cn.domain.run import (
     RUN_MANIFEST_UNADDRESSED_FIELDS,
+    RUN_MANIFEST_VERSIONS,
+    AgentVersion,
+    AlphaModelRef,
     ArtifactDigest,
     CheckpointRecord,
     RunManifest,
     RunManifestV1,
+    RunManifestV2,
     VersionRef,
 )
 from openalpha_cn.domain.run_mode import RunMode
@@ -49,11 +53,14 @@ from openalpha_cn.domain.validation import (
     ValidationResult,
     ValidationResultV1,
 )
+from openalpha_cn.domain.versioning import IdentityRewriteRequiredError, read_versioned
 
 NOW: Final[datetime] = datetime(2026, 1, 16, 7, 0, tzinfo=UTC)
 DIGEST: Final[str] = "a" * 64
 OTHER_DIGEST: Final[str] = "b" * 64
 ADDRESS: Final[str] = "run_" + "0" * 24
+ARTIFACT: Final[str] = "mdl_" + "0" * 24
+OTHER_ARTIFACT: Final[str] = "mdl_" + "1" * 24
 
 
 # --- the signal frame, which deliberately did NOT move ---------------------------------
@@ -146,8 +153,10 @@ def _manifest(**overrides: Any) -> RunManifest:
         "code_commit": "0123456789abcdef",
         "config_digest": DIGEST,
         "provider_payload_digests": (ArtifactDigest(name="tushare.daily", sha256=DIGEST),),
+        "agent_versions": (AgentVersion(agent_id="market-agent", kind="deterministic"),),
         "model_versions": (VersionRef(component="baseline", version="1.0.0"),),
         "prompt_versions": (),
+        "alpha_model_versions": (AlphaModelRef(name="lgbm-baseline", artifact_id=ARTIFACT),),
         "random_seed": 7,
         "environment": (VersionRef(component="python", version="3.11.14"),),
         "started_at": NOW,
@@ -158,8 +167,17 @@ def _manifest(**overrides: Any) -> RunManifest:
     return RunManifest(**{**fields, **overrides})
 
 
-GOLDEN_RUN_MANIFEST_ID: Final[str] = "run_bce5768e42bac31236638c6d"
-"""`_manifest().run_manifest_id`. New at `V2-P4-025`, so there is no earlier value to compare."""
+GOLDEN_RUN_MANIFEST_ID: Final[str] = "run_b046b7e50079ee325dee4929"
+"""`_manifest().run_manifest_id` at `run-manifest/v3`."""
+
+SUPERSEDED_RUN_MANIFEST_ID: Final[str] = "run_bce5768e42bac31236638c6d"
+"""The same fixture's address at `run-manifest/v2`, measured on `d234e4b`.
+
+Kept rather than deleted because "this contract change moved every stored run address" is the
+premise `storage/migrations.py`'s version 8 rests on, and a premise nothing re-measures is a
+premise that quietly stops being true. See
+`test_the_component_planes_moved_the_addresses_the_migration_has_to_rewrite`.
+"""
 
 _ADDRESSED_MANIFEST_VARIATIONS: Final[tuple[tuple[str, Any], ...]] = (
     ("run_id", "run_other"),
@@ -168,10 +186,20 @@ _ADDRESSED_MANIFEST_VARIATIONS: Final[tuple[tuple[str, Any], ...]] = (
     ("code_commit", "fedcba9876543210"),
     ("config_digest", OTHER_DIGEST),
     ("provider_payload_digests", (ArtifactDigest(name="tushare.daily", sha256=OTHER_DIGEST),)),
+    ("agent_versions", (AgentVersion(agent_id="market-agent", kind="llm_backed"),)),
     ("model_versions", (VersionRef(component="baseline", version="2.0.0"),)),
     ("prompt_versions", (VersionRef(component="committee", version="1.0.0"),)),
+    ("alpha_model_versions", (AlphaModelRef(name="lgbm-baseline", artifact_id=OTHER_ARTIFACT),)),
     ("random_seed", 99999),
 )
+"""`V2-P4-010`'s three additions are varied by their *discriminating* field, not by any field.
+
+`agent_versions` varies the `kind` while holding `agent_id` fixed, and
+`alpha_model_versions` varies the `artifact_id` while holding `name` fixed. Varying the id or
+the name instead would pass against a `RunManifest` that hashed only the half a human typed --
+which is exactly the state `model_versions` was in before this issue, where every entry paired
+a real `agent_id` with the constant `"baseline/v1"` and the constant reached nothing.
+"""
 
 _UNADDRESSED_MANIFEST_VARIATIONS: Final[tuple[tuple[str, Any], ...]] = (
     ("environment", (VersionRef(component="python", version="3.12.9"),)),
@@ -242,10 +270,66 @@ def test_a_rerun_at_a_different_wall_clock_reproduces_the_same_address() -> None
         "code_commit",
         "config_digest",
         "provider_payload_digests",
+        "agent_versions",
         "model_versions",
         "prompt_versions",
+        "alpha_model_versions",
         "random_seed",
     }
+
+
+def test_the_component_planes_moved_the_addresses_the_migration_has_to_rewrite() -> None:
+    """`V2-P4-010`'s cost, measured, because the migration it pays for is justified by it.
+
+    Both directions of the same fact. The manifest address moved because `RunManifest` gained
+    two fields; the *decision* identity moved even though `decision-ledger` was not bumped,
+    because `run_manifest_id` is one of its fields. The second is the one worth pinning: it is
+    the reason `storage/migrations.py`'s version 8 has to re-key `decisions` and cascade through
+    `validation_results`, `research_reports`, `research_memory` and `batch_tasks`, and reading
+    the diff of this issue would not tell you it was necessary.
+
+    Asserted against values taken from `d234e4b` rather than recomputed from this build, so
+    they are the historical answer rather than today's restated. `validation_id` is included
+    for the same reason `decision_id` is: `ValidationResult` was not bumped either.
+    """
+    assert GOLDEN_RUN_MANIFEST_ID != SUPERSEDED_RUN_MANIFEST_ID
+    assert GOLDEN_DECISION_ID != SUPERSEDED_DECISION_ID
+    assert GOLDEN_VALIDATION_ID != SUPERSEDED_VALIDATION_ID
+    assert _manifest().run_manifest_id == GOLDEN_RUN_MANIFEST_ID
+    assert _decision().decision_id == GOLDEN_DECISION_ID
+    assert _validation().validation_id == GOLDEN_VALIDATION_ID
+
+
+def test_a_v2_manifest_refuses_to_advance_itself_on_read() -> None:
+    """The measurement behind `refuse_run_manifest_v2_upgrade`, not a restatement of it.
+
+    `upgrade_run_manifest_v1` is allowed precisely because no stored row referenced a manifest
+    address at v1 -- `DecisionLedgerV1` has no `run_manifest_id`, asserted here rather than
+    recalled -- and that stopped being true at `V2-P4-025`. So the v1 hop still upgrades on
+    read and the v2 hop refuses, and the two are asserted side by side because the difference
+    between them is the whole argument.
+    """
+    dumped = _manifest().model_dump(mode="python", exclude_computed_fields=True)
+    v2_fields = {
+        key: value
+        for key, value in dumped.items()
+        if key not in {"schema_version", "agent_versions", "alpha_model_versions"}
+    }
+    stored_v2 = RunManifestV2.model_validate(v2_fields)
+
+    assert "run_manifest_id" not in DecisionLedgerV1.model_fields
+    assert "run_manifest_id" in DecisionLedger.model_fields
+
+    with pytest.raises(IdentityRewriteRequiredError, match="run-manifest"):
+        read_versioned(RUN_MANIFEST_VERSIONS, stored_v2.model_dump_json())
+
+    v1_fields = {
+        key: value for key, value in v2_fields.items() if key not in {"schema_version"}
+    } | {"mode": "live"}
+    stored_v1 = RunManifestV1.model_validate(v1_fields)
+    upgraded = read_versioned(RUN_MANIFEST_VERSIONS, stored_v1.model_dump_json())
+
+    assert upgraded.schema_version == "run-manifest/v3"
 
 
 def test_every_run_manifest_field_is_addressed_or_excluded_by_name() -> None:
@@ -338,8 +422,18 @@ def _decision(**overrides: Any) -> DecisionLedger:
     return DecisionLedger(**{**fields, **overrides})
 
 
-GOLDEN_DECISION_ID: Final[str] = "dec_6d621fd9a25506cec565420f"
-"""`_decision().decision_id` at `decision-ledger/v2`."""
+GOLDEN_DECISION_ID: Final[str] = "dec_26ea2f0a3b85c327029c76ff"
+"""`_decision().decision_id` at `decision-ledger/v2`, against a `run-manifest/v3` address."""
+
+SUPERSEDED_DECISION_ID: Final[str] = "dec_6d621fd9a25506cec565420f"
+"""The same fixture's identity on `d234e4b`, when the manifest it names was at v2.
+
+`decision-ledger` is **not** bumped by `V2-P4-010` and this value moved anyway, which is the
+whole reason the issue owes a migration: `run_manifest_id` is a field of `DecisionLedger`, so a
+manifest gaining a field re-keys every stored decision without the decision contract changing
+at all. `V2-P4-025`'s docstring predicted exactly this -- "including inputs `RunManifest` gains
+later" -- and these two constants are that sentence measured.
+"""
 
 
 def test_the_decision_identity_is_stable_and_moves_with_the_manifest_it_names() -> None:
@@ -389,8 +483,17 @@ def _validation(**overrides: Any) -> ValidationResult:
     return ValidationResult(**{**fields, **overrides})
 
 
-GOLDEN_VALIDATION_ID: Final[str] = "val_f898bce11540c6fb3b08459c"
-"""`_validation().validation_id` at `validation-result/v2`."""
+GOLDEN_VALIDATION_ID: Final[str] = "val_67f3514eb2107b79bebab445"
+"""`_validation().validation_id` at `validation-result/v2`, against the decision above."""
+
+SUPERSEDED_VALIDATION_ID: Final[str] = "val_f898bce11540c6fb3b08459c"
+"""The same fixture's identity on `d234e4b`. The third link of the same chain.
+
+`validation-result` is not bumped by `V2-P4-010` either, and moved anyway, because
+`ValidationResult.decision_id` names a decision that a manifest field addition re-keyed. Three
+contracts, one of them changed, three identities moved -- which is the shape of the cascade
+`storage/migrations.py` has to reproduce on disk, and the reason it cannot stop at `runs`.
+"""
 
 
 def test_the_validation_identity_is_stable_for_a_fixed_result() -> None:

@@ -161,7 +161,7 @@ def test_sqlite_run_repository_get_run_fails_loudly_on_an_unknown_schema_version
 ) -> None:
     path = tmp_path / "state.sqlite3"
     SQLiteRunRepository(path)  # create the schema
-    future_payload = json.dumps({"schema_version": "run-manifest/v3", "run_id": "run_future"})
+    future_payload = json.dumps({"schema_version": "run-manifest/v4", "run_id": "run_future"})
     with closing(sqlite3.connect(path)) as connection, connection:
         connection.execute(
             "INSERT INTO runs (run_id, payload) VALUES (?, ?)",
@@ -174,10 +174,11 @@ def test_sqlite_run_repository_get_run_fails_loudly_on_an_unknown_schema_version
 
     error = exc_info.value
     assert error.contract == "run-manifest"
-    assert error.found_version == "run-manifest/v3"
+    assert error.found_version == "run-manifest/v4"
     assert "run-manifest/v1" in error.supported_versions
     assert "run-manifest/v2" in error.supported_versions
-    assert "run-manifest/v3" in str(error)
+    assert "run-manifest/v3" in error.supported_versions
+    assert "run-manifest/v4" in str(error)
 
 
 def test_sqlite_run_repository_get_decision_fails_loudly_on_an_unknown_schema_version(

@@ -3,9 +3,17 @@
 from collections.abc import Mapping
 from typing import Literal, cast
 
-from openalpha_cn.agents.base import AgentContext, AgentResult
+from openalpha_cn.agents.base import AgentContext, AgentProvenance, AgentResult
 from openalpha_cn.domain.evidence import EvidenceSnapshot
 from openalpha_cn.domain.signal import SignalFrame
+
+DETERMINISTIC: AgentProvenance = AgentProvenance(kind="deterministic")
+"""What all three agents in this module are, stated once (`V2-P4-010`, S40).
+
+One shared instance rather than three identical literals, for the reason `V2-P4-003` records
+about `RunMode`: a value written out per class is a value that drifts when somebody edits two
+of the three. `AgentProvenance` is frozen, so sharing it is safe.
+"""
 
 
 def _family(item: EvidenceSnapshot) -> str:
@@ -46,6 +54,7 @@ class MarketAgent:
 
     agent_id = "market-agent"
     evidence_families = frozenset({"market_event"})
+    provenance = DETERMINISTIC
 
     def analyze(self, context: AgentContext) -> AgentResult:
         items = tuple(item for item in context.evidence if _family(item) == "market_event")
@@ -82,6 +91,7 @@ class ThemeAgent:
 
     agent_id = "theme-agent"
     evidence_families = frozenset({"theme", "catalyst", "disclosure"})
+    provenance = DETERMINISTIC
 
     def analyze(self, context: AgentContext) -> AgentResult:
         items = tuple(item for item in context.evidence if _family(item) in self.evidence_families)
@@ -118,6 +128,7 @@ class CapitalAgent:
 
     agent_id = "capital-agent"
     evidence_families = frozenset({"capital"})
+    provenance = DETERMINISTIC
 
     def analyze(self, context: AgentContext) -> AgentResult:
         items = tuple(item for item in context.evidence if _family(item) == "capital")

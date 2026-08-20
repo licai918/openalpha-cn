@@ -87,7 +87,7 @@ def test_run_manifest_records_reproduction_inputs_and_terminal_state(
         ),
     )
 
-    assert manifest.schema_version == "run-manifest/v2"
+    assert manifest.schema_version == "run-manifest/v3"
     assert manifest.provider_payload_digests[0].sha256 == DIGEST
 
 

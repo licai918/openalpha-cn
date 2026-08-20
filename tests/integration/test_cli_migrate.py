@@ -13,6 +13,7 @@ from openalpha_cn.storage.migrations import (
     CREATE_VALIDATION_RESULTS_VERSION,
     DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
     REWRITE_CONTRACT_IDENTITIES_VERSION,
+    REWRITE_MANIFEST_COMPONENT_PLANES_VERSION,
     SPLIT_BATCH_TASK_ITEMS_VERSION,
 )
 
@@ -36,6 +37,7 @@ def test_migrate_status_reports_pending_migrations_for_a_fresh_runtime_dir(tmp_p
         REWRITE_CONTRACT_IDENTITIES_VERSION,
         ADD_RUNS_MODE_PROJECTION_VERSION,
         SPLIT_BATCH_TASK_ITEMS_VERSION,
+        REWRITE_MANIFEST_COMPONENT_PLANES_VERSION,
     ]
 
 
@@ -121,8 +123,8 @@ def test_migrate_run_converges_after_it_constructs_stores_then_reports_up_to_dat
     # build_storage() constructed every store, so all of their preconditions are met by
     # the time this second call's run_migrations() runs.
     assert (
-        f"migrated {CREATE_VALIDATION_RESULTS_VERSION} -> {SPLIT_BATCH_TASK_ITEMS_VERSION}"
-        in second.output
+        f"migrated {CREATE_VALIDATION_RESULTS_VERSION} -> "
+        f"{REWRITE_MANIFEST_COMPONENT_PLANES_VERSION}" in second.output
     )
     assert "up to date" not in second.output
     assert "still pending" not in second.output
@@ -131,7 +133,7 @@ def test_migrate_run_converges_after_it_constructs_stores_then_reports_up_to_dat
         app, ["migrate", "status", "--runtime-dir", str(runtime_dir), "--json"]
     )
     status_after_second = json.loads(status_result.output)
-    assert status_after_second["current_version"] == SPLIT_BATCH_TASK_ITEMS_VERSION
+    assert status_after_second["current_version"] == REWRITE_MANIFEST_COMPONENT_PLANES_VERSION
     assert status_after_second["pending"] == []
 
     third = runner.invoke(app, ["migrate", "run", "--runtime-dir", str(runtime_dir)])

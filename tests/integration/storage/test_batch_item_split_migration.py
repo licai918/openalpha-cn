@@ -26,6 +26,7 @@ from openalpha_cn.batch_contracts import BatchResearchTask, BatchResultRef, Batc
 from openalpha_cn.domain.run_request import ResearchRunRequest
 from openalpha_cn.storage.batch import SQLiteBatchTaskStore
 from openalpha_cn.storage.migrations import (
+    REWRITE_MANIFEST_COMPONENT_PLANES_VERSION,
     SPLIT_BATCH_TASK_ITEMS_VERSION,
     BatchItemSplitError,
     MigrationNotYetApplicable,
@@ -157,7 +158,7 @@ def test_the_split_empties_the_items_key_out_of_the_header_row(
         ).fetchall()
     assert "items" not in json.loads(header)
     assert [row[0] for row in positions] == [0, 1, 2, 3]
-    assert read_status(path).current_version == SPLIT_BATCH_TASK_ITEMS_VERSION
+    assert read_status(path).current_version == REWRITE_MANIFEST_COMPONENT_PLANES_VERSION
 
 
 def test_running_the_split_twice_changes_nothing(

@@ -1,5 +1,55 @@
 {
   "$defs": {
+    "AgentVersion": {
+      "additionalProperties": false,
+      "description": "One agent that contributed to a run, and which implementation kind it is.\n\nNo `version` field, and its absence is a measurement rather than an omission. The slot this\nreplaces carried `VersionRef(component=<agent_id>, version=\"baseline/v1\")` -- a constant,\nwhich is why it was wrong about `StructuredSignalAgent` for the whole of v1 at no cost: a\nfield whose value never varies contributes a fixed string to the canonical JSON and\ntherefore nothing to any address. What a deterministic agent's \"version\" actually is, is\nthe commit its code was at, and `RunManifest.code_commit` already carries that; restating\nit once per agent would put the same fact in two places, which is the drift this repository\npays for most often. The vendor model an LLM-backed agent calls is the part `code_commit`\ngenuinely cannot pin, and it goes to `RunManifest.model_versions`, the slot named for it.",
+      "properties": {
+        "agent_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Agent Id",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "deterministic",
+            "learned",
+            "llm_backed"
+          ],
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "agent_id",
+        "kind"
+      ],
+      "title": "AgentVersion",
+      "type": "object"
+    },
+    "AlphaModelRef": {
+      "additionalProperties": false,
+      "description": "A quantitative model artifact a run consumed, named by its content address.\n\nThe manifest's third component plane, and a separate type from `VersionRef` on purpose.\n`V2-P4-011` is where the distinction stops being a matter of naming: `models/base.py`'s\n`ModelProvider` is LLM-JSON-shaped (`generate_json(system, user, schema) -> dict`) and\ncannot express a panel fit/predict, so the thing that produces a quantitative model version\nis not the thing that produces an agent id or a vendor model string -- and the identifiers\ndiffer in kind with it. An agent id and a vendor model are *names*: somebody chose them and\na reader can only take them on trust. A model artifact reference is a *digest*: `V2-P4-016`\ncomputes it from the training cutoff, feature version, parameters, seed and code version\n(Implementation Decision 11), and a reader can re-derive it. Keeping all three in one\n`tuple[VersionRef, ...]` is what let an agent id occupy the model slot for the whole of v1\nwith nothing able to object.\n\n`artifact_id` is therefore pattern-bound to `stable_model_id`'s output rather than left as\nfree text -- the same guard `DecisionLedger.run_manifest_id` carries, for the same reason.\nWhich prefix, and which fields the digest is taken over, are `V2-P4-016`'s to decide; that\nit must be an address this repository computed is decided here.",
+      "properties": {
+        "artifact_id": {
+          "pattern": "^[a-z][a-z0-9_]*_[0-9a-f]{24}$",
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "artifact_id"
+      ],
+      "title": "AlphaModelRef",
+      "type": "object"
+    },
     "ArtifactDigest": {
       "additionalProperties": false,
       "description": "A named SHA-256 digest for a provider payload or other artifact.",
@@ -92,6 +142,22 @@
   "additionalProperties": false,
   "description": "Everything required to reproduce and recover one research run.",
   "properties": {
+    "agent_versions": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/AgentVersion"
+      },
+      "title": "Agent Versions",
+      "type": "array"
+    },
+    "alpha_model_versions": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/AlphaModelRef"
+      },
+      "title": "Alpha Model Versions",
+      "type": "array"
+    },
     "as_of": {
       "format": "date-time",
       "title": "As Of",
@@ -181,8 +247,8 @@
       "type": "string"
     },
     "schema_version": {
-      "const": "run-manifest/v2",
-      "default": "run-manifest/v2",
+      "const": "run-manifest/v3",
+      "default": "run-manifest/v3",
       "title": "Schema Version",
       "type": "string"
     },

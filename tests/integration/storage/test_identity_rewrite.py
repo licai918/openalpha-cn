@@ -49,7 +49,7 @@ from openalpha_cn.storage.batch import SQLiteBatchTaskStore
 from openalpha_cn.storage.memory import SQLiteResearchMemory
 from openalpha_cn.storage.migrations import (
     REWRITE_CONTRACT_IDENTITIES_VERSION,
-    SPLIT_BATCH_TASK_ITEMS_VERSION,
+    REWRITE_MANIFEST_COMPONENT_PLANES_VERSION,
     MigrationFailedError,
     UnmigratableHorizonError,
     _rewrite_contract_identities,
@@ -255,11 +255,11 @@ def test_a_pre_p4_database_reads_back_at_the_current_version_after_migrating(
 
     run_migrations(path, clock=migration_clock)
 
-    assert read_status(path).current_version == SPLIT_BATCH_TASK_ITEMS_VERSION
+    assert read_status(path).current_version == REWRITE_MANIFEST_COMPONENT_PLANES_VERSION
     repository = SQLiteRunRepository(path)
     manifest = repository.get_run(RUN_ID)
     assert manifest is not None
-    assert manifest.schema_version == "run-manifest/v2"
+    assert manifest.schema_version == "run-manifest/v3"
     assert manifest.mode == "replay"
     assert manifest.config_digest == DIGEST
 
@@ -374,7 +374,7 @@ def test_reading_an_unmigrated_v1_row_refuses_instead_of_upcasting_it(
 
     manifest = repository.get_run(RUN_ID)
     assert manifest is not None
-    assert manifest.schema_version == "run-manifest/v2"
+    assert manifest.schema_version == "run-manifest/v3"
 
     with pytest.raises(IdentityRewriteRequiredError, match="openalpha migrate run") as decision_err:
         repository.get_decision(before["decision_id"])
@@ -475,7 +475,7 @@ def test_a_stored_calendar_horizon_refuses_the_whole_rewrite_by_name(
         read_versioned(
             RUN_MANIFEST_VERSIONS, _column(path, "SELECT payload FROM runs")[0]
         ).schema_version
-        == "run-manifest/v2"
+        == "run-manifest/v3"
     )  # upgraded on read; the stored payload is untouched
     assert json.loads(_column(path, "SELECT payload FROM runs")[0])["schema_version"] == (
         "run-manifest/v1"
@@ -498,7 +498,7 @@ def test_build_storage_migrates_a_pre_p4_runtime_directory_end_to_end(
 
     storage = build_storage(runtime_dir=runtime_dir, clock=migration_clock)
 
-    assert storage.migration_result.to_version == SPLIT_BATCH_TASK_ITEMS_VERSION
+    assert storage.migration_result.to_version == REWRITE_MANIFEST_COMPONENT_PLANES_VERSION
     decision = storage.repository.get_decision_for_run(RUN_ID)
     assert decision is not None
     assert decision.decision_id != before["decision_id"]
