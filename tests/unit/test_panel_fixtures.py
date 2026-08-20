@@ -82,6 +82,7 @@ EXPECTED_SHAPE_IDS = (
     "industry.session_adjacent_handover",
     "name_history.announcement_on_the_newest_session",
     "name_history.announcement_precedes_effect",
+    "name_history.effect_after_every_priced_session",
     "name_history.reform_prefixed_special_treatment",
     "price_limits.limit_free_sentinel",
     "price_limits.one_price_limit_up",
@@ -119,6 +120,7 @@ EXPECTED_PROVOCATIONS = {
     "industry.session_adjacent_handover": (),
     "name_history.announcement_on_the_newest_session": (),
     "name_history.announcement_precedes_effect": (),
+    "name_history.effect_after_every_priced_session": (),
     "name_history.reform_prefixed_special_treatment": (),
     "price_limits.limit_free_sentinel": (),
     "price_limits.one_price_limit_up": (),
@@ -269,10 +271,13 @@ CROSS_TRIGGERS = {
     "financials.second_statement_dataset": (
         "financials.statement_dataset_without_a_revision_label",
     ),
+    "name_history.announcement_precedes_effect": (
+        "name_history.effect_after_every_priced_session",
+    ),
     "suspension.timed_interruption": ("suspension.halt_on_the_newest_session",),
     "universe.delisted_security": ("universe.termination_on_the_newest_session",),
 }
-"""Detector -> the other shapes' panels it also answers `True` on. Seven, each declared.
+"""Detector -> the other shapes' panels it also answers `True` on. Eight, each declared.
 
 Statement (4) below is "a detector answers `False` on somebody else's shape", and these are the
 pairs where it does not. None is a detector reaching outside what it names; each is one shape's
@@ -309,6 +314,14 @@ written down rather than allowed by a loose assertion. In order:
 - `financials.statement_dataset_without_a_revision_label` stores all four statement endpoints,
   of which `second_statement_dataset` asks for two. Again containment, and the reverse
   direction is `False`: two datasets are not four.
+- `name_history.effect_after_every_priced_session` is a rename announced 2026-01-14 and
+  effective 2026-01-20, so its two clocks separate -- which is `announcement_precedes_effect`
+  read literally, and the corpus fact that shape is filed under. What the newer shape adds is
+  *where the effect lands*: `RENAME_EFFECTIVE_FROM` is 2026-08-02, seven months out but with
+  `LISTED_ON`'s baseline record still under it, so `record_on` answers every session of the
+  window; the newer shape drops that baseline, so the security's earliest stored record is the
+  one past `WINDOW_LAST` and no session has a name at all. The reverse direction is `False`,
+  and that asymmetry is the pair's whole content.
 - `suspension.halt_on_the_newest_session` writes a **timed** halt, so it is a timed
   interruption as well as a newest-session one. The timing is forced rather than chosen: the
   price grid carries a bar for every name on every session except `_missing_bars`' one cell,
@@ -321,7 +334,7 @@ written down rather than allowed by a loose assertion. In order:
   no session's cross section, and the newer one's is dated on the last session so that the
   *partition's newest availability instant* moves onto it. Again the reverse is `False`.
 
-The table is a dict literal for `EXPECTED_PROVOCATIONS`' reason. An eighth pair appearing is a
+The table is a dict literal for `EXPECTED_PROVOCATIONS`' reason. A ninth pair appearing is a
 diff on this list and a decision somebody makes, rather than a silently widened detector.
 """
 

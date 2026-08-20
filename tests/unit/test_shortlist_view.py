@@ -15,7 +15,7 @@ rather than against whatever a fixture happened to contain.
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Final, NoReturn
@@ -24,13 +24,21 @@ import pytest
 
 from openalpha_cn.api.app import SHORTLIST_HTTP_STATUS
 from openalpha_cn.cli import SHORTLIST_EXIT, PanelExit
+from openalpha_cn.domain.name_history import (
+    NameHistory,
+    NameHistoryHorizonError,
+    NameRecord,
+    build_name_history,
+)
 from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.factor_view import _PANEL_FAULTS as FACTOR_PANEL_FAULTS
 from openalpha_cn.factor_view import _REGISTRY_FAULTS as FACTOR_REGISTRY_FAULTS
 from openalpha_cn.factor_view import FactorPanelUnreadableError
 from openalpha_cn.factor_view import _read as factor_read
 from openalpha_cn.factor_view import _read_registry as factor_read_registry
+from openalpha_cn.factor_view import _risk_warned_on as factor_risk_warned_on
 from openalpha_cn.panel.store import PanelStore
+from openalpha_cn.panel_view import PANEL_STORE_PLACEHOLDER
 from openalpha_cn.shortlist_view import _PANEL_FAULTS as SHORTLIST_PANEL_FAULTS
 from openalpha_cn.shortlist_view import _REGISTRY_FAULTS as SHORTLIST_REGISTRY_FAULTS
 from openalpha_cn.shortlist_view import (
@@ -50,6 +58,7 @@ from openalpha_cn.shortlist_view import (
 )
 from openalpha_cn.shortlist_view import _read as shortlist_read
 from openalpha_cn.shortlist_view import _read_registry as shortlist_read_registry
+from openalpha_cn.shortlist_view import _risk_warned_on as shortlist_risk_warned_on
 
 AS_OF: Final[datetime] = datetime(2026, 1, 16, 12, 0, tzinfo=UTC)
 FIRST: Final[datetime] = datetime(2026, 1, 16, 9, 0, tzinfo=UTC)
@@ -217,13 +226,113 @@ def test_the_registry_read_is_the_only_site_either_face_widens_for(tmp_path: Pat
             factor_read(_raising(fault), store=store, what="a factor tier")
 
 
-def test_the_known_shortlist_view_limitations_are_the_six_this_face_declares() -> None:
+UNNAMED_SESSION: Final[date] = date(2026, 1, 15)
+"""A session before the corpus below reaches, and the day both seams are driven on."""
+
+WALLED_HISTORY: Final[NameHistory] = build_name_history(
+    "000002.SZ",
+    (
+        NameRecord(
+            ts_code="000002.SZ",
+            name="\u4e07\u79d1A",
+            effective_from=date(2026, 1, 20),
+            announced_on=date(2026, 1, 14),
+            change_reason="\u5176\u4ed6",
+        ),
+    ),
+)
+"""One ordinary two-clock rename, announced before `UNNAMED_SESSION` and effective after it.
+
+`load_name_histories` is scoped to announcement years, so this is what one year's slice of the
+corpus looks like for a security whose only rename that year has not landed yet -- not a
+truncated store. `first_effective_date` is 2026-01-20, so `record_on` refuses every session in
+the window rather than answering the name on file.
+"""
+
+
+def test_both_faces_refuse_an_unnamed_session_with_the_same_sentence(tmp_path: Path) -> None:
+    """`V2-P4-080`, pinned on the seams for the reason the pin above is.
+
+    `MarketBar.is_st` is `risk_warning_on(...) is not RiskWarning.none` and it is written out at
+    two call sites in two modules. Both sat outside every `_read` guard, so one ordinary rename
+    reached a user as `exit 5` from `shortlist run`, `500 text/plain` from the route and `exit 5`
+    from `factor run` -- with the sentence naming the security withheld each time.
+
+    The two modules restate the refusal rather than sharing it, which is what `_PANEL_FAULTS`
+    already does and what a paragraph makes riskier than a four-member tuple. So the messages are
+    driven and compared as **strings**: an edit to one copy that does not reach the other is red
+    here, which is the thing `V2-P4-070` proved a constant-to-constant assertion cannot be.
+    """
+    store = PanelStore(tmp_path / "panel")
+    arguments = {
+        "subject": "000002.SZ",
+        "session": UNNAMED_SESSION,
+        "store": store,
+        "years": (2026,),
+    }
+
+    with pytest.raises(ShortlistPanelUnreadableError) as shortlist:
+        shortlist_risk_warned_on(WALLED_HISTORY, **arguments)  # type: ignore[arg-type]
+    with pytest.raises(FactorPanelUnreadableError) as factor:
+        factor_risk_warned_on(WALLED_HISTORY, **arguments)  # type: ignore[arg-type]
+
+    assert str(shortlist.value) == str(factor.value)
+    assert shortlist.value.disclosable == factor.value.disclosable
+    assert shortlist.value.reason == factor.value.reason == "panel_unreadable"
+    assert "000002.SZ" in str(shortlist.value)
+    assert "2026-01-15" in str(shortlist.value)
+    assert "namechange" in str(shortlist.value)
+    assert str(store.root) in str(shortlist.value)
+    assert str(store.root) not in shortlist.value.disclosable
+    assert PANEL_STORE_PLACEHOLDER in shortlist.value.disclosable
+    assert isinstance(shortlist.value.__cause__, NameHistoryHorizonError)
+    assert isinstance(factor.value.__cause__, NameHistoryHorizonError)
+
+
+def test_both_faces_still_answer_for_a_corpus_that_reaches_the_session(tmp_path: Path) -> None:
+    """The control, and the two states this seam must keep apart.
+
+    A history that **does** reach the session answers, and a security with no history at all is
+    `False` rather than a refusal -- most of the market has no rename announced in any one year,
+    and refusing them would refuse every honest run. That asymmetry is the residue
+    `a_name_never_announced_inside_the_requested_years_is_screened_as_ordinary` discloses; without
+    this test the fix above is satisfied by a seam that refuses everything.
+    """
+    store = PanelStore(tmp_path / "panel")
+    arguments: dict[str, object] = {
+        "subject": "000002.SZ",
+        "session": UNNAMED_SESSION,
+        "store": store,
+        "years": (2026,),
+    }
+    reaching = build_name_history(
+        "000002.SZ",
+        (
+            NameRecord(
+                ts_code="000002.SZ",
+                name="*ST\u4e07\u79d1",
+                effective_from=date(2026, 1, 6),
+                announced_on=date(2026, 1, 6),
+                change_reason="*ST",
+            ),
+        ),
+    )
+
+    assert shortlist_risk_warned_on(reaching, **arguments) is True  # type: ignore[arg-type]
+    assert factor_risk_warned_on(reaching, **arguments) is True  # type: ignore[arg-type]
+    assert shortlist_risk_warned_on(None, **arguments) is False  # type: ignore[arg-type]
+    assert factor_risk_warned_on(None, **arguments) is False  # type: ignore[arg-type]
+
+
+def test_the_known_shortlist_view_limitations_are_the_seven_this_face_declares() -> None:
     """Equality rather than membership: a membership assertion can see a code that was renamed and
     never one that was removed. `KNOWN_ADJUSTMENT_LIMITATIONS`' form since `V2-P1-005`.
 
     Four until `V2-P4-049` and `V2-P4-062` added one each: what a resolved `run_manifest_id` does
     and does not prove about the conclusion beside it, and what a content-addressed answer store
-    can and cannot say about when an answer was reached.
+    can and cannot say about when an answer was reached. `V2-P4-080` added the seventh, which is
+    the residue of its own fix: the refusal it installed fires on a corpus that *shows* a rename
+    this run cannot resolve, and cannot fire on one that shows nothing at all.
     """
     assert {
         "the_clip_block_is_recovered_from_a_tie_and_may_over_report",
@@ -232,8 +341,9 @@ def test_the_known_shortlist_view_limitations_are_the_six_this_face_declares() -
         "a_neutralized_tier_screen_needs_exposures_this_face_does_not_load",
         "a_resolved_run_manifest_is_not_a_resolved_signal",
         "the_stored_answer_is_addressed_by_content_and_not_by_when_it_was_run",
+        "a_name_never_announced_inside_the_requested_years_is_screened_as_ordinary",
     } == SHORTLIST_VIEW_LIMITATION_CODES
-    assert len(KNOWN_SHORTLIST_VIEW_LIMITATIONS) == 6
+    assert len(KNOWN_SHORTLIST_VIEW_LIMITATIONS) == 7
     assert all(limitation.detail.strip() for limitation in KNOWN_SHORTLIST_VIEW_LIMITATIONS)
 
 

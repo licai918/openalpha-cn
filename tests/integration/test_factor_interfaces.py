@@ -239,9 +239,14 @@ them. The pin is what makes that a decision somebody records rather than a diff 
 """
 
 
-def _panel() -> GeneratedPanel:
-    """The generated panel with a market capitalisation that actually varies."""
-    built = generate_panel(shapes=SHAPES)
+def _panel(shapes: Sequence[str] = SHAPES) -> GeneratedPanel:
+    """The generated panel with a market capitalisation that actually varies.
+
+    `shapes` defaults to this module's three and is a parameter for one caller:
+    `tests/integration/test_unnamed_session_faces.py` needs the same three stored tiers over a
+    rename corpus that does **not** reach every priced session, which is a fourth shape rather
+    than a second fixture."""
+    built = generate_panel(shapes=shapes)
     batch = built.batch(DAILY_BASIC_DATASET)
     caps = tuple(CAP_BASE + CAP_STEP * SECURITIES.index(str(item)) for item in batch.subjects)
     columns = tuple(
@@ -262,6 +267,7 @@ def store_three_tiers(
     evaluator: Callable[[Any], float | None] | None = None,
     transform: Any = CROSS_SECTION_STANDARD,
     neutralization: Any = INDUSTRY_AND_SIZE,
+    shapes: Sequence[str] = SHAPES,
 ) -> PanelStore:
     """Write one generated panel and one factor's three stored tiers into `runtime_dir/panel`.
 
@@ -284,7 +290,7 @@ def store_three_tiers(
     `neutralized_days` defaults to `prediction_days`; naming a subset is how the blocked case is
     built -- a raw tier the neutralised tier does not cover.
     """
-    panel = _panel()
+    panel = _panel(shapes)
     store = PanelStore(runtime_dir / "panel")
     write_generated_panel(store, panel)
     calendar = panel.calendar()

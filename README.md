@@ -535,6 +535,33 @@ registered in this panel at all, and this command reads it. Build it first: `ope
 build --dataset namechange --year <year>`
 ```
 
+**分区建好了，也仍然可能有某个证券在某个会话上「没有名字」（`V2-P4-080`）。** `namechange` 是
+按**公告年份**切片读的：一只证券在所请求年份里唯一的一次更名，如果公告在定价会话之前、生效在
+它之后（本仓库专门建模的那种「两个时钟」更名），那么在那个会话上语料里就没有任何一条记录生
+效。`NameHistory.record_on` 对这一天的回答是拒绝而不是回退到最早的那
+个名字——「一个没有记录的名字是未知的，而不是等于在册最早的那一个」。`shortlist run`、`factor
+run` 和 `POST /api/v1/shortlists/run` 现在都把它当作面板判定报出来（`exit 1` / `409
+panel_unreadable`），并点名是哪只证券、哪个会话：
+
+```
+the risk-warning state of 000002.SZ on 2026-01-16 could not be read out of this service's panel
+store: 2026-01-16 is before 000002.SZ's first known name, which takes effect 2026-01-20; an
+unrecorded name is unknown rather than equal to the earliest one on file. `MarketBar.is_st` is
+that state, so screening 000002.SZ would file a risk warning nobody knows as a known-clean one.
+The rename corpus is read one announcement year at a time and this run read 2026, ... Extend the
+corpus back to an announcement year that covers 2026-01-16 -- `openalpha panel build --dataset
+namechange --year <year>` -- and ask this run for that year too.
+```
+
+补法就是把公告年份往前扩：多建一年 `namechange`，并在这次运行里一并 `--year` 上它。**默认成
+`is_st=False` 不是补法**——那等于在一个「取自当日生效名称的风险警示状态」的字段上，写下语料并
+不支持的断言，而读到这根 bar 的人无法把它和一个真的测出来是普通名字的证券区分开。（实测：
+`MarketBar.is_st` 全仓只有 `backtest/execution._price_band` 一处读它，且只在没有已发布涨跌停带
+时才读；两个面都用 `published_limit_fields(limit)` 建 bar、没有带就根本不建，所以今天它不改变
+任何裁决——是潜伏的错，不是无害的错。）反过来，一只在所请求年份里**一条记录都没有**的证券仍
+然按 `is_st=False` 处理（多数证券在任一年份内都没有更名），这条残留写在
+`KNOWN_SHORTLIST_VIEW_LIMITATIONS.a_name_never_announced_inside_the_requested_years_is_screened_as_ordinary`。
+
 **决定按哪个会话定价的，是横截面被「建」在哪个 `--as-of` 上，而那不是它落在的那一天
 （`V2-P4-077`）。** 一个会话的行情在 Asia/Shanghai 16:30 才可知，所以一个盖在当天零点到 16:30
 之间的构建，是按**前一个**会话定价的——即它自己的因子值算出来时最新那个已经发布的会话。以前

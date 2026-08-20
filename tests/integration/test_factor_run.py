@@ -405,6 +405,7 @@ def test_the_declared_limitations_are_the_ones_this_face_carries() -> None:
         "the_document_store_holds_bytes_and_re_derives_no_number",
         "a_run_is_evaluated_at_one_as_of_and_the_labels_are_read_at_it",
         "the_shipped_transform_and_neutralisation_floors_exceed_a_thin_market",
+        "a_name_never_announced_inside_the_requested_years_is_priced_as_ordinary",
     } == FACTOR_RUN_LIMITATION_CODES
     assert all(limitation.detail.strip() for limitation in KNOWN_FACTOR_RUN_LIMITATIONS)
 

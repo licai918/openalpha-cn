@@ -162,6 +162,23 @@ class NameHistoryHorizonError(NameHistoryError):
     Separate from its parent because it is not a caller mistake: the question was well formed
     and the corpus simply does not reach that far back, or the announcement filter removed
     every record. `V2-P1-013`'s gate blocks on it; a malformed query is a bug.
+
+    **Being a verdict is a claim about what callers do with it, and for two of them it was
+    false until `V2-P4-080`.** `shortlist_view._bars_on` and `factor_view._PanelInputs.
+    market_bar` both read `MarketBar.is_st` off `risk_warning_on`, and both made that call
+    outside every guard they had. So this refusal -- designed to say "the corpus does not
+    reach that day" -- was laundered into `exit 5` and `500 text/plain`, whose whole meaning is
+    "the command broke and nothing was judged", with this class's own message withheld on the
+    correct grounds that an unanticipated frame can be holding a credential. Nothing here was
+    wrong and nothing here changed; what changed is that both faces now catch it and answer
+    `panel_unreadable`, naming the security and the corpus (`_risk_warned_on` on each face,
+    `tests/integration/test_unnamed_session_faces.py` at all three surfaces).
+
+    The reachable shape is ordinary rather than exotic, which is why it is written down here:
+    `load_name_histories` is scoped to announcement years, so a security whose only rename in a
+    requested year is announced before a priced session and effective after it has no record in
+    effect on that session -- the two clocks this module exists to keep apart, met one year at a
+    time.
     """
 
 

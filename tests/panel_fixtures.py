@@ -534,6 +534,22 @@ def _has_rename_announced_on_the_newest_session(panel: GeneratedPanel) -> bool:
     )
 
 
+def _has_a_name_first_effective_after_the_newest_session(panel: GeneratedPanel) -> bool:
+    """A security whose earliest **stored** rename takes effect after the last priced session.
+
+    Off the stored `effective_date` column rather than off `panel.name_records`, because the
+    property is about what a reader of the partition can answer: `load_name_histories` builds
+    each `NameHistory` from these rows, and its first record is what `record_on` refuses below.
+    ISO dates compare as text in date order, which is what lets the newest session be one.
+    """
+    newest = _newest_session(panel)
+    first: dict[str, str] = {}
+    for code, effective in panel.rows_of(NAMECHANGE_DATASET, NAME_EFFECTIVE_COLUMN):
+        subject, day = str(code), str(effective)
+        first[subject] = min(first.get(subject, day), day)
+    return any(day > newest for day in first.values())
+
+
 def _has_announcement_before_effect(panel: GeneratedPanel) -> bool:
     return any(
         record.announced_on < record.effective_from
@@ -979,6 +995,23 @@ _SHAPES: Final[tuple[PanelShape, ...]] = (
             "rest separate them (domain/name_history.py)"
         ),
         detect=_has_announcement_before_effect,
+    ),
+    PanelShape(
+        shape_id="name_history.effect_after_every_priced_session",
+        datasets=(NAMECHANGE_DATASET,),
+        summary="a security whose whole rename corpus takes effect after the priced window",
+        measurement=(
+            "the same two clocks, read one announcement year at a time. 6,150 of the "
+            "14,166-row corpus's rows carry announcement and effect on one day and the other "
+            "8,016 separate them (domain/name_history.py), and load_name_histories is scoped "
+            "to the announcement years a run asks for -- so a security whose only announcement "
+            "in the requested year is announced before the session being priced and takes "
+            "effect after it has no name on that session in the corpus at all. "
+            "NameHistory.record_on refuses that day rather than answering the earliest name on "
+            "file, and nothing in the read backfills it: the year below is a partition the run "
+            "did not ask for"
+        ),
+        detect=_has_a_name_first_effective_after_the_newest_session,
     ),
     PanelShape(
         shape_id="name_history.reform_prefixed_special_treatment",
@@ -2158,10 +2191,88 @@ about the shape. `risk_warning_of('招商蛇口')` is `RiskWarning.none`, the sa
 `标的N` names it replaces, so this shape moves an availability instant and nothing else.
 """
 
+UNNAMED_SESSION_SECURITY_INDEX: Final[int] = 3
+UNNAMED_SESSION_RENAME: Final[str] = "招商银行"
+UNNAMED_SESSION_ANNOUNCED_ON: Final[date] = date(2026, 1, 14)
+UNNAMED_SESSION_EFFECTIVE_FROM: Final[date] = date(2026, 1, 20)
+"""`securities[3]`, whose whole rename corpus is one record that takes effect after the window.
+
+The index is the fourth this file's renames have needed and the one no other rename names:
+`securities[0]` carries the pending rename, `securities[1]` the reform-marked one and
+`securities[6]` the announcement on the newest session. The name carries **no** risk warning
+(`risk_warning_of('招商银行') is RiskWarning.none`), for `NEWEST_RENAME`'s reason: a shape that
+moved a screen's verdict by being ST would make every assertion about the screen an assertion
+about the shape.
+
+**This shape `replace`s the security's records rather than appending to them**, which is the
+only one of the four that does, and the replacement is the whole content: the baseline row
+`_name_records` gives every security is what makes `record_on` answerable on every session of
+every generated panel, and dropping it is what makes the corpus's own lower horizon reachable.
+The two dates are the ordinary two-clock rename this repository models on purpose --
+`UNNAMED_SESSION_ANNOUNCED_ON` is a session inside the window so the announcement is knowable
+at every `as_of` a test asks about, and `UNNAMED_SESSION_EFFECTIVE_FROM` is past `WINDOW_LAST`
+so no session in the window has a name on file at all.
+"""
+
 
 def _name_records(
     securities: Sequence[str], shapes: frozenset[str]
 ) -> Mapping[str, tuple[NameRecord, ...]]:
+    """The rename corpus, one `NameRecord` per announcement.
+
+    **The baseline record every security gets here is a flattery, and `V2-P4-080` is what it
+    cost.** `load_name_histories` is scoped to announcement years, so the corpus a run holds is
+    one year's slice: a security whose only announcement in that year takes effect after the
+    session being priced has no record in effect on it, and `NameHistory.record_on` refuses that
+    day rather than answering the earliest name on file. Giving every security a record effective
+    at `LISTED_ON`, three days before the window's first session, made that refusal unreachable in
+    every generated panel on both product faces -- and the `is_st` call sites in `shortlist_view`
+    and `factor_view` sat outside every guard for four rounds of acceptance because nothing
+    offline could reach them.
+
+    The generalisation is worth more than the row: a fixture can hide a wall not only by stopping
+    short of it but by making a dataset look **better-formed than the corpus it stands for**, and
+    a row every subject carries unconditionally is the shape that does it.
+
+    **`V2-P4-080` swept this file for the same shape and this was not the only one.** Six more
+    builders hand every subject a row. They are recorded here rather than left to be rediscovered,
+    and the first two are recorded first because they are not gaps -- they hide a live defect:
+
+    - `_universe_batch` gives every security a listing row at `LISTED_ON`, and it draws from the
+      same `SECURITIES` tuple as `_factor_batch`, `_bar_batch`, `_valuation_batch` and
+      `_statement_batch` -- so no generated panel can carry a subject with a factor row and no
+      `stock_basic` row, and `StockUniverse.security`'s refusal is unreachable. The reverse
+      direction is covered (`DELISTED_SECURITY` is in the registry and in no price grid); this one
+      is not.
+    - `_factor_batch` builds the full `sessions x securities` cross product with no `omit` set,
+      unlike `_bar_batch` and `_valuation_batch`, so `AdjustmentHistory.factor_on`'s two horizons
+      are unreachable.
+
+      Both matter because `factor_view._PanelInputs.label` wraps `label_outcome` in
+      `except LabelError` alone, and `StockUniverseError`, `AdjustmentError` and `PriceDataError`
+      are none of them -- all three are plain `ValueError`s. That is this issue's own defect one
+      seam over, still open when this was written.
+
+    The remaining four are gaps rather than defects, each because every raise they hide is caught
+    at its call sites:
+
+    - `_industry_assignments` opens every security at `LISTED_ON` with `through=None`, hiding
+      `IndustryHorizonError`'s first arm; `panel_ingest.load_industry_cross_section` and
+      `panel_neutralization._industry_answer` both catch it.
+    - `_limit_batch` gives every cell a published band, so "no published band" -- which folds to a
+      code rather than raising -- is never exercised.
+    - `_income_rows` and `_plain_statement_rows` announce every security's filing on
+      `BASE_ANNOUNCEMENT`, which is `WINDOW_FIRST`, so `FinancialStatementHorizonError` is
+      unreachable; neither raising method has a caller outside `domain/`.
+    - `_index_weight_batch` is the inverse and is recorded for symmetry: one publication dated
+      `WINDOW_LAST`, so `IndexMembershipHorizonError` fires on every session but the last and it is
+      the *success* path that is unreachable.
+
+    `name_history.effect_after_every_priced_session` is the shape that reaches this one. The
+    baseline stays for the other seven securities rather than being dropped wholesale: this
+    generator is not a corpus sampler, and `namechange` needs rows for its partition to exist at
+    all.
+    """
     records: dict[str, list[NameRecord]] = {
         code: [
             NameRecord(
@@ -2174,6 +2285,17 @@ def _name_records(
         ]
         for index, code in enumerate(securities)
     }
+    if "name_history.effect_after_every_priced_session" in shapes:
+        code = securities[UNNAMED_SESSION_SECURITY_INDEX]
+        records[code] = [
+            NameRecord(
+                ts_code=code,
+                name=UNNAMED_SESSION_RENAME,
+                effective_from=UNNAMED_SESSION_EFFECTIVE_FROM,
+                announced_on=UNNAMED_SESSION_ANNOUNCED_ON,
+                change_reason="其他",
+            )
+        ]
     if "name_history.announcement_precedes_effect" in shapes:
         records[securities[0]].append(
             NameRecord(
