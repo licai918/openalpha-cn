@@ -28,6 +28,12 @@ reconciled per event date, because as a sum over the year two errors in opposite
 cancelled and admitted a look-ahead.** That block's corpus is the one purpose-built fixture in
 this file -- the captured corpus cannot express the failure, and `PROBE_ROWS` records why it
 cannot and what was measured instead.
+
+`V2-P4-082` adds a second corpus to that seventh, in the last block: **`034`'s own pair is caught
+by the look-ahead branch, so nothing in this repository held the shortfall branch to a per-date
+comparison.** `CENSUS_PAIR_ROWS` is the corpus that separates the two -- two dates at or below
+`census_day` disagreeing in opposite directions, which needs a census that is wrong as well as a
+clock that is.
 """
 
 from __future__ import annotations
@@ -54,6 +60,7 @@ from openalpha_cn.domain.panel_batch import (
     PanelColumn,
     TimelineColumns,
 )
+from openalpha_cn.panel.catalog import DateCoverage
 from openalpha_cn.panel.store import PanelStorageError, PanelStore
 from openalpha_cn.panel_ingest import (
     load_industry_cross_section,
@@ -973,7 +980,10 @@ _STATE_BANKS = ("801780.SI", "801782.SI", "857821.SI")
 _POWER_CODES = ("801160.SI", "801161.SI", "851611.SI")
 _AGROCHEMICAL_CODES = ("801030.SI", "801038.SI", "850331.SI")
 
-PROBE_ROWS: tuple[tuple[str, tuple[str, str, str], date, date | None, date], ...] = (
+ProbeRows = tuple[tuple[str, tuple[str, str, str], date, date | None, date], ...]
+"""`(subject, (l1, l2, l3), industry_from, industry_through, event_date)` per row."""
+
+PROBE_ROWS: ProbeRows = (
     # `(subject, (l1, l2, l3), industry_from, industry_through, event_date)`.
     ("600000.SH", _SHARE_BANKS, date(2024, 1, 5), None, date(2024, 1, 5)),
     ("600000.SH", _SHARE_BANKS, date(2024, 1, 5), date(2024, 9, 1), date(2024, 9, 1)),
@@ -1014,16 +1024,17 @@ def _probe_midnight(day: date) -> datetime:
     return datetime.combine(day, time(0, 0), tzinfo=SHANGHAI)
 
 
-def _probe_batch(moved: dict[int, datetime]) -> Any:
-    """`PROBE_ROWS` as one batch, with the availability of the named rows moved and nothing else.
+def _probe_batch(moved: dict[int, datetime], rows: ProbeRows = PROBE_ROWS) -> Any:
+    """`rows` as one batch, with the availability of the named ones moved and nothing else.
 
     `_retimed`'s doctoring at row scale. That helper moves a whole partition's clock, which can
     only ever produce a one-sided error; a compensating pair needs two rows of one partition to
     move in opposite directions across the same `as_of`.
+
+    `rows` is an argument rather than `PROBE_ROWS` closed over because `V2-P4-082` needs a second
+    corpus with the same shape and different dates -- see `CENSUS_PAIR_ROWS`.
     """
-    available = tuple(
-        moved.get(index, _probe_midnight(row[4])) for index, row in enumerate(PROBE_ROWS)
-    )
+    available = tuple(moved.get(index, _probe_midnight(row[4])) for index, row in enumerate(rows))
     fetched = max((*available, PROBE_AS_OF))
     return ColumnarPanelBatch(
         provider_id="openalpha-cn/p4-034-probe",
@@ -1032,35 +1043,37 @@ def _probe_batch(moved: dict[int, datetime]) -> Any:
         as_of=fetched,
         fetched_at=fetched,
         status="success",
-        subjects=tuple(row[0] for row in PROBE_ROWS),
+        subjects=tuple(row[0] for row in rows),
         timeline=TimelineColumns(
-            event_time=tuple(_probe_midnight(row[4]) for row in PROBE_ROWS),
+            event_time=tuple(_probe_midnight(row[4]) for row in rows),
             available_time=available,
-            ingested_time=tuple(fetched for _ in PROBE_ROWS),
+            ingested_time=tuple(fetched for _ in rows),
             revision_time=available,
         ),
         columns=(
-            PanelColumn("industry_from", "string", tuple(row[2].isoformat() for row in PROBE_ROWS)),
+            PanelColumn("industry_from", "string", tuple(row[2].isoformat() for row in rows)),
             PanelColumn(
                 "industry_through",
                 "string",
-                tuple(None if row[3] is None else row[3].isoformat() for row in PROBE_ROWS),
+                tuple(None if row[3] is None else row[3].isoformat() for row in rows),
             ),
-            PanelColumn("l1_code", "string", tuple(row[1][0] for row in PROBE_ROWS)),
-            PanelColumn("l2_code", "string", tuple(row[1][1] for row in PROBE_ROWS)),
-            PanelColumn("l3_code", "string", tuple(row[1][2] for row in PROBE_ROWS)),
+            PanelColumn("l1_code", "string", tuple(row[1][0] for row in rows)),
+            PanelColumn("l2_code", "string", tuple(row[1][1] for row in rows)),
+            PanelColumn("l3_code", "string", tuple(row[1][2] for row in rows)),
         ),
     )
 
 
-def _probe_store(root: Any, name: str, moved: dict[int, datetime]) -> PanelStore:
+def _probe_store(
+    root: Any, name: str, moved: dict[int, datetime], rows: ProbeRows = PROBE_ROWS
+) -> PanelStore:
     """The probe corpus in its own store, written through the **public** writer.
 
     Through `write_industry_memberships` rather than `write_panel_batch`, because the defect this
     fixture reproduces is reachable by a caller who only ever uses the published door.
     """
     store = PanelStore(root / name / "panel")
-    write_industry_memberships(store, [_probe_batch(moved)])
+    write_industry_memberships(store, [_probe_batch(moved, rows)])
     return store
 
 
@@ -1143,3 +1156,139 @@ def test_each_one_sided_census_error_keeps_being_refused_and_is_named_for_what_i
     with pytest.raises(PanelStorageError, match="had not happened at") as early:
         _probe_read(ahead)
     assert "2024-09-01" in str(early.value)
+
+
+# --- `V2-P4-082`: the pair the sum cancels does not need a look-ahead in it ------------------
+
+CENSUS_PAIR_ROWS: ProbeRows = (
+    # `(subject, (l1, l2, l3), industry_from, industry_through, event_date)`.
+    ("600000.SH", _SHARE_BANKS, date(2024, 1, 5), None, date(2024, 1, 5)),
+    ("600021.SH", _POWER_CODES, date(2024, 1, 5), None, date(2024, 1, 5)),
+    ("601398.SH", _STATE_BANKS, date(2024, 3, 1), None, date(2024, 3, 1)),
+    ("600141.SH", _AGROCHEMICAL_CODES, date(2024, 9, 1), None, date(2024, 9, 1)),
+)
+"""A second 2024 partition, four rows, four securities, three event dates.
+
+**`PROBE_ROWS` cannot express this and `V2-P4-082` is why.** The compensating pair above is a
+withheld row traded against a **look-ahead** row, and `_refuse_a_slice_the_census_disagrees_with`
+decides look-aheads first, on their own branch, before any counting: `PROBE_ROWS`' second error is
+dated 2024-09-01, after `census_day`, so that corpus is refused by the branch that never compares
+a total at all. And every corpus that does reach the shortfall branch disagrees on exactly **one**
+date -- 2 against 1 here, 1 against 0 in `test_event_dated_visible_reads.py` -- which moves the
+year's totals by the same one row it moves that date's. A sum catches all of those. So re-applying
+`V2-P4-034`'s original defect to the shortfall branch alone -- `if sum(visible.values()) ==
+sum(happened.values()): return` -- left the whole of `tests/unit` and `tests/integration/panel`
+green, 3,254 tests in 32:01, including the test written for `034` itself. The property held in the
+code and nothing would have noticed it stopping.
+
+What separates a per-date comparison from a sum is two dates **at or below `census_day`**
+disagreeing in opposite directions, and that is what these rows are for. Two of them are dated
+2024-01-05 and one 2024-03-01, both of which `PROBE_AS_OF` can see; the fourth is dated 2024-09-01
+and is ordinary absence. One assignment per security, `PROBE_ROWS`' own rule, so that
+`build_security_industry_history`'s overlap refusal cannot stand in for the check under test.
+"""
+
+CENSUS_PAIR_WITHHELD_ROW = 2
+"""601398.SH's opening row: its event is 2024-03-01, which the census counts at `PROBE_AS_OF`.
+Move its availability to `PROBE_LATE` and it is **withheld** -- the census counted it, the
+predicate removed it, and its absence from the cross section is indistinguishable from a security
+nobody ever classified."""
+
+MISFILED_CENSUS: tuple[DateCoverage, ...] = (
+    DateCoverage(event_date=date(2024, 1, 5), row_count=1),
+    DateCoverage(event_date=date(2024, 3, 1), row_count=1),
+    DateCoverage(event_date=date(2024, 9, 1), row_count=2),
+)
+"""`CENSUS_PAIR_ROWS`' own census with one of the two January rows filed under September.
+
+The other half of the pair, and the half `PROBE_ROWS` had no way to build. On a date the census is
+right about, the visible rows can only ever be *fewer* than it counts -- the slice is a subset of
+the partition -- so an error in the opposite direction has to be a census that is wrong about its
+own partition, which is precisely what this reconciliation exists to measure rather than assume.
+
+`V2-P4-027`'s two definitions both take the census as given: a **withheld** row is one the census
+counted and the predicate removed, an **absent** row is one the census never counted. The row this
+fixture adds is the state they have no name for -- one the census never counted and the predicate
+returned anyway -- and that state is what a census which does not describe its partition looks
+like from inside this read.
+
+**Where the misfiling lands is what makes the totals match.** `_read_visible_event_dated_rows`
+pools only the census entries at or before `census_day`, so an error parked beyond it is invisible
+to this read: the September overcount never enters `happened`, and what the read compares is a
+January undercount of one against a March shortfall of one. Two wrongs, opposite signs, equal
+sums.
+
+**And why it is a misfiling rather than a miscount.** `PanelStore.record_coverage` refuses a
+census that does not account for every row (`_validated_coverage`: "coverage date census must
+account for every row"), so a doctored census that simply lost a row could not be stored at all.
+One row filed under the wrong date is the only shape this fixture *can* take, and it is also the
+honest one: a census that miscounts is a census whose arithmetic is broken, while a census that
+misfiles is one resolved against a clock that is not the partition's -- which is the failure this
+whole reconciliation is a backstop against, because that clock lives in a provider one package
+away and nothing in the store enforces it.
+"""
+
+
+def _census_pair_store(
+    root: Any, name: str, *, moved: dict[int, datetime], misfiled: bool
+) -> PanelStore:
+    """`CENSUS_PAIR_ROWS` in its own store, with the census replaced afterwards if asked.
+
+    Through `record_coverage` rather than by editing the catalog, because that door re-validates
+    every value and re-stamps `partition_content_hash` from the registered partition. So the
+    stored record is one the store itself accepted and one readiness reads as current -- the
+    misfiling has to survive every rule *except* the one under test, or the refusal this fixture
+    produces would be some other refusal wearing its name.
+    """
+    store = _probe_store(root, name, moved, CENSUS_PAIR_ROWS)
+    if misfiled:
+        stored = store.read_coverage(INDUSTRY_MEMBERSHIP_DATASET, 2024)
+        assert stored is not None
+        store.record_coverage(dataclasses.replace(stored, dates=MISFILED_CENSUS))
+    return store
+
+
+def test_the_census_pair_corpus_answers_while_its_census_describes_its_own_rows(tmp_path) -> None:
+    """The sentinel under the refusal below: honest clocks and an honest census read fine.
+
+    Three of the four securities answer. 600141.SH does not, and that is ordinary absence rather
+    than a fault: its assignment is dated 2024-09-01, the census never counted it at
+    `PROBE_AS_OF`, the predicate never returned it, and the two agree that nothing is missing.
+
+    Without this, the test below would pass just as well against a corpus that was refused for
+    being malformed -- which is the fixture hazard `PROBE_ROWS`' own docstring records paying for.
+    """
+    answered = _probe_read(_census_pair_store(tmp_path, "honest-pair", moved={}, misfiled=False))
+
+    assert sorted(answered) == ["600000.SH", "600021.SH", "601398.SH"]
+    assert answered["601398.SH"].l2_code == "801782.SI"
+
+
+def test_two_census_errors_below_the_census_day_are_refused_rather_than_cancelling_out(
+    tmp_path,
+) -> None:
+    """`V2-P4-082`: the shortfall branch compares per date, and this is what says so.
+
+    Measured with the branch weakened to `if sum(visible.values()) == sum(happened.values()):
+    return`: the read is **admitted**, and what it admits is a cross section holding 600000.SH and
+    600021.SH and *not* 601398.SH, whose assignment opened 2024-03-01 -- three and a half months
+    before the instant the read stands at. A caller cannot tell that from a security nobody
+    classified, which is the whole of what this reconciliation exists to prevent, and the two
+    totals it would have compared are 2 and 2.
+
+    The look-ahead branch is untouched here and cannot fire: every visible row is dated
+    2024-01-05, which `census_day` can see. So the refusal has to come from the shortfall branch,
+    and it is asserted to name **2024-01-05** -- the earliest disagreeing date, which is the
+    *overcounted* one rather than the withheld one. That is the sharper assertion of the two: a
+    sum can be made to notice a shortfall by accident, and no sum can name a date.
+    """
+    store = _census_pair_store(
+        tmp_path, "misfiled-pair", moved={CENSUS_PAIR_WITHHELD_ROW: PROBE_LATE}, misfiled=True
+    )
+
+    with pytest.raises(PanelStorageError, match="whose event had already happened") as refusal:
+        _probe_read(store)
+
+    assert "2024-01-05" in str(refusal.value)
+    assert "its date census counts 1 row(s) dated 2024-01-05" in str(refusal.value)
+    assert "the visible slice carries 2" in str(refusal.value)

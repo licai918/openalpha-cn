@@ -3706,9 +3706,12 @@ def load_industry_cross_section(
       refused.** `answerable_through`'s rule, asked about a day instead of about a year: an
       assignment's close is filed in its own year, so an unread year at or before `day` can hold
       the close that ends an interval this cross section is about to report as current.
-    - **A partition holding fewer visible rows on an event date than its own census counts there
-      is refused.** The equality above, checked rather than assumed, because the clock it rests on
-      lives in a provider one package away and nothing in the store enforces it.
+    - **A partition whose visible rows on an event date do not number what its own census counts
+      there is refused.** The equality above, checked rather than assumed, because the clock it
+      rests on lives in a provider one package away and nothing in the store enforces it. Both
+      directions, and `V2-P4-082` is why the sentence says *number* rather than *fewer*: fewer is
+      a row withheld for a reason this read cannot see, more is a census that does not describe
+      its own partition.
     - **A partition answering with a visible row whose event date `as_of` cannot see is refused**,
       separately and first. That row's availability precedes its own event, which
       `_taxonomy_backfill_timeline` cannot produce at all, and it is a look-ahead rather than a
@@ -4083,6 +4086,21 @@ def _refuse_a_slice_the_census_disagrees_with(
     look-ahead is decided first: it says a row was visible before its own event, which the
     availability rule this dataset is stored under cannot produce at all, while a shortfall says
     only that a row this read should have seen was held back.
+
+    **The second refusal is a disagreement in either direction, and `V2-P4-082` is what it took to
+    hold it to one.** A date carrying *fewer* visible rows than the census counts there is a
+    withholding. A date carrying *more* cannot come from the predicate at all -- the slice is a
+    subset of the partition -- so it is a census that does not describe its own partition, which
+    matters because that census is the only instrument this read has for telling a withheld row
+    from an absent one. Until `V2-P4-082` no corpus in the repository put both directions in front
+    of this comparison at once: every one that reached it disagreed on exactly one date, and a
+    one-date disagreement moves the year's totals by the same row it moves that date's. Weakening
+    the comparison to `sum(visible.values()) == sum(happened.values())` was therefore green across
+    `tests/unit` and `tests/integration/panel` -- 3,254 tests, including the one written for
+    `V2-P4-034`, whose own pair the look-ahead branch above catches first. The corpus that
+    separates a per-date comparison from a sum is `CENSUS_PAIR_ROWS`, and the test holding it is
+    `tests/integration/panel/test_industry_ingest.py::
+    test_two_census_errors_below_the_census_day_are_refused_rather_than_cancelling_out`.
 
     `availability_rule` is the caller's own sentence about how its dataset's `available_time`
     follows from its event date, and it is an argument rather than a constant because the four
