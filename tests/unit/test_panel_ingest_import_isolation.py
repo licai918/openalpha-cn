@@ -320,6 +320,7 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_ingest.load_adjustment_histories",
             "panel_ingest.load_daily_bars",
             "panel_ingest.load_daily_valuations",
+            "panel_ingest.load_index_prices",
             "panel_ingest.load_industry_histories",
             "panel_ingest.load_industry_trees",
             "panel_ingest.load_name_histories",

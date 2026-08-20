@@ -144,8 +144,35 @@ class _LookAheadInjection:
     shape: str
     dataset: str
     future_rows: int
-    refusal: str
+    refusal: str | None
     load: Callable[[PanelStore, datetime], object]
+
+    @property
+    def refuses_the_partition(self) -> bool:
+        """Whether this dataset's reader still answers the injection with a whole-year refusal.
+
+        **`V2-P4-083` made this a question rather than an invariant, and the guarantee it moved
+        is stronger rather than weaker.** `load_statement_histories` came off `read_if_ready`
+        onto `_read_visible_event_dated_rows`, so `income` no longer refuses a year because one
+        row in it is not yet knowable -- it withholds that row and reconciles what is left
+        against the partition's own per-event-date census.
+
+        A refusal is not what `V2-P2-001` was ever for. This file's own thesis is that "the
+        refusal came from that row" must be an assertion rather than an argument, and the pair
+        below now makes the sharper claim directly: the injected store and the pruned store,
+        read at the same `as_of`, give the **same answer**. A partition-wide refusal could never
+        say that -- it says only that something in the year was invisible.
+
+        What the moved door must not lose is the separation of withheld from absent, and that is
+        not this file's to hold: `_refuse_a_slice_the_census_disagrees_with` is where it lives
+        and `tests/integration/panel/test_event_dated_visible_reads.py` is where it is driven.
+        The two datasets still on the whole-partition door are not left as they are for want of
+        attention -- `index_weight` has no `src/` caller and `index_member_all` is read here
+        through `load_industry_histories`, whose `answerable_through` is a *year* and therefore
+        has no honest bound to offer a mid-year `as_of`; `load_industry_cross_section` is the
+        reader that took the filtered door for it in `V2-P4-027`.
+        """
+        return self.refusal is not None
 
 
 LOOKAHEAD_INJECTIONS = (
@@ -154,7 +181,7 @@ LOOKAHEAD_INJECTIONS = (
         shape="financials.announced_after_the_as_of",
         dataset=INCOME_DATASET,
         future_rows=1,
-        refusal=r"the income panel cannot be read at .*\['not_yet_knowable'\]",
+        refusal=None,
         load=_load_income,
     ),
     _LookAheadInjection(
@@ -258,7 +285,14 @@ def test_a_row_the_read_cannot_see_blocks_it_and_the_same_partition_without_that
     the two stores is the rows whose `available_time` is after the read -- so a refusal that
     survived their removal would be the year's granularity talking, and one that did not is the
     row's. The refusal is required to name both the rule and the instant the injected row
-    carries, because "blocked" alone is satisfied by every other readiness code too."""
+    carries, because "blocked" alone is satisfied by every other readiness code too.
+
+    **For a reader on the filtered door the pair says something stronger, and `V2-P4-083` is
+    where the first of the three moved.** There is no refusal to attribute, so what is asserted
+    instead is that the two stores are *indistinguishable at the read*: the injected partition
+    and the pruned one hand back equal answers at `AS_OF`. A partition-wide refusal can only say
+    that something in the year was invisible; this says that the thing that was invisible did
+    not reach the answer, which is the guarantee `V2-P2-001` was filed for."""
     panel = generate_panel(shapes=(injection.shape,))
     pruned = _without_the_rows_the_read_cannot_see(panel, injection.dataset)
     knowable = _knowable_at(panel, injection.dataset)
@@ -273,9 +307,12 @@ def test_a_row_the_read_cannot_see_blocks_it_and_the_same_partition_without_that
         == injection.future_rows
     )
     assert knowable > AS_OF
-    with pytest.raises(PanelStorageError, match=injection.refusal) as refused:
-        injection.load(injected_store, AS_OF)
-    assert knowable.isoformat() in str(refused.value)
+    if injection.refuses_the_partition:
+        with pytest.raises(PanelStorageError, match=injection.refusal) as refused:
+            injection.load(injected_store, AS_OF)
+        assert knowable.isoformat() in str(refused.value)
+    else:
+        assert injection.load(injected_store, AS_OF) == injection.load(pruned_store, AS_OF)
     assert injection.load(pruned_store, AS_OF) is not None
 
 
@@ -286,15 +323,27 @@ def test_the_read_opens_at_the_instant_the_row_became_knowable_and_not_a_microse
     """`evaluate_readiness` compares `max_available_time > as_of`, so the boundary is inclusive
     on the read side exactly as `is_visible_at` is on the write side. One partition, two
     `as_of`s a microsecond apart: a test that only moved the clock to "much later" would pass
-    against a rule that had drifted to `>=`, or to comparing dates instead of instants."""
+    against a rule that had drifted to `>=`, or to comparing dates instead of instants.
+
+    **The filtered door has the same boundary and a different observable**, which is why the
+    microsecond is asserted on both sides rather than only on the refusing ones.
+    `PanelStore.read_visible_at` runs the identical `evaluate_readiness` and then applies
+    `is_visible_at` per row, so the instant the answer *changes* is the instant the refusal used
+    to lift -- and a rule that had drifted to `>=` would show up here as the injected row
+    arriving one microsecond early rather than as a refusal that came late."""
     panel = generate_panel(shapes=(injection.shape,))
     knowable = _knowable_at(panel, injection.dataset)
 
     store = _stored(tmp_path, panel, injection.dataset)
 
     assert injection.load(store, knowable) is not None
-    with pytest.raises(PanelStorageError, match=injection.refusal):
-        injection.load(store, knowable - timedelta(microseconds=1))
+    if injection.refuses_the_partition:
+        with pytest.raises(PanelStorageError, match=injection.refusal):
+            injection.load(store, knowable - timedelta(microseconds=1))
+    else:
+        assert injection.load(store, knowable) != injection.load(
+            store, knowable - timedelta(microseconds=1)
+        )
 
 
 @pytest.mark.parametrize("injection", LOOKAHEAD_INJECTIONS, ids=_ids)

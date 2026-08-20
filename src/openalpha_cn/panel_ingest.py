@@ -1867,6 +1867,49 @@ def load_adjustment_histories(
     session, a factor that cannot scale a price -- is refused afterwards by
     `adjustment_histories_from_panel_rows`.
 
+    ## `V2-P4-079`: the wall here is real, and the door `V2-P4-076` used does not fit it
+
+    This is the last whole-year read in `factor_view._PanelInputs` and one of three in
+    `panel_doctor`, and it keeps `read_if_ready()` -- which decides `not_yet_knowable` on a
+    **partition's** newest `available_time`, so one factor row on the newest session refuses the
+    whole year. `V2-P4-076` left it standing because the shortlist face does not read it;
+    `V2-P4-079` drove the two paths that do, and found the wall reachable **and** the obvious
+    repair wrong. Both halves are measured rather than argued.
+
+    **The wall is reachable.** `panel doctor` standing at 2026-01-09T20:00+08 and asked about
+    2026-01-06 -- a session that had published three days earlier -- runs `close_agreement`
+    through `V2-P4-061`'s session door and loses `unpriced_explained` and `return_paths` to
+    `['not_yet_knowable']` on this partition, because the store has since advanced to
+    2026-01-16. Two of eight cross-checks, refused for a week the report was not asked about.
+
+    **`_read_visible_event_dated_rows` is nonetheless the wrong door, and the reason is
+    `compress_adjustment_batch`.** The clock fits -- `adj_factor` is `ClockStrategy.daily_close`
+    exactly as `suspend_d` is -- and the corpus does not. Every other dataset on that door stores
+    one row per event; this one stores a **step function**, keeping the year's opening anchor,
+    every change point, and the year's closing anchor. Measured on the generated panel: 64 rows
+    written, 18 stored, and six of the eight securities keep exactly two -- 2026-01-05 and
+    2026-01-16. A row-filtering read at 2026-01-09 therefore sees **one** row for six of eight,
+    and `covered_through` falls from 2026-01-16 to 2026-01-05 for all eight. The door moved to
+    answer questions about 2026-01-06 and would refuse every one of them with
+    `AdjustmentHorizonError`, which is not a smaller wall but a differently shaped one.
+
+    **The census cannot repair it, and that is the load-bearing measurement.** The reconciliation
+    the five callers on that door rely on works because `PartitionCoverage.dates` says how many
+    rows each event date is due; its entries carry `event_date` and `row_count` and **no subject
+    axis**. The
+    horizon question is per security -- `KNOWN_ADJUSTMENT_LIMITATIONS.suspension_is_invisible`
+    records `000024.SZ`'s last bar at 2015-12-07 against a factor series running to 2015-12-29, so
+    a series that genuinely ended and a series whose tail was withheld are two different facts
+    about one security -- and a per-partition census cannot separate them. Filtering rows would
+    make `AdjustmentHorizonError` stop meaning what it says.
+
+    So the move needs `AdjustmentHistory` to carry an answerable horizon that is not
+    `max(observed_on)` -- `statement_histories_from_panel_rows`' `answerable_through` one dataset
+    over, in `domain/adjustment.py` -- **and** a per-subject census in `panel/catalog.py` to
+    decide it. Both are outside this module. Until they exist the honest refusal is the whole
+    partition's, and `tests/integration/panel/test_whole_partition_doors.py` holds both halves of
+    the measurement so that neither the wall nor the reason for it becomes prose.
+
     ## Why the gap rule is stricter here than it is for the registry
 
     `load_stock_universe` refuses a requested range that skips a year *the store holds*, and
@@ -3921,10 +3964,11 @@ def _read_visible_event_dated_rows(
     """Every row of `requirement.years` that was knowable at `as_of`, reconciled per event date.
 
     **The only door onto a whole-year partition of an event-driven dataset, since `V2-P4-076`.**
-    Four callers take it -- `load_industry_cross_section`, `load_stock_universe`,
-    `load_suspensions` and `load_name_histories` -- and it is one function rather than four
-    because `_read_visible_price_session`'s own docstring records what two doors onto one
-    question cost the last time there were two.
+    Five callers take it -- `load_industry_cross_section`, `load_stock_universe`,
+    `load_suspensions`, `load_name_histories` and, since `V2-P4-083`,
+    `load_statement_histories` -- and it is one function rather than five because
+    `_read_visible_price_session`'s own docstring records what two doors onto one question cost
+    the last time there were two.
 
     ## What `V2-P4-076` measured, and why these three joined the fourth
 
@@ -3964,7 +4008,19 @@ def _read_visible_event_dated_rows(
     and using the other one would count the current session's halts as knowable from midnight
     and refuse every honest read taken before that session's close. `index_member_all` is
     `taxonomy_backfill`, whose floor sits behind `as_of` by the time
-    `load_industry_cross_section` reaches here, leaving `_knowable_through_the_same_day`.
+    `load_industry_cross_section` reaches here, leaving `_knowable_through_the_same_day`. The
+    four statement endpoints are `ClockStrategy.announcement`, where `_announcement_timeline`
+    sets `available_time == event_time ==` midnight of the row's own `ann_date` -- the same
+    equality `calendar_static` makes, arrived at from a different column, so the same bound.
+    (`f_ann_date` moves `revision_time` and nothing this read consults; `filings_on` reads
+    `ann_date` and only `ann_date`, deliberately.)
+
+    **What the census cannot do is separate two rows of one subject from two of two**, and that
+    is the boundary `V2-P4-079` measured rather than the one it hit. `PartitionCoverage.dates`
+    carries an event date and a row count and no subject, so a dataset whose *per-security*
+    horizon is the answer -- `adj_factor`, whose partition is a compressed step function and
+    whose closing anchor is the row most likely to be withheld -- cannot use this reconciliation
+    even though its clock fits it exactly. See `load_adjustment_histories` for the numbers.
 
     **On a partition whose rows carry the provider's own clock the reconciliation therefore
     cannot disagree, and that is the point rather than a weakness.** It is the same backstop
@@ -4405,9 +4461,34 @@ def load_statement_histories(
     """Read stored announcement years back as one history per security, or refuse to.
 
     Fail-closed in `load_industry_histories`' shape: a year whose partition is missing, damaged,
-    unprofiled or stale is blocked by `read_if_ready()` with its structured issue codes, and the
-    rows that survive are assembled by `statement_histories_from_panel_rows`, which refuses a
-    row missing a projected column.
+    unprofiled or stale is blocked at partition scope by `assess_readiness()` -- the same rule
+    table `read_if_ready()` runs -- with its structured issue codes, and the rows that survive
+    are assembled by `statement_histories_from_panel_rows`, which refuses a row missing a
+    projected column.
+
+    ## As-of-sensitive since `V2-P4-083`, and why this corpus takes the door `adj_factor` cannot
+
+    It took `read_if_ready()`, which refuses a whole year for the sake of its newest row, so one
+    filing announced late in the year made every earlier filing in it unreadable. Reachable, and
+    measured on the path that reaches it: `panel_doctor._ambiguity_check` is the only `src/`
+    reader -- `panel_factors` reads the four statement datasets through `read_visible_at` already
+    -- and at 2026-01-09T20:00+08 it was `SKIPPED` with `income cannot be read ...
+    ['not_yet_knowable']`, for a filing announced on 2026-01-12 that nobody had asked about.
+
+    The bound is `_knowable_through_the_same_day`, and it follows from the clock rather than from
+    the convenience: `ClockStrategy.announcement` sets `event_time == available_time ==` midnight
+    of the row's own `ann_date`, exactly as `calendar_static` does for `stock_basic` and
+    `namechange`, so a filing dated `D` is visible to every `as_of` on `D` and to none before it.
+    `_sessions_published_through` would be the wrong pair: a filing is not a session and does not
+    wait for 16:30.
+
+    **This is the corpus `load_adjustment_histories` is not.** That read stays on the whole-
+    partition door because `compress_adjustment_batch` stores a step function, so a withheld row
+    shortens a *horizon* the census cannot reconstruct per security. A statement partition is
+    stored uncompressed, one row per announced version, and this reader already carries an
+    explicit `answerable_through` rather than deriving one from the newest row -- so a short read
+    answers **narrowly** rather than wrongly, which is what the paragraph below has always said
+    and what makes the row predicate admissible here and not there.
 
     The years asked for are compared against the years the store actually holds, and the first
     stored year this read skipped becomes the histories' `answerable_through` bound --
@@ -4434,16 +4515,18 @@ def load_statement_histories(
     requirement = financial_statement_requirement(
         dataset=dataset, years=requested, as_of=as_of, max_staleness=max_staleness
     )
-    rows: list[tuple[object, ...]] = []
-    for year in requested:
-        outcome = store.read_if_ready(requirement, year=year, columns=columns)
-        if outcome.is_blocked:
-            raise PanelStorageError(
-                f"the {dataset} panel cannot be read at {as_of.isoformat()}: "
-                f"{[issue.code for issue in outcome.readiness.issues]}; "
-                f"{'; '.join(issue.detail for issue in outcome.readiness.issues)}"
-            )
-        rows.extend(outcome.rows)
+    rows = _read_visible_event_dated_rows(
+        store,
+        requirement,
+        columns,
+        as_of=as_of,
+        what=f"the {dataset} panel",
+        availability_rule=(
+            "A filing's availability is midnight on its own ann_date, the day the announcement "
+            "was made"
+        ),
+        census_through=_knowable_through_the_same_day,
+    )
     skipped = sorted(set(store.registered_years(dataset)) - set(requested))
     return statement_histories_from_panel_rows(
         dataset=dataset,

@@ -268,7 +268,6 @@ GATED_READERS: dict[str, tuple[str, ...]] = {
     "load_index_prices": ("read_if_ready",),
     "load_industry_histories": ("read_if_ready",),
     "load_industry_trees": ("read_if_ready",),
-    "load_statement_histories": ("read_if_ready",),
     "load_trading_calendar": ("read_if_ready",),
 }
 """Every function in `panel_ingest` that reaches rows, and the door it reaches them through.
@@ -282,9 +281,44 @@ the count fell to 7 while the coverage rose. A threshold lowered to match would 
 guard being edited to fit the tree instead of the other way round.
 
 The map cannot drift that way: a loader that stopped reading through a gated door disappears
-from it, a new door appears in it, and either is a diff somebody signs. The three loaders that
+from it, a new door appears in it, and either is a diff somebody signs. The four loaders that
 are no longer here by name reach `_read_visible_event_dated_rows` instead, which is, and
 `test_no_loader_reaches_a_partition_outside_this_map` is the half that says nobody else does.
+
+**`V2-P4-083` removed the fourth and deliberately left three, which is the review this map is
+for.** `load_statement_histories` went the way `V2-P4-076`'s three did: `ClockStrategy.
+announcement` dates a filing's availability at midnight on its own `ann_date`, so the
+per-event-date census reconciles exactly, and the whole-year refusal was costing
+`panel_doctor._ambiguity_check` every read at an instant inside the year.
+
+**Six rows still take `read_if_ready`, and they are five different reasons rather than one
+backlog.** Written out because "these are the ones nobody has moved yet" is exactly the sentence
+this map exists to stop somebody from having to assume:
+
+- **`load_trading_calendar`** -- `V2-P4-076`'s measurement, unchanged. `calendar_publication`
+  makes a year partition's newest availability instant the *earliest* in it, so
+  `not_yet_knowable` cannot fire at any `as_of` inside the year and there is no refusal to
+  remove.
+- **`load_industry_trees`** -- `V2-P4-083`'s, and the same conclusion from the other side. Every
+  row of an `index_classify` vintage carries one `taxonomy_date`, so the partition's newest
+  availability instant is its **only** one: the refusal is all-or-nothing and can only mean "you
+  asked before this taxonomy existed", never "the panel has moved on".
+- **`load_industry_histories`** -- `V2-P4-027`'s, and it is a signature rather than a clock. It
+  returns histories whose only bound is `answerable_through`, a *year*, so a mid-year `as_of` has
+  no honest bound to offer; `load_industry_cross_section` is the reader that takes the day as an
+  argument and therefore took the filtered door for this dataset. See
+  `tests/unit/panel/test_visible_read_callers.py`.
+- **`load_adjustment_histories`** -- `V2-P4-079`'s, and the one where the wall is real and the
+  door still does not fit. `compress_adjustment_batch` stores a step function, so a row
+  predicate collapses `covered_through` onto the year's opening anchor; see the loader's own
+  docstring and `tests/integration/panel/test_whole_partition_doors.py` for the numbers and for
+  the two edits outside `panel_ingest` that a move would need.
+- **`load_index_membership` and `load_index_prices`** -- about callers rather than clocks. The
+  first has none in `src/` at all (`test_whole_partition_doors.py` pins it, so the day something
+  reaches for it the door has to be judged on that caller's instant). The second had none
+  anywhere until `V2-P4-083` gave it `panel_doctor.REBUILDABLE_INDEX_PRICES`, which reads at the
+  report's own `as_of` and over years the caller named -- a rebuild rather than a point-in-time
+  question, so the whole-partition verdict is the one it wants.
 """
 
 
