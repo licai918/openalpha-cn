@@ -38,7 +38,9 @@ from openalpha_cn.panel.catalog import (
     ReadinessIssue,
 )
 from openalpha_cn.panel_doctor import (
+    _PRICE_SHAPED_FIELDS,
     BLOCKS_A_READ,
+    CALENDAR_SCOPED_REQUIREMENTS,
     DATASET_CADENCE,
     DOCTOR_ISSUE_CODES,
     FACTOR_PLANE_SEALS,
@@ -349,6 +351,28 @@ def test_every_statement_dataset_is_quarterly() -> None:
     from openalpha_cn.panel_ingest import FINANCIAL_STATEMENT_DATASETS
 
     assert {DATASET_CADENCE[name] for name in FINANCIAL_STATEMENT_DATASETS} == {"quarterly"}
+
+
+def test_every_calendar_scoped_requirement_has_a_census_free_fallback() -> None:
+    """The pair of tables `V2-P4-083` found disagreeing, and the cost of the disagreement.
+
+    `_requirement_for` dispatches a session-census dataset to `CALENDAR_SCOPED_REQUIREMENTS`, and
+    when no census can be stated -- no calendar supplied, or one that does not reach the
+    requested year -- it falls back to `_PRICE_SHAPED_FIELDS` for the projection to require
+    instead. `index_daily` joined the first table with `V2-P3-016` and never joined the second,
+    so the branch whose whole purpose is to keep the rest of a verdict alive was the branch that
+    raised `KeyError`: `openalpha panel doctor --dataset index_daily --no-calendar` exited on it,
+    and `panel_health_report`'s docstring promises a finding for everything but an unknown
+    cadence.
+
+    An equality rather than a containment, in both directions. A dataset in the fallback table
+    and not the builder table is a projection nothing can reach, which is the same kind of dead
+    entry `test_the_allowlist_names_files_that_exist_and_actually_make_the_call` refuses one
+    plane over.
+    """
+    assert set(CALENDAR_SCOPED_REQUIREMENTS) == set(_PRICE_SHAPED_FIELDS)
+    assert set(CALENDAR_SCOPED_REQUIREMENTS) <= set(DATASET_CADENCE)
+    assert "index_daily" in CALENDAR_SCOPED_REQUIREMENTS
 
 
 # --- the inherent-limitation registries ----------------------------------------------------

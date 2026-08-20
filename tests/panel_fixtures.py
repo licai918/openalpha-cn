@@ -927,6 +927,59 @@ def _has_session_adjacent_handover(panel: GeneratedPanel) -> bool:
     return False
 
 
+def _has_a_security_classified_only_after_the_window(panel: GeneratedPanel) -> bool:
+    """A priced security whose earliest industry assignment starts after the newest session.
+
+    Read off the stored `index_member_all` rows rather than off `panel.industry_assignments`,
+    which is a carrier the generator hands back and would answer for the request. The comparison
+    is against the price panel's own newest session, so what it detects is "this panel prices a
+    security the classification corpus does not reach", not "some date is large".
+    """
+    starts: dict[str, str] = {}
+    for subject, day in panel.rows_of(INDUSTRY_MEMBERSHIP_DATASET, "industry_from"):
+        code, since = str(subject), str(day)
+        starts[code] = min(starts.get(code, since), since)
+    newest = _newest_session(panel)
+    priced = {str(subject) for subject in panel.batch(DAILY_DATASET).subjects}
+    return any(code in priced and since > newest for code, since in starts.items())
+
+
+def _has_bar_without_a_published_band(panel: GeneratedPanel) -> bool:
+    """A `(security, session)` the price panel has a bar for and `stk_limit` has no band for."""
+    banded = {
+        (str(subject), str(day))
+        for subject, day, _up, _down in panel.rows_of(
+            PRICE_LIMIT_DATASET, "trade_date", "up_limit", "down_limit"
+        )
+    }
+    return bool(_priced_keys(panel) - banded)
+
+
+def _has_priced_security_that_has_filed_nothing(panel: GeneratedPanel) -> bool:
+    """A security the price panel carries that the `income` partition holds no filing for."""
+    return bool(
+        {str(subject) for subject in panel.batch(DAILY_DATASET).subjects}
+        - {str(subject) for subject in panel.batch(INCOME_DATASET).subjects}
+    )
+
+
+def _has_constituent_absent_from_the_registry(panel: GeneratedPanel) -> bool:
+    """A published constituent the stored registry has no lifecycle row for.
+
+    The two stored subject sets are the wrong pair here and that is the whole care of it: an
+    index publication carries its constituents in the `con_code` **column**, and `index_weight`'s
+    subject is the index. So this reads the column against `stock_basic`'s subjects.
+    """
+    constituents = {
+        str(code)
+        for _subject, _day, code, _weight in panel.rows_of(
+            INDEX_WEIGHT_DATASET, "publication_date", "con_code", "weight"
+        )
+    }
+    registered = {str(subject) for subject in panel.batch(STOCK_BASIC_DATASET).subjects}
+    return bool(constituents - registered)
+
+
 def _has_industry_coverage_hole(panel: GeneratedPanel) -> bool:
     return any(
         _unclassified_sessions(panel, previous, current) > 0
@@ -1159,7 +1212,14 @@ _SHAPES: Final[tuple[PanelShape, ...]] = (
             "not a contrived one: `panel build` writes what it can see now"
         ),
         detect=_has_disclosure_after_the_as_of,
-        provokes=("not_yet_knowable", "check_unavailable"),
+        # `check_unavailable` was the second code here until `V2-P4-083`, and losing it is the
+        # fix rather than a regression: `_ambiguity_check`'s first read is
+        # `load_statement_histories`, which took the whole-partition door, so this injection
+        # cost the report a cross-check as well as producing the finding it is for. The read is
+        # on the per-event-date door now and runs on the rows it may see; the dataset-level
+        # `not_yet_knowable` stays, because the partition really does hold a row from after
+        # this `as_of` and that is a fact about the panel rather than about the check.
+        provokes=("not_yet_knowable",),
     ),
     PanelShape(
         shape_id="daily.bar_without_valuation",
@@ -1375,6 +1435,71 @@ _SHAPES: Final[tuple[PanelShape, ...]] = (
             "3,299 (domain/industry_classification.py)"
         ),
         detect=_has_industry_coverage_hole,
+    ),
+    PanelShape(
+        shape_id="industry.first_assignment_after_the_window",
+        datasets=(INDUSTRY_MEMBERSHIP_DATASET, DAILY_DATASET),
+        summary="a priced security the classification corpus does not reach yet",
+        measurement=(
+            "the first in_date is neither a listing date nor an event this dataset explains: "
+            "for 4,325 of the 5,875 securities the registry also carries it precedes the "
+            "security's own list_date, and 243 fall after it -- the extreme being 600841.SH "
+            "动力新科, listed 1994-03-11 with no assignment until 2022-07-29, 6,903 sessions "
+            "later. Whole-market coverage of the listed universe is 5,538 of 5,539 on "
+            "2026-08-07, the one exception being 920038.BJ 森合高科, which has none at all "
+            "(domain/industry_classification.py's the_first_in_date_is_not_a_classification_"
+            "event and a_security_can_be_unclassified_inside_its_listed_life)"
+        ),
+        detect=_has_a_security_classified_only_after_the_window,
+    ),
+    PanelShape(
+        shape_id="price_limits.bar_without_a_published_band",
+        datasets=(PRICE_LIMIT_DATASET, DAILY_DATASET),
+        summary="a security that traded on a session no band was published for",
+        measurement=(
+            "daily is a subset of stk_limit only from 2023-01-03. A quarterly sweep of "
+            "2013-01..2026-07 brackets the changeover between 2022-12-26, which has 4 bars "
+            "with no band, and 2023-01-03, which has 0; and the dataset serves 0 rows for "
+            "2005-01-04 and 2006-01-04 against 1,408 for 2007-01-04, so no published band "
+            "exists for the first sixteen years of the market at all "
+            "(domain/price_limits.py's stk_limit_starts_in_2007_and_reached_the_beijing_"
+            "board_late). panel_doctor.SUBJECT_CONTAINMENTS declares the containment this "
+            "breaks and names that same limitation beside it"
+        ),
+        detect=_has_bar_without_a_published_band,
+    ),
+    PanelShape(
+        shape_id="financials.security_has_filed_nothing",
+        datasets=(INCOME_DATASET, DAILY_DATASET),
+        summary="a security that trades and has announced nothing on this endpoint",
+        measurement=(
+            "the four endpoints do not cover the same years for the same security: in a "
+            "53-security sample the earliest report period is 1989-12-31 for balancesheet and "
+            "fina_indicator, 1993-12-31 for income and 2003-12-31 for cashflow, because the "
+            "cash flow statement is a later accounting requirement -- so a reader must not "
+            "treat a missing filing as a fact about the company "
+            "(domain/financial_statements.py's the_corpus_starts_before_the_exchanges_did). "
+            "The other three endpoints keep this security's row, which is the same corpus "
+            "shape rather than a narrower one"
+        ),
+        detect=_has_priced_security_that_has_filed_nothing,
+    ),
+    PanelShape(
+        shape_id="index.constituent_absent_from_the_registry",
+        datasets=(INDEX_WEIGHT_DATASET, STOCK_BASIC_DATASET),
+        summary="a published constituent the security registry has no lifecycle row for",
+        measurement=(
+            "990018.SH appears in eighteen 000300.SH publications from 2005-04-29 to "
+            "2006-09-29, at weights from 0.681 to 1.391, and is in neither the L nor the D "
+            "half of stock_basic's 5,878-row registry, so StockUniverse refuses it as an "
+            "unknown code. It is not a corrupt code: namechange resolves it to 上港集箱 / "
+            "G上港, the entity 上港集团 absorbed by share exchange in 2006, and the "
+            "publications show the handover directly "
+            "(domain/index_membership.py's "
+            "a_constituent_can_be_missing_from_the_security_registry). "
+            "constituent_listing_report is the function that exists for it"
+        ),
+        detect=_has_constituent_absent_from_the_registry,
     ),
 )
 
@@ -1919,10 +2044,41 @@ def _locked_key(sessions: Sequence[date], securities: Sequence[str]) -> tuple[st
     return securities[LOCKED_SECURITY_INDEX], sessions[LOCKED_SESSION_INDEX]
 
 
+UNBANDED_SECURITY_INDEX: Final[int] = 2
+UNBANDED_SESSION_INDEX: Final[int] = 3
+"""`securities[2]` on `sessions[3]`: the one bar this panel can carry with no published band.
+
+`_limit_batch` built the whole `sessions x securities` cross product, so every bar in every
+generated panel had a band beside it and "a bar with no published band" -- the containment
+`panel_doctor.SUBJECT_CONTAINMENTS` declares between `daily` and `stk_limit`, and the branch
+`limit_touch` folds to a code rather than raising -- could not be produced at all.
+
+The cell is chosen so nothing else in the panel moves. `sessions[3]` is not `sessions[0]` (the
+limit-free sentinel's session), not `sessions[1]` (the locked session `price_limits.
+one_price_limit_up` names) and not `sessions[-1]`, so the newest cross section still has a band
+for every name and no test that screens it changes its verdict. `securities[2]` already carries
+the uncorroborated restatement, in a different dataset on a different session, which composes.
+
+`_omitted_bands` is the named set rather than an `if` inside the builder, which is
+`_omitted_factors`' and `_missing_bars`' arrangement: a second omission is a row there instead of
+another branch here.
+"""
+
+
+def _omitted_bands(
+    *, sessions: Sequence[date], securities: Sequence[str], shapes: frozenset[str]
+) -> frozenset[tuple[str, date]]:
+    """Which `(security, session)` band rows the batch leaves out."""
+    if "price_limits.bar_without_a_published_band" not in shapes:
+        return frozenset()
+    return frozenset({(securities[UNBANDED_SECURITY_INDEX], sessions[UNBANDED_SESSION_INDEX])})
+
+
 def _limit_batch(
     *, sessions: Sequence[date], securities: Sequence[str], shapes: frozenset[str]
 ) -> ColumnarPanelBatch:
-    pairs = [(day, code) for day in sessions for code in securities]
+    omitted = _omitted_bands(sessions=sessions, securities=securities, shapes=shapes)
+    pairs = [(day, code) for day in sessions for code in securities if (code, day) not in omitted]
     sentinel: tuple[str, date] | None = None
     if "price_limits.limit_free_sentinel" in shapes:
         sentinel = (securities[0], sessions[0])
@@ -1968,6 +2124,27 @@ Within `published_weight_tolerance(count=3, decimals=2)` -- 0.015 -- and outside
 equality test would accept, which is the entire point of the shape.
 """
 
+UNREGISTERED_CONSTITUENT: Final[str] = "990018.SH"
+"""A constituent code the generated registry has no row for, and it is the real one.
+
+`_index_weight_batch` drew every constituent from `securities`, the same tuple `_universe_batch`
+builds the registry from, so no generated panel could hold a publication naming a code
+`StockUniverse` cannot place -- and `constituent_listing_report` exists for precisely that
+mismatch.
+
+`KNOWN_INDEX_MEMBERSHIP_LIMITATIONS.a_constituent_can_be_missing_from_the_security_registry` is
+the measurement, and the code is quoted from it rather than invented: 990018.SH appears in
+eighteen 000300.SH publications from 2005-04-29 to 2006-09-29 at weights from 0.681 to 1.391 and
+is in neither the `L` nor the `D` half of `stock_basic`'s 5,878-row registry. It is not a corrupt
+code -- `namechange` resolves it to 上港集箱 / G上港, the entity absorbed by share exchange in
+2006 -- which is why the right answer is a report and not a refusal.
+
+It **replaces** the last constituent rather than being added beside it, so the publication's
+weights still sum the way the shape it composes with says they do: appending a name would leave
+`index.published_weights_do_not_sum_to_exactly_one_hundred`'s three cells summing to 133.32 and
+`build_index_publication` would refuse the batch outright.
+"""
+
 
 def _index_weight_batch(
     *, sessions: Sequence[date], securities: Sequence[str], shapes: frozenset[str]
@@ -1984,6 +2161,8 @@ def _index_weight_batch(
     else:
         constituents = tuple(securities[:2])
         weights = tuple(100.0 / len(constituents) for _ in constituents)
+    if "index.constituent_absent_from_the_registry" in shapes:
+        constituents = (*constituents[:-1], UNREGISTERED_CONSTITUENT)
     publications: list[tuple[date, tuple[str, ...], tuple[float, ...]]] = [
         (sessions[-1], constituents, weights)
     ]
@@ -2032,6 +2211,32 @@ two pairs rather than a first-two-agree triple.
 """
 THIRD_VERSION_VALUE: Final[float] = 777.0
 
+UNFILED_SECURITY_INDEX: Final[int] = 5
+"""`securities[5]`, the security `financials.security_has_filed_nothing` leaves out of `income`.
+
+`_income_rows` and `_plain_statement_rows` both opened with one filing for **every** security
+drawn from the same `SECURITIES` tuple the price builders use, so no generated panel could carry
+a security that trades and has announced nothing -- and the live corpus is not like that.
+`KNOWN_FINANCIAL_STATEMENT_LIMITATIONS.the_corpus_starts_before_the_exchanges_did` measures the
+systematic version: `income` begins at report period 1993-12-31, `balancesheet` and
+`fina_indicator` at 1989-12-31 and `cashflow` only at 2003-12-31, "so the three statements do not
+cover the same years for the same security and a reader must not treat a missing cashflow filing
+as a" fact about the company.
+
+Dropped rather than dated late, which is `V2-P4-080`'s lesson and the difference from
+`financials.announced_after_the_as_of`: that shape adds a row nobody can see yet, and this one
+removes the row entirely, so the two exercise `filings_on` returning nothing for two different
+reasons and a fix to one cannot silently cover the other.
+
+`income` alone, so the same panel still answers about `securities[5]` on the other three
+endpoints -- which is exactly the corpus shape the measurement above describes, and is why
+`_plain_statement_rows` takes no `shapes` argument and keeps its unconditional row.
+
+The index is the one whose other roles are all in price-shaped datasets:
+`adjustment.factor_series_stops_inside_the_window` truncates its factor series and
+`suspension.halt_on_the_newest_session` halts it, neither of which a statement reader consults.
+"""
+
 
 def _income_rows(securities: Sequence[str], shapes: frozenset[str]) -> tuple[_StatementRow, ...]:
     """One filing per security, then whichever extra versions and periods were asked for.
@@ -2040,6 +2245,11 @@ def _income_rows(securities: Sequence[str], shapes: frozenset[str]) -> tuple[_St
     describes every statement dataset through a different column name.
     """
     width = len(INCOME_COLUMNS)
+    unfiled = (
+        securities[UNFILED_SECURITY_INDEX]
+        if "financials.security_has_filed_nothing" in shapes
+        else None
+    )
     rows = [
         _StatementRow(
             security=code,
@@ -2049,6 +2259,7 @@ def _income_rows(securities: Sequence[str], shapes: frozenset[str]) -> tuple[_St
             values=(100.0 + index, *(1.0 for _ in range(width - 1))),
         )
         for index, code in enumerate(securities)
+        if code != unfiled
     ]
     if "financials.same_day_duplicate_versions" in shapes:
         rows.append(
@@ -2405,20 +2616,37 @@ def _name_records(
     one reason a defect survives acceptance; nobody having asked the question is another, and the
     two look identical from inside this file.
 
-    The remaining four are gaps rather than defects, each because every raise they hide is caught
-    at its call sites. They are `V2-P4-085`'s, not this issue's:
+    The remaining four were gaps rather than defects, each because every raise they hid is caught
+    at its call sites. **`V2-P4-085` closed all four**, and each closure drops a row or replaces a
+    corpus rather than appending one, which is this docstring's own lesson applied four more times:
 
-    - `_industry_assignments` opens every security at `LISTED_ON` with `through=None`, hiding
+    - `_industry_assignments` opened every security at `LISTED_ON` with `through=None`, hiding
       `IndustryHorizonError`'s first arm; `panel_ingest.load_industry_cross_section` and
       `panel_neutralization._industry_answer` both catch it.
-    - `_limit_batch` gives every cell a published band, so "no published band" -- which folds to a
-      code rather than raising -- is never exercised.
-    - `_income_rows` and `_plain_statement_rows` announce every security's filing on
-      `BASE_ANNOUNCEMENT`, which is `WINDOW_FIRST`, so `FinancialStatementHorizonError` is
-      unreachable; neither raising method has a caller outside `domain/`.
-    - `_index_weight_batch` is the inverse and is recorded for symmetry: one publication dated
-      `WINDOW_LAST`, so `IndexMembershipHorizonError` fires on every session but the last and it is
-      the *success* path that is unreachable.
+      `industry.first_assignment_after_the_window` **replaces** `securities[4]`'s assignments with
+      one that starts the day after the newest session.
+    - `_limit_batch` gave every cell a published band, so "no published band" -- which folds to a
+      code rather than raising, and which `panel_doctor.SUBJECT_CONTAINMENTS` declares a
+      containment about -- was never exercised.
+      `price_limits.bar_without_a_published_band` gives it an `_omitted_bands` set, through the
+      same idiom `_omitted_factors` and `_missing_bars` already use.
+    - `_income_rows` and `_plain_statement_rows` announced every security's filing on
+      `BASE_ANNOUNCEMENT`, which is `WINDOW_FIRST`, so no generated panel could carry a security
+      that trades and has announced nothing. `financials.security_has_filed_nothing` **drops**
+      `securities[5]` from `income` and leaves it on the other three endpoints, which is the
+      corpus shape rather than a narrower one -- the four statement endpoints genuinely do not
+      cover the same years for the same security.
+    - `_index_weight_batch` drew every constituent from the same tuple the registry is built
+      from, so a publication naming a code `StockUniverse` cannot place -- what
+      `constituent_listing_report` exists for -- was unreachable.
+      `index.constituent_absent_from_the_registry` **replaces** the last constituent with the
+      real 990018.SH.
+
+    What that issue did **not** find is a fifth of the same kind, and one gap it left standing is
+    recorded here because it is a different shape of gap: `STORED_DATASETS` carries fourteen of
+    the sixteen declared datasets, and the two absent are `index_classify` (see that constant's
+    docstring for the per-dataset partition year it would need) and `index_daily`. Neither is a
+    builder that flatters; both are datasets with no synthetic form at all.
 
     `name_history.effect_after_every_priced_session` is the shape that reaches this one. The
     baseline stays for the other seven securities rather than being dropped wholesale: this
@@ -2503,12 +2731,47 @@ def _assignment(
     )
 
 
+UNCLASSIFIED_SECURITY_INDEX: Final[int] = 4
+UNCLASSIFIED_FROM: Final[date] = date(2026, 1, 17)
+"""`securities[4]`, whose only industry assignment starts after every priced session.
+
+The fourth index this file's industry shapes have needed and the one no other names:
+`securities[0]` carries the hand-over, `securities[1]` the coverage hole and `securities[2]` the
+reclassification after the `as_of`, so all four compose.
+
+**This shape `replace`s the security's assignments rather than appending**, which is
+`name_history.effect_after_every_priced_session`'s move one dataset over and the same argument:
+the baseline row `_industry_assignments` gives every security is what makes
+`SecurityIndustryHistory.assignment_on` answerable on every session of every generated panel, so
+`IndustryHorizonError`'s **lower** arm -- a listed, priced security the classification corpus does
+not reach yet -- was unreachable in every one. `industry.coverage_hole` does not reach it either:
+that shape opens at `LISTED_ON` and leaves a gap in the middle, which is a different refusal
+arriving from a different direction.
+
+`UNCLASSIFIED_FROM` is the day **after** the newest session and no later, which is a narrower
+window than it looks and the first draft of this shape missed it. `RECLASSIFIED_FROM`
+(2026-02-02) was the obvious date -- past `WINDOW_LAST`, so no session in the window has an
+assignment in effect -- and it is also past `AS_OF`, which turns the shape into
+`industry.reclassification_after_the_as_of` wearing a different name: an `index_member_all` row's
+availability is its own event date floored at the taxonomy, so a row dated 2026-02-02 is one no
+read at `AS_OF` can see, and the panel provokes `not_yet_knowable` instead of being a corpus with
+a hole in it. `test_no_detector_answers_true_on_a_shape_that_is_not_its_own` is what said so.
+
+2026-01-17 is knowable at `AS_OF` (midnight Asia/Shanghai, twelve hours before it) and later than
+every session the panel prices. The security has an industry; it simply has none on any day this
+panel is about, which is the corpus fact and not an injection.
+"""
+
+
 def _industry_assignments(
     securities: Sequence[str], shapes: frozenset[str]
 ) -> Mapping[str, tuple[IndustryAssignment, ...]]:
     assignments: dict[str, tuple[IndustryAssignment, ...]] = {
         code: (_assignment(code, 0, since=LISTED_ON, through=None),) for code in securities
     }
+    if "industry.first_assignment_after_the_window" in shapes:
+        code = securities[UNCLASSIFIED_SECURITY_INDEX]
+        assignments[code] = (_assignment(code, 1, since=UNCLASSIFIED_FROM, through=None),)
     if "industry.session_adjacent_handover" in shapes:
         code = securities[0]
         assignments[code] = (

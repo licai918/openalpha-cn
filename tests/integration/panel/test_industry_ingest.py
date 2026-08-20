@@ -48,6 +48,7 @@ import pytest
 from openalpha_cn.domain.industry_classification import (
     INDUSTRY_MEMBERSHIP_DATASET,
     INDUSTRY_MEMBERSHIP_TAXONOMY,
+    INDUSTRY_TAXONOMY_EFFECTIVE_FROM,
     INDUSTRY_TREE_DATASET,
     SW2014_TAXONOMY,
     SW2021_TAXONOMY,
@@ -61,7 +62,7 @@ from openalpha_cn.domain.panel_batch import (
     TimelineColumns,
 )
 from openalpha_cn.panel.catalog import DateCoverage
-from openalpha_cn.panel.store import PanelStorageError, PanelStore
+from openalpha_cn.panel.store import AVAILABILITY_COLUMN, PanelStorageError, PanelStore
 from openalpha_cn.panel_ingest import (
     load_industry_cross_section,
     load_industry_histories,
@@ -468,6 +469,67 @@ def test_both_taxonomy_vintages_can_share_the_store_and_come_back_apart(tmp_path
     assert sorted(trees) == [SW2014_TAXONOMY, SW2021_TAXONOMY]
     assert trees[SW2021_TAXONOMY].ancestry("850111.SI")[-1].index_code == "801010.SI"
     assert trees[SW2014_TAXONOMY].node("801020.SI").is_published is None
+
+
+def test_a_tree_partition_is_all_or_nothing_at_the_read_so_there_is_no_refusal_to_remove(
+    tmp_path,
+) -> None:
+    """Why `V2-P4-083` left `load_industry_trees` on the whole-partition door.
+
+    The other three doors that issue swept were refused for the sake of **one** row while the
+    rest of the year was knowable, which is what makes a whole-partition verdict the wrong
+    granularity. A tree vintage is not like that. `index_classify` is
+    `ClockStrategy.calendar_static` on `taxonomy_date`, and every node of a vintage carries the
+    vintage's own effective date -- which `industry_trees_from_panel_rows` re-checks against
+    `INDUSTRY_TAXONOMY_EFFECTIVE_FROM`, so a partition whose rows disagreed would not read at
+    all. One distinct availability instant per partition therefore means `not_yet_knowable` is
+    all-or-nothing: it fires exactly when the whole vintage is unknowable, never when the panel
+    has moved on.
+
+    That is `trade_cal`'s argument arriving from the other side. There, a year partition's newest
+    availability instant is the *earliest* in it, so the code cannot fire inside the year; here
+    it is the only one, so when it fires there is nothing a row predicate could have handed back.
+
+    Both vintages, because the constant is a per-vintage measurement and a rule that held for
+    2021 and not 2014 would be a rule about one number.
+    """
+    store = _store(tmp_path)
+    provider = _provider(MEMBERSHIP_SCRIPT)
+    for taxonomy in (SW2021_TAXONOMY, SW2014_TAXONOMY):
+        write_industry_tree(
+            store,
+            provider.fetch_panel(
+                ProviderRequest(dataset=INDUSTRY_TREE_DATASET, as_of=AS_OF, subjects=(taxonomy,))
+            ),
+        )
+
+    for taxonomy, year in ((SW2021_TAXONOMY, 2021), (SW2014_TAXONOMY, 2014)):
+        coverage = store.read_coverage(INDUSTRY_TREE_DATASET, year)
+        assert coverage is not None
+        opens_at = coverage.max_available_time
+        effective = INDUSTRY_TAXONOMY_EFFECTIVE_FROM[taxonomy]
+        assert opens_at == datetime.combine(effective, time(0, 0), tzinfo=ZoneInfo("Asia/Shanghai"))
+        stored = store.query(
+            dataset=INDUSTRY_TREE_DATASET, year=year, columns=(AVAILABILITY_COLUMN,)
+        )
+        assert len({row[0] for row in stored}) == 1
+        # Non-vacuity, and only `SW2021` can carry it: this script's `SW2014` spine is a single
+        # node, so "one distinct instant" is true of it by arithmetic. `SW2021` is the vintage
+        # `INDUSTRY_MEMBERSHIP_TAXONOMY` names and the one every stored membership row is
+        # labelled with, so it is also the one the claim has to hold for.
+        if taxonomy == SW2021_TAXONOMY:
+            assert len(stored) > 1
+        assert (
+            load_industry_trees(store, years=(year,), as_of=opens_at, max_staleness=None)
+            is not None
+        )
+        with pytest.raises(PanelStorageError, match=r"\['not_yet_knowable'\]"):
+            load_industry_trees(
+                store,
+                years=(year,),
+                as_of=opens_at - timedelta(microseconds=1),
+                max_staleness=None,
+            )
 
 
 def test_a_membership_batch_handed_to_the_tree_writer_is_refused(tmp_path) -> None:

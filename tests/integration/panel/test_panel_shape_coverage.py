@@ -118,8 +118,21 @@ EXPECTED_HEALTHY_SHAPES = (
     "financials.statement_dataset_without_a_revision_label",
     "industry.session_adjacent_handover",
     "industry.coverage_hole",
+    "industry.first_assignment_after_the_window",
+    "price_limits.bar_without_a_published_band",
+    "financials.security_has_filed_nothing",
+    "index.constituent_absent_from_the_registry",
 )
-"""Twenty-three of the thirty-one, in table order. The eight left out, and why:
+"""Twenty-seven of the thirty-five, in table order. The eight left out, and why:
+
+**The four `V2-P4-085` added are all here, and that is the finding rather than an oversight.**
+Each closes a builder that handed every subject a row -- an industry assignment, a published
+band, a filing, a registry-resolvable constituent -- and none of the four provokes anything,
+because a corpus with a hole in it is not an unhealthy panel. That is the difference from
+`V2-P4-084`'s two, which had to join `DEFECT_SHAPES`: a security with a bar and no `stock_basic`
+row breaks a declared containment, and one whose factor series stops short breaks a return path.
+Measured rather than assumed -- `test_a_shape_provokes_exactly_the_health_codes_it_declares`
+runs each of the four against a real report and requires exactly `()`.
 
 - `daily.uncorroborated_factor_step`, `adjustment.factor_series_stops_inside_the_window` and
   `universe.priced_security_absent_from_the_registry` are each a `warning`, and
@@ -303,7 +316,15 @@ def test_the_defect_shapes_are_the_ones_that_make_a_generated_panel_unhealthy(
     knowable at the read -- aimed at `income`, `index_weight` and `index_member_all` in turn,
     which is `V2-P2-001`, `003` and `004`. They are listed separately rather than collapsed
     because each partition is judged on its own `max_available_time`, so a regression that lost
-    one dataset's coverage census would leave the other two green."""
+    one dataset's coverage census would leave the other two green.
+
+    **`financials.announced_after_the_as_of` lost its `warning` to `V2-P4-083` and the loss is
+    the fix.** That count was `_ambiguity_check` reporting `check_unavailable` -- "I could not
+    look" -- because `load_statement_histories` took the whole-partition door and the injected
+    row refused the year. The read is on the per-event-date door now, so the check runs on the
+    rows it may see and the injection produces exactly the one finding it is for: the
+    dataset-level `not_yet_knowable`, which is still true and still `blocking`, because the
+    partition really does hold a row from after this `as_of`."""
     severities: dict[str, dict[str, int]] = {}
     for shape_id in DEFECT_SHAPES:
         panel = generate_panel(shapes=(shape_id,))
@@ -318,7 +339,7 @@ def test_the_defect_shapes_are_the_ones_that_make_a_generated_panel_unhealthy(
     assert severities == {
         "adjustment.factor_series_stops_inside_the_window": {"warning": 1},
         "daily.uncorroborated_factor_step": {"warning": 1},
-        "financials.announced_after_the_as_of": {"blocking": 1, "warning": 1},
+        "financials.announced_after_the_as_of": {"blocking": 1},
         "index.publication_after_the_as_of": {"blocking": 1},
         "industry.reclassification_after_the_as_of": {"blocking": 1},
         "universe.priced_security_absent_from_the_registry": {"warning": 1},

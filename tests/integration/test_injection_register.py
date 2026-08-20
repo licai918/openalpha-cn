@@ -110,6 +110,12 @@ from openalpha_cn.domain.panel_batch import PanelColumn
 from openalpha_cn.domain.time import Timeline
 from openalpha_cn.domain.trading_calendar import TRADING_CALENDAR_DATASET, TradingCalendar
 from openalpha_cn.panel.store import PanelStorageError, PanelStore
+from openalpha_cn.panel_gate import (
+    DependencyClearance,
+    DependencyRequest,
+    PanelGateError,
+    require_datasets,
+)
 from openalpha_cn.panel_ingest import (
     load_adjustment_histories,
     load_daily_bars,
@@ -224,14 +230,50 @@ def _clear_future_evidence(root: Path) -> str:
 # --- V2-P2-001 (panel plane): a filing announced after the read --------------------------------
 
 
+def _statement_clearance(store: PanelStore) -> DependencyClearance:
+    return require_datasets(
+        store,
+        DependencyRequest(
+            datasets=(INCOME_DATASET,),
+            as_of=AS_OF,
+            years=(YEAR,),
+            sessions=(),
+            calendar=None,
+        ),
+    )
+
+
 def _inject_future_filing(root: Path) -> object:
+    """The `V2-P1-013` gate on a partition holding a filing the read cannot see.
+
+    **`V2-P4-083` moved which surface this vector asks, and the injection is unchanged.**
+    `load_statement_histories` used to refuse the whole year here; it is on
+    `_read_visible_event_dated_rows` now, so it withholds the row and answers from the rest --
+    which means the loader is no longer where the refusal is, and a row that went on asserting
+    one would be asserting the wall rather than the guarantee.
+
+    The guarantee did not move. `panel_doctor` still reports `not_yet_knowable` at partition
+    scope -- the partition really does hold a row from after this `as_of` -- and `GATE_CODE_BLOCKS`
+    still blocks on it, so `DependencyClearance.cleared` refuses by name. That is also the
+    surface a downstream actually meets, which the loader was standing in for.
+
+    The finer statement -- that the withheld row does not reach the *answer*, asserted by
+    reading the injected partition and the same partition without the row and requiring them
+    equal -- is `tests/integration/panel/test_lookahead_injection.py`'s, which this file's own
+    docstring already says it does not subsume.
+    """
     panel = generate_panel(shapes=("financials.announced_after_the_as_of",))
-    return _income(_stored(root, panel, INCOME_DATASET))
+    return _statement_clearance(_stored(root, panel, INCOME_DATASET)).cleared
 
 
 def _clear_future_filing(root: Path) -> str:
-    histories = _income(_stored(root, generate_panel(), INCOME_DATASET))
-    return f"the income panel answered for {len(histories)} securities"
+    store = _stored(root, generate_panel(), INCOME_DATASET)
+    cleared = _statement_clearance(store).cleared
+    histories = _income(store)
+    return (
+        f"the income panel cleared {len(cleared)} dataset(s) and answered for "
+        f"{len(histories)} securities"
+    )
 
 
 # --- V2-P2-002: two versions of one key, on one announcement day -------------------------------
@@ -516,11 +558,14 @@ INJECTION_VECTORS = (
         issue="V2-P2-001",
         injects=(
             "one income row whose ann_date is three days after the panel's as_of, in the same "
-            "partition year as the rows around it"
+            "partition year as the rows around it, put to the V2-P1-013 dependency gate -- "
+            "which is where the refusal lives since V2-P4-083 moved the loader onto the "
+            "per-event-date read. See _inject_future_filing for why the surface moved and the "
+            "injection did not"
         ),
-        refused_by=PanelStorageError,
-        refusal=r"the income panel cannot be read at .*\['not_yet_knowable'\]",
-        cleared=r"^the income panel answered for 8 securities$",
+        refused_by=PanelGateError,
+        refusal=r"this request is blocked by \['not_yet_knowable'\]: income: income holds",
+        cleared=r"^the income panel cleared 1 dataset\(s\) and answered for 8 securities$",
         inject=_inject_future_filing,
         clear=_clear_future_filing,
     ),

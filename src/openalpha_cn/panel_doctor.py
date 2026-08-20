@@ -144,9 +144,10 @@ same way it pins `panel_ingest`'s.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
+from functools import partial
 from itertools import pairwise
 from types import MappingProxyType
 from typing import Final, Literal, Protocol
@@ -183,6 +184,7 @@ from openalpha_cn.domain.index_membership import (
 )
 from openalpha_cn.domain.index_prices import (
     INDEX_DAILY_DATASET,
+    INDEX_DAILY_PANEL_COLUMNS,
     KNOWN_INDEX_PRICE_LIMITATIONS,
     IndexPriceError,
 )
@@ -237,6 +239,7 @@ from openalpha_cn.panel_ingest import (
     load_adjustment_histories,
     load_daily_bars,
     load_daily_valuations,
+    load_index_prices,
     load_industry_histories,
     load_industry_trees,
     load_name_histories,
@@ -1347,6 +1350,29 @@ that changes values in place -- disclosed as `KNOWN_STORAGE_LIMITATIONS`'
 here."""
 
 
+CALENDAR_SCOPED_REQUIREMENTS: Final[Mapping[str, Callable[..., ReadinessRequirement]]] = (
+    MappingProxyType(
+        {
+            DAILY_DATASET: daily_requirement,
+            DAILY_BASIC_DATASET: daily_basic_requirement,
+            PRICE_LIMIT_DATASET: price_limit_requirement,
+            INDEX_DAILY_DATASET: index_price_requirement,
+        }
+    )
+)
+"""The datasets whose requirement states a session census, and the builder that states it.
+
+Every one of them publishes on each open session, so its requirement can name the days the
+partition must hold -- which is the one readiness dimension that sees a hole in the middle of a
+year rather than only at its ends. Each builder takes the calendar first and the same four
+keywords after, which is what lets `_requirement_for` call them through one name.
+
+A module constant rather than a dict literal inside that function because it has a partner --
+`_PRICE_SHAPED_FIELDS`, what to require when no census can be stated -- and a pair of tables that
+must agree cannot be checked while one of them is a local.
+"""
+
+
 def _requirement_for(
     dataset: str,
     *,
@@ -1460,12 +1486,7 @@ def _requirement_for(
             ),
             None,
         )
-    builder = {
-        DAILY_DATASET: daily_requirement,
-        DAILY_BASIC_DATASET: daily_basic_requirement,
-        PRICE_LIMIT_DATASET: price_limit_requirement,
-        INDEX_DAILY_DATASET: index_price_requirement,
-    }.get(dataset)
+    builder = CALENDAR_SCOPED_REQUIREMENTS.get(dataset)
     if builder is None:
         raise PanelDoctorError(
             f"{dataset!r} is not a dataset this report knows how to require anything of "
@@ -1509,8 +1530,25 @@ _PRICE_SHAPED_FIELDS: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
         DAILY_DATASET: DAILY_PANEL_COLUMNS,
         DAILY_BASIC_DATASET: DAILY_BASIC_PANEL_COLUMNS,
         PRICE_LIMIT_DATASET: PRICE_LIMIT_PANEL_COLUMNS,
+        INDEX_DAILY_DATASET: INDEX_DAILY_PANEL_COLUMNS,
     }
 )
+"""The projection each calendar-scoped requirement falls back to when no census can be stated.
+
+**One row per key of the builder table above, and `V2-P4-083` is what the missing fourth cost.**
+`index_daily` joined that table with `V2-P3-016` and not this one, so the branch that exists
+precisely so the rest of a verdict survives a missing calendar was the branch that raised:
+`openalpha panel doctor --dataset index_daily --no-calendar` exited on a bare `KeyError`, and so
+did any caller whose calendar did not reach the requested year, which takes the same fallback
+through `TradingCalendarError`. That contradicts `panel_health_report`'s own promise -- a
+`PanelDoctorError` for an unknown cadence and a *finding* for everything else -- on a dataset
+whose cadence is declared.
+
+The two tables are kept apart rather than merged because they answer different questions: one
+says which builder states a dataset's census, the other says what to require when none can be
+stated. `test_every_calendar_scoped_requirement_has_a_census_free_fallback` is what stops a
+fifth dataset from arriving in one and not the other.
+"""
 
 
 def _coverage_records(
@@ -2088,7 +2126,66 @@ absent for a different reason: they cannot run without naming a session, `--sess
 how a caller names one, and `_close_check`, `_unpriced_check` and `_return_path_check` exercise
 all three on the sessions named. `load_index_membership` is absent for the same reason with
 `--index-code` in place of `--session`, and `load_statement_histories` takes a `dataset`
-argument and is exercised by `_ambiguity_check`."""
+argument and is exercised by `_ambiguity_check`.
+
+`load_index_prices` was absent for **no** reason, and `V2-P4-083` is where that was fixed. It is
+`REBUILDABLE_INDEX_PRICES` below, kept apart only because its signature takes a calendar."""
+
+
+REBUILDABLE_INDEX_PRICES: Final[str] = INDEX_DAILY_DATASET
+"""The sixth rebuildable dataset, kept out of the table above by one positional argument.
+
+`load_index_prices(store, calendar, *, years, as_of, max_staleness)` is year-scoped in every way
+`_YearScopedLoader` cares about and takes the calendar first, so it cannot join a table typed on
+that protocol without widening the protocol for one member. A named constant and one branch is
+the smaller of the two, and the branch is what carries the reason.
+
+**Before `V2-P4-083` this loader had no caller anywhere -- not in `src/`, not in `tests/` -- and
+a row in `GATED_READERS` (`tests/unit/panel/test_query_callers.py`).** A gated reader nothing
+calls is a guard entry that can never fail: the allowlist counts it, the audit passes, and the
+row says nothing about the tree. So the choice was a caller, a deletion, or an executable reason,
+and the argument for a caller was already written down in
+`panel_ingest._refuse_unrebuildable_index_prices`: a `suspend_d` partition that cannot be rebuilt
+fails loudly at the next read, while an `index_daily` one is the **regressor** of every residual
+in the cross section and `compute_factor` does not rebuild it -- it reads `close` and `pre_close`
+straight out of the partition. A duplicated session therefore puts two market returns where the
+market had one and changes the sample size of every regression over that window, with nothing
+downstream of the store to notice.
+
+That guard runs at write time only, so its own residue is a partition written before it existed.
+That residue is exactly what this check is for, in the words of the docstring below it: *"of the
+partitions we are about to call readable, do they read?"*
+
+Skipped when no calendar was supplied, because `index_price_requirement` states a session census
+and cannot be built without one. Silently rather than as a `check_unavailable`, for the reason
+`_requirement_for` gives in the derived-factor branch: `DatasetReadiness` already records that
+the census check was waived, and a second line saying "I could not look" would be a warning about
+a report that looked at everything it could."""
+
+
+def _rebuilders(
+    calendar: TradingCalendar | None, date_timezone: str
+) -> Mapping[str, _YearScopedLoader]:
+    """`REBUILDABLE_DATASETS` plus the index level series, when a calendar makes it readable.
+
+    The calendar and the timezone are bound here rather than branched on in the loop, so
+    `_rebuild_check` keeps one call shape for all six and the one dataset whose signature differs
+    is reconciled in the place that says why. `date_timezone` is bound too, even though it has a
+    default, because the report resolves the panel's zone once and a rebuild reading a different
+    one from the readiness that cleared it would be two calendars in one verdict.
+
+    `index_daily` drops out entirely when no calendar was supplied -- `index_price_requirement`
+    states a session census and cannot be built without one -- and that is silent rather than a
+    `check_unavailable`, for `REBUILDABLE_INDEX_PRICES`' reason.
+    """
+    if calendar is None:
+        return REBUILDABLE_DATASETS
+    return {
+        **REBUILDABLE_DATASETS,
+        REBUILDABLE_INDEX_PRICES: partial(
+            load_index_prices, calendar=calendar, date_timezone=date_timezone
+        ),
+    }
 
 
 def _rebuild_check(
@@ -2098,6 +2195,8 @@ def _rebuild_check(
     as_of: datetime,
     years: Mapping[str, tuple[int, ...]],
     bounds: Mapping[str, timedelta | None],
+    calendar: TradingCalendar | None,
+    date_timezone: str,
 ) -> tuple[tuple[HealthFinding, ...], CrossCheckOutcome]:
     """Rebuild every ready partition into its domain type, and report the ones that refuse.
 
@@ -2130,15 +2229,14 @@ def _rebuild_check(
     `check_unavailable`. Distinguishing them matters because only the first is a statement
     about the data, and `check_unavailable` already means "I could not look".
     """
+    rebuilders = _rebuilders(calendar, date_timezone)
     subjects = tuple(
-        health.dataset
-        for health in healths
-        if health.dataset in REBUILDABLE_DATASETS and health.is_ready
+        health.dataset for health in healths if health.dataset in rebuilders and health.is_ready
     )
     findings: list[HealthFinding] = []
     for dataset in subjects:
         try:
-            REBUILDABLE_DATASETS[dataset](
+            rebuilders[dataset](
                 store,
                 years=years[dataset],
                 as_of=as_of,
@@ -2612,7 +2710,13 @@ def panel_health_report(
     checks.append(outcome)
 
     findings, outcome = _rebuild_check(
-        store, healths=healths, as_of=as_of, years=years_for, bounds=bounds
+        store,
+        healths=healths,
+        as_of=as_of,
+        years=years_for,
+        bounds=bounds,
+        calendar=calendar,
+        date_timezone=date_timezone,
     )
     cross_findings.extend(findings)
     checks.append(outcome)
