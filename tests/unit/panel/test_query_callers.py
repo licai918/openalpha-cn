@@ -89,11 +89,16 @@ is caught one plane up by `_refuse_two_builds_of_one_factor_at_one_as_of`'s stor
 
 Adding a name here is a deliberate act with a review attached, which is the property this test
 exists to create.
+
+**A file is the wrong unit for the second entry, and `UNGATED_READERS` below is where that is
+repaired.** The argument in the two paragraphs above is about one function; the permission is
+over a module of fourteen loaders. `V2-P4-081` measured what that gap admits, and the narrower
+map is what the file-level entry now delegates to.
 """
 
 
-def _calls(tree: ast.AST) -> set[str]:
-    """Every `PanelStore` un-gated read called as `<something>.<name>(...)` in `tree`.
+def _read_method(node: ast.AST, doors: frozenset[str]) -> str | None:
+    """The door among `doors` that `node` calls as `<something>.<name>(...)`, or `None`.
 
     Matched on the call's *shape* rather than on the receiver's type, because this test parses
     files rather than type-checking them and `query` is not a unique name in this tree --
@@ -106,18 +111,58 @@ def _calls(tree: ast.AST) -> set[str]:
     cannot see. That is the same limit every AST allowlist in this repository has, and it is
     named rather than papered over: this file raises the cost of the bypass and does not make
     it impossible.
+
+    One function for both allowlists, rather than a copy per door set. The discriminator is a
+    property of `query` wherever it is called, so a second copy of it would be a second thing
+    to keep true.
     """
-    found: set[str] = set()
-    for node in ast.walk(tree):
-        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
-            continue
-        name = node.func.attr
-        if name not in UNGATED_READS:
-            continue
-        if name == "query" and not any(word.arg == "columns" for word in node.keywords):
-            continue
-        found.add(name)
-    return found
+    if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+        return None
+    name = node.func.attr
+    if name not in doors:
+        return None
+    if name == "query" and not any(word.arg == "columns" for word in node.keywords):
+        return None
+    return name
+
+
+def _calls(tree: ast.AST) -> set[str]:
+    """Every `PanelStore` un-gated read called anywhere in `tree`, whatever encloses it."""
+    return {
+        found for node in ast.walk(tree) if (found := _read_method(node, UNGATED_READS)) is not None
+    }
+
+
+def _functions(tree: ast.AST) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    """Every function defined in `tree`, by name -- `async def` counted like `def`.
+
+    **`V2-P4-081`.** Both maps below and the fixpoint under them walked `ast.FunctionDef`
+    alone, so an `async def load_*` was invisible to all three: it could take the un-gated door
+    without appearing in `UNGATED_READERS`, and it could read a partition some third way
+    without appearing in `test_no_loader_reaches_a_partition_outside_this_map`'s residue. No
+    such function exists in `src/` today, which is exactly the condition under which closing
+    the hole costs nothing and leaving it open buys nothing -- and
+    `tests/unit/test_import_layering.py`'s own walk already spells the pair out
+    (`ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef`), so a one-node-kind walk here was
+    an inconsistency rather than a considered boundary. `test_both_maps_read_an_async_def_the
+    _same_way_they_read_a_def` is what keeps this sentence from drifting back.
+    """
+    return {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+    }
+
+
+def _reads_by_function(tree: ast.AST, doors: frozenset[str]) -> dict[str, tuple[str, ...]]:
+    """Each enclosing function in `tree` mapped to the doors among `doors` that it calls."""
+    found: dict[str, list[str]] = {}
+    for name, node in _functions(tree).items():
+        for inner in ast.walk(node):
+            door = _read_method(inner, doors)
+            if door is not None:
+                found.setdefault(name, []).append(door)
+    return {name: tuple(sorted(doors_called)) for name, doors_called in found.items()}
 
 
 def test_only_the_store_itself_reads_a_partition_without_a_readiness_verdict() -> None:
@@ -150,6 +195,55 @@ def test_the_allowlist_names_files_that_exist_and_actually_make_the_call() -> No
             f"QUERY_CALLERS names {name}, which no longer calls any of {sorted(UNGATED_READS)}; "
             "remove the entry rather than leaving the exemption standing"
         )
+
+
+UNGATED_READERS: dict[str, tuple[str, ...]] = {
+    "carry_stored_rows_forward": ("query",),
+}
+"""Every function in `panel_ingest` that takes the un-gated door, and which door it takes.
+
+**The file-level entry above is too coarse for this one file, and `V2-P4-081` is what it cost.**
+`QUERY_CALLERS` answers *which files may* -- the right granularity for `panel/store.py`, which is
+the gate's own implementation and whose single `self.query(...)` is what `read_if_ready` runs
+after `assess_readiness` has answered. It is the wrong granularity for `panel_ingest.py`:
+`V2-P4-071` put that file on the list for one function's sake, and the permission it actually
+granted covers every function in it, the fourteen loaders included. Every argument in
+`QUERY_CALLERS`' second paragraph is about `carry_stored_rows_forward` and none of it is true of
+anything else in the module, so the exemption is written where the argument is.
+
+The map cannot be satisfied by silence. Adding an un-gated read to any other function in
+`panel_ingest` puts that function's name in this map's measured half and nothing in its declared
+half, whatever else the function does and whatever else it calls -- which is the property the
+fixpoint below could not have, because it widens toward callers and a loader that calls
+`load_trading_calendar` first is admitted by that call rather than judged on its own read.
+"""
+
+
+def test_no_other_function_in_this_module_takes_the_un_gated_door() -> None:
+    """The reads, enumerated, rather than the readers.
+
+    `test_no_loader_reaches_a_partition_outside_this_map` asks whether a function reaches a gate
+    *somewhere*, and `V2-P4-081` measured what that is not: a `load_*` that calls
+    `load_trading_calendar` -- which every real loader does, because they all need the calendar --
+    and then reads its own partition through `store.query()` satisfies it exactly. Reaching a gate
+    is not the same as reaching a gate for *this* read, and the fixpoint cannot tell the two apart
+    by construction, because widening toward callers is what makes it able to follow a chain at
+    all.
+
+    So this is the half that answers the question the file is named for. It does not ask which
+    functions reach a verdict; it asks which calls return rows without one, and requires the set
+    of functions making them to be exactly the one function that argued for the right.
+    """
+    ingest = ast.parse((SOURCE / "panel_ingest.py").read_text(encoding="utf-8"))
+
+    assert _reads_by_function(ingest, UNGATED_READS) == UNGATED_READERS, (
+        "panel_ingest's un-gated reads are not the ones this map declares. query() takes no "
+        "as_of and filters no row by availability, so a function reading through it has moved "
+        "the point-in-time guarantee out of the storage plane -- and being on QUERY_CALLERS is "
+        "a permission granted to this file for carry_stored_rows_forward's argument, which is "
+        "that nothing it reads is answered with. If a second function has that same property, "
+        "name it here and say in the diff why its rows are put back rather than answered"
+    )
 
 
 GATED_READS: frozenset[str] = frozenset({"read_if_ready", "read_visible_at"})
@@ -194,22 +288,6 @@ are no longer here by name reach `_read_visible_event_dated_rows` instead, which
 """
 
 
-def _gated_reads(tree: ast.AST) -> dict[str, tuple[str, ...]]:
-    """Each enclosing function in `tree` mapped to the gated store methods it calls."""
-    found: dict[str, list[str]] = {}
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.FunctionDef):
-            continue
-        for inner in ast.walk(node):
-            if (
-                isinstance(inner, ast.Call)
-                and isinstance(inner.func, ast.Attribute)
-                and inner.func.attr in GATED_READS
-            ):
-                found.setdefault(node.name, []).append(inner.func.attr)
-    return {name: tuple(sorted(calls)) for name, calls in found.items()}
-
-
 def test_the_gated_read_is_what_the_rest_of_the_tree_uses() -> None:
     """The positive half: this allowlist would also be satisfied by a tree where nobody reads
     partitions at all, which would make it vacuous. `panel_ingest` is where the readers live,
@@ -217,13 +295,13 @@ def test_the_gated_read_is_what_the_rest_of_the_tree_uses() -> None:
     """
     ingest = ast.parse((SOURCE / "panel_ingest.py").read_text(encoding="utf-8"))
 
-    assert _gated_reads(ingest) == GATED_READERS, (
+    assert _reads_by_function(ingest, GATED_READS) == GATED_READERS, (
         "panel_ingest's gated reads are not the ones this map declares; if the loaders stopped "
         "using a verdict-returning method this allowlist would pass while proving nothing"
     )
 
 
-def _plain_calls(node: ast.FunctionDef) -> set[str]:
+def _plain_calls(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
     """The module-level names `node` calls directly -- `foo(...)`, not `store.foo(...)`."""
     return {
         inner.func.id
@@ -241,9 +319,22 @@ def test_no_loader_reaches_a_partition_outside_this_map() -> None:
     thing to get wrong: `load_industry_cross_section` is two hops out --
     `_read_visible_membership_rows` is `V2-P4-027`'s door and since `V2-P4-076` it is a call into
     the shared `_read_visible_event_dated_rows` rather than a fourth copy of it.
+
+    **What this does and does not decide, corrected by `V2-P4-081`.** The fixpoint widens
+    *toward callers*, so admission here means "calls something that reaches a gate", and a
+    loader that calls `load_trading_calendar` -- which every real loader does -- is admitted by
+    that call whatever it then does with its own partition. That is not a hole to be plugged in
+    this test: widening toward callers is the only way to follow a chain at all, and narrowing
+    it to "reaches a gate and reads nothing else" would be
+    `test_no_other_function_in_this_module_takes_the_un_gated_door` written twice, in the weaker
+    place. So the two halves are two questions. That one enumerates the reads: no call returns
+    rows without a verdict except the one function that argued for it. This one enumerates the
+    readers: no `load_*` reaches rows by some *third* route -- a method in neither `GATED_READS`
+    nor `UNGATED_READS`, which neither map would see and which a `load_*` with no path to a gate
+    at all is the visible shape of.
     """
     ingest = ast.parse((SOURCE / "panel_ingest.py").read_text(encoding="utf-8"))
-    functions = {node.name: node for node in ast.walk(ingest) if isinstance(node, ast.FunctionDef)}
+    functions = _functions(ingest)
     reaching = set(GATED_READERS)
     while True:
         widened = {
@@ -262,3 +353,28 @@ def test_no_loader_reaches_a_partition_outside_this_map() -> None:
         "module's own functions; a loader that reaches rows some third way is what this file "
         "exists to make visible"
     )
+
+
+ASYNC_READERS: str = """
+async def load_probe_async(store, *, year):
+    return store.query(dataset="d", year=year, columns=("subject",))
+
+
+async def load_probe_async_gated(store, *, year):
+    return store.read_if_ready(requirement, year=year, columns=("subject",))
+"""
+"""A module with no `def` in it at all, only `async def`, holding one read through each door."""
+
+
+def test_both_maps_read_an_async_def_the_same_way_they_read_a_def() -> None:
+    """`V2-P4-081`'s secondary finding, kept from drifting back rather than written down.
+
+    See `_functions` for why the gap was closed instead of named. Asserted on a synthetic module
+    because `src/` has no `async def` outside `api/app.py`'s ASGI callables, and a guard whose
+    only witness is the tree it guards goes quiet exactly when the tree changes.
+    """
+    tree = ast.parse(ASYNC_READERS)
+
+    assert sorted(_functions(tree)) == ["load_probe_async", "load_probe_async_gated"]
+    assert _reads_by_function(tree, UNGATED_READS) == {"load_probe_async": ("query",)}
+    assert _reads_by_function(tree, GATED_READS) == {"load_probe_async_gated": ("read_if_ready",)}
