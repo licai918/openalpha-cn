@@ -183,8 +183,15 @@ class AlphaModelLimitation:
     detail: str
 
 
-def _validate_feature_ids(feature_ids: Sequence[str], *, role: str) -> None:
+def validate_feature_ids(feature_ids: Sequence[str], *, role: str) -> None:
     """Refuse a feature list that is empty, unsorted, repeated, blank or too long.
+
+    Public rather than module-private, and `V2-P4-012` is why: the producer that builds a
+    versioned feature matrix declares a column list before it has a cross section to put it on,
+    and it has to be held to exactly this rule. A second copy of these five checks beside it
+    would be one check plus a place for this one to fall behind -- which is the ground
+    `V2-P4-011` deleted its own duplicated check on -- so the rule stays here, with one
+    implementation, and `feature_matrix.FeatureSpec` re-raises its refusal in its own vocabulary.
 
     **Strictly increasing** rather than merely unique, and that is the load-bearing half: every
     row in this module is positional, so two cross sections carrying the same feature *set* in
@@ -273,7 +280,7 @@ class FeatureCrossSection:
                 "an as_of without a zone cannot say what was knowable when, which is the one "
                 "thing a point-in-time read is for"
             ) from error
-        _validate_feature_ids(self.feature_ids, role="a feature cross section")
+        validate_feature_ids(self.feature_ids, role="a feature cross section")
         if not self.rows:
             raise AlphaModelError(
                 "a feature cross section carries no security; there is nothing to predict "
@@ -381,7 +388,7 @@ class TrainingSet:
     examples: tuple[TrainingExample, ...]
 
     def __post_init__(self) -> None:
-        _validate_feature_ids(self.feature_ids, role="a training set")
+        validate_feature_ids(self.feature_ids, role="a training set")
         if not self.examples:
             raise AlphaModelError(
                 "a training set carries no example; a fit over nothing produces a model whose "
@@ -537,8 +544,8 @@ class AlphaModelArtifact(BaseModel):
 
     @field_validator("feature_ids")
     @classmethod
-    def validate_feature_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        _validate_feature_ids(value, role="an alpha model artifact")
+    def validate_artifact_feature_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        validate_feature_ids(value, role="an alpha model artifact")
         return value
 
     @field_validator("parameters")
@@ -875,7 +882,14 @@ KNOWN_ALPHA_MODEL_LIMITATIONS: Final[tuple[AlphaModelLimitation, ...]] = (
             "feature list is not the fitted one (require_features) and cannot refuse one whose "
             "columns carry the same names computed a different way. That is the distinction "
             "V2-P4-010 drew between a name and a digest, sitting on the feature plane instead "
-            "of the model plane, and V2-P4-012 is where it closes."
+            "of the model plane. V2-P4-012 closed it there and not here: feature_matrix."
+            "FeatureSpec.feature_version is a stable_model_id over the columns' content "
+            "addresses and the preprocessing policy, and feature_matrix."
+            "require_declared_features is the check at the join. This field stays a free "
+            "string on purpose -- narrowing it to CONTENT_ADDRESS_PATTERN would refuse a model "
+            "whose features came from somewhere that producer is not -- so the sentence above "
+            "is still true of this contract, and a declaration that never meets a matrix is "
+            "still one nobody can check."
         ),
     ),
     AlphaModelLimitation(

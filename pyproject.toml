@@ -230,6 +230,16 @@ forbidden_modules = ["duckdb", "sqlite3"]
 # unguarded. `V2-P4-004`'s `cross_section.py` was the tenth, `V2-P4-005`'s
 # `candidate_ranking.py` the eleventh and `V2-P4-023`'s `shortlist_gate.py` is the twelfth; all
 # three joined these lists on arrival, which is the property that test exists to create.
+#
+# `V2-P4-012`'s `feature_matrix.py` joined the whole-package contract's *forbidden* list instead,
+# and the direction is the point: it is a top-level module on the panel plane, reading stored
+# factor tiers and the security registry through `panel_factors`, `panel_neutralization` and
+# `panel_ingest`, so a `backtest/` study reaching it would reach DuckDB through `panel/store.py`.
+# `V2-P4-013`'s walk-forward split lives under `backtest/` and consumes what that module
+# *produces* -- a `FeatureCrossSection`, which is in `domain/` -- which is the seam
+# `shortlist_view.py` and `ComponentCrossSection` already stand on: the panel-plane adapter reads
+# the store and hands a study a domain contract, and the study imports neither the adapter nor the
+# store.
 
 [[tool.importlinter.contracts]]
 id = "backtest-no-numeric-stack-or-panel-plane"
@@ -249,6 +259,7 @@ forbidden_modules = [
   "openalpha_cn.panel_neutralization",
   "openalpha_cn.panel_view",
   "openalpha_cn.factor_view",
+  "openalpha_cn.feature_matrix",
   "openalpha_cn.providers",
   "openalpha_cn.api",
   "openalpha_cn.product",
