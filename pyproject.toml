@@ -282,6 +282,7 @@ id = "backtest-studies-touch-no-store"
 name = "every backtest module except the replay harness reaches no store and no numpy"
 type = "forbidden"
 source_modules = [
+  "openalpha_cn.backtest.alpha_baseline",
   "openalpha_cn.backtest.alpha_model",
   "openalpha_cn.backtest.candidate_ranking",
   "openalpha_cn.backtest.cross_section",
@@ -325,6 +326,7 @@ id = "backtest-studies-reach-no-composition-root"
 name = "every backtest module except the replay harness and the outcome validator reaches no composition root"
 type = "forbidden"
 source_modules = [
+  "openalpha_cn.backtest.alpha_baseline",
   "openalpha_cn.backtest.alpha_model",
   "openalpha_cn.backtest.candidate_ranking",
   "openalpha_cn.backtest.cross_section",

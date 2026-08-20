@@ -15,7 +15,7 @@ inside a docstring, which is prose the runner never reads.
 ## Why the mechanism is not copied as it stands
 
 `007`'s form is "one test per entry, named after the entry". At three entries that is exactly
-right. Across the twenty-eight code-carrying registries there are **258** entries -- 69 in
+right. Across the twenty-nine code-carrying registries there are **268** entries -- 69 in
 `KNOWN_PANEL_LIMITATIONS` alone -- and it stops being right somewhere well before that, for
 three reasons and not one:
 
@@ -34,7 +34,8 @@ three reasons and not one:
    proof. The naming convention is what is enforced, not the exercising.
 
 `V2-P4-013` added the twenty-eighth (`KNOWN_WALK_FORWARD_LIMITATIONS`, eleven entries) and
-moved them from 247 / 69.
+moved them from 247 / 69, and `V2-P4-014` added the twenty-ninth
+(`KNOWN_BASELINE_LIMITATIONS`, ten entries) and moved them from 258 / 69.
 
 **Those two totals are the argument, so they are not left as prose.**
 `test_the_registries_together_carry_the_entry_count_the_report_folds` holds a floor under both,
@@ -95,6 +96,7 @@ from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Final, Protocol
 
+from openalpha_cn.backtest.alpha_baseline import KNOWN_BASELINE_LIMITATIONS
 from openalpha_cn.backtest.candidate_ranking import KNOWN_RANKING_LIMITATIONS
 from openalpha_cn.backtest.cross_section import KNOWN_CROSS_SECTION_LIMITATIONS
 from openalpha_cn.backtest.execution import KNOWN_EXECUTION_LIMITATIONS
@@ -155,6 +157,7 @@ LIMITATION_REGISTRIES: Final[dict[str, Sequence[_Limitation]]] = {
     "KNOWN_RANKING_LIMITATIONS": KNOWN_RANKING_LIMITATIONS,
     "KNOWN_SHORTLIST_GATE_LIMITATIONS": KNOWN_SHORTLIST_GATE_LIMITATIONS,
     "KNOWN_WALK_FORWARD_LIMITATIONS": KNOWN_WALK_FORWARD_LIMITATIONS,
+    "KNOWN_BASELINE_LIMITATIONS": KNOWN_BASELINE_LIMITATIONS,
     "KNOWN_SCREENING_LIMITATIONS": KNOWN_SCREENING_LIMITATIONS,
     "KNOWN_SHORTLIST_VIEW_LIMITATIONS": KNOWN_SHORTLIST_VIEW_LIMITATIONS,
     "KNOWN_FEATURE_MATRIX_LIMITATIONS": KNOWN_FEATURE_MATRIX_LIMITATIONS,
@@ -173,7 +176,7 @@ LIMITATION_REGISTRIES: Final[dict[str, Sequence[_Limitation]]] = {
     "KNOWN_STORAGE_LIMITATIONS": KNOWN_STORAGE_LIMITATIONS,
     "KNOWN_PANEL_LIMITATIONS": KNOWN_PANEL_LIMITATIONS,
 }
-"""The twenty-seven registries whose entries are identified by a `code`, keyed by their own
+"""The twenty-nine registries whose entries are identified by a `code`, keyed by their own
 names.
 
 **None of `KNOWN_NEUTRALIZATION_LIMITATIONS`, `KNOWN_IC_LIMITATIONS`,
@@ -265,6 +268,20 @@ values, and the third address that would be is `V2-P4-016`'s), what the transfor
 `imputed` code costs a matrix that will not stack two imputations, what a cross-sectional median
 is measured over, what one unbuilt column does to a whole instant, and the gap between the
 registry's *listed* set and a tradeable one. It moved the totals from 242 / 69 to 247 / 69.
+
+`KNOWN_BASELINE_LIMITATIONS` (`V2-P4-014`) is the twenty-ninth and moved the totals from
+258 / 69. Its ten entries bound a **fit and the numbers that judge one** -- the first registry
+here that does both. Four say what the model is: a score that is a position inside one cross
+section rather than a property of a security, coefficients that are marginal and therefore count
+two redundant columns twice, a rank output that forecasts no return and carries no units, and a
+tie it can see against the neutralised tier's tie it cannot. Three say what the numbers are not:
+D13's *"新模型必须战胜基线"* is computed by nothing here, an evaluation's `predicted_at` is the
+instant it simulates and proves nothing about when, and every figure so far was measured on a
+leak fixture with no noise model. The last three are corrections rather than caveats -- that a
+`backtest/` study cannot call `require_declared_features` however twice `feature_matrix.py` says
+this issue would, that a minority leak moves this baseline's coefficient and not its ordering
+(the opposite of what the issue expected before it measured), and that the two abstention
+sentences are not yet Story S35's vocabulary.
 
 Imported and named rather than reached through `importlib`: a test may import every one of
 these directly, so a name-to-module indirection would buy nothing and would hide from the
@@ -385,12 +402,12 @@ def test_the_registry_table_is_every_known_registry_in_the_source_tree() -> None
     }
 
     assert found == set(LIMITATION_REGISTRIES) | set(CODELESS_REGISTRIES)
-    assert len(LIMITATION_REGISTRIES) == 28
+    assert len(LIMITATION_REGISTRIES) == 29
     assert set(LIMITATION_REGISTRIES) & set(CODELESS_REGISTRIES) == set()
 
 
 def test_every_declared_limitation_code_is_named_in_executable_test_code() -> None:
-    """The binding itself, over all twenty-eight code-carrying registries and all their entries.
+    """The binding itself, over all twenty-nine code-carrying registries and all their entries.
 
     A code that appears nowhere but in prose is a code the suite has no opinion about: rename
     it and everything stays green while every citation of it silently stops resolving. That is
@@ -490,5 +507,5 @@ def test_the_registries_together_carry_the_entry_count_the_report_folds() -> Non
 
     assert len(codes["KNOWN_PANEL_LIMITATIONS"]) == folded + plane_wide + 1
     assert all(codes[registry] for registry in codes)
-    assert sum(len(entries) for entries in codes.values()) >= 258
+    assert sum(len(entries) for entries in codes.values()) >= 268
     assert len(codes["KNOWN_PANEL_LIMITATIONS"]) >= 69

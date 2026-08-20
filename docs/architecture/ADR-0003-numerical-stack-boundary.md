@@ -647,3 +647,85 @@ turnover and a cost bracket and deliberately no net asset value -- see
 _return_series` for the two contract-level reasons -- so the chained-arithmetic workload a net
 asset value would introduce has not been measured and does not inherit this answer. That is the
 fourth time this ADR has written that sentence.
+
+## Update, 2026-08-20 (`V2-P4-014`): the first **model fit**, and where the line actually falls
+
+The Decision above stands unchanged and this section adds no new one. What it records is that a
+workload this ADR's Context never named -- not a factor, a transform, a correlation or a portfolio,
+but a *fit* -- has now been written, and the runtime dependency set is still the nine it was.
+
+`openalpha_cn.backtest.alpha_baseline` is a standard-library leaf and is in both per-module
+`backtest/` contracts, so `numpy` is forbidden to it by `backtest-studies-touch-no-store` and
+`pandas`/`scipy`/`sklearn` by the whole-package one. `CrossSectionalRankModel.fit` learns one
+coefficient per declared column -- that column's mean training rank IC -- and
+`FittedCrossSectionalRankModel.predict` scores a cross section by the coefficient-weighted sum of
+each security's cross-sectional rank position. There is no matrix, no broadcast and no solve
+anywhere in the module; every step is `factor_ic`'s own `average_ranks` and `_pearson`, imported
+rather than re-implemented.
+
+Measured at ADR-0002's whole-market cross section of **5,534 securities** over three columns,
+best of five runs, on the machine that produced the sections above:
+
+| step | time |
+|---|---|
+| `fit`, 20 training days x 5,534 securities x 3 columns (**real** `OutcomeLabel`s) | **216.4 ms** |
+| the same, per training cross section (four sorts: three columns and the targets) | 10.8 ms |
+| `predict`, one 5,534-name cross section | **11.4 ms** |
+| *(reference, same process)* building the 110,680 real labels the fit consumed | 6.3 s |
+
+The scaling is the `n log n` the sorts predict, and it is measured rather than asserted:
+`predict`'s per-element cost rises 1.926 us -> 2.055 us -> 2.766 us across `n = 500`, `5,534` and
+`55,340`, a 1.44x rise over a 110x rise in `n` -- the same shape as the 1.55x the `V2-P3-005`
+section measured for the rank correlation this module is built out of.
+
+**The fit is 29x cheaper than constructing the labels it fits on**, which is the useful reading and
+is why no further work was done here. A whole-market daily walk-forward is bounded below by
+`label_outcome`, and by `compute_factor` before that (2.24 s for one 675,148-row partition, in
+the `V2-P3-002` section above), and 10.8 ms per training cross section disappears into both.
+
+### Where the line falls, which is not where "expressible" falls
+
+This is the first section in this ADR that **declines** something it could have written, so it is
+worth being exact about which.
+
+A **joint** least-squares fit over `p` columns is expressible in the standard library: the normal
+equations are a `p x p` Gram matrix and Gaussian elimination with partial pivoting is about thirty
+lines. It was not written, and the reason is not the arithmetic. What the standard library does
+not offer is a QR, an SVD or an honest condition number -- the things that turn "the solve returned
+a number" into "the number means something" -- and this repository's own columns are the
+adversarial case for a solve without them: `backtest/factor_redundancy.py` exists because these
+factors are correlated, and `V2-P4-012`'s feature grammar stores one factor's `raw`, `processed`
+and `neutralized` tiers as three columns of one matrix, which are near-duplicates by construction.
+`V2-P4-013`'s own test corpus is the extreme case rather than a hypothetical: its two columns are
+exactly rank-anticorrelated, so the Gram matrix there is singular -- measured, determinant zero to
+`1e-9` -- and a joint fit has no answer at all, while the marginal one answers `+1` and `-1`.
+
+So the coefficients are **marginal**, each bounded in `[-1, 1]` by construction. That is a real
+modelling cost -- two redundant columns are counted twice -- and it is recorded as
+`KNOWN_BASELINE_LIMITATIONS`' entry on marginal coefficients rather than hidden. The distinction
+this section adds is that the boundary is not between what can and cannot be *computed* without
+numpy; it is between a failure mode that is loud and one that is a large coefficient nobody can
+tell from a signal. Every previous section answered "the workload did not need the stack". This
+one answers "the workload that would have needed it was replaced by one that is bounded, and the
+replacement's cost is named".
+
+### What numpy would buy here
+
+For the fit as written, the same thing it would have bought `V2-P3-005`: a constant factor on a
+sort, on a workload two orders of magnitude cheaper than the read that feeds it. For the fit that
+was *not* written, something real -- `numpy.linalg.lstsq` is a driver over LAPACK's `gelsd`, an
+SVD with a rank cutoff, which is precisely the safety net the section above says the standard
+library cannot supply. **This is therefore the first section in this ADR where the answer is "it
+would buy something", and it is still not an argument to adopt the stack here**: a baseline whose
+coefficients can flip sign between folds because two columns were 0.99 correlated is not the
+comparison floor Implementation Decision 13 asks for, whatever library computed it.
+
+### What is *not* claimed
+
+`V2-P4-015`'s LightGBM baseline inherits **nothing** from this section. `V2-P4-011` already
+measured that it cannot follow the reference model into `backtest/` -- `numpy` is forbidden there
+by `backtest-studies-touch-no-store` and the rest by the whole-package contract -- so it has to
+argue its own home and its own dependency, against this ADR's Decision rather than around it.
+Nothing here says a gradient-boosted tree is expressible in the standard library, and nothing here
+should be read as having tried. That is the fifth time this ADR has written a sentence of this
+shape.

@@ -173,8 +173,13 @@ is wrong -- which is the direction to be slow in.
 - **`V2-P4-013`** owns the walk-forward split, purge and embargo, and owns turning these sections
   into a `TrainingSet`: the labels are `domain/labels.py`'s and the fold boundaries are that
   issue's. `FeatureMatrix` hands it dated cross sections and stops there.
-- **`V2-P4-014`** owns the linear/ranking baseline, and is the first caller
-  `require_declared_features` exists for.
+- **`V2-P4-014`** owns the linear/ranking baseline. This module said it would be the first caller
+  `require_declared_features` exists for; that issue delivered `backtest/alpha_baseline.py` and
+  corrected the pointer, because `backtest-no-numeric-stack-or-panel-plane` lists
+  `openalpha_cn.feature_matrix` among the modules forbidden to the whole `backtest/` package, so
+  no study under it can call this function at all. The first caller is whichever issue first
+  holds a declaration and a matrix together, which is a composition above both planes rather than
+  a study on one -- see the two paragraphs on `require_declared_features` itself.
 - **`V2-P4-016`** owns the artifact's content address. `AlphaModelArtifact` carries
   `declaration.feature_version` already, so a matrix's recipe reaches an artifact's digest with
   nothing here having to move; whether the artifact also records a **universe** version is that
@@ -600,9 +605,21 @@ def require_declared_features(declaration: AlphaModelDeclaration, spec: FeatureS
     `feature_ids` did not come from, and `V2-P4-016` would then address that artifact under a
     recipe nobody can re-derive.
 
-    `V2-P4-014`'s baseline is the first caller. It is a free function rather than a method on
-    either side because neither contract may reach the other: `domain/alpha_model.py` is in
-    `domain/`, which `domain-purity` forbids every sibling to, and this module reaches a store.
+    It is a free function rather than a method on either side because neither contract may reach
+    the other: `domain/alpha_model.py` is in `domain/`, which `domain-purity` forbids every
+    sibling to, and this module reaches a store.
+
+    **It still has no caller, and `V2-P4-014` is not the one this docstring said it would be.**
+    That issue delivered `backtest/alpha_baseline.py`, under `backtest/` for the reason
+    `walk_forward.py` is -- everything in it is stdlib arithmetic over `domain/` contracts --
+    and `backtest-no-numeric-stack-or-panel-plane` lists `openalpha_cn.feature_matrix` among the
+    modules forbidden to that whole package. So a `backtest/` study structurally cannot call
+    this, and the sentence was never achievable rather than merely unfulfilled. The caller is
+    whoever first holds a declaration and a matrix in one place, which is a **composition** above
+    both planes: `V2-P4-017` when a fit is persisted against the matrix it read, or `V2-P4-021`'s
+    faces, whichever arrives first. `KNOWN_BASELINE_LIMITATIONS` carries the same correction on
+    the other side of the seam, under the code naming what nothing checks about a declared
+    feature version.
     """
     if declaration.feature_version != spec.feature_version:
         raise FeatureSpecError(
