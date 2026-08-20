@@ -229,8 +229,13 @@ from openalpha_cn.backtest.factor_tradeability import (
     TradeabilityStudy,
     liquidity_from_amount,
 )
-from openalpha_cn.domain.adjustment import AdjustmentHistory
-from openalpha_cn.domain.daily_prices import DAILY_BASIC_DATASET, DAILY_DATASET, DailyBar
+from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET, AdjustmentError, AdjustmentHistory
+from openalpha_cn.domain.daily_prices import (
+    DAILY_BASIC_DATASET,
+    DAILY_DATASET,
+    DailyBar,
+    PriceDataError,
+)
 from openalpha_cn.domain.factor import (
     FactorDefinition,
     FactorError,
@@ -268,7 +273,11 @@ from openalpha_cn.domain.name_history import (
 )
 from openalpha_cn.domain.panel_batch import PanelBatchError
 from openalpha_cn.domain.price_limits import PriceLimit
-from openalpha_cn.domain.stock_universe import StockUniverse, StockUniverseError
+from openalpha_cn.domain.stock_universe import (
+    STOCK_BASIC_DATASET,
+    StockUniverse,
+    StockUniverseError,
+)
 from openalpha_cn.domain.trading_calendar import TradingCalendar, TradingCalendarError
 from openalpha_cn.panel.catalog import (
     DEFAULT_DATE_TIMEZONE,
@@ -536,6 +545,25 @@ KNOWN_FACTOR_RUN_LIMITATIONS: Final[tuple[FactorRunLimitation, ...]] = (
             "rename announced in any one year. The remedy available to a caller is the same one "
             "the refusal names: ask for the announcement years that cover the security's last "
             "rename. panel_ingest.load_name_histories states the same bound from the read's side."
+        ),
+    ),
+    FactorRunLimitation(
+        code="a_security_with_no_stored_adjustment_history_is_counted_unmatched_not_refused",
+        detail=(
+            "_PanelInputs.label answers None for a security load_adjustment_histories returned no "
+            "AdjustmentHistory for, so the name is left out of the label map and counted by "
+            "ICCensus.unmatched_count rather than refusing the run. V2-P4-084 fixed the "
+            "neighbouring case and deliberately did not fix this one, which is the same line "
+            "V2-P4-080 drew for the rename corpus: a history that EXISTS and stops before the "
+            "window is refused by name, because the corpus positively shows a span this run "
+            "cannot price across, while an absent history shows nothing about why. What it costs "
+            "is that two different situations reach one census cell -- a security the feed has no "
+            "factors for at all, and one whose adj_factor year simply was not built -- and the "
+            "count cannot separate them. The bound is narrower than it looks: panel_doctor's "
+            "SUBJECT_CONTAINMENTS reports daily subjects absent from adj_factor as "
+            "subject_set_disagreement, so a panel where this is happening at scale is already "
+            "unhealthy before a run is asked, and 'a security with a bar and no adjustment factor "
+            "cannot be price-adjusted' is that rule's own sentence."
         ),
     ),
 )
@@ -1209,6 +1237,86 @@ class _PanelInputs:
         `ICCensus.unmatched_count`. That is the honest place for it -- an unmatched name is visible
         in the census beside the cross section it was dropped from, while a fabricated unit factor
         would be a return computed across a corporate action nobody saw.
+
+        ## Four refusals reach this call and only one of them is a `LabelError` (`V2-P4-084`)
+
+        `label_outcome` asks three other modules questions, and each answers in its own vocabulary.
+        All four are independent `ValueError` subclasses, so `except LabelError` caught one of
+        them and let three past every guard on this face:
+
+            StockUniverse.security       -> StockUniverseError, for a code the registry has no
+                                            row for at all
+            AdjustmentHistory.factor_on  -> AdjustmentHorizonError, for a day outside
+                                            [covered_from, covered_through]
+            daily_prices.session_returns -> PriceDataError, when `adj_factor` and `daily`
+                                            disagree about one session's corporate action
+
+        Measured before the fix, on the three stores in
+        `tests/integration/test_unlabelled_corpus_faces.py`: `factor run` exited `5` with "it
+        raised an unhandled StockUniverseError / AdjustmentHorizonError / PriceDataError ... The
+        exception's own message is withheld", and `POST /api/v1/factors/run` answered `500` with a
+        `text/plain` body Starlette wrote. That is `V2-P4-080`'s class one seam over: a domain
+        error designed to be a verdict, raised where no `faults=` argument can reach it.
+
+        The three now raise `FactorPanelUnreadableError` -- `exit 1` / `409 panel_unreadable` --
+        while `LabelError` stays `FactorRunBlockedError`, and the split is not cosmetic.
+        `LabelError` is what `label_outcome` says about **this window**: no bar on a session, a
+        bar filed under the wrong day, a halt corpus that does not span it. The other three are
+        statements about the stored corpus, and their remedy is a `panel build` rather than a
+        different range.
+
+        **The `LabelError` arm is unreachable from this face, and that was measured rather than
+        noticed.** A mutant swapping its `FactorRunBlockedError` for `FactorPanelUnreadableError`
+        -- which would file a window fault under the panel's row on the HTTP face -- survived both
+        the file that drives this seam and `tests/integration/test_factor_run.py`, 28 tests, with
+        nothing red. Nothing enters the branch: `halt_corpus_for_years` spans
+        `min(years)-01-01..max(years)-12-31` from the same `request.years` the calendar every
+        window is derived from was read over, so `require_coverage` has nothing outside it to
+        find; and `window_return`'s missing-bar refusal is pre-empted by `_session_refusals`,
+        which codes an absent bar `missing_bar` before any return is computed. It is kept rather
+        than deleted -- deleting a guard is the fail-open direction and this reasoning spans three
+        functions in two modules -- and both halves are pinned by
+        `tests/integration/test_unlabelled_corpus_faces.py::
+        test_the_label_error_arm_is_unreachable_from_this_face_and_here_is_each_reason`, which
+        turns red if either stops holding.
+
+        ## Where absence stops and unreadability starts, once per error
+
+        `V2-P4-080` kept `history is None -> False` because most of the market has no rename in
+        any one year and refusing on absence would refuse every honest run. Each of these three
+        has the same line and it falls somewhere different:
+
+        - **the registry.** A code the registry can *place* -- `not_yet_listed`, `delisted`,
+          `beyond_snapshot` -- is already a `LabelRefusal` with its own code, collected beside
+          every other reason the window cannot be priced, and stays one. `StockUniverse.security`
+          refuses only a code it has no row for at all, deliberately: "an absent code is not a
+          security that was never listed". Papering that over would put a name in the label map
+          whose membership `is_listed` cannot answer for, which is exactly what
+          `PricedCrossSection.unlisted_bars` exists to avoid doing silently.
+        - **the factor series.** A security with **no** stored adjustment history is the `None`
+          two paragraphs up and is left alone -- unmatched, counted, visible. A history that
+          exists and does not reach the window is different: `factor_on` refuses outside its own
+          bounds because "an unfetched factor is unknown rather than equal to the earliest one on
+          file", and the fail-open it is refusing produces a return that is wrong by percentage
+          points with the sign reversed (`_refuse_missing_factor_sessions` measures one:
+          +2.742251% read back as -0.530973%).
+        - **the price panel.** A *missing* bar is a finding: `_session_refusals` codes it
+          `REFUSAL_MISSING_BAR`, and that is what a caller gets -- `window_return`'s own
+          `LabelError` for the same condition is pre-empted by it, which is half of why the arm
+          above is unreachable. What is refused here is two stored datasets **contradicting**
+          each other about one session, which no amount of range-editing repairs.
+
+        Absence is a finding in all three. A contradiction, and a corpus that does not reach, are
+        not.
+
+        ## Why not drop the security instead
+
+        Returning `None` for these three was the other candidate and it is the fail-open this
+        whole seam exists to refuse. `None` here means "unmatched", which `ICCensus.unmatched_count`
+        reports as *this name had no forward return* -- a sentence that is true of a security with
+        no adjustment history and false of one whose corpus contradicts itself. A reader of the
+        census could not tell the two apart, and the second one is a panel defect that would then
+        have shrunk the cross section silently and moved every statistic computed over it.
         """
         history = self.adjustments.get(ts_code)
         if history is None:
@@ -1238,6 +1346,135 @@ class _PanelInputs:
                 f"{ts_code} could not be labelled over "
                 f"{window.entry_day.isoformat()}..{window.exit_day.isoformat()}: {error}"
             ) from error
+        except _LABEL_CORPUS_FAULTS as error:
+            raise FactorPanelUnreadableError(
+                _unlabelled_corpus_refusal(
+                    str(self._store.root), subject=ts_code, window=window, error=error
+                ),
+                disclosable=_unlabelled_corpus_refusal(
+                    PANEL_STORE_PLACEHOLDER, subject=ts_code, window=window, error=error
+                ),
+            ) from error
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _LabelCorpusFault:
+    """One refusal `label_outcome` can raise that is a verdict about the stored corpus.
+
+    `about` is the partition the sentence is about and `remedy` the command line that repairs it,
+    and they are two fields rather than one because **they do not always match**. A registry that
+    has never heard of a code and a factor series that stops short are both fixed by building the
+    named year of the named dataset; a `daily` row that contradicts `adj_factor` about one session
+    is fixed by re-fetching that session, and neither dataset is the one at fault -- which one is
+    wrong is precisely what the disagreement does not say. An earlier draft of this table had a
+    single `--dataset {about} --year <year>` line for all three and told a user to rebuild `daily`
+    for a contradiction that `adj_factor` was equally likely to have caused.
+    """
+
+    about: str
+    why: str
+    remedy: str
+
+
+_LABEL_CORPUS_FAULTS: Final[tuple[type[Exception], ...]] = (
+    StockUniverseError,
+    AdjustmentError,
+    PriceDataError,
+)
+"""The three refusals `label` anticipates beside `LabelError`, named once.
+
+Used as the `except` clause **and** as `_LABEL_CORPUS_REMEDIES`' key set, so the set that is
+caught and the set that has a message cannot come apart -- `_REGISTRY_FAULTS`' arrangement and
+`V2-P4-060`'s lesson about two sites keeping the same list by hand.
+`test_every_anticipated_label_corpus_fault_has_a_remedy_row` pins the two against each other.
+
+The three module-level bases, **not** their horizon subclasses: `AdjustmentHorizonError` is an
+`AdjustmentError` and `UniverseHorizonError` is a `StockUniverseError`, and both arms of a horizon
+are the same fact about the same partition.
+"""
+
+_LABEL_CORPUS_REMEDIES: Final[Mapping[type[Exception], _LabelCorpusFault]] = {
+    StockUniverseError: _LabelCorpusFault(
+        about=STOCK_BASIC_DATASET,
+        why=(
+            "the registry has no lifecycle row for this code at all, so a run that dropped it "
+            "would file a priced name as unmatched and no reader of the census could tell that "
+            "apart from a name that never traded"
+        ),
+        remedy=(
+            f"build the lifecycle year that carries its listing -- `openalpha panel build "
+            f"--dataset {STOCK_BASIC_DATASET} --year <year>` -- and ask this run for that year "
+            "too"
+        ),
+    ),
+    AdjustmentError: _LabelCorpusFault(
+        about=ADJ_FACTOR_DATASET,
+        why=(
+            "a series that stops short is not a security with no series at all (that one is "
+            "already left out of the label map and counted), and carrying the nearest factor "
+            "across the gap returns the unadjusted number wearing an adjusted one's name"
+        ),
+        remedy=(
+            f"extend the factor series over the window -- `openalpha panel build --dataset "
+            f"{ADJ_FACTOR_DATASET} --year <year>` -- and ask this run for that year too"
+        ),
+    ),
+    PriceDataError: _LabelCorpusFault(
+        about=f"{DAILY_DATASET} and {ADJ_FACTOR_DATASET}",
+        why=(
+            "which of the two is wrong is not decidable from the pair, so dropping this name "
+            "would hide a panel defect rather than report it"
+        ),
+        remedy=(
+            "re-fetch the session both datasets are about rather than rebuilding either one of "
+            "them, and read the same session off `openalpha panel doctor --session <that "
+            "session>`, which reports it as `return_path_disagreement`"
+        ),
+    ),
+}
+"""What each anticipated refusal is about, why answering anyway would be wrong, and the repair.
+
+A table rather than a chain of `isinstance`, `domain/labels.py`'s `_LISTING_REFUSALS`' own
+arrangement and its reason: the vocabulary and the branch are one object, so a fourth fault added
+to `_LABEL_CORPUS_FAULTS` with no row here fails a test rather than being enveloped under
+whichever dataset happened to be checked last.
+"""
+
+
+def _unlabelled_corpus_refusal(
+    where: str, *, subject: str, window: LabelWindow, error: Exception
+) -> str:
+    """What this face says when a label window asks the corpus something it cannot answer.
+
+    Not restated on the other face, and it could not be: `shortlist_view` labels nothing --
+    `label_outcome` has exactly one caller in this repository. So unlike
+    `_unnamed_session_refusal`, which `V2-P4-080` had to duplicate across two faces and hold
+    together with `test_both_faces_refuse_an_unnamed_session_with_the_same_sentence`, this
+    sentence has one home and needs no equality test to keep two copies from drifting.
+
+    `where` is the store's own location on the message carried as the exception's own text and
+    `PANEL_STORE_PLACEHOLDER` on `disclosable`, which is `_read`'s arrangement and its reason: a
+    message that stays inside the process that owns the store may name it, while one that may
+    cross a boundary would hand that path to whoever could reach the port. `cli._factor_fail`
+    prints `str(error)` and `api/app.py`'s `_factor_refusal` sends `disclosable`; this function
+    makes both available rather than choosing for them.
+
+    **The domain's own sentence is carried through rather than summarised.** It is the half that
+    says which day and by how much -- `factor_on` names the bound it refused past,
+    `session_returns` names the two implied prices, the gap and the tolerance it cleared -- and a
+    paraphrase would lose the number a user needs in order to decide whether to re-fetch one
+    session or a decade.
+    """
+    fault = _LABEL_CORPUS_REMEDIES[
+        next(base for base in _LABEL_CORPUS_FAULTS if isinstance(error, base))
+    ]
+    return (
+        f"{subject} could not be labelled over "
+        f"{window.entry_day.isoformat()}..{window.exit_day.isoformat()} out of {where}, and the "
+        f"reason is the stored {fault.about} rather than the window: {error}. That is a verdict "
+        f"about the panel rather than a range to edit -- {fault.why}. To repair it, "
+        f"{fault.remedy}."
+    )
 
 
 def _board(ts_code: str) -> Literal["main", "star", "growth", "bse"]:

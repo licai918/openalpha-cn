@@ -20,14 +20,22 @@ from typing import Any, Final
 
 import pytest
 
+from openalpha_cn.domain.adjustment import AdjustmentHorizonError
+from openalpha_cn.domain.daily_prices import PriceDataError
 from openalpha_cn.domain.factor import FactorRegistry
+from openalpha_cn.domain.horizon import parse_horizon
+from openalpha_cn.domain.labels import LabelError, LabelWindow
+from openalpha_cn.domain.stock_universe import UniverseHorizonError
 from openalpha_cn.factor_view import (
+    _LABEL_CORPUS_FAULTS,
+    _LABEL_CORPUS_REMEDIES,
     FACTOR_DATE_ZONE,
     MISSING_INSTANTS_SHOWN,
     PANEL_STORE_PLACEHOLDER,
     FactorRequestError,
     FactorRunBlockedError,
     _refuse_tiers_over_different_instants,
+    _unlabelled_corpus_refusal,
     _without_store_path,
     factor_request,
     resolve_factor,
@@ -495,3 +503,65 @@ def test_the_two_filename_patterns_are_stable_model_ids_own_output() -> None:
     assert not CONTENT_DIGEST_PATTERN.match(IDENTITY)
     assert not EXPERIMENT_ID_PATTERN.match(IDENTITY.upper())
     assert MISSING_INSTANTS_SHOWN == 5
+
+
+def test_every_anticipated_label_corpus_fault_has_a_remedy_row() -> None:
+    """`_LABEL_CORPUS_FAULTS` is the `except` clause and `_LABEL_CORPUS_REMEDIES`' key set both.
+
+    `V2-P4-060`'s lesson was two sites keeping the same list of refusals by hand until one of them
+    caught something the other let escape. The two here are one tuple used twice, and this is what
+    makes `_unlabelled_corpus_refusal`'s lookup total rather than merely untested: every class the
+    `except` admits has a row, so the `next(...)` cannot run off the end.
+
+    Both directions, because either alone is satisfiable by deleting the other side. The last two
+    assertions are the reason the split exists at all: these three are `ValueError`s that
+    `except LabelError` does not catch, which is the whole of `V2-P4-084`.
+    """
+    assert set(_LABEL_CORPUS_FAULTS) == set(_LABEL_CORPUS_REMEDIES)
+    assert len(_LABEL_CORPUS_FAULTS) == 3
+    for fault in _LABEL_CORPUS_FAULTS:
+        assert issubclass(fault, ValueError)
+        assert not issubclass(fault, LabelError)
+
+
+@pytest.mark.parametrize(
+    ("raised", "about", "spells"),
+    [
+        (UniverseHorizonError("beyond the snapshot"), "stock_basic", "stock_basic --year"),
+        (AdjustmentHorizonError("before the first factor"), "adj_factor", "adj_factor --year"),
+        (PriceDataError("the two paths disagree"), "daily and adj_factor", "re-fetch the session"),
+    ],
+)
+def test_each_corpus_refusal_names_its_own_dataset_and_its_own_repair(
+    raised: Exception, about: str, spells: str
+) -> None:
+    """A horizon subclass resolves to its base's row, and the three remedies are not one remedy.
+
+    The subclasses are what the domain actually raises -- `factor_on` raises
+    `AdjustmentHorizonError` and `listed_on` raises `UniverseHorizonError` -- so a table keyed on
+    the bases has to reach them through `isinstance`, and this is where that is asserted rather
+    than assumed.
+
+    The third row is the one an earlier draft got wrong: it told a user to rebuild `daily` for a
+    contradiction `adj_factor` was equally likely to have caused. `re-fetch the session` is the
+    only repair that is true of a disagreement, and it is asserted here so the distinction cannot
+    be flattened back into one `--dataset {about}` line.
+    """
+    window = LabelWindow(
+        prediction_day=date(2026, 1, 7),
+        entry_day=date(2026, 1, 8),
+        exit_day=date(2026, 1, 9),
+        sessions=(date(2026, 1, 8), date(2026, 1, 9)),
+        horizon=parse_horizon("1d"),
+        exchange="SZSE",
+        zone=FACTOR_DATE_ZONE,
+    )
+
+    message = _unlabelled_corpus_refusal(
+        PANEL_STORE_PLACEHOLDER, subject="000001.SZ", window=window, error=raised
+    )
+
+    assert f"the stored {about} rather than the window" in message
+    assert spells in message
+    assert str(raised) in message
+    assert "000001.SZ could not be labelled over 2026-01-08..2026-01-09" in message

@@ -510,6 +510,7 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
     "openalpha_cn.factor_view": DatasetReach(
         named=frozenset(
             {
+                "adj_factor",
                 "balancesheet",
                 "cashflow",
                 "daily",
@@ -518,6 +519,7 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
                 "income",
                 "index_daily",
                 "namechange",
+                "stock_basic",
             }
         ),
         reached=frozenset(
@@ -597,7 +599,7 @@ because this instrument counts every literal that equals a dataset name -- see t
 docstring, blind spot 2, for why the narrower rule is worse -- and it costs nothing here because
 the gate's `reached` already covers `daily` through `panel_health_report`.
 
-**`factor_view` names seven and reaches thirteen, and the two it does not reach are the row.**
+**`factor_view` names ten and reaches fourteen, and the two it does not reach are the row.**
 `index_classify` and `index_weight` are the only upstream datasets left, and the shape of this
 row is `V2-P3-019`'s doing: when this table was first written the face named *none* and reached
 *eleven*, because it rendered stored tiers and its reach came from the seven `panel_ingest`
@@ -608,13 +610,25 @@ names the same six `panel_factors` does -- it imports `DAILY_DATASET`, `DAILY_BA
 `load_industry_market_cap_cross_section`, which is the industry corpus the neutralisation
 regresses against and which a renderer had no reason to touch.
 
-The seventh is `namechange`, and it arrived as a **remedy string** rather than as a read.
-`V2-P4-080` gave `_unnamed_session_refusal` the `openalpha panel build --dataset namechange`
-line a caller needs, so the module imports `NAMECHANGE_DATASET` to spell it -- and this table
-correctly calls that naming the dataset even though the face has reached it since this row was
-written, through `load_name_histories`. `named` growing into `reached` is the benign direction
-and the instrument does not distinguish it; what it is here to catch is `named` or `reached`
-growing past `reached`'s declared set, which this did not. It is covered here at all because
+**The last three all arrived as remedy strings rather than as reads**, and all three name a
+dataset the face had already reached. `V2-P4-080` gave `_unnamed_session_refusal` the `openalpha
+panel build --dataset namechange` line a caller needs, so the module imports `NAMECHANGE_DATASET`
+to spell it; `V2-P4-084` did the same for `ADJ_FACTOR_DATASET` and `STOCK_BASIC_DATASET` in
+`_LABEL_CORPUS_REMEDIES`, whose whole content is which partition each refusal is about and what
+command repairs it. This table correctly calls that naming the dataset even though the face has
+reached all three since this row was written, through `load_name_histories`,
+`load_adjustment_histories` and `load_stock_universe`. `named` growing into `reached` is the
+benign direction and the instrument does not distinguish it; what it is here to catch is `named`
+or `reached` growing past `reached`'s declared set, which none of them did.
+
+**Both counts in the heading above were wrong until `V2-P4-084` measured them.** It said "names
+seven and reaches thirteen" against a row of eight and fourteen. Both were true when the row was
+written -- at `7c59c1f` it held six and thirteen and the sentence said six and thirteen -- and
+each half drifted once: `V2-P3-016` added `index_daily` to `reached` in the same commit that grew
+`UPSTREAM_PANEL_DATASETS` from fifteen to sixteen, and `V2-P4-080` added `namechange` to `named`
+while writing "seven" for a set of eight. Neither number is asserted anywhere, which is why both
+survived: the row itself is checked against the source in both directions, and the sentence
+describing the row is not. It is covered here at all because
 `V2-P3-015` made `factor_*` a second top-level family and the glob above only knew about the
 first; see `RESEARCH_PLANE_PREFIXES`.
 

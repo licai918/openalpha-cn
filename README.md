@@ -464,6 +464,44 @@ SDK 两个面，与 `panel build` 一致——它写面板分区，而服务本�
 - 完整清单在 `openalpha factor list --json` 的 `run_limitations`，或
   `openalpha_cn/factor_view.py#KNOWN_FACTOR_RUN_LIMITATIONS`。
 
+**给一只证券打标签时，语料本身可能答不上来，而这有三种形态（`V2-P4-084`）。** 一个
+label window 要问登记簿「这几天它上市了吗」、问 `adj_factor`「这两天的复权因子是多少」、
+再让 `daily` 与 `adj_factor` 互相印证同一个会话。三个问题各自会被拒绝，而三种拒绝都
+**不是** `LabelError`——它们是四个互不相干的 `ValueError` 子类，所以以前
+`except LabelError` 只接住了一个，另外三个一路冲到 `exit 5` 和裸 `500`：
+
+| 遇到什么 | 抛出什么 | 以前的结果 |
+|---|---|---|
+| 有行情但登记簿里没有任何生命周期行的证券 | `StockUniverseError` | `exit 5` ／ `500` |
+| 因子序列在 label window 之前就断了 | `AdjustmentHorizonError` | `exit 5` ／ `500` |
+| `daily` 与 `adj_factor` 对同一个会话说法不一 | `PriceDataError` | `exit 5` ／ `500` |
+
+三种现在都是面板判定（`exit 1` ／ `409 panel_unreadable`），并点名证券、窗口、是哪个分区
+的问题，以及补法：
+
+```
+688981.SH could not be labelled over 2026-01-13..2026-01-14 out of this service's panel store,
+and the reason is the stored adj_factor rather than the window: 2026-01-14 is after 688981.SH's
+last adjustment factor, observed 2026-01-12; carrying the last factor forward would assert that
+no corporate action happened in a window this read never covered. That is a verdict about the
+panel rather than a range to edit -- a series that stops short is not a security with no series
+at all (that one is already left out of the label map and counted), and carrying the nearest
+factor across the gap returns the unadjusted number wearing an adjusted one's name. To repair
+it, extend the factor series over the window -- `openalpha panel build --dataset adj_factor
+--year <year>` -- and ask this run for that year too.
+```
+
+**第三种的补法不是「重建 daily」。** 两个数据集互相矛盾，而哪一个错**恰恰是这次矛盾没说的
+事**，所以拒绝里写的是「把那个会话重新取一次」，并指向
+`openalpha panel doctor --session <那个会话>` —— 它在那边报 `return_path_disagreement`
+（会话级的交叉检查只跑请求点名的那些会话，所以得把它点出来）。
+
+**「没有」和「读不出来」是两回事，三处各画在不同的地方。** 一只**根本没有**复权历史的证券
+仍然照旧被留在 label map 之外、计进 `ICCensus.unmatched_count`（这是 unmatched，不是拒绝）；
+登记簿能定位、只是回答「那天还没上市／已退市」的代码，仍然是 `LabelRefusal` 的一个码；
+某个会话**缺** K 线仍然是 `REFUSAL_MISSING_BAR`。被拒绝的只有「语料够不着」和「语料自相
+矛盾」这两类。
+
 ### `factor build` 的几点语义
 
 - **`--as-of` 是预测时刻而不是日期，可重复。** 一条存储观测的四个面板时钟都打这个时刻，

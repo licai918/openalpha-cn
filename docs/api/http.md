@@ -523,10 +523,12 @@ Server Error`. Nothing a caller can put in the body should produce one — a cal
 `position_capital` used to, and now does not — so a `500` here is a defect to report, not a
 request to change.
 
-**Nor should anything in the store produce one — and twice something did.** This sentence
-first read "and until `V2-P4-070` something did", which asserted the list was closed; it
-was written in `V2-P4-070`'s own commit and measured false eleven commits later. It is a
-list now, and the list is not closed.
+**Nor should anything in the store produce one — and three times something did.** This
+sentence first read "and until `V2-P4-070` something did", which asserted the list was
+closed; it was written in `V2-P4-070`'s own commit and measured false eleven commits later,
+and false again two commits after it became a list. It is a list, the list is not closed,
+and every entry so far has been the same shape: a domain refusal that is a verdict about
+stored data, raised somewhere no `except` on the route's path anticipated.
 
 The first was a registry whose lifecycle backfill was interrupted — a security's delisting
 row stored and its listing row in a year partition that was never written — which made this
@@ -544,16 +546,35 @@ year at a time — and the refusal escaped both faces: `500` `text/plain` here, 
 each time. It needs no damaged partition: the corpus is well formed and simply does not reach
 back past the session.
 
-Both are `409` `panel_unreadable` now, with the refusal's own sentence in `detail.message`
-naming the security and, for the second, the dataset and the build command that extends it.
-`tests/integration/test_partial_registry_faces.py` and
-`tests/integration/test_unnamed_session_faces.py` drive one store each at this route, at
-`shortlist run` and at the factor face.
+The third was three refusals at one seam (`V2-P4-084`), and it is `POST /api/v1/factors/run`
+rather than the shortlist route. `factor_view._PanelInputs.label` wrapped `label_outcome` in
+`except LabelError` alone, and `label_outcome` asks three other modules questions that answer
+in their own vocabulary — all four are independent `ValueError` subclasses, so three of them
+went straight past:
 
-Neither was a defect in this service, and neither is a reason to widen this row: what makes
-a `500` here still mean "report a bug" is that each such refusal is anticipated where it is
-raised — at the read for the first, and at the question asked of what the read returned for
-the second.
+| what the run met | what was raised | what the caller got |
+|---|---|---|
+| a priced security the registry has no row for | `StockUniverseError` | `500` `text/plain` |
+| a factor series ending before the label window | `AdjustmentHorizonError` | `500` `text/plain` |
+| `daily` and `adj_factor` disagreeing about a session | `PriceDataError` | `500` `text/plain` |
+
+None needs a damaged partition either. The first is measured on the live feed — 300114.SZ has
+a real bar on 2024-06-28 and no `stock_basic` row under any `list_status` — and the systematic
+version is a fetch parameter: `list_status='L'` serves 5,539 rows where `'L,D'` serves 5,878.
+
+All three are `409` `panel_unreadable` now, with the refusal's own sentence in
+`detail.message` naming the security, the window, the partition it is about and the repair —
+which for the third is re-fetching the session rather than rebuilding either dataset, because
+which of the two is wrong is exactly what the disagreement does not say.
+`tests/integration/test_partial_registry_faces.py`,
+`tests/integration/test_unnamed_session_faces.py` and
+`tests/integration/test_unlabelled_corpus_faces.py` drive stores at this route, at the
+`/shortlists/run` route, at `shortlist run` and at `factor run`.
+
+None was a defect in this service, and none is a reason to widen this row: what makes a `500`
+here still mean "report a bug" is that each such refusal is anticipated where it is raised —
+at the read for the first, and at the question asked of what a read returned for the other
+two.
 
 `openalpha shortlist run` maps the same names onto exit codes
 (`cli.py#SHORTLIST_EXIT`) and reuses `PanelExit`: `0` admitted, `1` for every `409` row —
