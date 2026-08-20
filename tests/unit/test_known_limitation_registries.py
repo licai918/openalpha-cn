@@ -15,7 +15,7 @@ inside a docstring, which is prose the runner never reads.
 ## Why the mechanism is not copied as it stands
 
 `007`'s form is "one test per entry, named after the entry". At three entries that is exactly
-right. Across the twenty-seven code-carrying registries there are **247** entries -- 69 in
+right. Across the twenty-eight code-carrying registries there are **258** entries -- 69 in
 `KNOWN_PANEL_LIMITATIONS` alone -- and it stops being right somewhere well before that, for
 three reasons and not one:
 
@@ -32,6 +32,9 @@ three reasons and not one:
 3. **A per-entry test is only as strong as its body.** `007`'s three have real bodies because
    somebody wrote them that way; the AST check cannot tell `def test_<code>(): pass` from a
    proof. The naming convention is what is enforced, not the exercising.
+
+`V2-P4-013` added the twenty-eighth (`KNOWN_WALK_FORWARD_LIMITATIONS`, eleven entries) and
+moved them from 247 / 69.
 
 **Those two totals are the argument, so they are not left as prose.**
 `test_the_registries_together_carry_the_entry_count_the_report_folds` holds a floor under both,
@@ -101,6 +104,7 @@ from openalpha_cn.backtest.factor_portfolio import KNOWN_QUANTILE_PORTFOLIO_LIMI
 from openalpha_cn.backtest.factor_redundancy import KNOWN_REDUNDANCY_LIMITATIONS
 from openalpha_cn.backtest.factor_tradeability import KNOWN_TRADEABILITY_LIMITATIONS
 from openalpha_cn.backtest.shortlist_gate import KNOWN_SHORTLIST_GATE_LIMITATIONS
+from openalpha_cn.backtest.walk_forward import KNOWN_WALK_FORWARD_LIMITATIONS
 from openalpha_cn.domain.adjustment import KNOWN_ADJUSTMENT_LIMITATIONS
 from openalpha_cn.domain.alpha_model import KNOWN_ALPHA_MODEL_LIMITATIONS
 from openalpha_cn.domain.daily_prices import KNOWN_PRICE_LIMITATIONS
@@ -150,6 +154,7 @@ LIMITATION_REGISTRIES: Final[dict[str, Sequence[_Limitation]]] = {
     "KNOWN_CROSS_SECTION_LIMITATIONS": KNOWN_CROSS_SECTION_LIMITATIONS,
     "KNOWN_RANKING_LIMITATIONS": KNOWN_RANKING_LIMITATIONS,
     "KNOWN_SHORTLIST_GATE_LIMITATIONS": KNOWN_SHORTLIST_GATE_LIMITATIONS,
+    "KNOWN_WALK_FORWARD_LIMITATIONS": KNOWN_WALK_FORWARD_LIMITATIONS,
     "KNOWN_SCREENING_LIMITATIONS": KNOWN_SCREENING_LIMITATIONS,
     "KNOWN_SHORTLIST_VIEW_LIMITATIONS": KNOWN_SHORTLIST_VIEW_LIMITATIONS,
     "KNOWN_FEATURE_MATRIX_LIMITATIONS": KNOWN_FEATURE_MATRIX_LIMITATIONS,
@@ -380,12 +385,12 @@ def test_the_registry_table_is_every_known_registry_in_the_source_tree() -> None
     }
 
     assert found == set(LIMITATION_REGISTRIES) | set(CODELESS_REGISTRIES)
-    assert len(LIMITATION_REGISTRIES) == 27
+    assert len(LIMITATION_REGISTRIES) == 28
     assert set(LIMITATION_REGISTRIES) & set(CODELESS_REGISTRIES) == set()
 
 
 def test_every_declared_limitation_code_is_named_in_executable_test_code() -> None:
-    """The binding itself, over all twenty-seven code-carrying registries and all their entries.
+    """The binding itself, over all twenty-eight code-carrying registries and all their entries.
 
     A code that appears nowhere but in prose is a code the suite has no opinion about: rename
     it and everything stays green while every citation of it silently stops resolving. That is
@@ -485,5 +490,5 @@ def test_the_registries_together_carry_the_entry_count_the_report_folds() -> Non
 
     assert len(codes["KNOWN_PANEL_LIMITATIONS"]) == folded + plane_wide + 1
     assert all(codes[registry] for registry in codes)
-    assert sum(len(entries) for entries in codes.values()) >= 247
+    assert sum(len(entries) for entries in codes.values()) >= 258
     assert len(codes["KNOWN_PANEL_LIMITATIONS"]) >= 69

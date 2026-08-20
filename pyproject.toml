@@ -296,6 +296,7 @@ source_modules = [
   "openalpha_cn.backtest.portfolio",
   "openalpha_cn.backtest.shortlist_gate",
   "openalpha_cn.backtest.validation",
+  "openalpha_cn.backtest.walk_forward",
 ]
 forbidden_modules = [
   "numpy",
@@ -337,6 +338,7 @@ source_modules = [
   "openalpha_cn.backtest.multi_day",
   "openalpha_cn.backtest.portfolio",
   "openalpha_cn.backtest.shortlist_gate",
+  "openalpha_cn.backtest.walk_forward",
 ]
 forbidden_modules = ["openalpha_cn.runtime"]
 # Split from the contract above rather than folded into it because the exemption is one module
