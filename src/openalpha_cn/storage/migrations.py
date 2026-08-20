@@ -51,7 +51,12 @@ from openalpha_cn.domain.decision import DECISION_LEDGER_VERSIONS, DecisionLedge
 from openalpha_cn.domain.horizon import is_countable_horizon
 from openalpha_cn.domain.memory import MEMORY_ENTRY_VERSIONS, MemoryEntry
 from openalpha_cn.domain.report import RESEARCH_REPORT_VERSIONS, ResearchReport
-from openalpha_cn.domain.run import RUN_MANIFEST_VERSIONS
+from openalpha_cn.domain.run import (
+    RUN_MANIFEST_VERSIONS,
+    RunManifest,
+    RunManifestV2,
+    upgrade_run_manifest_v2,
+)
 from openalpha_cn.domain.run_mode import RUN_MODES
 from openalpha_cn.domain.validation import (
     VALIDATION_RESULT_VERSIONS,
@@ -388,8 +393,30 @@ def _refuse_uncountable_stored_horizons(connection: sqlite3.Connection) -> None:
         )
 
 
+def _stored_run_manifest(payload: str | bytes) -> RunManifest:
+    """Bring one stored `runs` payload to the current contract version, whatever it was at.
+
+    `read_versioned` cannot be the whole answer any more. `V2-P4-010` registers a **refusing**
+    upgrade for `run-manifest/v2` -- see `domain/run.py::refuse_run_manifest_v2_upgrade`, whose
+    point is that advancing a v2 manifest on read hands back a manifest whose address no stored
+    decision names -- and a migration is the one caller allowed past that refusal, because it
+    is the one caller that can re-point the rows behind it in the same transaction.
+
+    Structured so the version-to-model map still comes from `RUN_MANIFEST_VERSIONS` rather than
+    being restated: the only thing special-cased here is which *upgrade* runs for v2, which is
+    exactly the one thing the registry deliberately answers differently for readers and for
+    this module. Migration 5 (`_rewrite_run_manifests`) routes through here for the same reason
+    it needs to keep working: a database at `user_version` 4 holds v1 payloads in practice, but
+    nothing in the schema stops it holding v2 ones.
+    """
+    version = json.loads(payload).get("schema_version")
+    if version == "run-manifest/v2":
+        return upgrade_run_manifest_v2(RunManifestV2.model_validate_json(payload))
+    return read_versioned(RUN_MANIFEST_VERSIONS, payload)
+
+
 def _rewrite_run_manifests(connection: sqlite3.Connection) -> dict[str, str]:
-    """Advance every `runs` payload to `run-manifest/v2` and return each run's content address.
+    """Advance every `runs` payload to the current version and return each run's address.
 
     `runs.run_id` is caller-supplied, so nothing about the row's key changes here; the manifest
     is re-serialised so the stored payload states its own version honestly rather than relying
@@ -398,7 +425,7 @@ def _rewrite_run_manifests(connection: sqlite3.Connection) -> dict[str, str]:
     """
     addresses: dict[str, str] = {}
     for run_id, payload in connection.execute("SELECT run_id, payload FROM runs").fetchall():
-        manifest = read_versioned(RUN_MANIFEST_VERSIONS, payload)
+        manifest = _stored_run_manifest(payload)
         addresses[str(run_id)] = manifest.run_manifest_id
         connection.execute(
             "UPDATE runs SET payload = ? WHERE run_id = ?",
@@ -874,6 +901,181 @@ def _audit_batch_item_split(
             )
 
 
+class StrandedManifestReferenceError(ValueError):
+    """A stored decision names a run-manifest address that no stored run produces.
+
+    The failure `refuse_run_manifest_v2_upgrade` exists to keep out of a database, raised here
+    if it got in anyway. It is silent by construction -- `DecisionLedger.run_manifest_id` is
+    pattern-constrained but not foreign-keyed, so a stale address is a perfectly valid string
+    that simply resolves to nothing, and every query keeps returning rows. Nothing in
+    `_audit_identity_rewrite` looked for it, because at `V2-P4-001` the address had only just
+    been created and could not yet be stale.
+    """
+
+
+def _repoint_decision_manifest_addresses(
+    connection: sqlite3.Connection, addresses: Mapping[str, str]
+) -> dict[str, str]:
+    """Point every decision at its run's *current* address, re-keying it, and return the map.
+
+    `V2-P4-010` adds two fields to `RunManifest`, so `run_manifest_id` moves for every stored
+    run; `DecisionLedger.run_manifest_id` is a field of the ledger, so `decision_id` moves with
+    it even though `decision-ledger` is not bumped by this issue. That second sentence is the
+    whole reason this migration exists and is the part a reader of the domain diff would not
+    see -- it is measured in
+    `tests/unit/domain/test_contract_identity.py::test_the_component_planes_moved_the_addresses_the_migration_has_to_rewrite`.
+
+    Rows already pointing at the right address are left untouched rather than rewritten to
+    identical bytes, which is what makes this migration a no-op on a database that never held a
+    v2 manifest -- the common case, since a fresh install's first `build_storage()` runs every
+    migration before a single run exists.
+    """
+    identities: dict[str, str] = {}
+    rows = connection.execute("SELECT decision_id, run_id, payload FROM decisions").fetchall()
+    for decision_id, run_id, payload in rows:
+        address = addresses.get(str(run_id))
+        if address is None:
+            raise StrandedManifestReferenceError(
+                f"decision {decision_id!r} references run {run_id!r}, which has no manifest "
+                "row; its run-level identity cannot be recomputed and it will not be re-keyed"
+            )
+        ledger = read_versioned(DECISION_LEDGER_VERSIONS, payload)
+        if ledger.run_manifest_id == address:
+            continue
+        repointed = DecisionLedger.model_validate(
+            {
+                **ledger.model_dump(mode="python", exclude_computed_fields=True),
+                "run_manifest_id": address,
+            }
+        )
+        connection.execute(
+            "UPDATE decisions SET decision_id = ?, payload = ? WHERE decision_id = ?",
+            (
+                repointed.decision_id,
+                repointed.model_dump_json(exclude_computed_fields=True),
+                decision_id,
+            ),
+        )
+        identities[str(decision_id)] = repointed.decision_id
+    return identities
+
+
+def _repoint_validation_results(
+    connection: sqlite3.Connection, identities: Mapping[str, str]
+) -> None:
+    """Re-point and re-key every validation result whose decision this migration moved.
+
+    The sibling of `_rewrite_validation_results` and deliberately not a parameterisation of it:
+    that one advances `validation-result/v1` rows and skips everything else, which is right for
+    `V2-P4-001` and wrong here, where every row is already current and only its *reference* went
+    stale. Folding the two into one function with a version flag would have made the v1 pass
+    silently applicable to a v2 row, which is the mistake the `if ... != "validation-result/v1":
+    continue` guard over there exists to prevent.
+    """
+    if not _table_exists(connection, "validation_results"):
+        return
+    rows = connection.execute("SELECT validation_id, payload FROM validation_results").fetchall()
+    for validation_id, payload in rows:
+        result = read_versioned(VALIDATION_RESULT_VERSIONS, payload)
+        moved = identities.get(result.decision_id)
+        if moved is None:
+            continue
+        repointed = ValidationResult.model_validate(
+            {
+                **result.model_dump(mode="python", exclude_computed_fields=True),
+                "decision_id": moved,
+            }
+        )
+        connection.execute(
+            """
+            UPDATE validation_results
+            SET validation_id = ?, decision_id = ?, payload = ?
+            WHERE validation_id = ?
+            """,
+            (
+                repointed.validation_id,
+                repointed.decision_id,
+                repointed.model_dump_json(exclude_computed_fields=True),
+                validation_id,
+            ),
+        )
+
+
+def _audit_manifest_references_resolve(connection: sqlite3.Connection) -> None:
+    """Refuse to commit a database in which a decision names a run address nothing produces.
+
+    The audit `_audit_identity_rewrite` does not have, and could not have had. That one asks
+    whether every content-addressed key equals the address of the payload beside it, which is a
+    question about a row and its own contents; this one asks whether a *cross-table reference*
+    still resolves, which only became a question that could be answered wrongly once
+    `V2-P4-025` gave the ledger something to point at.
+
+    Re-derived from the `runs` table rather than from this migration's own bookkeeping, for the
+    reason `_audit_runs_mode_projection` states about itself: an audit that reads back the same
+    dictionary the migration just wrote is checking its own arithmetic, not the database.
+
+    **Its call site below is not observable from the current code, and that is stated rather
+    than hidden.** Deleting `_audit_manifest_references_resolve(connection)` from
+    `_rewrite_manifest_component_planes` leaves the whole suite green -- measured, not assumed.
+    The reason is structural: `_repoint_decision_manifest_addresses` re-points every decision
+    against an address it read out of `runs`, and refuses outright when the run row is gone, so
+    no path through the passes above can reach this one with a stranded reference. The guard is
+    therefore against a *later* pass, and it is kept on exactly the grounds
+    `_audit_identity_rewrite` is kept on: a hand-written account of where an identity is
+    referenced goes stale the moment somebody adds a table or reorders a pass, and "I updated
+    all the references" is the sentence nothing checks. The behaviour itself is driven directly
+    by `tests/integration/storage/test_manifest_component_plane_rewrite.py::
+    test_a_decision_left_pointing_at_an_address_no_run_produces_refuses_the_whole_migration`,
+    which builds the state the passes make unreachable and asserts the refusal.
+    """
+    produced = {
+        _stored_run_manifest(payload).run_manifest_id
+        for (payload,) in connection.execute("SELECT payload FROM runs").fetchall()
+    }
+    for decision_id, payload in connection.execute(
+        "SELECT decision_id, payload FROM decisions"
+    ).fetchall():
+        ledger = read_versioned(DECISION_LEDGER_VERSIONS, payload)
+        if ledger.run_manifest_id not in produced:
+            raise StrandedManifestReferenceError(
+                f"decision {decision_id!r} names run-manifest address "
+                f"{ledger.run_manifest_id!r}, which no stored run produces; the component-plane "
+                "rewrite is incomplete"
+            )
+
+
+def _rewrite_manifest_component_planes(connection: sqlite3.Connection) -> None:
+    """`V2-P4-010`'s identity rewrite: the second one roadmap section 8's rule demands.
+
+    The issue gives `RunManifest` an agent plane and a quantitative-model plane, and moves the
+    agent ids out of `model_versions` so that slot can hold the vendor models it is named for.
+    Every one of those is a hashed field, so every stored run's `run_manifest_id` moves -- and
+    behind it `decisions.decision_id`, `validation_results.validation_id` and
+    `research_reports.report_id`, none of whose contracts changed at all.
+
+    The passes are `_rewrite_contract_identities`' in the same order and three of them are
+    literally its functions, because the cascade below a moved decision is the same cascade
+    whatever moved it. What differs is the top: that migration advanced two contracts' *versions*
+    and derived a new decision id from the version bump; this one advances one contract's
+    version and derives the new decision id from a reference that went stale underneath it. The
+    tail is also different -- `_audit_manifest_references_resolve` asks a question about
+    `runs`↔`decisions` that `_audit_identity_rewrite` never asks.
+
+    Precondition-bound to the same three tables, so it defers on a fresh install exactly as
+    version 5 does and applies on the next `build_storage()` call.
+    """
+    require_table(connection, "runs")
+    require_table(connection, "decisions")
+    require_table(connection, "validation_results")
+    addresses = _rewrite_run_manifests(connection)
+    identities = _repoint_decision_manifest_addresses(connection, addresses)
+    _repoint_validation_results(connection, identities)
+    _rewrite_research_reports(connection, identities)
+    _rewrite_decision_references(connection, identities)
+    _audit_identity_rewrite(connection, identities)
+    _audit_manifest_references_resolve(connection)
+
+
 BASELINE_VERSION = 1
 CREATE_VALIDATION_RESULTS_VERSION = 2
 DEMO_ADD_RUNS_ARCHIVED_AT_VERSION = 3
@@ -881,6 +1083,7 @@ CREATE_QUERY_PATH_INDEXES_VERSION = 4
 REWRITE_CONTRACT_IDENTITIES_VERSION = 5
 ADD_RUNS_MODE_PROJECTION_VERSION = 6
 SPLIT_BATCH_TASK_ITEMS_VERSION = 7
+REWRITE_MANIFEST_COMPONENT_PLANES_VERSION = 8
 
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=BASELINE_VERSION, name="baseline", apply=_baseline_apply),
@@ -913,6 +1116,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version=SPLIT_BATCH_TASK_ITEMS_VERSION,
         name="split_batch_task_items",
         apply=_split_batch_task_items,
+    ),
+    Migration(
+        version=REWRITE_MANIFEST_COMPONENT_PLANES_VERSION,
+        name="rewrite_manifest_component_planes",
+        apply=_rewrite_manifest_component_planes,
     ),
 )
 

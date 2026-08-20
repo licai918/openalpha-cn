@@ -32,6 +32,7 @@ from openalpha_cn.storage.migrations import (
     DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
     MIGRATIONS,
     REWRITE_CONTRACT_IDENTITIES_VERSION,
+    REWRITE_MANIFEST_COMPONENT_PLANES_VERSION,
     SPLIT_BATCH_TASK_ITEMS_VERSION,
     Migration,
     MigrationFailedError,
@@ -200,7 +201,7 @@ def test_demo_migration_advances_version_and_preserves_v1_records(
     result = run_migrations(path, clock=migration_clock)
 
     assert result.from_version == 0
-    assert result.to_version == SPLIT_BATCH_TASK_ITEMS_VERSION
+    assert result.to_version == REWRITE_MANIFEST_COMPONENT_PLANES_VERSION
     # `runs`, `checkpoints`, `portfolio_transitions`, and `research_reports` all already
     # exist (built above), so nothing defers: baseline, then create_validation_results
     # (V2-P0B-010, ordered before the demo migration -- see that migration's docstring for
@@ -215,13 +216,14 @@ def test_demo_migration_advances_version_and_preserves_v1_records(
         REWRITE_CONTRACT_IDENTITIES_VERSION,
         ADD_RUNS_MODE_PROJECTION_VERSION,
         SPLIT_BATCH_TASK_ITEMS_VERSION,
+        REWRITE_MANIFEST_COMPONENT_PLANES_VERSION,
     ]
     assert result.backup_path is not None
     assert result.backup_path.exists()
     assert result.backup_path.parent == path.parent / "backups"
 
     status = read_status(path)
-    assert status.current_version == SPLIT_BATCH_TASK_ITEMS_VERSION
+    assert status.current_version == REWRITE_MANIFEST_COMPONENT_PLANES_VERSION
     assert [(m.version, m.name) for m in status.applied] == [
         (BASELINE_VERSION, "baseline"),
         (CREATE_VALIDATION_RESULTS_VERSION, "create_validation_results"),
@@ -230,6 +232,7 @@ def test_demo_migration_advances_version_and_preserves_v1_records(
         (REWRITE_CONTRACT_IDENTITIES_VERSION, "rewrite_contract_identities"),
         (ADD_RUNS_MODE_PROJECTION_VERSION, "add_runs_mode_projection"),
         (SPLIT_BATCH_TASK_ITEMS_VERSION, "split_batch_task_items"),
+        (REWRITE_MANIFEST_COMPONENT_PLANES_VERSION, "rewrite_manifest_component_planes"),
     ]
     assert status.pending == ()
 
@@ -373,9 +376,9 @@ def test_running_migrations_again_is_idempotent(
     first = run_migrations(path, clock=migration_clock)
     second = run_migrations(path, clock=migration_clock)
 
-    assert first.to_version == SPLIT_BATCH_TASK_ITEMS_VERSION
-    assert second.from_version == SPLIT_BATCH_TASK_ITEMS_VERSION
-    assert second.to_version == SPLIT_BATCH_TASK_ITEMS_VERSION
+    assert first.to_version == REWRITE_MANIFEST_COMPONENT_PLANES_VERSION
+    assert second.from_version == REWRITE_MANIFEST_COMPONENT_PLANES_VERSION
+    assert second.to_version == REWRITE_MANIFEST_COMPONENT_PLANES_VERSION
     assert second.applied == ()
     assert second.backup_path is None  # nothing pending, so no backup taken
 
@@ -388,6 +391,7 @@ def test_running_migrations_again_is_idempotent(
         REWRITE_CONTRACT_IDENTITIES_VERSION,
         ADD_RUNS_MODE_PROJECTION_VERSION,
         SPLIT_BATCH_TASK_ITEMS_VERSION,
+        REWRITE_MANIFEST_COMPONENT_PLANES_VERSION,
     ]
 
 
@@ -408,7 +412,7 @@ def test_demo_migration_is_a_sql_level_no_op_when_the_column_already_exists(
 
     result = run_migrations(path, clock=migration_clock)
 
-    assert result.to_version == SPLIT_BATCH_TASK_ITEMS_VERSION
+    assert result.to_version == REWRITE_MANIFEST_COMPONENT_PLANES_VERSION
     with sqlite3.connect(path) as connection:
         columns = [row[1] for row in connection.execute("PRAGMA table_info(runs)")]
     assert columns.count("archived_at") == 1
@@ -425,7 +429,7 @@ def test_failing_migration_rolls_back_leaves_version_unmoved_and_backup_intact(
     # Bring the database up to date first, exactly as a real upgrade would.
     run_migrations(path, clock=migration_clock)
     before = read_status(path)
-    assert before.current_version == SPLIT_BATCH_TASK_ITEMS_VERSION
+    assert before.current_version == REWRITE_MANIFEST_COMPONENT_PLANES_VERSION
 
     # One past the real registry's own highest version, computed rather than hardcoded,
     # so this injected migration's version can never collide with a real one as the
@@ -446,7 +450,7 @@ def test_failing_migration_rolls_back_leaves_version_unmoved_and_backup_intact(
     assert error.backup_path.exists()
 
     after = read_status(path)
-    assert after.current_version == SPLIT_BATCH_TASK_ITEMS_VERSION  # unmoved
+    assert after.current_version == REWRITE_MANIFEST_COMPONENT_PLANES_VERSION  # unmoved
     assert [m.version for m in after.applied] == [
         BASELINE_VERSION,
         CREATE_VALIDATION_RESULTS_VERSION,
@@ -455,6 +459,7 @@ def test_failing_migration_rolls_back_leaves_version_unmoved_and_backup_intact(
         REWRITE_CONTRACT_IDENTITIES_VERSION,
         ADD_RUNS_MODE_PROJECTION_VERSION,
         SPLIT_BATCH_TASK_ITEMS_VERSION,
+        REWRITE_MANIFEST_COMPONENT_PLANES_VERSION,
     ]  # no row for doomed_version
 
     # Data is intact, and the DDL the doomed migration ran (before it raised) did not persist.
@@ -497,6 +502,7 @@ def test_run_migrations_logs_the_backup_path_and_each_applied_migration(
         (REWRITE_CONTRACT_IDENTITIES_VERSION, "rewrite_contract_identities"),
         (ADD_RUNS_MODE_PROJECTION_VERSION, "add_runs_mode_projection"),
         (SPLIT_BATCH_TASK_ITEMS_VERSION, "split_batch_task_items"),
+        (REWRITE_MANIFEST_COMPONENT_PLANES_VERSION, "rewrite_manifest_component_planes"),
     ]
 
 
@@ -572,6 +578,7 @@ def test_new_database_applies_baseline_and_validation_results_then_defers_the_de
         REWRITE_CONTRACT_IDENTITIES_VERSION,
         ADD_RUNS_MODE_PROJECTION_VERSION,
         SPLIT_BATCH_TASK_ITEMS_VERSION,
+        REWRITE_MANIFEST_COMPONENT_PLANES_VERSION,
     ]
 
     # Once the owning store creates its table (independent of the migrator, by design),
@@ -590,6 +597,7 @@ def test_new_database_applies_baseline_and_validation_results_then_defers_the_de
         REWRITE_CONTRACT_IDENTITIES_VERSION,
         ADD_RUNS_MODE_PROJECTION_VERSION,
         SPLIT_BATCH_TASK_ITEMS_VERSION,
+        REWRITE_MANIFEST_COMPONENT_PLANES_VERSION,
     ]
 
     # Constructing the last three owning stores lets the fourth call finish the job.
@@ -602,7 +610,7 @@ def test_new_database_applies_baseline_and_validation_results_then_defers_the_de
     SQLiteBatchTaskStore(path)
     fully_caught_up = run_migrations(path, clock=migration_clock)
     assert fully_caught_up.from_version == DEMO_ADD_RUNS_ARCHIVED_AT_VERSION
-    assert fully_caught_up.to_version == SPLIT_BATCH_TASK_ITEMS_VERSION
+    assert fully_caught_up.to_version == REWRITE_MANIFEST_COMPONENT_PLANES_VERSION
     assert read_status(path).pending == ()
 
 
@@ -624,6 +632,7 @@ def test_read_status_does_not_mutate_the_database(tmp_path: Path, migration_now:
         REWRITE_CONTRACT_IDENTITIES_VERSION,
         ADD_RUNS_MODE_PROJECTION_VERSION,
         SPLIT_BATCH_TASK_ITEMS_VERSION,
+        REWRITE_MANIFEST_COMPONENT_PLANES_VERSION,
     ]
     assert "schema_migrations" not in _table_names(path)
 

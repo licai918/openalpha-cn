@@ -3,10 +3,31 @@
 import json
 from collections.abc import Set as AbstractSet
 from hashlib import sha256
+from typing import Final
 
 from pydantic import BaseModel
 
 _NOTHING_EXCLUDED: frozenset[str] = frozenset()
+
+CONTENT_ADDRESS_PATTERN: Final[str] = r"^[a-z][a-z0-9_]*_[0-9a-f]{24}$"
+"""The shape of everything `stable_model_id` returns, and of nothing else.
+
+Declared beside the function that produces it rather than beside any one contract that
+references one, because it is a statement about *this* function's output: a lowercase prefix
+the caller chooses, an underscore, and the first 24 hex digits of a SHA-256 over canonical
+JSON. Twenty-five prefixes are in use across `domain/`, `providers/`, `factors/` and
+`backtest/`; the prefix is deliberately not enumerated here, so a contract can require "an
+address this repository computed" without also deciding which builder computed it.
+
+Attached to a field, it says the thing named there is a content address rather than a name.
+`domain/run.py`'s `RUN_MANIFEST_ID_PATTERN` is the same idea pinned to one prefix, and its
+docstring states the reason this generic form inherits: a content address that is only
+conventionally a content address stops being one the first time it is convenient.
+`AlphaModelRef.artifact_id` is the first user, and it is the reason the pattern is generic --
+`V2-P4-016` owns what a quantitative model artifact is made of, including its prefix, and this
+constrains only that the answer must be something `stable_model_id` produced rather than a
+second canonicalisation somebody wrote next to it (the defect `V2-P4-037` files).
+"""
 
 
 def stable_model_id(

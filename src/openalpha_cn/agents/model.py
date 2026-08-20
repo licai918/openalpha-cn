@@ -4,7 +4,8 @@ import json
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from openalpha_cn.agents.base import AgentContext, AgentResult
+from openalpha_cn.agents.base import AgentContext, AgentProvenance, AgentResult
+from openalpha_cn.domain.run import VersionRef
 from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.models.base import ModelProvider
 
@@ -39,6 +40,19 @@ class StructuredSignalAgent:
         self.evidence_families = evidence_families
         self.provider = provider
         self.max_attempts = max_attempts
+        # V2-P4-010: read off the provider at construction, not restated by the caller.
+        # `ModelMetadata` already knows which endpoint and which model this agent will call,
+        # and those two strings are precisely what `RunManifest.code_commit` cannot pin --
+        # they live at somebody else's service and change without a commit here. Deriving the
+        # declaration from the provider rather than accepting it as a constructor argument
+        # means the manifest cannot disagree with the thing that actually answered: the
+        # failure being closed is a manifest that names one model while the run called
+        # another, which is a strictly worse version of the `"baseline/v1"` this issue removes.
+        metadata = provider.metadata
+        self.provenance = AgentProvenance(
+            kind="llm_backed",
+            model=VersionRef(component=metadata.provider_id, version=metadata.model),
+        )
 
     def analyze(self, context: AgentContext) -> AgentResult:
         """Validate subject, clock, and evidence references across bounded retries."""

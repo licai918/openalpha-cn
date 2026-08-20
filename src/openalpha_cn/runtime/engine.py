@@ -6,12 +6,12 @@ from collections.abc import Callable, Sequence
 from datetime import datetime
 from typing import Literal
 
-from openalpha_cn.agents.base import AgentContext, AgentResult, ResearchAgent
+from openalpha_cn.agents.base import AgentContext, AgentProvenance, AgentResult, ResearchAgent
 from openalpha_cn.agents.baseline import baseline_agents
 from openalpha_cn.decisions.risk import RiskGate
 from openalpha_cn.domain.decision import AgentDecision, DecisionLedger
 from openalpha_cn.domain.json_value import canonical_json_bytes
-from openalpha_cn.domain.run import ArtifactDigest, RunManifest, VersionRef
+from openalpha_cn.domain.run import AgentVersion, ArtifactDigest, RunManifest, VersionRef
 from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.domain.time import ensure_aware
 from openalpha_cn.runtime.contracts import ResearchRunRequest, ResearchRunResult, RunConflictError
@@ -89,11 +89,10 @@ class ResearchEngine:
                 ArtifactDigest(name=item.evidence_id, sha256=item.content_hash)
                 for item in request.evidence
             ),
-            model_versions=tuple(
-                VersionRef(component=result.agent_id, version="baseline/v1")
-                for result in agent_results
-            ),
+            agent_versions=self._agent_versions(selected=selected, results=agent_results),
+            model_versions=self._model_versions(selected=selected, results=agent_results),
             prompt_versions=(),
+            alpha_model_versions=(),
             random_seed=request.random_seed,
             environment=(VersionRef(component="python", version=platform.python_version()),),
             started_at=run_time,
@@ -157,6 +156,72 @@ class ResearchEngine:
             )
         )
         return result
+
+    @staticmethod
+    def _provenance(
+        *,
+        selected: tuple[ResearchAgent, ...],
+        results: tuple[AgentResult, ...],
+    ) -> tuple[tuple[str, AgentProvenance], ...]:
+        """Pair each executed agent's id with what that agent declares about itself.
+
+        Keyed by `agent_id` rather than zipped positionally, because `results` and `selected`
+        are not guaranteed to line up: `_run_agents_with_recovery` starts from
+        `state.completed_results` after an interrupted run and continues from
+        `next_agent_index`, so a resumed cycle's results are assembled from two sources. Zipping
+        would silently attach one agent's declaration to another agent's result on exactly the
+        path where nobody is watching -- and the resulting manifest would be wrong about which
+        model produced which signal while still validating.
+
+        A result whose agent is not in `selected` is refused rather than skipped, for the same
+        reason `_run_agents_with_recovery` refuses a result whose `agent_id` does not match the
+        agent that produced it: the manifest would otherwise under-report the roster, and an
+        under-reported roster is a run declaration that does not describe the run.
+        """
+        declared = {agent.agent_id: agent.provenance for agent in selected}
+        paired: list[tuple[str, AgentProvenance]] = []
+        for result in results:
+            provenance = declared.get(result.agent_id)
+            if provenance is None:
+                raise ValueError(f"agent result has no declared provenance: {result.agent_id}")
+            paired.append((result.agent_id, provenance))
+        return tuple(paired)
+
+    @classmethod
+    def _agent_versions(
+        cls,
+        *,
+        selected: tuple[ResearchAgent, ...],
+        results: tuple[AgentResult, ...],
+    ) -> tuple[AgentVersion, ...]:
+        """The agent plane: who ran, and of what kind (`V2-P4-010`, S40)."""
+        return tuple(
+            AgentVersion(agent_id=agent_id, kind=provenance.kind)
+            for agent_id, provenance in cls._provenance(selected=selected, results=results)
+        )
+
+    @classmethod
+    def _model_versions(
+        cls,
+        *,
+        selected: tuple[ResearchAgent, ...],
+        results: tuple[AgentResult, ...],
+    ) -> tuple[VersionRef, ...]:
+        """The LLM plane: which vendor models this run actually called.
+
+        De-duplicated while keeping first-call order, because two agents pointed at the same
+        endpoint and model are one model version and not two -- the manifest is recording what
+        the run depended on, not how many times it depended on it. `dict.fromkeys` rather than
+        `sorted(set(...))` for the same reason `agent_versions` is unsorted: the order runs
+        happened in is a fact about the declaration, and sorting would discard it.
+        """
+        return tuple(
+            dict.fromkeys(
+                provenance.model
+                for _, provenance in cls._provenance(selected=selected, results=results)
+                if provenance.model is not None
+            )
+        )
 
     def _load_or_start_recovery(
         self,

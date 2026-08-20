@@ -60,6 +60,7 @@ from openalpha_cn.storage.migrations import (
     CREATE_VALIDATION_RESULTS_VERSION,
     DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
     REWRITE_CONTRACT_IDENTITIES_VERSION,
+    REWRITE_MANIFEST_COMPONENT_PLANES_VERSION,
     SPLIT_BATCH_TASK_ITEMS_VERSION,
     read_status,
     run_migrations,
@@ -374,6 +375,7 @@ def test_run_migrates_a_fresh_replay_database_before_constructing_any_store(
         REWRITE_CONTRACT_IDENTITIES_VERSION,
         ADD_RUNS_MODE_PROJECTION_VERSION,
         SPLIT_BATCH_TASK_ITEMS_VERSION,
+        REWRITE_MANIFEST_COMPONENT_PLANES_VERSION,
     ]
 
 
@@ -430,6 +432,7 @@ def test_run_catches_up_the_demo_migration_on_a_second_call_but_the_index_migrat
         REWRITE_CONTRACT_IDENTITIES_VERSION,
         ADD_RUNS_MODE_PROJECTION_VERSION,
         SPLIT_BATCH_TASK_ITEMS_VERSION,
+        REWRITE_MANIFEST_COMPONENT_PLANES_VERSION,
     ]
 
 
