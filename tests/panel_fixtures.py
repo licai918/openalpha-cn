@@ -506,6 +506,34 @@ def _has_delisted_security(panel: GeneratedPanel) -> bool:
     return DELISTING_EVENT in panel.column(STOCK_BASIC_DATASET, "lifecycle_event")
 
 
+def _newest_session(panel: GeneratedPanel) -> str:
+    """The last session the price panel reaches, as the three datasets below spell a date."""
+    return panel.sessions[-1].isoformat()
+
+
+def _has_termination_on_the_newest_session(panel: GeneratedPanel) -> bool:
+    return any(
+        event == DELISTING_EVENT and day == _newest_session(panel)
+        for _code, event, day in panel.rows_of(
+            STOCK_BASIC_DATASET, "lifecycle_event", "lifecycle_date"
+        )
+    )
+
+
+def _has_halt_on_the_newest_session(panel: GeneratedPanel) -> bool:
+    return any(
+        day == _newest_session(panel)
+        for _code, day in panel.rows_of(SUSPENSION_DATASET, "trade_date")
+    )
+
+
+def _has_rename_announced_on_the_newest_session(panel: GeneratedPanel) -> bool:
+    return any(
+        day == _newest_session(panel)
+        for _code, day in panel.rows_of(NAMECHANGE_DATASET, NAME_ANNOUNCEMENT_COLUMN)
+    )
+
+
 def _has_announcement_before_effect(panel: GeneratedPanel) -> bool:
     return any(
         record.announced_on < record.effective_from
@@ -894,6 +922,52 @@ _SHAPES: Final[tuple[PanelShape, ...]] = (
             "explained-share floor would refuse on a three-name universe."
         ),
         detect=_has_delisted_security,
+    ),
+    PanelShape(
+        shape_id="universe.termination_on_the_newest_session",
+        datasets=(STOCK_BASIC_DATASET,),
+        summary="a lifecycle partition whose newest row lands on the newest priced session",
+        measurement=(
+            "the form V2-P4-076 was found on and no fixture had. A live panel measured "
+            "2026-08-19 carried stock_basic at 2026-08-19T00:00+08 against a price panel whose "
+            "newest session was the same day, and stock_basic is clocked calendar_static -- "
+            "event_time == available_time == midnight on the lifecycle date "
+            "(providers/tushare.py::_calendar_static_timeline). A live probe of the full "
+            "registry on 2026-08-08 found lifecycle events in every year from 1990 to 2026, "
+            "6,217 rows over 37 years (panel_ingest.py::load_stock_universe), so a year whose "
+            "newest event is its newest session is the ordinary case rather than an exotic "
+            "one; domain/stock_universe.py is what folds the two rows back into a lifecycle"
+        ),
+        detect=_has_termination_on_the_newest_session,
+    ),
+    PanelShape(
+        shape_id="suspension.halt_on_the_newest_session",
+        datasets=(SUSPENSION_DATASET,),
+        summary="a halt corpus whose newest row lands on the newest priced session",
+        measurement=(
+            "V2-P4-076's second form. The same live panel carried suspend_d at "
+            "2026-08-19T16:30+08, the newest session's own close -- suspend_d is clocked "
+            "daily_close, so a halt is knowable at DAILY_AVAILABILITY_TIME on its own "
+            "trade_date (providers/tushare.py's suspend_d descriptor). Halts on the newest "
+            "session are routine rather than rare: 28 rows on 2024-06-28, 5 on 2026-08-07 and "
+            "1,466 on 2015-07-09 (providers/tushare.py), and domain/labels.py is what reads "
+            "the corpus back per session"
+        ),
+        detect=_has_halt_on_the_newest_session,
+    ),
+    PanelShape(
+        shape_id="name_history.announcement_on_the_newest_session",
+        datasets=(NAMECHANGE_DATASET,),
+        summary="a rename corpus whose newest announcement lands on the newest priced session",
+        measurement=(
+            "V2-P4-076's third form, and the one that was already visible in a docstring: a "
+            "live fetch on 2026-08-08 found namechange already carrying 920165.BJ / 珈凯生物 "
+            "announced 2026-08-11, three days ahead of the fetch "
+            "(providers/tushare.py::_calendar_static_timeline). Over the 14,166-row corpus "
+            "6,150 rows carry announcement and effect on one day (domain/name_history.py), so "
+            "an announcement dated on the newest session is the corpus's commonest shape"
+        ),
+        detect=_has_rename_announced_on_the_newest_session,
     ),
     PanelShape(
         shape_id="name_history.announcement_precedes_effect",
@@ -1320,10 +1394,32 @@ def _calendar_batch(days: Sequence[CalendarDay]) -> ColumnarPanelBatch:
     )
 
 
+TERMINATED_SECURITY_INDEX: Final[int] = 4
+"""`securities[4]`, which is the one name no other shape writes a lifecycle event for.
+
+`securities[0]` carries the ex-rights step, the limit-free sentinel and the timed halt,
+`securities[1]` the factor step-down and the reform-marked rename, `securities[2]` the
+uncorroborated restatement, `securities[3]` the locked band and `securities[-1]` the whole-day
+halt and the resumption. `securities[4]` is free, and it has to be a name the price grid already
+prices for every session: `delist_date` is exclusive, so a termination dated on the newest
+session leaves the name listed for every session but that one, and each of those sessions then
+wants a bar. Terminating a name the grid does *not* price is what
+`universe.termination_on_the_newest_session` cannot be built from -- measured, on a listing
+dated the same day: `panel doctor` answers `check_unavailable` because the unpriced cross-check
+cannot read an adjustment factor for a security the price panel never carried.
+"""
+
+
 def _universe_batch(securities: Sequence[str], shapes: frozenset[str]) -> ColumnarPanelBatch:
     codes = list(securities)
     events = [LISTING_EVENT] * len(codes)
     days = [LISTED_ON] * len(codes)
+    if "universe.termination_on_the_newest_session" in shapes:
+        # One row rather than two, unlike `universe.delisted_security`: this name's listing is
+        # already in the batch above, so only the termination is new.
+        codes.append(securities[TERMINATED_SECURITY_INDEX])
+        events.append(DELISTING_EVENT)
+        days.append(WINDOW_LAST)
     if "universe.delisted_security" in shapes:
         # Two rows, not one: `providers/tushare.py` files a listing and a termination as
         # separate panel rows precisely because they became knowable at different instants,
@@ -1492,6 +1588,14 @@ def _resumed_key(sessions: Sequence[date], securities: Sequence[str]) -> tuple[s
     return securities[-1], sessions[5]
 
 
+NEWEST_HALT_SECURITY_INDEX: Final[int] = 5
+"""`securities[5]`, which no other halt row names.
+
+`_halted_key` is `securities[-1]` and `_timed_key` is `securities[0]`, so a third name keeps
+`suspension.halt_on_the_newest_session` from being read as either of those two moved.
+"""
+
+
 def _missing_bars(
     *, sessions: Sequence[date], securities: Sequence[str]
 ) -> frozenset[tuple[str, date]]:
@@ -1595,6 +1699,11 @@ def _suspension_batch(
     if "suspension.resumption" in shapes:
         code, day = _resumed_key(sessions, securities)
         rows.append((code, day, "R", None))
+    if "suspension.halt_on_the_newest_session" in shapes:
+        # Timed rather than whole-day, so the name keeps its bar: `_missing_bars` withholds a
+        # bar for `_halted_key` alone, and a whole-day halt with a stored bar beside it is a
+        # contradiction the price writer's own cross-check would be right to object to.
+        rows.append((securities[NEWEST_HALT_SECURITY_INDEX], sessions[-1], "S", "13:00-15:00"))
     return _batch(
         SUSPENSION_DATASET,
         subjects=[code for code, _, _, _ in rows],
@@ -2036,6 +2145,19 @@ PENDING_RENAME: Final[str] = "平安银行"
 RENAME_ANNOUNCED_ON: Final[date] = date(2026, 1, 5)
 RENAME_EFFECTIVE_FROM: Final[date] = date(2026, 8, 2)
 
+NEWEST_RENAME_SECURITY_INDEX: Final[int] = 6
+NEWEST_RENAME: Final[str] = "招商蛇口"
+"""`securities[6]`, and a name that carries **no** risk warning.
+
+The index is the one no other rename names: `securities[0]` carries the pending rename and
+`securities[1]` the reform-marked one. The *name* matters as much as the index. A rename
+announced on the newest session moves `_bars_on`'s `is_st` for that name on that session, so an
+ST-marked one would change which securities the newest cross section can trade -- and a shape
+that quietly moved a screen's verdict would make every assertion about the screen an assertion
+about the shape. `risk_warning_of('招商蛇口')` is `RiskWarning.none`, the same as the generated
+`标的N` names it replaces, so this shape moves an availability instant and nothing else.
+"""
+
 
 def _name_records(
     securities: Sequence[str], shapes: frozenset[str]
@@ -2070,6 +2192,16 @@ def _name_records(
                 effective_from=date(2026, 1, 6),
                 announced_on=date(2026, 1, 6),
                 change_reason="*ST",
+            )
+        )
+    if "name_history.announcement_on_the_newest_session" in shapes:
+        records[securities[NEWEST_RENAME_SECURITY_INDEX]].append(
+            NameRecord(
+                ts_code=securities[NEWEST_RENAME_SECURITY_INDEX],
+                name=NEWEST_RENAME,
+                effective_from=WINDOW_LAST,
+                announced_on=WINDOW_LAST,
+                change_reason="其他",
             )
         )
     return MappingProxyType({code: tuple(rows) for code, rows in records.items()})

@@ -186,28 +186,75 @@ readiness codes, and a session whose 16:30 has not arrived at `as_of` is refused
 partition is touched. `tests/integration/panel/test_daily_panel_ingest.py` drives all four
 doors.
 
-The second is `_read_visible_membership_rows`, reached only from
-`load_industry_cross_section`, and it passes **no** `filters` at all -- there is no filter that
-would make `index_member_all` all-or-nothing, because the dataset is event-driven and a partial
-partition is what an honest mid-year read of it returns. Its measurement is the partition's own
-**date census** instead: `panel_coverage` records how many rows carry each event date, and
-`providers/tushare.py::_taxonomy_backfill_timeline` dates a row's availability at its own event
-floored at 2021-12-13, so once that floor is behind `as_of` the rows the predicate keeps are
-*exactly* the rows the census places at or before `as_of`'s day. The read counts the visible rows
-by their own event date and refuses on any difference from the census, date by date -- an
-**equality**, not a pair of permitted shapes, and per date rather than per year, for `V2-P4-034`'s
-reason above. Measured on the four-partition fixture at `as_of` 2024-06-30T04:00Z: 1993, 2003 and
-2017 each answer census-count rows with 0 withheld, and 2024 answers 0 rows with 2 withheld
-against a census count of 0, because both of its events fall on 2024-07-29 and 2024-07-30.
+The second is `_read_visible_event_dated_rows`, and it passes **no** `filters` at all -- there is
+no filter that would make an event-driven dataset all-or-nothing, because a partial partition is
+what an honest mid-year read of one returns. Its measurement is the partition's own **date
+census** instead: `panel_coverage` records how many rows carry each event date, so the census
+says exactly how many rows an `as_of` must see. The read counts the visible rows by their own
+event date and refuses on any difference from the census, date by date -- an **equality**, not a
+pair of permitted shapes, and per date rather than per year, for `V2-P4-034`'s reason above.
 
-Being able to *see* the difference is not the whole grant here, because for this dataset the
-dangerous shortness is not a short row set at all -- it is an **interval with no end in it**. So
-the second half of the answer is that the caller returns no history: it takes the `day` as an
-argument, resolves it inside, and refuses a `day` later than the newest event `as_of` could see,
-a `day` whose year has a stored partition the read did not name, and an `as_of` before the
-taxonomy existed. `tests/integration/panel/test_industry_ingest.py` drives all of them, and holds
-the refused day against the answer the same day gives once the revision has taken effect, so that
-the refusal is shown to be protecting a real difference rather than being cautious about nothing.
+It had one caller, `load_industry_cross_section`, and since `V2-P4-076` it has four.
+**This module's allowlist is scoped to a file, so the three that were added did not have to
+answer the question above; the answer is written here anyway, per dataset, and
+`V2-P4-074` is the issue filed against the gap itself.**
+
+- **`index_member_all`** (`load_industry_cross_section`, `V2-P4-027`/`034`).
+  `providers/tushare.py::_taxonomy_backfill_timeline` dates a row's availability at its own
+  event floored at 2021-12-13, so once that floor is behind `as_of` the rows the predicate keeps
+  are *exactly* the rows the census places at or before `as_of`'s day. Measured on the
+  four-partition fixture at `as_of` 2024-06-30T04:00Z: 1993, 2003 and 2017 each answer
+  census-count rows with 0 withheld, and 2024 answers 0 rows with 2 withheld against a census
+  count of 0, because both of its events fall on 2024-07-29 and 2024-07-30. Being able to *see*
+  the difference is not the whole grant here, because for this dataset the dangerous shortness is
+  not a short row set at all -- it is an **interval with no end in it**. So the second half of
+  the answer is that the caller returns no history: it takes the `day` as an argument, resolves
+  it inside, and refuses a `day` later than the newest event `as_of` could see, a `day` whose
+  year has a stored partition the read did not name, and an `as_of` before the taxonomy existed.
+  `tests/integration/panel/test_industry_ingest.py` drives all of them, and holds the refused day
+  against the answer the same day gives once the revision has taken effect, so that the refusal
+  is shown to be protecting a real difference rather than being cautious about nothing.
+
+- **`stock_basic`** (`load_stock_universe`). `_calendar_static_timeline` sets
+  `available_time == event_time == midnight` on the row's own lifecycle date, so the census bound
+  is `as_of`'s own day and the equality is exact. Withheld against absent has a second, stronger
+  answer on this dataset and it predates this issue:
+  `stock_universe_from_panel_rows` **refuses a termination whose listing is not in the rows** --
+  a partial read is a named refusal rather than a shorter universe. The visibility predicate
+  cannot produce that state, and the direction is the argument: a listing is never later than its
+  own termination, so a filter that removes the later row can only ever leave a security
+  *reported as still listed*, which is exactly what it was at the instant being read. What the
+  filter must not do is the reverse, and the census is what says it did not.
+  `StockUniverse.snapshot_date` is the upper horizon, unmoved by this issue: a day past it is
+  `beyond_snapshot` rather than an answer.
+
+- **`suspend_d`** (`load_suspensions`). This is the one where withheld and absent genuinely
+  collapse in the *values*: an absent halt row and a withheld one both read as "not halted"
+  (`backtest/execution.py::suspended_at_the_close` returns `False` for `None`, and 5,312 of
+  2024-06-28's 5,338 priced names have no row at all). So the separation cannot come from the
+  rows and it does not: a session the census counted and the predicate emptied is refused by
+  name, and a session the census never counted is answered, because nobody was halted. The bound
+  is `_sessions_published_through` and not `as_of`'s own day, because a halt is knowable at 16:30
+  on its own `trade_date` -- reconciling against the calendar day instead would count the current
+  session's halts as due from midnight and refuse every honest read taken before that session's
+  close. `HaltCorpus.require_coverage` remains the guard that makes an absent row mean "nothing
+  happened" rather than "nobody read the partition", and it is unchanged: this read still returns
+  whole years.
+
+- **`namechange`** (`load_name_histories`). `_calendar_static_timeline` again, dated at
+  `ann_date`, so the bound is `as_of`'s own day and the equality is exact. `NameHistory` has
+  deliberately **no upper horizon** -- the last record answers for every later day -- so a
+  corpus short by a withheld announcement would answer with the *previous* name and no signal,
+  which is why the census refusal rather than a short answer is the whole grant here. What the
+  filter removes is announcements made after `as_of`, which is what "knowable at `as_of`" means
+  and not a shortfall: a rename announced tomorrow was not readable at the whole-partition door
+  either, it merely refused the entire year instead of the one row.
+
+For all three of the new callers the availability instant is a **fixed function of the event
+date**, so the reconciliation cannot disagree on a partition whose rows carry the provider's own
+clock. It is a backstop, in the same sense `_read_visible_price_session`'s second refusal is one,
+and `tests/integration/panel/test_event_dated_visible_reads.py` stores a partition whose
+availability instants say something else in order to reach each of them.
 """
 
 

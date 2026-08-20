@@ -355,15 +355,25 @@ one its factor values never saw. `cross_section.as_of` and `cross_section.pricin
 are on every answer, because the cross section may legitimately be older than the `as_of`
 you asked about.
 
-**That sentence did not hold until `V2-P4-061`, and it is worth knowing why if you are
-reading answers this service gave before it.** The bars and the published bands were read
-through a whole-partition gate that decides "not yet knowable" from the newest row
-*anywhere in the calendar year*. So a panel that had advanced by one session refused every
-**earlier** cross section in that year — `daily cannot be read at …: ['not_yet_knowable']`
-— and only the newest one could be screened at all. Two days' shortlists could not be
-compared, yesterday's could not be re-run, and a published list could not be audited after
-the fact. Both reads now go through the same as-of-sensitive session read the valuation
-panel already used.
+**That sentence did not hold until `V2-P4-076`, and it is worth knowing why if you are
+reading answers this service gave before it.** Six datasets are read at the cross section's
+own instant, and until `V2-P4-061` five of them went through a whole-partition gate that
+decides "not yet knowable" from the newest row *anywhere in the calendar year*. So a panel
+that had advanced by one session refused every **earlier** cross section in that year —
+`daily cannot be read at …: ['not_yet_knowable']` — and only the newest one could be
+screened at all. Two days' shortlists could not be compared, yesterday's could not be
+re-run, and a published list could not be audited after the fact.
+
+`V2-P4-061` moved the bars and the published bands onto the same as-of-sensitive session
+read the valuation panel already used. **On a real panel all three of those sentences were
+still true afterwards**, because the registry, the halts and the name histories had not
+moved and each of them walls off a cross section on its own: measured 2026-08-19, the
+registry became knowable at that day's midnight and the halt corpus at its 16:30, so a
+cross section about the previous session was refused before a single bar was read. Those
+three now go through a per-event-date read that reconciles what it can see against the
+partition's own row census, date by date. The exchange calendar is the one read left on the
+whole-partition door, and that is measured rather than an omission: every row of a calendar
+year is dated knowable at 1 January of that year, so the gate has no way to fire inside it.
 
 Nothing about the look-ahead guard moved with them, and each refusal still has its own
 name. A session whose own 16:30 Asia/Shanghai has not arrived at the read's instant is
@@ -373,6 +383,14 @@ cannot see is refused rather than answered empty. A session the panel never stor
 refused as a `date_gap` against the exchange calendar's own census. And a session whose
 stored rows do not all share one availability instant — the property that makes a session
 read sound at all — is refused outright rather than returned short.
+
+The three whole-year reads keep their own two refusals, for the same reason. A partition
+that holds fewer rows on an event date than its own census counts there is refused by name,
+because a corpus short by a withheld row is indistinguishable from one where the row does
+not exist — and on the halt corpus those two are the same answer, "not halted". A partition
+that answers with a row visible *before* its own event is refused separately and first,
+because that is a look-ahead rather than a shortfall, and one message about two totals is
+what let a compensating pair through once already.
 
 ### Keeping an answer, and fetching it back
 

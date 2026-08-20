@@ -12,7 +12,7 @@ than as one test per shape:
 3. **No detector reads the request.** Each detector is re-run against the shapeless artifact
    relabelled as if it carried the shape. This is the one failure mode that would make the
    whole table a tautology, and it is the only way to rule it out from the outside.
-4. **No detector answers for somebody else's shape.** The full 25x25 matrix, with the five
+4. **No detector answers for somebody else's shape.** The full 28x28 matrix, with the seven
    containments that really do hold declared in `CROSS_TRIGGERS`. (1)-(3) are all satisfied by
    a detector that is about something far wider than the shape it is filed under -- and the
    three look-ahead shapes stay three separate injections only because each reads its own
@@ -80,13 +80,16 @@ EXPECTED_SHAPE_IDS = (
     "industry.coverage_hole",
     "industry.reclassification_after_the_as_of",
     "industry.session_adjacent_handover",
+    "name_history.announcement_on_the_newest_session",
     "name_history.announcement_precedes_effect",
     "name_history.reform_prefixed_special_treatment",
     "price_limits.limit_free_sentinel",
     "price_limits.one_price_limit_up",
+    "suspension.halt_on_the_newest_session",
     "suspension.resumption",
     "suspension.timed_interruption",
     "universe.delisted_security",
+    "universe.termination_on_the_newest_session",
 )
 """The closed set, spelled out.
 
@@ -114,13 +117,16 @@ EXPECTED_PROVOCATIONS = {
     "industry.coverage_hole": (),
     "industry.reclassification_after_the_as_of": ("not_yet_knowable",),
     "industry.session_adjacent_handover": (),
+    "name_history.announcement_on_the_newest_session": (),
     "name_history.announcement_precedes_effect": (),
     "name_history.reform_prefixed_special_treatment": (),
     "price_limits.limit_free_sentinel": (),
     "price_limits.one_price_limit_up": (),
+    "suspension.halt_on_the_newest_session": (),
     "suspension.resumption": (),
     "suspension.timed_interruption": (),
     "universe.delisted_security": (),
+    "universe.termination_on_the_newest_session": (),
 }
 """What each shape claims a `panel_health_report` will say about it, spelled out here too.
 
@@ -263,8 +269,10 @@ CROSS_TRIGGERS = {
     "financials.second_statement_dataset": (
         "financials.statement_dataset_without_a_revision_label",
     ),
+    "suspension.timed_interruption": ("suspension.halt_on_the_newest_session",),
+    "universe.delisted_security": ("universe.termination_on_the_newest_session",),
 }
-"""Detector -> the other shapes' panels it also answers `True` on. Five, each declared.
+"""Detector -> the other shapes' panels it also answers `True` on. Seven, each declared.
 
 Statement (4) below is "a detector answers `False` on somebody else's shape", and these are the
 pairs where it does not. None is a detector reaching outside what it names; each is one shape's
@@ -301,8 +309,19 @@ written down rather than allowed by a loose assertion. In order:
 - `financials.statement_dataset_without_a_revision_label` stores all four statement endpoints,
   of which `second_statement_dataset` asks for two. Again containment, and the reverse
   direction is `False`: two datasets are not four.
+- `suspension.halt_on_the_newest_session` writes a **timed** halt, so it is a timed
+  interruption as well as a newest-session one. The timing is forced rather than chosen: the
+  price grid carries a bar for every name on every session except `_missing_bars`' one cell,
+  and a whole-day halt sitting beside a stored bar is a contradiction rather than a shape. The
+  reverse direction is `False`, and that is the pair's whole content -- `_timed_key` is
+  `sessions[2]`, which is what makes "on the newest session" the thing the second shape adds.
+- `universe.termination_on_the_newest_session` writes a delisting row, and a delisting row is
+  what `universe.delisted_security` is. The two differ in the one thing this pair is filed
+  under: the older shape's termination is dated `2026-01-05` so that the terminated name is in
+  no session's cross section, and the newer one's is dated on the last session so that the
+  *partition's newest availability instant* moves onto it. Again the reverse is `False`.
 
-The table is a dict literal for `EXPECTED_PROVOCATIONS`' reason. A sixth pair appearing is a
+The table is a dict literal for `EXPECTED_PROVOCATIONS`' reason. An eighth pair appearing is a
 diff on this list and a decision somebody makes, rather than a silently widened detector.
 """
 
@@ -319,7 +338,7 @@ def test_no_detector_answers_true_on_a_shape_that_is_not_its_own() -> None:
     injections into one, which is precisely the property `V2-P2-001`/`003`/`004` are three
     issues for.
 
-    So the whole matrix is pinned, not just its diagonal: 25 panels, each detector run against
+    So the whole matrix is pinned, not just its diagonal: 28 panels, each detector run against
     all of them. The declared cross-triggers are named in `CROSS_TRIGGERS` above with the
     reason each one is a containment rather than a leak.
     """

@@ -967,12 +967,35 @@ def load_stock_universe(
     """Read stored lifecycle years back as a `StockUniverse`, or refuse to.
 
     Fail-closed three times over. A partition that is missing, damaged, unprofiled, stale or
-    described by an out-of-date coverage record is blocked by `read_if_ready()` and reported
+    described by an out-of-date coverage record is blocked at partition scope and reported
     by its structured issue codes. A gap in the requested years is refused here, because a
     skipped year is a silently *smaller* universe -- the same defect `build_trading_calendar`
     refuses a hole in a day sequence for. And a partition that passes both and is internally
     inconsistent -- an orphan delisting row, a duplicated security -- is refused afterwards by
     `stock_universe_from_panel_rows`.
+
+    ## The read is as-of-sensitive, and until `V2-P4-076` it was not
+
+    It took `read_if_ready()`, which judges `not_yet_knowable` on a **partition's** newest
+    `available_time` -- so one security listing on the newest session made the whole registry
+    unreadable at every earlier instant of that lifecycle year. That is what `V2-P4-076` found
+    still standing after `V2-P4-061` moved the price datasets: measured on a real panel,
+    `stock_basic` at 2026-08-19T00:00+08 refused every cross section about a session before that
+    day, and the shortlist face exited `1` on it before any bar was read.
+
+    It now takes `_read_visible_event_dated_rows` with `_knowable_through_the_same_day`, which is
+    this dataset's own clock: `providers/tushare.py::_calendar_static_timeline` sets
+    `available_time == event_time == midnight` on the lifecycle date, and the response row is
+    *split* first precisely so a listing and a termination carry their own instants. The rows a
+    read at `as_of` keeps are therefore exactly the rows the partition's date census places at or
+    before `as_of`'s own day, and any difference is a named refusal.
+
+    **The direction the filter can fail in is the safe one, and that is worth stating.** A
+    listing is never later than its own termination, so removing rows the read cannot see can
+    only leave a security reported as *still listed* -- which is what it was at that instant.
+    The reverse -- a termination whose listing was filtered away -- is what
+    `stock_universe_from_panel_rows` refuses by name, and the predicate cannot produce it.
+    `tests/integration/panel/test_event_dated_visible_reads.py` drives both halves.
 
     ## `years` is the top of the window; the history underneath it is not the caller's to name
 
@@ -1068,10 +1091,10 @@ def load_stock_universe(
 
     ## Cost, measured rather than estimated
 
-    Readiness is assessed once per year read, because `read_if_ready()` vets the dataset and
-    reads one partition. `PanelStore.assess_readiness` evaluates the whole requirement each
-    time, so a full-history read re-evaluates every year's catalog rows once per year: N
-    partitions cost N**2 coverage lookups.
+    Readiness is assessed once per year read, because the filtered door -- like `read_if_ready()`
+    before it -- vets the dataset and reads one partition. `PanelStore.assess_readiness`
+    evaluates the whole requirement each time, so a full-history read re-evaluates every year's
+    catalog rows once per year: N partitions cost N**2 coverage lookups.
 
     **This paragraph used to say that was milliseconds, and `V2-P4-059` measured it and it is
     not.** On a 36-year registry over `V2-P4-004`'s 5,545-security market, one call is **4.0 s**,
@@ -1094,6 +1117,13 @@ def load_stock_universe(
     and every other dataset -- and doing it locally would mean this one loader stepping around
     the fail-closed door the others take, losing its damaged-partition wrapping with it. Filed
     against `PanelStore` rather than worked around here.
+
+    **`V2-P4-076` did not fix that and made it fractionally worse, which is stated rather than
+    left to be discovered.** `read_visible_at` runs `assess_readiness` itself, exactly as
+    `read_if_ready` did, so the quadratic is untouched; what the new door adds on top is one
+    partition-scope assessment before the loop and one `read_coverage` per year for the census.
+    On the 36-year registry that is 1,332 coverage lookups against 1,296 and 36 more census
+    reads -- about 3% -- against a refusal it removes outright.
     """
     requested = tuple(sorted(set(years)))
     if not requested:
@@ -1133,16 +1163,21 @@ def load_stock_universe(
     requirement = stock_universe_requirement(
         years=resolved, as_of=as_of, max_staleness=max_staleness
     )
-    rows: list[tuple[object, ...]] = []
-    for year in resolved:
-        outcome = store.read_if_ready(requirement, year=year, columns=UNIVERSE_PANEL_COLUMNS)
-        if outcome.is_blocked:
-            raise PanelStorageError(
-                f"the security registry cannot be read at {as_of.isoformat()}: "
-                f"{[issue.code for issue in outcome.readiness.issues]}; "
-                f"{'; '.join(issue.detail for issue in outcome.readiness.issues)}"
-            )
-        rows.extend(outcome.rows)
+    rows = list(
+        _read_visible_event_dated_rows(
+            store,
+            requirement,
+            UNIVERSE_PANEL_COLUMNS,
+            as_of=as_of,
+            what="the security registry",
+            availability_rule=(
+                "A lifecycle row's availability is midnight on the day it is about, because "
+                "the response row is split so that a listing and a termination carry their own "
+                "instants"
+            ),
+            census_through=_knowable_through_the_same_day,
+        )
+    )
     snapshot_date = as_of.astimezone(_resolve_timezone(date_timezone)).date()
     unread_after = sorted(year for year in registered if year > resolved[-1])
     if unread_after:
@@ -1220,6 +1255,24 @@ def load_name_histories(
     `load_trading_calendar` has and it is answered the same way: `NameHistory.name_on()`
     refuses to answer for a day before its own first record rather than extrapolating the
     earliest name it happens to hold backwards.
+
+    ## As-of-sensitive since `V2-P4-076`
+
+    It took `read_if_ready()`, so a single rename announced on the newest session refused the
+    whole announcement year at every earlier instant -- and this corpus really does carry rows
+    dated ahead of a fetch: a live fetch on 2026-08-08 already held `920165.BJ` / 珈凯生物
+    announced 2026-08-11. It now takes `_read_visible_event_dated_rows` with
+    `_knowable_through_the_same_day`, which is `_calendar_static_timeline`'s rule for this
+    dataset: `available_time == event_time == midnight` on `ann_date`, with the effective date
+    riding along as an ordinary column because it is published *in* the announcement.
+
+    **`NameHistory` has deliberately no upper horizon, and that is what makes the census the
+    whole grant.** The last record answers for every later day, so a corpus short by a withheld
+    announcement answers with the *previous* name and nothing on it says so -- an ST name read
+    as ordinary, which `shortlist_view._bars_on` turns into `is_st=False` and a screen turns
+    into a wider band. What the predicate removes is announcements made after `as_of`, which is
+    what "knowable at `as_of`" means rather than a shortfall; what the census refuses is an
+    announcement the partition says had already been made and the read could not see.
     """
     requested = tuple(sorted(set(years)))
     if not requested:
@@ -1230,17 +1283,21 @@ def load_name_histories(
     requirement = name_history_requirement(
         years=requested, as_of=as_of, max_staleness=max_staleness
     )
-    rows: list[tuple[object, ...]] = []
-    for year in requested:
-        outcome = store.read_if_ready(requirement, year=year, columns=NAME_HISTORY_PANEL_COLUMNS)
-        if outcome.is_blocked:
-            raise PanelStorageError(
-                f"the rename corpus cannot be read at {as_of.isoformat()}: "
-                f"{[issue.code for issue in outcome.readiness.issues]}; "
-                f"{'; '.join(issue.detail for issue in outcome.readiness.issues)}"
-            )
-        rows.extend(outcome.rows)
-    return name_histories_from_panel_rows(rows)
+    return name_histories_from_panel_rows(
+        _read_visible_event_dated_rows(
+            store,
+            requirement,
+            NAME_HISTORY_PANEL_COLUMNS,
+            as_of=as_of,
+            what="the rename corpus",
+            availability_rule=(
+                "A rename's availability is midnight on its own announcement date, because the "
+                "date the new name takes effect is published in that announcement and rides "
+                "along as an ordinary column"
+            ),
+            census_through=_knowable_through_the_same_day,
+        )
+    )
 
 
 def merge_panel_batches(batches: Sequence[ColumnarPanelBatch]) -> ColumnarPanelBatch:
@@ -2782,6 +2839,30 @@ def load_suspensions(
     A year that was never ingested blocks rather than being skipped, for
     `load_name_histories`' reason and more sharply: a skipped year here answers "nothing was
     halted" for every session in it, which is a plausible, silent, and completely wrong answer.
+
+    ## As-of-sensitive since `V2-P4-076`, and this dataset's bound is the odd one
+
+    It took `read_if_ready()`, which refuses a whole year for the sake of its newest row, so a
+    halt on the newest session made every earlier cross section in that year unscreenable
+    (measured on a real panel: `suspend_d` at 2026-08-19T16:30+08). It now takes
+    `_read_visible_event_dated_rows`.
+
+    The census bound is `_sessions_published_through` and **not** `as_of`'s own calendar day,
+    which is the one thing this caller does differently from the other three. `suspend_d` is
+    `ClockStrategy.daily_close`: a halt is knowable at `DAILY_AVAILABILITY_TIME` on its own
+    `trade_date`, the same instant that session's bar is. Reconciling against the calendar day
+    would count the current session's halts as due from midnight, find them withheld, and refuse
+    every honest read taken before that session's close --
+    `test_a_halt_on_the_current_session_is_not_required_before_that_session_closes` is that read.
+
+    **Withheld and absent collapse in the values here and not in the numbers, which is why the
+    census is load-bearing rather than decorative.** A security with no halt row and one whose
+    halt row was withheld both read as "not halted" (`suspended_at_the_close` answers `False` for
+    `None`, and 5,312 of 2024-06-28's 5,338 priced names have no row at all). So the separation
+    is made before the rows are decoded: a session the census counted and the predicate emptied
+    is refused by name, and a session the census never counted is answered, because nobody was
+    halted. `HaltCorpus.require_coverage` is unchanged and still the guard that makes an absent
+    row mean "nothing happened" rather than "nobody read the partition".
     """
     requested = tuple(sorted(set(years)))
     if not requested:
@@ -2790,17 +2871,20 @@ def load_suspensions(
             "'nothing was ever halted', which is indistinguishable from a failed read"
         )
     requirement = suspension_requirement(years=requested, as_of=as_of, max_staleness=max_staleness)
-    rows: list[tuple[object, ...]] = []
-    for year in requested:
-        outcome = store.read_if_ready(requirement, year=year, columns=SUSPENSION_PANEL_COLUMNS)
-        if outcome.is_blocked:
-            raise PanelStorageError(
-                f"the {SUSPENSION_DATASET} corpus cannot be read at {as_of.isoformat()}: "
-                f"{[issue.code for issue in outcome.readiness.issues]}; "
-                f"{'; '.join(issue.detail for issue in outcome.readiness.issues)}"
-            )
-        rows.extend(outcome.rows)
-    return suspensions_from_panel_rows(rows)
+    return suspensions_from_panel_rows(
+        _read_visible_event_dated_rows(
+            store,
+            requirement,
+            SUSPENSION_PANEL_COLUMNS,
+            as_of=as_of,
+            what=f"the {SUSPENSION_DATASET} corpus",
+            availability_rule=(
+                f"A halt's availability is {DAILY_AVAILABILITY_TIME.isoformat()} on its own "
+                "trade_date, the same instant that session's bar becomes knowable"
+            ),
+            census_through=_sessions_published_through,
+        )
+    )
 
 
 def write_price_limits(
@@ -3671,6 +3755,25 @@ def load_industry_cross_section(
     return MappingProxyType(answers)
 
 
+def _knowable_through_the_same_day(as_of: datetime, zone: ZoneInfo) -> date:
+    """`as_of`'s own day: the census bound for a dataset whose rows publish at midnight.
+
+    The bound for `ClockStrategy.calendar_static` (`stock_basic`, `namechange`) and for
+    `ClockStrategy.taxonomy_backfill` (`index_member_all`). All three date a row's availability
+    at midnight `date_timezone` on the day the row is about -- exactly, for the first two, and
+    floored at the taxonomy's effective date for the third -- so a row dated `D` is visible to
+    every `as_of` on `D` and to none before it, and the newest event date this read can see is
+    the day `as_of` falls on.
+
+    `_sessions_published_through` is the same function for a dataset that publishes at 16:30
+    instead, and the pair is why `_read_visible_event_dated_rows` takes the bound as an argument
+    rather than computing one: `suspend_d`'s rows are `daily_close`-clocked, and reconciling them
+    against this bound would count the current session's halts as knowable from midnight and
+    refuse every honest read taken before that session's close.
+    """
+    return as_of.astimezone(zone).date()
+
+
 def _read_visible_membership_rows(
     store: PanelStore,
     requirement: ReadinessRequirement,
@@ -3678,6 +3781,11 @@ def _read_visible_membership_rows(
     as_of: datetime,
 ) -> tuple[tuple[object, ...], ...]:
     """Every membership row of `requirement.years` that was knowable at `as_of`, or a refusal.
+
+    `V2-P4-027`/`034`'s door, and since `V2-P4-076` a call into
+    `_read_visible_event_dated_rows` with this dataset's own availability rule rather than a
+    fourth copy of it. What is stated here is what is specific to `index_member_all`: the
+    availability rule the reconciliation rests on, and the bound that rule implies.
 
     The two-step `_read_visible_price_session` established, with the third step this dataset needs
     in place of the all-or-nothing check that dataset gets for free.
@@ -3734,24 +3842,122 @@ def _read_visible_membership_rows(
     converted in, not the caller's: the census's dates were resolved in that zone, and comparing
     them against days computed in another would be comparing two different calendars.
     """
+    return _read_visible_event_dated_rows(
+        store,
+        requirement,
+        INDUSTRY_MEMBERSHIP_PANEL_COLUMNS,
+        as_of=as_of,
+        what="the industry classification",
+        availability_rule=(
+            "A membership row's availability is its own event floored at the taxonomy's "
+            "effective date"
+        ),
+        census_through=_knowable_through_the_same_day,
+    )
+
+
+def _read_visible_event_dated_rows(
+    store: PanelStore,
+    requirement: ReadinessRequirement,
+    columns: tuple[str, ...],
+    *,
+    as_of: datetime,
+    what: str,
+    availability_rule: str,
+    census_through: Callable[[datetime, ZoneInfo], date],
+) -> tuple[tuple[object, ...], ...]:
+    """Every row of `requirement.years` that was knowable at `as_of`, reconciled per event date.
+
+    **The only door onto a whole-year partition of an event-driven dataset, since `V2-P4-076`.**
+    Four callers take it -- `load_industry_cross_section`, `load_stock_universe`,
+    `load_suspensions` and `load_name_histories` -- and it is one function rather than four
+    because `_read_visible_price_session`'s own docstring records what two doors onto one
+    question cost the last time there were two.
+
+    ## What `V2-P4-076` measured, and why these three joined the fourth
+
+    `V2-P4-061` moved `daily`, `daily_basic` and `stk_limit` onto the as-of-sensitive session
+    read so that a store holding two cross sections could screen both. On a real panel it could
+    still screen only the newest, because `load_shortlist_cross_section` reads four more things
+    at the cross section's own instant and three of them still went through `read_if_ready`,
+    which judges `not_yet_knowable` on a **partition's** newest `available_time`. Measured on a
+    real panel: `stock_basic` 2026-08-19T00:00+08 and `suspend_d` 2026-08-19T16:30+08 against a
+    price panel whose newest session was that same day, so every earlier cross section in the
+    year was refused for the sake of the newest session's rows. The wall did not fall; it moved.
+
+    The fourth read is the exchange calendar, and it is **not** here. `trade_cal` is clocked
+    `calendar_publication`, which dates every row of year Y at 1 January of Y, so a year
+    partition's newest availability instant is the *earliest* instant in it and
+    `not_yet_knowable` cannot fire at any `as_of` inside the year. It is left on the unfiltered
+    door because there is no refusal there to remove.
+
+    ## Why a row predicate is safe here, and what makes that a measurement
+
+    The objection `tests/unit/panel/test_visible_read_callers.py` puts to every caller of
+    `read_visible_at` is *can this caller tell a withheld row from an absent one*. For a
+    **whole-year** read of an event-driven dataset the answer is no from the rows alone --
+    `V2-P4-027` established that, and `V2-P4-034` proved that comparing whole-partition sums
+    instead lets a compensating pair admit a look-ahead. It is yes from the partition's own
+    **date census**, which counts rows per event date and therefore says exactly how many rows
+    an `as_of` must see. A row the census counted and the predicate removed is **withheld**; a
+    row the census never counted is **absent**; and the two are two different pairs of numbers
+    rather than one short answer.
+
+    That reconciliation is exact only while a row's `available_time` is a function of its own
+    event date, and each caller states which function. `stock_basic` and `namechange` are
+    `ClockStrategy.calendar_static`, where `_calendar_static_timeline` sets
+    `available_time == event_time == midnight` on the row's own date -- so the bound is
+    `_knowable_through_the_same_day`. `suspend_d` is `ClockStrategy.daily_close`, where a row is
+    knowable at 16:30 on its own `trade_date` -- so the bound is `_sessions_published_through`,
+    and using the other one would count the current session's halts as knowable from midnight
+    and refuse every honest read taken before that session's close. `index_member_all` is
+    `taxonomy_backfill`, whose floor sits behind `as_of` by the time
+    `load_industry_cross_section` reaches here, leaving `_knowable_through_the_same_day`.
+
+    **On a partition whose rows carry the provider's own clock the reconciliation therefore
+    cannot disagree, and that is the point rather than a weakness.** It is the same backstop
+    `_read_visible_price_session`'s second refusal is: unreachable through a well-formed
+    partition and live on one whose stored availability instants say something else. The clock
+    lives in a provider one package away and nothing in the store enforces it, so it is checked
+    rather than assumed -- and for `index_member_all` it is not merely a backstop, because the
+    taxonomy floor really can push a row's availability past its own event date.
+
+    ## The two steps before it
+
+    **Step one** runs `assess_readiness` on the caller's own requirement -- the same function,
+    the same rule table and the same partition scope as `read_if_ready` -- and refuses on
+    anything outside `ROW_FILTERABLE_ISSUE_CODES`. That is where `max_staleness` is decided, and
+    deciding it here is what stops `read_visible_at`'s slice-scope recheck from re-deciding it
+    against the newest *event*, which on every one of these datasets is a burst rather than a
+    measure of whether the panel has fallen behind.
+
+    **Step two** takes the filtered read per year with the bound waived.
+
+    `EVENT_TIME_COLUMN` is **prepended to the caller's own column contract and stripped before
+    the rows are returned** rather than added to it, which is `panel_factors`' idiom on this
+    same method: those constants document themselves as "the positional contract of the rows
+    back", their decoders check the width and unpack positionally, and the clock this
+    reconciliation needs is a property of *this read* rather than of the row shape the domain
+    decodes.
+
+    The census's own `date_timezone` is what `as_of` and every visible row's `event_time` are
+    converted in, not the caller's: the census's dates were resolved in that zone, and comparing
+    them against days computed in another would be comparing two different calendars.
+    """
     gate = store.assess_readiness(requirement)
     if {issue.code for issue in gate.issues} - ROW_FILTERABLE_ISSUE_CODES:
         raise PanelStorageError(
-            f"the industry classification cannot be read at {as_of.isoformat()}: "
+            f"{what} cannot be read at {as_of.isoformat()}: "
             f"{[issue.code for issue in gate.issues]}; "
             f"{'; '.join(issue.detail for issue in gate.issues)}"
         )
     filtered = replace(requirement, max_staleness=None)
     rows: list[tuple[object, ...]] = []
     for year in requirement.years:
-        outcome = store.read_visible_at(
-            filtered,
-            year=year,
-            columns=(EVENT_TIME_COLUMN, *INDUSTRY_MEMBERSHIP_PANEL_COLUMNS),
-        )
+        outcome = store.read_visible_at(filtered, year=year, columns=(EVENT_TIME_COLUMN, *columns))
         if outcome.is_blocked:
             raise PanelStorageError(
-                f"the industry classification cannot be read at {as_of.isoformat()}: "
+                f"{what} cannot be read at {as_of.isoformat()}: "
                 f"{[issue.code for issue in outcome.blocking_issues]}; "
                 f"{'; '.join(issue.detail for issue in outcome.blocking_issues)}"
             )
@@ -3762,9 +3968,9 @@ def _read_visible_membership_rows(
                 "the row census this read checks the visible slice against does not exist"
             )
         zone = _resolve_timezone(coverage.date_timezone)
-        census_day = as_of.astimezone(zone).date()
+        census_day = census_through(as_of, zone)
         visible: Counter[date] = Counter(
-            _membership_event_date(row[0], dataset=requirement.dataset, year=year, zone=zone)
+            _visible_event_date(row[0], dataset=requirement.dataset, year=year, zone=zone)
             for row in outcome.rows
         )
         happened = Counter(
@@ -3774,7 +3980,7 @@ def _read_visible_membership_rows(
                 if entry.event_date <= census_day
             }
         )
-        _refuse_a_membership_slice_the_census_disagrees_with(
+        _refuse_a_slice_the_census_disagrees_with(
             visible,
             happened,
             dataset=requirement.dataset,
@@ -3782,12 +3988,13 @@ def _read_visible_membership_rows(
             as_of=as_of,
             census_day=census_day,
             withheld_row_count=outcome.withheld_row_count,
+            availability_rule=availability_rule,
         )
         rows.extend(tuple(row[1:]) for row in outcome.rows)
     return tuple(rows)
 
 
-def _membership_event_date(value: object, *, dataset: str, year: int, zone: ZoneInfo) -> date:
+def _visible_event_date(value: object, *, dataset: str, year: int, zone: ZoneInfo) -> date:
     """One visible row's `event_time` as the day the partition's census filed it under.
 
     The same conversion `_date_census` performs at write time, in the same zone, so the two sides
@@ -3809,7 +4016,7 @@ def _membership_event_date(value: object, *, dataset: str, year: int, zone: Zone
     return value.astimezone(zone).date()
 
 
-def _refuse_a_membership_slice_the_census_disagrees_with(
+def _refuse_a_slice_the_census_disagrees_with(
     visible: Counter[date],
     happened: Counter[date],
     *,
@@ -3818,6 +4025,7 @@ def _refuse_a_membership_slice_the_census_disagrees_with(
     as_of: datetime,
     census_day: date,
     withheld_row_count: int,
+    availability_rule: str,
 ) -> None:
     """Hold the visible rows' event dates against the partition's census, date by date.
 
@@ -3826,6 +4034,12 @@ def _refuse_a_membership_slice_the_census_disagrees_with(
     look-ahead is decided first: it says a row was visible before its own event, which the
     availability rule this dataset is stored under cannot produce at all, while a shortfall says
     only that a row this read should have seen was held back.
+
+    `availability_rule` is the caller's own sentence about how its dataset's `available_time`
+    follows from its event date, and it is an argument rather than a constant because the four
+    callers' rules genuinely differ -- a floor at a taxonomy's effective date, a midnight, and a
+    16:30 close. The message has to name the rule it is holding the partition to, or a reader
+    handed "those two numbers should be equal" has no way to check whether they should.
     """
     ahead = sorted(day for day in visible if day > census_day)
     if ahead:
@@ -3834,10 +4048,9 @@ def _refuse_a_membership_slice_the_census_disagrees_with(
             f"{dataset} year={year} answered {visible[day]} visible row(s) dated "
             f"{day.isoformat()}, whose event had not happened at {as_of.isoformat()} -- the "
             f"partition's date census places it after the {census_day.isoformat()} this read can "
-            "see. A membership row's availability is its own event floored at the taxonomy's "
-            "effective date, so it is never earlier than the event, and a row visible before its "
-            "own event carries an availability this panel's model does not allow. The cross "
-            "section it feeds would name an industry from after the instant the read stands at"
+            f"see. {availability_rule}, so it is never earlier than the event, and a row visible "
+            "before its own event carries an availability this panel's model does not allow. The "
+            "answer it feeds would carry a fact from after the instant the read stands at"
         )
     disagreed = sorted(day for day in set(visible) | set(happened) if visible[day] != happened[day])
     if not disagreed:
@@ -3847,12 +4060,11 @@ def _refuse_a_membership_slice_the_census_disagrees_with(
         f"{dataset} year={year} cannot be read at {as_of.isoformat()}: its date census counts "
         f"{happened[day]} row(s) dated {day.isoformat()}, whose event had already happened, and "
         f"the visible slice carries {visible[day]} of them ({withheld_row_count} row(s) withheld "
-        "in all). A membership row's availability is its own event floored at the taxonomy's "
-        "effective date, so on a partition this read may answer from those two numbers are equal "
-        "on every event date one at a time -- not merely in sum, which two errors in opposite "
-        "directions cancel in. Where they differ, a row is being withheld for a reason this read "
-        "cannot see and a cross section short by it is indistinguishable from one where the row "
-        "does not exist"
+        f"in all). {availability_rule}, so on a partition this read may answer from those two "
+        "numbers are equal on every event date one at a time -- not merely in sum, which two "
+        "errors in opposite directions cancel in. Where they differ, a row is being withheld for "
+        "a reason this read cannot see and an answer short by it is indistinguishable from one "
+        "where the row does not exist"
     )
 
 

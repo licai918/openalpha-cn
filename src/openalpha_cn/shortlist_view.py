@@ -1119,6 +1119,39 @@ def load_shortlist_cross_section(
     same refusal onto `stk_limit` rather than removing it.
     `tests/integration/test_shortlist_earlier_sessions.py` drives the pair from all three faces,
     and holds the withheld/absent separation the session read rests on.
+
+    ## The wall did not fall then; it moved (`V2-P4-076`)
+
+    `V2-P4-061` fixed the three datasets it named and no fixture could show what it left. On a
+    real panel the earlier cross section was still refused, because **four** things beside the
+    prices are read at the resolved instant and three of them still took `read_if_ready`:
+
+        trading calendar ... trade_cal      calendar_publication   not part of the wall
+        security registry .. stock_basic    calendar_static        moved by `V2-P4-076`
+        halts .............. suspend_d      daily_close            moved by `V2-P4-076`
+        name histories ..... namechange     calendar_static        moved by `V2-P4-076`
+
+    Measured on a real panel: `stock_basic` at 2026-08-19T00:00+08 and `suspend_d` at
+    2026-08-19T16:30+08, against a price panel whose newest session was the same day -- so the
+    registry alone refused every cross section before that day's midnight. Reproduced from the
+    surface with the earlier run exiting `1` on `the security registry could not be read ...
+    ['not_yet_knowable']`, and behind it `suspend_d` and `namechange` with the same verdict.
+
+    The three now take `panel_ingest._read_visible_event_dated_rows`, the per-event-date census
+    reconciliation `V2-P4-027`/`034` built for `index_member_all`, each with its own availability
+    rule and its own census bound -- `suspend_d`'s is the newest *published session* and not
+    `as_of`'s calendar day, because a halt is knowable at 16:30 on its own `trade_date`.
+
+    **The calendar is left where it is, and that is a measurement rather than an omission.**
+    `_calendar_publication_timeline` dates every row of year Y available at 1 January of Y, so a
+    year partition's newest availability instant is the earliest instant in it and
+    `not_yet_knowable` has no way to fire at an `as_of` inside the year.
+
+    `tests/integration/test_shortlist_whole_year_reads.py` drives all of it from the three faces,
+    over a corpus built from the three `PANEL_SHAPES` entries that carry the form no fixture had
+    -- a whole-year partition whose newest row lands on the newest session -- and
+    `tests/integration/panel/test_event_dated_visible_reads.py` holds the withheld/absent
+    separation per dataset.
     """
     by_component = {
         component.factor_id: _rows_for(store, component.definition, request)

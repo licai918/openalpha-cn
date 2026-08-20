@@ -29,14 +29,13 @@ from openalpha_cn.domain.panel_batch import (
     PanelColumn,
     TimelineColumns,
 )
-from openalpha_cn.domain.stock_universe import StockUniverseError
 from openalpha_cn.domain.trading_calendar import (
     CalendarDay,
     TradingCalendar,
     build_trading_calendar,
 )
 from openalpha_cn.panel.catalog import KNOWN_STORAGE_LIMITATIONS
-from openalpha_cn.panel.store import ColumnSpec, PanelStore
+from openalpha_cn.panel.store import ColumnSpec, PanelStorageError, PanelStore
 from openalpha_cn.panel_doctor import (
     REBUILDABLE_DATASETS,
     FreshnessPolicy,
@@ -1795,7 +1794,22 @@ def universe_batch_with_a_future_listing() -> ColumnarPanelBatch:
     the same day as every other (`available_time` at `LISTED_ON`, well before the read), so the
     batch contract accepts it, the writer accepts it, and `evaluate_readiness` -- which compares
     only `max_available_time` against `as_of` -- reports `ready`. `load_stock_universe` then
-    raises `StockUniverseError: ... lists on 2026-12-31, after the ... registry snapshot`.
+    refuses it.
+
+    **Which refusal it is moved in `V2-P4-076`, and the reason is worth keeping.** Until then
+    the read handed every row of the partition to `stock_universe_from_panel_rows`, which raised
+    `StockUniverseError: ... lists on 2026-12-31, after the ... registry snapshot`. The read now
+    goes through `_read_visible_event_dated_rows`, whose per-event-date reconciliation sees the
+    same row one layer earlier and by its own name: this row's `available_time` precedes its own
+    `event_time`, which is the **look-ahead** half of `V2-P4-034`'s split rather than a withheld
+    row, and it is reported first for exactly that reason. The claim this test makes is unchanged
+    -- the reader the report exists to authorise refuses the partition the report just called
+    `ready` -- and the refusal it makes is sharper: it names the availability rule the partition
+    breaks instead of describing the consequence at the domain boundary.
+
+    `stock_universe_from_panel_rows`' own horizon rule is untouched and still the boundary for
+    every other caller of it; what this loader can no longer reach it with is a row whose clocks
+    contradict each other, because the door refuses that first.
     """
     securities = (*SECURITIES, "000004.SZ")
     listings = [LISTED_ON] * len(SECURITIES) + [FUTURE_LISTING]
@@ -1839,8 +1853,10 @@ def test_a_row_whose_event_has_not_happened_yet_is_reported_though_readiness_cle
     assert _midnight_shanghai(FUTURE_LISTING).isoformat() in finding.detail
     assert finding.dates == (FUTURE_LISTING,)
     assert report.is_clean is False
-    with pytest.raises(StockUniverseError, match=r"lists on 2026-12-31"):
+    with pytest.raises(PanelStorageError) as refusal:
         load_stock_universe(store, years=(YEAR,), as_of=AS_OF, max_staleness=None)
+    assert "answered 1 visible row(s) dated 2026-12-31" in str(refusal.value)
+    assert "whose event had not happened at" in str(refusal.value)
 
 
 def test_a_calendar_published_a_year_ahead_is_not_reported_as_a_row_about_the_future(

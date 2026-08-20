@@ -98,6 +98,9 @@ EXPECTED_HEALTHY_SHAPES = (
     "calendar.mid_window_weekday_closure",
     "calendar.multi_session_recess",
     "universe.delisted_security",
+    "universe.termination_on_the_newest_session",
+    "suspension.halt_on_the_newest_session",
+    "name_history.announcement_on_the_newest_session",
     "name_history.announcement_precedes_effect",
     "name_history.reform_prefixed_special_treatment",
     "adjustment.step_down",
@@ -115,7 +118,7 @@ EXPECTED_HEALTHY_SHAPES = (
     "industry.session_adjacent_handover",
     "industry.coverage_hole",
 )
-"""Nineteen of the twenty-five, in table order. The six left out, and why:
+"""Twenty-two of the twenty-eight, in table order. The six left out, and why:
 
 - `daily.uncorroborated_factor_step` is a `warning`, and `financials.announced_after_the_as_of`,
   `index.publication_after_the_as_of` and `industry.reclassification_after_the_as_of` are each a
@@ -157,7 +160,7 @@ def _shape_datasets(shape_id: str) -> tuple[str, ...]:
 
     `PanelShape.datasets` already declares which datasets each shape touches, and `V2-P2-000`
     gave `write_generated_panel` the ability to store a subset -- but nothing here used either,
-    so every one of the twenty-five cases below built and wrote all eleven datasets and ran a
+    so every one of the twenty-eight cases below built and wrote all eleven datasets and ran a
     whole-panel health report over them. The cost was almost entirely independent of which
     shape was being tested, which is the signature of a fixed overhead rather than of work the
     assertion needs.

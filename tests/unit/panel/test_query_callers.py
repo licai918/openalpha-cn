@@ -152,21 +152,113 @@ def test_the_allowlist_names_files_that_exist_and_actually_make_the_call() -> No
         )
 
 
+GATED_READS: frozenset[str] = frozenset({"read_if_ready", "read_visible_at"})
+"""The `PanelStore` methods that consult a readiness verdict before returning rows.
+
+Two, and the second is not a relaxation of the first. `read_visible_at` runs the **same**
+`evaluate_readiness` over the **same** `PartitionState`s and blocks on every issue
+`read_if_ready` blocks on, substituting a row predicate for a refusal only where the rule table
+found nothing but `ROW_FILTERABLE_ISSUE_CODES`; it then re-decides the two scope-sensitive codes
+over the rows it is about to hand back. What it is *not* is `query()`, which consults no verdict
+at all, and that is the line this file draws.
+
+Who may take the filtered door, and what each caller does about a short answer, is a separate
+allowlist with a separate argument: `tests/unit/panel/test_visible_read_callers.py`.
+"""
+
+GATED_READERS: dict[str, tuple[str, ...]] = {
+    "_read_visible_event_dated_rows": ("read_visible_at",),
+    "_read_visible_price_session": ("read_visible_at",),
+    "load_adjustment_histories": ("read_if_ready",),
+    "load_index_membership": ("read_if_ready",),
+    "load_index_prices": ("read_if_ready",),
+    "load_industry_histories": ("read_if_ready",),
+    "load_industry_trees": ("read_if_ready",),
+    "load_statement_histories": ("read_if_ready",),
+    "load_trading_calendar": ("read_if_ready",),
+}
+"""Every function in `panel_ingest` that reaches rows, and the door it reaches them through.
+
+**A map rather than a count, and `V2-P4-076` is why.** This was `len(reads) >= 10` over
+`read_if_ready` alone, and the number is a proxy for the thing that matters -- that the loaders
+reach rows through a verdict-returning method -- which drifts the moment two loaders come to
+*share* a door. `V2-P4-076` moved `load_stock_universe`, `load_suspensions` and
+`load_name_histories` onto one shared reader, which removed three call sites and added none, and
+the count fell to 7 while the coverage rose. A threshold lowered to match would have been the
+guard being edited to fit the tree instead of the other way round.
+
+The map cannot drift that way: a loader that stopped reading through a gated door disappears
+from it, a new door appears in it, and either is a diff somebody signs. The three loaders that
+are no longer here by name reach `_read_visible_event_dated_rows` instead, which is, and
+`test_no_loader_reaches_a_partition_outside_this_map` is the half that says nobody else does.
+"""
+
+
+def _gated_reads(tree: ast.AST) -> dict[str, tuple[str, ...]]:
+    """Each enclosing function in `tree` mapped to the gated store methods it calls."""
+    found: dict[str, list[str]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        for inner in ast.walk(node):
+            if (
+                isinstance(inner, ast.Call)
+                and isinstance(inner.func, ast.Attribute)
+                and inner.func.attr in GATED_READS
+            ):
+                found.setdefault(node.name, []).append(inner.func.attr)
+    return {name: tuple(sorted(calls)) for name, calls in found.items()}
+
+
 def test_the_gated_read_is_what_the_rest_of_the_tree_uses() -> None:
     """The positive half: this allowlist would also be satisfied by a tree where nobody reads
     partitions at all, which would make it vacuous. `panel_ingest` is where the readers live,
-    and it must be reaching them through the verdict-returning method.
+    and it must be reaching them through a verdict-returning method.
     """
     ingest = ast.parse((SOURCE / "panel_ingest.py").read_text(encoding="utf-8"))
-    reads = [
-        node
-        for node in ast.walk(ingest)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "read_if_ready"
-    ]
 
-    assert len(reads) >= 10, (
-        f"panel_ingest makes {len(reads)} gated reads; if the loaders stopped using "
-        "read_if_ready() this allowlist would pass while proving nothing"
+    assert _gated_reads(ingest) == GATED_READERS, (
+        "panel_ingest's gated reads are not the ones this map declares; if the loaders stopped "
+        "using a verdict-returning method this allowlist would pass while proving nothing"
+    )
+
+
+def _plain_calls(node: ast.FunctionDef) -> set[str]:
+    """The module-level names `node` calls directly -- `foo(...)`, not `store.foo(...)`."""
+    return {
+        inner.func.id
+        for inner in ast.walk(node)
+        if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name)
+    }
+
+
+def test_no_loader_reaches_a_partition_outside_this_map() -> None:
+    """The half a map of *readers* still needs: that the map is the whole set of them.
+
+    Every public `load_*` in `panel_ingest` reaches rows through a gated store method, directly
+    or through some chain of this module's own functions that does. Resolved as a fixpoint
+    rather than at a fixed depth, because the depth is not one and pinning it would be a second
+    thing to get wrong: `load_industry_cross_section` is two hops out --
+    `_read_visible_membership_rows` is `V2-P4-027`'s door and since `V2-P4-076` it is a call into
+    the shared `_read_visible_event_dated_rows` rather than a fourth copy of it.
+    """
+    ingest = ast.parse((SOURCE / "panel_ingest.py").read_text(encoding="utf-8"))
+    functions = {node.name: node for node in ast.walk(ingest) if isinstance(node, ast.FunctionDef)}
+    reaching = set(GATED_READERS)
+    while True:
+        widened = {
+            name for name, node in functions.items() if _plain_calls(node) & reaching
+        } - reaching
+        if not widened:
+            break
+        reaching |= widened
+
+    ungated = sorted(
+        name for name in functions if name.startswith("load_") and name not in reaching
+    )
+
+    assert ungated == [], (
+        f"{ungated} are load_* functions that reach no gated store method by any chain of this "
+        "module's own functions; a loader that reaches rows some third way is what this file "
+        "exists to make visible"
     )
