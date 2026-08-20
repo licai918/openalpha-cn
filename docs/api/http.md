@@ -523,16 +523,37 @@ Server Error`. Nothing a caller can put in the body should produce one — a cal
 `position_capital` used to, and now does not — so a `500` here is a defect to report, not a
 request to change.
 
-**Nor should anything in the store produce one, and until `V2-P4-070` something did.** A
-registry whose lifecycle backfill was interrupted — a security's delisting row stored and
-its listing row in a year partition that was never written — made this route answer `500`
-`text/plain` while `openalpha factor build` on the same store answered `1` and named the
-security. It was a verdict about the panel filed as a defect in the service, and the
-remedy was to finish the backfill rather than to report a bug. It is a `409`
-`panel_unreadable` now, with the refusal's own sentence in `detail.message`; both faces
-read the registry through the same fault list, and
-`tests/integration/test_partial_registry_faces.py` drives one such store at this route, at
-`shortlist run` and at `factor build`.
+**Nor should anything in the store produce one — and twice something did.** This sentence
+first read "and until `V2-P4-070` something did", which asserted the list was closed; it
+was written in `V2-P4-070`'s own commit and measured false eleven commits later. It is a
+list now, and the list is not closed.
+
+The first was a registry whose lifecycle backfill was interrupted — a security's delisting
+row stored and its listing row in a year partition that was never written — which made this
+route answer `500` `text/plain` while `openalpha factor build` on the same store answered
+`1` and named the security (`V2-P4-070`).
+
+The second was an ordinary rename (`V2-P4-080`). `MarketBar.is_st` is read off the stored
+`namechange` corpus, `load_name_histories` is scoped to the announcement years the request
+asks for, and `NameHistory.record_on` refuses a session before a security's earliest record
+in them rather than answering the earliest name on file. A security whose only rename in the
+requested year was announced before the priced session and takes effect after it therefore
+has no name on that session — the two-clock rename this repository models on purpose, met one
+year at a time — and the refusal escaped both faces: `500` `text/plain` here, `exit 5` from
+`shortlist run` and `exit 5` from `factor run`, with the sentence naming the security withheld
+each time. It needs no damaged partition: the corpus is well formed and simply does not reach
+back past the session.
+
+Both are `409` `panel_unreadable` now, with the refusal's own sentence in `detail.message`
+naming the security and, for the second, the dataset and the build command that extends it.
+`tests/integration/test_partial_registry_faces.py` and
+`tests/integration/test_unnamed_session_faces.py` drive one store each at this route, at
+`shortlist run` and at the factor face.
+
+Neither was a defect in this service, and neither is a reason to widen this row: what makes
+a `500` here still mean "report a bug" is that each such refusal is anticipated where it is
+raised — at the read for the first, and at the question asked of what the read returned for
+the second.
 
 `openalpha shortlist run` maps the same names onto exit codes
 (`cli.py#SHORTLIST_EXIT`) and reuses `PanelExit`: `0` admitted, `1` for every `409` row —

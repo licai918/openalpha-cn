@@ -175,7 +175,12 @@ from openalpha_cn.domain.factor_transform import (
 )
 from openalpha_cn.domain.horizon import COUNTABLE_HORIZON_PATTERN, is_countable_horizon
 from openalpha_cn.domain.labels import halt_corpus_for_years
-from openalpha_cn.domain.name_history import NAMECHANGE_DATASET, RiskWarning
+from openalpha_cn.domain.name_history import (
+    NAMECHANGE_DATASET,
+    NameHistory,
+    NameHistoryHorizonError,
+    RiskWarning,
+)
 from openalpha_cn.domain.panel_batch import PanelBatchError
 from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET, SUSPENSION_DATASET
 from openalpha_cn.domain.run import RunManifest
@@ -566,6 +571,26 @@ KNOWN_SHORTLIST_VIEW_LIMITATIONS: Final[tuple[ShortlistViewLimitation, ...]] = (
             "three tiers and `run_shortlist` refuses `tier='neutralized'` by name rather than "
             "loading an exposure cross section at an instant that would not match the screen's. "
             "Screen on `raw` or `processed`, where nothing was projected out."
+        ),
+    ),
+    ShortlistViewLimitation(
+        code="a_name_never_announced_inside_the_requested_years_is_screened_as_ordinary",
+        detail=(
+            "KNOWN_SHORTLIST_VIEW_NAMES: `MarketBar.is_st` is read off the stored rename corpus, "
+            "and `load_name_histories` is scoped to the announcement years the run asked for. A "
+            "security with no row in those years has no `NameHistory` at all, and "
+            "`_risk_warned_on` answers `False` for it -- which is right for a name that has not "
+            "been renamed and **wrong** for one that was put under special treatment in an "
+            "earlier year and is still under it, because a rename is dated at its announcement "
+            "and an announcement made in an earlier year is in a partition this read did not "
+            "cover. `V2-P4-080` fixed the neighbouring case and deliberately did not fix "
+            "this one: a security whose earliest row in the requested years takes effect *after* "
+            "the session being priced is refused by name, because the corpus positively shows a "
+            "rename this run cannot resolve. Absence shows nothing, and refusing on it would "
+            "refuse almost every honest run -- most of the market has no rename announced in any "
+            "one year. The remedy available to a caller is the same one the refusal names: ask "
+            "for the announcement years that cover the security's last rename. "
+            "`panel_ingest.load_name_histories` states the same bound from the read's side."
         ),
     ),
 )
@@ -1618,10 +1643,134 @@ def _bars_on(
             suspended=suspended_at_the_close(
                 halts.state_on(session, subject), halts.timing_on(session, subject)
             ),
-            is_st=history is not None and history.risk_warning_on(session) is not RiskWarning.none,
+            is_st=_risk_warned_on(
+                history, subject=subject, session=session, store=store, years=request.years
+            ),
             **published_limit_fields(limit),
         )
     return priced
+
+
+def _risk_warned_on(
+    history: NameHistory | None,
+    *,
+    subject: str,
+    session: date,
+    store: PanelStore,
+    years: Sequence[int],
+) -> bool:
+    """`MarketBar.is_st` for one security on one session, or a refusal naming both.
+
+    `factor_view._risk_warned_on` restated, `_PANEL_FAULTS`' arrangement and its reason: which
+    refusals are facts about stored data rather than defects in the code that read them is one
+    question with one answer, and two faces that answered it differently would put the same corpus
+    under two status codes on two channels. `tests/unit/test_shortlist_view.py::
+    test_both_faces_refuse_an_unnamed_session_with_the_same_sentence` drives the two seams with one
+    history rather than comparing two constants, which is the pin `V2-P4-070` showed a constant
+    cannot be.
+
+    ## Why this raises rather than defaulting, and `V2-P4-080` is why it raises *here*
+
+    `NameHistory.record_on` refuses a day before its first record on purpose -- "an unrecorded name
+    is unknown rather than equal to the earliest one on file" -- and `NameHistoryHorizonError`'s
+    own docstring says that refusal is a verdict rather than a caller mistake. Until `V2-P4-080`
+    the call sat bare inside `MarketBar(...)`, outside every `_read` guard, so `_PANEL_FAULTS`
+    never saw it and one ordinary two-clock rename reached a user as `exit 5` on the CLI and `500
+    text/plain` from the route -- with the sentence naming the security withheld, on the correct
+    grounds that an unanticipated frame can be holding the credential.
+
+    Answering `False` in the caller is what the crash replaced and it would have been the worse
+    of the two, but **not for the reason first written here**, which was measured false before it
+    shipped. The first draft said the security would be sized under a band the exchange may not
+    apply to it. It would not: `MarketBar.is_st` is read at exactly one site in this repository --
+    `backtest/execution._price_band`, `ratio = Decimal("0.05") if market.is_st else
+    _board_limit(market.board)` -- and only when `up_limit`/`down_limit` are absent. Both faces
+    build every bar with `published_limit_fields(limit)` and build none at all when the limit is
+    missing, so the derivation is unreachable from here and a wrong `is_st` moves no verdict today.
+
+    What is wrong with `False` is what it *records*. `is_st` is a field whose contract is "the
+    risk-warning state read off the name in effect on this session", stated in this module and
+    written out rather than hidden in a truth test precisely so the collapse is visible; writing
+    `False` into it for a security whose name nobody has would make the bar assert something the
+    corpus does not support, and no reader of the bar could tell that apart from a name measured
+    ordinary. It is latent rather than harmless: `KNOWN_CROSS_SECTION_LIMITATIONS.
+    an_absent_published_band_is_refused_here_and_derived_by_the_execution_policy` records that the
+    two planes already disagree about an absent band -- the funnel codes it `unbanded` and the
+    policy derives one -- so the derivation is live code one caller away, and it is measurably
+    wrong on 159 of the 5,338 priced names of 2024-06-28 (`domain/price_limits.py`).
+
+    **`history is None` is deliberately still `False`, and it is a different state.** A security
+    with no row in the announcement years read has had no rename announced in them, which is the
+    ordinary condition of most of the market; a security whose earliest row takes effect *after*
+    the session has had one, and the name it traded under before it is outside the corpus. The
+    residue that leaves is disclosed as
+    `a_name_never_announced_inside_the_requested_years_is_screened_as_ordinary`.
+    """
+    if history is None:
+        return False
+    try:
+        return history.risk_warning_on(session) is not RiskWarning.none
+    except NameHistoryHorizonError as error:
+        raise ShortlistPanelUnreadableError(
+            _unnamed_session_refusal(
+                str(store.root), subject=subject, session=session, years=years, error=error
+            ),
+            disclosable=_unnamed_session_refusal(
+                PANEL_STORE_PLACEHOLDER,
+                subject=subject,
+                session=session,
+                years=years,
+                error=error,
+            ),
+        ) from error
+
+
+def _unnamed_session_refusal(
+    where: str,
+    *,
+    subject: str,
+    session: date,
+    years: Sequence[int],
+    error: NameHistoryHorizonError,
+) -> str:
+    """What this face says when the rename corpus reaches no name for a priced session.
+
+    `factor_view._unnamed_session_refusal` restated word for word, and the restatement is a choice
+    with a cost. `V2-P4-070`'s own lesson is that "two sites that duplicate the `what=` string and
+    the fault list between them is how one of them comes to catch a refusal the other lets escape"
+    -- which is why `_read_registry` exists *within* each module. Across the two modules there is
+    no shared home that is not a new import edge between two faces, so the duplication stays and
+    is held by an executable pin instead: `tests/unit/test_shortlist_view.py::
+    test_both_faces_refuse_an_unnamed_session_with_the_same_sentence` drives both seams with one
+    history and requires the two messages to be the same string, which is the form
+    `V2-P4-070` proved a constant-to-constant assertion is not.
+
+    `where` is the store's own location on the message carried as the exception's own text and
+    `PANEL_STORE_PLACEHOLDER` on `disclosable`, which is `_read`'s arrangement and its reason: a
+    message that stays inside the process that owns the store may name it, while one that may cross
+    a boundary would hand that path to whoever could reach the port. Which of the two a given face
+    prints is that face's decision, and they differ: `cli._shortlist_fail` prints `disclosable` on
+    this face while `cli._factor_fail` prints `str(error)` on the other. This function makes both
+    available rather than choosing for them.
+
+    The remedy names a year rather than spelling one, deliberately. The name the security traded
+    under on `session` was established by an announcement outside the years this run read, and this
+    function cannot say which year holds it: `load_name_histories` is scoped to the announcement
+    years it is given, and how far back the security's last rename was is not knowable from a
+    corpus that does not contain it. A remedy that named a year which does not help would be worse
+    than one that names the dataset and the flag.
+    """
+    covered = ", ".join(str(year) for year in sorted(set(years)))
+    return (
+        f"the risk-warning state of {subject} on {session.isoformat()} could not be read out of "
+        f"{where}: {error}. `MarketBar.is_st` is that state, so screening {subject} would file a "
+        f"risk warning nobody knows as a known-clean one. The rename corpus is read one "
+        f"announcement year at a time and this run read {covered}, so a security whose earliest "
+        f"announcement in those years takes effect after the session being priced has no name on "
+        f"it at all. Extend the corpus back to an announcement year that covers "
+        f"{session.isoformat()} -- `openalpha panel build --dataset {NAMECHANGE_DATASET} --year "
+        f"<year>` -- and ask this run for that year too."
+    )
 
 
 def _board(ts_code: str) -> Literal["main", "star", "growth", "bse"]:

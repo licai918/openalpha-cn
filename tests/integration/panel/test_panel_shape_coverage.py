@@ -102,6 +102,7 @@ EXPECTED_HEALTHY_SHAPES = (
     "suspension.halt_on_the_newest_session",
     "name_history.announcement_on_the_newest_session",
     "name_history.announcement_precedes_effect",
+    "name_history.effect_after_every_priced_session",
     "name_history.reform_prefixed_special_treatment",
     "adjustment.step_down",
     "daily.close_moves_between_sessions",
@@ -118,7 +119,7 @@ EXPECTED_HEALTHY_SHAPES = (
     "industry.session_adjacent_handover",
     "industry.coverage_hole",
 )
-"""Twenty-two of the twenty-eight, in table order. The six left out, and why:
+"""Twenty-three of the twenty-nine, in table order. The six left out, and why:
 
 - `daily.uncorroborated_factor_step` is a `warning`, and `financials.announced_after_the_as_of`,
   `index.publication_after_the_as_of` and `industry.reclassification_after_the_as_of` are each a

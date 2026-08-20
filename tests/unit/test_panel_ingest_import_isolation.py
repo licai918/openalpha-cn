@@ -517,6 +517,7 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
                 "fina_indicator",
                 "income",
                 "index_daily",
+                "namechange",
             }
         ),
         reached=frozenset(
@@ -596,16 +597,24 @@ because this instrument counts every literal that equals a dataset name -- see t
 docstring, blind spot 2, for why the narrower rule is worse -- and it costs nothing here because
 the gate's `reached` already covers `daily` through `panel_health_report`.
 
-**`factor_view` names six and reaches thirteen, and the two it does not reach are the row.**
+**`factor_view` names seven and reaches thirteen, and the two it does not reach are the row.**
 `index_classify` and `index_weight` are the only upstream datasets left, and the shape of this
 row is `V2-P3-019`'s doing: when this table was first written the face named *none* and reached
 *eleven*, because it rendered stored tiers and its reach came from the seven `panel_ingest`
-loaders a tradeability label needs. `openalpha factor build` made it a builder as well, so it now
+loaders a tradeability label needs. `openalpha factor build` made it a builder as well, so it
 names the same six `panel_factors` does -- it imports `DAILY_DATASET`, `DAILY_BASIC_DATASET` and
 `FINANCIAL_STATEMENT_DATASETS` to state the requirements a build must clear -- and picks up
 `fina_indicator` and `index_member_all` in `reached`, the latter through
 `load_industry_market_cap_cross_section`, which is the industry corpus the neutralisation
-regresses against and which a renderer had no reason to touch. It is covered here at all because
+regresses against and which a renderer had no reason to touch.
+
+The seventh is `namechange`, and it arrived as a **remedy string** rather than as a read.
+`V2-P4-080` gave `_unnamed_session_refusal` the `openalpha panel build --dataset namechange`
+line a caller needs, so the module imports `NAMECHANGE_DATASET` to spell it -- and this table
+correctly calls that naming the dataset even though the face has reached it since this row was
+written, through `load_name_histories`. `named` growing into `reached` is the benign direction
+and the instrument does not distinguish it; what it is here to catch is `named` or `reached`
+growing past `reached`'s declared set, which this did not. It is covered here at all because
 `V2-P3-015` made `factor_*` a second top-level family and the glob above only knew about the
 first; see `RESEARCH_PLANE_PREFIXES`.
 
