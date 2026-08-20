@@ -126,6 +126,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, DecimalException
 from hashlib import sha256
+from types import MappingProxyType
 from typing import ClassVar, Final, Literal, Protocol, TypeVar
 from zoneinfo import ZoneInfo
 
@@ -162,6 +163,7 @@ from openalpha_cn.backtest.shortlist_gate import (
     ShortlistGateSpec,
     gate_shortlist,
 )
+from openalpha_cn.domain.daily_prices import DAILY_DATASET
 from openalpha_cn.domain.factor import FactorDefinition, FactorError, FactorRegistry
 from openalpha_cn.domain.factor_neutralization import (
     FactorNeutralizationRegistry,
@@ -173,12 +175,21 @@ from openalpha_cn.domain.factor_transform import (
 )
 from openalpha_cn.domain.horizon import COUNTABLE_HORIZON_PATTERN, is_countable_horizon
 from openalpha_cn.domain.labels import halt_corpus_for_years
-from openalpha_cn.domain.name_history import RiskWarning
+from openalpha_cn.domain.name_history import NAMECHANGE_DATASET, RiskWarning
 from openalpha_cn.domain.panel_batch import PanelBatchError
+from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET, SUSPENSION_DATASET
 from openalpha_cn.domain.run import RunManifest
 from openalpha_cn.domain.signal import SignalFrame
-from openalpha_cn.domain.stock_universe import StockUniverse, StockUniverseError
-from openalpha_cn.domain.trading_calendar import TradingCalendar, TradingCalendarError
+from openalpha_cn.domain.stock_universe import (
+    STOCK_BASIC_DATASET,
+    StockUniverse,
+    StockUniverseError,
+)
+from openalpha_cn.domain.trading_calendar import (
+    TRADING_CALENDAR_DATASET,
+    TradingCalendar,
+    TradingCalendarError,
+)
 from openalpha_cn.panel.catalog import PanelStorageError
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import (
@@ -195,6 +206,7 @@ from openalpha_cn.panel_ingest import (
     load_stock_universe,
     load_suspensions,
     load_trading_calendar,
+    newest_published_session,
 )
 from openalpha_cn.panel_neutralization import (
     FACTOR_NEUTRALIZATIONS,
@@ -207,6 +219,7 @@ __all__ = [
     "KNOWN_SHORTLIST_VIEW_LIMITATIONS",
     "SHORTLIST_ANSWER_UNADDRESSED_KEYS",
     "SHORTLIST_DOCUMENT_SCHEMA_VERSION",
+    "SHORTLIST_PANEL_DATASETS",
     "SHORTLIST_VIEW_LIMITATION_CODES",
     "SHORTLIST_VIEW_SCHEMA_VERSION",
     "ResearchRunStore",
@@ -310,6 +323,43 @@ symmetry: an A-share session is a calendar day on the exchange's own clock, and 
 2026-01-16T09:00Z is 17:00 in Shanghai -- after that session's close, and therefore about it. In
 UTC the same instant is still 2026-01-16 and the two agree; two hours later they do not, and the
 zone is what decides which session's bars stage two prices against.
+
+**The zone alone was not enough, which is `V2-P4-077`.** A calendar day turns over at midnight
+and a session publishes at 16:30, so the sixteen hours between them are a day this instant is
+*in* and a session it cannot see. `_pricing_session` reads the second clock too; see it.
+"""
+
+SHORTLIST_PANEL_DATASETS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        TRADING_CALENDAR_DATASET: TRADING_CALENDAR_DATASET,
+        STOCK_BASIC_DATASET: STOCK_BASIC_DATASET,
+        DAILY_DATASET: "price",
+        PRICE_LIMIT_DATASET: PRICE_LIMIT_DATASET,
+        SUSPENSION_DATASET: "price",
+        NAMECHANGE_DATASET: NAMECHANGE_DATASET,
+    }
+)
+"""Every panel dataset this face reads, mapped to the `panel build` target that writes it.
+
+`V2-P4-078`. `shortlist run` reaches `NameHistory.risk_warning_on` through `_bars_on` for every
+`MarketBar`'s `is_st`, so it **must** have `namechange`; `openalpha factor build --tier raw`
+neither needs nor fetches it, `BUILD_TARGETS` in `tests/e2e/e2e_support.py` does not build it,
+and the refusal a user then met named the partition and not the command. That is `V2-P4-067`(b)
+measured from the other side, against a bar the same acceptance had already set:
+`panel_view.NO_CALENDAR_REMEDY` names `openalpha panel build --dataset trade_cal --year <year>`
+and every refusal on this face named nothing.
+
+**Keyed by dataset and valued by target, because the two vocabularies are not the same one.**
+`panel build --dataset daily` is refused by name -- `write_daily_panel` takes the bars, the
+valuations and the halts together, so `PANEL_BUILD_COUPLED_DATASETS` sends the caller to
+`price` -- and a remedy spelling `daily` would name a command that does not run. Six datasets,
+five targets. `tests/integration/test_shortlist_build_prerequisites.py` holds every value
+against `cli.PANEL_BUILD_TARGETS` and drives each target's absence through a face.
+
+`adj_factor` is not here, measured rather than assumed: it is the sixth target the end-to-end
+panel fetches, and with it omitted both `factor build --tier raw` and `shortlist run` still
+answer. Naming it would send a user on a build measured in hours for a partition this face
+never opens.
 """
 
 
@@ -1164,6 +1214,7 @@ def load_shortlist_cross_section(
         ),
         store=store,
         what=f"the {request.exchange} trading calendar",
+        dataset=TRADING_CALENDAR_DATASET,
     )
     session = _pricing_session(instant, calendar=calendar)
 
@@ -1318,17 +1369,50 @@ def _resolve_instant(
 
 
 def _pricing_session(instant: datetime, *, calendar: TradingCalendar) -> date:
-    """The session stage two prices against: the cross section's own day, or the one before it.
+    """The session stage two prices against: the newest one that had **published** at `instant`.
 
-    `previous_trading_day` when the instant lands on a non-session -- a build stamped on a Saturday
-    is about the Friday close -- and the instant's own day when it is one. Both go through the
-    stored calendar rather than a weekday rule, because a Chinese public holiday is not a weekend
-    and a screen that priced through one would offer buys on a day the exchange was shut.
+    Two clocks and not one, which is the whole of `V2-P4-077`. `previous_trading_day` when the
+    instant lands on a non-session -- a build stamped on a Saturday is about the Friday close --
+    goes through the stored calendar rather than a weekday rule, because a Chinese public holiday
+    is not a weekend and a screen that priced through one would offer buys on a day the exchange
+    was shut. That was the only clock this function read, and it is the wrong one on its own.
+
+    ## What the calendar-day rule cost, measured
+
+    A calendar day turns over at midnight and a session's bars publish at 16:30, so a cross
+    section stamped 00:30 on a Friday sat *inside* Friday and could see nothing of it. This
+    function returned Friday; the values had been computed from Thursday's close; the price plane
+    refused the read as a look-ahead, correctly. Because the instant is stored **on the cross
+    section**, that refusal was permanent -- `V2-P4-077` swept every `as_of` from before the build
+    to days after it and every one exited `1`, half of them with "no cross section visible yet"
+    and the rest with `daily cannot be read for 2026-01-16 ... that session had not published
+    yet`. There was no gap between the two, and no later question that repaired it.
+
+    Nor was the overnight rollover the shape of it. The window ran from midnight Asia/Shanghai to
+    that session's own 16:30, so a build at 09:00 in Shanghai -- before the market opens, on an
+    ordinary working morning -- produced an equally unscreenable cross section.
+
+    `panel_ingest.newest_published_session` reads both clocks: `DAILY_AVAILABILITY_TIME` for when
+    a session becomes knowable, then the calendar for which day that lands on. It is **never
+    later** than the rule it replaces and differs from it only where that rule named a session
+    that had not published -- so every instant that already answered answers identically, and the
+    ones that could not answer at all now price the session their values were computed from. Both
+    halves are computed over a year at half-hourly steps rather than argued: 16,735 instants, 0
+    later, 8,518 identical, 8,217 different and 0 of those on a session the old rule could have
+    been answered for. Those 8,217 are just under **half of every instant in the year**, which is
+    the measurement that makes this an ordinary-use defect rather than an overnight one.
+
+    **Nothing was relaxed to do it.** `_read_visible_price_session` still refuses a session past
+    `_sessions_published_through`, and it is literally the same function this resolver asks, so
+    the two cannot come apart. What changed is that this face stopped asking a question whose
+    only honest answer was no; `panel doctor --session` is where that answer is still reachable.
     """
-    day = instant.astimezone(SHORTLIST_DATE_ZONE).date()
     try:
-        return day if calendar.is_trading_day(day) else calendar.previous_trading_day(day)
+        return newest_published_session(
+            calendar, as_of=instant, date_timezone=SHORTLIST_DATE_ZONE.key
+        )
     except TradingCalendarError as error:
+        day = instant.astimezone(SHORTLIST_DATE_ZONE).date()
         raise ShortlistRunBlockedError(
             f"the stored cross section is at {instant.isoformat()}, and the exchange calendar "
             f"cannot say which session {day.isoformat()} belongs to: {error}. Extend the calendar "
@@ -1490,6 +1574,7 @@ def _bars_on(
         ),
         store=store,
         what=f"the price bars for {session.isoformat()}",
+        dataset=DAILY_DATASET,
     )
     limits = _read(
         lambda: load_price_limits(
@@ -1497,12 +1582,14 @@ def _bars_on(
         ),
         store=store,
         what=f"the published limit bands for {session.isoformat()}",
+        dataset=PRICE_LIMIT_DATASET,
     )
     halts = halt_corpus_for_years(
         _read(
             lambda: load_suspensions(store, years=request.years, as_of=as_of, max_staleness=None),
             store=store,
             what="the halt corpus",
+            dataset=SUSPENSION_DATASET,
         ),
         years=request.years,
     )
@@ -1510,6 +1597,7 @@ def _bars_on(
         lambda: load_name_histories(store, years=request.years, as_of=as_of, max_staleness=None),
         store=store,
         what="the name histories",
+        dataset=NAMECHANGE_DATASET,
     )
     listed = set(universe)
     priced: dict[str, MarketBar] = {}
@@ -2233,6 +2321,7 @@ def _read(
     *,
     store: PanelStore,
     what: str,
+    dataset: str | None = None,
     faults: tuple[type[Exception], ...] = _PANEL_FAULTS,
 ) -> _T:
     """Run one panel read, turning its refusal into `ShortlistPanelUnreadableError`.
@@ -2244,17 +2333,52 @@ def _read(
     `faults` is every read's answer by default and is widened by exactly one caller; see
     `_REGISTRY_FAULTS` for why the registry's two extra refusals go to the read that raises them
     rather than to all of them.
+
+    `dataset` is a key of `SHORTLIST_PANEL_DATASETS` and is what `_unbuilt_dataset_remedy` needs
+    to name a command. It is `None` for the factor-tier reads, which are the other callers here:
+    those already refuse with `openalpha factor build --factor ... --tier ...` on them (see
+    `_resolve_instant`), and a `panel build` line appended to one of them would name the wrong
+    plane.
     """
     try:
         return reader()
     except faults as error:
+        remedy = "" if dataset is None else _unbuilt_dataset_remedy(store, dataset=dataset)
         raise ShortlistPanelUnreadableError(
-            f"{what} could not be read out of {store.root}: {error}",
+            f"{what} could not be read out of {store.root}: {error}{remedy}",
             disclosable=(
                 f"{what} could not be read out of {PANEL_STORE_PLACEHOLDER}: "
-                f"{_without_store_path(str(error), store)}"
+                f"{_without_store_path(str(error), store)}{remedy}"
             ),
         ) from error
+
+
+def _unbuilt_dataset_remedy(store: PanelStore, *, dataset: str) -> str:
+    """The `panel build` line for a dataset this panel holds no partition of, or `""`.
+
+    `V2-P4-078`, and `panel_view.NO_CALENDAR_REMEDY` is the bar it is written to: the message is
+    the only thing a caller who gets this refusal has to act on, and naming the partition without
+    naming the command leaves them to find `PANEL_BUILD_TARGETS` themselves. The target is looked
+    up rather than spelled, because `--dataset daily` is refused by name and this is exactly the
+    place a hand-written string would say it.
+
+    **It fires on "no partition of this dataset at all" and on nothing else, deliberately.** That
+    is the one state in which `panel build` is unambiguously the whole answer, and it is the state
+    `V2-P4-078` was found in -- a panel built from five targets, screened by a command that needs
+    six. A dataset the store holds *some* year of can be short for reasons this function cannot
+    tell apart: a year-partitioned dataset is missing that year and says so itself, while
+    `stock_basic` is partitioned by **lifecycle** year, so "the requested year is absent" is its
+    ordinary healthy state (`load_stock_universe` reads every lifecycle year below the request)
+    and a remedy keyed on it would be wrong far more often than right. A refusal that names a
+    command which does not help is worse than one that names none.
+    """
+    if store.registered_years(dataset):
+        return ""
+    return (
+        f". No {dataset} partition is registered in this panel at all, and this command reads "
+        f"it. Build it first: `openalpha panel build --dataset "
+        f"{SHORTLIST_PANEL_DATASETS[dataset]} --year <year>`"
+    )
 
 
 def _read_registry(reader: Callable[[], StockUniverse], *, store: PanelStore) -> StockUniverse:
@@ -2266,7 +2390,13 @@ def _read_registry(reader: Callable[[], StockUniverse], *, store: PanelStore) ->
     so that a second site cannot be added that quietly takes the default tuple -- which is the
     shape `V2-P4-070` was, with the second site in another module.
     """
-    return _read(reader, store=store, what="the security registry", faults=_REGISTRY_FAULTS)
+    return _read(
+        reader,
+        store=store,
+        what="the security registry",
+        dataset=STOCK_BASIC_DATASET,
+        faults=_REGISTRY_FAULTS,
+    )
 
 
 def _without_store_path(message: str, store: PanelStore) -> str:

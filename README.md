@@ -508,6 +508,52 @@ uv run openalpha shortlist run --component reversal_1d/v1=1.0 --tier raw \
 因子档必须先存在：`openalpha factor build` 是放它进去的那条命令。三个面等价：
 `openalpha shortlist run` ／ `POST /api/v1/shortlists/run` ／ `OpenAlphaSDK.run_shortlist()`。
 
+**除了因子档，这条命令还硬性需要五个面板目标，而以前没有任何地方写着这件事（`V2-P4-078`）。**
+它在解析出来的横截面自己的时刻上读六个面板数据集，缺任何一个都是拒绝而不是「筛出来的名字少
+一点」：
+
+```bash
+uv run openalpha panel build --dataset trade_cal    --year 2026   # 交易日历
+uv run openalpha panel build --dataset stock_basic  --year 2026   # 证券登记簿
+uv run openalpha panel build --dataset price        --year 2026   # K 线、估值、停牌（一个目标三个数据集）
+uv run openalpha panel build --dataset stk_limit    --year 2026   # 已发布的涨跌停带
+uv run openalpha panel build --dataset namechange   --year 2026   # 名称历史
+```
+
+**最容易漏的是 `namechange`，而它把本仓库自己的端到端套件绊了一跤。** `factor build --tier raw`
+不需要它，所以一个没有它的面板上，因子构建是绿的、榜是红的。它是 `is_st` 的唯一来源——每根
+`MarketBar` 带一个风险警示位，取自定价会话当天生效的那个名字——所以没有它就等于把每一只 ST
+名字按普通涨跌幅定价。`adj_factor` **不在**这张表里：`factor build` 可能要它，这条命令一次都
+不打开它，把它写进来等于让人白跑一次以小时计的构建。
+
+现在缺分区的拒绝会把命令一起报出来，标准就是面板闸口那条（`panel_view.NO_CALENDAR_REMEDY`）：
+
+```
+the name histories could not be read out of this service's panel store: the rename corpus
+cannot be read at ...: ['partition_missing', 'field_missing']; ... . No namechange partition is
+registered in this panel at all, and this command reads it. Build it first: `openalpha panel
+build --dataset namechange --year <year>`
+```
+
+**决定按哪个会话定价的，是横截面被「建」在哪个 `--as-of` 上，而那不是它落在的那一天
+（`V2-P4-077`）。** 一个会话的行情在 Asia/Shanghai 16:30 才可知，所以一个盖在当天零点到 16:30
+之间的构建，是按**前一个**会话定价的——即它自己的因子值算出来时最新那个已经发布的会话。以前
+这里取的是那个时刻自己的日历日：于是一个 19:01Z 起跑、在上海已经翻过零点的隔夜构建，会去问
+一个还没发布的会话，被行情平面正确地拒掉——而因为时刻是**存在横截面上**的，这个拒绝是永久
+的，之后无论在哪个 `as_of` 上再问都是同一个拒绝。实测扫过从构建之前到四天之后的每一个
+`as_of`，全部 `exit 1`，两种拒绝之间没有任何缝隙。
+
+**这也不只是「隔夜」，而这是这条最值得读两遍的地方。** 那个窗口从零点一直到 16:30，所以一个
+上海时间上午九点、开盘前建出来的横截面，同样一次都筛不出来。按半小时步长扫过 2026 全年
+16,735 个时刻：新规则**没有一次**晚于旧规则，8,518 个时刻两者相同，8,217 个不同——而这 8,217
+个里**没有一个**是旧规则本来就能作答的会话。也就是说，全年将近一半的时刻，建出来的横截面是
+永久不可筛的。
+
+**前视那道闸一步都没松。** `_read_visible_price_session` 依然拒绝任何越过
+`_sessions_published_through` 的会话，而定价会话现在问的就是同一个函数，两者不可能对不上；那条
+拒绝仍然可以从 `openalpha panel doctor --session` 直接问到。变的是这个面不再去问一个只有「不
+行」这一个诚实答案的问题。每个答案里的 `cross_section.pricing_session` 说的就是用了哪个会话。
+
 **「等价」是逐字面量成立的，不只是「大体一样」。** 同一个字面输入在三个面上必须得到同一个
 判决：`--code-commit ""` 是显式声明了一个空值，三个面都拒；把这个旗标**整个省掉**才是「由
 进程自己解析」，只有命令行和 HTTP 有这条回退，而它和「显式给空」是两件事。这条以前不成立

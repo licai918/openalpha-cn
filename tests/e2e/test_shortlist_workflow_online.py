@@ -486,21 +486,40 @@ def rename_corpus(built_panel: BuiltPanel, tmp_path_factory: pytest.TempPathFact
     """The one dataset this module needs and `BUILD_TARGETS` does not fetch, built at the instant
     the panel is about.
 
-    **`openalpha shortlist run` requires it and nothing says so.** `_bars_on` builds each
-    `MarketBar` with an `is_st` read off `NameHistory.risk_warning_on`, so a screen over a market
-    it cannot say the risk warnings of would treat every ST name as ordinary; `load_name_histories`
-    refuses a year that was never ingested rather than answering a shorter corpus. A panel built
-    from `e2e_support.BUILD_TARGETS` -- five targets, seven datasets -- holds no such year, and the
-    refusal a user meets does not name the command that fixes it. That is `V2-P4-067`'s (b),
-    measured again here from the other side. `openalpha factor build --tier raw` does **not** need
-    it, which is why this suite reached a green factor build and a red shortlist.
+    **`openalpha shortlist run` requires it, and `V2-P4-078` is that nothing said so.**
+    `_bars_on` builds each `MarketBar` with an `is_st` read off `NameHistory.risk_warning_on`, so a
+    screen over a market it cannot say the risk warnings of would treat every ST name as ordinary;
+    `load_name_histories` refuses a year that was never ingested rather than answering a shorter
+    corpus. A panel built from `e2e_support.BUILD_TARGETS` -- five targets, seven datasets -- holds
+    no such year, and the refusal a user met did not name the command that fixes it. That was
+    `V2-P4-067`'s (b), measured here from the other side. `openalpha factor build --tier raw` does
+    **not** need it, which is why this suite reached a green factor build and a red shortlist.
 
-    **`--as-of` is the screenable instant and not the wall clock**, which is the whole of this
-    module's second finding: `namechange` is announcement-dated and fetched whole, so a build
-    stamped `datetime.now(UTC)` on an overnight run carries a rename effective *tomorrow* while
-    `daily` legitimately stops at the last session that published -- and the chain that reads both
-    at one instant then has nowhere to stand. Built at the instant the price plane can answer for,
-    `ColumnarPanelBatch`'s own visible-at-`as_of` check leaves that row out.
+    That half is closed. `shortlist_view.SHORTLIST_PANEL_DATASETS` maps the six datasets this face
+    reads to the five `panel build` targets that write them, the refusal for a panel holding no
+    partition of one of them now carries `openalpha panel build --dataset namechange --year
+    <year>`, and `shortlist run --help`, `README.md` and `docs/api/http.md` name all five before a
+    caller can reach a refusal. `tests/integration/test_shortlist_build_prerequisites.py` drives
+    each target's absence through a face; **this fixture is left as it is**, because what it
+    demonstrates is that the corpus has to be *fetched* and no amount of documentation fetches it.
+
+    **`--as-of` is the screenable instant and not the wall clock**, which was this module's second
+    finding and is `V2-P4-077`. `namechange` is announcement-dated and fetched whole, so a build
+    stamped `datetime.now(UTC)` on an overnight run carries a rename announced *tomorrow* while
+    `daily` legitimately stops at the last session that published. Built at the instant the price
+    plane can answer for, `ColumnarPanelBatch`'s own visible-at-`as_of` check leaves that row out.
+
+    **Neither half of the wall that made is still standing, and both were re-measured offline.**
+    `V2-P4-076` moved `load_name_histories` onto the per-event-date read, so a rename announced
+    ahead of the read is now absent from the corpus rather than fatal to its year -- the "below"
+    refusal does not reproduce at all. `V2-P4-077` then found that the surviving half was never
+    about `namechange`: `_pricing_session` resolved a cross section to its instant's own Shanghai
+    calendar day, so *any* cross section built between midnight and 16:30 asked for a session that
+    had not published, and the refusal was permanent because the instant is stored on the cross
+    section. The session is now the newest one that had published at that instant. Pinning the
+    instant here therefore no longer decides whether this suite can screen at all; it stays because
+    one instant for a build spanning tens of minutes is what `built_panel` already promises, and
+    because a corpus fetched at the panel's own instant is the honest artifact to reason about.
 
     **It is one request, and only when the panel does not already hold a usable corpus.**
     `namechange` is one announcement year of the whole market (`cli.PANEL_BUILD_TARGETS`: "one

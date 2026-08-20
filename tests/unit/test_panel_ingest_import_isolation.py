@@ -431,6 +431,7 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_ingest.load_stock_universe",
             "panel_ingest.load_suspensions",
             "panel_ingest.load_trading_calendar",
+            "panel_ingest.newest_published_session",
             "panel_neutralization.FACTOR_NEUTRALIZATIONS",
             "panel_neutralization.NeutralizationEngineError",
             "panel_neutralization.load_neutralized_factor_observations",
@@ -538,7 +539,16 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
         ),
     ),
     "openalpha_cn.shortlist_view": DatasetReach(
-        named=frozenset(),
+        named=frozenset(
+            {
+                "daily",
+                "namechange",
+                "stk_limit",
+                "stock_basic",
+                "suspend_d",
+                "trade_cal",
+            }
+        ),
         reached=frozenset(
             {
                 "balancesheet",
