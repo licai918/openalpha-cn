@@ -729,3 +729,177 @@ argue its own home and its own dependency, against this ADR's Decision rather th
 Nothing here says a gradient-boosted tree is expressible in the standard library, and nothing here
 should be read as having tried. That is the fifth time this ADR has written a sentence of this
 shape.
+
+## Update, 2026-08-20 (`V2-P4-015`): the section that had to answer, and answered no
+
+Every section above records a workload arriving and not needing the stack. This one is different in
+kind: `V2-P4-015`'s row **names a library** -- `LightGBM 基线 + 容器修复` -- so "the workload did not
+need it" is not available as an answer. The question is whether to take the dependency, and the
+Decision above still stands unchanged: **the runtime dependency set is still the nine it was.**
+
+`V2-P4-011` wrote that this issue must argue its own home. That turned out to be the second
+question, and it dissolved once the first was answered: `openalpha_cn.backtest.alpha_tree` is a
+standard-library leaf, joined both per-module `backtest/` contracts on arrival, and **no contract
+was widened** -- `lint-imports` is 8 kept / 0 broken with two source lists one entry longer.
+
+### Why a tree, specifically, does not need what the previous section said stdlib lacks
+
+The `V2-P4-014` section declined a joint least-squares fit because the standard library has no QR,
+no SVD and no honest condition number, and because this repository's columns are the adversarial
+case: `V2-P4-013`'s corpus has two exactly rank-anticorrelated columns whose Gram determinant is
+zero to `1e-9`. That argument does not transfer to a tree, and the reason is one line of the
+implementation:
+
+> `_grow`'s only division is by a **count**.
+
+The squared-error gain of a candidate split is `L²/n_L + R²/n_R`, and `min_leaf_securities >= 2`
+keeps both denominators at two or more. There is no matrix, no conditioning question and no rank
+cutoff to choose. Two perfectly correlated columns make a *solve* undefined; they make a *tree*
+pick one and condition the other away at the next node. So the line the previous section drew --
+between a failure mode that is loud and one that is a large coefficient nobody can tell from a
+signal -- puts a tree on the near side of it with no library at all. **This is the first section in
+this ADR where the workload's shape, rather than its size, is the argument.**
+
+A second difference is worth naming because it is about *storage* rather than about arithmetic. A
+tree's regularisation is `max_depth`, `tree_count`, `learning_rate` and `min_leaf_securities` --
+four flat scalars in `AlphaModelDeclaration.hyperparameters`, so they travel into the artifact and
+into `V2-P4-016`'s address. A rank cutoff chosen inside `lstsq` at run time travels nowhere.
+(`AlphaModelDeclaration`'s docstring left "widening this is `V2-P4-015`'s call" open; the call is
+that four flat scalars fit and the field is **not** widened.)
+
+### Measured, at ADR-0002's whole-market scale
+
+20 prediction days x 5,534 securities x 3 columns = **110,680 pooled rows** built from real
+`OutcomeLabel`s, best of three, on the machine that produced the sections above:
+
+| step | time |
+|---|---|
+| `BoostedRankTreeModel.fit` at `BASELINE_HYPERPARAMETERS` (60 trees, depth 3, 900 encoded nodes) | **4.55 s** (76 ms/tree) |
+| the same at 40 trees of depth 3 (600 encoded nodes) | 3.09 s (77 ms/tree) |
+| `predict`, one 5,534-name cross section | **94.0 ms** |
+| *(the rank baseline, re-measured on the same corpus)* `fit` | 247.8 ms |
+| *(the rank baseline, re-measured on the same corpus)* `predict` | 11.3 ms |
+| *(reference, same process)* building the 110,680 real labels the fits consumed | 3.62 s |
+
+So the tree fit is **18.4x** the rank baseline's, **2.0x** one `compute_factor` over a 675,148-row
+partition (2.24 s), **1.26x** the label build that has to precede it, and **8.0%** of the smallest
+of the five `write_panel_batch` measurements (56.7 s). Prediction is **8.3x** the rank baseline's
+and still 94 ms for a whole market.
+
+**A claim this section made and then falsified.** A prototype measured 2.62 s and this section was
+first drafted saying the fit is *"0.42x the label build"* -- comfortably beneath the step that
+feeds it. Re-measured with the shipped implementation the fit is **1.26x** the label build, not
+0.42x, and the two figures for the label build differ as well: `V2-P4-014` recorded 6.3 s where
+three runs here give 3.62 / 3.72 / 3.73 s. That is the same phenomenon this ADR's own
+`write_panel_batch` correction records, arriving on a smaller quantity, and the number quoted above
+is the one that reproduced three times in one process. The conclusion survives the correction and
+is stated at the strength it now has: a tree fit is the **same order** as the steps already around
+it, and an order below the write path.
+
+### What LightGBM would buy, and why it is still not taken
+
+Real things, and they are named rather than waved at: histogram binning in C++ with multithreading
+(this implementation is one thread of CPython), leaf-wise best-first growth, L1/L2 leaf penalties,
+row and column subsampling, native categorical handling and a learned missing-value branch
+direction. What it would cost is the whole of the Consequences above -- a `libgomp1` layer in the
+runtime image, an override block entry so `mypy --strict` survives the first `import lightgbm`, the
+`NPY`/`PD`/`S` ruff evaluation, and more than one new distribution -- `lightgbm`'s published
+metadata requires `numpy` and `scipy`, which is a fact this repository cannot check for itself,
+because no test here may reach the network and neither wheel is in `uv.lock`.
+
+The decisive argument is none of those, and it is about what a *baseline* is. Implementation
+Decision 13 admits a more complex model only when it beats the floor on a pre-defined
+out-of-sample, net-of-cost criterion. A floor with several hundred tunable parameters and a
+leaf-wise growth policy is the thing that criterion exists to judge, not the thing it judges
+against. The measurement that says this is not rhetorical is the `monotone` corpus: on a target
+that rises with one column the rank baseline reads `+1.0000` and the tree reads `+0.9995`, so
+**the tree loses to the model it is paired with**, and a floor is a pair rather than a winner.
+
+What the tree adds, on the same fold and through the same `evaluate_fold`: on a target that is the
+product of two columns the rank baseline reads `-0.0189` and the tree `+0.8465`, because each
+column's marginal rank IC is zero by construction. And on two near-duplicate columns beside one
+real one the rank baseline's coefficients come out `[0.2941, 0.2934, 0.9468]` -- the pair carrying
+0.588 against the real column's 0.947 -- which is
+`KNOWN_BASELINE_LIMITATIONS.the_coefficients_are_marginal_so_two_redundant_columns_are_counted_twice`
+measured rather than restated; the tree reads `+0.9992` against `+0.9735`.
+
+### The optional extra was considered, and it is worse than either answer
+
+`pyproject.toml` has an `akshare` extra, so shipping something behind a flag has a precedent here.
+It is not a precedent for shipping a **baseline** behind one: D13's acceptance gate would become a
+gate that a default install cannot open, and a comparison floor nobody can run is not a floor.
+
+The extras route also turned out to be **the way this ADR would actually be reversed**, and that
+was measured rather than supposed.
+`test_the_optional_and_development_dependency_tables_are_not_a_way_around_the_nine` says in its own
+docstring that a numerical stack in `[project.optional-dependencies]` "is the same install by
+another name and is forbidden outright" -- and it is a check over *declared names* against eight
+distributions. `lightgbm` is not one of the eight, so an extra named after that wheel would have
+been waved through -- and the sentence that makes this a measurement rather than a supposition is
+about a different extra: **`akshare`** is not one of the eight either, has been in that table
+since P1, and reaches `pandas` and therefore `numpy`. The guard has been passing an extra that
+carries a numerical stack for as long as it has existed.
+
+`test_a_numerical_stack_cannot_arrive_through_an_extra_that_only_names_its_wheel` closes it over
+`uv.lock`'s resolved graph rather than over the declared names, and both halves are measurements:
+
+| install | distributions reached | numerical stack |
+|---|---|---|
+| the default nine | 25 | **none** |
+| `--extra akshare` | 35 | `numpy`, `pandas` |
+
+The first row is what this ADR has asserted nine times and never actually checked -- the nine-name
+pin cannot say it, because a numerical stack arrives as somebody else's dependency. The second is
+written into `EXTRAS_THAT_CARRY_A_NUMERICAL_STACK` rather than exempted, and the distinction it
+draws is this ADR's own: `akshare` is an optional *data provider* whose pandas dependency is the
+provider's, which Context item 2 above already records. A model needing a numerical stack would be
+this repository's own code depending on one.
+
+### The container half of the row, measured against the current files
+
+The row also names four deployment defects. Three of the four are not what the row says they are,
+and the one that is real has nothing to do with LightGBM:
+
+| the row's claim | measured |
+|---|---|
+| `libgomp1` is installed into the wrong stage | It is in **neither** stage: no `apt-get` appears anywhere in the `Dockerfile`, and `ls /usr/lib/*/libgomp*` in the shipped image finds nothing. Consequence 5's *conclusion* is right and its diagnosis is not. It stays out, because the dependency that links it was not taken. |
+| `shm_size` is unset and `/dev/shm` is absent | `/dev/shm` **exists**, writable, at Docker's own 64 MB default -- `grep /dev/shm /proc/mounts` inside the running container. The seam audit's F84 says there is none. |
+| the tmpfs is too small | Nothing this image ships writes to `/tmp`: no `tempfile`, no `TMPDIR` consumer anywhere under `src/`. Raising it would be a number nobody measured, for a consumer that does not exist -- the joblib spill F84 names arrives only with the dependency this section declined. |
+| OMP threads are unpinned | Already pinned, all five, by `V2-P0B-009`, and held by literal in `tests/unit/test_repository_assets.py`. Consequence 6 is satisfied. |
+
+**The spill that is real belongs to the DuckDB this repository already ships.** DuckDB defaults an
+in-memory connection's `temp_directory` to the *relative* path `.tmp`, resolved against the
+process's working directory -- and `panel/store.py` opens `duckdb.connect(":memory:")` on every
+`write_panel_batch` to stage a partition. With `WORKDIR /app` and `deploy/compose.yml`'s own
+`read_only: true`, that directory is on the read-only layer. Reproduced in the shipped image, one
+query and one 200 MB memory limit, three working directories:
+
+| working directory | result |
+|---|---|
+| `/app` (the image layer, read-only) | `IO Error: Failed to create directory ".tmp": Read-only file system` |
+| `/tmp` (the 64 MB tmpfs the row asks to enlarge) | `Out of Memory Error: failed to offload data block ... (57.3 MiB/57.5 MiB used). This limit was set by the 'max_temp_directory_size' setting` |
+| `/data` (the runtime volume) | the query completes, and `.tmp` exists afterwards |
+
+The middle row is why the row's prescription is the wrong fix and why no number was guessed for it:
+**a tmpfs is RAM, so a spill that lands in one has not spilled**, and enlarging 64 MB only moves the
+same wall. A spill needs a filesystem and this container has exactly one. The fix is one line --
+the runtime stage's last `WORKDIR` is `/data` -- plus `PYTHONSAFEPATH=1`, which is what makes it
+safe rather than worse: `python -m uvicorn` prepends the cwd to `sys.path` ahead of site-packages,
+so without it a file dropped into the data volume could shadow an installed module (`python -m
+site` under `-w /data` prints `/data` as `sys.path[0]`; with the variable, `sys.path` starts at the
+stdlib). Both are pinned by tests, and the DuckDB default that makes a working directory
+load-bearing at all is pinned against the library rather than against this paragraph -- so the day
+DuckDB resolves it absolutely, the argument goes red instead of going stale.
+
+### What is *not* claimed
+
+Nothing here says this implementation reaches LightGBM's accuracy on any real dataset. No such
+comparison was run, because running one requires the dependency the decision declined, and that is
+recorded as `KNOWN_TREE_LIMITATIONS`'
+`this_is_a_histogram_boosting_of_the_kind_lightgbm_does_and_not_lightgbm` rather than left implied.
+Nothing here says the three corpora the comparison was taken on mean anything about alpha: they are
+noiseless and deterministic, they exist to make a direction flip, and `V2-P4-022` owns the corpus
+with a known signal-to-noise ratio. And nothing here says a model whose parameters are learned by
+gradient descent over a dense tensor is expressible without the stack. That question is genuinely
+open, no issue on this chain has posed it, and nothing measured here carries over to it. That is
+the sixth time this ADR has written a sentence of this shape.

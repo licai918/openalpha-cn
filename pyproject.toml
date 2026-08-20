@@ -284,6 +284,7 @@ type = "forbidden"
 source_modules = [
   "openalpha_cn.backtest.alpha_baseline",
   "openalpha_cn.backtest.alpha_model",
+  "openalpha_cn.backtest.alpha_tree",
   "openalpha_cn.backtest.candidate_ranking",
   "openalpha_cn.backtest.cross_section",
   "openalpha_cn.backtest.event_study",
@@ -328,6 +329,7 @@ type = "forbidden"
 source_modules = [
   "openalpha_cn.backtest.alpha_baseline",
   "openalpha_cn.backtest.alpha_model",
+  "openalpha_cn.backtest.alpha_tree",
   "openalpha_cn.backtest.candidate_ranking",
   "openalpha_cn.backtest.cross_section",
   "openalpha_cn.backtest.event_study",

@@ -15,7 +15,7 @@ inside a docstring, which is prose the runner never reads.
 ## Why the mechanism is not copied as it stands
 
 `007`'s form is "one test per entry, named after the entry". At three entries that is exactly
-right. Across the twenty-nine code-carrying registries there are **268** entries -- 69 in
+right. Across the thirty code-carrying registries there are **275** entries -- 69 in
 `KNOWN_PANEL_LIMITATIONS` alone -- and it stops being right somewhere well before that, for
 three reasons and not one:
 
@@ -34,8 +34,9 @@ three reasons and not one:
    proof. The naming convention is what is enforced, not the exercising.
 
 `V2-P4-013` added the twenty-eighth (`KNOWN_WALK_FORWARD_LIMITATIONS`, eleven entries) and
-moved them from 247 / 69, and `V2-P4-014` added the twenty-ninth
-(`KNOWN_BASELINE_LIMITATIONS`, ten entries) and moved them from 258 / 69.
+moved them from 247 / 69, `V2-P4-014` added the twenty-ninth
+(`KNOWN_BASELINE_LIMITATIONS`, ten entries) and moved them from 258 / 69, and `V2-P4-015` added
+the thirtieth (`KNOWN_TREE_LIMITATIONS`, seven entries) and moved them from 268 / 69.
 
 **Those two totals are the argument, so they are not left as prose.**
 `test_the_registries_together_carry_the_entry_count_the_report_folds` holds a floor under both,
@@ -97,6 +98,7 @@ from pathlib import Path
 from typing import Final, Protocol
 
 from openalpha_cn.backtest.alpha_baseline import KNOWN_BASELINE_LIMITATIONS
+from openalpha_cn.backtest.alpha_tree import KNOWN_TREE_LIMITATIONS
 from openalpha_cn.backtest.candidate_ranking import KNOWN_RANKING_LIMITATIONS
 from openalpha_cn.backtest.cross_section import KNOWN_CROSS_SECTION_LIMITATIONS
 from openalpha_cn.backtest.execution import KNOWN_EXECUTION_LIMITATIONS
@@ -158,6 +160,7 @@ LIMITATION_REGISTRIES: Final[dict[str, Sequence[_Limitation]]] = {
     "KNOWN_SHORTLIST_GATE_LIMITATIONS": KNOWN_SHORTLIST_GATE_LIMITATIONS,
     "KNOWN_WALK_FORWARD_LIMITATIONS": KNOWN_WALK_FORWARD_LIMITATIONS,
     "KNOWN_BASELINE_LIMITATIONS": KNOWN_BASELINE_LIMITATIONS,
+    "KNOWN_TREE_LIMITATIONS": KNOWN_TREE_LIMITATIONS,
     "KNOWN_SCREENING_LIMITATIONS": KNOWN_SCREENING_LIMITATIONS,
     "KNOWN_SHORTLIST_VIEW_LIMITATIONS": KNOWN_SHORTLIST_VIEW_LIMITATIONS,
     "KNOWN_FEATURE_MATRIX_LIMITATIONS": KNOWN_FEATURE_MATRIX_LIMITATIONS,
@@ -176,7 +179,7 @@ LIMITATION_REGISTRIES: Final[dict[str, Sequence[_Limitation]]] = {
     "KNOWN_STORAGE_LIMITATIONS": KNOWN_STORAGE_LIMITATIONS,
     "KNOWN_PANEL_LIMITATIONS": KNOWN_PANEL_LIMITATIONS,
 }
-"""The twenty-nine registries whose entries are identified by a `code`, keyed by their own
+"""The thirty registries whose entries are identified by a `code`, keyed by their own
 names.
 
 **None of `KNOWN_NEUTRALIZATION_LIMITATIONS`, `KNOWN_IC_LIMITATIONS`,
@@ -227,6 +230,18 @@ reaches no trading calendar, and -- the one a reader is most likely to need -- t
 a coverage and age verdict and never a quality one.
 
 Together the two moved the totals from 211 / 69 to 225 / 69.
+
+`KNOWN_TREE_LIMITATIONS` (`V2-P4-015`) is the thirtieth, and it is the first registry whose
+first entry is about a **dependency that was not taken**:
+`this_is_a_histogram_boosting_of_the_kind_lightgbm_does_and_not_lightgbm` says which algorithm
+ships and which research programme does not, and says outright that no accuracy comparison
+against LightGBM was run because running one needs the library the decision declined. The other
+six bound a second model rather than a first: what a histogram costs in resolution, that neither
+baseline dominates the other and which corpus is where this one loses, that a column no split
+used is absent rather than reported, that its hyperparameters are declared and nothing selects
+them (a second and unaddressed leakage surface beside `V2-P4-013`'s purge), that its score has no
+closed-form bound where the rank baseline's has one, and that every number it produced came off a
+noiseless synthetic corpus. It moved the totals from 268 / 69 to 275 / 69.
 
 `KNOWN_SHORTLIST_VIEW_LIMITATIONS` (`V2-P4-032` / `V2-P4-033`) is the twenty-fifth, and it is
 the first that bounds an **adapter** rather than a study, a verdict or a dataset. Its four
@@ -402,7 +417,7 @@ def test_the_registry_table_is_every_known_registry_in_the_source_tree() -> None
     }
 
     assert found == set(LIMITATION_REGISTRIES) | set(CODELESS_REGISTRIES)
-    assert len(LIMITATION_REGISTRIES) == 29
+    assert len(LIMITATION_REGISTRIES) == 30
     assert set(LIMITATION_REGISTRIES) & set(CODELESS_REGISTRIES) == set()
 
 
@@ -507,5 +522,5 @@ def test_the_registries_together_carry_the_entry_count_the_report_folds() -> Non
 
     assert len(codes["KNOWN_PANEL_LIMITATIONS"]) == folded + plane_wide + 1
     assert all(codes[registry] for registry in codes)
-    assert sum(len(entries) for entries in codes.values()) >= 268
+    assert sum(len(entries) for entries in codes.values()) >= 275
     assert len(codes["KNOWN_PANEL_LIMITATIONS"]) >= 69

@@ -31,6 +31,21 @@ services:
       CUSTOM_MODEL_API_KEY: ${CUSTOM_MODEL_API_KEY:-}
     volumes:
       - openalpha-runtime:/data
+    # 64 MB, unchanged, and `shm_size` deliberately unset -- both re-measured by V2-P4-015
+    # against the seam audit's F84, which asks for them to be enlarged.
+    #
+    # Nothing this image ships writes to either. `/tmp` is reached by no module under
+    # `src/` (no `tempfile`, no `TMPDIR` consumer) and `/dev/shm` exists, writable, at
+    # Docker's own 64 MB default -- F84 says there is none, and `grep /dev/shm
+    # /proc/mounts` inside the running container says otherwise. So a number raised here
+    # would be a number nobody measured, for a consumer that does not exist: the joblib
+    # spill F84 names arrives only with the dependency ADR-0003's V2-P4-015 section
+    # declined.
+    #
+    # The spill that IS real belongs to the DuckDB this repository already ships, it does
+    # not land in either of these, and enlarging a tmpfs is the wrong fix for it because a
+    # tmpfs is RAM. See the `WORKDIR /data` comment in the Dockerfile for the three-way
+    # reproduction and the fix.
     tmpfs:
       - /tmp:size=64m,mode=1777
     cap_drop:
