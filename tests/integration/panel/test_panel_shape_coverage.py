@@ -119,13 +119,17 @@ EXPECTED_HEALTHY_SHAPES = (
     "industry.session_adjacent_handover",
     "industry.coverage_hole",
 )
-"""Twenty-three of the twenty-nine, in table order. The six left out, and why:
+"""Twenty-three of the thirty-one, in table order. The eight left out, and why:
 
-- `daily.uncorroborated_factor_step` is a `warning`, and `financials.announced_after_the_as_of`,
-  `index.publication_after_the_as_of` and `industry.reclassification_after_the_as_of` are each a
-  `blocking` -- the shapes that exist precisely so a generated panel can be unhealthy, which is
-  what `V2-P2`'s nine injection issues need. The three blocking ones are the same injection
-  aimed at three datasets, which is `V2-P2-001`/`003`/`004` respectively.
+- `daily.uncorroborated_factor_step`, `adjustment.factor_series_stops_inside_the_window` and
+  `universe.priced_security_absent_from_the_registry` are each a `warning`, and
+  `financials.announced_after_the_as_of`, `index.publication_after_the_as_of` and
+  `industry.reclassification_after_the_as_of` are each a `blocking` -- the shapes that exist
+  precisely so a generated panel can be unhealthy, which is what `V2-P2`'s nine injection issues
+  need. The three blocking ones are the same injection aimed at three datasets, which is
+  `V2-P2-001`/`003`/`004` respectively. The two `V2-P4-084` added are the two halves of a
+  registry and a factor series that do not reach as far as the price panel does, which is what
+  `factor_view._PanelInputs.label` asks both of them for.
 - `financials.same_day_duplicate_versions` and `financials.three_versions_of_one_key` produce a
   real `ambiguous_filing` **notice**, so a panel carrying them is still clean but no longer
   finding-free -- and the point of the healthy case is that a shape-rich panel produces
@@ -161,10 +165,10 @@ def _shape_datasets(shape_id: str) -> tuple[str, ...]:
 
     `PanelShape.datasets` already declares which datasets each shape touches, and `V2-P2-000`
     gave `write_generated_panel` the ability to store a subset -- but nothing here used either,
-    so every one of the twenty-eight cases below built and wrote all eleven datasets and ran a
-    whole-panel health report over them. The cost was almost entirely independent of which
-    shape was being tested, which is the signature of a fixed overhead rather than of work the
-    assertion needs.
+    so every one of the parametrised cases below built and wrote all eleven datasets and ran a
+    whole-panel health report over them. The cost was almost entirely independent of which shape
+    was being tested, which is the signature of a fixed overhead rather than of work the assertion
+    needs.
 
     Narrowing is sound and not merely faster, because the report is scoped by its `datasets`
     argument on both sides: `panel_health_report` assesses exactly what it is handed, and every
@@ -273,10 +277,12 @@ def test_a_shape_provokes_exactly_the_health_codes_it_declares(
 
 
 DEFECT_SHAPES = (
+    "adjustment.factor_series_stops_inside_the_window",
     "daily.uncorroborated_factor_step",
     "financials.announced_after_the_as_of",
     "index.publication_after_the_as_of",
     "industry.reclassification_after_the_as_of",
+    "universe.priced_security_absent_from_the_registry",
 )
 """Every shape that makes a generated panel unhealthy, spelled out rather than derived.
 
@@ -310,10 +316,12 @@ def test_the_defect_shapes_are_the_ones_that_make_a_generated_panel_unhealthy(
         assert report.is_clean is False
 
     assert severities == {
+        "adjustment.factor_series_stops_inside_the_window": {"warning": 1},
         "daily.uncorroborated_factor_step": {"warning": 1},
         "financials.announced_after_the_as_of": {"blocking": 1, "warning": 1},
         "index.publication_after_the_as_of": {"blocking": 1},
         "industry.reclassification_after_the_as_of": {"blocking": 1},
+        "universe.priced_security_absent_from_the_registry": {"warning": 1},
     }
     assert set(DEFECT_SHAPES) | set(HEALTHY_SHAPES) < set(PANEL_SHAPES)
 

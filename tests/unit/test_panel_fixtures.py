@@ -62,6 +62,7 @@ from openalpha_cn.domain.panel_batch import PanelColumn
 from openalpha_cn.panel_doctor import PANEL_HEALTH_CODES
 
 EXPECTED_SHAPE_IDS = (
+    "adjustment.factor_series_stops_inside_the_window",
     "adjustment.step_down",
     "calendar.mid_window_weekday_closure",
     "calendar.multi_session_recess",
@@ -90,6 +91,7 @@ EXPECTED_SHAPE_IDS = (
     "suspension.resumption",
     "suspension.timed_interruption",
     "universe.delisted_security",
+    "universe.priced_security_absent_from_the_registry",
     "universe.termination_on_the_newest_session",
 )
 """The closed set, spelled out.
@@ -100,6 +102,7 @@ visible diff on this list too -- the same reason `tests/unit/test_panel_gate_rul
 """
 
 EXPECTED_PROVOCATIONS = {
+    "adjustment.factor_series_stops_inside_the_window": ("return_path_disagreement",),
     "adjustment.step_down": (),
     "calendar.mid_window_weekday_closure": (),
     "calendar.multi_session_recess": (),
@@ -128,6 +131,7 @@ EXPECTED_PROVOCATIONS = {
     "suspension.resumption": (),
     "suspension.timed_interruption": (),
     "universe.delisted_security": (),
+    "universe.priced_security_absent_from_the_registry": ("subject_set_disagreement",),
     "universe.termination_on_the_newest_session": (),
 }
 """What each shape claims a `panel_health_report` will say about it, spelled out here too.
@@ -351,8 +355,8 @@ def test_no_detector_answers_true_on_a_shape_that_is_not_its_own() -> None:
     injections into one, which is precisely the property `V2-P2-001`/`003`/`004` are three
     issues for.
 
-    So the whole matrix is pinned, not just its diagonal: 28 panels, each detector run against
-    all of them. The declared cross-triggers are named in `CROSS_TRIGGERS` above with the
+    So the whole matrix is pinned, not just its diagonal: one panel per shape, each detector run
+    against all of them. The declared cross-triggers are named in `CROSS_TRIGGERS` above with the
     reason each one is a containment rather than a leak.
     """
     panels = {shape_id: generate_panel(shapes=(shape_id,)) for shape_id in EVERY_SHAPE}

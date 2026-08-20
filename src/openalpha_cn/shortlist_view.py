@@ -1247,6 +1247,26 @@ def load_shortlist_cross_section(
         lambda: load_stock_universe(store, years=request.years, as_of=instant, max_staleness=None),
         store=store,
     )
+    # `listed_on` refuses two horizons -- a day past `snapshot_date`, and a day before the first
+    # lifecycle year the read covered -- and `factor_view._computed` guards the identical call
+    # because both of them fire there. Neither can fire here, and the difference is which day is
+    # handed over. `factor_view` passes `as_of`'s own calendar date, which `request.years` does
+    # not constrain at all; this face passes a **session**, which `newest_published_session` takes
+    # out of a calendar loaded over `request.years` and never dates later than `instant` itself.
+    # `load_trading_calendar` reads exactly the years it is given, and `load_stock_universe`
+    # widens only downwards, so `years_read[0] <= request.years[0] <= session.year` and
+    # `session <= min(instant.date(), 31 December of request.years[-1]) <= snapshot_date`. A day
+    # the calendar cannot place is refused by `_pricing_session` before it ever reaches here.
+    # Measured rather than argued, at `V2-P4-084`: 1,014 instants from 2025-06 to 2027-07 at
+    # eighteen-hour steps against four year sets, over a store whose registry carries a lifecycle
+    # year above the one the read asks for -- which is what makes the `snapshot_date` clamp bite,
+    # and therefore the only shape on which the first horizon has anything to refuse. 962 of the
+    # 4,056 pairs reached this line and 0 raised; the rest were refused earlier by the two
+    # guarded reads.
+    # `tests/integration/test_unlabelled_corpus_faces.py::
+    # test_the_session_this_face_prices_is_always_one_the_loaded_registry_can_answer_for` pins it
+    # against real reads, so a later change to either one fails there rather than exiting 5 at a
+    # user.
     universe = tuple(sorted(registry.listed_on(session)))
     if not universe:
         raise ShortlistRunBlockedError(

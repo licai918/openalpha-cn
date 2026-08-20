@@ -520,6 +520,40 @@ def _has_termination_on_the_newest_session(panel: GeneratedPanel) -> bool:
     )
 
 
+def _has_priced_security_absent_from_the_registry(panel: GeneratedPanel) -> bool:
+    """A security the price panel carries that `stock_basic` has no lifecycle row for.
+
+    Read off the two stored subject sets rather than off `panel.securities`, which is the tuple
+    every builder draws from and would therefore answer for the request instead of for the
+    artifact -- `PanelShape`'s own rule about detectors.
+    """
+    return bool(
+        set(panel.batch(DAILY_DATASET).subjects) - set(panel.batch(STOCK_BASIC_DATASET).subjects)
+    )
+
+
+def _has_factor_series_stopping_before_its_bars(panel: GeneratedPanel) -> bool:
+    """A security whose newest `adj_factor` row is older than its newest bar.
+
+    Not "a subject missing from `adj_factor`" -- that is the containment
+    `panel_doctor.SUBJECT_CONTAINMENTS` already asks about, and it is a different fact. This one
+    is a subject present in both whose covered span stops short, which is what
+    `AdjustmentHistory.factor_on` refuses past rather than reads through.
+    """
+    newest_factor: dict[str, str] = {}
+    for subject, day in panel.rows_of(ADJ_FACTOR_DATASET, "factor_date"):
+        code, session = str(subject), str(day)
+        newest_factor[code] = max(newest_factor.get(code, session), session)
+    newest_bar: dict[str, str] = {}
+    for subject, day in panel.rows_of(DAILY_DATASET, "trade_date"):
+        code, session = str(subject), str(day)
+        newest_bar[code] = max(newest_bar.get(code, session), session)
+    return any(
+        code in newest_factor and newest_factor[code] < session
+        for code, session in newest_bar.items()
+    )
+
+
 def _has_halt_on_the_newest_session(panel: GeneratedPanel) -> bool:
     return any(
         day == _newest_session(panel)
@@ -955,6 +989,43 @@ _SHAPES: Final[tuple[PanelShape, ...]] = (
             "one; domain/stock_universe.py is what folds the two rows back into a lifecycle"
         ),
         detect=_has_termination_on_the_newest_session,
+    ),
+    PanelShape(
+        shape_id="universe.priced_security_absent_from_the_registry",
+        datasets=(STOCK_BASIC_DATASET, DAILY_DATASET),
+        summary="a security the price panel carries that the registry has no lifecycle row for",
+        measurement=(
+            "300114.SZ has a real daily bar on 2024-06-28 and returns zero stock_basic rows "
+            "under every list_status probed -- 'L', 'D', 'P', 'L,D' and the bare request -- so "
+            "StockUniverse.security() refuses it as an unknown code rather than reporting it "
+            "delisted (domain/daily_prices.py's "
+            "a_priced_security_can_be_absent_from_the_registry, live probe 2026-08-08). It is "
+            "the only such name among that session's 5,338 bars, and the registry's own "
+            "a_listed_only_registry_is_invisible_to_every_downstream_check measures the "
+            "systematic version: a list_status='L' fetch serves 5,539 rows against 'L,D''s "
+            "5,878, and rebuilding 2019-06-28 from the listed set alone lost 227 securities "
+            "(domain/stock_universe.py). Both directions produce a priced code the registry "
+            "cannot place, and the second one is a fetch parameter rather than a rare row"
+        ),
+        detect=_has_priced_security_absent_from_the_registry,
+        provokes=("subject_set_disagreement",),
+    ),
+    PanelShape(
+        shape_id="adjustment.factor_series_stops_inside_the_window",
+        datasets=(ADJ_FACTOR_DATASET, DAILY_DATASET),
+        summary="one security's factor series ending before its bars do",
+        measurement=(
+            "the adj_factor endpoint serves at most 6,000 rows per response and nothing in the "
+            "row data says it truncated -- a bare per-security request for 000001.SZ returns "
+            "6,000 rows starting 2001-11-14 against a true history of 8,627 starting "
+            "1991-04-03 (domain/adjustment.py's silent_truncation_at_the_response_cap, live "
+            "probe 2026-08-08). The two series are independently bounded in the other "
+            "direction too: 000024.SZ's last bar is 2015-12-07 while its factor runs to "
+            "2015-12-29 (suspension_is_invisible), so the spans are not required to agree and "
+            "AdjustmentHistory.factor_on refuses outside its own rather than extrapolating"
+        ),
+        detect=_has_factor_series_stopping_before_its_bars,
+        provokes=("return_path_disagreement",),
     ),
     PanelShape(
         shape_id="suspension.halt_on_the_newest_session",
@@ -1443,8 +1514,27 @@ cannot read an adjustment factor for a security the price panel never carried.
 """
 
 
+UNREGISTERED_SECURITY_INDEX: Final[int] = 6
+"""`securities[6]`, the name `universe.priced_security_absent_from_the_registry` **removes** from
+`stock_basic` while every price dataset goes on carrying it.
+
+Dropped rather than added, which is the whole of the shape and `V2-P4-080`'s own lesson applied
+one dataset over: `_universe_batch` handing every subject a listing row unconditionally is what
+made `StockUniverse.security`'s refusal unreachable in every generated panel, and a shape that
+appended a ninth code would leave that flattery exactly where it was.
+
+The index is the one whose other role cannot interact with a registry row:
+`name_history.announcement_on_the_newest_session` writes it a `namechange` row, and a rename is
+not a lifecycle event. `securities[4]` is the terminated name and `securities[5]` the newest
+halt -- both of them lifecycle or session facts about the same security this shape denies the
+registry knows at all, and composing either with this one would ask two questions at once.
+"""
+
+
 def _universe_batch(securities: Sequence[str], shapes: frozenset[str]) -> ColumnarPanelBatch:
     codes = list(securities)
+    if "universe.priced_security_absent_from_the_registry" in shapes:
+        codes.remove(securities[UNREGISTERED_SECURITY_INDEX])
     events = [LISTING_EVENT] * len(codes)
     days = [LISTED_ON] * len(codes)
     if "universe.termination_on_the_newest_session" in shapes:
@@ -1585,10 +1675,58 @@ def _pre_close_of(
     return earlier * previous_factor / factor
 
 
+TRUNCATED_FACTOR_SECURITY_INDEX: Final[int] = 5
+TRUNCATED_FACTOR_THROUGH_INDEX: Final[int] = 5
+"""`securities[5]`, whose factor series `adjustment.factor_series_stops_inside_the_window` ends at
+`sessions[5]` while its bars run to the last one.
+
+`_factor_batch` was the one price-side builder with no `omit`, unlike `_bar_batch` and
+`_valuation_batch`, so `AdjustmentHistory.factor_on`'s two horizons were unreachable from any
+generated panel -- and `factor_view._PanelInputs.label` reaches `factor_on` for both ends of
+every window it labels.
+
+**Only the newest rows are dropped, and only for one security.**
+`panel_ingest._refuse_missing_factor_sessions` refuses a *partition* that is missing a session the
+calendar reports open, and it is right to: a hole strictly inside a security's covered span is
+answered by `bisect` from the step before it, which is the unadjusted number wearing an adjusted
+one's name. Truncating the newest end leaves that guard satisfied -- the other seven securities
+carry every session, so the partition's own census is whole -- and moves `covered_through`, which
+is the bound `factor_on` refuses past rather than reads through.
+
+`securities[5]`'s other role is `suspension.halt_on_the_newest_session`, a halt on `sessions[-1]`,
+and the truncation covers `sessions[6..-1]` -- so asking for both puts a halt and an absent factor
+on the same name on the same session. That composes rather than conflicting (they are rows in two
+different datasets, and `_has_factor_series_stopping_before_its_bars` reads neither `suspend_d` nor
+the request), and it is written down because it is the one overlap between the two, not because it
+is a problem. Every other index was already carrying a shape whose dataset this one would have had
+to share: `securities[2]`'s uncorroborated restatement produces the same `return_path_disagreement`
+this shape does, and a single security carrying both would make the finding unattributable.
+"""
+
+
+def _omitted_factors(
+    *, sessions: Sequence[date], securities: Sequence[str], shapes: frozenset[str]
+) -> frozenset[tuple[str, date]]:
+    """Which `(security, session)` factor rows the batch leaves out.
+
+    Empty for the shapeless panel, which is `_missing_bars`' arrangement: the omission set is a
+    named thing a shape adds to rather than a condition spelled inline, so a second truncation
+    is a row here instead of another `if` inside the batch builder.
+    """
+    if "adjustment.factor_series_stops_inside_the_window" not in shapes:
+        return frozenset()
+    code = securities[TRUNCATED_FACTOR_SECURITY_INDEX]
+    return frozenset((code, day) for day in sessions[TRUNCATED_FACTOR_THROUGH_INDEX + 1 :])
+
+
 def _factor_batch(
     *, sessions: Sequence[date], securities: Sequence[str], shapes: frozenset[str]
 ) -> ColumnarPanelBatch:
-    pairs = [(day, code) for day in sessions for code in securities]
+    pairs = _price_grid(
+        sessions=sessions,
+        securities=securities,
+        omit=_omitted_factors(sessions=sessions, securities=securities, shapes=shapes),
+    )
     return _batch(
         ADJ_FACTOR_DATASET,
         subjects=[code for _, code in pairs],
@@ -2236,25 +2374,39 @@ def _name_records(
 
     **`V2-P4-080` swept this file for the same shape and this was not the only one.** Six more
     builders hand every subject a row. They are recorded here rather than left to be rediscovered,
-    and the first two are recorded first because they are not gaps -- they hide a live defect:
+    and the first two are recorded first because they were not gaps -- they hid a live defect,
+    which `V2-P4-084` then reproduced on both faces and fixed:
 
-    - `_universe_batch` gives every security a listing row at `LISTED_ON`, and it draws from the
+    - `_universe_batch` gave every security a listing row at `LISTED_ON`, and it draws from the
       same `SECURITIES` tuple as `_factor_batch`, `_bar_batch`, `_valuation_batch` and
-      `_statement_batch` -- so no generated panel can carry a subject with a factor row and no
-      `stock_basic` row, and `StockUniverse.security`'s refusal is unreachable. The reverse
-      direction is covered (`DELISTED_SECURITY` is in the registry and in no price grid); this one
-      is not.
-    - `_factor_batch` builds the full `sessions x securities` cross product with no `omit` set,
+      `_statement_batch` -- so no generated panel could carry a subject with a factor row and no
+      `stock_basic` row, and `StockUniverse.security`'s refusal was unreachable. The reverse
+      direction was already covered (`DELISTED_SECURITY` is in the registry and in no price grid).
+      `universe.priced_security_absent_from_the_registry` **removes** one security's listing row,
+      and removing rather than appending is the whole of it for the reason above.
+    - `_factor_batch` built the full `sessions x securities` cross product with no `omit` set,
       unlike `_bar_batch` and `_valuation_batch`, so `AdjustmentHistory.factor_on`'s two horizons
-      are unreachable.
+      were unreachable. `adjustment.factor_series_stops_inside_the_window` gives it an `omit`,
+      through the same `_price_grid` the other two use, and reaches the **upper** horizon --
+      `covered_through`. The lower one is reachable through the same `omit` with the slice
+      reversed (measured: the writers accept an oldest-rows truncation for one security, because
+      `_refuse_missing_factor_sessions` censuses the *partition's* dates and the other seven
+      carry them) and is not built, because one arm is what the defect needed and a second shape
+      would be a second fixture nothing asks a question of.
 
-      Both matter because `factor_view._PanelInputs.label` wraps `label_outcome` in
+      Both mattered because `factor_view._PanelInputs.label` wrapped `label_outcome` in
       `except LabelError` alone, and `StockUniverseError`, `AdjustmentError` and `PriceDataError`
-      are none of them -- all three are plain `ValueError`s. That is this issue's own defect one
-      seam over, still open when this was written.
+      are none of them -- all three are plain `ValueError`s. That was this issue's own defect one
+      seam over, and both faces laundered all three into `exit 5` and a bare `500`.
+
+    **The third of that defect's three arms needed nothing from this file, which is the part worth
+    keeping.** `daily.uncorroborated_factor_step` had been declared since `V2-P2-000` and reaches
+    `PriceDataError` on any run whose label window crosses the session it sits on. A fixture gap is
+    one reason a defect survives acceptance; nobody having asked the question is another, and the
+    two look identical from inside this file.
 
     The remaining four are gaps rather than defects, each because every raise they hide is caught
-    at its call sites:
+    at its call sites. They are `V2-P4-085`'s, not this issue's:
 
     - `_industry_assignments` opens every security at `LISTED_ON` with `through=None`, hiding
       `IndustryHorizonError`'s first arm; `panel_ingest.load_industry_cross_section` and
@@ -2271,7 +2423,10 @@ def _name_records(
     `name_history.effect_after_every_priced_session` is the shape that reaches this one. The
     baseline stays for the other seven securities rather than being dropped wholesale: this
     generator is not a corpus sampler, and `namechange` needs rows for its partition to exist at
-    all.
+    all. The two shapes `V2-P4-084` added take the same care for the same reason -- one security
+    loses its registry row and one loses the newest end of its factor series, and the other seven
+    keep both, because a partition with nothing in it is a different fixture and refuses at a
+    different place.
     """
     records: dict[str, list[NameRecord]] = {
         code: [

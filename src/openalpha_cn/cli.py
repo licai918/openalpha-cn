@@ -883,28 +883,41 @@ class PanelExit(IntEnum):
       that failed its check, so a scheduled job would report "the data is bad" for a defect in
       this file. The remedy is a bug report, not a re-fetch.
 
-      **That last sentence has been measured false three times, and every time by the same
+      **That last sentence has been measured false four times, and every time by the same
       shape.** A refusal that is a verdict about stored data, raised where no `except` in the
       command's path anticipated it, arrives here -- and then this row tells a user to file a bug
       when the remedy was to fix their panel. `V2-P4-060` was `factor build` meeting an ordinary
       mid-window delisting; `V2-P4-070` was `shortlist run` meeting an interrupted registry
       backfill, on a store where `factor build` already answered `unhealthy` with the sentence
       naming the security; `V2-P4-080` was `shortlist run` **and** `factor run` meeting an
-      ordinary two-clock rename, where no face answered. None was a defect in this file.
+      ordinary two-clock rename, where no face answered; `V2-P4-084` was `factor run` meeting
+      three more at one seam. None was a defect in this file.
 
-      **The third one moved where the guard has to sit, which is why it is worth reading after
+      **The last two moved where the guard has to sit, which is why they are worth reading after
       the first two.** `060` and `070` were both refusals raised *by a read*, and both were fixed
       by widening the fault tuple that read is made through. `080` was not a read at all: the
       corpus loaded cleanly and `NameHistory.record_on` refused a question asked of it afterwards,
       inside `MarketBar(...)`, where no `faults=` argument can reach. So "anticipated at the read
       that raises it" was the wrong rule to have generalised -- the rule is that every refusal
       which is a verdict about data is anticipated **wherever it is raised**, and a read is only
-      the commonest such place. See `factor_view._REGISTRY_FAULTS` and
-      `shortlist_view._REGISTRY_FAULTS` for the two reads, `factor_view._risk_warned_on` and
-      `shortlist_view._risk_warned_on` for the two questions asked of what a read returned, and
-      `tests/integration/test_partial_registry_faces.py` and
-      `tests/integration/test_unnamed_session_faces.py`, which drive one store each at both faces
-      and at the HTTP route. The withholding of an unanticipated exception's own message stays
+      the commonest such place.
+
+      **`084` is the same lesson a third time, and it says which sites to look at.** Its three
+      escaped through a call that already had an `except` -- `factor_view._PanelInputs.label`
+      caught `LabelError` and let `StockUniverseError`, `AdjustmentError` and `PriceDataError`
+      past, all four being independent `ValueError` subclasses. So an anticipated seam is not a
+      guarded one: what has to be enumerated is every refusal the callee can raise, not the one
+      whose module the caller happens to have imported. `factor_view._LABEL_CORPUS_FAULTS` is
+      that enumeration, and it is the `except` clause and the message table's key set both so
+      the two cannot come apart.
+
+      See `factor_view._REGISTRY_FAULTS` and `shortlist_view._REGISTRY_FAULTS` for the two reads,
+      `factor_view._risk_warned_on`, `shortlist_view._risk_warned_on` and
+      `factor_view._PanelInputs.label` for the three questions asked of what a read returned, and
+      `tests/integration/test_partial_registry_faces.py`,
+      `tests/integration/test_unnamed_session_faces.py` and
+      `tests/integration/test_unlabelled_corpus_faces.py`, which drive stores at both faces and
+      at both HTTP routes. The withholding of an unanticipated exception's own message stays
       right; being unanticipated is what was wrong.
 
     **2 is deliberately absent.** Click raises its own `UsageError` with exit code 2 for a
