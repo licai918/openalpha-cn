@@ -383,6 +383,12 @@ def test_the_shortlist_face_reads_no_adjustment_factor() -> None:
 
     Held on the import graph rather than on a grep of the call sites, because a loader reached
     through an alias would satisfy the second and not the first.
+
+    `newest_published_session` joined the set in `V2-P4-077` and is the one entry here that opens
+    no partition: it takes a `TradingCalendar` and an instant and answers which session had
+    published, off `_sessions_published_through` -- the same function `_read_visible_price_session`
+    bounds its own refusal by, imported rather than restated so `_pricing_session` cannot come to
+    disagree with the door it then knocks on.
     """
     import openalpha_cn.shortlist_view as module
     from openalpha_cn import panel_ingest
@@ -401,6 +407,7 @@ def test_the_shortlist_face_reads_no_adjustment_factor() -> None:
         "load_stock_universe",
         "load_suspensions",
         "load_trading_calendar",
+        "newest_published_session",
     }
 
 

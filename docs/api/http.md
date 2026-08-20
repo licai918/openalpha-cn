@@ -289,6 +289,36 @@ runs the shortlist gate over the result. It is the HTTP twin of `openalpha short
 and of `OpenAlphaSDK.run_shortlist`; all three resolve through
 `shortlist_view.shortlist_request` and run through `shortlist_view.run_shortlist`.
 
+**What the panel has to hold before this route can answer (`V2-P4-078`).** Six datasets,
+written by five `openalpha panel build` targets, and a panel short of any one of them is a
+`409 panel_unreadable` rather than a thinner list:
+
+| dataset | `panel build --dataset` | what this route reads it for |
+|---|---|---|
+| `trade_cal` | `trade_cal` | which day the cross section's session is |
+| `stock_basic` | `stock_basic` | who was listed on it |
+| `daily` | `price` | the bars stage two prices against |
+| `stk_limit` | `stk_limit` | the exchange's own published bands |
+| `suspend_d` | `price` | whether a name was halted at the close |
+| `namechange` | `namechange` | `is_st`, off the name in effect on that session |
+
+`namechange` is the one that catches people: `openalpha factor build --tier raw` — the command
+that writes the partition this route reads, and which has no HTTP twin — neither needs nor
+fetches it, so a panel without it serves a green factor build and a red shortlist. The `409` body now names the command — `panel build --dataset namechange --year
+<year>` — on `message`, which is the disclosable string and carries no filesystem path.
+`adj_factor` is deliberately absent from the table: the factor build may want it, this route
+never opens it.
+
+**Which session a cross section is priced on is decided by the `as_of` it was *built* at, and
+that is not the day that instant falls on (`V2-P4-077`).** A session's bars publish at 16:30
+Asia/Shanghai, so a cross section stamped anywhere between that day's midnight and 16:30 is
+priced against the **previous** session — the newest one that had published when its own factor
+values were computed. `cross_section.pricing_session` on every answer says which one was used.
+Before this the day itself was used, so such a cross section asked for a session that had not
+published, was refused for it, and — because the instant is stored on the cross section — was
+refused at every later `as_of` too. The look-ahead guard did not move: `panel doctor --session`
+still refuses an unpublished session by name, and this route simply no longer asks for one.
+
 `components` is `[{"factor": "<qualified key or fct_ address>", "weight": <number>}]`, and
 `tier` is `raw`, `processed` or `neutralized`. A **raw**-tier screen takes no `transform`
 and may declare exactly one component — raw values carry each factor's own units, so

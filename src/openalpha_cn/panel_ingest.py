@@ -2302,6 +2302,55 @@ def _sessions_published_through(as_of: datetime, zone: ZoneInfo) -> date:
     return local.date() - timedelta(days=1)
 
 
+def newest_published_session(
+    calendar: TradingCalendar,
+    *,
+    as_of: datetime,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> date:
+    """The newest open session whose bars had published at `as_of` (`V2-P4-077`).
+
+    Two clocks, in this order, and each of them is the one the plane beside it already uses.
+    `_sessions_published_through` answers *when*: a session becomes knowable at 16:30
+    `date_timezone` (`DAILY_AVAILABILITY_TIME`, the constant the provider dates `available_time`
+    at), so on a trading day before that instant the newest published day is yesterday. The
+    calendar answers *which*: the day that lands on may be a weekend or a public holiday, and the
+    session before it is what a caller asking "the market this instant could see" means.
+
+    ## Why this exists rather than a caller's own calendar-day rule
+
+    `shortlist_view._pricing_session` resolved a cross section's instant to that instant's own
+    Shanghai calendar day, walking back only when the day was not an open session -- so a build
+    stamped 00:30 on a Friday asked the price plane for Friday's bars, sixteen hours before that
+    session published. The plane refused, correctly, and because the instant is stored on the
+    cross section the refusal was permanent: `V2-P4-077` measured every `as_of` from before the
+    build to days after it, and every one of them was `exit 1`. The bug was the question, not
+    the guard.
+
+    **This is never later than the calendar-day rule, and differs from it only where that rule
+    asked for a session that had not published.** For an instant at or after its own day's 16:30
+    the two agree exactly; before it, this one is a session earlier and answerable, and that one
+    was a session later and refused. Computed over a year of the fixture calendar at half-hourly
+    steps rather than argued (`tests/integration/test_shortlist_build_prerequisites.py::
+    test_the_new_session_rule_is_never_later_than_the_one_it_replaces`): 16,735 instants, **0**
+    later, 8,518 identical, 8,217 different and **0** of those on a session the old rule could
+    have been answered for. Those 8,217 are what `V2-P4-077` cost -- just under half of every
+    instant in the year, not the overnight hour the report named.
+
+    `_read_visible_price_session` still refuses a session past `_sessions_published_through` --
+    the same function, so the two cannot disagree -- and that refusal is what
+    `panel doctor --session` still reaches.
+
+    `CalendarHorizonError` for an `as_of` before the calendar's first session, which is
+    `previous_trading_day`'s contract: no session had published, and answering the earliest one
+    the calendar happens to hold would be a look-ahead of exactly the kind this resolves.
+    """
+    published_through = _sessions_published_through(as_of, _resolve_timezone(date_timezone))
+    if calendar.is_trading_day(published_through):
+        return published_through
+    return calendar.previous_trading_day(published_through)
+
+
 def _price_requirement(
     dataset: str,
     fields: tuple[str, ...],

@@ -52,14 +52,23 @@ builds here are chosen so the two situations this door must separate meet on **o
 - `HALTED_BUILD` prices 2026-01-09, the session the generator halts `601318.SH` on. The store
   holds **seven** rows for it and the eighth security's row is *genuinely absent*. The read
   answers, and the missing name is counted as `unbarred` by stage two.
-- `UNPUBLISHED_BUILD` prices 2026-01-16 at an instant four and a half hours before that session
-  published. The store holds **eight** rows for it and every one is *withheld*. The read refuses
-  by name.
+- `UNPUBLISHED_BUILD` stands at noon Asia/Shanghai on 2026-01-16. The store holds **eight** rows
+  for that session and every one is *withheld* at that instant. The read refuses by name.
 
 Seven-and-nothing-withheld against nothing-and-eight-withheld: two different pairs of numbers,
 two different answers, one function. A door that could not tell them apart would either refuse
 `HALTED_BUILD` (which is what the tree did before this issue, for every session but the last) or
-answer `UNPUBLISHED_BUILD` with an empty cross section -- a look-ahead dressed as a thin market.
+answer 2026-01-16 with an empty cross section -- a look-ahead dressed as a thin market.
+
+**`V2-P4-077` moved which face asks the second one, and nothing else.** `_pricing_session` used
+to resolve a cross section's instant to that instant's own Shanghai calendar day, so
+`UNPUBLISHED_BUILD` asked the price plane for 2026-01-16 -- a session its own factor values had
+never seen, since `daily_requirement` clamps them at 2026-01-15's close. The plane refused, and
+because the instant is stored on the cross section the refusal was permanent at every `as_of`
+anyone could then ask at. The session is now the newest one that had *published* at the instant,
+so this build prices 2026-01-15 alongside `EARLIER_BUILD`, and the withheld half of the pair
+above is asked through `panel doctor --session` -- same loader, same store, same instant, session
+named rather than derived. The door is untouched; the question this face puts to it is not.
 
 `EARLIER_BUILD` and `HALTED_BUILD` carry the **same** sign, so their two answers differ in exactly
 one thing: whether the market had a bar for every listed name. The generator's closes do not move
@@ -117,8 +126,13 @@ EARLIER_BUILD: Final[datetime] = datetime(2026, 1, 15, 9, 0, tzinfo=UTC)
 sitting behind a newer one in the same year partition."""
 
 UNPUBLISHED_BUILD: Final[datetime] = datetime(2026, 1, 16, 4, 0, tzinfo=UTC)
-"""Noon Asia/Shanghai on 2026-01-16, so `_pricing_session` calls it that session -- four and a
-half hours before that session's own 16:30 publication. Every stored row for it is withheld."""
+"""Noon Asia/Shanghai on 2026-01-16, four and a half hours before that session's own 16:30
+publication. Every stored row for 2026-01-16 is withheld at it.
+
+It was chosen because `_pricing_session` then called it 2026-01-16 and the shortlist face could
+be made to ask for a withheld session that way. `V2-P4-077` is what that cost in the field, so
+the instant now resolves to 2026-01-15 -- the session its factor values were computed from -- and
+the withheld read is asked through `panel doctor --session` instead."""
 
 NEWEST_BUILD: Final[datetime] = datetime(2026, 1, 16, 9, 0, tzinfo=UTC)
 """The panel's newest session, after its close. The one instant that worked before this issue."""
@@ -157,8 +171,8 @@ instants their cross sections carry.
 """
 
 WITHHELD_AS_OF: Final[datetime] = datetime(2026, 1, 16, 5, 0, tzinfo=UTC)
-"""13:00 Asia/Shanghai on 2026-01-16, resolving `UNPUBLISHED_BUILD` -- a cross section about a
-session whose own 16:30 is still three and a half hours away."""
+"""13:00 Asia/Shanghai on 2026-01-16, resolving `UNPUBLISHED_BUILD` -- an intraday cross section,
+priced on the session before its own day."""
 
 NEWEST_AS_OF: Final[datetime] = datetime(2026, 1, 16, 12, 0, tzinfo=UTC)
 """After 2026-01-16 published; resolves `NEWEST_BUILD`. The one instant that worked before."""
@@ -395,6 +409,25 @@ def test_a_withheld_session_is_refused_while_a_session_missing_one_bar_is_answer
 
     The pair is the assertion. A door that answered both would have shipped a look-ahead as a thin
     market; one that refused both is the tree this issue was filed against.
+
+    ## The withheld half is asked through `panel doctor` now (`V2-P4-077`)
+
+    It used to be asked through `shortlist run` at `WITHHELD_AS_OF`, and that route is gone
+    because the question it put was itself wrong. `UNPUBLISHED_BUILD` stands at noon Asia/Shanghai
+    on 2026-01-16 and its factor values were computed from 2026-01-15's close -- that is what
+    `daily_requirement` clamps them to -- so resolving it onto 2026-01-16 offered a cross section
+    to a session its own values had never seen, which is the sentence this whole module exists to
+    make true, inverted. The price plane refused it, correctly, and because the instant is stored
+    **on the cross section** the refusal was permanent: `V2-P4-077` swept every `as_of` from
+    before that build to four days after it and every one exited `1`. `_pricing_session` now
+    resolves the newest session that had *published* at the instant, so this build prices
+    2026-01-15 and the two clocks agree.
+
+    **Nothing about the door changed, and this is where that is measured.** The same loader, the
+    same store and the same instant, asked with the session named rather than derived, still
+    refuses by name -- so the withheld half is exactly as live as it was, and what moved is which
+    question this face puts to it. `test_a_session_whose_bars_are_not_yet_published_is_refused_
+    rather_than_answered_empty` is the same refusal one session further out.
     """
     sdk = OpenAlphaSDK(runtime_dir=runtime_dir)
 
@@ -404,13 +437,15 @@ def test_a_withheld_session_is_refused_while_a_session_missing_one_bar_is_answer
     assert HALTED_SECURITY in answered.universe
     assert dict(answered.funnel.tradeability.refused_by_verdict)["unbarred"] == 1
 
-    with pytest.raises(ShortlistPanelUnreadableError) as refusal:
-        sdk.run_shortlist(**BASELINE, as_of=WITHHELD_AS_OF)
+    withheld = _close_agreement(
+        _doctor(runtime_dir, session=NEWEST_SESSION, as_of=UNPUBLISHED_BUILD)
+    )
 
-    message = str(refusal.value)
-    assert "the price bars for 2026-01-16" in message
-    assert "had not published yet" in message
-    assert "look-ahead" in message
+    assert withheld["ran"] is False
+    reason = str(withheld["skipped_reason"])
+    assert "daily cannot be read for 2026-01-16" in reason
+    assert "that session had not published yet" in reason
+    assert "look-ahead" in reason
 
 
 def test_the_session_with_every_bar_answers_one_more_name_than_the_halted_one(
@@ -436,18 +471,26 @@ def test_the_session_with_every_bar_answers_one_more_name_than_the_halted_one(
     assert dict(whole.funnel.tradeability.refused_by_verdict)["unbarred"] == 0
 
 
-def test_the_http_face_answers_the_earlier_cross_section_and_refuses_the_withheld_one(
+def test_the_http_face_answers_the_earlier_cross_section_and_refuses_what_is_not_there(
     rest: TestClient, runtime_dir: Path
 ) -> None:
     """The same two answers over HTTP, because three faces that disagree is `V2-P4-033`'s finding.
 
     `200` on a cross section the panel can price on its own session, and `409` -- not `200` with
-    an empty `admitted` -- on one whose session had not published. The status code is the half a
-    JSON body cannot make: a caller reading `admitted: []` cannot ask a dict whether it was
-    refused.
+    an empty `admitted` -- on an `as_of` at which no cross section exists at all. The status code
+    is the half a JSON body cannot make: a caller reading `admitted: []` cannot ask a dict whether
+    it was refused.
+
+    The refusing half used to be `WITHHELD_AS_OF`, and `V2-P4-077` is why it is not: that
+    question is no longer askable through this face, because asking it was the defect. The
+    refusal it drove is asserted where it is still reachable --
+    `test_a_withheld_session_is_refused_while_a_session_missing_one_bar_is_answered` -- and what
+    this test needs is any refusal at all, to hold the status code and the envelope apart from a
+    thin `200`.
     """
     answered = rest.post("/api/v1/shortlists/run", json=_rest_body(EARLIER_AS_OF))
-    refused = rest.post("/api/v1/shortlists/run", json=_rest_body(WITHHELD_AS_OF))
+    refused = rest.post("/api/v1/shortlists/run", json=_rest_body(BEFORE_ANY_BUILD_AS_OF))
+    intraday = rest.post("/api/v1/shortlists/run", json=_rest_body(WITHHELD_AS_OF))
 
     assert answered.status_code == 200, answered.text
     body = answered.json()
@@ -457,10 +500,14 @@ def test_the_http_face_answers_the_earlier_cross_section_and_refuses_the_withhel
 
     assert refused.status_code == 409, refused.text
     fault = refused.json()["detail"]
-    assert fault["reason"] == "panel_unreadable"
-    assert "that session had not published yet" in fault["message"]
+    assert fault["reason"] == "blocked"
+    assert "no raw-tier cross section" in fault["message"]
     assert "admitted" not in refused.json()
     assert str(runtime_dir) not in fault["message"]
+
+    assert intraday.status_code == 200, intraday.text
+    assert intraday.json()["cross_section"]["as_of"] == UNPUBLISHED_BUILD.isoformat()
+    assert intraday.json()["cross_section"]["pricing_session"] == EARLIER_SESSION.isoformat()
 
 
 def test_an_as_of_before_anything_was_knowable_is_still_refused_by_name(
@@ -576,8 +623,13 @@ def test_a_blocked_read_never_comes_back_as_an_empty_shortlist(runtime_dir: Path
     `ShortlistPanelUnreadableError` rather than a result whose funnel happens to be empty, because
     a caller reading zero names cannot ask a dataclass whether it was refused -- the distinction
     `V2-P4-023` built and the one a look-ahead would hide behind.
+
+    Driven at an `as_of` before any cross section exists rather than at `WITHHELD_AS_OF`, for
+    `test_the_http_face_answers_the_earlier_cross_section_and_refuses_what_is_not_there`'s reason:
+    `V2-P4-077` removed the second question from this face, and what this test needs is a refusal
+    rather than that particular one.
     """
     sdk = OpenAlphaSDK(runtime_dir=runtime_dir)
 
     with pytest.raises((ShortlistPanelUnreadableError, ShortlistRunBlockedError)):
-        sdk.run_shortlist(**BASELINE, as_of=WITHHELD_AS_OF)
+        sdk.run_shortlist(**BASELINE, as_of=BEFORE_ANY_BUILD_AS_OF)

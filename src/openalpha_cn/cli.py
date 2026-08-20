@@ -4405,6 +4405,31 @@ def shortlist_run_command(
     refused by name against it. `openalpha factor list` says which `--component` and `--transform`
     are legal.
 
+    **And so do five panel targets, which is the other half and `V2-P4-078`.** This command reads
+    six panel datasets at the resolved cross section's own instant, and a panel short of any one
+    of them is refused rather than screened::
+
+        openalpha panel build --dataset trade_cal    --year <year>   # the exchange calendar
+        openalpha panel build --dataset stock_basic  --year <year>   # the security registry
+        openalpha panel build --dataset price        --year <year>   # bars, valuations, halts
+        openalpha panel build --dataset stk_limit    --year <year>   # the published bands
+        openalpha panel build --dataset namechange   --year <year>   # the rename corpus
+
+    `namechange` is the one that catches people, and it caught this repository's own end-to-end
+    suite: `--tier raw` does not need it, so a factor build over a panel without it is green and
+    the shortlist over that same panel is red. It is read for `is_st` -- `MarketBar` carries a
+    risk-warning flag per name, taken from the name in effect on the pricing session -- so a
+    screen without it would price every special-treated name under an ordinary band. `adj_factor`
+    is **not** in the list: `openalpha factor build` may want it, this command never opens it.
+
+    **The `--as-of` a cross section was *built* at decides which session it is priced on, and
+    that is not the day it falls on.** A session's bars publish at 16:30 Asia/Shanghai, so a
+    build stamped anywhere from that day's midnight up to 16:30 is priced against the **previous**
+    session -- the newest one that had published when its values were computed. `V2-P4-077` is
+    what happened while this resolved the calendar day instead: every cross section built between
+    midnight and the close was permanently unscreenable, at every `as_of` anyone could then ask
+    at. `cross_section.pricing_session` is on every answer and says which session was used.
+
     **`--code-commit ""` is not the same as omitting `--code-commit`, and `V2-P4-046` is what
     happens when they are.** Both flags default to `None` -- *unset* -- rather than to `""`, which
     is what `openalpha run` and `openalpha replay` already do and what this command did not. With
