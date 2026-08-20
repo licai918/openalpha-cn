@@ -419,6 +419,18 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_view.panel_store",
         }
     ),
+    "openalpha_cn.feature_matrix": frozenset(
+        {
+            "panel_factors.FactorEngineError",
+            "panel_factors.load_factor_observations",
+            "panel_factors.load_processed_factor_observations",
+            "panel_ingest.load_stock_universe",
+            "panel_ingest.load_trading_calendar",
+            "panel_ingest.newest_published_session",
+            "panel_neutralization.NeutralizationEngineError",
+            "panel_neutralization.load_neutralized_factor_observations",
+        }
+    ),
     "openalpha_cn.shortlist_view": frozenset(
         {
             "panel_factors.FACTOR_DEFINITIONS",
@@ -542,6 +554,10 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
             }
         ),
     ),
+    "openalpha_cn.feature_matrix": DatasetReach(
+        named=frozenset(),
+        reached=frozenset({"stock_basic", "trade_cal"}),
+    ),
     "openalpha_cn.shortlist_view": DatasetReach(
         named=frozenset(
             {
@@ -633,6 +649,16 @@ describing the row is not. It is covered here at all because
 `V2-P3-015` made `factor_*` a second top-level family and the glob above only knew about the
 first; see `RESEARCH_PLANE_PREFIXES`.
 
+**`feature_matrix` names none and reaches two, which is the narrowest row in the table and is
+`V2-P4-012`'s whole claim about its own seam.** Every feature value it returns comes out of the
+factor plane's *derived* partitions -- `factor_obs_*`, `factor_proc_*`, `factor_neut*` -- which are
+built by concatenation at run time and are deliberately not in `UPSTREAM_PANEL_DATASETS` at all,
+so the three observation loaders it takes across the seam contribute nothing here. What is left is
+exactly what a matrix needs besides its numbers: `trade_cal` to say which session a stored build is
+about, and `stock_basic` to say who was listed on it. A row that grew a price or valuation dataset
+would mean this module had started deciding tradeability, which
+`a_universe_version_says_who_was_listed_and_not_who_was_tradeable` says it does not.
+
 **`panel_ingest`, `panel_doctor`, `panel_gate` and `panel_view` reach all fifteen**, and their
 rows say `UPSTREAM_PANEL_DATASETS` rather than repeating it. That is a derived value in a table
 that is otherwise written by hand, so it is worth being explicit about what it costs: a sixteenth
@@ -675,8 +701,8 @@ def _top_level_panel_modules() -> list[str]:
     )
 
 
-RESEARCH_PLANE_PREFIXES = ("panel_", "factor_", "shortlist_")
-"""The two top-level module families the research plane is built out of.
+RESEARCH_PLANE_PREFIXES = ("panel_", "factor_", "shortlist_", "feature_")
+"""The four top-level module families the research plane is built out of.
 
 `_top_level_panel_modules()` above globs `panel_*.py` alone, which was the whole plane when it
 was written and is not any more: `V2-P3-015` added `factor_view.py`, a *second* top-level family
@@ -694,6 +720,14 @@ family -- `signal_view.py`, say -- which is exactly the shape `V2-P3-015` was, o
 tiers back into the two-stage funnel's input. It went red on arrival, with a message saying which
 of the two remedies to take, and this is the one it took: it is a research-plane module, so it
 joins the discovered set and takes the rows below rather than a sentence excusing it from them.
+
+**`feature_` is the fourth, and it arrived the same way.** `V2-P4-012`'s `feature_matrix.py`
+reads the same three stored tiers back into a versioned feature matrix for the model chain, and
+`test_every_top_level_module_is_a_declared_leaf_or_a_member_of_a_discovered_family` failed on it
+before any of its own tests were written. It takes the two rows below, and it is named
+`feature_*` rather than folded into `factor_*` deliberately: a column of that matrix is a
+*(factor, tier, transform, neutralisation)* tuple rather than a factor, and renaming a module to
+land inside an existing glob is how a family stops being a claim about what a module is.
 """
 
 
