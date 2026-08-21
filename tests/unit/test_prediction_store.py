@@ -18,12 +18,18 @@ from typing import Final
 
 import pytest
 from alpha_model_fixtures import SHANGHAI, cross_section, fitted_reference, trading_calendar
+from pydantic import ValidationError
 
 from openalpha_cn.api.app import ModelDailyRunApiRequest
 from openalpha_cn.domain.alpha_model import PredictionBatch
 from openalpha_cn.domain.labels import LabelError
+from openalpha_cn.domain.prediction_record import PREDICTION_RECORD_VERSIONS
 from openalpha_cn.domain.trading_calendar import CalendarHorizonError
-from openalpha_cn.domain.versioning import UnknownSchemaVersionError
+from openalpha_cn.domain.versioning import (
+    STORED_DOCUMENT_FAULTS,
+    IdentityRewriteRequiredError,
+    UnknownSchemaVersionError,
+)
 from openalpha_cn.model_view import DailyRunRequest
 from openalpha_cn.sdk import OpenAlphaSDK
 from openalpha_cn.storage.predictions import (
@@ -317,7 +323,16 @@ def test_a_partial_file_from_a_crashed_write_is_never_offered_as_a_key(tmp_path:
 
 
 def test_a_document_written_by_a_newer_build_fails_by_name(tmp_path: Path) -> None:
-    """`read_versioned` is the read path, so a version this build cannot read says which."""
+    """`read_versioned` is the read path, so a version this build cannot read says which.
+
+    The `UnknownSchemaVersionError` sentence survives inside this store's refusal rather than
+    replacing it, which is `V2-P4-096`'s whole point: the version registry's message is the
+    actionable half -- it names the contract, the version found and the versions this build
+    reads -- and it was arriving at three product faces as `exit 5` with the message *withheld*,
+    because nothing above `storage/` catches a `ValueError` out of `domain/versioning.py`. This
+    test asserted the escape before that issue and asserts the envelope now; both halves of the
+    sentence are checked so a refusal that dropped the diagnosis to gain the type would be red.
+    """
     subject = store(tmp_path)
     held = put(subject, batch=batch()).record  # type: ignore[attr-defined]
     document = tmp_path / f"{held.record_id}{PREDICTION_DOCUMENT_SUFFIX}"
@@ -328,8 +343,120 @@ def test_a_document_written_by_a_newer_build_fails_by_name(tmp_path: Path) -> No
         encoding="utf-8",
     )
 
-    with pytest.raises(UnknownSchemaVersionError, match="alpha-prediction-record"):
+    with pytest.raises(PredictionStoreError) as raised:
         subject.get(held.record_id)
+
+    assert "could not be read back as a prediction" in str(raised.value)
+    assert "alpha-prediction-record/v2" in str(raised.value)
+    assert isinstance(raised.value.__cause__, UnknownSchemaVersionError)
+
+
+def test_a_document_that_will_not_parse_is_refused_by_this_store_and_not_by_python(
+    tmp_path: Path,
+) -> None:
+    """`V2-P4-096`: the parse was the one thing `get` did not check.
+
+    Four documents and three exception types, because `except json.JSONDecodeError` -- the fault
+    the issue was reported as -- covers exactly one of them. `STORED_DOCUMENT_FAULTS` is the
+    tuple, and it is named at `read_versioned` rather than here so that the day that function
+    grows a fourth exit, the store that reads through it is not the place anybody has to
+    remember.
+
+    The refusal names the record, says the bytes rather than the address are the problem, and
+    names the file to remove: this store has no `delete`, so the remedy is the operator's and a
+    message that did not say so would leave the document blocking its own re-registration
+    forever.
+    """
+    damaged: dict[str, Callable[[str], str]] = {
+        "truncated": lambda text: text[: len(text) // 2],
+        "an array rather than an object": lambda text: f"[{text}]",
+        "a schema_version this build has not got": lambda text: text.replace(
+            "alpha-prediction-record/v1", "alpha-prediction-record/v9", 1
+        ),
+        "a field of the wrong type": lambda text: json.dumps(
+            {**json.loads(text), "recorded_at": ["not", "an", "instant"]}
+        ),
+    }
+    subject = store(tmp_path)
+    held = put(subject, batch=batch()).record  # type: ignore[attr-defined]
+    document = tmp_path / f"{held.record_id}{PREDICTION_DOCUMENT_SUFFIX}"
+    filed = document.read_text(encoding="utf-8")
+
+    causes: list[type[BaseException]] = []
+    for described, damage in damaged.items():
+        document.write_text(damage(filed), encoding="utf-8")
+
+        with pytest.raises(PredictionStoreError) as raised:
+            subject.get(held.record_id)
+
+        message = str(raised.value)
+        assert held.record_id in message, described
+        assert "could not be read back as a prediction" in message, described
+        assert f"predictions/{held.record_id}{PREDICTION_DOCUMENT_SUFFIX}" in message, described
+        assert raised.value.__cause__ is not None, described
+        causes.append(type(raised.value.__cause__))
+
+    assert set(causes) == {json.JSONDecodeError, UnknownSchemaVersionError, ValidationError}, (
+        "four documents have to reach three exception types, or this corpus is testing "
+        "`except json.JSONDecodeError` under another name"
+    )
+
+
+def test_an_unreadable_document_refuses_the_write_that_would_replace_it(tmp_path: Path) -> None:
+    """`put` reads through `get`, which is why one `except` was enough.
+
+    Two readers, not one: the collision branch (`is_file()` -> `get`) and the `supersedes`
+    check. A caller re-offering the identical prediction is the ordinary case -- `put` is
+    idempotent by design and a repeated daily run is expected to report `unchanged` -- so an
+    unreadable document had to refuse *that* path too, and it did so as a bare `JSONDecodeError`
+    out of a store whose face catches `PredictionStoreError`.
+
+    Refused rather than overwritten. "Never write where something is already held" is this
+    store's one guarantee, and a document that cannot be parsed is still one that is held; a
+    `put` that repaired the directory by clobbering would be the escape hatch `V2-P4-071`'s
+    `--supersedes-raw` was removed for.
+    """
+    subject = store(tmp_path)
+    held = put(subject, batch=batch()).record  # type: ignore[attr-defined]
+    document = tmp_path / f"{held.record_id}{PREDICTION_DOCUMENT_SUFFIX}"
+    filed = document.read_text(encoding="utf-8")
+    document.write_text(filed[: len(filed) // 2], encoding="utf-8")
+
+    with pytest.raises(PredictionStoreError, match="could not be read back as a prediction"):
+        put(subject, batch=batch())
+
+    assert document.read_text(encoding="utf-8") == filed[: len(filed) // 2]
+    assert subject.list_ids() == (held.record_id,)
+
+
+def test_the_named_faults_are_what_reading_a_document_raises_and_not_what_a_bug_raises() -> None:
+    """`STORED_DOCUMENT_FAULTS`' membership, both directions, because both were decisions.
+
+    **In**: the three `read_versioned` reaches on damaged bytes, plus
+    `IdentityRewriteRequiredError`, which no registry read through this store can produce today
+    -- `PREDICTION_RECORD_VERSIONS` has one version and therefore no upgrade to refuse. It is
+    kept for `V2-P4-084`'s precedent, and this assertion is the pin that precedent asks for: a
+    mutation deleting the unreachable arm survives every corpus in this repository, so the reason
+    it stays is written down where a sweep will find it rather than left to be rediscovered.
+
+    **Out**: the `RuntimeError` `read_versioned` raises when an upgrade chain does not converge.
+    That is a `ContractVersions` whose upgrades cycle -- a defect in this build -- and a store
+    that enveloped it would report its own bug to the user as a damaged document.
+    """
+    named = (
+        json.JSONDecodeError,
+        UnknownSchemaVersionError,
+        IdentityRewriteRequiredError,
+        ValidationError,
+    )
+
+    assert named == STORED_DOCUMENT_FAULTS
+    assert RuntimeError not in STORED_DOCUMENT_FAULTS
+    assert not any(issubclass(RuntimeError, fault) for fault in STORED_DOCUMENT_FAULTS)
+    assert set(PREDICTION_RECORD_VERSIONS.upgrades) == set(), (
+        "an upgrade registered here makes IdentityRewriteRequiredError reachable, and this "
+        "test's stated reason for keeping the unreachable arm stops being the reason"
+    )
 
 
 def test_a_batch_the_calendar_cannot_reach_is_refused_rather_than_given_a_deadline(

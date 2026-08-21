@@ -533,7 +533,13 @@ KNOWN_MODEL_VIEW_LIMITATIONS: Final[tuple[ModelViewLimitation, ...]] = (
             "prediction day is a defensible policy against a label whose window overlaps the "
             "prediction day's own; it is not one this repository can measure the value of, so it "
             "is not offered as a flag nobody could choose a number for. `model evaluate` "
-            "declares `--embargo-sessions` because there a block exists to be separated from."
+            "declares `--embargo-sessions` because there a block exists to be separated from. "
+            "**A `--end` reaching within a horizon of the newest session your panel holds is "
+            "purged, not refused** (`V2-P4-095`): those cross sections are skipped before they "
+            "are labelled, so nothing asks the panel for prices it does not have yet, and "
+            "`--end` may simply be the last session you built. `training.day_count` on the "
+            "answer is what actually trained and `training.end` is what you asked for; when "
+            "they disagree, the difference is exactly the days whose outcome had not printed."
         ),
     ),
     ModelViewLimitation(
@@ -1604,6 +1610,49 @@ def _matrix_refusal(error: FeatureMatrixError) -> ModelViewError:
     return ModelRunBlockedError(str(error))
 
 
+def _cross_sections_whose_outcome_had_closed(
+    inputs: _LabelInputs,
+    *,
+    sections: Sequence[FeatureMatrixSection],
+    horizon: ResearchHorizon,
+    deadline: datetime,
+) -> tuple[FeatureMatrixSection, ...]:
+    """The cross sections a daily fit may consume, decided before any price is read.
+
+    ## `V2-P4-095`: the purge ran after the read that made it unreachable
+
+    `run_daily` labelled every stored cross section in `--start..--end` and *then* purged the
+    ones whose outcome had not closed. Labelling one means pricing its whole window, so a range
+    reaching within `horizon` sessions of the panel's newest session asked for bars the panel did
+    not hold and the run died -- `exit 1`, `409`, `ModelPanelUnreadableError` -- on sessions it
+    was about to discard. Measured on a panel built through 2026-03-20 predicting about it:
+    `--end 2026-03-13` refused, naming price bars for 2026-03-23; `--end 2026-03-12` answered.
+    The wall was exactly the horizon, and pulling `--end` back changed nothing about the fit,
+    because `--end 2026-03-13` would have purged to the same set.
+
+    So the decision moves ahead of the read. Nothing about *which* examples train changes --
+    `trainable_at` still runs over the labelled panel and is still the rule -- and
+    `_outcome_had_closed` is the single inequality both use, so the two cannot drift apart into a
+    run that labels a cross section only to throw it away.
+
+    ## The one window this does not drop, and why that is not an inconsistency
+
+    A window `build_label_window` cannot place at all -- a prediction day within
+    `horizon.sessions + 1` of the last session the *calendar* publishes -- stays `V2-P4-088`'s
+    named refusal with `openalpha panel build --dataset trade_cal --year <next>` on it, rather
+    than being silently dropped here. The two cases look alike and are not: an outcome the
+    calendar dates *after* the deadline is one this run knows it may not use, while an outcome
+    the calendar cannot date is one nothing here knows anything about. Dropping the second would
+    turn a missing partition into a quietly shorter training range, which is the
+    blocked-versus-empty conflation this face exists to keep apart.
+    """
+    return tuple(
+        section
+        for section in sections
+        if _outcome_had_closed(inputs.window(section.as_of, horizon=horizon), deadline=deadline)
+    )
+
+
 def _labelled(
     inputs: _LabelInputs, *, sections: Sequence[FeatureMatrixSection], horizon: ResearchHorizon
 ) -> LabelledPanel:
@@ -1651,12 +1700,35 @@ def trainable_at(panel: LabelledPanel, *, deadline: datetime) -> tuple[TrainingE
 
     Public, because it is the one rule this module applies that `backtest/` does not already own,
     and a rule a reader cannot call is a rule nobody can check.
+
+    The comparison itself is `_outcome_had_closed`, so that `run_daily`'s decision not to *label*
+    a cross section this would discard is the same inequality rather than a second one --
+    `_OUTCOME_WINDOW_FAULTS`' arrangement, and its reason: two copies of a check are one check
+    plus a place for a future path to skip it.
     """
     return tuple(
         example
         for example in panel.examples
-        if example.label.window.close_instant(example.label.window.exit_day) <= deadline
+        if _outcome_had_closed(example.label.window, deadline=deadline)
     )
+
+
+def _outcome_had_closed(window: LabelWindow, *, deadline: datetime) -> bool:
+    """Whether `window`'s outcome had already printed at `deadline`.
+
+    One inequality, in one place, because `V2-P4-095` is what happens when the fit and the
+    labeller disagree about which examples are in play. `trainable_at` reads it over an
+    example; `run_daily` reads it over a cross section before deciding to price one.
+
+    Private, and `trainable_at` above is not, which is the module's existing split rather than an
+    oversight: `_outcome_window_refusal` is private for the same reason while
+    `_OUTCOME_WINDOW_FAULTS`' public docstring names it. What a reader outside this module needs
+    to be able to *call* is the rule as it is applied -- `trainable_at`, over a panel and a
+    deadline -- and that is what "a rule a reader cannot call is a rule nobody can check" asks
+    for. This is the expression it shares with one internal caller, and widening `__all__` for it
+    would put a predicate over a `LabelWindow` on a face whose vocabulary is panels and runs.
+    """
+    return window.close_instant(window.exit_day) <= deadline
 
 
 def _model_of(declaration: AlphaModelDeclaration) -> AlphaModel:
@@ -1816,22 +1888,43 @@ def run_daily(
     `predicted_at` is a parameter for `FittedAlphaModel.predict`'s reason -- a hidden
     `datetime.now()` here would make every batch unreproducible and every test order-dependent --
     and the composition root is what passes a clock it did not choose.
+
+    **The cross section this run is *about* is resolved before the training panel is labelled,
+    and that reordering is `V2-P4-095`'s** rather than a tidy-up. Its `as_of` is the deadline the
+    purge compares against, so nothing can decide which cross sections are worth pricing until it
+    is known -- and deciding that is the whole fix. The visible consequence, which no test
+    separates because no fixture breaks both at once: when the predict-at cross section and the
+    training panel are *both* unreadable, the refusal now names the first rather than the second.
+    That is the better of the two to report, since a daily run with no cross section to score has
+    nothing to do with how far back `--start` reaches.
     """
     run = request.run
     instants = _prediction_instants(store, run)
     matrix = _matrix(store, run, as_ofs=instants)
     inputs = _LabelInputs(store, run)
-    panel = _labelled(inputs, sections=matrix.sections, horizon=run.horizon)
     section = _section(store, run, as_of=request.predict_at)
-    examples = trainable_at(panel, deadline=section.as_of)
-    if not examples:
+    closed = _cross_sections_whose_outcome_had_closed(
+        inputs, sections=matrix.sections, horizon=run.horizon, deadline=section.as_of
+    )
+    if not closed:
         raise ModelRunBlockedError(
-            f"none of this panel's {len(panel.examples)} labelled example(s) from "
+            f"none of the {len(matrix.sections)} stored cross section(s) from "
             f"{run.start.isoformat()}..{run.end.isoformat()} had an outcome window closed by "
             f"{section.as_of.isoformat()}, which is the instant this run predicts about. Every "
             "one of them would be an outcome the fit could not have known; widen the training "
             "range backwards, or predict about a later instant"
         )
+    panel = _labelled(inputs, sections=closed, horizon=run.horizon)
+    # Provably empty after the filter above, and kept: `_labelled` gives every example of one
+    # section the same window, so filtering sections and purging examples coincide *today*
+    # because of how `_labelled` is written, not because of what a purge is. The purge's unit is
+    # an example; the filter's is a read. A mutation replacing this with `panel.examples`
+    # survives every test in this repository and survives **correctly** -- the two are
+    # indistinguishable across any panel `_labelled` can build -- which is
+    # `test_a_partial_file_from_a_crashed_write_is_never_offered_as_a_key`'s stated situation
+    # rather than a gap. What is not indistinguishable is deleting the *filter*, which puts
+    # `V2-P4-095` straight back.
+    examples = trainable_at(panel, deadline=section.as_of)
     try:
         fitted: FittedAlphaModel = _model_of(run.declaration).fit(
             TrainingSet(feature_ids=panel.feature_ids, examples=examples)

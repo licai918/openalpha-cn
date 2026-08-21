@@ -362,6 +362,53 @@ def test_not_yet_knowable_is_partition_level_so_an_as_of_inside_a_year_reads_not
     assert after.state == "ready"
 
 
+def test_the_not_yet_knowable_refusal_names_its_instant_a_maximum_and_the_earliest_as_of() -> None:
+    """`V2-P4-094`: the sentence described a maximum as if it were a first.
+
+    *"`adj_factor` holds information that first became available at <instant>"* reads as a
+    statement about the dataset -- as though the whole of it had only just been published -- when
+    the instant is `max_available_time`, the newest row anywhere in the partition, and every other
+    row in it may be years old. A reader who takes it literally concludes their build is broken;
+    what has actually happened is that the check is judged per partition and one late row refuses
+    the year.
+
+    Two things the old sentence never said and this one does: that the instant is a **maximum**,
+    and that it is therefore the **earliest `as_of` that reads this dataset**. The second is the
+    whole remedy -- the number a caller needs was already in the message, framed as a fault
+    rather than as a bound, and the product acceptance for this issue found the reachable set by
+    bisection because of it.
+
+    What is *not* claimed here is that a mid-year `as_of` becomes reachable. It does not: the
+    partition-level judgement is unchanged, the test above still holds, and moving the door for
+    `adj_factor` needs the two edits `V2-P4-086` files.
+    """
+    partition = _agreeing(
+        _coverage(
+            year=2024,
+            dates=(date(2024, 1, 2), date(2024, 12, 30)),
+            last_event_time=datetime(2024, 12, 30, 7, 0, tzinfo=UTC),
+            max_available_time=datetime(2024, 12, 30, 8, 30, tzinfo=UTC),
+        )
+    )
+
+    verdict = evaluate_readiness(
+        _bare_requirement(as_of=datetime(2024, 6, 30, 12, 0, tzinfo=UTC), years=(2024,)),
+        partitions=(partition,),
+    )
+
+    detail = verdict.issues[0].detail
+    assert [issue.code for issue in verdict.issues] == ["not_yet_knowable"]
+    assert "newest" in detail
+    assert "first became available" not in detail
+    assert "earliest as_of" in detail
+    assert "per partition rather than per row" in detail
+    assert detail.count("2024-12-30T08:30:00+00:00") == 2, (
+        "the instant has to appear as the offending maximum and again as the bound, or the "
+        "reader is told what went wrong without being told what would work"
+    )
+    assert "2024-06-30T12:00:00+00:00" in detail
+
+
 def test_a_missing_required_field_blocks_and_names_the_field() -> None:
     requirement = _requirement(required_fields=("close", "vol", "amount"))
 

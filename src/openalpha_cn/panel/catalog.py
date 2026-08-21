@@ -1558,9 +1558,13 @@ def evaluate_readiness(
                 code="not_yet_knowable",
                 dataset=dataset,
                 detail=(
-                    f"{dataset} holds information that first became available at "
-                    f"{max_available.isoformat()}, after the requested as_of "
-                    f"{requirement.as_of.isoformat()}"
+                    f"{dataset} holds at least one row that only became knowable at "
+                    f"{max_available.isoformat()} -- the **newest** such instant anywhere in the "
+                    f"partition, which is not when the dataset as a whole became available -- "
+                    f"and that is after the requested as_of {requirement.as_of.isoformat()}. "
+                    f"This check is judged per partition rather than per row, so one late row "
+                    f"refuses the whole year: {max_available.isoformat()} is the earliest as_of "
+                    f"that reads {dataset} here"
                 ),
             )
         )
