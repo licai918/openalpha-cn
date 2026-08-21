@@ -9,7 +9,11 @@ is now the only place either module constructs a store; both call it and hold th
 v2 adds five more storage layers (panel, factor, model, ranking, portfolio). Without a
 composition root, each one would need wiring twice, by hand, forever.
 
-Field types mirror the storage-Protocol layer Task 9 (V2-P0B-003) built: six of eleven
+`V2-P4-021` wires the twelfth, `FilePredictionStore`, which `V2-P4-017` shipped and
+deliberately left out: nothing could fill it until a face above the model and storage planes
+existed, and `model daily-run` is that face. See `StorageContainer.prediction_store`.
+
+Field types mirror the storage-Protocol layer Task 9 (V2-P0B-003) built: six of twelve
 fields are typed against the narrowest Protocol their consumers need (`ResearchMemory`,
 `RecoveryStore`, `EvidenceStore`, `WatchlistStore`, `ReportStore`,
 `ValidationStore`) -- because `sdk.py`/`api/app.py` only ever call the methods those
@@ -52,6 +56,7 @@ from openalpha_cn.storage.memory import SQLiteResearchMemory
 from openalpha_cn.storage.migrations import MigrationRunResult, run_migrations
 from openalpha_cn.storage.parquet import ParquetEvidenceStore
 from openalpha_cn.storage.portfolio import SQLitePortfolioLedger
+from openalpha_cn.storage.predictions import FilePredictionStore
 from openalpha_cn.storage.product import SQLiteReportStore, SQLiteWatchlistStore
 from openalpha_cn.storage.recovery import SQLiteRecoveryStore
 from openalpha_cn.storage.shortlists import FileShortlistStore
@@ -63,7 +68,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class StorageContainer:
-    """All eleven storage components assembled for one shared `runtime_dir`.
+    """All twelve storage components assembled for one shared `runtime_dir`.
 
     `migration_result` is the outcome of the `run_migrations()` call this function makes
     before constructing any store below -- exposed so a caller that needs to report on
@@ -103,6 +108,32 @@ class StorageContainer:
     imports both. The structural match is what makes the injection work and
     `tests/unit/test_factor_view_layering.py` is what pins that it still holds.
     """
+    prediction_store: FilePredictionStore
+    """`V2-P4-017`'s registered predictions, under `runtime_dir / "predictions"`.
+
+    **The twelfth store, and it was deliberately not wired until something could fill it.**
+    `V2-P4-017` shipped `FilePredictionStore` and left it out of this container by name: two
+    `lint-imports` contracts stand between a `PredictionBatch` producer and this package, one per
+    direction -- `backtest-studies-touch-no-store` bars the outbound edge and
+    `storage-no-upward-deps` the inbound one -- so nothing could hand it a batch until a face
+    above both planes existed, and *"a twelfth store nothing can fill is a field, not a wiring"*.
+    `V2-P4-021`'s `model daily-run` is that face.
+
+    Concrete rather than Protocol-typed, and for the **opposite** reason to
+    `experiment_store`'s. That field is concrete because its consumer's Protocol lives above
+    `openalpha_cn.storage`; this one is concrete because it is the *only* store in this container
+    that is not opaque to its own documents -- it deserializes a `PredictionRecord` so that `get`
+    can re-derive the address and refuse a document edited on disk, which is `V2-P4-073`'s
+    read-side lesson. `model_view.ModelPredictionStore` is the narrow Protocol its consumer
+    declares, and this class satisfies it structurally.
+
+    **It is the one store here that takes the `clock`.** Every other store either ignores time or
+    is handed an instant per call; `FilePredictionStore` reads a clock the caller does not own,
+    because that is the entire mechanism behind `PredictionRecord.standing` -- a caller who
+    backdates `predicted_at` reaches `unwitnessed` and cannot reach `forward`. Passing
+    `build_storage`'s own `clock` here is what makes a test's fixed clock and a deployment's real
+    one the same seam.
+    """
     shortlist_store: FileShortlistStore
     """`V2-P4-062`'s stored shortlist answers, under `runtime_dir / "shortlists"`.
 
@@ -119,11 +150,12 @@ class StorageContainer:
 def build_storage(*, runtime_dir: Path, clock: Callable[[], datetime]) -> StorageContainer:
     """Run pending schema migrations, then assemble every storage component once.
 
-    All eleven stores share one `runtime_dir`: eight at its root-level `state.sqlite3`
+    All twelve stores share one `runtime_dir`: eight at its root-level `state.sqlite3`
     (matching the pre-existing per-store convention), plus the Parquet evidence store
     under `runtime_dir / "evidence"`, the sealed experiment documents under
-    `runtime_dir / "experiments"` and `V2-P4-062`'s shortlist answers under
-    `runtime_dir / "shortlists"`. Interrupted-batch recovery runs here, using the
+    `runtime_dir / "experiments"`, `V2-P4-062`'s shortlist answers under
+    `runtime_dir / "shortlists"` and `V2-P4-017`'s registered predictions under
+    `runtime_dir / "predictions"`. Interrupted-batch recovery runs here, using the
     caller-supplied `clock`, instead of being duplicated (and, in `api/app.py`'s case,
     hardcoded) at each call site.
 
@@ -153,6 +185,7 @@ def build_storage(*, runtime_dir: Path, clock: Callable[[], datetime]) -> Storag
     validation_store: ValidationStore = SQLiteValidationStore(runtime_dir / "state.sqlite3")
     experiment_store = FileExperimentStore(runtime_dir / "experiments")
     shortlist_store = FileShortlistStore(runtime_dir / "shortlists")
+    prediction_store = FilePredictionStore(runtime_dir / "predictions", clock=clock)
     batch_store.recover_interrupted(now=clock())
     logger.info(
         "storage_initialized",
@@ -173,5 +206,6 @@ def build_storage(*, runtime_dir: Path, clock: Callable[[], datetime]) -> Storag
         validation_store=validation_store,
         experiment_store=experiment_store,
         shortlist_store=shortlist_store,
+        prediction_store=prediction_store,
         migration_result=migration_result,
     )

@@ -6,6 +6,63 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Added
 
+- **A model plane reachable from a command line, and a prediction store something can fill.**
+  `openalpha model evaluate` fits one declaration once per walk-forward fold and reports the
+  five statistics `V2-P4-014` measures; `openalpha model daily-run` fits on the outcomes that
+  have already closed, scores one stored cross section and **registers the prediction before its
+  outcome is known** (Story S32). Before them, eight issues of contracts -- the `AlphaModel`
+  protocol, the versioned feature matrix, the walk-forward split with purge and embargo, both
+  stdlib baselines, the content-addressed artifact and the prediction record -- had no caller
+  outside `tests/`: the CLI had no `model` command, no route's path contained `model` or
+  `prediction`, and `OpenAlphaSDK` had no method that fitted anything. `POST
+  /api/v1/models/{evaluate,daily-run}`, `GET /api/v1/predictions[/{record_id}]` and
+  `OpenAlphaSDK.evaluate_model()` / `.run_daily_model()` / `.held_prediction()` are the other two
+  faces; all three resolve and run through one module, so they cannot fit three models from one
+  declaration.
+- **`FilePredictionStore` is wired into the composition root**, as the twelfth store, under
+  `runtime_dir / "predictions"` and with `build_storage`'s own clock. `V2-P4-017` shipped it and
+  left it out by name -- two `lint-imports` contracts stand between a `PredictionBatch` producer
+  and `openalpha_cn.storage`, one per direction, so nothing could hand it a batch until a face
+  above both planes existed.
+- **`RunManifest.alpha_model_versions` is filled**, by `model daily-run` and only by it. The slot
+  was declared at `V2-P4-010`, which named `V2-P4-016` for it; that issue measured that
+  `run_cycle` has no `AlphaModel` on its path and passed it on, and `V2-P4-017` reached the same
+  conclusion from the store side. A daily run files a `mode=daily` manifest naming the one
+  artifact it consumed, under a `run_id` derived from the prediction's own content address, so
+  re-running an identical day reports `unchanged` on both stores rather than a duplicate on one.
+  `model evaluate` writes no manifest and registers no prediction, and both absences are stated:
+  it fits one artifact per fold and acts on none of them, and every record it could register
+  would stand `unwitnessed`, because a simulated prediction is dated at the instant it simulates.
+- **`feature_matrix.require_declared_features` has its first caller.** `--feature-version`
+  omitted resolves from the columns the request declares (`--code-commit`'s arrangement, because
+  nobody can type a `feat_` digest by hand) and supplied is checked, with a mismatch refused by
+  name on all three faces. The answer records which of the two happened, because a resolved
+  recipe proves only that the artifact records what it was fitted on. `V2-P4-014` had been named
+  as this function's first caller and structurally could not be:
+  `backtest-no-numeric-stack-or-panel-plane` forbids `openalpha_cn.feature_matrix` to the whole
+  `backtest` package.
+- **`--min-scored-ratio` on both model faces, with no default, and a refusal that is not an empty
+  answer.** Above the declared floor: exit `0` / `200` with `admitted` carrying what the run
+  stands behind. Below it: exit `1` / `409` with `"admitted": null` and both sides of the bar
+  under `blocks`, while the `measurement` body stays byte-identical across the pair. It exists
+  because `FoldEvaluation.scored_ratio` does -- abstaining on the hard names is otherwise a free
+  way to win -- and it is a coverage verdict and never a quality one. A refused `daily-run` still
+  registered its prediction, and the `record_id` is on the `409` body.
+- **Every rendered prediction says what its `standing` does *not* prove.** `V2-P4-017` states
+  plainly that `predicted_at` is unverifiable and that nothing defends against whoever owns the
+  disk; a face printing `"standing": "forward"` and stopping would turn a single-user
+  bookkeeping fact into what reads like an attestation. Both sentences travel in the body and in
+  the terminal rendering.
+- **`feature_matrix.stored_cross_section_instants`**, so a face can take a **range** of
+  prediction days rather than one flag per instant: the builds every declared column shares,
+  visible at the reading `as_of`. The intersection and not the union, which is
+  `_resolve_instant`'s existing rule read forward.
+- **`openalpha model evaluate` and `daily-run` need `adj_factor` and `shortlist run` does not**,
+  while `shortlist run` needs `namechange` and these do not. A label is a return *between two
+  sessions*, so the labeller requires an adjustment series; nothing on the model faces builds a
+  `MarketBar`, so no name history is read. A panel built for one face is short for the other in
+  both directions, and each refusal names the `panel build` line that repairs it (`V2-P4-078`'s
+  bar).
 - **`runs.mode` is a queryable, indexed column, and the payload is still its only copy.**
   Listing every `paper` run used to mean a full table scan plus one JSON parse per stored run,
   because `mode` existed only inside the opaque `runs.payload`. It is now a `GENERATED ALWAYS

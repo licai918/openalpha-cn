@@ -15,7 +15,7 @@ inside a docstring, which is prose the runner never reads.
 ## Why the mechanism is not copied as it stands
 
 `007`'s form is "one test per entry, named after the entry". At three entries that is exactly
-right. Across the thirty-one code-carrying registries there are **285** entries -- 69 in
+right. Across the thirty-two code-carrying registries there are **294** entries -- 69 in
 `KNOWN_PANEL_LIMITATIONS` alone -- and it stops being right somewhere well before that, for
 three reasons and not one:
 
@@ -124,6 +124,7 @@ from openalpha_cn.domain.price_limits import KNOWN_SUSPENSION_LIMITATIONS
 from openalpha_cn.domain.stock_universe import KNOWN_UNIVERSE_LIMITATIONS
 from openalpha_cn.factor_view import KNOWN_FACTOR_RUN_LIMITATIONS
 from openalpha_cn.feature_matrix import KNOWN_FEATURE_MATRIX_LIMITATIONS
+from openalpha_cn.model_view import KNOWN_MODEL_VIEW_LIMITATIONS
 from openalpha_cn.panel.catalog import KNOWN_STORAGE_LIMITATIONS
 from openalpha_cn.panel_doctor import KNOWN_PANEL_LIMITATIONS
 from openalpha_cn.product.screening import KNOWN_SCREENING_LIMITATIONS
@@ -164,6 +165,7 @@ LIMITATION_REGISTRIES: Final[dict[str, Sequence[_Limitation]]] = {
     "KNOWN_TREE_LIMITATIONS": KNOWN_TREE_LIMITATIONS,
     "KNOWN_SCREENING_LIMITATIONS": KNOWN_SCREENING_LIMITATIONS,
     "KNOWN_SHORTLIST_VIEW_LIMITATIONS": KNOWN_SHORTLIST_VIEW_LIMITATIONS,
+    "KNOWN_MODEL_VIEW_LIMITATIONS": KNOWN_MODEL_VIEW_LIMITATIONS,
     "KNOWN_FEATURE_MATRIX_LIMITATIONS": KNOWN_FEATURE_MATRIX_LIMITATIONS,
     "KNOWN_ALPHA_MODEL_LIMITATIONS": KNOWN_ALPHA_MODEL_LIMITATIONS,
     "KNOWN_PREDICTION_RECORD_LIMITATIONS": KNOWN_PREDICTION_RECORD_LIMITATIONS,
@@ -181,7 +183,7 @@ LIMITATION_REGISTRIES: Final[dict[str, Sequence[_Limitation]]] = {
     "KNOWN_STORAGE_LIMITATIONS": KNOWN_STORAGE_LIMITATIONS,
     "KNOWN_PANEL_LIMITATIONS": KNOWN_PANEL_LIMITATIONS,
 }
-"""The thirty-one registries whose entries are identified by a `code`, keyed by their own
+"""The thirty-two registries whose entries are identified by a `code`, keyed by their own
 names.
 
 **None of `KNOWN_NEUTRALIZATION_LIMITATIONS`, `KNOWN_IC_LIMITATIONS`,
@@ -255,6 +257,18 @@ supplied rather than run (this repository stores no `SignalFrame`, so a face tha
 every shortlisted name would make `researched_ratio` unable to be anything but `1.0`), and
 that a neutralized-tier screen needs an exposure cross section this face does not load. It
 moved the totals from 225 / 69 to 229 / 69.
+
+`KNOWN_MODEL_VIEW_LIMITATIONS` (`V2-P4-021`) is the thirty-second and moved the totals from
+285 / 69 to **294 / 69**. It is the second that bounds a *face* and the first that bounds one
+whose answer is a **registration** rather than a reading: its nine entries say what a resolved
+`feature_version` is not a claim about, why an evaluation stores nothing (every record it could
+write would stand `unwitnessed`, so filling Story S32's register with backtests would bury the
+`forward` rows), why only the daily half writes a `RunManifest`, that the daily fit purges and
+does not embargo and what an embargo would have separated it from, that a prediction day is an
+instant's zone date and never its pricing session, that the labels behind every fold are read at
+one later `as_of` so the corpus's *shape* is today's even where its values are not, that the
+`scored_ratio` floor is a coverage bar and never a quality one, that nothing on this face selects
+a hyperparameter -- and that the neutralized tier is refused here by name.
 
 `KNOWN_ALPHA_MODEL_LIMITATIONS` (`V2-P4-011`) is the twenty-sixth, and it is the first that
 bounds a **contract for something this repository does not yet build**: the quantitative
@@ -429,12 +443,12 @@ def test_the_registry_table_is_every_known_registry_in_the_source_tree() -> None
     }
 
     assert found == set(LIMITATION_REGISTRIES) | set(CODELESS_REGISTRIES)
-    assert len(LIMITATION_REGISTRIES) == 31
+    assert len(LIMITATION_REGISTRIES) == 32
     assert set(LIMITATION_REGISTRIES) & set(CODELESS_REGISTRIES) == set()
 
 
 def test_every_declared_limitation_code_is_named_in_executable_test_code() -> None:
-    """The binding itself, over all thirty-one code-carrying registries and all their entries.
+    """The binding itself, over all thirty-two code-carrying registries and all their entries.
 
     A code that appears nowhere but in prose is a code the suite has no opinion about: rename
     it and everything stays green while every citation of it silently stops resolving. That is
@@ -534,5 +548,5 @@ def test_the_registries_together_carry_the_entry_count_the_report_folds() -> Non
 
     assert len(codes["KNOWN_PANEL_LIMITATIONS"]) == folded + plane_wide + 1
     assert all(codes[registry] for registry in codes)
-    assert sum(len(entries) for entries in codes.values()) >= 285
+    assert sum(len(entries) for entries in codes.values()) >= 294
     assert len(codes["KNOWN_PANEL_LIMITATIONS"]) >= 69

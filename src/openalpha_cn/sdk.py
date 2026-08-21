@@ -28,6 +28,7 @@ from openalpha_cn.backtest.replay import ReplayCorpus, ReplayReport, ReplayRunne
 from openalpha_cn.backtest.validation import OutcomeObservation, OutcomeValidator
 from openalpha_cn.domain.evidence import EvidenceSnapshot
 from openalpha_cn.domain.factor import FactorNote
+from openalpha_cn.domain.prediction_record import PredictionRecord
 from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.domain.validation import ValidationResult
 from openalpha_cn.evidence.service import build_provider_evidence
@@ -43,6 +44,18 @@ from openalpha_cn.factor_view import (
     factor_request,
     run_factor_experiment,
 )
+from openalpha_cn.model_view import (
+    DailyRunResult,
+    ModelEvaluation,
+    daily_request,
+    daily_view,
+    evaluation_view,
+    feature_columns,
+    held_prediction,
+    model_evaluation_request,
+)
+from openalpha_cn.model_view import evaluate_model as evaluate_model_run
+from openalpha_cn.model_view import run_daily as run_daily_model_run
 from openalpha_cn.panel.catalog import DatasetReadiness
 from openalpha_cn.panel_doctor import PanelHealthReport, panel_health_report
 from openalpha_cn.panel_gate import DependencyClearance, require_datasets
@@ -100,6 +113,7 @@ class OpenAlphaSDK:
         self.validation_store = storage.validation_store
         self.experiment_store = storage.experiment_store
         self.shortlist_store = storage.shortlist_store
+        self.prediction_store = storage.prediction_store
 
     def health(self) -> dict[str, str]:
         """Return SDK and package readiness."""
@@ -660,6 +674,157 @@ class OpenAlphaSDK:
     def list_shortlists(self) -> tuple[str, ...]:
         """Every held `shortlist_id`, ascending."""
         return self.shortlist_store.list_ids()
+
+    def evaluate_model(
+        self,
+        *,
+        features: Sequence[Mapping[str, object]],
+        name: str,
+        family: str,
+        horizon: str,
+        seed: int,
+        start: date,
+        end: date,
+        as_of: datetime,
+        years: Sequence[int],
+        exchange: str,
+        folds: int,
+        test_days_per_fold: int,
+        embargo_sessions: int,
+        minimum_scored_ratio: float,
+        code_commit: str,
+        config_digest: str,
+        feature_version: str | None = None,
+        hyperparameters: Sequence[tuple[str, bool | int | float | str]] = (),
+    ) -> ModelEvaluation:
+        """Fit one declaration once per walk-forward fold and report what it ordered.
+
+        `V2-P4-021`'s in-process face, resolving through the same
+        `model_view.model_evaluation_request` and running through the same
+        `model_view.evaluate_model` as `openalpha model evaluate` and
+        `POST /api/v1/models/evaluate`, so the three cannot come to fit three models from one
+        declaration.
+
+        **Hands back the `ModelEvaluation` rather than a rendering of it**, which is what an
+        in-process API is for: `result.folds` is a tuple of `FoldEvaluation`, and each one refuses
+        at construction to carry a `mean_rank_ic` its own coverage says it does not have. A caller
+        reading `fold.mean_rank_ic is None` beside `fold.coverage` can tell "not measured" from
+        "measured at nothing", which is the distinction JSON preserves only because
+        `evaluation_view` is careful to. `self.evaluation_view(result)` is the HTTP face's bytes
+        for a caller that wants those instead.
+
+        It stores nothing. See
+        `an_evaluation_registers_nothing_because_every_record_it_could_write_would_be_unwitnessed`.
+        """
+        return evaluate_model_run(
+            panel_store(self.runtime_dir),
+            model_evaluation_request(
+                columns=feature_columns(features),
+                name=name,
+                family=family,
+                horizon=horizon,
+                seed=seed,
+                start=start,
+                end=end,
+                as_of=as_of,
+                years=years,
+                exchange=exchange,
+                folds=folds,
+                test_days_per_fold=test_days_per_fold,
+                embargo_sessions=embargo_sessions,
+                minimum_scored_ratio=minimum_scored_ratio,
+                code_commit=code_commit,
+                config_digest=config_digest,
+                feature_version=feature_version,
+                hyperparameters=hyperparameters,
+            ),
+        )
+
+    def evaluation_view(self, result: ModelEvaluation) -> dict[str, object]:
+        """One evaluation as `openalpha model evaluate --json` and HTTP render it."""
+        return evaluation_view(result)
+
+    def run_daily_model(
+        self,
+        *,
+        features: Sequence[Mapping[str, object]],
+        name: str,
+        family: str,
+        horizon: str,
+        seed: int,
+        start: date,
+        end: date,
+        predict_at: datetime,
+        as_of: datetime,
+        years: Sequence[int],
+        exchange: str,
+        minimum_scored_ratio: float,
+        code_commit: str,
+        config_digest: str,
+        feature_version: str | None = None,
+        hyperparameters: Sequence[tuple[str, bool | int | float | str]] = (),
+    ) -> DailyRunResult:
+        """Fit on what has already closed, score `predict_at`, and register the answer.
+
+        Story S32's in-process face. `predicted_at` and `started_at` both come from `self.clock`
+        and neither is a parameter, which is deliberate and is the same decision the other two
+        faces take: `FilePredictionStore` is constructed by `build_storage` with this same clock,
+        so the instant the batch claims and the instant the store witnessed are readings of one
+        clock this method's caller does not reach. A caller who wants to drive the three standings
+        constructs the SDK with the clock it wants, which is what a test does.
+
+        **A refused run still registered its prediction**, and `result.record` carries it either
+        way -- Story S32's requirement is unconditional and the floor is about whether the answer
+        may be acted on.
+        """
+        now = self.clock()
+        return run_daily_model_run(
+            panel_store(self.runtime_dir),
+            daily_request(
+                columns=feature_columns(features),
+                name=name,
+                family=family,
+                horizon=horizon,
+                seed=seed,
+                start=start,
+                end=end,
+                predict_at=predict_at,
+                as_of=as_of,
+                years=years,
+                exchange=exchange,
+                minimum_scored_ratio=minimum_scored_ratio,
+                code_commit=code_commit,
+                config_digest=config_digest,
+                feature_version=feature_version,
+                hyperparameters=hyperparameters,
+            ),
+            predictions=self.prediction_store,
+            runs=self.repository,
+            predicted_at=now,
+            started_at=now,
+        )
+
+    def daily_view(self, result: DailyRunResult) -> dict[str, object]:
+        """One daily run as `openalpha model daily-run --json` and HTTP render it."""
+        return daily_view(result)
+
+    def held_prediction(self, record_id: str) -> PredictionRecord:
+        """One registered prediction, by the `record_id` its own run reported.
+
+        Hands back the `PredictionRecord` rather than a rendering, so a caller reads `standing`
+        off a `computed_field` that is re-derived from the two instants every time -- a provenance
+        a producer stamps is a provenance a producer chooses, and this is the form in which that
+        stays visible. `model_view.prediction_view(record)` is the rendering, and it is the one
+        that carries what the standing does *not* prove.
+
+        Raises `ModelNotHeldError` when nothing is held rather than answering `None`,
+        `held_shortlist`'s distinction: a `record_id` is an address that was printed on an answer.
+        """
+        return held_prediction(self.prediction_store, record_id)
+
+    def list_predictions(self) -> tuple[str, ...]:
+        """Every registered `record_id`, ascending."""
+        return self.prediction_store.list_ids()
 
     def execute_portfolio_order(
         self,

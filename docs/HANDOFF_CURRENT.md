@@ -8,7 +8,7 @@
 
 ## 当前状态
 
-v2 实现已进行到 **P3（因子层）**。P0.A / P0.B / P1 / P2 阶段已合并，P3 交付了因子契约、
+v2 实现已进行到 **P4（模型与排序层）**。P0.A / P0.B / P1 / P2 阶段已合并，P3 交付了因子契约、
 面板因子引擎、五个因子族、四项研究（IC / 分位组合 / 冗余 / 可交易性）、密封的三档实验
 产物，以及因子层的三个公开面。
 
@@ -35,6 +35,27 @@ openalpha factor run --factor reversal_1d/v1 --start 2026-01-08 --end 2026-01-09
 `factor build` 只有命令行与 SDK 两个面，与 `panel build` 一致——它写面板分区，
 而服务本身不带鉴权。
 
+**模型层现在也对操作者可达（`V2-P4-021`）。** `V2-P4-010`–`V2-P4-017` 那八条契约在此之前
+`tests/` 之外没有任何调用者；现在两条命令把它们接了起来：
+
+```bash
+openalpha model evaluate --feature reversal_1d/v1@raw --name reversal-rank \
+  --family cross_sectional_rank --horizon 5d --seed 7 \
+  --start 2026-01-06 --end 2026-01-14 --year 2026 \
+  --folds 2 --test-days-per-fold 2 --embargo-sessions 0 \
+  --min-scored-ratio 0.5 --as-of 2026-01-20T04:00:00+00:00   # 逐折拟合，逐折报数
+openalpha model daily-run --feature reversal_1d/v1@raw ... \
+  --predict-at 2026-01-16T09:00:00+00:00 --min-scored-ratio 0.5  # 在结果已知前把预测落库
+openalpha model predictions        # 这个 runtime 目录登记过的每一个地址
+openalpha model prediction prd_…   # 其中一条，按它登记时的样子
+```
+
+三个面等价：`openalpha model *`、`POST /api/v1/models/{evaluate,daily-run}` +
+`GET /api/v1/predictions[/{record_id}]`、`OpenAlphaSDK.evaluate_model()` /
+`.run_daily_model()`。`FilePredictionStore` 由此进了组装根（第十二个 store），
+`RunManifest.alpha_model_versions` 由 `daily-run` 填上——这个槽 `010` 声明、`016` 与 `017`
+先后实测自己填不了。
+
 ## 已知边界（不是遗漏，是有名字的披露）
 
 - **中性化档在覆盖年内建不出来**（`V2-P4-026`）。残差只能在「读到的每一年的最后一个已存
@@ -46,6 +67,13 @@ openalpha factor run --factor reversal_1d/v1 --start 2026-01-08 --end 2026-01-09
   两个派生档每个名字都只有覆盖码、没有值，六格归因全是 `not_measured`。
 - 完整清单：`openalpha factor list --json` 的 `run_limitations`，或
   `openalpha_cn/factor_view.py#KNOWN_FACTOR_RUN_LIMITATIONS`。
+- **模型面的九条边界随每个答案一起返回**（`--json` 的 `limitations`，或
+  `openalpha_cn/model_view.py#KNOWN_MODEL_VIEW_LIMITATIONS`）。最容易被误读的两条：
+  `--min-scored-ratio` 是**覆盖度**下限、永远不是质量判决；`standing: forward` 只说明本存储在
+  结果可知之前持有了这些字节，**不说明**批次是在它自称的时刻产出的——`predicted_at` 本仓校验不
+  了，也没有任何东西防得住拥有这块磁盘的人。两句话都随答案一起给出，不只写在文档里。
+- **模型面与榜单面的面板前置条件互有缺口**：模型面要 `adj_factor`（标签是两个交易日之间的收益）
+  而不要 `namechange`；榜单面反过来。两边的 `409` 都会写出修复它的那条 `panel build`。
 
 ## 维护者依次读取
 

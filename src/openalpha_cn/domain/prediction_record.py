@@ -108,18 +108,23 @@ recollection, which is what a multiple-testing policy needs. Counting is not dec
 - **`V2-P4-018`** owns the abstention vocabulary. `Prediction.abstention` is still free text and
   `standing` is not it -- one names why a security has no number, the other when a batch reached
   the store.
-- **`V2-P4-021`** owns the model faces, and with them the join. All three producers of a
+- **`V2-P4-021` owned the model faces, and it built the join.** All three producers of a
   `PredictionBatch` live under `backtest/` and are named on `backtest-studies-touch-no-store`'s
   source list, which forbids them `openalpha_cn.storage`; `storage-no-upward-deps` forbids the
-  return edge. So nothing can hand this store a batch until a face above both does -- and that is
-  why `FilePredictionStore` is not in `runtime/composition.py`'s container yet: a twelfth store
-  nothing can fill is a field, not a wiring. (This bullet first said *four* contracts barred the
-  outbound edge; the parsed configuration says one, and `storage/predictions.py` carries the
-  correction and the reading.)
+  return edge. So nothing could hand this store a batch until a face above both did, and until
+  then `FilePredictionStore` stayed out of `runtime/composition.py`'s container: a twelfth store
+  nothing can fill is a field, not a wiring. `model_view.run_daily` is that face and the store is
+  now wired, with `build_storage`'s own clock -- which is the whole mechanism behind `standing`,
+  since a caller of any of the three faces supplies neither timestamp. (This bullet first said
+  *four* contracts barred the outbound edge; the parsed configuration says one, and
+  `storage/predictions.py` carries the correction and the reading.)
 - **`V2-P4-022`** owns the corpus with a known signal-to-noise ratio. Nothing stored here is a
   claim about alpha.
-- **Filling `RunManifest.alpha_model_versions`** is still nobody's, for the reason
-  `V2-P4-016` recorded: `run_cycle` builds the manifest and there is no `AlphaModel` on that path.
+- **Filling `RunManifest.alpha_model_versions`** was still nobody's when this module landed,
+  for the reason `V2-P4-016` recorded: `run_cycle` builds the manifest and there is no
+  `AlphaModel` on that path. `V2-P4-021`'s `model daily-run` is what fills it, under a `run_id`
+  derived from **this** contract's `record_id` -- so one registered prediction and one stored run
+  are idempotent together rather than one of them raising on a repeat.
 """
 
 from __future__ import annotations

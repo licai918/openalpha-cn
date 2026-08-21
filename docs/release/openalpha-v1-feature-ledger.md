@@ -4,8 +4,8 @@
 
 ## 对账结论
 
-- 功能总数: 181
-- 当前真实完成: 176 (97.24%)
+- 功能总数: 182
+- 当前真实完成: 177 (97.25%)
 - `UNREVIEWED=0`
 - `UNKNOWN=0`
 - `legacy_acceptance_rows=85` (历史散文验收、尚未绑定为可执行 pytest/CI 断言)
@@ -18,7 +18,7 @@
 | `DEFERRED` | 1 |
 | `ENHANCED_REPLACEMENT` | 20 |
 | `EXCLUDED` | 4 |
-| `NATIVE_COMPLETE` | 155 |
+| `NATIVE_COMPLETE` | 156 |
 
 ## 功能明细
 
@@ -106,6 +106,7 @@
 | `OA-MODEL-002` | model | Model capability registry | `NATIVE_COMPLETE` | `src/openalpha_cn/models/governance.py#ModelRegistry` | `tests/unit/models/test_model_governance.py` | `legacy-prose` | `Duplicate registrations fail and secrets are absent.` |
 | `OA-MODEL-003` | model | Classified model retry | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/models/openai_compatible.py#OpenAICompatibleProvider;src/openalpha_cn/models/governance.py#ModelRetryPolicy` | `tests/unit/models/test_model_governance.py` | `legacy-prose` | `429 retries while 401 fails immediately.` |
 | `OA-MODEL-004` | model | Model usage and cost ledger | `NATIVE_COMPLETE` | `src/openalpha_cn/storage/models.py#SQLiteModelUsageStore` | `tests/unit/models/test_model_governance.py;tests/integration/storage/test_model_usage_store.py` | `legacy-prose` | `Usage survives reopen and reconciles configured prices.` |
+| `OA-MODEL-005` | model | The model chain reaches a user: a walk-forward evaluation, and a prediction registered before its outcome is known | `NATIVE_COMPLETE` | `src/openalpha_cn/model_view.py#evaluate_model;src/openalpha_cn/model_view.py#run_daily;src/openalpha_cn/model_view.py#model_evaluation_request;src/openalpha_cn/model_view.py#daily_request;src/openalpha_cn/model_view.py#trainable_at;src/openalpha_cn/model_view.py#evaluation_view;src/openalpha_cn/model_view.py#daily_view;src/openalpha_cn/model_view.py#PREDICTION_STANDING_MEANINGS;src/openalpha_cn/model_view.py#MODEL_VIEW_LIMITATION_CODES;src/openalpha_cn/feature_matrix.py#stored_cross_section_instants;src/openalpha_cn/cli.py#model_evaluate_command;src/openalpha_cn/cli.py#model_daily_run_command;src/openalpha_cn/cli.py#MODEL_EXIT;src/openalpha_cn/api/app.py#MODEL_HTTP_STATUS;src/openalpha_cn/sdk.py#OpenAlphaSDK;src/openalpha_cn/runtime/composition.py#build_storage` | `tests/integration/test_model_interfaces.py;tests/unit/test_model_view.py;tests/integration/test_feature_matrix_reads.py` | `pytest` | `tests/integration/test_model_interfaces.py::test_a_refused_evaluation_and_an_admitted_one_are_two_different_answers` |
 | `OA-PROV-007` | provider | ChainLin contract-first provider | `ADAPTER_COMPLETE` | `src/openalpha_cn/providers/chainlin.py#ChainLinDataProvider` | `tests/contract/providers/test_chainlin_provider.py` | `legacy-prose` | `Frozen contract preserves clocks and classifies auth rate limit and upstream errors.` |
 | `OA-DEC-008` | decision | Ablatable bull bear and risk committee | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/agents/committee.py#DeliberationCommittee` | `tests/unit/agents/test_deliberation_committee.py;tests/integration/test_advanced_research_interfaces.py` | `legacy-prose` | `Output includes evidence-linked cases risk votes and ablation delta.` |
 | `OA-BT-010` | backtest | Event-study statistical inference | `NATIVE_COMPLETE` | `src/openalpha_cn/backtest/event_study.py#EventStudy` | `tests/unit/backtest/test_event_study.py;tests/integration/test_advanced_research_interfaces.py` | `legacy-prose` | `Fixed samples reproduce CAR t-stat and interval.` |
