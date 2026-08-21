@@ -54,6 +54,18 @@ from openalpha_cn.factor_view import (
     run_factor_experiment,
 )
 from openalpha_cn.logging_setup import configure_logging
+from openalpha_cn.model_view import (
+    ModelViewError,
+    daily_request,
+    daily_view,
+    evaluate_model,
+    evaluation_view,
+    feature_columns,
+    held_prediction,
+    model_evaluation_request,
+    prediction_view,
+    run_daily,
+)
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_doctor import PanelDoctorError, panel_health_report
 from openalpha_cn.panel_gate import DependencyRequest, PanelGateError, require_datasets
@@ -97,6 +109,7 @@ from openalpha_cn.shortlist_view import (
     shortlist_view,
 )
 from openalpha_cn.storage.factor_experiments import ExperimentStoreError
+from openalpha_cn.storage.predictions import PredictionStoreError
 from openalpha_cn.storage.recovery import RunRecoveryState
 
 
@@ -730,6 +743,163 @@ class ShortlistRunApiRequest(BaseModel):
     """
 
 
+MODEL_HTTP_STATUS: Final[Mapping[str, int]] = MappingProxyType(
+    {
+        "answered": 200,
+        "refused": 409,
+        "blocked": 409,
+        "panel_unreadable": 409,
+        "not_held": 404,
+        "bad_request": 422,
+        "internal_error": 500,
+    }
+)
+"""What the model routes do about each situation, as one table.
+
+`SHORTLIST_HTTP_STATUS`' sibling, row for row, and the reasoning is shared: a caller has
+different remedies available and only the envelope to pick between them.
+
+- **`answered` (200)** -- the schedule ran, or the prediction was registered, and the declared
+  coverage floor admitted it.
+- **`refused` (409)** -- the floor refused it. *Not* a fault: the measurement, both sides of the
+  comparison and (for a daily run) the `record_id` the prediction was registered under are all on
+  the body, which is a **verdict** rather than a `detail` object. A conflict with the current
+  state of the panel and this model's coverage of it, which is what RFC 9110 reserves `409` for.
+- **`blocked` (409)** -- `ModelRunBlockedError`: no declared column has a stored cross section in
+  the range, two prediction days resolve to one session's market, a cross section produced no
+  labelled row, the purge left a fold with nothing to train on. A refusal body.
+- **`panel_unreadable` (409)** -- `ModelPanelUnreadableError`: a partition this run needs is
+  missing, damaged, stale, or contradicts another about one session.
+- **`not_held` (404)** -- `ModelNotHeldError` on `GET /api/v1/predictions/{record_id}`: the
+  address is well formed and this installation holds no prediction under it, or holds one that no
+  longer hashes to it. A *malformed* address is `bad_request` and never this, so "that is not an
+  address" and "nothing is filed under that address" stay two answers.
+- **`bad_request` (422)** -- `ModelRequestError`: a factor no registry declares, a family no
+  implementation answers to, a horizon that is not countable in sessions, a reading `as_of`
+  before the range it reads, a `predict_at` inside the training range, a declared
+  `feature_version` that is not the recipe these columns address.
+- **`internal_error` (500)** -- the endpoint itself broke. Nothing in this module raises it, and
+  nothing that does reach it wears this table's body: an exception no branch anticipates is caught
+  by Starlette and the caller gets `text/plain` with no `reason` at all. The row records a code
+  that is already spoken for, exactly as `SHORTLIST_HTTP_STATUS`' own does.
+
+**`409` carries two body schemas here and `detail` is the discriminator**, unchanged from the
+shortlist plane: a verdict body has `is_blocked` and no `detail` key, and a refusal body is
+`{"detail": {"reason": ..., "message": ...}}`. **`422` also carries two**, and there
+`"detail" in body` is not enough (`V2-P4-051`): this module's refusal is that same
+`{"reason", "message"}` **object**, while a body FastAPI itself rejected comes back as
+`{"detail": [...]}` -- a **list** of field errors. A client branches on `isinstance(detail, dict)`.
+"""
+
+
+def _model_refusal(error: ModelViewError) -> HTTPException:
+    """One `model_view` fault, enveloped by the row of `MODEL_HTTP_STATUS` it names.
+
+    Looked up by `error.reason` rather than switched on by exception type, `_shortlist_refusal`'s
+    rule and its reason: a fault added to `model_view.py` with no row here raises `KeyError` at
+    this boundary -- a `500` that says the table is incomplete -- instead of being quietly
+    enveloped as whichever branch an `isinstance` chain happened to end on.
+    """
+    return HTTPException(
+        status_code=MODEL_HTTP_STATUS[error.reason],
+        detail=_panel_detail(error.reason, error.disclosable),
+    )
+
+
+class ModelFeatureApiRequest(BaseModel):
+    """One column of the declared feature matrix: a factor, a tier and the specs narrowing it.
+
+    A model rather than a free-form object so that a body naming `factors` or `tiers` is refused
+    by FastAPI's own `422` with the offending key, rather than reaching `feature_columns` and
+    being reported as a missing one.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    factor: str
+    tier: str
+    transform: str | None = None
+    neutralization: str | None = None
+
+
+class ModelHyperparameterApiRequest(BaseModel):
+    """One declared hyperparameter, as a name and a flat scalar.
+
+    A list of `{name, value}` objects rather than a JSON object, because
+    `AlphaModelDeclaration.hyperparameters` is an ordered tuple of pairs whose *order* reaches the
+    artifact's address -- and a JSON object cannot express "this list is sorted" in a way a
+    contract can refuse. The face sorts, exactly as the CLI does, so the two spellings of one
+    declaration produce one address.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str
+    value: bool | int | float | str
+
+
+class ModelRunApiRequest(BaseModel):
+    """Every parameter both model routes share, and only the last four have a default.
+
+    `model_view`'s resolvers refuse a default for each of the rest and this model does not
+    reinstate one: a browser that omitted `minimum_scored_ratio` would otherwise get a bar nobody
+    chose on the one question these routes are gated by.
+
+    `code_commit`, `config_digest` and `feature_version` are `None` -- *unset* -- rather than
+    `""`, which is `V2-P4-046`'s measured requirement and not a style: with an empty-string
+    default there is no value the parser can hand back that means "the caller typed an empty one",
+    so `code_commit or None` resolves it server-side and the same literal is refused on one face
+    and accepted on another. Omitting still resolves; declaring empty is refused everywhere.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    features: tuple[ModelFeatureApiRequest, ...]
+    name: str
+    family: str
+    horizon: str
+    seed: int
+    start: date
+    end: date
+    as_of: datetime
+    years: tuple[int, ...]
+    exchange: str
+    minimum_scored_ratio: float
+    code_commit: str | None = None
+    config_digest: str | None = None
+    feature_version: str | None = None
+    hyperparameters: tuple[ModelHyperparameterApiRequest, ...] = ()
+
+    @property
+    def declared_features(self) -> list[dict[str, object]]:
+        """The feature mappings `model_view.feature_columns` takes."""
+        return [feature.model_dump() for feature in self.features]
+
+    @property
+    def declared_hyperparameters(self) -> tuple[tuple[str, bool | int | float | str], ...]:
+        """The declared hyperparameters, sorted by name -- `cli._model_hyperparameters`' rule."""
+        return tuple(sorted((item.name, item.value) for item in self.hyperparameters))
+
+
+class ModelEvaluateApiRequest(ModelRunApiRequest):
+    """A walk-forward schedule laid over the shared parameters. None of the three has a default."""
+
+    folds: int
+    test_days_per_fold: int
+    embargo_sessions: int
+
+
+class ModelDailyRunApiRequest(ModelRunApiRequest):
+    """One prediction instant laid over the shared parameters.
+
+    `predict_at` is the instant the prediction is **about** and never the instant it is produced
+    at: the latter is this service's own clock, which is what the prediction store compares its
+    reading against and is therefore the one input a caller must not be able to choose.
+    """
+
+    predict_at: datetime
+
+
 def _panel_detail(reason: str, message: str) -> dict[str, str]:
     """The body every panel refusal carries, whatever its status code.
 
@@ -884,6 +1054,7 @@ def create_app(
     report_store = storage.report_store
     validation_store = storage.validation_store
     experiment_store = storage.experiment_store
+    prediction_store = storage.prediction_store
 
     def run_one(request: ResearchRunRequest) -> ResearchRunResult:
         return ResearchEngine(
@@ -1539,6 +1710,141 @@ def create_app(
         except ShortlistViewError as error:
             raise _shortlist_refusal(error) from error
         return JSONResponse(status_code=SHORTLIST_HTTP_STATUS["answered"], content=answer)
+
+    @application.post("/api/v1/models/evaluate")
+    def model_evaluate(request: ModelEvaluateApiRequest) -> JSONResponse:
+        """Fit one declaration once per walk-forward fold and report what it ordered.
+
+        `V2-P4-021`'s HTTP face, and the twin of `openalpha model evaluate` and of
+        `OpenAlphaSDK.evaluate_model`. All three resolve through
+        `model_view.model_evaluation_request` and run through `model_view.evaluate_model`, so
+        they cannot come to fit three models from one declaration.
+
+        **A refused evaluation answers `409` with `"admitted": null`, never `200` with `[]`.**
+        That is `V2-P4-033`'s deliverable one plane over: the status code is what says the floor
+        refused, and the body still carries every fold, the artifact each was fitted to, and both
+        sides of the comparison it missed. See `MODEL_HTTP_STATUS`.
+        """
+        try:
+            resolved = model_evaluation_request(
+                columns=feature_columns(request.declared_features),
+                name=request.name,
+                family=request.family,
+                horizon=request.horizon,
+                seed=request.seed,
+                start=request.start,
+                end=request.end,
+                as_of=request.as_of,
+                years=request.years,
+                exchange=request.exchange,
+                folds=request.folds,
+                test_days_per_fold=request.test_days_per_fold,
+                embargo_sessions=request.embargo_sessions,
+                minimum_scored_ratio=request.minimum_scored_ratio,
+                code_commit=_resolved_code_commit(request.code_commit),
+                config_digest=_resolved_config_digest(request.config_digest),
+                feature_version=request.feature_version,
+                hyperparameters=request.declared_hyperparameters,
+            )
+            result = evaluate_model(panel_store(root), resolved)
+        except ModelViewError as error:
+            raise _model_refusal(error) from error
+        return JSONResponse(
+            status_code=(
+                MODEL_HTTP_STATUS["refused"] if result.is_blocked else MODEL_HTTP_STATUS["answered"]
+            ),
+            content=evaluation_view(result),
+        )
+
+    @application.post("/api/v1/models/daily-run")
+    def model_daily_run(request: ModelDailyRunApiRequest) -> JSONResponse:
+        """Fit on what has already closed, score the declared instant, and register the answer.
+
+        The route Story S32 is about. The batch is produced with **this service's** clock as
+        `predicted_at`, and `FilePredictionStore` stamps `recorded_at` with the same clock it was
+        constructed with -- a caller cannot supply either, which is the entire mechanism behind
+        `PredictionRecord.standing`.
+
+        **A refused run still registered its prediction**, and the `record_id` is on the `409`
+        body: the floor decides whether the answer may be acted on, and Story S32's requirement
+        that a prediction be persisted before its outcome is known is unconditional.
+        """
+        try:
+            resolved = daily_request(
+                columns=feature_columns(request.declared_features),
+                name=request.name,
+                family=request.family,
+                horizon=request.horizon,
+                seed=request.seed,
+                start=request.start,
+                end=request.end,
+                predict_at=request.predict_at,
+                as_of=request.as_of,
+                years=request.years,
+                exchange=request.exchange,
+                minimum_scored_ratio=request.minimum_scored_ratio,
+                code_commit=_resolved_code_commit(request.code_commit),
+                config_digest=_resolved_config_digest(request.config_digest),
+                feature_version=request.feature_version,
+                hyperparameters=request.declared_hyperparameters,
+            )
+            now = clock()
+            result = run_daily(
+                panel_store(root),
+                resolved,
+                predictions=prediction_store,
+                runs=run_repository,
+                predicted_at=now,
+                started_at=now,
+            )
+        except ModelViewError as error:
+            raise _model_refusal(error) from error
+        except PredictionStoreError as error:
+            raise HTTPException(
+                status_code=MODEL_HTTP_STATUS["blocked"],
+                detail=_panel_detail("blocked", str(error)),
+            ) from error
+        return JSONResponse(
+            status_code=(
+                MODEL_HTTP_STATUS["refused"] if result.is_blocked else MODEL_HTTP_STATUS["answered"]
+            ),
+            content=daily_view(result),
+        )
+
+    @application.get("/api/v1/predictions")
+    def prediction_list() -> dict[str, list[str]]:
+        """Every registered prediction this installation holds, by content address, ascending.
+
+        `GET /api/v1/shortlists`' twin and its shape: a listing of keys rather than of bodies,
+        because a prediction batch at market width is hundreds of kilobytes and a caller almost
+        always wants one of them.
+        """
+        return {"record_ids": list(prediction_store.list_ids())}
+
+    @application.get("/api/v1/predictions/{record_id}")
+    def prediction_get(record_id: str) -> JSONResponse:
+        """One registered prediction, by the `record_id` its own run reported.
+
+        **The body is what was registered and not a re-run.** `FilePredictionStore.get`
+        re-derives the address from the content before handing it over, so a document edited on
+        disk is a refusal rather than scores somebody trades on.
+
+        Registered **after** `POST /api/v1/models/daily-run` and beside `GET /api/v1/predictions`,
+        which do not collide with it: the run route is a different method on a different path, and
+        the listing route is a different path. FastAPI matches in declaration order.
+        """
+        try:
+            record = held_prediction(prediction_store, record_id)
+        except ModelViewError as error:
+            raise _model_refusal(error) from error
+        except PredictionStoreError as error:
+            raise HTTPException(
+                status_code=MODEL_HTTP_STATUS["not_held"],
+                detail=_panel_detail("not_held", str(error)),
+            ) from error
+        return JSONResponse(
+            status_code=MODEL_HTTP_STATUS["answered"], content=prediction_view(record)
+        )
 
     @application.get("/api/v1/factors/experiments")
     def factor_experiment_list() -> dict[str, list[str]]:

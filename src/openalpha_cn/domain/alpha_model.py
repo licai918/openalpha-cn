@@ -157,14 +157,17 @@ Overlapping labels need a gap, `overlapping_windows` is the input that measures 
   over, so a second storage form would be a second canonicalisation. A digest over the *training
   rows* rather than their count is still nobody's
   (`the_address_is_over_the_fit_and_not_over_the_rule_that_chose_it`).
-- **Filling `RunManifest.alpha_model_versions`** is nobody's yet. `V2-P4-010`'s docstring said
-  `V2-P4-016` would, and that was wrong for a reason this issue could not fix: `ResearchEngine
-  .run_cycle` builds the manifest and there is no `AlphaModel` anywhere on that path. The join
-  is one line -- `AlphaModelRef(name=artifact.declaration.name, artifact_id=artifact
-  .artifact_id)`, asserted in `tests/unit/domain/test_alpha_model_address.py` -- and the issue
-  that first composes a fit into a run (`V2-P4-021`'s model faces, or `V2-P4-017`) writes it.
-  No helper is shipped for it: `domain/run.py` importing this module to build one would put the
-  whole label and calendar import weight of the model plane behind every `RunManifest`.
+- **Filling `RunManifest.alpha_model_versions` is `V2-P4-021`'s, and it is done.**
+  `V2-P4-010`'s docstring said `V2-P4-016` would, and that was wrong for a reason that issue
+  could not fix: `ResearchEngine.run_cycle` builds the manifest and there is no `AlphaModel`
+  anywhere on that path. `V2-P4-017` reached the same conclusion from the store side. The first
+  thing in this repository to hold a fitted artifact and a run's identity at once is
+  `model_view.run_daily`, and it writes the one line this docstring named --
+  `AlphaModelRef(name=artifact.declaration.name, artifact_id=artifact.artifact_id)` -- into a
+  `mode=daily` manifest. `model evaluate` deliberately writes none: it fits one artifact per
+  fold and consumes none of them for a decision. No helper is shipped here either, for the
+  reason this bullet always gave: `domain/run.py` importing this module to build one would put
+  the whole label and calendar import weight of the model plane behind every `RunManifest`.
 """
 
 from __future__ import annotations
@@ -1046,9 +1049,12 @@ KNOWN_ALPHA_MODEL_LIMITATIONS: Final[tuple[AlphaModelLimitation, ...]] = (
             "time, which is what this repository refuses everywhere else. "
             "CandidatePrediction.model_artifact_id IS narrowed, because backtest/ may already "
             "import domain/alpha_model.py and a prediction can only have come from one kind of "
-            "artifact. So what keeps the manifest slot honest is that a producer stamps mdl_, "
-            "and no producer exists yet -- alpha_model_versions is () on every path this build "
-            "can execute."
+            "artifact. So what keeps the manifest slot honest is that a producer stamps mdl_. "
+            "There is now exactly one producer -- model_view.run_daily, V2-P4-021's daily face, "
+            "which reads artifact_id off an AlphaModelArtifact and can therefore only stamp "
+            "mdl_ -- and the slot is still () on every other path, including every "
+            "ResearchEngine.run_cycle. So the pattern is as wide as it always was and nothing "
+            "in this build exercises the width; a second producer on another plane would."
         ),
     ),
     AlphaModelLimitation(

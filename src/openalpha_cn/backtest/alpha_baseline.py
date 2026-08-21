@@ -193,17 +193,20 @@ exists for"*. That is not achievable and is corrected rather than quietly droppe
 `backtest-no-numeric-stack-or-panel-plane` lists `openalpha_cn.feature_matrix` among the modules
 forbidden to this whole package, so no `backtest/` study can call it. The check belongs where a
 declaration and a matrix are first held together, which is a composition above both planes and
-not a study on one of them -- `V2-P4-017` when a fit is persisted against the matrix it read, or
-`V2-P4-021`'s faces, whichever arrives first.
+not a study on one of them. **`V2-P4-021`'s faces arrived there first**, through
+`model_view._model_request`, which resolves the declaration and the recipe in one function and
+runs the check between them.
 `nothing_here_checks_that_the_declared_feature_version_is_the_matrix_it_was_fitted_on` is the
-entry, and the two lines in `feature_matrix.py` now point at the same place.
+entry, and it remains true *of this module*: a fit driven from anywhere else still records a
+`feature_version` nothing verified.
 
 ## Not re-exported from `openalpha_cn.backtest`
 
-`V2-P4-021` owns the model faces and nothing outside this package drives a fit yet, so a
-re-export today would be a public surface with no caller. `backtest/alpha_model.py` declined one
-for a different reason -- it is deliberately inadequate -- and this one declines for the ordinary
-one: the issue that needs it is named and is not this one.
+`V2-P4-021`'s faces drive a fit from outside this package and still need no re-export: they
+import `CrossSectionalRankModel` and `evaluate_walk_forward` by name, off the module, which is
+what a face is allowed to do. `backtest/alpha_model.py` declined a re-export for a different
+reason -- it is deliberately inadequate -- and this one declines for the ordinary one: a
+`__init__` name would be a second spelling nobody asked for.
 
 ## What is deliberately left to a named issue
 
@@ -225,7 +228,9 @@ one: the issue that needs it is named and is not this one.
   was known, which is Story S32's actual requirement.
 - **`V2-P4-018`** owns the abstention vocabulary. The two constants here are free text on
   purpose.
-- **`V2-P4-021`** owns the model faces, and with them any re-export.
+- **`V2-P4-021` landed.** `openalpha model evaluate` drives `evaluate_walk_forward` over this
+  model, and `openalpha model daily-run` fits it and registers what it predicted. What that issue
+  did **not** take is the abstention vocabulary below or the corpus after it.
 - **`V2-P4-022`** owns the corpus with a known signal-to-noise ratio and a known-null control.
   Every number this module produces in a test is measured on `V2-P4-013`'s leak fixture, which
   has no noise model and exists to make a direction flip. Nothing here is a claim about alpha.
@@ -965,10 +970,10 @@ KNOWN_BASELINE_LIMITATIONS: Final[tuple[BaselineLimitation, ...]] = (
             "the modules forbidden to the whole backtest package, so no study under it can call "
             "that function, and this baseline lives there for the same reason walk_forward.py "
             "does. The check belongs where a declaration and a matrix are first held together, "
-            "which is a composition above both planes rather than a study on one -- V2-P4-017 "
-            "when a fit is persisted against the matrix it read, or V2-P4-021's faces, whichever "
-            "arrives first. Until then AlphaModelDeclaration.feature_version is a string this "
-            "fit records and never verifies, which is exactly what "
+            "which is a composition above both planes rather than a study on one. V2-P4-021's "
+            "model_view._model_request arrived there first and runs the check. It does not make "
+            "this entry false: a fit driven from anywhere but that face still records an "
+            "AlphaModelDeclaration.feature_version this module never verifies, which is what "
             "KNOWN_ALPHA_MODEL_LIMITATIONS' the_feature_version_is_a_name_this_contract_cannot"
             "_check said would remain true of any declaration that never meets a matrix."
         ),

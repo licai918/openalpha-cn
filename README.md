@@ -729,6 +729,110 @@ build 的合并会被它逐字拒掉——它从「让调用者去重算」变�
 那是 `RunManifest` 平面的问题。三个面等价：`openalpha shortlist get|list`、
 `GET /api/v1/shortlists[/{shortlist_id}]`、`OpenAlphaSDK.held_shortlist()/list_shortlists()`。
 
+## 从一张面板到一条被登记的预测（P4，`V2-P4-021`）
+
+前一节把整个市场收敛成一张候选榜。这一节是另一条链：**拿声明好的特征去拟合一个模型，量它在
+样本外排得怎么样，然后把今天的预测在结果已知之前落库。**
+
+```bash
+# 1) 先把要读的档建出来（每个预测日一个时刻）
+uv run openalpha factor build --factor reversal_1d/v1 --tier raw \
+  --as-of 2026-01-06T09:00:00+00:00 --year 2026 --max-staleness-days 30
+# …每天一次，一直建到 2026-01-16
+
+# 2) 量一个声明：按 walk-forward 切，逐折拟合，逐折报数
+uv run openalpha model evaluate --feature reversal_1d/v1@raw \
+  --name reversal-rank --family cross_sectional_rank --horizon 5d --seed 7 \
+  --start 2026-01-06 --end 2026-01-14 --year 2026 \
+  --folds 2 --test-days-per-fold 2 --embargo-sessions 0 \
+  --min-scored-ratio 0.5 --as-of 2026-01-20T04:00:00+00:00
+
+# 3) 把今天的预测登记下来（结果还没发生）
+uv run openalpha model daily-run --feature reversal_1d/v1@raw \
+  --name reversal-rank --family cross_sectional_rank --horizon 5d --seed 7 \
+  --start 2026-01-06 --end 2026-01-14 --year 2026 \
+  --predict-at 2026-01-16T09:00:00+00:00 --min-scored-ratio 0.5
+
+# 4) 取回来
+uv run openalpha model predictions
+uv run openalpha model prediction prd_0123456789abcdef01234567
+```
+
+三个面等价：`openalpha model evaluate|daily-run`、`POST /api/v1/models/{evaluate,daily-run}`、
+`OpenAlphaSDK.evaluate_model()／.run_daily_model()`。三者都经同一个
+`model_view.model_evaluation_request`／`daily_request` 解析、同一个 `evaluate_model`／`run_daily`
+执行，所以不可能对同一份声明拟合出三个模型。
+
+### 面板要先有六个数据集，而且**不是**榜单那六个
+
+`trade_cal`、`stock_basic`、`daily`、`suspend_d`、`stk_limit`、**`adj_factor`**，由五个
+`panel build` 目标写入。`adj_factor` 是榜单不需要而这里必须有的那个：一个标签是**两个交易日之间
+的收益**，`label_outcome` 要一份复权序列，`window_return` 会拒掉够不到窗口的序列。反过来
+`namechange` 是榜单要而这里不要的——本面不构造任何 `MarketBar`，从不问 `is_st`。**两个方向都会
+少**，所以两条命令的 `409` 都会把修复它的那条命令写在拒绝信息里（`V2-P4-078` 的规矩）。
+
+### 两个时钟，以及请求只提供其中一个
+
+- `--as-of` 是**读标签**的时刻，必须在 `--end` 当天或之后。一次运行里所有面板读取都在它上面发生。
+  这不是把点时间保证放松了：每个横截面仍然是它**自己那个预测时刻**上可见的那个 build，晚于它的
+  build 在下一层就被 `read_visible_at` 滤掉了。在这一个 `as_of` 上读到的是语料的**形状**——登记簿
+  今天列了谁、日历今天有哪些交易日、复权序列今天覆盖到哪。结果按定义在它被预测的那一刻不可知，
+  所以一次在每个预测时刻上读标签的运行会一个已闭合的窗口都找不到。残留写在
+  `the_evaluation_reads_its_labels_at_one_as_of_and_that_is_not_a_point_in_time_fit`。
+- `--predict-at`（只有 `daily-run` 有）是这条预测**关于**哪个时刻，必须严格晚于 `--end`。它**不是**
+  批次被产出的时刻：那是本进程自己的时钟，任何请求字段都不带它——因为存储对同一个时钟的读数，正是
+  `standing` 全部机制之所在。
+
+### `--feature-version` 省略与显式是两件事
+
+省略：由本次声明的列解析出来（`--code-commit` 的规矩，因为没人能手写一个 `feat_` 摘要）。
+显式：由 `feature_matrix.require_declared_features` 校验，不一致就按名字拒（`422`／exit 3）。
+**这是 `V2-P4-012` 造出那个函数之后第一个调用者**——`V2-P4-014` 曾被指定为第一个调用者而结构上
+做不到（`backtest-no-numeric-stack-or-panel-plane` 禁止整个 `backtest` 包 import
+`openalpha_cn.feature_matrix`）。答案里记着到底是哪一种（`declaration.feature_version_source`），
+因为解析出来的那份只证明「制品记录了它拟合时用的配方」，**不证明有人打算用这个配方**：把一个
+`--feature` 打错，得到的是另一个自洽的摘要，而不是一次拒绝。
+
+### 被拒 ≠ 空
+
+`--min-scored-ratio` 在两个面上都没有默认值。它是 `打分数 / 被问到数` 的下限，存在的理由就是
+`FoldEvaluation.scored_ratio` 存在的理由：**弃权是免费的**，所以一个头条统计量只有并排放着它是在
+多大比例的市场上取的才可比。
+
+- 过线：`exit 0`／`200`，`is_blocked: false`，`admitted` 带着制品地址（evaluate）或被打分的证券
+  （daily-run）。
+- 不过线：`exit 1`／`409`，`is_blocked: true`，**`admitted: null`**，`blocks` 里带 `measured`、
+  `required` 和写清两个计数的 `detail`。
+
+`null` 和一个列表是两个答案，而两次运行的 `measurement` 体**逐字相同**——只差一个开关。这是一条
+**覆盖度**判决，永远不是质量判决。
+
+**被拒的 `daily-run` 仍然把预测登记了**，`record_id` 就在那个 `409` 体上。Story S32 说的是预测要在
+结果已知之前落库，这是无条件的；下限说的是这个答案能不能被拿去用，这是有条件的。
+
+### `standing` 到底证明了什么
+
+每一份被渲染的预测都带 `standing`、`standing_proves` 和 `standing_does_not_prove`，第二个不是装饰：
+
+- **`forward`** —— 批次自称在结果可知之前产出，**并且**本存储在那之前就持有了这些字节。它**不证明**
+  批次是在它自称的时刻产出的：`predicted_at` 是调用者传给 `predict` 的任意值，本仓没有任何东西能校验
+  它；**也没有任何东西防得住拥有这块磁盘的人**。一个第三方能校验的声明需要一个别人控制的时间戳，本仓
+  没有。
+- **`unwitnessed`** —— 声称及时，收到得晚。可能是慢磁盘，也可能是被回填的 `predicted_at`，这条记录
+  分不出是哪个。
+- **`backfill`** —— 在结果可知的时刻或之后产出，如实登记为一次重算。回填不得替换原件。
+
+### 它填上了三个 issue 留着的那个槽
+
+`model daily-run` 会写一条 `mode=daily` 的 `RunManifest`，`alpha_model_versions` 里正是它消费的那一个
+制品——`V2-P4-010` 声明了这个槽、`V2-P4-016` 实测自己填不了（`run_cycle` 那条路上没有任何
+`AlphaModel`）、`V2-P4-017` 从存储侧得到同样结论。`run_id` 由预测自己的内容地址派生，所以同一天重跑
+在**两个**存储上都报 `unchanged`，而不是其中一个报重复。
+
+`model evaluate` **不写** manifest 也**不登记**任何预测：它每折拟合一个制品、一个都不据以决策，而且
+它能登记的每一条记录都会是 `unwitnessed`——因为一次被模拟的预测的时刻就是它模拟的那个时刻，早已过去。
+往 Story S32 的登记簿里灌回测，只会把它存在的理由（那些 `forward` 行）埋掉。
+
 ## 核心独特优势
 
 OpenAlpha CN 整合 TradingAgents 和 AI Hedge Fund 的优势，接入 A 股数据源，更适合 A 股涨停量化分析。OpenAlpha CN 的竞争重点不是复制更多“投资大师人格”，而是：

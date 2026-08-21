@@ -431,6 +431,35 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_neutralization.load_neutralized_factor_observations",
         }
     ),
+    "openalpha_cn.model_view": frozenset(
+        {
+            "feature_matrix.FeatureColumn",
+            "feature_matrix.FeatureMatrix",
+            "feature_matrix.FeatureMatrixError",
+            "feature_matrix.FeatureMatrixRequest",
+            "feature_matrix.FeatureMatrixSection",
+            "feature_matrix.FeatureMatrixUnreadableError",
+            "feature_matrix.FeatureMissingPolicy",
+            "feature_matrix.FeatureSpec",
+            "feature_matrix.build_feature_matrix",
+            "feature_matrix.load_feature_cross_section",
+            "feature_matrix.require_declared_features",
+            "feature_matrix.stored_cross_section_instants",
+            "panel_factors.FACTOR_DEFINITIONS",
+            "panel_factors.FACTOR_TRANSFORMS",
+            "panel_factors.FactorEngineError",
+            "panel_ingest.load_adjustment_histories",
+            "panel_ingest.load_daily_bars",
+            "panel_ingest.load_price_limits",
+            "panel_ingest.load_stock_universe",
+            "panel_ingest.load_suspensions",
+            "panel_ingest.load_trading_calendar",
+            "panel_neutralization.FACTOR_NEUTRALIZATIONS",
+            "panel_neutralization.NeutralizationEngineError",
+            "panel_view.PANEL_STORE_PLACEHOLDER",
+            "panel_view.panel_store",
+        }
+    ),
     "openalpha_cn.shortlist_view": frozenset(
         {
             "panel_factors.FACTOR_DEFINITIONS",
@@ -557,6 +586,34 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
     "openalpha_cn.feature_matrix": DatasetReach(
         named=frozenset(),
         reached=frozenset({"stock_basic", "trade_cal"}),
+    ),
+    "openalpha_cn.model_view": DatasetReach(
+        named=frozenset(
+            {
+                "adj_factor",
+                "daily",
+                "stk_limit",
+                "stock_basic",
+                "suspend_d",
+                "trade_cal",
+            }
+        ),
+        reached=frozenset(
+            {
+                "adj_factor",
+                "balancesheet",
+                "cashflow",
+                "daily",
+                "daily_basic",
+                "fina_indicator",
+                "income",
+                "index_daily",
+                "stk_limit",
+                "stock_basic",
+                "suspend_d",
+                "trade_cal",
+            }
+        ),
     ),
     "openalpha_cn.shortlist_view": DatasetReach(
         named=frozenset(
@@ -701,8 +758,8 @@ def _top_level_panel_modules() -> list[str]:
     )
 
 
-RESEARCH_PLANE_PREFIXES = ("panel_", "factor_", "shortlist_", "feature_")
-"""The four top-level module families the research plane is built out of.
+RESEARCH_PLANE_PREFIXES = ("panel_", "factor_", "shortlist_", "feature_", "model_")
+"""The five top-level module families the research plane is built out of.
 
 `_top_level_panel_modules()` above globs `panel_*.py` alone, which was the whole plane when it
 was written and is not any more: `V2-P3-015` added `factor_view.py`, a *second* top-level family
@@ -728,6 +785,19 @@ before any of its own tests were written. It takes the two rows below, and it is
 `feature_*` rather than folded into `factor_*` deliberately: a column of that matrix is a
 *(factor, tier, transform, neutralisation)* tuple rather than a factor, and renaming a module to
 land inside an existing glob is how a family stops being a claim about what a module is.
+
+**`model_` is the fifth, and it arrived red exactly as the test below predicts a fifth would.**
+`V2-P4-021`'s `model_view.py` is the face that finally reaches `V2-P4-010`--`V2-P4-017`: it
+composes a feature matrix, a walk-forward split, a fitted artifact and a prediction store into
+`openalpha model evaluate` and `openalpha model daily-run`. It takes the two rows below rather
+than a sentence in `TOP_LEVEL_MODULES_OUTSIDE_EVERY_PLANE_FAMILY`, which is the remedy that
+test's own message names first and the one `shortlist_view.py` and `feature_matrix.py` both took.
+
+Its `RESEARCH_PLANE_SEAM_IMPORTS` row is the first that is **not** all `panel_*`: twelve of its
+twenty-five names come off `openalpha_cn.feature_matrix`, a research-plane sibling of its own.
+That is what `_is_research_plane_stem` was widened for at `factor_view`'s arrival, and it is why
+the table is at name granularity -- a face reaching a *producer* is a different edge from a face
+reaching a loader, and both are now diffs on one row.
 """
 
 

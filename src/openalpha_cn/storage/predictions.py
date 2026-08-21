@@ -22,16 +22,11 @@ one contract bars the outbound edge -- `backtest-studies-touch-no-store`, whose 
 all three `PredictionBatch` producers (`alpha_model`, `alpha_baseline`, `alpha_tree`) and whose
 forbidden list carries `openalpha_cn.storage`, with `backtest/replay.py` and the package
 `__init__` exempt. `storage-no-upward-deps` bars the inbound one. Both together are what make the
-join a *face's* job (`V2-P4-021`'s) rather than something either side can reach for.
-
-**`V2-P4-062`'s Protocol precedent does not apply here, and the direction is why.** That issue
-put `ShortlistDocumentStore` beside its consumer in `shortlist_view` and had
-`FileShortlistStore` satisfy it structurally, so that `openalpha_cn.storage` gained no edge into
-a module above it; `factor_view.ExperimentDocumentStore` is the same trick for the same reason.
-Both exist because the *contract* lived upward. `PredictionRecord` lives downward, so this module
-imports it outright and works in typed objects rather than opaque strings -- which is what lets
-`get` re-derive an address and refuse a document that no longer matches it. A Protocol here would
-buy nothing and cost the check.
+join a *face's* job (`V2-P4-021`'s) rather than something either side can reach for. That
+face is `model_view.run_daily`, and this store is in `runtime/composition.py` since it landed;
+`model_view.ModelPredictionStore` is the narrow Protocol it is injected through, so the face
+names no concrete store and the composition root stays the only place that decides where
+predictions live.
 
 **`V2-P4-062`'s Protocol precedent does not apply here, and the direction is why.** That issue
 put `ShortlistDocumentStore` beside its consumer in `shortlist_view` and had

@@ -273,23 +273,22 @@ class RunManifest(BaseModel):
     one, so this is left declared and unfilled rather than fabricated.
     """
     alpha_model_versions: tuple[AlphaModelRef, ...] = ()
-    """The quantitative model artifacts this run consumed. Still empty on every path.
+    """The quantitative model artifacts this run consumed. Filled by `openalpha model daily-run`.
 
     `V2-P4-010` wrote "`V2-P4-016` fills it" here, and that turned out to be wrong about which
     issue: `V2-P4-016` built the address this slot names -- `mdl_` over an `AlphaModelArtifact`,
     and the join is `AlphaModelRef(name=artifact.declaration.name,
     artifact_id=artifact.artifact_id)` -- but nothing on `ResearchEngine.run_cycle`'s path fits a
-    model, so there is still nothing to put here. Whichever issue first composes a fit into a run
-    fills it (`V2-P4-021`'s model faces, or `V2-P4-017`'s store), and the shape does not have to
-    move when it does.
+    model, so it had nothing to put here; `V2-P4-017` reached the same conclusion from the store
+    side. `V2-P4-021` is the issue that first composes a fit into a run, and the shape did not
+    have to move when it did: `model_view._file_run` writes exactly that one line.
 
-    The third plane, empty on every path this build can execute, and that is the honest state
-    rather than a placeholder: no `AlphaModel` exists until `V2-P4-011`. An empty tuple is a
-    legitimate answer here -- "this run used no quantitative model" is true of every run today
-    and will stay true of some runs afterwards -- which is what distinguishes it from the
-    hard-coded `"baseline/v1"` it sits beside in this issue's diff. A constant is invisible to
-    the address forever; an empty tuple starts moving it the moment there is something to put
-    in it.
+    **It is still `()` on every `run_cycle`, and that stays a real answer rather than a missing
+    one.** "This run used no quantitative model" is true of every evidence-plane run and will go
+    on being true of them -- which is what distinguishes an empty tuple from the hard-coded
+    `"baseline/v1"` it sits beside in `V2-P4-010`'s diff. A constant is invisible to the address
+    forever; an empty tuple started moving it the moment there was something to put in it, and
+    `mode` is what tells the two kinds of run apart in a listing.
 
     Added at `V2-P4-010` rather than later for one measured reason: a field added to `RunManifest`
     moves `run_manifest_id`, and through `DecisionLedger.run_manifest_id` every stored

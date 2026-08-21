@@ -60,6 +60,7 @@ from openalpha_cn.feature_matrix import (
     build_feature_matrix,
     load_feature_cross_section,
     require_declared_features,
+    stored_cross_section_instants,
 )
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import (
@@ -633,3 +634,68 @@ def test_a_stored_row_written_under_another_definition_of_the_same_key_is_refuse
     assert load_feature_cross_section(store, request, as_of=AT_B1).as_of == B1
     with pytest.raises(FeatureMatrixBlockedError, match="redefinition"):
         load_feature_cross_section(store, request, as_of=AT_B3)
+
+
+# --- which instants a caller can ask about (`V2-P4-021`) ----------------------------------------
+
+
+def test_the_stored_instants_are_every_build_visible_at_the_as_of(store: PanelStore) -> None:
+    """`stored_cross_section_instants` is what lets a face take a **range** of prediction days.
+
+    `V2-P4-021` needed it: a walk-forward is intrinsically over many days, and a face that made a
+    caller name each instant would be a face nobody runs a schedule through. It is here rather
+    than in `model_view` because the read is this module's -- `_rows_for` is what knows which
+    loader answers for which tier, and a second reader would be a second thing that can disagree
+    about visibility.
+
+    The `as_of` narrows it exactly as every other read here does: at `AT_B1` the store already
+    holds B2 and B3 and neither is visible. Asserting only that would pass on a function that
+    returned nothing, so both ends are driven.
+    """
+    columns = (_raw_column(),)
+
+    assert stored_cross_section_instants(store, columns=columns, years=(YEAR,), as_of=AT_B1) == (
+        B1,
+    )
+    assert (
+        stored_cross_section_instants(store, columns=columns, years=(YEAR,), as_of=AT_B3) == BUILDS
+    )
+
+
+def test_the_stored_instants_are_the_intersection_and_not_the_union(tmp_path: Path) -> None:
+    """An instant one column has a build at and another does not is not a candidate.
+
+    `_resolve_instant` refuses to assemble a row out of two columns' different instants -- a row
+    from one factor's Friday and another's Monday is a row about two markets -- so offering such
+    an instant as a candidate would only move that refusal later, past a labelling read that
+    costs a partition per session. The union is the shape a first draft had; this is the
+    measurement that they differ.
+    """
+    store = PanelStore(tmp_path / "panel")
+    panel = generate_panel()
+    write_generated_panel(store, panel)
+    raws = [_build(store, panel, B1), _build(store, panel, B3)]
+    write_factor_panels(store, raws)
+    write_processed_factor_panels(
+        store, [apply_factor_transform(raws[0], NARROW, code_commit=COMMIT, built_at=B1)]
+    )
+    columns = (_raw_column(), _processed_column())
+
+    shared = stored_cross_section_instants(store, columns=columns, years=(YEAR,), as_of=AT_B3)
+    alone = stored_cross_section_instants(
+        store, columns=(_raw_column(),), years=(YEAR,), as_of=AT_B3
+    )
+
+    assert shared == (B1,)
+    assert alone == (B1, B3)
+
+
+def test_a_request_declaring_no_column_has_no_instants_to_share(store: PanelStore) -> None:
+    """Refused rather than answered `()`, because the two mean different things.
+
+    An empty answer here would say "no build is visible", which is a statement about the store; a
+    request with no column is a statement about the request, and `FeatureSpec` refuses one
+    everywhere else for the same reason.
+    """
+    with pytest.raises(FeatureSpecError, match="no column was declared"):
+        stored_cross_section_instants(store, columns=(), years=(YEAR,), as_of=AT_B3)

@@ -180,6 +180,7 @@ is wrong -- which is the direction to be slow in.
   no study under it can call this function at all. The first caller is whichever issue first
   holds a declaration and a matrix together, which is a composition above both planes rather than
   a study on one -- see the two paragraphs on `require_declared_features` itself.
+  `V2-P4-021` arrived there first, through `model_view._model_request`.
 - **`V2-P4-016` landed** and nothing here moved: `AlphaModelArtifact` already carried
   `declaration.feature_version`, so a matrix's recipe reaches the artifact's digest as it stands.
   It answered the universe question **no**. `AlphaModelDeclaration` keeps its one version slot,
@@ -192,9 +193,12 @@ is wrong -- which is the direction to be slow in.
 - **`V2-P4-017`** owns persistence. Nothing here is stored: a matrix is rebuilt from a spec, a
   store and an `as_of`, which is what "reproducible" in S26 means and is why there is no document
   and no `*_id` on this plane.
-- **`V2-P4-021`** owns the model faces. This module is behind no CLI, HTTP or SDK surface, so it
-  carries no error envelope and no renderer -- the three-face drift `V2-P4-033` filed cannot start
-  here until there is a face to drift.
+- **`V2-P4-021` landed and this module still carries no envelope and no renderer**, which is
+  what keeping the face above it bought: `model_view` translates every `FeatureMatrixError` into
+  its own `blocked` or `panel_unreadable` row and renders the answers, so the three-face drift
+  `V2-P4-033` filed has one place to be prevented rather than three. What that issue did add here
+  is one read -- `stored_cross_section_instants`, so a face can take a range of prediction days
+  rather than one flag per instant.
 - **`AlphaModelDeclaration.feature_version` stays a free string.** Narrowing it to
   `CONTENT_ADDRESS_PATTERN` would refuse a model whose features came from somewhere this producer
   is not, and `V2-P4-011` declared that field before this module existed. What binds the two
@@ -267,6 +271,7 @@ __all__ = [
     "feature_spec",
     "load_feature_cross_section",
     "require_declared_features",
+    "stored_cross_section_instants",
 ]
 
 _T = TypeVar("_T")
@@ -619,7 +624,8 @@ def require_declared_features(declaration: AlphaModelDeclaration, spec: FeatureS
     the other: `domain/alpha_model.py` is in `domain/`, which `domain-purity` forbids every
     sibling to, and this module reaches a store.
 
-    **It still has no caller, and `V2-P4-014` is not the one this docstring said it would be.**
+    **Its caller is `V2-P4-021`'s `model_view._model_request`, and `V2-P4-014` was never
+    able to be the one this docstring first said it would be.**
     That issue delivered `backtest/alpha_baseline.py`, under `backtest/` for the reason
     `walk_forward.py` is -- everything in it is stdlib arithmetic over `domain/` contracts --
     and `backtest-no-numeric-stack-or-panel-plane` lists `openalpha_cn.feature_matrix` among the
@@ -1027,6 +1033,48 @@ def _rows_after_preprocessing(
             "which hands the model a None and lets it say so"
         )
     return tuple(FeatureRow(ts_code=ts_code, values=tuple(values)) for ts_code, values in kept)
+
+
+def stored_cross_section_instants(
+    store: PanelStore,
+    *,
+    columns: Sequence[FeatureColumn],
+    years: Sequence[int],
+    as_of: datetime,
+) -> tuple[datetime, ...]:
+    """Every instant **every** declared column has a stored build at, visible at `as_of`.
+
+    `V2-P4-021`'s addition and its caller is the only one: a walk-forward is intrinsically over
+    many prediction days, so a face that made a caller name each instant would be a face nobody
+    runs a schedule through. This is what lets `model evaluate` take a range of days and resolve
+    it against what the store actually holds.
+
+    **The intersection, not the union**, and that is `_resolve_instant`'s rule read forward rather
+    than a second decision: an instant one column has a build at and another does not is one this
+    module refuses to assemble a row from, so offering it as a candidate would only move the
+    refusal later, past a labelling read that costs a partition per session.
+
+    It answers `()` rather than raising when nothing is stored. An empty range is a statement
+    about a *request* -- which days were asked for -- and this function is not told what the
+    request was; the caller who knows compares the result against its own range and refuses with
+    both endpoints in the message. `_resolve_instant` is where a column with nothing in it is
+    refused, and it stays there.
+    """
+    if not columns:
+        raise FeatureSpecError(
+            "no column was declared, so there is no cross section for stored instants to be "
+            "shared across; a matrix with no column is a model fitted on nothing"
+        )
+    per_column = [
+        {
+            row_as_of
+            for _subject, _value, _coverage, row_as_of, _addresses in _rows_for(
+                store, column, years=years, as_of=as_of
+            )
+        }
+        for column in columns
+    ]
+    return tuple(sorted(set.intersection(*per_column)))
 
 
 def load_feature_cross_section(

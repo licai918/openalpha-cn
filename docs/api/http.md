@@ -584,6 +584,146 @@ table does not own. A scheduled job that cut a shortlist, had it refused and exi
 would be no gate at all. `openalpha shortlist get` uses the same two: `1` when nothing is
 held under the address, `3` when the token is not an address.
 
+## Models
+
+`POST /api/v1/models/evaluate` fits one model declaration once per walk-forward fold and
+reports what it ordered; `POST /api/v1/models/daily-run` fits on the outcomes that have
+already closed, scores one stored cross section, and **registers the prediction before its
+outcome is known**. They are the HTTP twins of `openalpha model evaluate` and `openalpha
+model daily-run` and of `OpenAlphaSDK.evaluate_model` / `.run_daily_model`; all three faces
+resolve through `model_view.model_evaluation_request` / `.daily_request` and run through
+`model_view.evaluate_model` / `.run_daily`, so they cannot come to fit three models from one
+declaration (`V2-P4-021`).
+
+**What the panel has to hold before either route can answer.** Six datasets, written by five
+`openalpha panel build` targets. They are **not** the shortlist's six:
+
+| dataset | `panel build --dataset` | what these routes read it for |
+|---|---|---|
+| `trade_cal` | `trade_cal` | the label windows and the embargo's sessions |
+| `stock_basic` | `stock_basic` | who was listed on each prediction day |
+| `daily` | `price` | the closes every outcome is measured between |
+| `suspend_d` | `price` | the halts that refuse a window |
+| `stk_limit` | `stk_limit` | the bands that refuse a window locked at a limit |
+| `adj_factor` | `adj_factor` | the corporate actions the return is adjusted for |
+
+`adj_factor` is the one `shortlist run` does not need and these do: a label is a *return
+between two sessions*, so `label_outcome` requires an adjustment series and `window_return`
+refuses one that does not reach the window. `namechange` is the reverse — the shortlist needs
+it for every `MarketBar`'s `is_st`, and nothing on these routes builds a `MarketBar`. A panel
+built for one of the two faces is short for the other, in **both** directions, and the `409`
+body names the command that repairs it.
+
+### The two clocks, and which one a request supplies
+
+`as_of` is when the **labels** are read, and it must be at or after `end`. Every panel read
+in a run is made at it. That is not a weakening of the point-in-time guarantee: each cross
+section is still the stored build visible at *its own* prediction instant, filtered by
+`read_visible_at` one layer down. What is read at the single `as_of` is the corpus's
+**shape** — which securities the registry lists, which sessions the calendar holds, which
+factors the adjustment series carries. An outcome is by definition not knowable at the
+instant it is predicted about, so a run that read the labels at each prediction instant would
+find no closed window at all. `model_view`'s
+`the_evaluation_reads_its_labels_at_one_as_of_and_that_is_not_a_point_in_time_fit` states the
+residual.
+
+`predict_at` (daily runs only) is the instant the prediction is **about** — the stored cross
+section it scores — and must be strictly after `end`. It is *not* the instant the batch was
+produced at: that is the service's own clock, and no request field carries it, because the
+store's reading of that same clock is the entire mechanism behind `standing` below.
+
+### Which prediction days a run is about
+
+`start` and `end` name the first and last prediction day in `Asia/Shanghai`, and the instants
+come from the builds every declared column actually shares, visible at `as_of`. One
+prediction day keeps its **newest** build, because two builds on one day are two answers to
+one question. A day is `instant.astimezone(Asia/Shanghai).date()` — `build_label_window`'s
+own first step — and deliberately not the *pricing session* the values were computed from;
+the two come apart for a build stamped between midnight and the 16:30 close, and two
+prediction days whose builds price one session are a `409 blocked` in `build_feature_matrix`'s
+own words.
+
+### `feature_version`, and what omitting it costs
+
+Omitted, it is resolved from the columns the request declares — `code_commit`'s arrangement,
+because nobody can type a `feat_` digest by hand. Supplied, it is checked by
+`feature_matrix.require_declared_features` and a mismatch is a `422`. The answer records
+which of the two happened, under `declaration.feature_version_source` (`resolved` or
+`declared`), because a resolved recipe proves only that the artifact records what it was
+fitted on — a mistyped `features` entry yields a different, self-consistent digest rather than
+a refusal.
+
+### Refused is not empty
+
+`minimum_scored_ratio` has no default on any face. It is the floor under `scored / offered`,
+and it exists because `FoldEvaluation.scored_ratio` does: abstaining on the hard names is
+otherwise a free way to win, so a headline statistic is only comparable beside the fraction of
+the market it was taken over.
+
+- Above the floor: **`200`**, `"is_blocked": false`, and `admitted` carries the artifact
+  addresses (evaluate) or the scored securities (daily run).
+- Below it: **`409`**, `"is_blocked": true`, `"admitted": null`, and every bar missed under
+  `blocks` with `measured`, `required` and a `detail` naming both counts.
+
+`null` and a list are two different answers on these routes, and the `measurement` object is
+byte-identical across the pair — which is what makes a client able to see that only the
+declared bar moved. It is a **coverage** verdict and never a quality one.
+
+**A refused daily run still registered its prediction**, and its `record_id` is on the `409`
+body. Story S32 is about a prediction being persisted before its outcome is known, which is
+unconditional; the floor is about whether the answer may be acted on, which is not.
+
+### `standing`, and exactly what it proves
+
+Every rendered prediction carries `standing` plus `standing_proves` and
+`standing_does_not_prove`, and the second is not decoration. `V2-P4-017`'s three standings
+are three different facts:
+
+- **`forward`** — the batch says it was produced before the outcome became knowable **and**
+  this store held the bytes before then. It does **not** prove the batch was produced when it
+  says it was: `predicted_at` is whatever the caller passed to `predict` and nothing in this
+  repository can check it, and nothing here defends against whoever owns the disk. A claim a
+  third party could check would need a timestamp somebody else controls, and this repository
+  has none.
+- **`unwitnessed`** — stamped in time, received late. Which may be a slow disk and may be a
+  backdated `predicted_at`, and the record cannot tell you which.
+- **`backfill`** — produced at or after the deadline, stated as a recomputation. A backfill
+  may not replace an original.
+
+`GET /api/v1/predictions` lists every registered address; `GET /api/v1/predictions/{record_id}`
+returns one. The body is **what was registered**, not a re-run: the store re-derives the
+address from the content before handing it over, so a document edited on disk is a `404`
+rather than scores somebody trades on. A malformed address is a `422` and never a `404`, so
+"that is not an address" and "nothing is filed under that address" stay two answers.
+
+### The manifest slot these routes fill
+
+`POST /api/v1/models/daily-run` files a `RunManifest` with `mode: "daily"` and
+`alpha_model_versions` naming the one artifact it consumed — the slot `V2-P4-010` declared,
+`V2-P4-016` measured it could not fill (`run_cycle` has no `AlphaModel` on its path) and
+`V2-P4-017` left open. `run_id` is derived from the prediction's own content address, so
+re-running an identical day reports `unchanged` on both stores instead of a duplicate on one.
+`POST /api/v1/models/evaluate` writes **no** manifest and **no** prediction: it fits one
+artifact per fold and acts on none of them, and every record an evaluation could register
+would stand `unwitnessed`, because a simulated prediction is dated at the instant it
+simulates.
+
+### Status codes
+
+`model_view`'s four faults map through `api/app.py#MODEL_HTTP_STATUS`: `bad_request` → `422`,
+`blocked` and `panel_unreadable` → `409`, `not_held` → `404`, plus `answered` → `200` and
+`refused` → `409` for the two verdicts, which are not faults. `409` therefore carries two body
+schemas and `detail` is the discriminator — a verdict body has `is_blocked` and no `detail`
+key. `422` carries two as well: this module's refusal is a `{"reason", "message"}` **object**
+while a body FastAPI itself rejected is a **list** of field errors, so a client branches on
+`isinstance(detail, dict)`.
+
+`openalpha model evaluate` / `daily-run` map the same names onto exit codes
+(`cli.py#MODEL_EXIT`) and reuse `PanelExit`: `0` admitted, `1` for every `409` row —
+**including a refused run** — and for the `404` one, `3` for `422`, `5` for an unhandled
+defect, and `2` for Click's own usage errors. `openalpha model prediction` uses the same two:
+`1` when nothing is held under the address, `3` when the token is not an address.
+
 The portfolio endpoint is intentionally stateless: callers submit the immutable
 `PortfolioState`, `PortfolioOrder`, `MarketBar`, and optional `PortfolioLimits`,
 then persist the returned `PortfolioTransition` in their own workflow. It is a

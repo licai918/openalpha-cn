@@ -88,6 +88,59 @@ tier in every cell computed nothing, yet it looks like a clean pass to anyone gr
 including `V2-P4-026`, which is why the neutralised tier cannot be built at a mid-year
 prediction instant.
 
+## The model plane
+
+Above the factor tiers sits the model chain: a versioned feature matrix, a walk-forward split
+with purge and embargo, two stdlib baselines (a cross-sectional rank model and gradient-boosted
+rank trees, no numerical dependency), a content-addressed artifact, and a store that holds a
+prediction **before its outcome is known**. Two commands:
+
+```bash
+uv run openalpha model evaluate --feature reversal_1d/v1@raw \
+  --name reversal-rank --family cross_sectional_rank --horizon 5d --seed 7 \
+  --start 2026-01-06 --end 2026-01-14 --year 2026 \
+  --folds 2 --test-days-per-fold 2 --embargo-sessions 0 \
+  --min-scored-ratio 0.5 --as-of 2026-01-20T04:00:00+00:00
+
+uv run openalpha model daily-run --feature reversal_1d/v1@raw \
+  --name reversal-rank --family cross_sectional_rank --horizon 5d --seed 7 \
+  --start 2026-01-06 --end 2026-01-14 --year 2026 \
+  --predict-at 2026-01-16T09:00:00+00:00 --min-scored-ratio 0.5
+
+uv run openalpha model predictions          # every registered address
+uv run openalpha model prediction prd_…     # one of them, as it was registered
+```
+
+Three faces again: `openalpha model *`, `POST /api/v1/models/{evaluate,daily-run}` plus
+`GET /api/v1/predictions[/{record_id}]`, and `OpenAlphaSDK.evaluate_model()` /
+`.run_daily_model()`. All three resolve and run through `model_view`, so they cannot fit three
+models from one declaration.
+
+**These commands need `adj_factor` and the shortlist does not.** A label is a return *between two
+sessions*, so the labeller requires an adjustment series; conversely the shortlist needs
+`namechange` for every bar's risk-warning flag and these commands never build a bar. A panel built
+for one face is short for the other, in both directions, and each refusal names the `panel build`
+line that repairs it.
+
+**`--min-scored-ratio` has no default, and refused is not empty.** It is the floor under
+`scored / offered`, and it exists because abstaining on the hard names is otherwise a free way to
+win. Above it: exit `0` / `200` with `admitted` carrying what the run stands behind. Below it:
+exit `1` / `409` with `"admitted": null` and both sides of the bar under `blocks` — while the
+`measurement` object is byte-identical across the pair. It is a coverage verdict and never a
+quality one.
+
+**A refused `daily-run` still registered its prediction.** Story S32 is about a prediction being
+persisted before its outcome is known, which is unconditional; the floor is about whether the
+answer may be acted on, which is not.
+
+**What a `forward` standing proves, and what it does not.** It means this store held the bytes
+before the instant the outcome became knowable. It does **not** mean the batch was produced when
+it says it was: `predicted_at` is whatever the caller passed to `predict`, nothing here can check
+it, and nothing here defends against whoever owns the disk. Every rendered prediction carries both
+sentences in the body, because a one-word badge reads as an attestation this repository cannot
+make. See [the HTTP contract](docs/api/http.md) for the three standings and the nine named
+boundaries.
+
 ## Development gates
 
 ```bash

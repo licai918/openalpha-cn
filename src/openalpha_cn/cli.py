@@ -92,7 +92,23 @@ from openalpha_cn.factor_view import (
     run_factor_experiment,
     tier_rows,
 )
+from openalpha_cn.feature_matrix import FeatureColumn
 from openalpha_cn.logging_setup import configure_logging
+from openalpha_cn.model_view import (
+    ModelEvaluation,
+    ModelViewError,
+    daily_request,
+    daily_rows,
+    daily_view,
+    evaluate_model,
+    evaluation_rows,
+    evaluation_view,
+    feature_columns,
+    held_prediction,
+    model_evaluation_request,
+    prediction_view,
+    run_daily,
+)
 from openalpha_cn.panel.catalog import DEFAULT_DATE_TIMEZONE, PanelStorageError
 from openalpha_cn.panel.store import PanelStore, PartitionRef
 from openalpha_cn.panel_doctor import (
@@ -174,6 +190,7 @@ from openalpha_cn.storage.migrations import (
     read_status,
 )
 from openalpha_cn.storage.parquet import read_parquet_records
+from openalpha_cn.storage.predictions import FilePredictionStore, PredictionStoreError
 from openalpha_cn.storage.shortlists import FileShortlistStore, ShortlistStoreError
 from openalpha_cn.storage.sqlite import SQLiteRunRepository
 
@@ -260,6 +277,32 @@ criteria -- the evidence plane's own answers, after the fact. This is the other 
 PRD §3.2 draws it as two planes: the whole market is scored and filtered **without** `run_cycle`,
 and the shortlist is what earns an evidence run. Naming both `screen` would have made "rank what
 I have researched" and "decide what to research" one word.
+"""
+
+
+model_app = typer.Typer(
+    help=(
+        "Evaluate one model declaration over a walk-forward schedule, and register today's "
+        "prediction before its outcome is known. Start with `openalpha model evaluate --help`."
+    )
+)
+app.add_typer(model_app, name="model")
+"""`V2-P4-021`'s commands are `openalpha model evaluate` and `openalpha model daily-run`.
+
+A sub-app for `factor`'s and `shortlist`'s reason: `run` on its own is already the shape four
+sub-apps take, and `evaluate` on its own would say nothing about which plane it is on -- this
+repository evaluates factors, screens and models, and two of the three already have a home.
+
+**`daily-run` keeps the roadmap's own spelling rather than being renamed to `run`.** PRD S84 lists
+the five commands a personal deployment is driven by as *"doctor / data-check / factor-run /
+model-evaluate / daily-run"*, and `RunMode.daily`'s docstring names `daily-run` by that name as
+the cycle it exists for. A hyphenated verb inside a sub-app is unusual here and the alternative
+was worse: `openalpha model run` would be a fifth meaning for `run` and would say "run the model"
+where the thing that happens is "register today's prediction".
+
+The two commands are in the order an operator meets them: `evaluate` (would this declaration have
+ordered the market), then `daily-run` (register what it says about today). `predictions` and
+`prediction` are the two reads beside them, `shortlist list`/`shortlist get`'s pair.
 """
 
 
@@ -4699,6 +4742,588 @@ def _echo_shortlist(result: ShortlistRunResult) -> None:
     for block in clearance.blocks:
         typer.echo(f"blocked    {block.code}: {block.detail}", err=True)
     typer.echo(f"held       {shortlist_view(result)['shortlist_id']}")
+
+
+# --- the model plane: evaluate a declaration, register today's prediction (V2-P4-021) -----------
+
+
+MODEL_EXIT: Final[Mapping[str, PanelExit]] = MappingProxyType(
+    {
+        "answered": PanelExit.ok,
+        "refused": PanelExit.unhealthy,
+        "blocked": PanelExit.unhealthy,
+        "panel_unreadable": PanelExit.unhealthy,
+        "not_held": PanelExit.unhealthy,
+        "bad_request": PanelExit.bad_request,
+        "internal_error": PanelExit.internal_error,
+    }
+)
+"""What the four `model` commands exit with for each situation, as one table.
+
+`SHORTLIST_EXIT`'s sibling and its reasoning unchanged: a CI job that already switches on 1/3/4/5
+for `panel doctor`, `data-check`, `factor run` and `shortlist run` must not have to learn a sixth
+meaning for the same numbers on a sixth command.
+
+**`refused` must not be `ok`.** A scheduled `daily-run` whose model answered about a tenth of the
+market, under a floor the operator declared it could not live with, exits `1` -- the "empty
+success" `V2-P1-013` exists to make unavailable. The remedy is `unhealthy`'s own: declare features
+more of the market carries, or rebuild the columns that are thin.
+
+**Exit `0` with `admitted` empty is not reachable on either run command, and that is a difference
+from `shortlist run` worth stating rather than discovering.** A shortlist may legitimately admit
+nothing; an evaluation always carries at least one fold (`walk_forward_folds` refuses a schedule
+of none) and a daily run always carries at least one security (`FeatureCrossSection` refuses an
+empty cross section). So the `null`-versus-`[]` pair here separates *refused* from *answered* and
+never *refused* from *empty* -- which is why `blocks` carries both sides of the comparison rather
+than leaving an empty list to speak for itself.
+"""
+
+
+def _model_fail(error: ModelViewError) -> typer.Exit:
+    """One `model_view` fault, enveloped by the row of `MODEL_EXIT` it names.
+
+    Looked up by `error.reason` rather than switched on by exception type, `_shortlist_fail`'s
+    rule: a fault added to `model_view.py` with no row here raises `KeyError` inside
+    `_panel_command`, which reports `internal_error` and says the table is incomplete, instead of
+    being quietly enveloped as whichever branch an `isinstance` chain happened to end on.
+    """
+    return _panel_fail(MODEL_EXIT[error.reason], error.disclosable)
+
+
+_MODEL_FEATURE_HELP: Final[str] = (
+    "One column of the feature matrix, as `<factor>@<tier>[:<transform>[:<neutralization>]]` "
+    "(`reversal_1d/v1@raw`, `reversal_1d/v1@processed:cross_section_standard/v1`). Repeatable, "
+    "and there is no default: the columns are the recipe `feature_version` is a digest of, so a "
+    "column nobody declared is a model nobody can rebuild. `processed` requires a transform and "
+    "`raw` refuses one. The `neutralized` tier is refused by this command; see "
+    "model_view.KNOWN_MODEL_VIEW_LIMITATIONS."
+)
+_MODEL_NAME_HELP: Final[str] = (
+    "The handle this declaration travels under (`momentum_5d_rank`). It reaches the artifact's "
+    "content address and the run manifest's model slot, so two declarations sharing a name and "
+    "differing anywhere else are still two addresses -- but a reader comparing them has only "
+    "this to go on."
+)
+_MODEL_FAMILY_HELP: Final[str] = (
+    "Which implementation fits this declaration. `cross_sectional_rank` is the stdlib rank "
+    "baseline; `boosted_rank_trees` is the stdlib gradient-boosted one. Fixed by the code path "
+    "rather than chosen freely -- it is what tells a reader that two differently-named "
+    "declarations went through the same arithmetic."
+)
+_MODEL_HORIZON_HELP: Final[str] = (
+    "The span every outcome in this run is measured over, as a count of trading sessions (`5d`). "
+    "It decides the label window, the purge's reach, and the instant a registered prediction's "
+    "outcome becomes knowable."
+)
+_MODEL_SEED_HELP: Final[str] = (
+    "The declared seed. It reaches the artifact's address and the run manifest's random_seed. "
+    "Neither shipped model draws a random number, so two seeds produce byte-identical "
+    "coefficients and two addresses -- which is recorded rather than repaired; see "
+    "KNOWN_ALPHA_MODEL_LIMITATIONS."
+)
+_MODEL_START_HELP: Final[str] = (
+    "The first prediction day of the training range, inclusive, as YYYY-MM-DD in Asia/Shanghai. "
+    "A stored cross section falls inside the range by the calendar day of the instant it was "
+    "built at, which is the same derivation a label window uses."
+)
+_MODEL_END_HELP: Final[str] = "The last prediction day of the range, inclusive."
+_MODEL_AS_OF_HELP: Final[str] = (
+    "The instant every panel read in this run is made at, defaulting to the wall clock. It must "
+    "be at or after --end, because an outcome is not knowable at the instant it is predicted "
+    "about: the features are read at each prediction instant and the labels behind them at this "
+    "one. See model_view's docstring for what the two clocks buy and what they do not."
+)
+_MODEL_FOLDS_HELP: Final[str] = (
+    "How many contiguous test blocks the tail of the range is cut into. No default: a schedule "
+    "nobody chose is a result nobody can defend."
+)
+_MODEL_TEST_DAYS_HELP: Final[str] = "How many prediction days each fold is evaluated on."
+_MODEL_EMBARGO_HELP: Final[str] = (
+    "How many sessions of separation to require between a surviving training label's close and "
+    "the day a fold is first asked on, on top of the purge. 0 removes nothing and is a statement "
+    "rather than a default."
+)
+_MODEL_SCORED_RATIO_HELP: Final[str] = (
+    "The floor under `scored / offered`. Abstaining is free, so a headline statistic is only "
+    "comparable beside the fraction of the market it was taken over. No default: below the floor "
+    "the answer is refused with `admitted: null` and exit 1, and above it the same measurement is "
+    "admitted with exit 0."
+)
+_MODEL_FEATURE_VERSION_HELP: Final[str] = (
+    "The recipe this declaration claims to have been fitted on (`feat_...`). Omitted, it is "
+    "resolved from the columns declared above -- --code-commit's arrangement. Supplied, it is "
+    "checked against them and refuses by name when it disagrees, which is what makes the "
+    "declared version a claim rather than a decoration."
+)
+_MODEL_HYPERPARAMETER_HELP: Final[str] = (
+    "One flat scalar hyperparameter, as `<name>=<value>`. Repeatable. Passed through verbatim to "
+    "the declaration, so it reaches the artifact's address; nothing here searches or tunes. "
+    "Values parse as int, then float, then bool (`true`/`false`), then string."
+)
+_MODEL_PREDICT_AT_HELP: Final[str] = (
+    "The instant the prediction is about -- the stored cross section it scores. Strictly after "
+    "--end, because a daily run fits on outcomes that have already closed and predicts about a "
+    "day that has none. It is not the instant the batch is produced at: that is this process's "
+    "clock, and it is what the store compares its own reading against."
+)
+_MODEL_CONFIG_DIGEST_HELP: Final[str] = (
+    "The configuration this run ran under, as a 64-character hex digest. Resolved from the "
+    "process's own configuration when omitted. A daily run files a RunManifest under it."
+)
+
+
+def _model_features(declared: Sequence[str]) -> tuple[FeatureColumn, ...]:
+    """`--feature <factor>@<tier>[:<transform>[:<neutralization>]]` as resolved columns.
+
+    One token per column rather than parallel `--factor`/`--tier`/`--transform` lists, which is
+    `_shortlist_component_pairs`' measured reason: three lists of different lengths attach a
+    transform to the wrong factor, and no arrangement of `typer.Option` makes that
+    unconstructible.
+
+    The grammar is `feature_matrix.FeatureColumn.feature_id`'s own, read backwards -- `@` between
+    the factor and the tier, `:` between the tier and each spec -- so a caller can paste a
+    `feature_id` off a stored artifact straight back into a command line.
+    """
+    columns: list[Mapping[str, object]] = []
+    for token in declared:
+        factor, separator, rest = token.partition("@")
+        if not separator or not factor.strip():
+            raise _panel_fail(
+                PanelExit.bad_request,
+                f"--feature {token!r} is not `<factor>@<tier>`; every column names the factor it "
+                "reads and the stored tier it reads it on, and neither has a default. "
+                "`openalpha factor list` prints every factor and transform this build declares",
+            )
+        parts = rest.split(":")
+        if len(parts) > 3:
+            raise _panel_fail(
+                PanelExit.bad_request,
+                f"--feature {token!r} carries {len(parts) - 1} spec(s) after its tier; a column "
+                "is a tier, at most one transform and at most one neutralization",
+            )
+        columns.append(
+            {
+                "factor": factor.strip(),
+                "tier": parts[0],
+                "transform": parts[1] if len(parts) > 1 else None,
+                "neutralization": parts[2] if len(parts) > 2 else None,
+            }
+        )
+    try:
+        return feature_columns(columns)
+    except ModelViewError as error:
+        raise _model_fail(error) from error
+
+
+def _model_hyperparameters(
+    declared: Sequence[str],
+) -> tuple[tuple[str, bool | int | float | str], ...]:
+    """`--hyperparameter <name>=<value>` as the sorted pairs a declaration takes.
+
+    Sorted here rather than left to the contract's refusal, because an unsorted command line is
+    not a claim: `AlphaModelDeclaration` refuses an unsorted tuple to keep one declaration from
+    having two canonical spellings, and a caller typing flags in the order they think of them has
+    made no statement about order. A **repeated** name is still refused, by that contract, because
+    that one is a claim and the two can disagree.
+    """
+    pairs: list[tuple[str, bool | int | float | str]] = []
+    for token in declared:
+        name, separator, raw = token.partition("=")
+        if not separator or not name.strip():
+            raise _panel_fail(
+                PanelExit.bad_request,
+                f"--hyperparameter {token!r} is not `<name>=<value>`",
+            )
+        pairs.append((name.strip(), _model_scalar(raw)))
+    return tuple(sorted(pairs, key=lambda pair: pair[0]))
+
+
+def _model_scalar(raw: str) -> bool | int | float | str:
+    """One hyperparameter value, in the narrowest type that reads it back unchanged.
+
+    Bool before int before float before string, and the order is the one that round-trips: `true`
+    read as a string would make `--hyperparameter x=true` and a JSON body's `{"x": true}` two
+    different declarations on two faces -- the equivalence `V2-P4-046` measured being broken, one
+    flag over -- and `3` read as a float would reach the artifact's address as `3.0` and give one
+    declaration two spellings.
+    """
+    text = raw.strip()
+    if text.lower() in {"true", "false"}:
+        return text.lower() == "true"
+    try:
+        return int(text)
+    except ValueError:
+        pass
+    try:
+        return float(text)
+    except ValueError:
+        return text
+
+
+@model_app.command("evaluate")
+def model_evaluate_command(
+    feature: Annotated[list[str], typer.Option("--feature", help=_MODEL_FEATURE_HELP)],
+    name: Annotated[str, typer.Option("--name", help=_MODEL_NAME_HELP)],
+    family: Annotated[str, typer.Option("--family", help=_MODEL_FAMILY_HELP)],
+    horizon: Annotated[str, typer.Option("--horizon", help=_MODEL_HORIZON_HELP)],
+    seed: Annotated[int, typer.Option("--seed", help=_MODEL_SEED_HELP)],
+    start: Annotated[str, typer.Option("--start", help=_MODEL_START_HELP)],
+    end: Annotated[str, typer.Option("--end", help=_MODEL_END_HELP)],
+    year: Annotated[list[int], typer.Option("--year", help=_BUILD_FACTOR_YEAR_HELP)],
+    folds: Annotated[int, typer.Option("--folds", help=_MODEL_FOLDS_HELP)],
+    test_days_per_fold: Annotated[
+        int, typer.Option("--test-days-per-fold", help=_MODEL_TEST_DAYS_HELP)
+    ],
+    embargo_sessions: Annotated[int, typer.Option("--embargo-sessions", help=_MODEL_EMBARGO_HELP)],
+    min_scored_ratio: Annotated[
+        float, typer.Option("--min-scored-ratio", help=_MODEL_SCORED_RATIO_HELP)
+    ],
+    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
+        "./runtime"
+    ),
+    exchange: Annotated[
+        str, typer.Option("--exchange", help=_FACTOR_EXCHANGE_HELP)
+    ] = TRADING_CALENDAR_DEFAULT_EXCHANGE,
+    as_of: Annotated[str, typer.Option("--as-of", help=_MODEL_AS_OF_HELP)] = "",
+    hyperparameter: Annotated[
+        list[str] | None, typer.Option("--hyperparameter", help=_MODEL_HYPERPARAMETER_HELP)
+    ] = None,
+    feature_version: Annotated[
+        str | None, typer.Option("--feature-version", help=_MODEL_FEATURE_VERSION_HELP)
+    ] = None,
+    code_commit: Annotated[
+        str | None, typer.Option("--code-commit", help=_CODE_COMMIT_HELP)
+    ] = None,
+    config_digest: Annotated[
+        str | None, typer.Option("--config-digest", help=_MODEL_CONFIG_DIGEST_HELP)
+    ] = None,
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit the whole evaluation as data.")
+    ] = False,
+) -> None:
+    """Fit one declaration once per walk-forward fold and report what it ordered.
+
+    **The command that makes `V2-P4-010` through `V2-P4-016` reachable at all.** Before it, the
+    feature matrix, the walk-forward split and both baselines had no caller outside `tests/`.
+
+    The usual invocation, against a panel `openalpha factor build` has written a tier into::
+
+        openalpha model evaluate --feature reversal_1d/v1@raw --name reversal-rank \\
+          --family cross_sectional_rank --horizon 5d --seed 7 \\
+          --start 2026-01-06 --end 2026-01-14 --year 2026 \\
+          --folds 2 --test-days-per-fold 2 --embargo-sessions 0 \\
+          --min-scored-ratio 0.5 --as-of 2026-01-20T04:00:00+00:00 --runtime-dir ./runtime
+
+    **The factor tier has to exist first, and so do five panel targets.** This command reads the
+    declared columns out of the factor partitions and then labels every cross section it found,
+    which needs the calendar, the registry, the bars, the published bands, the halt corpus and
+    the adjustment factors::
+
+        openalpha panel build --dataset trade_cal   --year <year>
+        openalpha panel build --dataset stock_basic --year <year>
+        openalpha panel build --dataset price       --year <year>   # bars, valuations, halts
+        openalpha panel build --dataset stk_limit   --year <year>
+        openalpha panel build --dataset adj_factor  --year <year>
+
+    `adj_factor` is the one that catches people here and it is the one `shortlist run` does not
+    need: a label is a return *between two sessions*, so `label_outcome` requires an adjustment
+    series and refuses a window the series does not reach. `namechange` is **not** on the list,
+    measured rather than assumed -- nothing here builds a `MarketBar`, so no name history is read.
+
+    **Exit `0` is not "this model works".** It is "the schedule ran and the answer cleared the
+    coverage floor you declared". Every statistic on it is a rank correlation over a handful of
+    test days on stored data, `--min-scored-ratio` is a coverage bar and never a quality one, and
+    nothing here controls for having tried ten declarations and kept this one. The `limitations`
+    array on `--json` carries all of that in the body.
+    """
+    with _panel_command("model evaluate"):
+        try:
+            request = model_evaluation_request(
+                columns=_model_features(feature),
+                name=name,
+                family=family,
+                horizon=horizon,
+                seed=seed,
+                start=_model_day(start, flag="--start"),
+                end=_model_day(end, flag="--end"),
+                as_of=_panel_as_of(as_of),
+                years=year,
+                exchange=exchange,
+                folds=folds,
+                test_days_per_fold=test_days_per_fold,
+                embargo_sessions=embargo_sessions,
+                minimum_scored_ratio=min_scored_ratio,
+                code_commit=_resolved_code_commit(code_commit),
+                config_digest=_resolved_config_digest(config_digest),
+                feature_version=feature_version,
+                hyperparameters=_model_hyperparameters(hyperparameter or []),
+            )
+            result = evaluate_model(_panel_store(runtime_dir), request)
+        except ModelViewError as error:
+            raise _model_fail(error) from error
+
+        if json_output:
+            typer.echo(json.dumps(evaluation_view(result), ensure_ascii=False, sort_keys=True))
+        else:
+            _echo_evaluation(result)
+        if result.is_blocked:
+            raise typer.Exit(code=int(MODEL_EXIT["refused"]))
+
+
+@model_app.command("daily-run")
+def model_daily_run_command(
+    feature: Annotated[list[str], typer.Option("--feature", help=_MODEL_FEATURE_HELP)],
+    name: Annotated[str, typer.Option("--name", help=_MODEL_NAME_HELP)],
+    family: Annotated[str, typer.Option("--family", help=_MODEL_FAMILY_HELP)],
+    horizon: Annotated[str, typer.Option("--horizon", help=_MODEL_HORIZON_HELP)],
+    seed: Annotated[int, typer.Option("--seed", help=_MODEL_SEED_HELP)],
+    start: Annotated[str, typer.Option("--start", help=_MODEL_START_HELP)],
+    end: Annotated[str, typer.Option("--end", help=_MODEL_END_HELP)],
+    year: Annotated[list[int], typer.Option("--year", help=_BUILD_FACTOR_YEAR_HELP)],
+    predict_at: Annotated[str, typer.Option("--predict-at", help=_MODEL_PREDICT_AT_HELP)],
+    min_scored_ratio: Annotated[
+        float, typer.Option("--min-scored-ratio", help=_MODEL_SCORED_RATIO_HELP)
+    ],
+    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
+        "./runtime"
+    ),
+    exchange: Annotated[
+        str, typer.Option("--exchange", help=_FACTOR_EXCHANGE_HELP)
+    ] = TRADING_CALENDAR_DEFAULT_EXCHANGE,
+    as_of: Annotated[str, typer.Option("--as-of", help=_MODEL_AS_OF_HELP)] = "",
+    hyperparameter: Annotated[
+        list[str] | None, typer.Option("--hyperparameter", help=_MODEL_HYPERPARAMETER_HELP)
+    ] = None,
+    feature_version: Annotated[
+        str | None, typer.Option("--feature-version", help=_MODEL_FEATURE_VERSION_HELP)
+    ] = None,
+    code_commit: Annotated[
+        str | None, typer.Option("--code-commit", help=_CODE_COMMIT_HELP)
+    ] = None,
+    config_digest: Annotated[
+        str | None, typer.Option("--config-digest", help=_MODEL_CONFIG_DIGEST_HELP)
+    ] = None,
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit the whole answer as data.")
+    ] = False,
+) -> None:
+    """Fit on what has already closed, score today's cross section, and register the answer.
+
+    **The command Story S32 is about**, and the reason `V2-P4-017` built a store this repository
+    could not fill::
+
+        openalpha model daily-run --feature reversal_1d/v1@raw --name reversal-rank \\
+          --family cross_sectional_rank --horizon 5d --seed 7 \\
+          --start 2026-01-06 --end 2026-01-14 --year 2026 \\
+          --predict-at 2026-01-16T09:00:00+00:00 --min-scored-ratio 0.5 --runtime-dir ./runtime
+
+    The training set is every labelled example whose outcome window had already closed at
+    `--predict-at`; nothing that had not is offered to the fit, which is `V2-P4-013`'s purge with
+    the deadline supplied rather than derived. The batch is then handed to the prediction store,
+    which stamps `recorded_at` off **its own** clock -- so a caller who backdates reaches
+    `unwitnessed` and cannot reach `forward`.
+
+    **What `standing` proves is on the answer, not in this help text.** `forward` means this
+    store held the bytes before the outcome became knowable. It does **not** mean the batch was
+    produced when it says it was: `predicted_at` is unverifiable by construction, and nothing here
+    defends against whoever owns the disk. Both sentences are in the body and in the terminal
+    rendering, because a badge with nothing beside it reads as an attestation this repository
+    cannot make.
+
+    **A refused run still registered its prediction.** Exit `1` under `--min-scored-ratio` says
+    the answer may not be acted on; it does not say nothing was stored. Story S32 is about the
+    prediction being persisted before the outcome is known, which is unconditional. The
+    `record_id` is on the answer either way.
+
+    This is also the command that finally fills `RunManifest.alpha_model_versions`: it files a
+    `mode=daily` manifest naming the one artifact it consumed, under a `run_id` derived from the
+    prediction's own address, so re-running an identical day is `unchanged` on both stores rather
+    than a duplicate on one of them.
+    """
+    with _panel_command("model daily-run"):
+        try:
+            request = daily_request(
+                columns=_model_features(feature),
+                name=name,
+                family=family,
+                horizon=horizon,
+                seed=seed,
+                start=_model_day(start, flag="--start"),
+                end=_model_day(end, flag="--end"),
+                predict_at=_model_instant(predict_at, flag="--predict-at"),
+                as_of=_panel_as_of(as_of),
+                years=year,
+                exchange=exchange,
+                minimum_scored_ratio=min_scored_ratio,
+                code_commit=_resolved_code_commit(code_commit),
+                config_digest=_resolved_config_digest(config_digest),
+                feature_version=feature_version,
+                hyperparameters=_model_hyperparameters(hyperparameter or []),
+            )
+            now = _panel_clock()
+            result = run_daily(
+                _panel_store(runtime_dir),
+                request,
+                predictions=FilePredictionStore(runtime_dir / "predictions", clock=_panel_clock),
+                runs=SQLiteRunRepository(runtime_dir / "state.sqlite3"),
+                predicted_at=now,
+                started_at=now,
+            )
+        except ModelViewError as error:
+            raise _model_fail(error) from error
+        except PredictionStoreError as error:
+            raise _panel_fail(PanelExit.unhealthy, str(error)) from error
+
+        if json_output:
+            typer.echo(json.dumps(daily_view(result), ensure_ascii=False, sort_keys=True))
+        else:
+            for label, value in daily_rows(result):
+                typer.echo(f"{label:<19} {value}")
+        if result.is_blocked:
+            raise typer.Exit(code=int(MODEL_EXIT["refused"]))
+
+
+_PREDICTION_ADDRESS_HELP: Final[str] = (
+    "The `record_id` a daily run's own answer carried (`prd_` and 24 lowercase hex characters). "
+    "It is on every `--json` body and in the terminal rendering; `openalpha model predictions` "
+    "prints every one this runtime directory holds."
+)
+
+
+@model_app.command("prediction")
+def model_prediction_command(
+    record_id: Annotated[str, typer.Argument(help=_PREDICTION_ADDRESS_HELP)],
+    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
+        "./runtime"
+    ),
+) -> None:
+    """Print one registered prediction, by the content address its own body carried.
+
+    What comes back is **what was registered**, not a re-run: the bytes the store holds, with the
+    address re-derived from the content before they are handed over, so a document edited on disk
+    exits `1` rather than printing scores somebody trades on.
+
+    Always JSON: a registered prediction is a document rather than a verdict this command is
+    making. Exits 0 when it is held, 1 when it is not, 3 when the address is not one.
+    """
+    with _panel_command("model prediction"):
+        try:
+            record = held_prediction(
+                FilePredictionStore(runtime_dir / "predictions", clock=_panel_clock), record_id
+            )
+        except ModelViewError as error:
+            raise _model_fail(error) from error
+        except PredictionStoreError as error:
+            raise _panel_fail(PanelExit.unhealthy, str(error)) from error
+        typer.echo(json.dumps(prediction_view(record), ensure_ascii=False, sort_keys=True))
+
+
+@model_app.command("predictions")
+def model_predictions_command(
+    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
+        "./runtime"
+    ),
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit the addresses as data.")
+    ] = False,
+) -> None:
+    """Every registered prediction this runtime directory holds, by address, ascending.
+
+    Addresses rather than bodies, `openalpha shortlist list`'s shape. A directory with nothing in
+    it prints nothing and exits 0, which is the ordinary state of a fresh install rather than a
+    fault -- and is also, for this store, where the *denominator*
+    `domain/prediction_record.py` says a multiple-testing policy needs would be counted from.
+    """
+    with _panel_command("model predictions"):
+        held = FilePredictionStore(runtime_dir / "predictions", clock=_panel_clock).list_ids()
+        if json_output:
+            typer.echo(json.dumps({"record_ids": list(held)}, ensure_ascii=False))
+        else:
+            for record_id in held:
+                typer.echo(record_id)
+
+
+def _model_day(value: str, *, flag: str) -> date:
+    try:
+        return date.fromisoformat(value)
+    except ValueError as error:
+        raise _panel_fail(
+            PanelExit.bad_request,
+            f"{flag} expects an ISO-8601 date (YYYY-MM-DD); got {value!r}",
+        ) from error
+
+
+def _model_instant(value: str, *, flag: str) -> datetime:
+    """Parse `--predict-at`, and refuse only what `model_view` structurally cannot see.
+
+    **Only the parse.** `_panel_as_of` also refuses a naive instant, and a first draft copied that
+    branch here; a mutation sweep deleted it and nothing went red, which was the right answer
+    rather than a missing test. `daily_request` runs `_aware` on this value and refuses a naive
+    one by name -- `predict_at '...' carries no UTC offset` -- so the copy here was one rule in
+    two places with this one free to drift, and `V2-P4-011` deleted a duplicate check on the same
+    ground. What is left is the half no contract below can do: a string that is not an instant at
+    all never becomes a `datetime` to be checked.
+
+    There is deliberately no wall-clock default either, which is where this parts company with
+    `_panel_as_of`: `--predict-at` names the cross section a prediction is **about**, and
+    defaulting it to "now" would register a prediction about whichever build happened to be
+    newest, which is a decision nobody took.
+    """
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise _panel_fail(
+            PanelExit.bad_request,
+            f"{flag} expects an ISO-8601 instant with an offset, e.g. "
+            f"2026-01-16T09:00:00+00:00; got {value!r}",
+        ) from error
+
+
+def _echo_evaluation(result: ModelEvaluation) -> None:
+    """Print one walk-forward evaluation: what was read, what was fitted, and whether it clears.
+
+    The verdict line comes **first** and says `REFUSED` in words, `_echo_shortlist`'s rule and its
+    reason: the one thing a reader must not have to infer is which of the two this is, and a table
+    of folds under a silent header reads identically either way.
+
+    A statistic that was not measured prints `not measured` rather than a number, which is
+    `model_view._number`'s single implementation of the rule: a zero that was measured and a zero
+    that was never measurable are the same float and different facts.
+    """
+    run = result.request.run
+    if result.is_blocked:
+        typer.echo("verdict    REFUSED by ['scored_ratio_below_floor']")
+    else:
+        typer.echo(f"verdict    admitted, {len(result.folds)} fitted artifact(s)")
+    declaration = run.declaration
+    typer.echo(f"model      {declaration.name} ({declaration.family}, {declaration.horizon})")
+    typer.echo(f"features   {list(run.feature_ids)} at {declaration.feature_version}")
+    typer.echo(
+        f"panel      {len(result.prediction_days)} prediction day(s) "
+        f"{result.prediction_days[0].isoformat()}..{result.prediction_days[-1].isoformat()} "
+        f"read at {run.as_of.isoformat()}"
+    )
+    typer.echo(
+        f"measured   scored={result.scored_count}/{result.offered_count} "
+        f"({result.scored_ratio:.4f}) against a floor of {run.minimum_scored_ratio:.4f}"
+    )
+    typer.echo("block      coverage             mean_rank_ic rank_icir    reach")
+    for block, coverage, mean, icir, reach in evaluation_rows(result):
+        typer.echo(f"{block:<10} {coverage:<20} {mean:<12} {icir:<12} {reach}")
+    if result.excluded:
+        typer.echo(
+            f"excluded   {len(result.excluded)} security-day(s) carried no training example; "
+            "see `excluded` on the --json body for each one's reason",
+            err=True,
+        )
+    if result.is_blocked:
+        typer.echo(
+            "blocked    scored_ratio_below_floor: "
+            f"{result.scored_count} of the {result.offered_count} securities offered across the "
+            f"folds' test blocks carried a score, which is {result.scored_ratio:.4f} against a "
+            f"floor of {run.minimum_scored_ratio:.4f}",
+            err=True,
+        )
 
 
 def main() -> None:
