@@ -9,7 +9,7 @@ about the prices rather than an assertion about the fixture.
 from __future__ import annotations
 
 import dataclasses
-from datetime import date, timedelta
+from datetime import UTC, date, time, timedelta
 from itertools import pairwise
 from zoneinfo import ZoneInfo
 
@@ -25,6 +25,7 @@ from walk_forward_fixtures import (
     SECURITIES,
     SESSION_CLOSE,
     TEST_DAYS_PER_FOLD,
+    as_of_for,
     cross_section_for,
     declaration,
     labelled_sections,
@@ -39,6 +40,7 @@ from openalpha_cn.backtest.alpha_model import SingleFeatureAlphaModel
 from openalpha_cn.backtest.walk_forward import (
     KNOWN_WALK_FORWARD_LIMITATIONS,
     LabelledCrossSection,
+    LabelledPanel,
     WalkForwardError,
     WalkForwardFold,
     labelled_panel,
@@ -224,14 +226,21 @@ def test_an_embargo_of_zero_sessions_removes_nothing_and_has_to_be_said() -> Non
 
 
 def test_a_fold_carries_no_field_naming_which_rows_train() -> None:
-    """禁止随机切分, made structural rather than discouraged.
+    """禁止随机切分, made structural rather than discouraged -- for what this type can carry.
 
     A fold is a panel, a calendar, a first test day, a block length and an embargo width. There
     is no field for train membership and none for test membership, so the only split this type
-    can express is "every earlier prediction day, less what the two rules remove". An unordered
-    split has nowhere to be written down -- and neither has a split that puts one security's
+    can express is "every earlier prediction day, less what the two rules remove". A shuffled
+    partition has nowhere to be written down -- and neither has a split that puts one security's
     later rows in train and another's earlier rows in test, because the boundary is a date and
     a date takes the whole cross section with it.
+
+    **This assertion is about the declaration and not about what a caller can assemble**, which
+    is exactly what `V2-P4-090` measured: it was the whole support for "an unordered split is
+    unrepresentable", and a panel whose sections were out of order defeated that claim without
+    touching a single field of this type.
+    `test_a_scattered_section_tuple_is_refused_by_the_panel_and_not_only_by_its_factory` is the
+    other half, and it is a refusal rather than an absence.
     """
     assert {field.name for field in dataclasses.fields(WalkForwardFold)} == {
         "panel",
@@ -240,6 +249,228 @@ def test_a_fold_carries_no_field_naming_which_rows_train() -> None:
         "test_day_count",
         "embargo_sessions",
     }
+
+
+# --------------------------------------------------------------------------------------
+# What the type refuses, rather than what the factory happened to check (`V2-P4-090`)
+# --------------------------------------------------------------------------------------
+
+
+def _scattered(built: LabelledPanel, *, index: int) -> LabelledPanel:
+    """`built` with one early section moved to the end of the tuple, and nothing else changed."""
+    sections = built.sections
+    return dataclasses.replace(
+        built, sections=sections[:index] + sections[index + 1 :] + (sections[index],)
+    )
+
+
+def test_a_scattered_section_tuple_is_refused_by_the_panel_and_not_only_by_its_factory() -> None:
+    """`V2-P4-090`: the invariant that makes a fold's membership derivable, on the type.
+
+    `labelled_panel` has always refused a section tuple whose prediction days do not strictly
+    increase. That refusal was the *factory's*, and the acceptance measured what a frozen
+    dataclass with no `__post_init__` is worth: `dataclasses.replace(panel, sections=...)` --
+    the idiom this repository's own tests use everywhere -- moved `2026-01-08` to the end of a
+    twenty-day panel and handed the result to the **shipped** `walk_forward_folds`, which
+    accepted it and returned two folds. The second tested on `['2026-01-28', '2026-01-08']` and
+    its `leaked_sessions` reported six sessions read by both the surviving training labels and
+    the test labels -- reported, that is, by the module's own independent measurement of the
+    property the purge exists to produce.
+
+    So the check moved to where `WalkForwardFold` already puts its own, and the factory now has
+    no copy of it -- both entry points are driven here, because the factory *delegating* rather
+    than duplicating is half of the fix. `V2-P4-011`'s ground for deleting its own duplicated
+    check is the same one: two copies is one check plus a place for the weaker one to fall
+    behind.
+    """
+    built = panel(aligned_from=ALIGNED_FROM_OVERLAPPING)
+    days = prediction_days()
+    ordered = labelled_sections(aligned_from=ALIGNED_FROM_OVERLAPPING, days=days[:3])
+
+    with pytest.raises(WalkForwardError, match="not strictly increasing"):
+        _scattered(built, index=5)
+    with pytest.raises(WalkForwardError, match="not strictly increasing"):
+        labelled_panel([ordered[1], ordered[0], ordered[2]])
+
+
+def test_the_shipped_schedule_can_no_longer_be_handed_the_split_that_leaked() -> None:
+    """The probe, end to end: the tuple that produced six leaked sessions never reaches a fold.
+
+    Asserted through `walk_forward_folds` rather than through the constructor alone, because the
+    finding was not "a dataclass admits a bad value" -- it was that the shipped scheduler took
+    one and returned folds. The panel is assembled first and then scattered, so the refusal has
+    to come from the reassembly and cannot be the factory's.
+    """
+    built = panel(aligned_from=ALIGNED_FROM_OVERLAPPING)
+    assert built.prediction_days[5] == date(2026, 1, 8)
+
+    with pytest.raises(WalkForwardError, match="not strictly increasing"):
+        walk_forward_folds(
+            _scattered(built, index=5),
+            calendar=trading_calendar(),
+            folds=FOLDS,
+            test_days_per_fold=2,
+            embargo_sessions=0,
+        )
+
+
+def test_a_section_whose_instant_does_not_date_its_own_prediction_day_is_refused() -> None:
+    """The second bypass, found while closing the first, and it reaches a leak the same way.
+
+    Ordering alone is not what makes the purge safe. The purge's whole argument is that
+    `first_test_as_of` is dated **on the fold's first prediction day, in the window's own zone**
+    -- that is what turns "a training label shares a session with a test label" into "its close
+    instant is after the first `as_of`". A section carrying a `prediction_day` its own instant
+    does not resolve to breaks that premise while leaving the day order untouched.
+
+    Both copies of the instant are moved here, so the refusal is this check and not the
+    cheaper one above it.
+    """
+    built = panel(aligned_from=ALIGNED_FROM_OVERLAPPING)
+    section = built.sections[FIRST_TEST_DAY_INDEX]
+    moved = section.as_of + timedelta(days=365)
+
+    with pytest.raises(WalkForwardError, match="in its labels' own zone"):
+        dataclasses.replace(
+            section,
+            as_of=moved,
+            cross_section=dataclasses.replace(section.cross_section, as_of=moved),
+        )
+
+
+def test_a_section_carrying_an_instant_its_own_cross_section_disagrees_with_is_refused() -> None:
+    """One prediction day is one instant, and the section states it twice.
+
+    This is the probe the second bypass was measured with: moving fold 0's first section's own
+    `as_of` forward by a year and nothing else left the prediction days ascending, was accepted
+    by the shipped `walk_forward_folds`, and produced a fold whose purge removed **0 of 48**
+    candidates while `leaked_sessions` reported five.
+
+    `evaluate_fold` also dates every batch at `section.as_of` while `score_point` refuses a
+    batch whose `as_of` is not the section's, so the two copies disagreeing is a second fault
+    on the same line.
+    """
+    built = panel(aligned_from=ALIGNED_FROM_OVERLAPPING)
+    section = built.sections[FIRST_TEST_DAY_INDEX]
+
+    with pytest.raises(WalkForwardError, match="its cross section is dated"):
+        dataclasses.replace(section, as_of=section.as_of + timedelta(days=365))
+
+
+def test_a_section_with_no_labelled_row_is_refused_however_it_was_assembled() -> None:
+    """`a_prediction_day_that_labels_nothing_is_refused_rather_than_skipped`, on the type.
+
+    The factory refused this and the type did not, so `dataclasses.replace(section, examples=())`
+    produced a prediction day a fold counts in its block and can learn nothing from.
+    """
+    built = panel(aligned_from=ALIGNED_FROM_OVERLAPPING)
+
+    with pytest.raises(WalkForwardError, match="produced no labelled row"):
+        dataclasses.replace(built.sections[0], examples=())
+
+
+def test_a_panel_with_no_section_is_refused_where_a_fold_would_have_read_past_the_end() -> None:
+    """An empty panel reached `WalkForwardFold.__post_init__`, which indexes `days[0]`.
+
+    Measured: `dataclasses.replace(panel, sections=())` was accepted, and the fold built on it
+    raised a bare `IndexError: tuple index out of range` -- not a `WalkForwardError`, so a
+    caller catching this module's own error caught nothing.
+    """
+    built = panel(aligned_from=ALIGNED_FROM_OVERLAPPING)
+
+    with pytest.raises(WalkForwardError, match="carries no cross section"):
+        dataclasses.replace(built, sections=())
+
+
+def test_a_panel_whose_sections_disagree_about_the_recipe_is_refused_by_the_type() -> None:
+    """Feature values travel positionally, and `_training_set_of` reads the *panel's* list.
+
+    So a panel whose declared `feature_ids` is not what its sections carry hands every fold a
+    `TrainingSet` whose column names are one matrix's and whose values are another's.
+    """
+    built = panel(aligned_from=ALIGNED_FROM_OVERLAPPING)
+
+    with pytest.raises(WalkForwardError, match="two feature lists"):
+        dataclasses.replace(built, feature_ids=(MOMENTUM,))
+
+
+def test_a_panel_whose_exchange_is_not_its_labels_is_refused_by_the_type() -> None:
+    """The embargo counts sessions on the calendar `WalkForwardFold` checks against this field.
+
+    That check compares the calendar to `panel.exchange`; if the field and the labels disagree,
+    the fold passes its own guard and counts another exchange's sessions.
+    """
+    built = panel(aligned_from=ALIGNED_FROM_OVERLAPPING)
+
+    with pytest.raises(WalkForwardError, match="mixes exchanges"):
+        dataclasses.replace(built, exchange="SSE")
+
+
+def test_a_section_holding_a_row_built_for_another_day_is_refused() -> None:
+    """The section reads one window to date itself, so every row in it has to be that day's.
+
+    `LabelledPanel` takes each section's zone, exchange and horizon off its first example, and
+    `PanelSection` resolves its own instant against that same one. A row filed under another
+    prediction day would ride through both and be purged, embargoed and tested against a
+    boundary its window does not stand behind.
+    """
+    built = panel(aligned_from=ALIGNED_FROM_OVERLAPPING)
+    today, tomorrow = built.sections[0], built.sections[1]
+
+    with pytest.raises(WalkForwardError, match="sits in the section this panel calls"):
+        dataclasses.replace(today, examples=(today.examples[0], tomorrow.examples[1]))
+
+
+def test_a_section_whose_rows_do_not_agree_on_the_three_things_the_purge_reads_is_refused() -> None:
+    """What makes reading one window per section sound rather than convenient.
+
+    A ten-session window sitting inside a five-session day is dated to the same prediction day,
+    so the check above cannot see it -- and the panel's own horizon, exchange and zone are read
+    off whichever example happens to be first.
+    """
+    days = prediction_days()
+    built = panel(aligned_from=ALIGNED_FROM_OVERLAPPING)
+    section = built.sections[0]
+    longer = labels_for(days[0], aligned_from=ALIGNED_FROM_OVERLAPPING, horizon="10d")
+    assert longer[1].window.prediction_day == section.prediction_day
+
+    with pytest.raises(WalkForwardError, match="one prediction day is one question"):
+        dataclasses.replace(
+            section,
+            examples=(
+                section.examples[0],
+                TrainingExample(label=longer[1], features=section.examples[1].features),
+            ),
+        )
+
+
+def test_a_sections_prediction_day_is_its_instants_date_in_the_labels_own_zone() -> None:
+    """Not the date the instant happens to be *written* in, which is `V2-P4-012`'s real shape.
+
+    A `FeatureMatrixSection.as_of` is an instant, and the corpus everywhere else in this file
+    writes its instants in Shanghai -- where an instant's own `.date()` and its Shanghai date
+    are the same day and a fixture cannot tell one rule from the other. A mutant replacing
+    `_prediction_day_of` with `as_of.date()` survived the whole unit suite on that account.
+
+    Between 00:00 and 08:00 Shanghai the two disagree, so this section is dated at 07:00 in the
+    market's own zone and handed over expressed in UTC, where it reads as the previous day.
+    """
+    day = prediction_days()[0]
+    early = time(7, 0)
+    instant = as_of_for(day, at=early).astimezone(UTC)
+    assert instant.date() != day
+
+    built = labelled_panel(
+        [
+            LabelledCrossSection(
+                cross_section=dataclasses.replace(cross_section_for(day, at=early), as_of=instant),
+                labels=labels_for(day, aligned_from=ALIGNED_FROM_OVERLAPPING, at=early),
+            )
+        ]
+    )
+
+    assert built.sections[0].prediction_day == day
+    assert built.sections[0].as_of == instant
 
 
 def test_folds_are_time_ordered_and_share_no_test_day() -> None:
@@ -526,7 +757,7 @@ def test_the_limitation_registry_is_exactly_the_boundaries_this_split_declares()
         "the_shared_session_rule_is_a_property_here_and_not_a_second_implementation",
         "the_embargo_width_is_declared_because_the_footprint_it_covers_is_not_on_the_label",
         "training_set_overlaps_is_grouped_by_security_and_a_fold_boundary_is_not",
-        "an_unordered_split_is_unrepresentable_and_a_badly_placed_block_is_only_refused",
+        "train_membership_is_unrepresentable_and_the_order_behind_it_is_only_refused",
         "only_an_expanding_training_window_is_offered",
         "nothing_here_evaluates_a_fold_and_this_corpus_is_not_a_benchmark",
         "the_join_is_by_instant_and_cannot_check_that_a_feature_row_is_point_in_time",

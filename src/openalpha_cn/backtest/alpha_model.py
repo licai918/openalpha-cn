@@ -18,9 +18,13 @@ reports no evaluation. Story S29 and `V2-P4-014` own the linear/ranking baseline
 Everything below is stdlib arithmetic over `domain/` contracts, so this module passes all four
 `backtest/` `lint-imports` contracts, in three different ways. The whole-package one
 (`backtest-no-numeric-stack-or-panel-plane`) covers it automatically -- there is no list to
-join, which is the property the P3 technical acceptance added it for. The two per-module study
-contracts have explicit source lists, and it **joined both on arrival**, which
-`tests/unit/test_import_layering.py` is what makes mandatory. The fourth,
+join, which is the property the P3 technical acceptance added it for, and it is the only one of
+the four that covers a *new* file at all. The two per-module study contracts have explicit
+source lists, and it **joined both on arrival**, which
+`tests/unit/test_import_layering.py::
+test_the_two_backtest_study_contracts_cover_every_module_in_the_package` is what makes mandatory
+-- a **pytest** assertion, and `V2-P4-093` measured that the distinction matters: a new
+`backtest/*.py` importing `numpy` clears `lint-imports` at `8 kept, 0 broken`. The fourth,
 `ranking-creates-no-portfolio-order`, it is deliberately **not** in: that contract's two sources
 are the candidate list and its gate, and a model that produces a number for every security in a
 cross section is neither. That is exactly why it is a *reference*:

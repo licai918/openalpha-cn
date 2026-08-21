@@ -771,7 +771,7 @@ _PANEL_FAULTS: Final[tuple[type[Exception], ...]] = (
     StockUniverseError,
     TradingCalendarError,
 )
-"""Every refusal the panel plane raises through the six loaders this module calls.
+"""Every refusal the panel plane raises through the five loaders this module calls.
 
 `shortlist_view._PANEL_FAULTS`' arrangement: a tuple rather than a chain of `except` clauses, so
 the translation into this module's vocabulary is written once, and a loader that starts raising a

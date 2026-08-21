@@ -171,6 +171,35 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   the re-scoped PRD, a seven-phase roadmap sliced to issue level, and a four-seam
   code audit whose findings each map to a closing issue. The v1 spec remains
   the contract baseline.
+- **A walk-forward panel now carries its own invariants, and three claims that were
+  broader than what held are narrowed to it.** `V2-P4-013` said an unordered split is
+  *unrepresentable*; the acceptance measured that the ordering behind that derivation lived
+  only in the `labelled_panel` factory, while `LabelledPanel` and `PanelSection` were exported
+  frozen dataclasses with no `__post_init__` — so one `dataclasses.replace` moving an early day
+  to the end of the tuple produced a fold the shipped `walk_forward_folds` accepted and whose
+  own `leaked_sessions` reported six shared sessions. A second bypass found while closing it
+  purged 0 of 48 candidates by moving a section's instant without its prediction day. Both are
+  refusals on the types now; the factory keeps only what a panel cannot see. The registry code
+  moved to `train_membership_is_unrepresentable_and_the_order_behind_it_is_only_refused`,
+  because membership really is unrepresentable and the order really is only refused.
+- **Two `KNOWN_BASELINE_LIMITATIONS` entries contradicted each other and the false one is
+  rewritten.** A mean rank IC does not separate a leaked fold from a purged one: measured
+  `-1.0` in all four configurations of both corpora, with the leak visible only in the
+  coefficient. The `1.0` and `0.0` that do separate them are `V2-P4-013`'s concordance numbers.
+  The audit that binds every registry `code` to executable test code cannot see a false
+  `detail`, and the cheapest structural candidate for closing that was measured and declined —
+  it would have been satisfied by this very sentence while raising 38 false alarms — so the
+  boundary is written where a reader meets it instead.
+- **`Prediction.score` normalises the sign of a zero**, the last of the three addressed floats
+  to get `V2-P4-016`'s `_unsign_zero`; before it, two batches that compared equal were filed
+  under two `record_id`s. Filed as latent and measured otherwise: the reference model's
+  `sign * (value - centre)` hands `-0.0` to any security sitting exactly on the learned centre
+  under a negative sign, which is the shipped `predict` and not a hand-built payload. `FilePredictionStore.put`'s `supersedes` referent check is recorded
+  as contract-only — no face can supply a lineage edge — with an AST assertion that goes red
+  the day one is wired. `feature_matrix._PANEL_FAULTS` speaks for five loaders, not six, and
+  the count is now executable. And `lint-imports` alone does not stop a new `backtest/*.py`:
+  a probe importing `numpy` and a store reads `8 kept, 0 broken`, so the sentences that said
+  otherwise now point at the pytest assertion that does.
 
 ## [1.0.0] - 2026-07-24
 

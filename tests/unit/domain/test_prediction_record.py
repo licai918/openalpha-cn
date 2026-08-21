@@ -15,7 +15,7 @@ import pytest
 from alpha_model_fixtures import SHANGHAI, cross_section, fitted_reference, trading_calendar
 from pydantic import ValidationError
 
-from openalpha_cn.domain.alpha_model import PredictionBatch
+from openalpha_cn.domain.alpha_model import Prediction, PredictionBatch
 from openalpha_cn.domain.horizon import parse_horizon
 from openalpha_cn.domain.labels import build_label_window
 from openalpha_cn.domain.prediction_record import (
@@ -197,6 +197,57 @@ def test_a_recomputation_addresses_somewhere_the_original_never_could() -> None:
     assert original.batch.predictions == recomputed.batch.predictions
     assert original.batch.artifact == recomputed.batch.artifact
     assert original.record_id != recomputed.record_id
+
+
+def _scored_as(held: PredictionBatch, value: float) -> PredictionBatch:
+    """`held` with every scored row rebuilt at `value`, through the constructors.
+
+    `model_copy(update=...)` would skip the very validator this is about, so the rows and the
+    batch are both constructed rather than copied.
+    """
+    return PredictionBatch(
+        as_of=held.as_of,
+        predicted_at=held.predicted_at,
+        artifact=held.artifact,
+        predictions=tuple(
+            Prediction(ts_code=item.ts_code, score=value)
+            if item.is_scored
+            else Prediction(ts_code=item.ts_code, abstention=item.abstention)
+            for item in held.predictions
+        ),
+    )
+
+
+def test_two_records_differing_only_in_the_sign_of_a_zero_score_share_one_address() -> None:
+    """`V2-P4-093`: the address does not move on a non-difference, once `Prediction` unsigns.
+
+    `AlphaModelArtifact` had this closed since `V2-P4-016` and `Prediction.score` did not, so a
+    batch carrying `-0.0` and one carrying `0.0` compared equal and filed two documents under two
+    `record_id`s. The scores are rebuilt by hand rather than left as the fixture model produced
+    them because this is the *store's* end of it -- that the reference model reaches `-0.0` on
+    its own is measured in `tests/unit/backtest/test_alpha_model_reference.py::
+    test_a_security_on_the_learned_centre_under_a_negative_sign_scores_positive_zero`, and it is
+    where `V2-P4-093`'s own "latent" reading was falsified.
+    """
+    held = record().batch
+    assert any(item.is_scored for item in held.predictions)
+
+    left = prediction_record_for(
+        batch=_scored_as(held, -0.0),
+        calendar=trading_calendar(),
+        zone=SHANGHAI,
+        recorded_at=CUSTODY_IN_TIME,
+    )
+    right = prediction_record_for(
+        batch=_scored_as(held, 0.0),
+        calendar=trading_calendar(),
+        zone=SHANGHAI,
+        recorded_at=CUSTODY_IN_TIME,
+    )
+
+    assert left == right
+    assert left.record_id == right.record_id
+    assert "-0.0" not in left.model_dump_json(exclude_computed_fields=True)
 
 
 def test_the_address_carries_the_prefix_and_the_shape_every_address_here_carries() -> None:
@@ -446,4 +497,5 @@ def test_the_known_limitations_are_named_rather_than_argued_away() -> None:
         "the_retrospective_half_of_decision_12s_third_clause_leaves_no_trace_in_a_record",
         "a_backfill_with_no_antecedent_is_admitted_because_most_recomputations_have_none",
         "one_fit_still_has_two_addresses_so_a_record_names_a_declaration_and_not_a_run",
+        "the_supersedes_edge_is_contract_only_because_no_face_offers_a_record_to_name",
     }

@@ -99,23 +99,42 @@ stands at. The purge's demonstration is therefore a learned direction plus a ref
 embargo's, where both sides run, is a pair of skill numbers: `1.0` against `0.0`. Both are in
 `tests/unit/backtest/test_walk_forward_leak.py`, on a corpus whose leak was planted.
 
-## Why a random split has nowhere to be written down
+## Why a random split has nowhere to be written down, and where that stops being true
 
 `WalkForwardFold` carries a panel, a calendar, a first test day, a block length and an embargo
 width. It carries **no field naming which rows train**. Membership is derived: every prediction
-day strictly before the block, less what the two rules remove. So an unordered split, a fold
-whose training rows come from after its test block, and a split sending one security's later rows
-to train while another's earlier rows go to test are all *unrepresentable* rather than
-discouraged -- a boundary is a date, and a date takes the whole cross section with it. The block
-being contiguous is unrepresentable too, since `(first_test_day, test_day_count)` cannot express
-a scattered set of days.
+day strictly before the block, less what the two rules remove. So a shuffled partition, a fold
+whose training rows are named from after its test block, and a split sending one security's later
+rows to train while another's earlier rows go to test are *unrepresentable* rather than
+discouraged -- there is no field to write any of them in, a boundary is a date, and a date takes
+the whole cross section with it. A scattered test block is unrepresentable for the same reason:
+`(first_test_day, test_day_count)` cannot express one.
 
-What is only **refused** is where a legal block sits: a first test day the panel never asked on,
-a block running past the panel's end, and a block starting on the panel's first day are three
+**And a derivation is only as safe as what it derives from, which `V2-P4-090` measured.** Every
+sentence above turns "strictly before the block" into "strictly earlier in time", and that step
+is the panel's, not the fold's. Until that issue the invariant behind it -- sections in strictly
+increasing prediction-day order -- lived only in the `labelled_panel` factory, while
+`LabelledPanel` and `PanelSection` were exported frozen dataclasses with no `__post_init__`. So
+`dataclasses.replace(panel, sections=...)`, the idiom this repository's own tests use
+everywhere, was enough: one early day moved to the end of a twenty-day tuple, handed to the
+**shipped** `walk_forward_folds`, produced two folds whose second tested on
+`['2026-01-28', '2026-01-08']` and reported **six** `leaked_sessions` -- read out by this
+module's own independent measurement of the property the purge exists to produce. A second
+bypass found while closing the first reached a leak by a different door: a section whose `as_of`
+did not date its own `prediction_day` left the day order intact, purged **0 of 48** candidates
+and leaked five sessions.
+
+Both are now **refusals on the types**, where `WalkForwardFold` already puts its own, and the
+factory keeps only what a `LabelledPanel` cannot see -- the labels that never became examples.
+So the honest form of the claim has two halves and the second is a refusal rather than an
+absence: *train membership is unrepresentable; the ordering it derives from is refused.*
+`train_membership_is_unrepresentable_and_the_order_behind_it_is_only_refused` is that where a
+reader meets it.
+
+Where a legal block **sits** is refused too: a first test day the panel never asked on, a block
+running past the panel's end, and a block starting on the panel's first day are three
 constructor refusals, and a caller may still place a legal block anywhere. `walk_forward_folds`
 is what tiles blocks from the tail in order, and a hand-built fold is not held to that schedule.
-`an_unordered_split_is_unrepresentable_and_a_badly_placed_block_is_only_refused` is that
-distinction where a reader meets it.
 
 ## Where this module lives, which was decided before it was written
 
@@ -256,6 +275,16 @@ class PanelSection:
     about every security the market held, and a name with nothing to say for it abstains rather
     than vanishing -- which is `V2-P4-011`'s *scored or abstained, never absent* and
     `V2-P4-012`'s row-of-`None`, one layer up.
+
+    `__post_init__` states one prediction day's own coherence, and it is `V2-P4-090`'s half of
+    the fix rather than defensive checking: `as_of` and `cross_section.as_of` are two copies of
+    one instant, the rows all answer for this day, they agree on the three things the purge
+    reads, and the instant resolves to `prediction_day` **in the labels' own zone**. That last
+    one is the purge's entire premise -- a fold's first `as_of` is dated on its first prediction
+    day in that zone, which is what turns "shares a session with a test label" into "closed
+    after the fold was asked" -- and a section carrying an instant that resolves elsewhere
+    anchors the purge at a moment no test label answers to. Measured on the shipped code before
+    the check existed: it purged nothing at all.
     """
 
     as_of: datetime
@@ -263,22 +292,128 @@ class PanelSection:
     cross_section: FeatureCrossSection
     examples: tuple[TrainingExample, ...]
 
+    def __post_init__(self) -> None:
+        if not self.examples:
+            raise WalkForwardError(
+                f"the cross section dated {self.cross_section.as_of.isoformat()} produced no "
+                f"labelled row out of {len(self.cross_section.rows)} offered; a prediction day "
+                "with nothing to learn from is a hole in the time axis, and a walk-forward that "
+                "silently skipped it would report a fold whose training span is not the one it "
+                "names"
+            )
+        if self.as_of != self.cross_section.as_of:
+            raise WalkForwardError(
+                f"this section is dated {self.as_of.isoformat()} and its cross section is dated "
+                f"{self.cross_section.as_of.isoformat()}; one prediction day is one instant, and "
+                "a fold anchors its purge on the first of these while an evaluation predicts at "
+                "it and scores against the second"
+            )
+        first = self.examples[0].label.window
+        for example in self.examples:
+            window = example.label.window
+            if window.prediction_day != self.prediction_day:
+                raise WalkForwardError(
+                    f"{example.label.ts_code}'s label was built for "
+                    f"{window.prediction_day.isoformat()} and sits in the section this panel "
+                    f"calls {self.prediction_day.isoformat()}; a fold's block is counted in "
+                    "prediction days, so a row filed under another day's is trained or tested "
+                    "on the wrong side of every boundary"
+                )
+            if (str(window.zone), window.exchange, window.horizon.text) != (
+                str(first.zone),
+                first.exchange,
+                first.horizon.text,
+            ):
+                raise WalkForwardError(
+                    f"{example.label.ts_code}'s label is measured on "
+                    f"{window.exchange}/{window.zone}/{window.horizon.text} and this section's "
+                    f"first is on {first.exchange}/{first.zone}/{first.horizon.text}; one "
+                    "prediction day is one question, and the purge reads all three of those"
+                )
+        asked_on = _prediction_day_of(self.examples[0].label, as_of=self.as_of)
+        if asked_on != self.prediction_day:
+            raise WalkForwardError(
+                f"this section is dated {self.as_of.isoformat()}, which is "
+                f"{asked_on.isoformat()} in its labels' own zone, and it calls itself "
+                f"{self.prediction_day.isoformat()}; the purge's whole argument is that a fold's "
+                "first as_of is dated on its first prediction day in that zone, so a section "
+                "whose two do not agree anchors the purge at an instant no test label answers to"
+            )
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class LabelledPanel:
     """Every instant's labelled rows under one recipe, in time order -- what a fold is cut from.
 
-    One feature list, one exchange, one zone and one horizon, all enforced by `labelled_panel`.
-    Each is load-bearing for a different rule: the feature list because values travel
-    positionally, the exchange because the embargo counts its sessions, the zone because the
-    purge compares `close_instant`s written on it, and the horizon because a purge's reach is a
-    function of it and one number cannot be right for two.
+    At least one section, prediction days strictly increasing, one feature list, one exchange,
+    one zone and one horizon. Each is load-bearing for a different rule: the order because a
+    fold's training rows are "every section before the block" and that is only a statement about
+    time if the tuple is one; the feature list because values travel positionally; the exchange
+    because the embargo counts its sessions; the zone because the purge compares `close_instant`s
+    written on it; and the horizon because a purge's reach is a function of it and one number
+    cannot be right for two.
+
+    **All six are refused here rather than in `labelled_panel`, which is `V2-P4-090`.** They were
+    the factory's, and this is an exported frozen dataclass -- so `dataclasses.replace`, direct
+    construction, or a future deserialization walked past every one of them, and the shipped
+    `walk_forward_folds` accepted a scattered tuple and cut a fold that leaked six sessions.
+    `WalkForwardFold.__post_init__` was already the precedent one type down. What the factory
+    keeps is what a panel cannot see: the labels that never became examples.
     """
 
     feature_ids: tuple[str, ...]
     exchange: str
     sections: tuple[PanelSection, ...]
     excluded: tuple[PanelExclusion, ...]
+
+    def __post_init__(self) -> None:
+        if not self.sections:
+            raise WalkForwardError(
+                "a labelled panel carries no cross section; a walk-forward over no instant is "
+                "an empty success, and there is no time axis to split"
+            )
+        days = [section.prediction_day for section in self.sections]
+        if days != sorted(set(days)):
+            raise WalkForwardError(
+                f"this panel's prediction days {[item.isoformat() for item in days]} are not "
+                "strictly increasing; a fold's block is counted in prediction days, so a "
+                "repeated or reordered day is one day's market counted twice or a boundary that "
+                "means nothing. Two cross sections of one day is a shape V2-P4-012 hands here "
+                "on purpose (test_feature_matrix_reads.py's own note says so), and this is the "
+                "answer to it"
+            )
+        # One window per section rather than one per example: `PanelSection.__post_init__` has
+        # already refused an empty section and a section whose rows disagree on these three, so
+        # the first example speaks for its whole day and this stays linear in the sections.
+        windows = tuple(section.examples[0].label.window for section in self.sections)
+        horizons = {window.horizon.text for window in windows}
+        if len(horizons) > 1:
+            raise WalkForwardError(
+                f"this panel mixes horizons {sorted(horizons)}; a five-session target and a "
+                "ten-session target reach different distances past a fold boundary, so one "
+                "purge cannot be right for both"
+            )
+        exchanges = {window.exchange for window in windows} | {self.exchange}
+        if len(exchanges) > 1:
+            raise WalkForwardError(
+                f"this panel mixes exchanges {sorted(exchanges)}; the embargo counts sessions, "
+                "and two exchanges' sessions are two different axes"
+            )
+        zones = {str(window.zone) for window in windows}
+        if len(zones) > 1:
+            raise WalkForwardError(
+                f"this panel mixes zones {sorted(zones)}; the purge compares "
+                "LabelWindow.close_instant against the instant the fold is first asked at, and "
+                "two zones put those two 15:00 closes on two different clocks"
+            )
+        for section in self.sections:
+            if section.cross_section.feature_ids != self.feature_ids:
+                raise WalkForwardError(
+                    f"this panel carries two feature lists, {list(self.feature_ids)} and "
+                    f"{list(section.cross_section.feature_ids)}; feature values travel "
+                    "positionally, so a panel that changes its columns part-way through is two "
+                    "matrices fitted as one"
+                )
 
     @property
     def prediction_days(self) -> tuple[date, ...]:
@@ -338,27 +473,20 @@ def labelled_panel(sections: Iterable[LabelledCrossSection]) -> LabelledPanel:
     which is `build_label_window`'s first step reused rather than re-derived. Inside a section
     the securities are matched by code, and both directions of a miss are disclosed rather than
     dropped.
+
+    **This is a join and nothing else.** Since `V2-P4-090` every invariant a fold's derivation
+    reads sits on `PanelSection` and `LabelledPanel`, so a panel assembled around this function
+    -- by `dataclasses.replace`, by hand, or by a deserializer nobody has written yet -- is held
+    to the same rules a panel built through it is. What stays here is what those two types
+    cannot see: the labels that were **offered** and never became examples, which is where a
+    matrix that resolved to an earlier build than the caller asked for is caught. That is the
+    whole content of the registry entry beginning `the_join_is_by_instant_`.
     """
     ordered = tuple(sections)
-    if not ordered:
-        raise WalkForwardError(
-            "a labelled panel carries no cross section; a walk-forward over no instant is an "
-            "empty success, and there is no time axis to split"
-        )
-    feature_ids = ordered[0].cross_section.feature_ids
     built: list[PanelSection] = []
     excluded: list[PanelExclusion] = []
-    exchanges: set[str] = set()
-    zones: set[str] = set()
-    horizons: set[str] = set()
     for entry in ordered:
         cross_section = entry.cross_section
-        if cross_section.feature_ids != feature_ids:
-            raise WalkForwardError(
-                f"this panel carries two feature lists, {list(feature_ids)} and "
-                f"{list(cross_section.feature_ids)}; feature values travel positionally, so a "
-                "panel that changes its columns part-way through is two matrices fitted as one"
-            )
         if not entry.labels:
             raise WalkForwardError(
                 f"the cross section dated {cross_section.as_of.isoformat()} offers no label at "
@@ -385,9 +513,6 @@ def labelled_panel(sections: Iterable[LabelledCrossSection]) -> LabelledPanel:
                     "not be recoverable"
                 )
             by_code[label.ts_code] = label
-            exchanges.add(label.window.exchange)
-            zones.add(str(label.window.zone))
-            horizons.add(label.window.horizon.text)
         prediction_day = _prediction_day_of(entry.labels[0], as_of=cross_section.as_of)
         examples: list[TrainingExample] = []
         for row in cross_section.rows:
@@ -415,14 +540,6 @@ def labelled_panel(sections: Iterable[LabelledCrossSection]) -> LabelledPanel:
                     ts_code=ts_code, prediction_day=prediction_day, reason=NO_FEATURE_ROW
                 )
             )
-        if not examples:
-            raise WalkForwardError(
-                f"the cross section dated {cross_section.as_of.isoformat()} produced no "
-                f"labelled row out of {len(cross_section.rows)} offered; a prediction day with "
-                "nothing to learn from is a hole in the time axis, and a walk-forward that "
-                "silently skipped it would report a fold whose training span is not the one it "
-                "names"
-            )
         built.append(
             PanelSection(
                 as_of=cross_section.as_of,
@@ -431,35 +548,13 @@ def labelled_panel(sections: Iterable[LabelledCrossSection]) -> LabelledPanel:
                 examples=tuple(examples),
             )
         )
-    if len(horizons) > 1:
-        raise WalkForwardError(
-            f"this panel mixes horizons {sorted(horizons)}; a five-session target and a "
-            "ten-session target reach different distances past a fold boundary, so one purge "
-            "cannot be right for both"
-        )
-    if len(exchanges) > 1:
-        raise WalkForwardError(
-            f"this panel mixes exchanges {sorted(exchanges)}; the embargo counts sessions, and "
-            "two exchanges' sessions are two different axes"
-        )
-    if len(zones) > 1:
-        raise WalkForwardError(
-            f"this panel mixes zones {sorted(zones)}; the purge compares "
-            "LabelWindow.close_instant against the instant the fold is first asked at, and two "
-            "zones put those two 15:00 closes on two different clocks"
-        )
-    days = [section.prediction_day for section in built]
-    if days != sorted(set(days)):
-        raise WalkForwardError(
-            f"this panel's prediction days {[item.isoformat() for item in days]} are not "
-            "strictly increasing; a fold's block is counted in prediction days, so a repeated "
-            "or reordered day is one day's market counted twice or a boundary that means "
-            "nothing. Two cross sections of one day is a shape V2-P4-012 hands here on purpose "
-            "(test_feature_matrix_reads.py's own note says so), and this is the answer to it"
-        )
+    # Both `feature_ids` and `exchange` are read off what was built rather than off the argument,
+    # and the empty case is not guarded here: `LabelledPanel.__post_init__` refuses a panel with
+    # no section by name, and a second refusal above it would be a second place for one sentence
+    # to drift -- `V2-P4-011`'s ground for deleting its own duplicated check.
     return LabelledPanel(
-        feature_ids=feature_ids,
-        exchange=exchanges.pop(),
+        feature_ids=built[0].cross_section.feature_ids if built else (),
+        exchange=built[0].examples[0].label.window.exchange if built else "",
         sections=tuple(built),
         excluded=tuple(excluded),
     )
@@ -471,9 +566,14 @@ class WalkForwardFold:
 
     Five fields, and the absent sixth is the point. There is no field naming which rows train,
     so train membership is *derived* -- every prediction day strictly before the block, less
-    what the purge and the embargo remove -- and an unordered split has nowhere to be written
+    what the purge and the embargo remove -- and a shuffled partition has nowhere to be written
     down. The block is `(first_test_day, test_day_count)` rather than a list of days for the
     same reason: a scattered test set is unrepresentable rather than refused.
+
+    "Strictly before the block" is a claim about **time** only because the panel's sections are
+    in strictly increasing prediction-day order, which `LabelledPanel.__post_init__` is what
+    refuses -- since `V2-P4-090`, and before it only the factory did, which a `dataclasses
+    .replace` walked past.
 
     The calendar is a field and not a global because the embargo counts sessions on it, and
     `__post_init__` refuses one whose exchange is not the panel's -- two exchanges' sessions are
@@ -791,20 +891,32 @@ KNOWN_WALK_FORWARD_LIMITATIONS: Final[tuple[WalkForwardLimitation, ...]] = (
         ),
     ),
     WalkForwardLimitation(
-        code="an_unordered_split_is_unrepresentable_and_a_badly_placed_block_is_only_refused",
+        code="train_membership_is_unrepresentable_and_the_order_behind_it_is_only_refused",
         detail=(
-            "禁止随机切分 is structural for the part that can be. WalkForwardFold carries a "
-            "panel, a calendar, a first test day, a block length and an embargo width, and no "
-            "field naming which rows train -- so train membership is derived from the boundary "
-            "and there is nowhere to write down a shuffled partition, a fold whose training "
-            "rows come from after its test block, or a split sending one security's later rows "
-            "to train and another's earlier rows to test. A boundary is a date, and a date "
-            "takes the whole cross section with it. What is only refused rather than "
-            "unrepresentable is where the block sits: a first test day the panel never asked "
-            "on, a block running past the panel's end, and a block starting on the panel's "
-            "first day are three constructor refusals, and a caller may still place a legal "
-            "block anywhere. walk_forward_folds is what tiles the blocks from the tail in "
-            "order; a hand-built fold is not held to that schedule."
+            "禁止随机切分 is structural for the part that can be, and a refusal for the part "
+            "that cannot -- and this entry said 'unrepresentable' for both until V2-P4-090 "
+            "measured the difference. What is genuinely unrepresentable is train membership: "
+            "WalkForwardFold carries a panel, a calendar, a first test day, a block length and "
+            "an embargo width, and no field naming which rows train, so there is nowhere to "
+            "write down a shuffled partition, a fold whose training rows are named from after "
+            "its test block, a split sending one security's later rows to train and another's "
+            "earlier rows to test, or a scattered test block. What that derivation *rests* on "
+            "is a different thing and is only refused: 'every prediction day strictly before "
+            "the block' means what it says only if the panel's sections are in strictly "
+            "increasing prediction-day order, and only if each section's instant dates its own "
+            "prediction day in the labels' zone. Both lived in the labelled_panel factory while "
+            "LabelledPanel and PanelSection were exported frozen dataclasses with no "
+            "__post_init__, so dataclasses.replace walked past them: one early day moved to the "
+            "end of a twenty-day tuple was accepted by the shipped walk_forward_folds and cut a "
+            "fold reporting six leaked_sessions, and a section whose as_of was moved without "
+            "its prediction_day purged 0 of 48 candidates. Both are refusals on the types now, "
+            "and 'refused' is what they are -- a caller still constructs the value and gets an "
+            "error, which is weaker than having no field to put it in. Where a legal block sits "
+            "is refused in the same sense: a first test day the panel never asked on, a block "
+            "running past the panel's end, and a block starting on the panel's first day are "
+            "three constructor refusals, and a caller may still place a legal block anywhere. "
+            "walk_forward_folds is what tiles the blocks from the tail in order; a hand-built "
+            "fold is not held to that schedule."
         ),
     ),
     WalkForwardLimitation(

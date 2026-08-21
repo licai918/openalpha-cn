@@ -193,12 +193,14 @@ This is a `backtest/` leaf -- the eleventh -- and the placement is the enforceme
 - **`product/` would hold it and enforce nothing.** Nothing forbids `product` to import
   `openalpha_cn.storage`, `openalpha_cn.runtime` or `domain.portfolio`; `product/research.py`
   already imports `runtime.contracts`. D16's prohibition there would be a sentence.
-- **`backtest/` forbids the store and the composition root already.**
+- **`backtest/` forbids the store and the composition root to the modules it names.**
   `backtest-studies-touch-no-store` forbids `openalpha_cn.storage`, `openalpha_cn.agents` and
   `openalpha_cn.decisions`; `backtest-studies-reach-no-composition-root` forbids
-  `openalpha_cn.runtime`, where `run_cycle` lives. `tests/unit/test_import_layering.py::
-  test_the_two_backtest_study_contracts_cover_every_module_in_the_package` is what made this module
-  join both source lists on arrival.
+  `openalpha_cn.runtime`, where `run_cycle` lives. Both enumerate their sources, so
+  `tests/unit/test_import_layering.py::
+  test_the_two_backtest_study_contracts_cover_every_module_in_the_package` is not a formality --
+  it is what made this module join both lists on arrival, and `V2-P4-093` measured that a file
+  which has not joined them clears `lint-imports` at `8 kept, 0 broken`.
 
 **Those three are what `V2-P4-004` had, and they are not enough for D16, which is why there is a
 fourth.** They stop this contract *persisting* an order and *reaching the engine that would place

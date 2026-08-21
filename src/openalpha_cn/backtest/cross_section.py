@@ -75,13 +75,22 @@ and `SQLiteRecoveryStore`. Three things break if a cross section is put through 
    a conclusion about a security, and writing one would put 5,000 ledgers behind a number
    nobody reasoned about.
 
-That is enforced by the import graph rather than by this paragraph. This module is under
-`backtest/`, and `backtest-studies-reach-no-composition-root` forbids `openalpha_cn.runtime` to
-every study module in the package while `backtest-studies-touch-no-store` forbids
+That is enforced by the import graph rather than by this paragraph. This module is named on
+`backtest-studies-reach-no-composition-root`'s source list, which forbids it
+`openalpha_cn.runtime`, and on `backtest-studies-touch-no-store`'s, which forbids it
 `openalpha_cn.storage`. `run_cycle` lives in `runtime/engine.py`. So a diff that made this
-funnel call it fails `lint-imports`, and `tests/unit/test_import_layering.py::
-test_the_two_backtest_study_contracts_cover_every_module_in_the_package` is what makes a new
-module under `backtest/` join both contracts on arrival instead of once somebody remembers.
+funnel call it fails `lint-imports`.
+
+**Named on the list, and that is the whole of the qualification.** Both contracts enumerate
+their sources -- there is no "package except these" form -- so what covers a *new* file is the
+pytest assertion `tests/unit/test_import_layering.py::
+test_the_two_backtest_study_contracts_cover_every_module_in_the_package`, which holds the lists
+against the directory in both directions. `V2-P4-093` measured the gap that leaves in between:
+a probe module under `backtest/` importing `numpy` and `openalpha_cn.storage` passes
+`lint-imports` at **8 kept, 0 broken**, and only the pytest run goes red. The gate is the CI
+pipeline, not either half of it, and
+`test_lint_imports_alone_does_not_stop_a_new_backtest_module_reaching_numpy_or_a_store` is that
+measurement kept alive.
 
 ## Calibrating N, which is the acceptance criterion and is not a taste
 
