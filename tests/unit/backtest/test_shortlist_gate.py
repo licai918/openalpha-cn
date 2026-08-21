@@ -42,7 +42,7 @@ from types import MappingProxyType
 from typing import Any, Final
 
 import pytest
-from importlinter.cli import lint_imports
+from import_linter_containment import contained_lint_imports
 from pydantic import ValidationError
 
 from openalpha_cn.backtest.candidate_ranking import (
@@ -879,58 +879,34 @@ def test_a_measurement_is_offered_whole_rather_than_as_a_ratio_a_reader_has_to_t
 
 
 def _lint(contract: str) -> int:
-    """`lint_imports` limited to one contract, with the logging state it wrecks put back.
+    """`contained_lint_imports` limited to one contract -- this file's whole use of the linter.
 
-    `tests/unit/backtest/test_candidate_ranking.py::_lint`'s wrapper and its measured reason:
-    `importlinter.cli.lint_imports` calls `logging.config.dictConfig` with
-    `disable_existing_loggers` defaulting to `True`, which sets `.disabled = True` on every
-    logger already created in the process. Without the restore, three `caplog` acceptances in
-    three other directories go red on a full run.
+    The containment is `tests/import_linter_containment.py` rather than eight lines copied here.
+    An earlier version of this docstring argued for the copy: importing would make "one collected
+    test module the import-time dependency of another and give pytest two paths to the same file",
+    and each copy came with a private `re.findall` over its own source to keep a later bare call
+    out. `V2-P4-089` measured what that convention is worth -- a fourth file imported the raw CLI
+    under the wrapper's own name, every private regex was keyed on a spelling it did not have, and
+    six logging guards went hollow. The objection was about importing from a *collected* module
+    and it stays true; the containment module is not one, exactly as `tests/offline_guard.py` and
+    `tests/panel_fixtures.py` are not.
     """
-    manager = logging.Logger.manager
-    before = {
-        name: existing.disabled
-        for name, existing in manager.loggerDict.items()
-        if isinstance(existing, logging.Logger)
-    }
-    try:
-        return lint_imports(  # type: ignore[arg-type]
-            config_filename=str(ROOT / "pyproject.toml"),
-            no_cache=True,
-            limit_to_contracts=(contract,),
-        )
-    finally:
-        for name, disabled in before.items():
-            restored = manager.loggerDict.get(name)
-            if isinstance(restored, logging.Logger):
-                restored.disabled = disabled
-
-
-def test_no_test_in_this_module_calls_lint_imports_without_restoring_logging() -> None:
-    """The guard `test_import_layering.py` wrote for itself and `test_candidate_ranking.py` had
-    to copy, installed here because this is the **third** file to call the import linter.
-
-    Each copy protects only its own source, which is exactly how the second one arrived
-    unguarded. The damage a bare call does is process-wide and lands in other directories --
-    `dictConfig(disable_existing_loggers=True)` disables every logger already created -- so the
-    failure it produces names three tests that never mention the import linter.
-    """
-    source = Path(__file__).read_text(encoding="utf-8")
-    bare_calls = re.findall(r"(?<![_`.])lint_imports\(", source)
-
-    assert len(bare_calls) == 1, (
-        f"expected exactly 1 bare `lint_imports(` call, the one inside `_lint`; found "
-        f"{len(bare_calls)}. Every other call site must go through `_lint`, or the whole suite "
-        "gains an order dependence that surfaces in another directory"
+    return contained_lint_imports(
+        config_filename=str(ROOT / "pyproject.toml"),
+        no_cache=True,
+        limit_to_contracts=(contract,),
     )
 
 
 def test_the_lint_wrapper_leaves_the_logging_state_it_found() -> None:
-    """The restore, in both directions, driven without reproducing the pollution.
+    """`_lint` above goes through the containment, in both directions.
 
     A logger that was enabled before `_lint` is enabled after it, and one that was already
-    disabled stays disabled -- because the wrapper puts back a snapshot rather than blanket
-    enabling whatever it can reach.
+    disabled stays disabled -- because `contained_lint_imports` puts back a snapshot rather than
+    blanket-enabling whatever it can reach. That the containment itself works is
+    `tests/unit/test_import_layering.py::
+    test_running_the_import_linter_leaves_every_existing_logger_enabled`'s job; what is checked
+    here is that this file's own helper reaches it rather than the raw CLI.
     """
     enabled = logging.getLogger("openalpha_cn.probe.shortlist_gate_lint_enabled")
     disabled = logging.getLogger("openalpha_cn.probe.shortlist_gate_lint_disabled")

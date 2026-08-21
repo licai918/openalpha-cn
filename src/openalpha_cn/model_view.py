@@ -160,7 +160,7 @@ blocked shortlist for the same reason.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, tzinfo
 from types import MappingProxyType
@@ -287,6 +287,7 @@ __all__ = [
     "daily_request",
     "daily_rows",
     "daily_view",
+    "declared_hyperparameters",
     "evaluate_model",
     "evaluation_rows",
     "evaluation_view",
@@ -679,6 +680,29 @@ restated. `load_stock_universe` is the one read here that can fail with a statem
 stored registry's *shape* -- an orphan delisting row, a duplicated `ts_code` -- rather than about
 its partitions."""
 
+_OUTCOME_WINDOW_FAULTS: Final[tuple[type[Exception], ...]] = (LabelError, TradingCalendarError)
+"""The two refusals building an outcome window raises, named once for the **two** places that
+build one -- and `V2-P4-088` is the second of those places going unguarded.
+
+`_LabelInputs.window` had this `except` inline and it covered the training side alone. The
+prediction side runs the identical computation inside the store -- `predictions.put` ->
+`prediction_record_for` -> `outcome_known_at_for` -> `build_label_window` -- and `run_daily`
+called `put` after its only `try` had closed. So one calculation had a verdict on one path and
+`exit 5` / a bare `500` on the other, and which path a run took was decided by
+`daily_request`'s own rule that `predict_at`'s date is **strictly after** `end`: the prediction
+day is always later than every training day, so the guarded path could never fire for it and the
+unguarded one always saw the furthest-reaching window.
+
+Named as a tuple used by both call sites rather than duplicated as a second `except`, which is
+`prediction_batch_for`'s own argument about `require_features`: two copies of a check are one
+check plus a place for a future path to skip it. Both sites also share
+`_outcome_window_refusal`, so there is one sentence as well as one rule.
+
+`CalendarHorizonError` is a `TradingCalendarError`, and its docstring says it is "the one failure
+that is *not* a caller mistake: the question was well formed and the exchange simply has not
+published that far". Two product faces were reporting it as a defect in the command.
+"""
+
 _LABEL_CORPUS_FAULTS: Final[tuple[type[Exception], ...]] = (
     StockUniverseError,
     AdjustmentError,
@@ -893,6 +917,34 @@ def feature_columns(
         except FeatureMatrixError as error:
             raise ModelRequestError(str(error)) from error
     return tuple(resolved)
+
+
+def declared_hyperparameters(
+    declared: Iterable[tuple[str, bool | int | float | str]],
+) -> tuple[tuple[str, bool | int | float | str], ...]:
+    """The declared hyperparameters in the one order a declaration has: sorted **by name alone**.
+
+    `feature_columns`' arrangement for the other declared list, and `V2-P4-091` is why it is one
+    function rather than a rule each face restates. Both faces sort, because
+    `AlphaModelDeclaration` refuses an unsorted tuple to keep one declaration from having two
+    canonical spellings, and the order a caller typed flags or wrote JSON keys in is not a claim.
+    They sorted **differently**: the command line by `pair[0]` and the HTTP body by the whole
+    `(name, value)` pair. Sorting by the pair reaches the values whenever two names tie, so
+    `[{"name": "x", "value": 1}, {"name": "x", "value": "a"}]` made the sort compare `1 < "a"` and
+    raise `TypeError` -- a caller's mistake arriving as `500 text/plain` on a face whose sibling
+    answered `422` with the reason on it.
+
+    A repeated name is still refused, and by the contract rather than here: it is the one thing
+    about this list a caller *did* claim, and `AlphaModelDeclaration.validate_hyperparameters`
+    already says why two entries under one name cannot both be honoured. Sorting by name keeps
+    that refusal reachable instead of failing ahead of it on the values' types -- which is the
+    whole difference between the two spellings, since a repetition is the only input on which
+    they can disagree.
+
+    Stable, so two entries sharing a name arrive in the order they were declared and the refusal
+    names them in that order on every face.
+    """
+    return tuple(sorted(declared, key=lambda pair: pair[0]))
 
 
 def _resolve_tier(token: object) -> FactorTier:
@@ -1262,6 +1314,36 @@ def _unbuilt_dataset_remedy(store: PanelStore, *, dataset: str) -> str:
     )
 
 
+def _outcome_window_refusal(
+    error: Exception, *, instant: datetime, calendar: TradingCalendar
+) -> ModelRunBlockedError:
+    """The one sentence this face answers an unbuildable outcome window with.
+
+    Shared by the two places that build one -- `_LabelInputs.window` for the training days, and
+    `run_daily`'s hand-off to the prediction store for the day being predicted about. See
+    `_OUTCOME_WINDOW_FAULTS` for why those were two answers until `V2-P4-088`.
+
+    **The remedy names the command**, `_unbuilt_dataset_remedy`'s rule: the condition this fires
+    on most often is a calendar that stops where the year does, and "build the calendar over the
+    year the window ends in" -- what this used to say -- leaves an operator to work out both the
+    dataset name and the year at three in the morning on the 31st of December. The year is the one
+    after the calendar's own last session, because that is where a window opened on its last few
+    sessions has to land, and a partition alone is not enough: `load_trading_calendar` reads the
+    years the *request* declared, so an unstated `--year` is a calendar that stops just as short.
+
+    The other remedy is deliberately "ask about a session", which is true on both paths: the
+    training side narrows `--start`/`--end` and the prediction side moves `--predict-at`, and a
+    sentence naming one flag would be wrong advice on the other half of its call sites.
+    """
+    return ModelRunBlockedError(
+        f"the outcome window for a prediction at {instant.isoformat()} cannot be built on the "
+        f"{calendar.exchange} calendar: {error}. Either build the calendar forward -- `openalpha "
+        f"panel build --dataset {MODEL_PANEL_DATASETS[TRADING_CALENDAR_DATASET]} --year "
+        f"{calendar.horizon.last_date.year + 1}`, then declare that year with `--year` -- or ask "
+        "about a session whose outcome window this calendar already reaches"
+    )
+
+
 def _without_store_path(message: str, store: PanelStore) -> str:
     """`message` with the store's own location replaced by a name for it.
 
@@ -1369,13 +1451,8 @@ class _LabelInputs:
             return build_label_window(
                 as_of=instant, zone=MODEL_DATE_ZONE, horizon=horizon, calendar=self.calendar
             )
-        except (LabelError, TradingCalendarError) as error:
-            raise ModelRunBlockedError(
-                f"the outcome window for a prediction at {instant.isoformat()} cannot be built on "
-                f"the {self.calendar.exchange} calendar: {error}. Narrow the range to days whose "
-                "outcome window the calendar reaches, or build the calendar over the year the "
-                "window ends in"
-            ) from error
+        except _OUTCOME_WINDOW_FAULTS as error:
+            raise _outcome_window_refusal(error, instant=instant, calendar=self.calendar) from error
 
     def label(self, ts_code: str, window: LabelWindow) -> OutcomeLabel | None:
         """One security's forward return over `window`, or `None` when it has no factor series.
@@ -1769,7 +1846,19 @@ def run_daily(
             f"could not score the cross section there: {error}"
         ) from error
 
-    write = predictions.put(batch=batch, calendar=inputs.calendar, zone=MODEL_DATE_ZONE)
+    # The store seals the batch against the calendar's answer to when its outcome becomes
+    # knowable, and derives that answer through the same `build_label_window` the training side
+    # goes through -- so the same two refusals reach it, and `V2-P4-088` measured them arriving
+    # unenveloped because this call sits after the `try` above rather than inside a guard of its
+    # own. Guarded on the *call* rather than by re-deriving the window first: a run that computed
+    # the deadline ahead of the store to check it would be a second reading of one calendar, and
+    # the day the two readings stopped agreeing the guard would stop guarding without saying so.
+    try:
+        write = predictions.put(batch=batch, calendar=inputs.calendar, zone=MODEL_DATE_ZONE)
+    except _OUTCOME_WINDOW_FAULTS as error:
+        raise _outcome_window_refusal(
+            error, instant=batch.as_of, calendar=inputs.calendar
+        ) from error
     record = write.record
     outcome = write.outcome
     run_id = f"daily-{record.record_id}"

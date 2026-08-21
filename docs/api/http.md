@@ -523,12 +523,13 @@ Server Error`. Nothing a caller can put in the body should produce one — a cal
 `position_capital` used to, and now does not — so a `500` here is a defect to report, not a
 request to change.
 
-**Nor should anything in the store produce one — and three times something did.** This
+**Nor should anything in the store produce one — and four times something did.** This
 sentence first read "and until `V2-P4-070` something did", which asserted the list was
 closed; it was written in `V2-P4-070`'s own commit and measured false eleven commits later,
 and false again two commits after it became a list. It is a list, the list is not closed,
-and every entry so far has been the same shape: a domain refusal that is a verdict about
-stored data, raised somewhere no `except` on the route's path anticipated.
+this is its fourth entry, and every entry so far has been the same shape: a domain refusal
+that is a verdict about stored data, raised somewhere no `except` on the route's path
+anticipated.
 
 The first was a registry whose lifecycle backfill was interrupted — a security's delisting
 row stored and its listing row in a year partition that was never written — which made this
@@ -571,10 +572,27 @@ which of the two is wrong is exactly what the disagreement does not say.
 `tests/integration/test_unlabelled_corpus_faces.py` drive stores at this route, at the
 `/shortlists/run` route, at `shortlist run` and at `factor run`.
 
+The fourth is on a different route — `POST /api/v1/models/daily-run` — and it is the first
+that turns on the *date asked about* rather than on anything in the corpus (`V2-P4-088`). The
+second and third need no damaged partition either, but each still needs a particular thing to
+be true of the stored rows; this one needs a well-formed calendar and a prediction day near
+the end of it. A prediction is sealed against the instant
+its outcome becomes knowable, which the store derives from the calendar; a prediction day in
+the last `horizon.sessions + 1` sessions of a year-keyed calendar has no such instant, because
+the exchange has not published that far. `model_view.run_daily` handed the batch to the store
+**after** its only `try` block had closed, so `CalendarHorizonError` — whose own docstring calls
+it "the one failure that is *not* a caller mistake" — arrived here as `500` `text/plain` and at
+`OpenAlphaSDK.run_daily_model` as a bare `ValueError` subclass. `daily_request` requires
+`predict_at`'s date to be strictly after `end`, so the prediction day is always later than every
+training day and the guarded path could never fire for it: a routine late-December daily run met
+this every time. It is a `409` `blocked` on all three faces now, naming the session it could not
+place and the repair — `openalpha panel build --dataset trade_cal --year <next>`, declared with
+`--year`. `tests/integration/test_year_end_daily_run.py` drives a whole year of 2026 at it.
+
 None was a defect in this service, and none is a reason to widen this row: what makes a `500`
 here still mean "report a bug" is that each such refusal is anticipated where it is raised —
-at the read for the first, and at the question asked of what a read returned for the other
-two.
+at the read for the first, at the question asked of what a read returned for the next two, and
+at the hand-off to the store for the fourth.
 
 `openalpha shortlist run` maps the same names onto exit codes
 (`cli.py#SHORTLIST_EXIT`) and reuses `PanelExit`: `0` admitted, `1` for every `409` row —

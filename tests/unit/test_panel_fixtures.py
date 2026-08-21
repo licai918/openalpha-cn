@@ -43,9 +43,11 @@ from panel_fixtures import (
     AS_OF,
     EVERY_SHAPE,
     EXCHANGE,
+    LAST_DAY,
     PANEL_SHAPES,
     STATEMENT_DATASETS,
     STORED_DATASETS,
+    WINDOW_FIRST,
     YEAR,
     GeneratedPanel,
     PanelFixtureError,
@@ -523,3 +525,40 @@ def test_a_detector_follows_the_stored_column_and_not_the_generators_intent() ->
 
     assert PANEL_SHAPES["daily.close_moves_between_sessions"].detect(panel) is False
     assert PANEL_SHAPES["daily.close_moves_between_sessions"].detect(edited) is True
+
+
+# --------------------------------------------------------------------------------------------
+# V2-P4-088: the window this generator could not reach, and the default it must not move
+# --------------------------------------------------------------------------------------------
+
+
+def test_the_default_window_still_reads_at_the_as_of_constant() -> None:
+    """`generate_panel()` reads at `AS_OF` exactly, with the read instant now derived.
+
+    `V2-P4-088` gave `generate_panel` a `window` and made both the batches' fetch instant and the
+    panel's `as_of` follow the last session it prices, because a December bar cannot sit in a
+    batch fetched in January -- `ColumnarPanelBatch` refuses a row published after its own
+    `as_of`. Every existing caller passes no window and imports `AS_OF` directly, so the two have
+    to be the same instant or several dozen files are asserting against a panel nobody built.
+    """
+    assert generate_panel().as_of == AS_OF
+
+
+def test_a_whole_year_window_prices_up_to_the_calendars_own_last_session() -> None:
+    """The corpus `V2-P4-088` needed and no shape could produce.
+
+    The calendar has always covered 2026-01-01..2026-12-31 while the priced window was ten
+    sessions in January, so the last session of a generated panel was never within a horizon of
+    the last session the calendar publishes -- which is the only place a prediction's outcome
+    window can run off the end of it. Ten sessions in the middle of a year cannot reach that wall
+    however many shapes are requested, which is why this is a window rather than a shape.
+    """
+    whole = generate_panel(window=(WINDOW_FIRST, LAST_DAY))
+    default = generate_panel()
+
+    assert whole.sessions[-1] == LAST_DAY
+    assert whole.sessions[-1] == whole.calendar().horizon.last_date
+    assert default.sessions[-1] < whole.sessions[-1]
+    assert whole.sessions[: len(default.sessions)] == default.sessions
+    assert whole.as_of > whole.batch("daily").fetched_at
+    assert whole.batch("daily").fetched_at >= max(whole.batch("daily").timeline.available_time)

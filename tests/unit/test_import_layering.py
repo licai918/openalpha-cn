@@ -70,11 +70,10 @@ from pathlib import Path
 from typing import Final
 
 import grimp
+from import_linter_containment import contained_lint_imports, raw_lint_imports_disables
 from importlinter import api as importlinter_api
-from importlinter.cli import lint_imports
 
 ROOT = Path(__file__).resolve().parents[2]
-THIS_FILE = Path(__file__)
 BASELINE_PATH = ROOT / "docs" / "architecture" / "import-layering-baseline.toml"
 PINNED_BASELINE_COUNT = 0
 ISSUE_PATTERN = re.compile(r"^V2-P0B-\d{3}$")
@@ -91,55 +90,6 @@ FORMER_BASELINE_EDGES = (
     ("openalpha_cn.storage.recovery", "openalpha_cn.agents.base"),
     ("openalpha_cn.storage.product", "openalpha_cn.product.research"),
 )
-
-
-def _lint_imports(**kwargs: object) -> int:
-    """`importlinter.cli.lint_imports`, with the logging state it silently wrecks put back.
-
-    `lint_imports` calls `importlinter.cli._configure_logging`, which calls
-    `logging.config.dictConfig` with a config naming only `importlinter`, `grimp` and
-    `_rustgrimp`. `dictConfig` defaults to `disable_existing_loggers=True`, and that default
-    sets `.disabled = True` on **every** logger that already exists and is not named in (or a
-    child of) the config -- including `openalpha_cn.storage.migrations`, which
-    `tests/integration/storage/test_migrations.py` imports at collection time, long before any
-    test in this module runs.
-
-    A disabled logger emits nothing, so `caplog` captures nothing, so
-    `test_run_migrations_logs_the_backup_path_and_each_applied_migration` and
-    `test_run_migrations_logs_failure_without_leaking_the_underlying_exception_message` --
-    V2-P0B-007's "the structured log is greppable" acceptance -- both failed on
-    `assert 0 == 1`, deterministically, in 0.9 seconds:
-
-        pytest tests/unit/test_import_layering.py tests/integration/storage/test_migrations.py
-        -> 2 failed, 33 passed
-        pytest tests/integration/storage/test_migrations.py tests/unit/test_import_layering.py
-        -> 35 passed
-
-    CI was green only because pytest's default collection order happens to put
-    `tests/integration` before `tests/unit`; pytest-randomly, xdist, a directory rename or
-    simply naming the two paths explicitly would have flipped it. Neither the root logger nor
-    any parent's level, propagate flag or handler list changes -- which is why the first probe
-    for this missed it -- and `logging.disable` is untouched too. The mutated state is the
-    per-logger `disabled` attribute, and nothing in `logging` restores it.
-
-    Every call in this module goes through here, and
-    `test_no_test_in_this_module_calls_lint_imports_without_restoring_logging` keeps it that
-    way; `test_running_the_import_linter_leaves_an_existing_logger_enabled` proves the restore
-    is real rather than a comment.
-    """
-    manager = logging.Logger.manager
-    before = {
-        name: existing.disabled
-        for name, existing in manager.loggerDict.items()
-        if isinstance(existing, logging.Logger)
-    }
-    try:
-        return lint_imports(**kwargs)  # type: ignore[arg-type]
-    finally:
-        for name, disabled in before.items():
-            restored = manager.loggerDict.get(name)
-            if isinstance(restored, logging.Logger):
-                restored.disabled = disabled
 
 
 def _load_baseline() -> list[dict[str, str]]:
@@ -164,7 +114,7 @@ def test_current_source_tree_satisfies_storage_providers_and_models_contracts_vi
     None
 ):
     """The real repository, with the baseline's 5 exemptions applied, is fully compliant."""
-    exit_code = _lint_imports(
+    exit_code = contained_lint_imports(
         config_filename=str(ROOT / "pyproject.toml"),
         no_cache=True,
     )
@@ -300,7 +250,7 @@ def test_storage_no_upward_deps_contract_rejects_indirect_leak_via_neutral_modul
         '__all__ = ["ResearchScreener"]\n'
     )
     try:
-        exit_code = _lint_imports(
+        exit_code = contained_lint_imports(
             config_filename=str(ROOT / "pyproject.toml"),
             no_cache=True,
             limit_to_contracts=("storage-no-upward-deps",),
@@ -316,7 +266,7 @@ def test_storage_no_upward_deps_contract_rejects_indirect_leak_via_neutral_modul
         _LEAKY_HELPER_PATH.unlink()
 
     # Confirm the gate is green again once both probe files are removed.
-    exit_code = _lint_imports(
+    exit_code = contained_lint_imports(
         config_filename=str(ROOT / "pyproject.toml"),
         no_cache=True,
         limit_to_contracts=("storage-no-upward-deps",),
@@ -339,7 +289,7 @@ def test_domain_layer_gate_rejects_a_newly_introduced_forbidden_stdlib_import() 
     assert not probe_path.exists(), "probe file must not already exist in the real source tree"
     probe_path.write_text('"""Temporary probe module for a layering test."""\n\nimport sqlite3\n')
     try:
-        exit_code = _lint_imports(
+        exit_code = contained_lint_imports(
             config_filename=str(ROOT / "pyproject.toml"),
             no_cache=True,
             limit_to_contracts=("domain-purity",),
@@ -349,7 +299,7 @@ def test_domain_layer_gate_rejects_a_newly_introduced_forbidden_stdlib_import() 
         probe_path.unlink()
 
     # Confirm the gate is green again once the probe is removed.
-    exit_code = _lint_imports(
+    exit_code = contained_lint_imports(
         config_filename=str(ROOT / "pyproject.toml"),
         no_cache=True,
         limit_to_contracts=("domain-purity",),
@@ -367,7 +317,7 @@ def test_domain_layer_gate_rejects_a_newly_introduced_cross_subpackage_import() 
         '__all__ = ["ProviderMetadata"]\n'
     )
     try:
-        exit_code = _lint_imports(
+        exit_code = contained_lint_imports(
             config_filename=str(ROOT / "pyproject.toml"),
             no_cache=True,
             limit_to_contracts=("domain-purity",),
@@ -376,7 +326,7 @@ def test_domain_layer_gate_rejects_a_newly_introduced_cross_subpackage_import() 
     finally:
         probe_path.unlink()
 
-    exit_code = _lint_imports(
+    exit_code = contained_lint_imports(
         config_filename=str(ROOT / "pyproject.toml"),
         no_cache=True,
         limit_to_contracts=("domain-purity",),
@@ -468,7 +418,7 @@ def test_legal_downward_imports_from_runtime_and_backtest_into_storage_are_not_f
         importer="openalpha_cn.backtest.replay", imported="openalpha_cn.storage.recovery"
     )
 
-    exit_code = _lint_imports(
+    exit_code = contained_lint_imports(
         config_filename=str(ROOT / "pyproject.toml"),
         no_cache=True,
         limit_to_contracts=("storage-no-upward-deps",),
@@ -766,7 +716,7 @@ def test_the_backtest_gate_rejects_a_probe_that_reaches_duckdb_and_the_panel_sto
         encoding="utf-8",
     )
     try:
-        exit_code = _lint_imports(
+        exit_code = contained_lint_imports(
             config_filename=str(ROOT / "pyproject.toml"),
             no_cache=True,
             limit_to_contracts=("backtest-no-numeric-stack-or-panel-plane",),
@@ -779,7 +729,7 @@ def test_the_backtest_gate_rejects_a_probe_that_reaches_duckdb_and_the_panel_sto
     finally:
         _BACKTEST_PROBE_PATH.unlink()
 
-    exit_code = _lint_imports(
+    exit_code = contained_lint_imports(
         config_filename=str(ROOT / "pyproject.toml"),
         no_cache=True,
         limit_to_contracts=("backtest-no-numeric-stack-or-panel-plane",),
@@ -808,7 +758,7 @@ def test_the_experiment_module_can_no_longer_reach_the_document_store_it_says_it
         encoding="utf-8",
     )
     try:
-        exit_code = _lint_imports(
+        exit_code = contained_lint_imports(
             config_filename=str(ROOT / "pyproject.toml"),
             no_cache=True,
             limit_to_contracts=("backtest-studies-touch-no-store",),
@@ -821,7 +771,7 @@ def test_the_experiment_module_can_no_longer_reach_the_document_store_it_says_it
     finally:
         module_path.write_text(original, encoding="utf-8")
 
-    exit_code = _lint_imports(
+    exit_code = contained_lint_imports(
         config_filename=str(ROOT / "pyproject.toml"),
         no_cache=True,
         limit_to_contracts=("backtest-studies-touch-no-store",),
@@ -856,7 +806,7 @@ def test_the_study_contracts_reject_numpy_and_a_composition_root_added_to_a_real
         module_path.write_text(original + addition, encoding="utf-8")
         try:
             assert (
-                _lint_imports(
+                contained_lint_imports(
                     config_filename=str(ROOT / "pyproject.toml"),
                     no_cache=True,
                     limit_to_contracts=(broken,),
@@ -864,7 +814,7 @@ def test_the_study_contracts_reject_numpy_and_a_composition_root_added_to_a_real
                 == 1
             ), f"{broken} should have rejected backtest/factor_ic.py{addition!r}"
             assert (
-                _lint_imports(
+                contained_lint_imports(
                     config_filename=str(ROOT / "pyproject.toml"),
                     no_cache=True,
                     limit_to_contracts=(intact,),
@@ -874,9 +824,9 @@ def test_the_study_contracts_reject_numpy_and_a_composition_root_added_to_a_real
         finally:
             module_path.write_text(original, encoding="utf-8")
 
-    assert _lint_imports(config_filename=str(ROOT / "pyproject.toml"), no_cache=True) == 0, (
-        "every contract must be green again once both probes are removed"
-    )
+    assert (
+        contained_lint_imports(config_filename=str(ROOT / "pyproject.toml"), no_cache=True) == 0
+    ), "every contract must be green again once both probes are removed"
 
 
 def test_the_replay_harness_and_the_outcome_validator_keep_the_imports_they_exist_for() -> None:
@@ -908,45 +858,63 @@ def test_the_replay_harness_and_the_outcome_validator_keep_the_imports_they_exis
 # `importlinter.cli.lint_imports` reconfigures logging as a side effect, and its
 # `dictConfig` call disables every pre-existing logger in the process. That made this
 # module's tests silently break `tests/integration/storage/test_migrations.py`'s two
-# `caplog` acceptances whenever pytest ran this file first. `_lint_imports` above is the
-# containment; the two tests below are what keeps the containment honest.
+# `caplog` acceptances whenever pytest ran this file first. `tests/import_linter_containment.py`
+# is the containment; the tests below are what keeps the containment honest.
 
 
-def test_running_the_import_linter_leaves_an_existing_logger_enabled() -> None:
-    """The pollution itself, reproduced and then shown closed.
+def test_running_the_import_linter_leaves_every_existing_logger_enabled() -> None:
+    """The pollution itself, reproduced and then shown closed -- on two loggers, not one.
 
-    `openalpha_cn.storage.migrations` is the logger that actually got disabled -- it exists
-    by the time this runs because pytest imports every test module during collection, and
-    `tests/integration/storage/test_migrations.py` creates it at import time. Asserted here
-    against a bare `lint_imports` first, so this test fails if `dictConfig`'s
-    `disable_existing_loggers` default ever stops being the cause, and then against
-    `_lint_imports`, which is the fix.
+    `openalpha_cn.storage.migrations` is the logger the original report named; it exists by the
+    time this runs because pytest imports every test module during collection, and
+    `tests/integration/storage/test_migrations.py` creates it at import time.
+    `openalpha_cn.storage.batch` is the second, and it is here because **this test used to be an
+    instance of the defect it proves**. It called the raw CLI and then put back, by hand, the
+    single logger it went on to assert about -- leaving every other one in the process disabled.
+    `V2-P4-089`'s sweep measured that with `test_model_view.py` already routed through the
+    containment, so nothing from that file is involved -- on a code path `fadf72d` had character
+    for character::
+
+        pytest tests/unit/test_import_layering.py tests/integration/storage/test_migrations.py \\
+               tests/integration/test_batch_research.py -q
+        -> 4 failed, 54 passed
+
+    The four are `test_batch_research.py`'s `caplog` acceptances, and they survived a full run only
+    because pytest's default collection order puts `tests/integration` first. Naming the two paths
+    explicitly -- which is the ordering CI does not use and a reviewer does -- flipped it.
+
+    So the proof is `raw_lint_imports_disables`, which takes the observation *inside* the restore
+    rather than handing the caller a wrecked process and trusting them to tidy up. A raw call this
+    module could make on its own is a raw call the next file can copy, which is exactly how three
+    copies of a wrapper became four call sites and one of them uncontained.
     """
-    logger = logging.getLogger("openalpha_cn.storage.migrations")
-    assert not logger.disabled, "precondition: the logger under test starts enabled"
+    named = logging.getLogger("openalpha_cn.storage.migrations")
+    unnamed = logging.getLogger("openalpha_cn.storage.batch")
+    assert not named.disabled, "precondition: the logger the report named starts enabled"
+    assert not unnamed.disabled, "precondition: the logger it did not name starts enabled too"
 
-    try:
-        lint_imports(
-            config_filename=str(ROOT / "pyproject.toml"),
-            no_cache=True,
-            limit_to_contracts=("domain-purity",),
-        )
-        assert logger.disabled, (
-            "the raw importlinter CLI is expected to disable existing loggers via "
-            "dictConfig(disable_existing_loggers=True); if it no longer does, _lint_imports "
-            "can be simplified -- but check the new mechanism before deleting it"
-        )
-    finally:
-        logger.disabled = False
+    assert raw_lint_imports_disables(
+        "openalpha_cn.storage.migrations",
+        config_filename=str(ROOT / "pyproject.toml"),
+        no_cache=True,
+        limit_to_contracts=("domain-purity",),
+    ), (
+        "the raw importlinter CLI is expected to disable existing loggers via "
+        "dictConfig(disable_existing_loggers=True); if it no longer does, the containment "
+        "can be simplified -- but check the new mechanism before deleting it"
+    )
+    assert not named.disabled
+    assert not unnamed.disabled
 
-    exit_code = _lint_imports(
+    exit_code = contained_lint_imports(
         config_filename=str(ROOT / "pyproject.toml"),
         no_cache=True,
         limit_to_contracts=("domain-purity",),
     )
 
     assert exit_code == 0
-    assert not logger.disabled
+    assert not named.disabled
+    assert not unnamed.disabled
 
 
 def test_ci_runs_the_import_linter_through_the_form_that_is_not_a_silent_no_op() -> None:
@@ -978,22 +946,113 @@ def test_ci_runs_the_import_linter_through_the_form_that_is_not_a_silent_no_op()
         assert "lint-imports" in line, line
 
 
-def test_no_test_in_this_module_calls_lint_imports_without_restoring_logging() -> None:
-    """One bare `lint_imports(` added later would reintroduce the order dependence for the
-    whole suite, and it would show up as two unrelated tests failing in another directory --
-    the least findable failure shape there is. So the rule is checked on this file's own
-    source: the only call to the raw CLI is the one inside `_lint_imports`, plus the single
-    deliberate one in the test above that proves the pollution is still real.
-    """
-    source = THIS_FILE.read_text(encoding="utf-8")
-    # A backtick before the name means this file is *talking about* the call, not making it.
-    bare_calls = re.findall(r"(?<![_`])lint_imports\(", source)
+TESTS_ROOT: Final[Path] = ROOT / "tests"
 
-    assert len(bare_calls) == 2, (
-        f"expected exactly 2 bare `lint_imports(` calls (one inside _lint_imports, one in "
-        f"test_running_the_import_linter_leaves_an_existing_logger_enabled); found "
-        f"{len(bare_calls)}. Every other call site must go through `_lint_imports`"
+IMPORT_LINTER_IMPORTS: Final[frozenset[tuple[str, str, tuple[str, ...]]]] = frozenset(
+    {
+        ("tests/import_linter_containment.py", "importlinter.cli", ("lint_imports",)),
+        ("tests/unit/test_adr_consistency.py", "importlinter", ("api",)),
+        ("tests/unit/test_import_layering.py", "importlinter", ("api",)),
+        ("tests/unit/backtest/test_ranking_sources_fill_no_order.py", "importlinter", ("api",)),
+        ("tests/unit/domain/test_alpha_model_layering.py", "importlinter", ("api",)),
+    }
+)
+"""Every way this test tree reaches import-linter, as `(file, module, imported names)`.
+
+**One row imports `importlinter.cli` and it is the containment module's.** That is the whole
+invariant: `lint_imports` is the only entry point that calls `_configure_logging`, so a file that
+cannot reach it cannot wreck process-wide logging, whatever it names what it got. The other four
+rows are `importlinter.api`, which was **measured** not to touch logging -- `read_configuration`
+leaves `openalpha_cn.storage.migrations` enabled -- and are listed rather than filtered out so
+that a fifth import-linter surface arriving in this tree is a decision somebody makes here.
+
+Asserted **equal** rather than merely covered, `ORDER_INTENT_DECLARATIONS`' rule: a census whose
+verdict is "at least these" cannot notice an addition, which is the failure this table replaces.
+
+## Why this is keyed on the import and swept over the whole tree
+
+Three files used to carry a private copy of the containment wrapper and a private
+`test_no_test_in_this_module_calls_lint_imports_without_restoring_logging`, each a `re.findall`
+over **its own source** for a bare ``lint_imports(``. That convention failed twice.
+`V2-P4-068` filed the first reintroduction; `V2-P4-012` diagnosed it; `V2-P4-089` measured the
+second, in `tests/unit/test_model_view.py`, and the way it arrived is why the per-file regex could
+never have caught it: that file imported the **raw** CLI under the alias `_lint_imports` -- the
+exact name of `test_import_layering.py`'s wrapper -- so its call sites read as contained, and a
+regex whose lookbehind excludes a leading `_` matched nothing. Two blind spots, one input: the
+guard was scoped to one file, and it was keyed on how a call is *spelled*.
+
+An import cannot be aliased away and a `rglob` cannot be scoped away, so both are gone. The
+residual gap, disclosed rather than papered over: this reads `import` statements off the AST, so
+`importlib.import_module("importlinter.cli")` would pass it. Nothing in this tree does that, and a
+guard that named every dynamic route to a module would be a guard about Python rather than about
+this rule.
+"""
+
+CONTAINMENT_EXPORTS: Final[frozenset[str]] = frozenset(
+    {"contained_lint_imports", "raw_lint_imports_disables", "restored_logger_flags"}
+)
+"""Everything `tests/import_linter_containment.py` offers, asserted **equal** to what it defines.
+
+There is deliberately no export that hands a caller the raw CLI. An earlier draft of this fix had
+one -- `uncontained_lint_imports`, with this file on a named allowlist of one, because the
+pollution has to be *proved* somewhere or the restore is a `finally` block nobody can justify.
+Then the sweep measured that the proof as it stood was itself the defect: it put back the single
+logger it asserted about and left the rest of the process disabled, four `caplog` acceptances
+deep. A permission slip would have carried that shape wherever it was granted, so the proof became
+`raw_lint_imports_disables` -- an operation that observes inside the restore -- and the permission
+list became unnecessary. This table is what keeps a raw escape hatch from growing back.
+"""
+
+
+def _importlinter_imports() -> frozenset[tuple[str, str, tuple[str, ...]]]:
+    """Every `importlinter` import anywhere under `tests/`, read off each file's AST."""
+    found: set[tuple[str, str, tuple[str, ...]]] = set()
+    for path in sorted(TESTS_ROOT.rglob("*.py")):
+        relative = path.relative_to(ROOT).as_posix()
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Import):
+                found.update(
+                    (relative, alias.name, ())
+                    for alias in node.names
+                    if _is_importlinter(alias.name)
+                )
+            elif isinstance(node, ast.ImportFrom) and _is_importlinter(node.module or ""):
+                found.add((relative, node.module or "", tuple(alias.name for alias in node.names)))
+    return frozenset(found)
+
+
+def _is_importlinter(module: str) -> bool:
+    return module == "importlinter" or module.startswith("importlinter.")
+
+
+def _containment_exports() -> frozenset[str]:
+    """Every public name the containment module defines, read off its AST."""
+    source = (TESTS_ROOT / "import_linter_containment.py").read_text(encoding="utf-8")
+    return frozenset(
+        node.name
+        for node in ast.parse(source).body
+        if isinstance(node, ast.FunctionDef) and not node.name.startswith("_")
     )
+
+
+def test_the_import_linter_cli_is_reached_from_one_file_in_this_whole_tree() -> None:
+    """`V2-P4-089`, closed on the property that failed rather than on the file that broke it.
+
+    A file that never imports `importlinter.cli` cannot call it, contained or not, so the count
+    that matters is one and it is checked across every `*.py` under `tests/` -- not, as twice
+    before, over one file's own source and against a spelling.
+    """
+    assert _importlinter_imports() == IMPORT_LINTER_IMPORTS
+
+
+def test_the_containment_module_hands_nobody_the_raw_cli() -> None:
+    """No export of the containment module runs the linter without restoring what it found.
+
+    The other half of the invariant. Holding the *import* to one file is worth nothing if that
+    file re-exports what it imported, and a named allowlist of callers who may do the damage is
+    the same convention that has now failed three times -- once inside the guard itself.
+    """
+    assert _containment_exports() == CONTAINMENT_EXPORTS
 
 
 # --------------------------------------------------------------------------------------------

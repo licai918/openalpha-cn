@@ -37,7 +37,6 @@ becomes a list of something else:
 from __future__ import annotations
 
 import logging
-import re
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -45,7 +44,7 @@ from typing import Any, Final
 
 import grimp
 import pytest
-from importlinter.cli import lint_imports
+from import_linter_containment import contained_lint_imports
 from pydantic import ValidationError
 
 from openalpha_cn.agents.committee import DeliberationCommittee
@@ -336,88 +335,41 @@ def _characteristics(
 
 
 def _lint(contract: str) -> int:
-    """`lint_imports` limited to one contract, with the logging state it silently wrecks put back.
+    """`contained_lint_imports` limited to one contract -- this file's whole use of the linter.
 
-    **The restore is not optional and the first draft of this file learned that from the suite.**
-    `importlinter.cli.lint_imports` calls `logging.config.dictConfig` with a config naming only
-    `importlinter`, `grimp` and `_rustgrimp`, and `dictConfig` defaults to
-    `disable_existing_loggers=True` -- which sets `.disabled = True` on **every** logger already
-    in the process. That damage is process-wide, not module-local: this file captures no logs of
-    its own, and a version of `_lint` without the restore took down three tests in three other
-    directories on a full run --
-    `tests/unit/runtime/test_composition_migrations.py::
-    test_build_storage_logs_runtime_dir_and_schema_version_on_startup`,
-    `tests/unit/test_cli.py::
-    test_probe_report_logs_provider_failure_category_and_provider_id_not_the_message` and
-    `tests/unit/test_import_layering.py::
-    test_running_the_import_linter_leaves_an_existing_logger_enabled`, whose *precondition* is
-    that no earlier test left that logger disabled. It is the least findable failure shape there
-    is, which is exactly what `test_import_layering.py`'s own docstring says about it.
-
-    Copied from `tests/unit/test_import_layering.py::_lint_imports` rather than imported. The
-    alternative is `from tests.unit.test_import_layering import _lint_imports`, which makes one
-    collected test module the import-time dependency of another and gives pytest two paths to the
-    same file; the duplication is eight lines and
-    `test_no_test_in_this_module_calls_lint_imports_without_restoring_logging` is what keeps a
-    later bare call out of *this* file, which is the half a shared helper would not have covered
-    anyway.
+    The containment is `tests/import_linter_containment.py` rather than eight lines copied here.
+    An earlier version of this docstring argued for the copy: importing would make "one collected
+    test module the import-time dependency of another and give pytest two paths to the same file",
+    and each copy came with a private `re.findall` over its own source to keep a later bare call
+    out. `V2-P4-089` measured what that convention is worth -- a fourth file imported the raw CLI
+    under the wrapper's own name, every private regex was keyed on a spelling it did not have, and
+    six logging guards went hollow. The objection was about importing from a *collected* module
+    and it stays true; the containment module is not one, exactly as `tests/offline_guard.py` and
+    `tests/panel_fixtures.py` are not.
     """
-    manager = logging.Logger.manager
-    before = {
-        name: existing.disabled
-        for name, existing in manager.loggerDict.items()
-        if isinstance(existing, logging.Logger)
-    }
-    try:
-        return lint_imports(  # type: ignore[arg-type]
-            config_filename=str(ROOT / "pyproject.toml"),
-            no_cache=True,
-            limit_to_contracts=(contract,),
-        )
-    finally:
-        for name, disabled in before.items():
-            restored = manager.loggerDict.get(name)
-            if isinstance(restored, logging.Logger):
-                restored.disabled = disabled
-
-
-def test_no_test_in_this_module_calls_lint_imports_without_restoring_logging() -> None:
-    """`test_import_layering.py`'s guard, installed on this file too, because it had to be.
-
-    That module's version of this test protects that module's own source and nothing else, so
-    the second file in the repository to call the import linter arrived unguarded -- and the
-    failure it produced was three unrelated tests in three other directories, which is the
-    failure shape that test's docstring names as the least findable there is.
-
-    Checked on this file's source: the only bare `lint_imports(` here is the one inside `_lint`.
-    A backtick before the name means this file is talking about the call rather than making it.
-    """
-    source = Path(__file__).read_text(encoding="utf-8")
-    bare_calls = re.findall(r"(?<![_`])lint_imports\(", source)
-
-    assert len(bare_calls) == 1, (
-        f"expected exactly 1 bare `lint_imports(` call, the one inside `_lint`; found "
-        f"{len(bare_calls)}. Every other call site must go through `_lint`, or the whole suite "
-        "gains an order dependence that surfaces in another directory -- and unlike "
-        "test_import_layering.py this file may not even keep one deliberate bare call, because "
-        "it sorts before the caplog acceptances such a call disables"
+    return contained_lint_imports(
+        config_filename=str(ROOT / "pyproject.toml"),
+        no_cache=True,
+        limit_to_contracts=(contract,),
     )
 
 
 def test_the_lint_wrapper_leaves_an_already_enabled_logger_enabled() -> None:
-    """The containment, driven without reproducing the pollution -- which this file may not do.
+    """The containment, driven from this file's own `_lint` rather than from the shared one.
 
-    `tests/unit/test_import_layering.py` proves the damage is real by calling the raw CLI once on
-    purpose and re-enabling the one logger it names. That call leaves every *other* logger
-    disabled, and the suite survives it only because `tests/unit/test_import_layering.py` sorts
-    after the `caplog` acceptances it would break. This file sorts **before** them, so the same
-    deliberate call here is not survivable and is not made: the pollution is proved once, where
-    the collection order absorbs it.
+    That the containment works is `tests/unit/test_import_layering.py::
+    test_running_the_import_linter_leaves_every_existing_logger_enabled`'s job and is not restated
+    here. What this checks is that `_lint` above actually *goes through* it -- the property a
+    `_lint` that reached the raw CLI would break, driven where this file's own contract tests use
+    it, and in both directions: a logger that existed and was enabled before is enabled after, and
+    one that was already disabled stays disabled.
 
-    What is checked here instead is the property that matters and that a deleted `finally` would
-    break -- a logger that existed and was enabled before `_lint` is enabled after it -- plus its
-    other direction, that a logger which was already disabled stays disabled, because the wrapper
-    restores a snapshot rather than blanket-enabling everything it can reach.
+    An earlier version of this docstring said the pollution could not be reproduced here because
+    this file sorts before the `caplog` acceptances a raw call would break, while
+    `test_import_layering.py` sorts after them and could absorb it. That was true of an
+    arrangement `V2-P4-089` removed: no export of the containment module leaves logging damaged
+    now, so there is nothing for a collection order to absorb and no file that may or may not
+    make a raw call.
     """
     enabled = logging.getLogger("openalpha_cn.probe.ranking_lint_enabled")
     disabled = logging.getLogger("openalpha_cn.probe.ranking_lint_disabled")

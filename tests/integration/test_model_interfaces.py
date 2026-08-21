@@ -670,6 +670,80 @@ def test_a_boolean_hyperparameter_is_one_declaration_on_all_three_faces(
     ]
 
 
+ONE_NAME_TWO_TYPES: Final[tuple[tuple[str, bool | int | float | str], ...]] = (
+    ("audited", 1),
+    ("audited", "a"),
+)
+"""`V2-P4-091`'s literal input: one name declared twice, with values of two different types.
+
+The repetition is what every face must refuse -- `AlphaModelDeclaration` calls a repeated key "one
+parameter stated twice, and the two can disagree" -- and the two *types* are what decided which
+face refused it. A face that sorts whole `(name, value)` pairs reaches the values only when the
+names tie, so this is the narrowest input that separates sorting by name from sorting by pair, and
+it is a caller's mistake on every face rather than an exotic one: `--hyperparameter audited=1
+--hyperparameter audited=a` is a typo a scheduler can make.
+"""
+
+
+@pytest.fixture
+def served(runtime_dir: Path) -> Iterator[TestClient]:
+    """The REST face with Starlette's own last-resort handler left in front of it.
+
+    `test_partial_registry_faces._post`'s arrangement and its reason: the defect this fixture is
+    for **is** the unenveloped `500`, so a client that re-raised the server's exception would hide
+    the thing under test behind a traceback. `rest` above keeps the default, because every other
+    test here wants a raised fault to be a loud one.
+    """
+    with TestClient(
+        create_app(runtime_dir=runtime_dir, clock=lambda: FORWARD_CLOCK),
+        raise_server_exceptions=False,
+    ) as client:
+        yield client
+
+
+@pytest.mark.parametrize(
+    ("command", "route"),
+    [("evaluate", "/api/v1/models/evaluate"), ("daily-run", "/api/v1/models/daily-run")],
+)
+def test_one_name_declared_twice_with_two_types_is_one_verdict_on_all_three_faces(
+    runtime_dir: Path, served: TestClient, command: str, route: str
+) -> None:
+    """`V2-P4-091`: sixteen bad inputs agreed across the faces and this one did not.
+
+    `cli._model_hyperparameters` sorted by name; `ModelRunApiRequest.declared_hyperparameters`
+    sorted whole `(name, value)` tuples. On two hyperparameters sharing a name the pair sort falls
+    through to the values and compares `1 < "a"`, which is a `TypeError` -- raised while the
+    route's arguments are still being evaluated, so it lands outside `except (ModelViewError,
+    PredictionStoreError)` and Starlette answers `500 text/plain "Internal Server Error"`. Not the
+    `{"detail": {...}}` envelope, so a client branching on `isinstance(detail, dict)` -- the
+    branch `MODEL_HTTP_STATUS`' own docstring tells it to take -- gets nothing at all.
+
+    A caller error reported as a service fault pages an operator and trips a retry, which is why
+    this is the divergence that matters rather than a cosmetic one. Both run routes are driven
+    because both evaluate the same property.
+    """
+    declared = {
+        **(BASELINE if command == "evaluate" else DAILY),
+        "hyperparameters": ONE_NAME_TWO_TYPES,
+    }
+
+    code, out = _cli(runtime_dir, command, declared)
+    assert code == 3, out
+    assert "not strictly increasing" in out
+
+    response = served.post(route, json=_rest_body(declared))
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert isinstance(detail, dict)
+    assert detail["reason"] == "bad_request"
+    assert "not strictly increasing" in detail["message"]
+
+    sdk = OpenAlphaSDK(runtime_dir=runtime_dir, clock=lambda: FORWARD_CLOCK)
+    call = sdk.evaluate_model if command == "evaluate" else sdk.run_daily_model
+    with pytest.raises(ModelRequestError, match="not strictly increasing"):
+        call(**_sdk_arguments(declared))
+
+
 # --- 4. the daily run, and the store V2-P4-017 could not fill ------------------------------------
 
 
