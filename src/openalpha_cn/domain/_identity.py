@@ -26,7 +26,7 @@ too, from the same `json.dumps` conventions and for the stated reason that a sec
 "canonical" is a second thing that can disagree. And of the twenty-five, **six were not
 addresses at all** -- `panel_doctor.FactorPlaneSeal`'s dataset-name prefixes, swept up by a text
 search for `prefix=` -- while three that are (`feat`, `set`, `xs`) were missing. The live census
-is **23 distinct prefixes over 26 call sites**, none containing an underscore, read off the
+is **24 distinct prefixes over 27 call sites**, none containing an underscore, read off the
 source tree by `tests/unit/domain/test_manifest_component_provenance.py::live_prefixes` rather
 than written down here, because a hand-written list checked against its own length is a
 tautology -- which is how `V2-P4-012`'s `feat` went unrecorded for four issues.
