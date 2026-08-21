@@ -120,16 +120,27 @@ Overlapping labels need a gap, `overlapping_windows` is the input that measures 
   registries: `domain/schema.py` exports the five stable v1 boundaries Implementation
   Decision 1 names, none of these is one of them, and a version registry earns its migration
   machinery when something has stored a row -- which is `V2-P4-017`'s. `FactorTransformSpec`
-  is the precedent: a versioned contract with a `Literal` and no registry.
+  is the precedent: a versioned contract with a `Literal` and no registry. **`V2-P4-017` has now
+  answered it, and the answer is that these three keep their `Literal`s.** That issue stores a
+  `PredictionRecord` wrapping this batch, and `read_versioned` dispatches on the payload's
+  *top-level* `schema_version` only -- so one registry at the document root is the whole of what a
+  chain can hang from, and `PREDICTION_RECORD_VERSIONS` is it. The consequence runs the other way
+  and is recorded there: bumping any of these three is a bump of that record too.
 - **`V2-P4-012`** owns the versioned feature matrix. `feature_version` here is a declared string
   and `feature_ids` is a declared list; the producer that reads the panel plane, resolves the
   universe and stamps the version is that issue's.
 - **`V2-P4-013`** owns purge and embargo, and `TrainingSet.overlaps` is the measurement it needs.
 - **`V2-P4-014`** owns the linear/ranking baseline. `backtest/alpha_model.py` ships a
   single-feature *reference*, which exists to prove this contract can be satisfied and driven.
-- **`V2-P4-017`** owns "before the outcome is known". `predicted_at >= as_of` is checkable here;
-  "before the observation window closed" needs a trading calendar and a store, and a backfill
-  being a separate artifact rather than a replacement is a storage rule.
+- **`V2-P4-017` landed**, and "before the outcome is known" resolved to one instant:
+  `build_label_window(as_of, horizon).close_instant(exit_day)`, the close of the very window the
+  outcome label will be measured over. `domain/prediction_record.py` derives it from a calendar
+  rather than accepting it, and `storage/predictions.py` stamps custody from its own clock -- so
+  a caller who backdates `predicted_at` reaches `unwitnessed` and cannot reach `forward`. The
+  backfill rule turned out not to need a store rule at all: a recomputation is produced at or
+  after the deadline and a forward batch before it, `predicted_at` reaches the record's address
+  through this batch, so the two **cannot** share a key and there is nothing for a write to
+  overwrite.
 - **`V2-P4-018`** owns the abstention vocabulary. `Prediction.abstention` is free text here so
   that S35's "stale 即弃权" can arrive as a coded reason without the shape moving.
 - **`backtest/candidate_ranking.py`'s `CandidatePrediction.model_artifact_id`** was free text
@@ -138,12 +149,14 @@ Overlapping labels need a gap, `overlapping_windows` is the input that measures 
   and that issue's answer is one prefix's addresses and nothing else. `AlphaModelRef.artifact_id`
   was deliberately **not** narrowed with it, and
   `the_manifest_slot_still_admits_an_address_from_another_plane` says what that leaves open.
-- **`V2-P4-017`** owns persistence, and with it the two things this address does not settle: a
-  digest over the *training rows* rather than their count
-  (`the_address_is_over_the_fit_and_not_over_the_rule_that_chose_it`), and whether several
-  hundred `(str, float)` rows want a storage form other than the artifact's own tuple --
-  `V2-P4-015` left that measurement there, and the *digest* half of its question is answered
-  (0.399 ms over a 900-node ensemble, four orders below that model's fit).
+- **`V2-P4-017` took persistence**, and settled one of the two things this address does not: the
+  storage form. `V2-P4-015` asked whether several hundred `(str, float)` rows want something other
+  than the artifact's own tuple, and the answer is no -- not on the numbers (a whole store round
+  trip at 5,545 securities is 4.9 ms against a 4.55 s fit, tabulated in `storage/predictions.py`)
+  but on the identity: the bytes that store writes **are** the canonical JSON its address is taken
+  over, so a second storage form would be a second canonicalisation. A digest over the *training
+  rows* rather than their count is still nobody's
+  (`the_address_is_over_the_fit_and_not_over_the_rule_that_chose_it`).
 - **Filling `RunManifest.alpha_model_versions`** is nobody's yet. `V2-P4-010`'s docstring said
   `V2-P4-016` would, and that was wrong for a reason this issue could not fix: `ResearchEngine
   .run_cycle` builds the manifest and there is no `AlphaModel` anywhere on that path. The join
@@ -186,9 +199,11 @@ and its job is to keep a malformed list from reaching a fit at all.
 ALPHA_MODEL_ARTIFACT_PREFIX: Final[str] = "mdl"
 """`V2-P4-016`'s answer to the half of the address `V2-P4-010` left open: the prefix.
 
-Three letters, `dec`/`run`/`sig`/`val`/`fct`'s shape, and **not already taken** -- measured, at 26
-call sites carrying 23 distinct prefixes across all three of this repository's address builders
-(`stable_model_id`, `domain/factor.py`'s `cross_section_digest` and its `set_digest`).
+Three letters, `dec`/`run`/`sig`/`val`/`fct`'s shape, and **not already taken** -- measured across
+all three of this repository's address builders (`stable_model_id`, `domain/factor.py`'s
+`cross_section_digest` and its `set_digest`). The census stood at 26 call sites carrying 23
+distinct prefixes when this was written; `V2-P4-017`'s `prd` has since made it 27 and 24, which
+is a number this docstring deliberately does not have to be right about --
 `tests/unit/domain/test_manifest_component_provenance.py::live_prefixes` reads them off the
 source tree by AST rather than from a hand-written list, because the list that existed had gone
 stale *and* was wrong about what it contained -- see that function for both.
@@ -1007,7 +1022,11 @@ KNOWN_ALPHA_MODEL_LIMITATIONS: Final[tuple[AlphaModelLimitation, ...]] = (
             "embargo differ but whose surviving rows do not are correctly one artifact, which is "
             "the same fact seen from the useful side. Closing it would mean putting a digest of "
             "the training rows on the artifact, which is a field rather than a computed value "
-            "and belongs to whichever issue first stores a training set: V2-P4-017. What is "
+            "and belongs to whichever issue first stores a training set. This entry named "
+            "V2-P4-017 and that was wrong by one object: that issue stores a PredictionRecord, "
+            "which carries the batch and through it the artifact, and never the rows the fit "
+            "consumed. So the owner is still open, and the next issue to persist a TrainingSet "
+            "inherits it rather than any issue on this chain having quietly closed it. What is "
             "structural today is that everything the fit consumed which the artifact does record "
             "reaches the address, measured field by field in "
             "tests/unit/domain/test_alpha_model_address.py."
@@ -1143,13 +1162,16 @@ KNOWN_ALPHA_MODEL_LIMITATIONS: Final[tuple[AlphaModelLimitation, ...]] = (
         detail=(
             "predicted_at >= as_of is checkable here. Story S32's real requirement -- that a "
             "batch was produced before its observation window closed -- is not: the window's "
-            "exit session is a function of a trading calendar, this contract deliberately owns "
-            "none, and Implementation Decision 14's remaining half -- a backfilled "
-            "recomputation is stored as its own artifact and may not replace the original -- "
-            "is a rule about what a store may overwrite. Both are V2-P4-017's. What "
-            "this contract contributes is that predicted_at exists, is separate from as_of, and "
-            "is on a frozen model, so a stored batch cannot be edited into agreement with what "
-            "happened."
+            "exit session is a function of a trading calendar and this contract deliberately "
+            "owns none. This entry stays because it is still true of a batch **on its own**, "
+            "which is the object most callers hold. V2-P4-017 answered it one layer up: a "
+            "PredictionRecord carries the deadline, derived from a calendar rather than "
+            "accepted, and a standing computed from it -- and it found that Implementation "
+            "Decision 14's other half needs no overwrite rule, because a backfill and its "
+            "original disagree about the predicted_at this batch carries and therefore address "
+            "apart. What this contract contributes is that predicted_at exists, is separate "
+            "from as_of, and is on a frozen model, so a stored batch cannot be edited into "
+            "agreement with what happened."
         ),
     ),
     AlphaModelLimitation(

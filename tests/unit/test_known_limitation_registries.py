@@ -15,7 +15,7 @@ inside a docstring, which is prose the runner never reads.
 ## Why the mechanism is not copied as it stands
 
 `007`'s form is "one test per entry, named after the entry". At three entries that is exactly
-right. Across the thirty code-carrying registries there are **278** entries -- 69 in
+right. Across the thirty-one code-carrying registries there are **285** entries -- 69 in
 `KNOWN_PANEL_LIMITATIONS` alone -- and it stops being right somewhere well before that, for
 three reasons and not one:
 
@@ -119,6 +119,7 @@ from openalpha_cn.domain.index_membership import KNOWN_INDEX_MEMBERSHIP_LIMITATI
 from openalpha_cn.domain.index_prices import KNOWN_INDEX_PRICE_LIMITATIONS
 from openalpha_cn.domain.industry_classification import KNOWN_INDUSTRY_LIMITATIONS
 from openalpha_cn.domain.labels import KNOWN_LABEL_LIMITATIONS
+from openalpha_cn.domain.prediction_record import KNOWN_PREDICTION_RECORD_LIMITATIONS
 from openalpha_cn.domain.price_limits import KNOWN_SUSPENSION_LIMITATIONS
 from openalpha_cn.domain.stock_universe import KNOWN_UNIVERSE_LIMITATIONS
 from openalpha_cn.factor_view import KNOWN_FACTOR_RUN_LIMITATIONS
@@ -165,6 +166,7 @@ LIMITATION_REGISTRIES: Final[dict[str, Sequence[_Limitation]]] = {
     "KNOWN_SHORTLIST_VIEW_LIMITATIONS": KNOWN_SHORTLIST_VIEW_LIMITATIONS,
     "KNOWN_FEATURE_MATRIX_LIMITATIONS": KNOWN_FEATURE_MATRIX_LIMITATIONS,
     "KNOWN_ALPHA_MODEL_LIMITATIONS": KNOWN_ALPHA_MODEL_LIMITATIONS,
+    "KNOWN_PREDICTION_RECORD_LIMITATIONS": KNOWN_PREDICTION_RECORD_LIMITATIONS,
     "KNOWN_ADJUSTMENT_LIMITATIONS": KNOWN_ADJUSTMENT_LIMITATIONS,
     "KNOWN_PRICE_LIMITATIONS": KNOWN_PRICE_LIMITATIONS,
     "KNOWN_FINANCIAL_STATEMENT_LIMITATIONS": KNOWN_FINANCIAL_STATEMENT_LIMITATIONS,
@@ -179,7 +181,7 @@ LIMITATION_REGISTRIES: Final[dict[str, Sequence[_Limitation]]] = {
     "KNOWN_STORAGE_LIMITATIONS": KNOWN_STORAGE_LIMITATIONS,
     "KNOWN_PANEL_LIMITATIONS": KNOWN_PANEL_LIMITATIONS,
 }
-"""The thirty registries whose entries are identified by a `code`, keyed by their own
+"""The thirty-one registries whose entries are identified by a `code`, keyed by their own
 names.
 
 **None of `KNOWN_NEUTRALIZATION_LIMITATIONS`, `KNOWN_IC_LIMITATIONS`,
@@ -427,12 +429,12 @@ def test_the_registry_table_is_every_known_registry_in_the_source_tree() -> None
     }
 
     assert found == set(LIMITATION_REGISTRIES) | set(CODELESS_REGISTRIES)
-    assert len(LIMITATION_REGISTRIES) == 30
+    assert len(LIMITATION_REGISTRIES) == 31
     assert set(LIMITATION_REGISTRIES) & set(CODELESS_REGISTRIES) == set()
 
 
 def test_every_declared_limitation_code_is_named_in_executable_test_code() -> None:
-    """The binding itself, over all twenty-nine code-carrying registries and all their entries.
+    """The binding itself, over all thirty-one code-carrying registries and all their entries.
 
     A code that appears nowhere but in prose is a code the suite has no opinion about: rename
     it and everything stays green while every citation of it silently stops resolving. That is
@@ -483,7 +485,7 @@ DERIVED_REGISTRY: Final[str] = "KNOWN_PANEL_LIMITATIONS"
 `silent_truncation_at_the_response_cap`, because the same defect really does recur at four
 different caps. Its identity is therefore `(code, datasets)`, which
 `tests/unit/test_panel_doctor_rules.py::test_a_limitation_is_identified_by_its_code_and_the_datasets_it_speaks_for`
-asserts. Uniqueness below is a claim about the sixteen registries a code is written into by hand.
+asserts. Uniqueness below is a claim about the thirty registries a code is written into by hand.
 """
 
 
@@ -532,5 +534,5 @@ def test_the_registries_together_carry_the_entry_count_the_report_folds() -> Non
 
     assert len(codes["KNOWN_PANEL_LIMITATIONS"]) == folded + plane_wide + 1
     assert all(codes[registry] for registry in codes)
-    assert sum(len(entries) for entries in codes.values()) >= 278
+    assert sum(len(entries) for entries in codes.values()) >= 285
     assert len(codes["KNOWN_PANEL_LIMITATIONS"]) >= 69
