@@ -201,6 +201,53 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   a probe importing `numpy` and a store reads `8 kept, 0 broken`, so the sentences that said
   otherwise now point at the pytest assertion that does.
 
+### Fixed
+
+- **A daily run on the last trading day of the year is a named refusal on all three faces,
+  not a bare `500`** (`V2-P4-088`). The prediction store seals a batch against the calendar's
+  answer to when its outcome becomes knowable, and derives that answer through the same
+  `build_label_window` the training side goes through — but `run_daily` handed the batch over
+  *after* its only `try` block had closed, so `CalendarHorizonError` reached the REST route as
+  `500 text/plain` and `OpenAlphaSDK` as an unenveloped `ValueError` subclass. It is not an
+  exotic input: `daily_request` requires `predict_at`'s date to be strictly after `end`, so the
+  prediction day is always later than every training day, and any prediction day in the last
+  `horizon.sessions + 1` sessions of a year-keyed calendar has an outcome window the exchange
+  has not published. Both places that build such a window now share one fault tuple and one
+  sentence, and the remedy names the command: `openalpha panel build --dataset trade_cal --year
+  <next>`, then declare that year with `--year`.
+- **`panel_fixtures.generate_panel` can price a window anywhere in its calendar year**, which is
+  what made the above reachable from a test at all. The generated calendar has always covered
+  the whole partition year while the priced window was ten sessions in January, so no generated
+  panel could put a prediction day near the calendar's last session — the third time a fixture
+  has been found hiding a wall by never walking up to it (`V2-P4-080`, `V2-P4-085`). Each batch's
+  fetch instant and the panel's `as_of` now follow the last session priced, which is
+  `_index_weight_batch`'s existing rule extended to the five builders that lacked it; the default
+  window is unchanged instant for instant.
+- **One test file no longer disables logging for the whole process** (`V2-P4-089`).
+  `tests/unit/test_model_view.py` imported the raw `importlinter.cli.lint_imports` under the
+  alias `_lint_imports` — the name of the containment wrapper one directory over — so it read as
+  contained while `dictConfig(disable_existing_loggers=True)` silently disabled every logger
+  already in the process, and six `caplog` acceptances under `tests/integration` failed whenever
+  that file was collected first. The convention that was supposed to prevent this had failed
+  twice (`V2-P4-068`, `V2-P4-012`) because it was a per-file regex over a *call spelling*: an
+  alias dodges it and another file is out of its scope. `tests/import_linter_containment.py` is
+  now the only import of `importlinter.cli` in the tree, both of its exports restore the whole
+  logger snapshot, and one AST sweep over every file under `tests/` replaces the three private
+  regex guards. That sweep found four files reaching the raw CLI rather than two, and then the
+  same defect inside the guard itself: the test that proves the pollution is real restored only
+  the logger it named, taking four `test_batch_research.py` acceptances with it whenever the unit
+  tests ran first — so four of the six failures had two causes, and routing the reported call
+  sites through the existing wrapper would have left `pytest tests/unit tests/integration
+  tests/contract` red.
+- **One name declared twice with values of two types is one verdict on every face**
+  (`V2-P4-091`). `ModelRunApiRequest.declared_hyperparameters` sorted whole `(name, value)`
+  pairs while `cli._model_hyperparameters` sorted by name, so two hyperparameters sharing a name
+  made the HTTP sort compare `1 < "a"` and answer `500 text/plain` where the command line and the
+  SDK answered `bad_request`. A caller error reported as a service fault pages an operator and
+  trips retries. The ordering rule now lives once, in `model_view.declared_hyperparameters`, and
+  both faces call it — the HTTP copy had carried a comment claiming it was "`cli
+  ._model_hyperparameters`' rule", which is what kept the disagreement invisible.
+
 ## [1.0.0] - 2026-07-24
 
 ### Added

@@ -12,14 +12,13 @@ from __future__ import annotations
 
 import ast
 import dataclasses
-import logging
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Final, get_args
 
 import pytest
 import walk_forward_fixtures
-from importlinter.cli import lint_imports as _lint_imports
+from import_linter_containment import contained_lint_imports
 
 from openalpha_cn import cli
 from openalpha_cn.api.app import MODEL_HTTP_STATUS
@@ -27,11 +26,16 @@ from openalpha_cn.backtest.alpha_baseline import BASELINE_FAMILY, BaselineScoreP
 from openalpha_cn.backtest.alpha_tree import TREE_FAMILY
 from openalpha_cn.backtest.walk_forward import LabelledPanel
 from openalpha_cn.cli import MODEL_EXIT, PANEL_BUILD_TARGETS
-from openalpha_cn.domain.alpha_model import TrainingSet, artifact_for
+from openalpha_cn.domain.alpha_model import AlphaModelDeclaration, TrainingSet, artifact_for
+from openalpha_cn.domain.horizon import HorizonError, parse_horizon
+from openalpha_cn.domain.labels import MINIMUM_LABEL_ZONE_OFFSET, LabelError
 from openalpha_cn.domain.prediction_record import PredictionStanding
+from openalpha_cn.domain.trading_calendar import TradingCalendarError
 from openalpha_cn.feature_matrix import FeatureColumn
 from openalpha_cn.model_view import (
+    _OUTCOME_WINDOW_FAULTS,
     KNOWN_MODEL_VIEW_LIMITATIONS,
+    MODEL_DATE_ZONE,
     MODEL_FAMILIES,
     MODEL_PANEL_DATASETS,
     MODEL_VIEW_LIMITATION_CODES,
@@ -364,10 +368,16 @@ def test_the_backtest_contract_names_this_module_and_the_entry_responds() -> Non
     The probe is a **new** file rather than an edit to a real one because this contract's source
     is the whole package, so a new module is covered on arrival -- which is the property the P3
     acceptance created it for.
+
+    **Both calls go through `contained_lint_imports`, and `V2-P4-089` is why that sentence is
+    here.** This file used to spell `from importlinter.cli import lint_imports as _lint_imports`
+    -- the raw CLI, wearing the exact name of the containment wrapper one directory over -- and
+    put back `logging.getLogger("importlinter").disabled` afterwards, which is the one logger the
+    linter's own `dictConfig` names and therefore the one it never disables. It read as contained
+    and was not: every other logger in the process stayed disabled, and six `caplog` acceptances
+    in `tests/integration` failed on `assert 0 == 1` whenever this file was collected first.
     """
     assert not PROBE.exists(), "probe file must not already exist"
-    logger = logging.getLogger("importlinter")
-    disabled = logger.disabled
     PROBE.write_text(
         '"""Temporary probe module for a layering test."""\n\n'
         "from openalpha_cn.model_view import evaluate_model\n\n"
@@ -375,26 +385,24 @@ def test_the_backtest_contract_names_this_module_and_the_entry_responds() -> Non
         encoding="utf-8",
     )
     try:
-        broken = _lint_imports(
+        broken = contained_lint_imports(
             config_filename=str(ROOT / "pyproject.toml"),
             no_cache=True,
             limit_to_contracts=("backtest-no-numeric-stack-or-panel-plane",),
         )
     finally:
         PROBE.unlink()
-        logger.disabled = disabled
 
     assert broken == 1, (
         "a backtest module importing openalpha_cn.model_view must break the contract; if this "
         "passes, the forbidden entry this issue added is decorative"
     )
 
-    kept = _lint_imports(
+    kept = contained_lint_imports(
         config_filename=str(ROOT / "pyproject.toml"),
         no_cache=True,
         limit_to_contracts=("backtest-no-numeric-stack-or-panel-plane",),
     )
-    logger.disabled = disabled
     assert kept == 0
 
 
@@ -540,3 +548,53 @@ def test_no_field_of_a_resolved_request_carries_a_default(
         f"{defaulted} carries a default on ModelRunRequest; a run parameter with a default is a "
         "decision nobody recorded making, and every face already requires each of these"
     )
+
+
+# --------------------------------------------------------------------------------------------
+# V2-P4-088: the outcome-window guard, and the arm of it that cannot fire
+# --------------------------------------------------------------------------------------------
+
+
+def test_the_label_error_arm_of_the_outcome_window_guard_cannot_fire_and_is_kept_anyway() -> None:
+    """A surviving mutant, answered the way `V2-P4-084` answered its own.
+
+    Dropping `LabelError` from `model_view._OUTCOME_WINDOW_FAULTS` leaves the whole suite green,
+    measured. `build_label_window` raises it for exactly one reason -- a `zone` west of
+    `MINIMUM_LABEL_ZONE_OFFSET`, which would date an afternoon Shanghai signal on the previous day
+    and enter on a session whose close had already been published -- and both call sites pass
+    `MODEL_DATE_ZONE`, a module constant at `+08:00`. No face supplies a zone at all.
+
+    The arm is kept rather than deleted, which is
+    `tests/integration/test_unlabelled_corpus_faces.py`'s decision on the identical finding:
+    removing a guard is the fail-open direction, and the only thing making this one dead is a
+    constant one line could move. So the *reason* is pinned instead. The day `MODEL_DATE_ZONE`
+    goes west, this test fails and says the arm is now live -- rather than a `500` saying it.
+
+    The neighbouring refusal `build_label_window` propagates is **not** in the tuple and does not
+    need to be. `ResearchHorizon.sessions` raises `HorizonError` for a calendar unit, but
+    `AlphaModelDeclaration.horizon` carries `COUNTABLE_HORIZON_PATTERN`, so a run declaring `3m`
+    is refused as a `bad_request` before anything asks a calendar to count it -- measured on the
+    command line as `exit 3`, "String should match pattern '^[1-9][0-9]{0,2}[d]$'".
+    """
+    offset = MODEL_DATE_ZONE.utcoffset(datetime(2026, 12, 31, tzinfo=UTC))
+
+    assert offset is not None and offset >= MINIMUM_LABEL_ZONE_OFFSET, (
+        "MODEL_DATE_ZONE has moved west of the bound build_label_window refuses at, so the "
+        "LabelError arm of _OUTCOME_WINDOW_FAULTS is now reachable and needs a face driving it"
+    )
+    assert LabelError in _OUTCOME_WINDOW_FAULTS
+    assert TradingCalendarError in _OUTCOME_WINDOW_FAULTS
+
+    assert HorizonError not in _OUTCOME_WINDOW_FAULTS
+    months = parse_horizon("3m")
+    with pytest.raises(HorizonError):
+        assert months.sessions
+    with pytest.raises(ValueError, match="horizon"):
+        AlphaModelDeclaration(
+            name="reversal-rank",
+            family=BASELINE_FAMILY,
+            horizon="3m",
+            feature_version=f"feat_{'0' * 24}",
+            seed=7,
+            code_commit="abcdef1234567",
+        )

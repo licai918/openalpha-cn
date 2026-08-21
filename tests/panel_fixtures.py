@@ -1533,6 +1533,20 @@ def _midnight_shanghai(day: date) -> datetime:
     return datetime(day.year, day.month, day.day, tzinfo=UTC) - timedelta(hours=8)
 
 
+def _read_instant(last_session: date) -> datetime:
+    """12:00 Asia/Shanghai on the day after `last_session` -- `AS_OF` stated as a rule.
+
+    `AS_OF` is the literal this returns for the default window's last session, and
+    `test_panel_fixtures.py::test_the_default_window_still_reads_at_the_as_of_constant` pins the
+    two equal. Derived rather than duplicated because `generate_panel(window=...)` can price into
+    December, and a read instant fixed in January would make every row after it invisible: the
+    panel reads filter on `available_time <= as_of`, so a partition written and then unreadable is
+    the shape a fixture must not be able to produce.
+    """
+    following = last_session + timedelta(days=1)
+    return datetime(following.year, following.month, following.day, 4, 0, tzinfo=UTC)
+
+
 def _close_time(day: date) -> datetime:
     """15:00 Asia/Shanghai, the session's event instant."""
     return datetime(day.year, day.month, day.day, 7, 0, tzinfo=UTC)
@@ -1852,6 +1866,7 @@ def _factor_batch(
         securities=securities,
         omit=_omitted_factors(sessions=sessions, securities=securities, shapes=shapes),
     )
+    available = [_published_time(day) for day, _ in pairs]
     return _batch(
         ADJ_FACTOR_DATASET,
         subjects=[code for _, code in pairs],
@@ -1867,7 +1882,8 @@ def _factor_batch(
             ),
         ],
         event_time=[_close_time(day) for day, _ in pairs],
-        available_time=[_published_time(day) for day, _ in pairs],
+        available_time=available,
+        fetched_at=max([AS_OF, *available]),
     )
 
 
@@ -1929,6 +1945,7 @@ def _bar_batch(
         _pre_close_of(code, day, sessions=sessions, securities=securities, shapes=shapes)
         for day, code in pairs
     )
+    available = [_published_time(day) for day, _ in pairs]
     return _batch(
         DAILY_DATASET,
         subjects=[code for _, code in pairs],
@@ -1951,7 +1968,8 @@ def _bar_batch(
             PanelColumn("amount", "float", tuple(10000.0 for _ in close)),
         ],
         event_time=[_close_time(day) for day, _ in pairs],
-        available_time=[_published_time(day) for day, _ in pairs],
+        available_time=available,
+        fetched_at=max([AS_OF, *available]),
     )
 
 
@@ -1967,6 +1985,7 @@ def _valuation_batch(
         _close_of(code, day, sessions=sessions, securities=securities, shapes=shapes)
         for day, code in pairs
     )
+    available = [_published_time(day) for day, _ in pairs]
     return _batch(
         DAILY_BASIC_DATASET,
         subjects=[code for _, code in pairs],
@@ -1979,7 +1998,8 @@ def _valuation_batch(
             ),
         ],
         event_time=[_close_time(day) for day, _ in pairs],
-        available_time=[_published_time(day) for day, _ in pairs],
+        available_time=available,
+        fetched_at=max([AS_OF, *available]),
     )
 
 
@@ -2000,6 +2020,7 @@ def _suspension_batch(
         # bar for `_halted_key` alone, and a whole-day halt with a stored bar beside it is a
         # contradiction the price writer's own cross-check would be right to object to.
         rows.append((securities[NEWEST_HALT_SECURITY_INDEX], sessions[-1], "S", "13:00-15:00"))
+    available = [_published_time(day) for _, day, _, _ in rows]
     return _batch(
         SUSPENSION_DATASET,
         subjects=[code for code, _, _, _ in rows],
@@ -2009,7 +2030,8 @@ def _suspension_batch(
             PanelColumn("suspend_timing", "string", tuple(timing for _, _, _, timing in rows)),
         ],
         event_time=[_close_time(day) for _, day, _, _ in rows],
-        available_time=[_published_time(day) for _, day, _, _ in rows],
+        available_time=available,
+        fetched_at=max([AS_OF, *available]),
     )
 
 
@@ -2104,6 +2126,7 @@ def _limit_batch(
             continue
         up.append(reference * 1.1)
         down.append(reference * 0.9)
+    available = [_published_time(day) for day, _ in pairs]
     return _batch(
         PRICE_LIMIT_DATASET,
         subjects=[code for _, code in pairs],
@@ -2113,7 +2136,8 @@ def _limit_batch(
             PanelColumn("down_limit", "float", tuple(down)),
         ],
         event_time=[_close_time(day) for day, _ in pairs],
-        available_time=[_published_time(day) for day, _ in pairs],
+        available_time=available,
+        fetched_at=max([AS_OF, *available]),
     )
 
 
@@ -2795,7 +2819,9 @@ def _industry_assignments(
     return MappingProxyType(assignments)
 
 
-def generate_panel(*, shapes: Iterable[str] = ()) -> GeneratedPanel:
+def generate_panel(
+    *, shapes: Iterable[str] = (), window: tuple[date, date] | None = None
+) -> GeneratedPanel:
     """Build a run-time panel fixture carrying exactly the shapes asked for.
 
     Nothing is written to disk and no `.parquet` is produced; see `write_generated_panel` for
@@ -2803,11 +2829,35 @@ def generate_panel(*, shapes: Iterable[str] = ()) -> GeneratedPanel:
 
     Refuses an unknown shape id by name rather than ignoring it, because a typo in a shape
     request is a test that silently asserts against the shapeless panel.
+
+    ## `window`, and the wall the default one hides (`V2-P4-088`)
+
+    The generated calendar has always covered the **whole** partition year, 2026-01-01 through
+    2026-12-31, while the priced window was ten sessions in January. Ten sessions in January are
+    the middle of a year-keyed calendar, so no generated panel could ever put a prediction day
+    near the calendar's **last** session -- and the last `horizon.sessions + 1` sessions of a
+    year-keyed partition are exactly where a prediction's outcome window runs off the end of what
+    the exchange has published. A routine late-December daily run was unreachable from every
+    fixture in this repository, which is `V2-P4-080`'s generalisation again: a fixture hides a
+    wall by never walking up to it.
+
+    `window` moves the priced range anywhere inside the calendar. `(WINDOW_FIRST, LAST_DAY)`
+    prices the whole year and puts the last session on the calendar's own last day, which is the
+    corpus `tests/integration/test_year_end_daily_run.py` drives.
+
+    The **fetch instant moves with it** and is not a second parameter: every session-keyed builder
+    dates its batch at `max(AS_OF, <the last row's publication>)`, which is
+    `_index_weight_batch`'s existing rule extended to the five that did not have it. It has to be
+    derived rather than declared, because `ColumnarPanelBatch` refuses a row published after its
+    own `as_of` -- a December bar in a batch fetched on 17 January is not a fixture, it is a batch
+    that cannot be built. `GeneratedPanel.as_of` follows the same rule (see `_read_instant`), so
+    the default window still produces `AS_OF` exactly and every existing caller is unmoved.
     """
     asked = _requested(shapes)
+    first, last = window or (WINDOW_FIRST, WINDOW_LAST)
     days = _calendar_days(asked)
     open_days = tuple(day.calendar_date for day in days if day.is_trading)
-    sessions = tuple(day for day in open_days if WINDOW_FIRST <= day <= WINDOW_LAST)
+    sessions = tuple(day for day in open_days if first <= day <= last)
     securities = SECURITIES
     batches: dict[str, ColumnarPanelBatch] = {
         TRADING_CALENDAR_DATASET: _calendar_batch(days),
@@ -2855,6 +2905,7 @@ def generate_panel(*, shapes: Iterable[str] = ()) -> GeneratedPanel:
         calendar_days=days,
         sessions=sessions,
         securities=securities,
+        as_of=_read_instant(sessions[-1]),
         batches=MappingProxyType(batches),
         name_records=names,
         industry_assignments=assignments,

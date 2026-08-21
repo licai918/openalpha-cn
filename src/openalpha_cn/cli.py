@@ -100,6 +100,7 @@ from openalpha_cn.model_view import (
     daily_request,
     daily_rows,
     daily_view,
+    declared_hyperparameters,
     evaluate_model,
     evaluation_rows,
     evaluation_view,
@@ -4925,6 +4926,11 @@ def _model_hyperparameters(
     having two canonical spellings, and a caller typing flags in the order they think of them has
     made no statement about order. A **repeated** name is still refused, by that contract, because
     that one is a claim and the two can disagree.
+
+    The sort itself is `model_view.declared_hyperparameters` rather than a `sorted` call of this
+    module's own, which is `V2-P4-091`'s finding: this face and the HTTP one each spelled the rule
+    once and the two spellings differed on the only input that can tell them apart. Parsing stays
+    here -- a `<name>=<value>` token is this face's own shape -- and the ordering does not.
     """
     pairs: list[tuple[str, bool | int | float | str]] = []
     for token in declared:
@@ -4935,7 +4941,7 @@ def _model_hyperparameters(
                 f"--hyperparameter {token!r} is not `<name>=<value>`",
             )
         pairs.append((name.strip(), _model_scalar(raw)))
-    return tuple(sorted(pairs, key=lambda pair: pair[0]))
+    return declared_hyperparameters(pairs)
 
 
 def _model_scalar(raw: str) -> bool | int | float | str:

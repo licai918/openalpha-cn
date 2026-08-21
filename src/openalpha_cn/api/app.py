@@ -58,6 +58,7 @@ from openalpha_cn.model_view import (
     ModelViewError,
     daily_request,
     daily_view,
+    declared_hyperparameters,
     evaluate_model,
     evaluation_view,
     feature_columns,
@@ -783,6 +784,16 @@ different remedies available and only the envelope to pick between them.
   by Starlette and the caller gets `text/plain` with no `reason` at all. The row records a code
   that is already spoken for, exactly as `SHORTLIST_HTTP_STATUS`' own does.
 
+  **This sentence was false the day it was written, and `V2-P4-088` is how.** It arrived in
+  `f81b0f5` -- `V2-P4-021`'s own commit, and the same commit that put `predictions.put` outside
+  `run_daily`'s only `try`. The store seals a batch against a deadline it derives from the
+  calendar, so a prediction day in the last `horizon.sessions + 1` sessions of a year-keyed
+  calendar reached `/models/daily-run` as `CalendarHorizonError` and left it as `500 text/plain`.
+  It is true again, and the way it is kept true is not this paragraph:
+  `model_view._OUTCOME_WINDOW_FAULTS` names the two refusals building an outcome window raises,
+  both places that build one catch it, and `tests/integration/test_year_end_daily_run.py` drives
+  a whole year of 2026 at this route.
+
 **`409` carries two body schemas here and `detail` is the discriminator**, unchanged from the
 shortlist plane: a verdict body has `is_blocked` and no `detail` key, and a refusal body is
 `{"detail": {"reason": ..., "message": ...}}`. **`422` also carries two**, and there
@@ -877,8 +888,17 @@ class ModelRunApiRequest(BaseModel):
 
     @property
     def declared_hyperparameters(self) -> tuple[tuple[str, bool | int | float | str], ...]:
-        """The declared hyperparameters, sorted by name -- `cli._model_hyperparameters`' rule."""
-        return tuple(sorted((item.name, item.value) for item in self.hyperparameters))
+        """The declared hyperparameters in the order a declaration has them.
+
+        Through `model_view.declared_hyperparameters`, which is the same call
+        `cli._model_hyperparameters` makes. It used to be this face's own `sorted(...)` over whole
+        `(name, value)` pairs described as "`cli._model_hyperparameters`' rule" -- and it was not
+        that rule: `V2-P4-091` measured the two disagreeing on a name declared twice with values
+        of two types, where sorting the pair compares the values and raises `TypeError` on the way
+        to a `500`. The comment claiming they agreed is what kept it invisible, so the agreement
+        is a shared call now rather than a sentence.
+        """
+        return declared_hyperparameters((item.name, item.value) for item in self.hyperparameters)
 
 
 class ModelEvaluateApiRequest(ModelRunApiRequest):
