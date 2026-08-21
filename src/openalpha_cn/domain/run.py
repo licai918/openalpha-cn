@@ -125,8 +125,19 @@ class AlphaModelRef(BaseModel):
 
     `artifact_id` is therefore pattern-bound to `stable_model_id`'s output rather than left as
     free text -- the same guard `DecisionLedger.run_manifest_id` carries, for the same reason.
-    Which prefix, and which fields the digest is taken over, are `V2-P4-016`'s to decide; that
-    it must be an address this repository computed is decided here.
+    Which prefix, and which fields the digest is taken over, were `V2-P4-016`'s to decide, and it
+    decided: `mdl_` over the whole of an `AlphaModelArtifact`.
+
+    **It stayed generic anyway, and that is a decision with a cost.** Narrowing this field to
+    `domain/alpha_model.py`'s `ALPHA_MODEL_ARTIFACT_ID_PATTERN` would need this module to import
+    that one, which puts the model contract's whole label/adjustment/calendar import weight
+    behind every `RunManifest`, or to spell the pattern a second time, which is what
+    `CONTENT_ADDRESS_PATTERN` exists to avoid. So a `fct_` factor address still validates in the
+    quantitative model slot, and what keeps that honest is a producer stamping `mdl_` rather than
+    a validator -- `the_manifest_slot_still_admits_an_address_from_another_plane` in
+    `KNOWN_ALPHA_MODEL_LIMITATIONS`. `backtest/candidate_ranking.py`'s
+    `CandidatePrediction.model_artifact_id` is the field that *did* narrow, because `backtest/`
+    may already reach the model contract and a prediction has exactly one kind of source.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
@@ -262,7 +273,15 @@ class RunManifest(BaseModel):
     one, so this is left declared and unfilled rather than fabricated.
     """
     alpha_model_versions: tuple[AlphaModelRef, ...] = ()
-    """The quantitative model artifacts this run consumed (`V2-P4-016` fills it).
+    """The quantitative model artifacts this run consumed. Still empty on every path.
+
+    `V2-P4-010` wrote "`V2-P4-016` fills it" here, and that turned out to be wrong about which
+    issue: `V2-P4-016` built the address this slot names -- `mdl_` over an `AlphaModelArtifact`,
+    and the join is `AlphaModelRef(name=artifact.declaration.name,
+    artifact_id=artifact.artifact_id)` -- but nothing on `ResearchEngine.run_cycle`'s path fits a
+    model, so there is still nothing to put here. Whichever issue first composes a fit into a run
+    fills it (`V2-P4-021`'s model faces, or `V2-P4-017`'s store), and the shape does not have to
+    move when it does.
 
     The third plane, empty on every path this build can execute, and that is the honest state
     rather than a placeholder: no `AlphaModel` exists until `V2-P4-011`. An empty tuple is a
@@ -272,7 +291,7 @@ class RunManifest(BaseModel):
     the address forever; an empty tuple starts moving it the moment there is something to put
     in it.
 
-    Added now rather than by `V2-P4-016` for one measured reason: a field added to `RunManifest`
+    Added at `V2-P4-010` rather than later for one measured reason: a field added to `RunManifest`
     moves `run_manifest_id`, and through `DecisionLedger.run_manifest_id` every stored
     `decision_id`, `validation_id` and `report_id` with it -- the identity rewrite roadmap
     section 8 describes and `storage/migrations.py` pays for. Implementation Decision 36 says

@@ -107,14 +107,16 @@ Overlapping labels need a gap, `overlapping_windows` is the input that measures 
 
 ## What is deliberately left to a named issue
 
-- **`V2-P4-016`** owns the artifact's content address: the prefix and which fields the digest is
-  taken over. `AlphaModelArtifact` therefore carries the training cutoff, the feature version,
-  the seed, the code version, the hyperparameters and the fitted parameters, and carries **no
-  id**. A `PredictionBatch` names its model *by value*, which is strictly more than an address
-  and is why `V2-P4-016` is an addition rather than a redesign. `AlphaModelArtifact` is a
+- **`V2-P4-016` landed**, and the address is `AlphaModelArtifact.artifact_id`:
+  `stable_model_id(prefix="mdl", ...)` over every declared field of the artifact and of the
+  declaration inside it, with an audited and **empty** `ARTIFACT_UNADDRESSED_FIELDS`. It is an
+  addition and not a redesign, exactly as this contract predicted: no declared field moved, so
+  nothing that was stored had to be re-keyed. A `PredictionBatch` still names its model *by
+  value*, which is strictly more than an address, and that is now checkable rather than
+  rhetorical -- a batch can produce the address without a lookup. `AlphaModelArtifact` is a
   pydantic `BaseModel` for exactly one reason: `stable_model_id` takes one, and this repository
-  has one hash function (`V2-P4-037` files the defect a second one would be). The three
-  `schema_version` fields here are `Literal` constants and **not** `ContractVersions`
+  hashes a model through one function (`V2-P4-037` files the defect a second one would be). The
+  three `schema_version` fields here are `Literal` constants and **not** `ContractVersions`
   registries: `domain/schema.py` exports the five stable v1 boundaries Implementation
   Decision 1 names, none of these is one of them, and a version registry earns its migration
   machinery when something has stored a row -- which is `V2-P4-017`'s. `FactorTransformSpec`
@@ -130,22 +132,40 @@ Overlapping labels need a gap, `overlapping_windows` is the input that measures 
   being a separate artifact rather than a replacement is a storage rule.
 - **`V2-P4-018`** owns the abstention vocabulary. `Prediction.abstention` is free text here so
   that S35's "stale 即弃权" can arrive as a coded reason without the shape moving.
-- **`backtest/candidate_ranking.py`'s `CandidatePrediction.model_artifact_id`** stays free text
-  until `V2-P4-016`; `V2-P4-005` wrote "by whatever identity `V2-P4-011` gives it" before
-  `V2-P4-010` decided the identity was `V2-P4-016`'s. Narrowing it is that issue's, not this
-  one's.
+- **`backtest/candidate_ranking.py`'s `CandidatePrediction.model_artifact_id`** was free text
+  until `V2-P4-016` and now carries `ALPHA_MODEL_ARTIFACT_ID_PATTERN`. `V2-P4-005` wrote "by
+  whatever identity `V2-P4-011` gives it", `V2-P4-010` decided the identity was `V2-P4-016`'s,
+  and that issue's answer is one prefix's addresses and nothing else. `AlphaModelRef.artifact_id`
+  was deliberately **not** narrowed with it, and
+  `the_manifest_slot_still_admits_an_address_from_another_plane` says what that leaves open.
+- **`V2-P4-017`** owns persistence, and with it the two things this address does not settle: a
+  digest over the *training rows* rather than their count
+  (`the_address_is_over_the_fit_and_not_over_the_rule_that_chose_it`), and whether several
+  hundred `(str, float)` rows want a storage form other than the artifact's own tuple --
+  `V2-P4-015` left that measurement there, and the *digest* half of its question is answered
+  (0.399 ms over a 900-node ensemble, four orders below that model's fit).
+- **Filling `RunManifest.alpha_model_versions`** is nobody's yet. `V2-P4-010`'s docstring said
+  `V2-P4-016` would, and that was wrong for a reason this issue could not fix: `ResearchEngine
+  .run_cycle` builds the manifest and there is no `AlphaModel` anywhere on that path. The join
+  is one line -- `AlphaModelRef(name=artifact.declaration.name, artifact_id=artifact
+  .artifact_id)`, asserted in `tests/unit/domain/test_alpha_model_address.py` -- and the issue
+  that first composes a fit into a run (`V2-P4-021`'s model faces, or `V2-P4-017`) writes it.
+  No helper is shipped for it: `domain/run.py` importing this module to build one would put the
+  whole label and calendar import weight of the model plane behind every `RunManifest`.
 """
 
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
+from types import MappingProxyType
 from typing import Final, Literal, Protocol, Self, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
+from openalpha_cn.domain._identity import stable_model_id
 from openalpha_cn.domain.horizon import COUNTABLE_HORIZON_PATTERN, ResearchHorizon
 from openalpha_cn.domain.labels import (
     LabelOverlap,
@@ -161,6 +181,64 @@ MAX_FEATURE_COUNT: Final[int] = 4096
 A range check on a stored list rather than a modelling opinion, `FactorTransformSpec
 .min_cross_section`'s precedent: the bound is far above anything `V2-P4-012` is likely to build
 and its job is to keep a malformed list from reaching a fit at all.
+"""
+
+ALPHA_MODEL_ARTIFACT_PREFIX: Final[str] = "mdl"
+"""`V2-P4-016`'s answer to the half of the address `V2-P4-010` left open: the prefix.
+
+Three letters, `dec`/`run`/`sig`/`val`/`fct`'s shape, and **not already taken** -- measured, at 26
+call sites carrying 23 distinct prefixes across all three of this repository's address builders
+(`stable_model_id`, `domain/factor.py`'s `cross_section_digest` and its `set_digest`).
+`tests/unit/domain/test_manifest_component_provenance.py::live_prefixes` reads them off the
+source tree by AST rather than from a hand-written list, because the list that existed had gone
+stale *and* was wrong about what it contained -- see that function for both.
+
+A prefix is not decoration. Two content addresses over two different contracts can only be told
+apart by it, and `AlphaModelRef.artifact_id` accepts any address this repository computed -- so
+what stops a `fct_` factor address occupying the quantitative model slot is that a producer
+stamps `mdl_`, which is the direction `V2-P4-010` chose deliberately and
+`the_manifest_slot_still_admits_an_address_from_another_plane` records the residue of.
+"""
+
+ALPHA_MODEL_ARTIFACT_ID_PATTERN: Final[str] = rf"^{ALPHA_MODEL_ARTIFACT_PREFIX}_[0-9a-f]{{24}}$"
+"""Exactly what `stable_model_id(prefix="mdl", ...)` produces, and nothing else.
+
+Derived from the prefix above rather than spelled out a second time, `experiment_payload`'s rule
+about canonicalisation applied to a pattern: a second spelling of one fact is a second thing that
+can disagree about it. `domain/run.py`'s `RUN_MANIFEST_ID_PATTERN` is the same idea pinned to
+`run_`, and its docstring carries the reason both exist -- a content address that is only
+conventionally a content address stops being one the first time it is convenient.
+
+Attached to `backtest/candidate_ranking.py`'s `CandidatePrediction.model_artifact_id`, which
+`V2-P4-005` left as free text "by whatever identity `V2-P4-011` gives it" and `V2-P4-011` handed
+here. It is **not** attached to `AlphaModelRef.artifact_id`: see that contract for why the
+manifest's reference stays at the generic `CONTENT_ADDRESS_PATTERN`.
+"""
+
+ARTIFACT_UNADDRESSED_FIELDS: Final[Mapping[str, str]] = MappingProxyType({})
+"""Every `AlphaModelArtifact` field that is **recorded but not addressed** -- and there are none.
+
+`RUN_MANIFEST_UNADDRESSED_FIELDS`' shape, empty, and empty as a measurement rather than as a
+default. That mapping holds five kinds of field: two wall clocks, a lifecycle status, in-flight
+recovery bookkeeping and an observed host fact. This contract carries none of the five. Its one
+`datetime` is `training_cutoff`, which is the latest instant a training window closed on -- a
+property of the data the fit consumed, not of the clock the fit ran at -- and the field that
+*would* be a wall clock, `PredictionBatch.predicted_at`, is deliberately on the batch and not
+here. So there is nothing to exclude, and an artifact re-derived from the same training set on
+another day addresses to the same string without anything having to be kept out.
+
+Passed to `stable_model_id` rather than merely documented, so the mapping is load-bearing: adding
+a key to it really does remove that field from the address, and
+`tests/unit/domain/test_alpha_model_address.py` partitions `AlphaModelArtifact.model_fields` and
+`AlphaModelDeclaration.model_fields` against it, so field *n+1* fails until somebody either
+measures it moving the address or writes down why it may not. `V2-P4-013`, `V2-P4-014` and
+`V2-P4-015` each named one more of Implementation Decision 11's eleven fields while this
+contract stood still; without this audit the fifteenth field across the two models would have
+joined the digest with nobody deciding.
+
+`exclude` reaches only the top level, so a field added to `AlphaModelDeclaration` cannot be kept
+out through this mapping at all -- it would need an exclusion set of its own, and nothing has
+asked for one. The audit covers both models' field sets for exactly that reason.
 """
 
 
@@ -218,6 +296,32 @@ def validate_feature_ids(feature_ids: Sequence[str], *, role: str) -> None:
             "values travel positionally, so an unsorted or repeated list is two cross sections "
             "that agree on which features they carry and disagree on which column each is in"
         )
+
+
+def _unsign_zero(value: float) -> float:
+    """Collapse `-0.0` onto `0.0`, so one number has one canonical spelling (`V2-P4-016`).
+
+    The narrowest fix for a real hole in a content address. `-0.0 == 0.0` is `True` and every
+    arithmetic use of a coefficient in this repository treats them identically -- nothing divides
+    by one or reads its `copysign` -- so two artifacts differing only in the sign of a zero are
+    the *same* fitted model. `json.dumps` spells them `-0.0` and `0.0`, so before this they
+    addressed apart: two objects that compare equal with two content addresses, which is the
+    direction an address exists to rule out.
+
+    Neither shipped model can produce one, measured rather than assumed: `_pearson`'s covariance
+    is a `sum(...)` whose start value is the integer `0`, and `0 + -0.0` is `+0.0`; a tree's leaf
+    value is `math.fsum(...) / len(members)`, and `math.fsum` of any number of `-0.0`s is `+0.0`.
+    The hole is in the *contract* rather than in either implementation -- `AlphaModel` is a
+    Protocol, `nothing_forces_an_implementation_through_the_builders` says a caller may hand-build
+    an artifact, and `validate_parameters` admitted `-0.0` -- so it is closed where the contract
+    is, not where today's two arithmetics happen not to reach it.
+
+    Only the sign of zero. `1` and `1.0` are left alone on purpose: they compare equal too, and
+    `test_a_declaration_keeps_each_hyperparameter_at_the_type_it_was_given` is a shipped decision
+    that a declaration records what its author wrote. There the address is the stricter relation
+    and is right to be.
+    """
+    return 0.0 if value == 0.0 else value
 
 
 def _validate_values(
@@ -455,8 +559,14 @@ class AlphaModelDeclaration(BaseModel):
     A pydantic model rather than a dataclass because `V2-P4-016` addresses it through
     `domain/_identity.py::stable_model_id`, which takes a `BaseModel`. Every field here is one
     Implementation Decision 11 names -- but **not** every field D11 names is here, and the gap
-    is enumerated in `d11_names_eleven_things_and_this_artifact_carries_six` rather than left
-    for `V2-P4-016` to discover.
+    is enumerated in `d11_names_eleven_things_and_this_artifact_carries_seven`.
+
+    **Every field here reaches the artifact's address, and there is no way to keep one out.**
+    `stable_model_id`'s `exclude` reaches only the top level, so `ARTIFACT_UNADDRESSED_FIELDS`
+    cannot name anything on this model; a field that had to be recorded and not addressed would
+    need an exclusion set of its own, and nothing has asked for one.
+    `tests/unit/domain/test_alpha_model_address.py` holds this field set against a per-field
+    sweep, so a ninth field fails until it is measured to move the address.
 
     `name` and `family` are two facts, not one spelling of one. `name` is the handle a
     declaration's author chose (`"momentum_5d_ridge"`); `family` is fixed by the implementation
@@ -500,21 +610,24 @@ class AlphaModelDeclaration(BaseModel):
                 raise ValueError("a hyperparameter carries a blank name")
             if isinstance(item, float) and not math.isfinite(item):
                 raise ValueError(f"hyperparameter {key!r} carries {item!r}, which is not finite")
-        return value
+        return tuple(
+            (key, _unsign_zero(item) if isinstance(item, float) else item) for key, item in value
+        )
 
 
 class AlphaModelArtifact(BaseModel):
     """What a fit produced: the declaration, what the training set was, and what was learned.
 
-    Carries no id, and that absence is `V2-P4-010`'s decision rather than an omission: which
-    prefix a quantitative model artifact takes and which of these fields its digest is computed
-    over are `V2-P4-016`'s, and `AlphaModelRef.artifact_id` is already pattern-bound to
-    "something `stable_model_id` produced". The six things Implementation Decision 11 names that
-    belong to a *fit* are all here to be hashed when that issue arrives -- training cutoff,
-    horizon, feature version, parameters, seed, code version -- so `V2-P4-016` adds a computed
-    field rather than reopening this contract. The five it names that do **not** belong to a fit
+    Carries **no declared id** and one computed one, which is `V2-P4-010`'s decision and
+    `V2-P4-011`'s framing both kept: the field set below is byte-identical to what that issue
+    shipped, and `artifact_id` is a `computed_field` that `stable_model_id
+    (exclude_computed_fields=True)` is built to ignore, so the address cannot depend on itself
+    and no stored payload had to move for it. The seven things Implementation Decision 11 names
+    that belong to a *fit* are all reachable here -- training cutoff, horizon, feature version,
+    parameters, seed, code version and now the content hash -- and the four it names that do not
     are absent by issue, not by oversight: see
-    `d11_names_eleven_things_and_this_artifact_carries_six`.
+    `d11_names_eleven_things_and_this_artifact_carries_seven` for where each went, including why
+    the split policy and the metrics are on the fold and the evaluation rather than here.
 
     `feature_ids` and `training_example_count` are not on D11's list and are here anyway,
     because `artifact_for` measures them off the training set. They are what makes
@@ -562,7 +675,53 @@ class AlphaModelArtifact(BaseModel):
         for key, item in value:
             if not math.isfinite(item):
                 raise ValueError(f"parameter {key!r} carries {item!r}, which is not finite")
-        return value
+        return tuple((key, _unsign_zero(item)) for key, item in value)
+
+    @computed_field(return_type=str)  # type: ignore[prop-decorator]
+    @property
+    def artifact_id(self) -> str:
+        """Return this fit's content address (`V2-P4-016`).
+
+        `stable_model_id(prefix="mdl", ...)` over every field below and every field of the
+        declaration inside it, less `ARTIFACT_UNADDRESSED_FIELDS`, which is empty and says why.
+        The digest inputs were chosen by measurement, not by reading Implementation Decision 11
+        down the page: `tests/unit/backtest/test_artifact_address_collisions.py` tries five
+        candidate definitions against artifacts fitted on `V2-P4-013`'s real folds and each one
+        but this collides on a real case -- the declaration alone cannot tell two folds apart,
+        dropping `parameters` cannot tell a model that learned `-0.75` from one that learned
+        `0.0` on the same thirty-two rows, and dropping `training_example_count` cannot tell a
+        fit on twenty-four rows from one on sixteen with the same cutoff.
+
+        **What is not here is as decided as what is.** Implementation Decision 11's *split
+        policy* and *metrics* fields are both absent, and neither is an oversight:
+
+        - A **split policy** is how the training rows were chosen, and this address is over what
+          the fit consumed. The half of a `WalkForwardFold` that changes the fit -- the purge and
+          the embargo -- reaches this digest already, through the `training_cutoff` and
+          `training_example_count` it left behind. The half that does not, the test block, is not
+          an input to the fit at all: two folds differing only in `test_day_count` produce
+          **byte-identical** artifacts (measured), so addressing the policy would give one fitted
+          model two addresses, which is the failure direction this repository has paid for before
+          (`FactorInputRef.fetched_at`). `V2-P4-014`'s `FoldEvaluation` already carries
+          `first_test_day` beside the artifact, which is where a reader looks for the block.
+        - A **metric** is a measurement *of* this artifact taken on rows it never trained on, so
+          putting one here would make the identity of a fit depend on how it was later judged --
+          and `FoldEvaluation` carries the artifact by value, so the artifact would end up
+          containing the numbers that contain it. `V2-P3-014`'s split, reused: the declaration
+          gets an id and the answer gets its own.
+
+        Not cached, and `computed_field`s in this repository are not: ADR-0003 records the defect
+        of reading one inside a per-security loop. Measured here at **0.017 ms** for the rank
+        baseline's three parameters and **0.399 ms** for `V2-P4-015`'s 900-node encoded ensemble
+        -- linear in the table and four orders below that model's 4.55 s fit -- so `V2-P4-015`'s
+        question of whether hundreds of `(str, float)` rows want a different storage form is not
+        the digest's to answer. Read it once outside a loop anyway, `panel_factors.py`'s rule.
+        """
+        return stable_model_id(
+            prefix=ALPHA_MODEL_ARTIFACT_PREFIX,
+            model=self,
+            exclude=frozenset(ARTIFACT_UNADDRESSED_FIELDS),
+        )
 
     def require_features(self, cross_section: FeatureCrossSection) -> None:
         """Refuse a cross section whose feature list is not this artifact's, by name.
@@ -837,39 +996,99 @@ class FittedAlphaModel(Protocol):
 
 KNOWN_ALPHA_MODEL_LIMITATIONS: Final[tuple[AlphaModelLimitation, ...]] = (
     AlphaModelLimitation(
-        code="the_fitted_artifact_carries_no_content_address",
+        code="the_address_is_over_the_fit_and_not_over_the_rule_that_chose_it",
         detail=(
-            "AlphaModelArtifact carries the training cutoff, the feature version, the "
-            "hyperparameters, the fitted parameters, the seed and the code commit -- "
-            "Implementation Decision 11's whole list -- and no id. V2-P4-010 decided that the "
-            "prefix and the digest field set are V2-P4-016's, so computing one here would be "
-            "deciding that issue's question early and in the wrong module. Until it lands a "
-            "PredictionBatch names its model by value rather than by address, which is strictly "
-            "more information than an address and is why V2-P4-016 is an addition rather than a "
-            "redesign. backtest/candidate_ranking.py's CandidatePrediction.model_artifact_id "
-            "stays free text for the same reason."
+            "V2-P4-016 addresses AlphaModelArtifact by its whole content: the declaration, the "
+            "feature list, the training cutoff, the row count and the fitted parameters. What "
+            "that does NOT identify is which rule selected those rows. The artifact records how "
+            "many training examples there were and not which ones, so two different training "
+            "sets of the same size, ending at the same cutoff, that a given model fits to the "
+            "same parameters share one address -- and two walk-forward folds whose purge and "
+            "embargo differ but whose surviving rows do not are correctly one artifact, which is "
+            "the same fact seen from the useful side. Closing it would mean putting a digest of "
+            "the training rows on the artifact, which is a field rather than a computed value "
+            "and belongs to whichever issue first stores a training set: V2-P4-017. What is "
+            "structural today is that everything the fit consumed which the artifact does record "
+            "reaches the address, measured field by field in "
+            "tests/unit/domain/test_alpha_model_address.py."
         ),
     ),
     AlphaModelLimitation(
-        code="d11_names_eleven_things_and_this_artifact_carries_six",
+        code="the_manifest_slot_still_admits_an_address_from_another_plane",
+        detail=(
+            "RunManifest.alpha_model_versions holds AlphaModelRefs whose artifact_id is bound to "
+            "CONTENT_ADDRESS_PATTERN -- any address this repository computed -- rather than to "
+            "ALPHA_MODEL_ARTIFACT_ID_PATTERN, so a fct_ factor address or an rnk_ ranking "
+            "address validates in the quantitative model slot. That is V2-P4-010's decision and "
+            "V2-P4-016 left it standing rather than narrowing it, for a layering reason: "
+            "domain/run.py would have to import domain/alpha_model.py to name the narrower "
+            "pattern, which puts the whole label/adjustment/calendar import weight of the model "
+            "contract behind every RunManifest, or it would have to spell the pattern a second "
+            "time, which is what this repository refuses everywhere else. "
+            "CandidatePrediction.model_artifact_id IS narrowed, because backtest/ may already "
+            "import domain/alpha_model.py and a prediction can only have come from one kind of "
+            "artifact. So what keeps the manifest slot honest is that a producer stamps mdl_, "
+            "and no producer exists yet -- alpha_model_versions is () on every path this build "
+            "can execute."
+        ),
+    ),
+    AlphaModelLimitation(
+        code="a_seed_in_the_address_is_read_by_no_model_in_this_build",
+        detail=(
+            "AlphaModelDeclaration.seed is Implementation Decision 11's field and it reaches the "
+            "content address, so two declarations that differ only in it address apart. No model "
+            "in this repository reads it: backtest/alpha_model.py, backtest/alpha_baseline.py "
+            "and backtest/alpha_tree.py each say 'carried and unused' because none of the three "
+            "draws a number. Measured in "
+            "tests/unit/backtest/test_artifact_address_collisions.py -- two seeds, "
+            "byte-identical coefficients, two addresses -- so today the seed separates "
+            "declarations without separating fits. This is V2-P0B-009's seam F87 one plane down: "
+            "that issue built the mechanism (runtime/seeding.py really threads "
+            "request.random_seed into every registered source) and honestly recorded that no "
+            "production component consumes it. The address is right to carry it -- the first "
+            "stochastic model makes it load-bearing with no contract change -- and until then it "
+            "is a declared input rather than an observed one."
+        ),
+    ),
+    AlphaModelLimitation(
+        code="an_unknown_code_commit_is_one_constant_shared_by_every_build_that_has_none",
+        detail=(
+            "AlphaModelDeclaration.code_commit reaches the address, and V2-P0B-009 made the "
+            "value real: resolve_code_commit() returns git rev-parse HEAD, with a literal "
+            "'-dirty' suffix when the workspace is not clean, and falls back to a build-time "
+            "stamp. Its bottom tier is UNKNOWN_CODE_COMMIT, a single constant returned for every "
+            "wheel installed with no build stamp and no .git -- so two genuinely different "
+            "builds addressed under it produce the same code version and, given the same data, "
+            "the same artifact address. That is honest rather than plausible, which is the whole "
+            "difference from the 'baseline/v1' V2-P4-010 found in the model slot, and it is "
+            "still a real limit on what an mdl_ address proves. Nothing in domain/ can close it: "
+            "domain-purity forbids the edge into runtime/, so the commit is a declared input a "
+            "producer supplies, and this contract cannot check that it supplied a real one."
+        ),
+    ),
+    AlphaModelLimitation(
+        code="d11_names_eleven_things_and_this_artifact_carries_seven",
         detail=(
             "Implementation Decision 11 requires a model artifact to record the training "
             "cutoff, the target and horizon, the universe, the feature version, the "
             "preprocessing, the split policy, the parameters, the seed, the code version, the "
-            "metrics and the content hash. AlphaModelArtifact carries six of those eleven -- "
-            "cutoff, horizon, feature version, parameters (declared and fitted), seed and code "
-            "commit -- plus two D11 does not name (feature_ids and training_example_count, both "
-            "measured off the training set by artifact_for). The other five are each owned "
-            "downstream and are absent here rather than stubbed: the universe version and the "
-            "preprocessing belong to the feature matrix and are V2-P4-012's (Story S26 names "
-            "both, and a preprocessing policy is already content-addressed by "
-            "FactorTransformSpec.transform_id); the split policy is V2-P4-013's; the metrics "
-            "are an evaluation and are V2-P4-014's and V2-P4-015's; the content hash is "
-            "V2-P4-016's by V2-P4-010's decision. The target is not a field because this "
-            "repository has exactly one -- OutcomeLabel.realized_return -- so a slot for it "
-            "would record a constant, which is the objection V2-P4-010 raised against "
-            "AgentVersion.version. This entry exists so V2-P4-016 finds the gap enumerated "
-            "instead of discovering it while deciding what to hash."
+            "metrics and the content hash. AlphaModelArtifact carries seven of those eleven -- "
+            "cutoff, horizon, feature version, parameters (declared and fitted), seed, code "
+            "commit and, since V2-P4-016, the content hash -- plus two D11 does not name "
+            "(feature_ids and training_example_count, both measured off the training set by "
+            "artifact_for). The other four are each owned elsewhere and are absent rather than "
+            "stubbed: the universe version and the preprocessing belong to the feature matrix "
+            "and are V2-P4-012's (Story S26 names both, and a preprocessing policy is already "
+            "content-addressed by FactorTransformSpec.transform_id, while feature_version is "
+            "now a stable_model_id over both); the split policy and the metrics were left here "
+            "by V2-P4-013 and V2-P4-014 respectively, and V2-P4-016 placed both OUTSIDE this "
+            "contract on measurement rather than on taste -- a test block is not an input to a "
+            "fit (two folds differing only in test_day_count produce byte-identical artifacts) "
+            "and a metric is a judgement of the artifact taken on rows it never trained on, so "
+            "FoldEvaluation carries first_test_day and every number beside the artifact it "
+            "measured. The target is not a field because this repository has exactly one -- "
+            "OutcomeLabel.realized_return -- so a slot for it would record a constant, which is "
+            "the objection V2-P4-010 raised against AgentVersion.version."
         ),
     ),
     AlphaModelLimitation(
@@ -960,7 +1179,17 @@ KNOWN_ALPHA_MODEL_LIMITATIONS: Final[tuple[AlphaModelLimitation, ...]] = (
         ),
     ),
 )
-"""Eight named boundaries on what this contract says, in `KNOWN_LABEL_LIMITATIONS`' form.
+"""Eleven named boundaries on what this contract says, in `KNOWN_LABEL_LIMITATIONS`' form.
+
+Eight at `V2-P4-011`; `V2-P4-016` rewrote two of them and added three. The two rewritten are the
+ones that had become **false**: `the_fitted_artifact_carries_no_content_address` described an
+artifact with no id, and `d11_names_eleven_things_and_this_artifact_carries_six` counted the
+content hash among the missing. The three added are what the address does not prove --
+`the_address_is_over_the_fit_and_not_over_the_rule_that_chose_it`,
+`a_seed_in_the_address_is_read_by_no_model_in_this_build` and
+`an_unknown_code_commit_is_one_constant_shared_by_every_build_that_has_none` -- plus
+`the_manifest_slot_still_admits_an_address_from_another_plane`, which is what that issue chose
+*not* to narrow and why.
 
 Every `code` is required to appear as a string literal in executable test code by
 `tests/unit/test_known_limitation_registries.py`, which is what keeps a rename from silently

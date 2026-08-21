@@ -277,6 +277,13 @@ def test_a_declaration_keeps_each_hyperparameter_at_the_type_it_was_given() -> N
     Worth pinning because pydantic's union coercion is where that would silently happen, and a
     stored artifact whose `use_bias` reads `1` is one nobody can compare against a declaration
     that wrote `True`.
+
+    **`0` and `False` are here because `V2-P4-016`'s signed-zero normalisation is.** That
+    validator now rewrites the tuple, and a mutation sweep measured that widening its
+    `isinstance(item, float)` guard to `int | float` left every other assertion green while
+    turning a declared `0` into `0.0` and a declared `False` into `0.0` -- a type change and, for
+    `False`, a *value* change, both invisible to `==`. The two zero-valued scalars are what
+    separates the shipped guard from that one.
     """
     declared = AlphaModelDeclaration(
         name="probe",
@@ -285,13 +292,24 @@ def test_a_declaration_keeps_each_hyperparameter_at_the_type_it_was_given() -> N
         feature_version="features/v1",
         seed=0,
         code_commit="abcdef0",
-        hyperparameters=(("alpha", 0.5), ("depth", 3), ("label", "ic"), ("use_bias", True)),
+        hyperparameters=(
+            ("alpha", 0.5),
+            ("depth", 3),
+            ("floor", 0),
+            ("label", "ic"),
+            ("shuffle", False),
+            ("use_bias", True),
+        ),
     )
 
+    assert declared.hyperparameters[2] == ("floor", 0)
+    assert declared.hyperparameters[4] == ("shuffle", False)
     assert [type(value) for _key, value in declared.hyperparameters] == [
         float,
         int,
+        int,
         str,
+        bool,
         bool,
     ]
 
@@ -584,6 +602,14 @@ def test_a_batch_round_trips_through_json_so_v2_p4_017_can_store_one() -> None:
     one that has never been read back. The re-validated batch compares equal, which also proves
     the leakage and ordering validators pass on the deserialized form rather than only on the
     constructed one.
+
+    `exclude_computed_fields=True` arrived with `V2-P4-016`, and it is the whole of what that
+    issue costs the transport form: a nested `AlphaModelArtifact` now carries an `artifact_id`,
+    and `extra="forbid"` means a dump that kept it cannot be re-validated by the model that
+    produced it. That is this repository's standing arrangement rather than a new one -- see
+    `backtest/factor_experiment.py::experiment_payload`, which states it, and every
+    `storage/*.py` writer, which does it -- and the address survives anyway, because it is a
+    function of exactly the fields the payload carries.
     """
     artifact = artifact_for(
         declaration=fixtures.declaration(),
@@ -601,24 +627,32 @@ def test_a_batch_round_trips_through_json_so_v2_p4_017_can_store_one() -> None:
         ),
     )
 
-    restored = PredictionBatch.model_validate_json(batch.model_dump_json())
+    restored = PredictionBatch.model_validate_json(
+        batch.model_dump_json(exclude_computed_fields=True)
+    )
 
     assert restored == batch
     assert restored.artifact.parameters == (("centre", 0.21), ("sign", 1.0))
     assert restored.artifact.declaration.hyperparameters == (("feature_id", fixtures.MOMENTUM),)
+    assert restored.artifact.artifact_id == batch.artifact.artifact_id
 
 
-def test_the_artifact_carries_no_id_because_v2_p4_016_owns_it() -> None:
-    """Stated as a field-set assertion, so `V2-P4-016` adding one is a deliberate act.
+def test_v2_p4_016_added_an_address_without_moving_a_single_declared_field() -> None:
+    """`V2-P4-011`'s load-bearing framing, checked after the fact rather than promised.
 
-    `V2-P4-010` decided the prefix and the digest field set are that issue's. If this contract
-    had minted an address, `V2-P4-016` would have had to change one rather than add one, and a
-    changed address moves `RunManifest.alpha_model_versions`, which moves `run_manifest_id`,
-    which moves `decision_id` -- the migration `V2-P4-010` already paid for once.
+    That issue argued the address should be an **addition**: a changed field set would have moved
+    `RunManifest.alpha_model_versions`, `run_manifest_id` and `decision_id` with it, the migration
+    `V2-P4-010` already paid for once. `V2-P4-016` did exactly that -- `model_fields` is
+    byte-identical to what `V2-P4-011` shipped and the whole of the new surface is one
+    `computed_field`, which is what `stable_model_id(exclude_computed_fields=True)` is built to
+    ignore, so an artifact's address cannot depend on itself.
+
+    Asserted on both halves. The declared set has no `_id` in it and the computed set has exactly
+    one, so a *field* named like an identity in a later issue still fails here.
     """
-    fields = set(AlphaModelArtifact.model_fields)
+    declared = set(AlphaModelArtifact.model_fields)
 
-    assert fields == {
+    assert declared == {
         "schema_version",
         "declaration",
         "feature_ids",
@@ -626,17 +660,24 @@ def test_the_artifact_carries_no_id_because_v2_p4_016_owns_it() -> None:
         "training_example_count",
         "parameters",
     }
-    assert not any(name == "id" or name.endswith("_id") for name in fields)
+    assert not any(name == "id" or name.endswith("_id") for name in declared)
+    assert set(AlphaModelArtifact.model_computed_fields) == {"artifact_id"}
 
 
-def test_the_artifact_carries_six_of_decision_elevens_eleven_fields_and_says_which() -> None:
-    """The gap enumerated rather than left for `V2-P4-016` to discover.
+def test_the_artifact_carries_seven_of_decision_elevens_eleven_fields_and_says_which() -> None:
+    """The gap enumerated, and re-counted by the issue that closed one of it.
 
-    Implementation Decision 11 names eleven things a model artifact records. Six of them are
-    reachable off an `AlphaModelArtifact` today; the other five belong to `V2-P4-012` (universe
-    version, preprocessing), `V2-P4-013` (split policy), `V2-P4-014`/`V2-P4-015` (metrics) and
-    `V2-P4-016` (content hash). Asserted as a field-set so that adding one of the five here --
-    or quietly dropping one of the six -- has to be a deliberate act.
+    Implementation Decision 11 names eleven things a model artifact records. Seven are reachable
+    off an `AlphaModelArtifact` since `V2-P4-016` added the content hash to the six `V2-P4-011`
+    shipped. Of the remaining four, two belong to the feature plane (`V2-P4-012`: universe
+    version, preprocessing) and two were deferred *here* and then deliberately placed elsewhere:
+    the split policy is a property of the fold and not of the fit, and the metrics are a
+    judgement of the artifact and live on `FoldEvaluation` beside it.
+
+    Asserted as a field-set so that adding one of the four -- or quietly dropping one of the
+    seven -- has to be a deliberate act. `content_hash` is *still* absent from `model_fields`,
+    which is the point of `test_v2_p4_016_added_an_address_without_moving_a_single_declared_field`
+    stated from the other side: the eleventh thing arrived as a computed value.
     """
     artifact = artifact_for(
         declaration=fixtures.declaration(),
@@ -652,6 +693,7 @@ def test_the_artifact_carries_six_of_decision_elevens_eleven_fields_and_says_whi
         "fitted parameters": artifact.parameters,
         "seed": artifact.declaration.seed,
         "code version": artifact.declaration.code_commit,
+        "content hash": artifact.artifact_id,
     }
     assert all(value is not None for value in carried.values())
 
@@ -661,20 +703,27 @@ def test_the_artifact_carries_six_of_decision_elevens_eleven_fields_and_says_whi
     detail = next(
         item.detail
         for item in KNOWN_ALPHA_MODEL_LIMITATIONS
-        if item.code == "d11_names_eleven_things_and_this_artifact_carries_six"
+        if item.code == "d11_names_eleven_things_and_this_artifact_carries_seven"
     )
-    for issue in ("V2-P4-012", "V2-P4-013", "V2-P4-014", "V2-P4-015", "V2-P4-016"):
+    for issue in ("V2-P4-012", "V2-P4-013", "V2-P4-014", "V2-P4-016"):
         assert issue in detail
 
 
-def test_the_limitation_registry_names_eight_boundaries_with_no_repeated_code() -> None:
-    """`KNOWN_LABEL_LIMITATIONS`' form, and the codes each test in this suite cites."""
+def test_the_limitation_registry_names_eleven_boundaries_with_no_repeated_code() -> None:
+    """`KNOWN_LABEL_LIMITATIONS`' form, and the codes each test in this suite cites.
+
+    Eight at `V2-P4-011`, eleven after `V2-P4-016` rewrote the two that had become false and
+    added three about what an address does not prove.
+    """
     codes = [item.code for item in KNOWN_ALPHA_MODEL_LIMITATIONS]
 
-    assert len(codes) == len(set(codes)) == 8
+    assert len(codes) == len(set(codes)) == 11
     assert set(codes) == {
-        "d11_names_eleven_things_and_this_artifact_carries_six",
-        "the_fitted_artifact_carries_no_content_address",
+        "d11_names_eleven_things_and_this_artifact_carries_seven",
+        "the_address_is_over_the_fit_and_not_over_the_rule_that_chose_it",
+        "the_manifest_slot_still_admits_an_address_from_another_plane",
+        "a_seed_in_the_address_is_read_by_no_model_in_this_build",
+        "an_unknown_code_commit_is_one_constant_shared_by_every_build_that_has_none",
         "the_feature_version_is_a_name_this_contract_cannot_check",
         "nothing_forces_an_implementation_through_the_builders",
         "the_leakage_floor_is_not_a_purge_or_an_embargo",

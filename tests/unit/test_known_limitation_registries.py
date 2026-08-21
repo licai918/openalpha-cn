@@ -15,7 +15,7 @@ inside a docstring, which is prose the runner never reads.
 ## Why the mechanism is not copied as it stands
 
 `007`'s form is "one test per entry, named after the entry". At three entries that is exactly
-right. Across the thirty code-carrying registries there are **275** entries -- 69 in
+right. Across the thirty code-carrying registries there are **278** entries -- 69 in
 `KNOWN_PANEL_LIMITATIONS` alone -- and it stops being right somewhere well before that, for
 three reasons and not one:
 
@@ -257,17 +257,27 @@ moved the totals from 225 / 69 to 229 / 69.
 `KNOWN_ALPHA_MODEL_LIMITATIONS` (`V2-P4-011`) is the twenty-sixth, and it is the first that
 bounds a **contract for something this repository does not yet build**: the quantitative
 `AlphaModel` boundary, whose feature matrix, walk-forward split, baselines, content address and
-prediction store are all downstream issues. Its eight entries say which of those it deliberately
-does not decide -- that the fitted artifact carries every field Implementation Decision 11 names
-and no address, because `V2-P4-010` gave the prefix and the digest field set to `V2-P4-016`;
-that `feature_version` is a name and `V2-P4-012` owns the digest behind it; that the leakage
-floor `PredictionBatch` installs (`as_of >= training_cutoff`) is not the purge or the embargo
-`V2-P4-013` owns; that "before the outcome is known" needs a calendar and a store and is
-`V2-P4-017`'s; and that the reference model under `backtest/` is not a baseline. The other two
-bound what the shape cannot force: nothing routes an implementation through `artifact_for` or
-`prediction_batch_for`, and one abstained security can leave a whole `CandidateRanking` carrying
-no prediction, because `rank_candidates` enforces all-or-nothing per ranking while abstention
-answers per security.
+prediction store are all downstream issues. Its eight entries said which of those it deliberately
+did not decide -- that `feature_version` is a name and `V2-P4-012` owns the digest behind it;
+that the leakage floor `PredictionBatch` installs (`as_of >= training_cutoff`) is not the purge
+or the embargo `V2-P4-013` owns; that "before the outcome is known" needs a calendar and a store
+and is `V2-P4-017`'s; that the fitted artifact carried no address at all, because `V2-P4-010`
+gave the prefix and the digest field set to `V2-P4-016`; and that the reference model under
+`backtest/` is not a baseline. Two more bound what the shape cannot force: nothing routes an
+implementation through `artifact_for` or `prediction_batch_for`, and one abstained security can
+leave a whole `CandidateRanking` carrying no prediction, because `rank_candidates` enforces
+all-or-nothing per ranking while abstention answers per security.
+
+**`V2-P4-016` is the first issue on this chain to find two of a registry's entries false rather
+than incomplete**, and it rewrote both instead of appending around them: the artifact now
+carries an address, and the count of Implementation Decision 11's fields it holds moved from six
+to seven. Three entries were added for what an address does **not** prove -- that it identifies
+what a fit consumed and not which rule chose those rows, that the seed inside it is read by no
+model in this build (`V2-P0B-009`'s F87 one plane down, measured: two seeds, byte-identical
+coefficients, two addresses), and that `UNKNOWN_CODE_COMMIT` is one constant shared by every
+build with no git and no stamp -- plus one for what that issue deliberately did not narrow, the
+manifest slot that still admits a `fct_` address where an `mdl_` belongs. Eleven entries; the
+totals moved from 275 / 69 to **278 / 69**.
 
 **The arithmetic above was 5 behind before this entry arrived**, and the module that exists to
 stop that says so rather than quietly correcting it: at `c2c8e36` the prose and the floor both
@@ -276,7 +286,7 @@ is the drift this file's own executable assertions -- not its prose -- are what 
 figures here are now the measured 247 / 69 and the floor below moves with them.
 
 `KNOWN_FEATURE_MATRIX_LIMITATIONS` (`V2-P4-012`) is the twenty-seventh, and it is the answer to
-one of the twenty-sixth's eight entries: `the_feature_version_is_a_name_this_contract_cannot_check`
+one of the twenty-sixth's entries: `the_feature_version_is_a_name_this_contract_cannot_check`
 said `V2-P4-012` owned the digest behind that name. Its five entries bound the plane that now
 computes it -- what the two versions do **not** address (neither is a digest over the stored
 values, and the third address that would be is `V2-P4-016`'s), what the transform's own
@@ -522,5 +532,5 @@ def test_the_registries_together_carry_the_entry_count_the_report_folds() -> Non
 
     assert len(codes["KNOWN_PANEL_LIMITATIONS"]) == folded + plane_wide + 1
     assert all(codes[registry] for registry in codes)
-    assert sum(len(entries) for entries in codes.values()) >= 275
+    assert sum(len(entries) for entries in codes.values()) >= 278
     assert len(codes["KNOWN_PANEL_LIMITATIONS"]) >= 69

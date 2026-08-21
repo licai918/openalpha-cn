@@ -74,6 +74,7 @@ from openalpha_cn.backtest.cross_section import (
 )
 from openalpha_cn.backtest.execution import AShareExecutionPolicy, MarketBar
 from openalpha_cn.decisions.risk import RiskGate
+from openalpha_cn.domain.alpha_model import AlphaModelArtifact, AlphaModelDeclaration
 from openalpha_cn.domain.factor import (
     FactorBuildManifest,
     FactorDefinition,
@@ -108,6 +109,15 @@ COMMIT: Final[str] = "a1b2c3d"
 CONFIG: Final[str] = "c" * 64
 CAPITAL: Final[Decimal] = Decimal("100000")
 HORIZON: Final[str] = "5d"
+MODEL_ARTIFACT_ID: Final[str] = "mdl_" + "0" * 24
+"""A syntactically real `AlphaModelArtifact` address, which `V2-P4-016` is what makes possible.
+
+`CandidatePrediction.model_artifact_id` was free text until that issue and this file's three
+predictions carried `"mdl_pending_v2_p4_011"`, `"mdl_probe"` and `"mdl"` -- three spellings of
+"there is no model yet", which is exactly the placeholder a pattern exists to refuse. Written as
+a literal rather than fitted here, `test_manifest_component_provenance.ARTIFACT`'s precedent: the
+field's contract is the shape, and this module has no fit to take a real digest from.
+"""
 
 
 def code(index: int) -> str:
@@ -513,6 +523,7 @@ def test_this_ranking_grows_no_import_of_its_own_into_the_order_machinery() -> N
         "openalpha_cn.backtest.cross_section",
         "openalpha_cn.backtest.factor_ic",
         "openalpha_cn.domain._identity",
+        "openalpha_cn.domain.alpha_model",
         "openalpha_cn.domain.execution",
         "openalpha_cn.domain.factor",
         "openalpha_cn.domain.factor_neutralization",
@@ -1303,7 +1314,7 @@ def test_predictions_are_all_or_nothing_across_one_ranking() -> None:
     funnel = _funnel()
     subjects = tuple(entry.subject for entry in funnel.shortlist)
     prediction = CandidatePrediction(
-        model_artifact_id="mdl_pending_v2_p4_011", predicted_value=0.02, horizon=HORIZON
+        model_artifact_id=MODEL_ARTIFACT_ID, predicted_value=0.02, horizon=HORIZON
     )
 
     whole = _rank(funnel, predictions=dict.fromkeys(subjects, prediction))
@@ -1369,12 +1380,12 @@ def test_a_prediction_over_another_window_is_refused() -> None:
             predictions=dict.fromkeys(
                 subjects,
                 CandidatePrediction(
-                    model_artifact_id="mdl_probe", predicted_value=0.02, horizon="10d"
+                    model_artifact_id=MODEL_ARTIFACT_ID, predicted_value=0.02, horizon="10d"
                 ),
             ),
         )
     with pytest.raises(ValidationError):
-        CandidatePrediction(model_artifact_id="mdl_probe", predicted_value=0.02, horizon="3m")
+        CandidatePrediction(model_artifact_id=MODEL_ARTIFACT_ID, predicted_value=0.02, horizon="3m")
 
 
 # --------------------------------------------------------------------------------------------
@@ -1455,6 +1466,65 @@ def test_each_candidate_carries_the_content_address_v2_p4_025_gave_its_run() -> 
             prediction=None,
             risk_flags=(),
         )
+
+
+def test_a_prediction_names_a_fit_this_repository_computed_and_not_a_placeholder() -> None:
+    """`V2-P4-016` closing what `V2-P4-005` opened and `V2-P4-011` handed on.
+
+    `model_artifact_id` was `min_length=1, max_length=128` free text, and the three predictions in
+    this file carried three spellings of "there is no model yet". Now it is exactly what
+    `stable_model_id(prefix="mdl", ...)` produces -- proved against a real fitted
+    `AlphaModelArtifact` rather than against the pattern, so a change to either side shows -- and
+    every other shape is refused, including the three that used to live here and an address from
+    another plane that happens to be a content address.
+
+    **The two suffix cases are a mutation survivor made into an assertion.** Deleting the `$`
+    from the pattern left every test in this repository green while
+    `mdl_<24 hex>` followed by anything at all became a legal artifact id, and a 28-hex-digit
+    token did too -- which is `storage/factor_experiments.py`'s recorded `EXPERIMENT_ID_PATTERN`
+    defect (`re.match` against a `$`-anchored pattern) arriving through a different door. A
+    trailing newline is a *third* case and it behaves differently, measured rather than assumed:
+    `str_strip_whitespace=True` on this model strips it before the pattern is applied, so the id
+    is accepted **as the stripped value** rather than stored with a newline no caller can retype.
+    """
+    artifact = AlphaModelArtifact(
+        declaration=AlphaModelDeclaration(
+            name="rank_baseline",
+            family="cross_sectional_rank",
+            horizon=HORIZON,
+            feature_version="features/v1",
+            seed=7,
+            code_commit=COMMIT,
+        ),
+        feature_ids=("momentum_20d",),
+        training_cutoff=AS_OF,
+        training_example_count=32,
+        parameters=(("momentum_20d", 0.25),),
+    )
+
+    assert (
+        CandidatePrediction(
+            model_artifact_id=artifact.artifact_id, predicted_value=0.02, horizon=HORIZON
+        ).model_artifact_id
+        == artifact.artifact_id
+    )
+
+    for refused in (
+        "mdl",
+        "mdl_probe",
+        "mdl_pending_v2_p4_011",
+        "run_" + "0" * 24,
+        "fct_" + "a" * 24,
+        artifact.artifact_id + "zzz",
+        "mdl_" + "0" * 28,
+    ):
+        with pytest.raises(ValidationError, match="String should match pattern"):
+            CandidatePrediction(model_artifact_id=refused, predicted_value=0.02, horizon=HORIZON)
+
+    stripped = CandidatePrediction(
+        model_artifact_id=f"{artifact.artifact_id}\n", predicted_value=0.02, horizon=HORIZON
+    )
+    assert stripped.model_artifact_id == artifact.artifact_id
 
 
 def test_a_researched_name_with_no_run_manifest_id_is_refused() -> None:
@@ -1615,7 +1685,7 @@ def test_an_answer_about_a_name_the_funnel_did_not_shortlist_is_a_malformed_call
             exposures=None,
             predictions={
                 outsider: CandidatePrediction(
-                    model_artifact_id="mdl", predicted_value=0.0, horizon=HORIZON
+                    model_artifact_id=MODEL_ARTIFACT_ID, predicted_value=0.0, horizon=HORIZON
                 )
             },
         )
