@@ -70,6 +70,7 @@ from pathlib import Path
 from typing import Final
 
 import grimp
+import pytest
 from importlinter import api as importlinter_api
 from importlinter.cli import lint_imports
 
@@ -644,6 +645,13 @@ the whole point: `test_the_two_backtest_study_contracts_cover_every_module_in_th
 `backtest/*.py` is red until somebody either puts it in the contract or argues for it here.
 `V2-P4-004`'s `cross_section.py` was the tenth and `V2-P4-005`'s `candidate_ranking.py` the
 eleventh, and this test is what made each of them join both.
+
+**That test is the gate for a new file, and `lint-imports` alone is not**, which `V2-P4-093`
+measured rather than inferred: a probe module under `backtest/` importing `numpy` and
+`openalpha_cn.storage` gives `8 kept, 0 broken`, because neither target is on the whole-package
+contract and a new file is on neither enumerated list.
+`test_lint_imports_alone_does_not_stop_a_new_backtest_module_reaching_numpy_or_a_store` drives
+both halves in one place, so the distinction is a run rather than a sentence.
 """
 
 BACKTEST_MODULES_EXEMPT_FROM_THE_RUNTIME_CONTRACT: dict[str, str] = {
@@ -723,6 +731,46 @@ def test_the_two_backtest_study_contracts_cover_every_module_in_the_package() ->
         )
         vanished = sorted((sources | set(exempt)) - on_disk)
         assert not vanished, f"{contract_id} names {vanished}, which is not on disk"
+
+
+def test_lint_imports_alone_does_not_stop_a_new_backtest_module_reaching_numpy_or_a_store() -> None:
+    """`V2-P4-093`: which half of the gate actually catches a *new* file, measured.
+
+    The whole-package contract has `openalpha_cn.backtest` as its source, so it covers a new
+    module on arrival -- but only for what *it* forbids: `duckdb`, `pandas`, `scipy`, `sklearn`,
+    `openalpha_cn.panel` and the faces. `numpy` and `openalpha_cn.storage` are deliberately not
+    on that list, because `backtest/replay.py` composes a real store and reaches
+    `runtime/seeding.py`'s guarded `numpy` hook. They are forbidden by the two per-module
+    contracts instead, and those enumerate their sources -- which a new file is not one of.
+
+    So a probe module importing both passes `lint-imports` at **8 kept, 0 broken**, and what
+    goes red is the pytest assertion above it. That is a true statement about the CI pipeline
+    and a false one about `lint-imports` in isolation, and several docstrings said the strong
+    form. This is the measurement they now point at.
+
+    The other direction is asserted in the same breath -- the whole-package contract really does
+    reject the probe `test_the_backtest_gate_rejects_a_probe_that_reaches_duckdb_and_the_panel_
+    store` writes -- so "the contracts catch nothing new" is not what is being claimed either.
+    """
+    assert not _BACKTEST_PROBE_PATH.exists(), "probe file must not already exist"
+    _BACKTEST_PROBE_PATH.write_text(
+        '"""Temporary probe module for a layering test."""\n\n'
+        "import numpy\n\n"
+        "from openalpha_cn.storage.predictions import FilePredictionStore\n\n"
+        '__all__ = ["FilePredictionStore", "numpy"]\n',
+        encoding="utf-8",
+    )
+    try:
+        assert _lint_imports(config_filename=str(ROOT / "pyproject.toml"), no_cache=True) == 0, (
+            "if this now fails, a contract has been widened to cover a module it does not "
+            "name, and the sentences pointing at this test are stale in the good direction"
+        )
+        with pytest.raises(AssertionError, match="does not cover"):
+            test_the_two_backtest_study_contracts_cover_every_module_in_the_package()
+    finally:
+        _BACKTEST_PROBE_PATH.unlink()
+
+    assert _lint_imports(config_filename=str(ROOT / "pyproject.toml"), no_cache=True) == 0
 
 
 def test_the_backtest_contracts_forbid_the_targets_the_acceptance_probe_reached() -> None:

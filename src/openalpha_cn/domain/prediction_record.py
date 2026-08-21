@@ -489,6 +489,27 @@ KNOWN_PREDICTION_RECORD_LIMITATIONS: Final[tuple[PredictionRecordLimitation, ...
         ),
     ),
     PredictionRecordLimitation(
+        code="the_supersedes_edge_is_contract_only_because_no_face_offers_a_record_to_name",
+        detail=(
+            "Stronger than the entry above it, and measured by V2-P4-093 rather than intended: "
+            "`supersedes` is not merely optional, it is unreachable. `model_view.run_daily` is "
+            "the only caller of `FilePredictionStore.put` in `src/` and passes three keywords, "
+            "and none of the three faces above it carries a fourth -- no CLI flag, no field on "
+            "`DailyRunRequest` or `ModelDailyRunApiRequest`, no SDK parameter. So the "
+            "V2-P4-049-style referent check inside `put`, which refuses a `supersedes` naming "
+            "nothing held, cannot fire in shipped code: it guards a contract rather than a path "
+            "a user can walk, exactly as `load_index_prices` was a gated reader with no caller "
+            "until V2-P4-083 wired one. Exposing it was considered and declined here, and the "
+            "reason is the flag's own argument: every face would have to answer *which* record "
+            "is being corrected, and the only honest source of that is a `record_id` read off "
+            "an earlier run -- `held_prediction`'s address, not a daily run's input -- so the "
+            "flag belongs to whichever issue first gives a face a reason to hold one. What "
+            "stops this from being prose is "
+            "`test_the_supersedes_lineage_is_contract_only_and_no_shipped_face_can_supply_one`, "
+            "which reads the call sites off the AST and goes red the day somebody wires it."
+        ),
+    ),
+    PredictionRecordLimitation(
         code="one_fit_still_has_two_addresses_so_a_record_names_a_declaration_and_not_a_run",
         detail=(
             "V2-P4-016 measured that `seed` enters `AlphaModelArtifact.artifact_id` and does "
@@ -501,7 +522,7 @@ KNOWN_PREDICTION_RECORD_LIMITATIONS: Final[tuple[PredictionRecordLimitation, ...
         ),
     ),
 )
-"""Seven named boundaries on what a stored prediction proves.
+"""Eight named boundaries on what a stored prediction proves.
 
 Each code is asserted by set equality in `tests/unit/domain/test_prediction_record.py`, which is
 the shape every registry in this repository uses: equality rather than membership, because

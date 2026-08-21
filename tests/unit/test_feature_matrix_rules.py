@@ -9,11 +9,15 @@ limitation registry.
 
 from __future__ import annotations
 
+import ast
+import inspect
 from datetime import UTC, date, datetime
+from pathlib import Path
 from typing import Final
 
 import pytest
 
+from openalpha_cn import feature_matrix
 from openalpha_cn.domain.alpha_model import FeatureCrossSection, FeatureRow
 from openalpha_cn.domain.factor import set_digest
 from openalpha_cn.feature_matrix import (
@@ -69,6 +73,75 @@ def _processed_row(coverage: str, *, value: float | None = 1.5) -> tuple[object,
         INSTANT,
         (REVERSAL.factor_id, TRANSFORM.transform_id),
     )
+
+
+NUMBER_WORDS: Final[dict[int, str]] = {3: "three", 4: "four", 5: "five", 6: "six", 7: "seven"}
+"""Enough to spell the loader count `_PANEL_FAULTS`' own docstring has to agree with."""
+
+
+def _module_source() -> ast.Module:
+    return ast.parse(Path(inspect.getfile(feature_matrix)).read_text(encoding="utf-8"))
+
+
+def _attribute_docstring(tree: ast.Module, name: str) -> str:
+    """The bare string statement that follows a module-level assignment to `name`."""
+    body = tree.body
+    for index, node in enumerate(body[:-1]):
+        targets = node.targets if isinstance(node, ast.Assign) else []
+        if isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        if not any(isinstance(item, ast.Name) and item.id == name for item in targets):
+            continue
+        following = body[index + 1]
+        if (
+            isinstance(following, ast.Expr)
+            and isinstance(following.value, ast.Constant)
+            and isinstance(following.value.value, str)
+        ):
+            return following.value.value
+    raise AssertionError(f"{name} carries no attribute docstring")
+
+
+def test_the_panel_faults_tuple_counts_the_loaders_this_module_actually_calls() -> None:
+    """`V2-P4-093`: the docstring said six, the module calls five, and nothing could tell.
+
+    `_PANEL_FAULTS` is what turns a panel refusal into this module's own, and the number in its
+    docstring is the only statement of how wide it has to reach. A count in prose is a count
+    that drifts -- `tests/unit/test_known_limitation_registries.py`'s whole argument, arriving
+    here -- so the loaders are read off the AST and the sentence has to agree with them.
+
+    Five: three tier loaders in `_rows_for`, plus the calendar and the registry in the build. A
+    sixth is a deliberate widening of `_PANEL_FAULTS`, and this is where forgetting shows up.
+    """
+    tree = _module_source()
+    imported = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        and node.module is not None
+        and node.module.startswith("openalpha_cn.panel")
+        for alias in node.names
+        if alias.name.startswith("load_")
+    }
+    called_inside_a_read = {
+        inner.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_read"
+        for inner in ast.walk(node)
+        if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name)
+    } & imported
+
+    assert called_inside_a_read == {
+        "load_factor_observations",
+        "load_processed_factor_observations",
+        "load_neutralized_factor_observations",
+        "load_trading_calendar",
+        "load_stock_universe",
+    }
+    note = _attribute_docstring(tree, "_PANEL_FAULTS")
+    assert f"the {NUMBER_WORDS[len(called_inside_a_read)]} loaders this module calls" in note
 
 
 def test_a_processed_value_the_transform_imputed_is_read_as_missing() -> None:

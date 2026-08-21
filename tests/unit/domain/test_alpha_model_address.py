@@ -321,6 +321,62 @@ def test_two_artifacts_that_compare_equal_share_one_address() -> None:
     assert math.copysign(1.0, declared_negative.declaration.hyperparameters[0][1]) == 1.0
 
 
+def test_a_prediction_normalises_the_sign_of_a_zero_score_like_the_other_two_addressed_floats() -> (
+    None
+):
+    """`V2-P4-093`: the one addressed float that was left out of `_unsign_zero`.
+
+    `AlphaModelArtifact.parameters` and `AlphaModelDeclaration.hyperparameters` both collapse
+    `-0.0`; `Prediction.score` did not, and it reaches an address the same way -- through
+    `PredictionBatch`, which `PredictionRecord` carries by value. So two batches that compared
+    equal dumped two payloads and `V2-P4-017` filed them under two `record_id`s, which is the
+    direction-two failure this normalisation exists to rule out.
+
+    The contract-level half is here and the *driven* half is
+    `tests/unit/backtest/test_alpha_model_reference.py::
+    test_a_security_on_the_learned_centre_under_a_negative_sign_scores_positive_zero`, which is
+    where the issue's own "latent -- no shipped implementation produces the pair" was falsified:
+    the reference's `sign * (value - centre)` really does hand `-0.0` to a security sitting on
+    the learned centre under a negative sign. This test stays because
+    `nothing_forces_an_implementation_through_the_builders` -- a caller may hand-build a batch,
+    and the normalisation belongs to the contract rather than to one implementation's arithmetic.
+
+    The surviving spelling is asserted through `math.copysign` for
+    `test_two_artifacts_that_compare_equal_share_one_address`' reason: a normalisation onto
+    `-0.0` would satisfy every equality here just as well, and `==` cannot see the difference.
+    """
+    positive = Prediction(ts_code="000001.SZ", score=0.0)
+    negative = Prediction(ts_code="000001.SZ", score=-0.0)
+
+    assert positive == negative
+    assert negative.score is not None
+    assert math.copysign(1.0, negative.score) == 1.0
+
+    signed = PredictionBatch(
+        as_of=CUTOFF,
+        predicted_at=CUTOFF,
+        artifact=_artifact(),
+        predictions=(negative, Prediction(ts_code="000002.SZ", abstention="no feature row")),
+    )
+    unsigned = PredictionBatch(
+        as_of=CUTOFF,
+        predicted_at=CUTOFF,
+        artifact=_artifact(),
+        predictions=(positive, Prediction(ts_code="000002.SZ", abstention="no feature row")),
+    )
+
+    assert signed == unsigned
+    assert "-0.0" not in signed.model_dump_json()
+    assert stable_model_id(prefix="prd", model=signed) == stable_model_id(
+        prefix="prd", model=unsigned
+    )
+
+
+def test_an_abstention_is_left_alone_by_the_score_normalisation() -> None:
+    """The validator runs on `None` too, and `None` is not a number to unsign."""
+    assert Prediction(ts_code="000001.SZ", abstention="no feature row").score is None
+
+
 @pytest.mark.parametrize(
     ("parameters", "expected"),
     [

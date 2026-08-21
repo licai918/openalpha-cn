@@ -16,6 +16,7 @@ unmeasured prose:
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime, timedelta
 
 import alpha_model_fixtures as fixtures
@@ -188,6 +189,49 @@ def test_a_fitted_model_rebuilt_from_its_serialized_artifact_predicts_identicall
     assert restored.predict(section, predicted_at=AS_OF) == fitted.predict(
         section, predicted_at=AS_OF
     )
+
+
+def test_a_security_on_the_learned_centre_under_a_negative_sign_scores_positive_zero() -> None:
+    """`V2-P4-093`, and a correction of what that issue assumed about itself.
+
+    The signed zero `V2-P4-016` closed on `AlphaModelArtifact.parameters` was left open on
+    `Prediction.score`, and the acceptance filed it as **latent** -- "no shipped implementation
+    produces the pair". Measured here, that is false. `predict` is
+    `sign * (float(value) - centre)`, `fit` learns `sign = -1.0` whenever the below-centre group
+    realized the higher mean target, and `-1.0 * 0.0` is `-0.0` in IEEE 754. So a security whose
+    declared feature lands exactly on the learned centre is one this model hands `-0.0`, through
+    the shipped `predict`, on a cross section the contract admits.
+
+    The test above it covers the same row under `sign = +1`, where the product is `+0.0` and
+    nothing is at stake -- which is why the gap survived. A float landing exactly on a training
+    mean is a coincidence on a real panel rather than a certainty, so "latent" was not far
+    wrong; what it got wrong is *where* the value comes from, and a payload this model produced
+    is a different thing from one a caller hand-built.
+
+    `math.copysign` is what can see the fix. `==` cannot: `-0.0 == 0.0`.
+    """
+    fitted = SingleFeatureAlphaModel(declaration=fixtures.declaration()).fit(
+        fixtures.training_set(reverse=True)
+    )
+    parameters = dict(fitted.artifact.parameters)
+    centre = parameters[CENTRE_PARAMETER]
+
+    assert parameters[SIGN_PARAMETER] == -1.0
+    assert math.copysign(1.0, parameters[SIGN_PARAMETER] * (centre - centre)) == -1.0
+
+    batch = fitted.predict(
+        fixtures.cross_section(
+            as_of=AS_OF,
+            rows=(("000001.SZ", (centre, 0.05)), ("000002.SZ", (centre + 0.1, 0.04))),
+        ),
+        predicted_at=AS_OF,
+    )
+    scored = _scores(batch)["000001.SZ"]
+
+    assert scored is not None
+    assert scored == 0.0
+    assert math.copysign(1.0, scored) == 1.0
+    assert "-0.0" not in batch.model_dump_json()
 
 
 def test_a_security_with_no_value_abstains_and_is_still_in_the_batch() -> None:

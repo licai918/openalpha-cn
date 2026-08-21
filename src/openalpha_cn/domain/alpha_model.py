@@ -71,6 +71,13 @@ growing a numeric import.
 it must choose a home outside it. Nothing here has to move when it does, which is the point of
 a structural boundary; **which** home is `V2-P4-015`'s to argue.
 
+"Per module" is the load-bearing half and `V2-P4-093` measured it: a *new* `backtest/*.py` is on
+neither enumerated source list, so `import numpy` in one clears `lint-imports` at
+`8 kept, 0 broken`. What refuses it is `tests/unit/test_import_layering.py::
+test_the_two_backtest_study_contracts_cover_every_module_in_the_package`, which makes the new
+file join both lists -- and the numpy import then breaks the contract it just joined. The
+conclusion holds; the mechanism is two steps rather than one.
+
 ## What `fit` is given, and what `predict` returns
 
 The panel plane is cross-sectional and every read of it is as-of sensitive, so neither side of
@@ -806,6 +813,30 @@ class Prediction(BaseModel):
     ts_code: str = Field(min_length=1, max_length=32)
     score: float | None = None
     abstention: str | None = Field(default=None, min_length=1, max_length=256)
+
+    @field_validator("score")
+    @classmethod
+    def normalize_score(cls, value: float | None) -> float | None:
+        """Collapse `-0.0` onto `0.0`, the third and last addressed float to get this.
+
+        `V2-P4-016` closed the hole on `AlphaModelArtifact.parameters` and
+        `AlphaModelDeclaration.hyperparameters` and this field was left out, which `V2-P4-093`
+        measured: a score reaches an address too, through `PredictionBatch` and the
+        `PredictionRecord` that carries one by value, so two batches that compared equal dumped
+        two payloads and were filed under two `record_id`s -- one prediction with two names.
+
+        **Not latent, which is a correction of what `V2-P4-093` was filed as.** That issue read
+        "no shipped implementation produces the pair"; measured, `backtest/alpha_model.py`'s
+        `predict` is `sign * (float(value) - centre)`, its `fit` learns `sign = -1.0` whenever
+        the below-centre group realized the higher mean target, and `-1.0 * 0.0` is `-0.0`. So
+        any security whose declared feature lands exactly on the learned centre under a negative
+        sign is one the shipped reference model hands `-0.0`
+        (`test_a_security_on_the_learned_centre_under_a_negative_sign_scores_positive_zero`). A
+        float hitting a training mean exactly is a coincidence on a real panel rather than a
+        certainty, so the *frequency* the issue guessed at was fair; the *source* was not.
+        `_unsign_zero`'s own docstring is the argument for why only the sign of zero is touched.
+        """
+        return None if value is None else _unsign_zero(value)
 
     @model_validator(mode="after")
     def validate_exactly_one_answer(self) -> Self:

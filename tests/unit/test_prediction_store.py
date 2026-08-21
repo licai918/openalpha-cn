@@ -8,23 +8,31 @@ stamps is that a caller does not choose it.
 
 from __future__ import annotations
 
+import ast
+import inspect
 import json
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Final
 
 import pytest
 from alpha_model_fixtures import SHANGHAI, cross_section, fitted_reference, trading_calendar
 
+from openalpha_cn.api.app import ModelDailyRunApiRequest
 from openalpha_cn.domain.alpha_model import PredictionBatch
 from openalpha_cn.domain.labels import LabelError
 from openalpha_cn.domain.trading_calendar import CalendarHorizonError
 from openalpha_cn.domain.versioning import UnknownSchemaVersionError
+from openalpha_cn.model_view import DailyRunRequest
+from openalpha_cn.sdk import OpenAlphaSDK
 from openalpha_cn.storage.predictions import (
     PREDICTION_DOCUMENT_SUFFIX,
     FilePredictionStore,
     PredictionStoreError,
 )
+
+SOURCE_ROOT: Final[Path] = Path(__file__).resolve().parents[2] / "src" / "openalpha_cn"
 
 AS_OF = datetime(2026, 6, 15, 7, 0, tzinfo=UTC)
 IN_TIME = datetime(2026, 6, 15, 7, 30, tzinfo=UTC)
@@ -160,6 +168,54 @@ def test_a_recomputation_naming_a_record_this_store_does_not_hold_is_refused(
         )
 
     assert subject.list_ids() == ()
+
+
+def _prediction_put_call_sites() -> set[tuple[str, frozenset[str]]]:
+    """Every `<something>.put(batch=...)` call in `src/`, with the keywords it passes.
+
+    Keyed on `batch=`, which is this store's own shape -- the watchlist, shortlist and
+    experiment stores all take something else -- and read off the AST rather than off a grep so
+    that a keyword split across lines still counts.
+    """
+    found: set[tuple[str, frozenset[str]]] = set()
+    for path in sorted(SOURCE_ROOT.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr != "put":
+                continue
+            keywords = frozenset(item.arg for item in node.keywords if item.arg is not None)
+            if "batch" in keywords:
+                found.add((path.relative_to(SOURCE_ROOT).as_posix(), keywords))
+    return found
+
+
+def test_the_supersedes_lineage_is_contract_only_and_no_shipped_face_can_supply_one() -> None:
+    """`V2-P4-093`: the referent check above cannot fire in shipped code, and that is recorded.
+
+    `put` refuses a `supersedes` naming nothing held, which is `V2-P4-049`'s lesson applied. The
+    acceptance measured that nothing can reach it: `run_daily` is the only caller and passes
+    three keywords, and none of the three faces above it carries a fourth -- no CLI flag, no
+    field on either request model, no SDK parameter. So
+    `test_a_recomputation_naming_a_record_this_store_does_not_hold_is_refused` exercises a
+    contract, not a path a user can walk.
+
+    Exposing it was considered and not done, and the reason is recorded rather than implied:
+    every face that would have to carry the flag also has to answer *which* record is being
+    corrected, and the only honest source of that answer is a `record_id` the caller read off an
+    earlier run -- which is `held_prediction`'s address and not a daily run's input.
+    `the_supersedes_edge_is_contract_only_because_no_face_offers_a_record_to_name` is where a
+    reader meets it, and this test is what turns wiring one into a red rather than a surprise.
+    """
+    assert _prediction_put_call_sites() == {
+        ("model_view.py", frozenset({"batch", "calendar", "zone"}))
+    }
+    assert "supersedes" in inspect.signature(FilePredictionStore.put).parameters
+
+    assert "supersedes" not in DailyRunRequest.__annotations__
+    assert "supersedes" not in ModelDailyRunApiRequest.model_fields
+    assert "supersedes" not in inspect.signature(OpenAlphaSDK.run_daily_model).parameters
 
 
 def test_a_document_edited_after_it_was_filed_is_refused_on_read_by_name(tmp_path: Path) -> None:

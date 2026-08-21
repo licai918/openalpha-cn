@@ -1007,7 +1007,9 @@ KNOWN_BASELINE_LIMITATIONS: Final[tuple[BaselineLimitation, ...]] = (
             "value, and invisible in the fold's own number. Whether that generalises is exactly "
             "what this corpus cannot say: its two columns are rank-anticorrelated, so both "
             "coefficients rescale together and the order they produce cannot move at all. "
-            "V2-P4-022 owns the corpus that could answer it."
+            "V2-P4-022 owns the corpus that could answer it. This entry and its neighbour "
+            "every_number_this_module_has_produced_was_measured_on_a_leak_fixture contradicted "
+            "each other for two issues, and V2-P4-092 measured that this one is the true half."
         ),
     ),
     BaselineLimitation(
@@ -1015,13 +1017,23 @@ KNOWN_BASELINE_LIMITATIONS: Final[tuple[BaselineLimitation, ...]] = (
         detail=(
             "The corpus behind the tests is tests/walk_forward_fixtures.py, whose own docstring "
             "says it has no noise model and exists to make one bit of a reference model flip. So "
-            "the mean rank ICs of exactly +1.0 and -1.0 that separate a leaked fold from a "
-            "purged one there are a statement about the split, not about alpha: four securities "
-            "whose returns are a single per-session coefficient times a fixed offset order "
-            "perfectly or reverse perfectly and can do nothing else. V2-P4-022 owns the corpus "
-            "with a known signal-to-noise ratio and a known-null control, which is what an "
-            "evaluation needs before any number it reports is a claim, and no number here should "
-            "be read as one."
+            "every fold number in this module is a statement about a split, not about alpha: "
+            "four securities whose returns are a single per-session coefficient times a fixed "
+            "offset order perfectly or reverse perfectly and can do nothing else, and a "
+            "mean_rank_ic of exactly -1.0 is what that corpus can produce rather than a "
+            "measurement of skill. V2-P4-092 corrected this entry rather than appending around "
+            "it: it said those numbers were '+1.0 and -1.0 that separate a leaked fold from a "
+            "purged one', which contradicted its own neighbour "
+            "a_minority_leak_moves_this_baselines_coefficient_and_not_the_order_it_produces "
+            "and is false. Measured across all four configurations of both corpora, mean_rank_ic "
+            "reads -1.0 every time and the leak shows only in the coefficient (-1/3 against "
+            "-1.0); the 1.0 and 0.0 that do separate the two are V2-P4-013's concordance "
+            "numbers, whose own helper says it 'can only come out 1.0 or 0.0', read into a "
+            "metric that is not it. test_no_configuration_of_either_corpus_lets_a_rank_ic_"
+            "separate_a_leak_from_a_purge is what would now fail. V2-P4-022 owns the corpus with "
+            "a known signal-to-noise ratio and a known-null control, which is what an evaluation "
+            "needs before any number it reports is a claim, and no number here should be read as "
+            "one."
         ),
     ),
 )

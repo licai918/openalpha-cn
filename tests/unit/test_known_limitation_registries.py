@@ -15,7 +15,7 @@ inside a docstring, which is prose the runner never reads.
 ## Why the mechanism is not copied as it stands
 
 `007`'s form is "one test per entry, named after the entry". At three entries that is exactly
-right. Across the thirty-two code-carrying registries there are **294** entries -- 69 in
+right. Across the thirty-two code-carrying registries there are **295** entries -- 69 in
 `KNOWN_PANEL_LIMITATIONS` alone -- and it stops being right somewhere well before that, for
 three reasons and not one:
 
@@ -88,6 +88,34 @@ One phrase in this module's own docstring is a sentinel that
 It is the extractor's own test: if the docstring filter ever broke, every prose mention in the
 repository would start satisfying the rule and this module would go green while proving
 nothing.
+
+## What that weakness cost, once, and why nothing cheap closes it
+
+`V2-P4-092` is the first consequence and it is worth reading rather than summarising. Two
+entries of `KNOWN_BASELINE_LIMITATIONS` stood side by side and **contradicted each other** --
+one said a leaked and a purged fold "both read exactly `-1.0`", the next said the mean rank ICs
+of "`+1.0` and `-1.0`" were the numbers "that separate a leaked fold from a purged one" -- and
+the second was false, measured `-1.0` in all four configurations of both corpora. Every
+assertion in this module was green throughout, correctly: both `code`s appear in executable
+test code, which is all this binding claims. **A binding on names cannot see a false sentence.**
+
+The cheapest structural candidate was tried and measured before being declined: *every decimal
+in a `detail` must be a number the suite evaluates*. It fails in both directions at once. The
+false entry's two decimals are `-1.0` and `1.0`, and the suite evaluates both -- so the rule
+would have been **satisfied** by exactly the sentence it was invented for. And of the 61 entries
+whose `detail` carries a decimal, **38** name at least one number no test evaluates, because
+most of them are measurements recorded in prose (`0.14%` of an ordinary session, `3/7` against
+`3/8`, `795.78` of turnover) that no assertion has a reason to restate. Nothing catches the
+defect; 38 alarms is what it costs.
+
+So the answer is the honest one: this binding is about names, the `detail` beside a name is
+prose, and the only thing that makes a `detail` true is somebody driving what it says.
+`V2-P4-016` and `V2-P4-092` both did that by **rewriting** the entry rather than appending
+around it, and the second left a test behind
+(`test_no_configuration_of_either_corpus_lets_a_rank_ic_separate_a_leak_from_a_purge`) so the
+sentence now has something under it. That is a per-entry discipline and not a mechanism, and
+saying so here is the point -- a reader who meets this module should not leave it believing the
+audit checks what an entry claims.
 """
 
 from __future__ import annotations
@@ -269,6 +297,12 @@ instant's zone date and never its pricing session, that the labels behind every 
 one later `as_of` so the corpus's *shape* is today's even where its values are not, that the
 `scored_ratio` floor is a coverage bar and never a quality one, that nothing on this face selects
 a hyperparameter -- and that the neutralized tier is refused here by name.
+
+`V2-P4-093` added no registry and one entry, `KNOWN_PREDICTION_RECORD_LIMITATIONS`'
+`the_supersedes_edge_is_contract_only_because_no_face_offers_a_record_to_name`, which moved the
+totals from 294 / 69 to **295 / 69** with the count of registries unchanged at thirty-two. It
+belongs to the same family as `V2-P4-083`'s `load_index_prices`: a guard that cannot fail,
+because nothing on any face can reach the input it guards.
 
 `KNOWN_ALPHA_MODEL_LIMITATIONS` (`V2-P4-011`) is the twenty-sixth, and it is the first that
 bounds a **contract for something this repository does not yet build**: the quantitative
@@ -548,5 +582,5 @@ def test_the_registries_together_carry_the_entry_count_the_report_folds() -> Non
 
     assert len(codes["KNOWN_PANEL_LIMITATIONS"]) == folded + plane_wide + 1
     assert all(codes[registry] for registry in codes)
-    assert sum(len(entries) for entries in codes.values()) >= 294
+    assert sum(len(entries) for entries in codes.values()) >= 295
     assert len(codes["KNOWN_PANEL_LIMITATIONS"]) >= 69

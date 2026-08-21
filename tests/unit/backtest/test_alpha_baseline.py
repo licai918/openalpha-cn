@@ -40,8 +40,10 @@ import pytest
 from alpha_model_fixtures import training_example
 from walk_forward_fixtures import (
     ALIGNED_FROM_ADJACENT,
+    ALIGNED_FROM_OVERLAPPING,
     EMBARGO_SESSIONS,
     FIRST_TEST_DAY_INDEX,
+    MOMENTUM,
     MOMENTUM_VALUES,
     TEST_DAYS_PER_FOLD,
     VALUE_VALUES,
@@ -693,6 +695,41 @@ def test_the_embargo_moves_this_baselines_coefficient_and_not_its_ordering() -> 
     assert dict(honest.artifact.parameters)["momentum_20d"] == -1.0
     assert dict(leaked.artifact.parameters)["momentum_20d"] == pytest.approx(-1 / 3)
     assert honest.mean_rank_ic == leaked.mean_rank_ic == -1.0
+
+
+def test_no_configuration_of_either_corpus_lets_a_rank_ic_separate_a_leak_from_a_purge() -> None:
+    """`V2-P4-092`: the registry said this number separates them, and it never has.
+
+    Two entries stood side by side and contradicted each other.
+    `a_minority_leak_moves_this_baselines_coefficient_and_not_the_order_it_produces` said a
+    leaked and a purged fold "both read exactly -1.0";
+    `every_number_this_module_has_produced_was_measured_on_a_leak_fixture` said the mean rank ICs
+    of "+1.0 and -1.0" were the numbers "that separate a leaked fold from a purged one". Only one
+    of those can be true, and the acceptance measured which.
+
+    Every configuration of both corpora is driven here rather than the two the embargo test
+    needed, because "no configuration separates them" is the claim, and a pair of readings cannot
+    carry it. The `+1.0` and `0.0` in the second entry were `V2-P4-013`'s **concordance**
+    numbers -- `test_walk_forward_leak.py::_concordance`, whose own docstring says it "can only
+    come out 1.0 or 0.0" -- read into a metric that is not it.
+    """
+    readings = {
+        (aligned_from, embargo): evaluate_fold(
+            fold_model(), _fold(embargo=embargo, aligned_from=aligned_from)
+        )
+        for aligned_from in (ALIGNED_FROM_OVERLAPPING, ALIGNED_FROM_ADJACENT)
+        for embargo in (0, EMBARGO_SESSIONS)
+    }
+
+    assert {key: item.mean_rank_ic for key, item in readings.items()} == dict.fromkeys(
+        readings, -1.0
+    )
+    assert {key: dict(item.artifact.parameters)[MOMENTUM] for key, item in readings.items()} == {
+        (ALIGNED_FROM_OVERLAPPING, 0): -1.0,
+        (ALIGNED_FROM_OVERLAPPING, EMBARGO_SESSIONS): -1.0,
+        (ALIGNED_FROM_ADJACENT, 0): pytest.approx(-1 / 3),
+        (ALIGNED_FROM_ADJACENT, EMBARGO_SESSIONS): -1.0,
+    }
 
 
 def test_a_model_fitted_on_its_own_test_block_is_refused_before_it_can_report_a_number() -> None:

@@ -148,12 +148,15 @@ exclusion the way `V2-P4-005`'s was:
   `lint-imports` at "4 kept, 0 broken". `panel_gate.py` is top-level because it *consumes* the
   panel plane; this gate consumes neither a store nor a panel and would only inherit the freedom
   to.
-- **`backtest/` forbids all of it already.** `backtest-no-numeric-stack-or-panel-plane`,
-  `backtest-studies-touch-no-store`, `backtest-studies-reach-no-composition-root` and
-  `ranking-creates-no-portfolio-order` -- this module joins the source list of the last three on
-  arrival, which is what `test_the_two_backtest_study_contracts_cover_every_module_in_the_package`
-  exists to force. **`lint-imports` stays at 8 kept, 0 broken; three contracts widen and none is
-  relaxed.**
+- **`backtest/` forbids all of it already, once this module is on the lists.**
+  `backtest-no-numeric-stack-or-panel-plane`, `backtest-studies-touch-no-store`,
+  `backtest-studies-reach-no-composition-root` and `ranking-creates-no-portfolio-order` -- this
+  module joins the source list of the last three on arrival, which is what
+  `test_the_two_backtest_study_contracts_cover_every_module_in_the_package` exists to force.
+  That clause is load-bearing and `V2-P4-093` measured why: three of the four enumerate their
+  sources, so a file that has not joined them is forbidden nothing by them, and a probe under
+  `backtest/` importing `numpy` and a store reads `8 kept, 0 broken`. **`lint-imports` stays at
+  8 kept, 0 broken; three contracts widen and none is relaxed.**
 
 `ranking-creates-no-portfolio-order` is widened rather than left alone, and that is the one
 judgement here that is not forced. D16's 绝不直接创建组合订单 is a property of the ranking, and a
