@@ -183,17 +183,22 @@ pointers are stored and no dead slot exists for a node that did not split.
 
 `FittedBoostedRankTreeModel.__post_init__` decodes the whole table before a prediction is ever
 asked for, which is what makes a truncated or a foreign artifact a refusal rather than a wrong
-number. That is the property `V2-P4-016` will address and `V2-P4-017` will store, and it is the
+number. That is the property `V2-P4-016` addresses and `V2-P4-017` will store, and it is the
 same property `FittedCrossSectionalRankModel` has for a much smaller table.
 
 ## What is deliberately left to a named issue
 
-- **`V2-P4-016`** owns the artifact's content address. This ensemble is `parameters` and nothing
-  else, so that issue adds a computed field rather than reopening anything -- and where D11's
-  *metrics* field goes is still that issue's.
+- **`V2-P4-016` landed** and added a computed field rather than reopening anything: this ensemble
+  is `parameters` and nothing else, and `parameters` reaches `AlphaModelArtifact.artifact_id`
+  whole. Where D11's *metrics* field goes was answered there too, and the answer is
+  `FoldEvaluation` rather than the artifact -- a metric judges a fit on rows it never trained on,
+  so it may not be part of the fit's identity.
 - **`V2-P4-017`** owns persistence. An encoded ensemble is several hundred `(str, float)` rows
   where a rank baseline's is three, and whether that shape wants a different storage form is
-  that issue's measurement to take.
+  still that issue's measurement to take. The *digest* half of the question is answered:
+  addressing a 900-node ensemble costs **0.399 ms** against the rank baseline's three rows at
+  **0.017 ms**, linear in the table and four orders below this model's own 4.55 s fit -- so the
+  storage question is about storage and not about hashing.
 - **`V2-P4-018`** owns the abstention vocabulary. The two constants here are **imported** from
   `alpha_baseline` rather than re-spelled, `ICCoverage`'s own reason: a second spelling of "this
   security is outside the population" is a second code for one condition.
@@ -292,7 +297,8 @@ MAX_DEPTH_CAP: Final[int] = 6
 
 A cap rather than a warning, because depth is what bounds both the artifact's size and the fit's
 cost, and because a `max_depth` a caller can raise without limit turns `parameters` into a table
-whose canonical JSON `V2-P4-016` has to hash.
+whose canonical JSON `V2-P4-016`'s address has to hash -- 900 encoded nodes measure 0.399 ms,
+and the cost is linear in the node count this cap bounds.
 """
 
 MAX_TREE_COUNT: Final[int] = 500
@@ -917,9 +923,10 @@ KNOWN_TREE_LIMITATIONS: Final[tuple[TreeLimitation, ...]] = (
             "column, and ignoring one is a finding rather than a failure. What it costs is that "
             "the fact is not published -- an unused column simply never appears as a feature "
             "index in the encoded ensemble, so a reader who wants to know must recompute it "
-            "from AlphaModelArtifact.parameters. A per-column attribution is a metric, "
-            "Implementation Decision 11's metrics field is V2-P4-016's, and no issue on this "
-            "chain owns a feature-importance report yet."
+            "from AlphaModelArtifact.parameters. A per-column attribution is a metric, and "
+            "V2-P4-016 placed Implementation Decision 11's metrics field on FoldEvaluation "
+            "rather than on the artifact, so a feature-importance report would belong beside an "
+            "evaluation -- and no issue on this chain owns one yet."
         ),
     ),
     TreeLimitation(

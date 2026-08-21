@@ -155,10 +155,16 @@ and a silently missing day moves every boundary after it.
 
 - **`V2-P4-014`** and **`V2-P4-015`** own the baselines and the evaluation. Nothing here scores a
   fold; `test_set` exists so that whichever of them arrives first does not have to re-derive it.
-- **`V2-P4-016`** owns the artifact's content address, and with it where Implementation Decision
-  11's *split policy* field goes. A fold's policy is three scalars -- the block's first day, its
-  length, and the embargo width -- against a panel and a calendar, so addressing one is an
-  addition rather than a redesign.
+- **`V2-P4-016`** owned the artifact's content address, and with it where Implementation Decision
+  11's *split policy* field goes. It measured the three scalars apart rather than addressing them
+  together. The purge and the embargo change what a fit consumed, and they reach that address
+  already, through the `training_cutoff` and `training_example_count` they leave behind. The
+  block does **not**: `candidates` is every prediction day strictly before it and `_embargo_floor`
+  is anchored on its first day, so `test_day_count` cannot touch the training set -- measured, two
+  folds differing only in it produce byte-identical artifacts. Putting the policy on the artifact
+  would therefore have given one fitted model two addresses, `V2-P3-002`'s `fetched_at` defect in
+  new vocabulary. `V2-P4-014`'s `FoldEvaluation` carries `first_test_day` beside the artifact,
+  which is where a reader looks for the block.
 - **`V2-P4-017`** owns persistence. Nothing here is stored: a split is recomputed from a panel, a
   calendar and five numbers.
 - **`V2-P4-022`** owns the corpus with a known signal-to-noise ratio and a known-null control.
@@ -819,8 +825,9 @@ KNOWN_WALK_FORWARD_LIMITATIONS: Final[tuple[WalkForwardLimitation, ...]] = (
         detail=(
             "This module splits and stops. It fits no model, computes no metric and reports no "
             "number: V2-P4-014 and V2-P4-015 own the baselines and their evaluation, and "
-            "Implementation Decision 11's split-policy field on a model artifact is "
-            "V2-P4-016's to place. The skill numbers in "
+            "Implementation Decision 11's split-policy field is not on a model artifact at all "
+            "-- V2-P4-016 measured that a fold's test block cannot change what its fit consumed, "
+            "so addressing it would give one fitted model two addresses. The skill numbers in "
             "tests/unit/backtest/test_walk_forward_leak.py exist to demonstrate that a rule "
             "removes a planted leak and are not a claim about alpha -- the corpus behind them "
             "has no noise model, and its signal is a step function chosen to flip one bit of a "

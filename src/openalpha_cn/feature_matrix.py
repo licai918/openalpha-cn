@@ -180,11 +180,15 @@ is wrong -- which is the direction to be slow in.
   no study under it can call this function at all. The first caller is whichever issue first
   holds a declaration and a matrix together, which is a composition above both planes rather than
   a study on one -- see the two paragraphs on `require_declared_features` itself.
-- **`V2-P4-016`** owns the artifact's content address. `AlphaModelArtifact` carries
-  `declaration.feature_version` already, so a matrix's recipe reaches an artifact's digest with
-  nothing here having to move; whether the artifact also records a **universe** version is that
-  issue's call, because `AlphaModelDeclaration` has one version slot and this module has two
-  measurements and the choice is a property of what a digest is over.
+- **`V2-P4-016` landed** and nothing here moved: `AlphaModelArtifact` already carried
+  `declaration.feature_version`, so a matrix's recipe reaches the artifact's digest as it stands.
+  It answered the universe question **no**. `AlphaModelDeclaration` keeps its one version slot,
+  because a `universe_version` is a property of the matrix that was *read* rather than of the
+  recipe that was declared or of the fit that consumed it -- and the artifact already records
+  what the universe cost it, as `training_example_count`. What that leaves open is stated where a
+  reader of the model plane meets it, as
+  `the_address_is_over_the_fit_and_not_over_the_rule_that_chose_it`: two universes producing the
+  same number of rows, the same cutoff and the same coefficients are one address.
 - **`V2-P4-017`** owns persistence. Nothing here is stored: a matrix is rebuilt from a spec, a
   store and an `as_of`, which is what "reproducible" in S26 means and is why there is no document
   and no `*_id` on this plane.
@@ -348,8 +352,13 @@ KNOWN_FEATURE_MATRIX_LIMITATIONS: Final[tuple[FeatureMatrixLimitation, ...]] = (
             "cross_section_digest` already computes per stored build and which "
             "`load_factor_observations` already checks each build against -- so the property "
             "'these values are the ones their manifest addresses' is enforced one layer down "
-            "and is not restated here. Carrying a third address on the matrix is left to "
-            "`V2-P4-016`, which owns what an artifact's digest is taken over."
+            "and is not restated here. Carrying a third address on the matrix was left to "
+            "`V2-P4-016`, and that issue declined it: an artifact's digest is over what the fit "
+            "consumed, and a matrix is neither stored nor addressed on this plane, so a third "
+            "version here would be an address for something no reader can look up. The same gap "
+            "is stated on the model plane as "
+            "`the_address_is_over_the_fit_and_not_over_the_rule_that_chose_it`, and closing it "
+            "means a digest over the training rows, which is `V2-P4-017`'s to store."
         ),
     ),
     FeatureMatrixLimitation(
@@ -602,8 +611,9 @@ def require_declared_features(declaration: AlphaModelDeclaration, spec: FeatureS
     somewhere this producer is not -- so the binding is a check at the join instead of a pattern
     on a field. The join is also where a mismatch costs something: a model declaring one recipe
     and fitted on another produces an `AlphaModelArtifact` recording a `feature_version` its
-    `feature_ids` did not come from, and `V2-P4-016` would then address that artifact under a
-    recipe nobody can re-derive.
+    `feature_ids` did not come from, and `V2-P4-016` then addresses that artifact under a recipe
+    nobody can re-derive -- the address is faithful to the declaration either way, which is
+    exactly why the declaration has to be checked here rather than trusted there.
 
     It is a free function rather than a method on either side because neither contract may reach
     the other: `domain/alpha_model.py` is in `domain/`, which `domain-purity` forbids every

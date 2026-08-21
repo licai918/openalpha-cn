@@ -163,15 +163,26 @@ def test_a_fitted_model_rebuilt_from_its_serialized_artifact_predicts_identicall
     Nothing but `AlphaModelArtifact` crosses the round trip -- no centre held in a closure, no
     feature id passed to a constructor -- so a stored artifact is sufficient to reproduce every
     number, and a difference between the two batches would be state that lives only in memory.
+
+    `exclude_computed_fields=True` since `V2-P4-016`, and it is this repository's rule rather
+    than this test's convenience: every content-addressed model here is `extra="forbid"` with its
+    identity as a `computed_field`, so a dump that kept the identity cannot be re-validated by the
+    model that produced it (`backtest/factor_experiment.py::experiment_payload` states it, and
+    `storage/sqlite.py` writes every manifest that way). The address is a function of the
+    declared fields, so a payload of exactly those is a payload of exactly what it hashes --
+    asserted below by recomputing it on the far side.
     """
     fitted = SingleFeatureAlphaModel(declaration=fixtures.declaration()).fit(
         fixtures.training_set()
     )
     section = fixtures.cross_section(as_of=AS_OF)
 
+    payload = fitted.artifact.model_dump_json(exclude_computed_fields=True)
+    assert fitted.artifact.artifact_id not in payload
     restored = FittedSingleFeatureAlphaModel(
-        artifact=AlphaModelArtifact.model_validate_json(fitted.artifact.model_dump_json())
+        artifact=AlphaModelArtifact.model_validate_json(payload)
     )
+    assert restored.artifact.artifact_id == fitted.artifact.artifact_id
 
     assert restored.artifact == fitted.artifact
     assert restored.predict(section, predicted_at=AS_OF) == fitted.predict(

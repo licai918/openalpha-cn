@@ -921,7 +921,7 @@ def test_a_fold_evaluation_refuses_a_measured_count_its_own_points_disagree_with
             update={"measured_count": evaluation.measured_count - 1}
         ).model_validate(
             {
-                **evaluation.model_dump(),
+                **evaluation.model_dump(exclude_computed_fields=True),
                 "measured_count": evaluation.measured_count - 1,
             }
         )
@@ -968,7 +968,7 @@ def test_a_score_point_refuses_a_number_its_coverage_says_is_absent() -> None:
 
 def test_a_fold_evaluation_refuses_an_unordered_or_repeated_block() -> None:
     evaluation = evaluate_fold(fold_model(), _fold(embargo=EMBARGO_SESSIONS))
-    payload = evaluation.model_dump()
+    payload = evaluation.model_dump(exclude_computed_fields=True)
     payload["points"] = list(reversed(payload["points"]))
 
     with pytest.raises(ValueError, match="strictly increasing"):
@@ -1216,7 +1216,7 @@ def test_a_stored_fold_evaluation_is_refused_when_its_summary_contradicts_itself
     payload, which is the boundary a pydantic model on this plane exists for -- `ICSummary`
     carries the same four refusals for the same reason."""
     evaluation = evaluate_fold(fold_model(), _holed_panel_fold())
-    payload = {**evaluation.model_dump(), **mutation}
+    payload = {**evaluation.model_dump(exclude_computed_fields=True), **mutation}
 
     with pytest.raises(ValueError, match=message):
         FoldEvaluation.model_validate(payload)
@@ -1231,7 +1231,10 @@ def test_a_stored_fold_evaluation_is_refused_when_it_carries_a_ratio_without_a_m
         test_day_count=MINIMUM_FOLD_DAYS - 1,
         embargo_sessions=EMBARGO_SESSIONS,
     )
-    payload = {**evaluate_fold(fold_model(), single).model_dump(), "rank_icir": 0.4}
+    payload = {
+        **evaluate_fold(fold_model(), single).model_dump(exclude_computed_fields=True),
+        "rank_icir": 0.4,
+    }
 
     with pytest.raises(ValueError, match="cannot carry a rank_icir"):
         FoldEvaluation.model_validate(payload)

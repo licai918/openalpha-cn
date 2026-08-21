@@ -211,10 +211,13 @@ one: the issue that needs it is named and is not this one.
   also inherits every metric here: `evaluate_fold` takes the `AlphaModel` **Protocol**, so a
   LightGBM model living wherever it argues its home into can be measured by this module without
   either importing the other.
-- **`V2-P4-016`** owns the artifact's content address. `FoldEvaluation` names the artifact it
-  measured **by value**, `PredictionBatch`'s decision, so this module has nothing to move when an
-  address arrives -- and where Implementation Decision 11's *metrics* field goes is that issue's,
-  not this one's.
+- **`V2-P4-016` landed and this module did not move**, which is what "names the artifact by
+  value" bought: `FoldEvaluation.artifact` simply gained a readable `artifact_id`. That issue
+  also answered where Implementation Decision 11's *metrics* field goes, and the answer is
+  **here**, not on the artifact: a metric is a judgement of a fit taken on rows it never trained
+  on, so putting one inside the fit's address would make a model's identity depend on how it was
+  later judged -- and since `FoldEvaluation` carries the artifact by value, the artifact would
+  end up containing the numbers that contain it. `V2-P3-014`'s split, reused.
 - **`V2-P4-017`** owns persistence, and with it the one thing an evaluation's `predicted_at`
   cannot mean. `evaluate_fold` dates every batch at the section's own `as_of`, because a
   simulated prediction is made at the instant it simulates and a wall clock would make every
@@ -485,7 +488,7 @@ class FittedCrossSectionalRankModel:
     """A fitted baseline, whose entire state is its artifact.
 
     No field but `artifact`, `FittedSingleFeatureAlphaModel`'s decision and for its reason:
-    `V2-P4-016` will content-address that artifact and `V2-P4-017` will store a batch beside it,
+    `V2-P4-016` content-addresses that artifact and `V2-P4-017` will store a batch beside it,
     and both are worth doing only if the artifact is sufficient to reproduce the model. Here it
     is sufficient by construction -- the coefficients *are* `artifact.parameters`, keyed by the
     column each belongs to, and `__post_init__` refuses an artifact whose parameter keys are not
@@ -637,9 +640,13 @@ class FoldEvaluation(BaseModel):
     """One fold's whole reading: the artifact that produced it, and the numbers it produced.
 
     The artifact is carried **by value**, `PredictionBatch`'s decision: the fit that produced
-    these numbers is recoverable without a lookup and without an address `V2-P4-016` has not
-    defined yet. Two folds of one declaration therefore compare field by field, which is what
-    makes a walk-forward schedule a series rather than a list of unrelated floats.
+    these numbers is recoverable without a lookup and without an address at all. `V2-P4-016`
+    defined one and this field did not have to move for it, which was that issue's whole claim to
+    being an addition: the artifact carried by value simply gained an `artifact_id` a reader can
+    read off it. Two folds of one declaration still compare field by field, which is what makes a
+    walk-forward schedule a series rather than a list of unrelated floats -- and `first_test_day`
+    beside the artifact is where Implementation Decision 11's *split policy* ended up, because a
+    test block is not an input to the fit and does not belong in the fit's address.
 
     `scored_ratio` is the only statistic that is never `None`. A cross section cannot be empty, so
     a fold always has a denominator -- and the fraction of the offered market a model answered
@@ -860,8 +867,12 @@ KNOWN_BASELINE_LIMITATIONS: Final[tuple[BaselineLimitation, ...]] = (
             "taken inside the set it is about. What it costs is that a stored PredictionBatch is "
             "a statement about a cross section and not a per-security forecast, and two batches "
             "over different universes are not comparable row by row. V2-P4-017 owns what a store "
-            "may put beside a batch, and whether a universe version belongs in the artifact is "
-            "V2-P4-016's -- V2-P4-012 already measured two of them and left the choice there."
+            "may put beside a batch. Whether a universe version belongs in the artifact was "
+            "V2-P4-016's and it declined: a universe version addresses the matrix that was read "
+            "rather than the fit, and what the universe cost a fit is already in the artifact as "
+            "training_example_count -- see "
+            "the_address_is_over_the_fit_and_not_over_the_rule_that_chose_it for what that "
+            "leaves open."
         ),
     ),
     BaselineLimitation(

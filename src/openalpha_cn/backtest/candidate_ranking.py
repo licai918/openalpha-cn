@@ -242,9 +242,12 @@ import matters. `V2-P4-035` guarded this with a pin on this module's own import 
 indented import inside a function escaped it, and a caller needed no new import at all, because
 `cross_section` re-exports `AShareExecutionPolicy` and is already first on the pinned list.
 
-The three imports this leaves are the ones D16 permits and D17 requires: `ExecutionResult` is a
+The imports this leaves are the ones D16 permits and D17 requires: `ExecutionResult` is a
 verdict about a *hypothetical* buy, which is what `V2-P3-006` has produced since it was written;
-`SignalFrame` is a conclusion; and `RunManifest`'s identity arrives here as a 28-character string.
+`SignalFrame` is a conclusion; `RunManifest`'s identity arrives here as a 28-character string; and
+since `V2-P4-016` an `AlphaModelArtifact`'s identity arrives as a pattern, not as a model --
+`ALPHA_MODEL_ARTIFACT_ID_PATTERN` is a `str` constant, so `CandidatePrediction` names a fit
+without this module being able to build, fit or read one.
 
 ## Layering, restated
 
@@ -275,6 +278,7 @@ from openalpha_cn.backtest.cross_section import (
 )
 from openalpha_cn.backtest.factor_ic import FactorTier
 from openalpha_cn.domain._identity import stable_model_id
+from openalpha_cn.domain.alpha_model import ALPHA_MODEL_ARTIFACT_ID_PATTERN
 from openalpha_cn.domain.execution import ExecutionResult
 from openalpha_cn.domain.factor import set_digest
 from openalpha_cn.domain.factor_neutralization import (
@@ -584,15 +588,27 @@ class CandidatePrediction(BaseModel):
     to -- a contract that grew the field later would have had to grow the rule later too.
 
     Three fields and no more, because every one of them is named by D16 or already exists: the
-    artifact this number came from (by whatever identity `V2-P4-011` gives it), the number, and
-    the horizon it is over. `horizon` carries `COUNTABLE_HORIZON_PATTERN` and `rank_candidates`
-    requires it to equal the ranking's, for the reason a signal's must: a prediction over ten
-    sessions sitting in a five-session ranking is a number about a different question.
+    artifact this number came from, the number, and the horizon it is over. `horizon` carries
+    `COUNTABLE_HORIZON_PATTERN` and `rank_candidates` requires it to equal the ranking's, for the
+    reason a signal's must: a prediction over ten sessions sitting in a five-session ranking is a
+    number about a different question.
+
+    `model_artifact_id` is pattern-bound to `ALPHA_MODEL_ARTIFACT_ID_PATTERN` since `V2-P4-016`.
+    `V2-P4-005` wrote "by whatever identity `V2-P4-011` gives it", `V2-P4-010` decided the
+    identity was `V2-P4-016`'s, and that issue's answer is `stable_model_id(prefix="mdl", ...)`
+    over an `AlphaModelArtifact` -- so the legal values here are exactly one prefix's, and the
+    narrowing costs nothing to migrate because `no_model_prediction_exists_in_this_build` is
+    still true. `DecisionLedger.run_manifest_id` is the precedent: a provenance pointer that is
+    only conventionally a content address stops being one the first time it is convenient.
+
+    Narrower than `AlphaModelRef.artifact_id`, deliberately, and the asymmetry is `V2-P4-010`'s
+    rather than an oversight -- see `the_manifest_slot_still_admits_an_address_from_another_plane`
+    in `domain/alpha_model.py` for what that costs and what closing it would cost.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
 
-    model_artifact_id: str = Field(min_length=1, max_length=128)
+    model_artifact_id: str = Field(pattern=ALPHA_MODEL_ARTIFACT_ID_PATTERN)
     predicted_value: float
     horizon: str = Field(pattern=COUNTABLE_HORIZON_PATTERN)
 

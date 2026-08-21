@@ -213,10 +213,10 @@ class SingleFeatureAlphaModel:
 class FittedSingleFeatureAlphaModel:
     """A fitted reference model, whose entire state is its artifact.
 
-    No field but `artifact`, deliberately. `V2-P4-016` will content-address that artifact and
-    `V2-P4-017` will store a batch beside it, and both are worth doing only if the artifact is
-    sufficient to reproduce the model -- so here it is made sufficient by construction rather
-    than by discipline.
+    No field but `artifact`, deliberately. `V2-P4-016` content-addresses that artifact
+    (`AlphaModelArtifact.artifact_id`) and `V2-P4-017` will store a batch beside it, and both are
+    worth doing only if the artifact is sufficient to reproduce the model -- so here it is made
+    sufficient by construction rather than by discipline.
     """
 
     artifact: AlphaModelArtifact
