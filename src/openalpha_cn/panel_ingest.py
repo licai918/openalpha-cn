@@ -1910,6 +1910,35 @@ def load_adjustment_histories(
     partition's, and `tests/integration/panel/test_whole_partition_doors.py` holds both halves of
     the measurement so that neither the wall nor the reason for it becomes prose.
 
+    ## `V2-P4-094` drove those paths from a product face, and corrects `V2-P4-086`'s second edit
+
+    That issue's acceptance ran `model evaluate`'s own `--help` example and met this wall: on a
+    panel priced 2026-01-05..2026-03-20, every `--as-of` earlier than 2026-03-20T08:30Z was
+    refused here and every one at or after it was admitted, so the reachable set was a single
+    point. Substituting a `read_visible_at` read with **no** `answerable_through` repair
+    reproduced `V2-P4-079`'s collapse exactly, from the face rather than from the store:
+    `000001.SZ's outcome over 2026-01-07..2026-01-08 could not be priced ... 2026-01-08 is after
+    000001.SZ's last adjustment factor, observed 2026-01-05`. The door is still the wrong one and
+    the two edits are still what it needs.
+
+    **What that issue did change is the shape of the second edit, because the one `V2-P4-086`
+    specifies is unaffordable and the one the horizon question needs is not.** `086` asks for "a
+    subject axis on `PartitionCoverage.dates`". `DateCoverage` is shared by every dataset and its
+    census holds one entry per event date; giving it a subject makes that one entry per *stored
+    row*. Measured: a whole-market `daily` year is 244 x 5,545 = 1,352,980 rows, so its census
+    goes from 244 entries to 1,352,980, and `_read_coverage` materialises the census on every
+    readiness evaluation -- 0.0001 s becomes 0.29 s per load, against **98 loads of `daily` alone
+    in one `model daily-run`** (476 census materialisations, 32,681 entries, on an eight-security
+    fixture). The catalog would stop being metadata and become a second copy of the panel.
+
+    The question this door actually asks is per subject and not per (subject, date): *is this
+    security's series finished, or is its tail withheld?* That needs one `last_event_date` per
+    subject -- cardinality equal to `PartitionCoverage.subjects`, which the catalog already
+    stores, ~5,545 rows rather than 1.35 million. It is still a stored-catalog schema change with
+    a migration, a `record_coverage` cross-check and `panel_doctor`'s three reads behind it, which
+    is why `V2-P4-094` measured it and did not take it; but it is the edit `V2-P4-086` should be
+    read as naming.
+
     ## Why the gap rule is stricter here than it is for the registry
 
     `load_stock_universe` refuses a requested range that skips a year *the store holds*, and

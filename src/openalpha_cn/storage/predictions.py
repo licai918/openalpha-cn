@@ -121,7 +121,7 @@ from openalpha_cn.domain.prediction_record import (
     prediction_record_for,
 )
 from openalpha_cn.domain.trading_calendar import TradingCalendar
-from openalpha_cn.domain.versioning import read_versioned
+from openalpha_cn.domain.versioning import STORED_DOCUMENT_FAULTS, read_versioned
 
 __all__ = [
     "PREDICTION_DOCUMENT_SUFFIX",
@@ -139,11 +139,19 @@ class PredictionStoreError(RuntimeError):
     A `RuntimeError` rather than a subclass of `PredictionRecordError`, which is
     `ShortlistStoreError`'s arrangement for a reason that reverses here and lands in the same
     place. There it was that this layer *may not* import the consumer's vocabulary; here it may
-    -- `domain/` is below -- and the vocabularies are still separate, because these three
-    refusals are about a **filing system** and not about a prediction. A key that is not an
-    address, a `supersedes` naming nothing held, and a document whose bytes moved after they were
-    filed are all statements about this directory; `PredictionRecordError` and pydantic's
-    `ValidationError` remain what a malformed prediction raises, and they propagate unchanged.
+    -- `domain/` is below -- and the vocabularies are still separate, because these refusals are
+    about a **filing system** and not about a prediction. A key that is not an address, a
+    `supersedes` naming nothing held, a document whose bytes moved after they were filed, and a
+    document whose bytes will not parse back into a record at all are statements about this
+    directory.
+
+    **The last of those is `V2-P4-096` and this docstring used to say the opposite.** It read:
+    *"`PredictionRecordError` and pydantic's `ValidationError` remain what a malformed prediction
+    raises, and they propagate unchanged"* -- and that sentence was describing the defect. It is
+    true of `put`, where a caller hands over live objects and the contract judges them; it was
+    false of `get`, where the same types are raised about *bytes on a disk this store owns* and
+    reached the user as `exit 5`. The two directions are now separate: constructing a record
+    still raises the contract's own errors unchanged, and reading one back raises this store's.
     """
 
 
@@ -252,12 +260,43 @@ class FilePredictionStore:
         `the_address_does_not_commit_to_the_custody_stamp` states that cost and
         `tests/unit/test_prediction_store.py::
         test_the_custody_stamp_is_the_one_edit_that_check_cannot_see` measures it.
+
+        ## `V2-P4-096`: the address was checked and the parse was not
+
+        Until that issue this method re-derived the address of every document it could *parse*
+        and let every document it could not parse escape as whatever `read_versioned` raised --
+        so a write a power cut stopped half way arrived at three product faces as `exit 5` with
+        the message withheld, a bare `500 text/plain`, and an unenveloped `JSONDecodeError`,
+        while a document with one number *edited* was refused perfectly one line below. The
+        contrast was the diagnosis, and it is the fourth instance of the class `V2-P4-080`,
+        `V2-P4-084` and `V2-P4-088` each closed one at a time.
+
+        `STORED_DOCUMENT_FAULTS` rather than `except json.JSONDecodeError`, and the measurement
+        that settles it is in that constant: three of the four documents this store can be handed
+        raise something else. Converted here rather than at either face, because `get` is this
+        store's only reader and `put` reads through it -- so one `except` covers the read *and*
+        the daily run that would re-register the same prediction, which is the shape `V2-P4-088`
+        chose over guarding two call sites separately.
         """
         _refuse_an_unusable_id(record_id)
         document = self._document(record_id)
         if not document.is_file():
             return None
-        record = read_versioned(PREDICTION_RECORD_VERSIONS, document.read_text(encoding="utf-8"))
+        try:
+            record = read_versioned(
+                PREDICTION_RECORD_VERSIONS, document.read_text(encoding="utf-8")
+            )
+        except STORED_DOCUMENT_FAULTS as error:
+            raise PredictionStoreError(
+                f"the document filed as {record_id} could not be read back as a prediction: "
+                f"{type(error).__name__}: {error}. The address is well formed and a file is held "
+                "under it, so this is damage to the bytes rather than a question about the "
+                "address -- a write this store never finished, or a document something outside "
+                "it rewrote. Nothing here can repair it and nothing here will overwrite it: "
+                f"remove `predictions/{record_id}{PREDICTION_DOCUMENT_SUFFIX}` from this runtime "
+                "directory and re-run `openalpha model daily-run` to register the prediction "
+                "again"
+            ) from error
         if record.record_id != record_id:
             raise PredictionStoreError(
                 f"the document filed as {record_id} no longer addresses to that name -- its "
@@ -272,8 +311,19 @@ class FilePredictionStore:
 
         Reads the directory rather than an index, and skips a name that is not a well-formed
         address -- including the `.partial` file a crashed write leaves behind.
-        `FileShortlistStore.list_ids`' rule: a store that returned one of those would hand a
-        caller a key `get` then refuses.
+        `FileShortlistStore.list_ids`' rule.
+
+        **What that rule covers is names, and `V2-P4-096` is where the difference showed.** This
+        used to add *"a store that returned one of those would hand a caller a key `get` then
+        refuses"*, which claimed more than a directory scan can know: a document damaged after it
+        was filed keeps a perfectly well-formed name, so it is listed here and refused by `get`.
+        That pair is now the answer rather than a silent disagreement -- `get` names the damage,
+        the document, and what to do about it -- and the alternative was measured rather than
+        waved off. Verifying each name would mean parsing every body, which the module docstring
+        measures at 3.6 ms per document at market width: 0.9 s for a year of one model's daily
+        runs and 22 s for five models over five years, on a command whose entire purpose is to be
+        the cheap half. It would also *hide* the damaged document, which is the opposite of what
+        an operator holding a broken disk needs.
         """
         if not self.path.is_dir():
             return ()

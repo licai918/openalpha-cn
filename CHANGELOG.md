@@ -203,6 +203,55 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **A stored prediction that cannot be parsed is a named refusal, not "a defect in the command"**
+  (`V2-P4-096`). A write a power cut stopped half way reached the command line as `exit 5` with
+  the message withheld, HTTP as a bare `500 text/plain`, and the SDK as an unenveloped
+  `JSONDecodeError` — while a document with one number *edited* was already refused perfectly,
+  because the store re-derived the address and never checked the parse. Measuring the class first
+  is what changed the fix: `read_versioned` is the single entry point every deserializing store
+  in this package reads through, and **four damaged documents reach three different exception
+  types** — a truncation raises `JSONDecodeError`, a newer build's `schema_version` and a payload
+  that is an array rather than an object raise `UnknownSchemaVersionError`, and one retyped field
+  raises pydantic's `ValidationError`. So the faults are named once as
+  `domain.versioning.STORED_DOCUMENT_FAULTS` beside the function that raises them, rather than as
+  a fourth `except json.JSONDecodeError` at a fourth call site, and `FilePredictionStore.get`
+  converts them where it already re-derives the address. One `except` covers both readers: `put`
+  reads through `get`, so re-running the daily run that would register the same prediction is
+  refused by name too — and refused rather than repaired, because "never write where something is
+  already held" is this store's one guarantee. The message names the record, the underlying fault
+  and the document to remove. `openalpha model predictions` still lists the address, and that is
+  now deliberate: verifying every name means parsing every body, measured at 3.6 ms per document
+  at market width — 22 s for five models over five years — and it would *hide* the damage from
+  the one person who needs to see it.
+- **A same-day `daily-run` may set `--end` to the last session it built** (`V2-P4-095`). A
+  training range reaching within `--horizon` sessions of the panel's newest session died reading
+  price bars for a session that had not published yet, on all three faces, so a caller had to pull
+  `--end` back `horizon + 1` sessions and nothing — no message, flag or limitations entry — said
+  so. It contradicted the command's own contract: the training set is every example whose outcome
+  window had closed at `--predict-at`, and those cross sections were always going to be purged.
+  The labelling read simply ran first. `run_daily` now drops them **before** labelling, through
+  `_outcome_had_closed` — the one inequality `trainable_at` already applied, extracted so the two
+  cannot drift — so nothing asks the panel for prices it does not hold. Measured on the
+  ten-session corpus: `--end 2026-01-15` refused before and now answers with the same
+  `artifact_id` and the same `record_id` as `--end 2026-01-14`. A window the *calendar* cannot
+  place at all is untouched and stays `V2-P4-088`'s named refusal: an outcome dated after the
+  deadline and an outcome that cannot be dated are two different facts.
+- **Both `openalpha model --help` examples run, and a test executes the ones that are printed**
+  (`V2-P4-094`). Neither did. Three faults, only the first of which was reported: `--as-of` is a
+  **partition**-level clock, so the printed `2026-01-20T04:00:00+00:00` refuses any 2026 panel
+  holding a row published after it; the bound runs the other way as well, because the calendar
+  requires every session up to `--as-of` to be present, so a later instant is a `date_gap` and the
+  wall-clock default lands outside the interval on every panel not built up to today; and
+  `model evaluate`'s example could not run on *any* panel, since `--horizon 5d` over the seven
+  prediction days it names purges the first fold to nothing and `walk_forward_folds` refuses the
+  schedule — a reason this repository's own test corpus had already recorded. The examples now
+  read a whole year from after it, both spell `--as-of` out, and the help states the rule in both
+  directions. The `not_yet_knowable` refusal stops describing a **maximum** as when the dataset
+  "first became available", says that the judgement is per partition rather than per row, and
+  names the earliest `as_of` that would read it — the number a caller needs was always in the
+  message, framed as a fault rather than as a bound, which is why the acceptance found the
+  reachable set by bisection. **What is not fixed is the partition-level gate itself**, and the
+  reason is measured rather than deferred: see `panel_ingest.load_adjustment_histories`.
 - **A daily run on the last trading day of the year is a named refusal on all three faces,
   not a bare `500`** (`V2-P4-088`). The prediction store seals a batch against the calendar's
   answer to when its outcome becomes knowable, and derives that answer through the same

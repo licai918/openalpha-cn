@@ -5015,10 +5015,27 @@ def model_evaluate_command(
     The usual invocation, against a panel `openalpha factor build` has written a tier into::
 
         openalpha model evaluate --feature reversal_1d/v1@raw --name reversal-rank \\
-          --family cross_sectional_rank --horizon 5d --seed 7 \\
+          --family cross_sectional_rank --horizon 1d --seed 7 \\
           --start 2026-01-06 --end 2026-01-14 --year 2026 \\
           --folds 2 --test-days-per-fold 2 --embargo-sessions 0 \\
-          --min-scored-ratio 0.5 --as-of 2026-01-20T04:00:00+00:00 --runtime-dir ./runtime
+          --min-scored-ratio 0.5 --as-of 2027-01-01T00:00:00+08:00 --runtime-dir ./runtime
+
+    **`--as-of` reads a *partition*, so reading a year means standing after it** (`V2-P4-094`,
+    and the granularity is `panel/catalog.py`'s own). The point-in-time check compares one instant
+    per year partition -- the newest at which any row in it became knowable -- against `--as-of`,
+    and refuses the whole partition when that instant is later; it does not filter rows. So an
+    `--as-of` inside 2026 refuses a 2026 panel however narrow the range you asked about, and the
+    refusal names the earliest instant that would read it. The bound the other way is the
+    calendar: every session up to `--as-of` has to be *present*, so an `--as-of` past the newest
+    session you have built is a `date_gap`. On a panel built for a whole year the usable interval
+    is everything after its last session, which is the literal above; on a panel built to
+    yesterday it is the hours between yesterday's 16:30 and today's.
+
+    **`--horizon` and the schedule have to leave every fold something to learn from**, and `1d`
+    above is measured rather than picked. `5d` over these seven prediction days purges the first
+    fold's training set down to nothing and `walk_forward_folds` refuses the schedule outright --
+    the example printed here said `5d` until `V2-P4-094`, and no panel could run it. A longer
+    horizon wants a longer `--start..--end`, not a different `--as-of`.
 
     **The factor tier has to exist first, and so do five panel targets.** This command reads the
     declared columns out of the factor partitions and then labels every cross section it found,
@@ -5121,13 +5138,27 @@ def model_daily_run_command(
         openalpha model daily-run --feature reversal_1d/v1@raw --name reversal-rank \\
           --family cross_sectional_rank --horizon 5d --seed 7 \\
           --start 2026-01-06 --end 2026-01-14 --year 2026 \\
-          --predict-at 2026-01-16T09:00:00+00:00 --min-scored-ratio 0.5 --runtime-dir ./runtime
+          --predict-at 2026-01-16T09:00:00+00:00 --min-scored-ratio 0.5 \\
+          --as-of 2027-01-01T00:00:00+08:00 --runtime-dir ./runtime
+
+    `--as-of` is spelled out rather than defaulted, and `V2-P4-094` is why: it defaults to the
+    wall clock, which is the right reading instant only on a panel built up to today. Against a
+    stored 2026 panel it asks the calendar for every session between the newest one you built and
+    now, and the run stops on a `date_gap` that is about the clock rather than about the panel.
+    `model evaluate --help` carries the rule in full; the short form is that reading a year means
+    standing after it.
 
     The training set is every labelled example whose outcome window had already closed at
     `--predict-at`; nothing that had not is offered to the fit, which is `V2-P4-013`'s purge with
     the deadline supplied rather than derived. The batch is then handed to the prediction store,
     which stamps `recorded_at` off **its own** clock -- so a caller who backdates reaches
     `unwitnessed` and cannot reach `forward`.
+
+    **`--end` may be the last session you built.** A range reaching within `--horizon` sessions of
+    it used to die reading price bars the panel does not hold yet -- `V2-P4-095` -- so a caller
+    had to pull `--end` back `horizon + 1` sessions and nothing said so. Those cross sections are
+    now skipped before they are labelled, which is the purge above arriving one step earlier;
+    `training.day_count` on the answer is what actually trained.
 
     **What `standing` proves is on the answer, not in this help text.** `forward` means this
     store held the bytes before the outcome became knowable. It does **not** mean the batch was

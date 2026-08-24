@@ -16,6 +16,12 @@ instants, only the **newest** could be screened at all::
     information that first became available at 2026-01-16T08:30:00+00:00
        exit 1
 
+(That last sentence is quoted as it stood when this file was written. `V2-P4-094` rewrote it,
+because *"first became available"* described `max_available_time` -- the **newest** instant
+anywhere in the partition -- as though the dataset as a whole had only just been published, and
+it never said that the judgement is per partition or which `as_of` would work. The refusal is the
+same refusal; only what it tells the reader changed.)
+
 (Those are the two invocations that reproduced it. The `as_of`s the tests below use are a few
 hours later, so that each run's `as_of` lands on a *different* session from the cross section it
 resolves; `EARLIER_AS_OF` says why that matters and what it separates.)

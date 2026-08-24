@@ -53,9 +53,9 @@ address and a transparent upcast would move it while every reference kept the ol
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Generic, TypeVar, cast
+from typing import Final, Generic, TypeVar, cast
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -120,6 +120,47 @@ class IdentityRewriteRequiredError(ValueError):
         )
         self.contract = contract
         self.found_version = found_version
+
+
+STORED_DOCUMENT_FAULTS: Final[tuple[type[Exception], ...]] = (
+    json.JSONDecodeError,
+    UnknownSchemaVersionError,
+    IdentityRewriteRequiredError,
+    ValidationError,
+)
+"""Everything `read_versioned()` raises *about the stored bytes*, named once (`V2-P4-096`).
+
+`model_view._OUTCOME_WINDOW_FAULTS` one plane down, and for the reason that issue stated: which
+exceptions are facts about stored data rather than defects in the code that read them is one
+question with one answer, and a store that answered it with a single `except json.JSONDecodeError`
+would be the fourth call-site patch in a class that has now had three.
+
+**Measured before the fix, on `FilePredictionStore.get` through all three product faces.** Four
+documents, three exception types, one seam -- and every one of them arrived as `exit 5` with the
+message withheld, a bare `500 text/plain`, and an unenveloped raise:
+
+| the document | what `read_versioned` raised |
+| --- | --- |
+| truncated to half its bytes | `json.JSONDecodeError` |
+| a `schema_version` this build has never heard of | `UnknownSchemaVersionError` |
+| a JSON array rather than an object | `UnknownSchemaVersionError` (`version` reads as `None`) |
+| one field retyped, still valid JSON | `pydantic.ValidationError` |
+
+So the tuple is what a caller catches, not `json.JSONDecodeError`: three of the four faults are
+not that type, and the one a power cut produces is the only one anybody would have thought of.
+
+**`IdentityRewriteRequiredError` is in the tuple and is unreachable from every registry that
+reads through it today**, because it comes from a *refusing upgrade* and only
+`decisions`/`validation_results` register one -- both of which are read by
+`storage/migrations.py`, which handles them by name. It is kept for `V2-P4-084`'s stated
+precedent: a guard whose arm no corpus reaches is kept, and the reason is pinned in a test rather
+than left for a mutation sweep to find and delete.
+
+**What is deliberately *not* here is `RuntimeError`**, which `read_versioned` raises when an
+upgrade chain fails to converge. That is a statement about the *registry* -- a `ContractVersions`
+whose upgrades cycle -- and it is a defect in this build rather than a fact about a document. A
+store that swallowed it would report its own bug as damaged data.
+"""
 
 
 @dataclass(frozen=True)

@@ -115,6 +115,7 @@ from openalpha_cn.panel_factors import (
 from openalpha_cn.panel_ingest import daily_requirement
 from openalpha_cn.panel_view import PANEL_STORE_PLACEHOLDER
 from openalpha_cn.sdk import OpenAlphaSDK
+from openalpha_cn.storage.predictions import PredictionStoreError
 
 REVERSAL: Final = FACTOR_DEFINITIONS.get("reversal_1d/v1")
 COMMIT: Final[str] = "abcdef1234567"
@@ -1013,6 +1014,65 @@ def test_the_daily_fit_consumed_only_outcomes_that_had_already_closed(
     assert result.training_example_count == artifact.training_example_count
 
 
+def test_a_training_range_reaching_the_prediction_day_is_purged_rather_than_refused(
+    daily_runtime_dir: Path, tmp_path: Path, runtime_dir: Path
+) -> None:
+    """`V2-P4-095`: the labelling read refused a range the purge was about to discard.
+
+    The panel prices ten sessions and the run predicts about the last of them. `--end` at the
+    session *before* it -- the most natural thing to type, and one this command's own contract
+    invites -- opened a `1d` window exiting on 2026-01-19, a session the panel does not hold, and
+    the whole run died at `exit 1` reading price bars for it. The wall was exactly the horizon:
+    a caller had to pull `--end` back `horizon + 1` sessions, and no message, flag or limitations
+    entry said so.
+
+    **What makes it a defect rather than a limitation is that the answer was never in doubt.**
+    `daily-run` promises *"the training set is every labelled example whose outcome window had
+    already closed at `--predict-at`; nothing that had not is offered to the fit"*, and
+    2026-01-15's window closes on 2026-01-19, three days after the instant this run predicts
+    about. It was always going to be purged. So the two `--end` values one session apart are
+    asserted to produce the **same artifact**, not merely two successes: the user was losing
+    nothing but the guessing, and an assertion that only checked `exit 0` would pass on a fix
+    that quietly trained on a different set.
+
+    **Both directions of the section filter are pinned here and nowhere else, which is why a
+    second test asserting "the purge removes nothing" was written and deleted.** Whether
+    `trainable_at` removes anything after the filter is not observable from any face -- a filter
+    that kept 2026-01-15 and let the purge drop it reports the identical `day_count` -- so that
+    test asserted a formula (`days x securities`) rather than the property, and the formula was
+    wrong: the fixture labels 54 examples over 7 days and 8 names, not 56, because two of them
+    carry no outcome. What separates the two directions is *this* test: a looser filter reaches
+    for 2026-01-19's bars again and the run dies, and a stricter one trains on six days and the
+    artifact stops matching.
+    """
+    root = tmp_path / "purged"
+    root.mkdir()
+    shutil.copytree(runtime_dir / "panel", root / "panel")
+    reaching = {**DAILY, "end": SESSIONS[8]}
+    assert reaching["end"] == date(2026, 1, 15), "the session before the one predicted about"
+    assert reaching["end"] > DAILY["end"], "this range has to reach further than the safe one"
+
+    code, out = _cli(root, "daily-run", reaching)
+    assert code == 0, out
+    reached = json.loads(out)
+
+    with TestClient(create_app(runtime_dir=root, clock=lambda: FORWARD_CLOCK)) as client:
+        response = client.post("/api/v1/models/daily-run", json=_rest_body(reaching))
+    assert response.status_code == 200, response.text
+
+    sdk = OpenAlphaSDK(runtime_dir=daily_runtime_dir, clock=lambda: FORWARD_CLOCK)
+    pulled_back = sdk.run_daily_model(**_sdk_arguments(DAILY))
+    reaching_sdk = sdk.run_daily_model(**_sdk_arguments(reaching))
+
+    assert reached["training"]["day_count"] == len(TRAINING_SESSIONS) == 7
+    assert reached["training"]["end"] == SESSIONS[8].isoformat()
+    assert (
+        reaching_sdk.record.batch.artifact.artifact_id
+        == pulled_back.record.batch.artifact.artifact_id
+    ), "pulling --end back a session was never a different fit, only a different guess"
+    assert reaching_sdk.record.record_id == pulled_back.record.record_id
+
+
 def test_an_evaluation_registers_nothing(daily_runtime_dir: Path) -> None:
     """The register stays empty after an evaluation, and that is a decision rather than a gap.
 
@@ -1090,6 +1150,102 @@ def test_a_prediction_address_that_is_not_one_and_one_nothing_is_held_under_are_
 
     assert _cli_prediction(daily_runtime_dir, "not-an-address")[0] == 3
     assert _cli_prediction(daily_runtime_dir, f"prd_{'0' * 24}")[0] == 1
+
+
+def _register_then(daily_runtime_dir: Path, damage: Any) -> str:
+    """Register one prediction, apply `damage` to the bytes on disk, and return its address."""
+    _sdk, result = _sdk_daily(daily_runtime_dir, lambda: FORWARD_CLOCK)
+    record_id = result.record.record_id
+    document = daily_runtime_dir / "predictions" / f"{record_id}.json"
+    document.write_text(damage(document.read_text(encoding="utf-8")), encoding="utf-8")
+    return record_id
+
+
+_DAMAGE: Final[dict[str, Any]] = {
+    "a write that stopped half way": lambda whole: whole[: len(whole) // 2],
+    "a schema_version this build cannot read": lambda whole: whole.replace(
+        "alpha-prediction-record/v1", "alpha-prediction-record/v2", 1
+    ),
+    "a field that is no longer the type it was filed as": lambda whole: json.dumps(
+        {**json.loads(whole), "batch": {**json.loads(whole)["batch"], "scored": "not a list"}}
+    ),
+}
+"""Three documents `read_versioned` cannot turn back into a record, one per fault it raises.
+
+Truncation is `V2-P4-096`'s own -- a power cut or a full disk between `write_text` and the
+flush behind `replace` -- and the other two are the same seam's other two exits, which the
+measurement found arriving exactly as badly: `UnknownSchemaVersionError` and pydantic's
+`ValidationError`, both `exit 5` / bare `500` / unenveloped before this issue.
+"""
+
+
+@pytest.mark.parametrize("described", sorted(_DAMAGE))
+def test_a_stored_prediction_that_cannot_be_parsed_is_refused_by_name_on_every_face(
+    tmp_path: Path, runtime_dir: Path, described: str
+) -> None:
+    """`V2-P4-096`: the fourth instance of `V2-P4-080`'s class, on Story S32's own store.
+
+    The contrast is the diagnosis. A document *edited* on disk was already handled perfectly --
+    `get` re-derives the address and refuses a document that no longer matches its filename, at
+    `exit 1` with the recomputed address in the sentence. A document that cannot be **parsed**
+    never reached that check, because it fails one line earlier inside `read_versioned`: the
+    store checked the address and not the parse.
+
+    Driven from all three faces because that is where the defect was visible. Nothing in
+    `model_view` or the routes changed to close it -- `FilePredictionStore.get` converts the
+    faults `read_versioned` names, and the `PredictionStoreError` arm every face already had
+    does the rest.
+    """
+    root = tmp_path / "damaged"
+    root.mkdir()
+    shutil.copytree(runtime_dir / "panel", root / "panel")
+    record_id = _register_then(root, _DAMAGE[described])
+
+    code, out = _cli_prediction(root, record_id)
+    assert code == 1, out
+    assert record_id in out
+    assert "could not be read back as a prediction" in out
+    assert "unhandled" not in out
+
+    with TestClient(create_app(runtime_dir=root), raise_server_exceptions=False) as client:
+        response = client.get(f"/api/v1/predictions/{record_id}")
+        assert response.status_code == 404, response.text
+        assert response.json()["detail"]["reason"] == "not_held"
+        assert "could not be read back as a prediction" in response.json()["detail"]["message"]
+
+    with pytest.raises(PredictionStoreError, match="could not be read back as a prediction"):
+        OpenAlphaSDK(runtime_dir=root).held_prediction(record_id)
+
+
+def test_a_prediction_that_cannot_be_parsed_refuses_the_run_that_would_re_register_it(
+    tmp_path: Path, runtime_dir: Path
+) -> None:
+    """The store's **other** reader, which is the reason the fix is not at the call site.
+
+    `put` reads through `get` twice -- once for `supersedes`, and once when a document is already
+    filed under the address a write derived -- so an unreadable document does not only refuse
+    `openalpha model prediction`, it refuses the daily run that would produce the same prediction
+    again. Measured before the fix: `JSONDecodeError` straight out of `put`, which `run_daily`
+    calls outside every arm that could name it.
+
+    A named refusal on this path rather than an overwrite: `put` writes only where nothing is
+    held, and a document that cannot be parsed is still a document that is held.
+
+    Driven through the SDK rather than the command line because the address has to be the *same*
+    one: `predicted_at` reaches it, so a second run under a different clock derives a different
+    address and never meets the damaged document at all. That is what the first draft of this
+    test did, and it passed while proving nothing.
+    """
+    root = tmp_path / "reregister"
+    root.mkdir()
+    shutil.copytree(runtime_dir / "panel", root / "panel")
+    record_id = _register_then(root, _DAMAGE["a write that stopped half way"])
+
+    unreadable = "could not be read back as a prediction"
+    with pytest.raises(PredictionStoreError, match=unreadable) as raised:
+        _sdk_daily(root, lambda: FORWARD_CLOCK)
+
+    assert record_id in str(raised.value)
 
 
 # --- 5. the request, refused where it should be -------------------------------------------------
