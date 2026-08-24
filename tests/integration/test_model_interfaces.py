@@ -82,8 +82,9 @@ the same one `FilePredictionStore` is constructed with by `build_storage`.
 from __future__ import annotations
 
 import json
+import re
 import shutil
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final
@@ -104,7 +105,11 @@ from typer.testing import CliRunner
 from openalpha_cn import cli
 from openalpha_cn.api.app import create_app
 from openalpha_cn.cli import app
-from openalpha_cn.model_view import ModelPanelUnreadableError, ModelRequestError
+from openalpha_cn.model_view import (
+    KNOWN_MODEL_VIEW_LIMITATIONS,
+    ModelPanelUnreadableError,
+    ModelRequestError,
+)
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import (
     FACTOR_DEFINITIONS,
@@ -1086,7 +1091,11 @@ def test_an_evaluation_registers_nothing(daily_runtime_dir: Path) -> None:
     assert OpenAlphaSDK(runtime_dir=daily_runtime_dir).list_predictions() == ()
     listed_code, listed_out = _cli_predictions(daily_runtime_dir)
     assert listed_code == 0
-    assert json.loads(listed_out) == {"record_ids": []}
+    assert json.loads(listed_out) == {"record_ids": [], "predictions": []}
+
+    terminal_code, terminal_out = _cli_predictions(daily_runtime_dir, json_output=False)
+    assert terminal_code == 0
+    assert terminal_out == "", "an empty register prints no header to hang a row on"
 
 
 def _cli_prediction(runtime_dir: Path, record_id: str) -> tuple[int, str]:
@@ -1096,10 +1105,9 @@ def _cli_prediction(runtime_dir: Path, record_id: str) -> tuple[int, str]:
     return result.exit_code, result.output
 
 
-def _cli_predictions(runtime_dir: Path) -> tuple[int, str]:
-    result = CliRunner().invoke(
-        app, ["model", "predictions", "--runtime-dir", str(runtime_dir), "--json"]
-    )
+def _cli_predictions(runtime_dir: Path, *, json_output: bool = True) -> tuple[int, str]:
+    arguments = ["model", "predictions", "--runtime-dir", str(runtime_dir)]
+    result = CliRunner().invoke(app, arguments + (["--json"] if json_output else []))
     return result.exit_code, result.output
 
 
@@ -1121,13 +1129,14 @@ def test_the_rest_face_registers_and_hands_back_one_prediction(
         record_id = body["prediction"]["record_id"]
 
         listed = client.get("/api/v1/predictions")
-        assert listed.json() == {"record_ids": [record_id]}
+        assert listed.json()["record_ids"] == [record_id]
+        assert [row["record_id"] for row in listed.json()["predictions"]] == [record_id]
 
         held = client.get(f"/api/v1/predictions/{record_id}")
         assert held.status_code == 200
         assert held.json()["record_id"] == record_id
         assert held.json()["standing"] == "forward"
-        assert held.json() == body["prediction"]
+        assert held.json() == {**body["prediction"], "limitations": body["limitations"]}
 
 
 def test_a_prediction_address_that_is_not_one_and_one_nothing_is_held_under_are_two_answers(
@@ -1909,3 +1918,601 @@ def test_a_partition_whose_file_is_gone_is_refused_without_naming_it(
         OpenAlphaSDK(runtime_dir=root).evaluate_model(**_sdk_arguments(BASELINE))
     assert str(root / "panel") in str(raised.value)
     assert str(root) not in raised.value.disclosable
+
+
+# --- 7. what the model chain's product acceptance measured (V2-P4-097..100) ----------------------
+
+TREES: Final[dict[str, Any]] = {
+    **BASELINE,
+    "name": "reversal-trees",
+    "family": "boosted_rank_trees",
+    "hyperparameters": (
+        ("learning_rate", "0.1"),
+        ("max_depth", "2"),
+        ("min_leaf_securities", "3"),
+        ("tree_count", "4"),
+    ),
+}
+"""The same one column through the other shipped family. See `test_the_other_shipped_family_...`,
+which measured that these four hyperparameters fit on this corpus."""
+
+
+def _fold_column(terminal: str) -> list[str]:
+    """The last column of each fold row in a terminal evaluation, which is the fit."""
+    return [
+        line.rsplit("  ", 1)[-1].strip()
+        for line in terminal.splitlines()
+        if line.startswith("2026-01-")
+    ]
+
+
+def test_the_terminal_evaluation_prints_the_coefficient_its_headline_cannot_move(
+    runtime_dir: Path,
+) -> None:
+    """`V2-P4-097`: the one number that responds to the fit was the one the default face dropped.
+
+    Measured on this corpus: the two folds are fitted on 15 and 30 examples and learn `-0.9107`
+    and `-0.9464`, and every column the terminal printed -- block, coverage, `mean_rank_ic`,
+    `rank_icir`, reach -- came from `evaluation_rows`, which omitted `folds[].parameters`
+    entirely. `V2-P4-014` measured that a leak shows in the coefficient, so the default face was
+    the one place it could not be seen.
+    """
+    _code, body = _cli(runtime_dir, "evaluate", BASELINE)
+    folds = json.loads(body)["folds"]
+    assert [item["value"] for fold in folds for item in fold["parameters"]] == [
+        pytest.approx(-0.9107142857142855),
+        pytest.approx(-0.9464285714285712),
+    ], "the corpus is expected to fit two folds to two different coefficients"
+
+    _terminal_code, terminal = _cli(runtime_dir, "evaluate", {**BASELINE, "json_output": False})
+    assert _fold_column(terminal) == [
+        "reversal_1d/v1@raw=-0.9107",
+        "reversal_1d/v1@raw=-0.9464",
+    ], terminal
+    header = next(line for line in terminal.splitlines() if line.startswith("block"))
+    assert header.endswith("fit"), header
+
+
+def test_an_ensemble_too_wide_to_print_is_counted_rather_than_truncated(
+    runtime_dir: Path,
+) -> None:
+    """The other shipped family encodes its whole ensemble in `parameters`, and a terminal cannot.
+
+    `alpha_tree._encode` emits two entries per node under keys like `t000.n000.edge`, which on
+    this corpus is 40 and 56 of them. Printing a column-keyed coefficient table and printing a
+    tree are not one rendering, so the rule is the artifact's own rather than the family's: the
+    entries whose key is a declared feature column are printed by name and everything else is
+    counted. A branch on `family` here would be the `if`/`elif` `MODEL_FAMILIES` exists to avoid.
+    """
+    _code, body = _cli(runtime_dir, "evaluate", TREES)
+    assert [len(fold["parameters"]) for fold in json.loads(body)["folds"]] == [40, 56]
+
+    _terminal_code, terminal = _cli(runtime_dir, "evaluate", {**TREES, "json_output": False})
+    assert _fold_column(terminal) == [
+        "40 parameter(s), none on a declared column",
+        "56 parameter(s), none on a declared column",
+    ], terminal
+
+
+def test_a_rank_evaluation_says_its_statistics_see_only_the_ordering_its_fit_induces(
+    runtime_dir: Path,
+) -> None:
+    """`V2-P4-097`'s second half: the invariance is a fact about *this* answer, not a footnote.
+
+    Sweeping `--embargo-sessions` moves the training set and leaves `mean_rank_ic` identical to
+    twelve decimals, because `CrossSectionalRankModel` scores `c.rank(x)` and a rank correlation
+    is invariant to every positive monotone transform of the score. Over **one** declared column
+    that leaves the coefficient's sign as the only thing the headline can see.
+
+    It is declared as a boundary *and* said by the run, and the two are different statements: the
+    registry entry is true of the family, and this key is true of this run's own column count --
+    which is why the count is rendered into the sentence rather than described in it.
+    """
+    _code, body = _cli(runtime_dir, "evaluate", BASELINE)
+    invariances = json.loads(body)["invariances"]
+
+    assert [item["code"] for item in invariances] == [
+        "a_rank_statistic_sees_only_the_ordering_this_fit_induces"
+    ]
+    detail = str(invariances[0]["detail"])
+    assert "over this run's 1 declared column(s)" in detail
+    assert "the sign of its coefficient and nothing else" in detail
+
+    _terminal_code, terminal = _cli(runtime_dir, "evaluate", {**BASELINE, "json_output": False})
+    assert "invariance a_rank_statistic_sees_only_the_ordering_this_fit_induces" in terminal
+    assert "over this run's 1 declared column(s)" in terminal
+
+
+def test_the_other_family_claims_no_such_invariance(runtime_dir: Path) -> None:
+    """The falsifier, and the reason this key is a list rather than a sentence on every answer.
+
+    A boosted ensemble over one column is a step function of it, not a monotone transform of it,
+    so the statistic really does see the fit: measured on this corpus the tree's `mean_rank_ic` is
+    `0.9274` where the rank baseline's is `0.9107` on the same fold, out of the same column.
+    """
+    _code, body = _cli(runtime_dir, "evaluate", TREES)
+    answer = json.loads(body)
+
+    assert answer["invariances"] == []
+    assert answer["folds"][0]["mean_rank_ic"] == pytest.approx(0.9274260335029674)
+
+    _rank_code, rank_body = _cli(runtime_dir, "evaluate", BASELINE)
+    assert json.loads(rank_body)["folds"][0]["mean_rank_ic"] == pytest.approx(0.9107142857142855)
+
+
+def test_both_model_terminal_faces_say_how_many_limitations_the_body_carries(
+    runtime_dir: Path, daily_runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`V2-P4-099`'s fourth account: `evaluate`'s terminal carried none of the named boundaries.
+
+    `daily-run`'s terminal prints the standing pair and `evaluate`'s printed nothing at all, and
+    the asymmetry was not a decision. What a terminal may not do is print fifteen paragraphs, so
+    both faces name the count and the flag that hands them over -- falsifiable, because the count
+    is the registry's own length, where "see the documentation" would not be.
+    """
+    expected = (
+        f"{len(KNOWN_MODEL_VIEW_LIMITATIONS)} named boundary(ies) on what this answer means; "
+        "read them with --json"
+    )
+    _code, terminal = _cli(runtime_dir, "evaluate", {**BASELINE, "json_output": False})
+    assert expected in terminal
+
+    monkeypatch.setattr(cli, "_panel_clock", lambda: FORWARD_CLOCK)
+    _daily_code, daily = _cli(daily_runtime_dir, "daily-run", {**DAILY, "json_output": False})
+    assert expected in daily
+
+
+CUSTODY_CLOCKS: Final[tuple[datetime, ...]] = tuple(
+    datetime(2026, 1, 16, hour, 0, tzinfo=UTC) for hour in (10, 11, 12, 13, 14)
+)
+"""Five custody instants an hour apart, all before `OUTCOME_KNOWN_AT`, so all five stand forward.
+
+Five records rather than two because two can agree on an order by accident. Measured on this
+corpus, the five addresses sort into the order `[3rd, 1st, 4th, 5th, 2nd]` -- the record created
+third sorts first and the one created second sorts last -- which is the shape `V2-P4-098` found on
+a real register and is asserted below rather than assumed.
+"""
+
+
+def _register(root: Path, clocks: Sequence[datetime]) -> tuple[str, ...]:
+    """One daily run per clock, in order, and the addresses they were filed under.
+
+    Every run declares the identical day; they get different addresses because `predicted_at`
+    reaches the content address and each run is stamped from its own clock. That is
+    `V2-P4-100`'s duplicate seen from the other side, and it is what makes five records out of
+    one command.
+    """
+    return tuple(
+        OpenAlphaSDK(runtime_dir=root, clock=lambda clock=clock: clock)  # type: ignore[misc]
+        .run_daily_model(**_sdk_arguments(DAILY))
+        .record.record_id
+        for clock in clocks
+    )
+
+
+def test_the_register_lists_what_it_holds_in_custody_order_and_not_by_content_hash(
+    daily_runtime_dir: Path,
+) -> None:
+    """`V2-P4-098`'s first account: the register could not answer what it exists to answer.
+
+    The user's stated need is to show later that they committed first, and the listing was
+    `sorted(list_ids())` -- a sort over content digests, which is *uncorrelated* with time and
+    therefore actively misleading rather than merely unhelpful. Measured on these five records,
+    the one created third sorted first.
+
+    The order is the **custody stamp** and not `predicted_at`, and the choice is the same one
+    `standing` rests on: `predicted_at` is whatever the caller passed to `predict` and this
+    repository cannot check it, while `recorded_at` is the one instant a caller does not set.
+    Ordering a register by a field its subjects choose would be the register agreeing to be told.
+    """
+    made = _register(daily_runtime_dir, CUSTODY_CLOCKS)
+
+    assert len(set(made)) == len(CUSTODY_CLOCKS), "five clocks must file five records"
+    by_address = sorted(made)
+    assert by_address != list(made), "this corpus is expected to misorder under a digest sort"
+    assert by_address[0] == made[2], "the record created third is expected to sort first"
+    assert by_address[-1] == made[1], "the record created second is expected to sort last"
+
+    held = OpenAlphaSDK(runtime_dir=daily_runtime_dir).held_predictions()
+    assert tuple(record.record_id for record in held) == made
+
+    _code, listed = _cli_predictions(daily_runtime_dir)
+    assert json.loads(listed)["record_ids"] == list(made)
+
+    with TestClient(create_app(runtime_dir=daily_runtime_dir)) as client:
+        response = client.get("/api/v1/predictions")
+    assert response.status_code == 200
+    assert response.json()["record_ids"] == list(made)
+
+
+def test_a_listed_prediction_says_what_it_is_without_being_opened(
+    daily_runtime_dir: Path,
+) -> None:
+    """The other half: a listing of bare addresses has no date, no model and no standing on it.
+
+    A register whose index answers only "these twenty-four digests exist" makes every question a
+    user actually has -- which of these was about last Tuesday, which are `forward`, which came
+    out of the declaration I was running in March -- a loop of `model prediction` calls. So the
+    row carries what a reader needs to choose *which* body to open, and the standing travels with
+    both of `PREDICTION_STANDING_MEANINGS`' sentences here exactly as it does on a body, because
+    a `forward` in a table reads as an attestation just as fast as a `forward` in a document.
+    """
+    made = _register(daily_runtime_dir, CUSTODY_CLOCKS[:2])
+
+    _code, listed = _cli_predictions(daily_runtime_dir)
+    rows = json.loads(listed)["predictions"]
+
+    assert [row["record_id"] for row in rows] == list(made)
+    assert [row["recorded_at"] for row in rows] == [
+        clock.isoformat() for clock in CUSTODY_CLOCKS[:2]
+    ]
+    assert {row["standing"] for row in rows} == {"forward"}
+    assert {row["as_of"] for row in rows} == {_build_instant(PREDICT_SESSION).isoformat()}
+    assert {row["outcome_known_at"] for row in rows} == {OUTCOME_KNOWN_AT}
+    assert {row["model_name"] for row in rows} == {"reversal-rank"}
+    assert {row["horizon"] for row in rows} == {HORIZON}
+    assert {(row["scored_count"], row["offered_count"]) for row in rows} == {
+        (DAILY_SCORED, DAILY_OFFERED)
+    }
+    for row in rows:
+        assert "held these bytes before the instant" in str(row["standing_proves"])
+        assert "nothing here defends against whoever owns the disk" in str(
+            row["standing_does_not_prove"]
+        )
+
+    _terminal_code, terminal = _cli_predictions(daily_runtime_dir, json_output=False)
+    assert terminal.splitlines()[0].split() == [
+        "recorded_at",
+        "as_of",
+        "standing",
+        "horizon",
+        "scored",
+        "model",
+        "record_id",
+    ]
+    assert [line.split()[-1] for line in terminal.splitlines()[1:3]] == list(made)
+    # Once per *standing*, not once per row: two rows of one standing get one legend, which is
+    # the one place `PREDICTION_STANDING_MEANINGS`' "the sentences travel in the body" has to
+    # bend, because two paragraphs against every line of a long table is a table nobody reads.
+    assert terminal.count("forward means") == 1
+    assert terminal.count("and does not prove") == 1
+
+
+def test_the_register_orders_by_the_stamp_the_caller_does_not_set(
+    daily_runtime_dir: Path,
+) -> None:
+    """`recorded_at` and not `predicted_at`, driven where the two disagree.
+
+    On every ordinary run the two instants are equal -- one clock stamps both, which is
+    `no_face_here_can_produce_an_unwitnessed_record_because_one_clock_stamps_both_instants` -- so
+    a register sorted on either would look identical and a mutation between them would survive.
+    Here one record is written through a clock that advances between the two readings: it claims
+    the **earliest** production instant of the four and reaches custody **last**.
+
+    Sorted on `predicted_at` it would lead the register; sorted on custody it trails it. Custody
+    is the honest key, and for the reason `standing` rests on: `predicted_at` is whatever the
+    caller passed to `predict` and nothing here can check it, so a register ordered on it is a
+    register that agrees to be told what order it is in.
+    """
+    settled = _register(daily_runtime_dir, CUSTODY_CLOCKS[1:4])
+
+    reading = {"count": 0}
+
+    def clock() -> datetime:
+        """The earliest production instant of the four, then a custody stamp after the deadline.
+
+        Armed after the container is built rather than counted from zero, `test_a_batch_this_
+        store_received_late_is_unwitnessed_and_says_which_half_failed`'s reason: `build_storage`
+        reads the clock itself to recover interrupted batches.
+        """
+        reading["count"] += 1
+        return CUSTODY_CLOCKS[0] if reading["count"] == 1 else LATE_CLOCK
+
+    sdk = OpenAlphaSDK(runtime_dir=daily_runtime_dir, clock=clock)
+    reading["count"] = 0
+    slow = sdk.run_daily_model(**_sdk_arguments(DAILY)).record
+
+    assert slow.standing == "unwitnessed"
+    assert slow.batch.predicted_at == CUSTODY_CLOCKS[0]
+    assert slow.recorded_at == LATE_CLOCK
+
+    held = OpenAlphaSDK(runtime_dir=daily_runtime_dir).held_predictions()
+    assert [record.record_id for record in held] == [*settled, slow.record_id]
+    assert sorted(held, key=lambda record: record.batch.predicted_at)[0].record_id == (
+        slow.record_id
+    ), "the slow record claims the earliest production instant of the four"
+
+
+def test_a_stored_prediction_resolves_back_to_the_declaration_it_was_fitted_under(
+    daily_runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`V2-P4-098`'s second account, and the finding's own premise is half wrong.
+
+    *"A record read a year later says 'reversal-rank predicted these sixty numbers' and cannot say
+    what reversal-rank was."* The **document** can: `PredictionRecord` carries the whole
+    `AlphaModelArtifact` by value, which carries the declaration, the resolved `feature_version`,
+    the feature columns, the code commit, the seed, the hyperparameters, the training cutoff, the
+    example count and the fitted coefficients. It was `prediction_view` that threw all of it away
+    and rendered `model_name` and `artifact_id`, so no face could resolve `mdl_...` -- and none
+    needs to, because nothing has to be looked up.
+
+    What is genuinely absent is the training **range** and the instant the fit read the panel;
+    see `a_forward_standing_does_not_bound_the_instant_the_fit_read_the_panel`.
+    """
+    monkeypatch.setattr(cli, "_panel_clock", lambda: FORWARD_CLOCK)
+    _run_code, run_out = _cli(daily_runtime_dir, "daily-run", DAILY)
+    answer = json.loads(run_out)
+    record_id = answer["prediction"]["record_id"]
+
+    _code, held_out = _cli_prediction(daily_runtime_dir, record_id)
+    model = json.loads(held_out)["model"]
+
+    assert model == {
+        "artifact_id": answer["prediction"]["artifact_id"],
+        "code_commit": COMMIT,
+        "family": "cross_sectional_rank",
+        "feature_ids": ["reversal_1d/v1@raw"],
+        "feature_version": "feat_3b3122f39322527699a2cabc",
+        "hyperparameters": [],
+        "name": "reversal-rank",
+        "parameters": [
+            {"feature_id": "reversal_1d/v1@raw", "value": pytest.approx(-0.9438775510204079)}
+        ],
+        "seed": 7,
+        "training_cutoff": "2026-01-16T07:00:00+00:00",
+        "training_example_count": 54,
+    }
+
+    with TestClient(create_app(runtime_dir=daily_runtime_dir)) as client:
+        response = client.get(f"/api/v1/predictions/{record_id}")
+    assert response.status_code == 200
+    assert response.json()["model"] == json.loads(held_out)["model"]
+
+
+EARLY_DAILY: Final[dict[str, Any]] = {
+    **DAILY,
+    "start": SESSIONS[1],
+    "end": SESSIONS[2],
+    "predict_at": _build_instant(SESSIONS[3]),
+}
+"""A daily run about 2026-01-08, whose outcome closes long before this corpus's reading `as_of`."""
+
+EARLY_CLOCK: Final[datetime] = datetime(2026, 1, 8, 10, 0, tzinfo=UTC)
+"""Before that outcome closed, so the record stands `forward` while the panel was read after."""
+
+
+def test_a_forward_standing_does_not_bound_the_instant_the_fit_read_the_panel(
+    daily_runtime_dir: Path,
+) -> None:
+    """`V2-P4-098`'s sharpest account, reproduced on the fixture: honesty stops at the record.
+
+    Measured here -- the outcome of a 2026-01-08 prediction becomes knowable at 2026-01-12T07:00Z,
+    this run's clock stamps both instants at 2026-01-08T10:00Z so the record stands `forward`, and
+    every panel read behind the fit was made at 2026-01-17T04:00Z, **five days after** the answer
+    printed. The standing is correct about what it claims and says nothing whatever about that.
+
+    The reading instant is deliberately **not** added to the record, and
+    `a_forward_standing_does_not_bound_the_instant_the_fit_read_the_panel` carries the argument.
+    What is added is at the faces: the terminal rendering of a daily run prints the reading
+    instant beside the deadline, because that is the one face holding both numbers at once.
+    """
+    sdk = OpenAlphaSDK(runtime_dir=daily_runtime_dir, clock=lambda: EARLY_CLOCK)
+    result = sdk.run_daily_model(**_sdk_arguments(EARLY_DAILY))
+    view = sdk.daily_view(result)
+    training = view["training"]
+    assert isinstance(training, dict)
+
+    assert result.record.standing == "forward"
+    assert result.record.outcome_known_at.isoformat() == "2026-01-12T07:00:00+00:00"
+    assert datetime.fromisoformat(str(training["as_of"])) > result.record.outcome_known_at
+
+    _code, held_out = _cli_prediction(daily_runtime_dir, result.record.record_id)
+    assert READ_AT.isoformat() not in held_out, (
+        "the stored document is expected to carry no field naming the instant its fit read"
+    )
+
+    codes = {item["code"] for item in json.loads(held_out)["limitations"]}
+    assert "a_forward_standing_does_not_bound_the_instant_the_fit_read_the_panel" in codes
+
+
+def test_the_daily_terminal_prints_the_instant_the_panel_was_read_beside_the_deadline(
+    daily_runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The half of `V2-P4-098`'s third account that a face *can* answer.
+
+    The stored record cannot carry the reading instant, and the argument for not putting it there
+    is on the limitation. But a daily run's own terminal answer is holding the deadline and the
+    reading instant at the same moment, and it printed only one of them -- so a reader watching a
+    scheduled job go past could not see the contradiction even where it was visible.
+    """
+    monkeypatch.setattr(cli, "_panel_clock", lambda: FORWARD_CLOCK)
+    code, out = _cli(daily_runtime_dir, "daily-run", {**DAILY, "json_output": False})
+
+    assert code == 0, out
+    labels = [line.split("  ")[0] for line in out.splitlines()]
+    assert labels.index("panel read at") == labels.index("outcome_known_at") + 1
+    assert f"panel read at       {READ_AT.isoformat()}" in out
+
+
+def test_a_re_run_of_one_day_through_the_command_line_files_a_second_record(
+    daily_runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`V2-P4-100`'s second account, and it is a defect in a claim rather than in the store.
+
+    `model daily-run --help` said re-running an identical day was `unchanged` on both stores. It
+    cannot be through this face: `predicted_at` is the process clock's reading, it reaches
+    `record_id` through the batch, and a scheduled job retrying an hour after a transient failure
+    therefore leaves two records and two manifests for one prediction day.
+
+    The clock is monkeypatched to a value this test moves *between* the two invocations, which is
+    the production shape rather than a convenience: within one run both instants come from one
+    reading, and between two runs the wall clock has moved. `test_re_running_an_identical_day_
+    registers_nothing_new_on_either_store` reaches `unchanged` from the SDK with a *fixed* clock,
+    and the contrast is the finding.
+    """
+    now = {"value": FORWARD_CLOCK}
+    monkeypatch.setattr(cli, "_panel_clock", lambda: now["value"])
+
+    first_code, first_out = _cli(daily_runtime_dir, "daily-run", DAILY)
+    now["value"] = FORWARD_CLOCK + timedelta(hours=1)
+    second_code, second_out = _cli(daily_runtime_dir, "daily-run", DAILY)
+
+    assert (first_code, second_code) == (0, 0), (first_out, second_out)
+    first, second = json.loads(first_out), json.loads(second_out)
+
+    assert first["write_outcome"] == second["write_outcome"] == "created"
+    assert first["prediction"]["record_id"] != second["prediction"]["record_id"]
+    assert first["run_id"] != second["run_id"]
+    assert first["prediction"]["as_of"] == second["prediction"]["as_of"]
+    assert first["prediction"]["artifact_id"] == second["prediction"]["artifact_id"]
+
+    _listed_code, listed = _cli_predictions(daily_runtime_dir)
+    assert json.loads(listed)["record_ids"] == [
+        first["prediction"]["record_id"],
+        second["prediction"]["record_id"],
+    ], "two records for one prediction day, oldest custody first"
+
+    rendered = CliRunner().invoke(app, DAILY_HELP).output
+    assert "every invocation of this command files a new record" in re.sub(r"\s+", " ", rendered)
+    assert (
+        "a_re_run_of_one_day_files_a_second_record_because_predicted_at_reaches_the_address"
+        in re.sub(r"\s+", "", rendered)
+    ), "a limitation code is one token and rich breaks it across lines; join rather than collapse"
+
+
+DAILY_HELP: Final[list[str]] = ["model", "daily-run", "--help"]
+
+
+def test_no_shipped_face_stamps_the_two_instants_from_two_clock_readings(
+    daily_runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`V2-P4-099`'s third account: a third of the standing vocabulary is unreachable in practice.
+
+    `unwitnessed` describes a batch stamped in time that reached the store late. Every shipped
+    face hands `predicted_at` and the store's clock the *same* callable, so the two instants come
+    out equal and the window the standing describes is the duration of one `put`. Measured here
+    on the command line with a fixed clock, which is what makes the equality visible rather than
+    merely likely: a real clock would differ in the microseconds and prove nothing about which
+    reading each instant came from.
+
+    Not repaired. `V2-P4-017` argues the standing may not be collapsed into either neighbour, and
+    a contract that could not express a slow disk would be wrong the first time this store lives
+    somewhere a write can block.
+    """
+    monkeypatch.setattr(cli, "_panel_clock", lambda: FORWARD_CLOCK)
+    _code, out = _cli(daily_runtime_dir, "daily-run", DAILY)
+    prediction = json.loads(out)["prediction"]
+
+    assert prediction["predicted_at"] == prediction["recorded_at"] == FORWARD_CLOCK.isoformat()
+    assert prediction["standing"] == "forward"
+
+    codes = {item["code"] for item in json.loads(out)["limitations"]}
+    assert (
+        "no_face_here_can_produce_an_unwitnessed_record_because_one_clock_stamps_both_instants"
+        in codes
+    )
+
+
+def test_no_shipped_face_can_name_the_record_a_backfill_supersedes(
+    daily_runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`V2-P4-099`'s second account, brought up into the registry a caller actually reads.
+
+    A backfill is rendered with *"a backfill naming no earlier record corrects nothing"* and no
+    face carries a flag, a field or a parameter that could name one. `domain/prediction_record.py`
+    has known that since `V2-P4-093`; what it did not have was a way to reach a body, and this
+    registry is what a caller pastes into a report.
+    """
+    monkeypatch.setattr(cli, "_panel_clock", lambda: LATE_CLOCK)
+    _code, out = _cli(daily_runtime_dir, "daily-run", DAILY)
+    answer = json.loads(out)
+
+    assert answer["prediction"]["standing"] == "backfill"
+    assert answer["prediction"]["supersedes"] is None
+    assert "corrects nothing" in answer["prediction"]["standing_does_not_prove"]
+
+    collapsed = re.sub(r"\s+", " ", CliRunner().invoke(app, DAILY_HELP).output)
+    assert "--supersedes" not in collapsed
+    codes = {item["code"] for item in answer["limitations"]}
+    assert "the_supersedes_edge_is_unreachable_from_every_face_this_module_serves" in codes
+
+
+def test_a_factor_built_over_fewer_subjects_is_still_offered_the_whole_registry(
+    daily_runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`V2-P4-100`'s first account, at the scale this corpus can carry it.
+
+    `feature_matrix.py` says *"the rows are the universe"*: the cross section is the stored
+    registry's listed set, not the subjects a factor build named. This corpus builds
+    `reversal_1d/v1` over seven of its eight listed securities, and the eighth is offered to the
+    model on every prediction day and abstained on by name -- one name out of eight here, and
+    32,742 security-days out of 33,090 on the real panel that acceptance ran, which is why no
+    meaningful `--min-scored-ratio` was reachable there.
+    """
+    monkeypatch.setattr(cli, "_panel_clock", lambda: FORWARD_CLOCK)
+    _code, out = _cli(daily_runtime_dir, "daily-run", DAILY)
+    answer = json.loads(out)
+
+    assert len(SUBJECTS) == len(SECURITIES) - 1
+    assert answer["measurement"]["offered_count"] == len(SECURITIES)
+    assert answer["measurement"]["scored_count"] == len(SUBJECTS)
+    assert [
+        row["ts_code"] for row in answer["prediction"]["predictions"] if row["score"] is None
+    ] == [UNVALUED]
+
+    codes = {item["code"] for item in answer["limitations"]}
+    assert "a_subject_narrowed_factor_build_does_not_narrow_the_market_this_face_labels" in codes
+
+
+def test_the_horizon_wall_names_the_horizon_and_the_prediction_day_that_reached_it(
+    runtime_dir: Path,
+) -> None:
+    """`V2-P4-099`'s first account: one sentence for every horizon, naming neither flag.
+
+    Measured on this corpus, `--horizon 2d`, `3d`, `5d` and `8d` all produce the **identical**
+    refusal about 2026-01-19's 16:30 publication, because the first unpublished session a window
+    reaches is the same one whatever the horizon; `1d` clears it. So the wall is a joint function
+    of the declared horizon and the last prediction day in the range, and the refusal named
+    neither -- against the same face's schedule refusal, which is exemplary: *"this panel's 7
+    prediction day(s) cannot carry the declared schedule of 2 fold(s) of 2 test day(s)"*.
+
+    The remedy names **both** flags because either one moves the wall, which is the whole finding.
+
+    The two sentences now differ in the half that matters and agree in the half that is a fact
+    about the panel: both refusals are still about 2026-01-19, because that is the first
+    unpublished session either window touches -- and they name *different prediction days*,
+    because a `5d` window already overshoots from the range's first day while a `2d` one only
+    overshoots from its last. Measured, not chosen: a reader of the `5d` sentence learns that
+    shortening the range will not help them, which the old sentence could not have told them.
+    """
+    refusals = {
+        horizon: _cli(runtime_dir, "evaluate", {**BASELINE, "horizon": horizon})
+        for horizon in ("2d", "5d")
+    }
+    assert {code for code, _out in refusals.values()} == {1}
+    assert refusals["2d"][1] != refusals["5d"][1], (
+        "two horizons must no longer produce one identical sentence"
+    )
+
+    for _horizon, (_code, out) in refusals.items():
+        assert "daily cannot be read for 2026-01-19" in out
+        assert "that session had not published yet" in out
+        assert "a shorter --horizon, or a --start/--end range that stops earlier" in out
+        # `V2-P4-100`'s fourth account, pinned here: lengthening the horizon on a mid-year panel
+        # does *not* reach `V2-P4-088`'s calendar-horizon refusal. The calendar is built to the
+        # end of its year and reaches every window this range can ask for, so the price plane
+        # answers first. `tests/integration/test_year_end_daily_run.py` is what reaches the other.
+        assert "cannot be built on the SZSE calendar" not in out
+
+    assert (
+        "This run reached it because the 2d outcome window for the prediction day 2026-01-14 "
+        "opens on 2026-01-15 and exits on 2026-01-19" in refusals["2d"][1]
+    ), refusals["2d"][1]
+    assert (
+        "This run reached it because the 5d outcome window for the prediction day 2026-01-09 "
+        "opens on 2026-01-12 and exits on 2026-01-19" in refusals["5d"][1]
+    ), refusals["5d"][1]
+    # The remedy is conditioned on the reason rather than asserted: every read behind a label
+    # window comes through the same `except`, and "shorten your horizon" cannot repair a
+    # partition whose file is gone.
+    assert "Where that session has simply not published yet" in refusals["2d"][1]

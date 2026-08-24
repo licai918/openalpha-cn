@@ -63,8 +63,10 @@ from openalpha_cn.model_view import (
     evaluation_view,
     feature_columns,
     held_prediction,
+    held_prediction_view,
+    held_predictions,
     model_evaluation_request,
-    prediction_view,
+    prediction_index_view,
     run_daily,
 )
 from openalpha_cn.panel.store import PanelStore
@@ -1832,14 +1834,21 @@ def create_app(
         )
 
     @application.get("/api/v1/predictions")
-    def prediction_list() -> dict[str, list[str]]:
-        """Every registered prediction this installation holds, by content address, ascending.
+    def prediction_list() -> dict[str, object]:
+        """Every registered prediction this installation holds, oldest custody first.
 
         `GET /api/v1/shortlists`' twin and its shape: a listing of keys rather than of bodies,
         because a prediction batch at market width is hundreds of kilobytes and a caller almost
         always wants one of them.
+
+        **The order is the custody stamp and no longer the content digest** (`V2-P4-098`). A
+        digest sort is uncorrelated with time, and this listing is read to answer which of two
+        predictions was committed to first -- measured on five records, the one created third
+        sorted first. `record_ids` keeps its name and its place and carries the new order;
+        `predictions` is the same list with each row saying what it is, both standing sentences
+        included, so a caller chooses which body to fetch rather than fetching all of them.
         """
-        return {"record_ids": list(prediction_store.list_ids())}
+        return prediction_index_view(held_predictions(prediction_store))
 
     @application.get("/api/v1/predictions/{record_id}")
     def prediction_get(record_id: str) -> JSONResponse:
@@ -1852,6 +1861,11 @@ def create_app(
         Registered **after** `POST /api/v1/models/daily-run` and beside `GET /api/v1/predictions`,
         which do not collide with it: the run route is a different method on a different path, and
         the listing route is a different path. FastAPI matches in declaration order.
+
+        The body carries the whole fitted artifact under `model` and `KNOWN_MODEL_VIEW_
+        LIMITATIONS` under `limitations` -- `held_prediction_view`, shared with the command line,
+        because this and `openalpha model prediction` are the two faces a stored prediction is
+        read through a year later and neither has the run's own answer to hand.
         """
         try:
             record = held_prediction(prediction_store, record_id)
@@ -1863,7 +1877,7 @@ def create_app(
                 detail=_panel_detail("not_held", str(error)),
             ) from error
         return JSONResponse(
-            status_code=MODEL_HTTP_STATUS["answered"], content=prediction_view(record)
+            status_code=MODEL_HTTP_STATUS["answered"], content=held_prediction_view(record)
         )
 
     @application.get("/api/v1/factors/experiments")

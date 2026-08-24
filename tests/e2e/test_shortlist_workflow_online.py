@@ -36,22 +36,42 @@ phases it constrains). Measured on the panel this suite fetched on 2026-08-19:
     daily         knowable from 2026-08-19T16:30+08:00   (152 sessions, newest 2026-08-19)
 
 `adj_factor` and `suspend_d` are whole-year partitions whose newest row is the newest session's,
-so their availability instant *is* that session's close -- and therefore **the only `as_of` a
-factor can be built at or a shortlist cut at is at or after the newest stored session's close.
-Every earlier session is refused, on every panel, whatever the listings did.** The registry is
-merely the first of them to say so, because it is read first:
+so their availability instant *is* that session's close -- and therefore, **as measured on
+2026-08-19**, the only `as_of` a factor could be built at or a shortlist cut at was at or after
+the newest stored session's close. The registry was merely the first of them to say so, because
+it is read first:
 
     $ openalpha factor build --factor reversal_1d/v1 --as-of 2026-08-18T17:30:00+08:00
     the security registry cannot be read at 2026-08-18T17:30+08:00: ['not_yet_knowable'];
     stock_basic holds information that first became available at 2026-08-18T16:00:00+00:00
 
-That is `V2-P4-061`'s wall, still standing on the datasets that fix did not move. `061` put
-`daily`, `daily_basic` and `stk_limit` on the as-of-sensitive session read precisely so that "two
-days' shortlists could not be compared, yesterday's could not be re-run, and a published list
-could not be audited after the fact" would stop being true -- and on a real panel all three are
-still true, because the four planes read beside the prices were not moved with them.
+That is `V2-P4-061`'s wall, standing on the datasets that fix did not move. `061` put `daily`,
+`daily_basic` and `stk_limit` on the as-of-sensitive session read precisely so that "two days'
+shortlists could not be compared, yesterday's could not be re-run, and a published list could not
+be audited after the fact" would stop being true, and on the panel above all three were still
+true, because the four planes read beside the prices were not moved with them.
 `test_a_cross_section_earlier_than_the_registrys_own_availability_is_refused` is where that
 finding lives, with its own contrast one instant later.
+
+**`V2-P4-076` then moved three of those four, and the paragraph above is kept as a dated
+measurement rather than as a standing claim.** `shortlist_view.load_shortlist_cross_section`'s own
+table names them: `stock_basic`, `suspend_d` and `namechange` now take
+`panel_ingest._read_visible_event_dated_rows`, the per-event-date census reconciliation, each with
+its own availability rule -- so the transcript above is the *pre-`076`* refusal and the sentence
+"every earlier session is refused, on every panel" is no longer the rule. What `076` left standing
+for this chain is `adj_factor`, and it was left deliberately: `V2-P4-086` measured that
+`compress_adjustment_batch` stores a step function, that a row predicate at an earlier instant
+drops six of eight securities to a single row and pulls `covered_through` back far enough to turn
+every question this chain asks into an `AdjustmentHorizonError`, and that `PartitionCoverage.dates`
+carries no subject axis to decide it per security. That issue names the two exact edits the move
+needs and neither is this file's.
+
+**Not re-measured against a live panel since `076`.** The transcripts in this section, and
+`test_a_cross_section_earlier_than_the_registrys_own_availability_is_refused`'s own reading that
+the registry is what refuses, date from before it; that test skips when no stored session is
+earlier than `registry_knowable_from`, so a panel on which `076` has moved the wall makes it skip
+rather than fail. Re-running this suite against a fresh panel is what would settle which dataset
+now answers first, and `V2-P4-100` fixed the sentence rather than claiming the measurement.
 
 ## The second finding, which had no instant left at all
 

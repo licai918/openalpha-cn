@@ -186,6 +186,7 @@ from openalpha_cn.backtest.walk_forward import (
 from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET, AdjustmentError, AdjustmentHistory
 from openalpha_cn.domain.alpha_model import (
     AlphaModel,
+    AlphaModelArtifact,
     AlphaModelDeclaration,
     AlphaModelError,
     FittedAlphaModel,
@@ -289,12 +290,19 @@ __all__ = [
     "daily_view",
     "declared_hyperparameters",
     "evaluate_model",
+    "evaluation_invariances",
     "evaluation_rows",
     "evaluation_view",
     "feature_columns",
     "held_prediction",
+    "held_prediction_view",
+    "held_predictions",
+    "limitation_pointer",
     "model_evaluation_request",
     "panel_store",
+    "prediction_index_rows",
+    "prediction_index_view",
+    "prediction_standing_legend",
     "prediction_view",
     "run_daily",
     "trainable_at",
@@ -601,6 +609,136 @@ KNOWN_MODEL_VIEW_LIMITATIONS: Final[tuple[ModelViewLimitation, ...]] = (
         ),
     ),
     ModelViewLimitation(
+        code="a_rank_statistic_sees_only_the_ordering_this_fit_induces",
+        detail=(
+            "`CrossSectionalRankModel` scores the sum of `coefficient x rank(column)` and every "
+            "statistic this face reports is a rank correlation, which is invariant under every "
+            "positive monotone transform of the score. Over a single declared column that "
+            "leaves the sign of the coefficient as the only part of the fit `mean_rank_ic` and "
+            "`rank_icir` can see: V2-P4-097 swept `--embargo-sessions` from 0 to 15, moved the "
+            "training set from 780 examples to 2,640, and got `mean_rank_ic` identical to twelve "
+            "decimal places at every step -- two `openalpha model evaluate` runs ten sessions of "
+            "embargo apart printed byte-identical terminal output. The whole purged walk-forward "
+            "ceremony above it is real and none of it reaches the headline. What does move is "
+            "`folds[].parameters` (+0.180 to +0.212 across that sweep), which is why the "
+            "coefficient is now the terminal rendering's last column and why `evaluation_"
+            "invariances` says on each answer whether that answer is standing on this. "
+            "`boosted_rank_trees` is not: a step function of one column is not a monotone "
+            "transform of it."
+        ),
+    ),
+    ModelViewLimitation(
+        code="a_forward_standing_does_not_bound_the_instant_the_fit_read_the_panel",
+        detail=(
+            "`standing` compares two instants against the deadline -- when the batch says it was "
+            "produced, and when this store held it. It says nothing about `as_of`, the instant "
+            "every panel read behind the fit was made at, and the two can contradict each other: "
+            "V2-P4-098 measured a record standing `forward` out of a run whose training `as_of` "
+            "was 2026-04-01 against an `outcome_known_at` of 2026-03-30. `--as-of` defaults to "
+            "the wall clock, so an ordinary run cannot reach this; one that names an instant "
+            "later than its own clock can, and V2-P4-094 measured that the reachable `--as-of` "
+            "set is pinned to the newest built session, which pushes callers toward late values "
+            "rather than away from them. The instant is deliberately **not** added to the "
+            "record. It is a caller-supplied value exactly as `predicted_at` is, so a reader "
+            "meeting it in a stored document would take it for a bound on what the fit saw when "
+            "nothing checked it -- the field-that-looks-like-proof V2-P4-017 refuses -- and "
+            "adding it would take `alpha-prediction-record` to v2 through a refusing migration "
+            "that moves every address already filed. **Blocking the contradiction was considered "
+            "and declined, and the reason is not that it is unreachable** -- `put` hands back a "
+            "record carrying `outcome_known_at`, so `run_daily` could compare after the write "
+            "and add a second `blocks` entry without reading the calendar twice. It is declined "
+            "because the block would be about a *claim* rather than about a leak. What a late "
+            "`as_of` actually admits into a run is today's registry, calendar and adjustment "
+            "shape, which is already declared by "
+            "`the_evaluation_reads_its_labels_at_one_as_of_and_that_is_not_a_point_in_time_fit`; "
+            "the outcome itself is kept out of the fit by `trainable_at`'s purge and by each "
+            "cross section being read at its own prediction instant, both of which hold whatever "
+            "`--as-of` says. So a run that reached this really may be sound, and refusing it "
+            "would refuse a sound answer to protect a reader from over-reading a badge. The "
+            "remedy for over-reading a badge is words: this entry, and the two faces that hold "
+            "both numbers printing both -- `daily_view`'s `training.as_of` and the terminal "
+            "rendering's `panel read at`, beside the deadline."
+        ),
+    ),
+    ModelViewLimitation(
+        code="the_supersedes_edge_is_unreachable_from_every_face_this_module_serves",
+        detail=(
+            "`PredictionRecord.supersedes` is what Implementation Decision 14's 回溯重算 is "
+            "supposed to name -- the earlier record a recomputation corrects -- and no face "
+            "offers it. `run_daily` is the only caller of `put` in `src/` and passes three "
+            "keywords; there is no CLI flag, no field on `DailyRunRequest` or its HTTP body, and "
+            "no SDK parameter. So the sentence a `backfill` is rendered with -- *a backfill "
+            "naming no earlier record corrects nothing* -- describes a state no user of this "
+            "product can leave. `domain/prediction_record.py` records the same fact one plane "
+            "down under `the_supersedes_edge_is_contract_only_because_no_face_offers_a_record_"
+            "to_name`, and V2-P4-099 measured that it never reaches a body: this registry is "
+            "what a caller pastes into a report, and the contract's own is not rendered on any "
+            "answer. Exposing the flag stays declined for that entry's reason -- the only honest "
+            "argument is a `record_id` read off an earlier run, which is `held_prediction`'s "
+            "address rather than a daily run's input."
+        ),
+    ),
+    ModelViewLimitation(
+        code="no_face_here_can_produce_an_unwitnessed_record_because_one_clock_stamps_both_instants",
+        detail=(
+            "`unwitnessed` is a third of `PredictionStanding` and describes a batch stamped in "
+            "time that reached the store late. All three faces read one clock: the CLI takes "
+            "`predicted_at` from `_panel_clock()` and hands `FilePredictionStore` the same "
+            "callable, HTTP and the SDK hand both halves the container's clock. V2-P4-099 "
+            "measured the two instants **equal** on every shipped path, so the window this "
+            "standing describes is the duration of one `put` -- microseconds -- and the state is "
+            "unreachable in practice. It is still not collapsible: `V2-P4-017` argues that "
+            "folding it into `forward` makes it evidence it is not and folding it into "
+            "`backfill` accuses a caller whose only fault may have been a slow disk, and a "
+            "contract that could not express a slow disk would be wrong the first time a store "
+            "lives somewhere a write can block. What is measured is that this build has no such "
+            "store: `tests/integration/test_model_interfaces.py` reaches the standing only by "
+            "injecting a clock that advances between the two readings."
+        ),
+    ),
+    ModelViewLimitation(
+        code="a_re_run_of_one_day_files_a_second_record_because_predicted_at_reaches_the_address",
+        detail=(
+            "`model daily-run` said re-running an identical day was `unchanged` on both stores. "
+            "It is not, and cannot be through this face: `predicted_at` is this process's clock "
+            "reading, it reaches `record_id` through the batch, and so every invocation files a "
+            "new record and a new manifest. V2-P4-100 measured a scheduled job retrying after a "
+            "transient failure leaving **two records for one prediction day**, which inflates "
+            "every count taken over this store -- including the multiple-testing denominator "
+            "`domain/prediction_record.py` says the register holds. The three repairs that look "
+            "obvious are each refused, and by this repository's own arguments. Taking "
+            "`predicted_at` out of the address is V2-P4-016's field and would let a backfill "
+            "collide with the original it recomputes, which is the one collision "
+            "`storage/predictions.py` rests on being impossible. A `--predicted-at` flag would "
+            "hand a caller the field that is unverifiable *by construction* and make it a chosen "
+            "one, which is the same move `put` refuses by having no `recorded_at` parameter. A "
+            "scan of the register before each write -- 'is a record already held for this "
+            "declaration and this `as_of`' -- is the access pattern "
+            "`the_store_never_checks_that_its_own_clock_moved_forward` declines for the sibling "
+            "question. So this is a constraint rather than a defect to repair here: two runs of "
+            "one day really did produce two batches at two instants, the store records both "
+            "truthfully, and what is missing is a way to say they are one forecast -- which is "
+            "`supersedes`, and `the_supersedes_edge_is_unreachable_from_every_face_this_module_"
+            "serves` is the entry above."
+        ),
+    ),
+    ModelViewLimitation(
+        code="a_subject_narrowed_factor_build_does_not_narrow_the_market_this_face_labels",
+        detail=(
+            "`openalpha factor build --subject` narrows what is *computed*; it does not narrow "
+            "what is *offered*. `feature_matrix.py`'s cross section is the stored registry's "
+            "listed set -- 'the rows are the universe' -- so a factor built over sixty names is "
+            "read against every listed security on every prediction day, and every name with no "
+            "stored value abstains. V2-P4-100 measured 348 scores over 33,090 security-days on a "
+            "real panel: **1.05%**, which puts every meaningful `--min-scored-ratio` out of "
+            "reach. On the shortlist chain `--subject` buys proportional work; here it buys a "
+            "shorter build and nothing else. Widening the recipe rather than the floor is the "
+            "remedy -- build the declared columns over the whole registry -- and lowering the "
+            "floor to fit a narrow build is the move `the_scored_ratio_floor_is_a_coverage_bar_"
+            "and_never_a_quality_one` exists to make visible."
+        ),
+    ),
+    ModelViewLimitation(
         code="a_neutralized_feature_column_is_refused_by_this_face",
         detail=(
             "A `--feature` on the neutralized tier resolves and then fails to read on any panel "
@@ -707,6 +845,26 @@ check plus a place for a future path to skip it. Both sites also share
 `CalendarHorizonError` is a `TradingCalendarError`, and its docstring says it is "the one failure
 that is *not* a caller mistake: the question was well formed and the exchange simply has not
 published that far". Two product faces were reporting it as a defect in the command.
+
+**Which of three refusals a caller actually meets is a fact about their panel, and `V2-P4-100`
+measured the order.** This one needs a window that runs past the *calendar's* last published
+session, and a calendar built to the end of its year reaches every window a mid-year panel can
+ask for -- so on a panel built in August 2026 with `trade_cal` stored through December, the
+calendar never refuses. What refuses first is the price plane, and which of its two sentences
+arrives depends on the reading `as_of`:
+
+- `as_of` inside what the panel holds -- `daily cannot be read for <session> ...: that session
+  had not published yet`, from `_read_visible_price_session`, extended by
+  `_window_reach_refusal` with the horizon and the prediction day that reached it (`V2-P4-099`).
+- `as_of` past the newest stored session -- `date_gap`, `89 required date(s) are absent from
+  daily`, because `daily_requirement` requires every session through the newest that had
+  published at `as_of` and the partition has fallen behind.
+
+So this refusal is reachable at a real year end, or on a runtime whose `trade_cal` was never
+built forward, and not by simply lengthening `--horizon` on a mid-year panel.
+`tests/integration/test_year_end_daily_run.py` drives a whole year of 2026 to reach it, which is
+what that costs. What `V2-P4-088` was protecting holds under all three: exit `1` and a sentence a
+caller can act on, never `exit 5` and never a bare `500`.
 """
 
 _LABEL_CORPUS_FAULTS: Final[tuple[type[Exception], ...]] = (
@@ -1320,6 +1478,50 @@ def _unbuilt_dataset_remedy(store: PanelStore, *, dataset: str) -> str:
     )
 
 
+def _window_reach_refusal(
+    error: ModelPanelUnreadableError, *, window: LabelWindow
+) -> ModelPanelUnreadableError:
+    """Say which two flags put a session inside a label window (`V2-P4-099`).
+
+    The refusal underneath is exactly right about the panel -- *"daily cannot be read for
+    2026-01-19 ...: that session had not published yet, because a session becomes knowable at
+    16:30 Asia/Shanghai"* -- and says nothing about why **this run** wanted 2026-01-19. That
+    acceptance measured `--horizon 8d`, `10d`, `12d`, `20d`, `60d` and `250d` producing that one
+    sentence character for character while `5d` cleared it, because the first unpublished session
+    a window reaches is the same session whatever the horizon: only the *first* read fails, and
+    every horizon long enough reaches it first.
+
+    So the wall is a joint function of the declared horizon and the last prediction day in the
+    range, and neither appeared. The contrast is on this same face and is the standard:
+    *"this panel's 54 prediction day(s) cannot carry the declared schedule of 40 fold(s) of 5 test
+    day(s)"* names both halves of what a caller declared. `V2-P4-095` is the same wall met from
+    the `--end` side on `daily-run`, which is why the remedy names both flags rather than the one
+    this call site happens to be under.
+
+    The inner message is kept **verbatim and first**, `_matrix_refusal`'s rule: it names the
+    session, the instant and the publication rule, and a caller told only "shorten your horizon"
+    could not tell this from a panel that was simply never built. `disclosable` is extended in
+    step, because a clause naming two flags and three dates contains no path and belongs on both.
+
+    **Every read behind a label window comes through here, not only the unpublished-session
+    one**, so the clause is split: *why this run wanted that session* is true of all of them and
+    is stated flatly, while the remedy is conditioned on the reason the inner sentence gives.
+    A `daily` partition whose Parquet file is gone reaches this same `except`, and "shorten your
+    horizon" would be advice that cannot work -- the failure mode `_unbuilt_dataset_remedy`
+    refuses one layer down, in its own words: a refusal naming a command which does not help is
+    worse than one naming none.
+    """
+    clause = (
+        f". This run reached it because the {window.horizon.text} outcome window for the "
+        f"prediction day {window.prediction_day.isoformat()} opens on "
+        f"{window.entry_day.isoformat()} and exits on {window.exit_day.isoformat()}: the reach "
+        "is the declared horizon and the last prediction day in the range together. Where that "
+        "session has simply not published yet, either flag moves the window back inside what "
+        "has -- a shorter --horizon, or a --start/--end range that stops earlier"
+    )
+    return ModelPanelUnreadableError(f"{error}{clause}", disclosable=f"{error.disclosable}{clause}")
+
+
 def _outcome_window_refusal(
     error: Exception, *, instant: datetime, calendar: TradingCalendar
 ) -> ModelRunBlockedError:
@@ -1477,16 +1679,19 @@ class _LabelInputs:
         history = self.adjustments.get(ts_code)
         if history is None:
             return None
-        bars = {
-            day: session[ts_code]
-            for day in window.sessions
-            if ts_code in (session := self.bars_on(day))
-        }
-        limits = {
-            day: band[ts_code]
-            for day in window.sessions
-            if ts_code in (band := self.limits_on(day))
-        }
+        try:
+            bars = {
+                day: session[ts_code]
+                for day in window.sessions
+                if ts_code in (session := self.bars_on(day))
+            }
+            limits = {
+                day: band[ts_code]
+                for day in window.sessions
+                if ts_code in (band := self.limits_on(day))
+            }
+        except ModelPanelUnreadableError as error:
+            raise _window_reach_refusal(error, window=window) from error
         try:
             return label_outcome(
                 window,
@@ -2126,6 +2331,13 @@ def evaluation_view(result: ModelEvaluation) -> dict[str, object]:
     `V2-P4-033`'s two keys transplanted and is the whole of the blocked-versus-empty guarantee at
     this boundary. `measurement` is what both answers share, byte for byte, so a caller comparing
     two runs one flag apart sees the bar move and nothing else.
+
+    `invariances` is `V2-P4-097`'s key and is about the statistics on **this** answer -- see
+    `evaluation_invariances`. `daily_view` deliberately has no counterpart, and the asymmetry is
+    the one `V2-P4-099` asked about the other way round: a daily run reports no rank statistic at
+    all, so there is nothing for a rank correlation's invariance to be a boundary on. What both
+    faces do share is `limitations`, and both terminal renderings now say how many of them there
+    are (`limitation_pointer`).
     """
     run = result.request.run
     blocked = result.is_blocked
@@ -2164,10 +2376,54 @@ def evaluation_view(result: ModelEvaluation) -> dict[str, object]:
             offered=result.offered_count,
             about="the folds' test blocks",
         ),
+        "invariances": evaluation_invariances(run),
         "limitations": [
             {"code": item.code, "detail": item.detail} for item in KNOWN_MODEL_VIEW_LIMITATIONS
         ],
     }
+
+
+def evaluation_invariances(run: ModelRunRequest) -> list[dict[str, object]]:
+    """What this run's own arithmetic keeps out of its own reported statistics.
+
+    A **list on the answer** rather than a tenth row of `KNOWN_MODEL_VIEW_LIMITATIONS`, and the
+    two are different kinds of statement. The registry travels on every answer and is true of the
+    face; this is true of *this* run and false of the next one -- `V2-P4-097` asked which of the
+    two the single-feature invariance is, and it is both, so it is written twice on purpose. The
+    registry entry states the boundary; this key states that the run in the caller's hand is
+    standing on it, with the run's own column count rendered into the sentence rather than
+    described in it. A boundary a reader has to check their own flags against is one they will
+    not check.
+
+    `blocks`' shape, deliberately: a coded list a caller can act on, empty when nothing applies.
+    Empty is the load-bearing case -- a `boosted_rank_trees` fit over one column is a step
+    function of it rather than a monotone transform of it, so its statistic really does see the
+    fit, and an entry that appeared on every answer would say nothing about any of them.
+    """
+    if run.declaration.family != BASELINE_FAMILY:
+        return []
+    count = len(run.feature_ids)
+    return [
+        {
+            "code": "a_rank_statistic_sees_only_the_ordering_this_fit_induces",
+            "detail": (
+                f"{BASELINE_FAMILY} scores the sum of `coefficient x rank(column)`, and every "
+                "statistic on this answer is a rank correlation -- invariant under every positive "
+                "monotone transform of the score. The coefficients on `folds[].parameters` "
+                "therefore reach `mean_rank_ic` and `rank_icir` only through the ordering they "
+                f"induce over this run's {count} declared column(s). Over a single column that "
+                "ordering is the sign of its coefficient and nothing else, so the magnitude -- "
+                "and with it every difference the purge, the embargo and the surviving training "
+                "set made to the fit -- cannot reach the headline. V2-P4-097 measured exactly "
+                "that: "
+                "`--embargo-sessions` swept 0 to 15, the training set moved from 780 examples to "
+                "2,640, `mean_rank_ic` was identical to twelve decimal places at every step, and "
+                "the coefficient moved from +0.180 to +0.212. That coefficient is where "
+                "V2-P4-014 measured a leak showing, so it is on `folds[].parameters` here and in "
+                "the last column of the terminal rendering"
+            ),
+        }
+    ]
 
 
 def _scored_ratio_blocks(
@@ -2205,6 +2461,122 @@ def prediction_view(record: PredictionRecord) -> dict[str, object]:
     documentation because the body is what a caller pastes into a report, and a `"standing":
     "forward"` with nothing beside it reads as an attestation this repository cannot make.
     """
+    batch = record.batch
+    return {
+        **_prediction_index_entry(record),
+        "supersedes": record.supersedes,
+        "predicted_at": batch.predicted_at.isoformat(),
+        "model": _artifact_view(batch.artifact),
+        "predictions": [
+            {"ts_code": item.ts_code, "score": item.score, "abstention": item.abstention}
+            for item in batch.predictions
+        ],
+    }
+
+
+def _artifact_view(artifact: AlphaModelArtifact) -> dict[str, object]:
+    """The fit a stored prediction carries by value, rendered whole (`V2-P4-098`).
+
+    That acceptance read a stored record and found it saying *"reversal-rank predicted these sixty
+    numbers"* with no way to say what reversal-rank was, and concluded the record does not hold
+    it. **The record holds all of it.** `PredictionBatch.artifact` is an `AlphaModelArtifact` by
+    value, which carries the declaration -- family, horizon, seed, `code_commit`, resolved
+    `feature_version`, hyperparameters -- plus the feature columns, the training cutoff, the
+    example count and the fitted coefficients. It was this rendering that dropped it and printed
+    two strings.
+
+    So there is nothing to resolve and no face is needed to resolve it: `mdl_...` is an address
+    for *comparing* two fits, not a key to look one up under, and a face that offered to resolve
+    it would be offering to open a store that holds no artifacts. What is genuinely not here is
+    the training range and the instant the panel was read at; see
+    `a_forward_standing_does_not_bound_the_instant_the_fit_read_the_panel`.
+    """
+    declaration = artifact.declaration
+    return {
+        "artifact_id": artifact.artifact_id,
+        "name": declaration.name,
+        "family": declaration.family,
+        "seed": declaration.seed,
+        "code_commit": declaration.code_commit,
+        "feature_version": declaration.feature_version,
+        "feature_ids": list(artifact.feature_ids),
+        "hyperparameters": [
+            {"name": key, "value": value} for key, value in declaration.hyperparameters
+        ],
+        "training_cutoff": artifact.training_cutoff.isoformat(),
+        "training_example_count": artifact.training_example_count,
+        "parameters": [{"feature_id": key, "value": value} for key, value in artifact.parameters],
+    }
+
+
+def held_prediction_view(record: PredictionRecord) -> dict[str, object]:
+    """One stored prediction as the two faces that hand out a record on its own render it.
+
+    `prediction_view` plus `KNOWN_MODEL_VIEW_LIMITATIONS`, and the split is the point rather than
+    an omission: `daily_view` embeds `prediction_view` under a body that already carries the
+    registry once, and a nested second copy would be the same fifteen paragraphs twice in one
+    answer. `openalpha model prediction` and `GET /api/v1/predictions/{record_id}` hand out the
+    record and nothing else -- and they are exactly the faces a stored prediction is read through
+    a year later, which is when the boundaries matter most and when nobody has the run's own
+    output to hand.
+
+    One function rather than each face appending its own key, `declared_hyperparameters`'
+    finding: two faces that each spelled one rule differed on the only input that could tell them
+    apart.
+    """
+    return {
+        **prediction_view(record),
+        "limitations": [
+            {"code": item.code, "detail": item.detail} for item in KNOWN_MODEL_VIEW_LIMITATIONS
+        ],
+    }
+
+
+def held_predictions(predictions: ModelPredictionStore) -> tuple[PredictionRecord, ...]:
+    """Every held record, in the order this store took custody of them (`V2-P4-098`).
+
+    **The register's index is a different question from the store's filing system, and this is
+    where they part.** `FilePredictionStore.list_ids` reads its directory and sorts by name, which
+    is a sort over content digests -- correct for a filing system, where the only requirement is
+    that two runs list the same keys in the same order, and uncorrelated with time. The register
+    exists to answer *which of these did I commit to first*, and a digest sort does not merely
+    fail to answer it: measured on five records, the one created third sorted first, so the
+    listing was actively misleading about the one thing it was read for.
+
+    Ordered by `recorded_at`, not by `predicted_at`, and that is `standing`'s own choice made
+    once more: `predicted_at` is whatever the caller passed to `predict` and nothing here can
+    check it, while the custody stamp is the one instant a caller does not set. A register
+    ordered by a field its subjects choose is a register that agrees to be told. The address
+    breaks ties, so two records stamped in the same microsecond still list in one stable order.
+
+    **What custody order is not is evidence**, and the record contract says so in its own words:
+    `the_store_never_checks_that_its_own_clock_moved_forward` -- a clock that went backwards
+    between two writes produces two records whose stored order contradicts their stamps, and
+    `nothing_here_defends_against_whoever_owns_the_disk` covers the rest. This is bookkeeping a
+    user can read, and reading every held document to build it is what it costs: one `get` per
+    record, each of which re-derives an address (3.5 ms at market width, `storage/predictions.py`
+    measures it). A listing is a rare read and a wrong order is a permanent one.
+    """
+    records = [
+        record
+        for record_id in predictions.list_ids()
+        for record in (predictions.get(record_id),)
+        if record is not None
+    ]
+    return tuple(sorted(records, key=lambda record: (record.recorded_at, record.record_id)))
+
+
+def _prediction_index_entry(record: PredictionRecord) -> dict[str, object]:
+    """What one record says about itself before anybody opens it.
+
+    Shared by `prediction_view` and the register's listing rather than spelled twice, so a row in
+    the index and the head of the body it points at cannot disagree about a standing or a date.
+
+    The two `PREDICTION_STANDING_MEANINGS` sentences are on the **index row** as well as on the
+    body, which is not decoration: that mapping's own docstring says a rendering printing
+    `"standing": "forward"` and stopping turns a local-first bookkeeping fact into what reads like
+    an attestation, and a column in a table does that at least as fast as a field in a document.
+    """
     proves, does_not = PREDICTION_STANDING_MEANINGS[record.standing]
     batch = record.batch
     return {
@@ -2212,9 +2584,7 @@ def prediction_view(record: PredictionRecord) -> dict[str, object]:
         "standing": record.standing,
         "standing_proves": proves,
         "standing_does_not_prove": does_not,
-        "supersedes": record.supersedes,
         "as_of": batch.as_of.isoformat(),
-        "predicted_at": batch.predicted_at.isoformat(),
         "recorded_at": record.recorded_at.isoformat(),
         "outcome_known_at": record.outcome_known_at.isoformat(),
         "horizon": batch.horizon,
@@ -2222,11 +2592,65 @@ def prediction_view(record: PredictionRecord) -> dict[str, object]:
         "model_name": batch.artifact.declaration.name,
         "offered_count": len(batch.predictions),
         "scored_count": len(batch.scored),
-        "predictions": [
-            {"ts_code": item.ts_code, "score": item.score, "abstention": item.abstention}
-            for item in batch.predictions
-        ],
     }
+
+
+def prediction_index_view(records: Sequence[PredictionRecord]) -> dict[str, object]:
+    """The whole register as the CLI's `--json`, HTTP and the SDK all render it.
+
+    `record_ids` is kept, and kept first, because it is what `GET /api/v1/predictions` and
+    `openalpha model predictions` already answered with and what `tests/e2e` reads -- but it now
+    carries the **custody order** rather than the digest order, which is the fix rather than a
+    compatible extension. `predictions` is the same list with each row saying what it is, so a
+    reader can choose which body to open instead of opening all of them.
+
+    Bodies stay out of it, `GET /api/v1/shortlists`' rule: a batch at market width is hundreds of
+    kilobytes and a caller almost always wants one of them.
+    """
+    return {
+        "record_ids": [record.record_id for record in records],
+        "predictions": [_prediction_index_entry(record) for record in records],
+    }
+
+
+def prediction_index_rows(
+    records: Sequence[PredictionRecord],
+) -> tuple[tuple[str, str, str, str, str, str, str], ...]:
+    """One row per held record for the terminal rendering, in custody order.
+
+    `recorded_at` first, because the column a reader is looking for is the one the sort is on and
+    a table sorted on a column it does not show is a table that looks arbitrary.
+    """
+    return tuple(
+        (
+            record.recorded_at.isoformat(),
+            record.batch.as_of.isoformat(),
+            record.standing,
+            record.batch.horizon,
+            f"{len(record.batch.scored)}/{len(record.batch.predictions)}",
+            record.batch.artifact.declaration.name,
+            record.record_id,
+        )
+        for record in records
+    )
+
+
+def prediction_standing_legend(
+    records: Sequence[PredictionRecord],
+) -> tuple[tuple[str, str, str], ...]:
+    """Each standing present in a listing, once, with what it proves and what it does not.
+
+    Once per *standing* rather than once per row, which is the one place the rule
+    `PREDICTION_STANDING_MEANINGS` states has to bend to survive: two paragraphs against every
+    line of a twenty-four row table is a table nobody reads, and the sentences would be lost by
+    being printed. Ordered by first appearance in the listing, so the legend reads down in the
+    same direction as the rows it explains.
+    """
+    seen: list[PredictionStanding] = []
+    for record in records:
+        if record.standing not in seen:
+            seen.append(record.standing)
+    return tuple((standing, *PREDICTION_STANDING_MEANINGS[standing]) for standing in seen)
 
 
 def daily_view(result: DailyRunResult) -> dict[str, object]:
@@ -2282,12 +2706,21 @@ def daily_view(result: DailyRunResult) -> dict[str, object]:
     }
 
 
-def evaluation_rows(result: ModelEvaluation) -> tuple[tuple[str, str, str, str, str], ...]:
-    """One row per fold for the terminal rendering: block, coverage, headline, spread, coverage.
+def evaluation_rows(result: ModelEvaluation) -> tuple[tuple[str, str, str, str, str, str], ...]:
+    """One row per fold for the terminal rendering: block, coverage, headline, spread, reach, fit.
 
     Strings rather than numbers, `shortlist_rows`' rule: a terminal rendering is a rendering, and
     formatting a `None` as `"not measured"` in the renderer would put the same decision in two
     places -- one of which would eventually print `0.00`.
+
+    **`fit` is `V2-P4-097`'s column and it is last because it is the one that moves.** That
+    acceptance swept `--embargo-sessions` from 0 to 15, moved the training set from 780 examples
+    to 2,640, and got `mean_rank_ic` identical to twelve decimals on every one of them -- while
+    the coefficient went from +0.180 to +0.212. The five columns this row used to carry were
+    exactly the five that could not see the difference, so a caller comparing two runs of this
+    family from a terminal was comparing two renderings that are byte-identical by construction.
+    `_fit` is what they see instead, and `a_rank_statistic_sees_only_the_ordering_this_fit_induces`
+    is why they needed to.
     """
     return tuple(
         (
@@ -2296,13 +2729,53 @@ def evaluation_rows(result: ModelEvaluation) -> tuple[tuple[str, str, str, str, 
             _number(fold.mean_rank_ic),
             _number(fold.rank_icir),
             f"{fold.measured_count}/{fold.test_day_count} days, {fold.scored_ratio:.2%} scored",
+            _fit(fold.artifact),
         )
         for fold in result.folds
     )
 
 
+def _fit(artifact: AlphaModelArtifact) -> str:
+    """What one fold learned, in a line: the coefficients on the columns a caller declared.
+
+    Keyed on the **artifact's own `feature_ids`** rather than on its family, which is
+    `MODEL_FAMILIES`' rule applied to a rendering: a branch on `family` here would be the
+    `if`/`elif` that table exists to avoid, and it would go stale the day a third family lands.
+    What the two shipped families put in `parameters` differs in kind rather than in size --
+    `CrossSectionalRankModel` stores one coefficient per declared column and
+    `BoostedRankTreeModel` stores its whole ensemble under `t000.n000.edge`-shaped keys, two
+    entries per node -- so "the entries a caller can read against the columns they declared" is
+    the one selection that answers both without naming either.
+
+    An ensemble is **counted rather than truncated**, because a terminal that printed the first
+    six of fifty-six node parameters would look like a fit somebody could compare. The count is
+    still a number that moves with the fit, which is the whole point of the column.
+
+    A first draft carried a third arm -- a coefficient table plus `+n not on a declared column`,
+    for a family storing both kinds -- and it is deleted rather than kept. Neither shipped family
+    can reach it, so a mutation sweep cannot tell it from a wrong one, and it would have been
+    this rendering deciding something no fitting code has decided yet. `--json` carries
+    `folds[].parameters` whole either way; this line is a rendering, and a rendering that
+    anticipates a family is the `if`/`elif` above under another name.
+    """
+    declared = frozenset(artifact.feature_ids)
+    named = tuple((key, value) for key, value in artifact.parameters if key in declared)
+    if not named:
+        return f"{len(artifact.parameters)} parameter(s), none on a declared column"
+    return ", ".join(f"{key}={value:.4f}" for key, value in named)
+
+
 def daily_rows(result: DailyRunResult) -> tuple[tuple[str, str], ...]:
-    """The terminal rendering of one daily run, as label/value pairs in reading order."""
+    """The terminal rendering of one daily run, as label/value pairs in reading order.
+
+    **`panel read at` sits between the deadline and the artifact, and `V2-P4-098` is why.** That
+    acceptance produced a record standing `forward` -- claimed and held before its outcome could
+    be known -- out of a run whose panel reads were all made *after* the outcome had printed. The
+    standing is correct about what it claims; it is simply not a statement about what the fit was
+    allowed to see. The record cannot carry that instant (see
+    `a_forward_standing_does_not_bound_the_instant_the_fit_read_the_panel`), but this face is
+    holding both numbers at the moment it prints one of them, so it prints both.
+    """
     record = result.record
     return (
         (
@@ -2315,11 +2788,33 @@ def daily_rows(result: DailyRunResult) -> tuple[tuple[str, str], ...]:
         ("and does not prove", PREDICTION_STANDING_MEANINGS[record.standing][1]),
         ("as_of", record.batch.as_of.isoformat()),
         ("outcome_known_at", record.outcome_known_at.isoformat()),
+        ("panel read at", result.request.run.as_of.isoformat()),
         ("artifact_id", record.batch.artifact.artifact_id),
         ("scored", f"{result.scored_count} of {result.offered_count}"),
         ("write", result.outcome),
         ("run_id", result.run_id),
         ("run_manifest_id", result.manifest.run_manifest_id),
+        ("limitations", limitation_pointer()),
+    )
+
+
+def limitation_pointer() -> str:
+    """The one line both terminal faces carry in place of fifteen paragraphs (`V2-P4-099`).
+
+    That acceptance found `evaluate`'s terminal carrying **none** of the named boundaries while
+    `daily-run`'s printed the standing pair, and called the asymmetry unintended. It was. What a
+    terminal may not do is print the registry: fifteen entries at a paragraph each buries the
+    table of folds they are about, which is how a caller stops reading either.
+
+    So both faces name the **count** and the flag that hands the text over. The count is the
+    registry's own length rather than a number typed here, which is what makes this falsifiable --
+    an entry added with this line left alone goes red at
+    `test_both_model_terminal_faces_say_how_many_limitations_the_body_carries`, where "see the
+    documentation" could never go red at all.
+    """
+    return (
+        f"{len(KNOWN_MODEL_VIEW_LIMITATIONS)} named boundary(ies) on what this answer means; "
+        "read them with --json"
     )
 
 

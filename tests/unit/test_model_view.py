@@ -76,13 +76,21 @@ PROBE: Final[Path] = ROOT / "src" / "openalpha_cn" / "backtest" / "_model_face_p
 # --- the registry, bound to this file the way every other one is -------------------------------
 
 
-def test_the_declared_limitations_are_exactly_these_nine() -> None:
+def test_the_declared_limitations_are_exactly_these_fifteen() -> None:
     """`KNOWN_MODEL_VIEW_LIMITATIONS`' codes, as a set literal compared for equality.
 
     `tests/unit/test_known_limitation_registries.py`'s binding: every declared code has to appear
     as a string literal in executable test code, and equality rather than membership because a
     membership assertion is additive -- it can see a code that was renamed and never one that was
     removed.
+
+    **Nine until the model chain's product acceptance, and the six it added are what that
+    acceptance found the registry unable to say.** `V2-P4-097` measured a headline statistic no
+    flag on the command could move; `V2-P4-098` measured a `forward` record whose fit read the
+    panel after the answer had printed; `V2-P4-099` found two entries that existed one plane down
+    in `domain/prediction_record.py` and never reached a body a caller pastes into a report; and
+    `V2-P4-100` measured a retrying scheduled job filing two records for one day and a
+    `--subject`-narrowed factor build scoring 1.05% of the security-days it was offered.
     """
     assert {
         "a_resolved_feature_version_is_not_a_declared_one",
@@ -93,9 +101,15 @@ def test_the_declared_limitations_are_exactly_these_nine() -> None:
         "the_evaluation_reads_its_labels_at_one_as_of_and_that_is_not_a_point_in_time_fit",
         "the_scored_ratio_floor_is_a_coverage_bar_and_never_a_quality_one",
         "no_hyperparameter_is_selected_by_anything_on_this_face",
+        "a_rank_statistic_sees_only_the_ordering_this_fit_induces",
+        "a_forward_standing_does_not_bound_the_instant_the_fit_read_the_panel",
+        "the_supersedes_edge_is_unreachable_from_every_face_this_module_serves",
+        "no_face_here_can_produce_an_unwitnessed_record_because_one_clock_stamps_both_instants",
+        "a_re_run_of_one_day_files_a_second_record_because_predicted_at_reaches_the_address",
+        "a_subject_narrowed_factor_build_does_not_narrow_the_market_this_face_labels",
         "a_neutralized_feature_column_is_refused_by_this_face",
     } == MODEL_VIEW_LIMITATION_CODES
-    assert len(KNOWN_MODEL_VIEW_LIMITATIONS) == len(MODEL_VIEW_LIMITATION_CODES)
+    assert len(KNOWN_MODEL_VIEW_LIMITATIONS) == len(MODEL_VIEW_LIMITATION_CODES) == 15
 
 
 # --- the two envelope tables, complete rather than merely correct -------------------------------

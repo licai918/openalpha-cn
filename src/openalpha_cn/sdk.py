@@ -52,6 +52,7 @@ from openalpha_cn.model_view import (
     evaluation_view,
     feature_columns,
     held_prediction,
+    held_predictions,
     model_evaluation_request,
 )
 from openalpha_cn.model_view import evaluate_model as evaluate_model_run
@@ -823,8 +824,24 @@ class OpenAlphaSDK:
         return held_prediction(self.prediction_store, record_id)
 
     def list_predictions(self) -> tuple[str, ...]:
-        """Every registered `record_id`, ascending."""
+        """Every registered `record_id`, by content address, ascending.
+
+        The store's own filing order, kept as it is: a caller who wants to know *which set* of
+        predictions is held wants a stable key list, and this is it. A caller who wants to know
+        which of them was committed to first wants `held_predictions`, which is what the two
+        product faces now list -- see `V2-P4-098` and `model_view.held_predictions`.
+        """
         return self.prediction_store.list_ids()
+
+    def held_predictions(self) -> tuple[PredictionRecord, ...]:
+        """Every registered prediction, in the order this store took custody of them.
+
+        Records rather than a rendering, `held_prediction`'s arrangement and its reason: an
+        in-process caller reads `standing` off a `computed_field` re-derived from the two instants
+        every time. `model_view.prediction_index_view(records)` is the rendering the other two
+        faces hand out, and `prediction_index_rows` is the terminal one.
+        """
+        return held_predictions(self.prediction_store)
 
     def execute_portfolio_order(
         self,

@@ -102,12 +102,18 @@ from openalpha_cn.model_view import (
     daily_view,
     declared_hyperparameters,
     evaluate_model,
+    evaluation_invariances,
     evaluation_rows,
     evaluation_view,
     feature_columns,
     held_prediction,
+    held_prediction_view,
+    held_predictions,
+    limitation_pointer,
     model_evaluation_request,
-    prediction_view,
+    prediction_index_rows,
+    prediction_index_view,
+    prediction_standing_legend,
     run_daily,
 )
 from openalpha_cn.panel.catalog import DEFAULT_DATE_TIMEZONE, PanelStorageError
@@ -4122,13 +4128,21 @@ _BUILD_FACTOR_YEAR_HELP: Final[str] = (
 )
 _BUILD_STALENESS_HELP: Final[str] = (
     "How many days old the newest row of a read partition may be. Every panel_ingest requirement "
-    "builder refuses to default this, so state it or waive it with --waive-max-staleness; there "
-    "is no third option, because a defaulted bound is silence about all six datasets at once."
+    "builder refuses to default this, so this command makes you state it or waive it with "
+    "--waive-max-staleness rather than defaulting one -- a defaulted bound is silence about all "
+    "six datasets at once. State it: V2-P4-100 measured that the waiver reaches an exit 1 on "
+    "every tier of this command and never a looser read, so on this face the two options are not "
+    "two."
 )
 _BUILD_WAIVE_STALENESS_HELP: Final[str] = (
-    "Read with no freshness bound at all, on the record. The waiver a fixed historical build "
-    "wants, and the wrong answer for a scheduled one: a price panel whose newest session is a "
-    "month old has missed a month of the market. Mutually exclusive with --max-staleness-days."
+    "Read with no freshness bound at all, on the record -- and measured NOT to reach a build. "
+    "compute_factor reads through read_visible_at, which answers with the rows knowable at as_of "
+    "rather than with the partition, so a waived bound would accept a slice reaching arbitrarily "
+    "far short of as_of while every structural check cleared; the engine refuses it by name "
+    "('State a bound') for every dataset the factor reads, and V2-P4-100 measured that on both "
+    "the raw and the processed tier. The flag stays because the request contract has to be able "
+    "to carry a waiver -- factor_view.factor_build_request refuses neither-nor-both without it, "
+    "and the refusal a caller then meets names the rule rather than defaulting it away."
 )
 _BUILD_SUBJECT_FACTOR_HELP: Final[str] = (
     "A ts_code to evaluate, repeatable. Without it the subjects are every code the stored registry "
@@ -4207,10 +4221,17 @@ def factor_build_command(
         openalpha factor build --factor reversal_1d/v1 --tier processed \\
           --transform cross_section_standard/v1 \\
           --as-of 2026-01-08T09:00:00+00:00 --as-of 2026-01-09T09:00:00+00:00 \\
-          --year 2026 --waive-max-staleness --runtime-dir ./runtime
+          --year 2026 --max-staleness-days 30 --runtime-dir ./runtime
 
     and then `openalpha factor run --factor reversal_1d/v1 --start 2026-01-08 --end 2026-01-09 ...`
     reads what it stored.
+
+    **That example said `--waive-max-staleness` until `V2-P4-100` ran it.** It exits `1`:
+    `compute_factor` refuses a waived `max_staleness` for every dataset a factor reads, because
+    it reads through `read_visible_at` and a waived bound accepts a slice reaching arbitrarily
+    far short of `as_of` while every structural check clears. `V2-P4-094` found the model face's
+    printed examples failing the same way; a `--help` example that has not been run is a claim
+    like any other.
 
     **The third tier is the one that may refuse, and it refuses by name.** A residual can only be
     computed at a prediction instant at or after the last stored *assignment* of every membership
@@ -5174,8 +5195,18 @@ def model_daily_run_command(
 
     This is also the command that finally fills `RunManifest.alpha_model_versions`: it files a
     `mode=daily` manifest naming the one artifact it consumed, under a `run_id` derived from the
-    prediction's own address, so re-running an identical day is `unchanged` on both stores rather
-    than a duplicate on one of them.
+    prediction's own address, so a re-run that reproduces the prediction is `unchanged` on both
+    stores rather than a duplicate on one of them.
+
+    **This face cannot reproduce one, and `V2-P4-100` measured what that costs.** `predicted_at`
+    is this process's clock reading and it reaches the record's content address, so every
+    invocation of this command files a new record and a new manifest -- a scheduled job that
+    retries after a transient failure leaves two records for one prediction day. Neither taking
+    `predicted_at` out of the address nor offering a flag to set it is the repair; see
+    `model_view.KNOWN_MODEL_VIEW_LIMITATIONS`'
+    `a_re_run_of_one_day_files_a_second_record_because_predicted_at_reaches_the_address` for the
+    argument against each. `openalpha model predictions` lists what is held in custody order, so
+    a second record for one day is visible rather than silent.
     """
     with _panel_command("model daily-run"):
         try:
@@ -5242,6 +5273,13 @@ def model_prediction_command(
 
     Always JSON: a registered prediction is a document rather than a verdict this command is
     making. Exits 0 when it is held, 1 when it is not, 3 when the address is not one.
+
+    **What comes back says what the model was**, which `V2-P4-098` found it did not. The `model`
+    key carries the whole fitted artifact the record holds by value -- family, feature columns,
+    resolved `feature_version`, `code_commit`, seed, hyperparameters, training cutoff, example
+    count and coefficients -- so a prediction read a year later resolves to its declaration
+    without a lookup. What it still cannot say is the range it trained over and the instant it
+    read the panel at; the `limitations` array names both.
     """
     with _panel_command("model prediction"):
         try:
@@ -5252,7 +5290,7 @@ def model_prediction_command(
             raise _model_fail(error) from error
         except PredictionStoreError as error:
             raise _panel_fail(PanelExit.unhealthy, str(error)) from error
-        typer.echo(json.dumps(prediction_view(record), ensure_ascii=False, sort_keys=True))
+        typer.echo(json.dumps(held_prediction_view(record), ensure_ascii=False, sort_keys=True))
 
 
 @model_app.command("predictions")
@@ -5261,23 +5299,54 @@ def model_predictions_command(
         "./runtime"
     ),
     json_output: Annotated[
-        bool, typer.Option("--json", help="Emit the addresses as data.")
+        bool,
+        typer.Option("--json", help="Emit the register as data: the addresses and one row each."),
     ] = False,
 ) -> None:
-    """Every registered prediction this runtime directory holds, by address, ascending.
+    """Every registered prediction this runtime directory holds, oldest custody first.
 
-    Addresses rather than bodies, `openalpha shortlist list`'s shape. A directory with nothing in
-    it prints nothing and exits 0, which is the ordinary state of a fresh install rather than a
-    fault -- and is also, for this store, where the *denominator*
+    **In the order this store took custody of them, and that is `V2-P4-098`'s fix.** This command
+    used to print `list_ids()` -- a sort over content digests, which is uncorrelated with time.
+    Measured on five records, the one created third printed first, while the question a register
+    is read for is *which of these did I commit to before the other*. Now the first column is the
+    custody stamp and the rows are sorted on it.
+
+    Each row says what it is -- the cross section it is about, its standing, the horizon, how much
+    of the market it scored and which model produced it -- so a reader chooses which body to open
+    instead of opening all of them. `openalpha model prediction <record_id>` is the body. The
+    standings present are spelled out under the table, because a `forward` in a column reads as an
+    attestation just as fast as a `forward` in a document and this repository can attest nothing.
+
+    A directory with nothing in it prints nothing and exits 0, which is the ordinary state of a
+    fresh install rather than a fault -- and is also, for this store, where the *denominator*
     `domain/prediction_record.py` says a multiple-testing policy needs would be counted from.
     """
     with _panel_command("model predictions"):
-        held = FilePredictionStore(runtime_dir / "predictions", clock=_panel_clock).list_ids()
+        try:
+            held = held_predictions(
+                FilePredictionStore(runtime_dir / "predictions", clock=_panel_clock)
+            )
+        except PredictionStoreError as error:
+            raise _panel_fail(PanelExit.unhealthy, str(error)) from error
         if json_output:
-            typer.echo(json.dumps({"record_ids": list(held)}, ensure_ascii=False))
-        else:
-            for record_id in held:
-                typer.echo(record_id)
+            typer.echo(json.dumps(prediction_index_view(held), ensure_ascii=False))
+            return
+        if not held:
+            return
+        typer.echo(
+            f"{'recorded_at':<26} {'as_of':<26} {'standing':<12} {'horizon':<8} "
+            f"{'scored':<8} {'model':<24} record_id"
+        )
+        for recorded, as_of, standing, horizon, scored, model, record_id in prediction_index_rows(
+            held
+        ):
+            typer.echo(
+                f"{recorded:<26} {as_of:<26} {standing:<12} {horizon:<8} {scored:<8} "
+                f"{model:<24} {record_id}"
+            )
+        for standing, proves, does_not in prediction_standing_legend(held):
+            typer.echo(f"{standing} means      {proves}", err=True)
+            typer.echo(f"and does not prove  {does_not}", err=True)
 
 
 def _model_day(value: str, *, flag: str) -> date:
@@ -5344,9 +5413,14 @@ def _echo_evaluation(result: ModelEvaluation) -> None:
         f"measured   scored={result.scored_count}/{result.offered_count} "
         f"({result.scored_ratio:.4f}) against a floor of {run.minimum_scored_ratio:.4f}"
     )
-    typer.echo("block      coverage             mean_rank_ic rank_icir    reach")
-    for block, coverage, mean, icir, reach in evaluation_rows(result):
-        typer.echo(f"{block:<10} {coverage:<20} {mean:<12} {icir:<12} {reach}")
+    for invariance in evaluation_invariances(run):
+        typer.echo(f"invariance {invariance['code']}: {invariance['detail']}")
+    typer.echo(
+        f"{'block':<10} {'coverage':<20} {'mean_rank_ic':<12} {'rank_icir':<12} {'reach':<24}  fit"
+    )
+    for block, coverage, mean, icir, reach, fit in evaluation_rows(result):
+        typer.echo(f"{block:<10} {coverage:<20} {mean:<12} {icir:<12} {reach:<24}  {fit}")
+    typer.echo(f"{'limitations':<10} {limitation_pointer()}")
     if result.excluded:
         typer.echo(
             f"excluded   {len(result.excluded)} security-day(s) carried no training example; "

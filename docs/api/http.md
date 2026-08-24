@@ -708,19 +708,37 @@ are three different facts:
 - **`backfill`** — produced at or after the deadline, stated as a recomputation. A backfill
   may not replace an original.
 
-`GET /api/v1/predictions` lists every registered address; `GET /api/v1/predictions/{record_id}`
-returns one. The body is **what was registered**, not a re-run: the store re-derives the
-address from the content before handing it over, so a document edited on disk is a `404`
-rather than scores somebody trades on. A malformed address is a `422` and never a `404`, so
-"that is not an address" and "nothing is filed under that address" stay two answers.
+`GET /api/v1/predictions` lists the register **in the order this store took custody**, oldest
+first: `record_ids` keeps its name and its place and now carries that order, and `predictions`
+is the same list with a row each — the cross section it is about, its standing with both of the
+sentences above, the horizon, the model name and how much of the market it scored. The order was
+a sort over content digests until `V2-P4-098`, which is uncorrelated with time and so answered
+the one question a register is read for with a shuffle; it is `recorded_at` and not
+`predicted_at`, because the custody stamp is the one instant a caller does not set.
+
+`GET /api/v1/predictions/{record_id}` returns one. The body is **what was registered**, not a
+re-run: the store re-derives the address from the content before handing it over, so a document
+edited on disk is a `404` rather than scores somebody trades on. A malformed address is a `422`
+and never a `404`, so "that is not an address" and "nothing is filed under that address" stay
+two answers. It carries `model` — the whole fitted artifact the record holds by value, so a
+prediction read a year later resolves to its declaration with no lookup — and `limitations`,
+because this route and `openalpha model prediction` hand out a record with no run's answer
+beside it. What no stored record carries is the training range and the instant the fit read the
+panel at: a `forward` standing does not bound the latter, and
+`a_forward_standing_does_not_bound_the_instant_the_fit_read_the_panel` is the entry that says
+so and says why the instant is not added to the document.
 
 ### The manifest slot these routes fill
 
 `POST /api/v1/models/daily-run` files a `RunManifest` with `mode: "daily"` and
 `alpha_model_versions` naming the one artifact it consumed — the slot `V2-P4-010` declared,
 `V2-P4-016` measured it could not fill (`run_cycle` has no `AlphaModel` on its path) and
-`V2-P4-017` left open. `run_id` is derived from the prediction's own content address, so
-re-running an identical day reports `unchanged` on both stores instead of a duplicate on one.
+`V2-P4-017` left open. `run_id` is derived from the prediction's own content address, so a re-run
+that reproduces the prediction reports `unchanged` on both stores instead of a duplicate on one
+— and **this route cannot reproduce one**: `predicted_at` is the service's own clock reading and
+it reaches that address, so a client retrying after a transient failure files a second record for
+one prediction day. `a_re_run_of_one_day_files_a_second_record_because_predicted_at_reaches_the_
+address` carries the argument against each of the two repairs that look obvious.
 `POST /api/v1/models/evaluate` writes **no** manifest and **no** prediction: it fits one
 artifact per fold and acts on none of them, and every record an evaluation could register
 would stand `unwitnessed`, because a simulated prediction is dated at the instant it
