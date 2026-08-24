@@ -2645,8 +2645,10 @@ def _name_records(
     corpus rather than appending one, which is this docstring's own lesson applied four more times:
 
     - `_industry_assignments` opened every security at `LISTED_ON` with `through=None`, hiding
-      `IndustryHorizonError`'s first arm; `panel_ingest.load_industry_cross_section` and
-      `panel_neutralization._industry_answer` both catch it.
+      `IndustryHorizonError`'s first arm; `panel_ingest.load_industry_cross_section` catches it
+      and leaves the security out of the cross section, which `V2-P4-028` made the *only* place
+      on this path that does -- `panel_neutralization._industry_answer` used to catch it too and
+      now reads a mapping that has already been folded.
       `industry.first_assignment_after_the_window` **replaces** `securities[4]`'s assignments with
       one that starts the day after the newest session.
     - `_limit_batch` gave every cell a published band, so "no published band" -- which folds to a

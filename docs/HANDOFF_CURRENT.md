@@ -58,11 +58,18 @@ openalpha model prediction prd_…   # 其中一条，按它登记时的样子
 
 ## 已知边界（不是遗漏，是有名字的披露）
 
-- **中性化档在覆盖年内建不出来**（`V2-P4-026`）。残差只能在「读到的每一年的最后一个已存
-  会话」当天或之后的预测时刻上计算，而分区是整块替换的，所以一个 store 无法同时持有年中的
-  raw 观测和年末时刻的残差。`openalpha factor build --tier neutralized` 在更早的时刻上
-  **按名字拒绝**并且不写任何东西，代码是
-  `the_builder_cannot_produce_a_residual_before_its_years_stored_horizon`。
+- **中性化档只差一个会话**（`V2-P4-026` + `V2-P4-028`）。这条曾经写作「中性化档在覆盖年内
+  建不出来」：两个外部数据集都整块读，残差只能在「读到的每一年的最后一次已存**调整**」当天
+  或之后算出来，真实语料上那就是年度成分股调整。`V2-P4-026` 把 `daily_basic` 撤了，
+  `V2-P4-028` 把 `index_member_all` 也撤了（`load_industry_market_cap_cross_section` 改走
+  `panel_ingest.load_industry_cross_section`，该门收**日期**作参数）。**剩下的边界只有一个
+  会话宽**：残差必须带处理档面板自己的时刻，而两个外部读都按该时刻所在的那一天取，所以只有
+  在那天自己的收盘之后、且那天开市，才建得出来。`openalpha factor build --tier neutralized`
+  在更早的时刻上**按名字拒绝**并且不写任何东西，代码是
+  `the_builder_cannot_produce_a_residual_for_a_session_that_has_not_closed`；另有一条来自调用
+  方自己的收窄（`--year` 少报了截止到那天的某个已存成员年），见
+  `KNOWN_NEUTRALIZATION_LIMITATIONS
+  .a_stored_membership_year_left_unread_refuses_the_day_rather_than_answering_it`。
 - **出厂的变换与中性化下限（`min_cross_section=100`）高于一个稀薄市场**，所以窄截面上
   两个派生档每个名字都只有覆盖码、没有值，六格归因全是 `not_measured`。
 - 完整清单：`openalpha factor list --json` 的 `run_limitations`，或

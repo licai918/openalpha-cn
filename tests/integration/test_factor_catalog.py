@@ -470,7 +470,7 @@ def test_the_run_limitations_reach_a_face_at_all() -> None:
     codes = {str(limitation["code"]) for limitation in factor_catalog()["run_limitations"]}
 
     assert codes == {limitation.code for limitation in KNOWN_FACTOR_RUN_LIMITATIONS}
-    assert "the_builder_cannot_produce_a_residual_before_its_years_stored_horizon" in codes
+    assert "the_builder_cannot_produce_a_residual_for_a_session_that_has_not_closed" in codes
     assert "the_shipped_transform_and_neutralisation_floors_exceed_a_thin_market" in codes
 
 

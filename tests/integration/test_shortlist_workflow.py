@@ -53,7 +53,7 @@ from panel_fixtures import EXCHANGE, YEAR, generate_panel, write_generated_panel
 from typer.testing import CliRunner
 
 from openalpha_cn.api.app import create_app
-from openalpha_cn.cli import app
+from openalpha_cn.cli import PanelExit, app
 from openalpha_cn.domain.run import RunManifest
 from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.panel.store import PanelStore
@@ -588,6 +588,46 @@ def test_every_measurement_key_is_addressed_or_excluded_by_name(runtime_dir: Pat
         assert addressed is (key not in SHORTLIST_ANSWER_UNADDRESSED_KEYS), key
 
 
+def test_a_neutralized_tier_screen_is_refused_by_name_and_says_what_this_face_lacks(
+    runtime_dir: Path,
+) -> None:
+    """`a_neutralized_tier_screen_needs_exposures_this_face_does_not_load`, driven.
+
+    **The entry existed and nothing exercised it.** `V2-P4-033` recorded that this face refuses
+    the neutralised tier by name, and the only occurrence of the code anywhere in `tests/` was the
+    set literal `tests/unit/test_shortlist_view.py` keeps for the registry audit -- a string, not
+    a branch. A mutation rewriting the refusal's whole stated *reason* survived the sweep
+    `V2-P4-028` ran, which is how that was found.
+
+    **The reason is what this asserts, because `V2-P4-028` changed it.** The entry used to say
+    the obstacle was the instant: the loader read `index_member_all` through `read_if_ready` and
+    answered only at an `as_of` at or after the newest stored assignment. It is day-scoped now, so
+    what is missing is a **request contract** -- a shortlist request carries no membership years,
+    no trading calendar and no neutralisation to decide what the exposures *are* -- and the
+    message has to say that rather than a bound that no longer exists.
+
+    Driven from the command line at `bad_request`, not from `run_shortlist`: the whole point of
+    the entry is what a caller is told. The request is built before it is refused, so
+    `--transform` and `--neutralization` are supplied -- a request the face rejects for its own
+    reason rather than one `shortlist_request` never assembled.
+    """
+    result = CliRunner().invoke(
+        app,
+        [
+            *_shortlist_arguments(runtime_dir, {**BASELINE, "tier": "neutralized"}),
+            "--transform",
+            "cross_section_standard/v1",
+            "--neutralization",
+            "industry_and_size/v1",
+        ],
+    )
+
+    assert result.exit_code == int(PanelExit.bad_request), result.output
+    assert "no membership years, no trading calendar and no neutralisation" in result.stderr
+    assert "The instant is no longer the obstacle" in result.stderr
+    assert "read_if_ready" not in result.stderr
+
+
 def test_the_retrieval_shape_and_the_stores_own_shape_are_one_literal() -> None:
     """`shortlist_view`'s refusal pattern and `storage/shortlists.py`'s are the same shape.
 
@@ -705,10 +745,12 @@ def test_the_two_derived_planes_append_a_second_instant_as_well(
     back through the tier's own loader, so this measures the stored partition rather than the
     command's exit code.
 
-    The neutralised instants are on and after 2026-01-12 because a residual exists only at a
+    The neutralised instants were on and after 2026-01-12 because a residual existed only at a
     prediction instant at or after the last stored assignment of every membership year read --
-    `V2-P4-027`'s bound, which `tests/integration/test_factor_build.py` measures and which this
-    test inherits rather than re-argues.
+    `V2-P4-027`'s bound, inherited from `tests/integration/test_factor_build.py` rather than
+    re-argued. **`V2-P4-028` removed that bound** and the instants are left where they are: what
+    this test measures is that a *second* instant appends to each derived plane's partition, and
+    both build fine wherever they sit, so moving them would change nothing here.
     """
     store = PanelStore(tmp_path / "panel")
     write_generated_panel(store, generate_panel(shapes=(*SHAPES, "industry.coverage_hole")))

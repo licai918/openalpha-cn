@@ -138,6 +138,15 @@ the two faults are refused under separate names, the look-ahead first, because "
 before its own event" and "a row this read should have seen was held back" are two different
 statements about the corpus and were reported by one message that could say neither.
 
+**`V2-P4-028` finished the sentence three paragraphs up.** "The industry memberships and the
+market caps are read through `panel_ingest.load_industry_histories` and
+`panel_ingest.load_daily_valuations`, which take `read_if_ready`" is now false of both halves:
+`panel_neutralization.load_industry_market_cap_cross_section` takes
+`panel_ingest.load_industry_cross_section`, so the neutralisation's two foreign inputs are both
+read at the *same* setting as its own output partitions rather than at a stricter one.
+`load_industry_histories` is unmoved and keeps the un-gated door; what changed is who calls it,
+and the answer in `src/` is now `panel_doctor` alone.
+
 **`panel_doctor.py` (`V2-P3-019`) is the third, and its answer is the sharpest of the three
 because it is the only caller here that is not reading a partition it wrote.** `_factor_seal_check`
 takes the filtered read over the six derived partitions -- three tiers of answers and the three

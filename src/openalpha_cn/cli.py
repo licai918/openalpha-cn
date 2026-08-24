@@ -4233,16 +4233,17 @@ def factor_build_command(
     printed examples failing the same way; a `--help` example that has not been run is a claim
     like any other.
 
-    **The third tier is the one that may refuse, and it refuses by name.** A residual can only be
-    computed at a prediction instant at or after the last stored *assignment* of every membership
-    year the read touches -- `load_industry_market_cap_cross_section` takes the unfiltered door
-    for `index_member_all` and the residual has to carry the processed panel's own instant, so the
-    two cannot be satisfied earlier. `daily_basic` used to state a bound here too and no longer
-    does: `V2-P4-026` gave it an as-of-sensitive session-level read. The
+    **The third tier is the one that may refuse, and it refuses by name.** A residual has to carry
+    the processed panel's own instant, and both foreign reads are taken for the day that instant
+    falls on -- so it can only be computed at a prediction instant at or after that day's own
+    close, on a day the exchange was open. Neither dataset states a whole-partition bound any
+    more: `V2-P4-026` gave `daily_basic` an as-of-sensitive session-level read, and `V2-P4-028`
+    put `index_member_all` on a day-scoped one, which is what took "at or after the last stored
+    *assignment* of every membership year the read touches" out of this paragraph. The
     refusal says that, names the remedies, and **writes nothing**: a build that stored two tiers
     and gave up on the third would leave the exact store shape that makes `factor run` refuse one
     command later, about a different thing. See
-    `the_builder_cannot_produce_a_residual_before_its_years_stored_horizon`, which
+    `the_builder_cannot_produce_a_residual_for_a_session_that_has_not_closed`, which
     `openalpha factor list --json` also serves.
 
     Exits 0 when everything asked for was stored; 1 when the panel could not answer; 3 when the
