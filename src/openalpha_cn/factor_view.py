@@ -459,33 +459,45 @@ KNOWN_FACTOR_RUN_LIMITATIONS: Final[tuple[FactorRunLimitation, ...]] = (
             "back goes through read_visible_at, which filters rather than refuses, so an as_of no "
             "build was stamped at is EMPTY rather than an error, and a face that shrugged would "
             "report a three-tier artifact whose neutralised row measured nothing. That row is the "
-            "one V2-P3-014's acceptance criterion is decided on. Two refusals outside this module "
-            "still bound which schedules are reachable at all: index_member_all is read whole "
-            "partition (V2-P4-027) and no cross section before 2021-12-13 is assemblable."
+            "one V2-P3-014's acceptance criterion is decided on. ONE refusal outside this module "
+            "still bounds which schedules are reachable at all, and it used to be two: no cross "
+            "section before 2021-12-13 is assemblable. The other -- index_member_all read whole "
+            "partition -- was V2-P4-027's issue and V2-P4-028 put this plane's read of it on a "
+            "day-scoped door, so a membership year no longer states a schedule bound either."
         ),
     ),
     FactorRunLimitation(
-        code="the_builder_cannot_produce_a_residual_before_its_years_stored_horizon",
+        code="the_builder_cannot_produce_a_residual_for_a_session_that_has_not_closed",
         detail=(
             "`openalpha factor build` (V2-P3-019) computes and stores the raw and processed tiers "
             "at any prediction instant the panel covers, so a store built only by `openalpha "
-            "panel build` now reaches `factor run`. It cannot put the third tier at an arbitrary "
-            "instant either, and the bound is arithmetic rather than a policy -- but V2-P4-026 "
-            "moved WHICH dataset states it, and the entry is narrower than it was. It used to "
-            "name both foreign reads: daily_basic is now read one session at a time under a "
-            "WHERE available_time <= as_of predicate (panel_ingest._read_visible_price_session), "
-            "so it no longer bounds anything a caller can reach. What remains is "
-            "load_industry_histories, which still takes read_if_ready and refuses a membership "
-            "partition whose newest assignment post-dates the as_of, together with "
-            "_refuse_a_cross_section_that_is_not_this_panels requiring the characteristic cross "
-            "section's as_of to equal the processed panel's exactly. The two admit only a "
-            "prediction instant at or after the last stored ASSIGNMENT of every membership year "
-            "the read touches -- which for a whole-year corpus is the year's last "
-            "reclassification rather than its last session, and on a real corpus is the annual "
-            "constituent review. `--tier neutralized` at an earlier instant is refused BY NAME "
-            "and writes nothing, rather than storing two tiers and leaving `factor run` to report "
-            "the third as an empty in-range read. V2-P4-027 is where the remaining half is "
-            "solved."
+            "panel build` now reaches `factor run`. The third tier is narrower than the other "
+            "two, and THIS ENTRY HAS BEEN NARROWED TWICE, EACH TIME BY A DATASET LEAVING IT. It "
+            "began as the_builder_cannot_produce_a_residual_before_its_years_stored_horizon and "
+            "named both foreign reads. V2-P4-026 took daily_basic off it -- that dataset is read "
+            "one session at a time under a WHERE available_time <= as_of predicate "
+            "(panel_ingest._read_visible_price_session). V2-P4-028 took index_member_all off it: "
+            "load_industry_market_cap_cross_section now reads through "
+            "panel_ingest.load_industry_cross_section, which takes the DAY as an argument, so a "
+            "membership partition whose newest assignment post-dates the as_of no longer refuses "
+            "the build. The old entry's bound -- a prediction instant at or after the last stored "
+            "ASSIGNMENT of every membership year the read touches, which on a real corpus is the "
+            "annual constituent review -- IS GONE, and with it the reason the neutralised tier "
+            "was a year-end operation. "
+            "WHAT REMAINS IS ONE SESSION WIDE AND IS ARITHMETIC RATHER THAN POLICY. The residual "
+            "must carry the processed panel's own instant "
+            "(_refuse_a_cross_section_that_is_not_this_panels requires the characteristic cross "
+            "section's as_of to equal it exactly), and the cross section is read for the day that "
+            "instant falls on -- so `--tier neutralized` at an instant BEFORE that day's own "
+            "16:30 close, or on a day the exchange was shut, is refused BY NAME and writes "
+            "nothing, rather than storing two tiers and leaving `factor run` to report the third "
+            "as an empty in-range read. The remedies are the same two and one of them is now "
+            "cheap: move `--as-of` to after the session's close, or build `--tier processed` at "
+            "this instant. A second refusal comes from the industry read and is a caller's own "
+            "narrowing rather than a horizon: naming fewer `--year`s than the stored membership "
+            "years at or before the day leaves an assignment's close unread, which is "
+            "KNOWN_NEUTRALIZATION_LIMITATIONS."
+            "a_stored_membership_year_left_unread_refuses_the_day_rather_than_answering_it."
         ),
     ),
     FactorRunLimitation(
@@ -2802,7 +2814,7 @@ def build_factor_panels(
     refuse, reported one command too late and about a different thing.
 
     So a build that cannot finish stores nothing and says why, by name. See
-    `the_builder_cannot_produce_a_residual_before_its_years_stored_horizon`.
+    `the_builder_cannot_produce_a_residual_for_a_session_that_has_not_closed`.
     """
     computed = [
         _computed(store, request, as_of=as_of, built_at=built_at) for as_of in request.as_ofs
@@ -3041,17 +3053,20 @@ def _neutralized(
 ) -> NeutralizedFactorPanel:
     """One residual cross section, or the named refusal that says why there cannot be one.
 
-    The whole of `the_builder_cannot_produce_a_residual_before_its_years_stored_horizon` lives
-    here, and `V2-P4-026` halved it. `load_industry_market_cap_cross_section` reads the industry
-    memberships through `read_if_ready`, the **unfiltered** door, which refuses a partition whose
-    newest row post-dates the `as_of` instead of filtering it; and
+    The whole of `the_builder_cannot_produce_a_residual_for_a_session_that_has_not_closed` lives
+    here, and it has been narrowed twice. `V2-P4-026` took `daily_basic`'s year-wide bound off
+    it; `V2-P4-028` took `index_member_all`'s off it, by putting
+    `load_industry_market_cap_cross_section` on `panel_ingest.load_industry_cross_section` -- a
+    door that takes the **day** as an argument, so a membership event later than the day being
+    priced no longer refuses the read. What used to be "a residual exists only at a prediction
+    instant at or after the last stored *assignment* of every membership year this read touches",
+    which on a real corpus is the annual constituent review, is gone.
+
+    What is left is one session wide and is arithmetic.
     `_refuse_a_cross_section_that_is_not_this_panels` requires the returned cross section's
-    `as_of` to equal this panel's exactly, so the read cannot simply be made later. Those two
-    together mean a residual exists only at a prediction instant at or after the last stored
-    *assignment* of every membership year this read touches. `daily_basic` used to state the same
-    bound one session tighter and no longer does: it is read one session at a time under an
-    availability predicate, so a price partition never blocks a build a membership partition
-    would have allowed.
+    `as_of` to equal this panel's exactly, so the read cannot simply be made later, and the cross
+    section is read for the day that instant falls on -- so an instant before that day's own
+    close, or on a day the exchange was shut, has no session to read and is refused.
 
     The refusal is `blocked` rather than `bad_request` because it is a conflict with what the panel
     currently holds -- extending the panel is one remedy and moving `--as-of` forward is the other
@@ -3085,15 +3100,16 @@ def _neutralized(
         message = (
             f"no {neutralization.qualified_key} cross section can be assembled at "
             "{cause}. This is "
-            "the_builder_cannot_produce_a_residual_before_its_years_stored_horizon: the industry "
-            "membership read takes the unfiltered door, which refuses a partition whose newest "
-            "row post-dates the as_of, and the residual must carry the processed panel's own "
-            "instant -- so a residual exists only at a prediction instant at or after the last "
-            f"stored assignment of every year in {list(request.years)}. (The market-"
-            "capitalisation read no longer states a bound of its own: V2-P4-026 gave it an "
-            "as-of-sensitive session-level door.) Build --tier processed at this instant, or move "
-            "--as-of to at or after the panel's horizon, or fetch the later sessions first. "
-            "Nothing was written"
+            "the_builder_cannot_produce_a_residual_for_a_session_that_has_not_closed: the "
+            "residual must carry the processed panel's own instant, and both foreign reads are "
+            "taken for the day that instant falls on -- so a residual exists only at a prediction "
+            "instant at or after that day's own close, on a day the exchange was open, with "
+            f"every stored membership year at or before it named in {list(request.years)}. "
+            "(Neither read states a whole-partition bound any more: V2-P4-026 gave daily_basic an "
+            "as-of-sensitive session-level door and V2-P4-028 gave index_member_all a day-scoped "
+            "one.) Build --tier processed at this instant, or move --as-of to after the session's "
+            "close, or name the missing year, or fetch the later sessions first. Nothing was "
+            "written"
         )
         prefix = f"{panel.as_of.isoformat()}: "
         raise FactorRunBlockedError(

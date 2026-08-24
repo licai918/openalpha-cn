@@ -389,19 +389,21 @@ def test_the_declared_limitations_are_the_ones_this_face_carries() -> None:
     string literal in executable test code; this is that literal for this registry, compared for
     equality rather than membership because a membership assertion cannot see a removal.
 
-    **One entry was replaced rather than edited, and this literal is how that was noticed.**
-    `V2-P3-015` declared `nothing_in_this_repository_builds_a_factor_panel_from_a_command_line`,
-    and `V2-P3-019` shipped `openalpha factor build`, which makes the sentence false. A false
-    disclosure is worse than no disclosure -- it is the shape this whole registry mechanism exists
-    to stop -- so the entry became
-    `the_builder_cannot_produce_a_residual_before_its_years_stored_horizon`, which is the part of
-    it that is *still* true: the builder reaches the raw and processed tiers at any instant and the
-    third only at or after its year's stored horizon. Nothing here was weakened to accommodate the
-    change; the equality went red, which is the mechanism working.
+    **One entry has been replaced twice rather than edited, and this literal is how each was
+    noticed.** `V2-P3-015` declared
+    `nothing_in_this_repository_builds_a_factor_panel_from_a_command_line`, and `V2-P3-019`
+    shipped `openalpha factor build`, which makes the sentence false. A false disclosure is worse
+    than no disclosure -- it is the shape this whole registry mechanism exists to stop -- so the
+    entry became `the_builder_cannot_produce_a_residual_before_its_years_stored_horizon`, the part
+    of it that was still true. `V2-P4-028` made *that* sentence false in turn: the industry read
+    is day-scoped now, so the third tier is not bounded by any year's stored horizon, and the
+    entry became `the_builder_cannot_produce_a_residual_for_a_session_that_has_not_closed`, which
+    is the one-session bound that survives. Nothing here was weakened to accommodate either
+    change; the equality went red both times, which is the mechanism working.
     """
     assert {
         "the_three_tiers_must_have_been_built_at_the_same_instants",
-        "the_builder_cannot_produce_a_residual_before_its_years_stored_horizon",
+        "the_builder_cannot_produce_a_residual_for_a_session_that_has_not_closed",
         "the_document_store_holds_bytes_and_re_derives_no_number",
         "a_run_is_evaluated_at_one_as_of_and_the_labels_are_read_at_it",
         "the_shipped_transform_and_neutralisation_floors_exceed_a_thin_market",

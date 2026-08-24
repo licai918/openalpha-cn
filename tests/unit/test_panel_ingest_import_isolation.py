@@ -62,7 +62,8 @@ about. Measured against the tree as `P3` closed:
   module leaves every test above green.
 - `panel_neutralization` names **no** dataset anywhere in its own source. Its entire dataset
   reach is the two foreign ones it takes across the seam, `daily_basic` through
-  `load_daily_valuations` and `index_member_all` through `load_industry_histories`, which are
+  `load_daily_valuations` and `index_member_all` through `load_industry_cross_section`
+  (`load_industry_histories` until `V2-P4-028`), which are
   exactly the two `V2-P3-004` split the file in order to make visible. A package-granular table
   cannot see either of them, before or after the split.
 
@@ -200,7 +201,8 @@ be 4,900 lines.
 
 **What the edge buys the audit is the reason `V2-P3-004` split the file at all.** This module
 reaches `panel_ingest` for two things `panel_factors` deliberately does not:
-`load_industry_histories` and `load_daily_valuations`, the readers of the two **foreign** datasets
+`load_industry_cross_section` and `load_daily_valuations`, the readers of the two **foreign**
+datasets
 a neutralisation regresses against. Had this code stayed in `panel_factors`, that widening would
 have been invisible here --
 `openalpha_cn.panel_ingest` is already in `_ALLOWED_FACTOR_DEPENDENCIES` and this table records
@@ -378,7 +380,7 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_factors._refuse_to_drop_a_stored_build",
             "panel_factors.appended_to_the_stored_year",
             "panel_ingest.load_daily_valuations",
-            "panel_ingest.load_industry_histories",
+            "panel_ingest.load_industry_cross_section",
             "panel_ingest.merge_panel_batches",
             "panel_ingest.split_panel_batch_by_year",
             "panel_ingest.write_panel_batch",
@@ -491,7 +493,8 @@ helpers ... not for a requirement builder, which is the edge it deliberately doe
 until this table existed nothing measured the "not". A fourth name in that row is now a diff.
 
 `panel_neutralization`'s twelve are the row `V2-P3-004` argued for, unrolled. Two of them --
-`load_daily_valuations` and `load_industry_histories` -- are the whole of that issue's foreign
+`load_daily_valuations` and `load_industry_cross_section` -- are the whole of that issue's
+foreign
 reach, and seven more are the shared vocabulary that made the split cheaper than a second copy.
 The seventh, `_refuse_rows_that_are_not_the_answers_their_manifest_addresses`, is `V2-P3-019`'s
 seal check reused rather than re-written on the third tier, and it arrived here as a diff on this
@@ -663,7 +666,8 @@ superset is for.
 
 **`panel_neutralization` names none and reaches two.** No dataset name appears anywhere in that
 module's 2,172 lines; `daily_basic` and `index_member_all` arrive entirely through
-`load_daily_valuations` and `load_industry_histories`. That difference is `V2-P3-004`'s claim as
+`load_daily_valuations` and `load_industry_cross_section`. That difference is `V2-P3-004`'s
+claim as
 a measurement, and it is also why a scan of `FactorField(dataset=...)` literals alone would have
 reported this module as reading nothing at all.
 
@@ -1554,8 +1558,15 @@ def test_the_neutralisation_reaches_its_two_foreign_datasets_only_across_the_sea
     scan of `FactorField(dataset=...)` literals -- the obvious way to measure a factor plane's
     dataset reach -- would have reported this module as reading nothing at all.
 
-    `index_classify` is deliberately absent: the neutralisation takes `load_industry_histories`
-    and not `load_industry_trees`, so it reads assignments and never the taxonomy tree.
+    `index_classify` is deliberately absent: the neutralisation takes
+    `load_industry_cross_section` and not `load_industry_trees`, so it reads assignments and never
+    the taxonomy tree.
+
+    **The industry name in that pair moved and the dataset behind it did not**, which is
+    `V2-P4-028` and is the case this instrument is built to be quiet about: the loader changed
+    from `load_industry_histories` to `load_industry_cross_section`, both of which reach
+    `index_member_all` and nothing else, so `reached` is unmoved while the seam row is a diff a
+    reviewer reads.
     """
     measured = _research_plane_dataset_reach(_research_plane_sources())
     neutralisation = measured["openalpha_cn.panel_neutralization"]
@@ -1565,7 +1576,7 @@ def test_the_neutralisation_reaches_its_two_foreign_datasets_only_across_the_sea
     assert "index_classify" not in neutralisation.reached
     assert RESEARCH_PLANE_SEAM_IMPORTS["openalpha_cn.panel_neutralization"] >= {
         "panel_ingest.load_daily_valuations",
-        "panel_ingest.load_industry_histories",
+        "panel_ingest.load_industry_cross_section",
     }
 
 
@@ -1714,9 +1725,9 @@ def test_a_seam_name_declared_that_nobody_imports_turns_this_audit_red() -> None
         "this test mutates the row by adding panel_ingest.load_daily_bars and needs it to be "
         "absent; the neutralisation now imports it, so pick a name it does not"
     )
-    assert "panel_ingest.load_industry_histories" in row, (
-        "this test mutates the row by removing panel_ingest.load_industry_histories and needs "
-        "it to be present; the neutralisation no longer imports it, so pick a name it does"
+    assert "panel_ingest.load_industry_cross_section" in row, (
+        "this test mutates the row by removing panel_ingest.load_industry_cross_section and "
+        "needs it to be present; the neutralisation no longer imports it, so pick a name it does"
     )
 
     overclaimed = dict(RESEARCH_PLANE_SEAM_IMPORTS)
@@ -1728,11 +1739,11 @@ def test_a_seam_name_declared_that_nobody_imports_turns_this_audit_red() -> None
 
     underclaimed = dict(RESEARCH_PLANE_SEAM_IMPORTS)
     underclaimed["openalpha_cn.panel_neutralization"] = row - {
-        "panel_ingest.load_industry_histories"
+        "panel_ingest.load_industry_cross_section"
     }
     assert _seam_import_violations(underclaimed, sources) == [
-        "openalpha_cn.panel_neutralization takes panel_ingest.load_industry_histories across "
-        "the seam and its row does not say so"
+        "openalpha_cn.panel_neutralization takes panel_ingest.load_industry_cross_section "
+        "across the seam and its row does not say so"
     ]
 
     dropped = {

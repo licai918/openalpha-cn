@@ -903,14 +903,17 @@ def test_the_neutralisation_limitations_are_the_five_this_issue_measured() -> No
 
     The fourth is the sharpest and is driven rather than merely declared:
     `tests/integration/panel/test_factor_neutralizations.py::
-    test_a_mid_year_as_of_cannot_assemble_the_second_cross_section_at_all` reproduces it against
-    real partitions.
+    test_a_stored_membership_year_the_caller_did_not_name_refuses_the_day_on_this_builder`
+    reproduces it against real partitions. **It has been renamed twice as its subject shrank** --
+    from `the_two_foreign_inputs_are_read_whole_partition_...` to
+    `the_industry_input_is_read_whole_partition_...` to what it is now -- and each rename went red
+    here first, which is the whole reason this is an equality.
     """
     assert {
         "no_cross_section_is_neutralisable_before_2021_12_13",
         "an_industry_answer_inside_the_era_can_still_be_backfilled",
         "the_residual_is_orthogonal_to_the_design_and_not_to_size_itself",
-        "the_industry_input_is_read_whole_partition_so_a_mid_year_as_of_can_be_refused",
+        "a_stored_membership_year_left_unread_refuses_the_day_rather_than_answering_it",
         "a_thin_industry_is_coded_rather_than_pooled",
     } == NEUTRALIZATION_LIMITATION_CODES
     assert len(KNOWN_NEUTRALIZATION_LIMITATIONS) == len(NEUTRALIZATION_LIMITATION_CODES)

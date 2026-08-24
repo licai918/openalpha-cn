@@ -17,7 +17,7 @@ rather than a second's."* The evidence arrived and it points the other way, on o
 - **The new one, and it is the deciding one: this is the first thing on the factor plane that
   reads a *foreign* dataset.** `compute_factor` and `apply_factor_transform` read the factor's own
   inputs and its own output; a neutralisation needs `index_member_all` and `daily_basic`, so its
-  store-side half calls `panel_ingest.load_industry_histories` and
+  store-side half calls `panel_ingest.load_industry_cross_section` and
   `panel_ingest.load_daily_valuations`. Putting that in `panel_factors.py` would widen the
   *factor engine's* reach to two datasets it has no business knowing about -- and
   `tests/unit/test_panel_ingest_import_isolation.py` records dependencies at **package**
@@ -40,7 +40,7 @@ rather than a second's."* The evidence arrived and it points the other way, on o
   `RESEARCH_PLANE_SEAM_IMPORTS` records the twelve names this module takes across the seam so a
   thirteenth is a diff, and its `RESEARCH_PLANE_DATASETS` records that this module names **no**
   upstream dataset in its own source and reaches exactly `daily_basic` and `index_member_all`
-  through `load_daily_valuations` and `load_industry_histories`. The widening this paragraph
+  through `load_daily_valuations` and `load_industry_cross_section`. The widening this paragraph
   describes as unpoliced is driven on a mutated copy of this file by
   `tests/unit/test_panel_ingest_import_isolation.py::
   test_a_loader_added_to_the_neutralisation_turns_both_tables_red`, and the difference between the
@@ -171,15 +171,15 @@ It is not broken here, and the shape is stated at the strength it has:
   section assembled for a different universe -- or a different day -- is a refusal rather than a
   silently narrower regression. That is the guard the coverage codes would otherwise hide: a name
   the second cross section never heard of would look exactly like a name it had no industry for.
-- **The store-side half opens no new door of its own, and `V2-P4-026` moved one of the two it
-  uses.** `load_industry_market_cap_cross_section` is the only builder in `src/`, and it reads its
-  two foreign datasets through `panel_ingest.load_industry_histories` and
-  `panel_ingest.load_daily_valuations`. The first still takes `PanelStore.read_if_ready`, the
-  **unfiltered** door that refuses a partition whose newest row post-dates `as_of` rather than
-  filtering it; the second now takes the filtered door one session at a time, through
-  `panel_ingest._read_visible_price_session`, under `panel_ingest.py`'s own
-  `FILTERED_READ_CALLERS` grant. This module's entry is still spent entirely on reading its
-  **own** output partitions back.
+- **The store-side half opens no new door of its own, and `V2-P4-026` and `V2-P4-028` moved both
+  of the two it uses.** `load_industry_market_cap_cross_section` is the only builder in `src/`,
+  and it reads its two foreign datasets through `panel_ingest.load_industry_cross_section` and
+  `panel_ingest.load_daily_valuations`. Both now take the **filtered** door under
+  `panel_ingest.py`'s own `FILTERED_READ_CALLERS` grant -- one session at a time through
+  `panel_ingest._read_visible_price_session`, and one day at a time through
+  `panel_ingest._read_visible_membership_rows` -- where both used to take
+  `PanelStore.read_if_ready` and refuse a partition whose newest row post-dated `as_of`. This
+  module's entry is still spent entirely on reading its **own** output partitions back.
 
 **What is not claimed.** A caller can hand-build an `IndustryMarketCapCrossSection`, stamp it with
 the right `as_of` and populate it from rows that were not knowable then -- exactly as a caller can
@@ -226,12 +226,14 @@ residual is visible from the instant its own build was run and not before -- tha
 point-in-time rule, and an `as_of` earlier than any build still reads **empty rather than an
 error**, because this loader filters rows rather than refusing partitions. So a series built once
 at year end is still one December instant, and nothing in the stored rows says which schedule
-produced them. One refusal outside this module still bounds which schedules are reachable:
-`index_member_all` is read whole partition, so a build cannot be run inside a membership year
-whose newest assignment post-dates the `as_of`. That is
-`KNOWN_NEUTRALIZATION_LIMITATIONS
-.the_industry_input_is_read_whole_partition_so_a_mid_year_as_of_can_be_refused`, it is not
-fixable from this module, and it is filed as `V2-P4-027`.
+produced them. **The refusal this paragraph used to name is gone**: `index_member_all` was read
+whole partition, so a build could not be run inside a membership year whose newest assignment
+post-dated the `as_of`, and on the real corpus that was the annual constituent review.
+`V2-P4-028` put `load_industry_market_cap_cross_section` on
+`panel_ingest.load_industry_cross_section`, which takes the day as an argument. What is left is a
+caller's own narrowing -- `KNOWN_NEUTRALIZATION_LIMITATIONS
+.a_stored_membership_year_left_unread_refuses_the_day_rather_than_answering_it` -- plus the
+outer floor that no cross section before 2021-12-13 is assemblable at all.
 """
 
 import math
@@ -276,9 +278,8 @@ from openalpha_cn.domain.factor_transform import (
 )
 from openalpha_cn.domain.industry_classification import (
     INDUSTRY_MEMBERSHIP_TAXONOMY,
+    IndustryAnswer,
     IndustryAssignment,
-    IndustryHorizonError,
-    SecurityIndustryHistory,
 )
 from openalpha_cn.domain.panel_batch import (
     SUBJECT_COLUMN_NAME,
@@ -306,7 +307,7 @@ from openalpha_cn.panel_factors import (
 )
 from openalpha_cn.panel_ingest import (
     load_daily_valuations,
-    load_industry_histories,
+    load_industry_cross_section,
     merge_panel_batches,
     split_panel_batch_by_year,
     write_panel_batch,
@@ -2200,52 +2201,62 @@ def load_industry_market_cap_cross_section(
     store-free.** `apply_factor_neutralization` takes the result as a value; this is where a store
     is touched, once, in a function that computes no residual.
 
-    ## Which door each read takes, and why they are no longer the same one
+    ## Which door each read takes, and why both are now as-of-sensitive (`V2-P4-028`)
 
-    Both reads go through `panel_ingest`, and **since `V2-P4-026` the two take different doors**.
+    Both reads go through `panel_ingest`, and **both are now scoped to `day` rather than to a
+    partition.** This paragraph described them as taking *different* doors for two issues running,
+    and it does not any more.
 
-    `load_industry_histories` still takes `PanelStore.read_if_ready`, the **unfiltered** door,
-    which refuses a partition whose newest row post-dates `as_of` (`not_yet_knowable` is decided
-    on a partition's `max_available_time`) rather than filtering the offending rows out. That is
-    not conservatism for its own sake: a row predicate over `index_member_all` cannot be told from
-    an absent row, which is the whole reason `SecurityIndustryHistory.answerable_through` exists,
-    and `tests/unit/panel/test_visible_read_callers.py` makes every caller of the filtered door
-    answer that question before taking it.
+    `load_daily_valuations` takes the filtered door one session at a time, through
+    `panel_ingest._read_visible_price_session`. It can, because `daily_basic`'s shape answers
+    `tests/unit/panel/test_visible_read_callers.py`'s objection -- can this caller tell a withheld
+    row from an absent one? -- with an all-or-nothing measurement: every row of one session
+    carries one `available_time`, so a withheld session arrives as a **named refusal** rather than
+    as a short cross section. That is `V2-P4-026`.
 
-    `load_daily_valuations` takes the filtered door, one session at a time, through
-    `panel_ingest._read_visible_price_session`. It can, because `daily_basic`'s shape answers the
-    same question the other way: every row of one session carries one `available_time`, so a
-    session read is all-or-nothing and a withheld session arrives as a **named refusal** rather
-    than as a short cross section. That is `V2-P4-026`, and it is why a mid-year `as_of` no longer
-    refuses this whole function. This module's own `FILTERED_READ_CALLERS` entry is still spent
-    entirely on reading its own output partitions back; the new grant is `panel_ingest.py`'s.
+    `load_industry_cross_section` takes the same door with a different answer to the same
+    objection, because `index_member_all` has no such shape and cannot be given one. Its rows are
+    events and carry as many availability instants as there are event days, so it answers the
+    objection with the partition's own **date census**: the visible rows are counted by their own
+    event date against `panel_coverage`'s entry for that date, one date at a time, and any
+    disagreement refuses the read. A withheld row is one the census counted and the predicate
+    removed; an absent row is one the census never counted. That is `V2-P4-027`, and reading
+    through it here is `V2-P4-028`.
 
-    Two consequences of the industry read's strictness are costs rather than benefits and are
-    stated:
+    **What this function no longer does is hand back a history.** `load_industry_histories`
+    remains on `PanelStore.read_if_ready` and is unmoved, for the reason its own docstring gives:
+    the only bound a history carries is `SecurityIndustryHistory.answerable_through`, a **year**,
+    and a mid-year `as_of` has no honest year to report. The door this now takes resolves the day
+    inside itself and refuses the days it cannot speak for, so no interval with no end in it can
+    escape into an answer. This module's own `FILTERED_READ_CALLERS` entry is still spent entirely
+    on reading its **own** output partitions back; both grants above are `panel_ingest.py`'s.
 
-    - **A membership year whose latest assignment starts after `as_of` blocks the whole read.**
-      `providers/tushare.py` dates a membership row's availability at the day it is about, so a
-      reclassification effective next month makes its partition unreadable today -- and
-      `membership_years` is how a caller narrows the read to the years it needs, exactly as
-      `load_industry_histories`' own callers do. Narrowing has its own cost:
-      `SecurityIndustryHistory.answerable_through` then refuses a day past the last year read,
-      which is the fail-open direction `KNOWN_INDUSTRY_LIMITATIONS
-      .a_partial_year_read_cannot_see_an_interval_close` closed.
+    Two bounds survive and are costs rather than benefits:
+
+    - **A stored membership year at or before `day` that `membership_years` did not name refuses
+      the read.** An assignment's close is filed as its own row in its own year, so an unread year
+      can hold the close of an interval this cross section would otherwise report as current --
+      the fail-open direction `KNOWN_INDUSTRY_LIMITATIONS
+      .a_partial_year_read_cannot_see_an_interval_close` closed. It is a named refusal that says
+      which year to add, rather than the counted absence it used to be here, and it is
+      `KNOWN_NEUTRALIZATION_LIMITATIONS
+      .a_stored_membership_year_left_unread_refuses_the_day_rather_than_answering_it`.
     - **No cross section before 2021-12-13 is assemblable at all**, because every membership row's
       `available_time` is floored at the SW2021 taxonomy's effective date. That is a refusal of
       the whole build rather than a thinning of it, and it is
       `KNOWN_NEUTRALIZATION_LIMITATIONS.no_cross_section_is_neutralisable_before_2021_12_13`.
-      **It is the outermost of the two bounds and `V2-P4-026` made it the binding one**: with
-      `daily_basic` no longer refusing an in-year `as_of`, the earliest instant at which anything
-      here can answer is this floor, and the finest granularity reachable inside the era is what
-      the bullet above allows.
+      **It is the outermost bound and is now the only one a well-formed request meets**: with
+      neither dataset refusing an in-year `as_of`, the earliest instant at which anything here can
+      answer is this floor, and inside the era the granularity is one session.
 
     ## What it does with a security it cannot answer for
 
     Nothing is dropped and nothing is guessed. A security with no assignment covering `day` --
-    including one inside the 49 measured coverage holes, and one whose history this read cannot
-    speak for -- goes to `without_industry`; one that has an industry and no `daily_basic` row
-    goes to `without_market_cap`. Both are carried into the returned value, hashed into
+    including one inside the 49 measured coverage holes -- goes to `without_industry`; one that
+    has an industry and no `daily_basic` row goes to `without_market_cap`. **"A security whose
+    history this read cannot speak for" used to be in that first list and is not any more**: it is
+    the named refusal above -- see `_industry_answer`, where the fold went from three to two.
+    Both are carried into the returned value, hashed into
     `characteristic_digest`, and turned into their own coverage codes by the engine. That is the
     whole reason this function returns a three-part value instead of a mapping: a mapping would
     make "no industry", "no capitalisation" and "never asked about" one absence, and the third of
@@ -2262,8 +2273,13 @@ def load_industry_market_cap_cross_section(
             "section would satisfy every per-security check vacuously and would then be refused "
             "by the engine's coverage guard with a message about the wrong thing"
         )
-    histories = load_industry_histories(
-        store, years=membership_years, as_of=as_of, max_staleness=max_staleness
+    industries = load_industry_cross_section(
+        store,
+        day=day,
+        years=membership_years,
+        as_of=as_of,
+        max_staleness=max_staleness,
+        date_timezone=date_timezone,
     )
     valuations = load_daily_valuations(
         store,
@@ -2277,7 +2293,7 @@ def load_industry_market_cap_cross_section(
     without_industry: list[str] = []
     without_market_cap: list[str] = []
     for subject in sorted(set(subjects)):
-        answer = _industry_answer(histories, subject=subject, day=day)
+        answer = _industry_answer(industries, subject=subject)
         if answer is None:
             without_industry.append(subject)
             continue
@@ -2307,34 +2323,40 @@ def load_industry_market_cap_cross_section(
 
 
 def _industry_answer(
-    histories: Mapping[str, SecurityIndustryHistory], *, subject: str, day: date
+    industries: Mapping[str, IndustryAnswer], *, subject: str
 ) -> tuple[IndustryAssignment, bool] | None:
-    """One security's assignment on `day` and whether the label is backfilled, or `None`.
+    """One security's assignment on the cross section's day and whether the label is backfilled.
 
-    Three "no answer" states are folded into one `None` here, deliberately, and the fold is the
-    one place this module treats an `IndustryHorizonError` as data:
+    **Two "no answer" states are folded here now and there used to be three, which is
+    `V2-P4-028`'s behaviour change and is written down rather than left in a diff.** What remains
+    is data:
 
-    - the corpus has no history for this code at all (a name `index_member_all` never carried);
-    - it has one and no assignment covers `day` -- before the first, after a closed last, or
-      inside one of the 49 measured coverage holes;
-    - it has one and this read cannot speak for `day`'s year, because a stored membership year was
-      left unread and an assignment's close is filed in its own year.
+    - the corpus has no assignment for this code at all (a name `index_member_all` never carried);
+    - it has one and none covers the day -- before the first, after a closed last, or inside one
+      of the 49 measured coverage holes.
 
-    All three mean "this build has no industry for this security on this day", which is exactly
-    what `industry_missing` says, and none of them is a fault in *this* module. The third is the
-    one worth naming: it is fail-closed by construction (`answerable_through` refuses rather than
-    answering from a stale open interval), so folding it in here turns a refusal into a counted
-    code rather than into a silent answer.
+    Both mean "this build has no industry for this security on this day", which is exactly what
+    `industry_missing` says, and neither is a fault in this module.
+
+    **The third used to be "this read cannot speak for that day", and it is now a named refusal.**
+    A stored membership year at or before the day that the read did not name can hold the closing
+    row of an interval this cross section would otherwise report as current, and
+    `load_industry_cross_section` refuses the read outright rather than handing back a mapping
+    that is short by exactly the securities it could not speak for. So a caller who narrows
+    `membership_years` too far now gets an error naming the year to add, where before it got a
+    cross section with those names counted as `industry_missing` -- a coverage number that looked
+    like a property of the market. Every security in a **returned** mapping is one this read could
+    speak for; every one missing from it is one the corpus does not classify that day.
+
+    This is `dict.get` and one attribute pair, and it stays a named function because the fold is
+    the claim: `IndustryHorizonError` is caught one layer down, inside the door, and the reason
+    it is data there and a refusal here would otherwise be recorded nowhere on this path.
 
     `is_backfilled` comes off `IndustryAnswer` rather than being recomputed, so the one definition
     of "this label predates its taxonomy" lives in `domain/industry_classification.py`.
     """
-    history = histories.get(subject)
-    if history is None:
-        return None
-    try:
-        answer = history.industry_on(day)
-    except IndustryHorizonError:
+    answer = industries.get(subject)
+    if answer is None:
         return None
     return answer.assignment, answer.is_backfilled
 

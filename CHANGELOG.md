@@ -122,6 +122,35 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Changed
 
+- **The neutralised tier builds inside the membership year, not after it (`V2-P4-028`).**
+  `panel_neutralization.load_industry_market_cap_cross_section` reads `index_member_all` through
+  `panel_ingest.load_industry_cross_section` — `V2-P4-027`'s day-scoped door — instead of
+  `load_industry_histories`, which took `PanelStore.read_if_ready` and decided `not_yet_knowable`
+  on a partition's **max** `available_time`. A membership year was therefore unreadable until its
+  last adjustment took effect, which on the real corpus is the annual constituent review (613
+  assignments start 2021-07-30, 255 on 2022-07-29), so a walk-forward that fetched today and
+  replayed history was refused once a year. Measured on the generated fixture, the cross section
+  assembled on **3 of the window's 10 sessions** before this change and on **10 of 10** after it,
+  and `openalpha factor build --tier neutralized` at a mid-window prediction instant now stores
+  all three tiers where it used to exit `blocked` — `factor run` answers over the same two days
+  at the end of `test_the_dead_end_the_acceptance_review_found_is_closed_end_to_end`. The storage
+  door itself shipped with `V2-P4-027` and was never on the product path.
+- **A behaviour change inside that: `panel_neutralization._industry_answer` folds two absences
+  where it folded three.** "This read cannot speak for that day" — a stored membership year at or
+  before the day that `membership_years` did not name — used to be counted as `industry_missing`
+  alongside "no assignment covers this day", which made a fail-closed refusal look like a
+  property of the market. It is now a **named refusal** that says which year to add. A caller who
+  narrows `membership_years` past the day being priced gets an error where it previously got a
+  cross section short by exactly the securities it could not speak for.
+- **Two `KNOWN_*` codes renamed because `V2-P4-028` made their sentences false**, which is the
+  registry mechanism working rather than an edit around it.
+  `KNOWN_FACTOR_RUN_LIMITATIONS.the_builder_cannot_produce_a_residual_before_its_years_stored_horizon`
+  becomes `...for_a_session_that_has_not_closed` — the third tier is now bounded by one session
+  (the prediction instant must be at or after its own day's close, on a day the exchange was
+  open) rather than by any year's horizon. `KNOWN_NEUTRALIZATION_LIMITATIONS
+  .the_industry_input_is_read_whole_partition_so_a_mid_year_as_of_can_be_refused` becomes
+  `a_stored_membership_year_left_unread_refuses_the_day_rather_than_answering_it`, which is the
+  narrowing cost that survives. Registry totals are unchanged at 32 / 301.
 - **Three breaking contract versions cut at once, with the identity rewrite they require.**
   `RunManifest.mode` gains `paper` and `daily` (`run-manifest/v2`), `AttributionTerm.category`
   gains `model` and `ValidationResult` gains an explicit `unexplained_return`
@@ -159,7 +188,8 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   `nothing_in_this_repository_builds_a_factor_panel_from_a_command_line` — which
   `openalpha factor build` makes false — with
   `the_builder_cannot_produce_a_residual_before_its_years_stored_horizon`, the part of it
-  that is still true and the residual `V2-P4-026` closes.
+  that was still true and the residual `V2-P4-026` closes. `V2-P4-028` then made *that*
+  sentence false in turn; see the entry at the top of this section.
 - `docs/HANDOFF_CURRENT.md` no longer says "v2 implementation has not started; the next
   step is `V2-P0A-001`". P0.A, P0.B, P1, P2 and P3 are merged; a reader following the
   repository's own pointer would have concluded the factor plane does not exist.

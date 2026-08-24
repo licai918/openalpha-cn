@@ -94,7 +94,7 @@ from openalpha_cn.panel_factors import (
     write_factor_panels,
     write_processed_factor_panels,
 )
-from openalpha_cn.panel_ingest import daily_requirement
+from openalpha_cn.panel_ingest import daily_requirement, load_industry_histories
 from openalpha_cn.panel_neutralization import (
     INDUSTRY_AND_SIZE,
     apply_factor_neutralization,
@@ -277,15 +277,18 @@ def store_three_tiers(
 
     - **`evaluator`**, `compute_factor`'s own documented substitution seam. `None` uses the
       shipped table, which is what every test in this file does.
-    - **the neutralisation's second cross section is re-stamped at the panel's own instant.** It
-      is read off the real store through the real `load_industry_market_cap_cross_section`, at an
-      `as_of` after the whole panel, and then stamped with the prediction day's instant --
-      because that loader reads `daily_basic` through `read_if_ready` and therefore cannot be
-      called at a mid-window `as_of` at all. That is not a defect in this fixture: it is
-      `the_three_tiers_must_have_been_built_at_the_same_instants` itself, and
-      `test_the_neutralisation_loader_really_refuses_the_mid_window_as_of_this_fixture_works_around`
-      drives the refusal this fixture works around so the claim is measured rather than asserted
-      here in prose.
+
+    **One substitution was removed here by `V2-P4-028` and the removal is worth stating, because
+    it was a fixture flattering itself.** The neutralisation's cross section used to be read at an
+    `as_of` *after the whole panel* and then re-stamped with the prediction day's instant --
+    `dataclasses.replace(section, as_of=as_of)` -- because the loader read both foreign datasets
+    through `read_if_ready` and could not be called at a mid-window `as_of` at all. So this
+    fixture stored residuals computed against a cross section that had never been read at the
+    instant it claimed, which is exactly the hole `panel_neutralization`'s own docstring names
+    under "what is not claimed". The loader is day-scoped now, so the read is taken **at the
+    prediction day's own instant** and nothing is stamped by hand.
+    `test_the_neutralisation_loader_answers_the_mid_window_as_of_this_fixture_used_to_work_around`
+    drives the reversal, with the unfiltered door still refusing the same store beside it.
 
     `neutralized_days` defaults to `prediction_days`; naming a subset is how the blocked case is
     built -- a raw tier the neutralised tier does not cover.
@@ -323,7 +326,7 @@ def store_three_tiers(
             neutralization,
             subjects=panel.securities,
             day=day,
-            as_of=RUN_AS_OF,
+            as_of=as_of,
             calendar=calendar,
             membership_years=(YEAR,),
             max_staleness=None,
@@ -332,7 +335,7 @@ def store_three_tiers(
             apply_factor_neutralization(
                 transformed,
                 neutralization,
-                dataclasses.replace(section, as_of=as_of),
+                section,
                 code_commit=COMMIT,
                 built_at=as_of,
             )
@@ -799,32 +802,45 @@ def test_a_partially_built_neutralised_tier_names_the_missing_instant_rather_tha
     assert "2026-01-08T09:00:00+00:00" not in answer["message"]
 
 
-def test_the_neutralisation_loader_really_refuses_the_mid_window_as_of_this_fixture_works_around(
+def test_the_neutralisation_loader_answers_the_mid_window_as_of_this_fixture_used_to_work_around(
     tmp_path: Path,
 ) -> None:
-    """The fact the whole tier-schedule rule rests on, driven rather than quoted.
+    """The reversal of the fact the whole tier-schedule rule used to rest on.
 
-    `store_three_tiers` re-stamps the second cross section because
-    `load_industry_market_cap_cross_section` cannot be called at a prediction day's own instant.
-    That claim is load-bearing -- it is why a neutralised series inside a covered year does not
-    exist -- so it is measured here: the same call, at the same day, at the prediction day's own
-    `as_of`, refuses on `daily_basic`.
+    This test asserted a `not_yet_knowable` refusal, and `store_three_tiers`' second substitution
+    existed because of it: the cross section had to be read after the panel and re-stamped, so
+    every residual this file stored was computed against a value that had never been read at the
+    instant it carried. `V2-P4-028` put `load_industry_market_cap_cross_section` on
+    `panel_ingest.load_industry_cross_section`, the call answers at the prediction day's own
+    instant, and the substitution is gone.
+
+    **The unfiltered door is driven beside it and still refuses**, which is what keeps this a
+    measurement rather than a fixture that stopped exercising anything: `load_industry_histories`
+    on the same store at the same instant is still `not_yet_knowable`, because this panel's 2026
+    membership partition carries an assignment opening 2026-01-14. What changed is which door the
+    builder takes, not what the store holds.
     """
     panel = _panel()
     store = PanelStore(tmp_path / "panel")
     write_generated_panel(store, panel)
+    mid_window = datetime(2026, 1, 8, 9, 0, tzinfo=UTC)
 
     with pytest.raises(Exception, match="not_yet_knowable"):
-        load_industry_market_cap_cross_section(
-            store,
-            INDUSTRY_AND_SIZE,
-            subjects=panel.securities,
-            day=PREDICTION_DAYS[0],
-            as_of=datetime(2026, 1, 8, 9, 0, tzinfo=UTC),
-            calendar=panel.calendar(),
-            membership_years=(YEAR,),
-            max_staleness=None,
-        )
+        load_industry_histories(store, years=(YEAR,), as_of=mid_window, max_staleness=None)
+
+    section = load_industry_market_cap_cross_section(
+        store,
+        INDUSTRY_AND_SIZE,
+        subjects=panel.securities,
+        day=PREDICTION_DAYS[0],
+        as_of=mid_window,
+        calendar=panel.calendar(),
+        membership_years=(YEAR,),
+        max_staleness=None,
+    )
+
+    assert section.as_of == mid_window
+    assert set(section.subjects()) == set(panel.securities)
 
 
 def test_a_request_that_cannot_be_put_is_a_different_row_on_every_face(runtime_dir: Path) -> None:

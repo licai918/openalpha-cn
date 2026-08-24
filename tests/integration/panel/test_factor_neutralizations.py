@@ -46,10 +46,12 @@ import math
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Final
+from zoneinfo import ZoneInfo
 
 import pytest
 from panel_fixtures import (
     DAILY_BASIC_DATASET,
+    INDUSTRY_MEMBERSHIP_DATASET,
     SECURITIES,
     YEAR,
     GeneratedPanel,
@@ -73,13 +75,23 @@ from openalpha_cn.domain.factor_transform import (
     MissingValuePolicy,
     WinsorizationPolicy,
 )
-from openalpha_cn.domain.industry_classification import INDUSTRY_MEMBERSHIP_TAXONOMY
+from openalpha_cn.domain.industry_classification import (
+    INDUSTRY_MEMBERSHIP_TAXONOMY,
+    INDUSTRY_TAXONOMY_EFFECTIVE_FROM,
+    IndustryAnswer,
+    IndustryAssignment,
+)
 from openalpha_cn.domain.panel_batch import (
     SUBJECT_COLUMN_NAME,
     ColumnarPanelBatch,
     PanelColumn,
+    TimelineColumns,
 )
-from openalpha_cn.panel.catalog import PanelStorageError, ReadinessRequirement
+from openalpha_cn.panel.catalog import (
+    DEFAULT_DATE_TIMEZONE,
+    PanelStorageError,
+    ReadinessRequirement,
+)
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import (
     REVERSAL_1D,
@@ -95,7 +107,12 @@ from openalpha_cn.panel_factors import (
     write_factor_panels,
     write_processed_factor_panels,
 )
-from openalpha_cn.panel_ingest import daily_requirement, load_daily_valuations, write_panel_batch
+from openalpha_cn.panel_ingest import (
+    daily_requirement,
+    load_daily_valuations,
+    load_industry_histories,
+    write_panel_batch,
+)
 from openalpha_cn.panel_neutralization import (
     INDUSTRY_AND_SIZE,
     NEUTRALIZATION_MANIFEST_DATA_COLUMNS,
@@ -118,15 +135,16 @@ written both foreign inputs went through loaders taking `PanelStore.read_if_read
 `not_yet_knowable` verdict is decided on a partition's **max** `available_time`, so a
 `daily_basic` year was unreadable at every `as_of` inside the year it covers.
 `load_daily_valuations` now reads one session at a time under an availability predicate, and
-`test_a_mid_year_as_of_assembles_the_cross_section_and_only_the_industry_read_can_refuse_it`
+`test_a_mid_year_as_of_assembles_the_cross_section_on_a_partition_holding_a_later_revision`
 drives the reversal. This constant stays what it is because every test below it was written
 against a year-end build and comparing them is the point; the in-year instants are
 `MID_YEAR_BUILD` and `LATER_BUILD`.
 
-What has *not* changed is the industry corpus: `index_member_all` is still read whole partition,
-which is what `KNOWN_NEUTRALIZATION_LIMITATIONS
-.the_industry_input_is_read_whole_partition_so_a_mid_year_as_of_can_be_refused` now records and
-what `wide_store` demonstrates at `MID_WINDOW`.
+**`V2-P4-028` then did the same to the industry corpus**, so the sentence that used to stand
+here -- "what has *not* changed is that `index_member_all` is still read whole partition" -- is
+gone too. `load_industry_market_cap_cross_section` reads through
+`panel_ingest.load_industry_cross_section`, and `wide_store`, which was this file's demonstration
+of the refusal at `MID_WINDOW`, is now its demonstration of the answer.
 """
 
 MID_WINDOW: Final[datetime] = datetime(2026, 1, 12, 4, 0, tzinfo=UTC)
@@ -150,12 +168,33 @@ LATER_SESSION: Final[date] = date(2026, 1, 13)
 satisfied by inside one covered year. See
 `test_two_in_year_builds_give_the_ic_floor_of_two_as_ofs_two_points_inside_one_year`.
 
-**The pair is 01-12/01-13 and not 01-09/01-12, and the reason is the constraint that survives.**
-`SHAPES` opens an assignment on 2026-01-12, so `index_member_all`'s 2026 partition has a
-`max_available_time` of 2026-01-11T16:00Z and every `as_of` before that is refused whole --
-measured, by moving this constant back and watching `load_industry_histories` raise
-`not_yet_knowable`. The earliest in-year build this fixture admits is therefore set by the
-*industry* corpus, which is `V2-P4-027`'s half and not this issue's.
+**The pair was 01-12/01-13 rather than 01-09/01-12 because of a constraint `V2-P4-028` removed,
+and the constant stays where it is.** `SHAPES` opens an assignment on 2026-01-12, so
+`index_member_all`'s 2026 partition has a `max_available_time` of 2026-01-11T16:00Z, and while
+this builder read through `load_industry_histories` every earlier `as_of` was refused whole with
+`not_yet_knowable`. It is not any more --
+`test_across_the_whole_window_only_the_industry_read_ever_refuses_an_in_year_as_of` measures that
+all ten sessions of the window now assemble -- so the pair is free to move and is deliberately
+not moved: every test below was written against these two instants, and re-pointing them would
+change what those tests compare for no gain here.
+"""
+
+UNBLOCKED_BUILD: Final[datetime] = datetime(2026, 1, 9, 9, 0, tzinfo=UTC)
+UNBLOCKED_SESSION: Final[date] = date(2026, 1, 9)
+"""17:00 Asia/Shanghai on 2026-01-09, and the session it is about.
+
+Strictly before `wide_store`'s 2026 membership partition's newest `available_time`
+(2026-01-13T16:00Z, the assignment opening 2026-01-14), which is the condition `read_if_ready`
+decides `not_yet_knowable` on -- so `load_industry_histories` refuses this store at this instant
+and `test_a_residual_is_computed_at_an_instant_the_unfiltered_door_still_refuses` requires it to.
+"""
+
+ACROSS_THE_DATE_LINE: Final[datetime] = datetime(2026, 1, 12, 17, 0, tzinfo=UTC)
+"""01:00 Asia/Shanghai on 2026-01-13, which is still 2026-01-12 in UTC.
+
+The one instant on this window where the panel's own zone and UTC disagree about what day it is,
+and therefore the only one at which `date_timezone` can be shown to reach the industry read. See
+`test_the_declared_date_zone_reaches_the_industry_read_and_not_only_the_price_read`.
 """
 
 HALTED_ON_THE_NINTH: Final[tuple[str, ...]] = ("601318.SH",)
@@ -310,6 +349,67 @@ def _with_market_caps(panel: GeneratedPanel) -> GeneratedPanel:
     return dataclasses.replace(panel, batches={**panel.batches, DAILY_BASIC_DATASET: replaced})
 
 
+WITHHELD_CLOSE: Final[date] = date(2026, 1, 6)
+"""The event date of `SECURITIES[1]`'s **closing** row under `WIDE_SHAPES`.
+
+`industry.coverage_hole` closes that security's first assignment here and opens its second on
+2026-01-14. The close is the row a withholding fixture has to reach: withholding the *opening*
+row of an interval that starts after `day` changes no answer at all, which is the property this
+whole door rests on, so a fixture that moved it would refuse nothing and prove nothing.
+"""
+
+WITHHELD_UNTIL: Final[datetime] = datetime(2026, 1, 13, 16, 0, tzinfo=UTC)
+"""Where `_with_a_withheld_membership_close` moves that row's `available_time`.
+
+Chosen to equal the partition's existing `max_available_time` -- 2026-01-14 midnight
+Asia/Shanghai, the 01-14 opening row's own instant -- so the doctored partition and the honest one
+are indistinguishable from their catalog records and differ only in *which* rows a predicate at
+`MID_WINDOW` returns.
+"""
+
+
+def _with_a_withheld_membership_close(panel: GeneratedPanel) -> GeneratedPanel:
+    """`panel` with `SECURITIES[1]`'s 2026-01-06 closing row unavailable until `WITHHELD_UNTIL`.
+
+    `providers/tushare.py::_taxonomy_backfill_timeline` dates a membership row's availability at
+    its own event floored at the taxonomy, so this partition is one no provider in this repository
+    can produce -- which is the point. The census check exists because that clock lives one
+    package away and nothing in the store enforces it, and a threat model asserted only against
+    corpora that satisfy it is asserted against nothing. `event_time` is left where the generator
+    put it, so the census still counts the row on 2026-01-06.
+    """
+    batch = panel.batch(INDUSTRY_MEMBERSHIP_DATASET)
+    timeline = batch.timeline
+    zone = ZoneInfo(DEFAULT_DATE_TIMEZONE)
+    withheld = tuple(
+        subject == SECURITIES[1] and event.astimezone(zone).date() == WITHHELD_CLOSE
+        for subject, event in zip(batch.subjects, timeline.event_time, strict=True)
+    )
+    assert sum(withheld) == 1, (
+        "this fixture withholds exactly one row and needs the shape set to carry it; "
+        f"{sum(withheld)} rows of {batch.subjects.count(SECURITIES[1])} matched"
+    )
+    moved = TimelineColumns(
+        event_time=timeline.event_time,
+        available_time=tuple(
+            WITHHELD_UNTIL if hidden else original
+            for hidden, original in zip(withheld, timeline.available_time, strict=True)
+        ),
+        ingested_time=tuple(
+            max(WITHHELD_UNTIL, original) if hidden else original
+            for hidden, original in zip(withheld, timeline.ingested_time, strict=True)
+        ),
+        revision_time=tuple(
+            max(WITHHELD_UNTIL, original) if hidden else original
+            for hidden, original in zip(withheld, timeline.revision_time, strict=True)
+        ),
+    )
+    replaced: ColumnarPanelBatch = dataclasses.replace(batch, timeline=moved)
+    return dataclasses.replace(
+        panel, batches={**panel.batches, INDUSTRY_MEMBERSHIP_DATASET: replaced}
+    )
+
+
 @pytest.fixture
 def panel() -> GeneratedPanel:
     return _with_market_caps(generate_panel(shapes=SHAPES))
@@ -455,31 +555,28 @@ def test_the_market_caps_are_the_stored_ones_and_the_declared_measure_selects_th
     assert {item.market_cap for item in by_circ.characteristics} == {1.0}
 
 
-def test_a_mid_year_as_of_assembles_the_cross_section_and_only_the_industry_read_can_refuse_it(
+def test_a_mid_year_as_of_assembles_the_cross_section_on_a_partition_holding_a_later_revision(
     store: PanelStore, panel: GeneratedPanel, wide_store: PanelStore, wide_panel: GeneratedPanel
 ) -> None:
-    """The reverse pin of `V2-P3-004`'s sharpest constraint, and the half of it that survives.
+    """The reverse pin of `V2-P3-004`'s sharpest constraint, now turned round a second time.
 
-    This test used to be
-    `test_a_mid_year_as_of_cannot_assemble_the_second_cross_section_at_all` and asserted a
-    `not_yet_knowable` refusal at `MID_WINDOW`, with a docstring saying "this test is what would
-    go red if that ever changed, which is the point of driving it rather than writing it down".
-    `V2-P4-026` changed it, so it is turned round rather than deleted -- the precedent
-    `V2-P3-016` and `V2-P3-017` set for a pin whose subject was solved.
+    This test began as `test_a_mid_year_as_of_cannot_assemble_the_second_cross_section_at_all`
+    and asserted a `not_yet_knowable` refusal at `MID_WINDOW`. `V2-P4-026` turned over the
+    `daily_basic` half; `V2-P4-028` turns over the other one, so the assertion that used to be
+    a refusal on `wide_store` is now an answer. Turned round rather than deleted, which is the
+    precedent `V2-P3-016` and `V2-P3-017` set for a pin whose subject was solved.
 
-    **What changed.** `load_daily_valuations` reads one session under a
-    `WHERE available_time <= as_of` predicate, so the `daily_basic` year no longer refuses an
-    `as_of` inside itself. At `MID_WINDOW` -- noon Asia/Shanghai on the sixth of ten sessions --
-    the whole cross section for 2026-01-09 assembles, with every security carrying the industry
-    and the capitalisation that session's stored rows imply.
+    **The two halves, now the same answer for two different reasons.** `store` holds a 2026
+    membership partition whose newest event is 2026-01-12, already knowable at `MID_WINDOW`;
+    `wide_store` is the same fixture plus one assignment **opening 2026-01-14**, which put that
+    partition's newest `available_time` at 2026-01-13T16:00Z and used to make the whole read
+    `not_yet_knowable`. Both assemble now, because `load_industry_cross_section` takes the day as
+    an argument and a membership event later than that day cannot change who covered it.
 
-    **What did not.** `index_member_all` is still read whole partition. `wide_store` is the same
-    fixture plus one assignment opening 2026-01-14, which puts that partition's newest
-    `available_time` at 2026-01-13T16:00Z -- after `MID_WINDOW` -- and the identical call on it is
-    still refused with `not_yet_knowable`. Both halves are driven here so the entry that names
-    them (`KNOWN_NEUTRALIZATION_LIMITATIONS
-    .the_industry_input_is_read_whole_partition_so_a_mid_year_as_of_can_be_refused`) has one test
-    holding both directions, and so a later change to *either* dataset's door is visible.
+    **The withheld row is withheld and the answer says so.** `SECURITIES[1]`'s assignment closed
+    2026-01-06 and its next one opens 2026-01-14 -- a row `MID_WINDOW` cannot see and, on this
+    day, must not need to. It lands in `without_industry` on `wide_store`, which is the corpus's
+    own answer for 2026-01-09 and is unchanged by the revision this read is inside of.
     """
     section = load_industry_market_cap_cross_section(
         store,
@@ -507,9 +604,67 @@ def test_a_mid_year_as_of_assembles_the_cross_section_and_only_the_industry_read
     # are here with the values the stored partition holds, not merely present.
     assert section.without_market_cap == HALTED_ON_THE_NINTH
 
-    with pytest.raises(PanelStorageError, match="not_yet_knowable"):
+    revised = load_industry_market_cap_cross_section(
+        wide_store,
+        _spec(),
+        subjects=wide_panel.securities,
+        day=date(2026, 1, 9),
+        as_of=MID_WINDOW,
+        calendar=wide_panel.calendar(),
+        membership_years=MEMBERSHIP_YEARS,
+        max_staleness=None,
+    )
+
+    assert revised.as_of == MID_WINDOW
+    assert revised.without_industry == (SECURITIES[1],)
+    assert revised.without_market_cap == HALTED_ON_THE_NINTH
+    assert {item.subject for item in revised.characteristics} == set(wide_panel.securities) - {
+        SECURITIES[1],
+        *HALTED_ON_THE_NINTH,
+    }
+
+
+def test_a_withheld_membership_row_and_an_absent_one_are_two_answers_on_this_builder(
+    wide_store: PanelStore, wide_panel: GeneratedPanel, tmp_path: Path
+) -> None:
+    """The `V2-P4-034` standard, driven on the builder rather than on the read one layer down.
+
+    Both situations reach this function as "no industry for this security on this day", and on
+    `wide_store` they arrive from the same security:
+
+    - **absent** -- `SECURITIES[1]`'s assignment closed 2026-01-06 and its next opens 2026-01-14,
+      so nothing covers 2026-01-09 and nothing ever will. `without_industry`, which is data.
+    - **withheld** -- the identical corpus with that **closing** row's `available_time` moved
+      past `MID_WINDOW`. A bare row predicate then sees one interval opening at `LISTED_ON` and
+      never closing, and answers 2026-01-09 with an industry the corpus says the security had
+      already left -- so what ought to be `industry_missing` would have become a stored
+      characteristic instead, which is a residual regressed against the wrong group.
+
+    The two stores hold the same rows and the same partition `max_available_time`; they differ in
+    one clock on one row. The doctored one is refused **by name**, and the sentinel underneath is
+    that the same read of the same store answers once that clock has passed -- and answers with
+    `SECURITIES[1]` back in `without_industry`, which is the honest store's answer. So the
+    refusal is about visibility rather than about the corpus, and the assertion can tell the two
+    apart rather than merely holding on this fixture.
+    """
+    withheld = PanelStore(tmp_path / "withheld" / "panel")
+    write_generated_panel(withheld, _with_a_withheld_membership_close(wide_panel))
+
+    honest = load_industry_market_cap_cross_section(
+        wide_store,
+        _spec(),
+        subjects=wide_panel.securities,
+        day=date(2026, 1, 9),
+        as_of=MID_WINDOW,
+        calendar=wide_panel.calendar(),
+        membership_years=MEMBERSHIP_YEARS,
+        max_staleness=None,
+    )
+    assert honest.without_industry == (SECURITIES[1],)
+
+    with pytest.raises(PanelStorageError, match="whose event had already happened"):
         load_industry_market_cap_cross_section(
-            wide_store,
+            withheld,
             _spec(),
             subjects=wide_panel.securities,
             day=date(2026, 1, 9),
@@ -517,6 +672,162 @@ def test_a_mid_year_as_of_assembles_the_cross_section_and_only_the_industry_read
             calendar=wide_panel.calendar(),
             membership_years=MEMBERSHIP_YEARS,
             max_staleness=None,
+        )
+
+    once_visible = load_industry_market_cap_cross_section(
+        withheld,
+        _spec(),
+        subjects=wide_panel.securities,
+        day=date(2026, 1, 9),
+        as_of=AS_OF,
+        calendar=wide_panel.calendar(),
+        membership_years=MEMBERSHIP_YEARS,
+        max_staleness=None,
+    )
+    assert once_visible.without_industry == (SECURITIES[1],)
+
+
+def test_a_stored_membership_year_the_caller_did_not_name_refuses_the_day_on_this_builder(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """The whole of what is left of
+    `KNOWN_NEUTRALIZATION_LIMITATIONS
+    .a_stored_membership_year_left_unread_refuses_the_day_rather_than_answering_it`, driven here.
+
+    `membership_years` is the lever a caller has for narrowing the industry read, and narrowing
+    it past the day being priced is the one shape that still refuses a build. An assignment's
+    close is filed as its own row in its own year, so a stored year at or before `SESSION` that
+    this call did not name can hold the close of an interval the cross section would otherwise
+    report as current -- and the refusal names the year to add rather than handing back a cross
+    section short by exactly the securities it could not speak for.
+
+    Driven with the sentinel beside it: the identical call naming the year answers, so the
+    refusal is about the narrowing and not about the store. `V2-P4-028` is why this is the
+    remaining entry -- before it, this call was refused for a reason that had nothing to do with
+    which years the caller named.
+    """
+    with pytest.raises(PanelStorageError, match="did not name"):
+        load_industry_market_cap_cross_section(
+            store,
+            _spec(),
+            subjects=panel.securities,
+            day=SESSION,
+            as_of=AS_OF,
+            calendar=panel.calendar(),
+            membership_years=(YEAR - 1,),
+            max_staleness=None,
+        )
+
+    named = load_industry_market_cap_cross_section(
+        store,
+        _spec(),
+        subjects=panel.securities,
+        day=SESSION,
+        as_of=AS_OF,
+        calendar=panel.calendar(),
+        membership_years=MEMBERSHIP_YEARS,
+        max_staleness=None,
+    )
+    assert named.without_industry == ()
+
+
+def test_a_backfilled_label_reaches_the_stored_characteristic_and_is_not_recomputed() -> None:
+    """`is_backfilled` travels from `IndustryAnswer` to `SecurityCharacteristic` unchanged.
+
+    **This test exists because a mutation survived, and the survivor is a fixture limit rather
+    than a design fault.** Replacing `_industry_answer`'s `answer.is_backfilled` with a literal
+    `False` left every test in this file, `test_factor_build.py`, `test_factor_run.py` and
+    `test_industry_ingest.py` green -- 249 of them. `IndustryAnswer.is_backfilled` is
+    `asked_for < taxonomy_effective_from`, SW2021's date is 2021-12-13, and **every day any
+    generated panel prices is in 2026**, so no cross section this repository can assemble from a
+    fixture has a backfilled row in it. The whole-build path cannot reach one either: a day before
+    2021-12-13 has no `daily_basic` session on a 2026 calendar, so `load_daily_valuations` refuses
+    it before any characteristic is built.
+
+    So the fold is driven directly, with both answers in one mapping, rather than through a store
+    that cannot express the case. `panel_ingest.load_industry_cross_section`'s own end of it is
+    driven against real partitions at
+    `tests/integration/panel/test_industry_ingest.py::
+    test_a_security_with_no_assignment_covering_the_day_is_left_out_rather_than_raised`, which
+    reads a 1995 day and asserts `is_backfilled is True`; what was untested is the two lines
+    between that answer and a stored `SecurityCharacteristic`.
+    """
+    taxonomy_floor = INDUSTRY_TAXONOMY_EFFECTIVE_FROM[INDUSTRY_MEMBERSHIP_TAXONOMY]
+    backfilled_day = taxonomy_floor - timedelta(days=1)
+    inside_the_era = taxonomy_floor
+
+    def answer(subject: str, day: date) -> IndustryAnswer:
+        return IndustryAnswer(
+            ts_code=subject,
+            asked_for=day,
+            assignment=IndustryAssignment(
+                ts_code=subject,
+                l1_code="801780.SI",
+                l2_code="801782.SI",
+                l3_code="857821.SI",
+                effective_from=date(1993, 1, 1),
+            ),
+            taxonomy=INDUSTRY_MEMBERSHIP_TAXONOMY,
+            taxonomy_effective_from=taxonomy_floor,
+        )
+
+    cross_section = {
+        SECURITIES[0]: answer(SECURITIES[0], backfilled_day),
+        SECURITIES[1]: answer(SECURITIES[1], inside_the_era),
+    }
+
+    before = panel_neutralization._industry_answer(cross_section, subject=SECURITIES[0])
+    on_the_day = panel_neutralization._industry_answer(cross_section, subject=SECURITIES[1])
+
+    assert before is not None
+    assert on_the_day is not None
+    assert before[1] is True
+    assert on_the_day[1] is False
+    assert panel_neutralization._industry_answer(cross_section, subject="000000.SZ") is None
+
+
+def test_the_declared_date_zone_reaches_the_industry_read_and_not_only_the_price_read(
+    store: PanelStore, panel: GeneratedPanel
+) -> None:
+    """`date_timezone` is a parameter of this builder and both of its reads resolve days with it.
+
+    It used to reach only one. `load_industry_histories` resolved no day at all -- it returned
+    histories and left the day to the caller -- so `date_timezone` was `load_daily_valuations`'
+    alone, and forgetting to thread it to the industry read was not a mistake anyone could make.
+    `V2-P4-028` makes it one: `load_industry_cross_section` decides *which day this read may
+    speak for* in the declared zone, and a builder that dropped the argument would silently use
+    Asia/Shanghai for one read and the caller's zone for the other.
+
+    Driven at `ACROSS_THE_DATE_LINE` -- 2026-01-12T17:00Z, which is 01-13 in Asia/Shanghai and
+    still 01-12 in UTC -- asked about 2026-01-13. The two zones give **two different named
+    refusals** off one call, which is what makes this an assertion rather than a shape: in the
+    panel's own zone the membership read admits the day and `daily_basic` refuses it because that
+    session's 16:30 has not arrived, and in UTC the membership read refuses it first because the
+    day is one the `as_of` cannot see at all.
+    """
+    with pytest.raises(PanelStorageError, match="that session had not published yet"):
+        load_industry_market_cap_cross_section(
+            store,
+            _spec(),
+            subjects=panel.securities,
+            day=LATER_SESSION,
+            as_of=ACROSS_THE_DATE_LINE,
+            calendar=panel.calendar(),
+            membership_years=MEMBERSHIP_YEARS,
+            max_staleness=None,
+        )
+
+    with pytest.raises(PanelStorageError, match="becomes knowable at midnight UTC"):
+        load_industry_market_cap_cross_section(
+            store,
+            _spec(),
+            subjects=panel.securities,
+            day=LATER_SESSION,
+            as_of=ACROSS_THE_DATE_LINE,
+            calendar=panel.calendar(),
+            membership_years=MEMBERSHIP_YEARS,
+            max_staleness=None,
+            date_timezone="UTC",
         )
 
 
@@ -1705,6 +2016,57 @@ def test_a_residual_built_at_a_mid_year_as_of_is_visible_at_that_same_as_of(
     assert a_moment_earlier == ()
 
 
+def test_a_residual_is_computed_at_an_instant_the_unfiltered_door_still_refuses(
+    wide_store: PanelStore, wide_panel: GeneratedPanel
+) -> None:
+    """`V2-P4-028`'s acceptance as a **number** rather than as a reachable code path.
+
+    `test_the_neutralised_tier_builds_at_the_mid_window_instants_it_used_to_refuse` drives the
+    same change from the command line and can only show that the build happened: the shipped
+    `industry_and_size/v1` declares `min_cross_section = 100`, so on an eight-name panel every
+    neutralised row is `insufficient_cross_section` and no residual is ever computed there. This
+    test uses the probe spec, whose floors an eight-name panel clears, and asserts the residuals.
+
+    **The pairing is what makes it a measurement.** `UNBLOCKED_BUILD` is 17:00 Asia/Shanghai on
+    2026-01-09, and `wide_store`'s 2026 membership partition holds an assignment opening
+    2026-01-14, so its newest `available_time` is *after* that instant -- which is exactly the
+    condition `read_if_ready` decides `not_yet_knowable` on. `load_industry_histories` is called
+    on the same store at the same instant and is required to still refuse. The whole three-tier
+    build runs anyway, and its cross section carries the corpus's own answer for that day:
+    `SECURITIES[1]` unclassified because its assignment closed 2026-01-06 and the next has not
+    opened, and the halted name without a capitalisation.
+    """
+    with pytest.raises(PanelStorageError, match="not_yet_knowable"):
+        load_industry_histories(
+            wide_store, years=MEMBERSHIP_YEARS, as_of=UNBLOCKED_BUILD, max_staleness=None
+        )
+
+    section = load_industry_market_cap_cross_section(
+        wide_store,
+        _spec(),
+        subjects=wide_panel.securities,
+        day=UNBLOCKED_SESSION,
+        as_of=UNBLOCKED_BUILD,
+        calendar=wide_panel.calendar(),
+        membership_years=MEMBERSHIP_YEARS,
+        max_staleness=None,
+    )
+    assert section.without_industry == (SECURITIES[1],)
+    assert section.without_market_cap == HALTED_ON_THE_NINTH
+
+    result = _build_at(wide_store, wide_panel, as_of=UNBLOCKED_BUILD, day=UNBLOCKED_SESSION)
+    write_neutralized_factor_panels(wide_store, [result])
+    stored = load_neutralized_factor_observations(
+        wide_store, REVERSAL_1D, _spec(), years=(YEAR,), as_of=UNBLOCKED_BUILD
+    )
+
+    assert {row.as_of for row in stored} == {UNBLOCKED_BUILD}
+    assert {row.subject: row.value for row in stored} == {
+        row.subject: row.value for row in result.observations
+    }
+    assert any(row.value is not None for row in stored)
+
+
 def test_two_in_year_builds_give_the_ic_floor_of_two_as_ofs_two_points_inside_one_year(
     store: PanelStore, panel: GeneratedPanel
 ) -> None:
@@ -1746,62 +2108,69 @@ def test_two_in_year_builds_give_the_ic_floor_of_two_as_ofs_two_points_inside_on
 def test_across_the_whole_window_only_the_industry_read_ever_refuses_an_in_year_as_of(
     store: PanelStore, panel: GeneratedPanel, wide_store: PanelStore, wide_panel: GeneratedPanel
 ) -> None:
-    """The census behind `V2-P4-026`'s two headline numbers, taken rather than argued.
+    """The census behind `V2-P4-026`'s headline numbers, retaken after `V2-P4-028` moved them.
 
     Every session of the fixture's ten-session window is tried at 17:00 Asia/Shanghai on itself,
     and for each one two questions are asked separately: does `daily_basic` answer, and does the
-    whole cross section assemble. The gap between the two answers is the remaining bottleneck,
-    and naming it as a *set of sessions* rather than as a count is what makes the test say which
-    dataset is responsible.
+    whole cross section assemble. Naming the answers as *sets of sessions* rather than as counts
+    is what makes the test say which dataset is responsible.
 
-    - `daily_basic` answers on **every** session of both fixtures. It contributes no refusal
-      anywhere in the window, which is the property this issue delivered.
-    - The cross section assembles on 5 of 10 sessions under `SHAPES` and 3 of 10 under
-      `WIDE_SHAPES`, and the missing prefix is exactly the sessions before the membership
-      partition's newest assignment became knowable (2026-01-12 and 2026-01-14 respectively).
+    **The measurement, in three readings.** Before `V2-P4-026` the cross section assembled on
+    **1** of 10 sessions on both fixtures -- the year-end instant and nothing else. After it, on
+    5 of 10 under `SHAPES` and 3 of 10 under `WIDE_SHAPES`: the missing prefix was exactly the
+    sessions before each membership partition's newest assignment became knowable (2026-01-12 and
+    2026-01-14). After `V2-P4-028` it is **10 of 10 on both**, and the shape that used to produce
+    the shorter census -- `WIDE_SHAPES`' assignment opening 2026-01-14, the fixture's stand-in for
+    the annual constituent review -- no longer refuses a single session of the window.
 
-    Before this issue the count was **1** on both fixtures -- the year-end instant and nothing
-    else -- so this is also the measurement `min_as_ofs=2` is satisfiable by. A single covered
-    year now yields five point-in-time neutralised cross sections where it yielded one.
+    **A census of "it answers everywhere" would say nothing on its own**, so what each session
+    answered *with* is asserted beside it. `WIDE_SHAPES` puts `SECURITIES[1]` in a coverage hole
+    from 2026-01-07 to 2026-01-13, and that security is in `without_industry` on exactly the
+    sessions inside it and in the cross section on the others. That is the corpus's own answer
+    moving with the day, which is the thing an as-of-insensitive read could not produce and a
+    read that had simply stopped refusing would get wrong.
     """
+    hole = (date(2026, 1, 7), date(2026, 1, 13))
     censuses = {}
-    for label, a_store, a_panel, first in (
-        ("SHAPES", store, panel, date(2026, 1, 12)),
-        ("WIDE_SHAPES", wide_store, wide_panel, date(2026, 1, 14)),
+    for label, a_store, a_panel in (
+        ("SHAPES", store, panel),
+        ("WIDE_SHAPES", wide_store, wide_panel),
     ):
         answered, assembled = [], []
+        unclassified: dict[date, tuple[str, ...]] = {}
         for session in a_panel.sessions:
             as_of = datetime(session.year, session.month, session.day, 9, 0, tzinfo=UTC)
             load_daily_valuations(
                 a_store, day=session, calendar=a_panel.calendar(), as_of=as_of, max_staleness=None
             )
             answered.append(session)
-            try:
-                load_industry_market_cap_cross_section(
-                    a_store,
-                    _spec(),
-                    subjects=a_panel.securities,
-                    day=session,
-                    as_of=as_of,
-                    calendar=a_panel.calendar(),
-                    membership_years=MEMBERSHIP_YEARS,
-                    max_staleness=None,
-                )
-            except PanelStorageError as error:
-                assert "not_yet_knowable" in str(error)
-                assert "index_member_all" in str(error)
-                continue
+            section = load_industry_market_cap_cross_section(
+                a_store,
+                _spec(),
+                subjects=a_panel.securities,
+                day=session,
+                as_of=as_of,
+                calendar=a_panel.calendar(),
+                membership_years=MEMBERSHIP_YEARS,
+                max_staleness=None,
+            )
             assembled.append(session)
-        censuses[label] = (tuple(answered), tuple(assembled), first)
+            unclassified[session] = section.without_industry
+        censuses[label] = (tuple(answered), tuple(assembled), unclassified)
 
-    for label, (answered, assembled, first) in censuses.items():
+    for label, (answered, assembled, _unclassified) in censuses.items():
         a_panel = panel if label == "SHAPES" else wide_panel
         assert answered == tuple(a_panel.sessions), label
-        assert assembled == tuple(day for day in a_panel.sessions if day >= first), label
+        assert assembled == tuple(a_panel.sessions), label
         assert len(assembled) >= MINIMUM_IC_AS_OFS, label
 
-    assert len(censuses["SHAPES"][1]) == 5
-    assert len(censuses["WIDE_SHAPES"][1]) == 3
+    assert len(censuses["SHAPES"][1]) == 10
+    assert set(censuses["SHAPES"][2].values()) == {()}
+    assert censuses["WIDE_SHAPES"][2] == {
+        session: ((SECURITIES[1],) if hole[0] <= session <= hole[1] else ())
+        for session in wide_panel.sessions
+    }
+    assert len(censuses["WIDE_SHAPES"][1]) == 10
 
 
 def test_a_neutralised_row_is_invisible_before_the_as_of_it_was_computed_at(

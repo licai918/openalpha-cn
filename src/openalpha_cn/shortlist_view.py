@@ -564,11 +564,18 @@ KNOWN_SHORTLIST_VIEW_LIMITATIONS: Final[tuple[ShortlistViewLimitation, ...]] = (
             "neutralized tier, because an industry mean and a size slope have already been "
             "subtracted out of every score and a ranking that cannot say what was removed has no "
             "readable explanation. The cross section that says it is "
-            "`IndustryMarketCapCrossSection`, whose loader reads `index_member_all` through "
-            "`read_if_ready` and therefore answers only at an `as_of` at or after the newest "
-            "stored assignment -- `V2-P4-027`'s issue, and the same bound "
-            "`tests/integration/test_factor_build.py` measures. So the **adapter** here serves all "
-            "three tiers and `run_shortlist` refuses `tier='neutralized'` by name rather than "
+            "`IndustryMarketCapCrossSection`. **THE REASON THIS ENTRY GIVES HAS CHANGED AND THE "
+            "CHANGE IS PART OF IT.** It used to be that the loader read `index_member_all` "
+            "through `read_if_ready` and therefore answered only at an `as_of` at or after the "
+            "newest stored assignment -- `V2-P4-027`'s issue rather than this face's. `V2-P4-028` "
+            "removed that: `panel_neutralization.load_industry_market_cap_cross_section` reads "
+            "through `panel_ingest.load_industry_cross_section`, which is day-scoped, so the "
+            "instant is no longer the obstacle. WHAT REMAINS IS THIS FACE'S OWN AND IS SMALLER: "
+            "it loads no exposure cross section, and doing so needs three things a shortlist "
+            "request does not carry -- the membership years to read, a trading calendar for the "
+            "pricing session, and the neutralisation whose `industry_level` and "
+            "`market_cap_measure` decide what the exposures ARE. So the **adapter** here serves "
+            "all three tiers and `run_shortlist` refuses `tier='neutralized'` by name rather than "
             "loading an exposure cross section at an instant that would not match the screen's. "
             "Screen on `raw` or `processed`, where nothing was projected out."
         ),
@@ -1918,10 +1925,12 @@ def run_shortlist(
     if request.tier == "neutralized":
         raise ShortlistRequestError(
             "a neutralized-tier shortlist needs the industry and market-cap cross section its "
-            "scores were neutralised against, and this face does not load one: that loader reads "
-            "index_member_all through read_if_ready and answers only at an as_of at or after the "
-            "newest stored assignment, which is V2-P4-027's issue rather than this one's. Screen "
-            "on the raw or processed tier, where nothing was projected out"
+            "scores were neutralised against, and this face does not load one: a shortlist "
+            "request carries no membership years, no trading calendar and no neutralisation, and "
+            "those three are what decide which exposures a cross section holds. The instant is no "
+            "longer the obstacle -- V2-P4-028 made that loader day-scoped -- so what is missing "
+            "here is a request contract rather than a readable partition. Screen on the raw or "
+            "processed tier, where nothing was projected out"
         )
     section = load_shortlist_cross_section(store, request)
     screen = CrossSectionScreen(
