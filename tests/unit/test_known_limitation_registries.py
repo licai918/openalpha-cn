@@ -15,7 +15,7 @@ inside a docstring, which is prose the runner never reads.
 ## Why the mechanism is not copied as it stands
 
 `007`'s form is "one test per entry, named after the entry". At three entries that is exactly
-right. Across the thirty-two code-carrying registries there are **295** entries -- 69 in
+right. Across the thirty-two code-carrying registries there are **301** entries -- 69 in
 `KNOWN_PANEL_LIMITATIONS` alone -- and it stops being right somewhere well before that, for
 three reasons and not one:
 
@@ -304,6 +304,21 @@ totals from 294 / 69 to **295 / 69** with the count of registries unchanged at t
 belongs to the same family as `V2-P4-083`'s `load_index_prices`: a guard that cannot fail,
 because nothing on any face can reach the input it guards.
 
+The model chain's product acceptance then added **six** to `KNOWN_MODEL_VIEW_LIMITATIONS`, taking
+it from nine to fifteen and the totals from 295 / 69 to **301 / 69**, again with the registry
+count unchanged. They are worth reading as one group, because four of the six are the same
+failure shape in four places: something this repository already knew, written where the user
+cannot meet it. `V2-P4-099` found two of them stated one plane down in
+`domain/prediction_record.py` and never reaching a body a caller pastes into a report -- an
+unreachable `supersedes` and an `unwitnessed` standing no shipped face can produce. `V2-P4-100`
+found a third in a `--help` sentence that was false (a retried daily run files a second record)
+and a fourth in a docstring that was true and unfindable (`--subject` narrows a factor build and
+not the market a model is offered). The remaining two are `V2-P4-097`'s single-column rank
+invariance -- which is also the first entry with a *per-answer* companion, `model_view.
+evaluation_invariances`, because the boundary is true of the family and the run's own column
+count decides whether that run is standing on it -- and `V2-P4-098`'s measured `forward` record
+whose fit read the panel after the outcome had printed.
+
 `KNOWN_ALPHA_MODEL_LIMITATIONS` (`V2-P4-011`) is the twenty-sixth, and it is the first that
 bounds a **contract for something this repository does not yet build**: the quantitative
 `AlphaModel` boundary, whose feature matrix, walk-forward split, baselines, content address and
@@ -582,5 +597,5 @@ def test_the_registries_together_carry_the_entry_count_the_report_folds() -> Non
 
     assert len(codes["KNOWN_PANEL_LIMITATIONS"]) == folded + plane_wide + 1
     assert all(codes[registry] for registry in codes)
-    assert sum(len(entries) for entries in codes.values()) >= 295
+    assert sum(len(entries) for entries in codes.values()) >= 301
     assert len(codes["KNOWN_PANEL_LIMITATIONS"]) >= 69

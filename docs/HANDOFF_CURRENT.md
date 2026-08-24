@@ -67,11 +67,22 @@ openalpha model prediction prd_…   # 其中一条，按它登记时的样子
   两个派生档每个名字都只有覆盖码、没有值，六格归因全是 `not_measured`。
 - 完整清单：`openalpha factor list --json` 的 `run_limitations`，或
   `openalpha_cn/factor_view.py#KNOWN_FACTOR_RUN_LIMITATIONS`。
-- **模型面的九条边界随每个答案一起返回**（`--json` 的 `limitations`，或
-  `openalpha_cn/model_view.py#KNOWN_MODEL_VIEW_LIMITATIONS`）。最容易被误读的两条：
-  `--min-scored-ratio` 是**覆盖度**下限、永远不是质量判决；`standing: forward` 只说明本存储在
-  结果可知之前持有了这些字节，**不说明**批次是在它自称的时刻产出的——`predicted_at` 本仓校验不
-  了，也没有任何东西防得住拥有这块磁盘的人。两句话都随答案一起给出，不只写在文档里。
+- **模型面的十五条边界随每个答案一起返回**（`--json` 的 `limitations`，或
+  `openalpha_cn/model_view.py#KNOWN_MODEL_VIEW_LIMITATIONS`；两个终端面各印一行报数与取全文的
+  flag）。最容易被误读的四条：`--min-scored-ratio` 是**覆盖度**下限、永远不是质量判决；
+  `standing: forward` 只说明本存储在结果可知之前持有了这些字节，**不说明**批次是在它自称的时刻
+  产出的——`predicted_at` 本仓校验不了，也没有任何东西防得住拥有这块磁盘的人；它同样**不限定**
+  拟合读面板的那个时刻，`--as-of` 可以晚于结果可知的时刻而 standing 仍是 `forward`，那个时刻
+  只在 `daily-run` 自己的答案上（`training.as_of` 与终端的 `panel read at`）而不在记录里；
+  单列的 `cross_sectional_rank` 运行，其 `mean_rank_ic` 只看得见拟合的**符号**，会动的数在
+  `folds[].parameters`，也是终端折表的最后一列。前两句随答案一起给出，不只写在文档里。
+- **`openalpha model predictions` 按托管顺序（`recorded_at`）列出，不是按内容哈希**，每行自带
+  日期、standing、horizon、打分数与模型名，故不必逐条打开就能挑。`model prediction <id>` 的正文
+  带 `model` 键，即记录按值携带的整份拟合制品（特征列、`feature_version`、`code_commit`、seed、
+  超参、训练截止、样本数、系数），所以一年后读到的记录能自己说出模型是什么。
+- **同一天重跑会多落一条记录**：`predicted_at` 取自本进程时钟并进入内容地址，定时任务重试因此
+  为一天留下两条；这是记为约束而非缺陷，三种「修法」各自被本仓已有的论证挡住，见
+  `a_re_run_of_one_day_files_a_second_record_because_predicted_at_reaches_the_address`。
 - **模型面与榜单面的面板前置条件互有缺口**：模型面要 `adj_factor`（标签是两个交易日之间的收益）
   而不要 `namechange`；榜单面反过来。两边的 `409` 都会写出修复它的那条 `panel build`。
 

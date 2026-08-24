@@ -44,6 +44,7 @@ pins the absence so it stays a decision.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -631,6 +632,51 @@ def test_a_freshness_bound_is_stated_or_waived_and_never_defaulted() -> None:
         **_build_parameters(max_staleness_days=None, waive_max_staleness=True)
     )
     assert waived.max_staleness is None
+
+
+def test_the_waiver_this_command_offers_is_refused_by_the_engine_that_reads_the_bound(
+    panel_only: Path,
+) -> None:
+    """`V2-P4-100`'s third account: `--help` offered two options and only one of them builds.
+
+    The help said *"state it or waive it with --waive-max-staleness; there is no third option"*
+    and the command's own printed example used the waiver. Run verbatim, it exits `1`:
+    `compute_factor._validate_requirements` refuses a waived `max_staleness` for **every** dataset
+    a factor reads, because the engine reads through `read_visible_at` and a waived bound accepts
+    a slice reaching arbitrarily far short of `as_of` while every structural check clears.
+
+    The request contract keeps the flag -- it is what makes `factor_build_request` able to refuse
+    neither-and-both -- so this is a wall to name rather than a flag to delete, and both halves
+    are driven here: the waived build refuses by that rule and the bounded one writes a tier.
+    """
+    waived = CliRunner().invoke(
+        app,
+        _cli_arguments(
+            panel_only,
+            _build_parameters(
+                tier="raw", transform="", max_staleness_days=None, waive_max_staleness=True
+            ),
+        ),
+    )
+    assert waived.exit_code == 1, waived.output
+    assert "the daily requirement waives max_staleness" in waived.output
+    assert "State a bound" in waived.output
+
+    bounded = CliRunner().invoke(
+        app, _cli_arguments(panel_only, _build_parameters(tier="raw", transform=""))
+    )
+    assert bounded.exit_code == 0, bounded.output
+    assert json.loads(bounded.output)["coverage"]["raw"] == {"computed": 16}
+
+    # The option table is drawn inside a box, so a wrapped option help carries `|` characters
+    # between its lines; collapsing whitespace alone would not rejoin the sentence.
+    printed = CliRunner().invoke(app, ["factor", "build", "--help"]).output
+    rendered = re.sub(r"\s+", " ", printed.replace("│", " "))
+    assert "there is no third option" not in rendered
+    assert "on this face the two options are not two" in rendered
+    assert "measured NOT to reach a build" in rendered
+    assert "--year 2026 --max-staleness-days 30 --runtime-dir ./runtime" in rendered
+    assert "--year 2026 --waive-max-staleness --runtime-dir ./runtime" not in rendered
 
 
 def test_a_request_that_cannot_be_put_names_the_rule_that_refused_it() -> None:

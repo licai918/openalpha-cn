@@ -1004,14 +1004,27 @@ def test_a_second_daily_run_on_a_later_instant_does_not_destroy_the_first(
         cwd=model_panel.workspace,
     )
     assert listed.exit_code == EXIT_OK
-    held = listed.payload()["record_ids"]
+    payload = listed.payload()
+    held = payload["record_ids"]
     assert first_id in held
     assert second_id in held
-    assert held == sorted(held)
+    # Custody order since `V2-P4-098`, not the digest order this line used to assert. The two
+    # runs were filed in this process's own order, so the earlier one lists first -- which is the
+    # question a register is read for and the one a `sorted()` over content addresses answered
+    # with a shuffle.
+    assert held.index(first_id) < held.index(second_id)
+    assert [row["record_id"] for row in payload["predictions"]] == held
+    assert {row["model_name"] for row in payload["predictions"]} == {MODEL_NAME}
 
     status, survivor = http_get(served, f"/api/v1/predictions/{first_id}", ())
     assert status == HTTP_OK
-    assert survivor == fitted.first["prediction"]
+    # `held_prediction_view` is `prediction_view` plus the registry (`V2-P4-098`): this route and
+    # `openalpha model prediction` hand out a record with no run's answer beside it, so they carry
+    # the boundaries the daily run's own body carried.
+    assert survivor == {**fitted.first["prediction"], "limitations": fitted.first["limitations"]}
+    model = survivor["model"]
+    assert model["feature_ids"] == [f"{FACTOR}@raw"]
+    assert model["code_commit"] and model["feature_version"].startswith("feat_")
 
 
 def test_re_asking_one_day_on_the_command_line_files_a_second_record_rather_than_unchanged(
@@ -1019,7 +1032,7 @@ def test_re_asking_one_day_on_the_command_line_files_a_second_record_rather_than
 ) -> None:
     """The identical day, re-asked through the same command, is a **new** address.
 
-    **This contradicts `openalpha model daily-run --help`**, which says re-running an identical
+    **This contradicted `openalpha model daily-run --help`**, which said re-running an identical
     day is *"`unchanged` on both stores rather than a duplicate on one of them"*. It is not, and
     cannot be, through this face: `predicted_at` reaches the record's content address
     (`prediction_record.py`'s "and `predicted_at` reaches the address"), and the CLI takes it from
@@ -1028,8 +1041,14 @@ def test_re_asking_one_day_on_the_command_line_files_a_second_record_rather_than
     failure files a second record for one day rather than recognising the first.
 
     The behaviour is right for what the store is -- a content-addressed document is what its bytes
-    say -- and the help text is what is behind it. What is genuinely unreachable from the command
-    line is the `unchanged` path, and the test below reaches it the one way the SDK documents.
+    say -- and the help text was what was behind it. `V2-P4-100` corrected the sentence and filed
+    the consequence as
+    `model_view.KNOWN_MODEL_VIEW_LIMITATIONS`'
+    `a_re_run_of_one_day_files_a_second_record_because_predicted_at_reaches_the_address`, which
+    carries the argument against each of the three repairs that look obvious -- taking
+    `predicted_at` out of the address, offering a flag to set it, and scanning the register before
+    every write. What is genuinely unreachable from the command line is the `unchanged` path, and
+    the test below reaches it the one way the SDK documents.
     """
     again = _daily_run(model_panel, predict_at=model_panel.prediction_instants[0])
     assert again.exit_code == EXIT_OK
