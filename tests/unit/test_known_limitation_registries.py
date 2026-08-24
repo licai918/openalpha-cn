@@ -39,9 +39,12 @@ moved them from 247 / 69, `V2-P4-014` added the twenty-ninth
 the thirtieth (`KNOWN_TREE_LIMITATIONS`, seven entries) and moved them from 268 / 69.
 
 **Those two totals are the argument, so they are not left as prose.**
-`test_the_registries_together_carry_the_entry_count_the_report_folds` holds a floor under both,
-and a floor is the direction that can falsify the claim: entries only ever arrive, and "one test
-per entry does not scale" stops being true if the registries shrink back towards `007`'s three.
+`test_the_registries_together_carry_the_entry_count_the_report_folds` holds `REGISTRY_ENTRY_COUNTS`
+against them -- an **equality per registry** since `V2-P4-038`, where a floor stood until that
+issue measured what a floor is worth: any non-negative net change satisfies it, so a registry
+losing a real limitation while another gains one is green. The direction the argument needs is
+still covered, because an equality covers both -- "one test per entry does not scale" stops being
+true if the registries shrink back towards `007`'s three, and now they cannot shrink quietly.
 The figures above are re-measured whenever a registry grows -- `V2-P3-017` added a twelfth
 financial-statement limitation and moved them from 187 / 64, `V2-P3-016` added a whole
 twentieth registry (`KNOWN_INDEX_PRICE_LIMITATIONS`, four entries) and moved them from 189 / 65,
@@ -551,6 +554,126 @@ different caps. Its identity is therefore `(code, datasets)`, which
 asserts. Uniqueness below is a claim about the thirty registries a code is written into by hand.
 """
 
+CODES_THAT_RECUR_ACROSS_REGISTRIES: Final[dict[str, frozenset[str]]] = {
+    "silent_truncation_at_the_response_cap": frozenset(
+        {
+            "KNOWN_ADJUSTMENT_LIMITATIONS",
+            "KNOWN_PRICE_LIMITATIONS",
+            "KNOWN_INDEX_MEMBERSHIP_LIMITATIONS",
+            "KNOWN_INDUSTRY_LIMITATIONS",
+        }
+    ),
+    "no_revision_history": frozenset(
+        {"KNOWN_ADJUSTMENT_LIMITATIONS", "KNOWN_INDEX_MEMBERSHIP_LIMITATIONS"}
+    ),
+    "a_neutralised_series_is_only_as_point_in_time_as_its_build_schedule": frozenset(
+        {
+            "KNOWN_IC_LIMITATIONS",
+            "KNOWN_QUANTILE_PORTFOLIO_LIMITATIONS",
+            "KNOWN_EXPERIMENT_LIMITATIONS",
+        }
+    ),
+}
+"""The three codes that are written by hand into more than one registry, and where.
+
+Per-registry uniqueness has been asserted since `V2-P2-007`'s binding was widened; **across**
+registries nothing was asserted at all, and `V2-P4-038` is what that cost. The binding one
+section up tests membership in a set of every string literal the whole suite evaluates, so a
+code carried by registry A is "bound" by a literal somebody wrote about registry B -- and a
+foreign code is therefore the cheapest possible filler for a hole. Measured on `146698c`:
+adding `the_cut_is_broken_by_subject_code_when_two_scores_tie`,
+`KNOWN_CROSS_SECTION_LIMITATIONS`' own code, as a tenth `KNOWN_INDEX_MEMBERSHIP_LIMITATIONS`
+entry left `tests/unit` at 2816 passed and the seven integration and contract modules that
+touch a limitation registry at 233 passed.
+
+So this is a table rather than a bare "no code appears twice", because global uniqueness is
+**false today and rightly so**, in three places and for three different reasons:
+
+- `silent_truncation_at_the_response_cap` names one defect that really does recur at four
+  different response caps, which is the reason `DERIVED_REGISTRY` gives for
+  `KNOWN_PANEL_LIMITATIONS` keying on `(code, datasets)` rather than on `code`.
+- `no_revision_history` is the same sentence about two endpoints that each serve one snapshot
+  per request and carry no revision instant.
+- `a_neutralised_series_is_only_as_point_in_time_as_its_build_schedule` is one boundary of the
+  neutralised tier restated on each of the three studies that read it, and it is the entry
+  `V2-P4-026` **renamed** rather than appended around -- so all three had to move together and
+  a table that pins where it lives is what makes the next such rename visible.
+
+The value is the exact set of registries, not a count, so a recurrence that *moves* to a
+different registry is as red as one that appears. `KNOWN_PANEL_LIMITATIONS` is excluded on
+`DERIVED_REGISTRY`'s terms: 68 of its 69 codes are somebody else's by construction, so every
+one of them would appear here and the table would say nothing.
+"""
+
+REGISTRY_ENTRY_COUNTS: Final[dict[str, int]] = {
+    "KNOWN_EXECUTION_LIMITATIONS": 3,
+    "KNOWN_IC_LIMITATIONS": 5,
+    "KNOWN_QUANTILE_PORTFOLIO_LIMITATIONS": 8,
+    "KNOWN_EXPERIMENT_LIMITATIONS": 6,
+    "KNOWN_FACTOR_RUN_LIMITATIONS": 7,
+    "KNOWN_REDUNDANCY_LIMITATIONS": 6,
+    "KNOWN_TRADEABILITY_LIMITATIONS": 11,
+    "KNOWN_CROSS_SECTION_LIMITATIONS": 7,
+    "KNOWN_RANKING_LIMITATIONS": 7,
+    "KNOWN_SHORTLIST_GATE_LIMITATIONS": 7,
+    "KNOWN_WALK_FORWARD_LIMITATIONS": 11,
+    "KNOWN_BASELINE_LIMITATIONS": 10,
+    "KNOWN_TREE_LIMITATIONS": 7,
+    "KNOWN_SCREENING_LIMITATIONS": 7,
+    "KNOWN_SHORTLIST_VIEW_LIMITATIONS": 7,
+    "KNOWN_MODEL_VIEW_LIMITATIONS": 15,
+    "KNOWN_FEATURE_MATRIX_LIMITATIONS": 5,
+    "KNOWN_ALPHA_MODEL_LIMITATIONS": 11,
+    "KNOWN_PREDICTION_RECORD_LIMITATIONS": 8,
+    "KNOWN_ADJUSTMENT_LIMITATIONS": 6,
+    "KNOWN_PRICE_LIMITATIONS": 6,
+    "KNOWN_FINANCIAL_STATEMENT_LIMITATIONS": 12,
+    "KNOWN_INDEX_MEMBERSHIP_LIMITATIONS": 9,
+    "KNOWN_INDEX_PRICE_LIMITATIONS": 4,
+    "KNOWN_INDUSTRY_LIMITATIONS": 10,
+    "KNOWN_LABEL_LIMITATIONS": 8,
+    "KNOWN_NEUTRALIZATION_LIMITATIONS": 5,
+    "KNOWN_FACTOR_SEAL_LIMITATIONS": 3,
+    "KNOWN_SUSPENSION_LIMITATIONS": 9,
+    "KNOWN_UNIVERSE_LIMITATIONS": 7,
+    "KNOWN_STORAGE_LIMITATIONS": 5,
+}
+"""How many entries each hand-written registry carries -- an equality, one registry per line.
+
+`V2-P4-038`'s first half. What stood here was `sum(...) >= 301`, and a floor is satisfied by
+**any** non-negative net change: a registry that loses a real limitation while anything else
+gains one is green, and so is a registry that gains a foreign code and loses nothing. Both were
+measured rather than argued.
+
+Per registry rather than as one total, and that is the whole design choice. A single scalar
+catches only the *net*, so a deletion in one registry masked by two additions in another passes
+it; this fails naming the registry whose count moved. It is also the shape that survives the
+merge a scalar did not: this module's own docstring records `V2-P4-006` and `V2-P4-023` each
+writing `>= 218` in parallel, git merging two textually identical edits without a conflict, and
+the arithmetic being wrong afterwards with nothing to say so. Two siblings adding to two
+different registries edit two different lines here and git merges both correctly; two adding to
+the *same* registry conflict on one line, which is the right outcome because only a person can
+say whether the two additions are the same entry.
+
+**It is red on every merge that adds an entry, and that is the cost being paid on purpose.**
+The direction it does not cover is stated rather than left to be discovered: an entry replaced
+by a differently-named entry inside one registry leaves the count alone. Nothing here can see
+that, for `V2-P4-092`'s reason one section down -- a binding on names and counts cannot see what
+an entry claims. What does see it is the registry's own module naming all of its codes at once:
+measured by AST, 30 of the 32 have a literal collection somewhere under `tests/` whose members
+are exactly that registry's code set, and `KNOWN_INDEX_MEMBERSHIP_LIMITATIONS` and the derived
+`KNOWN_PANEL_LIMITATIONS` are the two that do not -- which is why the measured probe was built
+on the first of them.
+
+`KNOWN_PANEL_LIMITATIONS` is deliberately absent. Its count is not an independent fact: the
+assertion above already pins it at `folded + plane_wide + 1`, so writing 69 here would be a
+second hand-written number derived from the first, and a sibling adding to a folded dataset
+registry would have to update both or make them disagree. The measured totals this module's
+docstring quotes -- 301 across the thirty-two registries, 69 in the derived one -- are the sum
+of the thirty-one entries here plus that derived equality, and are not written down a second
+time as a scalar anybody can bump without re-measuring.
+"""
+
 
 def test_every_registry_entry_is_uniquely_identified_within_its_own_registry() -> None:
     """A duplicated code makes a registry's set literal smaller than the registry itself, so
@@ -568,8 +691,7 @@ def test_every_registry_entry_is_uniquely_identified_within_its_own_registry() -
 
 
 def test_the_registries_together_carry_the_entry_count_the_report_folds() -> None:
-    """A total, so this module fails on a registry that empties itself out, and the floor under
-    the volume argument in this module's docstring.
+    """The per-registry equality under the volume argument in this module's docstring.
 
     Every assertion above is per-entry and would be satisfied by a registry of length zero.
     `KNOWN_PANEL_LIMITATIONS` is a fold of two kinds of source, and they are counted apart
@@ -597,5 +719,32 @@ def test_the_registries_together_carry_the_entry_count_the_report_folds() -> Non
 
     assert len(codes["KNOWN_PANEL_LIMITATIONS"]) == folded + plane_wide + 1
     assert all(codes[registry] for registry in codes)
-    assert sum(len(entries) for entries in codes.values()) >= 301
-    assert len(codes["KNOWN_PANEL_LIMITATIONS"]) >= 69
+    assert {
+        registry: len(entries)
+        for registry, entries in codes.items()
+        if registry != DERIVED_REGISTRY
+    } == REGISTRY_ENTRY_COUNTS
+
+
+def test_no_code_recurs_across_two_registries_except_where_it_is_declared_to() -> None:
+    """`V2-P4-038`'s second half: per-registry uniqueness was asserted, global uniqueness was not.
+
+    Equality against `CODES_THAT_RECUR_ACROSS_REGISTRIES` rather than a bare "no code twice",
+    because three codes genuinely recur and each has a reason recorded beside it. The value is the
+    exact set of registries, so a recurrence that moves is as red as one that appears -- and a
+    foreign code arriving in a registry it does not belong to, which is the measured probe, is a
+    key the table does not have.
+    """
+    codes = declared_codes()
+    homes: dict[str, set[str]] = {}
+    for registry, entries in codes.items():
+        if registry == DERIVED_REGISTRY:
+            continue
+        for code in entries:
+            homes.setdefault(code, set()).add(registry)
+
+    assert {
+        code: frozenset(registries) for code, registries in homes.items() if len(registries) > 1
+    } == CODES_THAT_RECUR_ACROSS_REGISTRIES
+    assert set(CODES_THAT_RECUR_ACROSS_REGISTRIES) <= set(homes)
+    assert all(len(registries) > 1 for registries in CODES_THAT_RECUR_ACROSS_REGISTRIES.values())

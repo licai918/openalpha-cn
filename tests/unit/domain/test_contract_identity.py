@@ -26,12 +26,16 @@ different from the base.
 
 from __future__ import annotations
 
+import ast
+import re
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, Final
 
 import pytest
 
-from openalpha_cn.domain._identity import stable_model_id
+import openalpha_cn
+from openalpha_cn.domain._identity import CONTENT_ADDRESS_PATTERN, stable_model_id
 from openalpha_cn.domain.decision import AgentDecision, DecisionLedger, DecisionLedgerV1
 from openalpha_cn.domain.run import (
     RUN_MANIFEST_UNADDRESSED_FIELDS,
@@ -634,3 +638,227 @@ def test_the_frozen_v1_snapshots_still_refuse_what_v1_refused() -> None:
                 "run_manifest_id": ADDRESS,
             }
         )
+
+
+# --- the one canonicalisation, audited rather than claimed (V2-P4-037) -----------------
+#
+# `domain/_identity.py` says a second canonicalisation "would have put two canonicalisations in
+# play where a difference between them would be invisible until two IDs disagreed". Until
+# `V2-P4-037` **nothing enforced it**, and the cost was measured twice on `146698c`:
+#
+#   - Rewriting `ShortlistGateManifest.gate_manifest_id` as its own `json.dumps(..., sort_keys=
+#     False, separators=(", ", ": "))` plus `sha256[:24]` moved that declaration's address from
+#     `sgt_6c3ec68a648da428cffaa992` to `sgt_3248f195a1022718a0a1b2a2`.
+#   - Minting a **new** address beside the existing one -- a second computed field on the same
+#     model, `sgs_<24 hex>`, with the same bespoke spelling -- left ruff, `uv run mypy`
+#     (140 files), `lint-imports` (8 kept, 0 broken) and `tests/unit` (2813 passed) all green.
+#
+# The first probe went red by accident and the accident is worth recording, because it is not a
+# guard: `test_manifest_component_provenance.py::live_prefixes` counts `stable_model_id` and
+# `cross_section_digest` **call sites**, so *replacing* one drops the census from 27 to 26.
+# `test_a_quantitative_model_reference_must_be_something_the_one_hash_function_produced` then
+# fails on arithmetic, saying nothing about canonicalisation -- and the second probe, which adds
+# a mint without removing a call, moves that census not at all. A count of who calls the one
+# function cannot answer who else is minting.
+#
+# So the audit below is over the **mint**: every place under `src/` that truncates a digest to
+# a content address's width, keyed by the function it sits in and checked in both directions.
+# It is the shape `tests/unit/product/test_governed_screening.py::
+# test_no_shipped_risk_flag_is_written_in_executable_code_under_product` uses one plane over.
+#
+# What it cannot see is stated rather than left to be found: it reads the literal `24` written
+# at the slice, so a mint spelled `hexdigest()[:_WIDTH]` against a module constant would pass.
+# Every one of the eight sites writes the literal, a copy of one of them will too, and widening
+# to "every `sha256` call in `src/`" would mix content addresses in with the seven plain
+# 64-hex checksums (`payload_digest`, `config_digest`, `content_hash`, ...) that are a different
+# question. This guards drift, not an adversary.
+
+SOURCE_ROOT: Final[Path] = Path(openalpha_cn.__file__).resolve().parent
+
+_DIGITS = re.fullmatch(r".*\{(\d+)\}\$", CONTENT_ADDRESS_PATTERN)
+assert _DIGITS is not None, CONTENT_ADDRESS_PATTERN
+CONTENT_ADDRESS_DIGITS: Final[int] = int(_DIGITS.group(1))
+
+CANONICAL_JSON_KEYWORDS: Final[frozenset[str]] = frozenset(
+    {"ensure_ascii=False", "separators=(',', ':')", "allow_nan=False"}
+)
+
+OPTIONAL_JSON_KEYWORDS: Final[frozenset[str]] = frozenset({"sort_keys=True"})
+
+DECLARED_CONTENT_ADDRESS_MINTS: Final[dict[str, str]] = {
+    "domain/_identity.py::stable_model_id": (
+        "the one canonicalisation: every identity derived from a pydantic model is this one"
+    ),
+    "domain/factor.py::set_digest": (
+        "`set_`: an unordered set of subject codes, which is not a model and has no fields"
+    ),
+    "domain/factor.py::cross_section_digest": (
+        "`obs`/`prc`/`nrs`/`xs`: one cross section of (subject, coverage, value) triples"
+    ),
+    "domain/factor_neutralization.py::characteristic_digest": (
+        "`chr_`: one industry/market-cap cross section, reachable from two planes that may "
+        "not import each other"
+    ),
+    "backtest/candidate_ranking.py::ranking_content_digest": (
+        "`rkc_`: the researched candidates a ranking answered with, beside the declaration "
+        "address `ranking_manifest_id` that `stable_model_id` mints"
+    ),
+    "shortlist_view.py::stable_answer_digest": (
+        "`sla_`: one rendered shortlist answer, a mapping this face assembles and never a model"
+    ),
+    "domain/evidence.py::EvidenceSnapshot.evidence_id": (
+        "`ev_`: provenance and content joined with `|`, so there is no JSON to canonicalise"
+    ),
+    "storage/parquet.py::ParquetEvidenceStore.append": (
+        "not an address at all: `part-<24 hex>.parquet` is a file name, and no prefix "
+        "`CONTENT_ADDRESS_PATTERN` admits can be spelled with the `-` it uses"
+    ),
+}
+
+"""Every function under `src/` that may mint a content address, and what each one addresses.
+
+Eight, and the roadmap row for this issue named five of them -- `stable_model_id` plus a
+"genuine non-model content digests" list of `set_digest`, `rkc_`, `chr_` and `ev_`. Read off
+the tree instead, `cross_section_digest`, `stable_answer_digest` and `ParquetEvidenceStore
+.append` are there too, which is the same lesson `V2-P4-016` took from the hand-written prefix
+list this module's sibling replaced: a list of who hashes, written from memory, is a list that
+is already wrong.
+
+Keyed by `<module>::<class.function>` rather than by module, so a **second** bespoke digest
+added inside a file that already holds a legitimate one is red. `domain/factor.py` is why that
+matters: it holds two, and a file-level allowlist would have admitted a third.
+
+The seven prefixes these mint (`set`, `obs`/`prc`/`nrs`/`xs`, `chr`, `rkc`, `sla`, `ev`, and
+whichever the caller hands `stable_model_id`) are a different census from the one in
+`test_manifest_component_provenance.py::live_prefixes`, which reads **prefix arguments** off
+call sites -- 27 of them carrying 24 distinct prefixes, none containing an underscore, as of
+this issue. That one answers "is `mdl` taken"; this one answers "who is allowed to mint at
+all", and neither implies the other.
+"""
+
+JOINED_STRING_MINTS: Final[frozenset[str]] = frozenset(
+    {
+        "domain/evidence.py::EvidenceSnapshot.evidence_id",
+        "storage/parquet.py::ParquetEvidenceStore.append",
+    }
+)
+"""The two mints that canonicalise without JSON, declared so the keyword audit cannot skip.
+
+`evidence_id` joins five strings with `|` and `ParquetEvidenceStore.append` joins sorted
+evidence ids the same way, so there is no `json.dumps` in either function and no keyword
+spelling to compare. Declared as an exact set rather than tested for where a `json.dumps`
+happens to exist, because "check the spelling where there is one" is satisfied by a new mint
+that canonicalises some third way -- the direction `V2-P4-092` warns about, where an audit is
+made wide by being made unfalsifiable.
+"""
+
+
+def _qualified_owners(tree: ast.Module) -> dict[int, str]:
+    """`id(node)` -> the dotted class/function path it sits inside; `""` at module level."""
+    owners: dict[int, str] = {}
+
+    def walk(parent: ast.AST, path: tuple[str, ...]) -> None:
+        for child in ast.iter_child_nodes(parent):
+            owners[id(child)] = ".".join(path)
+            walk(
+                child,
+                (*path, child.name)
+                if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
+                else path,
+            )
+
+    walk(tree, ())
+    return owners
+
+
+def _canonicalisations(tree: ast.Module, owners: dict[int, str]) -> dict[str, frozenset[str]]:
+    """Every `json.dumps(...)` keyword spelling in one file, keyed by its enclosing function."""
+    found: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        if node.func.attr != "dumps":
+            continue
+        found.setdefault(owners[id(node)], set()).update(
+            f"{word.arg}={ast.unparse(word.value)}" for word in node.keywords
+        )
+    return {owner: frozenset(spelling) for owner, spelling in found.items()}
+
+
+def content_address_mints() -> dict[str, frozenset[str] | None]:
+    """Every place under `src/` that truncates a digest to a content address's width."""
+    mints: dict[str, frozenset[str] | None] = {}
+    for path in sorted(SOURCE_ROOT.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        owners = _qualified_owners(tree)
+        canonicalisations = _canonicalisations(tree, owners)
+        module = path.relative_to(SOURCE_ROOT).as_posix()
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Slice)):
+                continue
+            upper = node.slice.upper
+            if not (isinstance(upper, ast.Constant) and upper.value == CONTENT_ADDRESS_DIGITS):
+                continue
+            owner = owners[id(node)]
+            mints[f"{module}::{owner}"] = canonicalisations.get(owner)
+    return mints
+
+
+def test_the_width_the_audit_looks_for_is_the_one_the_pattern_declares() -> None:
+    """The extractor's own test: the audit hunts the width `CONTENT_ADDRESS_PATTERN` requires.
+
+    Read out of the pattern rather than written as a second `24`, so a repository that widened
+    its addresses would move the audit with them instead of leaving it hunting a width nothing
+    produces any more -- which is an audit that passes by finding nothing, the failure shape
+    every AST census in this repository is arranged against.
+    """
+    assert CONTENT_ADDRESS_DIGITS == 24
+    assert re.fullmatch(CONTENT_ADDRESS_PATTERN, "mdl_" + "0" * CONTENT_ADDRESS_DIGITS)
+    assert not re.fullmatch(CONTENT_ADDRESS_PATTERN, "mdl_" + "0" * (CONTENT_ADDRESS_DIGITS - 1))
+
+
+def test_every_content_address_in_the_source_tree_is_minted_where_this_module_says() -> None:
+    """`V2-P4-037`: the audit `_identity.py`'s "one canonicalisation" sentence never had.
+
+    Equality rather than containment, so this is red in both directions: a mint that appears
+    (the measured probe -- a second computed field spelling its own `sgs_<24 hex>` -- is caught
+    here rather than by the prefix census, which it does not move at all), and a declared mint
+    that is deleted or renamed without this table being told.
+    """
+    assert set(content_address_mints()) == set(DECLARED_CONTENT_ADDRESS_MINTS)
+    assert set(DECLARED_CONTENT_ADDRESS_MINTS) >= JOINED_STRING_MINTS
+    assert all(DECLARED_CONTENT_ADDRESS_MINTS.values()), (
+        "a mint on the allowlist with no stated reason is a name somebody added to make a "
+        "failure go away, which is the allowlist failure mode this shape has to survive"
+    )
+
+
+def test_every_declared_mint_spells_canonical_the_one_way() -> None:
+    """The other half of the sentence: one canonicalisation, not merely one set of minters.
+
+    Six of the eight canonicalise with `json.dumps`, and all six must spell it the way
+    `stable_model_id` does -- `ensure_ascii=False`, `separators=(",", ":")`, `allow_nan=False`.
+    That is the exact difference the measured probe introduced (`sort_keys=False` and
+    `separators=(", ", ": ")`), and it is the difference their docstrings each promise not to
+    have while nothing checked.
+
+    `sort_keys=True` is optional rather than required, and the reason is a real one rather than
+    a convenience: four of the six hash a **list** -- sorted subject codes, sorted rows,
+    sorted candidate tuples -- where `sort_keys` cannot change a byte, and requiring it would
+    mean editing `backtest/candidate_ranking.py` to satisfy an audit rather than to fix a
+    defect. The two whose payload is a mapping (`stable_model_id`, `stable_answer_digest`) both
+    pass it. `sort_keys=False` is refused by the second assertion, which is what keeps
+    "optional" from meaning "unchecked".
+    """
+    mints = content_address_mints()
+
+    assert {site for site, spelling in mints.items() if spelling is None} == JOINED_STRING_MINTS
+
+    canonicalising = {site: words for site, words in mints.items() if words is not None}
+    assert {
+        site: sorted(CANONICAL_JSON_KEYWORDS - words) for site, words in canonicalising.items()
+    } == {site: [] for site in canonicalising}
+    assert {
+        site: sorted(words - CANONICAL_JSON_KEYWORDS - OPTIONAL_JSON_KEYWORDS)
+        for site, words in canonicalising.items()
+    } == {site: [] for site in canonicalising}

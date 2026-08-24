@@ -16,13 +16,12 @@ V2-P0B-013.
 from __future__ import annotations
 
 import logging
-import socket
 from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
-from offline_guard import GUARDED_SOCKET_FAMILIES, REFUSAL_MESSAGE, OfflineSuiteViolation
+from offline_guard import refusing_outbound_traffic
 
 from openalpha_cn.backtest.execution import MarketBar
 from openalpha_cn.domain.evidence import EvidenceSnapshot
@@ -275,7 +274,7 @@ def bar() -> Callable[..., MarketBar]:
 # The fixture below turns it into a property of the run. Its limits, stated rather than
 # implied:
 #
-#   - It refuses `connect`/`connect_ex` on `AF_INET`/`AF_INET6` sockets **in this process**. A
+#   - It refuses `GUARDED_SOCKET_METHODS` on `AF_INET`/`AF_INET6` sockets **in this process**. A
 #     child process (`subprocess`, `multiprocessing`) gets a fresh interpreter and is not
 #     guarded; `tests/unit/test_repository_assets.py` shells out to `git` and
 #     `tests/integration/storage/test_migrations.py` spawns a writer, and neither is a network
@@ -286,52 +285,32 @@ def bar() -> Callable[..., MarketBar]:
 #   - `AF_UNIX` and every other family are left alone: a local socket is not the network, and
 #     refusing one would be a guess about what a future test needs rather than a rule about
 #     what this one forbids.
+#   - It refuses by **family**, never by destination. A datagram aimed at loopback is refused on
+#     the same terms as one aimed at a routable host, because a guard that read the address
+#     would have to decide which addresses are the network, and `127.0.0.1` is the answer a
+#     test reaches for when it wants to be sure -- which is exactly the reasoning that let the
+#     `sendto` hole `V2-P4-039` filed look harmless.
+#
+# `V2-P4-039` widened the first limit from `connect`/`connect_ex` to the four names in
+# `GUARDED_SOCKET_METHODS`: the pair that opens a connection and the pair that transmits
+# without one. The docstring there carries the closure argument and the measurement.
 #
 # `tests/unit/test_offline_suite.py` proves the guard is live rather than merely installed.
 
 
 @pytest.fixture(autouse=True)
 def _refuse_outbound_connections(request: pytest.FixtureRequest) -> Iterator[None]:
-    """Make an outbound TCP connection raise for the duration of every unmarked test.
+    """Make anything that leaves this process over IP raise, for every unmarked test.
 
-    Restored by hand rather than through `monkeypatch` because `socket.socket` inherits
-    `connect` from the C `_socket.socket` and does not define one of its own:
-    `monkeypatch.undo` would put the inherited function back as an attribute *on the Python
-    subclass*, which is a different object graph from the one the test started with. Deleting
-    the shadow is the only restoration that leaves the class exactly as it was found.
+    The patching and its restoration live in `tests/offline_guard.py` rather than here, and
+    that module's docstring says why: inside an autouse fixture there is no moment at which a
+    test can look at `socket.socket` unguarded, so the restoration was a `finally` block
+    nothing could observe. This is the whole of what belongs in a fixture -- deciding *whether*
+    a given test is guarded.
     """
     if request.node.get_closest_marker("e2e") is not None:
         yield
         return
 
-    original_connect = socket.socket.connect
-    original_connect_ex = socket.socket.connect_ex
-    had_own_connect = "connect" in vars(socket.socket)
-    had_own_connect_ex = "connect_ex" in vars(socket.socket)
-
-    def _refuse(name: str, wrapped: Callable[..., object]) -> Callable[..., object]:
-        def _guard(self: socket.socket, address: object, *args: object, **kwargs: object):
-            if self.family in GUARDED_SOCKET_FAMILIES:
-                raise OfflineSuiteViolation(
-                    f"socket.{name}({address!r}) from a test that is not marked `e2e`. "
-                    f"{REFUSAL_MESSAGE}"
-                )
-            return wrapped(self, address, *args, **kwargs)
-
-        return _guard
-
-    socket.socket.connect = _refuse("connect", original_connect)  # type: ignore[method-assign]
-    socket.socket.connect_ex = _refuse(  # type: ignore[method-assign]
-        "connect_ex", original_connect_ex
-    )
-    try:
+    with refusing_outbound_traffic():
         yield
-    finally:
-        if had_own_connect:
-            socket.socket.connect = original_connect  # type: ignore[method-assign]
-        else:
-            del socket.socket.connect
-        if had_own_connect_ex:
-            socket.socket.connect_ex = original_connect_ex  # type: ignore[method-assign]
-        else:
-            del socket.socket.connect_ex
