@@ -230,7 +230,7 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   so. It contradicted the command's own contract: the training set is every example whose outcome
   window had closed at `--predict-at`, and those cross sections were always going to be purged.
   The labelling read simply ran first. `run_daily` now drops them **before** labelling, through
-  `outcome_had_closed` — the one inequality `trainable_at` already applied, extracted so the two
+  `_outcome_had_closed` — the one inequality `trainable_at` already applied, extracted so the two
   cannot drift — so nothing asks the panel for prices it does not hold. Measured on the
   ten-session corpus: `--end 2026-01-15` refused before and now answers with the same
   `artifact_id` and the same `record_id` as `--end 2026-01-14`. A window the *calendar* cannot
