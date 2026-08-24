@@ -331,6 +331,8 @@ def _cli(runtime_dir: Path, command: str, parameters: dict[str, Any]) -> tuple[i
         "--min-scored-ratio",
         str(parameters["minimum_scored_ratio"]),
     ]
+    if parameters.get("shelf_life_days") is not None:
+        arguments += ["--shelf-life-days", str(parameters["shelf_life_days"])]
     if parameters.get("json_output", True):
         arguments.append("--json")
     for feature in parameters["features"]:
@@ -998,6 +1000,83 @@ def test_the_security_the_model_declined_says_so_rather_than_vanishing(
     assert declined[0]["abstention"] == (
         "this security carries no value for at least one declared feature"
     )
+
+
+def test_a_stale_daily_run_abstains_on_every_security_and_is_refused_by_the_coverage_floor(
+    daily_runtime_dir: Path,
+) -> None:
+    """Story S35 at a surface: `stale 模型显式弃权`, end to end through the command line.
+
+    One flag apart, on one store, with the same declaration and the same stored cross section.
+    Under a shelf life of zero days the fit stands further past its training cutoff than it is
+    allowed to and **every** security carries `ABSTAIN_STALE_MODEL` instead of a score -- including
+    the ones the model had a number for a line above, which is what makes this a policy rather than
+    a coincidence about coverage.
+
+    The refusal comes from `--min-scored-ratio` and not from the shelf life, which is
+    `an_expired_run_is_refused_only_by_the_coverage_floor_the_caller_declared` driven: the same
+    expired run under a floor of `0.0` exits `0`. Both are asserted, because a bar asserted in one
+    direction is a constant.
+
+    **The prediction is registered either way.** Story S32 is about a prediction being persisted
+    before its outcome is known, which is unconditional -- and a batch of stated refusals is
+    exactly the kind of answer that has to be on the record rather than absent from it.
+    """
+    stale = {**DAILY, "shelf_life_days": 0, "minimum_scored_ratio": 0.5}
+    fresh_code, fresh_out = _cli(daily_runtime_dir, "daily-run", DAILY)
+    stale_code, stale_out = _cli(daily_runtime_dir, "daily-run", stale)
+    admitted_code, admitted_out = _cli(
+        daily_runtime_dir, "daily-run", {**stale, "minimum_scored_ratio": 0.0}
+    )
+
+    assert fresh_code == 0, fresh_out
+    fresh = json.loads(fresh_out)
+    expired = json.loads(stale_out)
+    admitted = json.loads(admitted_out)
+
+    assert any(row["score"] is not None for row in fresh["prediction"]["predictions"])
+    assert [row["ts_code"] for row in expired["prediction"]["predictions"]] == sorted(SECURITIES)
+    assert {row["abstention"] for row in expired["prediction"]["predictions"]} == {
+        "this fit's training cutoff stands further behind this cross section than its shelf life"
+    }
+    assert all(row["score"] is None for row in expired["prediction"]["predictions"])
+
+    assert expired["measurement"]["scored_ratio"] == 0.0
+    assert expired["declaration"]["shelf_life_days"] == 0
+    assert fresh["declaration"]["shelf_life_days"] is None
+    assert stale_code == 1 and expired["admitted"] is None
+    assert admitted_code == 0 and admitted["admitted"] == []
+    assert expired["prediction"]["record_id"], "a refused run still registered its prediction"
+
+
+def test_a_declared_shelf_life_is_one_answer_on_all_three_faces(
+    runtime_dir: Path, rest: TestClient
+) -> None:
+    """`--shelf-life-days 0`, `{"shelf_life_days": 0}` and `shelf_life_days=0` are one question.
+
+    The evaluation face rather than the daily one, because a walk-forward schedule expires every
+    fold at once and the comparison is then over the whole `folds` array. `artifact_id` is asserted
+    equal across the three **and** unchanged from the un-expired run: the shelf life is a property
+    of the ask, so it reaches no artifact field and cannot move a fit's address.
+    """
+    expired = {**BASELINE, "shelf_life_days": 0}
+    code, out = _cli(runtime_dir, "evaluate", expired)
+    assert code == 0, out
+    from_cli = json.loads(out)
+    from_rest = rest.post("/api/v1/models/evaluate", json=_rest_body(expired)).json()
+    from_sdk = OpenAlphaSDK(runtime_dir=runtime_dir).evaluate_model(**_sdk_arguments(expired))
+    fresh = json.loads(_cli(runtime_dir, "evaluate", BASELINE)[1])
+
+    assert from_cli["declaration"] == from_rest["declaration"]
+    assert from_cli["declaration"]["shelf_life_days"] == 0
+    assert from_cli["measurement"] == from_rest["measurement"]
+    assert from_cli["measurement"]["scored_ratio"] == 0.0
+    assert from_sdk.scored_ratio == 0.0
+    assert all(fold["mean_rank_ic"] is None for fold in from_cli["folds"])
+    assert [fold["artifact_id"] for fold in from_cli["folds"]] == [
+        fold["artifact_id"] for fold in fresh["folds"]
+    ], "the fit is the same fit; only the reading of it changed"
+    assert any(fold["mean_rank_ic"] is not None for fold in fresh["folds"])
 
 
 def test_the_daily_fit_consumed_only_outcomes_that_had_already_closed(

@@ -279,8 +279,10 @@ def verdicts(
     cut = fold(shape)
     tree = BoostedRankTreeModel(declaration=declaration(hyperparameters=hyperparameters))
     return (
-        evaluate_fold(tree, cut),
-        evaluate_fold(CrossSectionalRankModel(declaration=rank_declaration()), cut),
+        evaluate_fold(tree, cut, shelf_life=None),
+        evaluate_fold(
+            CrossSectionalRankModel(declaration=rank_declaration()), cut, shelf_life=None
+        ),
     )
 
 
@@ -318,9 +320,9 @@ def test_a_fitted_tree_rebuilt_from_its_artifact_alone_reproduces_every_predicti
     model = fitted()
     rebuilt = FittedBoostedRankTreeModel(artifact=model.artifact)
 
-    assert rebuilt.predict(cross_section("interaction"), predicted_at=AS_OF) == model.predict(
-        cross_section("interaction"), predicted_at=AS_OF
-    )
+    assert rebuilt.predict(
+        cross_section("interaction"), predicted_at=AS_OF, shelf_life=None
+    ) == model.predict(cross_section("interaction"), predicted_at=AS_OF, shelf_life=None)
 
 
 def test_every_encoded_node_is_a_leaf_or_a_split_on_a_declared_column() -> None:
@@ -718,7 +720,7 @@ def test_the_learning_rate_scales_every_score_and_nothing_else() -> None:
                 )
             )
         ).fit(training_set("interaction"))
-        batch = model.predict(cross_section("interaction"), predicted_at=AS_OF)
+        batch = model.predict(cross_section("interaction"), predicted_at=AS_OF, shelf_life=None)
         return [item.score for item in batch.predictions if item.score is not None]
 
     halved = scores(0.1)
@@ -733,7 +735,7 @@ def test_the_learning_rate_scales_every_score_and_nothing_else() -> None:
 
 
 def test_every_offered_security_is_scored_or_abstained() -> None:
-    batch = fitted().predict(cross_section("interaction"), predicted_at=AS_OF)
+    batch = fitted().predict(cross_section("interaction"), predicted_at=AS_OF, shelf_life=None)
 
     assert batch.subjects == tuple(sorted(SECURITIES))
     assert len(batch.scored) + len(batch.abstained) == len(SECURITIES)
@@ -743,7 +745,9 @@ def test_a_security_missing_one_declared_column_abstains_with_the_stated_reason(
     offered = [(ts_code, columns) for ts_code, columns, _t in rows_for("interaction", 0)]
     holed = [(offered[0][0], (None, *offered[0][1][1:])), *offered[1:]]
 
-    batch = fitted().predict(cross_section("interaction", rows=holed), predicted_at=AS_OF)
+    batch = fitted().predict(
+        cross_section("interaction", rows=holed), predicted_at=AS_OF, shelf_life=None
+    )
 
     refused = next(item for item in batch.predictions if item.ts_code == offered[0][0])
     assert refused.abstention == ABSTAIN_INCOMPLETE_FEATURES
@@ -753,7 +757,9 @@ def test_a_security_missing_one_declared_column_abstains_with_the_stated_reason(
 def test_a_cross_section_too_small_to_rank_abstains_on_every_security() -> None:
     offered = [(ts_code, columns) for ts_code, columns, _t in rows_for("interaction", 0)][:2]
 
-    batch = fitted().predict(cross_section("interaction", rows=offered), predicted_at=AS_OF)
+    batch = fitted().predict(
+        cross_section("interaction", rows=offered), predicted_at=AS_OF, shelf_life=None
+    )
 
     assert {item.abstention for item in batch.predictions} == {ABSTAIN_UNRANKABLE_CROSS_SECTION}
 
@@ -783,7 +789,9 @@ def test_a_score_is_finite_and_can_step_outside_the_range_of_the_targets_it_chas
     """
     scores = [
         item.score
-        for item in fitted().predict(cross_section("interaction"), predicted_at=AS_OF).predictions
+        for item in fitted()
+        .predict(cross_section("interaction"), predicted_at=AS_OF, shelf_life=None)
+        .predictions
         if item.score is not None
     ]
 
@@ -804,7 +812,7 @@ def test_the_score_orders_the_cross_section_the_way_the_fitted_ensemble_asks_it_
     day_offset = len(PANEL_DAYS) + 3
     rows = rows_for("interaction", day_offset)
     batch = fitted().predict(
-        cross_section("interaction", day_offset=day_offset), predicted_at=AS_OF
+        cross_section("interaction", day_offset=day_offset), predicted_at=AS_OF, shelf_life=None
     )
     targets = {ts_code: target for ts_code, _columns, target in rows}
     pairs = [
@@ -838,7 +846,7 @@ def test_a_cross_section_missing_a_fitted_column_is_refused_as_a_value_error() -
     )
 
     with pytest.raises(ValueError):
-        fitted().predict(narrowed, predicted_at=AS_OF)
+        fitted().predict(narrowed, predicted_at=AS_OF, shelf_life=None)
 
 
 def test_a_cross_section_carrying_an_extra_column_is_refused_before_a_batch_exists() -> None:
@@ -853,7 +861,7 @@ def test_a_cross_section_carrying_an_extra_column_is_refused_before_a_batch_exis
     )
 
     with pytest.raises(AlphaModelError, match="positionally"):
-        fitted().predict(widened, predicted_at=AS_OF)
+        fitted().predict(widened, predicted_at=AS_OF, shelf_life=None)
 
 
 # --------------------------------------------------------------------------------------

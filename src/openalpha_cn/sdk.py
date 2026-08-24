@@ -695,6 +695,7 @@ class OpenAlphaSDK:
         minimum_scored_ratio: float,
         code_commit: str,
         config_digest: str,
+        shelf_life_days: int | None = None,
         feature_version: str | None = None,
         hyperparameters: Sequence[tuple[str, bool | int | float | str]] = (),
     ) -> ModelEvaluation:
@@ -734,6 +735,7 @@ class OpenAlphaSDK:
                 test_days_per_fold=test_days_per_fold,
                 embargo_sessions=embargo_sessions,
                 minimum_scored_ratio=minimum_scored_ratio,
+                shelf_life_days=shelf_life_days,
                 code_commit=code_commit,
                 config_digest=config_digest,
                 feature_version=feature_version,
@@ -762,6 +764,7 @@ class OpenAlphaSDK:
         minimum_scored_ratio: float,
         code_commit: str,
         config_digest: str,
+        shelf_life_days: int | None = None,
         feature_version: str | None = None,
         hyperparameters: Sequence[tuple[str, bool | int | float | str]] = (),
     ) -> DailyRunResult:
@@ -794,6 +797,7 @@ class OpenAlphaSDK:
                 years=years,
                 exchange=exchange,
                 minimum_scored_ratio=minimum_scored_ratio,
+                shelf_life_days=shelf_life_days,
                 code_commit=code_commit,
                 config_digest=config_digest,
                 feature_version=feature_version,

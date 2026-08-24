@@ -4871,6 +4871,12 @@ _MODEL_SCORED_RATIO_HELP: Final[str] = (
     "the answer is refused with `admitted: null` and exit 1, and above it the same measurement is "
     "admitted with exit 0."
 )
+_MODEL_SHELF_LIFE_HELP: Final[str] = (
+    "How many days past its training cutoff a fit may still be asked about a cross section. "
+    "Beyond it every security abstains with a stated reason rather than being scored, so the run "
+    "reports `scored_ratio: 0.0` and is refused by --min-scored-ratio. Omitted, no shelf life is "
+    "declared and the answer body says so (`shelf_life_days: null`) rather than implying one."
+)
 _MODEL_FEATURE_VERSION_HELP: Final[str] = (
     "The recipe this declaration claims to have been fitted on (`feat_...`). Omitted, it is "
     "resolved from the columns declared above -- --code-commit's arrangement. Supplied, it is "
@@ -5012,6 +5018,9 @@ def model_evaluate_command(
         str, typer.Option("--exchange", help=_FACTOR_EXCHANGE_HELP)
     ] = TRADING_CALENDAR_DEFAULT_EXCHANGE,
     as_of: Annotated[str, typer.Option("--as-of", help=_MODEL_AS_OF_HELP)] = "",
+    shelf_life_days: Annotated[
+        int | None, typer.Option("--shelf-life-days", help=_MODEL_SHELF_LIFE_HELP)
+    ] = None,
     hyperparameter: Annotated[
         list[str] | None, typer.Option("--hyperparameter", help=_MODEL_HYPERPARAMETER_HELP)
     ] = None,
@@ -5097,6 +5106,7 @@ def model_evaluate_command(
                 test_days_per_fold=test_days_per_fold,
                 embargo_sessions=embargo_sessions,
                 minimum_scored_ratio=min_scored_ratio,
+                shelf_life_days=shelf_life_days,
                 code_commit=_resolved_code_commit(code_commit),
                 config_digest=_resolved_config_digest(config_digest),
                 feature_version=feature_version,
@@ -5135,6 +5145,9 @@ def model_daily_run_command(
         str, typer.Option("--exchange", help=_FACTOR_EXCHANGE_HELP)
     ] = TRADING_CALENDAR_DEFAULT_EXCHANGE,
     as_of: Annotated[str, typer.Option("--as-of", help=_MODEL_AS_OF_HELP)] = "",
+    shelf_life_days: Annotated[
+        int | None, typer.Option("--shelf-life-days", help=_MODEL_SHELF_LIFE_HELP)
+    ] = None,
     hyperparameter: Annotated[
         list[str] | None, typer.Option("--hyperparameter", help=_MODEL_HYPERPARAMETER_HELP)
     ] = None,
@@ -5193,6 +5206,15 @@ def model_daily_run_command(
     prediction being persisted before the outcome is known, which is unconditional. The
     `record_id` is on the answer either way.
 
+    **`--shelf-life-days` is how a stale fit says so.** `--start`/`--end` and `--predict-at` are
+    independent, so a run may train on last year and predict about today; past the declared span
+    every security abstains with a stated reason instead of being scored, which is Story S35. The
+    span is **wall time, not sessions** -- a horizon counts open sessions and this repository
+    refuses to convert one into the other, so a caller who means five sessions widens it for
+    weekends. Omitted, no span is declared and the answer says so (`shelf_life_days: null`) rather
+    than implying one. It refuses nothing on its own: an expired run reads `scored_ratio 0.0`,
+    which is `--min-scored-ratio`'s to reject, and a floor of `0.0` admits it.
+
     This is also the command that finally fills `RunManifest.alpha_model_versions`: it files a
     `mode=daily` manifest naming the one artifact it consumed, under a `run_id` derived from the
     prediction's own address, so a re-run that reproduces the prediction is `unchanged` on both
@@ -5223,6 +5245,7 @@ def model_daily_run_command(
                 years=year,
                 exchange=exchange,
                 minimum_scored_ratio=min_scored_ratio,
+                shelf_life_days=shelf_life_days,
                 code_commit=_resolved_code_commit(code_commit),
                 config_digest=_resolved_config_digest(config_digest),
                 feature_version=feature_version,

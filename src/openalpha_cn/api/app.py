@@ -852,7 +852,7 @@ class ModelHyperparameterApiRequest(BaseModel):
 
 
 class ModelRunApiRequest(BaseModel):
-    """Every parameter both model routes share, and only the last four have a default.
+    """Every parameter both model routes share, and only the last five have a default.
 
     `model_view`'s resolvers refuse a default for each of the rest and this model does not
     reinstate one: a browser that omitted `minimum_scored_ratio` would otherwise get a bar nobody
@@ -880,6 +880,15 @@ class ModelRunApiRequest(BaseModel):
     minimum_scored_ratio: float
     code_commit: str | None = None
     config_digest: str | None = None
+    shelf_life_days: int | None = None
+    """`V2-P4-018`'s span, and `None` here means *declared none* rather than *unset*.
+
+    The one optional field on this model whose absence is not resolved server-side into something
+    else. `code_commit` and the two beside it are `None`-as-unset and get filled in; this stays
+    `None` all the way to `AlphaModelArtifact.is_stale_at`, and the answer body renders
+    `shelf_life_days: null` so a reader sees that no expiry was asked for rather than guessing
+    which one was assumed.
+    """
     feature_version: str | None = None
     hyperparameters: tuple[ModelHyperparameterApiRequest, ...] = ()
 
@@ -1763,6 +1772,7 @@ def create_app(
                 test_days_per_fold=request.test_days_per_fold,
                 embargo_sessions=request.embargo_sessions,
                 minimum_scored_ratio=request.minimum_scored_ratio,
+                shelf_life_days=request.shelf_life_days,
                 code_commit=_resolved_code_commit(request.code_commit),
                 config_digest=_resolved_config_digest(request.config_digest),
                 feature_version=request.feature_version,
@@ -1805,6 +1815,7 @@ def create_app(
                 years=request.years,
                 exchange=request.exchange,
                 minimum_scored_ratio=request.minimum_scored_ratio,
+                shelf_life_days=request.shelf_life_days,
                 code_commit=_resolved_code_commit(request.code_commit),
                 config_digest=_resolved_config_digest(request.config_digest),
                 feature_version=request.feature_version,

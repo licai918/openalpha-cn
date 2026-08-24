@@ -22,8 +22,19 @@ recorded here so it is not re-litigated by whoever next reads audit finding F49:
 What did change is that the approximation is no longer the *only* calendar in the repository,
 which is what F49 actually reported. Anything that needs to know whether the exchange was
 open now asks `TradingCalendar`, and this function's name is the last place `weekday() < 5`
-survives. `V2-P4-022` will replace this corpus outright with a known-signal-to-noise dataset;
-that is the task where a real calendar becomes worth its cost here.
+survives.
+
+**This docstring used to end "`V2-P4-022` will replace this corpus outright with a
+known-signal-to-noise dataset", and that issue landed and did not.** It is a correction rather
+than a deferral: the two corpora answer different questions and neither can stand in for the
+other. What is generated here is 300 agent *events* -- `limit_up`, `disclosure`, `theme` -- with
+no feature column, no label and no model, feeding `tests/replay/test_frozen_corpus.py`'s 300/300/0
+determinism assertion about **replay**. `tests/known_signal_corpus.py` is a labelled feature panel
+whose rank IC is known in closed form, and it fits models. Replacing one with the other would have
+deleted the replay determinism corpus to gain a benchmark nothing on that plane can use, and it
+would have rewritten all 300 `run_id`s for a calendar this corpus still does not model. So
+`weekday() < 5` survives here, and the real calendar is used where a session actually matters --
+which `tests/known_signal_corpus.py` does, through `build_trading_calendar`.
 """
 
 import json

@@ -76,7 +76,7 @@ PROBE: Final[Path] = ROOT / "src" / "openalpha_cn" / "backtest" / "_model_face_p
 # --- the registry, bound to this file the way every other one is -------------------------------
 
 
-def test_the_declared_limitations_are_exactly_these_fifteen() -> None:
+def test_the_declared_limitations_are_exactly_these_sixteen() -> None:
     """`KNOWN_MODEL_VIEW_LIMITATIONS`' codes, as a set literal compared for equality.
 
     `tests/unit/test_known_limitation_registries.py`'s binding: every declared code has to appear
@@ -91,6 +91,11 @@ def test_the_declared_limitations_are_exactly_these_fifteen() -> None:
     in `domain/prediction_record.py` and never reached a body a caller pastes into a report; and
     `V2-P4-100` measured a retrying scheduled job filing two records for one day and a
     `--subject`-narrowed factor build scoring 1.05% of the security-days it was offered.
+
+    The sixteenth is `V2-P4-018`'s, and it is the join between two flags rather than a property of
+    either: an expired run drives `scored_ratio` to `0.0` and it is `--min-scored-ratio` alone
+    that turns that into a refusal, so a caller who declared a floor of `0.0` reads an
+    all-abstaining model as a clean success.
     """
     assert {
         "a_resolved_feature_version_is_not_a_declared_one",
@@ -108,8 +113,9 @@ def test_the_declared_limitations_are_exactly_these_fifteen() -> None:
         "a_re_run_of_one_day_files_a_second_record_because_predicted_at_reaches_the_address",
         "a_subject_narrowed_factor_build_does_not_narrow_the_market_this_face_labels",
         "a_neutralized_feature_column_is_refused_by_this_face",
+        "an_expired_run_is_refused_only_by_the_coverage_floor_the_caller_declared",
     } == MODEL_VIEW_LIMITATION_CODES
-    assert len(KNOWN_MODEL_VIEW_LIMITATIONS) == len(MODEL_VIEW_LIMITATION_CODES) == 15
+    assert len(KNOWN_MODEL_VIEW_LIMITATIONS) == len(MODEL_VIEW_LIMITATION_CODES) == 16
 
 
 # --- the two envelope tables, complete rather than merely correct -------------------------------

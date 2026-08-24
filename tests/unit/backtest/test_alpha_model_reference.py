@@ -83,8 +83,8 @@ def test_reversing_the_training_targets_reverses_the_predicted_ordering() -> Non
         rows=(("000001.SZ", (0.05, 0.05)), ("000002.SZ", (0.45, 0.04))),
     )
 
-    up = _scores(rising.predict(section, predicted_at=AS_OF))
-    down = _scores(falling.predict(section, predicted_at=AS_OF))
+    up = _scores(rising.predict(section, predicted_at=AS_OF, shelf_life=None))
+    down = _scores(falling.predict(section, predicted_at=AS_OF, shelf_life=None))
 
     assert dict(rising.artifact.parameters)[SIGN_PARAMETER] == 1.0
     assert dict(falling.artifact.parameters)[SIGN_PARAMETER] == -1.0
@@ -110,7 +110,7 @@ def test_the_learned_centre_is_the_training_mean_and_reaches_every_score() -> No
         as_of=AS_OF,
         rows=(("000001.SZ", (centre, 0.05)), ("000002.SZ", (centre + 0.1, 0.04))),
     )
-    scores = _scores(fitted.predict(section, predicted_at=AS_OF))
+    scores = _scores(fitted.predict(section, predicted_at=AS_OF, shelf_life=None))
 
     assert scores["000001.SZ"] == pytest.approx(0.0)
     assert scores["000002.SZ"] == pytest.approx(0.1)
@@ -136,7 +136,7 @@ def test_a_feature_that_did_not_vary_fits_to_a_plus_one_sign_rather_than_raising
     section = fixtures.cross_section(
         as_of=AS_OF, rows=(("000001.SZ", (0.30, 0.05)), ("000002.SZ", (0.10, 0.04)))
     )
-    scores = _scores(fitted.predict(section, predicted_at=AS_OF))
+    scores = _scores(fitted.predict(section, predicted_at=AS_OF, shelf_life=None))
     assert scores["000001.SZ"] == pytest.approx(0.10)
     assert scores["000002.SZ"] == pytest.approx(-0.10)
 
@@ -186,8 +186,8 @@ def test_a_fitted_model_rebuilt_from_its_serialized_artifact_predicts_identicall
     assert restored.artifact.artifact_id == fitted.artifact.artifact_id
 
     assert restored.artifact == fitted.artifact
-    assert restored.predict(section, predicted_at=AS_OF) == fitted.predict(
-        section, predicted_at=AS_OF
+    assert restored.predict(section, predicted_at=AS_OF, shelf_life=None) == fitted.predict(
+        section, predicted_at=AS_OF, shelf_life=None
     )
 
 
@@ -225,6 +225,7 @@ def test_a_security_on_the_learned_centre_under_a_negative_sign_scores_positive_
             rows=(("000001.SZ", (centre, 0.05)), ("000002.SZ", (centre + 0.1, 0.04))),
         ),
         predicted_at=AS_OF,
+        shelf_life=None,
     )
     scored = _scores(batch)["000001.SZ"]
 
@@ -245,7 +246,7 @@ def test_a_security_with_no_value_abstains_and_is_still_in_the_batch() -> None:
     fitted = SingleFeatureAlphaModel(declaration=fixtures.declaration()).fit(
         fixtures.training_set()
     )
-    batch = fitted.predict(fixtures.cross_section(as_of=AS_OF), predicted_at=AS_OF)
+    batch = fitted.predict(fixtures.cross_section(as_of=AS_OF), predicted_at=AS_OF, shelf_life=None)
 
     assert batch.subjects == ("000001.SZ", "000002.SZ", "000003.SZ")
     assert [row.ts_code for row in batch.abstained] == ["000003.SZ"]
@@ -264,7 +265,7 @@ def test_the_driven_path_refuses_a_batch_dated_before_the_training_cutoff() -> N
     section = fixtures.cross_section(as_of=early, rows=(("000001.SZ", (0.3, 0.05)),))
 
     with pytest.raises(ValidationError, match="realized after the instant"):
-        fitted.predict(section, predicted_at=early)
+        fitted.predict(section, predicted_at=early, shelf_life=None)
 
 
 def test_predict_refuses_a_cross_section_whose_feature_list_is_not_the_fitted_one() -> None:
@@ -279,7 +280,7 @@ def test_predict_refuses_a_cross_section_whose_feature_list_is_not_the_fitted_on
     )
 
     with pytest.raises(AlphaModelError, match=r"missing \['value_ep'\]"):
-        fitted.predict(narrowed, predicted_at=AS_OF)
+        fitted.predict(narrowed, predicted_at=AS_OF, shelf_life=None)
 
 
 @pytest.mark.parametrize(

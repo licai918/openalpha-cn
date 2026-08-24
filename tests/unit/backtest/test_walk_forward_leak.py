@@ -91,7 +91,7 @@ def _measured_skill(fold: WalkForwardFold, examples: tuple[TrainingExample, ...]
         TrainingSet(feature_ids=fold.panel.feature_ids, examples=examples)
     )
     section: PanelSection = fold.test_sections[0]
-    batch = fitted.predict(section.cross_section, predicted_at=section.as_of)
+    batch = fitted.predict(section.cross_section, predicted_at=section.as_of, shelf_life=None)
     scores = {item.ts_code: item.score for item in batch.predictions if item.score is not None}
     realized = {item.ts_code: item.target for item in section.examples}
     assert set(scores) == set(realized)
@@ -142,7 +142,7 @@ def test_the_purge_is_what_stops_the_fit_learning_the_test_blocks_direction() ->
         TrainingSet(feature_ids=fold.panel.feature_ids, examples=fold.candidates)
     )
     with pytest.raises(ValueError, match="the fit consumed an outcome"):
-        unpurged.predict(section.cross_section, predicted_at=section.as_of)
+        unpurged.predict(section.cross_section, predicted_at=section.as_of, shelf_life=None)
     assert _measured_skill(fold, fold.train_examples) == 0.0
 
 

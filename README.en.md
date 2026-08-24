@@ -133,6 +133,14 @@ quality one.
 persisted before its outcome is known, which is unconditional; the floor is about whether the
 answer may be acted on, which is not.
 
+**`--shelf-life-days` makes a stale model abstain out loud.** How many days past its training
+cutoff a fit may still be asked; beyond it every security abstains with a stated reason instead of
+being scored, and the answer says which span was declared (`declaration.shelf_life_days`, `null`
+when none was). It is wall time, not sessions — a horizon counts open sessions and this
+repository refuses to convert the one into the other. And it refuses nothing on its own: an
+expired run reads `scored_ratio: 0.0`, which is `--min-scored-ratio`'s to reject, so the two flags
+are one mechanism.
+
 **What a `forward` standing proves, and what it does not.** It means this store held the bytes
 before the instant the outcome became knowable. It does **not** mean the batch was produced when
 it says it was: `predicted_at` is whatever the caller passed to `predict`, nothing here can check

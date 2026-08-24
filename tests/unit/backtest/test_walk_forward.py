@@ -166,9 +166,11 @@ def test_a_training_set_the_purge_did_not_cut_produces_a_batch_the_contract_refu
     model = SingleFeatureAlphaModel(declaration=declaration())
     section = fold.test_sections[0]
     with pytest.raises(ValueError, match="the fit consumed an outcome"):
-        model.fit(unpurged).predict(section.cross_section, predicted_at=section.as_of)
+        model.fit(unpurged).predict(
+            section.cross_section, predicted_at=section.as_of, shelf_life=None
+        )
     assert model.fit(fold.training_set).predict(
-        section.cross_section, predicted_at=section.as_of
+        section.cross_section, predicted_at=section.as_of, shelf_life=None
     ).subjects == tuple(sorted(SECURITIES))
 
 

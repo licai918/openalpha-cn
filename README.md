@@ -804,6 +804,20 @@ uv run openalpha model prediction prd_0123456789abcdef01234567
 - 不过线：`exit 1`／`409`，`is_blocked: true`，**`admitted: null`**，`blocks` 里带 `measured`、
   `required` 和写清两个计数的 `detail`。
 
+### stale 模型显式弃权
+
+`--shelf-life-days` 是「一次拟合在其训练截止之后还能被问多少天」。超过它，整个横截面上每只证券都
+**带理由弃权**而不是被打分；答案里 `declaration.shelf_life_days` 记录声明了哪个跨度，没声明就是
+`null` —— 与 `feature_version_source` 同一套安排：读者要能在答案上看见，而不是从命令行推断。
+
+两点值得单说：
+
+- **它是自然日，不是交易日。** 本仓的周期按**开市会话**计数，而 `domain/horizon.py` 明确拒绝把会话
+  数换算成日历跨度，所以 `5` 就是五个自然日，想要五个会话的调用方自己加上周末与假期。
+- **它自己拒绝不了任何东西。** 过期的运行报 `scored_ratio: 0.0`，把它变成 `exit 1`／`409` 的是
+  `--min-scored-ratio`。声明了 `0.0` 下限的调用方，会把一个全弃权的模型读成一次干净的成功。两个开关
+  是**一套机制**。
+
 `null` 和一个列表是两个答案，而两次运行的 `measurement` 体**逐字相同**——只差一个开关。这是一条
 **覆盖度**判决，永远不是质量判决。
 

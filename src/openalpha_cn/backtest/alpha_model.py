@@ -64,7 +64,7 @@ not because this model draws a number.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from statistics import fmean
 from typing import Final
 
@@ -245,7 +245,11 @@ class FittedSingleFeatureAlphaModel:
         return _declared_feature(self.artifact.declaration)
 
     def predict(
-        self, cross_section: FeatureCrossSection, *, predicted_at: datetime
+        self,
+        cross_section: FeatureCrossSection,
+        *,
+        predicted_at: datetime,
+        shelf_life: timedelta | None,
     ) -> PredictionBatch:
         """Score every security by the signed distance of its feature from the learned centre.
 
@@ -280,5 +284,6 @@ class FittedSingleFeatureAlphaModel:
             artifact=self.artifact,
             cross_section=cross_section,
             predicted_at=predicted_at,
+            shelf_life=shelf_life,
             predictions=predictions,
         )

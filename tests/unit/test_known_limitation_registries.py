@@ -15,7 +15,7 @@ inside a docstring, which is prose the runner never reads.
 ## Why the mechanism is not copied as it stands
 
 `007`'s form is "one test per entry, named after the entry". At three entries that is exactly
-right. Across the thirty-two code-carrying registries there are **301** entries -- 69 in
+right. Across the thirty-two code-carrying registries there are **304** entries -- 69 in
 `KNOWN_PANEL_LIMITATIONS` alone -- and it stops being right somewhere well before that, for
 three reasons and not one:
 
@@ -334,6 +334,14 @@ evaluation_invariances`, because the boundary is true of the family and the run'
 count decides whether that run is standing on it -- and `V2-P4-098`'s measured `forward` record
 whose fit read the panel after the outcome had printed.
 
+`V2-P4-018` then added **three**, taking the totals from 301 / 69 to **304 / 69** with the
+registry count still thirty-two. Two are on `KNOWN_ALPHA_MODEL_LIMITATIONS` and both bound what a
+shelf life is *not* -- it is wall time where a horizon counts sessions, and it leaves a verdict on
+a stored record without leaving the bar that produced it. The third is on
+`KNOWN_MODEL_VIEW_LIMITATIONS` and is the join between the two flags: an expired run is refused by
+`--min-scored-ratio` and by nothing else, so a caller who declared a floor of `0.0` reads an
+all-abstaining model as a clean success.
+
 `KNOWN_ALPHA_MODEL_LIMITATIONS` (`V2-P4-011`) is the twenty-sixth, and it is the first that
 bounds a **contract for something this repository does not yet build**: the quantitative
 `AlphaModel` boundary, whose feature matrix, walk-forward split, baselines, content address and
@@ -633,9 +641,9 @@ REGISTRY_ENTRY_COUNTS: Final[dict[str, int]] = {
     "KNOWN_TREE_LIMITATIONS": 7,
     "KNOWN_SCREENING_LIMITATIONS": 7,
     "KNOWN_SHORTLIST_VIEW_LIMITATIONS": 7,
-    "KNOWN_MODEL_VIEW_LIMITATIONS": 15,
+    "KNOWN_MODEL_VIEW_LIMITATIONS": 16,
     "KNOWN_FEATURE_MATRIX_LIMITATIONS": 5,
-    "KNOWN_ALPHA_MODEL_LIMITATIONS": 11,
+    "KNOWN_ALPHA_MODEL_LIMITATIONS": 13,
     "KNOWN_PREDICTION_RECORD_LIMITATIONS": 8,
     "KNOWN_ADJUSTMENT_LIMITATIONS": 6,
     "KNOWN_PRICE_LIMITATIONS": 6,

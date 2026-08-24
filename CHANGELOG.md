@@ -48,6 +48,40 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   because `FoldEvaluation.scored_ratio` does -- abstaining on the hard names is otherwise a free
   way to win -- and it is a coverage verdict and never a quality one. A refused `daily-run` still
   registered its prediction, and the `record_id` is on the `409` body.
+- **A stale model abstains out loud, and the abstention is not free** (Story S35).
+  `--shelf-life-days` on both model faces, `shelf_life_days` on both routes and both SDK methods,
+  declares how far past its training cutoff a fit may still be asked. Beyond it every security in
+  the batch carries `ABSTAIN_STALE_MODEL` instead of a score -- not a raise, which would delete
+  the answer, and not a `0.0`, which is a number a reader cannot tell from an opinion. The check
+  lives in `domain/alpha_model.py::prediction_batch_for`, the one chokepoint every implementation
+  goes through including a third party's, and it is `require_features`' own argument for being
+  there. The span is a property of the *ask* and reaches no artifact field: putting it on the
+  declaration would give one fitted model as many addresses as there are opinions about how
+  strictly to read it.
+
+  What stops such a model looking skilful is machinery that already existed. An expired fold
+  scores nothing, so no test day is `measured`, `FoldEvaluation` refuses to carry a `mean_rank_ic`
+  beside a coverage that is not, and `scored_ratio` reads `0.0` -- which `--min-scored-ratio`
+  refuses. The interesting case is a fold that expires *partway*: its headline is taken over the
+  fresh days alone and is not a worse-looking number, which is exactly why `V2-P4-014` made
+  `scored_ratio` the one statistic that is never `null`.
+- **The abstention vocabulary is coded and closed over what this repository produces.** Three
+  codes for three conditions -- `incomplete_features`, `unrankable_cross_section`, `stale_model` --
+  in `ABSTENTION_VOCABULARY`, with `abstention_code` reading one back. `V2-P4-014`'s two sentences
+  moved from `backtest/alpha_baseline.py` to `domain/alpha_model.py` and are re-exported unchanged;
+  `Prediction.abstention` stays free text, so a third-party model's own reason answers `None`
+  rather than raising.
+- **A synthetic corpus with a known signal-to-noise ratio and a known-null control**
+  (`tests/known_signal_corpus.py`). Sixty securities over thirty prediction days, two columns of
+  which one carries the plant, and a realized return of `beta * signal + noise` whose population
+  rank IC is closed-form -- `0.317` for the alpha arm and exactly zero for the null, which is the
+  same draw with the coefficient set to zero and nothing else changed. Measured: the alpha arm's
+  folds read `0.286`/`0.294`/`0.372`; the null arm's read `-0.009`/`-0.008`/`-0.033`. It separates
+  a fitted model from an unfitted one three ways, which a one-column corpus provably cannot -- with
+  a single feature every rank statistic is invariant to the coefficient, and the two readings come
+  out bit-identical. What it cannot do is certify a *realistic* IC: the null arm's own folds wander
+  as far as `0.113` from zero, so a plant of `0.03` would be inside this corpus's noise, and that
+  is stated where a reader meets it rather than hidden behind a plausible-looking number.
 - **Every rendered prediction says what its `standing` does *not* prove.** `V2-P4-017` states
   plainly that `predicted_at` is unverifiable and that nothing defends against whoever owns the
   disk; a face printing `"standing": "forward"` and stopping would turn a single-user
