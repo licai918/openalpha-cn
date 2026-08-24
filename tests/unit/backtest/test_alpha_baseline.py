@@ -459,7 +459,7 @@ def test_two_fits_of_one_training_set_produce_equal_and_distinct_artifacts() -> 
 
 
 def test_every_offered_security_is_scored_or_abstained() -> None:
-    batch = fitted().predict(cross_section(), predicted_at=AS_OF)
+    batch = fitted().predict(cross_section(), predicted_at=AS_OF, shelf_life=None)
 
     assert batch.subjects == tuple(sorted(SECURITIES))
     assert len(batch.scored) == len(SECURITIES)
@@ -471,7 +471,7 @@ def test_a_security_missing_one_declared_column_abstains_with_the_stated_reason(
     offered = [(ts_code, values) for ts_code, values, _target in rows_for(0)]
     offered[2] = (offered[2][0], (offered[2][1][0], None, offered[2][1][2]))
 
-    batch = fitted().predict(cross_section(rows=offered), predicted_at=AS_OF)
+    batch = fitted().predict(cross_section(rows=offered), predicted_at=AS_OF, shelf_life=None)
 
     assert [item.ts_code for item in batch.abstained] == [SECURITIES[2]]
     assert batch.abstained[0].abstention == ABSTAIN_INCOMPLETE_FEATURES
@@ -486,7 +486,7 @@ def test_a_cross_section_too_small_to_rank_abstains_on_every_security_including_
         : MINIMUM_RANK_SECURITIES - 1
     ]
 
-    batch = fitted().predict(cross_section(rows=offered), predicted_at=AS_OF)
+    batch = fitted().predict(cross_section(rows=offered), predicted_at=AS_OF, shelf_life=None)
 
     assert len(batch.abstained) == MINIMUM_RANK_SECURITIES - 1
     assert {item.abstention for item in batch.abstained} == {ABSTAIN_UNRANKABLE_CROSS_SECTION}
@@ -510,7 +510,7 @@ def test_the_score_orders_the_cross_section_the_learned_coefficients_ask_it_to()
         for index, (ts_code, _values) in enumerate(offered)
     }
 
-    batch = model.predict(cross_section(rows=offered), predicted_at=AS_OF)
+    batch = model.predict(cross_section(rows=offered), predicted_at=AS_OF, shelf_life=None)
 
     assert {item.ts_code: item.score for item in batch.scored} == pytest.approx(expected)
 
@@ -531,7 +531,7 @@ def test_a_block_tied_on_one_column_shares_one_position_there_and_is_separated_b
         for ts_code, values, _target in rows_for(0)
     ]
 
-    batch = fitted().predict(cross_section(rows=offered), predicted_at=AS_OF)
+    batch = fitted().predict(cross_section(rows=offered), predicted_at=AS_OF, shelf_life=None)
     scores = {item.ts_code: item.score for item in batch.scored}
 
     assert len({scores[ts_code] for ts_code in clipped}) == len(clipped)
@@ -548,7 +548,7 @@ def test_a_block_tied_on_every_column_carries_one_identical_score() -> None:
         for index, (ts_code, values, _target) in enumerate(rows_for(0))
     ]
 
-    batch = fitted().predict(cross_section(rows=offered), predicted_at=AS_OF)
+    batch = fitted().predict(cross_section(rows=offered), predicted_at=AS_OF, shelf_life=None)
     scores = {item.ts_code: item.score for item in batch.scored}
 
     assert len({scores[ts_code] for ts_code in SECURITIES[-3:]}) == 1
@@ -572,11 +572,15 @@ def test_a_securitys_score_moves_when_a_different_security_leaves_the_cross_sect
 
     whole = {
         item.ts_code: item.score
-        for item in model.predict(cross_section(rows=offered), predicted_at=AS_OF).scored
+        for item in model.predict(
+            cross_section(rows=offered), predicted_at=AS_OF, shelf_life=None
+        ).scored
     }
     fewer = {
         item.ts_code: item.score
-        for item in model.predict(cross_section(rows=offered[:-1]), predicted_at=AS_OF).scored
+        for item in model.predict(
+            cross_section(rows=offered[:-1]), predicted_at=AS_OF, shelf_life=None
+        ).scored
     }
 
     assert whole[SECURITIES[3]] != fewer[SECURITIES[3]]
@@ -589,9 +593,9 @@ def test_a_fitted_model_rebuilt_from_its_artifact_alone_reproduces_every_predict
     original = fitted()
     rebuilt = FittedCrossSectionalRankModel(artifact=original.artifact)
 
-    assert rebuilt.predict(cross_section(), predicted_at=AS_OF) == original.predict(
-        cross_section(), predicted_at=AS_OF
-    )
+    assert rebuilt.predict(
+        cross_section(), predicted_at=AS_OF, shelf_life=None
+    ) == original.predict(cross_section(), predicted_at=AS_OF, shelf_life=None)
 
 
 def test_an_artifact_whose_coefficient_keys_are_not_its_columns_is_refused() -> None:
@@ -616,7 +620,7 @@ def test_a_cross_section_carrying_a_different_column_list_is_refused_by_name() -
     )
 
     with pytest.raises(ValueError, match="zeta_extra"):
-        fitted().predict(widened, predicted_at=AS_OF)
+        fitted().predict(widened, predicted_at=AS_OF, shelf_life=None)
 
 
 # --------------------------------------------------------------------------------------
@@ -647,7 +651,7 @@ def fold_fit() -> FittedCrossSectionalRankModel:
 
 
 def test_a_test_day_reports_the_rank_correlation_of_the_rows_it_both_scored_and_labelled() -> None:
-    evaluation = evaluate_fold(fold_model(), _fold(embargo=EMBARGO_SESSIONS))
+    evaluation = evaluate_fold(fold_model(), _fold(embargo=EMBARGO_SESSIONS), shelf_life=None)
     point = evaluation.points[0]
 
     assert point.coverage == "measured"
@@ -664,7 +668,7 @@ def test_the_fold_reads_the_honest_answer_the_corpus_says_it_should() -> None:
     the opposite of the test period's". A fold that had absorbed the test period's direction
     would read `+1.0` here.
     """
-    evaluation = evaluate_fold(fold_model(), _fold(embargo=EMBARGO_SESSIONS))
+    evaluation = evaluate_fold(fold_model(), _fold(embargo=EMBARGO_SESSIONS), shelf_life=None)
 
     assert evaluation.mean_rank_ic == -1.0
     assert dict(evaluation.artifact.parameters)["momentum_20d"] == -1.0
@@ -689,8 +693,8 @@ def test_the_embargo_moves_this_baselines_coefficient_and_not_its_ordering() -> 
     produce cannot move. That is a property of a four-name two-column fixture, and it is why
     `V2-P4-022` owns the corpus an evaluation would need before reporting a number at all.
     """
-    honest = evaluate_fold(fold_model(), _fold(embargo=EMBARGO_SESSIONS))
-    leaked = evaluate_fold(fold_model(), _fold(embargo=0))
+    honest = evaluate_fold(fold_model(), _fold(embargo=EMBARGO_SESSIONS), shelf_life=None)
+    leaked = evaluate_fold(fold_model(), _fold(embargo=0), shelf_life=None)
 
     assert dict(honest.artifact.parameters)["momentum_20d"] == -1.0
     assert dict(leaked.artifact.parameters)["momentum_20d"] == pytest.approx(-1 / 3)
@@ -715,7 +719,7 @@ def test_no_configuration_of_either_corpus_lets_a_rank_ic_separate_a_leak_from_a
     """
     readings = {
         (aligned_from, embargo): evaluate_fold(
-            fold_model(), _fold(embargo=embargo, aligned_from=aligned_from)
+            fold_model(), _fold(embargo=embargo, aligned_from=aligned_from), shelf_life=None
         )
         for aligned_from in (ALIGNED_FROM_OVERLAPPING, ALIGNED_FROM_ADJACENT)
         for embargo in (0, EMBARGO_SESSIONS)
@@ -747,7 +751,7 @@ def test_a_model_fitted_on_its_own_test_block_is_refused_before_it_can_report_a_
 
     assert dict(in_sample.artifact.parameters)["momentum_20d"] == 1.0
     with pytest.raises(ValueError, match="realized after the instant"):
-        in_sample.predict(section.cross_section, predicted_at=section.as_of)
+        in_sample.predict(section.cross_section, predicted_at=section.as_of, shelf_life=None)
 
 
 def test_a_perfectly_ordered_day_reads_plus_one_and_a_reversed_one_reads_minus_one() -> None:
@@ -775,7 +779,7 @@ def test_a_day_on_which_every_score_ties_reports_degenerate_scores_and_no_number
         ),
     )
 
-    batch = fold_fit().predict(flat, predicted_at=section.as_of)
+    batch = fold_fit().predict(flat, predicted_at=section.as_of, shelf_life=None)
     point = score_point(batch, section=section)
 
     assert len({item.score for item in batch.scored}) == 1
@@ -853,7 +857,7 @@ def test_the_rank_correlation_does_not_order_a_tied_block_the_way_sort_position_
 
 def test_the_scored_ratio_counts_every_offered_security_including_the_abstained() -> None:
     """Abstention is otherwise free skill: declining the hard names buys a better mean."""
-    evaluation = evaluate_fold(fold_model(), _fold(embargo=EMBARGO_SESSIONS))
+    evaluation = evaluate_fold(fold_model(), _fold(embargo=EMBARGO_SESSIONS), shelf_life=None)
 
     assert evaluation.scored_ratio == 1.0
     assert sum(point.offered_count for point in evaluation.points) == len(evaluation.points) * len(
@@ -878,7 +882,7 @@ def test_a_fold_with_fewer_measured_days_than_a_dispersion_needs_reports_no_stab
         embargo_sessions=EMBARGO_SESSIONS,
     )
 
-    evaluation = evaluate_fold(fold_model(), single)
+    evaluation = evaluate_fold(fold_model(), single, shelf_life=None)
 
     assert evaluation.coverage == "insufficient_as_ofs"
     assert evaluation.mean_rank_ic is None
@@ -891,7 +895,7 @@ def test_a_fold_with_fewer_measured_days_than_a_dispersion_needs_reports_no_stab
 
 def test_a_fold_whose_measured_days_all_agree_reports_a_mean_and_no_ratio() -> None:
     """`ICSummary.icir`'s decision taken rather than retaken: `None`, never `math.inf`."""
-    evaluation = evaluate_fold(fold_model(), _fold(embargo=EMBARGO_SESSIONS))
+    evaluation = evaluate_fold(fold_model(), _fold(embargo=EMBARGO_SESSIONS), shelf_life=None)
 
     assert evaluation.coverage == "measured"
     assert evaluation.stdev_rank_ic == 0.0
@@ -901,7 +905,7 @@ def test_a_fold_whose_measured_days_all_agree_reports_a_mean_and_no_ratio() -> N
 
 def test_the_fold_evaluation_carries_the_artifact_it_measured_by_value() -> None:
     """`PredictionBatch`'s decision, so this module has nothing to move when `V2-P4-016` lands."""
-    evaluation = evaluate_fold(fold_model(), _fold(embargo=EMBARGO_SESSIONS))
+    evaluation = evaluate_fold(fold_model(), _fold(embargo=EMBARGO_SESSIONS), shelf_life=None)
 
     assert evaluation.artifact == fold_fit().artifact
     assert evaluation.first_test_day == prediction_days()[FIRST_TEST_DAY_INDEX]
@@ -911,7 +915,7 @@ def test_a_point_read_against_another_instants_outcomes_is_refused() -> None:
     """The one mistake here that would otherwise produce a plausible number."""
     fold = _fold(embargo=EMBARGO_SESSIONS)
     first, second = fold.test_sections[0], fold.test_sections[1]
-    batch = fold_fit().predict(first.cross_section, predicted_at=first.as_of)
+    batch = fold_fit().predict(first.cross_section, predicted_at=first.as_of, shelf_life=None)
 
     with pytest.raises(ValueError, match="two instants correlate to a number that means nothing"):
         score_point(batch, section=second)
@@ -928,7 +932,7 @@ def test_each_fold_of_a_schedule_is_fitted_separately_and_carries_its_own_artifa
         embargo_sessions=EMBARGO_SESSIONS,
     )
 
-    evaluations = evaluate_walk_forward(fold_model(), folds)
+    evaluations = evaluate_walk_forward(fold_model(), folds, shelf_life=None)
 
     assert len(evaluations) == 2
     assert evaluations[0].artifact != evaluations[1].artifact
@@ -937,13 +941,13 @@ def test_each_fold_of_a_schedule_is_fitted_separately_and_carries_its_own_artifa
 
 def test_a_schedule_of_no_fold_is_refused() -> None:
     with pytest.raises(ValueError, match="empty success"):
-        evaluate_walk_forward(fold_model(), ())
+        evaluate_walk_forward(fold_model(), (), shelf_life=None)
 
 
 def test_an_evaluation_dates_every_batch_at_the_instant_the_section_it_reads_is_dated() -> None:
     """No clock, so an evaluation is reproducible -- and therefore no evidence for Story S32."""
     fold = _fold(embargo=EMBARGO_SESSIONS)
-    evaluation = evaluate_fold(fold_model(), fold)
+    evaluation = evaluate_fold(fold_model(), fold, shelf_life=None)
 
     assert tuple(point.as_of for point in evaluation.points) == tuple(
         section.as_of for section in fold.test_sections
@@ -951,7 +955,7 @@ def test_an_evaluation_dates_every_batch_at_the_instant_the_section_it_reads_is_
 
 
 def test_a_fold_evaluation_refuses_a_measured_count_its_own_points_disagree_with() -> None:
-    evaluation = evaluate_fold(fold_model(), _fold(embargo=EMBARGO_SESSIONS))
+    evaluation = evaluate_fold(fold_model(), _fold(embargo=EMBARGO_SESSIONS), shelf_life=None)
 
     with pytest.raises(ValueError, match="cannot disagree"):
         evaluation.model_copy(
@@ -1004,7 +1008,7 @@ def test_a_score_point_refuses_a_number_its_coverage_says_is_absent() -> None:
 
 
 def test_a_fold_evaluation_refuses_an_unordered_or_repeated_block() -> None:
-    evaluation = evaluate_fold(fold_model(), _fold(embargo=EMBARGO_SESSIONS))
+    evaluation = evaluate_fold(fold_model(), _fold(embargo=EMBARGO_SESSIONS), shelf_life=None)
     payload = evaluation.model_dump(exclude_computed_fields=True)
     payload["points"] = list(reversed(payload["points"]))
 
@@ -1071,7 +1075,7 @@ def test_a_cross_section_missing_a_fitted_column_is_refused_as_a_value_error() -
     )
 
     with pytest.raises(ValueError):
-        fitted().predict(narrowed, predicted_at=AS_OF)
+        fitted().predict(narrowed, predicted_at=AS_OF, shelf_life=None)
 
 
 def _holed_panel_fold(*, embargo: int = EMBARGO_SESSIONS) -> WalkForwardFold:
@@ -1118,7 +1122,7 @@ def test_a_fold_the_model_abstains_inside_reports_a_scored_ratio_below_one() -> 
     names it found hard would otherwise report a better `mean_rank_ic` over an easier population
     with nothing beside it to say so.
     """
-    evaluation = evaluate_fold(fold_model(), _holed_panel_fold())
+    evaluation = evaluate_fold(fold_model(), _holed_panel_fold(), shelf_life=None)
     point = evaluation.points[0]
 
     assert point.offered_count == len(FOLD_SECURITIES)
@@ -1134,7 +1138,7 @@ def test_a_scored_security_the_panel_could_not_label_is_not_a_pair() -> None:
     outcome for it, and only a section short one example can tell the two counts apart."""
     fold = _fold(embargo=EMBARGO_SESSIONS)
     section = fold.test_sections[0]
-    batch = fold_fit().predict(section.cross_section, predicted_at=section.as_of)
+    batch = fold_fit().predict(section.cross_section, predicted_at=section.as_of, shelf_life=None)
 
     trimmed = PanelSection(
         as_of=section.as_of,
@@ -1180,7 +1184,7 @@ def test_every_point_carries_the_instant_the_batch_it_read_was_produced_at() -> 
     whole suite green. It is legal -- `PredictionBatch` only refuses `predicted_at < as_of` -- and
     it is not what an evaluation means, so the choice is carried where it can be contradicted."""
     fold = _fold(embargo=EMBARGO_SESSIONS)
-    evaluation = evaluate_fold(fold_model(), fold)
+    evaluation = evaluate_fold(fold_model(), fold, shelf_life=None)
 
     assert tuple(point.predicted_at for point in evaluation.points) == tuple(
         section.as_of for section in fold.test_sections
@@ -1198,7 +1202,8 @@ def test_a_point_carries_the_batchs_own_timestamp_and_not_a_second_copy_of_its_a
     later = section.as_of + timedelta(hours=6)
 
     point = score_point(
-        fold_fit().predict(section.cross_section, predicted_at=later), section=section
+        fold_fit().predict(section.cross_section, predicted_at=later, shelf_life=None),
+        section=section,
     )
 
     assert point.as_of == section.as_of
@@ -1252,7 +1257,7 @@ def test_a_stored_fold_evaluation_is_refused_when_its_summary_contradicts_itself
     """Every one of these is unreachable from `evaluate_fold` and reachable from a stored
     payload, which is the boundary a pydantic model on this plane exists for -- `ICSummary`
     carries the same four refusals for the same reason."""
-    evaluation = evaluate_fold(fold_model(), _holed_panel_fold())
+    evaluation = evaluate_fold(fold_model(), _holed_panel_fold(), shelf_life=None)
     payload = {**evaluation.model_dump(exclude_computed_fields=True), **mutation}
 
     with pytest.raises(ValueError, match=message):
@@ -1269,7 +1274,9 @@ def test_a_stored_fold_evaluation_is_refused_when_it_carries_a_ratio_without_a_m
         embargo_sessions=EMBARGO_SESSIONS,
     )
     payload = {
-        **evaluate_fold(fold_model(), single).model_dump(exclude_computed_fields=True),
+        **evaluate_fold(fold_model(), single, shelf_life=None).model_dump(
+            exclude_computed_fields=True
+        ),
         "rank_icir": 0.4,
     }
 

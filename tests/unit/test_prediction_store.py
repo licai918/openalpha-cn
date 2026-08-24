@@ -63,7 +63,9 @@ def store(path: Path, *instants: datetime) -> FilePredictionStore:
 
 
 def batch(*, predicted_at: datetime = IN_TIME, as_of: datetime = AS_OF) -> PredictionBatch:
-    return fitted_reference().predict(cross_section(as_of=as_of), predicted_at=predicted_at)
+    return fitted_reference().predict(
+        cross_section(as_of=as_of), predicted_at=predicted_at, shelf_life=None
+    )
 
 
 def put(subject: FilePredictionStore, **kwargs: object) -> object:

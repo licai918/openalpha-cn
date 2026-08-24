@@ -220,7 +220,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Final
 
 from openalpha_cn.backtest.alpha_baseline import (
@@ -802,7 +802,11 @@ class FittedBoostedRankTreeModel:
         _decode(self.artifact)
 
     def predict(
-        self, cross_section: FeatureCrossSection, *, predicted_at: datetime
+        self,
+        cross_section: FeatureCrossSection,
+        *,
+        predicted_at: datetime,
+        shelf_life: timedelta | None,
     ) -> PredictionBatch:
         """Score every security by the ensemble's sum over its binned cross-sectional positions.
 
@@ -828,6 +832,7 @@ class FittedBoostedRankTreeModel:
                 artifact=self.artifact,
                 cross_section=cross_section,
                 predicted_at=predicted_at,
+                shelf_life=shelf_life,
                 predictions=(
                     Prediction(ts_code=row.ts_code, abstention=ABSTAIN_UNRANKABLE_CROSS_SECTION)
                     for row in cross_section.rows
@@ -854,6 +859,7 @@ class FittedBoostedRankTreeModel:
             artifact=self.artifact,
             cross_section=cross_section,
             predicted_at=predicted_at,
+            shelf_life=shelf_life,
             predictions=(
                 Prediction(ts_code=row.ts_code, score=totals[row.ts_code])
                 if row.ts_code in totals

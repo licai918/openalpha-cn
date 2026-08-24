@@ -530,6 +530,7 @@ def test_prediction_batch_for_refuses_a_model_that_dropped_or_invented_a_securit
             artifact=artifact,
             cross_section=section,
             predicted_at=as_of,
+            shelf_life=None,
             predictions=[
                 Prediction(ts_code="000001.SZ", score=0.1),
                 Prediction(ts_code="000002.SZ", score=0.2),
@@ -540,6 +541,7 @@ def test_prediction_batch_for_refuses_a_model_that_dropped_or_invented_a_securit
             artifact=artifact,
             cross_section=section,
             predicted_at=as_of,
+            shelf_life=None,
             predictions=[
                 Prediction(ts_code=code, score=0.1)
                 for code in ("000001.SZ", "000002.SZ", "000003.SZ", "999999.SZ")
@@ -559,6 +561,7 @@ def test_prediction_batch_for_sorts_the_rows_and_carries_the_cross_section_s_as_
         artifact=artifact,
         cross_section=section,
         predicted_at=predicted_at,
+        shelf_life=None,
         predictions=[
             Prediction(ts_code="000003.SZ", abstention="no value"),
             Prediction(ts_code="000001.SZ", score=0.1),
@@ -709,15 +712,17 @@ def test_the_artifact_carries_seven_of_decision_elevens_eleven_fields_and_says_w
         assert issue in detail
 
 
-def test_the_limitation_registry_names_eleven_boundaries_with_no_repeated_code() -> None:
+def test_the_limitation_registry_names_thirteen_boundaries_with_no_repeated_code() -> None:
     """`KNOWN_LABEL_LIMITATIONS`' form, and the codes each test in this suite cites.
 
     Eight at `V2-P4-011`, eleven after `V2-P4-016` rewrote the two that had become false and
-    added three about what an address does not prove.
+    added three about what an address does not prove, thirteen after `V2-P4-018` added two about
+    what a shelf life is not -- wall time where a horizon counts sessions, and a verdict on a
+    stored record without the bar that produced it.
     """
     codes = [item.code for item in KNOWN_ALPHA_MODEL_LIMITATIONS]
 
-    assert len(codes) == len(set(codes)) == 11
+    assert len(codes) == len(set(codes)) == 13
     assert set(codes) == {
         "d11_names_eleven_things_and_this_artifact_carries_seven",
         "the_address_is_over_the_fit_and_not_over_the_rule_that_chose_it",
@@ -730,5 +735,7 @@ def test_the_limitation_registry_names_eleven_boundaries_with_no_repeated_code()
         "a_batch_cannot_tell_a_prediction_from_a_backfill",
         "an_abstention_can_empty_a_ranking_of_predictions",
         "the_reference_implementation_is_not_a_baseline",
+        "a_shelf_life_is_wall_time_and_a_horizon_is_sessions",
+        "a_stale_record_carries_the_verdict_and_not_the_bar_it_failed",
     }
     assert all(len(item.detail) > 200 for item in KNOWN_ALPHA_MODEL_LIMITATIONS)

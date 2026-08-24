@@ -93,8 +93,20 @@ on two different statistics" one layer up.
 ## Abstention is an answer, not an error path
 
 `V2-P4-011` requires a row for every security offered, scored or abstained. Two reasons, and both
-are module constants rather than interpolated sentences so that `V2-P4-018` can map each to one
-code without parsing a number back out of prose:
+are constants rather than interpolated sentences so that one code binds one condition without
+anybody parsing a number back out of prose. **Both now live in `domain/alpha_model.py` and are
+re-exported here**, which is `V2-P4-018` taking the vocabulary this module deferred to it: that
+issue's third reason has to be produced inside `prediction_batch_for`, and `domain-purity`
+forbids `domain/` from importing anything under `backtest`, so a vocabulary split across the two
+layers would have been two sets neither of which was closed. Nothing about the two sentences
+changed, and `alpha_tree.py` still reads them from here -- which is what makes the import a
+**re-export**, spelled with a redundant `as` alias because strict mypy's `no_implicit_reexport`
+requires an explicit one. That reason is measured rather than assumed, and twice: the re-export
+was first written as an `__all__` on the stated ground that `ruff` would otherwise report the
+names as unused, which is **false** -- both are used by `predict` below, so the import was never
+unused -- and removing the `__all__` on that finding turned `uv run mypy` red with "does not
+explicitly export attribute". The alias satisfies the real constraint without a second list of
+names to keep in step with this file. The two sentences:
 
 - `ABSTAIN_INCOMPLETE_FEATURES` -- this security carries no value for at least one declared
   column, so it is outside the population above.
@@ -103,9 +115,12 @@ code without parsing a number back out of prose:
   argument is why the floor is three and not two: two points that tie on neither axis lie on one
   line, so a rank position among two names carries no information whatever the two did.
 
-`V2-P4-018` owns the vocabulary Story S35 asks for -- a coded reason, `stale 即弃权`, and whatever
-a face renders. What is here is the *shape*: two stable sentences, each produced by exactly one
-condition, and neither of them a score of `0.0`.
+`V2-P4-018` filled the vocabulary in: `ABSTENTION_VOCABULARY` names all three conditions -- these
+two and its own `ABSTAIN_STALE_MODEL` -- and `abstention_code` reads one back. **A third reason
+does not reach this module's numbers by a third path.** An expired fit abstains on *every* row,
+so it lands in `scored_ratio` exactly as an unrankable cross section does, and the statistics
+below need no case for it. That is deliberate and it is the answer to "an abstention is free
+skill": see `evaluate_fold`.
 
 ## The metrics, and why each one is here rather than three others
 
@@ -245,7 +260,7 @@ import math
 import statistics
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Final, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -259,6 +274,12 @@ from openalpha_cn.backtest.factor_ic import (
     average_ranks,
 )
 from openalpha_cn.backtest.walk_forward import PanelSection, WalkForwardFold
+from openalpha_cn.domain.alpha_model import (
+    ABSTAIN_INCOMPLETE_FEATURES as ABSTAIN_INCOMPLETE_FEATURES,  # re-export, see the docstring
+)
+from openalpha_cn.domain.alpha_model import (
+    ABSTAIN_UNRANKABLE_CROSS_SECTION as ABSTAIN_UNRANKABLE_CROSS_SECTION,  # re-export
+)
 from openalpha_cn.domain.alpha_model import (
     AlphaModel,
     AlphaModelArtifact,
@@ -301,29 +322,6 @@ MINIMUM_FOLD_DAYS: Final[int] = MINIMUM_IC_AS_OFS
 
 `factor_ic.MINIMUM_IC_AS_OFS` for its own stated reason: a sample standard deviation of one
 number does not exist, so a ratio over a single day is undefined rather than merely weak.
-"""
-
-ABSTAIN_INCOMPLETE_FEATURES: Final[str] = (
-    "this security carries no value for at least one declared feature"
-)
-"""Why one security is outside the scored population.
-
-A weighted sum missing a term is a different statistic, so a row short one column is not scored
-on the others -- it says so instead. Free text, because `V2-P4-018` owns the coded vocabulary
-Story S35 asks for; a constant rather than an f-string, so that issue can bind one code to one
-condition without parsing a number back out of a sentence.
-"""
-
-ABSTAIN_UNRANKABLE_CROSS_SECTION: Final[str] = (
-    "fewer securities carry every declared feature at this as_of than a rank can be taken over"
-)
-"""Why **every** security in a cross section abstains.
-
-The count is deliberately not interpolated: `MINIMUM_RANK_SECURITIES` is a module constant a
-reader can look up, and a sentence carrying a number is a sentence `V2-P4-018` would have to
-parse. Scoring the survivors anyway is the alternative and is refused -- a rank position among
-two names is `MINIMUM_IC_SECURITIES`' "magnitude one whatever the two securities did", wearing a
-score's clothes.
 """
 
 
@@ -525,7 +523,11 @@ class FittedCrossSectionalRankModel:
             )
 
     def predict(
-        self, cross_section: FeatureCrossSection, *, predicted_at: datetime
+        self,
+        cross_section: FeatureCrossSection,
+        *,
+        predicted_at: datetime,
+        shelf_life: timedelta | None,
     ) -> PredictionBatch:
         """Score every security by the coefficient-weighted sum of its cross-sectional positions.
 
@@ -554,6 +556,7 @@ class FittedCrossSectionalRankModel:
                 artifact=self.artifact,
                 cross_section=cross_section,
                 predicted_at=predicted_at,
+                shelf_life=shelf_life,
                 predictions=(
                     Prediction(ts_code=row.ts_code, abstention=ABSTAIN_UNRANKABLE_CROSS_SECTION)
                     for row in cross_section.rows
@@ -570,6 +573,7 @@ class FittedCrossSectionalRankModel:
             artifact=self.artifact,
             cross_section=cross_section,
             predicted_at=predicted_at,
+            shelf_life=shelf_life,
             predictions=(
                 Prediction(ts_code=row.ts_code, score=totals[row.ts_code])
                 if row.ts_code in totals
@@ -783,7 +787,9 @@ def score_point(batch: PredictionBatch, *, section: PanelSection) -> BaselineSco
     )
 
 
-def evaluate_fold(model: AlphaModel, fold: WalkForwardFold) -> FoldEvaluation:
+def evaluate_fold(
+    model: AlphaModel, fold: WalkForwardFold, *, shelf_life: timedelta | None
+) -> FoldEvaluation:
     """Fit one fold's training set and read its test block, one prediction day at a time.
 
     `model` is typed as the `AlphaModel` **Protocol** rather than as this module's baseline, and
@@ -794,11 +800,29 @@ def evaluate_fold(model: AlphaModel, fold: WalkForwardFold) -> FoldEvaluation:
     instant it simulates, and a wall clock would make an evaluation unreproducible and every test
     order-dependent -- but it is therefore *not* evidence that anything was predicted before an
     outcome was known, which is Story S32's requirement and `V2-P4-017`'s to meet.
+
+    **`shelf_life` is why a stale model cannot win here, and the mechanism is one this module
+    already had.** A fold's fit is dated at its own `training_cutoff` and its test block runs
+    forward from there, so the *later* days of a long block stand further past the cutoff than the
+    earlier ones -- and an expired fit abstains on every row of those days. Nothing below needs a
+    case for it:
+
+    - A fold that is stale **throughout** scores nothing, so no day is `measured`, `coverage` is
+      not `measured`, and `mean_rank_ic` is `None` by `FoldEvaluation`'s own validator. It reports
+      no headline rather than a flattering one.
+    - A fold that expires **partway** reports a `mean_rank_ic` over only the days it survived --
+      which is exactly the free-skill case, and exactly what `scored_ratio` was made never-`None`
+      for. `V2-P4-018` measured that the headline alone cannot tell the truncated fold from a
+      short honest one and that the pair can:
+      `test_a_fold_that_expires_partway_reports_the_fresh_headline_and_a_ratio_below_one`.
     """
     fitted: FittedAlphaModel = model.fit(fold.training_set)
     points = tuple(
         score_point(
-            fitted.predict(section.cross_section, predicted_at=section.as_of), section=section
+            fitted.predict(
+                section.cross_section, predicted_at=section.as_of, shelf_life=shelf_life
+            ),
+            section=section,
         )
         for section in fold.test_sections
     )
@@ -806,20 +830,24 @@ def evaluate_fold(model: AlphaModel, fold: WalkForwardFold) -> FoldEvaluation:
 
 
 def evaluate_walk_forward(
-    model: AlphaModel, folds: Sequence[WalkForwardFold]
+    model: AlphaModel, folds: Sequence[WalkForwardFold], *, shelf_life: timedelta | None
 ) -> tuple[FoldEvaluation, ...]:
     """Every fold of a schedule, each fitted separately and each carrying its own artifact.
 
     One fit per fold rather than one shared fit, which `AlphaModel.fit`'s "returns a new object"
     is what makes possible: folds that shared a mutable model would share one artifact, and
     `V2-P4-016` could not address them apart.
+
+    One `shelf_life` for the whole schedule rather than one per fold: it is a property of the
+    *ask*, and a schedule that read its early folds more leniently than its late ones would not be
+    a series at all.
     """
     if not folds:
         raise AlphaModelError(
             "a walk-forward evaluation was given no fold; an evaluation over nothing is an empty "
             "success, and walk_forward_folds refuses to build a schedule of none"
         )
-    return tuple(evaluate_fold(model, fold) for fold in folds)
+    return tuple(evaluate_fold(model, fold, shelf_life=shelf_life) for fold in folds)
 
 
 def _summarize(

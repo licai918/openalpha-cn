@@ -53,7 +53,9 @@ _session` is what ties this constant back to the calendar.
 
 def batch(*, predicted_at: datetime = IN_TIME, as_of: datetime = AS_OF) -> PredictionBatch:
     """A real batch off the reference model, dated inside the fixture calendar."""
-    return fitted_reference().predict(cross_section(as_of=as_of), predicted_at=predicted_at)
+    return fitted_reference().predict(
+        cross_section(as_of=as_of), predicted_at=predicted_at, shelf_life=None
+    )
 
 
 def record(

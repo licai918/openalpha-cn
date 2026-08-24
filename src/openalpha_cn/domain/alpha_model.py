@@ -182,7 +182,7 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from types import MappingProxyType
 from typing import Final, Literal, Protocol, Self, runtime_checkable
 
@@ -265,6 +265,97 @@ joined the digest with nobody deciding.
 out through this mapping at all -- it would need an exclusion set of its own, and nothing has
 asked for one. The audit covers both models' field sets for exactly that reason.
 """
+
+
+ABSTAIN_INCOMPLETE_FEATURES: Final[str] = (
+    "this security carries no value for at least one declared feature"
+)
+"""Why one security is outside the scored population.
+
+A weighted sum missing a term is a different statistic, so a row short one column is not scored
+on the others -- it says so instead. A constant rather than an f-string, so exactly one code
+binds this condition without anybody parsing a number back out of a sentence.
+
+**Written by `V2-P4-014` and moved here by `V2-P4-018`, which is the issue that owns the
+vocabulary.** It stood in `backtest/alpha_baseline.py` while it was one implementation's private
+sentence; the moment a *third* reason existed and had to be produced by `prediction_batch_for` --
+which `domain-purity` forbids from importing anything under `backtest` -- a vocabulary split
+across the two layers would have been two sets, neither of them closed. `alpha_baseline`
+re-exports this name unchanged, so its public surface is what it was and
+`alpha_tree.ABSTAIN_INCOMPLETE_FEATURES is alpha_baseline.ABSTAIN_INCOMPLETE_FEATURES` still
+holds -- the same object, one import further along.
+"""
+
+ABSTAIN_UNRANKABLE_CROSS_SECTION: Final[str] = (
+    "fewer securities carry every declared feature at this as_of than a rank can be taken over"
+)
+"""Why **every** security in a cross section abstains.
+
+The count is deliberately not interpolated: `backtest/alpha_baseline.py`'s
+`MINIMUM_RANK_SECURITIES` is a module constant a reader can look up, and a sentence carrying a
+number is a sentence a code would have to be parsed out of. Scoring the survivors anyway is the
+alternative and is refused -- a rank position among two names is `MINIMUM_IC_SECURITIES`'
+"magnitude one whatever the two securities did", wearing a score's clothes.
+
+`V2-P4-014`'s sentence, here for `ABSTAIN_INCOMPLETE_FEATURES`' reason.
+"""
+
+ABSTAIN_STALE_MODEL: Final[str] = (
+    "this fit's training cutoff stands further behind this cross section than its shelf life"
+)
+"""Why every security abstains when the fit has expired -- Story S35's `stale 模型显式弃权`.
+
+The third sentence and the one `V2-P4-018` wrote rather than moved. It names the two instants
+being compared and not the span between them, which is the same decision the other two made
+about `MINIMUM_RANK_SECURITIES`: a shelf life is declared per ask, so interpolating it would
+give one condition as many sentences as there are callers, and `PredictionRecord` addresses the
+batch -- two runs that both expired would be filed under two names for having disagreed about a
+number neither of them acted on differently.
+
+**Not an error and not a zero.** `V2-P4-011` chose the shape: a score of `0.0` is a number, and a
+batch full of them is indistinguishable from a model that had an opinion; a raise would delete
+the answer entirely, which is the invisible drop `prediction_batch_for` exists to make
+impossible. An expired fit therefore produces a batch a reader can store, count and compare --
+and one whose `scored_ratio` is `0.0`, which is what stops the abstention from being free.
+"""
+
+ABSTENTION_VOCABULARY: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "incomplete_features": ABSTAIN_INCOMPLETE_FEATURES,
+        "unrankable_cross_section": ABSTAIN_UNRANKABLE_CROSS_SECTION,
+        "stale_model": ABSTAIN_STALE_MODEL,
+    }
+)
+"""Every abstention reason this repository produces, and the code that names each one.
+
+Story S35 asks for a **coded** reason. The mapping runs code -> sentence rather than the other
+way round because the code is the stable half: `Prediction.abstention` is free text by
+`V2-P4-011`'s contract and reaches a stored address, so the day a sentence is reworded is the day
+every held record re-addresses -- while a code is a token a face renders and a reader greps.
+Three entries and three conditions, one each, which is the property `V2-P4-014` gave up an
+interpolated count to make possible.
+
+**Closed over what this repository produces, and not over what the contract admits.**
+`Prediction.abstention` stays free text, so a third-party `AlphaModel` may state a reason no code
+here names; `abstention_code` answers `None` there rather than raising, because a reason this
+vocabulary has not met is still a disclosed refusal and refusing to read it would turn `V2-P4-011`
+'s "scored or abstained, never absent" back into an error path.
+"""
+
+
+def abstention_code(reason: str) -> str | None:
+    """Name the coded condition behind one abstention, or `None` for a reason from elsewhere.
+
+    A linear scan over three entries rather than an inverted mapping built at import: the
+    inverse would be a second copy of the vocabulary that a reworded sentence could desynchronise
+    silently, and `panel_factors.py`'s rule about reading a `computed_field` in a loop is about
+    per-security work, which this is not -- a batch has one reason per row and a face renders the
+    distinct set.
+    """
+    for code, text in ABSTENTION_VOCABULARY.items():
+        if text == reason:
+            return code
+    return None
 
 
 class AlphaModelError(ValueError):
@@ -748,6 +839,54 @@ class AlphaModelArtifact(BaseModel):
             exclude=frozenset(ARTIFACT_UNADDRESSED_FIELDS),
         )
 
+    def is_stale_at(self, as_of: datetime, *, shelf_life: timedelta | None) -> bool:
+        """Whether this fit has expired by the time it is being asked about `as_of` (`V2-P4-018`).
+
+        **What "stale" is measured against.** The same two instants `PredictionBatch`'s leakage
+        floor compares -- the cross section's `as_of` and this artifact's `training_cutoff` -- read
+        from the other end. `training_cutoff` is the latest **exit** session's close, not the
+        latest prediction day (`V2-P4-011`'s decision, restated on `TrainingSet.training_cutoff`),
+        so the gap this measures is the distance between the last instant an outcome the fit
+        consumed became knowable and the instant it is now being asked to speak about.
+
+        **It is not the same rule as the floor**, and the two are not two thresholds on one axis:
+
+        - The floor is `as_of < training_cutoff`, refuses, and needs no parameter, because it is
+          arithmetic on what the fit consumed -- an outcome realized after the instant the
+          prediction claims to stand at is leakage whoever is asking.
+        - This is `as_of - training_cutoff > shelf_life`, **abstains**, and cannot be computed
+          without a declared span, because how long a fit stays usable is a claim about how fast
+          the world moved and nothing on this artifact measures that. The row's own words:
+          *minimum version -- expire and abstain, no drift detection.*
+
+        Equality is fresh, mirroring the floor's admitted equality at the other end: a shelf life
+        of exactly the gap is a fit read on the last instant its author said it was good for.
+
+        **The span is wall time and not sessions, and that is a boundary rather than a
+        preference.** A horizon in this repository counts *open sessions*
+        (`domain/horizon.py`'s `HorizonUnit.trading_days`), and that module refuses to convert a
+        session count into a calendar span -- "multiplying by a sessions-per-unit constant nobody
+        measured". This method holds no calendar and neither does `prediction_batch_for`, so a
+        session-counted shelf life is a real design available only to a caller that carries one.
+        `a_shelf_life_is_wall_time_and_a_horizon_is_sessions` is that where a reader meets it.
+
+        `shelf_life=None` is a sentence and not an omission -- *this ask declares no shelf life* --
+        which is `V2-P4-013`'s reading of its own embargo width, where `0` is a statement rather
+        than a switch. The faces refuse to leave it unsaid: `ModelRunRequest.shelf_life` has no
+        default, exactly as `minimum_scored_ratio` has none.
+        """
+        if shelf_life is None:
+            return False
+        if shelf_life < timedelta(0):
+            raise AlphaModelError(
+                f"{self.declaration.name} is read under a shelf life of {shelf_life!r}, which is "
+                "negative; that expires a fit before the instant its own training cutoff stands "
+                "at, where PredictionBatch's leakage floor already refuses -- so every cross "
+                "section this model could legally be asked about would abstain, and a model that "
+                "answers nothing at all is a declaration rather than a shelf life"
+            )
+        return ensure_aware(as_of) - self.training_cutoff > shelf_life
+
     def require_features(self, cross_section: FeatureCrossSection) -> None:
         """Refuse a cross section whose feature list is not this artifact's, by name.
 
@@ -957,6 +1096,7 @@ def prediction_batch_for(
     cross_section: FeatureCrossSection,
     predicted_at: datetime,
     predictions: Iterable[Prediction],
+    shelf_life: timedelta | None,
 ) -> PredictionBatch:
     """Assemble a batch that answers about **every** security the cross section carried.
 
@@ -973,6 +1113,24 @@ def prediction_batch_for(
     the other one had already refused every mismatched cross section a test drove. Two copies of
     a check are one check plus a place for a future implementation to skip it, so the surviving
     copy is the one every implementation goes through rather than the one each has to remember.
+
+    **`V2-P4-018`'s expiry is here for that same argument, and it is the whole of Story S35's
+    `stale 模型显式弃权`.** A stale fit's rows are replaced with `ABSTAIN_STALE_MODEL` -- every one
+    of them, because staleness is a property of the *ask* and not of any one security. Three
+    consequences worth naming:
+
+    - The scoring pass that produced `predictions` is **not** skipped, and its work is thrown
+      away. That is the price of putting the check at the one chokepoint every implementation goes
+      through rather than at the top of each `predict`, and it is the cheaper of the two: one
+      wasted pass over a cross section by a model that is already unusable, against a check three
+      shipped implementations and every third-party one would each have to remember.
+    - The coverage refusal above runs **first** and unchanged, so a stale model that also dropped
+      a security is still refused for dropping it. Expiring is not an amnesty.
+    - The replacement is the only trace the declared span leaves. `PredictionRecord` addresses the
+      batch, so a run that expired is filed apart from the run that scored -- but the *threshold*
+      is nowhere on the record, and `a_stale_record_carries_the_verdict_and_not_the_bar_it_failed`
+      says so. What a reader can recompute is the gap: `as_of` and `artifact.training_cutoff` are
+      both on the batch.
     """
     artifact.require_features(cross_section)
     rows = tuple(sorted(predictions, key=lambda item: item.ts_code))
@@ -986,6 +1144,10 @@ def prediction_batch_for(
             f"about {len(answered)}: {unanswered} carry no row and {uninvited} were never in "
             "the cross section. A security a model found no answer for abstains, which a "
             "reader can see; a security it dropped is invisible"
+        )
+    if artifact.is_stale_at(cross_section.as_of, shelf_life=shelf_life):
+        rows = tuple(
+            Prediction(ts_code=item.ts_code, abstention=ABSTAIN_STALE_MODEL) for item in rows
         )
     return PredictionBatch(
         as_of=cross_section.as_of,
@@ -1031,6 +1193,25 @@ class FittedAlphaModel(Protocol):
     `predicted_at` is a parameter and not a clock this reads for itself: a prediction batch's
     timestamp is part of what S32 asks to be persisted before the outcome is known, and a hidden
     `datetime.now()` would make every batch unreproducible and every test order-dependent.
+
+    `shelf_life` is a parameter for a **different** reason, and `V2-P4-018` weighed the two other
+    homes it could have had:
+
+    - **Not on `AlphaModelDeclaration`.** Every field there reaches `artifact_id`, and `V2-P4-016`
+      already drew this exact line for metrics: a measurement *of* a fit does not belong in the
+      identity *of* the fit, or one fitted model gets as many addresses as there are opinions
+      about how strictly to read it. A shelf life is a rule for judging the fit later, so it is
+      the same kind of thing -- and it would have cost a third identity rewrite to install.
+    - **Not on the fitted model.** `backtest/alpha_model.py` states, and
+      `tests/unit/backtest/test_alpha_model_reference.py` proves, that the artifact is the whole
+      model: rebuilding one from a stored artifact reproduces every prediction. A shelf life field
+      on the fitted object would break that -- a rebuilt model would need it re-supplied anyway,
+      so the parameter is where it was going to have to be named regardless.
+
+    `None` is admitted and means *this ask declares no shelf life*. It is a sentence rather than
+    an omission, which is `V2-P4-013`'s reading of its own embargo width, and the faces refuse to
+    leave it unsaid: `ModelRunRequest.shelf_life` has no default, exactly as `minimum_scored_ratio`
+    has none.
     """
 
     @property
@@ -1038,7 +1219,11 @@ class FittedAlphaModel(Protocol):
         """Everything the fit recorded: the declaration, the training set, the parameters."""
 
     def predict(
-        self, cross_section: FeatureCrossSection, *, predicted_at: datetime
+        self,
+        cross_section: FeatureCrossSection,
+        *,
+        predicted_at: datetime,
+        shelf_life: timedelta | None,
     ) -> PredictionBatch:
         """Answer about every security in `cross_section`, scored or abstained."""
 
@@ -1237,8 +1422,38 @@ KNOWN_ALPHA_MODEL_LIMITATIONS: Final[tuple[AlphaModelLimitation, ...]] = (
             "here should be read as a claim about alpha."
         ),
     ),
+    AlphaModelLimitation(
+        code="a_shelf_life_is_wall_time_and_a_horizon_is_sessions",
+        detail=(
+            "V2-P4-018's shelf_life is a timedelta compared against as_of - training_cutoff, "
+            "which is wall time. A model horizon is not: domain/horizon.py's HorizonUnit "
+            ".trading_days counts *open sessions*, and that module refuses to convert a session "
+            "count into a calendar span because a month holding the Spring Festival recess is "
+            "far shorter than an ordinary one and a future one's session count is not knowable "
+            "at all. So a shelf life of 5 days is not five sessions, and a caller who means "
+            "sessions has to widen it for weekends and holidays itself. Stating the span in "
+            "sessions instead would need a TradingCalendar at prediction_batch_for, which holds "
+            "none and whose three callers hold none either -- a real design, and one nothing in "
+            "this chain asked for."
+        ),
+    ),
+    AlphaModelLimitation(
+        code="a_stale_record_carries_the_verdict_and_not_the_bar_it_failed",
+        detail=(
+            "An expired batch's rows all read ABSTAIN_STALE_MODEL, and V2-P4-017's "
+            "PredictionRecord addresses the batch, so a run that expired is filed apart from one "
+            "that scored. The shelf life itself reaches no stored field. A reader can therefore "
+            "recompute the *gap* -- as_of and artifact.training_cutoff are both on the batch -- "
+            "but not the span it was measured against, and two callers who declared different "
+            "spans that both expired the same fit produce one record rather than two. That is "
+            "deliberate: putting the span on the artifact would give one fitted model two "
+            "addresses whenever two readers disagreed about how strictly to read it, which is "
+            "V2-P4-016's own reason for keeping a metric off the fit. The declared span is "
+            "rendered on every model answer as shelf_life_days instead."
+        ),
+    ),
 )
-"""Eleven named boundaries on what this contract says, in `KNOWN_LABEL_LIMITATIONS`' form.
+"""Thirteen named boundaries on what this contract says, in `KNOWN_LABEL_LIMITATIONS`' form.
 
 Eight at `V2-P4-011`; `V2-P4-016` rewrote two of them and added three. The two rewritten are the
 ones that had become **false**: `the_fitted_artifact_carries_no_content_address` described an
@@ -1249,6 +1464,10 @@ content hash among the missing. The three added are what the address does not pr
 `an_unknown_code_commit_is_one_constant_shared_by_every_build_that_has_none` -- plus
 `the_manifest_slot_still_admits_an_address_from_another_plane`, which is what that issue chose
 *not* to narrow and why.
+
+`V2-P4-018` added the last two, and both are about the thing it deliberately did **not** build: a
+shelf life is wall time rather than sessions because no calendar reaches this contract, and the
+span leaves no trace on a record beyond the verdict it produced.
 
 Every `code` is required to appear as a string literal in executable test code by
 `tests/unit/test_known_limitation_registries.py`, which is what keeps a rename from silently

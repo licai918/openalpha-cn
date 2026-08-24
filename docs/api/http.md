@@ -691,6 +691,25 @@ declared bar moved. It is a **coverage** verdict and never a quality one.
 body. Story S32 is about a prediction being persisted before its outcome is known, which is
 unconditional; the floor is about whether the answer may be acted on, which is not.
 
+### `shelf_life_days`, and what a stale model answers
+
+Optional, and its absence is recorded rather than resolved. Supplied, it is how many days past
+its training cutoff a fit may still be asked about a cross section; beyond that every security
+in the batch abstains with a stated reason instead of being scored, which is Story S35's
+`stale 模型显式弃权`. The answer renders it under `declaration.shelf_life_days`, `null` when the
+request declared none — `feature_version_source`'s arrangement, because a reader has to be able
+to see on the answer which of the two happened.
+
+It is **wall time and not sessions**. A horizon in this repository counts open sessions, and
+`domain/horizon.py` refuses to convert a session count into a calendar span, so `5` here is five
+calendar days and a caller who means five sessions widens it for weekends.
+
+An expired run is not refused by this field. It drives `scored_ratio` to `0.0`, and it is
+`minimum_scored_ratio` above that turns that into the `409`, so a request declaring a floor of
+`0.0` reads an all-abstaining model as a `200`. The two are one mechanism and
+`an_expired_run_is_refused_only_by_the_coverage_floor_the_caller_declared` is the entry in
+`limitations` that says so.
+
 ### `standing`, and exactly what it proves
 
 Every rendered prediction carries `standing` plus `standing_proves` and

@@ -162,7 +162,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, tzinfo
+from datetime import date, datetime, timedelta, tzinfo
 from types import MappingProxyType
 from typing import ClassVar, Final, Literal, Protocol, TypeVar
 from zoneinfo import ZoneInfo
@@ -596,6 +596,19 @@ KNOWN_MODEL_VIEW_LIMITATIONS: Final[tuple[ModelViewLimitation, ...]] = (
         ),
     ),
     ModelViewLimitation(
+        code="an_expired_run_is_refused_only_by_the_coverage_floor_the_caller_declared",
+        detail=(
+            "`--shelf-life-days` makes a fit past its training cutoff abstain on every security, "
+            "which drives `scored_ratio` to `0.0`. Nothing on this face refuses that reading on "
+            "its own: it is `--min-scored-ratio` that turns it into `is_blocked: true` and exit "
+            "`1`, so a caller who declared a floor of `0.0` gets an expired run reported as a "
+            "clean success with no scored name on it. The two flags are one mechanism and the "
+            "reason is `V2-P4-014`'s -- abstention is free skill, so what stops a stale model "
+            "looking good is the coverage bar and never the headline, which an all-abstaining "
+            "fold reports as `null` rather than as a number anybody could quote."
+        ),
+    ),
+    ModelViewLimitation(
         code="no_hyperparameter_is_selected_by_anything_on_this_face",
         detail=(
             "`--hyperparameter` is passed through to the declaration verbatim and reaches the "
@@ -995,6 +1008,21 @@ class ModelRunRequest:
     exchange: str
     horizon: ResearchHorizon
     minimum_scored_ratio: float
+    shelf_life: timedelta | None
+    """How far past its training cutoff a fit may be asked, or `None` for a run that does not say.
+
+    `V2-P4-018`'s span, in wall time, and it is the one field here that is allowed to be absent.
+    `declared_feature_version`'s arrangement and its reason: an undeclared shelf life is a
+    *boundary a reader has to be able to see on the answer* rather than infer from the command
+    line, so `_declaration_view` renders it as `declaration.shelf_life_days` on both faces and it
+    reads `null` when nothing was declared. That is not the same thing as a default -- no span is
+    silently chosen, and a run that declared none says so in its own output.
+
+    Rendered under `declaration` rather than under `measurement` because it is a *bar* and not a
+    reading, which is the same reason `minimum_scored_ratio` appears only under `blocks`. The
+    `measurement` body stays byte-identical across a refused answer and an admitted one, and a
+    declared policy inside it would break that.
+    """
     config_digest: str
     declared_feature_version: str | None
 
@@ -1194,6 +1222,7 @@ def _model_request(
     years: Sequence[int],
     exchange: str,
     minimum_scored_ratio: float,
+    shelf_life_days: int | None,
     code_commit: str,
     config_digest: str,
     feature_version: str | None,
@@ -1234,6 +1263,13 @@ def _model_request(
             f"minimum_scored_ratio {minimum_scored_ratio!r} is outside [0, 1]; it is a floor "
             "under the fraction of the offered market a model answered about, and a fraction "
             "above one refuses every possible answer"
+        )
+    if shelf_life_days is not None and shelf_life_days < 0:
+        raise ModelRequestError(
+            f"shelf_life_days {shelf_life_days!r} is negative; a shelf life is how far past its "
+            "training cutoff a fit may still be asked, and a negative one expires every fit "
+            "before PredictionBatch's leakage floor would even admit the question. Omit it to "
+            "declare none, which the answer body reports as null"
         )
     if not years:
         raise ModelRequestError(
@@ -1280,6 +1316,7 @@ def _model_request(
         exchange=exchange,
         horizon=parsed,
         minimum_scored_ratio=minimum_scored_ratio,
+        shelf_life=None if shelf_life_days is None else timedelta(days=shelf_life_days),
         config_digest=config_digest,
         declared_feature_version=feature_version,
     )
@@ -1326,6 +1363,7 @@ def model_evaluation_request(
     minimum_scored_ratio: float,
     code_commit: str,
     config_digest: str,
+    shelf_life_days: int | None = None,
     feature_version: str | None = None,
     hyperparameters: Sequence[tuple[str, bool | int | float | str]] = (),
     missing: FeatureMissingPolicy = "abstain",
@@ -1360,6 +1398,7 @@ def model_evaluation_request(
             years=years,
             exchange=exchange,
             minimum_scored_ratio=minimum_scored_ratio,
+            shelf_life_days=shelf_life_days,
             code_commit=code_commit,
             config_digest=config_digest,
             feature_version=feature_version,
@@ -1388,6 +1427,7 @@ def daily_request(
     minimum_scored_ratio: float,
     code_commit: str,
     config_digest: str,
+    shelf_life_days: int | None = None,
     feature_version: str | None = None,
     hyperparameters: Sequence[tuple[str, bool | int | float | str]] = (),
     missing: FeatureMissingPolicy = "abstain",
@@ -1406,6 +1446,7 @@ def daily_request(
         years=years,
         exchange=exchange,
         minimum_scored_ratio=minimum_scored_ratio,
+        shelf_life_days=shelf_life_days,
         code_commit=code_commit,
         config_digest=config_digest,
         feature_version=feature_version,
@@ -2020,7 +2061,9 @@ def evaluate_model(store: PanelStore, request: EvaluationRequest) -> ModelEvalua
             f"day(s): {error}"
         ) from error
     try:
-        evaluations = evaluate_walk_forward(_model_of(run.declaration), folds)
+        evaluations = evaluate_walk_forward(
+            _model_of(run.declaration), folds, shelf_life=run.shelf_life
+        )
     except AlphaModelError as error:
         raise ModelRunBlockedError(
             f"{run.declaration.name} could not be evaluated over this panel: {error}"
@@ -2135,7 +2178,9 @@ def run_daily(
             TrainingSet(feature_ids=panel.feature_ids, examples=examples)
         )
         batch = fitted.predict(
-            section.cross_section, predicted_at=_aware(predicted_at, flag="predicted_at")
+            section.cross_section,
+            predicted_at=_aware(predicted_at, flag="predicted_at"),
+            shelf_life=run.shelf_life,
         )
     except (AlphaModelError, ValueError) as error:
         raise ModelRunBlockedError(
@@ -2309,6 +2354,15 @@ def _fold_view(fold: FoldEvaluation) -> dict[str, object]:
 def _declaration_view(
     declaration: AlphaModelDeclaration, request: ModelRunRequest
 ) -> dict[str, object]:
+    """What this run declared, which is the declaration plus the two things it does not carry.
+
+    `feature_version_source` was the first: a resolved feature version is not a declared one, and
+    a reader has to be able to see which it was on the answer. `shelf_life_days` is `V2-P4-018`'s
+    and is the second, for exactly that reason -- it is `null` when the run declared none, so
+    "this model was read under no expiry" is a sentence in the body rather than the absence of
+    one. It sits here rather than under `measurement` because it is a bar and not a reading, and
+    here rather than on each face because both faces render one declaration.
+    """
     return {
         "name": declaration.name,
         "family": declaration.family,
@@ -2317,6 +2371,7 @@ def _declaration_view(
         "code_commit": declaration.code_commit,
         "feature_version": declaration.feature_version,
         "feature_version_source": "declared" if request.declared_feature_version else "resolved",
+        "shelf_life_days": None if request.shelf_life is None else request.shelf_life.days,
         "feature_ids": list(request.feature_ids),
         "hyperparameters": [
             {"name": key, "value": value} for key, value in declaration.hyperparameters
