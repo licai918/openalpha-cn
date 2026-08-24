@@ -934,6 +934,14 @@ subjects 取并集），于是同一个 requirement 在两条路径上得到了�
    `.the_industry_input_is_read_whole_partition_so_a_mid_year_as_of_can_be_refused`）。
    而一年分区的 `max_available_time` 就是**该年最后一个会话**。
 
+   > **后续（2026-08-24，由 P4 技术验收实测点出）**：这一条的两半都已被撤回，原文按本节惯例保留。
+   > `V2-P4-026` 把 `load_daily_valuations` 改到 `_read_visible_price_session` 上，估值那一半不再
+   > 整块拒绝；`V2-P4-027`/`028` 把 `index_member_all` 也放到按日的门上。所引 code 已两次改名，
+   > 今名 `a_stored_membership_year_left_unread_refuses_the_day_rather_than_answering_it`。
+   > **这是 `d748796` 漏掉的同一类缺陷**：那次提交只扫了 `src/` 与 `tests/`，却在提交信息里写成
+   > 「全树仅此一处」，实为 3 个文件 5 处；另两处（第 246、1046 行）是正当的改名史，本处不是。
+   > 没有任何可执行的东西会抓到它 —— `docs/` 不在任何 code-binding 审计的扫描范围内。
+
 合起来：**年 Y 中任意交易日的残差，其 `available_time` 都落在 Y 年最后一个 session 之后。**
 而 `load_neutralized_factor_observations` 走的是 `read_visible_at`（**行过滤**），
 所以年内任何 `as_of` 读回来的是**空**，不是报错 ——
