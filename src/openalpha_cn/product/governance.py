@@ -1,117 +1,98 @@
-"""What a risk flag is *worth*, asked of the gates that already ship rather than restated.
+"""What a risk flag is *worth*, read off the flag itself rather than inferred from a gate.
 
-`V2-P4-006`. The screen this module serves used to order by `confidence` and to read
-`risk_flags` only as a **count** (`ScreeningCriteria.max_risk_flags`), which is the one reading
-that cannot separate the two answers: a signal carrying `future_data` -- the flag
-`decisions/risk.py::RiskGate` refuses outright -- and a signal carrying any cosmetic note some
-evidence payload happened to set both have a count of one, and the flagged one sorted to the
-top on confidence alone. `risk_flags` is an open string set, so "any cosmetic note" is not
-hypothetical: `agents/baseline.py::_quality_flags` copies whatever strings a payload's
-`quality_flags` holds, unchecked.
+`V2-P4-006` built this module, `V2-P4-030` and `V2-P4-036` rebuilt it. The screen it serves used
+to order by `confidence` and to read `risk_flags` only as a **count**
+(`ScreeningCriteria.max_risk_flags`), which is the one reading that cannot separate the two
+answers: a signal carrying `future_data` -- the flag `decisions/risk.py::RiskGate` refuses
+outright -- and a signal carrying a cosmetic note both have a count of one, and the flagged one
+sorted to the top on confidence alone.
 
-## The measurement this module exists because of
+## What `V2-P4-006` could not do from here, and what changed underneath it
 
-`V2-P4-005` recorded it as `KNOWN_RANKING_LIMITATIONS
-.the_signals_own_risk_flags_are_an_open_set_and_two_gates_read_disjoint_subsets`, and it is
-still true at this commit:
+`risk_flags` was an open string set, and three modules read disjoint closed subsets of it. This
+module could not repair that -- writing the union down here would have been a **fourth** list,
+correct on the day it was written and drifting the first time either gate changed -- so it did
+the only honest thing available from inside `product/`: it held **no flag strings at all** and
+obtained severity by *asking* the two shipped gates, driving a synthetic one-flag `SignalFrame`
+through each and reading the verdict back out.
 
-- `decisions/risk.py::RiskGate` blocks on `{future_data, look_ahead_violation}` and reduces on
-  `{redistribution_unknown, source_uri_missing, revised_after_initial_availability}`.
-- `agents/committee.py::DeliberationCommittee` treats `{regulatory, data-quality, suspension}`
-  as severe.
-- **Their intersection is empty**, and `committee-disagreement` -- a flag the committee raises
-  about its own deliberation -- is in neither, so a signal explicitly marked as disputed reaches
-  the runtime gate and gets `pass`.
+That indirection is gone, because the thing that forced it is gone. `V2-P4-030` closed the
+vocabulary at the point the flags are written: `domain/risk_flag.py::RiskFlag` declares every
+flag **with what it is worth**, `SignalFrame.risk_flags` names that enum, and both gates derive
+their sets from it. Severity is no longer something to be inferred from behaviour -- it is
+declared, and this module reads the declaration.
 
-Three closed subsets of one open set, and none of them agrees with another. The obvious repair
-is to write the union down here and sort on it. That would be a **fourth** list, and a fourth
-list is the defect rather than the fix: it would be correct on the day it was written and would
-drift the first time either shipped gate changed, with nothing red.
+Three things fell out of that, and all three were load-bearing before:
 
-## So this module holds no flag strings at all
+- **`SHIPPED_RISK_GATES` is deleted** (`V2-P4-036`). It named the two gates as callables and
+  called itself "the single source for what counts as severe", and **nothing read it**:
+  `_verdicts` called the two module-level functions directly and `_rung` hardcoded exactly two
+  verdicts. Measured on the previous commit, adding an always-blocking third gate and clearing
+  the cache left `flag_severity('bogus-flag')` at `unrecognised`, and *emptying the registry
+  entirely* left `flag_severity('future_data')` at `blocked`. A registry that decorative is
+  worse than none: it invites a contributor to add a third gate the documented way and see
+  nothing happen. It is not repaired by being wired up, because a closed vocabulary makes it
+  redundant -- a gate does not get to have an opinion about what a flag is worth; it gets to
+  decide what to *do* about a flag whose worth is declared.
+- **The one-flag probe is deleted.** It existed because `DeliberationCommittee.review` was not
+  total on `SignalFrame` -- handed an abstention it recomputed a direction it could never make
+  `abstain` and died on its own output -- so `assess` could not call the committee on the signal
+  it was given. `V2-P4-029` fixed that, and `assess` now asks both gates about the actual
+  signal.
+- **The memo is deleted.** `flag_severity` was `lru_cache(maxsize=512)`, bounded rather than
+  unbounded because the strings came from request bodies and an unbounded memo over those is a
+  leak whose size a caller chooses. There is nothing left to memoise: the answer is an enum
+  lookup, and the key space is now ten members rather than every string a caller can type.
 
-`SHIPPED_RISK_GATES` is the single named source, and what it names is the two gates
-**themselves**, as callables. Severity is obtained by *asking* them:
-
-    flag_severity("future_data")   # -> "blocked",       because RiskGate says block
-    flag_severity("regulatory")    # -> "severe",        because the committee says block
-    flag_severity("source_uri_missing")      # -> "reduced",  because RiskGate says reduce
-    flag_severity("committee-disagreement")  # -> "unrecognised"
-
-Grep this file for `future_data` and the only occurrences are in this docstring. There is no
-list to drift from, because there is no list: rename a member of `RiskGate._blocking_flags` and
-the severity of that string moves here on the same commit, with no edit and no rediscovery.
-
-`tests/unit/product/test_governed_screening.py::
-test_no_shipped_risk_flag_is_written_in_executable_code_under_product` holds that property by
-AST over this package's own source -- prose may name a flag, code may not -- because a single
-well-meant literal is all it takes to lose it. It is `test_known_limitation_registries.py`'s
-docstring/executable split, pointed at source rather than at tests.
-
-## Reading the committee by behaviour, and why that is not a workaround
-
-`RiskGate` exposes `evaluate(signal)`, so asking it is ordinary. The committee's severe set is a
-**set literal inside `DeliberationCommittee.review`'s body** -- not a class attribute, not a
-module constant -- so behaviour is the only public way to read it, and `review` is the public
-way. Driven with `results=()` its `risk_decision` is a pure function of `signal.risk_flags`:
-with no agent results there is no debate, so it adds no `committee-disagreement` of its own,
-and the three perspectives reduce to `block` on a severe flag, `reduce` on any other flag and
-`pass` on none.
-
-"Pure function of `risk_flags`" is the load-bearing claim -- it is what makes a synthetic
-one-flag probe a measurement of the flag rather than of the probe -- so it is measured rather
-than asserted: `tests/unit/product/test_governed_screening.py::
-test_both_shipped_gates_answer_about_the_flags_and_about_nothing_else_on_the_signal` varies
-every other `SignalFrame` field on the probe and requires both verdicts to stand still.
-
-The change this module would prefer is one line in `agents/committee.py`: promote that set
-literal to a named module constant. That file is outside this issue's ownership, so the probe
-is what is shipped; the probe is strictly more honest anyway, since it measures what the
-committee *does* rather than what a constant beside it claims.
-
-## The ladder, and why `unrecognised` is a rung rather than a synonym for `clear`
+## The ladder
 
 Five rungs, best first, declared in `SEVERITY_ORDER` and ranked by position:
 
-- **`clear`** -- no flags at all. Both gates pass.
-- **`unrecognised`** -- the signal carries a flag and **neither gate names it**. The committee's
-  catch-all ("any flag at all is at least a reduction") is the only thing that sees it. This is
-  exactly where `committee-disagreement` lands, and saying so is the finding: before this
-  module a disputed signal sorted as though it were clean, and now it does not.
-- **`reduced`** -- `RiskGate` reduces on it.
-- **`severe`** -- the committee blocks on it.
-- **`blocked`** -- `RiskGate` blocks on it.
+- **`clear`** -- no flags at all.
+- **`unrecognised`** -- the string is not a declared flag. See below; this is no longer
+  reachable from a `SignalFrame`.
+- **`reduced`** -- a caution that should cost the signal its place, not its life.
+- **`severe`** -- the evidence is readable but the name should not be acted on.
+- **`blocked`** -- the evidence itself is unusable.
 
 `blocked` above `severe` because `RiskGate` is the runtime gate that actually stops a decision
-while the committee is optional by design (PRD S41, `agents/committee.py`'s "remain optional"),
-so the two `block` verdicts are not the same claim about the same thing.
+while the committee is optional by design (PRD S41), so the two are not the same claim about the
+same thing. `domain/risk_flag.py` carries the table of which gate says what for each rung.
 
-A signal's severity is the **worst** rung any of its flags reaches, and both gates are set
-intersections over the whole flag tuple, so the whole-signal verdict already *is* that maximum
--- `assess` calls each gate once and derives the rung from the pair, then names the flags that
-account for it. `tests/unit/product/test_governed_screening.py::
-test_a_signals_severity_is_the_worst_of_its_flags_taken_one_at_a_time` drives both readings and
-requires them equal, which is the assertion that would go red if either gate ever stopped being
-a set intersection.
+**`unrecognised` survives as a rung but can no longer be reached through `assess`**, and that
+is the whole point of `V2-P4-030` rather than an oversight. It used to mean "no shipped gate
+names this string", and the flag that landed there most often was a **misspelling**: a payload
+writing `future-data` instead of `future_data` was demoted from `blocked` to `unrecognised` and
+therefore **promoted** up this screen. `SignalFrame` now refuses that string outright, so a
+signal cannot carry a flag no gate names. `flag_severity` still answers `unrecognised`, because
+it is a public function that takes a `str` and has to say *something* about one that is not a
+flag -- and "this is not in the vocabulary" is the honest answer. The rung is kept rather than
+removed because `ScreeningCriteria.worst_severity_admitted` is a field of a shipped request body
+(`POST /api/v1/screen`) and dropping a value a caller may already send would break the endpoint
+to record a fact.
+
+## What this module still does not decide
+
+Nothing here claims either gate is *right*, or that `blocked` really is worse than `severe` for
+every caller -- only that a list needs one order and this is the one, written down in
+`SEVERITY_ORDER` rather than implied.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from datetime import UTC, datetime
-from functools import lru_cache
+from collections.abc import Mapping
 from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict
 
 from openalpha_cn.agents.committee import DeliberationCommittee
 from openalpha_cn.decisions.risk import RiskDecision, RiskGate
+from openalpha_cn.domain.risk_flag import RISK_FLAGS_BY_VALUE, RiskFlag
 from openalpha_cn.domain.signal import SignalFrame
 
 __all__ = [
     "SEVERITY_ORDER",
     "SEVERITY_RANK",
-    "SHIPPED_RISK_GATES",
     "GovernanceSeverity",
     "GovernanceVerdict",
     "assess",
@@ -138,91 +119,22 @@ SEVERITY_RANK: Final[Mapping[GovernanceSeverity, int]] = {
 """`SEVERITY_ORDER` as a sort key: ascending rank is improving-to-worsening governance."""
 
 
-def _runtime_risk_gate(signal: SignalFrame) -> RiskDecision:
-    """`decisions/risk.py::RiskGate`, asked about one signal."""
-    return RiskGate().evaluate(signal)
-
-
-def _deliberation_committee(signal: SignalFrame) -> RiskDecision:
-    """`agents/committee.py::DeliberationCommittee`, asked about one signal and no debate.
-
-    `results=()` is what makes this a reading of `signal.risk_flags` rather than of a debate
-    that did not happen: with neither bulls nor bears the committee adds no
-    `committee-disagreement` of its own, so the flags it votes on are exactly the ones handed
-    to it.
-    """
-    return DeliberationCommittee().review(signal=signal, results=()).risk_decision
-
-
-SHIPPED_RISK_GATES: Final[Mapping[str, Callable[[SignalFrame], RiskDecision]]] = {
-    "runtime-risk-gate": _runtime_risk_gate,
-    "deliberation-committee": _deliberation_committee,
-}
-"""**The single source for what counts as severe**: the two gates this build already ships.
-
-Named callables and not a set of strings, which is the whole design -- see this module's
-docstring. Every severity below is derived by calling these; a third gate arriving is one entry
-here and no change to anything that reads a severity.
-"""
-
-_PROBE_AS_OF: Final[datetime] = datetime(2000, 1, 1, tzinfo=UTC)
-"""A fixed instant for the one-flag probe. Neither gate reads `as_of`; that is measured by
-`test_both_shipped_gates_answer_about_the_flags_and_about_nothing_else_on_the_signal` rather
-than assumed here."""
-
-
-def _probe(flags: tuple[str, ...]) -> SignalFrame:
-    """The most boring valid `SignalFrame` carrying exactly `flags`, and nothing to read."""
-    return SignalFrame(
-        subject="governance-probe",
-        as_of=_PROBE_AS_OF,
-        direction="neutral",
-        strength=0.0,
-        confidence=0.0,
-        horizon="1d",
-        evidence_ids=("evd_governance_probe",),
-        risk_flags=flags,
-    )
-
-
-def _rung(gate: RiskDecision, committee: RiskDecision) -> GovernanceSeverity:
-    """The ladder as a function of the two gates' verdicts, and the only place it is decided."""
-    if gate == "block":
-        return "blocked"
-    if committee == "block":
-        return "severe"
-    if gate == "reduce":
-        return "reduced"
-    if committee == "reduce":
-        return "unrecognised"
-    return "clear"
-
-
-def _verdicts(flags: tuple[str, ...]) -> tuple[RiskDecision, RiskDecision]:
-    """Both gates' verdicts on a flag tuple, asked of a canonical carrier of it.
-
-    Deliberately **not** cached, unlike `flag_severity` below. Its key would be a whole flag
-    tuple, and `POST /api/v1/screen` accepts caller-supplied `risk_flags`, so an unbounded
-    memo on it is a map whose key space a request body chooses -- growth this process would
-    never reclaim. Once per result costs one `SignalFrame` and one committee pass, which is
-    small beside the run the result came from.
-    """
-    probe = _probe(flags)
-    return _runtime_risk_gate(probe), _deliberation_committee(probe)
-
-
-@lru_cache(maxsize=512)
 def flag_severity(flag: str) -> GovernanceSeverity:
-    """What one risk flag is worth, measured by putting it alone in front of both gates.
+    """What one risk flag is worth, read off `domain/risk_flag.py::RiskFlag`.
 
-    Cached because the answer is a pure function of the string and `assess` asks it once per
-    flag per result, while a whole screen carries only a handful of distinct flags between
-    them. **Bounded** rather than `functools.cache`, for the reason `_verdicts` gives: the
-    strings come from request bodies, and an unbounded memo over those is a leak a caller
-    chooses the size of. `test_the_ladder_is_declared_once_and_every_rung_is_reachable`
-    asserts the bound exists.
+    Takes a bare `str` rather than a `RiskFlag` deliberately. Every caller inside this build
+    hands it a member -- `SignalFrame.risk_flags` cannot hold anything else -- but this is a
+    public function re-exported from `product/research.py`, and answering "is this string worth
+    anything?" for an arbitrary string is a question worth being able to ask. `unrecognised` is
+    that answer, and it is the only way to reach that rung now that the contract refuses the
+    strings which used to land there.
+
+    Uncached, unlike every previous version of this function. The answer was previously derived
+    by building a `SignalFrame` and running a committee over it, which was worth memoising; it
+    is now a dictionary lookup on a ten-member enum.
     """
-    return _rung(*_verdicts((flag,)))
+    declared = RISK_FLAGS_BY_VALUE.get(flag)
+    return "unrecognised" if declared is None else declared.severity
 
 
 class GovernanceVerdict(BaseModel):
@@ -236,49 +148,62 @@ class GovernanceVerdict(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     severity: GovernanceSeverity
-    driving_flags: tuple[str, ...]
+    driving_flags: tuple[RiskFlag, ...]
     """The signal's own flags that sit at `severity`, in the order the signal carries them.
 
     Empty exactly when `severity` is `clear`, because a rung above `clear` is reached by a flag
     and by nothing else.
     """
     gate_decision: RiskDecision
-    """`RiskGate.evaluate`'s verdict on this signal's flags, carried rather than summarised."""
+    """`RiskGate.evaluate`'s verdict on this signal, carried rather than summarised."""
     committee_decision: RiskDecision
-    """`DeliberationCommittee.review`'s verdict on this signal's flags, with no debate."""
+    """`DeliberationCommittee.review`'s verdict on this signal, with no debate."""
 
 
 def assess(signal: SignalFrame) -> GovernanceVerdict:
-    """Ask both shipped gates about one signal's flags and name the ones that decided it.
+    """Rate one signal's flags, and name the ones that decided it.
 
-    **About the flags, on a canonical probe, rather than about the signal itself.** That is a
-    measured requirement and not a stylistic preference: `DeliberationCommittee.review` is not
-    total on `SignalFrame`. Handed an abstaining signal -- `direction="abstain"`, and therefore
-    `evidence_ids=()` by `SignalFrame.validate_conclusion` -- it recomputes a direction from
-    `adjusted_strength`, never reproduces `abstain`, and dies constructing its own
-    `DeliberationOutcome` with *"directional signal requires evidence"*. Every abstention in
-    this build is such a signal, `ScreeningCriteria.directions` lists `abstain` as a thing a
-    caller may screen for, and PRD S42 makes explicit abstention a guarantee -- so a screen
-    that called the committee on the signal it was given would raise on the one outcome the
-    product promises to show.
+    **About the signal itself**, which is new. Until `V2-P4-029` this function could not touch
+    the signal it was given: `DeliberationCommittee.review` was not total on `SignalFrame`, and
+    handed an abstention -- `direction="abstain"`, and therefore no `evidence_ids` by
+    `SignalFrame.validate_conclusion` -- it raised *"directional signal requires evidence"* while
+    building its own output. Every abstention in this build is such a signal and
+    `ScreeningCriteria.directions` lists `abstain` as something a caller may screen for, so this
+    function routed around the committee with a synthetic carrier of the flags. The committee
+    accepts an abstention now, and the indirection is gone with it.
 
-    `tests/unit/product/test_governed_screening.py::
-    test_the_shipped_committee_cannot_be_asked_about_an_abstaining_signal_at_all` pins that
-    refusal on the real class, so it is red the day somebody repairs it upstream. The probe
-    costs nothing in fidelity because both gates are functions of `risk_flags` alone, which
-    `test_both_shipped_gates_answer_about_the_flags_and_about_nothing_else_on_the_signal`
-    measures on nine otherwise-unrelated signals.
+    Severity is the worst rung any of the signal's flags reaches, taken from the flags
+    themselves. The two gate verdicts are carried beside it rather than used to derive it:
+    they are what the shipped gates will actually *do* with this signal, which is a different
+    and separately useful fact from what its flags are worth.
+    `tests/unit/domain/test_risk_flag.py::
+    test_both_gates_answer_about_every_declared_flag_and_agree_with_its_severity` is what holds
+    the two readings together, and it is not vacuous despite both gates deriving their sets from
+    the same enum: each gate maps a severity band to a decision independently, and the two
+    deliberately differ on `severe`.
     """
-    gate, committee = _verdicts(signal.risk_flags)
-    severity = _rung(gate, committee)
+    severity = _worst_severity(signal.risk_flags)
     driving = (
         ()
         if severity == "clear"
-        else tuple(flag for flag in signal.risk_flags if flag_severity(flag) == severity)
+        else tuple(flag for flag in signal.risk_flags if flag.severity == severity)
     )
     return GovernanceVerdict(
         severity=severity,
         driving_flags=driving,
-        gate_decision=gate,
-        committee_decision=committee,
+        gate_decision=RiskGate().evaluate(signal),
+        committee_decision=DeliberationCommittee().review(signal=signal, results=()).risk_decision,
     )
+
+
+def _worst_severity(flags: tuple[RiskFlag, ...]) -> GovernanceSeverity:
+    """The worst rung any of `flags` reaches, or `clear` for none.
+
+    Split out of `assess` so the rule is written in one place. Private, because this module
+    declares an `__all__` and a public name outside it is an ambiguous surface. `max` over
+    `SEVERITY_RANK` rather than a chain of `if`s, because the ordering already exists and a
+    second encoding of it is exactly what `SEVERITY_ORDER`'s docstring refuses.
+    """
+    if not flags:
+        return "clear"
+    return max(flags, key=lambda flag: SEVERITY_RANK[flag.severity]).severity

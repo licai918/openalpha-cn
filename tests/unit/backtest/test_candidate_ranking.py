@@ -31,7 +31,8 @@ becomes a list of something else:
    first consumer of `V2-P4-001`'s narrowing that can fail, and it says which subject differs.
 6. **The evidence plane's own flag vocabulary is measured rather than described.**
    `test_the_two_shipped_gates_read_disjoint_subsets_of_an_open_flag_set` reads `RiskGate` and
-   `DeliberationCommittee` themselves.
+   `domain/risk_flag.py` themselves -- and its name is stale since `V2-P4-030` closed that set;
+   see that test's own docstring for why it cannot be renamed here.
 """
 
 from __future__ import annotations
@@ -88,6 +89,7 @@ from openalpha_cn.domain.factor_neutralization import (
     SecurityCharacteristic,
     build_industry_market_cap_cross_section,
 )
+from openalpha_cn.domain.risk_flag import RISK_FLAGS, RiskFlag
 from openalpha_cn.domain.run import RunManifest
 from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.panel_factors import (
@@ -1068,25 +1070,40 @@ def test_an_exposure_cross_section_read_on_another_day_is_refused() -> None:
 
 
 def test_the_two_shipped_gates_read_disjoint_subsets_of_an_open_flag_set() -> None:
-    """The measurement behind this contract having a closed flag set of its own.
+    """**This test's name is stale and says the opposite of what it now measures.**
 
-    `SignalFrame.risk_flags` has no vocabulary. `RiskGate` reads five strings, `agents/committee`
-    treats three others as severe, the two are disjoint, and `committee-disagreement` -- which
-    the committee raises itself -- is in neither, so a signal it flagged passes the runtime gate.
-    Read off the real classes rather than restated, so a change to either is red here.
+    It is kept anyway, and deliberately: `src/openalpha_cn/backtest/candidate_ranking.py:136`
+    cites this test by name from a module docstring, and
+    `tests/unit/test_source_cited_tests.py` holds every such citation to a test that exists
+    under that name. `candidate_ranking.py` is outside `V2-P4-030`'s ownership, so renaming
+    here would break a file this issue may not repair. The name goes when the citation does --
+    see the report's blocked dependencies.
+
+    What it used to measure: `RiskGate` read five strings, `agents/committee` treated three
+    others as severe, the two sets were **disjoint**, and `committee-disagreement` -- which the
+    committee raises about its own deliberation -- was in neither, so a signal the committee had
+    just marked as disputed reached the runtime gate and returned `pass`.
+
+    What it measures now: `domain/risk_flag.py::RiskFlag` declares the vocabulary once and both
+    gates derive from it, so the sets are identical rather than disjoint and no declared flag
+    reaches `RiskGate` and clears it. Two things in `candidate_ranking.py` are therefore stale
+    at this commit and are **not** corrected here -- the section this test is cited from, and
+    `RankingLimitation
+    .the_signals_own_risk_flags_are_an_open_set_and_two_gates_read_disjoint_subsets`.
+
+    What did **not** change is this contract's reason for keeping `RankingRiskFlag`, which is
+    the half worth re-asserting: the two vocabularies describe different planes -- one is about
+    evidence and subjects, the other about a score and a rank -- so neither is a lossy summary
+    of the other and the `SignalFrame` still travels whole. That argument never rested on the
+    evidence plane's set being *open*, only on it being a different set, which is why this test
+    survives its own premise being removed.
     """
     gate_flags = RiskGate._blocking_flags | RiskGate._reducing_flags
-    severe = {"regulatory", "data-quality", "suspension"}
 
-    assert gate_flags == {
-        "future_data",
-        "look_ahead_violation",
-        "redistribution_unknown",
-        "source_uri_missing",
-        "revised_after_initial_availability",
-    }
-    assert gate_flags & severe == set()
-    assert "committee-disagreement" not in gate_flags | severe
+    assert gate_flags == set(RISK_FLAGS), "both gates now act on every declared flag"
+    assert set(RANKING_RISK_FLAG_CODES).isdisjoint({flag.value for flag in RISK_FLAGS}), (
+        "the two planes' vocabularies must not start overlapping by accident"
+    )
 
     committee_source = Path(DeliberationCommittee.__module__.replace(".", "/") + ".py")
     assert (ROOT / "src" / committee_source).exists()
@@ -1100,11 +1117,11 @@ def test_the_two_shipped_gates_read_disjoint_subsets_of_an_open_flag_set() -> No
                 confidence=0.7,
                 horizon=HORIZON,
                 evidence_ids=("evd_000000000000000000000001",),
-                risk_flags=("committee-disagreement",),
+                risk_flags=(RiskFlag.committee_disagreement,),
             )
         )
-        == "pass"
-    ), "a flag the committee raises itself reaches the runtime gate and passes it"
+        == "reduce"
+    ), "the flag the committee raises itself used to reach the runtime gate and pass it"
 
 
 def test_the_declared_risk_flags_are_the_closed_set_this_contract_reports() -> None:

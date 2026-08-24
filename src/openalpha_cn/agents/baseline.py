@@ -5,6 +5,7 @@ from typing import Literal, cast
 
 from openalpha_cn.agents.base import AgentContext, AgentProvenance, AgentResult
 from openalpha_cn.domain.evidence import EvidenceSnapshot
+from openalpha_cn.domain.risk_flag import RiskFlag, parse_risk_flag
 from openalpha_cn.domain.signal import SignalFrame
 
 DETERMINISTIC: AgentProvenance = AgentProvenance(kind="deterministic")
@@ -31,15 +32,38 @@ def _facts(item: EvidenceSnapshot) -> Mapping[str, object]:
     return facts if isinstance(facts, Mapping) else {}
 
 
-def _quality_flags(items: tuple[EvidenceSnapshot, ...]) -> tuple[str, ...]:
-    flags: set[str] = set()
+def _quality_flags(items: tuple[EvidenceSnapshot, ...]) -> tuple[RiskFlag, ...]:
+    """Every declared risk flag the evidence payloads carry, refusing any string that is not one.
+
+    ## Why this raises rather than copying (`V2-P4-030`)
+
+    This function used to `str()` whatever an evidence payload's `quality_flags` held and hand
+    the result to `SignalFrame.risk_flags`, which was `tuple[str, ...]` and accepted it. That is
+    the producer half of the open-set defect, and it is reachable from outside the process:
+    `EvidenceSnapshot.payload` is a `JsonValue` with no schema, and
+    `POST /api/v1/research/run`, `POST /api/v1/research/batches`,
+    `POST /api/v1/backtests/replay` and two CLI commands all take evidence straight off a
+    request body. `freeze_json` turns a JSON list into the `tuple` the old `isinstance` check
+    was looking for, so `{"quality_flags": ["future-data"]}` arrived intact.
+
+    The consequence was not that the junk string was ignored. It was scored: an unrecognised
+    flag ranks **above** a recognised one on `product/governance.py`'s ladder, so a payload
+    misspelling the build's most serious flag moved its candidate *up* a governed screen.
+
+    Refusing is therefore the fail-closed answer and copying was the fail-open one. `RiskFlag`
+    raises `ValueError` naming the offending string, so a producer learns which flag it spelled
+    wrong at the point it wrote it, instead of shipping a promotion. A caller who wants a
+    cosmetic annotation on evidence has the rest of `payload` to put it in; `quality_flags` is
+    the field the gates read.
+    """
+    flags: set[RiskFlag] = set()
     for item in items:
         payload = item.payload
         if not isinstance(payload, Mapping):
             continue
         raw_flags = payload.get("quality_flags", ())
         if isinstance(raw_flags, tuple):
-            flags.update(str(flag) for flag in cast(tuple[object, ...], raw_flags))
+            flags.update(parse_risk_flag(str(flag)) for flag in cast(tuple[object, ...], raw_flags))
     return tuple(sorted(flags))
 
 

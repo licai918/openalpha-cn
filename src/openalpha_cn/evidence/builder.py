@@ -1,14 +1,35 @@
 """A-share-native evidence normalization from provider records."""
 
-from typing import Literal, cast
+from typing import Final, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from openalpha_cn.domain.evidence import EvidenceSnapshot
 from openalpha_cn.domain.json_value import thaw_json
+from openalpha_cn.domain.risk_flag import RiskFlag
 from openalpha_cn.providers.base import ProviderBatch, ProviderMetadata, ProviderRecord
 
 EvidenceFamily = Literal["market_event", "disclosure", "theme", "catalyst", "capital"]
+
+_REDISTRIBUTION_FLAGS: Final[dict[Literal["restricted", "unknown"], RiskFlag]] = {
+    "restricted": RiskFlag.redistribution_restricted,
+    "unknown": RiskFlag.redistribution_unknown,
+}
+"""Which flag a non-`allowed` redistribution term earns (`V2-P4-030`).
+
+This was `f"redistribution_{metadata.redistribution}"`, and the f-string is how the vocabulary
+drifted without anybody noticing. `EvidenceSnapshot.redistribution` is
+`Literal["allowed", "restricted", "unknown"]`, so the expression could produce
+`redistribution_restricted` or `redistribution_unknown` -- and `decisions/risk.py::RiskGate`
+named only the second. All three shipped providers declare `restricted`, so **every flag this
+build actually wrote for redistribution was one no gate had heard of**, while the one the gate
+named could not be produced at all.
+
+A `dict` keyed on the two non-`allowed` terms rather than a formatted string, because that is
+what makes the pair checkable: the key type is the contract's own `Literal` minus `allowed`, so
+a fourth redistribution term added to `EvidenceSnapshot` fails `mypy` here instead of silently
+minting an undeclared flag at runtime.
+"""
 
 
 class _Facts(BaseModel):
@@ -94,11 +115,11 @@ class EvidenceBuilder:
 
         quality_flags: list[str] = []
         if metadata.redistribution != "allowed":
-            quality_flags.append(f"redistribution_{metadata.redistribution}")
+            quality_flags.append(_REDISTRIBUTION_FLAGS[metadata.redistribution].value)
         if record.source_uri is None:
-            quality_flags.append("source_uri_missing")
+            quality_flags.append(RiskFlag.source_uri_missing.value)
         if record.timeline.revision_time > record.timeline.available_time:
-            quality_flags.append("revised_after_initial_availability")
+            quality_flags.append(RiskFlag.revised_after_initial_availability.value)
 
         return EvidenceSnapshot(
             subject=record.subject,
