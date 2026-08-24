@@ -158,15 +158,19 @@ does is make the consequences of each answer unavoidable:
   one boundary that is not this module's to close. Its inputs are read at the run's `as_of`, and
   `V2-P4-026` has just made the valuation half readable inside its own year
   (`load_daily_valuations` now takes the visibility-filtered session read), which took the
-  buildable within-year `as_of`s from one to five. The half that is **not** solved is
-  `index_member_all`: `load_industry_histories` goes through `read_if_ready`, which judges a
-  partition by its `max_available_time`, so a membership year is unreadable until its last
-  adjustment takes effect -- 613 rows from 2021-07-30 and 255 from 2022-07-29 on the real
-  corpus. **`V2-P4-027` is therefore the boundary on any neutralised screen at a mid-year
-  `as_of`**, and it is a boundary on the *caller* that assembles the cross section rather than
-  on this leaf, which reads no partition at all: a screen that cannot get an industry cross
-  section gets no neutralised values, and this module reports `no_scored_candidate` for the
-  ordinary reason. SW2021's own 2021-12-13 availability floor sits outside both.
+  buildable within-year `as_of`s from one to five. The other half, `index_member_all`, used to
+  be unsolved: `load_industry_histories` went through `read_if_ready`, which judges a partition
+  by its `max_available_time`, so a membership year was unreadable until its last adjustment
+  took effect -- 613 rows from 2021-07-30 and 255 from 2022-07-29 on the real corpus.
+  `V2-P4-027`/`V2-P4-028` put the product path on a day-scoped door, so that is no longer the
+  boundary. **What now bounds a neutralised screen is the shortlist face's own request
+  contract** -- `shortlist_view`'s
+  `a_neutralized_tier_screen_needs_exposures_this_face_does_not_load`: a shortlist request
+  carries no membership years, no trading calendar and no neutralisation, and those three decide
+  what the exposures *are*. That is still a boundary on the *caller* that assembles the cross
+  section rather than on this leaf, which reads no partition at all: a screen that cannot get an
+  industry cross section gets no neutralised values, and this module reports `no_scored_candidate`
+  for the ordinary reason. SW2021's own 2021-12-13 availability floor sits outside both.
 
 ## What the hard filter is worth, measured, because the answer is surprising
 

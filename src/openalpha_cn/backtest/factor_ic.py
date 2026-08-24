@@ -212,10 +212,10 @@ back at it.
 series actually meets.** The stamping rule is unchanged, so a neutralised series is exactly as
 point-in-time as the schedule it was built on: a tier built once at year end still reads as one
 December instant, and nothing in a stored artifact says which of the two it was. And one refusal
-still bounds the schedule from outside this module -- `index_member_all` is still read whole
-partition, so a build cannot be scheduled inside a membership year whose newest assignment
-post-dates the `as_of` (`V2-P4-027`), and no cross section at all is assemblable before the
-SW2021 availability floor of 2021-12-13.
+still bounds the schedule from outside this module -- no cross section at all is assemblable
+before the SW2021 availability floor of 2021-12-13. `index_member_all` is read one day at a time
+since `V2-P4-027`/`V2-P4-028` and states no bound of its own; it used to be a second refusal
+here, read whole partition.
 
 `V2-P3-004`'s review judged the original constraint non-blocking for this issue and that
 judgement is unchanged: the residuals' *content* was always clean -- each was computed from the
@@ -503,12 +503,11 @@ KNOWN_IC_LIMITATIONS: Final[tuple[ICLimitation, ...]] = (
             "December instant and a series built daily is a daily series, and NOTHING IN A "
             "STORED IC SAYS WHICH. A reader who wants a point-in-time neutralised IC has to know "
             "the build schedule; this module cannot infer it, because the only evidence it sees "
-            "is the as_ofs the rows carry and both schedules produce well-formed ones. Two "
-            "refusals still bound the schedule from outside this module and are not this entry's "
-            "to fix: index_member_all is read whole partition (V2-P4-027, "
-            "KNOWN_NEUTRALIZATION_LIMITATIONS."
-            "the_industry_input_is_read_whole_partition_so_a_mid_year_as_of_can_be_refused) and "
-            "no cross section before 2021-12-13 is assemblable at all. The residuals' CONTENT "
+            "is the as_ofs the rows carry and both schedules produce well-formed ones. One "
+            "refusal still bounds the schedule from outside this module and is not this entry's "
+            "to fix: no cross section before 2021-12-13 is assemblable at all. index_member_all "
+            "is read one day at a time since V2-P4-027/V2-P4-028 and states no bound of its own. "
+            "The residuals' CONTENT "
             "was clean before this change and is clean after it -- each is regressed against the "
             "industry, the market capitalisation and the processed value of its own day -- which "
             "is what V2-P3-004's review measured when it judged the original constraint "
