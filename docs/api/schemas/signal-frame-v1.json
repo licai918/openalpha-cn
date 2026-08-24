@@ -1,4 +1,23 @@
 {
+  "$defs": {
+    "RiskFlag": {
+      "description": "Every risk flag this build can attach to a signal, with what it is worth.\n\nMembers are grouped by severity, worst first, and ordered oldest-first within a group so\nthat additions read as additions. Order is not semantic: nothing sorts flags by declaration\nposition, and a signal's severity is the worst of its flags rather than the first.",
+      "enum": [
+        "future_data",
+        "look_ahead_violation",
+        "regulatory",
+        "data-quality",
+        "suspension",
+        "redistribution_restricted",
+        "redistribution_unknown",
+        "source_uri_missing",
+        "revised_after_initial_availability",
+        "committee-disagreement"
+      ],
+      "title": "RiskFlag",
+      "type": "string"
+    }
+  },
   "additionalProperties": false,
   "description": "An immutable, evidence-linked research conclusion or abstention.",
   "properties": {
@@ -69,7 +88,7 @@
     "risk_flags": {
       "default": [],
       "items": {
-        "type": "string"
+        "$ref": "#/$defs/RiskFlag"
       },
       "title": "Risk Flags",
       "type": "array"

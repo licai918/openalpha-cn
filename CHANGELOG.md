@@ -203,6 +203,37 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **The risk committee no longer answers `500` to an abstention, and the risk-flag vocabulary has
+  one owner** (`V2-P4-029`, `V2-P4-030`, `V2-P4-036`). `SignalFrame` has always called itself "a
+  research conclusion **or abstention**", and `DeliberationCommittee.review` could not accept one:
+  it recomputed `direction` from `adjusted_strength` into a `Literal` with no `abstain` in it, so
+  an abstention -- which carries no `evidence_ids`, because that is what abstaining means -- came
+  back out directional and died on its own output. `POST /api/v1/research/deliberate` answered
+  **`500` with a `text/plain` body reading `Internal Server Error`**, and `OpenAlphaSDK.deliberate`
+  raised `ValidationError: directional signal requires evidence`. Both now return the abstention
+  unchanged, with the debate still reported beside it: widening the annotation alone would not have
+  been enough, since an abstaining signal has `strength == 0` and a live debate would have put
+  `debate_net / 2` into it and minted a conclusion out of a frame with no evidence behind it.
+- **`risk_flags` is a closed vocabulary, declared once with what each flag is worth.**
+  `domain/risk_flag.py::RiskFlag` replaces three disjoint sets -- two on `RiskGate`, one a literal
+  inside `DeliberationCommittee.review`'s body -- and both gates derive from it, so
+  `regulatory`, `data-quality`, `suspension` and `committee-disagreement` no longer reach the
+  runtime gate and clear it. A misspelling is now a **`422` naming `risk_flags` and listing the
+  vocabulary** instead of a silent demotion to `unrecognised`, which used to move the candidate
+  carrying it *up* a governed screen. Closing the set exposed a drift nobody had recorded: all
+  three shipped providers declare `redistribution="restricted"`, so `redistribution_restricted`
+  was the only redistribution flag this build could produce and **no gate named it**, while the
+  one that was named could not be generated at all. `RiskFlag` is a `StrEnum`, so every stored
+  `signal_id` is byte-identical; `docs/api/schemas/signal-frame-v1.json` now states the
+  vocabulary instead of `"items": {"type": "string"}`.
+- **`SHIPPED_RISK_GATES` is deleted rather than wired up.** It called itself the single source for
+  what counts as severe and nothing read it: adding an always-blocking third gate left
+  `flag_severity('bogus-flag')` at `unrecognised`, and emptying the registry entirely left
+  `flag_severity('future_data')` at `blocked`. A declared vocabulary leaves it nothing to do -- a
+  gate does not get to decide what a flag is *worth*, only what to do about one -- so the registry,
+  the synthetic one-flag probe that existed to route around the committee's crash, and the
+  `lru_cache` that memoised a severity derived by running the gates all went with it.
+
 - **A stored prediction that cannot be parsed is a named refusal, not "a defect in the command"**
   (`V2-P4-096`). A write a power cut stopped half way reached the command line as `exit 5` with
   the message withheld, HTTP as a bare `500 text/plain`, and the SDK as an unenveloped

@@ -142,54 +142,63 @@ KNOWN_SCREENING_LIMITATIONS: Final[tuple[ScreeningLimitation, ...]] = (
     ScreeningLimitation(
         code="the_two_shipped_gates_disagree_and_this_screen_ranks_them_rather_than_reconciling",
         detail=(
-            "SHIPPED_RISK_GATES asks both gates and _rung picks one answer from the pair, with "
+            "V2-P4-030 removed the disagreement about WORDS and kept the one about DECISIONS. "
+            "Both gates now derive their sets from domain/risk_flag.py, so no flag is named by "
+            "one and unknown to the other -- what remains is that the two act differently on "
+            "the severe band, RiskGate reducing where the committee blocks. SEVERITY_ORDER puts "
             "RiskGate's block above the committee's on the argument that RiskGate is the "
             "runtime gate that stops a decision while the committee is optional by design "
-            "(S41). That is a precedence this module declares, not a reconciliation: the two "
-            "vocabularies are still disjoint (KNOWN_RANKING_LIMITATIONS.the_signals_own_risk"
-            "_flags_are_an_open_set_and_two_gates_read_disjoint_subsets, re-measured green at "
-            "this commit), and nothing here makes RiskGate read the committee's words or the "
-            "reverse. A flag one gate names and the other has never heard of still gets exactly "
-            "one rung, chosen by the gate that spoke. What is NOT claimed is that either gate "
-            "is right, or that blocked really is worse than severe for every caller -- only "
-            "that a list needs one order and this is the one, written down in SEVERITY_ORDER "
-            "rather than implied."
+            "(S41). That is still a precedence this module DECLARES rather than a "
+            "reconciliation: nothing here derives one gate's verdict from the other's, and a "
+            "caller who reads blocked as strictly worse than severe is reading this tuple and "
+            "not a measurement. What is NOT claimed is that either gate is right, or that "
+            "blocked really is worse than severe for every caller -- only that a list needs one "
+            "order and this is the one, written down rather than implied."
         ),
     ),
     ScreeningLimitation(
-        code="an_unrecognised_flag_and_a_misspelling_of_a_named_one_are_the_same_rung",
+        code="a_recovery_row_carrying_a_caller_injected_flag_is_refused_rather_than_migrated",
         detail=(
-            "risk_flags is an open string set -- agents/baseline.py::_quality_flags copies "
-            "whatever strings an evidence payload's quality_flags holds, unchecked -- so "
-            "unrecognised means 'no shipped gate names this string' and cannot mean more. A "
-            "caution neither gate has learned yet and a typo of one they both know land on the "
-            "same rung, and the typo case is a DEMOTION of the flag rather than of the name: a "
-            "payload writing future-data instead of future_data drops that candidate from "
-            "blocked to unrecognised and moves it UP the screen. This is not repairable here. "
-            "Closing it needs the vocabulary closed at the point risk_flags is written, which "
-            "is domain/signal.py's contract and agents/baseline.py's producer, neither of which "
-            "this issue owns. Recording it is the honest half: a governed screen over an open "
-            "set is exactly as good as the strings its producers spell correctly."
+            "V2-P4-030 narrowed SignalFrame.risk_flags to a closed enum, which replaces the "
+            "entry this slot used to hold (an_unrecognised_flag_and_a_misspelling_of_a_named"
+            "_one_are_the_same_rung: a payload writing future-data instead of future_data was "
+            "demoted from blocked to unrecognised and moved UP this screen). What the narrowing "
+            "leaves behind is a read path. run_recovery.payload is the only place in this "
+            "database a whole SignalFrame is stored, SQLiteRecoveryStore.get re-validates it "
+            "through the model, and EvidenceSnapshot.payload is an unschema'd JsonValue that "
+            "POST /api/v1/research/run accepts from a request body -- so a row written before "
+            "this commit by a caller who put an undeclared string in quality_flags now fails to "
+            "load, and the run it belonged to cannot resume. No migration pass refuses it by "
+            "name, unlike the horizon narrowing's UnmigratableHorizonError. The difference is "
+            "deliberate: 3m was a value the contract genuinely accepted and no constant could "
+            "convert, whereas every flag this build ever WROTE is declared, so nothing "
+            "openalpha itself produced is outlawed and there is no rewrite to perform. The cost "
+            "of being wrong about that is one unreadable operational row whose documented "
+            "remedy is already deletion, against a schema-version bump on every database. If it "
+            "ever bites, the fix has a template: a _refuse_undeclared_stored_risk_flags pass "
+            "beside _refuse_uncountable_stored_horizons in storage/migrations.py, reading the "
+            "payload as raw JSON and naming the offending runs."
         ),
     ),
     ScreeningLimitation(
-        code="the_committee_is_read_through_a_probe_because_it_refuses_an_abstaining_signal",
+        code="a_severity_is_declared_on_the_flag_and_is_not_a_measurement_of_either_gate",
         detail=(
-            "governance.assess asks both gates about a canonical carrier of the signal's flags "
-            "rather than about the signal, because DeliberationCommittee.review is not total on "
-            "SignalFrame: it recomputes direction from adjusted_strength into "
-            "{bullish, bearish, neutral}, never reproduces abstain, and an abstaining frame "
-            "carries no evidence_ids by SignalFrame.validate_conclusion -- so constructing its "
-            "own DeliberationOutcome raises 'directional signal requires evidence'. Every "
-            "abstention in this build is such a signal and ScreeningCriteria.directions lists "
-            "abstain, so the direct call would raise on the one outcome S42 guarantees. The "
-            "probe is faithful because both gates read risk_flags and nothing else, measured on "
-            "nine otherwise-unrelated signals -- but it IS an indirection, and if either gate "
-            "ever starts reading a second field the probe stops being the signal. That is what "
-            "test_both_shipped_gates_answer_about_the_flags_and_about_nothing_else_on_the"
-            "_signal exists to catch. The defect itself is agents/committee.py's, is reachable "
-            "from POST /api/v1/research/deliberate and OpenAlphaSDK.deliberate, and is not "
-            "fixed here."
+            "This slot used to hold the_committee_is_read_through_a_probe_because_it_refuses_an"
+            "_abstaining_signal -- governance.assess could not call DeliberationCommittee on "
+            "the signal it was given, because review recomputed direction into "
+            "{bullish, bearish, neutral}, never reproduced abstain, and died on an abstaining "
+            "frame's empty evidence_ids. V2-P4-029 fixed that and the probe is gone. What "
+            "replaces the entry is what the repair exposed. Severity is now DECLARED on "
+            "domain/risk_flag.py::RiskFlag rather than inferred from what a gate answers, so "
+            "flag_severity is a statement about the vocabulary and not a measurement of this "
+            "build's behaviour. A gate that stopped honouring its own severity band would not "
+            "move any severity here; only tests/unit/domain/test_risk_flag.py::"
+            "test_both_gates_answer_about_every_declared_flag_and_agree_with_its_severity "
+            "would notice. That "
+            "is the trade V2-P4-036 chose over a registry of gates: a declaration a reader can "
+            "check beats a behaviour a reader has to run, but it is a declaration, and "
+            "GovernanceVerdict carries gate_decision and committee_decision beside the severity "
+            "precisely so the two can be compared without being conflated."
         ),
     ),
     ScreeningLimitation(
@@ -221,19 +230,23 @@ KNOWN_SCREENING_LIMITATIONS: Final[tuple[ScreeningLimitation, ...]] = (
         ),
     ),
     ScreeningLimitation(
-        code="a_flag_severity_is_memoised_per_process_and_a_gate_swapped_at_runtime_is_not_seen",
+        code="the_unrecognised_rung_is_kept_for_the_wire_and_no_signal_can_reach_it",
         detail=(
-            "flag_severity is lru_cache(maxsize=512), bounded rather than functools.cache "
-            "because flag strings arrive in request bodies and an unbounded memo over those is "
-            "a leak whose size a caller chooses. The consequence is that the FIRST answer for a "
-            "string is the one this process keeps: a gate replaced after that -- a test "
-            "monkeypatching what SHIPPED_RISK_GATES calls, or a plugin swapping RiskGate -- "
-            "does not move an already-computed severity until cache_clear(). "
-            "test_the_flag_severity_memo_does_not_see_a_gate_swapped_after_first_use drives "
-            "exactly that, in both directions, so the staleness is measured rather than "
-            "theoretical. It is harmless on the shipped path, where both gates are module-level "
-            "classes that never change within a process, and it is the reason a caller who does "
-            "swap one has to say so."
+            "This slot used to hold a_flag_severity_is_memoised_per_process_and_a_gate_swapped"
+            "_at_runtime_is_not_seen. Both halves of that entry are gone: flag_severity no "
+            "longer derives its answer by running the gates, so there is nothing to memoise, "
+            "and the lru_cache(maxsize=512) it was bounded by -- bounded because flag strings "
+            "arrived in request bodies -- is deleted. What replaces it is the rung that "
+            "measurement lived on. unrecognised meant 'no shipped gate names this string', and "
+            "V2-P4-030 closed the vocabulary at SignalFrame, so assess can never return it: a "
+            "signal cannot carry an undeclared flag. The rung is NOT removed, because "
+            "worst_severity_admitted is a field of a shipped request body and dropping a value "
+            "a caller may already be sending would break POST /api/v1/screen in order to record "
+            "a fact. So the ladder has five rungs of which a signal reaches four, "
+            "worst_severity_admitted='unrecognised' behaves exactly as "
+            "worst_severity_admitted='clear' would for any signal this build can construct, and "
+            "a caller who sets it expecting to admit 'flags nobody recognises' is naming a set "
+            "that is now empty by construction rather than by accident."
         ),
     ),
 )

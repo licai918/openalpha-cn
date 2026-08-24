@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validat
 
 from openalpha_cn.domain._identity import stable_model_id
 from openalpha_cn.domain.horizon import COUNTABLE_HORIZON_PATTERN
+from openalpha_cn.domain.risk_flag import RiskFlag
 from openalpha_cn.domain.time import ensure_aware
 from openalpha_cn.domain.versioning import ContractVersions
 
@@ -47,7 +48,33 @@ class SignalFrame(BaseModel):
     evidence_ids: tuple[str, ...] = ()
     confirmation_conditions: tuple[str, ...] = ()
     invalidation_conditions: tuple[str, ...] = ()
-    risk_flags: tuple[str, ...] = ()
+    risk_flags: tuple[RiskFlag, ...] = ()
+    """The cautions this signal carries, from the closed vocabulary in `domain/risk_flag.py`.
+
+    `tuple[str, ...]` until `V2-P4-030`, which is the field the open-set defect lived in. Three
+    modules read closed subsets of it and none of them agreed; worse, a producer that misspelled
+    a flag was not refused -- `future-data` instead of `future_data` was worth `unrecognised`,
+    a rung *above* `clear` and *below* `reduced`, so a typo of the most serious flag in the
+    build **promoted** the candidate carrying it up a governed screen. `V2-P4-006` measured that
+    and named this field as the place it had to be closed.
+
+    Narrowing rather than re-versioning, and `schema_version` stays at `signal-frame/v1` for
+    `domain/horizon.py`'s reason: `signal_id` hashes the canonical JSON of these fields, and
+    `RiskFlag` is a `StrEnum`, so every value that was already well formed serialises to the
+    bytes it always did and no stored identity moves. That is measured rather than assumed --
+    `tests/unit/domain/test_risk_flag.py::test_closing_the_vocabulary_moved_no_stored_signal_id`
+    asserts a fixed digest, because an identity that moved would not fail.
+
+    The one casualty is a stored `run_recovery` payload carrying a flag no shipped writer
+    produces, which `SQLiteRecoveryStore.get` re-validates through this model and would now
+    refuse. Unlike the horizon narrowing -- which outlawed `3m`, a value the contract had
+    genuinely accepted and which no constant could convert -- nothing this build ever *wrote* is
+    outlawed here, so there is no rewrite to perform and no `storage/migrations.py` pass to
+    perform it: every flag `evidence/builder.py` and the committee emit is declared, held by
+    `tests/unit/evidence/test_builder.py` and by `test_risk_flag.py`'s gate audit. See
+    `KNOWN_SCREENING_LIMITATIONS
+    .a_recovery_row_carrying_a_caller_injected_flag_is_refused_rather_than_migrated`.
+    """
     abstention_reason: str | None = Field(default=None, min_length=1, max_length=2000)
 
     @field_validator("as_of")

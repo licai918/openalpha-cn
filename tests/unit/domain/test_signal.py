@@ -3,6 +3,7 @@ from datetime import datetime
 import pytest
 from pydantic import ValidationError
 
+from openalpha_cn.domain.risk_flag import RiskFlag
 from openalpha_cn.domain.signal import SignalFrame
 
 
@@ -36,6 +37,14 @@ def test_signal_requires_an_explicit_reason_when_abstaining(plain_frozen_now: da
 
 
 def test_signal_is_immutable_versioned_and_content_addressed(plain_frozen_now: datetime) -> None:
+    """Immutability and content addressing, on a frame carrying a flag that is really a flag.
+
+    `risk_flags` used to read `("event_concentration",)` here -- a string that appeared **nowhere
+    else in the repository**: no gate named it, no builder emitted it, and nothing could have
+    told it from a typo. That a fixture could invent a risk flag and no test notice is the
+    open-set defect in miniature, and `V2-P4-030` is why it now has to be one of the ten
+    `domain/risk_flag.py` declares.
+    """
     AS_OF = plain_frozen_now
     signal = SignalFrame(
         subject="000001.SZ",
@@ -47,7 +56,7 @@ def test_signal_is_immutable_versioned_and_content_addressed(plain_frozen_now: d
         evidence_ids=("ev_123",),
         confirmation_conditions=("volume remains above its 20-day median",),
         invalidation_conditions=("closes below the event-day low",),
-        risk_flags=("event_concentration",),
+        risk_flags=(RiskFlag.suspension,),
     )
 
     assert signal.schema_version == "signal-frame/v1"

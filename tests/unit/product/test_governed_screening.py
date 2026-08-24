@@ -5,20 +5,27 @@ _rank_first`, and it failed against the implementation this replaces with
 `['000001.SZ', '600000.SH'] != ['600000.SH', '000001.SZ']` -- the old key was
 `(-confidence, -strength, subject)`, so 0.95 with `future_data` outsorted 0.60 with nothing.
 
-Everything below the ordering tests is about the *source* of severity.
-`src/openalpha_cn/product/governance.py` deliberately holds no risk-flag strings: it asks the
-two gates this build already ships (`decisions/risk.py::RiskGate` and
-`agents/committee.py::DeliberationCommittee`) what each flag is worth. Three tests hold that
-arrangement up -- `test_no_shipped_risk_flag_is_written_in_executable_code_under_product` (no
-fourth list exists), `test_both_shipped_gates_answer_about_the_flags_and_about_nothing_else_on
-_the_signal` (the one-flag probe measures the flag), and
-`test_the_two_shipped_vocabularies_are_still_disjoint_and_are_read_rather_than_restated` (the
-fracture `V2-P4-005` recorded is still real, and is re-measured off the classes).
+Everything below the ordering tests is about the *source* of severity, and `V2-P4-030` moved it.
 
-The committee's three severe strings are the only flag literals in this file that are not read
-off a shipped object, because they live inside `DeliberationCommittee.review`'s body rather
-than in any attribute. They are not trusted as literals: every one is asserted to be `severe`
-*through* `flag_severity`, so renaming one upstream turns this file red rather than stale.
+`V2-P4-006` could not name a flag from inside `product/`: the vocabulary was open, three modules
+read disjoint closed subsets of it, and writing the union down here would have been a fourth
+list. So `governance.py` held no flag strings at all and obtained severity by *asking* the two
+shipped gates -- driving a synthetic one-flag `SignalFrame` through each and reading the verdict
+back out.
+
+`domain/risk_flag.py::RiskFlag` now declares every flag **with what it is worth**, and both gates
+derive their sets from it, so severity is read rather than inferred.
+`test_no_shipped_risk_flag_is_written_in_executable_code_under_product` survives that move
+unchanged and matters more than before -- `product/` still may not spell a flag, because a
+literal here would be a copy of a vocabulary that now has an owner.
+`tests/unit/domain/test_risk_flag.py` holds the vocabulary itself.
+
+Three tests in this file used to assert the defect and now assert its absence, and each says so
+where it stands: the two gates are no longer disjoint
+(`test_the_two_shipped_gates_now_read_one_vocabulary_and_still_disagree_usefully`), a misspelling
+is refused rather than demoted (`test_a_misspelling_of_a_named_flag_is_refused_rather_than_
+promoting_the_candidate`), and the committee can be asked about an abstention
+(`test_the_shipped_committee_can_now_be_asked_about_an_abstaining_signal`).
 """
 
 from __future__ import annotations
@@ -34,13 +41,13 @@ from pydantic import ValidationError
 from openalpha_cn.agents.committee import DeliberationCommittee
 from openalpha_cn.decisions.risk import RiskGate
 from openalpha_cn.domain.decision import DecisionLedger
+from openalpha_cn.domain.risk_flag import RISK_FLAGS, RiskFlag
 from openalpha_cn.domain.run import RunManifest
 from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.product import governance, reporting, research, screening, watchlist
 from openalpha_cn.product.governance import (
     SEVERITY_ORDER,
     SEVERITY_RANK,
-    SHIPPED_RISK_GATES,
     GovernanceSeverity,
     assess,
     flag_severity,
@@ -63,17 +70,24 @@ COMMIT: Final[str] = "0123456789abcdef"
 CONFIG_DIGEST: Final[str] = "b" * 64
 EVIDENCE: Final[tuple[str, ...]] = ("evd_000000000000000000000001",)
 
-COMMITTEE_SEVERE_FLAGS: Final[tuple[str, ...]] = ("regulatory", "data-quality", "suspension")
-"""The set literal inside `DeliberationCommittee.review`, which is not readable as an attribute.
+COMMITTEE_SEVERE_FLAGS: Final[tuple[RiskFlag, ...]] = tuple(
+    flag for flag in RISK_FLAGS if flag.severity == "severe"
+)
+"""The flags the committee blocks on, **read off the vocabulary** rather than spelled here.
 
-Spelled here and then *checked* rather than trusted: `test_the_two_shipped_vocabularies_are
-_still_disjoint_and_are_read_rather_than_restated` requires `flag_severity` to answer `severe`
-for each, and `severe` is only reachable when `RiskGate` passes and the committee blocks. A
-rename upstream therefore fails this file instead of silently making it assert nothing.
+They used to be spelled out, because they lived in a set literal inside
+`DeliberationCommittee.review`'s body and no attribute exposed them. `V2-P4-030` lifted them to
+`domain/risk_flag.py`, so this file no longer has to name a flag to test one -- which is the
+same property `test_no_shipped_risk_flag_is_written_in_executable_code_under_product` demands of
+`product/` itself.
 """
 
-COMMITTEE_DISAGREEMENT: Final[str] = "committee-disagreement"
-"""The flag the committee raises about its own deliberation, which neither gate reads."""
+COMMITTEE_DISAGREEMENT: Final[RiskFlag] = RiskFlag.committee_disagreement
+"""The flag the committee raises about its own deliberation.
+
+Neither gate read it before `V2-P4-030` -- so `RiskGate` answered `pass` on a signal the
+committee had just recorded as disputed. It is `reduced` now, and both gates act on it.
+"""
 
 
 def make_result(
@@ -120,21 +134,26 @@ def make_result(
     return ResearchRunResult(signal=signal, decision=decision, manifest=manifest, agent_results=())
 
 
-def gate_flags() -> frozenset[str]:
-    """Every flag `RiskGate` names, read off the class rather than restated."""
+def gate_flags() -> frozenset[RiskFlag]:
+    """Every flag `RiskGate` acts on, read off the class rather than restated."""
     return RiskGate._blocking_flags | RiskGate._reducing_flags
 
 
-def one_flag_per_rung() -> dict[GovernanceSeverity, str]:
-    """One real flag for each rung above `clear`, all three sources read the same way."""
-    blocking = sorted(RiskGate._blocking_flags)[0]
-    reducing = sorted(RiskGate._reducing_flags)[0]
-    return {
-        "blocked": blocking,
-        "severe": COMMITTEE_SEVERE_FLAGS[0],
-        "reduced": reducing,
-        "unrecognised": COMMITTEE_DISAGREEMENT,
-    }
+def flags_at(severity: GovernanceSeverity) -> tuple[RiskFlag, ...]:
+    """Every declared flag sitting on `severity`, in declaration order."""
+    return tuple(flag for flag in RISK_FLAGS if flag.severity == severity)
+
+
+def one_flag_per_rung() -> dict[GovernanceSeverity, RiskFlag]:
+    """One real flag for each rung a *signal* can reach above `clear`.
+
+    Three rungs rather than four. `unrecognised` is no longer among them and cannot be: it means
+    "this string is not a declared flag", and `SignalFrame.risk_flags` refuses such a string
+    outright since `V2-P4-030`. The rung survives on the ladder because `flag_severity` takes a
+    bare `str` and has to answer about one -- see
+    `test_the_unrecognised_rung_survives_for_strings_but_no_signal_can_reach_it`.
+    """
+    return {rung: flags_at(rung)[0] for rung in ("blocked", "severe", "reduced")}
 
 
 # --- the acceptance criterion -----------------------------------------------------------
@@ -162,9 +181,16 @@ def test_a_flag_count_cannot_separate_the_severe_from_the_benign_and_a_severity_
 
     Two candidates, one flag each, identical confidence: the count is 1 for both, so no
     `max_risk_flags` admits one and rejects the other. The severity does, by name.
+
+    The benign flag was `cosmetic-note` -- an invented string, which the open set accepted and
+    scored at `unrecognised`. It is `source_uri_missing` now, a declared `reduced` flag, and the
+    point survives the change intact: the count still cannot tell the two apart and the severity
+    still can. What no longer exists is the *invented* flag, which is `V2-P4-030`.
     """
     severe = make_result(subject="000001.SZ", confidence=0.8, risk_flags=("future_data",))
-    benign = make_result(subject="600000.SH", confidence=0.8, risk_flags=("cosmetic-note",))
+    benign = make_result(
+        subject="600000.SH", confidence=0.8, risk_flags=(RiskFlag.source_uri_missing,)
+    )
 
     by_count = ResearchScreener().screen(
         results=(severe, benign), criteria=ScreeningCriteria(max_risk_flags=1)
@@ -180,7 +206,7 @@ def test_a_flag_count_cannot_separate_the_severe_from_the_benign_and_a_severity_
 
     by_severity = ResearchScreener().screen(
         results=(severe, benign),
-        criteria=ScreeningCriteria(worst_severity_admitted="unrecognised"),
+        criteria=ScreeningCriteria(worst_severity_admitted="reduced"),
     )
     assert [item.subject for item in by_severity.items] == ["600000.SH"]
     assert [entry.subject for entry in by_severity.excluded] == ["000001.SZ"]
@@ -189,12 +215,17 @@ def test_a_flag_count_cannot_separate_the_severe_from_the_benign_and_a_severity_
 
 
 def test_a_disputed_signal_no_longer_sorts_as_though_it_were_clean() -> None:
-    """The fracture `V2-P4-005` recorded, closed on the screening plane.
+    """The fracture `V2-P4-005` recorded, closed on the screening plane and then at the gate.
 
-    `committee-disagreement` is in neither gate's closed subset, so `RiskGate` returns `pass`
-    for it -- which is asserted here rather than assumed. Before this issue that made a
-    disputed signal indistinguishable from a clean one to the screen; now it sits one rung
-    down and a clean name at *lower* confidence outranks it.
+    `committee-disagreement` was in neither gate's closed subset, so `RiskGate` returned `pass`
+    for the one flag in the build guaranteed to be spelled correctly -- the committee raises it
+    itself. `V2-P4-006` gave it a rung here (`unrecognised`, one above `clear`) without being
+    able to change what the runtime gate did about it. `V2-P4-030` declared it `reduced`, so the
+    gate now reduces on it and the rung moved with the declaration.
+
+    Both facts are asserted rather than assumed, because the second is the one that was a
+    fail-open hole: a screen that merely re-sorts a disputed name leaves the gate that decides
+    whether to act on it saying `pass`.
     """
     disputed_signal = SignalFrame(
         subject="000001.SZ",
@@ -206,8 +237,8 @@ def test_a_disputed_signal_no_longer_sorts_as_though_it_were_clean() -> None:
         evidence_ids=EVIDENCE,
         risk_flags=(COMMITTEE_DISAGREEMENT,),
     )
-    assert RiskGate().evaluate(disputed_signal) == "pass"
-    assert flag_severity(COMMITTEE_DISAGREEMENT) == "unrecognised"
+    assert RiskGate().evaluate(disputed_signal) == "reduce"
+    assert flag_severity(COMMITTEE_DISAGREEMENT) == "reduced"
 
     disputed = make_result(
         subject="000001.SZ", confidence=0.9, risk_flags=(COMMITTEE_DISAGREEMENT,)
@@ -217,9 +248,9 @@ def test_a_disputed_signal_no_longer_sorts_as_though_it_were_clean() -> None:
     screened = ResearchScreener().screen(results=(disputed, clean), criteria=ScreeningCriteria())
 
     assert [item.subject for item in screened.items] == ["600000.SH", "000001.SZ"]
-    assert screened.items[1].severity == "unrecognised"
+    assert screened.items[1].severity == "reduced"
     assert screened.items[1].driving_flags == (COMMITTEE_DISAGREEMENT,)
-    assert screened.items[1].gate_decision == "pass"
+    assert screened.items[1].gate_decision == "reduce"
     assert screened.items[1].committee_decision == "reduce"
 
 
@@ -263,51 +294,56 @@ def test_equal_confidence_within_a_rung_still_breaks_on_strength_then_subject() 
 # --- where severity comes from ----------------------------------------------------------
 
 
-def test_the_two_shipped_vocabularies_are_still_disjoint_and_are_read_rather_than_restated() -> (
-    None
-):
-    """The premise of the whole design, re-measured at this commit off the real classes.
+def test_the_two_shipped_gates_now_read_one_vocabulary_and_still_disagree_usefully() -> None:
+    """The premise of this design, inverted from what `V2-P4-006` had to assume.
 
-    `V2-P4-005` measured `RiskGate`'s five flags and the committee's three to be disjoint, with
-    `committee-disagreement` in neither. If either gate is ever widened to read the other's
-    words, this goes red -- which is the point: the design below assumes the two disagree, and
-    a design whose premise silently stopped holding is worse than one that never had it.
+    `V2-P4-005` measured `RiskGate`'s five flags and the committee's three to be **disjoint**,
+    with `committee-disagreement` in neither, and the previous version of this test asserted
+    exactly that -- because a severity read out of two gates' behaviour is only well defined
+    while the two disagree about which words they know.
+
+    `V2-P4-030` removed the disagreement about *words* and kept the one about *decisions*. Every
+    declared flag now reaches both gates; what still differs, deliberately, is what each does
+    with the `severe` band. That residual difference is what keeps `severe` a rung of its own
+    rather than a synonym for `blocked`, and it is asserted here as an equality on the gate's
+    own sets so that a gate quietly acquiring a private set again fails this file.
     """
-    assert gate_flags() == {
-        "future_data",
-        "look_ahead_violation",
-        "redistribution_unknown",
-        "source_uri_missing",
-        "revised_after_initial_availability",
-    }
+    assert gate_flags() == set(RISK_FLAGS), "RiskGate must act on every declared flag"
+    assert RiskGate._blocking_flags == set(flags_at("blocked"))
+    assert RiskGate._reducing_flags == set(flags_at("severe")) | set(flags_at("reduced"))
 
     for flag in RiskGate._blocking_flags:
         assert flag_severity(flag) == "blocked"
-    for flag in RiskGate._reducing_flags:
-        assert flag_severity(flag) == "reduced"
 
     for flag in COMMITTEE_SEVERE_FLAGS:
-        assert flag_severity(flag) == "severe", (
-            f"{flag} is no longer the committee's alone; either RiskGate now reads it or the "
-            "committee stopped -- reread agents/committee.py before touching this file"
+        assert flag_severity(flag) == "severe"
+        assert flag in gate_flags(), (
+            f"{flag} used to reach RiskGate and return pass; that is the hole V2-P4-030 closed"
         )
-        assert flag not in gate_flags()
+        assert RiskGate().evaluate(unflagged_signal((flag,))) == "reduce"
 
-    assert flag_severity(COMMITTEE_DISAGREEMENT) == "unrecognised"
-    assert COMMITTEE_DISAGREEMENT not in gate_flags()
+    assert flag_severity(COMMITTEE_DISAGREEMENT) == "reduced"
+    assert COMMITTEE_DISAGREEMENT in gate_flags()
 
 
 def test_no_shipped_risk_flag_is_written_in_executable_code_under_product() -> None:
-    """There is no fourth list, and this is how that is known rather than asserted.
+    """There is no second list under `product/`, and this is how that is known rather than asserted.
 
-    Every flag string any shipped gate reads, checked against every string constant under
-    `src/openalpha_cn/product/` that is **not** a docstring. Prose may name a flag -- both new
-    modules do, at length -- and code may not, because a literal in code is a copy and a copy
-    is the thing that drifts. The docstring/executable split is
+    Every declared flag, checked against every string constant under
+    `src/openalpha_cn/product/` that is **not** a docstring. Prose may name a flag -- both
+    modules do, at length -- and code may not, because a literal in code is a copy and a copy is
+    the thing that drifts. The docstring/executable split is
     `tests/unit/test_known_limitation_registries.py`'s, pointed at source instead of tests.
+
+    Unchanged by `V2-P4-030` except for the count, and that is worth saying: this test was
+    written when `product/` had no vocabulary it was *allowed* to name, and it still passes now
+    that one exists in `domain/`. The rule was never "product may not know the flags", it was
+    "product may not be where they are written".
+    `tests/unit/domain/test_risk_flag.py::test_no_other_module_declares_the_risk_flag_set` is
+    the same audit over the whole source tree.
     """
-    shipped = gate_flags() | set(COMMITTEE_SEVERE_FLAGS) | {COMMITTEE_DISAGREEMENT}
-    assert len(shipped) == 9
+    shipped = {flag.value for flag in RISK_FLAGS}
+    assert len(shipped) == 10
 
     offenders: dict[str, set[str]] = {}
     for path in sorted(PRODUCT_ROOT.rglob("*.py")):
@@ -316,35 +352,39 @@ def test_no_shipped_risk_flag_is_written_in_executable_code_under_product() -> N
             offenders[path.name] = found
 
     assert offenders == {}, (
-        "a risk-flag string in executable position under product/ is a fourth copy of a "
-        "vocabulary that already disagrees with itself three ways; ask SHIPPED_RISK_GATES "
-        "instead"
+        "a risk-flag string in executable position under product/ is a second copy of a "
+        "vocabulary that has an owner; import domain/risk_flag.py::RiskFlag instead"
     )
 
 
 def test_both_shipped_gates_answer_about_the_flags_and_about_nothing_else_on_the_signal() -> None:
-    """What makes a synthetic one-flag probe a measurement of the flag rather than of the probe.
+    """Both gates read `risk_flags` and no other field, measured rather than assumed.
 
-    `governance._probe` builds a `SignalFrame` that carries the flags and is otherwise
-    arbitrary, so the whole design rests on neither gate reading any other field. Nine signals
-    that agree on nothing but `risk_flags` -- different subject, instant, direction, strength,
-    confidence, horizon, evidence and conditions -- must produce one verdict from each gate and
-    one severity from `assess`.
+    This used to be the load-bearing justification for `governance._probe`: severity was read
+    off a synthetic carrier of the flags, so the design rested on neither gate looking at any
+    other field. The probe is gone -- `assess` asks about the real signal now -- but the
+    property is still worth holding, because `GovernanceVerdict.gate_decision` and
+    `committee_decision` are what the gates will actually do, and a gate that started reading
+    `confidence` would make a severity and a verdict disagree with no test noticing.
 
-    The committee is driven on the seven directional ones only, because it cannot be driven on
-    the other two at all; that is not a gap in this measurement but a separate defect, and
-    `test_the_shipped_committee_cannot_be_asked_about_an_abstaining_signal_at_all` is where it
-    is measured.
+    Nine signals that agree on nothing but `risk_flags` -- different subject, instant,
+    direction, strength, confidence, horizon, evidence and conditions -- must produce one
+    verdict from each gate and one severity from `assess`.
+
+    **All nine, including the two abstaining ones.** The previous version drove the committee on
+    seven, because `review` could not be handed an abstention at all; `V2-P4-029` fixed that,
+    and driving the full nine is how this test stops silently excluding the case that used to
+    crash.
     """
     for flags in ((), ("future_data",), COMMITTEE_SEVERE_FLAGS[:1], (COMMITTEE_DISAGREEMENT,)):
         signals = signals_agreeing_only_on(flags)
-        directional = tuple(item for item in signals if item.direction != "abstain")
         assert len(signals) == 9
-        assert len(directional) == 7
+        assert sum(1 for item in signals if item.direction == "abstain") == 2
 
-        gate_answers = {SHIPPED_RISK_GATES["runtime-risk-gate"](item) for item in signals}
+        gate_answers = {RiskGate().evaluate(item) for item in signals}
         committee_answers = {
-            SHIPPED_RISK_GATES["deliberation-committee"](item) for item in directional
+            DeliberationCommittee().review(signal=item, results=()).risk_decision
+            for item in signals
         }
         severities = {assess(item).severity for item in signals}
 
@@ -355,22 +395,23 @@ def test_both_shipped_gates_answer_about_the_flags_and_about_nothing_else_on_the
         assert severities == {expected}
 
 
-def test_the_shipped_committee_cannot_be_asked_about_an_abstaining_signal_at_all() -> None:
-    """A pre-existing defect in `agents/committee.py`, measured here because this issue routes
-    around it rather than editing a file it does not own.
+def test_the_shipped_committee_can_now_be_asked_about_an_abstaining_signal() -> None:
+    """The defect this module used to route around, and the indirection that went with it.
 
-    `DeliberationCommittee.review` recomputes `direction` from `adjusted_strength` and can
-    never reproduce `abstain`, so on an abstaining signal -- which by
-    `SignalFrame.validate_conclusion` carries no `evidence_ids` -- it dies validating its own
-    `DeliberationOutcome`. `POST /api/v1/research/deliberate` and `OpenAlphaSDK.deliberate`
-    both hand a caller-supplied signal straight in, so this reaches a shipped face; PRD S42
-    makes explicit abstention a guarantee, and `ScreeningCriteria.directions` lists `abstain`
-    as something a caller may screen for.
+    The previous version of this test asserted the **opposite**, and did so deliberately: it
+    pinned `ValidationError: directional signal requires evidence` on the real class so that the
+    day somebody repaired `review` it would go red and `governance.assess`'s workaround would be
+    re-read rather than kept out of habit. `V2-P4-029` is that day. It went red exactly as
+    designed, and this is the reread.
 
-    `governance.assess` therefore asks both gates about a canonical carrier of the signal's
-    flags instead of about the signal. This test pins the refusal on the real class, so the day
-    somebody repairs `review` it goes red and the workaround gets re-read rather than kept out
-    of habit -- and the second half proves the screen survives the defect today.
+    `review` recomputed `direction` from `adjusted_strength` into a `Literal` with no `abstain`
+    in it, so an abstaining signal -- which by `SignalFrame.validate_conclusion` carries no
+    `evidence_ids` -- came back out directional and killed its own `DeliberationOutcome`. That
+    is why `assess` used to ask both gates about a synthetic carrier of the flags rather than
+    about the signal. It asks about the signal now.
+
+    The second half is unchanged and is the reason this test still exists: an abstention is a
+    first-class outcome (PRD S42) whose flags must still be rated.
     """
     abstaining = SignalFrame(
         subject="000001.SZ",
@@ -381,14 +422,16 @@ def test_the_shipped_committee_cannot_be_asked_about_an_abstaining_signal_at_all
         horizon="5d",
         abstention_reason="evidence insufficient",
     )
-    with pytest.raises(ValidationError, match="directional signal requires evidence"):
-        DeliberationCommittee().review(signal=abstaining, results=())
+    outcome = DeliberationCommittee().review(signal=abstaining, results=())
+    assert outcome.adjusted_signal.direction == "abstain"
+    assert outcome.risk_decision == "pass"
 
     assert assess(abstaining).severity == "clear"
-    flagged = abstaining.model_copy(update={"risk_flags": ("future_data",)})
+    flagged = abstaining.model_copy(update={"risk_flags": (RiskFlag.future_data,)})
     verdict = assess(flagged)
     assert verdict.severity == "blocked"
-    assert verdict.driving_flags == ("future_data",)
+    assert verdict.driving_flags == (RiskFlag.future_data,)
+    assert verdict.gate_decision == "block"
 
 
 def test_a_signals_severity_is_the_worst_of_its_flags_taken_one_at_a_time() -> None:
@@ -398,7 +441,7 @@ def test_a_signals_severity_is_the_worst_of_its_flags_taken_one_at_a_time() -> N
     The assertion is what would notice if one stopped being one.
     """
     rungs = one_flag_per_rung()
-    mixed = (rungs["severe"], rungs["blocked"], rungs["reduced"], rungs["unrecognised"])
+    mixed = (rungs["severe"], rungs["blocked"], rungs["reduced"])
 
     verdict = assess(
         SignalFrame(
@@ -445,30 +488,72 @@ def test_driving_flags_names_every_flag_at_the_worst_rung_and_only_those() -> No
 
 
 def test_any_flag_at_all_lifts_a_signal_off_the_clear_rung() -> None:
-    """`clear` means no flags, and nothing else -- so an unknown word is not silently clean."""
+    """`clear` means no flags, and nothing else -- every declared flag outranks it.
+
+    This used to drive one invented string (`a-word-no-gate-has-ever-heard-of`) and assert it
+    landed on `unrecognised`. That string is unconstructable now, so the claim is made the way
+    it should always have been made: over the **whole vocabulary**, so a flag added at the
+    gentlest severity still cannot be mistaken for a clean signal.
+    """
     clean = assess(unflagged_signal(()))
     assert clean.severity == "clear"
     assert clean.driving_flags == ()
 
-    unknown = assess(unflagged_signal(("a-word-no-gate-has-ever-heard-of",)))
-    assert unknown.severity == "unrecognised"
-    assert unknown.driving_flags == ("a-word-no-gate-has-ever-heard-of",)
-    assert SEVERITY_RANK[unknown.severity] > SEVERITY_RANK["clear"]
+    for flag in RISK_FLAGS:
+        verdict = assess(unflagged_signal((flag,)))
+        assert verdict.driving_flags == (flag,)
+        assert SEVERITY_RANK[verdict.severity] > SEVERITY_RANK["clear"], flag
+
+
+def test_the_unrecognised_rung_survives_for_strings_but_no_signal_can_reach_it() -> None:
+    """Where `unrecognised` went, which is the ladder's half of `V2-P4-030`.
+
+    It meant "no shipped gate names this string", and the string that landed there most often
+    was a **misspelling** -- which is how a typo of the build's most serious flag used to
+    outrank the flag itself. `SignalFrame` refuses such a string now, so `assess` can never
+    return this rung.
+
+    The rung is kept rather than deleted, for a reason that is about the wire and not about
+    tidiness: `ScreeningCriteria.worst_severity_admitted` is a field of a shipped request body,
+    and removing a value a caller may already be sending would break `POST /api/v1/screen` in
+    order to record a fact. `flag_severity` still answers it, because it takes a bare `str` and
+    "that is not a flag" is a real answer to a real question.
+    """
+    assert "unrecognised" in SEVERITY_ORDER
+    assert flag_severity("a-word-no-gate-has-ever-heard-of") == "unrecognised"
+    assert ScreeningCriteria(worst_severity_admitted="unrecognised").worst_severity_admitted == (
+        "unrecognised"
+    )
+
+    with pytest.raises(ValidationError, match="risk_flags"):
+        unflagged_signal(("a-word-no-gate-has-ever-heard-of",))
+
+    reachable = {assess(unflagged_signal((flag,))).severity for flag in RISK_FLAGS}
+    assert "unrecognised" not in reachable
 
 
 def test_the_ladder_is_declared_once_and_every_rung_is_reachable() -> None:
-    """The vocabulary, the order and the ranking are one declaration, and none of it is dead."""
+    """The vocabulary, the order and the ranking are one declaration, and none of it is dead.
+
+    `SHIPPED_RISK_GATES` used to be asserted here, and its deletion is `V2-P4-036`: it called
+    itself the single source for what counts as severe and **nothing read it**. Measured on the
+    previous commit, adding an always-blocking third gate left `flag_severity('bogus-flag')` at
+    `unrecognised`, and emptying the registry entirely left `flag_severity('future_data')` at
+    `blocked`. It is not replaced by a registry that works, because a declared vocabulary leaves
+    it nothing to do.
+
+    The `lru_cache` bound was asserted here too, and it is gone for the same kind of reason: the
+    memo existed because the answer was computed by building a `SignalFrame` and running a
+    committee, and it was *bounded* because the keys came from request bodies. The answer is a
+    dictionary lookup on a ten-member enum now.
+    """
     assert SEVERITY_ORDER == ("clear", "unrecognised", "reduced", "severe", "blocked")
     assert {name: index for index, name in enumerate(SEVERITY_ORDER)} == SEVERITY_RANK
-    assert set(SHIPPED_RISK_GATES) == {"runtime-risk-gate", "deliberation-committee"}
-    assert flag_severity.cache_info().maxsize is not None, (
-        "flag strings come from request bodies; an unbounded memo over them is a leak "
-        "whose size a caller chooses"
-    )
+    assert not hasattr(governance, "SHIPPED_RISK_GATES")
+    assert not hasattr(flag_severity, "cache_info")
 
-    reached = {"clear": flag_severity_of_no_flags()} | {
-        rung: flag_severity(flag) for rung, flag in one_flag_per_rung().items()
-    }
+    reached = {"clear": flag_severity_of_no_flags(), "unrecognised": flag_severity("not-a-flag")}
+    reached |= {rung: flag_severity(flag) for rung, flag in one_flag_per_rung().items()}
     assert reached == {rung: rung for rung in SEVERITY_ORDER}
 
 
@@ -534,7 +619,11 @@ def test_each_per_result_exclusion_reason_is_reachable_on_its_own() -> None:
             ScreeningCriteria(final_actions=("watch",)),
         ),
         "over_max_risk_flags": (
-            make_result(subject="AAA", confidence=0.9, risk_flags=("a", "b")),
+            make_result(
+                subject="AAA",
+                confidence=0.9,
+                risk_flags=(RiskFlag.source_uri_missing, RiskFlag.redistribution_restricted),
+            ),
             ScreeningCriteria(max_risk_flags=1),
         ),
         "worse_than_admitted_severity": (
@@ -557,7 +646,10 @@ def test_a_result_failing_two_criteria_is_reported_under_the_declared_precedence
     time: the reported reason must walk the declared tuple in order.
     """
     result = make_result(
-        subject="AAA", confidence=0.05, direction="neutral", risk_flags=("future_data", "x")
+        subject="AAA",
+        confidence=0.05,
+        direction="neutral",
+        risk_flags=(RiskFlag.future_data, RiskFlag.source_uri_missing),
     )
     relaxations: dict[str, ScreeningCriteria] = {
         "below_min_confidence": ScreeningCriteria(
@@ -604,18 +696,19 @@ def test_the_default_criteria_cut_nothing_and_only_reorder() -> None:
     assert screened.excluded == ()
     assert [item.severity for item in screened.items] == [
         "clear",
-        "unrecognised",
+        "reduced",
         "severe",
         "blocked",
     ]
 
 
 def test_an_abstaining_result_screens_without_raising_and_keeps_its_flags_reading() -> None:
-    """The path the committee's defect would otherwise break, driven through the real screen.
+    """An abstention ranked through the real screen, which is where the defect would have landed.
 
     An abstention is a first-class outcome (PRD S42) and `ScreeningCriteria.directions` names
-    it, so a screen must be able to rank one. It is here rather than folded into the
-    governance test because `ResearchScreener` is the caller that would have raised.
+    it, so a screen must be able to rank one. It is here rather than folded into the governance
+    test because `ResearchScreener` is the caller that would have raised -- and, until
+    `V2-P4-029`, only did not because `assess` routed around the committee entirely.
     """
     abstaining_signal = SignalFrame(
         subject="000001.SZ",
@@ -658,7 +751,7 @@ def test_an_abstaining_result_screens_without_raising_and_keeps_its_flags_readin
     )
 
     assert [item.subject for item in screened.items] == ["600000.SH", "000001.SZ"]
-    assert screened.items[1].severity == "unrecognised"
+    assert screened.items[1].severity == "reduced"
     assert screened.items[1].driving_flags == (COMMITTEE_DISAGREEMENT,)
     assert screened.items[1].final_action == "abstain"
 
@@ -897,7 +990,7 @@ def test_the_docstring_filter_is_what_makes_the_no_fourth_list_audit_mean_anythi
     path = PRODUCT_ROOT / "governance.py"
     assert "future_data" in path.read_text(encoding="utf-8")
     assert "future_data" not in executable_string_constants(path)
-    assert "runtime-risk-gate" in executable_string_constants(path)
+    assert "unrecognised" in executable_string_constants(path)
 
     probe = tmp_path / "probe.py"
     probe.write_text('"""future_data, named in prose."""\n\nBANNED = "future_data"\n')
@@ -919,11 +1012,11 @@ def test_the_declared_screening_limitations_are_the_closed_set_this_module_repor
     assert {
         "a_severity_orders_a_list_and_changes_no_gate_decision_anywhere",
         "the_two_shipped_gates_disagree_and_this_screen_ranks_them_rather_than_reconciling",
-        "an_unrecognised_flag_and_a_misspelling_of_a_named_one_are_the_same_rung",
-        "the_committee_is_read_through_a_probe_because_it_refuses_an_abstaining_signal",
+        "a_recovery_row_carrying_a_caller_injected_flag_is_refused_rather_than_migrated",
+        "a_severity_is_declared_on_the_flag_and_is_not_a_measurement_of_either_gate",
         "a_flag_count_is_kept_as_a_filter_and_is_not_a_governance_reading",
         "the_default_screen_admits_every_rung_and_only_reorders",
-        "a_flag_severity_is_memoised_per_process_and_a_gate_swapped_at_runtime_is_not_seen",
+        "the_unrecognised_rung_is_kept_for_the_wire_and_no_signal_can_reach_it",
     } == SCREENING_LIMITATION_CODES
     assert len(KNOWN_SCREENING_LIMITATIONS) == len(SCREENING_LIMITATION_CODES) == 7
     assert all(entry.detail for entry in KNOWN_SCREENING_LIMITATIONS)
@@ -933,30 +1026,43 @@ def test_the_declared_screening_limitations_are_the_closed_set_this_module_repor
     )
 
 
-def test_a_misspelling_of_a_named_flag_demotes_it_and_promotes_the_candidate() -> None:
-    """`an_unrecognised_flag_and_a_misspelling_of_a_named_one_are_the_same_rung`, driven.
+def test_a_misspelling_of_a_named_flag_is_refused_rather_than_promoting_the_candidate() -> None:
+    """The harm `V2-P4-006` recorded and `V2-P4-030` removed, driven from both ends.
 
-    The direction is the uncomfortable one and is why the entry exists: a typo does not make a
-    name look worse, it makes it look *better*. `future_data` is `blocked` and last; the same
-    string with a hyphen is `unrecognised` and outranks it.
+    The previous version of this test asserted the harm itself, under the entry
+    `an_unrecognised_flag_and_a_misspelling_of_a_named_one_are_the_same_rung`: `future_data` was
+    `blocked` and sorted last, the same string with a hyphen was `unrecognised` and **outranked
+    it**. A typo did not make a name look worse; it made it look better, which is the worst
+    possible direction for a governance reading to fail in.
+
+    A misspelling is now refused at the contract. The refusal is asserted to name both the field
+    and the offending value, because that is what makes it a repair rather than a different
+    failure: a producer has to be able to see which string it got wrong.
+
+    The second half is the part that could regress silently -- that the correctly spelled flag
+    still carries its full weight through a real screen -- so it is driven rather than assumed.
     """
     named = sorted(RiskGate._blocking_flags)[0]
-    typo = named.replace("_", "-")
-    assert typo != named
+    typo = named.value.replace("_", "-")
+    assert typo != named.value
+
+    with pytest.raises(ValidationError) as caught:
+        make_result(subject="000001.SZ", confidence=0.5, risk_flags=(typo,))
+    assert "risk_flags" in str(caught.value)
+    assert typo in str(caught.value)
 
     assert flag_severity(named) == "blocked"
     assert flag_severity(typo) == "unrecognised"
-    assert flag_severity(typo) == flag_severity("a-word-no-gate-has-ever-heard-of")
 
     screened = ResearchScreener().screen(
         results=(
             make_result(subject="000001.SZ", confidence=0.5, risk_flags=(named,)),
-            make_result(subject="600000.SH", confidence=0.5, risk_flags=(typo,)),
+            make_result(subject="600000.SH", confidence=0.5),
         ),
         criteria=ScreeningCriteria(),
     )
     assert [item.subject for item in screened.items] == ["600000.SH", "000001.SZ"]
-    assert [item.severity for item in screened.items] == ["unrecognised", "blocked"]
+    assert [item.severity for item in screened.items] == ["clear", "blocked"]
 
 
 def test_a_severity_changes_no_ledger_and_no_runtime_gate_verdict() -> None:
@@ -980,27 +1086,33 @@ def test_a_severity_changes_no_ledger_and_no_runtime_gate_verdict() -> None:
     assert screened.items[-1].gate_decision == RiskGate().evaluate(flagged.signal)
 
 
-def test_the_flag_severity_memo_does_not_see_a_gate_swapped_after_first_use(
+def test_a_severity_no_longer_depends_on_what_a_gate_happens_to_answer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`a_flag_severity_is_memoised_per_process_and_a_gate_swapped_at_runtime_is_not_seen`.
+    """What replaced `a_flag_severity_is_memoised_per_process_and_a_gate_swapped_at_runtime...`.
 
-    Both directions: the memo holds the first answer across a swapped gate, and clearing it
-    picks the new one up. Driven rather than described, because "harmless on the shipped path"
-    is a claim about a staleness whose existence has to be shown first.
+    That entry existed because `flag_severity` derived its answer by *running* the gates and
+    memoised the result, so a gate swapped after first use was invisible until the cache was
+    cleared. Both halves are gone: the memo, and the derivation it memoised.
+
+    The replacement claim is stronger and is what is driven here -- a severity is a property of
+    the flag, so swapping a gate wholesale cannot move one at all, with or without a cache. The
+    gate swap is still performed rather than described, because "cannot be affected" is only
+    worth asserting against something that would previously have affected it.
+
+    What the swap *does* still move is `GovernanceVerdict.gate_decision`, which is the honest
+    split: what a flag is worth is declared, and what a gate does about it is the gate's.
     """
-    flag = "a-flag-invented-for-this-memo-test"
-    flag_severity.cache_clear()
-    try:
-        assert flag_severity(flag) == "unrecognised"
+    flagged = unflagged_signal((RiskFlag.source_uri_missing,))
+    assert flag_severity(RiskFlag.source_uri_missing) == "reduced"
+    assert assess(flagged).gate_decision == "reduce"
 
-        monkeypatch.setattr(governance, "_runtime_risk_gate", lambda signal: "block")
-        assert flag_severity(flag) == "unrecognised", "the memo must hold the first answer"
+    class AlwaysBlocking:
+        def evaluate(self, signal: SignalFrame) -> str:
+            return "block"
 
-        flag_severity.cache_clear()
-        assert flag_severity(flag) == "blocked", "clearing it must pick the new gate up"
-    finally:
-        monkeypatch.undo()
-        flag_severity.cache_clear()
+    monkeypatch.setattr(governance, "RiskGate", AlwaysBlocking)
 
-    assert flag_severity(flag) == "unrecognised"
+    assert flag_severity(RiskFlag.source_uri_missing) == "reduced"
+    assert assess(flagged).severity == "reduced", "a gate cannot redefine what a flag is worth"
+    assert assess(flagged).gate_decision == "block", "but it still reports what it would do"

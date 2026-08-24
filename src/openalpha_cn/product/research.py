@@ -37,7 +37,6 @@ from __future__ import annotations
 from openalpha_cn.product.governance import (
     SEVERITY_ORDER,
     SEVERITY_RANK,
-    SHIPPED_RISK_GATES,
     GovernanceSeverity,
     GovernanceVerdict,
     assess,
@@ -76,7 +75,6 @@ __all__ = [
     "SCREENING_LIMITATION_CODES",
     "SEVERITY_ORDER",
     "SEVERITY_RANK",
-    "SHIPPED_RISK_GATES",
     "WATCHLIST_ENTRY_VERSIONS",
     "GovernanceSeverity",
     "GovernanceVerdict",

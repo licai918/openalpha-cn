@@ -248,10 +248,22 @@ lint-imports contracts rather than a sentence.
 
 `KNOWN_SCREENING_LIMITATIONS` (`V2-P4-006`) is the twenty-third. Its seven entries bound a
 *reading*: a governed screen re-orders completed runs and writes nothing, so its entries say
-what the ordering is not (an enforcement -- no ledger and no runtime gate verdict moves), what
-its severity source cannot do (reconcile two shipped gates that still read disjoint subsets of
-an open flag set, or tell an unrecognised flag from a misspelled one), and why the committee
-half of that source is read through a probe.
+what the ordering is not (an enforcement -- no ledger and no runtime gate verdict moves) and
+what its severity source cannot do.
+
+**Three of the seven were replaced in place by `V2-P4-029`/`V2-P4-030`/`V2-P4-036`, and the
+count did not move.** They had recorded an open flag vocabulary: that a misspelling and an
+unrecognised flag shared a rung (and that the misspelling therefore *promoted* its candidate),
+that the committee half of the severity source had to be read through a synthetic probe because
+`DeliberationCommittee.review` raised on an abstaining signal, and that `flag_severity` memoised
+a severity it derived by running the gates. `domain/risk_flag.py` closed the vocabulary and the
+first and third stopped being true; `V2-P4-029` made the committee total on `SignalFrame` and
+the second did. What stands in their place bounds the *fix* rather than the defect: a stored
+recovery row carrying a caller-injected flag is now refused rather than migrated, a severity is
+a declaration about the vocabulary rather than a measurement of either gate, and the
+`unrecognised` rung is kept for the wire although no signal can reach it. That is the shape a
+registry entry is supposed to have when the thing it bounded is repaired -- replaced by what
+the repair itself costs, not deleted.
 
 `KNOWN_SHORTLIST_GATE_LIMITATIONS` (`V2-P4-023`) is the twenty-fourth. Its seven entries bound a
 *verdict*: the third gate between a market and a published candidate list, sitting above
