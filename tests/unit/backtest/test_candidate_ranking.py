@@ -30,9 +30,9 @@ becomes a list of something else:
 5. **A horizon is one horizon.** `test_two_horizons_in_one_ranking_are_refused_by_name` is the
    first consumer of `V2-P4-001`'s narrowing that can fail, and it says which subject differs.
 6. **The evidence plane's own flag vocabulary is measured rather than described.**
-   `test_the_two_shipped_gates_read_disjoint_subsets_of_an_open_flag_set` reads `RiskGate` and
-   `domain/risk_flag.py` themselves -- and its name is stale since `V2-P4-030` closed that set;
-   see that test's own docstring for why it cannot be renamed here.
+   `test_both_shipped_gates_act_on_every_flag_of_the_one_closed_set` reads `RiskGate` and
+   `domain/risk_flag.py` themselves rather than restating their contents, so closing or widening
+   that vocabulary is measured here rather than remembered.
 """
 
 from __future__ import annotations
@@ -528,7 +528,7 @@ def test_every_declared_limitation_code_is_the_registrys_own_set() -> None:
         "the_ranking_does_not_re_rank_and_inherits_every_caveat_on_the_funnels_order",
         "no_model_prediction_exists_in_this_build",
         "factor_exposure_here_is_a_characteristic_and_not_a_fitted_loading",
-        "the_signals_own_risk_flags_are_an_open_set_and_two_gates_read_disjoint_subsets",
+        "the_evidence_planes_closed_flag_set_is_not_folded_into_this_contracts_own",
         "no_capacity_warning_is_derivable_here_so_none_is_flagged",
         "the_universe_is_addressed_by_digest_and_the_funnel_can_only_check_its_size",
         "this_contract_creates_no_order_because_of_where_it_lives_and_not_because_it_says_so",
@@ -1069,34 +1069,25 @@ def test_an_exposure_cross_section_read_on_another_day_is_refused() -> None:
 # --------------------------------------------------------------------------------------------
 
 
-def test_the_two_shipped_gates_read_disjoint_subsets_of_an_open_flag_set() -> None:
-    """**This test's name is stale and says the opposite of what it now measures.**
+def test_both_shipped_gates_act_on_every_flag_of_the_one_closed_set() -> None:
+    """Both gates act on every member of the one closed set, and the ranking keeps its own.
 
-    It is kept anyway, and deliberately: `src/openalpha_cn/backtest/candidate_ranking.py:136`
-    cites this test by name from a module docstring, and
-    `tests/unit/test_source_cited_tests.py` holds every such citation to a test that exists
-    under that name. `candidate_ranking.py` is outside `V2-P4-030`'s ownership, so renaming
-    here would break a file this issue may not repair. The name goes when the citation does --
-    see the report's blocked dependencies.
+    What this used to measure, and why the change matters: `RiskGate` read five strings,
+    `agents/committee` treated three others as severe, the two sets were **disjoint**, and
+    `committee-disagreement` -- which the committee raises about its own deliberation -- was in
+    neither, so a signal the committee had just marked as disputed reached the runtime gate and
+    returned `pass`. `V2-P4-030` closed the vocabulary in `domain/risk_flag.py` and both gates
+    now derive from it, so the union of `RiskGate`'s two bands is the whole set and that flag
+    reduces. Both halves are asserted, the second on a real `RiskGate` rather than on its
+    attributes, because a band that covers a flag and an `evaluate` that acts on it are two
+    claims.
 
-    What it used to measure: `RiskGate` read five strings, `agents/committee` treated three
-    others as severe, the two sets were **disjoint**, and `committee-disagreement` -- which the
-    committee raises about its own deliberation -- was in neither, so a signal the committee had
-    just marked as disputed reached the runtime gate and returned `pass`.
-
-    What it measures now: `domain/risk_flag.py::RiskFlag` declares the vocabulary once and both
-    gates derive from it, so the sets are identical rather than disjoint and no declared flag
-    reaches `RiskGate` and clears it. Two things in `candidate_ranking.py` are therefore stale
-    at this commit and are **not** corrected here -- the section this test is cited from, and
-    `RankingLimitation
-    .the_signals_own_risk_flags_are_an_open_set_and_two_gates_read_disjoint_subsets`.
-
-    What did **not** change is this contract's reason for keeping `RankingRiskFlag`, which is
-    the half worth re-asserting: the two vocabularies describe different planes -- one is about
-    evidence and subjects, the other about a score and a rank -- so neither is a lossy summary
-    of the other and the `SignalFrame` still travels whole. That argument never rested on the
-    evidence plane's set being *open*, only on it being a different set, which is why this test
-    survives its own premise being removed.
+    What did **not** change is this contract's reason for keeping `RankingRiskFlag`: the two
+    vocabularies describe different planes -- one is about evidence and subjects, the other
+    about a score and a rank -- so neither is a lossy summary of the other and the `SignalFrame`
+    still travels whole. That argument never rested on the evidence plane's set being *open*,
+    only on it being a different set, which is why the disjointness assertion below is about the
+    two planes and not about the two gates.
     """
     gate_flags = RiskGate._blocking_flags | RiskGate._reducing_flags
 

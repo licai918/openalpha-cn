@@ -120,23 +120,20 @@ what was removed is a ranking whose numbers are unexplainable by construction. O
 `processed` the cross section is optional and its absence is a per-candidate flag rather than a
 refusal, because nothing was projected out of those values.
 
-## "风险标记": a closed set here, beside the open one the evidence plane already has
+## "风险标记": two closed sets, one per plane, deliberately not merged
 
-`SignalFrame.risk_flags` is `tuple[str, ...]` with no vocabulary. `agents/baseline.py::
-_quality_flags` copies whatever strings an evidence payload's `quality_flags` holds, and
-`DeliberationCommittee` adds `committee-disagreement` of its own. Two gates then read subsets of
-it, and **the two subsets are disjoint**: `decisions/risk.py::RiskGate` blocks on `future_data` and
-`look_ahead_violation` and reduces on `redistribution_unknown`, `source_uri_missing` and
-`revised_after_initial_availability`; `agents/committee.py` treats `regulatory`, `data-quality` and
-`suspension` as severe. Neither reads the other's, and neither reads the committee's own
-`committee-disagreement` -- so a signal the committee flagged as disagreed-upon reaches the
-runtime risk gate and passes it. `the_signals_own_risk_flags_are_an_open_set_and_two_gates_read
-_disjoint_subsets_of_it` carries that measurement, and
-`tests/unit/backtest/test_candidate_ranking.py::
-test_the_two_shipped_gates_read_disjoint_subsets_of_an_open_flag_set` drives it off the
+`SignalFrame.risk_flags` is `tuple[RiskFlag, ...]`. `domain/risk_flag.py` declares the ten-member
+vocabulary once, with what each member is worth carried in the member itself, and both shipped
+gates derive their bands from it: `decisions/risk.py::RiskGate` blocks on the two `blocked` flags
+and reduces on the other eight, so the union of its bands **is** the whole set and no declared
+flag reaches it and clears it -- `committee-disagreement` included, which the committee raises
+about its own deliberation and which used to sit in neither gate's subset.
+`the_evidence_planes_closed_flag_set_is_not_folded_into_this_contracts_own` carries what remains
+true, and `tests/unit/backtest/test_candidate_ranking.py::
+test_both_shipped_gates_act_on_every_flag_of_the_one_closed_set` drives it off the
 real classes rather than restating their contents here.
 
-`RankingRiskFlag` is therefore this contract's own closed set, derived from quantities this
+`RankingRiskFlag` remains this contract's own closed set, derived from quantities this
 contract holds, and it does **not** fold the signal's flags in. The signal travels whole, so a
 reader gets the evidence plane's own words unaltered and this plane's own vocabulary beside them,
 and neither is a lossy summary of the other.
@@ -384,23 +381,21 @@ KNOWN_RANKING_LIMITATIONS: Final[tuple[RankingLimitation, ...]] = (
         ),
     ),
     RankingLimitation(
-        code="the_signals_own_risk_flags_are_an_open_set_and_two_gates_read_disjoint_subsets",
+        code="the_evidence_planes_closed_flag_set_is_not_folded_into_this_contracts_own",
         detail=(
-            "SignalFrame.risk_flags is tuple[str, ...] with no vocabulary: agents/baseline.py's "
-            "_quality_flags copies whatever strings an evidence payload's quality_flags holds. "
-            "Two gates in this build read closed subsets of it and the two subsets are disjoint. "
-            "decisions/risk.py's RiskGate blocks on {future_data, look_ahead_violation} and "
-            "reduces on {redistribution_unknown, source_uri_missing, "
-            "revised_after_initial_availability}; agents/committee.py treats {regulatory, "
-            "data-quality, suspension} as severe. Their intersection is empty, and "
-            "committee-disagreement -- a flag the committee raises itself -- is in neither, so a "
-            "signal the committee marked as disagreed-upon reaches RiskGate.evaluate and returns "
-            "pass. RankingRiskFlag is therefore this contract's own closed set over quantities "
-            "this contract holds, and it does not fold the signal's flags in: the SignalFrame "
-            "travels whole so the evidence plane's own words are unaltered, and neither "
-            "vocabulary is a lossy summary of the other. What is NOT claimed is that either gate "
-            "is wrong -- only that a reader who took risk_flags for a checked vocabulary would be "
-            "reading an open set."
+            "SignalFrame.risk_flags has been a closed vocabulary since V2-P4-030: "
+            "domain/risk_flag.py declares ten members once, each carrying what it is worth, and "
+            "both shipped gates derive from it. decisions/risk.py's RiskGate blocks on the two "
+            "blocked flags and reduces on the remaining eight, so its bands cover the whole set "
+            "and no declared flag reaches it and clears it -- including committee-disagreement, "
+            "which the committee raises about its own deliberation and which formerly reached "
+            "RiskGate.evaluate and returned pass. RankingRiskFlag is this contract's own closed "
+            "set over quantities this contract holds, and it does not fold the signal's flags "
+            "in: the SignalFrame travels whole so the evidence plane's own words are unaltered, "
+            "and neither vocabulary is a lossy summary of the other. What is NOT claimed is that "
+            "a reader gets one merged view of risk. A caller who wants the evidence plane's "
+            "flags must read them off the SignalFrame this ranking carries, because a "
+            "RankedCandidate's own risk_flags answer a question about a score and a rank."
         ),
     ),
     RankingLimitation(
@@ -512,10 +507,12 @@ RankingRiskFlag = Literal[
 ]
 """Six ways one candidate's rank is less than it looks, as a closed set this contract derives.
 
-Closed and this contract's own, for the reason `the_signals_own_risk_flags_are_an_open_set_and_two
-_gates_read_disjoint_subsets` measures: the evidence plane's own `risk_flags` is an open string set
-that two shipped gates read two disjoint closed subsets of. Folding the two vocabularies together
-would produce a third open set nobody reads all of. The `SignalFrame` travels whole instead.
+Closed and this contract's own, for the reason
+`the_evidence_planes_closed_flag_set_is_not_folded_into_this_contracts_own` measures: the evidence
+plane has a closed vocabulary of its own in `domain/risk_flag.py`, answering about evidence and
+subjects, while every member here is derived from a quantity this record holds. Folding the two
+together would produce a third set whose members answer two different questions, and no reader
+could tell which. The `SignalFrame` travels whole instead.
 
 Every member is derived from a quantity this record holds, and every member separates -- there is
 deliberately no flag that every candidate would carry (see
