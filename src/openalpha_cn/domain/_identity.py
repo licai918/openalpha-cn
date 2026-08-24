@@ -18,18 +18,26 @@ lowercase prefix the caller chooses, an underscore, and the first 24 hex digits 
 over canonical JSON. The prefix is deliberately not enumerated here, so a contract can require
 "an address this repository computed" without also deciding which builder computed it.
 
-**Three builders, one canonicalisation, and the count corrected by `V2-P4-016`.** This
-docstring used to say "twenty-five prefixes are in use" and to claim the shape belonged to
-`stable_model_id` alone. Both were wrong, and measured so. `domain/factor.py`'s `set_digest`
-(`set_`) and `cross_section_digest` (`obs`, `prc`, `nrs`, and an `xs` default) return this shape
-too, from the same `json.dumps` conventions and for the stated reason that a second spelling of
-"canonical" is a second thing that can disagree. And of the twenty-five, **six were not
+**Seven builders, one canonicalisation, and the count corrected twice.** This docstring used
+to say "twenty-five prefixes are in use" and to claim the shape belonged to `stable_model_id`
+alone. Both were wrong, and measured so by `V2-P4-016`: of the twenty-five, **six were not
 addresses at all** -- `panel_doctor.FactorPlaneSeal`'s dataset-name prefixes, swept up by a text
 search for `prefix=` -- while three that are (`feat`, `set`, `xs`) were missing. The live census
 is **24 distinct prefixes over 27 call sites**, none containing an underscore, read off the
 source tree by `tests/unit/domain/test_manifest_component_provenance.py::live_prefixes` rather
 than written down here, because a hand-written list checked against its own length is a
 tautology -- which is how `V2-P4-012`'s `feat` went unrecorded for four issues.
+
+Then this sentence said **three** builders, and that was the same mistake one size smaller: it
+counted the two that take a caller's prefix plus `set_digest`, and `chr_`, `rkc_`, `sla_` and
+`ev_` all match this pattern too. `V2-P4-037` read the tree instead. Seven functions mint a
+string of this shape, an eighth truncates a digest to the same width for a **file name**
+(`ParquetEvidenceStore.append`'s `part-<24 hex>`, which this pattern rejects), and the live
+table with a reason per entry is `DECLARED_CONTENT_ADDRESS_MINTS` in
+`tests/unit/domain/test_contract_identity.py` -- read off the source tree by AST, equality in
+both directions, so an eighth minter is red rather than recorded here after the fact
+(`tests/unit/domain/test_contract_identity.py::
+test_every_content_address_in_the_source_tree_is_minted_where_this_module_says`).
 
 Attached to a field, it says the thing named there is a content address rather than a name.
 `domain/run.py`'s `RUN_MANIFEST_ID_PATTERN` is the same idea pinned to one prefix, and its
@@ -68,7 +76,16 @@ def stable_model_id(
     alternative -- a bespoke `sha256` next to the one
     contract that needed a subset -- is exactly the "另造哈希" this repository has avoided
     everywhere else, and it would have put two canonicalisations in play where a difference
-    between them would be invisible until two IDs disagreed. The default is the empty set, so
+    between them would be invisible until two IDs disagreed.
+
+    **That last sentence was a claim with nothing under it until `V2-P4-037`.** Rewriting one
+    `computed_field` to spell its own `json.dumps` moved that contract's address; *adding* a
+    second address beside an existing one left every gate green and moved not even the prefix
+    census, because a count of who calls this function cannot see who else is hashing.
+    `tests/unit/domain/test_contract_identity.py`'s `DECLARED_CONTENT_ADDRESS_MINTS` is the
+    audit: every truncation to a content address's width under `src/`, keyed by the function it
+    sits in, and every one of those functions' `json.dumps` keywords held to this one's.
+    The default is the empty set, so
     every existing caller hashes the whole field set exactly as before
     (`tests/unit/domain/test_contract_identity.py::test_the_default_excludes_nothing_so_no_existing_identity_moved`).
     """

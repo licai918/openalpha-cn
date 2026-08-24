@@ -203,6 +203,72 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **Nothing stopped a second content-address canonicalisation; now an AST audit does**
+  (`V2-P4-037`). `domain/_identity.py` says every identity goes through `stable_model_id`, and
+  that a second spelling of "canonical" would put two things in play whose difference is
+  "invisible until two IDs disagreed" — with nothing enforcing it. The row's own probe turned
+  out **not** to be green: rewriting `ShortlistGateManifest.gate_manifest_id` as its own
+  `json.dumps` plus `sha256[:24]` moves that declaration's address (`sgt_6c3ec68a…` to
+  `sgt_3248f195…`) and does go red, but on arithmetic and by accident — the prefix census counts
+  *call sites* of the one function, so replacing one drops it from 27 to 26. Adding a mint
+  instead of replacing a call moves that census not at all: a second computed field spelling its
+  own `sgs_<24 hex>` left ruff, mypy (140 files), `lint-imports` (8 kept) and `tests/unit`
+  (2813 passed) green. `tests/unit/domain/test_contract_identity.py` now reads every truncation
+  to a content address's width off `src/` by AST, keyed by the function it sits in — per
+  function and not per file, because `domain/factor.py` already holds two and a file-level
+  allowlist would admit a third — with equality in both directions, and holds each mint's
+  `json.dumps` keywords to `stable_model_id`'s. Two of this repository's own sentences were
+  falsified doing it: the allowlist is **eight** mints where the row named five (it missed
+  `cross_section_digest`, `stable_answer_digest` and `ParquetEvidenceStore.append`, whose
+  `part-<24 hex>` is a file name the pattern rejects), and `_identity.py`'s "three builders" is
+  **seven**, because `chr_`, `rkc_`, `sla_` and `ev_` all match `CONTENT_ADDRESS_PATTERN` too.
+  What the audit cannot see is written beside it: it reads the literal `24` at the slice, so
+  `hexdigest()[:_WIDTH]` would pass, and widening to every `sha256` call in `src/` would mix in
+  seven plain 64-hex checksums that are a different question.
+- **The `KNOWN_*` entry count is an equality per registry, and a code cannot recur across two
+  registries unnoticed** (`V2-P4-038`). `sum(...) >= 301` is satisfied by any non-negative net
+  change, and nothing asserted anything about a `code` across registries — which matters because
+  the binding one section up tests membership in a set of every literal the *whole* suite
+  evaluates, so a code carried by registry A is "bound" by a literal written about registry B,
+  making a foreign code the cheapest possible filler for a hole. The row's probe is caught
+  already, in `tests/integration` rather than `tests/unit`: 30 of the 32 registries carry a
+  literal collection equal to their whole code set, measured by AST. The two that do not are
+  where the hole lives, so the probe was rebuilt there — adding
+  `KNOWN_CROSS_SECTION_LIMITATIONS`' own `the_cut_is_broken_by_subject_code_when_two_scores_tie`
+  as a tenth `KNOWN_INDEX_MEMBERSHIP_LIMITATIONS` entry left `tests/unit` at 2816 passed and the
+  seven integration and contract modules that touch a registry at 233 passed, with the total up
+  from 301 to 303 under a floor of 301. The floor is now `REGISTRY_ENTRY_COUNTS`, one line per
+  registry: per registry rather than one scalar because a scalar sees only the net, and because
+  two siblings editing two different lines merge correctly where this module's own history
+  records two siblings bumping one scalar to the same wrong value and git merging it silently.
+  Cross-registry recurrence is a table of `code → the exact registries it lives in` rather than a
+  bare "no code twice", because global uniqueness is **false today and rightly so**: three codes
+  recur, in 4, 3 and 2 registries, each for a stated reason.
+- **The offline guarantee covers UDP, not only TCP `connect`** (`V2-P4-039`). Reproduced: with
+  the guard installed, `connect` on an `AF_INET` socket raised while `sendto` and `sendmsg` each
+  returned 5 bytes — a wrapped set of `{connect, connect_ex}` and nothing else — and the guard
+  refuses by family rather than by address, so a routable destination was no more refused than
+  loopback. Wrapped rather than narrowing the claim to "outbound TCP", because narrowing makes
+  the sentence true by making the guarantee smaller, which is the direction every Critical this
+  project has booked already went. `GUARDED_SOCKET_METHODS` is the whole outbound surface and
+  that is an argument rather than a list: `send`, `sendall` and `socket.sendfile` all need a
+  connected socket and `connect` is guarded, so shadowing them would be code no input can reach —
+  asserted in both directions. Along the way the patching moved into `tests/offline_guard.py` as
+  `refusing_outbound_traffic(target)`: inside an autouse fixture no test could ever see
+  `socket.socket` unguarded, so "deleting the shadow is the only restoration that leaves the
+  class exactly as it was found" was a `finally` block with nothing under it — measured by
+  replacing that `delattr` with `pass` and watching 59 tests stay green. The round trip is now
+  driven over a throwaway subclass that inherits the same methods from the same C base.
+- **`V2-P4-068`'s ordering-dependent test is closed**, by `V2-P4-089`'s containment rather than by
+  anything in this change — verified rather than assumed, because the row asked for a measurement
+  either way. The original failing selection is green in both directions
+  (`tests/unit/test_import_layering.py` with `tests/unit/runtime/`, 70 passed either order), and
+  both reproductions written verbatim into `tests/import_linter_containment.py` are green where
+  they were 4 failed and 6 failed. The green is caused by the containment and not by luck: the
+  mechanism is still live, and `raw_lint_imports_disables` asserts that the **raw** CLI still
+  disables existing loggers, so returning either call site to a bare call turns those selections
+  red again.
+
 - **A stored prediction that cannot be parsed is a named refusal, not "a defect in the command"**
   (`V2-P4-096`). A write a power cut stopped half way reached the command line as `exit 5` with
   the message withheld, HTTP as a bare `500 text/plain`, and the SDK as an unenveloped
