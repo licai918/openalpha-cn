@@ -9,8 +9,22 @@ from __future__ import annotations
 from html import escape
 from pathlib import Path
 
+from openalpha_cn.config import OpenAlphaConfig
+
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_DIR = ROOT / "assets" / "diagrams"
+
+DEFAULT_REQUEST_MIB = int(OpenAlphaConfig.model_fields["max_request_bytes"].default) // (
+    1024 * 1024
+)
+"""The declared default request ceiling, read from the settings model rather than restated.
+
+This diagram said `8 MiB 默认请求上限` for as long as `V2-P4-043` has been merged -- that row
+raised the default to 32 MiB, and this was a fourth statement of a number that lives in
+`config.py`, and the one that was wrong. The **declared** default is used rather than
+`load_config()`, so the generated asset never depends on the environment of whoever regenerates
+it.
+"""
 
 COLORS = {
     "indigo": "#5968F2",
@@ -238,7 +252,7 @@ def landscape() -> str:
         endpoint="GET /health · /docs · /openapi.json",
         lines=(
             "Pydantic 严格 Schema",
-            "8 MiB 默认请求上限",
+            f"{DEFAULT_REQUEST_MIB} MiB 默认请求上限",
             "安全响应头",
             "本机 CORS 白名单",
             "HTTP 只接结构化记录",

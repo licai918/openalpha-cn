@@ -46,7 +46,7 @@ Invoke-RestMethod http://127.0.0.1:8000/health
 |---|---|---|
 | `OPENALPHA_PORT` | `8000` | 主机回环端口 |
 | `OPENALPHA_RUNTIME_DIR` | `/data` | 容器内持久目录 |
-| `OPENALPHA_MAX_REQUEST_BYTES` | `8388608` | 声明的最大请求体 |
+| `OPENALPHA_MAX_REQUEST_BYTES` | `33554432` | 声明的最大请求体（32 MiB），见 §8 |
 | `TUSHARE_TOKEN` | 空 | 用户自带 Tushare Token |
 | `CHAINLIN_API_BASE_URL` / `CHAINLIN_API_KEY` | 空 | 链邻数据接口地址与密钥 |
 
@@ -131,11 +131,20 @@ docker compose -f deploy/compose.yml up -d --build --wait
 - `cap_drop: ALL`；
 - `no-new-privileges:true`；
 - 仅 `/data` 可持久写入，`/tmp` 为受限 tmpfs；
-- CSP、禁止 iframe、MIME 嗅探、Referrer/Permissions/COOP 响应头；
-- 8 MiB 默认请求上限；
-- CORS 只允许本地 Vite 开发源。
+- CSP、禁止 iframe、MIME 嗅探、Referrer/Permissions/COOP/COEP/CORP/HSTS 响应头，按名**替换**而非追加，
+  路由无法给同一个策略头再加一个值（`V2-P5-012`）；
+- 32 MiB 请求上限，两道闸：声明了 `Content-Length` 的在读体之前拒，未声明长度的（chunked）边收边计数、
+  到顶即停止读取（`V2-P5-012`；此前 chunked 可完全绕过）。**这个数字在 `Dockerfile` 与 `compose.yml`
+  的环境变量里被显式设定，也就是说它覆盖 `config.py` 的默认值**：`V2-P4-043` 把默认抬到 32 MiB 时
+  只改了 `config.py`，两个容器文件都停在旧值，于是出货容器实测仍以旧上限拒绝一个 `MAX_BATCH_ITEMS`
+  批量（9,840,054 字节，正是该行自己的实测）—— `V2-P5-012` 一并修正，并由
+  `test_every_deployment_that_sets_the_ceiling_sets_the_one_this_service_declares` 钉住；
+- `openalpha serve` 与容器 `CMD` 一样不发 `server:` 头（`V2-P5-012`）；
+- CORS 只允许本地 Vite 开发源，方法覆盖 `GET/HEAD/POST/PUT/PATCH/DELETE`，不带凭据（`V2-P5-011`）。
 
-若跨机器开放，必须在反向代理增加 TLS/HSTS、认证、授权、限流、审计日志和网络 ACL。当前 API 不能裸露到公网。
+若跨机器开放，必须在反向代理增加 TLS、认证、授权、限流、审计日志和网络 ACL。当前 API 不能裸露到公网。
+HSTS 头应用已自己发出，但按 RFC 6797 §7.2，非安全传输下用户代理必须忽略它 —— 换言之它只在反向代理已经终结
+TLS 时才生效，代理仍需负责 TLS 本身。
 
 ## 9. 监控
 

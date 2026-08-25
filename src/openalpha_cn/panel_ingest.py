@@ -2436,6 +2436,31 @@ def _sessions_published_through(as_of: datetime, zone: ZoneInfo) -> date:
     return local.date() - timedelta(days=1)
 
 
+def session_publication_instant(
+    session: date, *, date_timezone: str = DEFAULT_DATE_TIMEZONE
+) -> datetime:
+    """The instant `session`'s data becomes knowable -- `_sessions_published_through` backwards.
+
+    `V2-P5-010`. A scheduler needs the direction this module did not have: not "given an
+    instant, which session has published" but "given a session, when may I run". It lives here,
+    beside the function it inverts and reading the same `DAILY_AVAILABILITY_TIME`, rather than
+    in `scheduler.py`, and that placement is the whole point. `V2-P4-063` found this rule
+    restated in three places with two of them disagreeing; `V2-P4-114` found a fourth a row
+    later, in this very module, and fixed it by calling `_sessions_published_through` instead of
+    doing the arithmetic again. A scheduler computing `datetime.combine(session, time(16, 30))`
+    for itself would have been the fifth.
+
+    `_sessions_published_through(session_publication_instant(d)) == d` for every date, which is
+    what makes these two one rule rather than two -- pinned over a full year at half-hourly
+    resolution by `tests/unit/test_session_publication_instant.py`, not asserted here.
+
+    The instant is timezone-aware in `date_timezone`, so a caller comparing it against a UTC
+    clock is comparing two aware instants and cannot silently subtract a day.
+    """
+    zone = _resolve_timezone(date_timezone)
+    return datetime.combine(session, DAILY_AVAILABILITY_TIME, tzinfo=zone)
+
+
 def newest_published_session(
     calendar: TradingCalendar,
     *,

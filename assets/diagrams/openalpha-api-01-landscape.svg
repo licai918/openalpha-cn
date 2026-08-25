@@ -48,7 +48,7 @@
   <rect x="324" y="262" width="208" height="27" rx="9" fill="#5968F2" opacity=".10" />
   <text x="334" y="281" class="endpoint">GET /health · /docs · /openapi.json</text>
   <text x="326" y="316" class="body">Pydantic 严格 Schema</text>
-  <text x="326" y="341" class="body">8 MiB 默认请求上限</text>
+  <text x="326" y="341" class="body">32 MiB 默认请求上限</text>
   <text x="326" y="366" class="body">安全响应头</text>
   <text x="326" y="391" class="body">本机 CORS 白名单</text>
   <text x="326" y="416" class="body">HTTP 只接结构化记录</text>
