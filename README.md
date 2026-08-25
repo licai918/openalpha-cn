@@ -908,6 +908,55 @@ uv run openalpha portfolio construct sla_0123456789abcdef01234567 \
 相同**的权重。`--min-cash-weight` 照样提供（行要求、且按下限声明意图更好读），取更紧的那个绑住，
 拒绝理由会说是哪一个绑的——代码不假装两者可以叠加。
 
+## 结果的统计口径：家族有多大，区间假设了什么（P5，`V2-P5-007`/`V2-P5-008`）
+
+组合平面之上是**结果平面**。`openalpha validation statistics` 把已经落库的 `ValidationResult`
+按 signal 聚成同期群，每个同期群就是一个假设。
+
+```bash
+# signal ID 来自 openalpha research run；--family-size 是「一共检验了几个」，不是 --signal 的个数
+uv run openalpha validation statistics \
+  --signal sig_0123456789abcdef01234567 --signal sig_89abcdef0123456701234567 \
+  --family-size 40 --false-discovery-rate 0.10 \
+  --dependence independent-or-positively-dependent
+```
+
+两个面等价：`openalpha validation statistics` ／ `OpenAlphaSDK.outcome_statistics()`。
+
+### gross 与 net 并排，成本自成一列
+
+`gross`（仓位相对基准赚到的）、`drag`（交易成本，负号自带）、`net`（真正留下的），三列各自独立求
+均值而**不是**从另两列推出来——一个推导出来的列永远和它的父列一致，因此永远测不出任何东西，那正是
+`V2-P5-005` 从归因里拿掉的那个自由变量。第四列是 `unexplained`：`V2-P5-006` 的残差聚合上来，而不
+是在出口被悄悄丢掉（那正是 `V2-P5-006` 修的那个缺陷，只是高了一层）。
+
+### 区间说得出它假设了什么，样本太小就直接不给
+
+ADR-0003 不发数值栈，t 分布分位数无从取得。所以这里给的是**百分位 bootstrap**：`method`、
+`confidence_level`、`bootstrap_samples`、`random_seed` 全部印在区间上，任何人都能复算。它做不到的
+事也写在答案上——重采样均值是样本的凸组合，区间**永远出不了 `[min, max]`**；三个相同的收益率会得到
+一个宽度为零的「95% 区间」，`distinct_bootstrap_means` 会老实报告这时候的分辨率是 `1`。
+
+**少于两个观测就没有区间、也没有 p 值**：n = 1 时每一次重采样都是那个样本本身，任何置信水平下
+`lower == upper`，那不是一个精确的估计而是一个缺席披着区间的外衣。这一行照样打印它的五列和样本
+数，`absence_reason` 说明为什么没有推断，并且**不进入被检验的家族**——没被检验过的假设不是「没被
+拒绝」的假设。
+
+### `--family-size` 是这一行存在的理由
+
+p 值来自**符号翻转随机化检验**（n ≤ 12 时穷举全部 `2**n` 种符号，故 p 值是分母为 `2**n` 的有理
+数），零假设写在每一行上：净主动收益关于零对称。BH 拿这一族 p 值排序、比较、step up。
+
+**同一批 p 值，在 `--family-size 2` 与 `--family-size 8` 下是两个答案**：前者拒绝一个假设，后者一个
+都不拒绝，而没有任何一个被测量出来的数字改变过。所以家族大小是**存下来的字段**，不是读的时候数行
+数数出来的——数行数在有一行被过滤掉的那天就是另一个数了。可检查的方向只有一个（声明的家族不得小于
+报出来的行数，这一条在契约上拒绝），另一个方向不可检查，`--json` 里的
+`the_family_size_is_declared_and_no_check_can_confirm_it` 直说了这件事。
+
+`--dependence` 没有默认值：`independent-or-positively-dependent` 走 BH，`arbitrary` 加上
+Benjamini–Yekutieli 的调和惩罚 `H_m`。它改的是算术而不是标签——同一族在 `H_2 = 1.5` 下临界值减半，
+上面那个恰好压线的发现就消失了。宽松的读法不该同时是最省事的那个读法。
+
 ## 核心独特优势
 
 OpenAlpha CN 整合 TradingAgents 和 AI Hedge Fund 的优势，接入 A 股数据源，更适合 A 股涨停量化分析。OpenAlpha CN 的竞争重点不是复制更多“投资大师人格”，而是：
