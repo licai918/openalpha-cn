@@ -245,6 +245,7 @@ main {
 }
 
 .empty-state,
+.warning-state,
 .error-state {
   display: grid;
   gap: 0.375rem;
@@ -256,6 +257,15 @@ main {
 
 .error-state {
   color: var(--error);
+}
+
+/* V2-P5-019: `degraded` and `stale` render this *above the data*, not instead of it, so it
+   needs to read as a qualification rather than as a full-height empty state. */
+.warning-state {
+  padding: 0.75rem 1rem;
+  color: var(--warning);
+  text-align: left;
+  border-left: 3px solid var(--warning);
 }
 
 .skeleton-stack {
