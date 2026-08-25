@@ -338,7 +338,7 @@ P3 结束即可独立使用（Jupyter 直连面板 + 因子）
 
 ---
 
-## P5 — 组合、验证与工作台（24 issues）
+## P5 — 组合、验证与工作台（25 issues）
 
 | ID | 标题 | 类型 | 依赖 | 说明 | PRD |
 |---|---|---|---|---|---|
@@ -366,6 +366,7 @@ P3 结束即可独立使用（Jupyter 直连面板 + 因子）
 | `V2-P5-022` | 报告导出许可过滤（不导出 Tushare 原始 payload） | 产 | 018 | — | S72, S81, D27 |
 | `V2-P5-024` | **buffered / turnover-controlled 对照版本**：默认与无缓冲版并列出报，避免把高换手因子的 gross edge 误读为可执行 alpha | 技 | 001,008 | 全库无缓冲区排序概念 | 集成：缓冲版换手显著低于无缓冲版 | S53, S56 |
 | `V2-P5-023` | 测试树重组的三制品同步（`features.csv` 点名全部 34+2 个测试文件 ⇒ 任何移动都要同步 `features.csv`+`summary.json`+ledger，否则两个 CI job 同时红） | 测 | P0A-001 | — | S87 |
+| `V2-P5-025` | ~~前端契约漂移守卫自己停止了守卫：`ResearchResult.manifest` 的 schema 文件名停在不存在的 `run-manifest-v2.json`~~ **已完成** | 测 | P4-010 | **肇事行是 `V2-P4-010`（`9f68d65`，2026-08-20），不是 `V2-P4-001`**：它把 `docs/api/schemas/run-manifest-v2.json` 改名为 `run-manifest-v3.json`，并且**没有碰 `web/` 下任何文件**；该行按它自己列出的验收条目关闭，前端契约镜像不在那张单子上，集成者的双序门只跑 pytest，所以没有任何东西报告过它。**归因更正**：`V2-P4-001`/`V2-P4-025`（`5b3383f`，2026-08-18）**做对了**——它同步改了 `web/src/types.ts` 与 `web/src/typesContractDrift.test.ts`（v1→v2）；失手的是下一次升版，也就是说这条同步一直是**手工习惯**而非测试，习惯撑过一次、第二次就漏了，这正是本行补测试而不是补记忆的理由。**实测后果**：`cd web && pnpm test` 自 2026-08-20 起红了五天（`readSchema` 在 `findFieldDrift` 之前抛 `ENOENT`，`1 failed \| 51 passed (52)`），即 manifest 镜像在这段时间内**完全没有**漂移保护。**改名指向 v3 之后实测漂移为零**：镜像只声明 `run_id` 与 `status`，两者在 v2→v3 中都没动；且 `findFieldDrift` 按设计**单向**（只遍历 `tsFields`，`schemaDrift.ts:277`；`schemaDrift.ts:13-14` 与 `typesContractDrift.test.ts:29-33` 都写明了），v3 多出的 16 个属性（`agent_versions`/`alpha_model_versions`/`mode`/`run_manifest_id`/`model_versions` 等）从不被访问。**所以 ENOENT 掩盖的不是镜像漂移，而是守卫自身的存活性**——镜像没有说谎，`run_id`/`status` 都是真话，声明子集是该模块明文许可的；不因此把 16 个 UI 从不渲染的字段抄进 `types.ts`。补的是一条前置测试 `no DriftCheckSpec silently stops checking`：`DRIFT_CHECKS` 里每个 `schemaFile` 必须存在**且**其 `schema_version.const` 经 `schema_document_name` 的同一变换后仍等于文件名。后半条抓的是改名抓不到的那一格：一份留在原地、内容却已升版的文档会正常加载，并**静默地**对着错误的契约做漂移检查。**三次变异实测**：①改回 v2 文件名 → 新测试点名报错并列出实际发行的五份文档（漂移测试同时 ENOENT）；②文件在但版本不符（把 v3 文档复制成 `run-manifest-v2.json` 并指向它）→ **只有新测试红，漂移测试全绿**，正是它单独抓不到的情形；③把 `manifest.run_id` 改名为 `run_ident` → 漂移测试红在 `missing_in_schema: run_ident`。**另四份 schema 全部复核通过**：五份文档的 `schema_version.const` 与文件名逐一相符，`DRIFT_CHECKS` 引用的 5 个文件名全部存在，无第二处失效引用。顺带修 `domain/run_mode.py:36` 的散文（它写着 `run-manifest-v2.json` 承载 mode 全集，而那份文件已不存在）；`domain/schema.py:59` 的 `"run-manifest/v2"→"run-manifest-v2"` 保留不动，因为那是对函数变换的正确举例，不是对文件存在的断言。实测门：`pnpm test` 53 passed、`pnpm lint`/`tsc -b` 干净、`pnpm test:e2e` 4 passed（**离线可跑已复核**：浏览器已在本机 `ms-playwright` 缓存、spec 用 `page.route` stub 了全部三个接口、`webServer` 是本地 vite 127.0.0.1:5173，无任何外部主机）、`pytest tests/unit` 2959 passed | T14 |
 
 **闸门**：归因对账通过且残差显式；广泛搜索记录被检验假设数与多重检验政策；4 页各 8 态有组件测试；Playwright 桌面金流通过（含归因）；后端覆盖率 ≥80% 且前端覆盖率门生效；确定性回放成功。
 

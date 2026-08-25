@@ -17,6 +17,14 @@
 //    break for callers like `DecisionPanel` that switch on the value, even though
 //    kind-only comparison sees no difference (both sides still say "string").
 //
+// 1(c). Liveness of the checks themselves: every `schemaFile` a spec names must exist
+//    and must still declare the version its filename claims. Layers 1 and 2 both assume
+//    a spec's schema *loads*; a spec pointing at a re-versioned contract does not fail as
+//    drift, it throws ENOENT out of `readSchema` before `findFieldDrift` is ever called —
+//    the check stops checking, while `DRIFT_CHECKED_TYPES` (derived from `coversType`,
+//    not from whether the spec can run) still reports its type as protected. See the
+//    "no DriftCheckSpec silently stops checking" test below for the full argument.
+//
 // 2. Generic discovery, so a *new* mirrored type doesn't slip in unguarded: every
 //    top-level `export type` in `types.ts` must be accounted for, either by appearing
 //    in `DRIFT_CHECKS` (and therefore having a real, running assertion against a real
@@ -62,6 +70,23 @@ const typesPath = path.resolve(here, "types.ts");
 function readSchema(filename: string): ResolvedSchema {
   const raw = JSON.parse(fs.readFileSync(path.join(schemaDir, filename), "utf-8")) as JsonSchemaNode;
   return loadSchema(raw);
+}
+
+/**
+ * The stem of the document a schema *declares* it should be checked in as — the mirror of
+ * `openalpha_cn.domain.schema.schema_document_name`, which is what actually names the files
+ * under `docs/api/schemas/`: `"run-manifest/v3"` becomes `"run-manifest-v3"`. Returns `null`
+ * for a schema with no `schema_version` const, which is not something any of the five
+ * checked-in contracts does today.
+ */
+function declaredSchemaDocumentStem(raw: JsonSchemaNode): string | null {
+  const properties = raw.properties;
+  if (typeof properties !== "object" || properties === null) return null;
+  const schemaVersion = (properties as Record<string, JsonSchemaNode>).schema_version;
+  if (typeof schemaVersion !== "object" || schemaVersion === null) return null;
+  const declared = (schemaVersion as JsonSchemaNode).const;
+  if (typeof declared !== "string") return null;
+  return declared.replace("/", "-");
 }
 
 function readTypesSourceFile(): ts.SourceFile {
@@ -170,8 +195,8 @@ const DRIFT_CHECKS: DriftCheckSpec[] = [
   },
   {
     coversType: "ResearchResult",
-    label: "ResearchResult.manifest matches run-manifest-v2",
-    schemaFile: "run-manifest-v2.json",
+    label: "ResearchResult.manifest matches run-manifest-v3",
+    schemaFile: "run-manifest-v3.json",
     resolve: (sourceFile, schema) => {
       const researchResult = findTypeAlias(sourceFile, "ResearchResult");
       const manifest = findNestedTypeLiteral(researchResult, sourceFile, "manifest");
@@ -214,6 +239,66 @@ describe("web/src/types.ts declared fields never silently drift from the checked
       expect(drift).toEqual([]);
     });
   }
+
+  // Why this test exists, concretely: `V2-P4-001` re-versioned the run manifest
+  // (run-manifest/v2 -> /v3, adding the `paper`/`daily` modes, a comparable `horizon`
+  // enum, model attribution, an explicit residual, and a content-addressed
+  // `run_manifest_id`). The Python side renames its schema document from the version
+  // string, so `docs/api/schemas/run-manifest-v2.json` became `run-manifest-v3.json`.
+  // The `ResearchResult.manifest` spec above still named the v2 file. That did not
+  // surface as drift — `readSchema` threw ENOENT before `findFieldDrift` ran, so the
+  // manifest mirror had *no* drift protection from that row until `V2-P5-025`, and the
+  // only symptom was one opaque ENOENT in a suite the integrator's gate did not run.
+  //
+  // A missing file is the cheap half. The expensive half is that a spec's type stays in
+  // `DRIFT_CHECKED_TYPES` regardless of whether its spec can run, because that set is
+  // derived from `coversType`, not from the assertion succeeding — so the "every exported
+  // type is accounted for" test below keeps reporting the type as protected. Where a type
+  // is covered by exactly one spec (Evidence, Timeline, ValidationResult today), a stale
+  // filename therefore removes the type's only real check while the bookkeeping still
+  // claims coverage. This test is what makes that state fail up front and by name.
+  it("no DriftCheckSpec silently stops checking: every schemaFile exists and still declares the version its name claims", () => {
+    const shipped = fs
+      .readdirSync(schemaDir)
+      .filter((name) => name.endsWith(".json"))
+      .sort();
+    const problems: string[] = [];
+
+    for (const filename of [...new Set(DRIFT_CHECKS.map((spec) => spec.schemaFile))].sort()) {
+      const covers = DRIFT_CHECKS.filter((spec) => spec.schemaFile === filename)
+        .map((spec) => spec.coversType)
+        .join("/");
+
+      if (!fs.existsSync(path.join(schemaDir, filename))) {
+        problems.push(
+          `${filename} (named by the ${covers} spec) does not exist. docs/api/schemas ships: ` +
+            `${shipped.join(", ")}. If the contract was re-versioned, point the spec at the new ` +
+            `file and re-check the mirror in types.ts against it — do not assume the mirror is ` +
+            `still correct just because the rename makes this test green again.`,
+        );
+        continue;
+      }
+
+      const raw = JSON.parse(
+        fs.readFileSync(path.join(schemaDir, filename), "utf-8"),
+      ) as JsonSchemaNode;
+      const declaredStem = declaredSchemaDocumentStem(raw);
+      if (declaredStem === null) {
+        problems.push(`${filename} declares no schema_version const, so its version cannot be verified.`);
+        continue;
+      }
+      if (`${declaredStem}.json` !== filename) {
+        problems.push(
+          `${filename} declares schema_version "${String(
+            (raw.properties as Record<string, JsonSchemaNode>).schema_version.const,
+          )}", which belongs in ${declaredStem}.json — the file name and the contract version ` +
+            `it carries have diverged.`,
+        );
+      }
+    }
+
+    expect(problems, problems.join("\n")).toEqual([]);
+  });
 
   it("every exported type in types.ts is either drift-checked above or explicitly listed as unmapped", () => {
     const sourceFile = readTypesSourceFile();
