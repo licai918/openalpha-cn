@@ -533,7 +533,7 @@ def test_the_registry_table_is_every_known_registry_in_the_source_tree() -> None
     }
 
     assert found == set(LIMITATION_REGISTRIES) | set(CODELESS_REGISTRIES)
-    assert len(LIMITATION_REGISTRIES) == 35
+    assert len(LIMITATION_REGISTRIES) == 36
     assert set(LIMITATION_REGISTRIES) & set(CODELESS_REGISTRIES) == set()
 
 
@@ -720,11 +720,11 @@ no longer written in prose at all. `DOCSTRING_TOTALS` below holds them as an equ
 
 DOCSTRING_TOTALS: Final[Mapping[str, int]] = MappingProxyType(
     {
-        "registries": 35,
-        "entries": 330,
+        "registries": 36,
+        "entries": 334,
         "derived_entries": 70,
-        "table_rows": 34,
-        "table_entries": 260,
+        "table_rows": 35,
+        "table_entries": 264,
     }
 )
 """Every number this module would otherwise have stated in prose, as an equality.

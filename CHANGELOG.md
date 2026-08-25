@@ -441,6 +441,28 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   opening anchor" case, and the measurement is pinned by
   `test_a_horizon_the_read_declares_cannot_carry_the_per_security_half` rather than left as prose.
 
+- **The web contract-drift guard stopped guarding the run manifest, and `pnpm test` has been red
+  in CI since 2026-08-20** (`V2-P5-025`). `V2-P4-010` (`9f68d65`) renamed
+  `docs/api/schemas/run-manifest-v2.json` to `run-manifest-v3.json` when it gave the manifest its
+  three component planes, and touched no file under `web/`. The `ResearchResult.manifest` spec in
+  `web/src/typesContractDrift.test.ts` still named the v2 file, so `readSchema` threw `ENOENT`
+  before `findFieldDrift` ever ran (`1 failed | 51 passed (52)`) and the manifest mirror had *no*
+  drift protection at all for five days. Attribution correction: `V2-P4-001`/`V2-P4-025`
+  (`5b3383f`) did **not** cause this -- that commit updated `web/src/types.ts` and the drift test
+  in step (v1 -> v2). The sync was a manual habit rather than a test, and it lapsed on the next
+  re-version. The spec now names `run-manifest-v3.json`, against which the measured drift is
+  **zero**: the mirror declares only `run_id` and `status`, both unchanged across v2 -> v3, and
+  `findFieldDrift` is one-directional by design (`schemaDrift.ts:277`), so the sixteen properties
+  v3 has that the mirror lacks are never inspected. The mirror was therefore not lying and was
+  not expanded -- declaring a subset is what that module explicitly permits. What the `ENOENT`
+  hid was the guard's own liveness, so a new test requires every `schemaFile` in `DRIFT_CHECKS`
+  to exist **and** to still declare the version its filename claims; the second half catches what
+  a rename cannot, where a stale-but-present document loads cleanly and drift-checks against the
+  wrong contract silently. All five checked-in schemas were re-verified: every filename matches
+  its own `schema_version` const, and no second stale reference remains in `DRIFT_CHECKS`. Also
+  corrects `domain/run_mode.py`'s prose, which pointed `mode`'s full enum at the deleted
+  `run-manifest-v2.json`.
+
 - **The write-time session census stopped one session short of what every other layer required**
   (`V2-P4-114`). `panel_ingest._session_census` bounded a partition at `fetched_at - 1 day` and
   justified it with the 16:30 publication rule -- which is that rule only *below* 16:30, and is

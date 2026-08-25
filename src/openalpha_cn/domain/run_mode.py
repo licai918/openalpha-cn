@@ -33,7 +33,7 @@ while claiming to only widen a set
 (`tests/unit/domain/test_run_mode.py::test_the_enum_serialises_to_the_bare_string_the_literal_did`).
 
 The only visible change is in the generated schema: `mode` is now a `$ref` into `$defs`
-rather than an inline `enum`. `docs/api/schemas/run-manifest-v2.json` carries the whole set
+rather than an inline `enum`. `docs/api/schemas/run-manifest-v3.json` carries the whole set
 either way, and `web/src/types.ts` has never mirrored `RunManifest.mode`.
 
 ## What the two new modes mean, and what this module deliberately does not decide
