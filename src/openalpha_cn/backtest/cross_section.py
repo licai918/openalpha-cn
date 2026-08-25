@@ -263,6 +263,7 @@ __all__ = [
     "MAXIMUM_SHORTLIST",
     "MINIMUM_SCORE_COMPONENTS",
     "MINIMUM_SHORTLIST",
+    "REFUSED_VERDICT_CODES",
     "REFUSED_VERDICT_ORDER",
     "SCORE_COVERAGE_CODES",
     "SCORE_COVERAGE_ORDER",
@@ -275,6 +276,7 @@ __all__ = [
     "CrossSectionLimitation",
     "CrossSectionScreen",
     "FunnelCoverage",
+    "RefusedSecurity",
     "ScoreCensus",
     "ScoreComponent",
     "ScoreCoverage",
@@ -565,6 +567,12 @@ REFUSED_VERDICT_ORDER: Final[tuple[TradeabilityVerdict, ...]] = tuple(
 )
 """`TRADEABILITY_VERDICT_ORDER` without `tradeable`: the cells stage two's refusal table is
 keyed by."""
+
+REFUSED_VERDICT_CODES: Final[frozenset[str]] = frozenset(REFUSED_VERDICT_ORDER)
+"""`REFUSED_VERDICT_ORDER` as a set, for `RefusedSecurity`'s membership check.
+
+Derived from the tuple rather than restated, `TRADEABILITY_VERDICT_CODES`' own arrangement.
+"""
 
 
 FunnelCoverage = Literal[
@@ -907,6 +915,45 @@ class ScoreCensus:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class RefusedSecurity:
+    """One scored security stage two did **not** admit, under the rule that decided it.
+
+    `V2-P4-066`. `TradeabilityCensus` could already say that nine names went and under which four
+    headings; it could not say *which nine*, and neither could any shipped surface, so a screen
+    refused by `--min-tradable-ratio` told a user a number about a market they could not look at.
+    A count is the answer to "how much coverage did this list have"; a name is the answer to "what
+    do I do about it", and the two questions are not the same question.
+
+    `reason` is the execution policy's own string and is present for **exactly** `rejected`, which
+    `__post_init__` requires in both directions. The other three verdicts are decided by this
+    module before `AShareExecutionPolicy.execute` is called at all -- there is no order to refuse
+    -- so a reason beside one of them would be this module inventing a sentence the policy never
+    said, which is `_rejection_reasons`' stated rule about not being a second authority.
+    """
+
+    subject: str
+    verdict: TradeabilityVerdict
+    reason: str | None
+
+    def __post_init__(self) -> None:
+        if not self.subject.strip():
+            raise TwoStageFunnelError("a refused security must name a subject")
+        if self.verdict not in REFUSED_VERDICT_CODES:
+            raise TwoStageFunnelError(
+                f"{self.verdict!r} is not one of the verdicts stage two refuses under; "
+                f"expected one of {list(REFUSED_VERDICT_ORDER)}"
+            )
+        if (self.reason is None) is (self.verdict == "rejected"):
+            raise TwoStageFunnelError(
+                f"{self.subject} is {self.verdict!r} carrying reason {self.reason!r}; the policy "
+                "gives a reason for exactly the buys it refused, and the other three verdicts are "
+                "decided before it is called"
+            )
+        if self.reason is not None and not self.reason.strip():
+            raise TwoStageFunnelError(f"{self.subject}'s rejection reason is blank")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class TradeabilityCensus:
     """What became of every scored security offered to stage two, as numbers that add up.
 
@@ -928,6 +975,15 @@ class TradeabilityCensus:
     unoffered_count: int
     refused_by_verdict: tuple[tuple[TradeabilityVerdict, int], ...]
     rejection_reasons: tuple[tuple[str, int], ...]
+    refused: tuple[RefusedSecurity, ...]
+    """Every refused security by name, in `REFUSED_VERDICT_ORDER` and then by subject.
+
+    `V2-P4-066`, and it is held to the counts above rather than trusted beside them: a census
+    whose named list disagreed with its own cells would be two answers to one question, which is
+    the arithmetic this class exists to make un-fudgeable. Grouped by verdict rather than sorted
+    by subject alone, because the reading a refused screen needs first is *which rule*, and a
+    reader scanning for one rule should not have to scan the whole list to be sure they have it.
+    """
 
     def __post_init__(self) -> None:
         for name in ("scored_count", "tradeable_count", "unoffered_count"):
@@ -965,6 +1021,42 @@ class TradeabilityCensus:
                 f"the rejection reasons total "
                 f"{sum(count for _reason, count in self.rejection_reasons)} and {rejected} "
                 "securities were rejected; the policy gives exactly one reason per refusal"
+            )
+        named = tuple(item.subject for item in self.refused)
+        if len(set(named)) != len(named):
+            raise TwoStageFunnelError(
+                f"the refused list names {sorted({s for s in named if named.count(s) > 1})} twice; "
+                "a scored security gets one verdict"
+            )
+        expected_order = tuple(
+            sorted(
+                self.refused,
+                key=lambda item: (REFUSED_VERDICT_ORDER.index(item.verdict), item.subject),
+            )
+        )
+        if self.refused != expected_order:
+            raise TwoStageFunnelError(
+                "the refused list is not in REFUSED_VERDICT_ORDER and then subject order; two "
+                "runs of one screen must name the same securities in the same order or a reader "
+                "diffing them is reading an iteration order as a change"
+            )
+        counted = {
+            code: sum(1 for item in self.refused if item.verdict == code)
+            for code in REFUSED_VERDICT_ORDER
+        }
+        if counted != dict(self.refused_by_verdict):
+            raise TwoStageFunnelError(
+                f"the refused list names {counted} and the verdict census reports "
+                f"{dict(self.refused_by_verdict)}; the names and the counts are one answer"
+            )
+        named_reasons: dict[str, int] = {}
+        for item in self.refused:
+            if item.reason is not None:
+                named_reasons[item.reason] = named_reasons.get(item.reason, 0) + 1
+        if named_reasons != dict(self.rejection_reasons):
+            raise TwoStageFunnelError(
+                f"the refused list carries reasons {named_reasons} and the census reports "
+                f"{dict(self.rejection_reasons)}"
             )
 
     @property
@@ -1248,6 +1340,7 @@ class CrossSectionScreen:
                 for code in REFUSED_VERDICT_ORDER
             ),
             rejection_reasons=_rejection_reasons(fills, verdicts),
+            refused=_refused_securities(verdicts, fills),
         )
 
         if not tradeable:
@@ -1557,6 +1650,36 @@ def _empty_tradeability(scored_count: int) -> TradeabilityCensus:
         unoffered_count=scored_count,
         refused_by_verdict=tuple((code, 0) for code in REFUSED_VERDICT_ORDER),
         rejection_reasons=(),
+        refused=(),
+    )
+
+
+def _refused_securities(
+    verdicts: Mapping[str, TradeabilityVerdict], fills: Mapping[str, ExecutionResult]
+) -> tuple[RefusedSecurity, ...]:
+    """Every non-`tradeable` verdict as a named record, in the order the census requires.
+
+    `V2-P4-066`. The names come out of the same mapping the counts are taken from and in one pass
+    over it, so the two cannot describe different markets -- `TradeabilityCensus.__post_init__`
+    then holds them to each other, which is what makes that a property rather than a convention.
+
+    A `rejected` name's reason is `fills[subject].reason`, exactly as `_rejection_reasons` reads
+    it and with the same `"unstated"` fallback: `ExecutionResult.reason` is optional, and a
+    refusal with no sentence would otherwise be a `None` this record forbids.
+    """
+    return tuple(
+        sorted(
+            (
+                RefusedSecurity(
+                    subject=subject,
+                    verdict=verdict,
+                    reason=(fills[subject].reason or "unstated") if verdict == "rejected" else None,
+                )
+                for subject, verdict in verdicts.items()
+                if verdict != "tradeable"
+            ),
+            key=lambda item: (REFUSED_VERDICT_ORDER.index(item.verdict), item.subject),
+        )
     )
 
 

@@ -186,6 +186,7 @@ from openalpha_cn.backtest.candidate_ranking import (
     CandidateRanking,
     RankedCandidate,
 )
+from openalpha_cn.backtest.cross_section import TradeabilityCensus
 from openalpha_cn.domain._identity import stable_model_id
 from openalpha_cn.domain.time import ensure_aware
 
@@ -701,7 +702,12 @@ def gate_shortlist(*, ranking: CandidateRanking, spec: ShortlistGateSpec) -> Sho
         ranking_manifest_id=_ranking_manifest_id_of(ranking), spec=spec
     )
     measurement = _measure(ranking)
-    blocks = _blocks_for(measurement, spec=spec, coverage=ranking.coverage)
+    blocks = _blocks_for(
+        measurement,
+        spec=spec,
+        coverage=ranking.coverage,
+        tradeability=ranking.funnel.tradeability,
+    )
     return ShortlistClearance(
         manifest=manifest,
         ranking_content_digest=ranking.content_digest,
@@ -726,6 +732,38 @@ def _ranking_manifest_id_of(ranking: CandidateRanking) -> str:
             "conventionally a content address stops being one the first time it is convenient"
         )
     return identity
+
+
+def _stage_two_loss(tradeability: TradeabilityCensus, *, named: int = 5) -> str:
+    """The stage-two loss as *rules* and *securities*, for the refusal that gates it.
+
+    `V2-P4-066`. The block said `the loss is 0 at stage one and 2 at stage two` and stopped, so a
+    user refused by `--min-tradable-ratio` learned a number about a market they could not look at
+    -- and the two remedies behind that number are different in kind: a limit-up name is a
+    different session's problem and a name over `--position-capital` is this call's.
+
+    Bounded at `named` securities per verdict, because a block detail is a sentence on somebody's
+    terminal: the *rules* and their counts are always complete (the vocabulary bounds them), and
+    the whole list is on `funnel.untradeable`, which this points at rather than duplicating.
+    Empty verdicts are left out here rather than printed as noughts, which is the block lines' own
+    rule and the opposite of the census': a census must separate "nobody was" from "nothing
+    looked", and a sentence naming what went wrong must not bury it in zeroes.
+    """
+    occurred = [(code, count) for code, count in tradeability.refused_by_verdict if count > 0]
+    if not occurred:
+        return "Stage two refused nobody; the whole loss is stage one's."
+    rules = ", ".join(f"{code}={count}" for code, count in occurred)
+    parts = [f"Stage two refused under {rules}."]
+    for code, _count in occurred:
+        subjects = [item.subject for item in tradeability.refused if item.verdict == code]
+        shown = ", ".join(subjects[:named])
+        rest = len(subjects) - named
+        parts.append(f"{code}: {shown}{f' and {rest} more' if rest > 0 else ''}.")
+    if tradeability.rejection_reasons:
+        reason, count = tradeability.rejection_reasons[0]
+        parts.append(f"The commonest refusal the execution policy gave is {reason!r} ({count}).")
+    parts.append("Every refused security is named on funnel.untradeable.")
+    return " ".join(parts)
 
 
 def _measure(ranking: CandidateRanking) -> ShortlistMeasurement:
@@ -795,6 +833,7 @@ def _blocks_for(
     *,
     spec: ShortlistGateSpec,
     coverage: str,
+    tradeability: TradeabilityCensus,
 ) -> tuple[ShortlistGateBlock, ...]:
     """The bars this measurement failed, decided in `SHORTLIST_BLOCK_ORDER` and returned in it.
 
@@ -821,6 +860,7 @@ def _blocks_for(
                     f"{measurement.scored_count} of them were scored at all, so the loss is "
                     f"{measurement.universe_count - measurement.scored_count} at stage one and "
                     f"{measurement.scored_count - measurement.tradeable_count} at stage two. "
+                    f"{_stage_two_loss(tradeability)} "
                     "Every shortlisted name still filled its own buy; this is the list's coverage "
                     "and not any one candidate's verdict"
                 ),
@@ -854,7 +894,9 @@ def _blocks_for(
                     f"({measurement.researched_ratio:.4f}), and this gate was declared with a "
                     f"floor of {spec.minimum_researched_ratio:.4f}. The rest are named on "
                     "CandidateRanking.unresearched, which is a fact about which runs finished "
-                    "rather than about the market"
+                    "rather than about the market -- and V2-P4-075 is what makes that sentence "
+                    "true: evidence naming a run that did not finish is counted unresearched and "
+                    "reported apart, rather than clearing this floor"
                 ),
             )
         )

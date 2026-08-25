@@ -22,7 +22,7 @@ Two things follow, and they are separate:
 
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Final, Literal, Self
+from typing import Final, Literal, Self, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
@@ -55,6 +55,44 @@ will make one -- and is declared anyway, because unlike the unreachable
 `TradeabilityVerdict.not_in_registry` branch `V2-P4-005` deleted, this value is reachable
 today by any agent a user writes. A manifest that could not record one would be recording a
 falsehood about it, which is exactly the state `V2-P4-010` found.
+"""
+
+
+RunStatus = Literal["pending", "running", "succeeded", "failed", "interrupted"]
+"""Where one run got to, as a closed set -- the outcome half of `RunManifest`.
+
+Written out once here rather than inline on `RunManifest.status`, because `V2-P4-075` needed a
+second reader of the same vocabulary and a second inline `Literal` is the drift
+`domain/run_mode.py` exists to have stopped. A `Literal` alias rather than a `StrEnum` for the
+reason that module states from the other side: nothing renders a status as a CLI choice, so the
+third declaration a `StrEnum` buys off does not exist here, and an alias keeps the published
+schema's inline `enum` byte-for-byte what it was.
+
+`pending` and `running` are non-terminal (`validate_lifecycle` requires `finished_at` to be
+absent on neither, and requires it on the other three).
+"""
+
+RUN_STATUSES: Final[frozenset[RunStatus]] = frozenset(get_args(RunStatus))
+"""Every declared status, derived from the alias so it cannot disagree with it."""
+
+FINISHED_RUN_STATUSES: Final[frozenset[RunStatus]] = frozenset({"succeeded"})
+"""The statuses under which a run **produced the conclusions it was asked for** (`V2-P4-075`).
+
+One member, and it is a set rather than an equality test so the distinction has a name a reader
+can find. `failed` and `interrupted` are terminal -- the run stopped -- and terminal is not
+finished: whatever a failed run left behind, it is not the answer its declaration asked for, and
+`pending` and `running` have not got there yet. `V2-P4-075` measured what the other reading
+costs: a `RunManifest(status="failed")` stored under an address, and evidence filed against that
+address, cleared `--min-researched-ratio 1.0` and published 25 candidates at
+`researched_ratio: 1.0` -- while `ShortlistGateBlock("researched_ratio_below_floor")` was calling
+that ratio "a fact about which runs finished".
+
+**This is a property of an address and not of a manifest row**, which matters because `status` is
+in `RUN_MANIFEST_UNADDRESSED_FIELDS`: a run that is interrupted and re-run to success is the
+*same declared run* and shares one `run_manifest_id`. So the question a reader of this set must
+ask is "does this deployment hold **a** finished run at this address", never "is the row I found
+first a finished one". `shortlist_view.stored_run_manifest_ids` is the one caller and asks it
+that way.
 """
 
 
@@ -301,7 +339,7 @@ class RunManifest(BaseModel):
     environment: tuple[VersionRef, ...] = ()
     started_at: datetime
     finished_at: datetime | None = None
-    status: Literal["pending", "running", "succeeded", "failed", "interrupted"]
+    status: RunStatus
     checkpoints: tuple[CheckpointRecord, ...] = ()
 
     @field_validator("as_of", "started_at", "finished_at")
@@ -369,6 +407,9 @@ class RunManifestV1(BaseModel):
     started_at: datetime
     finished_at: datetime | None = None
     status: Literal["pending", "running", "succeeded", "failed", "interrupted"]
+    """Written out rather than sharing `RunStatus`, this class's own stated rule: a frozen
+    shape describes what that version accepted, and an alias would widen it silently on the
+    day the live set widens."""
     checkpoints: tuple[CheckpointRecord, ...] = ()
 
     @field_validator("as_of", "started_at", "finished_at")
@@ -403,6 +444,9 @@ class RunManifestV2(BaseModel):
     started_at: datetime
     finished_at: datetime | None = None
     status: Literal["pending", "running", "succeeded", "failed", "interrupted"]
+    """Written out rather than sharing `RunStatus`, this class's own stated rule: a frozen
+    shape describes what that version accepted, and an alias would widen it silently on the
+    day the live set widens."""
     checkpoints: tuple[CheckpointRecord, ...] = ()
 
     @field_validator("as_of", "started_at", "finished_at")

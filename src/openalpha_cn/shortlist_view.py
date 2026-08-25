@@ -111,8 +111,10 @@ stored run, and this is where a public face for them lives.
   more, so an invented conclusion beside a well-formed literal cleared a `1.0` floor and was
   published with a provenance pointer that resolved to nothing. `stored_run_manifest_ids` is the
   set this deployment holds, evidence outside it is dropped before the ranking is built, and the
-  names it was filed under are reported on `evidence_without_a_stored_run`. What that proves is
-  bounded and the bound is written down:
+  names it was filed under are reported on `evidence_without_a_stored_run`. `V2-P4-075` narrows
+  which stored runs resolve -- a `failed` or `interrupted` run is *held* and has not finished, and
+  it used to clear a `1.0` floor -- and reports that second case apart, on
+  `evidence_from_an_unfinished_run`. What that proves is bounded and the bound is written down:
   `a_resolved_run_manifest_is_not_a_resolved_signal`.
 """
 
@@ -142,8 +144,10 @@ from openalpha_cn.backtest.cross_section import (
     ComponentCrossSection,
     CrossSectionFunnel,
     CrossSectionScreen,
+    RefusedSecurity,
     ScoreComponent,
     ShortlistSpec,
+    TradeabilityCensus,
     TwoStageFunnelError,
 )
 from openalpha_cn.backtest.execution import (
@@ -183,7 +187,7 @@ from openalpha_cn.domain.name_history import (
 )
 from openalpha_cn.domain.panel_batch import PanelBatchError
 from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET, SUSPENSION_DATASET
-from openalpha_cn.domain.run import RunManifest
+from openalpha_cn.domain.run import FINISHED_RUN_STATUSES, RunManifest
 from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.domain.stock_universe import (
     STOCK_BASIC_DATASET,
@@ -225,6 +229,7 @@ from openalpha_cn.panel_view import PANEL_STORE_PLACEHOLDER, panel_store
 
 __all__ = [
     "KNOWN_SHORTLIST_VIEW_LIMITATIONS",
+    "MAX_NAMED_UNTRADEABLE",
     "SHORTLIST_ANSWER_UNADDRESSED_KEYS",
     "SHORTLIST_DOCUMENT_SCHEMA_VERSION",
     "SHORTLIST_PANEL_DATASETS",
@@ -243,9 +248,11 @@ __all__ = [
     "ShortlistViewError",
     "ShortlistViewLimitation",
     "ShortlistWrite",
+    "StoredRunAddresses",
     "clipped_from_the_tie_at_the_top",
     "held_shortlist",
     "load_shortlist_cross_section",
+    "named_untradeable",
     "open_shortlist",
     "panel_store",
     "run_shortlist",
@@ -532,7 +539,10 @@ KNOWN_SHORTLIST_VIEW_LIMITATIONS: Final[tuple[ShortlistViewLimitation, ...]] = (
             "KNOWN_SHORTLIST_VIEW_RESOLUTION: `V2-P4-049` made the supplied `run_manifest_id` "
             "resolve against the stored runs, so evidence pointing at a run this deployment never "
             "made no longer counts toward `researched_ratio` and is reported as "
-            "`evidence_without_a_stored_run`. What is resolved is the **run**, and not the "
+            "`evidence_without_a_stored_run`; `V2-P4-075` narrowed the resolving set to the runs "
+            "that **finished**, so a held `failed` or `interrupted` run no longer counts either "
+            "and is reported apart as `evidence_from_an_unfinished_run`. What is resolved is the "
+            "**run**, and not the "
             "`SignalFrame` beside it: this repository stores no signal (see "
             "`the_evidence_plane_is_supplied_rather_than_run_by_this_module`), so there is nothing "
             "to resolve one against, and a caller who holds a real `run_manifest_id` can still "
@@ -618,6 +628,24 @@ A version of its own beside `SHORTLIST_VIEW_SCHEMA_VERSION` rather than reusing 
 two can move independently: the answer's shape is what three faces agreed to hand out, and this is
 what a *document* on disk looks like around it. `FactorExperimentRecord` carries the same pair for
 the same reason one plane over.
+"""
+
+MAX_NAMED_UNTRADEABLE: Final[int] = 50
+"""How many refused securities `funnel.untradeable` names before it starts counting instead.
+
+`V2-P4-066` asked for the names and this is the bound on them, stated here rather than left to be
+discovered. `TradeabilityCensus.refused` names **every** refused security -- it is a record and
+not a response -- and this is a rendering that goes into an HTTP body, a terminal and a stored
+document, so it is the one place the length has to stop scaling with the market. `V2-P4-110` is
+the row that measured what the other choice costs: a `422` echoing its own input reached
+13.18 MiB.
+
+Fifty rather than a round ten, chosen against the acceptance this row came from: the whole-market
+screen it measured lost **nine** names at this tier, so fifty leaves the ordinary answer complete
+and truncates only a day when the market itself is shut. `untradeable_not_named` carries the
+residual so a truncated list is never mistaken for a short one, and the *counts* --
+`refused_by_verdict` and `rejection_reasons` -- are exact whatever the length, because those are
+bounded by the vocabulary rather than by the market.
 """
 
 SHORTLIST_ANSWER_UNADDRESSED_KEYS: Final[frozenset[str]] = frozenset({"ranking_age_days"})
@@ -734,8 +762,61 @@ class ResearchRunStore(Protocol):
         """Every stored run manifest."""
 
 
-def stored_run_manifest_ids(runs: ResearchRunStore) -> frozenset[str]:
-    """Every `run_manifest_id` this deployment holds a run for.
+@dataclass(frozen=True, slots=True, kw_only=True)
+class StoredRunAddresses:
+    """What one pass over the stored runs says about the addresses evidence may name.
+
+    Two sets rather than one, and the split is `V2-P4-075`. `held` is every address this
+    deployment holds a run for -- the literal claim `stored_run_manifest_ids` always made, and it
+    stayed exactly true of a `RunManifest(status="failed")`. `finished` is the subset whose runs
+    **produced the conclusions they were asked for** (`FINISHED_RUN_STATUSES`), and it is the one
+    the evidence join resolves against.
+
+    Kept apart rather than collapsed because the two differences have different remedies, which is
+    `unused_evidence`'s own rule applied one step down: a name whose address is in neither is
+    evidence about a run nobody made and the remedy is to run the research; a name in `held` and
+    not in `finished` names a run this deployment *did* make and that did not finish, and the
+    remedy is to go and look at why. Reported apart for that reason, on
+    `evidence_without_a_stored_run` and `evidence_from_an_unfinished_run`.
+
+    `finished <= held` by construction and `__post_init__` requires it, so a caller reading the
+    difference of the two is reading a partition rather than whatever two independent passes
+    happened to produce.
+    """
+
+    held: frozenset[str]
+    finished: frozenset[str]
+
+    def __post_init__(self) -> None:
+        if not self.finished <= self.held:
+            raise ShortlistRequestError(
+                "a finished run's address is a stored run's address; "
+                f"{sorted(self.finished - self.held)} is in neither order"
+            )
+
+
+def named_untradeable(
+    tradeability: TradeabilityCensus,
+) -> tuple[tuple[RefusedSecurity, ...], int]:
+    """The refused securities a face may name, and how many it must leave unnamed.
+
+    One decision rather than two, and `V2-P4-066`'s own mutation sweep is why it is a function.
+    The `--json` body and the terminal rendering both truncate at `MAX_NAMED_UNTRADEABLE`, and
+    with each face slicing for itself the two could disagree about what "the first fifty" means --
+    or, as measured, one face could be held to the ceiling by a test while the other quietly
+    read a stale copy of the number. A face that renders the pair renders one answer.
+
+    The residual is returned beside the list rather than left to be recomputed from a length,
+    because `len(refused) - MAX_NAMED_UNTRADEABLE` is the subtraction a reader gets wrong when
+    nothing was truncated: it is negative, and a body reporting `-48` unnamed securities would be
+    a rendering defect wearing a number.
+    """
+    named = tradeability.refused[:MAX_NAMED_UNTRADEABLE]
+    return named, len(tradeability.refused) - len(named)
+
+
+def stored_run_manifest_ids(runs: ResearchRunStore) -> StoredRunAddresses:
+    """Every `run_manifest_id` this deployment holds a run for, and the finished ones (`V2-P4-075`).
 
     `V2-P4-049`, which the P4 re-acceptance measured like this: `run_manifest_id` was only
     format-checked and a supplied `SignalFrame` only had to hash to its own address, so an invented
@@ -754,8 +835,33 @@ def stored_run_manifest_ids(runs: ResearchRunStore) -> frozenset[str]:
     would add to one shortlist. Giving the address a column and an index is the repair when that
     bites -- `V2-P4-002` did exactly that for `mode`, and its docstring is the template -- and it
     is a migration rather than this row's work.
+
+    **`V2-P4-075`: holding a run is not the same as having finished one, and the gap was
+    reachable.** The P4 fourth-round acceptance stored a `RunManifest(status="failed")` and a
+    `RunManifest(status="interrupted")`, filed evidence for every shortlisted name against their
+    addresses, and cleared `--min-researched-ratio 1.0` at `researched_ratio: 1.0` on both. The
+    docstring above was *literally* true throughout -- the deployment did hold those runs -- and
+    what was false was the thing built on it: `ShortlistGateBlock("researched_ratio_below_floor")`
+    called that ratio "a fact about which runs finished". So the ratio now measures what the
+    refusal says it measures, and the two sets are returned apart rather than the loose one being
+    narrowed in place, so a caller can still be told which of the two it is.
+
+    **The quantifier is over the address, not over a row.** `status` is in
+    `RUN_MANIFEST_UNADDRESSED_FIELDS`, so an interrupted run and its successful re-run are one
+    declaration at one address; `finished` is therefore "this deployment holds **a** finished run
+    here", built by union rather than by last-writer-wins over a mapping. That is unreachable
+    through `SQLiteRunRepository` today for a reason worth writing down rather than relying on --
+    `runs` is keyed by `run_id`, `run_id` *is* addressed, and `append_run` refuses a second row
+    under one `run_id`, so one address holds at most one row there -- but `ResearchRunStore` is a
+    Protocol and a caller's own store is under no such constraint.
     """
-    return frozenset(manifest.run_manifest_id for manifest in runs.list_runs())
+    held: set[str] = set()
+    finished: set[str] = set()
+    for manifest in runs.list_runs():
+        held.add(manifest.run_manifest_id)
+        if manifest.status in FINISHED_RUN_STATUSES:
+            finished.add(manifest.run_manifest_id)
+    return StoredRunAddresses(held=frozenset(held), finished=frozenset(finished))
 
 
 # --- the request, which touches no store --------------------------------------------------------
@@ -1883,6 +1989,21 @@ class ShortlistRunResult:
     list. Merging them would have made "you researched more names than I shortlisted" and "your
     provenance does not resolve" one line in a report.
     """
+    unfinished_evidence: tuple[str, ...]
+    """Subjects whose supplied `run_manifest_id` names a run this deployment holds and that did
+    not finish, ascending.
+
+    `V2-P4-075`. These names are **not** researched, exactly as `unresolvable_evidence`'s are and
+    by the same arithmetic: the evidence is dropped before `rank_candidates` sees it, so each
+    falls into `CandidateRanking.unresearched` and leaves `researched_ratio` where a name with no
+    evidence at all leaves it. What is different is the *reason*, and it is carried separately for
+    `unresolvable_evidence`'s own stated rule -- a run nobody made and a run that broke have
+    different remedies, run the research or find out why the run broke -- and because a single
+    bucket would have to describe a held run as one this deployment holds no run for.
+
+    `FINISHED_RUN_STATUSES` is the vocabulary. `pending` and `running` land here too, which is the
+    same statement about a run that has not got there yet.
+    """
     cross_section_as_of: datetime
     pricing_session: date
     universe: tuple[str, ...]
@@ -1976,18 +2097,25 @@ def run_shortlist(
     _refuse_a_component_the_panel_never_valued(request, section=section, funnel=funnel)
 
     shortlisted = {entry.subject for entry in funnel.shortlist}
-    resolvable = stored_run_manifest_ids(runs)
+    stored = stored_run_manifest_ids(runs)
     unresolvable = tuple(
         sorted(
             subject
             for subject, item in request.evidence.items()
-            if item.run_manifest_id not in resolvable
+            if item.run_manifest_id not in stored.held
+        )
+    )
+    unfinished = tuple(
+        sorted(
+            subject
+            for subject, item in request.evidence.items()
+            if item.run_manifest_id in stored.held and item.run_manifest_id not in stored.finished
         )
     )
     supplied = {
         subject: item
         for subject, item in request.evidence.items()
-        if item.run_manifest_id in resolvable
+        if item.run_manifest_id in stored.finished
     }
     joined = {subject: item for subject, item in supplied.items() if subject in shortlisted}
     unused = tuple(sorted(set(supplied) - shortlisted))
@@ -2026,6 +2154,7 @@ def run_shortlist(
         request=request,
         unused_evidence=unused,
         unresolvable_evidence=unresolvable,
+        unfinished_evidence=unfinished,
         cross_section_as_of=section.as_of,
         pricing_session=section.session,
         universe=section.universe,
@@ -2211,6 +2340,23 @@ def shortlist_view(result: ShortlistRunResult) -> dict[str, object]:
     nothing is refused by `_refuse_a_component_the_panel_never_valued` before the gate runs, so
     the caller is told about `insufficient_cross_section` rather than about a researched ratio.
 
+    ## `refused_by_verdict`, `rejection_reasons` and `untradeable` (`V2-P4-066`)
+
+    `excluded_by_coverage` explains stage one and stops there, so `scored -> tradeable` was the
+    subtraction with nothing beside it: a whole-market acceptance read `5542 scored -> 5533
+    tradeable` and `tradable=0.9978`, and the words `halted`, `below_board_minimum` and `up_limit`
+    were nowhere in the body. `--min-tradable-ratio` gates precisely that ratio, so a list could
+    be refused for a market fact its reader had no way to look at.
+
+    All three come off `TradeabilityCensus`, which has carried the first two since `V2-P4-005` and
+    reached no face; `refused` is the names, added by this row. The four cells are always all four
+    -- `ScoreCensus.excluded_by_coverage`'s rule, one tier down -- and `rejection_reasons` carries
+    the execution policy's own strings rather than a re-derivation.
+
+    **`untradeable` is bounded and `untradeable_not_named` is the residual.** See
+    `MAX_NAMED_UNTRADEABLE` for the length and why a rendering has one where the record does not.
+    The two count objects are exact at any market size, because they are keyed by a vocabulary.
+
     ## `shortlist_id`, the address that made the other three retrievable (`V2-P4-062`)
 
     The body carried three content addresses and there was nothing to address: no store held a
@@ -2277,6 +2423,13 @@ def shortlist_view(result: ShortlistRunResult) -> dict[str, object]:
             "scored_count": result.funnel.scores.scored_count,
             "excluded_by_coverage": dict(result.funnel.scores.excluded_by_coverage),
             "tradeable_count": result.funnel.tradeability.tradeable_count,
+            "refused_by_verdict": dict(result.funnel.tradeability.refused_by_verdict),
+            "rejection_reasons": dict(result.funnel.tradeability.rejection_reasons),
+            "untradeable": [
+                {"subject": item.subject, "verdict": item.verdict, "reason": item.reason}
+                for item in named_untradeable(result.funnel.tradeability)[0]
+            ],
+            "untradeable_not_named": named_untradeable(result.funnel.tradeability)[1],
             "clip_block": result.funnel.clip_block,
             "tied_at_the_cut": result.funnel.tied_at_the_cut,
             "shortlist": [
@@ -2321,6 +2474,7 @@ def shortlist_view(result: ShortlistRunResult) -> dict[str, object]:
         ),
         "unresearched": list(result.ranking.unresearched),
         "evidence_not_shortlisted": list(result.unused_evidence),
+        "evidence_from_an_unfinished_run": list(result.unfinished_evidence),
         "evidence_without_a_stored_run": list(result.unresolvable_evidence),
     }
     return {**answer, "shortlist_id": stable_answer_digest(answer)}

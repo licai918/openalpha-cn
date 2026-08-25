@@ -107,7 +107,12 @@ from panel_fixtures import (
 from typer.testing import CliRunner
 
 from openalpha_cn.cli import PanelExit, app
-from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET, ADJUSTMENT_PANEL_COLUMNS
+from openalpha_cn.domain.adjustment import (
+    ADJ_FACTOR_DATASET,
+    ADJUSTMENT_PANEL_COLUMNS,
+    AdjustmentHorizonError,
+    adjustment_histories_from_panel_rows,
+)
 from openalpha_cn.domain.index_prices import (
     INDEX_DAILY_DATA_COLUMNS,
     INDEX_DAILY_DATASET,
@@ -268,6 +273,77 @@ def test_the_compressed_factor_partition_is_why_a_row_predicate_cannot_replace_t
     assert sorted(len(days) for days in dates_by_subject.values()) == [2, 2, 2, 2, 2, 2, 3, 3]
     assert {len(days) for days in visible_at_the_earlier_instant.values()} == {1}
     assert set(type(coverage.dates[0]).__dataclass_fields__) == {"event_date", "row_count"}
+
+
+def test_a_horizon_the_read_declares_cannot_carry_the_per_security_half(
+    tmp_path: Path,
+) -> None:
+    """`V2-P4-086`: edit (a) is delivered and edit (b) is measured here to be load-bearing.
+
+    That row names two edits. The first landed --
+    `adjustment_histories_from_panel_rows(rows, *, answerable_through=...)`, following
+    `statement_histories_from_panel_rows`' shape, so a read can say how far it looked instead of
+    letting its newest row say it. This test is the second edit's acceptance, written from the
+    side that shows why one date cannot stand in for it.
+
+    **The move was attempted and reverted on this measurement.** Putting
+    `load_adjustment_histories` on `_read_visible_event_dated_rows` with a read-level
+    `answerable_through` does make `panel doctor` answer at `EARLIER_AS_OF` -- the census
+    reconciliation fits `adj_factor` exactly, because its clock is `ClockStrategy.daily_close` and
+    a row's availability is a function of its own event date, so that half of `V2-P4-079`'s
+    objection turned out not to bind. What did bind is this one:
+    `tests/integration/panel/test_panel_shape_coverage.py::
+    test_a_shape_provokes_exactly_the_health_codes_it_declares[adjustment.factor_series_stops
+    _inside_the_window]` went from `['return_path_disagreement']` to `[]`. A security whose factor
+    series genuinely ends inside the window stopped being refused and started being answered, from
+    the shipped health report -- the exact fail-open `AdjustmentHistory`'s upper horizon exists to
+    prevent, and the exact per-security distinction `KNOWN_ADJUSTMENT_LIMITATIONS.
+    suspension_is_invisible` names.
+
+    Its own store rather than the module fixture, and the difference is the point: `HEALTHY_SHAPES`
+    excludes every shape that provokes a finding, so the panel the tests above read carries no
+    stopped series at all and could not separate the two answers. Below is the defect shape in one
+    partition and no report: the corpus holds one security whose series stops
+    before the others', a single read-level bound lifts *its* horizon along with everybody else's,
+    and nothing in the rows or in `PartitionCoverage` can tell the two apart. `covered_through`
+    and `observed_through` are asserted together because their coming apart is the whole finding:
+    the read is answering past its last measurement for a security it has no business answering
+    for.
+
+    **A frontier rule does not rescue it, and that was checked rather than assumed.** "Widen only
+    the securities whose last visible row sits at the read's newest visible event date" separates
+    the two here, and it fails on the ordinary case instead: on a step function a security that
+    simply did not move since the opening anchor also sits behind the frontier, so it would be
+    refused for being quiet. What separates "quiet" from "finished" is a per-subject
+    `last_event_date`, which is `V2-P4-086`'s second edit in the shape `V2-P4-094` corrected it to
+    -- cardinality `PartitionCoverage.subjects`, not one entry per stored row.
+    """
+    store = PanelStore(tmp_path / "panel")
+    write_generated_panel(
+        store, generate_panel(shapes=("adjustment.factor_series_stops_inside_the_window",))
+    )
+
+    rows = store.query(dataset=ADJ_FACTOR_DATASET, year=YEAR, columns=ADJUSTMENT_PANEL_COLUMNS)
+    unbounded = adjustment_histories_from_panel_rows(rows)
+
+    horizons = {code: history.covered_through for code, history in unbounded.items()}
+    newest = max(horizons.values())
+    stopped = sorted(code for code, day in horizons.items() if day < newest)
+    assert stopped, (
+        "the fixture no longer carries a series that stops inside the window, so this test "
+        "cannot separate the two answers it exists to separate"
+    )
+
+    bounded = adjustment_histories_from_panel_rows(rows, answerable_through=newest)
+    for code in stopped:
+        assert bounded[code].observed_through == horizons[code]
+        assert bounded[code].covered_through == newest
+        assert bounded[code].factor_on(newest) == unbounded[code].factor_on(horizons[code]), (
+            "a read-level horizon answers this security's last factor across a window its own "
+            "series never covered, which is what edit (b) has to stop"
+        )
+        with pytest.raises(AdjustmentHorizonError):
+            unbounded[code].factor_on(newest)
 
 
 # --- V2-P4-083: the statement door, driven from `panel doctor` -------------------------------

@@ -305,6 +305,30 @@ class AdjustmentHistory:
 
     ts_code: str
     observations: tuple[FactorObservation, ...]
+    answerable_through: date | None = None
+    """The last day the *read* that produced these observations covered, when it is not the
+    newest observation's own day (`V2-P4-086`).
+
+    `StatementHistory.answerable_through`'s counterpart one dataset over, and it exists here for
+    a reason that dataset does not have: this corpus is a **step function**, so "no row after D"
+    means "the factor did not move after D" and never "the series stopped at D".
+    `covered_through` reading `observations[-1].observed_on` conflates the two, and a
+    point-in-time read is where they come apart.
+
+    `V2-P4-079` measured what that costs. `compress_adjustment_batch` keeps the year's opening
+    anchor, every change point and the year's closing anchor: 64 rows written, 18 stored, six of
+    eight securities keeping exactly two (2026-01-05 and 2026-01-16). A read that withholds rows
+    not yet knowable at 2026-01-09 leaves **one** row for those six, and without this field
+    `covered_through` falls to 2026-01-05 for all eight -- so every question about 2026-01-06,
+    a session that had published three days earlier, becomes an `AdjustmentHorizonError`. The
+    factor did not stop; the read did, and only one of those two is a fact about the market.
+
+    `None` means "the newest observation is the horizon", which is what an unfiltered whole-year
+    read gives and is the behaviour every caller had before this field existed. Supplying it is
+    the caller stating what its own read covered, never this contract inferring it -- the same
+    split `SecurityIndustryHistory.answerable_through` makes, and for its reason: the read knows
+    the bound and the rows cannot.
+    """
 
     @property
     def covered_from(self) -> date:
@@ -313,7 +337,27 @@ class AdjustmentHistory:
 
     @property
     def covered_through(self) -> date:
-        """The last day this history can answer for; see this module's docstring."""
+        """The last day this history can answer for; see this module's docstring.
+
+        `answerable_through` when the read that built this stated one, and the newest
+        observation's own day otherwise. Never the later of the two: a caller declaring a
+        horizon is declaring what its read covered, and a history that quietly answered past it
+        because it happened to hold a row there would make the declaration decorative.
+        """
+        if self.answerable_through is not None:
+            return self.answerable_through
+        return self.observations[-1].observed_on
+
+    @property
+    def observed_through(self) -> date:
+        """The newest day this history actually holds an observation for.
+
+        Separate from `covered_through` since `V2-P4-086`, because the two answer different
+        questions once a read can declare its own horizon: this is where the step function's
+        last known value was measured, and `covered_through` is how far the read that produced
+        it may be asked. A caller that wants to know whether it is reading a live tail or a
+        carried-forward one reads both.
+        """
         return self.observations[-1].observed_on
 
     def change_points(self) -> tuple[FactorObservation, ...]:
@@ -338,11 +382,19 @@ class AdjustmentHistory:
                 "rather than equal to the earliest one on file"
             )
         if day > self.covered_through:
+            if self.answerable_through is None:
+                raise AdjustmentHorizonError(
+                    f"{day.isoformat()} is after {self.ts_code}'s last adjustment factor, "
+                    f"observed {self.covered_through.isoformat()}; carrying the last factor "
+                    "forward would assert that no corporate action happened in a window this "
+                    "read never covered"
+                )
             raise AdjustmentHorizonError(
-                f"{day.isoformat()} is after {self.ts_code}'s last adjustment factor, "
-                f"observed {self.covered_through.isoformat()}; carrying the last factor "
-                "forward would assert that no corporate action happened in a window this "
-                "read never covered"
+                f"{day.isoformat()} is after {self.answerable_through.isoformat()}, the last "
+                f"day the read that built {self.ts_code}'s factor series covered (its newest "
+                f"observation is {self.observed_through.isoformat()}); carrying the last factor "
+                "forward would assert that no corporate action happened in a window this read "
+                "never covered"
             )
         position = bisect_right([entry.observed_on for entry in self.observations], day)
         return self.observations[position - 1].factor
@@ -455,7 +507,10 @@ def load_bearing_observations(
 
 
 def build_adjustment_history(
-    ts_code: str, observations: Iterable[FactorObservation]
+    ts_code: str,
+    observations: Iterable[FactorObservation],
+    *,
+    answerable_through: date | None = None,
 ) -> AdjustmentHistory:
     """Assemble an `AdjustmentHistory` from factor observations, in any order.
 
@@ -493,15 +548,34 @@ def build_adjustment_history(
             "none, and an empty history refuses every question, which is indistinguishable "
             "from a failed read"
         )
+    kept = tuple(by_day[key] for key in sorted(by_day))
+    if answerable_through is not None:
+        _require_plain_date(answerable_through, "answerable_through")
+        if answerable_through < kept[-1].observed_on:
+            raise AdjustmentError(
+                f"{ts_code}'s read declares it covers through "
+                f"{answerable_through.isoformat()} and carries an observation on "
+                f"{kept[-1].observed_on.isoformat()}, which is after it; a row the read holds "
+                "is a row the read saw, so a horizon behind it describes a different read"
+            )
     return AdjustmentHistory(
-        ts_code=ts_code, observations=tuple(by_day[key] for key in sorted(by_day))
+        ts_code=ts_code, observations=kept, answerable_through=answerable_through
     )
 
 
 def adjustment_histories_from_panel_rows(
     rows: Iterable[Sequence[object]],
+    *,
+    answerable_through: date | None = None,
 ) -> Mapping[str, AdjustmentHistory]:
     """Rebuild one history per security from rows shaped like `ADJUSTMENT_PANEL_COLUMNS`.
+
+    `answerable_through` is the last day the read that produced `rows` covered, and every history
+    built here carries it -- `statement_histories_from_panel_rows`' shape and `V2-P4-086`'s edit
+    (a), verbatim. It is one date for the whole read and not one per security **on purpose**: it
+    describes the read, and a read has one horizon however many securities it returned. Which
+    security's tail is genuinely finished and which is merely quiet is a different question, and
+    this contract answers neither -- see `KNOWN_ADJUSTMENT_LIMITATIONS.suspension_is_invisible`.
 
     The counterpart of the provider's projection. What this function owns is the shape of a
     *stored row* -- its width, the ISO text its date column is stored as, and the fact that
@@ -527,7 +601,10 @@ def adjustment_histories_from_panel_rows(
             )
         )
     return MappingProxyType(
-        {ts_code: build_adjustment_history(ts_code, group) for ts_code, group in grouped.items()}
+        {
+            ts_code: build_adjustment_history(ts_code, group, answerable_through=answerable_through)
+            for ts_code, group in grouped.items()
+        }
     )
 
 

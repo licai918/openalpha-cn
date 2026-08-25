@@ -83,7 +83,8 @@ class StorageContainer:
 
     It joined `batch_store` and `portfolio_ledger` for their reason and by their route
     (`V2-P4-049`): `shortlist_view.stored_run_manifest_ids` resolves a supplied
-    `run_manifest_id` against what this deployment holds, and the only way to answer that is
+    `run_manifest_id` against what this deployment holds -- and, since `V2-P4-075`, against
+    which of those runs *finished* -- and the only way to answer either is
     `list_runs()`, which `RunRepository` does not declare and must not -- that Protocol names
     exactly the four methods `ResearchEngine` calls, and widening it would hand every
     service-layer consumer a listing it has no business asking for. `ResearchEngine` still takes

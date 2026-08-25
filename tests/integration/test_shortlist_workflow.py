@@ -54,7 +54,7 @@ from typer.testing import CliRunner
 
 from openalpha_cn.api.app import create_app
 from openalpha_cn.cli import PanelExit, app
-from openalpha_cn.domain.run import RunManifest
+from openalpha_cn.domain.run import RunManifest, RunStatus
 from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import (
@@ -275,9 +275,18 @@ def _signal(subject: str, *, as_of: datetime) -> SignalFrame:
     )
 
 
-def _stored_run_manifest(subject: str, *, as_of: datetime) -> RunManifest:
+def _stored_run_manifest(
+    subject: str, *, as_of: datetime, status: RunStatus = "succeeded", label: str = ""
+) -> RunManifest:
+    """One stored run for `subject`, at a declared outcome and under a declared name.
+
+    `status` is **not** addressed by `run_manifest_id` (`RUN_MANIFEST_UNADDRESSED_FIELDS`) and
+    `run_id` **is**, which together decide the shape of `V2-P4-075`'s test below: three outcomes
+    under one `run_id` would be one address, and `SQLiteRunRepository.append_run` refuses the
+    second row of a `run_id` anyway, so each arm is given its own `label` and its own address.
+    """
     return RunManifest(
-        run_id=f"run-{subject}",
+        run_id=f"run-{label}{subject}",
         mode="backtest",
         as_of=as_of,
         code_commit=COMMIT,
@@ -285,7 +294,7 @@ def _stored_run_manifest(subject: str, *, as_of: datetime) -> RunManifest:
         random_seed=7,
         started_at=as_of,
         finished_at=as_of,
-        status="succeeded",
+        status=status,
     )
 
 
@@ -835,3 +844,98 @@ def test_a_stored_answer_renamed_on_disk_is_not_served_under_its_new_name(
         assert "a key its own content does not carry" in served.output
     finally:
         renamed.unlink()
+
+
+def test_a_run_that_did_not_finish_does_not_resolve_the_evidence_filed_under_it(
+    tmp_path: Path,
+) -> None:
+    """`V2-P4-075`: `failed` and `interrupted` runs used to clear a `1.0` floor.
+
+    The P4 fourth-round acceptance stored a `RunManifest(status="failed")` and a
+    `RunManifest(status="interrupted")`, filed evidence for every shortlisted name against their
+    addresses, and asked for `--min-researched-ratio 1.0`. Both answered `exit 0`,
+    `researched_ratio=1.0`, `unresolvable=[]`, `is_blocked=False` -- while the refusal this floor
+    raises was calling that ratio "a fact about which runs finished".
+
+    **The succeeded arm is what makes the two answers separable.** Without it this test passes on
+    a tree that dropped *every* supplied answer, which would make `researched_ratio` permanently
+    zero -- the exact failure mode
+    `test_evidence_that_names_a_stored_run_is_counted_and_evidence_that_does_not_is_not` was
+    written against one row earlier. Three arms, one store, one command line, one file different.
+
+    **And the reported reason has to separate the two ways an address fails to resolve.** A run
+    nobody made and a run that did not finish have different remedies -- research the name, or go
+    and look at why the run broke -- so `evidence_without_a_stored_run` stays *empty* on the two
+    refused arms and the names appear under `evidence_from_an_unfinished_run` instead. Folding
+    them into one bucket would make this test pass while telling a user the deployment holds no
+    run for an address it holds a run for.
+    """
+    store = PanelStore(tmp_path / "panel")
+    write_generated_panel(store, generate_panel(shapes=SHAPES))
+    assert _build(tmp_path, DAY_ONE_BUILD)[0] == 0
+
+    code, first = _run_shortlist(tmp_path, BASELINE)
+    assert code == 0, first
+    shortlisted = _subjects(first)
+    assert shortlisted
+
+    sdk = OpenAlphaSDK(runtime_dir=tmp_path)
+    arms: tuple[RunStatus, ...] = ("failed", "interrupted", "succeeded")
+    files: dict[str, Path] = {}
+    for status in arms:
+        for subject in shortlisted:
+            sdk.repository.append_run(
+                _stored_run_manifest(subject, as_of=DAY_ONE_AS_OF, status=status, label=status)
+            )
+        path = tmp_path / f"{status}.json"
+        path.write_text(
+            json.dumps(
+                {
+                    subject: {
+                        "signal": json.loads(
+                            _signal(subject, as_of=DAY_ONE_AS_OF).model_dump_json()
+                        ),
+                        "run_manifest_id": _stored_run_manifest(
+                            subject, as_of=DAY_ONE_AS_OF, status=status, label=status
+                        ).run_manifest_id,
+                    }
+                    for subject in shortlisted
+                }
+            ),
+            encoding="utf-8",
+        )
+        files[status] = path
+
+    strict = {**BASELINE, "minimum_researched_ratio": 1.0}
+    answers = {status: _run_shortlist(tmp_path, strict, evidence=files[status]) for status in arms}
+
+    assert [answers[status][0] for status in arms] == [1, 1, 0]
+    for status in ("failed", "interrupted"):
+        body = answers[status][1]
+        assert body["measurement"]["researched_ratio"] == 0.0, status
+        assert body["is_blocked"] is True, status
+        assert body["admitted"] is None, status
+        assert body["unresearched"] == sorted(shortlisted), status
+        assert body["evidence_from_an_unfinished_run"] == sorted(shortlisted), status
+        assert body["evidence_without_a_stored_run"] == [], status
+
+    succeeded = answers["succeeded"][1]
+    assert succeeded["measurement"]["researched_ratio"] == 1.0
+    assert succeeded["is_blocked"] is False
+    assert succeeded["evidence_from_an_unfinished_run"] == []
+    assert succeeded["evidence_without_a_stored_run"] == []
+    assert [entry["subject"] for entry in succeeded["admitted"]] == sorted(shortlisted)
+
+    # ... and the terminal face says which of the two happened, in its own words.
+    printed = CliRunner().invoke(
+        app,
+        [
+            argument
+            for argument in _shortlist_arguments(tmp_path, strict, evidence=files["failed"])
+            if argument != "--json"
+        ],
+    )
+    assert printed.exit_code == 1, printed.output
+    assert "unfinished" in printed.output
+    assert "holds a run for that did not finish" in printed.output
+    assert "holds no run for" not in printed.output

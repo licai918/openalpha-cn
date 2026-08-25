@@ -291,6 +291,96 @@ def test_the_horizon_is_reported_rather_than_discovered_by_tripping_over_it() ->
     assert history.covered_through == date(2024, 12, 31)
 
 
+def test_a_read_that_declares_its_own_horizon_answers_to_it_and_not_to_its_newest_row() -> None:
+    """`V2-P4-086`: on a step function the newest *row* is not the newest *day* a read covered.
+
+    `compress_adjustment_batch` keeps the year's opening anchor, every change point and the year's
+    closing anchor, so a point-in-time read that withholds the closing anchor is left holding a
+    row from January -- and `covered_through` reading `observations[-1].observed_on` then says the
+    series *stopped* in January, which is a statement about the read wearing the shape of a
+    statement about the market. `V2-P4-079` measured what that costs on the shipped path: two of
+    `panel doctor`'s eight cross-checks died on it, for a session that had published three days
+    earlier.
+
+    Both horizons are asserted, because the field is only worth having if the two come apart:
+    `covered_through` is how far this read may be asked and `observed_through` is where its last
+    measurement actually sits. A build that returned the same date for both would pass every
+    assertion about the first alone.
+    """
+    history = _history(
+        (("20240102", 116.713), ("20240613", 121.6), ("20240614", 121.6)),
+    )
+    bounded = build_adjustment_history(
+        PING_AN,
+        history.observations,
+        answerable_through=date(2024, 9, 30),
+    )
+
+    assert bounded.observed_through == date(2024, 6, 14)
+    assert bounded.covered_through == date(2024, 9, 30)
+    assert bounded.factor_on(date(2024, 9, 30)) == bounded.factor_on(date(2024, 6, 14))
+
+    with pytest.raises(AdjustmentHorizonError, match=r"the last day the read that built"):
+        bounded.factor_on(date(2024, 10, 1))
+
+    # ... and the message says both numbers, because "the read stopped" and "the series stopped"
+    # are the two readings this field exists to separate.
+    try:
+        bounded.factor_on(date(2024, 10, 1))
+    except AdjustmentHorizonError as error:
+        assert "2024-09-30" in str(error) and "2024-06-14" in str(error)
+
+
+def test_a_horizon_behind_the_rows_the_read_is_holding_is_refused() -> None:
+    """A row the read holds is a row the read saw, so a horizon behind it describes another read.
+
+    The direction that is easy to leave out. `answerable_through` is a *widening* of what the
+    rows alone would say, and a caller that computed it from the wrong clock -- or clamped it
+    against the wrong partition -- would narrow it instead, silently refusing days the read
+    genuinely covered. Refused at construction rather than discovered at `factor_on`.
+    """
+    with pytest.raises(AdjustmentError, match="describes a different read"):
+        build_adjustment_history(
+            PING_AN,
+            _history((("20240102", 116.713), ("20240613", 121.6))).observations,
+            answerable_through=date(2024, 3, 1),
+        )
+
+
+def test_every_history_from_one_read_carries_that_reads_horizon() -> None:
+    """`adjustment_histories_from_panel_rows` hands the bound to every security it rebuilds.
+
+    One date for the whole read and not one per security, `statement_histories_from_panel_rows`'
+    shape: it describes the read, and a read has one horizon however many securities came back.
+    Which security's tail is genuinely finished and which is merely quiet is a different question
+    and this contract answers neither -- `KNOWN_ADJUSTMENT_LIMITATIONS.suspension_is_invisible`.
+    """
+    histories = adjustment_histories_from_panel_rows(
+        [
+            (PING_AN, "2024-01-02", 116.713),
+            (PING_AN, "2024-06-13", 121.6),
+            ("600000.SH", "2024-01-02", 1.0),
+        ],
+        answerable_through=date(2024, 9, 30),
+    )
+
+    assert sorted(histories) == ["000001.SZ", "600000.SH"]
+    assert {code: history.covered_through for code, history in histories.items()} == {
+        PING_AN: date(2024, 9, 30),
+        "600000.SH": date(2024, 9, 30),
+    }
+    assert {code: history.observed_through for code, history in histories.items()} == {
+        PING_AN: date(2024, 6, 13),
+        "600000.SH": date(2024, 1, 2),
+    }
+
+    unbounded = adjustment_histories_from_panel_rows([(PING_AN, "2024-01-02", 116.713)])
+    assert unbounded[PING_AN].covered_through == date(2024, 1, 2), (
+        "omitting the bound is the pre-V2-P4-086 behaviour and every caller that does not "
+        "filter rows keeps it"
+    )
+
+
 def test_a_datetime_is_not_a_date() -> None:
     history = _history()
     with pytest.raises(AdjustmentError, match=r"must be a plain datetime\.date"):

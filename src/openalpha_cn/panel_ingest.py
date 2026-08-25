@@ -1955,6 +1955,51 @@ def load_adjustment_histories(
     is why `V2-P4-094` measured it and did not take it; but it is the edit `V2-P4-086` should be
     read as naming.
 
+    ## `V2-P4-086`: the first edit landed, the second is now measured rather than argued
+
+    That row names two edits and this module needs both. **The first is delivered**:
+    `adjustment_histories_from_panel_rows(rows, *, answerable_through=...)` and
+    `build_adjustment_history(..., answerable_through=...)` now exist in `domain/adjustment.py`,
+    following `statement_histories_from_panel_rows`' shape, so a read that filtered rows can say
+    how far it looked instead of letting its newest surviving row say it for it. `covered_through`
+    returns it when given and `observed_through` is the newest observation, kept apart because
+    their coming apart is the whole point.
+
+    **The move onto `_read_visible_event_dated_rows` was then attempted, measured and reverted,
+    and one half of `V2-P4-079`'s objection did not survive the attempt.** The census
+    reconciliation *does* fit this corpus: `adj_factor` is `ClockStrategy.daily_close`, a row's
+    availability is a function of its own event date exactly as `suspend_d`'s is, and driven at
+    2026-01-09 the visible slice and the census agree with no subject axis anywhere in the
+    comparison. `panel doctor` answered at that instant: `unpriced_explained` and `return_paths`
+    ran instead of being `SKIPPED`.
+
+    **What did bind is the per-security half, and it is now reproducible from a shipped report
+    rather than argued from the corpus.** With a read-level horizon in place,
+    `tests/integration/panel/test_panel_shape_coverage.py::
+    test_a_shape_provokes_exactly_the_health_codes_it_declares[adjustment.factor_series_stops
+    _inside_the_window]` went from `['return_path_disagreement']` to `[]`: a security whose factor
+    series genuinely ends inside the window stopped being refused and started being answered by a
+    factor carried across a window its own series never covered. One date describes a *read*, and
+    "this security's series finished" is a fact about a *security*, so no read-level bound can
+    carry it however it is computed.
+
+    A frontier rule -- widen only the securities whose newest visible row sits at the read's
+    newest visible event date -- was checked and fails the ordinary case in the other direction:
+    on a step function a security that simply has not moved since the opening anchor also sits
+    behind the frontier, so it would be refused for being quiet. Separating "quiet" from
+    "finished" is exactly the per-subject `last_event_date` `V2-P4-086` asks for, in the shape
+    `V2-P4-094` corrected it to: cardinality `PartitionCoverage.subjects` (~5,545 rows), not one
+    entry per stored row (1,352,980).
+
+    One thing worth writing down for whoever takes that edit: a per-subject `last_event_date` read
+    at `as_of` would answer "does this security have a row later in the partition", which is
+    itself a fact from after `as_of`. The question that is actually knowable at `as_of` is whether
+    the security was still listed -- which `StockUniverse` already answers and this loader does not
+    consult. That may be the cheaper door, and it is a different one from either edit this row
+    names.
+    `tests/integration/panel/test_whole_partition_doors.py::
+    test_a_horizon_the_read_declares_cannot_carry_the_per_security_half` holds the measurement.
+
     ## Why the gap rule is stricter here than it is for the registry
 
     `load_stock_universe` refuses a requested range that skips a year *the store holds*, and

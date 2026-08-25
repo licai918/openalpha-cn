@@ -201,6 +201,7 @@ from openalpha_cn.shortlist_view import (
     ShortlistRunResult,
     ShortlistViewError,
     held_shortlist,
+    named_untradeable,
     run_shortlist,
     shortlist_evidence,
     shortlist_request,
@@ -4995,6 +4996,21 @@ def _echo_shortlist(result: ShortlistRunResult) -> None:
     subtraction with no explanation beside it, and a human reading a refused list off a terminal
     needs that explanation more than a program does, not less. Omitted when every cell is zero, so
     a clean screen does not print a line of noughts -- the same rule the block lines follow.
+
+    **`untradeable` is `unscored`'s sibling and `V2-P4-066` is why it exists.** `unscored`
+    explained stage one and nothing explained stage two, so `listed -> scored -> tradeable` had an
+    explanation under the first arrow and a bare subtraction under the second -- and the second is
+    the one `--min-tradable-ratio` gates. The counts come first because "which rule" is the
+    reading a person wants first, then the securities under each rule, bounded by
+    `MAX_NAMED_UNTRADEABLE` with the residual stated. Omitted entirely when stage two refused
+    nobody, which is `unscored`'s own rule; the `--json` face reports all four cells either way,
+    because a program diffing two answers needs the zero and a person reading one does not.
+
+    **`unresolved` and `unfinished` are two lines and not one** (`V2-P4-075`). Both count their
+    names unresearched and they are different findings: an address this runtime directory holds
+    no run for is a provenance claim nobody can stand behind, and an address it holds a *broken*
+    run for is a run that needs looking at. One line saying "holds no run for" would have been
+    false about the second.
     """
     clearance = result.clearance
     measurement = clearance.measurement
@@ -5018,6 +5034,16 @@ def _echo_shortlist(result: ShortlistRunResult) -> None:
     }
     if unscored:
         typer.echo(f"unscored   {unscored}")
+    tradeability = result.funnel.tradeability
+    untradeable = {code: count for code, count in tradeability.refused_by_verdict if count > 0}
+    if untradeable:
+        typer.echo(f"untradeable {untradeable}")
+        named, withheld = named_untradeable(tradeability)
+        for item in named:
+            because = "" if item.reason is None else f" ({item.reason})"
+            typer.echo(f"  {item.verdict:<20} {item.subject}{because}")
+        if withheld > 0:
+            typer.echo(f"  ... and {withheld} more, all counted above")
     researched = (
         "not measurable"
         if measurement.researched_ratio is None
@@ -5034,6 +5060,13 @@ def _echo_shortlist(result: ShortlistRunResult) -> None:
         typer.echo(
             f"unresolved {list(result.unresolvable_evidence)} supplied a run_manifest_id this "
             "runtime directory holds no run for; each is counted unresearched",
+            err=True,
+        )
+    if result.unfinished_evidence:
+        typer.echo(
+            f"unfinished {list(result.unfinished_evidence)} supplied a run_manifest_id this "
+            "runtime directory holds a run for that did not finish; each is counted "
+            "unresearched. Re-run the research rather than the screen",
             err=True,
         )
     for block in clearance.blocks:

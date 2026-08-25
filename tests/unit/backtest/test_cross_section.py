@@ -1069,7 +1069,106 @@ def test_a_census_reporting_a_market_that_half_happened_is_refused() -> None:
             unoffered_count=2,
             refused_by_verdict=tuple((code, 0) for code in REFUSED_VERDICT_ORDER),
             rejection_reasons=(),
+            refused=(),
         )
+
+
+def test_a_census_whose_named_refusals_disagree_with_its_own_cells_is_refused() -> None:
+    """`V2-P4-066`'s names are held to `V2-P4-005`'s counts, in every direction that can drift.
+
+    The names were added so a refused screen could say *which* securities went; a named list that
+    could disagree with the census beside it would be a second answer to the one question the
+    census exists to answer once, which is `ScoreCensus`' own arithmetic rule. Four ways to
+    disagree, because each is a different edit a later contributor makes: a count with no name, a
+    name under a verdict the cells did not report, a reason the census never counted, and a list
+    in some order other than the declared one.
+    """
+    from openalpha_cn.backtest.cross_section import RefusedSecurity, TradeabilityCensus
+
+    def census(**overrides: object) -> TradeabilityCensus:
+        fields: dict[str, object] = {
+            "scored_count": 4,
+            "tradeable_count": 2,
+            "unoffered_count": 0,
+            "refused_by_verdict": tuple(
+                (code, 1 if code in {"unbarred", "rejected"} else 0)
+                for code in REFUSED_VERDICT_ORDER
+            ),
+            "rejection_reasons": (("security is suspended", 1),),
+            "refused": (
+                RefusedSecurity(subject="000001.SZ", verdict="unbarred", reason=None),
+                RefusedSecurity(
+                    subject="000002.SZ", verdict="rejected", reason="security is suspended"
+                ),
+            ),
+        }
+        fields.update(overrides)
+        return TradeabilityCensus(**fields)  # type: ignore[arg-type]
+
+    assert census().refused[0].subject == "000001.SZ"
+
+    with pytest.raises(TwoStageFunnelError, match="the names and the counts are one answer"):
+        census(refused=(RefusedSecurity(subject="000001.SZ", verdict="unbarred", reason=None),))
+
+    with pytest.raises(TwoStageFunnelError, match="the names and the counts are one answer"):
+        census(
+            refused=(
+                RefusedSecurity(subject="000001.SZ", verdict="unbanded", reason=None),
+                RefusedSecurity(
+                    subject="000002.SZ", verdict="rejected", reason="security is suspended"
+                ),
+            )
+        )
+
+    with pytest.raises(TwoStageFunnelError, match="carries reasons"):
+        census(
+            refused=(
+                RefusedSecurity(subject="000001.SZ", verdict="unbarred", reason=None),
+                RefusedSecurity(subject="000002.SZ", verdict="rejected", reason="something else"),
+            )
+        )
+
+    with pytest.raises(TwoStageFunnelError, match="REFUSED_VERDICT_ORDER and then subject order"):
+        census(
+            refused=(
+                RefusedSecurity(
+                    subject="000002.SZ", verdict="rejected", reason="security is suspended"
+                ),
+                RefusedSecurity(subject="000001.SZ", verdict="unbarred", reason=None),
+            )
+        )
+
+    with pytest.raises(TwoStageFunnelError, match="a scored security gets one verdict"):
+        census(
+            refused_by_verdict=tuple(
+                (code, 2 if code == "unbarred" else 0) for code in REFUSED_VERDICT_ORDER
+            ),
+            rejection_reasons=(),
+            refused=(
+                RefusedSecurity(subject="000001.SZ", verdict="unbarred", reason=None),
+                RefusedSecurity(subject="000001.SZ", verdict="unbarred", reason=None),
+            ),
+        )
+
+
+def test_a_refused_security_carries_a_reason_for_exactly_the_policys_own_refusal() -> None:
+    """`RefusedSecurity`'s both-directions rule: `rejected` has a sentence, the other three do not.
+
+    Both directions because only one of them is the obvious one. A missing reason on a `rejected`
+    name loses the half of the answer a user acts on; a reason attached to `below_board_minimum`
+    is this module inventing a sentence `AShareExecutionPolicy` never said, about an order that
+    was never built -- `_rejection_reasons`' stated rule about not being a second authority.
+    """
+    from openalpha_cn.backtest.cross_section import RefusedSecurity
+
+    with pytest.raises(TwoStageFunnelError, match="the policy gives a reason for exactly"):
+        RefusedSecurity(subject="000001.SZ", verdict="rejected", reason=None)
+
+    with pytest.raises(TwoStageFunnelError, match="the policy gives a reason for exactly"):
+        RefusedSecurity(subject="000001.SZ", verdict="unbarred", reason="security is suspended")
+
+    with pytest.raises(TwoStageFunnelError, match="is not one of the verdicts stage two refuses"):
+        RefusedSecurity(subject="000001.SZ", verdict="tradeable", reason=None)  # type: ignore[arg-type]
 
 
 # --------------------------------------------------------------------------------------------

@@ -362,6 +362,56 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **The tradable tier named nothing -- not the rule, not the security** (`V2-P4-066`). A
+  whole-market screen answered `5545 listed -> 5542 scored -> 5533 tradeable` and `measured
+  tradable=0.9978`, and the words `halted`, `below_board_minimum` and `up_limit` appeared nowhere
+  in the body: `funnel.excluded_by_coverage` explains stage **one** only, so the arrow
+  `--min-tradable-ratio` actually gates was a subtraction with no explanation beside it. The
+  census underneath was never the missing part -- `TradeabilityCensus` has carried
+  `refused_by_verdict` and `rejection_reasons` since `V2-P4-005` and neither reached a shipped
+  surface. It now carries `refused` as well, every non-admitted security **by name** with the rule
+  that decided it and, for exactly the ones the execution policy refused, that policy's own
+  sentence; `__post_init__` holds the names to the counts in four directions, so a census whose
+  list disagreed with its own cells fails its own arithmetic rather than reporting a plausible
+  total. All four cells are reported on every answer, occurred or not -- `ScoreCensus`' rule that
+  "nobody was `below_board_minimum`" and "nothing looked" are different claims -- while the named
+  list is bounded by `MAX_NAMED_UNTRADEABLE` with `untradeable_not_named` carrying the residual,
+  so a body cannot scale with the market (`V2-P4-110`'s 13.18 MiB lesson). The
+  `tradable_ratio_below_floor` refusal now names the rules, the first securities under each and
+  the commonest policy sentence, and the terminal grew an `untradeable` line beside `unscored`.
+  Driven through `CliRunner` and `TestClient` on a panel where one name is limit-up and one is
+  over budget, because a test importing `shortlist_view` would have been green throughout.
+- **`failed` and `interrupted` runs resolved evidence and cleared a `1.0` floor** (`V2-P4-075`).
+  A `RunManifest(status="failed")` stored under an address, with evidence filed against it,
+  answered `exit 0, researched_ratio=1.0, is_blocked=False` under `--min-researched-ratio 1.0` --
+  while the refusal that floor raises described the ratio as "a fact about which runs finished".
+  `stored_run_manifest_ids` was *literally* true throughout (the deployment did hold those runs),
+  so what was corrected is the thing built on it: it now returns `held` and `finished` apart, the
+  evidence join resolves against `FINISHED_RUN_STATUSES`, and the two ways an address fails to
+  resolve are reported apart -- `evidence_without_a_stored_run` for a run nobody made and
+  `evidence_from_an_unfinished_run` for one that broke, because the remedies differ. The
+  quantifier is over the **address**, not over a row: `status` is in
+  `RUN_MANIFEST_UNADDRESSED_FIELDS`, so an interrupted run and its successful re-run are one
+  declaration at one address.
+- **The adjustment corpus can now say how far a read looked** (`V2-P4-086`, first of its two
+  edits). `build_adjustment_history` and `adjustment_histories_from_panel_rows` take
+  `answerable_through`, `statement_histories_from_panel_rows`' shape one dataset over;
+  `covered_through` returns it when given and `observed_through` is the newest observation, kept
+  apart because on a step function "no row after D" means the factor did not move, never that the
+  series stopped. **The second edit is now measured rather than argued, and one half of
+  `V2-P4-079`'s reasoning did not survive the measurement.** Moving `load_adjustment_histories`
+  onto the row-filtered door *does* work for the census -- `adj_factor` is
+  `ClockStrategy.daily_close`, the visible slice and the per-date census agree with no subject
+  axis anywhere, and `panel doctor` answered at an earlier instant instead of losing
+  `unpriced_explained` and `return_paths` to `not_yet_knowable`. What binds is the per-security
+  half, and it is now reproducible from a shipped report: with a read-level horizon in place the
+  `adjustment.factor_series_stops_inside_the_window` shape went from provoking
+  `return_path_disagreement` to provoking nothing, i.e. a series that genuinely ended started
+  being answered by a factor carried across a window it never covered. The move was therefore
+  reverted, a frontier rule was checked and rejected for failing the ordinary "quiet since the
+  opening anchor" case, and the measurement is pinned by
+  `test_a_horizon_the_read_declares_cannot_carry_the_per_security_half` rather than left as prose.
+
 <<<<<<< HEAD
 - **The write-time session census stopped one session short of what every other layer required**
   (`V2-P4-114`). `panel_ingest._session_census` bounded a partition at `fetched_at - 1 day` and

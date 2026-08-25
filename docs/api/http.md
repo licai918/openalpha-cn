@@ -509,6 +509,15 @@ name with no evidence does, and it is named on the answer under
 `evidence_without_a_stored_run`. Dropped rather than refused, so a caller looping over a
 year of `as_of`s can keep going past it.
 
+**A run that did not finish does not resolve one either (`V2-P4-075`).** A
+`RunManifest` stored with `status` `failed` or `interrupted` — or `pending` or
+`running` — *is* held by the deployment, and filing evidence against its address used to
+clear a `minimum_researched_ratio` of `1.0` while the refusal that floor raises described
+the ratio as "a fact about which runs finished". Only a `succeeded` run resolves now. The
+two are reported apart, on `evidence_without_a_stored_run` and
+`evidence_from_an_unfinished_run`, because the remedies differ: run the research, or go and
+find out why the run broke.
+
 What that proves and what it does not: the run is resolved, the **signal** is not. This
 repository stores no `SignalFrame`, so there is nothing to resolve one against, and a
 caller holding a real `run_manifest_id` can still file an invented conclusion under it. The
@@ -538,6 +547,30 @@ coverage codes with their counts. `funnel.excluded_by_coverage` is the other hal
 securities stage one dropped, keyed by `incomplete_components`, `not_admissible` and
 `not_valued`. Together they separate "the rows carried no value" from "the components did
 not overlap", which a `row_count` beside a `scored_count` of zero could not.
+
+`funnel.excluded_by_coverage` explains stage one only, and stage two used to have nothing
+(`V2-P4-066`). `scored -> tradeable` was a subtraction with no explanation beside it, on the
+very ratio `minimum_tradable_ratio` gates — a whole-market acceptance read `5542 scored ->
+5533 tradeable` and could not learn which nine names went or under which rule. Four keys
+now say so:
+
+- `funnel.refused_by_verdict` — how many scored securities stage two refused, keyed by
+  `unbarred` (no bar for the pricing session), `unbanded` (a bar with no published band),
+  `below_board_minimum` (`position_capital` does not buy one board lot) and `rejected` (the
+  execution policy refused the buy). **All four cells always**, occurred or not, so "nobody
+  was `below_board_minimum`" and "nothing looked" stay different claims.
+- `funnel.rejection_reasons` — the execution policy's own sentences with their counts, for
+  the `rejected` cell only. `{}` when it refused nobody.
+- `funnel.untradeable` — every refused security **by name**, as
+  `{"subject", "verdict", "reason"}`, grouped in the verdict order above and then by
+  subject. `reason` is the policy's sentence for exactly `rejected` and `null` for the other
+  three, which are decided before the policy is called.
+- `funnel.untradeable_not_named` — how many refused securities the list above left out. The
+  named list is capped so a body cannot scale with the market; the two count objects above
+  are exact at any size.
+
+The `tradable_ratio_below_floor` refusal names the rules and the first few securities under
+each, and points at `funnel.untradeable` for the rest.
 
 The factor tier is read at your `as_of`. **Everything the screen prices with — the
 calendar, the registry, the bars, the published bands, the halts and the name histories —

@@ -979,6 +979,16 @@ def test_this_gate_cannot_measure_dataset_freshness_because_it_cannot_reach_the_
     `tests/unit/backtest/test_ranking_sources_fill_no_order.py`, which binds it behaviourally,
     because a second bypass -- adding the re-exported names to the `candidate_ranking` block
     below -- keeps every line here byte-identical and adds no import-graph edge at all.
+
+    **`openalpha_cn.backtest.cross_section` joined the list at `V2-P4-066`, and it is a
+    disclosure rather than a loosening.** That row made `tradable_ratio_below_floor` say which
+    *rule* and which *security* cost the ratio, which needs `TradeabilityCensus` -- a record this
+    module is handed and never builds. The edge is not new to the graph: `candidate_ranking`,
+    already on this list, imports the same module for `CrossSectionFunnel`, so the reachable set
+    is unchanged and only the *direct* edge is added. Every claim above still holds by name --
+    no `panel`, no `storage`, no `runtime` -- and `lint-imports` stays 8 kept / 0 broken. Taking
+    the census through the `candidate_ranking` block instead would have been exactly the
+    re-export laundering the paragraph above warns about, so it is written out here.
     """
     source = MODULE_PATH.read_text(encoding="utf-8")
     imports = [
@@ -992,6 +1002,7 @@ def test_this_gate_cannot_measure_dataset_freshness_because_it_cannot_reach_the_
     assert not any("openalpha_cn.runtime" in line for line in imports)
     assert sorted(line.split()[1] for line in imports if line.startswith("from openalpha_cn")) == [
         "openalpha_cn.backtest.candidate_ranking",
+        "openalpha_cn.backtest.cross_section",
         "openalpha_cn.domain._identity",
         "openalpha_cn.domain.time",
     ]
