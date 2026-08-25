@@ -33,7 +33,8 @@ per-item hot path uses instead.
 import json
 import logging
 import sqlite3
-from collections import defaultdict
+from collections import Counter, defaultdict
+from collections.abc import Mapping
 from contextlib import closing
 from datetime import datetime
 from pathlib import Path
@@ -43,9 +44,11 @@ from openalpha_cn.batch_contracts import (
     BATCH_PROGRESS_EVENT_VERSIONS,
     BATCH_RESEARCH_TASK_VERSIONS,
     BATCH_TASK_ITEM_VERSIONS,
+    BatchItemCensus,
     BatchProgressEvent,
     BatchResearchTask,
     BatchTaskItem,
+    BatchTaskSummary,
 )
 from openalpha_cn.domain.versioning import read_versioned
 from openalpha_cn.storage.connection import open_state_connection
@@ -223,6 +226,53 @@ class SQLiteBatchTaskStore:
             ).fetchall()
         return reassemble_task(row[0], [item[0] for item in items])
 
+    def count_batches(self) -> int:
+        """How many batches this store holds. O(1) in their items."""
+        with closing(self._connect()) as connection:
+            row = connection.execute("SELECT COUNT(*) FROM batch_tasks").fetchone()
+        return int(row[0])
+
+    def list_summaries(self, *, limit: int, offset: int) -> tuple[BatchTaskSummary, ...]:
+        """One page of batches, counted rather than reassembled (`V2-P4-040`).
+
+        Narrower than `list()` for the reason `is_cancellation_requested` is narrower than
+        `get()`: the listing needs each batch's bookkeeping and a per-status tally, and pulling
+        115,355 items through pydantic to produce five integers per batch is the cost that made
+        `GET /api/v1/research/batches` a 36.9 MB, 2.35s answer. The tally is a
+        `GROUP BY json_extract(payload, '$.status')` inside SQLite, so the item rows are still
+        visited -- there is no stored counter to read instead -- but they are visited in C and
+        nothing is materialised per item.
+
+        The page is taken on `batch_tasks` **before** the items are touched, so the `IN` list is
+        bounded by `limit` and a deployment holding a thousand batches pays for the fifty it
+        asked for.
+
+        A header that still carries its own inline `items` is counted from those instead. That
+        is `reassemble_task`'s pre-split row shape and the same one route reaches it -- a
+        database whose `split_batch_task_items` migration has not run -- and a listing that read
+        only `batch_task_items` would report every such batch as empty, which is a wrong answer
+        rather than a refused one.
+        """
+        with closing(self._connect()) as connection:
+            headers = connection.execute(
+                "SELECT batch_id, payload FROM batch_tasks ORDER BY batch_id LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
+            if not headers:
+                return ()
+            batch_ids = [batch_id for batch_id, _ in headers]
+            placeholders = ",".join("?" * len(batch_ids))
+            tallies = connection.execute(
+                "SELECT batch_id, json_extract(payload, '$.status') AS item_status, COUNT(*) "
+                f"FROM batch_task_items WHERE batch_id IN ({placeholders}) "
+                "GROUP BY batch_id, item_status",
+                batch_ids,
+            ).fetchall()
+        counted: dict[str, dict[str, int]] = defaultdict(dict)
+        for batch_id, item_status, count in tallies:
+            counted[batch_id][item_status] = int(count)
+        return tuple(summarize_task(header, counted[batch_id]) for batch_id, header in headers)
+
     def list(self) -> tuple[BatchResearchTask, ...]:
         """Return all batches in stable ID order."""
         with closing(self._connect()) as connection:
@@ -355,6 +405,32 @@ def store_task_row(connection: sqlite3.Connection, task: BatchResearchTask, *, s
     connection.executemany(
         "UPDATE batch_task_items SET payload = ? WHERE batch_id = ? AND position = ?",
         [(item, task.batch_id, position) for position, item in enumerate(items)],
+    )
+
+
+def summarize_task(header: str, counts: Mapping[str, int]) -> BatchTaskSummary:
+    """Build one listing summary from a stored header and its per-status tally.
+
+    The header is read as plain JSON rather than through `read_versioned`, because a header on
+    its own is *not* a `BatchResearchTask`: `items` carries `min_length=1`, so validating one
+    would fail on every batch. `BatchTaskSummary` does its own validation of what is extracted
+    -- including that the census sums to `item_count` -- so the fields are still checked, by the
+    contract that describes this shape rather than by one that describes a different one.
+    """
+    document: dict[str, Any] = json.loads(header)
+    inline = document.get("items")
+    if inline is not None:
+        counts = Counter(str(item.get("status", "queued")) for item in inline)
+    census = BatchItemCensus.from_counts(counts)
+    return BatchTaskSummary(
+        batch_id=document["batch_id"],
+        status=document["status"],
+        max_concurrency=document["max_concurrency"],
+        cancellation_requested=bool(document.get("cancellation_requested", False)),
+        created_at=document["created_at"],
+        updated_at=document["updated_at"],
+        item_count=census.total,
+        items_by_status=census,
     )
 
 

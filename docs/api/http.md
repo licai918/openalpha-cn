@@ -62,6 +62,130 @@ filesystem path. Local file access remains a CLI responsibility.
   Bootstrap confidence interval.
 - `POST /api/v1/backtests/validate` accepts a previously returned research result and a future outcome observation, verifies content-derived IDs, and returns reconciled attribution.
 
+## Batch research: two ceilings, one listing, and how each refusal reads
+
+### `max_concurrency` is capped at 8, and was 32 (`V2-P4-042`)
+
+`POST /api/v1/research/batches` takes `max_concurrency` between `1` and **`8`**; `9` or more is
+refused `422` with pydantic's own `Input should be less than or equal to 8`. **It was `32` until
+`V2-P4-019`**, so a request that worked before that release now fails, and this paragraph is the
+place a caller who met that `422` can find out why.
+
+The ceiling was lowered because the parallelism above it was advertised and not delivered. Every
+item transition is persisted and every store call in `BatchResearchService` happens under one
+process-wide lock, so past a handful of workers the extra threads queue rather than write.
+Measured with a runner that sleeps 10 ms to stand in for a model-provider call, N=600:
+
+| `max_concurrency` | 1 | 2 | 4 | 8 | 16 | 32 |
+|---|---|---|---|---|---|---|
+| items/sec | 57 | 114 | 211 | 184 | 201 | 216 |
+
+Near-linear to 4, then flat inside the noise band all the way to 32. With the real research
+engine the plateau arrives at 2, because that work is CPU-bound. `8` is one doubling above the
+highest measured plateau, so a slower real-network runner has room while the number stops
+claiming a 32x that does not exist. Raising it back is not a supported knob: it is a property of
+how batch state is persisted, not a throttle.
+
+A batch may carry up to **10,000** items (`MAX_BATCH_ITEMS`), which is above `V2-P4-004`'s
+measured A-share market of 5,545 listed names on purpose — see the request-size section below,
+because the two numbers have to be read together.
+
+### `GET /api/v1/research/batches` answers summaries, not items (`V2-P4-040`)
+
+The listing returns a page of **summaries**:
+
+```json
+{
+  "batches": [
+    {
+      "batch_id": "whole-market-2026-08-14",
+      "status": "partial",
+      "max_concurrency": 8,
+      "cancellation_requested": false,
+      "created_at": "2026-08-14T01:30:00Z",
+      "updated_at": "2026-08-14T02:11:04Z",
+      "item_count": 5545,
+      "items_by_status": {
+        "queued": 0, "running": 0, "succeeded": 5502, "failed": 43, "cancelled": 0
+      }
+    }
+  ],
+  "total": 20,
+  "limit": 50,
+  "offset": 0
+}
+```
+
+`limit` defaults to `50` and may not exceed `500`; `offset` defaults to `0`. `total` is the whole
+shelf, not the window. `items_by_status` is **total** over the five item states, so a zero means
+zero and never "not counted".
+
+**The items are one route away**: `GET /api/v1/research/batches/{batch_id}` returns the full
+`BatchResearchTask` with every item, unchanged.
+
+This route previously inlined every item of every batch. Twenty whole-market batches — roughly a
+trading month — measured `items: 115,355, bytes: 36,857,096` (36.9 MB) in 2.35 s, and three
+batches already exceeded the request ceiling this same service enforces on the way *in*. If you
+were reading `items` off this route, read it off `/batches/{batch_id}` instead.
+
+### Request size: `OPENALPHA_MAX_REQUEST_BYTES` (`V2-P4-043`)
+
+A request body larger than the configured ceiling is refused `413` **before it is read**, off the
+declared `Content-Length`:
+
+```json
+{"detail": {
+  "reason": "request_too_large",
+  "message": "the request declared 41000000 bytes against a configured ceiling of 33554432. Raise OPENALPHA_MAX_REQUEST_BYTES on the server, or send fewer items per request.",
+  "declared_bytes": 41000000,
+  "limit_bytes": 33554432
+}}
+```
+
+The default is **33554432** bytes (32 MiB), raised from 8 MiB by `V2-P4-043`. 8 MiB was smaller
+than the ceilings this service declares elsewhere, so two of its own limits contradicted each
+other. Measured, one evidence snapshot per request:
+
+| request | at | bytes | at 8 MiB |
+|---|---|---|---|
+| `POST /api/v1/research/batches` | 10,000 items | 9,840,054 | `413` |
+| `POST /api/v1/screen` | 10,000 names | 14,770,051 | `413` |
+| `POST /api/v1/screen` | 5,545 names (the measured market) | 8,190,016 | `200` |
+
+The first row is the one that decided the new default: `MAX_BATCH_ITEMS` is 10,000 *deliberately*
+— because the market is a moving number — and a batch at exactly that ceiling could not be
+posted at all. The third shows how little headroom the market had left: 198,592 bytes, about 134
+more listings. A real caller sends more evidence per request than these measurements do, which is
+why the new ceiling is a factor above the measurement rather than fitted to it.
+
+`POST /api/v1/screen` now also states its own item ceiling — the same 10,000 — so one name too
+far is a `422` naming the number rather than a `413` about bytes.
+
+### A refused research result names the record and the identifier (`V2-P4-041`)
+
+`POST /api/v1/screen`, `POST /api/v1/reports` and `POST /api/v1/backtests/validate` all rebuild a
+returned `ResearchRunResult` and re-derive its three content addresses. A mismatch is `422` with
+the `{"reason", "message"}` object the panel refusals use, plus the record's own coordinates:
+
+```json
+{"detail": {
+  "reason": "decision_id_mismatch",
+  "message": "research[17] (subject 000017.SZ) carries decision_id 'dec_…' but its own content derives 'dec_…'. All three identifiers on a research result are content-derived, so send the record back exactly as this service handed it out, or omit the identifier and let it be re-derived.",
+  "index": 17,
+  "subject": "000017.SZ",
+  "field": "research[17].decision.decision_id",
+  "claimed": "dec_…",
+  "derived": "dec_…"
+}}
+```
+
+`reason` is one of `signal_id_mismatch`, `decision_id_mismatch`, `run_manifest_id_mismatch`, or
+`malformed_research_result` for a body that is not a research result at all. `index` is the
+record's position in `research` and is `null` on the two routes that take a single result. The
+refusal is on the **first** faulty record, so a 5,545-record body answers with one sentence and
+not a wall of them. Before `V2-P4-041` all four causes came back as the single string
+`Research result failed integrity validation.`
+
 ## Panel readiness, health, and the dependency gate
 
 Three read-side endpoints over the point-in-time panel plane at `runtime_dir/panel`,

@@ -93,11 +93,14 @@ from openalpha_cn.product.research import (
 )
 from openalpha_cn.providers.base import utc_now
 from openalpha_cn.runtime.batch import (
+    DEFAULT_BATCH_PAGE_SIZE,
     MAX_BATCH_ITEMS,
+    MAX_BATCH_PAGE_SIZE,
     MAX_BATCH_WORKERS,
     BatchProgressEvent,
     BatchResearchService,
     BatchResearchTask,
+    BatchTaskPage,
 )
 from openalpha_cn.runtime.composition import build_storage
 from openalpha_cn.runtime.contracts import ResearchRunRequest, ResearchRunResult
@@ -246,11 +249,19 @@ class DeliberationApiRequest(BaseModel):
 
 
 class ScreeningApiRequest(BaseModel):
-    """Serialized verified research results plus screening criteria."""
+    """Serialized verified research results plus screening criteria.
+
+    `research` states the same ceiling `BatchSubmitRequest.requests` states, and `V2-P4-043` is
+    why it states one at all: before this it declared none, so the only thing bounding a screen
+    was `OPENALPHA_MAX_REQUEST_BYTES`, and a caller one name too far met a `413` about bytes
+    with no number to aim at. One ceiling rather than a second constant, because a screen is the
+    answer-side of a batch and a service whose two whole-market routes disagreed about how big
+    the market may be would be `V2-P4-043` again in a different field.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    research: tuple[dict[str, Any], ...]
+    research: tuple[dict[str, Any], ...] = Field(max_length=MAX_BATCH_ITEMS)
     criteria: ScreeningCriteria = ScreeningCriteria()
 
 
@@ -305,7 +316,19 @@ class SecurityHeadersMiddleware:
             if content_length > self.max_request_bytes:
                 response = JSONResponse(
                     status_code=413,
-                    content={"detail": "Request body exceeds configured limit."},
+                    content={
+                        "detail": {
+                            "reason": "request_too_large",
+                            "message": (
+                                f"the request declared {content_length} bytes against a "
+                                f"configured ceiling of {self.max_request_bytes}. Raise "
+                                "OPENALPHA_MAX_REQUEST_BYTES on the server, or send fewer "
+                                "items per request."
+                            ),
+                            "declared_bytes": content_length,
+                            "limit_bytes": self.max_request_bytes,
+                        }
+                    },
                 )
                 await response(scope, receive, send)
                 return
@@ -316,6 +339,76 @@ class SecurityHeadersMiddleware:
             await send(message)
 
         await self.app(scope, receive, send_with_security_headers)
+
+
+class ResearchIntegrityError(ValueError):
+    """One research result whose content-derived identifier does not describe its content.
+
+    `V2-P4-041`. `_parse_research_result` has always distinguished the three -- `signal_id`,
+    `decision_id`, `run_manifest_id` -- and the routes flattened all three into
+    `"Research result failed integrity validation."`, so a caller holding 5,545 results learned
+    neither which record nor which of the three addresses had moved.
+
+    A `ValueError` subclass so the existing `except (KeyError, TypeError, ValueError)` at each
+    call site still catches it; what the routes now do is *ask* it which fault it is instead of
+    discarding that. `claimed` and `derived` are both carried because the difference between
+    them is the only actionable thing this route can offer: an edited record and an edited
+    identifier need different fixes, and only the two values side by side tell them apart.
+    """
+
+    def __init__(
+        self, *, reason: str, field: str, claimed: object, derived: str, subject: str
+    ) -> None:
+        super().__init__(f"research {field} does not match its content")
+        self.reason = reason
+        self.field = field
+        self.claimed = claimed
+        self.derived = derived
+        self.subject = subject
+
+
+def _research_refusal(error: Exception, *, index: int | None) -> HTTPException:
+    """Turn a rejected research result into this service's `{"reason", "message"}` refusal.
+
+    The shape is `_panel_detail`'s, which `docs/api/http.md` already documents as the thing a
+    client switches on (`detail.reason`); this route joining it is the point of the row rather
+    than an incidental tidy-up. `index` is `None` on `POST /api/v1/reports`, which parses one
+    result rather than a list, and is carried as an explicit `null` so a client reads the same
+    keys from both routes.
+    """
+    path = "research" if index is None else f"research[{index}]"
+    if isinstance(error, ResearchIntegrityError):
+        detail: dict[str, Any] = {
+            "reason": error.reason,
+            "message": (
+                f"{path} (subject {error.subject}) carries {error.field.rsplit('.', 1)[-1]} "
+                f"{error.claimed!r} but its own content derives {error.derived!r}. All three "
+                "identifiers on a research result are content-derived, so send the record back "
+                "exactly as this service handed it out, or omit the identifier and let it be "
+                "re-derived."
+            ),
+            "index": index,
+            "subject": error.subject,
+            "field": f"{path}.{error.field}",
+            "claimed": error.claimed,
+            "derived": error.derived,
+        }
+        return HTTPException(status_code=422, detail=detail)
+    return HTTPException(
+        status_code=422,
+        detail={
+            "reason": "malformed_research_result",
+            "message": (
+                f"{path} is not a well-formed research result and was refused before any "
+                f"identifier could be checked: {error}"
+            ),
+            "index": index,
+            "subject": None,
+            "field": path,
+            "claimed": None,
+            "derived": None,
+        },
+    )
 
 
 def _parse_research_result(payload: dict[str, Any]) -> ResearchRunResult:
@@ -356,12 +449,31 @@ def _parse_research_result(payload: dict[str, Any]) -> ResearchRunResult:
     clean["agent_results"] = agent_results
 
     result = ResearchRunResult.model_validate(clean)
+    subject = result.signal.subject
     if claimed_signal_id != result.signal.signal_id:
-        raise ValueError("research signal_id does not match its content")
+        raise ResearchIntegrityError(
+            reason="signal_id_mismatch",
+            field="signal.signal_id",
+            claimed=claimed_signal_id,
+            derived=result.signal.signal_id,
+            subject=subject,
+        )
     if claimed_decision_id != result.decision.decision_id:
-        raise ValueError("research decision_id does not match its content")
+        raise ResearchIntegrityError(
+            reason="decision_id_mismatch",
+            field="decision.decision_id",
+            claimed=claimed_decision_id,
+            derived=result.decision.decision_id,
+            subject=subject,
+        )
     if claimed_manifest_id != result.manifest.run_manifest_id:
-        raise ValueError("research run_manifest_id does not match its content")
+        raise ResearchIntegrityError(
+            reason="run_manifest_id_mismatch",
+            field="manifest.run_manifest_id",
+            claimed=claimed_manifest_id,
+            derived=result.manifest.run_manifest_id,
+            subject=subject,
+        )
     return result
 
 
@@ -1274,15 +1386,21 @@ def create_app(
 
     @application.post("/api/v1/screen")
     def screen(request: ScreeningApiRequest) -> ScreeningResult:
-        """Rank verified research results by explicit screening criteria."""
-        try:
-            results = tuple(_parse_research_result(item) for item in request.research)
-        except (KeyError, TypeError, ValueError) as error:
-            raise HTTPException(
-                status_code=422,
-                detail="Research result failed integrity validation.",
-            ) from error
-        return ResearchScreener().screen(results=results, criteria=request.criteria)
+        """Rank verified research results by explicit screening criteria.
+
+        Parsed one record at a time rather than inside a generator expression, because the
+        index of the offending record is half of what `V2-P4-041` is about and a comprehension
+        discards it. The refusal is still on the first fault: a caller who edited one record
+        wants to be told which, and enumerating every fault in a 5,545-record body would
+        reproduce this row's defect as a wall of text instead of a single sentence.
+        """
+        results = []
+        for index, item in enumerate(request.research):
+            try:
+                results.append(_parse_research_result(item))
+            except (KeyError, TypeError, ValueError) as error:
+                raise _research_refusal(error, index=index) from error
+        return ResearchScreener().screen(results=tuple(results), criteria=request.criteria)
 
     @application.post("/api/v1/watchlist")
     def watchlist_put(entry: WatchlistEntry) -> WatchlistEntry:
@@ -1306,10 +1424,7 @@ def create_app(
         try:
             result = _parse_research_result(request.research)
         except (KeyError, TypeError, ValueError) as error:
-            raise HTTPException(
-                status_code=422,
-                detail="Research result failed integrity validation.",
-            ) from error
+            raise _research_refusal(error, index=None) from error
         report = ResearchReportFactory().build(result)
         report_store.append(report)
         return report
@@ -1347,9 +1462,35 @@ def create_app(
         return task
 
     @application.get("/api/v1/research/batches")
-    def batch_list() -> tuple[BatchResearchTask, ...]:
-        """List durable research batches."""
-        return batch_store.list()
+    def batch_list(
+        limit: int = Query(default=DEFAULT_BATCH_PAGE_SIZE, ge=1, le=MAX_BATCH_PAGE_SIZE),
+        offset: int = Query(default=0, ge=0),
+    ) -> BatchTaskPage:
+        """List durable research batches as summaries, one page at a time.
+
+        `V2-P4-040`. This route was `return batch_store.list()`, which inlined every item of
+        every batch: twenty whole-market batches measured `items: 115,355, bytes: 36,857,096`
+        (36.9 MB) in 2.35s, and three batches already exceeded the 8 MiB body this same service
+        refuses on the way *in*. `V2-P4-019` raised `MAX_BATCH_ITEMS` tenfold and this listing
+        did not follow, so a listing became a bulk export.
+
+        A summary carries no field that grows with a batch's item count -- the items themselves
+        are one route away at `GET /api/v1/research/batches/{batch_id}`, which is unchanged --
+        so `MAX_BATCH_PAGE_SIZE` bounds this response in bytes and not merely in rows.
+
+        **This changes the response shape, and deliberately.** It was `[BatchResearchTask, ...]`
+        and is now `{"batches": [...], "total": n, "limit": n, "offset": n}`. Nothing in this
+        repository consumed it -- no test, no `sdk.py` method, no page under `web/` -- and the
+        shape it had could not answer the question it exists for at the scale the same release
+        made reachable. No stored contract moved, so AGENTS.md's rule 3 migration is not in play;
+        `CHANGELOG.md` records it for callers outside this tree.
+        """
+        return BatchTaskPage(
+            batches=batch_store.list_summaries(limit=limit, offset=offset),
+            total=batch_store.count_batches(),
+            limit=limit,
+            offset=offset,
+        )
 
     @application.get("/api/v1/research/batches/{batch_id}")
     def batch_get(batch_id: str) -> BatchResearchTask:
@@ -1465,10 +1606,7 @@ def create_app(
         try:
             research = _parse_research_result(request.research)
         except (KeyError, TypeError, ValueError) as error:
-            raise HTTPException(
-                status_code=422,
-                detail="Research result failed integrity validation.",
-            ) from error
+            raise _research_refusal(error, index=None) from error
         result = OutcomeValidator().validate(
             research=research,
             observation=request.observation,

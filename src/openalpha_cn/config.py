@@ -99,7 +99,32 @@ class OpenAlphaConfig(BaseSettings):
 
     runtime_dir: Path = Path("./runtime")
     web_dir: Path | None = None
-    max_request_bytes: int = 8 * 1024 * 1024
+    max_request_bytes: int = 32 * 1024 * 1024
+    """Largest declared request body this service accepts. Raised from 8 MiB by `V2-P4-043`.
+
+    8 MiB was smaller than the ceilings this same service declares elsewhere, which made two of
+    its own limits contradict each other. Measured on this repository:
+
+        POST /api/v1/research/batches at MAX_BATCH_ITEMS (10,000)   9,840,054 bytes -> 413
+        POST /api/v1/screen           at MAX_BATCH_ITEMS names     14,770,051 bytes -> 413
+        POST /api/v1/screen           at the measured market (5,545) 8,190,016 bytes -> 200
+
+    The first line is the one that decided this. `MAX_BATCH_ITEMS` is 10,000 *deliberately* --
+    `V2-P4-019` raised it because "the market is a moving number" -- and
+    `tests/integration/test_batch_whole_market_scale.py` proves the durable contract holds a
+    batch that size. It was nonetheless **unreachable through the only surface that can express
+    it**: every test at that scale built the task in process rather than posting it, so nothing
+    noticed that the transport refused what the contract advertised. The third line shows how
+    little headroom the market had left -- 198,592 bytes, about 134 more listings.
+
+    32 MiB rather than a number fitted to those two measurements: both are taken with a *single*
+    evidence snapshot per request, and a real caller sends more, so a ceiling at 15 MiB would be
+    this same defect on a delay. It is still a bound, and deliberately: the check is made against
+    `Content-Length` before any body is read, so this is also the largest single allocation one
+    request can commit this process to. `tests/integration/test_request_body_ceiling.py` asserts
+    the default clears both declared ceilings with a factor of two and that a body one byte over
+    a configured ceiling is still refused.
+    """
     host: str = "127.0.0.1"
     port: int = 8000
     log_level: str = _DEFAULT_LOG_LEVEL
