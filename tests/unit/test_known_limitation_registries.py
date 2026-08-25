@@ -15,7 +15,8 @@ inside a docstring, which is prose the runner never reads.
 ## Why the mechanism is not copied as it stands
 
 `007`'s form is "one test per entry, named after the entry". At three entries that is exactly
-right. Across the thirty-four code-carrying registries there are **318** entries -- 69 in
+right. Across the code-carrying registries there are the many hundreds of entries
+`test_the_docstring_totals_are_the_measured_ones` pins -- most of them in
 `KNOWN_PANEL_LIMITATIONS` alone -- and it stops being right somewhere well before that, for
 three reasons and not one:
 
@@ -124,8 +125,9 @@ audit checks what an entry claims.
 from __future__ import annotations
 
 import ast
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
+from types import MappingProxyType
 from typing import Final, Protocol
 
 from openalpha_cn.backtest.alpha_baseline import KNOWN_BASELINE_LIMITATIONS
@@ -702,11 +704,56 @@ on the first of them.
 `KNOWN_PANEL_LIMITATIONS` is deliberately absent. Its count is not an independent fact: the
 assertion above already pins it at `folded + plane_wide + 1`, so writing 69 here would be a
 second hand-written number derived from the first, and a sibling adding to a folded dataset
-registry would have to update both or make them disagree. The measured totals this module's
-docstring quotes -- 318 across the thirty-four registries, 69 in the derived one -- are the sum
-of the thirty-one entries here plus that derived equality, and are not written down a second
-time as a scalar anybody can bump without re-measuring.
+registry would have to update both or make them disagree. The totals this module's docstring
+used to quote were 318 across thirty-four registries, 69 in the derived one, and thirty-one
+rows here. All three were wrong when the P4 wave-9 technical acceptance measured them (322 / 70
+/ 33) -- prose in the very module whose job is catching that drift, which is why the numbers are
+no longer written in prose at all. `DOCSTRING_TOTALS` below holds them as an equality instead.
 """
+
+
+DOCSTRING_TOTALS: Final[Mapping[str, int]] = MappingProxyType(
+    {
+        "registries": 34,
+        "entries": 322,
+        "derived_entries": 70,
+        "table_rows": 33,
+        "table_entries": 252,
+    }
+)
+"""Every number this module would otherwise have stated in prose, as an equality.
+
+`V2-P4-038` made the per-registry counts executable and left the module docstring's own
+summary in prose. The P4 wave-9 technical acceptance then measured that summary and found
+**three of its numbers wrong at once** -- 318 for 322, 69 for 70, "thirty-one" for 33 -- inside
+the module whose stated purpose is catching exactly that drift. A count that lives in a sentence
+is a count nobody re-measures, which is the whole finding of `V2-P4-038` arriving one level up.
+
+Every entry here is derived from the live registries by the test below, so a wave that adds a
+registry or an entry goes red naming which number moved, the same way `REGISTRY_ENTRY_COUNTS`
+goes red naming which registry moved.
+"""
+
+
+def test_the_docstring_totals_are_the_measured_ones() -> None:
+    """The numbers this module talks about, measured off the live registries.
+
+    `table_entries` deliberately excludes the derived registry and `entries` deliberately
+    includes it, because those are two different questions and the old prose ran them together:
+    it called 322 "the sum of the thirty-one entries here plus that derived equality" when the
+    table held 33 rows summing to 252 and the derived registry held 70.
+    """
+    codes = declared_codes()
+    measured = {
+        "registries": len(codes),
+        "entries": sum(len(entries) for entries in codes.values()),
+        "derived_entries": len(codes[DERIVED_REGISTRY]),
+        "table_rows": len(REGISTRY_ENTRY_COUNTS),
+        "table_entries": sum(REGISTRY_ENTRY_COUNTS.values()),
+    }
+    assert measured == dict(DOCSTRING_TOTALS)
+    assert measured["table_entries"] + measured["derived_entries"] == measured["entries"]
+    assert measured["table_rows"] + 1 == measured["registries"]
 
 
 def test_every_registry_entry_is_uniquely_identified_within_its_own_registry() -> None:
