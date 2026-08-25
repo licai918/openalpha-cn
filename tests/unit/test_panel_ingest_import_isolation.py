@@ -462,6 +462,14 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_view.panel_store",
         }
     ),
+    "openalpha_cn.shortlist_compare": frozenset(
+        {
+            "shortlist_view.SHORTLIST_VIEW_SCHEMA_VERSION",
+            "shortlist_view.ShortlistDocumentStore",
+            "shortlist_view.ShortlistRequestError",
+            "shortlist_view.held_shortlist",
+        }
+    ),
     "openalpha_cn.shortlist_view": frozenset(
         {
             "panel_factors.FACTOR_DEFINITIONS",
@@ -507,6 +515,14 @@ two panel types, `load_industry_market_cap_cross_section` and the two requiremen
 are ones a *renderer* would not have. That is a face that now writes the tiers it used to only
 read, and it arrived here as thirteen lines on this row rather than as a package edge nothing
 measured, which is the whole reason the table is at name granularity.
+
+**`shortlist_compare` is the emptiest row on the panel side and that is its whole claim**
+(`V2-P4-007`). It takes four names, all off `openalpha_cn.shortlist_view`, and **not one**
+`panel_*` name: a comparison of two *published answers* reads two documents out of a byte
+store and touches no partition, no calendar and no registry. `model_view` was the first row
+that was not all `panel_*`; this is the first that is none of it, and the row is what makes
+"it reads no panel data" a diff rather than a sentence -- a later version of that module that
+reached for a loader to re-price something would arrive here before it arrived anywhere else.
 
 The values are `"<sibling module stem>.<name>"` rather than fully qualified, because every
 importer and every import target in this table is a top-level `openalpha_cn.panel_*` module by
@@ -617,6 +633,17 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
                 "trade_cal",
             }
         ),
+    ),
+    "openalpha_cn.shortlist_compare": DatasetReach(
+        # V2-P4-007. The only row in this table that is empty in both directions, and the
+        # only module in the discovered set that can say so: it reads two rendered answers
+        # out of `ShortlistDocumentStore` and follows `held_shortlist`, whose whole reach is
+        # `open_shortlist` and `stable_answer_digest` -- no loader, no dataset name, nothing
+        # to close over. `panel_view` is empty on `named` and reaches all fifteen; this is
+        # empty on both, which is the difference between a face that renders panel data and
+        # one that compares two documents somebody else already produced.
+        named=frozenset(),
+        reached=frozenset(),
     ),
     "openalpha_cn.shortlist_view": DatasetReach(
         named=frozenset(

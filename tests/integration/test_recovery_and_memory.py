@@ -18,6 +18,7 @@ DIGEST = "b" * 64
 
 class RecoverableAgent:
     evidence_families = frozenset({"market_event"})
+    feature_dependencies: frozenset[str] = frozenset()
     provenance = AgentProvenance(kind="deterministic")
     """`V2-P4-010`: `ResearchAgent` now requires an agent to say what kind of thing it is,
     because the manifest records it (S40) and nothing else can know. This double is

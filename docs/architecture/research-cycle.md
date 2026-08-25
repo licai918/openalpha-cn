@@ -28,7 +28,10 @@ abstention.
 
 ## Extension boundaries
 
-- `ResearchAgent`: receives `AgentContext`, returns `AgentResult`
+- `ResearchAgent`: receives `AgentContext`, returns `AgentResult`; declares
+  `evidence_families` and `feature_dependencies`, and routing satisfies both
+- `FeaturePlane`: `feature_ids` and `value(ts_code, feature_id)` — the panel-plane
+  handle on `AgentContext`, satisfied by `domain/alpha_model.py::FeatureCrossSection`
 - `ResearchTool`: accepts `ToolRequest`, returns explicit success/no-data
 - `ModelProvider`: returns JSON validated as `StructuredAgentPayload`
 - `ResearchMemory`: append/list contract for decision-linked memory
