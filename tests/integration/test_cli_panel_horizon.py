@@ -72,6 +72,17 @@ finished after it would give its remaining targets."""
 EARLY_SESSIONS = 11
 LATE_SESSIONS = 12
 
+CLOSE_CLOCK = datetime(YEAR, 1, 20, 9, 0, tzinfo=UTC)
+"""17:00 Asia/Shanghai on 2026-01-20 -- an open session, half an hour after it published.
+
+The only clock in this module above `DAILY_AVAILABILITY_TIME` (16:30), and `V2-P4-063` is what
+its absence cost: `EARLY_CLOCK` and `LATE_CLOCK` are both noon, and below 16:30 the build bound
+and the read bound agree exactly, so no fixture here could separate them.
+"""
+
+CLOSE_SESSION: date = SESSIONS[LATE_SESSIONS - 1]
+"""2026-01-20 -- the session `CLOSE_CLOCK` falls on, and the one a build at that instant owes."""
+
 HALT_SESSION: date = SESSIONS[2]
 """The only session the scripted `suspend_d` serves a row for -- 2026-01-07, well before either
 horizon. That is the ordinary shape of the dataset and the reason it is excluded from
@@ -588,3 +599,62 @@ def test_a_year_whose_last_halt_predates_the_horizon_is_not_a_split_horizon(
 
     assert later.exit_code == PanelExit.ok, later.stderr
     assert _payload(later)["sessions"]["count"] == EARLY_SESSIONS
+
+
+# --- the horizon build runs to is the one doctor requires (`V2-P4-063`) -----------------------
+
+
+def test_a_panel_built_after_the_close_is_clean_at_the_very_instant_that_built_it(
+    tmp_path: Path, transport: HorizonTransport, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One `--as-of` through `panel build` and then through `panel doctor`, and it must be clean.
+
+    `V2-P4-063` measured the product contradicting itself on its own output at its own instant:
+    a build at `2026-02-10T09:00Z` produced a panel that a health check at the same literal
+    instant called `BLOCKING ... date_gap`, exit 1. Two rules disagreed by one session.
+    `panel_ingest._sessions_published_through` -- which every *read* of the price plane uses,
+    which `_price_requirement` clamps `required_dates` at, and which `newest_published_session`
+    resolves a shortlist's pricing session through -- says a session becomes knowable at
+    `DAILY_AVAILABILITY_TIME` (16:30 Asia/Shanghai) on its own day. `cli._build_sessions`
+    subtracted a day unconditionally.
+
+    `CLOSE_CLOCK` is 17:00 Asia/Shanghai on 2026-01-20, an open session, thirty minutes after
+    that session published. Every other clock in this module is noon, which is why none of them
+    could separate the two rules: below 16:30 the two agree exactly, and the whole defect lives
+    in the half-day above it.
+
+    The measurement here reads `stk_limit` rather than `adj_factor` because `adj_factor` waives
+    `required_dates` (`panel_doctor`'s own docstring calls it "the gap"), so a session missing
+    from it is invisible to a health check -- an assertion on that dataset would be green under
+    both rules and would separate nothing.
+    """
+    _at(monkeypatch, CLOSE_CLOCK)
+    _seeded(tmp_path)
+
+    built = _build(tmp_path, PRICE_LIMIT_DATASET, "--json")
+    assert built.exit_code == PanelExit.ok, built.stderr
+    assert _payload(built)["sessions"]["count"] == LATE_SESSIONS
+    assert _payload(built)["sessions"]["last"] == CLOSE_SESSION.isoformat()
+
+    report = runner.invoke(
+        app,
+        [
+            "panel",
+            "doctor",
+            "--dataset",
+            PRICE_LIMIT_DATASET,
+            "--year",
+            str(YEAR),
+            "--runtime-dir",
+            str(tmp_path),
+            "--exchange",
+            EXCHANGE,
+            "--as-of",
+            CLOSE_CLOCK.isoformat(),
+            "--json",
+        ],
+    )
+
+    assert report.exit_code == PanelExit.ok, report.stdout + report.stderr
+    codes = [finding["code"] for finding in json.loads(report.stdout)["findings"]]
+    assert "date_gap" not in codes, codes

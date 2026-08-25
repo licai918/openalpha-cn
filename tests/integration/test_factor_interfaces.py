@@ -1152,3 +1152,50 @@ def test_a_refusal_body_names_no_filesystem_path(runtime_dir: Path) -> None:
     # And the in-process message really is the other one: the split is not a no-op.
     assert str(runtime_dir) in local["local"]
     assert "this service's panel store" not in local["local"]
+
+
+# --- V2-P4-052: `--code-commit ""` means the same thing on all three faces -----------------------
+
+
+def test_an_explicitly_empty_code_commit_is_refused_on_every_face(runtime_dir: Path) -> None:
+    """`V2-P4-046`, one command over: the same literal published here and was refused there.
+
+    `cli.py` declared `--code-commit` with an empty-string default and then wrote
+    `_resolved_code_commit(code_commit or None)`, so there was no value the parser could hand
+    back that meant "the caller typed an empty one" -- `""` collapsed into *omitted* and was
+    resolved from this process's git. Over HTTP and through the SDK the same literal reached
+    `factor_request`'s seven-character rule and was a `bad_request`. So the command line sealed a
+    factor experiment stamped with a commit the caller never declared, and the two other faces
+    refused to.
+
+    Driven through `assert_three_faces_agree` rather than asserted per face, because that helper
+    already knows each channel's own vocabulary for one verdict -- and because the defect is
+    precisely a *disagreement* between channels, which is the thing it exists to catch.
+    """
+    declared = {**BASELINE, "code_commit": ""}
+
+    # Named before the parity assertion so a red here reads as "the command line answered" rather
+    # than as a missing key inside the helper.
+    assert cli_answer(runtime_dir, declared).get("exit_code") == int(FACTOR_EXIT["bad_request"])
+    refusal = assert_three_faces_agree(runtime_dir, declared)
+
+    assert refusal["reason"] == "bad_request"
+    assert "--code-commit must be at least 7 characters" in refusal["message"]
+
+
+def test_an_omitted_code_commit_still_resolves_from_the_process(runtime_dir: Path) -> None:
+    """The other half, and without it the fix above could be a regression instead.
+
+    A change that refused `""` by refusing every falsy value would also have broken the
+    documented fallback -- omitting the flag resolves the real commit this process runs from --
+    and the test above cannot see that, because it never omits the flag. The command line is the
+    only face with a fallback to break: `run_factor_experiment` and `POST /api/v1/factors/run`
+    both take `code_commit` as a required argument.
+    """
+    omitted = {name: value for name, value in BASELINE.items() if name != "code_commit"}
+    result = CliRunner().invoke(app, _cli_arguments(runtime_dir, omitted))
+
+    assert result.exit_code == int(PanelExit.ok), result.stderr
+    sealed = json.loads(result.stdout)["document"]["artifact"]["spec"]["code_commit"]
+    assert len(sealed) >= 7, sealed
+    assert sealed != COMMIT, "the fallback must resolve, not echo this file's literal"

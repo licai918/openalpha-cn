@@ -104,7 +104,9 @@ from panel_fixtures import (
     generate_panel,
     write_generated_panel,
 )
+from typer.testing import CliRunner
 
+from openalpha_cn.cli import PanelExit, app
 from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET, ADJUSTMENT_PANEL_COLUMNS
 from openalpha_cn.domain.index_prices import (
     INDEX_DAILY_DATA_COLUMNS,
@@ -466,3 +468,50 @@ def test_the_report_survives_being_asked_about_index_levels_with_no_calendar(
         (note,) = report.findings_with_code("check_unavailable")
         assert expected in note.detail
         assert report.dataset(INDEX_DAILY_DATASET).readiness.state == "blocked"
+
+
+def test_the_shipped_command_survives_being_asked_about_index_levels_with_no_calendar(
+    tmp_path: Path,
+) -> None:
+    """`V2-P4-087` as the caller typed it, which the test above does not drive.
+
+    The measurement in that row is a **command line** -- `openalpha panel doctor --dataset
+    index_daily --no-calendar` -- and the assertion beside it calls `panel_health_report`
+    directly. Those are not the same claim: everything between the two, `_panel_request`'s
+    dispatch and `_panel_command`'s envelope included, is unasserted by the library call, and this
+    repository's most-repeated measured root cause is a green unit test with no green product path
+    under it. So the literal command is driven here.
+
+    `--no-calendar` and not `--calendar` on an empty store, because the two reach the fallback by
+    different routes and only one of them is a shipped flag: with no `trade_cal` partition the
+    request resolution would refuse before `_requirement_for` ran at all, which measures the wrong
+    thing.
+
+    The exit code is `1` and not `0`: an empty store is an unhealthy store, and that is the point
+    -- the whole reason the fallback exists is to keep producing a verdict about a panel that is
+    in trouble. What must not happen is exit `5` with a traceback, which is what
+    `create_app`'s docstring rules out for this repository: "naming the specific variable, never a
+    bare traceback".
+    """
+    PanelStore(tmp_path / "panel")
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "panel",
+            "doctor",
+            "--dataset",
+            INDEX_DAILY_DATASET,
+            "--year",
+            str(YEAR),
+            "--runtime-dir",
+            str(tmp_path),
+            "--no-calendar",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == int(PanelExit.unhealthy), result.output
+    assert "KeyError" not in result.output
+    assert "Traceback" not in result.output
+    assert "no trading calendar was supplied" in result.output
