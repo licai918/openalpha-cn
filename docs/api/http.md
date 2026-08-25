@@ -51,11 +51,53 @@ filesystem path. Local file access remains a CLI responsibility.
 - `GET /api/v1/memory/{subject}` returns durable decision-linked research memory.
 - `GET /api/v1/runs/{run_id}/recovery` exposes the durable node checkpoint used
   to resume an interrupted run; an unknown run returns `404`.
+- `GET /api/v1/jobs` and `GET /api/v1/jobs/{job_id}` read the trading-day
+  schedules this installation holds (`V2-P5-013`). The listing carries the
+  schedules; the single-job route also carries every per-session attempt,
+  ascending by session, because a job accumulates roughly 250 of them a year and
+  a listing that carried them all would grow without bound. A name no schedule is
+  registered under is `404` with a `{reason, message}` **object**, byte-identical
+  to what `openalpha jobs due` prints.
+
+  **Read-only, and deliberately.** Declaring a schedule, taking a lease and
+  running due sessions are `openalpha jobs register` / `openalpha jobs run` on the
+  machine that holds the runtime directory. This service still has no
+  authentication of any kind (audit `F101`), so it serves the operational
+  question -- *is the daily job running* -- and takes no authority.
 - `POST /api/v1/backtests/replay` executes a supplied versioned frozen corpus.
 - `POST /api/v1/portfolio/execute` applies one deterministic A-share portfolio
   transition, including cash, T+1, board-lot, suspension, price-limit, fee, FIFO,
   single-position, and total-exposure checks.
+
+  **Two unhappy answers, and they are different kinds** (`V2-P5-013`). A fact about
+  the market the simulator disagrees with -- a suspended bar, a limit-locked price,
+  a subject mismatch, a sell of stock the book does not hold -- is a `200` carrying
+  `status: "rejected"` and a `reason`, and it is still recorded in the ledger. A
+  fault in the *request* is a `422` whose `detail` is a plain string: today the only
+  one is reusing an `order_id` the ledger already holds with different content.
+  Before `V2-P5-013` that second case was an uncaught `ValueError` and answered
+  `500 text/plain`. `POST /api/v1/backtests/portfolio` reaches the same ledger
+  through a series rather than one order and answers **the same sentence**, so one
+  fault does not depend on which door the caller came through.
+
+  `detail` is a bare string on these two routes rather than the `{reason, message}`
+  object the panel, shortlist and model planes use, because those planes have a
+  fault-reason table the object discriminates between and these routes have one
+  refusal.
 - `GET /api/v1/portfolio/ledger` lists immutable accepted/rejected transitions.
+- `POST /api/v1/portfolio/construct` weights one *held* shortlist under a declared
+  heuristic policy (`V2-P5-013`). The body is `{shortlist_id, policy, previous}`,
+  where `policy` is `PortfolioConstructionPolicy` itself -- the same model
+  `OpenAlphaSDK.construct_portfolio` takes and `openalpha portfolio construct`
+  builds from its flags -- and `previous` is a book the **caller** declares, never
+  read from `/api/v1/portfolio/ledger`. The `200` body is byte-identical to
+  `openalpha portfolio construct --json`. A well-formed address this installation
+  does not hold is `404`; a malformed address, a shortlist the gate refused, an
+  admitted list holding no names, and a `max_industry_weight` over candidates that
+  carry no industry are all `422` with a `{reason, message}` **object**; a body
+  pydantic itself rejected (a tier vector that does not sum to one) is `422` with a
+  **list** of field errors. `isinstance(detail, dict)` is the discriminator, exactly
+  as on the shortlist and model routes.
 - `POST /api/v1/backtests/portfolio` returns multi-day return, benchmark,
   active return, turnover, capacity, and exposure attribution. **Each `steps[]` entry is one
   trading session, not one order** (`V2-P5-003`): it carries `trade_date`, the session's `bars`

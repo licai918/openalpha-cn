@@ -91,7 +91,7 @@ CREATE TABLE IF NOT EXISTS job_runs (
 JOB_RUNS_INDEX_DDL = """
 CREATE INDEX IF NOT EXISTS idx_job_runs_job_session ON job_runs (job_id, session)
 """
-"""The one query shape that is not the primary key: "what has this job done", newest first.
+"""The one query shape that is not the primary key: "what has this job done", by session.
 
 Without it, `runs()` and the `last_fired_session` repair path are table scans over every run of
 every job -- which is one row per job per trading session, so roughly 250 rows per job per year
@@ -322,6 +322,10 @@ class SQLiteJobStore:
         still owed; what stops it looping is that the run row is already there, so a retry is
         an explicit `retry_session` rather than an accident.
         """
+        # `retry_session` below is what makes the sentence above true. It named a method that
+        # did not exist until `V2-P5-013` gave this store a caller: with the row present and
+        # `last_fired_session` un-advanced, a failed session was owed for ever and refused for
+        # ever, and the job could never reach the sessions after it.
         finished = JobRun(
             idempotency_key=trading_day_key(job_id, session),
             job_id=job_id,
@@ -366,6 +370,67 @@ class SQLiteJobStore:
         stored = self.run_for(job_id, session)
         assert stored is not None  # the UPDATE above matched it
         return stored
+
+    def retry_session(self, job_id: str, session: date, *, owner: str, now: datetime) -> JobRun:
+        """Reopen a **terminal** run of `session` so the work can be attempted again.
+
+        `V2-P5-013`, and it closes a dead end this store had from the day it was written --
+        `finish_session`'s docstring has always named this method and this method did not exist.
+        A failed run leaves `last_fired_session` where it was, so `due()` keeps owing the
+        session; the row it left behind means `start_session` answers `JobAlreadyRanError` for
+        it. Between them the job was stuck on that session permanently, and so on every session
+        after it. Nothing had met it because nothing outside the tests called this store.
+
+        **The row is updated in place rather than deleted and re-inserted**, which is what keeps
+        the per-trading-day guarantee intact while the retry runs: the `PRIMARY KEY` is
+        continuously occupied, so a second process cannot slip a `start_session` in between a
+        delete and an insert. `started_at` moves to this attempt's instant; `session` and
+        `idempotency_key` do not move at all, because a retry is another attempt at the same
+        trading day and not a different one.
+
+        **Only a terminal run is reopened.** `status = 'running'` in the `WHERE` clause would
+        let a second process reopen a live run and hold the same session open twice -- the
+        exact guarantee `start_session` exists to give, leaking out of a side door. It is
+        refused, and separately from the lease check, because "someone else holds this job" and
+        "this run has not finished" are different faults with different remedies.
+
+        This is deliberately **not** automatic. A caller that retried on its own would loop on a
+        session that fails for a reason time does not fix; `openalpha jobs run --retry-failed` is
+        where the decision is stated, once, by whoever is looking at the failure.
+        """
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            held = connection.execute(
+                "SELECT 1 FROM scheduled_jobs WHERE job_id = ? AND lease_owner = ? "
+                "AND lease_expires_at > ?",
+                (job_id, owner, now.isoformat()),
+            ).fetchone()
+            if held is None:
+                connection.execute("ROLLBACK")
+                raise LeaseNotHeldError(job_id=job_id, owner=owner)
+            cursor = connection.execute(
+                "UPDATE job_runs SET status = 'running', owner = ?, started_at = ?, "
+                "finished_at = NULL, error_type = NULL "
+                "WHERE idempotency_key = ? AND status != 'running'",
+                (owner, now.isoformat(), trading_day_key(job_id, session)),
+            )
+            if cursor.rowcount != 1:
+                connection.execute("ROLLBACK")
+                existing = self.run_for(job_id, session)
+                if existing is None:
+                    raise JobStoreError(
+                        f"no run of {job_id!r} for {session.isoformat()} exists, so there is "
+                        "nothing to retry; start the session instead"
+                    )
+                raise JobStoreError(
+                    f"the run of {job_id!r} for {session.isoformat()} is already running under "
+                    f"{existing.owner!r}: a retry reopens a finished attempt, and reopening a "
+                    "live one would let two processes hold the same trading session at once"
+                )
+            connection.execute("COMMIT")
+        reopened = self.run_for(job_id, session)
+        assert reopened is not None  # the UPDATE above matched it
+        return reopened
 
     def advance_past(
         self,

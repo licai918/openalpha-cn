@@ -367,3 +367,104 @@ def test_advancing_a_job_this_process_does_not_hold_is_refused_as_a_lease_fault(
         )
 
     assert store.get("daily-panel-build").last_fired_session is None  # type: ignore[union-attr]
+
+
+def test_a_failed_session_can_be_retried_rather_than_owed_for_ever(tmp_path: Path) -> None:
+    """`V2-P5-013`. `finish_session`'s docstring names `retry_session`; it did not exist.
+
+    The two halves of this store's design meet here and, until this test, they met in a dead
+    end. A **failed** run deliberately does not advance `last_fired_session`, so `due()` keeps
+    owing the session -- that is right, the work did not happen. But `idempotency_key` is the
+    `PRIMARY KEY`, so the row is already there and `start_session` answers `JobAlreadyRanError`
+    for that session **for ever**. A job whose first attempt at a session failed could never
+    reach another one: not that session, and not the sessions after it, because
+    `last_fired_session` is what `due()` counts forward from.
+
+    Nothing had measured it because nothing outside these tests had ever called this store
+    (`V2-P5-010` recorded exactly that: "没有 CLI 命令、没有 REST 路由、不在 `build_storage` 里").
+    `openalpha jobs run` is the caller that reaches it on an ordinary Tuesday, because the work
+    it runs -- a point-in-time panel health report -- legitimately fails on a session whose data
+    has not landed.
+
+    The last two assertions are what make this test able to fail for the right reason. Asserting
+    only that `retry_session` returns a `running` run would pass against an implementation that
+    simply deleted the row, which would throw away the record of the failed attempt *and* the
+    idempotency guarantee with it. So the run's `started_at` is required to move to the retry's
+    instant while the session it addresses does not, and the job must then be able to finish and
+    advance past it.
+    """
+    store = _store(tmp_path)
+    store.register(_job())
+    store.claim("daily-panel-build", owner="worker-a", now=NOW, lease_for=LEASE)
+    store.start_session("daily-panel-build", SESSION, owner="worker-a", now=NOW)
+    store.finish_session(
+        "daily-panel-build",
+        SESSION,
+        owner="worker-a",
+        now=NOW,
+        status="failed",
+        error_type="not_yet_knowable",
+    )
+
+    assert store.get("daily-panel-build").last_fired_session is None  # type: ignore[union-attr]
+    with pytest.raises(JobAlreadyRanError):
+        store.start_session("daily-panel-build", SESSION, owner="worker-a", now=NOW)
+
+    later = NOW + timedelta(hours=1)
+    store.claim("daily-panel-build", owner="worker-a", now=later, lease_for=LEASE)
+    reopened = store.retry_session("daily-panel-build", SESSION, owner="worker-a", now=later)
+
+    assert reopened.status == "running"
+    assert reopened.started_at == later
+    assert reopened.finished_at is None
+    assert reopened.error_type is None
+    assert reopened.idempotency_key == trading_day_key("daily-panel-build", SESSION)
+
+    store.finish_session(
+        "daily-panel-build", SESSION, owner="worker-a", now=later, status="succeeded"
+    )
+    assert store.get("daily-panel-build").last_fired_session == SESSION  # type: ignore[union-attr]
+
+
+def test_a_run_still_in_flight_is_not_reopened_by_a_retry(tmp_path: Path) -> None:
+    """A retry reopens a *terminal* run and never a `running` one.
+
+    Without this the guarantee `start_session` provides leaks out of the side door: two
+    processes could hold one session open at once by having the second call `retry_session` on
+    the first's live run, and the `PRIMARY KEY` would not stop it because no second row is being
+    inserted. The lease is checked too, and separately, because an expired lease and a run that
+    is already running are different faults with different remedies.
+    """
+    store = _store(tmp_path)
+    store.register(_job())
+    store.claim("daily-panel-build", owner="worker-a", now=NOW, lease_for=LEASE)
+    store.start_session("daily-panel-build", SESSION, owner="worker-a", now=NOW)
+
+    with pytest.raises(JobStoreError, match="already running"):
+        store.retry_session("daily-panel-build", SESSION, owner="worker-a", now=NOW)
+
+    store.finish_session(
+        "daily-panel-build",
+        SESSION,
+        owner="worker-a",
+        now=NOW,
+        status="failed",
+        error_type="boom",
+    )
+    with pytest.raises(LeaseNotHeldError):
+        store.retry_session("daily-panel-build", SESSION, owner="worker-b", now=NOW)
+    with pytest.raises(LeaseNotHeldError):
+        # An EXPIRED lease, held by the right owner. Distinct from the case above and not a
+        # duplicate of it: that one fails the `lease_owner = ?` half of the guard and this one
+        # fails the `lease_expires_at > ?` half, and the second half is a *string* comparison
+        # against an ISO-8601 column -- so it is also what fails if the instant is bound as a
+        # `datetime` and SQLite's default adapter writes a space where the stored rows carry a
+        # `T`, which sorts the other way round.
+        store.retry_session(
+            "daily-panel-build",
+            SESSION,
+            owner="worker-a",
+            now=NOW + LEASE + timedelta(seconds=1),
+        )
+    with pytest.raises(JobStoreError, match="no run of"):
+        store.retry_session("daily-panel-build", date(2026, 8, 21), owner="worker-a", now=NOW)

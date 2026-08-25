@@ -414,3 +414,30 @@ def test_skipping_records_the_instant_it_was_given(tmp_path: Path) -> None:
 
     assert advanced.updated_at == skipped_at
     assert advanced.last_fired_session == date(2026, 10, 8)
+
+
+def test_a_retry_is_stamped_with_the_instant_it_is_handed_not_with_the_clock(
+    tmp_path: Path,
+) -> None:
+    """`V2-P5-013`. `retry` takes `now` for the reason every other method here does.
+
+    The caller decides the instant, and a method that silently used `self.clock()` instead would
+    be indistinguishable in the shipped wiring -- `openalpha jobs run` passes the wall clock and
+    the scheduler holds the wall clock -- and wrong for every caller with a clock of its own,
+    which is what a test is. So the two are separated here by handing an instant an hour past the
+    scheduler's own frozen clock and requiring the run to carry it.
+    """
+    scheduler = _scheduler(tmp_path, catch_up=CatchUpPolicy.RUN_EACH_MISSED)
+    session = date(2026, 8, 24)
+    scheduler.claim("daily-panel-build")
+    scheduler.start("daily-panel-build", session)
+    scheduler.fail("daily-panel-build", session, error_type="date_gap")
+
+    later = NOW + timedelta(hours=1)
+    scheduler.claim("daily-panel-build", now=later)
+    reopened = scheduler.retry("daily-panel-build", session, now=later)
+
+    assert reopened.started_at == later
+    assert reopened.status == "running"
+    assert reopened.finished_at is None
+    assert reopened.error_type is None

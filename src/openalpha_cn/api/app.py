@@ -36,6 +36,14 @@ from openalpha_cn.backtest.portfolio import (
     PortfolioState,
     PortfolioTransition,
 )
+from openalpha_cn.backtest.portfolio_policy import (
+    PortfolioConstruction,
+    PortfolioConstructionError,
+    PortfolioConstructionPolicy,
+    candidates_from_shortlist_answer,
+    construct_portfolio,
+    construction_view,
+)
 from openalpha_cn.backtest.replay import ReplayCorpus, ReplayReport, ReplayRunner
 from openalpha_cn.backtest.validation import OutcomeObservation, OutcomeValidator
 from openalpha_cn.config import load_config
@@ -58,6 +66,7 @@ from openalpha_cn.factor_view import (
     factor_request,
     run_factor_experiment,
 )
+from openalpha_cn.job_contracts import job_not_registered, job_run_view, scheduled_job_view
 from openalpha_cn.logging_setup import configure_logging
 from openalpha_cn.model_view import (
     ModelViewError,
@@ -220,6 +229,33 @@ class PortfolioApiRequest(BaseModel):
     order: PortfolioOrder
     market: MarketBar
     limits: PortfolioLimits = PortfolioLimits()
+
+
+class PortfolioConstructionApiRequest(BaseModel):
+    """One held shortlist, one declared policy, and the book being moved from (`V2-P5-013`).
+
+    **`policy` is `PortfolioConstructionPolicy` itself rather than a set of loose numbers this
+    route re-assembles**, which is the whole reason this face could be added as wiring. The SDK
+    takes that exact model as its `policy` argument and the CLI builds it out of its flags, so
+    the tier-weight validator a caller meets here is the one the other two faces meet -- in
+    pydantic's own words, once, rather than restated at a third boundary. A route that took
+    `tier_weights` and five `limits` fields flat would be a second declaration of the same
+    contract, and `V2-P5-013` exists because faces that restate a contract come to disagree
+    about it.
+
+    `previous` is weights the **caller** states. It reaches no ledger, exactly as on the other
+    two faces: see `KNOWN_CONSTRUCTION_LIMITATIONS
+    .the_previous_book_is_declared_by_the_caller_and_never_read_from_a_ledger`. Empty by default,
+    which is the first construction over a book that does not exist yet -- and *not* an implicit
+    "read what I hold", which would make a turnover number depend on a store this request never
+    named.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    shortlist_id: str
+    policy: PortfolioConstructionPolicy
+    previous: dict[str, Decimal] = Field(default_factory=dict)
 
 
 class BatchSubmitRequest(BaseModel):
@@ -1628,6 +1664,8 @@ def create_app(
     validation_store = storage.validation_store
     experiment_store = storage.experiment_store
     prediction_store = storage.prediction_store
+    job_store = storage.job_store
+    job_store = storage.job_store
 
     def run_one(request: ResearchRunRequest) -> ResearchRunResult:
         return ResearchEngine(
@@ -1897,6 +1935,51 @@ def create_app(
         """Return durable decision-linked memory for one subject."""
         return memory.list(subject=subject)
 
+    @application.get("/api/v1/jobs")
+    def job_list() -> dict[str, list[dict[str, object]]]:
+        """Every trading-day schedule this installation holds, by name (`V2-P5-013`).
+
+        `V2-P5-010` shipped the scheduling primitive with no route at all and said so in its own
+        row. This is the read half of the face, and it is **only** the read half, deliberately:
+        this service has no authentication of any kind (audit `F101`'s second sentence, still
+        open), so declaring a schedule and taking a lease stay on the machine that holds the
+        runtime directory, where `openalpha jobs register` and `openalpha jobs run` are. What an
+        unauthenticated reader can have is the answer to *is the daily job running*, which is
+        the operational question and carries no authority.
+
+        Rendered through `job_contracts.scheduled_job_view`, the same function `openalpha jobs
+        list --json` calls, so the two cannot come to describe one schedule two ways --
+        `tests/integration/test_scheduled_job_faces.py` asserts the bodies equal rather than
+        alike.
+        """
+        return {"jobs": [scheduled_job_view(job) for job in job_store.list_jobs()]}
+
+    @application.get("/api/v1/jobs/{job_id}")
+    def job_get(job_id: str) -> dict[str, object]:
+        """One schedule and every per-session attempt it has recorded, ascending by session.
+
+        The runs are on this route and not on the listing above for `GET /api/v1/shortlists`'
+        reason: a job accumulates one row per trading session, so roughly 250 a year, and a
+        listing that carried them all would grow without bound while answering a question
+        ("which schedules exist") that never needed them.
+
+        A name no schedule is registered under is `404` with `_panel_detail`'s `{reason,
+        message}` object -- the shortlist plane's own `not_held` row -- and the message is
+        byte-identical to the one `openalpha jobs due` prints, because both faces call
+        `_job_not_registered`. A bare `"Not Found"` string here would be indistinguishable from
+        the router's answer for a path that does not exist.
+        """
+        job = job_store.get(job_id)
+        if job is None:
+            raise HTTPException(
+                status_code=SHORTLIST_HTTP_STATUS["not_held"],
+                detail=_panel_detail("not_held", job_not_registered(job_id)),
+            )
+        return {
+            "job": scheduled_job_view(job),
+            "runs": [job_run_view(run) for run in job_store.runs(job_id)],
+        }
+
     @application.get("/api/v1/runs/{run_id}/recovery")
     def recovery_query(run_id: str) -> RunRecoveryState:
         """Return node-level progress used to resume an interrupted run."""
@@ -1930,13 +2013,37 @@ def create_app(
 
     @application.post("/api/v1/portfolio/execute")
     def portfolio_execute(request: PortfolioApiRequest) -> PortfolioTransition:
-        """Apply A-share execution, T+1, costs, and exposure limits."""
+        """Apply A-share execution, T+1, costs, and exposure limits.
+
+        **The `except` is the whole of `V2-P5-013`'s fix on this route, and it is not
+        decorative.** `SQLitePortfolioLedger.append` raises a bare `ValueError` when an
+        `order_id` is reused with different content, and nothing caught it -- so resubmitting an
+        order under an id the ledger already holds answered `500` `text/plain` `Internal Server
+        Error`. That says "this repository has a defect" for a request the caller fixes by
+        changing one field.
+
+        **Narrow by type and by placement.** Only the *ledger* write is wrapped, not the
+        simulation: `PortfolioSimulator` **returns** its disagreements with the market -- a
+        suspended bar, a limit-locked price, a subject mismatch -- as `accepted: false`
+        transitions with a `reason`, and those are correct `200` answers. Widening this to cover
+        the simulation would report a fact about the market as a bad request, which is
+        `V2-P4-045`'s over-broad catch in a second place.
+
+        `detail` is a plain string here rather than the `{reason, message}` object the panel and
+        shortlist planes use, and that is deliberate: those planes have a fault-reason table
+        (`SHORTLIST_HTTP_STATUS`) whose rows the object discriminates between, and this route has
+        exactly one refusal. Inventing a one-row table to carry it would be a shape a client has
+        to branch on for no information.
+        """
         transition = PortfolioSimulator(limits=request.limits).execute_order(
             state=request.state,
             order=request.order,
             market=request.market,
         )
-        portfolio_ledger.append(transition)
+        try:
+            portfolio_ledger.append(transition)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
         return transition
 
     @application.get("/api/v1/portfolio/ledger")
@@ -1946,13 +2053,89 @@ def create_app(
         """List immutable order/execution transitions."""
         return portfolio_ledger.list(subject=subject)
 
+    @application.post("/api/v1/portfolio/construct")
+    def portfolio_construct(request: PortfolioConstructionApiRequest) -> JSONResponse:
+        """Weight one admitted shortlist under a declared heuristic policy (`V2-P5-013`).
+
+        `V2-P5-001` shipped `openalpha portfolio construct` and `OpenAlphaSDK
+        .construct_portfolio` and left this face out; `V2-P5-013`'s measurement is what found
+        it. It is `/api/v1/portfolio/construct` and not `/portfolios/`: `portfolio/execute` and
+        `portfolio/ledger` already spell this noun singular, and a second spelling of one noun on
+        one API is the drift this row exists to close rather than to add to.
+
+        **Three lines of body, and that is the point.** The read is `held_shortlist`, the policy
+        is `construct_portfolio`, and the rendering is `construction_view` -- the same three the
+        CLI and the SDK call, so the three faces cannot come to weight one list three ways.
+        `tests/integration/test_portfolio_construction_interfaces.py` asserts this route's `200`
+        body **byte-equal** to `openalpha portfolio construct --json`, and both refusals below
+        equal to the sentence the CLI prints on stderr.
+
+        ## What each refusal is
+
+        - **`404`** -- `ShortlistNotHeldError`: a well-formed address this installation holds no
+          answer under. Through `_shortlist_refusal`, so it is the same row of
+          `SHORTLIST_HTTP_STATUS` that `GET /api/v1/shortlists/{shortlist_id}` answers with.
+        - **`422` with a `{reason, message}` object** -- a request with no answer:
+          `ShortlistRequestError` for a malformed address, `PortfolioConstructionError` for a
+          shortlist the gate refused (`admitted` is null), for an admitted list holding no names,
+          and for a declared `max_industry_weight` over candidates that carry no industry -- the
+          refusal `V2-P5-001` chose over an unenforceable cap, which arrives here unchanged
+          because it is raised in the shared policy rather than at any one face.
+        - **`422` with a list of field errors** -- a body pydantic itself rejected: a tier vector
+          that does not sum to one, a weight that is not positive, a cap outside `(0, 1]`. Two
+          shapes on one status code is this module's standing arrangement and `isinstance(detail,
+          dict)` is the discriminator; see `SHORTLIST_HTTP_STATUS`.
+
+        `ShortlistStoreError` is deliberately **not** caught. It is a fault in the store rather
+        than in the request, and letting it reach Starlette is the same choice
+        `shortlist_get` above makes one route over.
+        """
+        try:
+            construction: PortfolioConstruction = construct_portfolio(
+                candidates=candidates_from_shortlist_answer(
+                    held_shortlist(shortlist_store, request.shortlist_id)
+                ),
+                policy=request.policy,
+                previous=request.previous,
+            )
+        except ShortlistViewError as error:
+            raise _shortlist_refusal(error) from error
+        except PortfolioConstructionError as error:
+            raise HTTPException(
+                status_code=SHORTLIST_HTTP_STATUS["bad_request"],
+                detail=_panel_detail("bad_request", str(error)),
+            ) from error
+        return JSONResponse(status_code=200, content=construction_view(construction))
+
     @application.post("/api/v1/backtests/portfolio")
     def portfolio_backtest(request: PortfolioBacktestRequest) -> PortfolioBacktestReport:
-        """Run a multi-day A-share portfolio report and persist transitions."""
-        return PortfolioBacktestRunner(
-            limits=request.limits,
-            ledger=portfolio_ledger,
-        ).run(initial=request.initial, steps=request.steps)
+        """Run a multi-day A-share portfolio report and persist transitions.
+
+        `portfolio_execute`'s `except` and its reason, on the route that reaches the same ledger
+        through a series rather than through one order -- so one fault cannot answer two ways
+        depending on which door the caller came through. `V2-P5-013`; both are asserted equal in
+        `tests/integration/test_portfolio_route_refusals.py`.
+
+        **Measured before it was believed.** This arrived reported as a regression that
+        `V2-P5-003` introduced with a strictly-ascending-session check. Driven on `2746663`,
+        before any of that row exists, the `500` is already here: `PortfolioBacktestRunner.run`
+        appends every transition to the ledger, so resubmitting a backtest whose orders keep
+        their ids reaches the same bare `ValueError`. That row adds a third road to a fault that
+        already had one. Its check lands in this same `except` when it merges.
+
+        Wrapping the whole `run` rather than the append alone, and that is the one difference
+        from the route above: the runner owns the loop, so there is no seam between "simulate"
+        and "record" to put a narrower guard at. It costs nothing here because the runner's
+        *own* refusals are the same kind of fault -- a step series that cannot be put --
+        while every disagreement with the market is still a returned rejection inside the report.
+        """
+        try:
+            return PortfolioBacktestRunner(
+                limits=request.limits,
+                ledger=portfolio_ledger,
+            ).run(initial=request.initial, steps=request.steps)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
 
     @application.post("/api/v1/backtests/event-study")
     def event_study(request: EventStudyRequest) -> EventStudyReport:

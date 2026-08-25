@@ -860,7 +860,7 @@ uv run openalpha portfolio construct sla_0123456789abcdef01234567 \
   --previous-weight 000001.SZ=0.05
 ```
 
-两个面等价：`openalpha portfolio construct` ／ `OpenAlphaSDK.construct_portfolio()`。
+三个面等价：`openalpha portfolio construct` ／ `OpenAlphaSDK.construct_portfolio()` ／ `POST /api/v1/portfolio/construct`（`V2-P5-013` 补上了第三个）。REST 请求体的 `policy` 字段就是 `PortfolioConstructionPolicy` 本身——SDK 收的那个模型、CLI 用参数拼出来的那个模型——所以三个面读的是同一份校验、同一句拒绝；`200` 正文与 `--json` 逐字节相等，两条拒绝与 CLI 打在 stderr 的那句逐字相等，由 `tests/integration/test_portfolio_construction_interfaces.py` 钉住。
 
 ### 三步都是算术，而且每一步都说得出自己没做什么
 

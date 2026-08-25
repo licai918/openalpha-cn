@@ -105,6 +105,13 @@ from openalpha_cn.factor_view import (
     tier_rows,
 )
 from openalpha_cn.feature_matrix import FeatureColumn
+from openalpha_cn.job_contracts import (
+    MAX_OWNER_LENGTH,
+    CatchUpPolicy,
+    ScheduledJob,
+    job_not_registered,
+    scheduled_job_view,
+)
 from openalpha_cn.logging_setup import configure_logging
 from openalpha_cn.model_view import (
     ModelEvaluation,
@@ -148,6 +155,7 @@ from openalpha_cn.panel_ingest import (
     load_suspensions,
     load_trading_calendar,
     merge_panel_batches,
+    session_publication_instant,
     split_panel_batch_by_year,
     write_adjustment_factors,
     write_daily_panel,
@@ -169,6 +177,7 @@ from openalpha_cn.panel_view import (
     health_report_payload,
     panel_request,
     panel_store,
+    stored_calendar,
 )
 from openalpha_cn.providers.akshare import AKShareProvider
 from openalpha_cn.providers.base import (
@@ -191,6 +200,7 @@ from openalpha_cn.providers.tushare import (
 from openalpha_cn.runtime.composition import build_storage
 from openalpha_cn.runtime.contracts import ResearchRunRequest
 from openalpha_cn.runtime.provenance import compute_config_digest, resolve_code_commit
+from openalpha_cn.scheduler import ScheduleHorizonError, TradingDayScheduler
 from openalpha_cn.sdk import OpenAlphaSDK
 from openalpha_cn.shortlist_compare import (
     compare_held_shortlists,
@@ -209,6 +219,7 @@ from openalpha_cn.shortlist_view import (
     shortlist_view,
 )
 from openalpha_cn.storage.factor_experiments import ExperimentStoreError, FileExperimentStore
+from openalpha_cn.storage.jobs import JobAlreadyRanError, SQLiteJobStore
 from openalpha_cn.storage.migrations import (
     REPAIR_APPLIED,
     MigrationFailedError,
@@ -322,6 +333,42 @@ run, and a construction is a set of weights over one; folding them into one comm
 exit code covering "the gate refused the list" and "the caps could not place the capital", which
 are different facts with different remedies. Keeping them apart is also what makes the refusal
 below possible at all: a construction that takes a *held* answer can see that the gate said no.
+"""
+
+
+jobs_app = typer.Typer(
+    help=(
+        "Declare a trading-day schedule, ask what it owes, and run the sessions it owes. "
+        "Start with `openalpha jobs run --help`."
+    )
+)
+app.add_typer(jobs_app, name="jobs")
+"""`V2-P5-013`'s commands, and the caller `V2-P5-010` said in its own row it was not writing.
+
+That row shipped `job_contracts.py`, `storage/jobs.py` and `scheduler.py` and recorded the other
+half as open by name: *"三个模块没有 CLI 命令、没有 REST 路由、不在 `build_storage` 里"*. Audit
+`F98` carries the same sentence. Every guarantee those modules give was tested at its own
+boundary against real SQLite; *an operator can run due jobs* was tested nowhere, because there
+was no operator.
+
+A sub-app for `factor`'s and `shortlist`'s reason, and the four commands are in the order an
+operator meets them: `register` (declare the schedule), `list` (what is declared), `due` (what
+does this one owe right now), `run` (do it).
+
+## What this scheduler owns, and what it does not
+
+It owns **when**: which trading sessions a job owes, at most one run per session, one process at
+a time, and what to do about sessions that were missed. It does not own a general vocabulary of
+work, and `openalpha jobs run` ships exactly one job body -- a point-in-time panel health report
+at each owed session's own publication instant. That is a measurement rather than an ambition:
+every other per-session action this build has takes between eight and twenty declared parameters
+(`model daily-run` takes seventeen), and `scheduled_jobs` has no column that could hold them.
+Storing a payload would be a change to a stored contract, which AGENTS.md rule 3 confines to the
+closed `V2-P4-001` window. So the parameters are typed on the command line, where a crontab line
+already carries them, and the row stays a schedule rather than becoming a task queue.
+
+It is also the one per-session action that reaches **no network**: a scheduled job that hit a
+paid provider on a timer is not something to ship by accident.
 """
 
 
@@ -678,6 +725,13 @@ def doctor(
         raise typer.Exit(code=1)
 
 
+_RUNTIME_DIR_HELP: Final[str] = (
+    "One installation's whole state. The panel plane is `<runtime-dir>/panel` and sealed "
+    "experiments are `<runtime-dir>/experiments`, the same directory `openalpha panel build` "
+    "writes and the HTTP service reads."
+)
+
+
 @evidence_app.command("build")
 def evidence_build(
     path: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
@@ -688,8 +742,25 @@ def evidence_build(
         Redistribution,
         typer.Option("--redistribution"),
     ] = Redistribution.restricted,
+    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
+        "./runtime"
+    ),
 ) -> None:
-    """Build evidence from a user-owned CSV, JSON, JSONL, or Parquet file."""
+    """Build evidence from a user-owned CSV, JSON, JSONL, or Parquet file, and store it.
+
+    **`--runtime-dir` and the append arrived with `V2-P5-013`, closing audit `F31`.** This
+    command used to print its snapshots and throw them away, while
+    `OpenAlphaSDK.build_file_evidence` and `POST /api/v1/evidence/build` both appended to the
+    evidence store -- two faces of three agreeing and the command line the odd one out. A caller
+    who built evidence from the terminal and then queried it found nothing, and could not tell
+    "the file produced no events" from "the build discarded them".
+
+    The default is `./runtime`, the same directory every other command in this CLI means by
+    `--runtime-dir`, so a build and a subsequent `openalpha research run` see one store.
+
+    The printed payload is unchanged and is still the whole response, so a caller piping this
+    into `jq` keeps working; what changed is that the snapshots also survive the process.
+    """
     point_in_time = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
     metadata = ProviderMetadata(
         provider_id=source_id,
@@ -704,6 +775,13 @@ def evidence_build(
     )
     provider = FileProvider(path=path, metadata=metadata, parquet_reader=read_parquet_records)
     response = build_provider_evidence(provider=provider, dataset="events", as_of=point_in_time)
+    if response.items:
+        # Through the composition root rather than `ParquetEvidenceStore(runtime_dir /
+        # "evidence")`, v2 hard rule 5: `sdk.py` and `api/app.py` once assembled this store by
+        # hand at the same path and drifted, and a third hand-assembly is that mistake again.
+        build_storage(runtime_dir=runtime_dir, clock=_panel_clock).evidence_store.append(
+            response.items
+        )
     typer.echo(response.model_dump_json())
 
 
@@ -3941,11 +4019,6 @@ _FACTOR_NOTE_HELP: Final[str] = (
     "Prose recorded on the sealed record and deliberately outside every content address, so "
     "writing about an experiment cannot change its identity."
 )
-_RUNTIME_DIR_HELP: Final[str] = (
-    "One installation's whole state. The panel plane is `<runtime-dir>/panel` and sealed "
-    "experiments are `<runtime-dir>/experiments`, the same directory `openalpha panel build` "
-    "writes and the HTTP service reads."
-)
 _FACTOR_EXCHANGE_HELP: Final[str] = (
     "Which stored exchange calendar the sessions are counted on. It decides the label windows and "
     "the readiness dates, so a calendar this store never fetched is refused rather than "
@@ -6076,3 +6149,474 @@ def portfolio_construct_command(
             )
         else:
             _echo_construction(construction)
+
+
+# --- V2-P5-013: the scheduling face -------------------------------------------------------
+#
+# `V2-P5-010` built the primitive and said in its own row that it was leaving the caller to a
+# later row: no CLI command, no REST route, not in `build_storage`. This is that caller. What
+# lives here is the *face* -- flags, exit codes and a rendering; every guarantee (the lease, the
+# per-trading-day primary key, what `due` means) stays in `scheduler.py` and `storage/jobs.py`,
+# so the CLI and `GET /api/v1/jobs` cannot come to answer two different things.
+
+
+_JOB_ID_HELP: Final[str] = (
+    "The operator's own name for this schedule, e.g. `daily-panel-check`. It is a name and not "
+    "an address: it is the primary key of `scheduled_jobs` and half of the per-trading-day "
+    "idempotency key `<job-id>@<session>`, so `@` is refused in it."
+)
+
+_JOB_CATCH_UP_HELP: Final[str] = (
+    "What this job owes when it wakes to find sessions it never ran. `run-each-missed` returns "
+    "every one of them, which is the only policy under which a gap in a point-in-time panel gets "
+    "filled. `skip-missed` runs only the newest and advances past the rest, which is right for a "
+    "job whose output is a snapshot of now and wrong for anything that accumulates."
+)
+
+_JOB_YEAR_HELP: Final[str] = (
+    "A calendar year this schedule counts sessions on, repeatable. The stored `trade_cal` "
+    "partitions for these years are what decides which days are open, so a job whose "
+    "`last_fired_session` predates them is refused by name rather than answered with only the "
+    "sessions the loaded calendar happens to see."
+)
+
+_JOB_AS_OF_HELP: Final[str] = (
+    "ISO-8601 instant this question is asked at; defaults to now. It decides which sessions have "
+    "published -- a session becomes knowable at 16:30 Asia/Shanghai -- and nothing else."
+)
+
+_JOB_RETRY_HELP: Final[str] = (
+    "Attempt a session whose previous attempt finished and failed. Off by default and stated "
+    "rather than automatic: a session that fails for a reason time does not fix would otherwise "
+    "be retried on every wake-up, for ever."
+)
+
+
+class JobsCatchUp(StrEnum):
+    """The two catch-up policies, spelled the way a command line spells things.
+
+    A separate enum from `CatchUpPolicy` because the stored value is `run_each_missed` and the
+    flag a person types is `--catch-up run-each-missed`; mapping the two here keeps the stored
+    contract's spelling out of the terminal and the terminal's out of the database.
+    """
+
+    skip_missed = "skip-missed"
+    run_each_missed = "run-each-missed"
+
+    def policy(self) -> CatchUpPolicy:
+        return (
+            CatchUpPolicy.SKIP_MISSED
+            if self is JobsCatchUp.skip_missed
+            else CatchUpPolicy.RUN_EACH_MISSED
+        )
+
+
+def _job_owner() -> str:
+    """Who this process is, for the lease.
+
+    A hostname and a pid, which is what makes a stuck lease diagnosable -- `lease_owner` is the
+    one column that answers "which machine is holding this". Truncated to the column's declared
+    width rather than left to `ScheduledJob`'s validator, because a long hostname is not an
+    operator error worth refusing a run over.
+    """
+    return f"{platform.node() or 'unknown-host'}:{os.getpid()}"[:MAX_OWNER_LENGTH]
+
+
+def _job_store(runtime_dir: Path) -> SQLiteJobStore:
+    """The schedule table inside a runtime directory, through the one composition root.
+
+    `build_storage` rather than `SQLiteJobStore(runtime_dir / "state.sqlite3")` directly, which
+    is v2 hard rule 5 and not a stylistic preference: `api/app.py` and `sdk.py` once assembled
+    the same stores by hand and drifted, and a fourteenth hand-assembly here would be the same
+    mistake with a new name. It also means these commands apply pending migrations exactly as
+    every other face does.
+    """
+    return build_storage(runtime_dir=runtime_dir, clock=_panel_clock).job_store
+
+
+def _job_calendar(
+    runtime_dir: Path, *, exchange: str, years: Sequence[int], as_of: datetime
+) -> TradingCalendar:
+    """The stored exchange calendar this schedule counts sessions on.
+
+    Loaded from the panel rather than constructed, because "which sessions exist" is a fact the
+    exchange publishes and this repository stores, and a scheduler that generated weekdays would
+    owe work on a national holiday. `stored_calendar` is fail-closed twice over, so a missing or
+    stale `trade_cal` partition is a refusal here rather than a calendar that silently reads the
+    gap as a holiday.
+    """
+    try:
+        return stored_calendar(
+            _panel_store(runtime_dir), exchange=exchange, years=tuple(years), as_of=as_of
+        )
+    except PanelRequestError as error:
+        raise _panel_fail(PanelExit.bad_request, str(error)) from error
+    except PanelUnreadableError as error:
+        raise _panel_fail(PanelExit.unhealthy, str(error)) from error
+
+
+def _job_scheduler(
+    runtime_dir: Path, *, exchange: str, years: Sequence[int], as_of: datetime
+) -> TradingDayScheduler:
+    return TradingDayScheduler(
+        store=_job_store(runtime_dir),
+        calendar=_job_calendar(runtime_dir, exchange=exchange, years=years, as_of=as_of),
+        clock=_panel_clock,
+        owner=_job_owner(),
+    )
+
+
+@jobs_app.command("register")
+def jobs_register_command(
+    job_id: Annotated[str, typer.Argument(help=_JOB_ID_HELP)],
+    catch_up: Annotated[JobsCatchUp, typer.Option("--catch-up", help=_JOB_CATCH_UP_HELP)],
+    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
+        "./runtime"
+    ),
+) -> None:
+    """Declare a trading-day schedule, or leave the declared one exactly as it is.
+
+    **Idempotent by declaration and never by progress.** Re-running this is the ordinary case --
+    a machine boots, a deployment script runs -- and it must not reset `last_fired_session`,
+    because that would re-run every session since the last one. It also does **not** rewrite an
+    existing job's `--catch-up`: changing a catch-up policy has a consequence measured in
+    sessions of work, and applying it silently on the next restart is how a `skip-missed` job
+    quietly becomes a `run-each-missed` one. To change a policy, delete the row deliberately.
+
+    `--catch-up` has no default. It is the one field that decides whether a missed session is
+    work or history, and the most permissive answer must not also be the easiest one to get.
+    """
+    with _panel_command("jobs register"):
+        instant = _panel_clock()
+        try:
+            job = ScheduledJob(
+                job_id=job_id,
+                catch_up=catch_up.policy(),
+                created_at=instant,
+                updated_at=instant,
+            )
+        except ValidationError as error:
+            raise _panel_fail(PanelExit.bad_request, str(error)) from error
+        stored = _job_store(runtime_dir).register(job)
+        if stored.created_at != instant:
+            typer.echo(
+                f"{job_id} was already declared as {stored.catch_up.value}"
+                + (
+                    ""
+                    if stored.last_fired_session is None
+                    else f", last fired {stored.last_fired_session.isoformat()}"
+                )
+            )
+        else:
+            typer.echo(f"registered {job_id} as {stored.catch_up.value}")
+
+
+@jobs_app.command("list")
+def jobs_list_command(
+    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
+        "./runtime"
+    ),
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit the schedules as data.")
+    ] = False,
+) -> None:
+    """Every schedule this installation holds, by name, ascending.
+
+    Reads no calendar, which is why it takes no `--year`: what is *declared* is a fact about
+    this database alone, and what is *owed* is a question for `openalpha jobs due`. Keeping them
+    apart means a listing still answers on an installation whose `trade_cal` partition is
+    missing -- which is exactly when an operator is looking at it.
+    """
+    with _panel_command("jobs list"):
+        jobs = _job_store(runtime_dir).list_jobs()
+        if json_output:
+            typer.echo(
+                json.dumps(
+                    {"jobs": [scheduled_job_view(job) for job in jobs]},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+            return
+        if not jobs:
+            typer.echo("no schedules are declared; see `openalpha jobs register --help`")
+            return
+        for job in jobs:
+            last = "never" if job.last_fired_session is None else job.last_fired_session.isoformat()
+            lease = "free" if job.lease_owner is None else f"held by {job.lease_owner}"
+            typer.echo(f"{job.job_id}  {job.catch_up.value}  last fired {last}  lease {lease}")
+
+
+@jobs_app.command("due")
+def jobs_due_command(
+    job_id: Annotated[str, typer.Argument(help=_JOB_ID_HELP)],
+    year: Annotated[list[int], typer.Option("--year", help=_JOB_YEAR_HELP)],
+    exchange: Annotated[
+        str, typer.Option("--exchange", help=_FACTOR_EXCHANGE_HELP)
+    ] = TRADING_CALENDAR_DEFAULT_EXCHANGE,
+    as_of: Annotated[str, typer.Option("--as-of", help=_JOB_AS_OF_HELP)] = "",
+    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
+        "./runtime"
+    ),
+    json_output: Annotated[bool, typer.Option("--json", help="Emit the answer as data.")] = False,
+) -> None:
+    """Which trading sessions this job owes right now, and which it is about to skip.
+
+    `openalpha jobs run`'s dry run: the same question, none of the writes.
+
+    **The answer is read off the calendar and off `last_fired_session`, never off the stored
+    `next_fire_time`.** That column exists so a poller can `WHERE` on one indexed comparison, and
+    it is recomputed from the calendar every time a job advances -- but a stored fire time is
+    derived from a calendar that changes (a holiday is announced, a session is added for a
+    make-up day), so treating it as the answer is how a job fires on a closed session and
+    succeeds on nothing. The two questions asked instead are which sessions had published at
+    `--as-of` (`panel_ingest.newest_published_session`, the one function that owns the 16:30
+    rule) and which of them this job has already run.
+    """
+    with _panel_command("jobs due"):
+        instant = _panel_as_of(as_of)
+        scheduler = _job_scheduler(runtime_dir, exchange=exchange, years=year, as_of=instant)
+        job = scheduler.store.get(job_id)
+        if job is None:
+            raise _panel_fail(PanelExit.bad_request, job_not_registered(job_id))
+        try:
+            due = scheduler.due(job_id, now=instant)
+        except ScheduleHorizonError as error:
+            raise _panel_fail(PanelExit.bad_request, str(error)) from error
+        payload = {
+            "job_id": due.job_id,
+            "catch_up": job.catch_up.value,
+            "last_fired_session": (
+                None if job.last_fired_session is None else job.last_fired_session.isoformat()
+            ),
+            "published_through": due.published_through.isoformat(),
+            "owed": [session.isoformat() for session in due.owed],
+            "skipped": [session.isoformat() for session in due.skipped],
+        }
+        if json_output:
+            typer.echo(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+            return
+        typer.echo(f"{job_id} ({job.catch_up.value}) published through {due.published_through}")
+        if not due.owed:
+            typer.echo("  owes nothing")
+        for session in due.owed:
+            typer.echo(f"  owes {session.isoformat()}")
+        for session in due.skipped:
+            typer.echo(f"  would skip {session.isoformat()}")
+
+
+@jobs_app.command("run")
+def jobs_run_command(
+    job_id: Annotated[str, typer.Argument(help=_JOB_ID_HELP)],
+    dataset: Annotated[list[str], typer.Option("--dataset", help=_DATASET_HELP)],
+    year: Annotated[list[int], typer.Option("--year", help=_JOB_YEAR_HELP)],
+    exchange: Annotated[
+        str, typer.Option("--exchange", help=_FACTOR_EXCHANGE_HELP)
+    ] = TRADING_CALENDAR_DEFAULT_EXCHANGE,
+    index_code: Annotated[list[str] | None, typer.Option("--index-code")] = None,
+    as_of: Annotated[str, typer.Option("--as-of", help=_JOB_AS_OF_HELP)] = "",
+    retry_failed: Annotated[bool, typer.Option("--retry-failed", help=_JOB_RETRY_HELP)] = False,
+    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
+        "./runtime"
+    ),
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit the whole run as data.")
+    ] = False,
+) -> None:
+    """Run the sessions this job owes, one at a time, under a lease (`V2-P5-013`).
+
+    The crontab line this is meant to be::
+
+        */10 * * * * openalpha jobs run daily-panel-check --dataset daily --dataset adj_factor \\
+          --year 2026 --runtime-dir /srv/openalpha/runtime
+
+    Fire it as often as you like. What makes that safe is not this command's care but SQLite's:
+    the lease is one conditional `UPDATE`, and `job_runs.idempotency_key` -- `<job-id>@<session>`
+    -- is a `PRIMARY KEY`, so a second attempt at one trading session is an `IntegrityError`
+    rather than a race two processes can both win.
+
+    ## What the work is, and why it is this and not something bigger
+
+    A point-in-time panel health report over `--dataset`/`--year`, run at **each owed session's
+    own publication instant** rather than at wall-clock now. So a job catching up on three
+    sessions asks three different point-in-time questions, and a session whose rows had not
+    landed yet answers `failed` while a later one answers `succeeded`.
+
+    This build ships one job body rather than a vocabulary of them, and that is measured: every
+    other per-session action here takes between eight and twenty declared parameters, and
+    `scheduled_jobs` has no column to hold them -- adding one would be a change to a stored
+    contract. It is also the only per-session action that reaches no network, which a job on a
+    timer had better be.
+
+    ## Exit codes
+
+    - `0` -- every attempted session succeeded, or nothing was owed, or another process holds
+      the lease. The last is deliberate: the work is being done, by somebody, and a cron line
+      that fired while the previous run was still going has nothing to report.
+    - `1` (`unhealthy`) -- at least one session's health report was not clean, or a session is
+      owed and its previous attempt already finished (see `--retry-failed`). The panel is at
+      fault, not the request.
+    - `2` (`bad_request`) -- no such schedule, an unparseable `--as-of`, a calendar this store
+      cannot answer for.
+
+    ## Why the catch-up stops at the first failure
+
+    `finish_session` deliberately does not advance `last_fired_session` past a failed run, so
+    the session stays owed. But a *later* success in the same loop would move the watermark over
+    it -- a daily ingest that failed on Monday and succeeded on Wednesday would report itself
+    complete through Wednesday with Monday's hole still open, which is precisely the silent gap
+    a point-in-time panel must not acquire. So the loop stops, and the sessions after the
+    failure stay owed until the failure is dealt with.
+    """
+    with _panel_command("jobs run"):
+        instant = _panel_as_of(as_of)
+        store, request = _panel_request(
+            runtime_dir=runtime_dir,
+            dataset=dataset,
+            year=year,
+            session=None,
+            index_code=index_code,
+            exchange=exchange,
+            as_of=as_of,
+            with_calendar=True,
+        )
+        if request.calendar is None:  # pragma: no cover - `with_calendar=True` above
+            raise _panel_fail(PanelExit.internal_error, "jobs run resolved no calendar")
+        scheduler = TradingDayScheduler(
+            store=_job_store(runtime_dir),
+            calendar=request.calendar,
+            clock=_panel_clock,
+            owner=_job_owner(),
+        )
+        if scheduler.store.get(job_id) is None:
+            raise _panel_fail(PanelExit.bad_request, job_not_registered(job_id))
+        try:
+            due = scheduler.due(job_id, now=instant)
+        except ScheduleHorizonError as error:
+            raise _panel_fail(PanelExit.bad_request, str(error)) from error
+
+        payload: dict[str, object] = {
+            "job_id": job_id,
+            "claimed": False,
+            "published_through": due.published_through.isoformat(),
+            "owed": [session.isoformat() for session in due.owed],
+            "skipped": [session.isoformat() for session in due.skipped],
+            "attempts": [],
+            "stopped_after": None,
+        }
+        attempts: list[dict[str, object]] = []
+        # The lease and every run row are stamped with the **wall clock**, never with `--as-of`.
+        # The two are different questions and conflating them was a real defect while this
+        # command was being written: `--as-of` decides which sessions had published, and a lease
+        # expiry or a `started_at` derived from it would put a live lock's expiry in the past
+        # whenever an operator asked a point-in-time question about a week that has gone by.
+        if scheduler.claim(job_id, now=_panel_clock()) is None:
+            _echo_jobs_run(payload, json_output=json_output)
+            return
+        payload["claimed"] = True
+        try:
+            for session in due.skipped:
+                scheduler.skip_to(job_id, session, now=_panel_clock())
+            for session in due.owed:
+                attempt = _attempt_one_session(
+                    scheduler,
+                    store,
+                    request,
+                    job_id=job_id,
+                    session=session,
+                    retry_failed=retry_failed,
+                )
+                attempts.append(attempt)
+                if attempt["status"] != "succeeded":
+                    payload["stopped_after"] = session.isoformat()
+                    break
+        finally:
+            payload["attempts"] = attempts
+            scheduler.release(job_id, now=_panel_clock())
+        _echo_jobs_run(payload, json_output=json_output)
+        if any(attempt["status"] != "succeeded" for attempt in attempts):
+            raise typer.Exit(code=int(PanelExit.unhealthy))
+
+
+def _attempt_one_session(
+    scheduler: TradingDayScheduler,
+    store: PanelStore,
+    request: DependencyRequest,
+    *,
+    job_id: str,
+    session: date,
+    retry_failed: bool,
+) -> dict[str, object]:
+    """One owed session: open the run, do the work at *its* instant, close it.
+
+    `already_attempted` is this command's own word and not a `JobRun.status`. It is what a
+    session whose previous attempt finished looks like from here: the row holds the primary key,
+    so `start_session` refuses it, and refusing it is right -- re-running an already-attempted
+    trading session is a decision. `--retry-failed` is where the decision is stated.
+    """
+    try:
+        if retry_failed and scheduler.store.run_for(job_id, session) is not None:
+            scheduler.retry(job_id, session, now=_panel_clock())
+        else:
+            scheduler.start(job_id, session, now=_panel_clock())
+    except JobAlreadyRanError:
+        return {
+            "session": session.isoformat(),
+            "status": "already_attempted",
+            "error_type": None,
+            "remedy": (
+                f"{job_id} already attempted {session.isoformat()} and that attempt finished. "
+                "Re-running a trading session is a decision rather than a default; state it "
+                "with `--retry-failed`"
+            ),
+        }
+
+    report = panel_health_report(
+        store,
+        as_of=session_publication_instant(session),
+        datasets=request.datasets,
+        years=request.years,
+        calendar=request.calendar,
+        index_codes=request.index_codes,
+        cross_section_days=request.sessions,
+    )
+    if report.is_clean:
+        scheduler.succeed(job_id, session, now=_panel_clock())
+        return {"session": session.isoformat(), "status": "succeeded", "error_type": None}
+    worst = next(
+        (finding.code for finding in report.findings if finding.severity == "blocking"),
+        next((finding.code for finding in report.findings), "unhealthy"),
+    )
+    scheduler.fail(job_id, session, error_type=worst, now=_panel_clock())
+    return {"session": session.isoformat(), "status": "failed", "error_type": worst}
+
+
+def _echo_jobs_run(payload: Mapping[str, object], *, json_output: bool) -> None:
+    """The two renderings of one run. The terminal one must not be the poorer story.
+
+    A `--json`-only account of what was skipped or of a lease somebody else holds is an account
+    the person reading the terminal never sees, which is where a policy becomes invisible at the
+    moment it mattered.
+    """
+    if json_output:
+        typer.echo(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        return
+    typer.echo(f"{payload['job_id']} published through {payload['published_through']}")
+    if not payload["claimed"]:
+        typer.echo("  another process holds the lease; nothing attempted")
+        return
+    for session in cast(Sequence[str], payload["skipped"]):
+        typer.echo(f"  skipped {session} (skip-missed: advanced past it, no run recorded)")
+    attempts = cast(Sequence[Mapping[str, object]], payload["attempts"])
+    if not attempts:
+        typer.echo("  owes nothing")
+    for attempt in attempts:
+        suffix = "" if attempt["error_type"] is None else f" ({attempt['error_type']})"
+        typer.echo(f"  {attempt['session']} {attempt['status']}{suffix}")
+        if remedy := attempt.get("remedy"):
+            typer.echo(f"    {remedy}")
+    if attempt_note := payload["stopped_after"]:
+        typer.echo(
+            f"  stopped after {attempt_note}; the sessions behind it stay owed rather than "
+            "being run past. Deal with the failure, then `--retry-failed`"
+        )

@@ -191,3 +191,65 @@ class JobRun(BaseModel):
 
 
 JOB_RUN_VERSIONS: ContractVersions[JobRun] = single_version("job-run", JobRun)
+
+
+def job_not_registered(job_id: str) -> str:
+    """What every face says about a name no schedule is registered under (`V2-P5-013`).
+
+    One sentence rather than one per face, `V2-P4-101`'s standard: that row made the API's
+    refusal byte-identical to pydantic's for the same fault and pinned it with an equality
+    assertion, precisely so two faces could not grow two accounts of one fact. `openalpha jobs
+    due`, `openalpha jobs run` and `GET /api/v1/jobs/{job_id}` all render this string.
+
+    It says why the answer is a refusal rather than "nothing is due": that is
+    `TradingDayScheduler.due`'s own argument for raising `KeyError` instead of returning an
+    empty answer, and it is the half an operator who mistyped a name needs.
+    """
+    return (
+        f"no job is registered under {job_id!r}. A scheduler asked about a schedule it does not "
+        "hold has been given the wrong name, and answering 'nothing is due' would look identical "
+        "to a correctly idle job. Declare it with `openalpha jobs register` or see what is "
+        "declared with `openalpha jobs list`"
+    )
+
+
+def scheduled_job_view(job: ScheduledJob) -> dict[str, object]:
+    """One schedule as data, for whichever face is handing it out (`V2-P5-013`).
+
+    Here rather than at each face, and for `panel_view`/`shortlist_view`'s reason:
+    `openalpha jobs list --json` and `GET /api/v1/jobs` emit these bytes, and two renderings of
+    one schedule that disagree about which keys exist is how an operator comes to believe a job
+    is idle. `tests/integration/test_scheduled_job_faces.py` asserts the two **equal** rather
+    than merely alike.
+
+    A hand-written mapping rather than `model_dump(mode="json")`, so the wire shape is decided
+    here rather than by pydantic's serialiser: a field added to `ScheduledJob` for the store's
+    benefit does not silently become part of two product faces' contracts.
+    """
+    return {
+        "job_id": job.job_id,
+        "catch_up": job.catch_up.value,
+        "last_fired_session": (
+            None if job.last_fired_session is None else job.last_fired_session.isoformat()
+        ),
+        "next_fire_time": (None if job.next_fire_time is None else job.next_fire_time.isoformat()),
+        "lease_owner": job.lease_owner,
+        "lease_expires_at": (
+            None if job.lease_expires_at is None else job.lease_expires_at.isoformat()
+        ),
+        "created_at": job.created_at.isoformat(),
+        "updated_at": job.updated_at.isoformat(),
+    }
+
+
+def job_run_view(run: JobRun) -> dict[str, object]:
+    """One job's attempt at one trading session as data. `scheduled_job_view`'s twin."""
+    return {
+        "idempotency_key": run.idempotency_key,
+        "session": run.session.isoformat(),
+        "status": run.status,
+        "owner": run.owner,
+        "started_at": run.started_at.isoformat(),
+        "finished_at": None if run.finished_at is None else run.finished_at.isoformat(),
+        "error_type": run.error_type,
+    }
