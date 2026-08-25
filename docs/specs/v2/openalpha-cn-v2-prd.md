@@ -269,7 +269,7 @@ Proposed 版按可分发开源平台撰写。个人自用场景下，下列能�
 |---|---|---|---|
 | S36 | Fundamental/valuation/quality/growth/momentum/liquidity/event/regime Agent contracts | **IN-缩减** | 首批 4 类，其余随因子库增长 |
 | S37 | Every Agent emits a validated `SignalFrame` | **IN** | 已有 |
-| S38 | Evidence-family and feature dependencies declared for routing | **IN** | 需扩展到 feature 依赖 |
+| S38 | Evidence-family and feature dependencies declared for routing | **IN** | ~~需扩展到 feature 依赖~~ **已交付（`V2-P4-008`）**：`ResearchAgent.feature_dependencies` 与 `evidence_families` 并列，路由两半都要满足（家族取任一、列取全部），两者皆不声明者具名拒绝 |
 | S39 | Agent reliability measured by horizon and market regime | v2.1 | 需足够长样本外历史 |
 | S40 | Deterministic / learned / LLM-backed Agents distinguishable in manifests | **IN** | |
 | S41 | Bull/Bear and risk committees remain optional | **IN** | `agents/committee.py` 已有 |

@@ -16,6 +16,17 @@ about `RunMode`: a value written out per class is a value that drifts when someb
 of the three. `AgentProvenance` is frozen, so sharing it is safe.
 """
 
+NO_FEATURE_COLUMNS: frozenset[str] = frozenset()
+"""What all three agents in this module read off the panel plane: nothing (`V2-P4-008`, S38).
+
+Named rather than written out as a bare `frozenset()` three times, for the reason above and one
+more: this is a *positive* declaration and not an omission. Every one of these agents scores
+`context.evidence` and none of them touches `context.features`, so `AgentRouter` selects them on
+their evidence families exactly as it did before feature dependencies existed -- and a reader who
+meets `feature_dependencies = frozenset()` on an agent should be able to tell "reads no column"
+from "somebody forgot", which a name can say and a literal cannot.
+"""
+
 
 def _family(item: EvidenceSnapshot) -> str:
     payload = item.payload
@@ -108,6 +119,7 @@ class MarketAgent:
 
     agent_id = "market-agent"
     evidence_families = frozenset({"market_event"})
+    feature_dependencies = NO_FEATURE_COLUMNS
     provenance = DETERMINISTIC
 
     def analyze(self, context: AgentContext) -> AgentResult:
@@ -145,6 +157,7 @@ class ThemeAgent:
 
     agent_id = "theme-agent"
     evidence_families = frozenset({"theme", "catalyst", "disclosure"})
+    feature_dependencies = NO_FEATURE_COLUMNS
     provenance = DETERMINISTIC
 
     def analyze(self, context: AgentContext) -> AgentResult:
@@ -182,6 +195,7 @@ class CapitalAgent:
 
     agent_id = "capital-agent"
     evidence_families = frozenset({"capital"})
+    feature_dependencies = NO_FEATURE_COLUMNS
     provenance = DETERMINISTIC
 
     def analyze(self, context: AgentContext) -> AgentResult:

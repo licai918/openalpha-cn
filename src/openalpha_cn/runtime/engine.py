@@ -4,9 +4,15 @@ import hashlib
 import platform
 from collections.abc import Callable, Sequence
 from datetime import datetime
-from typing import Literal
+from typing import Final, Literal
 
-from openalpha_cn.agents.base import AgentContext, AgentProvenance, AgentResult, ResearchAgent
+from openalpha_cn.agents.base import (
+    AgentContext,
+    AgentProvenance,
+    AgentResult,
+    FeaturePlane,
+    ResearchAgent,
+)
 from openalpha_cn.agents.baseline import baseline_agents
 from openalpha_cn.decisions.risk import RiskGate
 from openalpha_cn.domain.decision import AgentDecision, DecisionLedger
@@ -22,6 +28,27 @@ from openalpha_cn.runtime.router import AgentRouter
 from openalpha_cn.runtime.seeding import seed_everything
 from openalpha_cn.storage.recovery import RunRecoveryState
 
+NO_AGENT_WAS_ROUTED: Final[str] = "No supported point-in-time evidence was available."
+"""Why a cycle abstained when `AgentRouter` selected nobody.
+
+Verbatim what this engine has always emitted for the empty roster, because it is user-visible
+text: a caller branching on the sentence keeps working. It is a named constant rather than a
+literal only so that the *second* abstention reason below cannot be written to say the same
+thing -- `tests/integration/test_abstaining_agent_aggregate.py` asserts they differ, and two
+literals in one function is how they would have come to agree.
+"""
+
+EVERY_ROUTED_AGENT_ABSTAINED: Final[str] = (
+    "Every agent that ran abstained, so no conclusion cites any evidence."
+)
+"""Why a cycle abstained when agents ran and none of them concluded anything (`V2-P4-008`).
+
+A different fact from the one above and a different remedy: the first is fixed by supplying
+evidence or composing a feature plane, and this one by looking at why the agents that did run
+declined -- which `DecisionLedger.agent_outputs` carries per agent, and which is empty in the
+first case.
+"""
+
 
 class ResearchEngine:
     """Run deterministic agents, aggregate a signal, apply risk, and persist."""
@@ -36,6 +63,7 @@ class ResearchEngine:
         agents: Sequence[ResearchAgent] | None = None,
         router: AgentRouter | None = None,
         risk_gate: RiskGate | None = None,
+        features: FeaturePlane | None = None,
     ) -> None:
         self.repository = repository
         self.memory = memory
@@ -44,6 +72,17 @@ class ResearchEngine:
         self.router = router or AgentRouter()
         self.risk_gate = risk_gate or RiskGate()
         self.recovery_store = recovery_store
+        self.features = features
+        """The panel-plane columns this engine was composed with (`V2-P4-008`/`V2-P4-009`).
+
+        Composed rather than requested, and that is a constraint rather than a preference.
+        `ResearchRunRequest` is `extra="forbid"`, it is the body of `POST /api/v1/research/run`,
+        and `_load_or_start_recovery` digests `request.model_dump(mode="json")` into
+        `RunRecoveryState.request_digest` -- so a field added here would move the digest of every
+        request and make every stored recovery row conflict with the request that produced it.
+        A feature plane is also not the kind of thing a JSON body can carry: it is ~5,500 rows
+        read out of the panel store by whoever wired this engine up.
+        """
 
     def run_cycle(self, request: ResearchRunRequest) -> ResearchRunResult:
         """Execute the same evidence-to-decision path for every run mode."""
@@ -57,8 +96,11 @@ class ResearchEngine:
             subject=request.subject,
             as_of=request.as_of,
             evidence=request.evidence,
+            features=self.features,
         )
-        selected = self.router.route(agents=self.agents, evidence=request.evidence)
+        selected = self.router.route(
+            agents=self.agents, evidence=request.evidence, features=self.features
+        )
         recovery = self._load_or_start_recovery(
             request=request,
             selected=selected,
@@ -355,17 +397,41 @@ class ResearchEngine:
                 strength=0,
                 confidence=0,
                 horizon="5d",
-                abstention_reason="No supported point-in-time evidence was available.",
+                abstention_reason=NO_AGENT_WAS_ROUTED,
+            )
+        evidence_ids = tuple(
+            dict.fromkeys(
+                evidence_id for result in results for evidence_id in result.signal.evidence_ids
+            )
+        )
+        risk_flags = tuple(
+            sorted({item for result in results for item in result.signal.risk_flags})
+        )
+        if not evidence_ids:
+            # V2-P4-008 found this, and `be262ea` had it: `direction` was computed from the
+            # mean strength before anything looked at `evidence_ids`, so a cycle in which every
+            # routed agent abstained built a `neutral` frame citing nothing and
+            # `SignalFrame.validate_conclusion` raised `directional signal requires evidence`
+            # straight out of `run_cycle`. `V2-P4-029` settled the same question for
+            # `DeliberationCommittee.review`: an abstention is the claim that the evidence
+            # supports no direction, and overruling it means minting a directional conclusion
+            # from a frame that cites nothing. So this abstains, and the risk flags the
+            # abstaining agents raised travel with it -- an agent that declined *because* the
+            # data was suspect has said something the gate should still hear.
+            return SignalFrame(
+                subject=request.subject,
+                as_of=request.as_of,
+                direction="abstain",
+                strength=0,
+                confidence=0,
+                horizon="5d",
+                risk_flags=risk_flags,
+                abstention_reason=EVERY_ROUTED_AGENT_ABSTAINED,
             )
         strength = sum(result.signal.strength for result in results) / len(results)
         confidence = sum(result.signal.confidence for result in results) / len(results)
         direction: Literal["bullish", "bearish", "neutral"] = (
             "bullish" if strength > 0.15 else "bearish" if strength < -0.15 else "neutral"
-        )
-        evidence_ids = tuple(
-            dict.fromkeys(
-                evidence_id for result in results for evidence_id in result.signal.evidence_ids
-            )
         )
         return SignalFrame(
             subject=request.subject,
@@ -385,9 +451,7 @@ class ResearchEngine:
                     item for result in results for item in result.signal.invalidation_conditions
                 )
             ),
-            risk_flags=tuple(
-                sorted({item for result in results for item in result.signal.risk_flags})
-            ),
+            risk_flags=risk_flags,
         )
 
     @staticmethod

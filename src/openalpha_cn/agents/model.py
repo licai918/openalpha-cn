@@ -32,12 +32,22 @@ class StructuredSignalAgent:
         agent_id: str,
         evidence_families: frozenset[str],
         provider: ModelProvider,
+        feature_dependencies: frozenset[str] = frozenset(),
         max_attempts: int = 2,
     ) -> None:
         if max_attempts < 1:
             raise ValueError("max_attempts must be at least one")
         self.agent_id = agent_id
         self.evidence_families = evidence_families
+        # V2-P4-008: accepted with a default rather than required, which is the opposite of
+        # what `ResearchAgent` does with the same name -- and the asymmetry is the point. The
+        # Protocol requires the *attribute* so no agent reaches the router without one; this
+        # constructor defaults the *argument* because `analyze` below renders `context.evidence`
+        # into a prompt and never reads `context.features`, so a caller declaring a column here
+        # would be declaring a dependency this class does not act on. It is offered anyway
+        # because the declaration is also a routing key: a deployment that only wants this agent
+        # to run when a factor build is available can say so, and the router will enforce it.
+        self.feature_dependencies = feature_dependencies
         self.provider = provider
         self.max_attempts = max_attempts
         # V2-P4-010: read off the provider at construction, not restated by the caller.

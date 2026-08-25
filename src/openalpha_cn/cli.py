@@ -181,6 +181,10 @@ from openalpha_cn.runtime.composition import build_storage
 from openalpha_cn.runtime.contracts import ResearchRunRequest
 from openalpha_cn.runtime.provenance import compute_config_digest, resolve_code_commit
 from openalpha_cn.sdk import OpenAlphaSDK
+from openalpha_cn.shortlist_compare import (
+    compare_held_shortlists,
+    shortlist_comparison_rows,
+)
 from openalpha_cn.shortlist_view import (
     ShortlistEvidence,
     ShortlistRunResult,
@@ -4671,6 +4675,95 @@ def shortlist_list_command(
         else:
             for shortlist_id in held:
                 typer.echo(shortlist_id)
+
+
+_SHORTLIST_BASELINE_HELP: Final[str] = (
+    "The address of the answer being compared **against** -- the earlier one, in the ordinary "
+    "reading. It is named rather than inferred because the store cannot say which answer came "
+    "first: `shortlist_id` is a content address and `shortlist list` is ascending by sha256. See "
+    "shortlist_compare.KNOWN_COMPARISON_LIMITATIONS."
+)
+_SHORTLIST_CURRENT_HELP: Final[str] = (
+    "The address of the answer being compared. `added` is what this one has and the baseline "
+    "does not; reversing the two arguments reverses `added` and `removed`."
+)
+
+
+@shortlist_app.command("compare")
+def shortlist_compare_command(
+    baseline_id: Annotated[str, typer.Argument(help=_SHORTLIST_BASELINE_HELP)],
+    current_id: Annotated[str, typer.Argument(help=_SHORTLIST_CURRENT_HELP)],
+    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
+        "./runtime"
+    ),
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit the whole comparison as data.")
+    ] = False,
+) -> None:
+    """What changed between two published shortlists: added, removed, and reasons (`V2-P4-007`).
+
+    `openalpha shortlist get`'s own docstring describes the workflow this finishes -- "run it,
+    run it again tomorrow, and compare the two" -- and the comparing was the step a caller had to
+    do by hand.
+
+        openalpha shortlist run --as-of 2026-01-15T23:00:00+00:00 ... --json   # note the id
+        openalpha shortlist run --as-of 2026-01-16T12:00:00+00:00 ... --json   # note the id
+        openalpha shortlist compare sla_<yesterday> sla_<today>
+
+    Both addresses are arguments and the **first is the baseline**: `shortlist_id` is a content
+    address, so the store holds the set of distinct answers this deployment has produced and
+    nothing that could order them. A command that guessed at "the previous run" would be
+    inventing the ordering.
+
+    The two answers must answer the same question. Two screens of different factors share no
+    name, so the difference would report every name added and every name removed -- true about
+    two lists, false about one market -- and that is refused by name with the key that differs.
+
+    Exits 0 when the comparison is made, 1 when either address is well formed and nothing is
+    held under it, 3 when an address is not one or the two questions differ.
+    """
+    with _panel_command("shortlist compare"):
+        try:
+            comparison = compare_held_shortlists(
+                FileShortlistStore(runtime_dir / "shortlists"),
+                baseline_id=baseline_id,
+                current_id=current_id,
+            )
+        except ShortlistViewError as error:
+            raise _shortlist_fail(error) from error
+        except ShortlistStoreError as error:
+            raise _panel_fail(PanelExit.unhealthy, str(error)) from error
+
+        if json_output:
+            typer.echo(json.dumps(comparison, ensure_ascii=False, sort_keys=True))
+        else:
+            _echo_comparison(comparison)
+
+
+def _echo_comparison(comparison: Mapping[str, object]) -> None:
+    """One comparison for a human: the two answers, the counts, then one row per security.
+
+    The header names both addresses in the order they were given, because the whole body is
+    directional and a reader who cannot see which side is which cannot read `added`. The summary
+    line comes before the rows for `_echo_shortlist`'s reason: the fact a reader needs first must
+    not have to be inferred by counting rows.
+    """
+    baseline = cast(Mapping[str, object], comparison["baseline"])
+    current = cast(Mapping[str, object], comparison["current"])
+    summary = cast(Mapping[str, int], comparison["summary"])
+    typer.echo(f"baseline   {baseline['shortlist_id']} as of {baseline['as_of']}")
+    typer.echo(f"current    {current['shortlist_id']} as of {current['as_of']}")
+    for role, side in (("baseline", baseline), ("current", current)):
+        if side["is_blocked"]:
+            typer.echo(f"refused    the {role} answer was REFUSED by {side['blocks']}")
+    typer.echo(
+        f"summary    {summary['added']} added, {summary['removed']} removed, "
+        f"{summary['held']} held ({summary['rank_changed']} moved rank, "
+        f"{summary['reason_changed']} changed reason)"
+    )
+    typer.echo(f"{'status':<8} {'security':<12} {'rank':<18} changed")
+    for status, subject, rank, changed in shortlist_comparison_rows(comparison):
+        typer.echo(f"{status:<8} {subject:<12} {rank:<18} {changed}")
 
 
 def _shortlist_component_pairs(declared: Sequence[str]) -> tuple[tuple[str, float], ...]:

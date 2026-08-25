@@ -6,7 +6,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from openalpha_cn import __version__
-from openalpha_cn.agents.base import AgentResult, ResearchAgent
+from openalpha_cn.agents.base import AgentResult, FeaturePlane, ResearchAgent
 from openalpha_cn.agents.committee import DeliberationCommittee, DeliberationOutcome
 from openalpha_cn.backtest.event_study import EventStudy, EventStudyReport, EventStudyRequest
 from openalpha_cn.backtest.execution import MarketBar
@@ -76,6 +76,7 @@ from openalpha_cn.runtime.composition import build_storage
 from openalpha_cn.runtime.contracts import ResearchRunRequest, ResearchRunResult
 from openalpha_cn.runtime.engine import ResearchEngine
 from openalpha_cn.runtime.memory import MemoryEntry
+from openalpha_cn.shortlist_compare import compare_held_shortlists
 from openalpha_cn.shortlist_view import (
     ShortlistEvidence,
     ShortlistRunResult,
@@ -98,10 +99,18 @@ class OpenAlphaSDK:
         runtime_dir: Path,
         clock: Callable[[], datetime] = utc_now,
         agents: Sequence[ResearchAgent] | None = None,
+        features: FeaturePlane | None = None,
     ) -> None:
         self.runtime_dir = runtime_dir
         self.clock = clock
         self.agents = None if agents is None else tuple(agents)
+        # V2-P4-008/V2-P4-009: the panel-plane columns every research cycle this SDK runs is
+        # composed with. Beside `agents` and not inside `ResearchRunRequest`, because the
+        # request is `extra="forbid"`, is the REST body, and is digested into
+        # `RunRecoveryState.request_digest` -- see `ResearchEngine.features`. This is the
+        # product path a feature-dependent agent is reachable through:
+        # `tests/integration/test_feature_dependent_routing.py` drives it.
+        self.features = features
         storage = build_storage(runtime_dir=runtime_dir, clock=clock)
         self.evidence_store = storage.evidence_store
         self.repository = storage.repository
@@ -157,6 +166,7 @@ class OpenAlphaSDK:
             clock=self.clock,
             recovery_store=self.recovery_store,
             agents=self.agents,
+            features=self.features,
         )
         return engine.run_cycle(request)
 
@@ -675,6 +685,24 @@ class OpenAlphaSDK:
     def list_shortlists(self) -> tuple[str, ...]:
         """Every held `shortlist_id`, ascending."""
         return self.shortlist_store.list_ids()
+
+    def compare_shortlists(self, *, baseline_id: str, current_id: str) -> dict[str, object]:
+        """What changed between two held shortlist answers (`V2-P4-007`, S44, S49).
+
+        The in-process face of `openalpha shortlist compare`, through the same
+        `shortlist_compare.compare_held_shortlists`, so the two cannot come to serve two shapes.
+        `baseline_id` is the answer being compared **against**: `added` is what `current_id` has
+        and it does not. Named rather than inferred because a content-addressed store cannot
+        order two documents -- see `shortlist_compare.KNOWN_COMPARISON_LIMITATIONS
+        .the_store_cannot_say_which_answer_came_first`.
+
+        Raises `ShortlistNotHeldError` for an address nothing is held under and
+        `ShortlistRequestError` for one that is not an address or for two answers to different
+        questions, which is `held_shortlist`'s arrangement and its reason.
+        """
+        return compare_held_shortlists(
+            self.shortlist_store, baseline_id=baseline_id, current_id=current_id
+        )
 
     def evaluate_model(
         self,

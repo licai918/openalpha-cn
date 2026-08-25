@@ -28,6 +28,7 @@ class _Agent:
     def __init__(self, agent_id: str, provenance: AgentProvenance) -> None:
         self.agent_id = agent_id
         self.evidence_families = frozenset({"market_event"})
+        self.feature_dependencies: frozenset[str] = frozenset()
         self.provenance = provenance
 
     def analyze(self, context: AgentContext) -> AgentResult:  # pragma: no cover - never called

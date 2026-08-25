@@ -15,7 +15,7 @@ inside a docstring, which is prose the runner never reads.
 ## Why the mechanism is not copied as it stands
 
 `007`'s form is "one test per entry, named after the entry". At three entries that is exactly
-right. Across the thirty-two code-carrying registries there are **304** entries -- 69 in
+right. Across the thirty-four code-carrying registries there are **318** entries -- 69 in
 `KNOWN_PANEL_LIMITATIONS` alone -- and it stops being right somewhere well before that, for
 three reasons and not one:
 
@@ -159,6 +159,8 @@ from openalpha_cn.model_view import KNOWN_MODEL_VIEW_LIMITATIONS
 from openalpha_cn.panel.catalog import KNOWN_STORAGE_LIMITATIONS
 from openalpha_cn.panel_doctor import KNOWN_PANEL_LIMITATIONS
 from openalpha_cn.product.screening import KNOWN_SCREENING_LIMITATIONS
+from openalpha_cn.runtime.router import KNOWN_ROUTING_LIMITATIONS
+from openalpha_cn.shortlist_compare import KNOWN_COMPARISON_LIMITATIONS
 from openalpha_cn.shortlist_view import KNOWN_SHORTLIST_VIEW_LIMITATIONS
 
 ROOT: Final[Path] = Path(__file__).resolve().parents[2]
@@ -196,6 +198,8 @@ LIMITATION_REGISTRIES: Final[dict[str, Sequence[_Limitation]]] = {
     "KNOWN_TREE_LIMITATIONS": KNOWN_TREE_LIMITATIONS,
     "KNOWN_SCREENING_LIMITATIONS": KNOWN_SCREENING_LIMITATIONS,
     "KNOWN_SHORTLIST_VIEW_LIMITATIONS": KNOWN_SHORTLIST_VIEW_LIMITATIONS,
+    "KNOWN_ROUTING_LIMITATIONS": KNOWN_ROUTING_LIMITATIONS,
+    "KNOWN_COMPARISON_LIMITATIONS": KNOWN_COMPARISON_LIMITATIONS,
     "KNOWN_MODEL_VIEW_LIMITATIONS": KNOWN_MODEL_VIEW_LIMITATIONS,
     "KNOWN_FEATURE_MATRIX_LIMITATIONS": KNOWN_FEATURE_MATRIX_LIMITATIONS,
     "KNOWN_ALPHA_MODEL_LIMITATIONS": KNOWN_ALPHA_MODEL_LIMITATIONS,
@@ -214,7 +218,7 @@ LIMITATION_REGISTRIES: Final[dict[str, Sequence[_Limitation]]] = {
     "KNOWN_STORAGE_LIMITATIONS": KNOWN_STORAGE_LIMITATIONS,
     "KNOWN_PANEL_LIMITATIONS": KNOWN_PANEL_LIMITATIONS,
 }
-"""The thirty-two registries whose entries are identified by a `code`, keyed by their own
+"""The thirty-four registries whose entries are identified by a `code`, keyed by their own
 names.
 
 **None of `KNOWN_NEUTRALIZATION_LIMITATIONS`, `KNOWN_IC_LIMITATIONS`,
@@ -335,7 +339,15 @@ count decides whether that run is standing on it -- and `V2-P4-098`'s measured `
 whose fit read the panel after the outcome had printed.
 
 `V2-P4-018` then added **three**, taking the totals from 301 / 69 to **304 / 69** with the
-registry count still thirty-two. Two are on `KNOWN_ALPHA_MODEL_LIMITATIONS` and both bound what a
+registry count still thirty-two. `V2-P4-008`/`V2-P4-009` added the **thirty-third**
+(`KNOWN_ROUTING_LIMITATIONS`, seven entries, declared in `runtime/router.py`) and moved the
+totals from 304 / 69 to **311 / 69** -- the first registry to arrive from `runtime/`, and the
+first whose subject is a *selection* rather than a dataset or a study. `V2-P4-007` added the
+**thirty-fourth** (`KNOWN_COMPARISON_LIMITATIONS`, seven entries, in `shortlist_compare.py`)
+and moved them to **318 / 69**; both arrived on one branch, which is why the arithmetic here
+moved twice rather than once.
+
+Of `V2-P4-018`'s three, two are on `KNOWN_ALPHA_MODEL_LIMITATIONS` and both bound what a
 shelf life is *not* -- it is wall time where a horizon counts sessions, and it leaves a verdict on
 a stored record without leaving the bar that produced it. The third is on
 `KNOWN_MODEL_VIEW_LIMITATIONS` and is the join between the two flags: an expired run is refused by
@@ -515,12 +527,12 @@ def test_the_registry_table_is_every_known_registry_in_the_source_tree() -> None
     }
 
     assert found == set(LIMITATION_REGISTRIES) | set(CODELESS_REGISTRIES)
-    assert len(LIMITATION_REGISTRIES) == 32
+    assert len(LIMITATION_REGISTRIES) == 34
     assert set(LIMITATION_REGISTRIES) & set(CODELESS_REGISTRIES) == set()
 
 
 def test_every_declared_limitation_code_is_named_in_executable_test_code() -> None:
-    """The binding itself, over all thirty-two code-carrying registries and all their entries.
+    """The binding itself, over all thirty-four code-carrying registries and all their entries.
 
     A code that appears nowhere but in prose is a code the suite has no opinion about: rename
     it and everything stays green while every citation of it silently stops resolving. That is
@@ -641,6 +653,8 @@ REGISTRY_ENTRY_COUNTS: Final[dict[str, int]] = {
     "KNOWN_TREE_LIMITATIONS": 7,
     "KNOWN_SCREENING_LIMITATIONS": 7,
     "KNOWN_SHORTLIST_VIEW_LIMITATIONS": 7,
+    "KNOWN_ROUTING_LIMITATIONS": 7,
+    "KNOWN_COMPARISON_LIMITATIONS": 7,
     "KNOWN_MODEL_VIEW_LIMITATIONS": 16,
     "KNOWN_FEATURE_MATRIX_LIMITATIONS": 5,
     "KNOWN_ALPHA_MODEL_LIMITATIONS": 13,
@@ -680,7 +694,7 @@ The direction it does not cover is stated rather than left to be discovered: an 
 by a differently-named entry inside one registry leaves the count alone. Nothing here can see
 that, for `V2-P4-092`'s reason one section down -- a binding on names and counts cannot see what
 an entry claims. What does see it is the registry's own module naming all of its codes at once:
-measured by AST, 30 of the 32 have a literal collection somewhere under `tests/` whose members
+measured by AST, 32 of the 34 have a literal collection somewhere under `tests/` whose members
 are exactly that registry's code set, and `KNOWN_INDEX_MEMBERSHIP_LIMITATIONS` and the derived
 `KNOWN_PANEL_LIMITATIONS` are the two that do not -- which is why the measured probe was built
 on the first of them.
@@ -689,7 +703,7 @@ on the first of them.
 assertion above already pins it at `folded + plane_wide + 1`, so writing 69 here would be a
 second hand-written number derived from the first, and a sibling adding to a folded dataset
 registry would have to update both or make them disagree. The measured totals this module's
-docstring quotes -- 301 across the thirty-two registries, 69 in the derived one -- are the sum
+docstring quotes -- 318 across the thirty-four registries, 69 in the derived one -- are the sum
 of the thirty-one entries here plus that derived equality, and are not written down a second
 time as a scalar anybody can bump without re-measuring.
 """

@@ -267,6 +267,76 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **An agent that declares a *feature* dependency was never routed, and nothing said so**
+  (`V2-P4-008`, S38). `AgentRouter.route` was `agent.evidence_families & families`, so an agent
+  whose whole dependency is a panel column -- and which therefore declares no evidence family --
+  intersected the empty set and was dropped: no entry in `DecisionLedger.routing_path`, no
+  `AgentVersion` in the manifest, no abstention. "This agent had nothing to say about this run"
+  and "this agent can never say anything about any run" were one observation. `ResearchAgent`
+  now declares `feature_dependencies` beside `evidence_families`, and routing satisfies **both**
+  halves: a family is satisfied by *any* declared family being present (`ThemeAgent` scores
+  whichever of its three arrived, so a partial arrival is a smaller sample), a column only when
+  *every* declared one is on the plane (an agent's arithmetic names a column by `feature_id`,
+  and a missing column is a missing term rather than a smaller sample). An agent declaring
+  neither is refused by name with `UndeclaredAgentDependencyError` rather than dropped -- the
+  fail-open answer is worse than it looks, because `SignalFrame` refuses every non-abstaining
+  direction with no `evidence_ids`, so such an agent's only reachable output is an abstention
+  that `_aggregate` would then average into the run.
+- **`AgentContext` had no handle for anything but evidence** (`V2-P4-009`, S36/S38). It now
+  carries `features: FeaturePlane | None`, a `runtime_checkable` Protocol declared beside its
+  consumer -- `ShortlistDocumentStore`'s and `ExperimentDocumentStore`'s arrangement -- which
+  `domain/alpha_model.py::FeatureCrossSection` satisfies structurally with no adapter, so
+  `agents/` gains no edge into `feature_matrix` and through it DuckDB. Under
+  `arbitrary_types_allowed` the field is an `isinstance` check on method presence rather than a
+  pydantic rebuild, which is Implementation Decision 31 on a ~5,500-row panel read; object
+  identity is asserted, because equality passes on a rebuilt copy. **The row's proposal to reuse
+  `tools/base.py::ResearchTool` was measured and declined**: `ToolRequest.kind` is
+  `max_length=64` and the neutralized spelling of this build's longest factor key is **89
+  characters** (refused with a `ValidationError`), and `ToolResult` has exactly three fields
+  under `extra="forbid"`, none numeric, with `status="success"` requiring a non-empty
+  `evidence_ids`. `agents/feature.py::FeatureScoreAgent` ships as the consumer, so the new seam
+  is not a second declared-and-unused extension point. Reachable through
+  `OpenAlphaSDK(features=...)`; the CLI and REST faces compose no plane, which is recorded
+  rather than implied.
+- **A cycle in which every routed agent abstained raised `ValidationError` out of `run_cycle`**.
+  `_aggregate` computed `direction` from the mean strength before anything looked at
+  `evidence_ids`, so an all-abstaining run built a `neutral` frame citing nothing and
+  `SignalFrame.validate_conclusion` refused it. Measured on `be262ea` before `V2-P4-008` touched
+  anything, with a deterministic agent returning an abstention -- so this predates the row that
+  found it and only a `StructuredSignalAgent` whose model abstained could reach it before; a
+  feature-dependent agent reaches it on any security the composed column has no number for. The
+  repair is `V2-P4-029`'s, one module over: an abstention is the claim that the evidence supports
+  no direction, and overruling it means minting a directional conclusion from a frame that cites
+  nothing. The aggregate abstains, says **which** of the two reasons applied (nobody was routed,
+  or everybody abstained), and carries the abstaining agents' `risk_flags` forward so a `block`
+  does not become a `pass`.
+- **"Run it, run it again tomorrow, and compare the two" ended at the comparing** (`V2-P4-007`,
+  S44/S49). `openalpha shortlist get`'s own docstring describes that workflow and
+  `tests/integration/test_shortlist_workflow.py` had to do the last step with a `set` difference
+  written into the test. `openalpha shortlist compare <baseline> <current>` and
+  `OpenAlphaSDK.compare_shortlists` now report added, removed and held names with each held
+  name's rank change, score change and **changed reason** -- direction, risk flags, backing run,
+  or a name that stopped being published at all. Both addresses are arguments and neither is
+  inferred: `shortlist_id` is a content address and `list_ids` is ascending by sha256, so the
+  store genuinely cannot say which answer came first
+  (`the_stored_answer_is_addressed_by_content_and_not_by_when_it_was_run`), and a command that
+  guessed would be inventing the ordering. Two answers to *different* questions are refused
+  naming the key that differs, because a diff across two questions reports every name added and
+  every name removed -- true about two lists and false about one market. `rank_change` and
+  `score_change` both read "positive means the name moved up", and the sign is asserted against
+  the pair it was derived from rather than against a literal.
+  A mutation sweep over the two rows' code ran **341 mutants, 326 killed**; the fifteen
+  survivors are seven provably equivalent (`Literal` members inside local-variable *type
+  annotations*, `@dataclass(slots=True)`, `ensure_ascii` on an all-ASCII payload) and eight
+  CLI presentation strings. Two survivors were closed by **changing the design rather than
+  adding an assertion**: `schema_version` was removed from `COMPARABLE_KEYS`, where it was
+  dead because the shape is refused by name before the two answers are compared with each
+  other. And the sweep found a real defect in the refusal it was probing -- `declaration`
+  keys were compared with `.get(key)`, so a key **absent** on one side and `null` on the
+  other compared equal and the refusal reported "these differ on `[]`", naming nothing.
+  `declaration.neutralization` is rendered `null` on every answer this build produces, so
+  that is the path an older stored answer takes. It now uses a sentinel.
+
 - **A closed vocabulary with no way to refuse: an undeclared `quality_flags` string answered
   `500 text/plain` on `POST /api/v1/research/run`** (`V2-P4-101`). `V2-P4-030` closed the
   risk-flag set and was right to — a payload writing `future-data` instead of `future_data` used
