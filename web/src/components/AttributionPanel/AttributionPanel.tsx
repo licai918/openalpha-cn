@@ -124,6 +124,11 @@ export function AttributionPanel({
               </li>
             ))}
           </ol>
+          <div className="attribution-total attribution-residual">
+            <span>未归因残差</span>
+            <strong>{percent(result.unexplained_return)}</strong>
+            <code>unexplained_return</code>
+          </div>
         </div>
       )}
     </section>

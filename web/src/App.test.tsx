@@ -69,11 +69,10 @@ describe("OpenAlpha workbench", () => {
             benchmark_return: 0.02,
             transaction_cost: 0.005,
             net_active_return: 0.075,
+            unexplained_return: 0.06,
             confidence: 0.65,
             attribution: [
-              { category: "rule", name: "decision-policy", contribution: 0.015 },
-              { category: "factor", name: "benchmark-and-cost", contribution: 0.0225 },
-              { category: "agent", name: "market-agent", contribution: 0.0375 }
+              { category: "rule", name: "transaction-cost", contribution: 0.015 }
             ]
           });
         }
@@ -110,6 +109,10 @@ describe("OpenAlpha workbench", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "计算归因" }));
     expect(await screen.findByText("+7.50%")).toBeInTheDocument();
-    expect(screen.getByText("market-agent")).toBeInTheDocument();
+    expect(screen.getByText("transaction-cost")).toBeInTheDocument();
+    // V2-P5-006: the terms shown add to +1.50% against a +7.50% net active return, and the
+    // difference is on screen rather than folded into whichever term came last.
+    expect(screen.getByText("未归因残差")).toBeInTheDocument();
+    expect(screen.getByText("+6.00%")).toBeInTheDocument();
   });
 });

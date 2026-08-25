@@ -53,18 +53,19 @@ class ValidationResult(BaseModel):
     cross-sectional quantity per name per day, this one is one number for one decision over
     one window.
 
-    Explicit because the alternative is what `backtest/validation.py` does today and
-    `V2-P5-005` exists to delete: the last agent term absorbs `net_active_return` minus
-    everything already allocated, so the reconciliation check below has always passed *by
-    construction* -- it can never fail, and therefore never measured anything. With the
-    leftover in its own field the check has a free variable removed from it: a term set that
-    does not add up now has to say so in a number a report can print, rather than hiding
-    inside whichever term happened to be last.
+    Explicit because the alternative is what `backtest/validation.py` did until `V2-P5-005`
+    deleted it: the last agent term absorbed `net_active_return` minus everything already
+    allocated, so the reconciliation check below passed *by construction* -- it could never
+    fail, and therefore had never measured anything. With the leftover in its own field the
+    check has a free variable removed from it: a term set that does not add up has to say so
+    in a number a report can print, rather than hiding inside whichever term happened to be
+    last.
 
-    Defaulting to `0.0` rather than being required, because every construction site today
-    produces terms that sum exactly to `net_active_return` and would have to write `0.0` by
-    hand; a default that is *the honest value for those callers* is not a lenient default.
-    `V2-P5-006` is what starts putting a non-zero number here.
+    Defaulting to `0.0` rather than being required, because a caller whose terms already sum
+    to `net_active_return` would otherwise have to write `0.0` by hand; a default that is *the
+    honest value for those callers* is not a lenient default. `OutcomeValidator` no longer
+    relies on it -- since `V2-P5-005`/`V2-P5-006` it states the residual on every result, and
+    a decision that held a position states a non-zero one.
     """
     confidence: float = Field(ge=0, le=1)
     data_quality_notes: tuple[str, ...] = ()

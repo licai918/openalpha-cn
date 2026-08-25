@@ -182,8 +182,14 @@ def test_running_the_real_validator_on_this_observation_returns_the_labels_own_n
 
     assert result.realized_return == label.realized_return == ADJUSTED_RETURN
     assert result.net_active_return == pytest.approx(ADJUSTED_RETURN - 0.012, abs=1e-15)
-    assert sum(item.contribution for item in result.attribution) == pytest.approx(
-        result.net_active_return
+    # The terms alone reconcile to nothing: since `V2-P5-005` they claim only the measured
+    # cost, and the label's own move -- `realized - benchmark` -- is carried as the residual
+    # instead of being split 20/30/50. Summing the terms *without* the residual was the
+    # tautology that issue deleted, so it is the whole equation that is asserted here.
+    assert sum(item.contribution for item in result.attribution) == -0.002
+    assert result.unexplained_return == ADJUSTED_RETURN - 0.01
+    assert sum(item.contribution for item in result.attribution) + result.unexplained_return == (
+        pytest.approx(result.net_active_return, abs=1e-15)
     )
     assert result.observation_start == datetime(2026, 6, 11, 7, 0, tzinfo=UTC)
 

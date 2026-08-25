@@ -6,7 +6,38 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Added
 
-<<<<<<< HEAD
+- **The placeholder attribution is deleted; what a run cannot measure is now a named residual**
+  (`V2-P5-005`, `V2-P5-006`). `OutcomeValidator._attribute` claimed the entire net active return
+  in fixed proportions nothing had measured -- 20% to a `rule` called `decision-policy`, 30% to a
+  `factor` called `benchmark-and-cost` (two quantities `net_active_return` has *already*
+  subtracted), and the remaining 50% split across the agents by `abs(signal.strength)` with the
+  **last agent absorbing whatever was left over**. That last step is why
+  `ValidationResult.validate_window_and_attribution` had never once failed on a computed result:
+  a reconciliation with a free variable in it cannot fail, and so had never measured anything.
+  Two terms survive, both exact: `transaction-cost` (`-transaction_cost`, emitted even at zero so
+  "cost was nil" stays distinguishable from "cost is not modelled") and, for a decision that took
+  **no** position, `no-position-versus-benchmark` -- worth `realized_return - benchmark_return`,
+  which is `-benchmark_return` exactly, with one claimant and nothing left over. A decision that
+  *held* a position books its whole selection return to `unexplained_return` instead: a finished
+  `ResearchRunResult` carries a conviction, a confidence and some version strings, and none of
+  those is a return, so no rule/factor/agent/model share can be shown. `KNOWN_ATTRIBUTION_LIMITATIONS`
+  (the thirty-fifth registry, four entries) states the four things now never claimed.
+  The control is closed-form and has **two arms**, because one arm separates nothing: every figure
+  is a dyadic rational, so both arms are asserted with `==` rather than `approx` -- held reads
+  `net 0.1796875 / residual 0.1875 / one term −0.0078125`, flat reads `net −0.0703125 /
+  residual 0.0 / two terms`. An implementation that routed everything to the residual passes the
+  held arm and fails the flat one; one that keeps any invented split fails the held arm.
+  Driven through **both** product faces (`OpenAlphaSDK.validate_outcome` and
+  `POST /api/v1/backtests/validate`, byte-identical, and queryable back out), and the web
+  attribution panel now prints 未归因残差 beside the terms -- a residual computed and then dropped
+  on the way to a reader is the same defect as one never computed.
+  **Mutation sweep** (baseline proven at `2970 passed, 1 skipped`): **24 mutants, 24 killed**.
+  The one survivor was not equivalent and was **measured rather than labelled** -- spelling the
+  flat term `-benchmark_return` instead of `realized_return - benchmark_return` agrees on every
+  reachable value except `benchmark_return == 0.0`, where it yields `-0.0` against `+0.0`;
+  canonical JSON writes the sign, so the same result took two addresses
+  (`val_dba127649bf529e77e53d6aa` vs `val_470895b1ba7335601a265760`). A test now drives that.
+
 - **Two guards for quantifiers and gates that prose asserted and nothing measured** (`V2-P4-112`,
   `V2-P4-115`). `AgentRouter` satisfies an evidence family when **any** declared family is present
   and a feature dependency only when **every** declared column is, and two docstrings cite
@@ -26,7 +57,6 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   now killed by a test that renders a non-ASCII exchange name. `@dataclass(slots=True)` is the one
   of the three that really is equivalent.
 
-=======
 - **`openalpha panel doctor --no-limitation-detail` and `GET /api/v1/panel/health?limitation_detail=false`**
   (`V2-P4-110`). Measured on a generated panel asked about `index_daily`, the `--json` answer was
   16,936 bytes of which **14,359 (84.8%) were the limitation paragraphs** and 1,340 were the
@@ -42,7 +72,6 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 - **`openalpha migrate prune-backups`** (`V2-P4-111`), the documented cleanup path for
   `runtime/backups/`. `--keep N` (default 10), `--dry-run` to list first, `.bak` files only, and
   exit `0` whether or not anything was removed.
->>>>>>> agent-six-defects
 - **A model plane reachable from a command line, and a prediction store something can fill.**
   `openalpha model evaluate` fits one declaration once per walk-forward fold and reports the
   five statistics `V2-P4-014` measures; `openalpha model daily-run` fits on the outcomes that
@@ -304,7 +333,6 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
-<<<<<<< HEAD
 - **The write-time session census stopped one session short of what every other layer required**
   (`V2-P4-114`). `panel_ingest._session_census` bounded a partition at `fetched_at - 1 day` and
   justified it with the 16:30 publication rule -- which is that rule only *below* 16:30, and is
@@ -344,7 +372,6 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   name that had not listed yet (`not_in_universe` 2 instead of 1). The `V2-P4-064` roadmap row and
   the citing docstrings in `factor_view._computed` and `test_factor_build.py` are corrected.
 
-=======
 - **`openalpha factor run` never named the command that builds a factor it could not read**
   (`V2-P4-067(b)`). The row was closed on a fix that landed in `shortlist_view.py`; its own
   reproduction command goes through `factor_view.py`, which was untouched, so all three tiers on
@@ -435,7 +462,6 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   `MigrationFailedError` points at. **No existing backup was deleted** — `openalpha migrate
   prune-backups --keep N [--dry-run]` is the cleanup path, chosen over an automatic retention cap
   precisely because a cap would have removed a user's existing data on their next command.
->>>>>>> agent-six-defects
 - **`--config-digest` is refused when the request is read, not after the store is** (`V2-P4-065`).
   `shortlist_request` had checked `code_commit` at request time since `V2-P4-046`, and the comment
   above that check says exactly why: `build_ranking_manifest` "raises the same objection after a
