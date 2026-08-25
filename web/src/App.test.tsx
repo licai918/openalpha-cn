@@ -37,6 +37,11 @@ describe("OpenAlpha workbench", () => {
         if (url === "/health") {
           return Response.json({ status: "ok", version: "1.0.0" });
         }
+        if (url === "/api/v1/evidence/build") {
+          return Response.json({
+            items: [{ ...evidence, evidence_id: "ev_imported", summary: "导入批次证据。" }]
+          });
+        }
         if (url.startsWith("/api/v1/evidence")) {
           return Response.json({ items: [evidence] });
         }
@@ -114,5 +119,84 @@ describe("OpenAlpha workbench", () => {
     // difference is on screen rather than folded into whichever term came last.
     expect(screen.getByText("未归因残差")).toBeInTheDocument();
     expect(screen.getByText("+6.00%")).toBeInTheDocument();
+  });
+
+  // --- V2-P5-019: the two staleness paths the old props could not express -----------------
+
+  it("marks the evidence list stale once the query form no longer matches it", async () => {
+    render(<App />);
+    await screen.findByText("服务正常");
+
+    fireEvent.click(screen.getByRole("button", { name: "查询证据" }));
+    expect(await screen.findByText("Synthetic limit-up evidence.")).toBeInTheDocument();
+    // Nothing is stale yet — the rows answer the query that is on the form.
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText("000001.SZ"), {
+      target: { value: "600519.SH" }
+    });
+
+    // The rows are still 000001.SZ's, while the form now says 600519.SH. Before this row
+    // the panel had no way to say so: `state: "ready"` plus a changed input rendered as a
+    // current answer to a question it had never been asked.
+    expect(screen.getByRole("status")).toHaveTextContent("表单已改动");
+    expect(screen.getByText("Synthetic limit-up evidence.")).toBeInTheDocument();
+  });
+
+  it("marks a research verdict stale when evidence is imported underneath it", async () => {
+    // A real defect this row closes rather than a hypothetical: `loadEvidence` cleared the
+    // downstream results, `importBatch` did not. Importing a batch left the previous run's
+    // verdict on screen, unqualified, as though it described the evidence just imported.
+    render(<App />);
+    await screen.findByText("服务正常");
+
+    fireEvent.click(screen.getByRole("button", { name: "查询证据" }));
+    await screen.findByText("Synthetic limit-up evidence.");
+    fireEvent.click(screen.getByRole("button", { name: "运行研究" }));
+    await waitFor(() => expect(screen.getByText("观察")).toBeInTheDocument());
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+
+    const fileInput = document.querySelector<HTMLInputElement>('input[type="file"]');
+    expect(fileInput).not.toBeNull();
+    fireEvent.change(fileInput as HTMLInputElement, {
+      target: {
+        files: [
+          new File([JSON.stringify({ metadata: {}, batch: {} })], "batch.json", {
+            type: "application/json"
+          })
+        ]
+      }
+    });
+
+    expect(await screen.findByText("导入批次证据。")).toBeInTheDocument();
+    // The verdict is still shown — it was a real run — but it is now labelled as describing
+    // an earlier evidence set rather than the one on screen.
+    const notices = await screen.findAllByRole("status");
+    expect(notices.some((node) => node.textContent?.includes("证据已在本次结论之后变更"))).toBe(
+      true
+    );
+    expect(screen.getByText("观察")).toBeInTheDocument();
+  });
+
+  it("renders a failed evidence query as an alert rather than an empty result", async () => {
+    // The branch V2-P5-020 records as never rendered, driven here through the real app: a
+    // rejected fetch must reach `role="alert"` carrying the server's own words, and must
+    // not read as "there is no evidence at that clock".
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "/health") return Response.json({ status: "ok", version: "1.0.0" });
+        return new Response("证据存储不可用", { status: 503 });
+      })
+    );
+    render(<App />);
+    await screen.findByText("服务正常");
+
+    fireEvent.click(screen.getByRole("button", { name: "查询证据" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("证据存储不可用");
+    expect(screen.queryByText("该标的在所选时间点没有可见证据。")).not.toBeInTheDocument();
   });
 });

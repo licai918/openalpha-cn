@@ -193,6 +193,50 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   without passing through this file. This is the actual lesson of `V2-P5-013`: **the row's claims
   went stale silently because nothing was checking them**, and the remedy for that is a test rather
   than a better paragraph.
+- **One panel-state vocabulary across all four web panels, so a refusal can no longer be
+  rendered as an empty success** (`V2-P5-019`). `web/src/panelState.ts` declares a nine-member
+  discriminated union and `web/src/components/PanelNotice/` is the single place that emits
+  `role="alert"` -- one implementation rather than four copies, because the defect this row
+  names *is* that the four panels had diverged in how they express failure. Three of them
+  carried `loading: boolean` + `error: string | null` + `result: T | null`, which makes
+  `{loading: false, error: null, result: null}` representable: a request that failed and lost
+  its message rendered exactly like one that never started. **The row's own text is wrong in
+  two places and both corrections are measured.** `EvidencePanel.tsx:9` held a **five**-state
+  union, not eight, and an eight-state union had never existed anywhere in `web/src`; the eight
+  names come from PRD Decision 14 and are **not** a superset of those five (`idle` and `error`
+  are absent from them). What shipped is therefore **nine**: PRD's eight, plus `idle` kept
+  rather than folded into `empty` (they are different answers -- "you have not asked" against
+  "we asked and there is nothing visible at that clock"), with `error` renamed `failed`. And
+  the row's declared dependency on `V2-P5-014` is **false**: this landed with no React Router
+  and no TanStack Query, and `web/package.json`'s runtime dependencies are still `react` +
+  `react-dom`. **`degraded`/`stale`/`blocked` are constructed from real contract fields, not
+  decoration** -- a state only ever built inside a component test is the "branch no test has
+  rendered" defect one level up. `blocked` comes from `decision.risk_decision === "block"` and
+  from `look_ahead_violations > 0` (PRD Decisions 8 and 19 make look-ahead fail-closed; a
+  report's success counters can all read perfect while the violation count is non-zero, so
+  that is read first, and the fixture pinning it is exactly `succeeded === total_cases &&
+  success_rate === 1 && look_ahead_violations === 1`). `degraded` comes from
+  `redistribution !== "allowed"` (`unknown` treated as restrictively as `restricted` -- not
+  knowing a licence is not a licence), from an abstaining signal, from carried `risk_flags`,
+  from `failures[]`, and from an attribution with **zero named terms** -- chosen because it
+  needs no threshold, since no cut-off separating an acceptable residual from an unacceptable
+  one has been measured anywhere in this repository and inventing one would be a number with
+  no evidence behind it. **A real defect is fixed in passing**: `loadEvidence` cleared the
+  downstream results and `importBatch` did not, so importing a batch left the previous run's
+  verdict on screen, unqualified, describing evidence it had never seen; it is now `stale`
+  with a reason, kept rather than cleared because the run was real and is merely about a
+  different input set. **`V2-P5-020`'s finding that all four panels have a `role="alert"`
+  branch no test has ever rendered is closed here**: `src/test/panelStateContract.tsx` runs
+  the *same* contract suite against each of the four panels -- hand-writing four suites is how
+  they diverged in the first place -- rendering all nine kinds and asserting that an alert
+  kind carries non-empty text and **no payload at all**. Mutation-checked both ways: forcing
+  the two staleness computations to `false` reddens exactly the two new tests and leaves the
+  other three green, and deleting a member from `PANEL_STATE_KINDS` fails `tsc -b` at
+  `panelState.ts:81`. Measured gates: `pnpm test` **150 passed / 9 files** (baseline 53 / 4);
+  coverage statements 80.9 -> **91.35%**, branches 73.47 -> **83.67%**, functions 77.58 ->
+  **89.88%**, lines 82.12 -> **92.55%**, with `vite.config.ts`'s ratchet raised to 91/83/89/92
+  per its own "only ever up" rule; `pnpm lint` and `tsc -b` clean; `pnpm build` succeeds;
+  `pnpm test:e2e` **4 passed** offline.
 
 - **`openalpha portfolio construct` and `OpenAlphaSDK.construct_portfolio`: heuristic target
   weights over one admitted shortlist** (`V2-P5-001`, the first module of P5). A twelfth
@@ -569,6 +613,28 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Changed
 
+- **`web/`'s npm dependency surface is recorded as ungoverned by count, and `V2-P5-014` stays
+  open with the measurement on it.** ADR-0003 mentions the frontend **zero** times (its only
+  grep hit is the phrase "chain **react**ion"); it constrains `pyproject.toml`'s
+  `[project].dependencies`, and the three assertions enforcing it in
+  `tests/unit/test_repository_assets.py` read only that file. Nothing anywhere counts, pins or
+  bounds `web/package.json`'s dependency table. The PRD's "frontend runtime dependencies =
+  only `react` + `react-dom`" sits in a table headed **实测基线** with a **验证方式** column --
+  a measurement taken 2026-07-29, not a rule -- and its neighbouring row listing seven backend
+  dependencies is already stale against today's nine with nothing going red, which is what
+  proves the table descriptive. What *is* governed, and what any future npm addition must
+  satisfy, is reproducibility (`pnpm install --frozen-lockfile`, pinned by CI and by
+  `test_quality_workflow_covers_supported_platforms_and_locked_dependencies`) and
+  vulnerability (`pnpm audit --audit-level high` in the `web` CI job, whose precedent is the
+  `brace-expansion: 5.0.8` override in `pnpm-workspace.yaml`). `scripts/verify_publication.py`
+  does not scan npm licences. So nothing forbids React Router or TanStack Query -- but the row
+  is not landed alone, for measurable reasons: its own metric is "consumes only 6 of 28
+  routes", and a router consumes no additional routes (the four page rows do); its one extant
+  dependent, `V2-P5-019`, shipped without it, falsifying the `019 dep 014` edge; and a routing
+  test in a single-page app cannot separate "routing works" from "the app rendered".
+  ADR-0003's reasoning is explicitly **not** transferable here: wheel size, BLAS thread
+  pinning and numerical reproducibility do not apply to a dependency bundled into a 205.74 kB
+  JS artifact.
 - **The neutralised tier builds inside the membership year, not after it (`V2-P4-028`).**
   `panel_neutralization.load_industry_market_cap_cross_section` reads `index_member_all` through
   `panel_ingest.load_industry_cross_section` — `V2-P4-027`'s day-scoped door — instead of

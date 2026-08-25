@@ -1,12 +1,15 @@
 import { useMemo, useState } from "react";
 
-import type { OutcomeInput, ResearchResult, ValidationResult } from "../../types";
+import { panelData, type PanelState } from "../../panelState";
+import { PanelNotice } from "../PanelNotice/PanelNotice";
+import type { OutcomeInput, ValidationResult } from "../../types";
 
 type AttributionPanelProps = {
-  research: ResearchResult | null;
-  result: ValidationResult | null;
-  loading: boolean;
-  error: string | null;
+  /** Only the presence of a research result was ever read (to gate the run button and the
+   * "complete a research run first" copy), so the panel takes the predicate. */
+  hasResearch: boolean;
+  /** V2-P5-019: replaces `result` + `loading` + `error`. */
+  state: PanelState<ValidationResult>;
   asOf: string;
   onRun: (outcome: OutcomeInput) => void;
 };
@@ -16,13 +19,13 @@ function percent(value: number) {
 }
 
 export function AttributionPanel({
-  research,
-  result,
-  loading,
-  error,
+  hasResearch,
+  state,
   asOf,
   onRun
 }: AttributionPanelProps) {
+  const loading = state.kind === "loading";
+  const result = panelData(state);
   const observationEnd = useMemo(() => {
     const end = new Date(asOf);
     end.setDate(end.getDate() + 5);
@@ -43,7 +46,7 @@ export function AttributionPanel({
         </div>
         <button
           type="button"
-          disabled={!research || loading}
+          disabled={!hasResearch || loading}
           onClick={() =>
             onRun({
               observationStart: asOf,
@@ -99,15 +102,14 @@ export function AttributionPanel({
           />
         </label>
       </div>
-      {!research && !error && <p className="empty-state">完成一次研究后，录入未来观察结果。</p>}
-      {research && !result && !error && (
-        <p className="empty-state">按 5 日观察窗计算净主动收益与可对账归因。</p>
-      )}
-      {error && (
-        <p className="error-state" role="alert">
-          {error}
-        </p>
-      )}
+      <PanelNotice
+        state={state}
+        idleText={
+          hasResearch
+            ? "按 5 日观察窗计算净主动收益与可对账归因。"
+            : "完成一次研究后，录入未来观察结果。"
+        }
+      />
       {result && (
         <div className="attribution-results">
           <div className="attribution-total">

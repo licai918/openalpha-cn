@@ -1,10 +1,15 @@
-import type { Evidence, ResearchResult } from "../../types";
+import { panelData, type PanelState } from "../../panelState";
+import { PanelNotice } from "../PanelNotice/PanelNotice";
+import type { ResearchResult } from "../../types";
 
 type DecisionPanelProps = {
-  evidence: Evidence[];
-  result: ResearchResult | null;
-  loading: boolean;
-  error: string | null;
+  /** Only the count was ever read from the evidence array (to gate the run button and the
+   * "证据不足" copy), so the panel takes the number rather than the rows. */
+  evidenceCount: number;
+  /** V2-P5-019: replaces `result` + `loading` + `error`, which made
+   * `{result: null, loading: false, error: null}` representable — a research run that
+   * failed and lost its message rendered identically to one that never started. */
+  state: PanelState<ResearchResult>;
   onRun: () => void;
 };
 
@@ -24,13 +29,13 @@ function actionLabel(action: string): string {
   return actionLabels[action] ?? `未知动作（${action}）`;
 }
 
-export function DecisionPanel({
-  evidence,
-  result,
-  loading,
-  error,
-  onRun
-}: DecisionPanelProps) {
+export function DecisionPanel({ evidenceCount, state, onRun }: DecisionPanelProps) {
+  const loading = state.kind === "loading";
+  const result = panelData(state);
+  // The precondition ("you have nothing to run on") outranks the idle copy, because it
+  // tells the user what to do next rather than merely that nothing has happened yet.
+  const blockedOnEvidence = evidenceCount === 0 && result === null && state.kind === "idle";
+
   return (
     <section className="panel decision-panel" aria-labelledby="decision-heading">
       <header className="panel-heading">
@@ -38,21 +43,18 @@ export function DecisionPanel({
           <p className="eyebrow">02 / DECISION</p>
           <h2 id="decision-heading">研究决策</h2>
         </div>
-        <button className="button button--primary" disabled={!evidence.length || loading} onClick={onRun}>
+        <button className="button button--primary" disabled={!evidenceCount || loading} onClick={onRun}>
           {loading ? "研究中…" : "运行研究"}
         </button>
       </header>
 
-      {!evidence.length && !result && (
+      {blockedOnEvidence ? (
         <div className="empty-state">
           <strong>证据不足</strong>
           <span>先查询或导入当前时钟可见的证据。</span>
         </div>
-      )}
-      {error && (
-        <p className="error-state" role="alert">
-          {error}
-        </p>
+      ) : (
+        <PanelNotice state={state} idleText="尚未运行研究" />
       )}
       {result && (
         <div className="decision-content">
