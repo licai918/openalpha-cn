@@ -847,6 +847,67 @@ uv run openalpha model prediction prd_0123456789abcdef01234567
 它能登记的每一条记录都会是 `unwitnessed`——因为一次被模拟的预测的时刻就是它模拟的那个时刻，早已过去。
 往 Story S32 的登记簿里灌回测，只会把它存在的理由（那些 `forward` 行）埋掉。
 
+## 从一张被开闸的榜到一组目标权重（P5，`V2-P5-001`/`V2-P5-002`）
+
+候选榜平面之上是**组合平面**。它接的是一张**已经被闸门放行**的榜，输出一组目标权重，并且在
+答案上原样写着这组权重是什么：`heuristic, not optimized`。
+
+```bash
+# 把 shortlist run 打印出来的那个 sla_ 地址喂给它
+uv run openalpha portfolio construct sla_0123456789abcdef01234567 \
+  --tier-weight 0.5 --tier-weight 0.3 --tier-weight 0.2 \
+  --max-position-weight 0.10 --turnover-budget 0.30 \
+  --previous-weight 000001.SZ=0.05
+```
+
+两个面等价：`openalpha portfolio construct` ／ `OpenAlphaSDK.construct_portfolio()`。
+
+### 三步都是算术，而且每一步都说得出自己没做什么
+
+**分层排序**：按 rank 切成连续的块，每块拿走声明的那一份、块内**等权**。所以同一层里排第 1 和排
+第 10 的名字权重相同，分数是给人看的、从不当量纲用——因为
+`KNOWN_CROSS_SECTION_LIMITATIONS.the_shortlist_is_not_a_ranking_of_expected_return` 已经实测过
+那些分数没有拟合任何东西，拿没拟合过的数去乘资金，就是让一个复合权重长得像一个预测。
+
+**上限裁剪**：clamp 到单票上限 → 把腾出来的重量按 headroom 按比例回配 → 再 clamp。循环**有界**，
+最后一步永远是 clamp，所以返回的权重无条件满足全部上限。**放不下的重量变成现金**并以
+`unallocated_weight` 单独报出——绝不摊到最后一个名字上，那正是 `V2-P5-005` 要从
+`backtest/validation.py` 里删掉的把戏。
+
+**换手预算**：`turnover` 是证券权重变化的绝对值之和，**两边都算**（卖掉一个 5% 的名字、买进另一
+个是 `0.10` 而不是 `0.05`）。超预算时整体按 `budget / turnover` 缩放，`turnover` 与
+`turnover_before_budget` 并列上报。代价也写在答案上：缩放是从**你声明的那本账簿**出发的部分移动，
+所以一本本来就超限的账簿，缩放之后可能仍然超限——这时 `caps_breached_after_turnover_damping`
+会点名说出是哪一条超了，而**不会**再裁一次（再裁就花掉了刚刚被预算拒绝的换手）。
+
+### 不引入求解器不是省略，是 ADR-0003 的结论
+
+九个运行时依赖、不发任何数值栈。均值方差或风险平价需要一个协方差估计和一个求解器，那不是这个仓库
+能发的东西。PRD 在另一个方向上做了同一个决定，并且只附了一个条件：**报告必须自称启发式**。所以
+`PortfolioConstruction.method` 是一个 `Literal`，终端渲染和 `--json` 两面都印它，说不出这句话的构建
+根本通不过校验。
+
+### 被拒绝的榜没有权重
+
+`admitted` 为 `null` 是「闸门拒了这张榜」，为 `[]` 是「闸门放行了、但一个名字都没有」——这是
+`V2-P4-032` 特意分开的两个答案。对第一种构建组合，等于把一次拒绝洗成一组数字，所以两个面都具名
+拒绝。
+
+### 行业上限在这条路上会被拒绝，而这是量出来的
+
+`shortlist_view` 用 `exposures=None` 建榜，存下来的答案里**没有任何名字带行业**。一条看不见行业的
+上限，是每一本账簿都满足的上限——报告说它守住了，既为真又无用。所以声明了
+`--max-industry-weight` 而候选没有 `industry_code` 时，这条命令**具名拒绝**。
+`OpenAlphaSDK.construct_portfolio_from_ranking()` 是等 `V2-P5-015` 载入暴露截面那天它开始生效的那
+条路，它的算术今天已经有单元测试。
+
+### 现金下限不是第三条约束
+
+长仓无杠杆下 `equity == cash + market_value`，于是 `cash / equity >= f` 和
+`market_value / equity <= 1 - f` 是同一个不等式：30% 的现金下限和 70% 的敞口上限实测给出**逐字节
+相同**的权重。`--min-cash-weight` 照样提供（行要求、且按下限声明意图更好读），取更紧的那个绑住，
+拒绝理由会说是哪一个绑的——代码不假装两者可以叠加。
+
 ## 核心独特优势
 
 OpenAlpha CN 整合 TradingAgents 和 AI Hedge Fund 的优势，接入 A 股数据源，更适合 A 股涨停量化分析。OpenAlpha CN 的竞争重点不是复制更多“投资大师人格”，而是：

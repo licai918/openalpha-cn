@@ -297,6 +297,7 @@ source_modules = [
   "openalpha_cn.backtest.factor_tradeability",
   "openalpha_cn.backtest.multi_day",
   "openalpha_cn.backtest.portfolio",
+  "openalpha_cn.backtest.portfolio_policy",
   "openalpha_cn.backtest.shortlist_gate",
   "openalpha_cn.backtest.validation",
   "openalpha_cn.backtest.walk_forward",
@@ -342,6 +343,7 @@ source_modules = [
   "openalpha_cn.backtest.factor_tradeability",
   "openalpha_cn.backtest.multi_day",
   "openalpha_cn.backtest.portfolio",
+  "openalpha_cn.backtest.portfolio_policy",
   "openalpha_cn.backtest.shortlist_gate",
   "openalpha_cn.backtest.walk_forward",
 ]

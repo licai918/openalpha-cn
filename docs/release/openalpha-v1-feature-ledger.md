@@ -4,8 +4,8 @@
 
 ## 对账结论
 
-- 功能总数: 182
-- 当前真实完成: 177 (97.25%)
+- 功能总数: 184
+- 当前真实完成: 179 (97.28%)
 - `UNREVIEWED=0`
 - `UNKNOWN=0`
 - `legacy_acceptance_rows=85` (历史散文验收、尚未绑定为可执行 pytest/CI 断言)
@@ -18,7 +18,7 @@
 | `DEFERRED` | 1 |
 | `ENHANCED_REPLACEMENT` | 20 |
 | `EXCLUDED` | 4 |
-| `NATIVE_COMPLETE` | 156 |
+| `NATIVE_COMPLETE` | 158 |
 
 ## 功能明细
 
@@ -206,6 +206,8 @@
 | `OA-RANK-003` | ranking | CandidateRanking: the panel plane's shortlist joined to the evidence plane's conclusions | `NATIVE_COMPLETE` | `src/openalpha_cn/backtest/candidate_ranking.py#CandidateRanking;src/openalpha_cn/backtest/candidate_ranking.py#CandidateRankingManifest;src/openalpha_cn/backtest/candidate_ranking.py#RankedCandidate;src/openalpha_cn/backtest/candidate_ranking.py#CandidateExposure;src/openalpha_cn/backtest/candidate_ranking.py#CandidatePrediction;src/openalpha_cn/backtest/candidate_ranking.py#rank_candidates;src/openalpha_cn/backtest/candidate_ranking.py#build_ranking_manifest;src/openalpha_cn/backtest/candidate_ranking.py#ranking_content_digest;src/openalpha_cn/backtest/candidate_ranking.py#RankingRiskFlag;src/openalpha_cn/backtest/candidate_ranking.py#RANKING_RISK_FLAG_ORDER;src/openalpha_cn/backtest/candidate_ranking.py#RANKING_MANIFEST_UNADDRESSED_FIELDS;src/openalpha_cn/backtest/candidate_ranking.py#KNOWN_RANKING_LIMITATIONS` | `tests/unit/backtest/test_candidate_ranking.py;tests/unit/test_import_layering.py;tests/unit/test_known_limitation_registries.py` | `pytest` | `tests/unit/backtest/test_candidate_ranking.py::test_the_ranking_contract_cannot_reach_the_three_modules_that_make_an_order` |
 | `OA-RANK-004` | ranking | 因子暴露 is a characteristic and not a fitted loading; 风险标记 is closed where the signal's is open | `NATIVE_COMPLETE` | `src/openalpha_cn/backtest/candidate_ranking.py#CandidateExposure;src/openalpha_cn/backtest/candidate_ranking.py#_exposure_of;src/openalpha_cn/backtest/candidate_ranking.py#_risk_flags_of;src/openalpha_cn/backtest/candidate_ranking.py#RANKING_RISK_FLAG_CODES;src/openalpha_cn/backtest/candidate_ranking.py#RANKING_LIMITATION_CODES;src/openalpha_cn/domain/factor_neutralization.py#SecurityCharacteristic;src/openalpha_cn/domain/factor_neutralization.py#FactorNeutralizationStatistics;src/openalpha_cn/backtest/cross_section.py#ComponentScore` | `tests/unit/backtest/test_candidate_ranking.py` | `pytest` | `tests/unit/backtest/test_candidate_ranking.py::test_a_neutralised_top_rank_is_an_industry_and_size_ordering_the_exposure_makes_readable` |
 | `OA-RANK-005` | ranking | The stored panel reaches the two-stage funnel, and the funnel reaches a user: one adapter and three faces | `NATIVE_COMPLETE` | `src/openalpha_cn/shortlist_view.py#load_shortlist_cross_section;src/openalpha_cn/shortlist_view.py#run_shortlist;src/openalpha_cn/shortlist_view.py#shortlist_request;src/openalpha_cn/shortlist_view.py#shortlist_view;src/openalpha_cn/shortlist_view.py#clipped_from_the_tie_at_the_top;src/openalpha_cn/shortlist_view.py#SHORTLIST_VIEW_LIMITATION_CODES;src/openalpha_cn/cli.py#shortlist_run_command;src/openalpha_cn/cli.py#SHORTLIST_EXIT;src/openalpha_cn/api/app.py#SHORTLIST_HTTP_STATUS;src/openalpha_cn/sdk.py#run_shortlist` | `tests/integration/test_shortlist_interfaces.py;tests/unit/test_shortlist_view.py` | `pytest` | `tests/integration/test_shortlist_interfaces.py::test_a_blocked_shortlist_and_a_legitimately_empty_one_are_two_different_answers` |
+| `OA-PORT-001` | backtest | Heuristic target-weight construction: tiered ranking, cap trimming, turnover budget | `NATIVE_COMPLETE` | `src/openalpha_cn/backtest/portfolio_policy.py#construct_portfolio;src/openalpha_cn/backtest/portfolio_policy.py#PortfolioConstructionPolicy;src/openalpha_cn/backtest/portfolio_policy.py#PortfolioConstruction;src/openalpha_cn/backtest/portfolio_policy.py#TargetWeight;src/openalpha_cn/backtest/portfolio_policy.py#ConstructionCandidate;src/openalpha_cn/backtest/portfolio_policy.py#candidates_from_shortlist_answer;src/openalpha_cn/backtest/portfolio_policy.py#candidates_from_ranking;src/openalpha_cn/backtest/portfolio_policy.py#construction_view;src/openalpha_cn/backtest/portfolio_policy.py#KNOWN_CONSTRUCTION_LIMITATIONS;src/openalpha_cn/cli.py#portfolio_construct_command` | `tests/unit/backtest/test_portfolio_policy.py;tests/integration/test_portfolio_construction_interfaces.py` | `pytest` | `tests/integration/test_portfolio_construction_interfaces.py::test_the_cli_weights_a_stored_shortlist_and_labels_the_answer_a_heuristic` |
+| `OA-PORT-002` | backtest | PortfolioOrder carries its target weight; PortfolioLimits carries industry, turnover and cash bounds | `NATIVE_COMPLETE` | `src/openalpha_cn/domain/portfolio.py#PortfolioOrder;src/openalpha_cn/backtest/portfolio.py#PortfolioLimits;src/openalpha_cn/backtest/portfolio.py#LIMITS_ENFORCED_BY_THE_SIMULATOR;src/openalpha_cn/backtest/portfolio_policy.py#LIMITS_ENFORCED_BY_THE_CONSTRUCTION_POLICY` | `tests/unit/backtest/test_portfolio.py;tests/unit/backtest/test_portfolio_policy.py` | `pytest` | `tests/unit/backtest/test_portfolio_policy.py::test_every_declared_limit_is_enforced_by_the_simulator_or_by_the_construction_policy` |
 
 ## 边界
 

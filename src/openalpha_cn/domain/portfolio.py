@@ -130,7 +130,28 @@ class PortfolioState(BaseModel):
 
 
 class PortfolioOrder(BaseModel):
-    """A deterministic order intent at one daily-bar close."""
+    """A deterministic order intent at one daily-bar close, with the weight it was aiming at.
+
+    `target_weight` (`V2-P5-002`) is the share of equity the position was *meant* to reach --
+    `backtest/portfolio_policy.py`'s output carried onto the instruction that acts on it, so a
+    stored transition says which plan produced it and not only how many shares changed hands.
+    It is a declaration and never a computation: `PortfolioSimulator` does not size the order
+    from it, it refuses a buy whose declared target is already over `max_position_weight`, and
+    the *realised* weight is still checked against the caps after the fill. The two are different
+    facts and a book that has drifted is the case where they differ.
+
+    **Optional, and the optionality is what makes this a non-breaking change to a stored row.**
+    `PortfolioTransition` embeds this model and is persisted by `SQLitePortfolioLedger` as opaque
+    JSON under `single_version()`, so AGENTS.md rule 3 applies. Measured rather than assumed: a
+    row written before this field parses unchanged, because the default supplies the missing key;
+    what does *not* survive is a row written after it being read by a build from before it, since
+    `extra="forbid"` refuses the unfamiliar key. That direction is the one `read_versioned` was
+    built to name rather than silently misread. One thing does change for identical inputs: the
+    payload `append` compares by bytes now carries `"target_weight":null`, so re-appending a
+    transition first stored by an older build raises the conflict guard. `V2-P5-002`'s note in
+    the changelog records that as the migration cost, and it is a re-write of the ledger rather
+    than a contract version bump -- there is no second version of this model to read.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
 
@@ -138,6 +159,7 @@ class PortfolioOrder(BaseModel):
     subject: str = Field(min_length=1, max_length=128)
     side: Literal["buy", "sell"]
     quantity: int = Field(gt=0)
+    target_weight: Decimal | None = Field(default=None, gt=0, le=1)
 
 
 class PortfolioTransition(BaseModel):

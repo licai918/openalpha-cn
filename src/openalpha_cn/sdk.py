@@ -24,6 +24,15 @@ from openalpha_cn.backtest.portfolio import (
     PortfolioState,
     PortfolioTransition,
 )
+from openalpha_cn.backtest.portfolio_policy import (
+    ConstructionCandidate,
+    PortfolioConstruction,
+    PortfolioConstructionPolicy,
+    candidates_from_ranking,
+    candidates_from_shortlist_answer,
+    construct_portfolio,
+    construction_view,
+)
 from openalpha_cn.backtest.replay import ReplayCorpus, ReplayReport, ReplayRunner
 from openalpha_cn.backtest.validation import OutcomeObservation, OutcomeValidator
 from openalpha_cn.domain.evidence import EvidenceSnapshot
@@ -685,6 +694,67 @@ class OpenAlphaSDK:
     def list_shortlists(self) -> tuple[str, ...]:
         """Every held `shortlist_id`, ascending."""
         return self.shortlist_store.list_ids()
+
+    def construct_portfolio(
+        self,
+        *,
+        shortlist_id: str,
+        policy: PortfolioConstructionPolicy,
+        previous: Mapping[str, Decimal] | None = None,
+    ) -> PortfolioConstruction:
+        """Heuristic target weights over one held shortlist's admitted names (`V2-P5-001`).
+
+        The in-process face of `openalpha portfolio construct`, through the same
+        `held_shortlist` read and the same `construct_portfolio` policy, so the two cannot come
+        to weight one list two ways.
+
+        **A refused shortlist has no weights and raises rather than answering.** `admitted` is
+        `null` when the gate turned the list down; building a portfolio out of it would launder
+        the refusal into a set of numbers, which is the "empty success" `V2-P1-013` exists to
+        make unavailable arriving one plane later.
+
+        The answer carries `heuristic, not optimized` on `method` and every limitation the
+        policy declares. `previous` is weights the *caller* states -- this reaches no ledger,
+        see `KNOWN_CONSTRUCTION_LIMITATIONS
+        .the_previous_book_is_declared_by_the_caller_and_never_read_from_a_ledger`.
+        """
+        return construct_portfolio(
+            candidates=candidates_from_shortlist_answer(self.held_shortlist(shortlist_id)),
+            policy=policy,
+            previous=previous,
+        )
+
+    def construct_portfolio_from_ranking(
+        self,
+        *,
+        result: ShortlistRunResult,
+        policy: PortfolioConstructionPolicy,
+        previous: Mapping[str, Decimal] | None = None,
+    ) -> PortfolioConstruction:
+        """The same construction over a run's own `CandidateRanking`, without a round trip.
+
+        Distinct from `construct_portfolio` in exactly one respect, and it is the one that
+        matters for `V2-P5-002`'s industry cap: a `RankedCandidate` can carry a
+        `CandidateExposure`, and a stored answer cannot -- `shortlist_view` renders no industry
+        at all. Today both paths arrive with `industry_code` unset, because the shipped face
+        builds the ranking with `exposures=None`; this method is where a declared industry cap
+        starts working the day that changes, and the other is where it stays refused.
+        """
+        return construct_portfolio(
+            candidates=candidates_from_ranking(result.ranking),
+            policy=policy,
+            previous=previous,
+        )
+
+    def construction_candidates(
+        self, result: ShortlistRunResult
+    ) -> tuple[ConstructionCandidate, ...]:
+        """The narrowed candidate rows a construction reads, for a caller assembling its own."""
+        return candidates_from_ranking(result.ranking)
+
+    def construction_view(self, construction: PortfolioConstruction) -> dict[str, object]:
+        """One construction as `openalpha portfolio construct --json` renders it."""
+        return construction_view(construction)
 
     def compare_shortlists(self, *, baseline_id: str, current_id: str) -> dict[str, object]:
         """What changed between two held shortlist answers (`V2-P4-007`, S44, S49).

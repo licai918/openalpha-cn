@@ -19,11 +19,21 @@ from zoneinfo import ZoneInfo
 
 import typer
 import uvicorn
+from pydantic import ValidationError
 
 from openalpha_cn import __version__
 from openalpha_cn.backtest.factor_experiment import FactorExperimentRecord
 from openalpha_cn.backtest.factor_ic import MINIMUM_IC_SECURITIES, ICMethod
 from openalpha_cn.backtest.factor_redundancy import MINIMUM_REDUNDANCY_SECURITIES
+from openalpha_cn.backtest.portfolio import PortfolioLimits
+from openalpha_cn.backtest.portfolio_policy import (
+    PortfolioConstruction,
+    PortfolioConstructionError,
+    PortfolioConstructionPolicy,
+    candidates_from_shortlist_answer,
+    construct_portfolio,
+    construction_view,
+)
 from openalpha_cn.backtest.replay import ReplayCorpus
 from openalpha_cn.config import ConfigError, load_config, load_dotenv, load_log_level
 from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET, AdjustmentError
@@ -291,6 +301,25 @@ criteria -- the evidence plane's own answers, after the fact. This is the other 
 PRD §3.2 draws it as two planes: the whole market is scored and filtered **without** `run_cycle`,
 and the shortlist is what earns an evidence run. Naming both `screen` would have made "rank what
 I have researched" and "decide what to research" one word.
+"""
+
+
+portfolio_app = typer.Typer(
+    help=(
+        "Turn one admitted shortlist into target weights under a declared, heuristic policy. "
+        "Start with `openalpha portfolio construct --help`."
+    )
+)
+app.add_typer(portfolio_app, name="portfolio")
+"""`V2-P5-001`'s command is `openalpha portfolio construct`, and it is a sub-app for `factor`'s
+and `shortlist`'s reason: `construct` alone would be a fifth top-level verb, and the plane the
+verb acts on is the half a reader needs.
+
+Deliberately not a flag on `shortlist run`. A shortlist is a list of names that earned an evidence
+run, and a construction is a set of weights over one; folding them into one command would mean one
+exit code covering "the gate refused the list" and "the caps could not place the capital", which
+are different facts with different remedies. Keeping them apart is also what makes the refusal
+below possible at all: a construction that takes a *held* answer can see that the gate said no.
 """
 
 
@@ -5744,3 +5773,206 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+_CONSTRUCT_ADDRESS_HELP: Final[str] = (
+    "The `shortlist_id` of the list to weight (`sla_` and 24 lowercase hex characters). It is on "
+    "every `openalpha shortlist run --json` body; `openalpha shortlist list` prints every one "
+    "this runtime directory holds."
+)
+_CONSTRUCT_TIER_HELP: Final[str] = (
+    "One tier's share of the invested book, repeatable and ordered best-rank-first, e.g. "
+    "`--tier-weight 0.5 --tier-weight 0.3 --tier-weight 0.2`. They must sum to exactly 1: they "
+    "are shares of the invested book, and a vector summing to less is a second, undeclared cash "
+    "position. Candidates are cut into that many contiguous rank blocks and each block splits its "
+    "share equally."
+)
+_CONSTRUCT_POSITION_HELP: Final[str] = "Largest share of equity any one name may hold."
+_CONSTRUCT_EXPOSURE_HELP: Final[str] = "Largest share of equity all names together may hold."
+_CONSTRUCT_CASH_HELP: Final[str] = (
+    "Smallest share of equity held as cash. Under long-only accounting this is "
+    "`--max-total-exposure` restated (equity == cash + market value), so the tighter of the two "
+    "binds and declaring both adds no constraint."
+)
+_CONSTRUCT_INDUSTRY_HELP: Final[str] = (
+    "Largest share of equity any one industry may hold. **Refused on this face**, and by design: "
+    "the shortlist a stored answer holds carries no industry for any name, so the cap could not "
+    "be enforced and a report saying it held would be true and useless."
+)
+_CONSTRUCT_TURNOVER_HELP: Final[str] = (
+    "Largest total absolute weight change this construction may ask for, both sides counted -- "
+    "selling one 5% name and buying another is 0.10. A larger move is scaled down proportionally "
+    "toward the previous book rather than refused."
+)
+_CONSTRUCT_PREVIOUS_HELP: Final[str] = (
+    "One held weight of the book being moved from, repeatable, as `SUBJECT=WEIGHT` (e.g. "
+    "`--previous-weight 000001.SZ=0.05`). Declared by you and never read from the ledger; a "
+    "stale declaration produces a turnover number about a book that no longer exists."
+)
+
+
+def _construct_decimal(value: str, *, flag: str) -> Decimal:
+    """One `--flag` as a `Decimal`, refused by name rather than by a traceback."""
+    try:
+        parsed = Decimal(value)
+    except ArithmeticError as error:
+        raise _panel_fail(
+            PanelExit.bad_request, f"{flag} expects a decimal share of equity; got {value!r}"
+        ) from error
+    if not parsed.is_finite():
+        raise _panel_fail(PanelExit.bad_request, f"{flag} expects a finite decimal; got {value!r}")
+    return parsed
+
+
+def _construct_previous(pairs: Sequence[str]) -> dict[str, Decimal]:
+    """`--previous-weight SUBJECT=WEIGHT`, repeated, as one book."""
+    book: dict[str, Decimal] = {}
+    for pair in pairs:
+        subject, separator, weight = pair.partition("=")
+        if not separator or not subject.strip():
+            raise _panel_fail(
+                PanelExit.bad_request,
+                f"--previous-weight expects SUBJECT=WEIGHT, e.g. 000001.SZ=0.05; got {pair!r}",
+            )
+        if subject.strip() in book:
+            raise _panel_fail(
+                PanelExit.bad_request,
+                f"--previous-weight names {subject.strip()!r} twice; a book holds one weight per "
+                "security, and two would make which one counts depend on flag order",
+            )
+        book[subject.strip()] = _construct_decimal(weight, flag="--previous-weight")
+    return book
+
+
+def _echo_construction(construction: PortfolioConstruction) -> None:
+    """The terminal rendering, which must carry the heuristic label where the numbers are."""
+    typer.echo(f"method: {construction.method}")
+    typer.echo(
+        f"invested {construction.invested_weight} / cash {construction.cash_weight} / "
+        f"unallocated {construction.unallocated_weight}"
+    )
+    typer.echo(
+        f"turnover {construction.turnover} of {construction.turnover_before_budget} requested"
+        + (
+            ""
+            if construction.turnover_damping is None
+            else f" (damped {construction.turnover_damping})"
+        )
+    )
+    for breach in construction.caps_breached_after_turnover_damping:
+        typer.echo(f"cap still breached after the turnover budget: {breach}")
+    for target in construction.targets:
+        typer.echo(
+            f"  {target.rank:>4}  tier {target.tier}  {target.subject}  {target.weight}"
+            + ("  (adjusted)" if target.was_adjusted else "")
+        )
+
+
+@portfolio_app.command("construct")
+def portfolio_construct_command(
+    shortlist_id: Annotated[str, typer.Argument(help=_CONSTRUCT_ADDRESS_HELP)],
+    tier_weight: Annotated[list[str], typer.Option("--tier-weight", help=_CONSTRUCT_TIER_HELP)],
+    max_position_weight: Annotated[
+        str, typer.Option("--max-position-weight", help=_CONSTRUCT_POSITION_HELP)
+    ] = "0.25",
+    max_total_exposure: Annotated[
+        str, typer.Option("--max-total-exposure", help=_CONSTRUCT_EXPOSURE_HELP)
+    ] = "0.80",
+    min_cash_weight: Annotated[
+        str, typer.Option("--min-cash-weight", help=_CONSTRUCT_CASH_HELP)
+    ] = "0",
+    max_industry_weight: Annotated[
+        str, typer.Option("--max-industry-weight", help=_CONSTRUCT_INDUSTRY_HELP)
+    ] = "",
+    turnover_budget: Annotated[
+        str, typer.Option("--turnover-budget", help=_CONSTRUCT_TURNOVER_HELP)
+    ] = "",
+    previous_weight: Annotated[
+        list[str] | None, typer.Option("--previous-weight", help=_CONSTRUCT_PREVIOUS_HELP)
+    ] = None,
+    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
+        "./runtime"
+    ),
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit the whole construction as data.")
+    ] = False,
+) -> None:
+    """Weight one admitted shortlist under a declared heuristic policy (`V2-P5-001`).
+
+    The usual invocation, against a `shortlist_id` `openalpha shortlist run` printed::
+
+        openalpha portfolio construct sla_0123456789abcdef01234567 \\
+          --tier-weight 0.5 --tier-weight 0.3 --tier-weight 0.2 \\
+          --max-position-weight 0.10 --turnover-budget 0.30 \\
+          --previous-weight 000001.SZ=0.05 --runtime-dir ./runtime
+
+    **The weights are a heuristic and the answer says so.** `method` reads `heuristic, not
+    optimized` on the terminal rendering and in `--json`, because nothing here maximises anything:
+    the three steps are a tiered cut on rank, a bounded trim against the caps, and a proportional
+    move toward the target bounded by the turnover budget. ADR-0003 is why there is no optimiser
+    -- this build ships no numerical stack -- and the PRD attaches exactly this label as the
+    condition of that decision.
+
+    **A shortlist the gate refused has no weights.** `openalpha shortlist run` exits `1` and
+    stores an answer whose `admitted` is `null` when the list missed a bar; this command refuses
+    that answer by name rather than weighting the names it holds, because a portfolio built out
+    of a refused list would launder the refusal into a set of numbers.
+
+    **`--max-industry-weight` is refused here, and that is a measurement rather than a gap.** The
+    shortlist face builds its ranking with no exposure cross section, so no stored answer carries
+    an industry for any name; a cap over names with no industry is satisfied by every book. It is
+    refused instead of being silently unenforceable, and `OpenAlphaSDK
+    .construct_portfolio_from_ranking` is where it starts working the day exposures are loaded.
+
+    **Three numbers are printed that a weight vector alone would not tell you**: `unallocated`
+    is the weight the caps refused and cash absorbed, `turnover ... of ... requested` is the move
+    made beside the move asked for, and any `cap still breached after the turnover budget` line is
+    a limit the damped book is over -- damping is a partial move out of the book you declared, so
+    a book that already breached a cap can still breach it, and re-trimming would spend the
+    turnover the budget just refused.
+    """
+    with _panel_command("portfolio construct"):
+        limits = PortfolioLimits(
+            max_position_weight=_construct_decimal(
+                max_position_weight, flag="--max-position-weight"
+            ),
+            max_total_exposure=_construct_decimal(max_total_exposure, flag="--max-total-exposure"),
+            min_cash_weight=_construct_decimal(min_cash_weight, flag="--min-cash-weight"),
+            max_industry_weight=(
+                None
+                if not max_industry_weight
+                else _construct_decimal(max_industry_weight, flag="--max-industry-weight")
+            ),
+            turnover_budget=(
+                None
+                if not turnover_budget
+                else _construct_decimal(turnover_budget, flag="--turnover-budget")
+            ),
+        )
+        previous = _construct_previous(previous_weight or ())
+        try:
+            policy = PortfolioConstructionPolicy(
+                tier_weights=tuple(
+                    _construct_decimal(weight, flag="--tier-weight") for weight in tier_weight
+                ),
+                limits=limits,
+            )
+            answer = held_shortlist(FileShortlistStore(runtime_dir / "shortlists"), shortlist_id)
+            construction = construct_portfolio(
+                candidates=candidates_from_shortlist_answer(answer),
+                policy=policy,
+                previous=previous,
+            )
+        except ShortlistViewError as error:
+            raise _shortlist_fail(error) from error
+        except (PortfolioConstructionError, ValidationError) as error:
+            raise _panel_fail(PanelExit.bad_request, str(error)) from error
+        except ShortlistStoreError as error:
+            raise _panel_fail(PanelExit.unhealthy, str(error)) from error
+
+        if json_output:
+            typer.echo(
+                json.dumps(construction_view(construction), ensure_ascii=False, sort_keys=True)
+            )
+        else:
+            _echo_construction(construction)

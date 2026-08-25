@@ -140,6 +140,7 @@ from openalpha_cn.backtest.factor_ic import KNOWN_IC_LIMITATIONS
 from openalpha_cn.backtest.factor_portfolio import KNOWN_QUANTILE_PORTFOLIO_LIMITATIONS
 from openalpha_cn.backtest.factor_redundancy import KNOWN_REDUNDANCY_LIMITATIONS
 from openalpha_cn.backtest.factor_tradeability import KNOWN_TRADEABILITY_LIMITATIONS
+from openalpha_cn.backtest.portfolio_policy import KNOWN_CONSTRUCTION_LIMITATIONS
 from openalpha_cn.backtest.shortlist_gate import KNOWN_SHORTLIST_GATE_LIMITATIONS
 from openalpha_cn.backtest.walk_forward import KNOWN_WALK_FORWARD_LIMITATIONS
 from openalpha_cn.domain.adjustment import KNOWN_ADJUSTMENT_LIMITATIONS
@@ -194,6 +195,7 @@ LIMITATION_REGISTRIES: Final[dict[str, Sequence[_Limitation]]] = {
     "KNOWN_TRADEABILITY_LIMITATIONS": KNOWN_TRADEABILITY_LIMITATIONS,
     "KNOWN_CROSS_SECTION_LIMITATIONS": KNOWN_CROSS_SECTION_LIMITATIONS,
     "KNOWN_RANKING_LIMITATIONS": KNOWN_RANKING_LIMITATIONS,
+    "KNOWN_CONSTRUCTION_LIMITATIONS": KNOWN_CONSTRUCTION_LIMITATIONS,
     "KNOWN_SHORTLIST_GATE_LIMITATIONS": KNOWN_SHORTLIST_GATE_LIMITATIONS,
     "KNOWN_WALK_FORWARD_LIMITATIONS": KNOWN_WALK_FORWARD_LIMITATIONS,
     "KNOWN_BASELINE_LIMITATIONS": KNOWN_BASELINE_LIMITATIONS,
@@ -529,7 +531,7 @@ def test_the_registry_table_is_every_known_registry_in_the_source_tree() -> None
     }
 
     assert found == set(LIMITATION_REGISTRIES) | set(CODELESS_REGISTRIES)
-    assert len(LIMITATION_REGISTRIES) == 34
+    assert len(LIMITATION_REGISTRIES) == 35
     assert set(LIMITATION_REGISTRIES) & set(CODELESS_REGISTRIES) == set()
 
 
@@ -650,6 +652,7 @@ REGISTRY_ENTRY_COUNTS: Final[dict[str, int]] = {
     "KNOWN_CROSS_SECTION_LIMITATIONS": 7,
     "KNOWN_RANKING_LIMITATIONS": 7,
     "KNOWN_SHORTLIST_GATE_LIMITATIONS": 7,
+    "KNOWN_CONSTRUCTION_LIMITATIONS": 7,
     "KNOWN_WALK_FORWARD_LIMITATIONS": 11,
     "KNOWN_BASELINE_LIMITATIONS": 10,
     "KNOWN_TREE_LIMITATIONS": 7,
@@ -714,11 +717,11 @@ no longer written in prose at all. `DOCSTRING_TOTALS` below holds them as an equ
 
 DOCSTRING_TOTALS: Final[Mapping[str, int]] = MappingProxyType(
     {
-        "registries": 34,
-        "entries": 323,
+        "registries": 35,
+        "entries": 330,
         "derived_entries": 70,
-        "table_rows": 33,
-        "table_entries": 253,
+        "table_rows": 34,
+        "table_entries": 260,
     }
 )
 """Every number this module would otherwise have stated in prose, as an equality.

@@ -22,6 +22,7 @@ from openalpha_cn.domain.portfolio import (
 )
 
 __all__ = [
+    "LIMITS_ENFORCED_BY_THE_SIMULATOR",
     "PORTFOLIO_TRANSITION_VERSIONS",
     "PortfolioLimits",
     "PortfolioOrder",
@@ -41,12 +42,49 @@ def _money(value: Decimal) -> Decimal:
 
 
 class PortfolioLimits(BaseModel):
-    """Hard long-only exposure limits applied before accepting a buy."""
+    """Hard long-only exposure limits, read by the simulator and by the construction policy.
+
+    `V2-P5-002` added the last three. They are declarations of one book's bounds and are read by
+    two consumers with different reach -- `PortfolioSimulator` sees one order against one fill and
+    no industry and no history, `backtest/portfolio_policy.py` sees the whole plan and no market
+    -- so which fields each reads is written down as a set rather than left to be discovered:
+    `LIMITS_ENFORCED_BY_THE_SIMULATOR` below and
+    `portfolio_policy.LIMITS_ENFORCED_BY_THE_CONSTRUCTION_POLICY`, held covering by
+    `tests/unit/backtest/test_portfolio_policy.py`. A field neither set names is a limit nothing
+    enforces, which is the fail-open shape `V2-P4-030` found four instances of in the risk gate.
+
+    **`min_cash_weight` is `max_total_exposure` restated and not a second constraint.** Under
+    long-only accounting `equity == cash + market_value`, so `cash / equity >= min_cash_weight`
+    and `market_value / equity <= 1 - min_cash_weight` are one inequality. Both fields exist
+    because the roadmap row asks for a cash floor and because stating intent as a floor is
+    legible; the binding bound is simply the tighter of the two, and the rejection reason says
+    which one bound. Nothing here pretends they compose.
+
+    `max_industry_weight` and `turnover_budget` are the two the simulator structurally cannot
+    read: `MarketBar` carries no industry, and one order carries no book history. They are read
+    by the construction policy, which sees both.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     max_position_weight: Decimal = Field(default=Decimal("0.25"), gt=0, le=1)
     max_total_exposure: Decimal = Field(default=Decimal("0.80"), gt=0, le=1)
+    min_cash_weight: Decimal = Field(default=Decimal("0"), ge=0, lt=1)
+    max_industry_weight: Decimal | None = Field(default=None, gt=0, le=1)
+    turnover_budget: Decimal | None = Field(default=None, ge=0)
+
+
+LIMITS_ENFORCED_BY_THE_SIMULATOR: frozenset[str] = frozenset(
+    {"max_position_weight", "max_total_exposure", "min_cash_weight"}
+)
+"""Which `PortfolioLimits` fields `PortfolioSimulator` actually checks.
+
+Not every field, and the two it omits are omitted for a structural reason rather than by
+oversight: an industry cap needs an industry and `MarketBar` has none, and a turnover budget
+needs the book's previous weights and `execute_order` sees one order. Writing the set down is
+what lets an audit prove the *other* consumer covers them, instead of a limit sitting on the
+contract that nobody reads.
+"""
 
 
 class PortfolioSimulator:
@@ -88,6 +126,15 @@ class PortfolioSimulator:
         order: PortfolioOrder,
         market: MarketBar,
     ) -> PortfolioTransition:
+        if (
+            order.target_weight is not None
+            and order.target_weight > self.limits.max_position_weight
+        ):
+            return self._reject(
+                state=state,
+                order=order,
+                reason="declared target weight exceeds maximum position weight",
+            )
         execution = self.execution.execute(
             ExecutionRequest(side="buy", quantity=order.quantity),
             market,
@@ -138,6 +185,12 @@ class PortfolioSimulator:
                 state=state,
                 order=order,
                 reason="maximum total exposure exceeded",
+            )
+        if after.cash / after.equity < self.limits.min_cash_weight:
+            return self._reject(
+                state=state,
+                order=order,
+                reason="minimum cash weight breached",
             )
         return PortfolioTransition(
             status="filled",

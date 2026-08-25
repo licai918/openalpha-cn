@@ -6,6 +6,64 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Added
 
+- **`openalpha portfolio construct` and `OpenAlphaSDK.construct_portfolio`: heuristic target
+  weights over one admitted shortlist** (`V2-P5-001`, the first module of P5). A twelfth
+  pure-stdlib `backtest/` leaf, `backtest/portfolio_policy.py`, turns one `as_of`'s ranked list
+  into weights by three declared arithmetic steps -- a contiguous cut on rank into tiers that each
+  split their share **equally**, a bounded clamp/redistribute/clamp pass against the caps, and a
+  proportional move toward the target bounded by a turnover budget -- and labels the answer
+  `heuristic, not optimized` on `PortfolioConstruction.method` (a `Literal`, so a build that
+  stopped saying it would not validate) and on every rendered body, terminal and `--json` alike.
+  There is no optimiser and that is ADR-0003's decision rather than a shortfall: nine runtime
+  dependencies, no numerical stack, so a covariance estimate and a solver are not shippable here.
+  **Nothing is pushed onto a last name to make a column add up** -- weight the caps will not take
+  becomes cash and is reported as `unallocated_weight`, which is the residual-absorption trick
+  `V2-P5-005` exists to delete out of `backtest/validation.py`, not reintroduced one phase earlier.
+  **A shortlist the gate refused cannot be turned into weights on either face**: `admitted` is
+  `null` for a refusal and `[]` for an admitted empty list, two answers `V2-P4-032` separated on
+  purpose, and building a portfolio out of the first would launder the refusal into a set of
+  numbers. Driven end to end from a `CliRunner` and an `OpenAlphaSDK` over a real generated panel,
+  a real `openalpha factor build` and a real `openalpha shortlist run`, because a policy nobody can
+  invoke is not delivered.
+- **`PortfolioOrder.target_weight`; `PortfolioLimits` from two fields to five** (`V2-P5-002`).
+  The order carries the share of equity it was *meant* to reach, so a stored transition says which
+  plan produced it; `PortfolioSimulator` refuses a buy whose **declared** target already exceeds
+  `max_position_weight` and still checks the **realised** weight after the fill, which is a
+  different fact and the one that differs on a drifted book. `PortfolioLimits` gains
+  `max_industry_weight`, `turnover_budget` and `min_cash_weight`, and **which consumer reads which
+  field is written down rather than discovered**: `LIMITS_ENFORCED_BY_THE_SIMULATOR` and
+  `LIMITS_ENFORCED_BY_THE_CONSTRUCTION_POLICY` are held *covering* against
+  `PortfolioLimits.model_fields`, so a limit the contract declares and nobody enforces is red --
+  the fail-open shape `V2-P4-030` found four instances of in the risk gate. The two the simulator
+  omits are omitted structurally: `MarketBar` carries no industry, and one order carries no book
+  history.
+
+### Measured, and it falsifies two premises this work started from
+
+- **The roadmap's "现金下限" is not a third limit.** Under long-only accounting
+  `equity == cash + market_value`, so `cash / equity >= f` and `market_value / equity <= 1 - f`
+  are one inequality: a 30% cash floor and a 70% exposure ceiling fund exactly the same book, and
+  `test_the_cash_floor_and_the_exposure_ceiling_are_one_inequality_and_the_tighter_one_binds`
+  drives both through the policy and compares the weights. The field ships because the row asks
+  for it and because stating intent as a floor is legible; what the code does not do is pretend
+  the two compose.
+- **An industry cap has no input on any shipped face, so it is refused rather than satisfied.**
+  `shortlist_view` builds its ranking with `exposures=None` and the stored answer renders no
+  industry for any name, so `RankedCandidate.exposure` is `None` everywhere a caller can reach.
+  A cap that cannot see an industry is satisfied by every book, so a declared
+  `max_industry_weight` over candidates carrying no `industry_code` is a **named refusal** on the
+  CLI and in the SDK. `OpenAlphaSDK.construct_portfolio_from_ranking` is where it starts working
+  the day exposures are loaded (`V2-P5-015`), and the cap's arithmetic is unit-tested there today.
+- **`V2-P5-002` is not a breaking change to a stored row, and that was measured rather than
+  assumed.** `PortfolioTransition` embeds `PortfolioOrder` and *is* persisted, under
+  `single_version()`, so AGENTS.md rule 3 applies and `V2-P4-001`'s window is closed. A payload
+  written before the field reads back unchanged through the same `read_versioned` the ledger uses,
+  because the default supplies the missing key. What *does* move is the bytes: the payload
+  `SQLitePortfolioLedger.append` compares by equality now carries `"target_weight":null`, so
+  **re-appending a transition an older build stored raises the conflict guard**. That is the
+  migration cost -- a ledger rewrite, not a contract version bump, since there is no second
+  version of this model and no portfolio contract is among the five checked-in schemas.
+
 <<<<<<< HEAD
 - **Two guards for quantifiers and gates that prose asserted and nothing measured** (`V2-P4-112`,
   `V2-P4-115`). `AgentRouter` satisfies an evidence family when **any** declared family is present
