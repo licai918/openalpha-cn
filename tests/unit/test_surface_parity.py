@@ -168,6 +168,9 @@ SDK_ONLY: Final[MappingProxyType[str, str]] = MappingProxyType(
         "factor_build_view": "a renderer, not a capability",
         "factor_experiment_view": "a renderer, not a capability",
         "held_predictions": "the batch behind `held_prediction`; the route serves one record",
+        "outcome_statistics": "`V2-P5-008`'s gross/net table; `openalpha outcome statistics`'s "
+        "twin, no route yet",
+        "outcome_statistics_view": "a renderer, not a capability",
         "shortlist_view": "a renderer, not a capability",
     }
 )
@@ -182,19 +185,21 @@ body can carry), and genuine CLI/SDK twins whose route has not been written.
 
 CLI_ONLY: Final[MappingProxyType[str, str]] = MappingProxyType(
     {
-        "version": "reports this build; `GET /health` carries the version too",
         "doctor": "probes provider credentials on this machine; deliberately not remote",
-        "serve": "starts the server, so it cannot be a route on it",
-        "migrate status": "operates on `state.sqlite3` before any app is built",
-        "migrate run": "operates on `state.sqlite3` before any app is built",
-        "migrate prune-backups": "deletes local backup files; not a remote capability",
-        "panel build": "reaches a paid provider; not exposed unauthenticated",
         "factor build": "writes factor partitions; `build_factor_panels` is the SDK twin",
         "factor describe": "`describe_factor` is the SDK twin; no route",
-        "shortlist compare": "`compare_shortlists` is the SDK twin; no route",
-        "jobs register": "declares a schedule; a write this unauthenticated API must not take",
         "jobs due": "needs a stored calendar and answers about this machine's schedules",
+        "jobs register": "declares a schedule; a write this unauthenticated API must not take",
         "jobs run": "takes a lease and does work on the machine holding the runtime directory",
+        "migrate prune-backups": "deletes local backup files; not a remote capability",
+        "migrate run": "operates on `state.sqlite3` before any app is built",
+        "migrate status": "operates on `state.sqlite3` before any app is built",
+        "panel build": "reaches a paid provider; not exposed unauthenticated",
+        "serve": "starts the server, so it cannot be a route on it",
+        "shortlist compare": "`compare_shortlists` is the SDK twin; no route",
+        "validation statistics": "`V2-P5-008`'s gross-beside-net table over stored "
+        "validations; the SDK twin exists and no route does yet",
+        "version": "reports this build; `GET /health` carries the version too",
     }
 )
 """CLI commands with no REST route, and why.
@@ -329,8 +334,8 @@ def test_the_measured_surface_counts_are_the_ones_this_file_was_written_against(
 
     assert measured == {
         "routes": 47,
-        "sdk_methods": 48,
-        "cli_commands": 29,
+        "sdk_methods": 50,
+        "cli_commands": 30,
         "without_sdk": 11,
         "rest_only": 9,
     }
