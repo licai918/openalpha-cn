@@ -267,6 +267,75 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **A closed vocabulary with no way to refuse: an undeclared `quality_flags` string answered
+  `500 text/plain` on `POST /api/v1/research/run`** (`V2-P4-101`). `V2-P4-030` closed the
+  risk-flag set and was right to — a payload writing `future-data` instead of `future_data` used
+  to be *scored*, and scored **above** the flag it misspells, so the typo moved its candidate up
+  a governed screen. What it did not do is give the refusal a delivery. Measured on `d748796`
+  with an evidence payload shaped `{"schema", "family", "facts", "quality_flags"}` (the first two
+  are required or `MarketAgent` drops the item by family before this code sees it, and every
+  assertion goes vacuously green): `['future_data']` → `200`; `['future-data']` and
+  `['totally_made_up']` → **`500`, `content-type: text/plain`, body `Internal Server Error`**.
+  `_quality_flags`' own docstring names five paths reachable from outside the process. **The
+  fail-open is not restored**: the refusal is correct and only its delivery was wrong.
+  `domain/risk_flag.py` now raises `UndeclaredRiskFlagError(ValueError)` carrying the offending
+  string, the vocabulary, and — filled in by `_quality_flags`, the only frame that knows them —
+  the offending snapshot's `evidence_id` and the flag's position. A **named** exception rather
+  than `except ValueError` around the route, which would report an unrelated arithmetic or
+  parsing defect as the caller's spelling mistake (the over-broad catch `V2-P4-045` booked on the
+  shortlist face). The route answers the FastAPI field-error **list** — not the `{reason,
+  message}` object a panel refusal carries, the two `422` schemas this app's docstring records —
+  with `loc == ["body", "evidence", 1, "payload", "quality_flags", 1]`, the `input` echoed, and
+  a `msg` byte-identical to the one pydantic already writes for `signal.risk_flags` on
+  `POST /api/v1/research/deliberate`. `evidence_id` and not an index crosses the agent boundary
+  because an agent sees only its own family's items, so an index taken there names the wrong
+  item on any mixed-family request.
+- **The same refusal was equally undeliverable on two more faces** (`V2-P4-102`).
+  `openalpha research run` rendered a rich Python traceback and exited 1 — the *message* was
+  already right and the presentation was a stack trace, which `create_app`'s own docstring rules
+  out ("naming the specific variable, never a bare traceback"). It now prints the flag and the
+  vocabulary on **stderr** and still exits 1: the finding is about presentation, and moving the
+  code too would fail a CI job already branching on it for a second, unrelated reason. And
+  `POST /api/v1/research/batches` degraded to `{"status":"failed","error_type":"ValueError"}` —
+  no message, no flag name, no vocabulary, discarding exactly the diagnostic `parse_risk_flag`
+  promises. `error_type` now names the specific subclass, and the whole reason goes into the
+  `item_failed` progress event's `detail`, a free `str | None` already published by
+  `GET /api/v1/research/batches/{batch_id}/events` — so nothing about a stored contract changed
+  and no migration was needed (`BatchTaskItem` is `extra="forbid"`, where an added key is a
+  breaking change). The default is still the type alone: `DISCLOSABLE_ITEM_FAULTS` is an
+  allow-list, because an unanticipated exception carries whatever the frame it escaped was
+  holding and a progress event is append-only and durable. **One claim in the report was
+  falsified by measurement**: `POST /api/v1/backtests/replay` was named alongside the other two
+  and was never broken — `ReplayRunner.run()` catches `(RuntimeError, ValueError)` per case and
+  records `f"{case.run_id}: {type(error).__name__}: {error}"`, so it returned `200` with the
+  offending string and all ten flags in `failures[0]` all along. It is the model the other three
+  now copy, and it works because the new exception still subclasses `ValueError`; the test is
+  kept as a regression guard on that base class rather than deleted.
+- **`factor build --tier`'s option help kept a bound `V2-P4-028` had already retracted, and
+  contradicted the same `--help` two paragraphs up** (`V2-P4-103`). The option said
+  `--tier neutralized` "only succeeds at a prediction instant at or after the panel's own stored
+  horizon"; the command's own docstring, in the same output, said that bound "IS GONE" and that
+  what remains is one session wide. Measured before choosing: the command line **does** write the
+  neutralised tier before the panel's horizon, so the help was the stale half and the code was
+  right. The prose and a real build are now asserted in one test — a test that only greps
+  `--help` proves the sentence changed, not that it is true, which is the exact failure this
+  file exists for. (The report's "eight sessions before the panel's horizon" is eight *calendar*
+  days; by sessions it is four and five.)
+- **`--min-securities` documented a floor the face does not have, and refused with a pydantic
+  model name instead of the flag** (`V2-P4-104`). The help said "the contract's own floor is 3";
+  passing `3` got `1 validation error for RedundancySpec … Input should be greater than or equal
+  to 4` and exit 3 — no occurrence of `--min-securities` anywhere in it. There is no single
+  contract: `factor_request` hands the same integer to `FactorICSpec` (floor 3) and
+  `RedundancySpec` (floor 4), and the higher binds. Measured before choosing: the **help** was
+  wrong. Both floors are arithmetic — three points are the first cross section at which
+  `|r| < 1` is attainable, and at `n = 3` an untied rank correlation is only `±0.5` or `±1`, so
+  no `--redundancy-threshold` at or below 0.5 distinguishes anything and lowering the redundancy
+  floor would make the survival row call every pair redundant. `factor_request` now refuses
+  before constructing either spec, naming the option and both floors, so `openalpha factor run`
+  and `POST /api/v1/factors/run` get it from the one shared resolver; previously whichever spec
+  happened to be built first decided the message (`2` reported `FactorICSpec`, `3` reported
+  `RedundancySpec`). The help interpolates the two constants rather than restating them.
+
 - **Nothing stopped a second content-address canonicalisation; now an AST audit does**
   (`V2-P4-037`). `domain/_identity.py` says every identity goes through `stable_model_id`, and
   that a second spelling of "canonical" would put two things in play whose difference is

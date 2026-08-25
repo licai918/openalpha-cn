@@ -196,6 +196,7 @@ from openalpha_cn.backtest.factor_experiment import (
 )
 from openalpha_cn.backtest.factor_ic import (
     FACTOR_TIER_ORDER,
+    MINIMUM_IC_SECURITIES,
     FactorICError,
     FactorICSpec,
     FactorICStudy,
@@ -214,6 +215,7 @@ from openalpha_cn.backtest.factor_portfolio import (
     QuantilePortfolioStudy,
 )
 from openalpha_cn.backtest.factor_redundancy import (
+    MINIMUM_REDUNDANCY_SECURITIES,
     FactorRedundancyError,
     RedundancyPoint,
     RedundancySpec,
@@ -822,6 +824,25 @@ def factor_request(
             f"--code-commit must be at least 7 characters; got {code_commit!r}. Different code "
             "may compute a different number from the same rows, so an identity that ignored it "
             "would claim a reproducibility it cannot deliver"
+        )
+    if min_securities < MINIMUM_REDUNDANCY_SECURITIES:
+        # V2-P4-104: stated here rather than left to the two `Field(ge=...)` bounds below.
+        # One option feeds two studies with different floors, so a caller passing 3 used to be
+        # refused by whichever spec happened to be constructed first -- `FactorICSpec` at 2 and
+        # `RedundancySpec` at 3 -- and the message was pydantic's own: a model name the caller
+        # has never heard of, a bound with no unit, and a link to a validation library. Neither
+        # branch contained the string `--min-securities`, which is the only thing the caller can
+        # actually edit.
+        raise FactorRequestError(
+            f"--min-securities must be at least {MINIMUM_REDUNDANCY_SECURITIES}; got "
+            f"{min_securities!r}. This one option feeds two studies with different floors and "
+            f"the higher one binds: the information coefficient needs "
+            f"{MINIMUM_IC_SECURITIES} securities (the first cross section at which a "
+            f"correlation of magnitude below one is attainable at all), and the redundancy "
+            f"study needs {MINIMUM_REDUNDANCY_SECURITIES}, because at "
+            f"{MINIMUM_REDUNDANCY_SECURITIES - 1} an untied rank correlation can only be "
+            "+-0.5 or +-1, so no --redundancy-threshold at or below 0.5 distinguishes anything "
+            "and the survival row would call every pair redundant"
         )
     try:
         ic = FactorICSpec(
