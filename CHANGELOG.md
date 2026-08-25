@@ -267,6 +267,60 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **`max_concurrency` was narrowed from 32 to 8 and no user-facing document said so**
+  (`V2-P4-042`). `V2-P4-019` lowered `MAX_BATCH_WORKERS` on `POST /api/v1/research/batches`, so a
+  request that worked the day before answered `422 Input should be less than or equal to 8` —
+  and `grep -rn max_concurrency docs README.md README.en.md web CHANGELOG.md` returned **zero
+  hits**, so nowhere a caller looks explained it. The reasoning existed all along, in
+  `batch_contracts.py`'s docstring, with the measured 1/2/4/8/16/32 throughput plateau behind it;
+  a source comment is not documentation. `docs/api/http.md` now carries the ceiling, the
+  measurement table, and the fact that `8` is a property of how batch state is persisted rather
+  than a throttle that can be turned back up — and this entry is the release note the narrowing
+  should have shipped with. **Breaking-change note for callers still on 32:** nothing about the
+  behaviour changed here, only its documentation.
+- **`GET /api/v1/research/batches` inlined every item of every batch** (`V2-P4-040`). Twenty
+  whole-market batches — about a trading month — answered `items: 115,355, bytes: 36,857,096`
+  (36.9 MB) in 2.35 s, and three batches already exceeded the 8 MiB body this same service
+  refuses on the way *in*: a listing that had become a bulk export, because `V2-P4-019` raised
+  the item ceiling tenfold and the route stayed `return batch_store.list()`. It now answers a
+  paginated envelope of **summaries** — `batch_id`, status, the two clocks,
+  `cancellation_requested`, `item_count` and a per-status census — with `limit` (default 50, max
+  500) and `offset`, and a `total` for the whole shelf. The counting is a `GROUP BY` inside
+  SQLite rather than 115,355 items through pydantic. **This is a response-shape change**: the
+  route returned a bare JSON array of full `BatchResearchTask` objects and now returns
+  `{"batches": [...], "total": n, "limit": n, "offset": n}` with no `items` key per batch. The
+  items moved to `GET /api/v1/research/batches/{batch_id}`, which is unchanged. Nothing in this
+  repository consumed the listing — no test, no SDK method, no page under `web/` — which is also
+  why the defect shipped. No stored contract moved and no migration is involved.
+- **The batch ceiling and the request-body ceiling contradicted each other** (`V2-P4-043`). A
+  whole-market screen of 5,545 names is 8,190,016 bytes and answered `200`; 6,000 names is
+  8,862,051 and answered `413`, against an 8 MiB `OPENALPHA_MAX_REQUEST_BYTES` default — 198,592
+  bytes of headroom, about 134 more listings. Measured here and worse than the report: a batch at
+  exactly `MAX_BATCH_ITEMS` (10,000, raised by `V2-P4-019` *because* "the market is a moving
+  number") is 9,840,054 bytes and was refused `413`, so the ceiling this service declares was
+  **unreachable through the only surface that can express it** — no test caught it because every
+  test at that scale builds the task in process instead of posting it. The default is now
+  33554432 bytes (32 MiB), which clears both declared ceilings with a factor of two for the
+  richer evidence real callers send; a body over the ceiling is still refused before it is read.
+  The `413` now carries `{"reason": "request_too_large", ...}` naming
+  `OPENALPHA_MAX_REQUEST_BYTES`, the declared size and the configured limit, and
+  `POST /api/v1/screen` states its own 10,000-item ceiling so one name too far is a `422` naming
+  the number rather than a `413` about bytes.
+- **`POST /api/v1/screen`'s 422 collapsed three distinct causes into one sentence**
+  (`V2-P4-041`). `_parse_research_result` distinguishes `signal_id`, `decision_id` and
+  `run_manifest_id` each failing to match its own content, and all three came back as
+  `Research result failed integrity validation.` — so a caller holding 5,545 results learned
+  neither which record nor which of the three addresses had moved. The refusal now carries the
+  `{"reason", "message"}` object the panel gate's `409` established, plus `index`, `subject`,
+  `field`, and both the `claimed` and the `derived` address, which is the difference between an
+  edited record and an edited identifier. `malformed_research_result` is a fourth, separate
+  reason. `POST /api/v1/reports` and `POST /api/v1/backtests/validate` share the fix.
+- **The HTTP reference's content-address examples were pinned to the minting function**
+  (`V2-P4-067`(a)). The documented `run_manifest_id` prefix was `rmf_` where this repository
+  mints `run_`, so a caller copying the example was refused; it was repaired in passing by
+  `V2-P4-032`/`V2-P4-049` and nothing held it there. Every `<prefix>_…` example in
+  `docs/api/http.md` is now checked against the AST-read prefix census, and the audit is itself
+  proved to fail on the exact text the row measured.
 - **A closed vocabulary with no way to refuse: an undeclared `quality_flags` string answered
   `500 text/plain` on `POST /api/v1/research/run`** (`V2-P4-101`). `V2-P4-030` closed the
   risk-flag set and was right to — a payload writing `future-data` instead of `future_data` used

@@ -110,7 +110,13 @@ def test_the_screen_endpoint_still_refuses_a_result_whose_identifiers_do_not_mat
     tmp_path: Path,
 ) -> None:
     """The integrity check the new fields must not have loosened: a tampered confidence moves
-    `signal_id`, and the endpoint refuses rather than screening it."""
+    `signal_id`, and the endpoint refuses rather than screening it.
+
+    `V2-P4-041` made the refusal say *which* address moved and on which record; what this test
+    is for is unchanged -- the check still fires -- so it asserts the `reason` rather than the
+    flat sentence it used to be. The full shape is driven by
+    `tests/integration/test_screen_integrity_refusal_names_the_record.py`.
+    """
     client = TestClient(create_app(runtime_dir=tmp_path, clock=lambda: AS_OF))
     tampered = _serialized_result(subject="000001.SZ", confidence=0.5, risk_flags=())
     tampered["signal"]["confidence"] = 0.9
@@ -118,7 +124,8 @@ def test_the_screen_endpoint_still_refuses_a_result_whose_identifiers_do_not_mat
     response = client.post("/api/v1/screen", json={"research": [tampered], "criteria": {}})
 
     assert response.status_code == 422
-    assert response.json()["detail"] == "Research result failed integrity validation."
+    assert response.json()["detail"]["reason"] == "signal_id_mismatch"
+    assert response.json()["detail"]["subject"] == "000001.SZ"
 
 
 def test_the_screen_endpoint_accepts_a_severity_cut_by_name(tmp_path: Path) -> None:

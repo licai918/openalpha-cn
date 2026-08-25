@@ -50,14 +50,27 @@ behavior: the service orchestrates work, it is not a stored value), so every exi
 `from openalpha_cn.runtime.batch import BatchResearchTask` (and friends) keeps working.
 """
 
+from collections.abc import Mapping
 from datetime import datetime
-from typing import Literal, Self
+from typing import Final, Literal, Self, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from openalpha_cn.domain.run_request import ResearchRunRequest
 from openalpha_cn.domain.time import ensure_aware
 from openalpha_cn.domain.versioning import ContractVersions, single_version
+
+BatchItemStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
+"""The states one batch item can be in. Stated once here; `BatchTaskItem` and the listing's
+per-status census both read it, so a sixth state cannot reach one and miss the other."""
+
+BATCH_ITEM_STATUSES: Final[tuple[BatchItemStatus, ...]] = get_args(BatchItemStatus)
+"""`BatchItemStatus` as a tuple, derived rather than retyped.
+
+`BatchItemCensus` has to be **total** over these -- a listing that omitted a status would make
+"zero" and "not counted" the same answer -- and deriving the set from the type is what keeps the
+totality check from being a second hand-written list that can go stale against the first.
+"""
 
 MAX_BATCH_ITEMS = 10_000
 """Most items one batch may carry. Stated once here; `api/app.py` reads it, not a copy.
@@ -132,7 +145,7 @@ class BatchTaskItem(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     request: ResearchRunRequest
-    status: Literal["queued", "running", "succeeded", "failed", "cancelled"] = "queued"
+    status: BatchItemStatus = "queued"
     result: BatchResultRef | None = None
     error_type: str | None = Field(default=None, max_length=256)
 
@@ -183,6 +196,112 @@ class BatchResearchTask(BaseModel):
 BATCH_RESEARCH_TASK_VERSIONS: ContractVersions[BatchResearchTask] = single_version(
     "batch-research-task", BatchResearchTask
 )
+
+
+DEFAULT_BATCH_PAGE_SIZE: Final[int] = 50
+"""How many batch summaries `GET /api/v1/research/batches` answers when asked for no window.
+
+Small enough that the default answer is a page a human reads, large enough that a deployment
+running a batch a day does not paginate for a month. A default of "all of them" is what
+`V2-P4-040` was.
+"""
+
+MAX_BATCH_PAGE_SIZE: Final[int] = 500
+"""Most summaries one listing page may carry. Stated once here; `api/app.py` reads it.
+
+A summary is bounded -- no field of it grows with the batch's item count -- so this ceiling
+bounds the response in bytes as well as in rows, which is the property the pre-`V2-P4-040`
+listing did not have at any page size.
+"""
+
+
+class BatchItemCensus(BaseModel):
+    """How many of one batch's items are in each state.
+
+    Total over `BATCH_ITEM_STATUSES` on purpose, and every field defaults to zero: a caller
+    reading `items_by_status["failed"]` must never have to tell "no failures" apart from "this
+    listing did not count failures", and a census that omitted empty states would make those the
+    same answer.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    queued: int = Field(default=0, ge=0)
+    running: int = Field(default=0, ge=0)
+    succeeded: int = Field(default=0, ge=0)
+    failed: int = Field(default=0, ge=0)
+    cancelled: int = Field(default=0, ge=0)
+
+    @property
+    def total(self) -> int:
+        """Every counted item. Equals `BatchTaskSummary.item_count` by construction."""
+        return sum(getattr(self, status) for status in BATCH_ITEM_STATUSES)
+
+    @classmethod
+    def from_counts(cls, counts: Mapping[str, int]) -> "BatchItemCensus":
+        """Build from whatever states the store actually saw, absent ones counted as zero.
+
+        Unknown keys are refused rather than dropped (`extra="forbid"` does that), which is what
+        turns a store row carrying a state this contract does not model into a loud failure
+        instead of a silently short census.
+        """
+        return cls(**{status: counts.get(status, 0) for status in BATCH_ITEM_STATUSES})
+
+
+class BatchTaskSummary(BaseModel):
+    """One batch as a listing shows it: its bookkeeping, and counts instead of items.
+
+    `V2-P4-040`. Everything here is O(1) in the batch's size, which is the whole contract: the
+    listing this replaces inlined every item of every batch, so twenty whole-market batches came
+    back as 36.9 MB -- a body larger than the 8 MiB this same service refuses on the way in. The
+    items did not become unavailable, they moved to `GET /api/v1/research/batches/{batch_id}`,
+    which returns the full `BatchResearchTask` unchanged.
+
+    Deliberately not a `BatchResearchTask` with `items` omitted: a model that can be built by
+    dropping a field can also be built by *forgetting* to drop it, and the per-status census is
+    a fact the full task does not carry in any case.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    batch_id: str = Field(min_length=1, max_length=128)
+    status: Literal["queued", "running", "succeeded", "partial", "failed", "cancelled"]
+    max_concurrency: int = Field(ge=1, le=MAX_BATCH_WORKERS)
+    cancellation_requested: bool = False
+    created_at: datetime
+    updated_at: datetime
+    item_count: int = Field(ge=0)
+    items_by_status: BatchItemCensus
+
+    @field_validator("created_at", "updated_at")
+    @classmethod
+    def normalize_datetimes(cls, value: datetime) -> datetime:
+        return ensure_aware(value)
+
+    @model_validator(mode="after")
+    def validate_census_totals(self) -> Self:
+        if self.items_by_status.total != self.item_count:
+            raise ValueError(
+                f"batch item census sums to {self.items_by_status.total} against an item_count "
+                f"of {self.item_count}"
+            )
+        return self
+
+
+class BatchTaskPage(BaseModel):
+    """One window onto the batch shelf, and how big the shelf is.
+
+    `total` is the whole count rather than the window's, so a caller can size their paging
+    without walking to the end; `limit`/`offset` are echoed so a response is interpretable
+    without the request beside it.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    batches: tuple[BatchTaskSummary, ...]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1, le=MAX_BATCH_PAGE_SIZE)
+    offset: int = Field(ge=0)
 
 
 class BatchProgressEvent(BaseModel):

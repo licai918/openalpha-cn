@@ -135,7 +135,12 @@ def test_api_rejects_declared_oversized_request_body(
     )
 
     assert response.status_code == 413
-    assert response.json() == {"detail": "Request body exceeds configured limit."}
+    # `V2-P4-043`: the refusal names the knob that raises it, and both sides of the comparison.
+    detail = response.json()["detail"]
+    assert detail["reason"] == "request_too_large"
+    assert "OPENALPHA_MAX_REQUEST_BYTES" in detail["message"]
+    assert detail["declared_bytes"] == 33
+    assert detail["limit_bytes"] == 32
 
 
 def test_api_persists_and_queries_built_evidence(
@@ -253,4 +258,10 @@ def test_api_runs_research_from_structured_evidence(
         },
     )
     assert rejected.status_code == 422
-    assert rejected.json() == {"detail": "Research result failed integrity validation."}
+    # `V2-P4-041`: the refusal names which of the three content addresses moved, and on which
+    # record, instead of one sentence for all four causes.
+    detail = rejected.json()["detail"]
+    assert detail["reason"] == "signal_id_mismatch"
+    assert detail["index"] is None
+    assert detail["field"] == "research.signal.signal_id"
+    assert detail["claimed"] != detail["derived"]

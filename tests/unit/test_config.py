@@ -93,11 +93,18 @@ def _isolated_environ() -> Iterator[None]:
 
 
 def test_load_config_defaults_match_the_pre_existing_hardcoded_values() -> None:
+    """`max_request_bytes` is 32 MiB and was 8 MiB until `V2-P4-043`.
+
+    Raised because 8 MiB was below this service's own declared ceilings: a batch at exactly
+    `MAX_BATCH_ITEMS` is 9,840,054 bytes and was refused `413`, so the item ceiling `V2-P4-019`
+    set on purpose could not be reached through the route that declares it. See that field's
+    docstring in `config.py` for the three measurements.
+    """
     config = load_config()
 
     assert config.runtime_dir == Path("./runtime")
     assert config.web_dir is None
-    assert config.max_request_bytes == 8 * 1024 * 1024
+    assert config.max_request_bytes == 32 * 1024 * 1024
     assert config.host == "127.0.0.1"
     assert config.port == 8000
 

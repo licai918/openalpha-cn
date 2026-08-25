@@ -271,4 +271,10 @@ def test_the_api_refuses_a_research_result_whose_manifest_address_was_tampered_w
     )
 
     assert rejected.status_code == 422
-    assert rejected.json() == {"detail": "Research result failed integrity validation."}
+    # `V2-P4-041`: the refusal names which of the three content addresses moved, and on which
+    # record, instead of one sentence for all four causes.
+    detail = rejected.json()["detail"]
+    assert detail["reason"] == "run_manifest_id_mismatch"
+    assert detail["index"] is None
+    assert detail["field"] == "research.manifest.run_manifest_id"
+    assert detail["claimed"] != detail["derived"]
