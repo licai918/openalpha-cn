@@ -971,6 +971,12 @@ def serve(
     flag, when given, always wins; otherwise `OPENALPHA_HOST`/`OPENALPHA_PORT`
     (including a value merged in from `.env` by `main()`); otherwise the
     `127.0.0.1:8000` default `OpenAlphaConfig` declares.
+
+    `server_header=False` is `V2-P5-012`, closing the second half of audit `F102`: the
+    `Dockerfile` passed `--no-server-header` and this command did not, so one deployment of
+    the same application advertised `server: uvicorn` and the other did not -- and the one
+    that leaked is the one a developer runs. Named here rather than left to the deployment,
+    because the two deployments disagreeing was the whole finding.
     """
     try:
         config = load_config()
@@ -981,6 +987,7 @@ def serve(
         "openalpha_cn.api.app:app",
         host=host if host is not None else config.host,
         port=port if port is not None else config.port,
+        server_header=False,
     )
 
 

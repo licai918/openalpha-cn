@@ -128,19 +128,47 @@ trading month — measured `items: 115,355, bytes: 36,857,096` (36.9 MB) in 2.35
 batches already exceeded the request ceiling this same service enforces on the way *in*. If you
 were reading `items` off this route, read it off `/batches/{batch_id}` instead.
 
-### Request size: `OPENALPHA_MAX_REQUEST_BYTES` (`V2-P4-043`)
+### Request size: `OPENALPHA_MAX_REQUEST_BYTES` (`V2-P4-043`, `V2-P5-012`)
 
-A request body larger than the configured ceiling is refused `413` **before it is read**, off the
-declared `Content-Length`:
+A request body larger than the configured ceiling is refused `413`. There are two gates and the
+refusal says which one answered.
+
+**A body that declares a `Content-Length` above the ceiling is refused before it is read at
+all** — nothing is allocated, and the routes are never called:
 
 ```json
 {"detail": {
   "reason": "request_too_large",
   "message": "the request declared 41000000 bytes against a configured ceiling of 33554432. Raise OPENALPHA_MAX_REQUEST_BYTES on the server, or send fewer items per request.",
   "declared_bytes": 41000000,
+  "measured_bytes": null,
   "limit_bytes": 33554432
 }}
 ```
+
+**A body that declares no length — `Transfer-Encoding: chunked` — is metered as it arrives**
+(`V2-P5-012`). Until that row, this ceiling was read off `Content-Length` and nothing else, so a
+chunked request bypassed it entirely: measured against a 1,024-byte ceiling, a 36,000,030-byte
+chunked body was read in full and answered `422` by the JSON parser, with a `tracemalloc` peak of
+108,346,472 bytes. It is now counted chunk by chunk and reading **stops** at the ceiling:
+
+```json
+{"detail": {
+  "reason": "request_too_large",
+  "message": "the request body reached 33554433 bytes without declaring a Content-Length, against a configured ceiling of 33554432. Reading stopped there, so that number is a floor and not the body's size. Raise OPENALPHA_MAX_REQUEST_BYTES on the server, or send fewer items per request.",
+  "declared_bytes": null,
+  "measured_bytes": 33554433,
+  "limit_bytes": 33554432
+}}
+```
+
+`reason` and `limit_bytes` are the same from either gate, so a client switches on `reason`
+exactly as before. `declared_bytes` and `measured_bytes` are both always present and exactly one
+is non-null: `declared_bytes` is what you said, `measured_bytes` is where reading stopped — a
+**floor** on the body and never its size, because the rest was never asked for.
+
+One case is deliberately still not metered: a body sent to a route that never reads one (a `404`,
+or a `GET` carrying a body). Nothing is accumulated there, because nothing asks for it.
 
 The default is **33554432** bytes (32 MiB), raised from 8 MiB by `V2-P4-043`. 8 MiB was smaller
 than the ceilings this service declares elsewhere, so two of its own limits contradicted each
@@ -160,6 +188,46 @@ why the new ceiling is a factor above the measurement rather than fitted to it.
 
 `POST /api/v1/screen` now also states its own item ceiling — the same 10,000 — so one name too
 far is a `422` naming the number rather than a `413` about bytes.
+
+### What a browser sees: CORS and the response headers (`V2-P5-011`, `V2-P5-012`)
+
+Every response carries nine hardening headers, and they **replace** rather than add to whatever a
+route set:
+
+| header | value |
+|---|---|
+| `content-security-policy` | `default-src 'self'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data:; script-src 'self'; style-src 'self'; connect-src 'self'` |
+| `x-content-type-options` | `nosniff` |
+| `x-frame-options` | `DENY` |
+| `referrer-policy` | `no-referrer` |
+| `permissions-policy` | `camera=(), microphone=(), geolocation=()` |
+| `cross-origin-opener-policy` | `same-origin` |
+| `cross-origin-embedder-policy` | `require-corp` |
+| `cross-origin-resource-policy` | `same-origin` |
+| `strict-transport-security` | `max-age=31536000; includeSubDomains` |
+
+`strict-transport-security` is sent unconditionally and a user agent must ignore it over plain
+HTTP (RFC 6797 §7.2), so it does nothing on `http://127.0.0.1:8000` and is the header a
+TLS-terminating reverse proxy needs the application to emit. `preload` is deliberately absent —
+that is a near-irreversible commitment about a domain, and an operator makes it, not a library.
+
+**CORS** allows the two local Vite dev origins (`http://127.0.0.1:5173`,
+`http://localhost:5173`), the header `Content-Type`, no credentials, and the methods
+`DELETE, GET, HEAD, PATCH, POST, PUT` — which is exactly what
+`Access-Control-Allow-Methods` carries. `OPTIONS` is not among them and does not need to be: the
+preflight *is* the `OPTIONS` request, and what is checked against this list is the value of
+`Access-Control-Request-Method`. The method list is wider than the routes this
+service serves today, on purpose: advertising a method no route serves costs a `405` — this
+service's own answer — while omitting one it does serve costs a browser-level refusal the caller
+cannot see. Before `V2-P5-011` the list was `GET, POST`, and `HEAD` was already refused despite
+four `HEAD` routes existing.
+
+CORS is the **outermost** layer, so a `413` or a `400` decided before any route runs still
+carries `Access-Control-Allow-Origin`. A CORS preflight (`OPTIONS` with
+`Access-Control-Request-Method`) is answered by that layer and does not carry the hardening
+headers; it renders nothing and has no body.
+
+None of this is authentication. This service has none, and CORS restricts browsers only.
 
 ### A refused research result names the record and the identifier (`V2-P4-041`)
 
@@ -946,7 +1014,10 @@ The portfolio endpoint is intentionally stateless: callers submit the immutable
 then persist the returned `PortfolioTransition` in their own workflow. It is a
 research/backtest accounting surface, not a live-broker order endpoint.
 
-The default declared request limit is 8 MiB. Configure it with
+The declared request limit, its default, and the two gates that enforce it are stated once
+under [Request size](#request-size-openalpha_max_request_bytes-v2-p4-043-v2-p5-012); this
+paragraph deliberately no longer restates the number, because it restated a stale one for
+as long as `V2-P4-043` has been merged. Configure it with
 `OPENALPHA_MAX_REQUEST_BYTES`. The service is local-first and has no public
 multi-tenant authentication; use a TLS/authentication gateway before any
 network exposure.

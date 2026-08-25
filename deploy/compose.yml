@@ -14,7 +14,13 @@ services:
     environment:
       OPENALPHA_RUNTIME_DIR: /data
       OPENALPHA_WEB_DIR: /app/web-dist
-      OPENALPHA_MAX_REQUEST_BYTES: ${OPENALPHA_MAX_REQUEST_BYTES:-8388608}
+      # 33554432 is `OpenAlphaConfig.max_request_bytes`'s declared default, and this line
+      # is configuration rather than documentation: it *overrides* that default inside the
+      # container. `V2-P4-043` raised the default and left this line at the value it
+      # replaced, so the shipped container still refused a MAX_BATCH_ITEMS batch (9,840,054
+      # bytes, that row's own measurement) with 413. Pinned against the declared default by
+      # tests/integration/test_batch_ceilings_are_documented_where_a_caller_looks.py.
+      OPENALPHA_MAX_REQUEST_BYTES: ${OPENALPHA_MAX_REQUEST_BYTES:-33554432}
       # User-owned data provider credentials (see .env.example). Each uses a `:-`
       # default so an unset host/`.env` variable still leaves `docker compose config`
       # well-formed; Compose substitutes from the host shell environment first, then

@@ -1437,11 +1437,27 @@ TOP_LEVEL_MODULES_OUTSIDE_EVERY_PLANE_FAMILY: dict[str, str] = {
         "the way this file pins the panel plane's."
     ),
     "openalpha_cn.cli": "a face. It may reach anything it renders; that is what a face is.",
+    "openalpha_cn.job_contracts": (
+        "the durable-scheduling contract `V2-P5-010` created, and `batch_contracts`'s reason "
+        "exactly: `storage.jobs` must persist a `ScheduledJob` without reaching upward, so this "
+        "depends on `domain` only. It is deliberately not a research-plane module -- it holds no "
+        "dataset and reads no panel, and the one thing a trading-day scheduler *does* need from "
+        "the plane, the 16:30 publication rule, it is forbidden from restating: "
+        "`openalpha_cn.scheduler` asks `panel_ingest` for it instead (`V2-P4-063`, `V2-P4-114`)."
+    ),
     "openalpha_cn.config": (
         "settings. `test_repository_assets.py` owns the dotenv precedence rules, and a "
         "configuration module that could reach the planes would invert the wiring direction."
     ),
     "openalpha_cn.logging_setup": "process-wide logging configuration, imported by the faces.",
+    "openalpha_cn.scheduler": (
+        "orchestration, not a plane. It reaches `panel_ingest` for exactly two names -- "
+        "`newest_published_session` and `session_publication_instant` -- and that edge is the "
+        "point of the module rather than a leak: a scheduler that computed 16:30 for itself "
+        "would be the fifth restatement of the rule `V2-P4-063` found stated three times and "
+        "`V2-P4-114` found stated a fourth. It reads no dataset and holds no panel, so it has "
+        "nothing to put in `RESEARCH_PLANE_DATASETS`."
+    ),
     "openalpha_cn.schema_export": "a build script's entry point, not a research module.",
     "openalpha_cn.sdk": "a face, for `openalpha_cn.cli`'s reason.",
 }

@@ -43,6 +43,107 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   `runtime/backups/`. `--keep N` (default 10), `--dry-run` to list first, `.bak` files only, and
   exit `0` whether or not anything was removed.
 >>>>>>> agent-six-defects
+- **A durable scheduling primitive, where audit `F98` measured there was none** (`V2-P5-010`).
+  `openalpha_cn/job_contracts.py` (the durable shapes), `storage/jobs.py` (`SQLiteJobStore`) and
+  `openalpha_cn/scheduler.py` (`TradingDayScheduler`) give the six things `F98` enumerates: a
+  persistent job table with a next-fire-time, a lease, a per-trading-day idempotency key, a
+  catch-up policy, a calendar dependency, and crash recovery. No new runtime dependency —
+  ADR-0003's nine stand; SQLite through the existing `storage/` layer, and the lock is
+  `BEGIN IMMEDIATE` rather than a broker.
+  - **The idempotency key is the `PRIMARY KEY`**, not a check: `job_id@YYYY-MM-DD`, so a second
+    run of the same trading session is an `IntegrityError` from SQLite rather than a race two
+    processes can both win between a `SELECT` and an `INSERT`.
+  - **Crash recovery is lease expiry**, not a sweeper — a sweeper would itself need scheduling.
+    `claim()` takes an expired lease as readily as an absent one, so a process that died holding
+    the job is recovered by the next process that asks for it.
+  - **`due()` deliberately does not read `next_fire_time`.** A stored fire time is derived from a
+    calendar that changes; asking `panel_ingest.newest_published_session` — the one function that
+    owns the 16:30 `DAILY_AVAILABILITY_TIME` rule — and comparing against `last_fired_session` is
+    the only formulation that survives a holiday being announced after the fire time was written.
+    The stored column is kept as a poller's index and recomputed on every advance.
+  - **`panel_ingest.session_publication_instant`** is the one new function on the panel plane: the
+    inverse of `_sessions_published_through`, placed beside it and reading the same constant.
+    `V2-P4-063` found that rule restated three times with two disagreeing and `V2-P4-114` found a
+    fourth; a scheduler computing `time(16, 30)` for itself would have been the fifth. The two are
+    pinned against each other by a round trip over a full year at half-hourly resolution (17,520
+    instants), not against a literal.
+  - **Measured while building this, and it decided the shape**: on a *fresh* `state.sqlite3`,
+    `create_app()` reaches `schema_version: 2` and stops — migration 3
+    (`demo_add_runs_archived_at`) raises `MigrationNotYetApplicable` because `runs` does not exist
+    yet, and `run_migrations` breaks out of the loop on that, so **migrations 4 through 8 never
+    run on a new database**. A ninth migration adding these tables would never have run either.
+    `CREATE TABLE IF NOT EXISTS` in the owning store is the only construction that works on both a
+    new database and an old one, which is what `_baseline_apply`'s docstring already says.
+  - **Not yet done, and stated rather than implied**: these three modules have no CLI command, no
+    REST route and no entry in `build_storage`. Nothing in the shipped product calls them yet, so
+    no product-surface claim is made for them here; a later row has to give them a face.
+- **The request-body ceiling is now metered on the way in, not read off a header** (`V2-P5-012`,
+  audit `F100`). It read `Content-Length` and nothing else, so a chunked request bypassed it
+  entirely. Measured on `c847295` against a deliberately tiny 1,024-byte ceiling: a chunked
+  `POST /api/v1/research/batches` of **36,000,030 bytes** was answered `422 json_invalid` -- the
+  JSON *parser's* verdict, reachable only after the whole body had been read -- with a
+  `tracemalloc` peak of **108,346,472 bytes**, three times the body, because Starlette
+  accumulates the chunks in a list and then joins them. Bodies with no declared length are now
+  counted chunk by chunk and reading **stops** at the ceiling; measured through
+  `httpx2.ASGITransport`, which pulls one chunk per `receive`, the fix reads **1 of 400 chunks**
+  (100 KB instead of 40 MB) before answering `413`. A declared `Content-Length` above the ceiling
+  is still refused before anything is read at all. The refusal carries the same `reason` and
+  `limit_bytes` from either gate and adds `measured_bytes` beside `declared_bytes`, exactly one of
+  which is ever non-null -- `measured_bytes` is a **floor** on the body, never its size, because
+  the rest was never asked for. One case is deliberately still unmetered and is documented as
+  such: a body sent to a route that never reads one.
+- **The three browser hardening headers audit `F102` named** (`V2-P5-012`):
+  `Strict-Transport-Security: max-age=31536000; includeSubDomains` (without `preload`, which is a
+  commitment about a domain that a library must not make on an operator's behalf),
+  `Cross-Origin-Embedder-Policy: require-corp` and `Cross-Origin-Resource-Policy: same-origin`.
+  The same finding's second half is fixed with them: the headers were **appended** to whatever a
+  response already carried, so a route setting `x-frame-options: SAMEORIGIN` produced two raw
+  header lines and a browser read `SAMEORIGIN, DENY` (measured). They are replaced by name now.
+- **`openalpha serve` no longer advertises `server: uvicorn`** (`V2-P5-012`, `F102`).
+  `--no-server-header` was passed by the `Dockerfile` and not by the command a developer runs, so
+  one deployment of the same application leaked its server software and the other did not.
+- **CORS admits every method this service serves, plus the three v2 will add** (`V2-P5-011`,
+  audit `F101`). The list was `["GET", "POST"]`, written by hand, and the roadmap row states the
+  cost as a v2 risk -- a later `PUT`/`DELETE`/`PATCH` route refused at the browser. **Measured, it
+  had already fallen behind the route table it guards**: a preflight naming `HEAD` answered
+  `400 Disallowed CORS method` while the application declares four `HEAD` routes. The allowed
+  origins (the two local Vite dev servers) and `allow_credentials=False` are unchanged, and both
+  are now pinned by tests, because widening methods is only safe while those two do not move.
+  The guard against a third divergence reads the methods off the running application rather than
+  restating them. `docs/api/http.md` now states the method list and all nine response headers, and
+  two tests read the document and the live response together so the table cannot drift — which is
+  how a false claim written into that document during this change was caught: `Starlette` does
+  **not** append `OPTIONS` to `Access-Control-Allow-Methods` (measured on 1.3.1, it carries
+  exactly the list it is given), so `allow_methods=["*"]` and the explicit tuple are *not*
+  observationally identical the way the first draft of this code's docstring asserted.
+- **`CORSMiddleware` is now the outer of the two middlewares.** While `SecurityHeadersMiddleware`
+  sat outside it, every refusal that middleware short-circuits -- the `413` `V2-P4-043` worded so
+  carefully, naming the number exceeded and the variable that raises it -- skipped the layer that
+  adds `Access-Control-Allow-Origin`, so a cross-origin browser caller saw an opaque network
+  failure instead. The one thing given up is the hardening headers on a CORS *preflight*
+  response, which renders nothing and carries no body.
+- **`V2-P4-043` raised the request ceiling in `config.py` and nowhere it ships** — found while
+  documenting that ceiling for `V2-P5-012`, and this one is not a stale sentence. `Dockerfile`
+  carried `OPENALPHA_MAX_REQUEST_BYTES=8388608` and `deploy/compose.yml` carried
+  `${OPENALPHA_MAX_REQUEST_BYTES:-8388608}`; both are **configuration that overrides the
+  default**, so the shipped container ran at 8 MiB. Measured: with that environment,
+  `load_config().max_request_bytes` is `8388608`, and `V2-P4-043`'s own measurement of a
+  `MAX_BATCH_ITEMS` batch — **9,840,054 bytes** — is still `413`. The row exists to make that
+  batch postable and it was postable nowhere the product is deployed. Both files, the deployment
+  doc's table, and a second contradicting sentence in `docs/api/http.md` (which said 8 MiB two
+  hundred lines after the same file said 33554432) are corrected, and
+  `test_every_deployment_that_sets_the_ceiling_sets_the_one_this_service_declares` now reads
+  every byte count beside `OPENALPHA_MAX_REQUEST_BYTES` in the four files that set it and
+  requires each to equal `OpenAlphaConfig`'s **declared** default. That test also falsifies a
+  claim its neighbour made: `test_the_request_body_ceiling_is_named_in_the_http_doc_with_its_variable`
+  says in its docstring that "a deployment-doc number that fell behind `config.max_request_bytes`
+  goes red here", and it never read the deployment doc at all.
+- **The README's own API landscape diagram said `8 MiB 默认请求上限`**, and has since
+  `V2-P4-043` raised the default to 32 MiB -- a fourth restatement of a number that lives in
+  `config.py`, and the one that was wrong. `scripts/generate_api_relationship_diagrams.py` now
+  reads the **declared** default off `OpenAlphaConfig.model_fields` (declared, not effective, so
+  the generated asset never depends on the environment of whoever regenerates it), and
+  `openalpha-api-01-landscape.svg` is regenerated: one line changed.
 - **A model plane reachable from a command line, and a prediction store something can fill.**
   `openalpha model evaluate` fits one declaration once per walk-forward fold and reports the
   five statistics `V2-P4-014` measures; `openalpha model daily-run` fits on the outcomes that

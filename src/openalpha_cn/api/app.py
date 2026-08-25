@@ -276,10 +276,81 @@ class ReportApiRequest(BaseModel):
     research: dict[str, Any]
 
 
-class SecurityHeadersMiddleware:
-    """Apply browser hardening headers and reject declared oversized bodies."""
+CORS_ALLOWED_ORIGINS: Final[tuple[str, ...]] = (
+    "http://127.0.0.1:5173",
+    "http://localhost:5173",
+)
+"""The only two origins a browser may talk to this service from.
 
-    _HEADERS = (
+Both are the local Vite dev server. This is the part of the CORS configuration that actually
+decides anything, and `V2-P5-011` deliberately did not touch it -- see `CORS_ALLOWED_METHODS`.
+"""
+
+CORS_ALLOWED_METHODS: Final[tuple[str, ...]] = (
+    "DELETE",
+    "GET",
+    "HEAD",
+    "PATCH",
+    "POST",
+    "PUT",
+)
+"""Every HTTP method a browser may preflight against an allowed origin (`V2-P5-011`).
+
+This was `["GET", "POST"]`, written by hand, and the roadmap row states the cost as a v2 risk: a
+`PUT`/`DELETE`/`PATCH` route added later would be refused at the browser before FastAPI saw it.
+
+**Measured on `c847295`, the hand-written list had already fallen behind the route table.** A
+preflight naming `HEAD` answered `400 Disallowed CORS method` while the application declared four
+`HEAD` routes -- FastAPI adds one to every `GET`. Nothing broke, because `HEAD` is a
+CORS-safelisted method and no browser preflights it, but the divergence is the point: two
+statements of "what this service serves" with nothing keeping them in step.
+
+**Why a fixed list rather than deriving it from `application.routes`.** CORS is not
+authorization. It tells a *browser* which cross-origin requests it may let a page make; it stops
+nothing else, and this service authenticates nobody (audit `F101`). Advertising a method no route
+serves costs a `405` instead of a browser-level refusal, which is the better failure -- the caller
+sees the service's own answer. What must not drift is the other direction, a served method that
+is *not* advertised, and that is pinned by
+`tests/integration/test_cors_method_surface.py::test_every_method_the_route_table_declares_survives_a_preflight`,
+which reads the methods off the running application.
+
+**`OPTIONS` is absent deliberately, and not for the reason first written here.** An earlier
+version of this docstring said Starlette "appends `OPTIONS` to what it advertises"; measured on
+`starlette 1.3.1`, **it does not** -- `Access-Control-Allow-Methods` is exactly the list it is
+given. `OPTIONS` is omitted because a browser never needs it advertised: the preflight *is* the
+`OPTIONS` request, and what Starlette checks against this list is the value of
+`Access-Control-Request-Method`, never `OPTIONS` itself.
+
+That measurement also falsifies the second claim that stood here, that this tuple is
+observationally identical to `["*"]`. It is not: `"*"` expands to Starlette's `ALL_METHODS`,
+which *is* these six plus `OPTIONS`, so the two advertise different strings --
+`tests/integration/test_cors_method_surface.py::
+test_the_documented_method_list_is_the_one_a_preflight_is_told` tells them apart, and found this
+error by failing on the document written from the same false belief.
+"""
+
+HSTS_MAX_AGE_SECONDS: Final[int] = 31_536_000
+"""One year, the value HSTS preload requires and the shortest one worth sending (`V2-P5-012`).
+
+`preload` itself is **not** in the header. Submitting an origin to the browser preload list is a
+commitment the operator makes about a domain, and it is close to irreversible; a library that
+made it on their behalf would be making it for a domain it has never seen. `includeSubDomains` is
+sent because the header is inert unless the deployment already terminates TLS, and a deployment
+that does is a deployment that owns its subdomains.
+
+Sent unconditionally rather than only over TLS: a user agent must ignore this header when the
+transport is not secure (RFC 6797 s7.2), so on `http://127.0.0.1:8000` it is a no-op, while
+behind the TLS-terminating reverse proxy `docs/deployment/production.zh-CN.md` requires it is the
+only place the header can come from.
+"""
+
+
+def _hardening_headers() -> tuple[tuple[bytes, bytes], ...]:
+    """The response headers every answer this service gives must carry.
+
+    A function rather than a literal so `HSTS_MAX_AGE_SECONDS` is read from one place.
+    """
+    return (
         (
             b"content-security-policy",
             (
@@ -293,11 +364,134 @@ class SecurityHeadersMiddleware:
         (b"referrer-policy", b"no-referrer"),
         (b"permissions-policy", b"camera=(), microphone=(), geolocation=()"),
         (b"cross-origin-opener-policy", b"same-origin"),
+        (b"cross-origin-embedder-policy", b"require-corp"),
+        (b"cross-origin-resource-policy", b"same-origin"),
+        (
+            b"strict-transport-security",
+            f"max-age={HSTS_MAX_AGE_SECONDS}; includeSubDomains".encode("ascii"),
+        ),
     )
+
+
+async def _no_body_receive() -> Message:
+    """A `receive` for a response that is sent instead of, not after, reading the request.
+
+    Returns a disconnect rather than the real `receive`, so a refusal issued because the body was
+    too large can never itself pull another chunk of that body off the wire.
+    """
+    return {"type": "http.disconnect"}
+
+
+class SecurityHeadersMiddleware:
+    """Apply browser hardening headers and meter the request body as it arrives.
+
+    ## The body meter (`V2-P5-012`)
+
+    This used to read `Content-Length` and nothing else, which audit `F100` records and which
+    **a measurement on `c847295` confirms is a complete bypass**: against a deliberately tiny
+    1,024-byte ceiling, a chunked `POST /api/v1/research/batches` of **36,000,030 bytes** was
+    answered `422 json_invalid` -- a *parser* error, reached only because the whole body had
+    already been read. `tracemalloc` measured a **108,346,472-byte** peak for that one request,
+    three times the body, because Starlette accumulates the chunks in a list and then joins them.
+
+    So there are now two gates, and they answer different questions:
+
+    - **Declared.** A `Content-Length` above the ceiling is refused before the application is
+      called at all. Unchanged, and still the cheapest refusal available -- nothing is read.
+    - **Streamed.** Every `http.request` chunk the application asks for is counted, and the
+      moment the running total crosses the ceiling the stream is cut: the middleware stops
+      calling `receive`, so the transport stops being asked for more, and the body the
+      application holds is bounded by the ceiling plus the one chunk that crossed it.
+
+    Cutting the stream means the application sees a body that ends early, and for a JSON route
+    that is a `422`. That answer would be a lie about *why* the request failed, so the refusal is
+    swapped at `http.response.start`: whatever the application decided, the truth is that the
+    body exceeded the ceiling, and `413` is what the caller is told. The swap is skipped if the
+    response had already started before the overrun was seen, since a second response start is
+    not something this middleware may send -- no route in this application streams a response
+    before reading its body, but the guard costs one comparison.
+
+    **What is deliberately still not metered**: a body sent to a route that never reads it (a
+    `404`, or a `GET` carrying a body). Nothing accumulates in that case -- the application never
+    asks for a chunk, so the transport's own flow control holds the connection -- and the harm
+    this row exists to close is memory, not arrival.
+
+    ## The headers
+
+    `V2-P5-012` adds the three audit `F102` names -- `Strict-Transport-Security`,
+    `Cross-Origin-Embedder-Policy`, `Cross-Origin-Resource-Policy` -- and fixes the same
+    finding's second half: the headers were **appended** to whatever the response already
+    carried, so a route setting `x-frame-options: SAMEORIGIN` produced
+    `x-frame-options: SAMEORIGIN, DENY` (measured on `c847295`, two raw header lines). They are
+    now replaced by name, which is what makes them a service-wide policy rather than a
+    suggestion any route can add to.
+    """
+
+    _HEADERS = _hardening_headers()
+    _MANAGED_NAMES = frozenset(name for name, _ in _HEADERS)
 
     def __init__(self, app: ASGIApp, *, max_request_bytes: int) -> None:
         self.app = app
         self.max_request_bytes = max_request_bytes
+
+    def _hardened(self, existing: Sequence[tuple[bytes, bytes]]) -> list[tuple[bytes, bytes]]:
+        """`existing` with every header this service owns replaced rather than added to.
+
+        Replacement is `V2-P4`/`F102`'s second half: appending let a route contribute a second
+        value for a policy header, and a browser reading `x-frame-options: SAMEORIGIN, DENY`
+        has been handed a policy this service never chose.
+        """
+        kept = [
+            (name, value) for name, value in existing if name.lower() not in self._MANAGED_NAMES
+        ]
+        return [*kept, *self._HEADERS]
+
+    async def _refuse(self, scope: Scope, send: Send, response: JSONResponse) -> None:
+        """Send `response` in place of the application's, still fully hardened."""
+
+        async def hardened(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                message = {**message, "headers": self._hardened(message.get("headers", ()))}
+            await send(message)
+
+        await response(scope, _no_body_receive, hardened)
+
+    def _too_large(self, *, declared: int | None, measured: int | None) -> JSONResponse:
+        """The one `413` this middleware issues, from either gate.
+
+        `reason` and `limit_bytes` are identical across the two, because `docs/api/http.md`
+        makes `detail.reason` the key a client switches on and a caller who exceeded the ceiling
+        exceeded the same ceiling either way. `declared_bytes` and `measured_bytes` are both
+        always present and exactly one is non-null, which is what tells the two gates apart:
+        `declared_bytes` means "you said so and nothing was read"; `measured_bytes` means "you
+        declared nothing, and this is where reading stopped" -- a floor on the body, never its
+        size, because the rest was never asked for.
+        """
+        if declared is not None:
+            message = (
+                f"the request declared {declared} bytes against a configured ceiling of "
+                f"{self.max_request_bytes}. Raise OPENALPHA_MAX_REQUEST_BYTES on the server, "
+                "or send fewer items per request."
+            )
+        else:
+            message = (
+                f"the request body reached {measured} bytes without declaring a Content-Length, "
+                f"against a configured ceiling of {self.max_request_bytes}. Reading stopped "
+                "there, so that number is a floor and not the body's size. Raise "
+                "OPENALPHA_MAX_REQUEST_BYTES on the server, or send fewer items per request."
+            )
+        return JSONResponse(
+            status_code=413,
+            content={
+                "detail": {
+                    "reason": "request_too_large",
+                    "message": message,
+                    "declared_bytes": declared,
+                    "measured_bytes": measured,
+                    "limit_bytes": self.max_request_bytes,
+                }
+            },
+        )
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -310,38 +504,56 @@ class SecurityHeadersMiddleware:
             try:
                 content_length = int(raw_length)
             except ValueError:
-                response = JSONResponse(
-                    status_code=400,
-                    content={"detail": "Invalid Content-Length header."},
+                await self._refuse(
+                    scope,
+                    send,
+                    JSONResponse(
+                        status_code=400,
+                        content={"detail": "Invalid Content-Length header."},
+                    ),
                 )
-                await response(scope, receive, send)
                 return
             if content_length > self.max_request_bytes:
-                response = JSONResponse(
-                    status_code=413,
-                    content={
-                        "detail": {
-                            "reason": "request_too_large",
-                            "message": (
-                                f"the request declared {content_length} bytes against a "
-                                f"configured ceiling of {self.max_request_bytes}. Raise "
-                                "OPENALPHA_MAX_REQUEST_BYTES on the server, or send fewer "
-                                "items per request."
-                            ),
-                            "declared_bytes": content_length,
-                            "limit_bytes": self.max_request_bytes,
-                        }
-                    },
+                await self._refuse(
+                    scope, send, self._too_large(declared=content_length, measured=None)
                 )
-                await response(scope, receive, send)
                 return
 
-        async def send_with_security_headers(message: Message) -> None:
+        received = 0
+        overrun = False
+        started = False
+        swallowing = False
+
+        async def metered_receive() -> Message:
+            nonlocal received, overrun
+            message = await receive()
+            if message["type"] != "http.request":
+                return message
+            received += len(message.get("body", b""))
+            if received > self.max_request_bytes:
+                overrun = True
+                # Cut the stream here. `receive` is not called again, so the transport is never
+                # asked for the rest, and the application holds at most one chunk past the
+                # ceiling instead of the whole body.
+                return {"type": "http.request", "body": b"", "more_body": False}
+            return message
+
+        async def hardened_send(message: Message) -> None:
+            nonlocal started, swallowing
             if message["type"] == "http.response.start":
-                message["headers"] = [*message.get("headers", ()), *self._HEADERS]
+                if overrun and not started:
+                    swallowing = True
+                    await self._refuse(
+                        scope, send, self._too_large(declared=None, measured=received)
+                    )
+                    return
+                started = True
+                message = {**message, "headers": self._hardened(message.get("headers", ()))}
+            elif swallowing:
+                return
             await send(message)
 
-        await self.app(scope, receive, send_with_security_headers)
+        await self.app(scope, metered_receive, hardened_send)
 
 
 class ResearchIntegrityError(ValueError):
@@ -1435,16 +1647,29 @@ def create_app(
         version=__version__,
         description="Evidence-traceable, point-in-time A-share research.",
     )
-    application.add_middleware(
-        CORSMiddleware,
-        allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
-        allow_credentials=False,
-        allow_methods=["GET", "POST"],
-        allow_headers=["Content-Type"],
-    )
+    # Added first, so it is the *inner* of the two: Starlette wraps `user_middleware[0]`
+    # outermost and `add_middleware` inserts at position 0. The order matters and it is not
+    # the one this file had. `SecurityHeadersMiddleware` short-circuits an oversized body, and
+    # while it was outermost that `413` never passed through the CORS layer -- so a browser
+    # asking cross-origin got an opaque network failure instead of the refusal this service
+    # went to some trouble to word (`V2-P4-043`). With CORS outermost, every refusal below it
+    # carries `Access-Control-Allow-Origin` and a browser can read it.
+    #
+    # The one thing CORS-outermost gives up is the hardening headers on a *preflight*
+    # response, which Starlette answers itself without calling inward. A preflight carries no
+    # body and renders nothing, so there is nothing for a content policy to protect; every
+    # response that a browser actually surfaces still comes back through
+    # `SecurityHeadersMiddleware`.
     application.add_middleware(
         SecurityHeadersMiddleware,
         max_request_bytes=request_limit,
+    )
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(CORS_ALLOWED_ORIGINS),
+        allow_credentials=False,
+        allow_methods=list(CORS_ALLOWED_METHODS),
+        allow_headers=["Content-Type"],
     )
 
     @application.get("/health")

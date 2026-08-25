@@ -20,6 +20,7 @@ behaviour cannot drift apart without one of these going red.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
@@ -29,7 +30,7 @@ from fastapi.testclient import TestClient
 
 from openalpha_cn.api.app import create_app
 from openalpha_cn.batch_contracts import MAX_BATCH_ITEMS, MAX_BATCH_WORKERS
-from openalpha_cn.config import load_config
+from openalpha_cn.config import OpenAlphaConfig, load_config
 
 ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 HTTP_DOC: Final[Path] = ROOT / "docs" / "api" / "http.md"
@@ -137,3 +138,75 @@ def test_the_request_body_ceiling_is_named_in_the_http_doc_with_its_variable(
     assert "OPENALPHA_MAX_REQUEST_BYTES" in http_doc
     assert "413" in http_doc
     assert str(load_config().max_request_bytes) in http_doc
+
+
+DEPLOYMENTS_THAT_SET_THE_CEILING: Final[tuple[str, ...]] = (
+    "Dockerfile",
+    "deploy/compose.yml",
+    ".env.example",
+    "docs/deployment/production.zh-CN.md",
+)
+"""Every file that names `OPENALPHA_MAX_REQUEST_BYTES` beside a byte count.
+
+The first two are **not documentation**. They are `ENV` and `environment:` entries, so they
+*override* whatever `config.py` declares -- which is why a stale number there is a live defect
+and not a stale sentence. `docs/api/http.md` is excluded on purpose: it names the variable beside
+several other numbers (a `41000000` in a refusal example, `10000` items), and a rule that every
+long number near the variable equals the ceiling is false of prose by construction.
+"""
+
+
+def test_every_deployment_that_sets_the_ceiling_sets_the_one_this_service_declares() -> None:
+    """`V2-P4-043` raised the default in `config.py` and three artefacts kept the old number.
+
+    **Measured on `c847295`.** `OpenAlphaConfig` declares `33554432`; `Dockerfile` carried
+    `OPENALPHA_MAX_REQUEST_BYTES=8388608`, `deploy/compose.yml` carried
+    `${OPENALPHA_MAX_REQUEST_BYTES:-8388608}`, and the deployment doc's table said `8388608`. The
+    first two are configuration, so the *shipped container ran at 8 MiB* -- and with that value
+    `load_config().max_request_bytes` is `8388608`, against which `V2-P4-043`'s own measurement of
+    a `MAX_BATCH_ITEMS` batch, **9,840,054 bytes**, is still `413`. The row that exists to make
+    that batch postable did not make it postable anywhere it ships.
+
+    `test_the_request_body_ceiling_is_named_in_the_http_doc_with_its_variable` claims in its own
+    docstring that "a deployment-doc number that fell behind `config.max_request_bytes` goes red
+    here"; that is **false** and this test is why it now is not -- that one reads only
+    `docs/api/http.md`, and asserts the live number is *present* rather than that no other number
+    contradicts it, so the deployment doc and both container files were outside everything.
+
+    Read against the **declared** default rather than `load_config()`: a developer with
+    `OPENALPHA_MAX_REQUEST_BYTES` exported would otherwise make this test agree with their shell
+    instead of with the repository.
+    """
+    declared = int(OpenAlphaConfig.model_fields["max_request_bytes"].default)
+    for name in DEPLOYMENTS_THAT_SET_THE_CEILING:
+        path = ROOT / name
+        found: list[str] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if "OPENALPHA_MAX_REQUEST_BYTES" not in line:
+                continue
+            found.extend(re.findall(r"\d{4,}", line))
+        assert found, f"{name} no longer states a byte count for the ceiling"
+        assert {int(number) for number in found} == {declared}, (
+            f"{name} states {sorted(set(found))} for OPENALPHA_MAX_REQUEST_BYTES and this "
+            f"service declares {declared}. The container files are configuration, not prose: a "
+            f"stale number there is the ceiling the deployment actually runs with."
+        )
+
+
+def test_the_shipped_container_can_carry_a_whole_market_batch() -> None:
+    """The consequence, asserted rather than left to the reader of the number.
+
+    The measurement is `V2-P4-043`'s own: one evidence snapshot per request, a
+    `MAX_BATCH_ITEMS` batch is 9,840,054 bytes. What this asserts is that the ceiling the
+    container is configured with clears it -- which is the sentence the row's fix was for, and
+    which was false of every shipped deployment until `V2-P5-012`.
+    """
+    measured_whole_market_batch_bytes = 9_840_054
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    configured = int(re.findall(r"OPENALPHA_MAX_REQUEST_BYTES=(\d+)", dockerfile)[0])
+
+    assert configured > measured_whole_market_batch_bytes, (
+        f"the container is configured at {configured} bytes and a batch at the ceiling this "
+        f"service declares measured {measured_whole_market_batch_bytes}"
+    )
+    assert configured >= MAX_BATCH_ITEMS, "sanity: the ceiling is bytes, not items"
