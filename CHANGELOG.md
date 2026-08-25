@@ -267,6 +267,92 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **The offline guard shadowed a class, not a surface; it is an audit hook now** (`V2-P4-105`).
+  `tests/offline_guard.py` shadowed four names on `socket.socket` — the Python *wrapper*, which
+  inherits every one of them from the C `_socket.socket` and defines none of its own. `import
+  _socket` is one line, and from inside a non-e2e test under the autouse fixture, loopback only,
+  three probes walked straight out: `_socket.socket` `connect`+`sendall` delivered
+  `b'ESCAPED-TCP'`, `_socket.socket.sendto` returned 11 and the listener received
+  `b'ESCAPED-UDP'`, and — needing no fresh class at all — a **guarded** socket's own `detach()`ed
+  file descriptor re-wrapped in `_socket.socket` delivered `b'ESCAPED-DETACH'`. The test that was
+  supposed to close the surface asserted over `vars(socket.socket)` and is structurally blind to
+  all three. The row's preferred repair, widening the shadow onto the base class, was measured and
+  **cannot be done**: `setattr(_socket.socket, "connect", …)` raises `TypeError: cannot set
+  'connect' attribute of immutable type '_socket.socket'`, and the C class is reachable by too
+  many spellings to hold by name (`__bases__[0]`, `__mro__[1]`, `type(sock).__mro__[1]`). So the
+  guard moved *below* the class graph instead of across it: a PEP 578 audit hook on
+  `socket.connect`, `socket.sendto` and `socket.sendmsg`, raised inside `_socket`'s own C code, so
+  a caller reaches them whichever class object it got. Narrowing the claim to "outbound TCP"
+  stayed refused for `V2-P4-039`'s reason. Three events and not four is a measurement: CPython
+  raises `socket.connect` for `connect_ex` too, and there is no `socket.connect_ex` event. The
+  price is stated rather than hidden — an audit hook can never be uninstalled, so `_depth` is what
+  turns it on and an e2e test runs with it installed and inert; the compensation is that
+  `socket.socket` is now never mutated at all, so the `delattr` a mutation could once skip does
+  not exist. Overhead is below this suite's noise (`tests/unit` 33.58s with, 35.49s without). The
+  closure argument for `send`/`sendall`/`sendfile` is now driven over the C class rather than
+  asserted about a class dict: connect is refused, `sendall` fails as an unconnected socket fails,
+  and the loopback listener receives nothing. DNS stays outside the guard and is **not** quietly
+  swept in — a child interpreter measures that resolving a name raises the declared event and no
+  guarded one — and one new limit is declared: code that reaches the kernel without passing
+  through `_socket` (`ctypes.CDLL(None).connect(…)`) raises no event, which is the same class of
+  deliberate evasion as a child process. Restoration is now observed end to end in a child
+  process: refused inside the block, delivered after it.
+
+- **The content-address audit disclosed one evasion where there were three** (`V2-P4-106`).
+  `V2-P4-037` keyed on the literal `24` written at a slice and disclosed `hexdigest()[:_WIDTH]`.
+  Two more were found, neither disclosed, each minting a valid `sgs_<24 hex>` and each violating
+  all three canonicalisation keywords. Measured on that module alone: the control
+  `sha256(c).hexdigest()[:24]` **2 failed**; `[:_WIDTH]` **39 passed**;
+  `sha256(c).digest()[:12].hex()` **39 passed**; `blake2b(c, digest_size=12).hexdigest()`, which
+  has no slice anywhere, **39 passed**. The third settles it — same hash function, same bytes, and
+  it minted the byte-identical address the control did (`sgs_2d711642b726b04401627ca9`), so it is
+  not a loophole with a different meaning but the same mint with one token moved. The extractor was
+  widened rather than the disclosure: it no longer looks for a slice, for `24`, or for `sha256` by
+  name, but finds **every `hashlib` constructor call under `src/`** and sorts each by whether its
+  digest is *narrowed* below the algorithm's full width — a subscript on `digest()`/`hexdigest()`
+  whatever is in the brackets, a length argument to either (`shake_128(…).hexdigest(12)`, a third
+  spelling added as a probe), or `digest_size=`/`digest_length=`/`dklen=` on the constructor.
+  `037`'s reason for not widening — that it would sweep in the plain 64-hex checksums — is answered
+  by construction rather than by a skip list: those are declared in their own equality-pinned table
+  and it is the narrowing *measurement*, not a name, that decides which table a site belongs to, so
+  a mint parked among the checksums is red and a checksum that starts truncating is red. Two of the
+  row's own numbers moved: "seven checksums" is right about calls and off by one about functions —
+  seven full-width `hexdigest()` calls in **six** functions, because
+  `ResearchEngine._load_or_start_recovery` hashes twice — and the whole tree measures **14 sites,
+  15 calls, 8 mints + 6 checksum functions**. `DIGESTS_PER_SITE` records the one two-hash site and
+  closes the direction two function-keyed tables cannot see: a second mint added *inside* a function
+  that already hashes. The extractor carries its own test, run over source the module writes itself
+  and `exec`s to prove each probe really does mint an address the live pattern accepts.
+
+- **The threshold-2 risk-flag audit fell to one broken literal; half closed, half disclosed by
+  name** (`V2-P4-107`). In `decisions/risk.py`, `frozenset({"future" "_data", "look_ahead" +
+  "_violation"})` passed (**1 passed**): adjacent literals fold at parse time and *were* caught,
+  explicit `+` is an `ast.BinOp` whose halves are each a non-name and was not — and the `blocked`
+  band has exactly two members, so a regressing `_blocking_flags` only ever needed one literal
+  broken to hide. All four spellings were reproduced: written out **1 failed**, implicit **1
+  failed**, `+` **9 passed**, `"".join([…])` **9 passed**. `+` is folded now, and the reason is
+  stated rather than dressed up as closing the class: it removes a difference that was an accident
+  of where CPython folds constants, not a line anybody drew. The rest of the class is disclosed
+  **specifically and executably** — `KNOWN_RUNTIME_ASSEMBLY_EVASION` holds the source, not prose,
+  and a test drives all three spellings through the real extractor, requiring the first two to be
+  seen and `"".join([…])` **not** to be; it goes red the day somebody closes the class, which is
+  the right signal. It is deliberately not a `KNOWN_*` registry entry: all thirty-two registries
+  are limitations of the shipped product declared in `src/`, and this is a limitation of a test —
+  the precedent is `037`'s own disclosure, living in the module that owns the audit, except that
+  this one is executable and so cannot rot into a sentence that used to be true.
+  `REGISTRY_ENTRY_COUNTS` is untouched. The identical helper duplicated in
+  `tests/unit/domain/test_run_mode.py` carried the identical hole and was fixed and covered too.
+  Two more of this repository's sentences were falsified on the way: the helper's claim that
+  counting docstrings "would make every one of those modules an offender" is false on this tree —
+  the comparison is exact equality between a whole `ast.Constant` and a flag name, a docstring is
+  one long constant that never equals `"future_data"`, and counting docstrings changes neither
+  audit's answer on **any** module of `src/`; the filter is kept for the case that would match (a
+  docstring that *is* a flag name) and now has a test that drives it, because it was unexercised
+  code carrying a justification the tree does not support. And `DECLARATION_THRESHOLD` is lifted
+  out of the comparison and named, because the threshold *is* all of `V2-P4-030` and nothing
+  pinned it: `domain/risk_flag.py` spells all five names and satisfies any threshold at all, so a
+  threshold that drifted upward left the suite green.
+
 - **Nothing stopped a second content-address canonicalisation; now an AST audit does**
   (`V2-P4-037`). `domain/_identity.py` says every identity goes through `stable_model_id`, and
   that a second spelling of "canonical" would put two things in play whose difference is

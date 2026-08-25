@@ -274,14 +274,17 @@ def bar() -> Callable[..., MarketBar]:
 # The fixture below turns it into a property of the run. Its limits, stated rather than
 # implied:
 #
-#   - It refuses `GUARDED_SOCKET_METHODS` on `AF_INET`/`AF_INET6` sockets **in this process**. A
+#   - It refuses `GUARDED_AUDIT_EVENTS` on `AF_INET`/`AF_INET6` sockets **in this process**. A
 #     child process (`subprocess`, `multiprocessing`) gets a fresh interpreter and is not
 #     guarded; `tests/unit/test_repository_assets.py` shells out to `git` and
 #     `tests/integration/storage/test_migrations.py` spawns a writer, and neither is a network
 #     call. `tests/e2e/` reaches Tushare exactly this way, through the real `openalpha` binary.
-#   - It does not block name resolution. `getaddrinfo` alone transfers nothing, and refusing it
-#     would break `socket.getaddrinfo("localhost", ...)`-style calls inside the standard
-#     library that never go on to connect.
+#   - It does not intercept name resolution. `getaddrinfo` alone transfers nothing, and refusing
+#     it would break `socket.getaddrinfo("localhost", ...)`-style calls inside the standard
+#     library that never go on to connect. This limit is unchanged by `V2-P4-105` and is not
+#     quietly narrowed by it: `offline_guard.UNGUARDED_RESOLUTION_EVENT` names the event that is
+#     deliberately absent, and `tests/unit/test_offline_suite.py::
+#     test_name_resolution_is_outside_the_guard_and_stays_outside` asserts it stays absent.
 #   - `AF_UNIX` and every other family are left alone: a local socket is not the network, and
 #     refusing one would be a guess about what a future test needs rather than a rule about
 #     what this one forbids.
@@ -290,10 +293,21 @@ def bar() -> Callable[..., MarketBar]:
 #     would have to decide which addresses are the network, and `127.0.0.1` is the answer a
 #     test reaches for when it wants to be sure -- which is exactly the reasoning that let the
 #     `sendto` hole `V2-P4-039` filed look harmless.
+#   - It refuses what goes through `_socket`, which is every socket CPython itself opens, and it
+#     is **not** a sandbox. Code that reaches the kernel without passing through the socket
+#     module -- `ctypes.CDLL(None).connect(...)` is the short spelling -- raises no audit event
+#     and is not seen. That is the same class of limit as the child process above: it is
+#     deliberate evasion rather than the drift this guard exists to catch, and no in-process
+#     mechanism available to a test suite closes it.
 #
-# `V2-P4-039` widened the first limit from `connect`/`connect_ex` to the four names in
-# `GUARDED_SOCKET_METHODS`: the pair that opens a connection and the pair that transmits
-# without one. The docstring there carries the closure argument and the measurement.
+# `V2-P4-039` widened the first limit from `connect`/`connect_ex` to four method names, and
+# `V2-P4-105` moved it off method names altogether. Shadowing names on `socket.socket` guarded
+# the Python *wrapper* class, which inherits all four from the C `_socket.socket` and defines
+# none of them -- so `import _socket` walked straight out, as did re-wrapping a guarded socket's
+# own `detach()`ed file descriptor. Widening the shadow onto the base class is impossible
+# (`_socket.socket` is an immutable extension type), so the guard is a PEP 578 audit hook and
+# sits *below* the class graph instead of spreading across it. `offline_guard.py`'s docstrings
+# carry the escapes, the measurement and the closure argument.
 #
 # `tests/unit/test_offline_suite.py` proves the guard is live rather than merely installed.
 
@@ -302,11 +316,11 @@ def bar() -> Callable[..., MarketBar]:
 def _refuse_outbound_connections(request: pytest.FixtureRequest) -> Iterator[None]:
     """Make anything that leaves this process over IP raise, for every unmarked test.
 
-    The patching and its restoration live in `tests/offline_guard.py` rather than here, and
-    that module's docstring says why: inside an autouse fixture there is no moment at which a
-    test can look at `socket.socket` unguarded, so the restoration was a `finally` block
-    nothing could observe. This is the whole of what belongs in a fixture -- deciding *whether*
-    a given test is guarded.
+    The guard and its unwinding live in `tests/offline_guard.py` rather than here, and that
+    module's docstring says why: inside an autouse fixture there is no moment at which a test
+    can look at the guard off, so the restoration was a `finally` block nothing could observe.
+    This is the whole of what belongs in a fixture -- deciding *whether* a given test is
+    guarded.
     """
     if request.node.get_closest_marker("e2e") is not None:
         yield

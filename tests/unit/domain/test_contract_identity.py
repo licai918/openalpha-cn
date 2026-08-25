@@ -27,10 +27,11 @@ different from the base.
 from __future__ import annotations
 
 import ast
+import hashlib
 import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, NamedTuple
 
 import pytest
 
@@ -640,7 +641,7 @@ def test_the_frozen_v1_snapshots_still_refuse_what_v1_refused() -> None:
         )
 
 
-# --- the one canonicalisation, audited rather than claimed (V2-P4-037) -----------------
+# --- the one canonicalisation, audited rather than claimed (V2-P4-037, V2-P4-106) ------
 #
 # `domain/_identity.py` says a second canonicalisation "would have put two canonicalisations in
 # play where a difference between them would be invisible until two IDs disagreed". Until
@@ -661,23 +662,84 @@ def test_the_frozen_v1_snapshots_still_refuse_what_v1_refused() -> None:
 # a mint without removing a call, moves that census not at all. A count of who calls the one
 # function cannot answer who else is minting.
 #
-# So the audit below is over the **mint**: every place under `src/` that truncates a digest to
-# a content address's width, keyed by the function it sits in and checked in both directions.
-# It is the shape `tests/unit/product/test_governed_screening.py::
+# So the audit below is over the **mint**, keyed by the function it sits in and checked in both
+# directions. It is the shape `tests/unit/product/test_governed_screening.py::
 # test_no_shipped_risk_flag_is_written_in_executable_code_under_product` uses one plane over.
 #
-# What it cannot see is stated rather than left to be found: it reads the literal `24` written
-# at the slice, so a mint spelled `hexdigest()[:_WIDTH]` against a module constant would pass.
-# Every one of the eight sites writes the literal, a copy of one of them will too, and widening
-# to "every `sha256` call in `src/`" would mix content addresses in with the seven plain
-# 64-hex checksums (`payload_digest`, `config_digest`, `content_hash`, ...) that are a different
-# question. This guards drift, not an adversary.
+# ## What `V2-P4-037` keyed on, and why `V2-P4-106` moved it
+#
+# `037` read the literal `24` written at a slice, and disclosed one evasion: a mint spelled
+# `hexdigest()[:_WIDTH]` against a module constant would pass. **The disclosure was far narrower
+# than the hole.** The P4 technical acceptance found two further spellings, neither disclosed,
+# each minting a valid `sgs_<24 hex>` that `CONTENT_ADDRESS_PATTERN` admits and each violating
+# all three canonicalisation keywords. Measured at `46253c4`, this module alone:
+#
+#   | spelling                                   | result     |
+#   |--------------------------------------------|------------|
+#   | `sha256(c).hexdigest()[:24]`   (control)   | 2 failed   |
+#   | `sha256(c).hexdigest()[:_WIDTH]` (disclosed) | 39 passed |
+#   | `sha256(c).digest()[:12].hex()`            | 39 passed  |
+#   | `blake2b(c, digest_size=12).hexdigest()`   | 39 passed  |
+#
+# The third is the one that settles it: `.digest()[:12].hex()` is the *same hash function* over
+# the *same bytes*, and it produced the byte-identical address the control did --
+# `sgs_2d711642b726b04401627ca9` from both. It is not a loophole with a different meaning, it is
+# the same mint spelled with one token moved, and a person reaching for bytes rather than hex
+# would write it without any intent to evade anything. The fourth needs no slice at all: the
+# truncation happens in the constructor.
+#
+# So the extractor was widened rather than the disclosure. It no longer looks for a slice, or
+# for the literal `24`, or for `sha256` by name: it finds **every call to a `hashlib`
+# constructor under `src/`** and sorts each one by whether its digest is *narrowed* below the
+# algorithm's full width -- by a slice on `digest()`/`hexdigest()`, by a length argument to
+# either, or by `digest_size=`/`digest_length=` on the constructor.
+#
+# `037`'s stated reason for not widening was that "every `sha256` call in `src/`" would mix
+# content addresses in with the plain 64-hex checksums (`payload_digest`, `config_digest`,
+# `content_hash`, ...) that are a different question. That objection is answered by
+# construction rather than by a skip list: the checksums are not excluded, they are **declared
+# in their own right** in `DECLARED_PLAIN_DIGESTS` and held to the same equality, and it is the
+# narrowing measurement -- not a name on a list -- that decides which table a site belongs in.
+# A mint parked in the checksum table is red because it is narrowed, and a checksum that starts
+# truncating is red for the same reason.
+#
+# The seven the row warned about were measured here and the figure is right about calls and off
+# by one about functions: seven `hexdigest()` calls returning a full digest, in **six**
+# functions -- `runtime/engine.py::ResearchEngine._load_or_start_recovery` hashes twice, for
+# `request_digest` and `graph_signature`. `DIGESTS_PER_SITE` is where that lives.
 
 SOURCE_ROOT: Final[Path] = Path(openalpha_cn.__file__).resolve().parent
 
 _DIGITS = re.fullmatch(r".*\{(\d+)\}\$", CONTENT_ADDRESS_PATTERN)
 assert _DIGITS is not None, CONTENT_ADDRESS_PATTERN
 CONTENT_ADDRESS_DIGITS: Final[int] = int(_DIGITS.group(1))
+
+HASH_CONSTRUCTORS: Final[frozenset[str]] = frozenset(hashlib.algorithms_available) | {
+    "new",
+    "pbkdf2_hmac",
+    "scrypt",
+    "file_digest",
+}
+"""Every name `hashlib` exports that returns a digest, read off `hashlib` rather than listed.
+
+`algorithms_available` is the interpreter's own answer, so a build carrying an algorithm this
+repository has never heard of is covered on the day it arrives -- which is the difference
+between an audit and a list of the things somebody thought of. The four added by hand are the
+ones `algorithms_available` does not name because they are not algorithms: `new` takes the
+algorithm as a string, and the other three are key-derivation and file helpers that still hand
+back bytes somebody could prefix.
+"""
+
+DIGEST_READERS: Final[frozenset[str]] = frozenset({"digest", "hexdigest"})
+
+NARROWING_KEYWORDS: Final[frozenset[str]] = frozenset({"digest_size", "digest_length", "dklen"})
+"""Constructor keywords that shorten the digest before anybody reads it.
+
+`blake2b`/`blake2s` take `digest_size`, `shake_*` take a length at `hexdigest(n)` instead, and
+`pbkdf2_hmac`/`scrypt` take `dklen`. This is the half of the audit that has nothing to do with
+slicing, and it is the half the `blake2b(c, digest_size=12).hexdigest()` probe walked through:
+there is no subscript anywhere in that expression.
+"""
 
 CANONICAL_JSON_KEYWORDS: Final[frozenset[str]] = frozenset(
     {"ensure_ascii=False", "separators=(',', ':')", "allow_nan=False"}
@@ -715,9 +777,9 @@ DECLARED_CONTENT_ADDRESS_MINTS: Final[dict[str, str]] = {
     ),
 }
 
-"""Every function under `src/` that may mint a content address, and what each one addresses.
+"""Every function under `src/` that narrows a digest, and what each one addresses.
 
-Eight, and the roadmap row for this issue named five of them -- `stable_model_id` plus a
+Eight, and the roadmap row for `V2-P4-037` named five of them -- `stable_model_id` plus a
 "genuine non-model content digests" list of `set_digest`, `rkc_`, `chr_` and `ev_`. Read off
 the tree instead, `cross_section_digest`, `stable_answer_digest` and `ParquetEvidenceStore
 .append` are there too, which is the same lesson `V2-P4-016` took from the hand-written prefix
@@ -726,7 +788,9 @@ is already wrong.
 
 Keyed by `<module>::<class.function>` rather than by module, so a **second** bespoke digest
 added inside a file that already holds a legitimate one is red. `domain/factor.py` is why that
-matters: it holds two, and a file-level allowlist would have admitted a third.
+matters: it holds two, and a file-level allowlist would have admitted a third. `DIGESTS_PER_SITE`
+carries the same argument one level down, for a second digest added inside a function that
+already legitimately holds one.
 
 The seven prefixes these mint (`set`, `obs`/`prc`/`nrs`/`xs`, `chr`, `rkc`, `sla`, `ev`, and
 whichever the caller hands `stable_model_id`) are a different census from the one in
@@ -734,6 +798,51 @@ whichever the caller hands `stable_model_id`) are a different census from the on
 call sites -- 27 of them carrying 24 distinct prefixes, none containing an underscore, as of
 this issue. That one answers "is `mdl` taken"; this one answers "who is allowed to mint at
 all", and neither implies the other.
+"""
+
+DECLARED_PLAIN_DIGESTS: Final[dict[str, str]] = {
+    "domain/evidence.py::EvidenceSnapshot.content_hash": (
+        "the whole 64 hex of one evidence payload, compared for equality and never prefixed"
+    ),
+    "domain/panel_batch.py::ColumnarPanelBatch._compute_digest": (
+        "`sha256:<64 hex>`, an incremental digest over a whole columnar batch"
+    ),
+    "panel/store.py::_content_hash": (
+        "the whole 64 hex of one stored partition's canonical bytes, for change detection"
+    ),
+    "providers/base.py::ProviderBatch.payload_digest": (
+        "`sha256:<64 hex>` over a provider batch, so a replayed batch can be recognised"
+    ),
+    "runtime/engine.py::ResearchEngine._load_or_start_recovery": (
+        "two of them: `request_digest` identifies a resumable request and `graph_signature` "
+        "identifies the graph that answered it; neither is addressed by either"
+    ),
+    "runtime/provenance.py::compute_config_digest": (
+        "the whole 64 hex of a run's configuration, quoted into a manifest as evidence"
+    ),
+}
+"""Every function under `src/` that hashes and does **not** narrow the result.
+
+`V2-P4-106`'s half of the answer to `V2-P4-037`'s stated reason for not widening. These are the
+"seven plain 64-hex checksums that are a different question", and they are a different question
+-- but declaring them is what lets the audit see every hash in the tree without an exclusion
+rule anybody can quietly extend. Nothing is skipped here: each of these is measured to be
+full-width, and a mint hidden among them fails `test_every_declared_plain_digest_is_the_whole_
+of_what_its_algorithm_produced` on the narrowing measurement rather than on its name.
+
+Six entries for seven calls, and the arithmetic is `DIGESTS_PER_SITE`'s.
+"""
+
+DIGESTS_PER_SITE: Final[dict[str, int]] = {
+    "runtime/engine.py::ResearchEngine._load_or_start_recovery": 2,
+}
+"""Sites that hash more than once. Everything not named here hashes exactly once.
+
+Written as the exception rather than as fourteen lines of `1`, and it closes a direction the
+two tables above cannot: both are keyed by function, so a *second* mint added inside a function
+that already appears on one of them changes no key. The count does change, and this is what
+reads it. Measured: one site out of fourteen, `request_digest` and `graph_signature` in the same
+recovery path.
 """
 
 JOINED_STRING_MINTS: Final[frozenset[str]] = frozenset(
@@ -751,6 +860,14 @@ happens to exist, because "check the spelling where there is one" is satisfied b
 that canonicalises some third way -- the direction `V2-P4-092` warns about, where an audit is
 made wide by being made unfalsifiable.
 """
+
+
+class DigestSite(NamedTuple):
+    """One function under `src/` that calls `hashlib`, and the three things the audit reads."""
+
+    digests: int
+    narrowed: bool
+    canonicalisation: frozenset[str] | None
 
 
 def _qualified_owners(tree: ast.Module) -> dict[int, str]:
@@ -785,36 +902,221 @@ def _canonicalisations(tree: ast.Module, owners: dict[int, str]) -> dict[str, fr
     return {owner: frozenset(spelling) for owner, spelling in found.items()}
 
 
-def content_address_mints() -> dict[str, frozenset[str] | None]:
-    """Every place under `src/` that truncates a digest to a content address's width."""
-    mints: dict[str, frozenset[str] | None] = {}
+def _hashlib_names(tree: ast.Module) -> frozenset[str]:
+    """The names one module binds that lead to a `hashlib` digest, by either import form.
+
+    Both `import hashlib` and `from hashlib import sha256` are in the tree already, and `as`
+    aliases are followed, so `from hashlib import blake2b as _b2` is not a way past this.
+    """
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "hashlib":
+            names.update(
+                alias.asname or alias.name
+                for alias in node.names
+                if alias.name in HASH_CONSTRUCTORS
+            )
+        elif isinstance(node, ast.Import):
+            names.update(
+                alias.asname or alias.name for alias in node.names if alias.name == "hashlib"
+            )
+    return frozenset(names)
+
+
+def _is_hash_call(node: ast.AST, bound: frozenset[str]) -> bool:
+    """`hashlib.sha256(...)` or a bare `sha256(...)` the module imported from `hashlib`."""
+    if not isinstance(node, ast.Call):
+        return False
+    if isinstance(node.func, ast.Attribute):
+        return (
+            isinstance(node.func.value, ast.Name)
+            and node.func.value.id in bound
+            and node.func.attr in HASH_CONSTRUCTORS
+        )
+    return isinstance(node.func, ast.Name) and node.func.id in bound
+
+
+def _is_narrowing(node: ast.AST, bound: frozenset[str]) -> bool:
+    """Does `node` shorten a digest below the width its algorithm produces?
+
+    Three spellings, and the second and third are the ones `V2-P4-037` could not see:
+
+      - a constructor keyword (`blake2b(..., digest_size=12)`), which truncates before anybody
+        reads the digest and involves no subscript at all;
+      - a length argument to the reader (`shake_128(...).hexdigest(12)`);
+      - a subscript on `digest()`/`hexdigest()`, **whatever is inside the brackets** -- so
+        `[:24]`, `[:_WIDTH]` and `[:12]`-then-`.hex()` are one case rather than three, and the
+        literal `24` this audit used to hunt is not read at all any more.
+    """
+    if _is_hash_call(node, bound):
+        assert isinstance(node, ast.Call)
+        return any(word.arg in NARROWING_KEYWORDS for word in node.keywords)
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        return node.func.attr in DIGEST_READERS and bool(node.args)
+    if isinstance(node, ast.Subscript):
+        inner = node.value
+        return (
+            isinstance(inner, ast.Call)
+            and isinstance(inner.func, ast.Attribute)
+            and inner.func.attr in DIGEST_READERS
+        )
+    return False
+
+
+def digest_sites(tree: ast.Module, module: str) -> dict[str, DigestSite]:
+    """Every function in one parsed module that calls `hashlib`, and how it reads the result.
+
+    Takes a tree rather than a path so that
+    `test_the_three_spellings_that_walked_past_the_previous_audit_are_classified_as_mints` can
+    drive the extractor over source it writes itself. An audit that can only be pointed at the
+    repository is an audit whose own correctness is asserted by the thing it audits.
+    """
+    owners = _qualified_owners(tree)
+    canonicalisations = _canonicalisations(tree, owners)
+    digests: dict[str, int] = {}
+    narrowed: set[str] = set()
+    bound = _hashlib_names(tree)
+    for node in ast.walk(tree):
+        owner = f"{module}::{owners[id(node)]}" if id(node) in owners else module
+        if _is_hash_call(node, bound):
+            digests[owner] = digests.get(owner, 0) + 1
+        if _is_narrowing(node, bound):
+            narrowed.add(owner)
+    return {
+        site: DigestSite(
+            digests=count,
+            narrowed=site in narrowed,
+            canonicalisation=canonicalisations.get(site.split("::", 1)[-1]),
+        )
+        for site, count in digests.items()
+    }
+
+
+def source_digest_sites() -> dict[str, DigestSite]:
+    """`digest_sites` over the whole of `src/openalpha_cn`, keyed `<module>::<owner>`."""
+    found: dict[str, DigestSite] = {}
     for path in sorted(SOURCE_ROOT.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        owners = _qualified_owners(tree)
-        canonicalisations = _canonicalisations(tree, owners)
-        module = path.relative_to(SOURCE_ROOT).as_posix()
-        for node in ast.walk(tree):
-            if not (isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Slice)):
-                continue
-            upper = node.slice.upper
-            if not (isinstance(upper, ast.Constant) and upper.value == CONTENT_ADDRESS_DIGITS):
-                continue
-            owner = owners[id(node)]
-            mints[f"{module}::{owner}"] = canonicalisations.get(owner)
-    return mints
+        found.update(digest_sites(tree, path.relative_to(SOURCE_ROOT).as_posix()))
+    return found
 
 
-def test_the_width_the_audit_looks_for_is_the_one_the_pattern_declares() -> None:
-    """The extractor's own test: the audit hunts the width `CONTENT_ADDRESS_PATTERN` requires.
+def content_address_mints() -> dict[str, frozenset[str] | None]:
+    """Every place under `src/` that narrows a digest, with its `json.dumps` spelling."""
+    return {
+        site: found.canonicalisation
+        for site, found in source_digest_sites().items()
+        if found.narrowed
+    }
 
-    Read out of the pattern rather than written as a second `24`, so a repository that widened
-    its addresses would move the audit with them instead of leaving it hunting a width nothing
-    produces any more -- which is an audit that passes by finding nothing, the failure shape
-    every AST census in this repository is arranged against.
+
+# --- the probe spellings, kept as the extractor's own test ---------------------------------
+#
+# Each of these is a whole module. Three of the four passed `V2-P4-037`'s audit at `46253c4`
+# while minting an address `CONTENT_ADDRESS_PATTERN` admits, and both halves of that sentence
+# are asserted below rather than remembered: the extractor is run over the source, and the
+# source is executed and its output matched against the live pattern. A probe that had stopped
+# minting a valid address would be a strawman, and this is what stops it becoming one quietly.
+
+PROBE_MINT_SPELLINGS: Final[dict[str, str]] = {
+    "hexdigest()[:24] -- the control, which V2-P4-037 already caught": (
+        "from hashlib import sha256\n"
+        "def probe(c: bytes) -> str:\n"
+        '    return f"sgs_{sha256(c).hexdigest()[:24]}"\n'
+    ),
+    "hexdigest()[:_WIDTH] -- the one evasion V2-P4-037 disclosed": (
+        "from hashlib import sha256\n"
+        "_WIDTH = 24\n"
+        "def probe(c: bytes) -> str:\n"
+        '    return f"sgs_{sha256(c).hexdigest()[:_WIDTH]}"\n'
+    ),
+    "digest()[:12].hex() -- undisclosed, and the same address the control mints": (
+        "from hashlib import sha256\n"
+        "def probe(c: bytes) -> str:\n"
+        '    return f"sgs_{sha256(c).digest()[:12].hex()}"\n'
+    ),
+    "blake2b(digest_size=12).hexdigest() -- undisclosed, and no slice anywhere": (
+        "from hashlib import blake2b as _b2\n"
+        "def probe(c: bytes) -> str:\n"
+        '    return f"sgs_{_b2(c, digest_size=12).hexdigest()}"\n'
+    ),
+    "shake_128().hexdigest(12) -- the third way to narrow, with the length at the reader": (
+        "import hashlib\n"
+        "def probe(c: bytes) -> str:\n"
+        '    return f"sgs_{hashlib.shake_128(c).hexdigest(12)}"\n'
+    ),
+}
+
+
+def test_the_width_the_pattern_declares_is_the_width_the_probes_mint() -> None:
+    """`CONTENT_ADDRESS_PATTERN`'s own width, pinned -- and no longer what the audit hunts.
+
+    `V2-P4-037` read this number off the pattern so that a repository which widened its
+    addresses would move the audit with them rather than leave it hunting a width nothing
+    produces any more. `V2-P4-106` took the number out of the extractor entirely -- narrowing is
+    detected by *shape* now, not by the literal at the slice -- so what it still pins is the
+    thing that made the evasions matter: the addresses those spellings mint are addresses this
+    repository would accept.
     """
     assert CONTENT_ADDRESS_DIGITS == 24
     assert re.fullmatch(CONTENT_ADDRESS_PATTERN, "mdl_" + "0" * CONTENT_ADDRESS_DIGITS)
     assert not re.fullmatch(CONTENT_ADDRESS_PATTERN, "mdl_" + "0" * (CONTENT_ADDRESS_DIGITS - 1))
+
+    minted = {}
+    for label, source in PROBE_MINT_SPELLINGS.items():
+        namespace: dict[str, Any] = {}
+        exec(compile(source, f"<probe {label}>", "exec"), namespace)
+        address = namespace["probe"](b"openalpha-cn")
+        assert re.fullmatch(CONTENT_ADDRESS_PATTERN, address), (label, address)
+        minted[label] = address
+
+    same_hash = [
+        address
+        for label, address in minted.items()
+        if "blake2b" not in label and "shake_128" not in label
+    ]
+    assert len(set(same_hash)) == 1, (
+        "the three sha256 spellings are the same bytes read three ways and must mint the same "
+        "address; if they ever diverge the sharpest point of V2-P4-106 has stopped being true"
+    )
+
+
+def test_the_three_spellings_that_walked_past_the_previous_audit_are_classified_as_mints() -> None:
+    """The extractor's own test, over source this module writes rather than over `src/`.
+
+    `V2-P4-037`'s extractor keyed on the literal `24` at a slice, so of these four it saw one.
+    Each is parsed here as a whole module and must come back as a narrowed site -- which is what
+    puts it in `content_address_mints()`, which is what makes it red against
+    `DECLARED_CONTENT_ADDRESS_MINTS`. Driving the extractor over a fixed string rather than over
+    the repository is the point: an audit whose only input is the tree it audits cannot be shown
+    to catch anything the tree does not already contain.
+    """
+    for label, source in PROBE_MINT_SPELLINGS.items():
+        found = digest_sites(ast.parse(source), "probe.py")
+        assert set(found) == {"probe.py::probe"}, (label, found)
+        assert found["probe.py::probe"].digests == 1, label
+        assert found["probe.py::probe"].narrowed, (
+            f"{label}: the extractor reads this as a full-width digest, so a mint spelled this "
+            "way is invisible to the equality below -- which is exactly the V2-P4-106 finding"
+        )
+
+
+def test_a_full_width_digest_is_not_read_as_a_mint() -> None:
+    """The other direction, without which "narrowed" could mean "hashes at all".
+
+    An extractor that called every `hashlib` call a mint would pass the test above and be
+    useless: `DECLARED_PLAIN_DIGESTS` exists precisely because six functions here hash without
+    addressing anything. This is the assertion that keeps the discriminator a discriminator.
+    """
+    source = (
+        "from hashlib import sha256\n"
+        "def probe(c: bytes) -> str:\n"
+        '    return f"sha256:{sha256(c).hexdigest()}"\n'
+    )
+    found = digest_sites(ast.parse(source), "probe.py")
+    assert found == {
+        "probe.py::probe": DigestSite(digests=1, narrowed=False, canonicalisation=None)
+    }
 
 
 def test_every_content_address_in_the_source_tree_is_minted_where_this_module_says() -> None:
@@ -830,6 +1132,75 @@ def test_every_content_address_in_the_source_tree_is_minted_where_this_module_sa
     assert all(DECLARED_CONTENT_ADDRESS_MINTS.values()), (
         "a mint on the allowlist with no stated reason is a name somebody added to make a "
         "failure go away, which is the allowlist failure mode this shape has to survive"
+    )
+
+
+def test_every_hashlib_call_under_src_is_one_of_the_two_declared_kinds() -> None:
+    """`V2-P4-106`: the census the `24`-at-a-slice extractor could not take.
+
+    Every `hashlib` call in the tree is either a mint or a plain digest, and both tables are
+    equalities, so there is no third place for one to sit. This is what makes the three evading
+    spellings red without the extractor having to recognise any of them by name: they are
+    `hashlib` calls in functions no table declares, and that alone fails here.
+
+    The two tables must also stay disjoint. A site named on both would let a mint satisfy the
+    census by being called a checksum, which is the skip-list-by-another-name that
+    `037` was right to refuse and this had to avoid rather than inherit.
+
+    **This test and the two below are deliberately over-determined, and `V2-P4-106` measured by
+    how much.** Against a real defect -- an undeclared `sgs_` mint added to `domain/_identity
+    .py`, and the same mint smuggled into `DECLARED_PLAIN_DIGESTS` -- the suite stays red with
+    the census equality weakened to containment, with the disjointness assertion deleted, and
+    with both weakened at once. Each of the three states a different sentence and names a
+    different failure, which is why all three are kept; none of them is the only thing standing
+    between the tree and either defect, which is why a mutation sweep reports them as survivors
+    rather than as gaps. Recorded here so the next sweep does not read that as coverage missing.
+    """
+    sites = source_digest_sites()
+    declared = set(DECLARED_CONTENT_ADDRESS_MINTS) | set(DECLARED_PLAIN_DIGESTS)
+
+    assert set(DECLARED_CONTENT_ADDRESS_MINTS) & set(DECLARED_PLAIN_DIGESTS) == set()
+    assert set(sites) == declared
+    assert all(DECLARED_PLAIN_DIGESTS.values()), (
+        "a plain digest declared with no stated reason is the same allowlist failure the mint "
+        "table is arranged against, and it is the easier of the two to hide a mint in"
+    )
+
+
+def test_every_declared_plain_digest_is_the_whole_of_what_its_algorithm_produced() -> None:
+    """The discriminator, asserted rather than trusted -- both tables in both directions.
+
+    Without this the two tables are one table with two names: a mint could be declared a plain
+    digest and nothing would contradict it. The narrowing measurement is what contradicts it,
+    and it is measured off the same trees the census is, so the two cannot drift apart.
+    """
+    sites = source_digest_sites()
+
+    assert {site for site, found in sites.items() if found.narrowed} == set(
+        DECLARED_CONTENT_ADDRESS_MINTS
+    )
+    assert {site for site, found in sites.items() if not found.narrowed} == set(
+        DECLARED_PLAIN_DIGESTS
+    )
+
+
+def test_no_declared_site_hashes_more_often_than_this_module_says() -> None:
+    """The direction two function-keyed tables cannot see: a second digest inside one function.
+
+    Both tables key on `<module>::<function>`, so adding a second mint *inside* an already
+    declared function moves no key and neither equality above notices. The count does, and
+    `DIGESTS_PER_SITE` is deliberately written as the single exception rather than as fourteen
+    lines of `1`, so that a new multi-hash site has to be argued for on a line of its own.
+    """
+    sites = source_digest_sites()
+    declared = set(DECLARED_CONTENT_ADDRESS_MINTS) | set(DECLARED_PLAIN_DIGESTS)
+
+    assert {site: found.digests for site, found in sites.items()} == {
+        site: DIGESTS_PER_SITE.get(site, 1) for site in declared
+    }
+    assert set(DIGESTS_PER_SITE) <= declared, (
+        "a count for a site no table declares is a number nothing reads; the census above is "
+        "what decides which sites exist"
     )
 
 
