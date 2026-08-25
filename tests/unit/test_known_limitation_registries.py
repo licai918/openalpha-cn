@@ -715,10 +715,10 @@ no longer written in prose at all. `DOCSTRING_TOTALS` below holds them as an equ
 DOCSTRING_TOTALS: Final[Mapping[str, int]] = MappingProxyType(
     {
         "registries": 34,
-        "entries": 322,
+        "entries": 323,
         "derived_entries": 70,
         "table_rows": 33,
-        "table_entries": 252,
+        "table_entries": 253,
     }
 )
 """Every number this module would otherwise have stated in prose, as an equality.
