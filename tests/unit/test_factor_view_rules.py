@@ -181,7 +181,7 @@ def test_a_well_formed_request_resolves_every_declared_parameter_into_the_four_s
         ({"code_commit": "abc"}, "at least 7 characters"),
         ({"transform": "no_such_transform/v1"}, "is not a declared transform"),
         ({"neutralization": "no_such_neutral/v1"}, "is not a declared neutralisation"),
-        ({"min_securities": 2}, "min_securities"),
+        ({"min_securities": 2}, r"--min-securities must be at least 4"),
         ({"min_as_ofs": 1}, "min_as_ofs"),
         ({"group_count": 1}, "group_count"),
         ({"min_periods": 0}, "min_periods"),
@@ -196,10 +196,21 @@ def test_a_request_that_cannot_be_put_is_refused_by_the_rule_that_refuses_it(
 
     The `match=` is the point rather than the exception type: every one of these raises
     `FactorRequestError`, so a test that only checked the class would pass for any of them and
-    would go on passing after the rule it names was deleted. The last six are the upstream
-    contracts' own floors surfacing through this resolver -- `MINIMUM_IC_SECURITIES` is 3,
-    `MINIMUM_IC_AS_OFS` is 2, `MINIMUM_PORTFOLIO_GROUPS` is 2 -- which is what "this module
-    declares no floor of its own" has to mean in practice.
+    would go on passing after the rule it names was deleted. The last five are the upstream
+    contracts' own floors surfacing through this resolver -- `MINIMUM_IC_AS_OFS` is 2,
+    `MINIMUM_PORTFOLIO_GROUPS` is 2 -- which is what "this module declares no floor of its own"
+    has to mean in practice: the `match=` is the *field name*, because what a caller sees is
+    pydantic's own `1 validation error for <Spec>` naming it.
+
+    **`min_securities` is deliberately no longer one of them** (`V2-P4-104`). It is the one
+    option that feeds *two* specs with different floors, so "whichever spec is constructed
+    first" decided the message -- `FactorICSpec` at 2 and `RedundancySpec` at 3 -- and neither
+    branch contained the string a caller could act on. This resolver now refuses it by name
+    before either spec exists, so the `match=` here is the **option** rather than the field, and
+    that difference is the whole issue. It still declares no floor of its own: the number comes
+    from `MINIMUM_REDUNDANCY_SECURITIES`, the higher of the two.
+    `tests/integration/test_factor_min_securities_floor.py` drives the same refusal through the
+    CLI and REST faces and holds it to naming both floors.
     """
     with pytest.raises(FactorRequestError, match=message):
         factor_request(**{**VALID, **override})

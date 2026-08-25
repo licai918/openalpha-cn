@@ -19,9 +19,39 @@ from openalpha_cn.batch_contracts import (
     BatchResultRef,
     BatchTaskItem,
 )
+from openalpha_cn.domain.risk_flag import UndeclaredRiskFlagError
 from openalpha_cn.runtime.contracts import ResearchRunRequest, ResearchRunResult
 
 logger = logging.getLogger(__name__)
+
+DISCLOSABLE_ITEM_FAULTS: tuple[type[Exception], ...] = (UndeclaredRiskFlagError,)
+"""The faults whose own message may be written into a batch's durable progress record.
+
+## Why the list exists rather than `str(error)` on everything (`V2-P4-102`)
+
+A failed item used to record `type(error).__name__` in both places it can say anything, so a
+batch reported `{"status": "failed", "error_type": "ValueError"}` -- the least informative name
+in Python -- and an `item_failed` event whose `detail` was the same word again. For an
+undeclared risk flag that discards the entire diagnostic `parse_risk_flag`'s docstring promises:
+the producer of a whole-market batch learns that one of five thousand items failed and has no
+way at all to find out which flag it spelled wrong.
+
+The tempting repair is `detail=str(error)` unconditionally, and it is refused here for
+`cli._panel_command`'s reason, stated at this module's own durability boundary: an
+*unanticipated* exception carries whatever the frame it escaped was holding -- a filesystem path,
+a query, a credential read out of the environment -- and a progress event is **append-only and
+durable**, so a leak into one cannot be taken back. An allow-list inverts the default: a message
+is written only where somebody has decided it is disclosable, and everything else still records
+its type alone, exactly as before.
+
+`UndeclaredRiskFlagError` qualifies because every part of its message is data the caller sent or
+this build publishes: the offending string came out of their own request body, and the ten
+declared flags are in `docs/api/schemas/signal-frame-v1.json`. Nothing in it is ours to leak.
+
+A tuple rather than a `Protocol` or a marker base class because there is one entry and the check
+is `isinstance`; a new entry is a deliberate line in this file, which is where the decision that
+a message may cross this boundary should have to be written down.
+"""
 
 __all__ = [
     "BATCH_PROGRESS_EVENT_VERSIONS",
@@ -35,6 +65,26 @@ __all__ = [
     "BatchTaskItem",
     "BatchTaskStore",
 ]
+
+
+def _item_failure_detail(error: Exception) -> str:
+    """What one failed item writes into its append-only `item_failed` event.
+
+    The whole message for a fault `DISCLOSABLE_ITEM_FAULTS` names, and the bare type for
+    everything else. `BatchProgressEvent.detail` is a free `str | None` that already exists for
+    exactly this, so making the reason durable needed no change to a stored contract and no
+    migration -- which is the reason it is carried here rather than as a new field on
+    `BatchTaskItem`, where `extra="forbid"` makes an added key a breaking change (AGENTS.md,
+    v2 hard rule 3).
+
+    `type(error).__name__` is prefixed even for a disclosed message, so a reader of the event
+    stream gets the same word `BatchTaskItem.error_type` holds and can line the two up without
+    parsing prose.
+    """
+    name = type(error).__name__
+    if isinstance(error, DISCLOSABLE_ITEM_FAULTS):
+        return f"{name}: {error}"
+    return name
 
 
 class BatchTaskStore(Protocol):
@@ -225,6 +275,12 @@ class BatchResearchService:
         try:
             result = self.runner(item.request)
         except Exception as error:
+            # V2-P4-102: `error_type` is the *specific* class either way -- `ValueError` was
+            # never this code's choice, it was the base class the risk-flag refusal happened to
+            # raise, and naming the subclass costs nothing and separates a misspelled flag from
+            # a bad price at a glance. `detail` carries the whole reason only for the faults
+            # DISCLOSABLE_ITEM_FAULTS names; see that constant for why the default is the type
+            # alone on an append-only durable record.
             with self._lock:
                 failed = self._required_item(batch_id, index).model_copy(
                     update={"status": "failed", "error_type": type(error).__name__}
@@ -237,7 +293,7 @@ class BatchResearchService:
                     kind="item_failed",
                     occurred_at=self.clock(),
                     run_id=item.request.run_id,
-                    detail=type(error).__name__,
+                    detail=_item_failure_detail(error),
                 )
             return
         with self._lock:

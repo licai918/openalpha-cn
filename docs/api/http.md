@@ -31,9 +31,18 @@ filesystem path. Local file access remains a CLI responsibility.
 ## Research, replay, and attribution
 
 - `POST /api/v1/research/run` executes the shared research core from verified evidence.
+  An evidence payload whose `quality_flags` names a string outside the declared risk-flag
+  vocabulary is refused `422` with a **field-error list** — the same body shape pydantic writes
+  for `signal.risk_flags` on `/api/v1/research/deliberate`, with the offending `input` echoed,
+  every declared flag in `msg`, and a `loc` addressing the exact item and position, e.g.
+  `["body", "evidence", 1, "payload", "quality_flags", 1]` (`V2-P4-101`). It answered
+  `500 text/plain` until that issue: `EvidenceSnapshot.payload` is an unschema'd `JsonValue`, so
+  pydantic cannot check the flag and the refusal is raised further in, by `agents/baseline.py`.
 - `POST /api/v1/research/batches` queues bounded concurrent research;
   `GET /api/v1/research/batches/{batch_id}` and `/events` expose durable state
-  and progress; `/cancel` and `/retry` are explicit control operations.
+  and progress; `/cancel` and `/retry` are explicit control operations. A failed item's
+  `error_type` is the specific exception class; the whole reason, where it is disclosable,
+  is on the `item_failed` progress event's `detail` under `/events` (`V2-P4-102`).
 - `POST /api/v1/research/deliberate` returns evidence-linked bull/bear cases,
   three risk perspectives, and an ablation delta.
 - `POST /api/v1/screen` filters verified research results; `GET/POST

@@ -36,7 +36,9 @@ from openalpha_cn.backtest.portfolio import (
 from openalpha_cn.backtest.replay import ReplayCorpus, ReplayReport, ReplayRunner
 from openalpha_cn.backtest.validation import OutcomeObservation, OutcomeValidator
 from openalpha_cn.config import load_config
+from openalpha_cn.domain.evidence import EvidenceSnapshot
 from openalpha_cn.domain.factor import FactorError, FactorNote
+from openalpha_cn.domain.risk_flag import UndeclaredRiskFlagError
 from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.domain.validation import ValidationResult
 from openalpha_cn.evidence.service import (
@@ -1026,6 +1028,79 @@ _PANEL_SESSION_QUERY = Query(
 _PANEL_INDEX_QUERY = Query(description="An index code index_weight is assessed against.")
 
 
+def _undeclared_risk_flag_refusal(
+    error: UndeclaredRiskFlagError,
+    *,
+    evidence: Sequence[EvidenceSnapshot],
+) -> HTTPException:
+    """One undeclared `quality_flags` string, enveloped as the `422` pydantic would have written.
+
+    ## Why this route needs a hand-written field error at all (`V2-P4-101`)
+
+    `risk_flags` reaches this application by two roads. On `POST /api/v1/research/deliberate` it
+    is a *field of the request body*, so pydantic validates it against `RiskFlag` and produces
+    its own field error -- `loc == ["body", "signal", "risk_flags", 0]`, the offending `input`,
+    and a `msg` listing all ten declared flags. On `POST /api/v1/research/run` it arrives inside
+    `EvidenceSnapshot.payload`, which is a `JsonValue` with **no schema** by design, so pydantic
+    has nothing to check it against and the string reaches `agents/baseline.py::_quality_flags`
+    intact. That is where `V2-P4-030` closed the vocabulary, and until this function existed the
+    refusal escaped the route uncaught: Starlette answered `500 text/plain Internal Server
+    Error`, which tells a producer nothing and tells an operator, falsely, that this repository
+    has a defect.
+
+    ## Why it copies pydantic's shape rather than inventing a body
+
+    Because a client should not have to learn that one field has two refusal dialects depending
+    on which route it entered by. The body is the `{"detail": [ ... ]}` **list** of field errors
+    -- the second of the two `422` schemas this module's docstring records, and deliberately not
+    the `{"reason", "message"}` object a panel refusal carries, which a client tells apart with
+    `isinstance(detail, dict)`. `msg` is `UndeclaredRiskFlagError.expected` under pydantic's own
+    `"Input should be ..."` preamble, in declaration order, so the two bodies are equal string
+    for string; `tests/integration/test_undeclared_risk_flag_surfaces.py::
+    test_the_two_faces_of_one_vocabulary_refuse_the_same_string_the_same_way` asserts exactly
+    that and would go red on a second dialect.
+
+    ## The `loc`, which is the half a producer cannot reconstruct
+
+    `_quality_flags` re-raises with the offending snapshot's `evidence_id` and the flag's
+    position, and this maps the former back to its index in the request's own `evidence` array.
+    `evidence_id` rather than an index is what crosses the agent boundary because an agent sees
+    only the items of its own family -- `MarketAgent` keeps `market_event` and drops the rest --
+    so a positional index taken there would name the wrong item on any request mixing families.
+    The lookup is by identity here, where the unfiltered array is in scope.
+
+    If the id is not found the `loc` stops at `["body", "evidence"]` rather than guessing a
+    position. That branch is unreachable through this route (the engine is handed exactly this
+    array) and is written as a widening rather than a `raise` because a wrong address is worse
+    than a general one: it would send a producer to edit an item that is correct.
+    """
+    location: list[str | int] = ["body", "evidence"]
+    index = next(
+        (
+            position
+            for position, item in enumerate(evidence)
+            if item.evidence_id == error.evidence_id
+        ),
+        None,
+    )
+    if index is not None:
+        location.extend([index, "payload", "quality_flags"])
+        if error.flag_index is not None:
+            location.append(error.flag_index)
+    return HTTPException(
+        status_code=422,
+        detail=[
+            {
+                "type": "enum",
+                "loc": location,
+                "msg": f"Input should be {error.expected}",
+                "input": error.value,
+                "ctx": {"expected": error.expected},
+            }
+        ],
+    )
+
+
 def create_app(
     *,
     runtime_dir: Path | None = None,
@@ -1169,14 +1244,25 @@ def create_app(
 
     @application.post("/api/v1/research/run")
     def research_run(request: ResearchApiRequest) -> ResearchRunResult:
-        """Execute the shared live/replay/backtest research cycle."""
+        """Execute the shared live/replay/backtest research cycle.
+
+        The one catch is by type and by exactly one type (`V2-P4-101`). `except ValueError` here
+        would be wide enough to report an unrelated arithmetic or parsing defect in this
+        repository as the caller's spelling mistake -- the over-broad catch `V2-P4-045` booked
+        against the shortlist face -- so anything that is not an undeclared risk flag still
+        reaches Starlette and is still a `500`, which for a genuine internal defect is the
+        honest answer.
+        """
         engine = ResearchEngine(
             repository=run_repository,
             memory=memory,
             clock=clock,
             recovery_store=recovery_store,
         )
-        return engine.run_cycle(request)
+        try:
+            return engine.run_cycle(request)
+        except UndeclaredRiskFlagError as error:
+            raise _undeclared_risk_flag_refusal(error, evidence=request.evidence) from error
 
     @application.post("/api/v1/research/deliberate")
     def research_deliberate(request: DeliberationApiRequest) -> DeliberationOutcome:

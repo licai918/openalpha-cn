@@ -22,7 +22,8 @@ import uvicorn
 
 from openalpha_cn import __version__
 from openalpha_cn.backtest.factor_experiment import FactorExperimentRecord
-from openalpha_cn.backtest.factor_ic import ICMethod
+from openalpha_cn.backtest.factor_ic import MINIMUM_IC_SECURITIES, ICMethod
+from openalpha_cn.backtest.factor_redundancy import MINIMUM_REDUNDANCY_SECURITIES
 from openalpha_cn.backtest.replay import ReplayCorpus
 from openalpha_cn.config import ConfigError, load_config, load_dotenv, load_log_level
 from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET, AdjustmentError
@@ -65,6 +66,7 @@ from openalpha_cn.domain.price_limits import (
     SUSPENSION_DATASET,
     SuspensionError,
 )
+from openalpha_cn.domain.risk_flag import UndeclaredRiskFlagError
 from openalpha_cn.domain.run_mode import RunMode
 from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET, StockUniverseError
 from openalpha_cn.domain.trading_calendar import (
@@ -724,24 +726,43 @@ def research_run(
     ] = None,
     random_seed: Annotated[int, typer.Option("--random-seed")] = 7,
 ) -> None:
-    """Run multi-agent research from serialized EvidenceSnapshot items."""
+    """Run multi-agent research from serialized EvidenceSnapshot items.
+
+    An evidence payload naming a `quality_flags` string the build never declared exits `1` with
+    the flag and the vocabulary on **stderr** (`V2-P4-102`). It used to exit `1` with a rich,
+    boxed Python traceback of `openalpha_cn` frames, which is the presentation `create_app`'s own
+    docstring rules out for this repository -- "naming the specific variable, never a bare
+    traceback". The message itself was already the right message; only its delivery was a stack
+    trace, so what changed here is the delivery and not the code: a CI job already branching on
+    `1` keeps working, and `openalpha replay run` has always reported the same fault as a
+    `failures` row inside a report because `ReplayRunner` catches it per case.
+
+    The catch is `UndeclaredRiskFlagError` and nothing wider. A bare `except ValueError` around
+    this body would also swallow `parse_serialized_evidence`'s own refusals -- a mismatched
+    `content_hash`, a non-object item -- and print the risk-flag vocabulary at somebody whose
+    problem is a tampered digest.
+    """
     raw = json.loads(evidence_path.read_text(encoding="utf-8"))
     raw_items = raw.get("items") if isinstance(raw, dict) else raw
     evidence = parse_serialized_evidence(raw_items)
     point_in_time = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
     sdk = OpenAlphaSDK(runtime_dir=runtime_dir)
-    result = sdk.run_research(
-        ResearchRunRequest(
-            run_id=run_id,
-            mode=mode,
-            subject=subject,
-            as_of=point_in_time,
-            evidence=evidence,
-            code_commit=_resolved_code_commit(code_commit),
-            config_digest=_resolved_config_digest(config_digest),
-            random_seed=random_seed,
+    try:
+        result = sdk.run_research(
+            ResearchRunRequest(
+                run_id=run_id,
+                mode=mode,
+                subject=subject,
+                as_of=point_in_time,
+                evidence=evidence,
+                code_commit=_resolved_code_commit(code_commit),
+                config_digest=_resolved_config_digest(config_digest),
+                random_seed=random_seed,
+            )
         )
-    )
+    except UndeclaredRiskFlagError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=1) from error
     typer.echo(result.model_dump_json())
 
 
@@ -3646,8 +3667,13 @@ _FACTOR_IC_METHOD_HELP: Final[str] = (
 )
 _FACTOR_MIN_SECURITIES_HELP: Final[str] = (
     "Fewest admitted names a cross section may have and still be scored. Below it the day is "
-    "reported as thin rather than correlated: two points always correlate perfectly, which is why "
-    "the contract's own floor is 3 and why no default is offered here."
+    "reported as thin rather than correlated, and no default is offered because the number moves "
+    "every verdict. This one option feeds TWO studies with different floors and the "
+    f"higher binds, so the floor on this option is {MINIMUM_REDUNDANCY_SECURITIES}: the "
+    f"information coefficient's own floor is {MINIMUM_IC_SECURITIES}, but the redundancy study "
+    f"needs {MINIMUM_REDUNDANCY_SECURITIES}, because at {MINIMUM_REDUNDANCY_SECURITIES - 1} an "
+    "untied rank correlation can only be +-0.5 or +-1 and no --redundancy-threshold at or below "
+    f"0.5 distinguishes anything. V2-P4-104: this said {MINIMUM_IC_SECURITIES} until it was run."
 )
 _FACTOR_MIN_AS_OFS_HELP: Final[str] = (
     "Fewest scored prediction days the range must hold before a mean IC exists. Below it the tier "
@@ -4101,8 +4127,12 @@ _BUILD_TIER_HELP: Final[str] = (
     "The highest tier to store: `raw`, `processed` or `neutralized`. Every tier below it is stored "
     "too, so `--tier neutralized` writes all three. `--transform` is required for the last two and "
     "`--neutralization` for the last; naming one the tier does not use is refused rather than "
-    "ignored. `--tier neutralized` only succeeds at a prediction instant at or after the panel's "
-    "own stored horizon -- see this command's help text and the refusal it prints."
+    "ignored. `--tier neutralized` succeeds at a prediction instant at or after that day's own "
+    "close, on a day the exchange was open -- one session wide, and arithmetic rather than "
+    "policy: the residual must carry the processed panel's own instant and both foreign reads are "
+    "taken for the day that instant falls on. V2-P4-103: this option stated a far wider bound "
+    "on the panel's own horizon until V2-P4-028 retracted it and left only this line behind, "
+    "contradicting the paragraph above it in the same --help."
 )
 _BUILD_FACTOR_AS_OF_HELP: Final[str] = (
     "A prediction instant to compute a cross section at, ISO-8601 with an offset, repeatable. An "

@@ -599,6 +599,58 @@ def test_the_neutralised_tier_builds_at_the_mid_window_instants_it_used_to_refus
     }
 
 
+def test_the_tier_option_help_states_the_bound_the_builder_actually_applies(
+    panel_only: Path,
+) -> None:
+    """`V2-P4-103`. `--tier`'s option help kept a bound `V2-P4-028` had already retracted.
+
+    The two halves of one `--help` output disagreed. This command's docstring said, correctly,
+    that the old bound "IS GONE, and with it the reason the neutralised tier was a year-end
+    operation", and that what remains is one session wide. Two paragraphs down, in the option
+    table, `--tier` still said::
+
+        `--tier neutralized` only succeeds at a prediction instant at or after the panel's own
+        stored horizon
+
+    A caller reading the option they are about to type -- which is the half of `--help` anybody
+    reads -- was told to wait for the panel's horizon before building a residual at all. On this
+    fixture that is `2026-01-16`, and the build below runs at `2026-01-08` and `2026-01-09`.
+
+    **The prose is asserted against a build in the same test on purpose.** A test that only
+    greps `--help` proves the sentence changed, not that the sentence is now true, and this file
+    exists because a sentence that was true once stopped being true without anything going red.
+    So the command line actually writes the neutralised tier before the horizon first, and the
+    help assertions run against a claim that has just been measured.
+
+    `test_the_neutralised_tier_builds_at_the_mid_window_instants_it_used_to_refuse` drives the
+    same window through the SDK and compares the coverage distribution against the horizon
+    instant; this is the command-line face and its `--help`.
+    """
+    built = cli_build(
+        panel_only,
+        _build_parameters(tier="neutralized", neutralization="industry_and_size/v1"),
+    )
+
+    assert "exit_code" not in built, built
+    assert built["tier"] == "neutralized"
+    assert built["manifest_ids"]["neutralized"], "the third tier was written before the horizon"
+    assert max(BUILD_INSTANTS) < HORIZON_INSTANT, (
+        "the build above has to sit strictly before the panel's stored horizon or it proves "
+        "nothing about the retracted bound"
+    )
+
+    # The option table is drawn inside a box, so a wrapped option help carries `|` characters
+    # between its lines; collapsing whitespace alone would not rejoin the sentence.
+    printed = CliRunner().invoke(app, ["factor", "build", "--help"]).output
+    rendered = re.sub(r"\s+", " ", printed.replace("│", " "))
+    assert "at or after the panel's own stored horizon" not in rendered
+    assert "stored horizon" not in rendered, (
+        "the retracted bound must not survive in any spelling on this option"
+    )
+    assert "at or after that day's own close" in rendered
+    assert "on a day the exchange was open" in rendered
+
+
 def test_a_refused_neutralisation_leaves_the_store_exactly_as_it_found_it(
     panel_only: Path, tmp_path_factory: pytest.TempPathFactory
 ) -> None:

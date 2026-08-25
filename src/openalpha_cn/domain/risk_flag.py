@@ -204,6 +204,90 @@ actually performs. A `Mapping` is also the better shape for `product/governance.
 """
 
 
+class UndeclaredRiskFlagError(ValueError):
+    """One wire string that is not a declared risk flag, with everything a producer needs.
+
+    ## Why a type rather than a bare `ValueError` (`V2-P4-101`)
+
+    `V2-P4-030` made `parse_risk_flag` raise, which was right -- copying the string was the
+    fail-open answer and dropping it silently is the same failure told quietly. What it left
+    undone is that a refusal nobody catches is not a refusal, it is a crash: measured on
+    `d748796`, `POST /api/v1/research/run` answered `500 text/plain Internal Server Error`,
+    `openalpha research run` printed a rich Python traceback, and a batch item recorded
+    `{"error_type": "ValueError"}` -- no flag name, no vocabulary, nothing to act on.
+
+    The obvious repair is `except ValueError` at each of those three boundaries, and it is the
+    wrong one for the reason `V2-P4-045` booked as a defect on the shortlist face: a catch that
+    wide swallows an unrelated arithmetic or parsing failure and reports it to the caller as
+    *their* spelling mistake, which turns a defect in this repository into a `422` nobody will
+    ever investigate. A distinct type lets every surface catch exactly this and nothing else.
+
+    ## Why it still subclasses `ValueError`
+
+    `LookAheadViolationError`'s reason (`domain/evidence.py`), and here it is load-bearing rather
+    than merely tidy. `backtest/replay.py::ReplayRunner.run` already catches
+    `(RuntimeError, ValueError)` per case and records
+    `f"{case.run_id}: {type(error).__name__}: {error}"`, which is why `POST /api/v1/backtests/
+    replay` was the one path named in `_quality_flags`' docstring that was **never** broken: it
+    reported the offending string and the whole vocabulary inside a `200` report all along.
+    Narrowing this base class to `Exception` would silently turn that into an uncaught crash.
+    `tests/integration/test_undeclared_risk_flag_surfaces.py::
+    test_the_replay_route_already_carried_the_whole_reason_and_still_does` is the guard.
+
+    ## The two optional coordinates
+
+    `evidence_id` and `flag_index` are `None` when `parse_risk_flag` raises, because that
+    function is handed a bare string and inventing an address it cannot know would be worse than
+    omitting one. `agents/baseline.py::_quality_flags` re-raises with both filled in, because it
+    is the caller that knows which snapshot and which position the string came from -- and
+    `api/app.py` turns them into the `loc` of a field error, so the REST refusal points at
+    `["body", "evidence", 1, "payload", "quality_flags", 1]` rather than at the request in
+    general. That is the bar `POST /api/v1/research/deliberate` already meets through pydantic's
+    own `422`, and it is the bar because the address is the half a producer cannot reconstruct:
+    a 5,000-item batch that says only "some flag was wrong" has told them nothing.
+    """
+
+    def __init__(
+        self,
+        value: str,
+        *,
+        evidence_id: str | None = None,
+        flag_index: int | None = None,
+    ) -> None:
+        self.value = value
+        self.declared: tuple[str, ...] = tuple(sorted(RISK_FLAGS_BY_VALUE))
+        self.evidence_id = evidence_id
+        self.flag_index = flag_index
+        located = "" if evidence_id is None else f" (evidence {evidence_id}"
+        if located and flag_index is not None:
+            located += f", quality_flags[{flag_index}]"
+        if located:
+            located += ")"
+        super().__init__(
+            f"{value!r} is not a declared risk flag; declared flags are: "
+            f"{', '.join(self.declared)}{located}"
+        )
+
+    @property
+    def expected(self) -> str:
+        """The vocabulary in pydantic's own `enum` phrasing, so two `422`s read alike.
+
+        `"'a', 'b' or 'c'"`, in **declaration order** -- which is the one detail here that was
+        measured rather than assumed. `self.declared` is sorted, because that is the order
+        `V2-P4-030` gave this error's prose and a message is read by a human; pydantic renders an
+        enum's members in the order the class declares them, and
+        `tests/integration/test_undeclared_risk_flag_surfaces.py::
+        test_the_two_faces_of_one_vocabulary_refuse_the_same_string_the_same_way` asserts the
+        evidence plane's `msg` equals the one pydantic writes for `signal.risk_flags`. So this
+        reads `RISK_FLAGS`, not `self.declared`, and the two orders stay deliberately different.
+
+        Built here rather than in `api/app.py` so there is one rendering of the vocabulary rather
+        than a second one sitting beside the assertion that compares them.
+        """
+        head = ", ".join(repr(flag.value) for flag in RISK_FLAGS[:-1])
+        return f"{head} or {RISK_FLAGS[-1].value!r}"
+
+
 def parse_risk_flag(value: str) -> RiskFlag:
     """Resolve one wire string to its declared flag, refusing anything outside the vocabulary.
 
@@ -212,11 +296,14 @@ def parse_risk_flag(value: str) -> RiskFlag:
     exactly the one that needs to know *which* flag it spelled wrong. Under the open set it got
     no error at all: the misspelling was carried through and scored **above** the flag it was a
     misspelling of.
+
+    `UndeclaredRiskFlagError` rather than a bare `ValueError` since `V2-P4-101`; see that class
+    for why the three faces that reach this function needed a type to catch, and for why the one
+    face that was already correct stayed correct.
     """
     flag = RISK_FLAGS_BY_VALUE.get(value)
     if flag is None:
-        declared = ", ".join(sorted(RISK_FLAGS_BY_VALUE))
-        raise ValueError(f"{value!r} is not a declared risk flag; declared flags are: {declared}")
+        raise UndeclaredRiskFlagError(value)
     return flag
 
 
