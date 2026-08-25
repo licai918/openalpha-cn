@@ -280,7 +280,11 @@ from openalpha_cn.domain.stock_universe import (
     StockUniverse,
     StockUniverseError,
 )
-from openalpha_cn.domain.trading_calendar import TradingCalendar, TradingCalendarError
+from openalpha_cn.domain.trading_calendar import (
+    CalendarDayStatus,
+    TradingCalendar,
+    TradingCalendarError,
+)
 from openalpha_cn.panel.catalog import (
     DEFAULT_DATE_TIMEZONE,
     PanelStorageError,
@@ -295,8 +299,10 @@ from openalpha_cn.panel_factors import (
     ProcessedFactorPanel,
     apply_factor_transform,
     compute_factor,
+    factor_observation_dataset,
     load_factor_observations,
     load_processed_factor_observations,
+    processed_factor_dataset,
     write_factor_panels,
     write_processed_factor_panels,
 )
@@ -320,6 +326,7 @@ from openalpha_cn.panel_neutralization import (
     apply_factor_neutralization,
     load_industry_market_cap_cross_section,
     load_neutralized_factor_observations,
+    neutralized_factor_dataset,
     write_neutralized_factor_panels,
 )
 from openalpha_cn.panel_view import PANEL_STORE_PLACEHOLDER, panel_store
@@ -440,6 +447,56 @@ class FactorRunLimitation:
 
 
 KNOWN_FACTOR_RUN_LIMITATIONS: Final[tuple[FactorRunLimitation, ...]] = (
+    FactorRunLimitation(
+        code="a_closed_day_and_an_unclosed_session_share_one_exit_code",
+        detail=(
+            "V2-P4-109. `openalpha factor build --tier neutralized` at a prediction instant on a "
+            "Saturday and at one before an open session's own 16:30 close both exit 1 "
+            "(FACTOR_EXIT['blocked'] is PanelExit.unhealthy). PanelExit's own docstring says the "
+            "codes exist so a CI job can tell 'go fetch the data again' from 'change your "
+            "command line', and those two states are on opposite sides of that line: a Saturday "
+            "never becomes a session and no retry produces one, while an unclosed session "
+            "becomes readable that afternoon. WHAT WAS FIXED IS THE MESSAGE, NOT THE CODE. Each "
+            "state now names only its own remedy (see RESIDUAL_REMEDIES, keyed by the "
+            "three-valued CalendarDayStatus), so a human reading the refusal is told the one "
+            "thing that helps. A machine switching on the exit code alone still cannot tell them "
+            "apart. THE CODE WAS DELIBERATELY NOT SPLIT AND THE REASON IS MEASURABLE: "
+            "PanelExit.bad_request means 'no amount of re-fetching fixes it', and a day the "
+            "loaded calendar reports `closed` can ALSO be a day whose trade_cal partition is "
+            "merely short of it -- the calendar cannot distinguish 'the exchange was shut' from "
+            "'this panel does not know that it was open', and for the second, re-fetching IS the "
+            "remedy. Answering 3 there would stop a scheduled job retrying a panel a retry would "
+            "repair, which is the more expensive of the two mistakes. The third verdict, "
+            "`beyond_horizon`, is the one that is unambiguously a fetch, and it says so."
+        ),
+    ),
+    FactorRunLimitation(
+        code="the_unbuilt_factor_remedy_fires_only_when_no_year_of_the_tier_is_registered",
+        detail=(
+            "V2-P4-067(b). A tier read that RAISES -- an empty store, a year no partition "
+            "covers, a damaged file -- now carries `openalpha factor build --factor <key> "
+            "--tier <tier> --year <year>` on all three tiers and on both faces. WHAT IS NOT "
+            "CLAIMED is that a refusal without that line means the panel is well. The remedy "
+            "fires on ONE state and deliberately on no other: no year of that tier's "
+            "observation partition is registered at all. A store holding SOME year of it can be "
+            "short for reasons this layer cannot tell apart -- the requested year is absent and "
+            "the engine's own sentence says so, the partition is present but unreadable at the "
+            "stated as_of, the rows are there and stale -- and `openalpha factor build` is not "
+            "the whole answer to any of those. V2-P4-078 measured the cost of getting this "
+            "wrong on the panel plane: a refusal naming a command that does not help is worse "
+            "than one naming none, because it sends the caller to rebuild something that is "
+            "already built. The tier named in the line is the tier whose READ raised, not the "
+            "tier `--tier` asked for: `run_factor_experiment` reads all three whatever the "
+            "request says. The dataset is looked up in FACTOR_TIER_DATASETS on both faces, "
+            "which is one table restated rather than two rules, so the two faces cannot drift "
+            "into naming different partitions for one tier. THIS ENTRY REPLACES "
+            "KNOWN_SHORTLIST_VIEW_LIMITATIONS.only_the_raw_tiers_unreadable_factor_refusal_"
+            "names_the_command_that_builds_it, whose stated reason -- `neutralized` having two "
+            "partition spellings -- was measured false: neutralized_factor_dataset is keyed by "
+            "the definition alone and factor_neutmn_* is the manifest dataset, not a second "
+            "name for the observations."
+        ),
+    ),
     FactorRunLimitation(
         code="the_three_tiers_must_have_been_built_at_the_same_instants",
         detail=(
@@ -1019,6 +1076,7 @@ def _read(
     *,
     store: PanelStore,
     what: str,
+    remedy: str = "",
     faults: tuple[type[Exception], ...] = _PANEL_FAULTS,
 ) -> _T:
     """Run one panel read, turning its refusal into `FactorPanelUnreadableError`.
@@ -1031,17 +1089,84 @@ def _read(
     `faults` is every read's answer by default and is widened by exactly one caller; see
     `_REGISTRY_FAULTS` for why the registry's two extra refusals go to the read that raises them
     rather than to all fourteen.
+
+    `remedy` is the command line that repairs the state this read met, appended to **both**
+    messages -- `V2-P4-067(b)`, on the face its own reproduction command names. Enveloping here
+    rather than in `panel_factors` is what lets a refusal carry one at all, for the reason
+    `_written`'s docstring gives: the engine raises the same sentence for a partition that was
+    never built and for one that is damaged, and only this layer knows which command the caller
+    ran. It is computed by `_unbuilt_factor_remedy` and is `""` whenever that function cannot
+    name a command that would help.
     """
     try:
         return reader()
     except faults as error:
         raise FactorPanelUnreadableError(
-            f"{what} could not be read out of {store.root}: {error}",
+            f"{what} could not be read out of {store.root}: {error}{remedy}",
             disclosable=(
                 f"{what} could not be read out of {PANEL_STORE_PLACEHOLDER}: "
-                f"{_without_store_path(str(error), store)}"
+                f"{_without_store_path(str(error), store)}{remedy}"
             ),
         ) from error
+
+
+FACTOR_TIER_DATASETS: Final[Mapping[str, Callable[[FactorDefinition], str]]] = MappingProxyType(
+    {
+        "raw": factor_observation_dataset,
+        "processed": processed_factor_dataset,
+        "neutralized": neutralized_factor_dataset,
+    }
+)
+"""Each tier's observation dataset, as the one function that names it.
+
+**All three take the definition and nothing else, and that is the measured fact that decided
+`V2-P4-067(b)`'s boundary.** `shortlist_view._unbuilt_factor_remedy` shipped covering `raw` alone
+and justified it by `neutralized` having "two partition spellings depending on the declared
+neutralization (`factor_neut_*` and `factor_neutmn_*`)". There is no second spelling:
+`factor_neutmn_*` is the **manifest** dataset, a sibling of the observations rather than an
+alternative name for them, and `load_neutralized_factor_observations` says in its own docstring
+that "the neutralisation is a filter here and the factor is the dataset". `factor_proc_*` and
+`factor_procmn_*` are the same arrangement one plane down. So a `registered_years` question asked
+about any tier is about the only partition that tier's observations can be in, and the failure
+mode the old boundary was drawn to avoid -- answering "nothing is stored" for a panel that holds
+the other spelling -- cannot occur.
+`tests/integration/test_factor_unbuilt_remedy.py::
+test_a_tier_stored_under_one_neutralisation_is_found_by_a_request_naming_another` drives that
+rather than restating it: residuals written under one neutralisation are read back by a request
+naming another, and the refusal that follows names no build command because the partition is
+there.
+
+A mapping rather than three `if`s, so `FACTOR_TIER_ORDER` and this table can be held equal by a
+test -- a tier added to the vocabulary with no dataset function here is a tier whose refusal
+would silently go back to naming nothing.
+"""
+
+
+def _unbuilt_factor_remedy(store: PanelStore, *, definition: FactorDefinition, tier: str) -> str:
+    """The `factor build` line for a tier this panel holds no partition of, or `""`.
+
+    `shortlist_view._unbuilt_dataset_remedy`'s bound, transplanted with its reason intact: it
+    fires on "no year of this tier is registered at all" and on nothing else. A store that holds
+    *some* year of it can be short for reasons this function cannot tell apart -- the requested
+    year is absent and the read says so itself -- and a refusal that names a command which does
+    not help is worse than one that names none, which is `V2-P4-078`'s finding and the trap this
+    bound is one line away from.
+
+    `tier` is the tier whose **read raised**, not the tier the request named:
+    `run_factor_experiment` reads all three whatever `--tier` says, so the actionable line is the
+    one that builds the
+    partition that could not be opened. Looked up in `FACTOR_TIER_DATASETS` rather than spelled,
+    for `_unbuilt_dataset_remedy`'s reason: a hand-written prefix is exactly where a plane's
+    naming rule and a message come apart.
+    """
+    dataset = FACTOR_TIER_DATASETS.get(tier)
+    if dataset is None or store.registered_years(dataset(definition)):
+        return ""
+    return (
+        f". No {tier} partition of this factor is registered in this panel at all. Build it "
+        f"first: `openalpha factor build --factor {definition.qualified_key} --tier {tier} "
+        f"--year <year>`"
+    )
 
 
 def _read_registry(reader: Callable[[], StockUniverse], *, store: PanelStore) -> StockUniverse:
@@ -1641,6 +1766,7 @@ def run_factor_experiment(
             ),
             store=store,
             what=f"the raw {request.definition.qualified_key} observations",
+            remedy=_unbuilt_factor_remedy(store, definition=request.definition, tier="raw"),
         ),
         request,
     )
@@ -1664,6 +1790,7 @@ def run_factor_experiment(
             ),
             store=store,
             what=f"the {request.transform.qualified_key} rows of that factor",
+            remedy=_unbuilt_factor_remedy(store, definition=request.definition, tier="processed"),
         ),
         request,
     )
@@ -1678,6 +1805,7 @@ def run_factor_experiment(
             ),
             store=store,
             what=f"the {request.neutralization.qualified_key} residuals of that factor",
+            remedy=_unbuilt_factor_remedy(store, definition=request.definition, tier="neutralized"),
         ),
         request,
     )
@@ -3189,6 +3317,63 @@ def _requirements(
     return built
 
 
+RESIDUAL_REMEDIES: Final[Mapping[CalendarDayStatus, str]] = MappingProxyType(
+    {
+        CalendarDayStatus.closed: (
+            "Move --as-of to a session: the exchange was never open on that day, so no fetch "
+            "and no later run produces one for it."
+        ),
+        CalendarDayStatus.trading: (
+            "That session is open and has not published yet -- it becomes readable after its "
+            "own 16:30 Asia/Shanghai close, so move --as-of to an instant after that, or build "
+            "--tier processed now and the residual once the session has closed."
+        ),
+        CalendarDayStatus.beyond_horizon: (
+            "The stored calendar does not reach that day at all, so whether it is a session is "
+            "not yet knowable here: fetch the later sessions first "
+            "(`openalpha panel build --dataset trade_cal --year <year>`)."
+        ),
+    }
+)
+"""One remedy per calendar verdict, because the three are answered by three different actions.
+
+`V2-P4-109`. `V2-P4-108` made this refusal reachable and left it saying all of the remedies at
+once: "Build --tier processed at this instant, or move --as-of to after the session's close, or
+name the missing year, or fetch the later sessions first." Three of those four are wrong for a
+Saturday and one is wrong for a session that simply has not closed, and both exit `1` --
+`FACTOR_EXIT["blocked"]`, which is `PanelExit.unhealthy`. `PanelExit`'s own docstring says the
+codes exist so a CI job can tell "re-fetch the data" from "edit the command line", and a message
+carrying both remedies gives back with one hand what the code was split to provide.
+
+**The verdict is three-valued and so is this table, deliberately.** `CalendarDayStatus` refuses
+to be a `bool` for the reason that applies here exactly: "the calendar says this is not a
+session" and "the calendar does not reach this day" have opposite remedies, and collapsing them
+would put "fetch the later sessions" in front of somebody who asked about a Saturday.
+
+**The exit code is not split and that is a decision with a reason**, recorded as
+`a_closed_day_and_an_unclosed_session_share_one_exit_code`: `bad_request` means "no amount of
+re-fetching fixes it", and a day reported `closed` here can also be a day whose `trade_cal`
+partition is merely short -- for which re-fetching is the remedy. Answering `3` there would stop
+a CI job retrying a panel a retry would repair.
+"""
+
+
+def _residual_remedy(calendar: TradingCalendar, *, day: date, years: Sequence[int]) -> str:
+    """The remedy sentence for the one state this day is in, plus the narrowing a caller owns.
+
+    The `--year` clause is appended rather than being a fourth row of `RESIDUAL_REMEDIES`,
+    because it is orthogonal to the calendar verdict: naming fewer years than the stored
+    membership years at or before the day leaves an assignment unread whether the day is a
+    session or not. It is the one remedy in the old sentence that was never wrong, only
+    undirected.
+    """
+    remedy = RESIDUAL_REMEDIES[calendar.day_status(day)]
+    return (
+        f"{remedy} If instead the industry read is what is short, --year names "
+        f"{list(years)} and every stored membership year at or before that day has to be in it."
+    )
+
+
 def _neutralized(
     store: PanelStore,
     request: FactorBuildRequest,
@@ -3251,9 +3436,8 @@ def _neutralized(
             "instant at or after that day's own close, on a day the exchange was open, with "
             f"every stored membership year at or before it named in {list(request.years)}. "
             "(Neither read states a whole-partition bound any more: V2-P4-026 gave daily_basic an "
-            "as-of-sensitive session-level door and V2-P4-028 gave index_member_all a day-scoped "
-            "one.) Build --tier processed at this instant, or move --as-of to after the session's "
-            "close, or name the missing year, or fetch the later sessions first. Nothing was "
+            f"as-of-sensitive session-level door and V2-P4-028 gave index_member_all a day-scoped "
+            f"one.) {_residual_remedy(calendar, day=day, years=request.years)} Nothing was "
             "written"
         )
         prefix = f"{panel.as_of.isoformat()}: "

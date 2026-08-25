@@ -33,14 +33,17 @@ from openalpha_cn.domain.name_history import (
 from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.factor_view import _PANEL_FAULTS as FACTOR_PANEL_FAULTS
 from openalpha_cn.factor_view import _REGISTRY_FAULTS as FACTOR_REGISTRY_FAULTS
+from openalpha_cn.factor_view import FACTOR_TIER_DATASETS as FACTOR_FACE_TIER_DATASETS
 from openalpha_cn.factor_view import FactorPanelUnreadableError
 from openalpha_cn.factor_view import _read as factor_read
 from openalpha_cn.factor_view import _read_registry as factor_read_registry
 from openalpha_cn.factor_view import _risk_warned_on as factor_risk_warned_on
 from openalpha_cn.panel.store import PanelStore
+from openalpha_cn.panel_factors import FACTOR_DEFINITIONS
 from openalpha_cn.panel_view import PANEL_STORE_PLACEHOLDER
 from openalpha_cn.shortlist_view import _PANEL_FAULTS as SHORTLIST_PANEL_FAULTS
 from openalpha_cn.shortlist_view import _REGISTRY_FAULTS as SHORTLIST_REGISTRY_FAULTS
+from openalpha_cn.shortlist_view import FACTOR_TIER_DATASETS as SHORTLIST_FACE_TIER_DATASETS
 from openalpha_cn.shortlist_view import (
     KNOWN_SHORTLIST_VIEW_LIMITATIONS,
     SHORTLIST_VIEW_LIMITATION_CODES,
@@ -59,6 +62,7 @@ from openalpha_cn.shortlist_view import (
 from openalpha_cn.shortlist_view import _read as shortlist_read
 from openalpha_cn.shortlist_view import _read_registry as shortlist_read_registry
 from openalpha_cn.shortlist_view import _risk_warned_on as shortlist_risk_warned_on
+from openalpha_cn.shortlist_view import _unbuilt_factor_remedy as unbuilt_factor_remedy
 
 AS_OF: Final[datetime] = datetime(2026, 1, 16, 12, 0, tzinfo=UTC)
 FIRST: Final[datetime] = datetime(2026, 1, 16, 9, 0, tzinfo=UTC)
@@ -203,6 +207,48 @@ def test_this_face_calls_the_same_panel_faults_unreadable_as_the_factor_face(
             shortlist_read_registry(_raising(fault), store=store)
         with pytest.raises(FactorPanelUnreadableError):
             factor_read_registry(_raising(fault), store=store)
+
+
+def test_both_faces_name_a_tiers_partition_with_the_same_table() -> None:
+    """`FACTOR_TIER_DATASETS` is restated in two modules that cannot import each other.
+
+    `lint-imports` keeps `factor_view` and `shortlist_view` siblings, so the table cannot be
+    shared by import -- `_PANEL_FAULTS`' arrangement, and this is the test that arrangement
+    depends on: two tables that cannot see each other, held equal by a test that can import
+    both. Written as a mapping equality on the **function objects** rather than on the tier
+    names, because two tables with the same three keys pointing at different dataset functions
+    is exactly the drift that would put one face's remedy on a partition the other face never
+    looks at, and a key-set equality cannot see it.
+
+    `V2-P4-067(b)`: the remedy that hangs off this table was raw-only on one face and absent on
+    the other, so a single table both faces read is what makes "which partition builds this
+    tier" one answer rather than two.
+    """
+    assert SHORTLIST_FACE_TIER_DATASETS == FACTOR_FACE_TIER_DATASETS
+    assert set(SHORTLIST_FACE_TIER_DATASETS) == {"raw", "processed", "neutralized"}
+    for tier, dataset in FACTOR_FACE_TIER_DATASETS.items():
+        assert dataset is SHORTLIST_FACE_TIER_DATASETS[tier]
+
+
+def test_a_tier_the_table_does_not_know_gets_no_command_rather_than_a_wrong_one(
+    tmp_path: Path,
+) -> None:
+    """The `None` arm of `_unbuilt_factor_remedy`'s lookup, which is not the dead guard it replaced.
+
+    The guard this replaced was `tier != "raw"`, and it was unreachable: the single call site
+    passed the literal `tier="raw"` from inside `if tier == "raw":`, so the clause that carried
+    the whole raw-only justification could never run. This arm is reachable and means something
+    different -- a tier name no dataset function is declared for -- and it answers with no
+    command rather than with a `KeyError` or with a command naming a partition nobody can build.
+    """
+    store = PanelStore(tmp_path / "panel")
+    definition = FACTOR_DEFINITIONS.get("reversal_1d/v1")
+
+    assert unbuilt_factor_remedy(store, definition=definition, tier="not-a-tier") == ""
+    for tier in FACTOR_FACE_TIER_DATASETS:
+        assert "openalpha factor build" in unbuilt_factor_remedy(
+            store, definition=definition, tier=tier
+        )
 
 
 def test_the_registry_read_is_the_only_site_either_face_widens_for(tmp_path: Path) -> None:
@@ -401,7 +447,7 @@ def test_a_calendar_horizon_is_a_bad_request_and_not_a_fact_about_the_panel() ->
 
 
 def test_a_short_code_commit_is_refused_because_different_code_cuts_a_different_list() -> None:
-    with pytest.raises(ShortlistRequestError, match="at least 7 characters"):
+    with pytest.raises(ShortlistRequestError, match="between 7 and 64 characters"):
         _request(code_commit="abc")
 
 

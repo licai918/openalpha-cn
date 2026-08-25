@@ -162,6 +162,83 @@ class UndeclaredAgentDependencyError(ValueError):
     """
 
 
+REQUIRED_AGENT_DECLARATIONS: Final[tuple[str, ...]] = (
+    "agent_id",
+    "evidence_families",
+    "feature_dependencies",
+    "provenance",
+)
+"""Every attribute `ResearchAgent` requires an implementation to carry, in one place.
+
+A tuple rather than four `hasattr` calls, because the check below has to fail when the
+*contract* grows and not only when this list is edited: `V2-P4-008` added
+`feature_dependencies` to the Protocol and nothing anywhere refused an agent that lacked it, so
+the fourth wave's own breaking change reached third-party deployments as
+`AttributeError: 'LegacyAgent' object has no attribute 'feature_dependencies'` out of
+`router.py`. `tests/integration/test_legacy_agent_contract_refusal.py` holds this tuple against
+the refusal one row per name.
+
+`analyze` is deliberately absent. It is a method rather than a declaration and an object without
+it is not an agent at all in a way `getattr` is a poor instrument for -- a bound method that
+raises is indistinguishable from one that works until it is called, so the engine's own handling
+of a raising agent (`_run_agents_with_recovery` records `failed` and re-raises) is the right
+place for that and already exists.
+"""
+
+
+class MissingAgentDeclarationError(TypeError):
+    """An agent was handed to the router without an attribute the contract requires.
+
+    `V2-P4-008` made `feature_dependencies` required and `runtime/router.py` then read it
+    unguarded, one line above `UndeclaredAgentDependencyError` -- the named refusal built for
+    exactly this class of failure. Measured on `daaabf5`, a third-party agent written before that
+    wave got `AttributeError: 'LegacyAgent' object has no attribute 'feature_dependencies'` at
+    `router.py:223`, which names no contract, no version and no remedy.
+
+    **`provenance` was in the same state and worse, and this class covers it too.** That field's
+    docstring says an agent omitting it "fails structurally at the point it is handed to the
+    engine instead". There was no such check: `ResearchEngine._pair` reads `agent.provenance`
+    inside a dict comprehension, which is *after* every selected agent has run. Measured the same
+    way, an agent short only `provenance` reached `analyze`, left a recovery row behind, and then
+    raised `AttributeError` at `engine.py:223` -- so the failure was neither structural nor at
+    hand-off, and it happened with a half-finished cycle on disk.
+
+    Checked here rather than at each read, because this is the one seam every cycle crosses
+    before any agent runs. `test_nothing_is_written_for_a_cycle_that_never_started` is that
+    property, and it is the same property `UndeclaredAgentDependencyError` is placed here for.
+
+    **A `TypeError` and deliberately not a subclass of `UndeclaredAgentDependencyError`.** The
+    two are different facts with different remedies -- "this object does not implement the
+    current `ResearchAgent`" against "this agent's declaration can never be satisfied by any
+    run" -- and the first is answered by editing the agent's class while the second is answered
+    by editing what it declares. A caller that could not tell them apart would be told to
+    reconsider its evidence families when what changed was the Protocol.
+    """
+
+
+def _refuse_an_incomplete_declaration(agent: ResearchAgent) -> None:
+    """Refuse one agent that does not carry every attribute `ResearchAgent` requires.
+
+    `agent_id` is read through `getattr` with a fallback to the class name, because it is itself
+    one of the required declarations: an agent missing it must still be named in the refusal, and
+    naming it by the only identity such an object has is better than a message about "an agent".
+    """
+    missing = tuple(name for name in REQUIRED_AGENT_DECLARATIONS if not hasattr(agent, name))
+    if not missing:
+        return
+    named = getattr(agent, "agent_id", None) or type(agent).__name__
+    raise MissingAgentDeclarationError(
+        f"{named} does not declare {', '.join(missing)}, which `ResearchAgent` requires. This is "
+        "an agent written against an older contract: `feature_dependencies` became required in "
+        "`V2-P4-008` and `provenance` in `V2-P4-010`, and neither is inferred, because the guess "
+        "either one would have to make is indistinguishable from a misdeclaration a deployment "
+        "wants to hear about. An agent that reads no panel column declares "
+        "`feature_dependencies = frozenset()` and says so; `provenance` is "
+        '`AgentProvenance(kind="deterministic")` for an agent that calls no model. Nothing was '
+        "run and nothing was written"
+    )
+
+
 class AgentRouter:
     """Select the agents whose whole declaration this run can satisfy.
 
@@ -219,6 +296,12 @@ class AgentRouter:
         available = frozenset() if features is None else frozenset(features.feature_ids)
         selected: list[ResearchAgent] = []
         for agent in agents:
+            # Before anything is read off the agent, and over the WHOLE roster rather than only
+            # the agents this run would select: an agent dropped for a family this run does not
+            # carry is an agent whose incomplete declaration would otherwise surface on some
+            # later run with different evidence, which is the intermittency `V2-P4-008`'s own
+            # breaking change already cost once.
+            _refuse_an_incomplete_declaration(agent)
             declared_families = agent.evidence_families
             declared_features = agent.feature_dependencies
             if not declared_families and not declared_features:

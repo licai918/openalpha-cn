@@ -400,8 +400,18 @@ def test_the_declared_limitations_are_the_ones_this_face_carries() -> None:
     entry became `the_builder_cannot_produce_a_residual_for_a_session_that_has_not_closed`, which
     is the one-session bound that survives. Nothing here was weakened to accommodate either
     change; the equality went red both times, which is the mechanism working.
+
+    **`V2-P4-067(b)` added a ninth and it arrived from another registry.**
+    `the_unbuilt_factor_remedy_fires_only_when_no_year_of_the_tier_is_registered` replaces
+    `KNOWN_SHORTLIST_VIEW_LIMITATIONS.only_the_raw_tiers_unreadable_factor_refusal_names_the_`
+    `command_that_builds_it`, whose stated reason -- `neutralized` having two partition
+    spellings -- was measured false. The boundary it recorded (a tier asymmetry) is gone; the
+    boundary that survives (the one store state the remedy fires on) belongs to both faces, and
+    it is declared here because this is the face whose reproduction command the row names.
     """
     assert {
+        "the_unbuilt_factor_remedy_fires_only_when_no_year_of_the_tier_is_registered",
+        "a_closed_day_and_an_unclosed_session_share_one_exit_code",
         "the_three_tiers_must_have_been_built_at_the_same_instants",
         "the_builder_cannot_produce_a_residual_for_a_session_that_has_not_closed",
         "the_document_store_holds_bytes_and_re_derives_no_number",

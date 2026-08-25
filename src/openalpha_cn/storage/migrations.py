@@ -104,9 +104,15 @@ class MigrationFailedError(RuntimeError):
 
     Carries the failed migration's identity and the pre-migration backup path so a caller
     (the CLI, in particular) can tell the user exactly where to find their data.
+
+    `backup_path` is `None` only when the backup itself is what failed -- `V2-P4-111` moved it
+    inside the same `try` as the first `apply()`, so a disk that cannot be written to now reaches
+    a caller as this refusal naming the migration rather than as a bare `sqlite3.OperationalError`
+    from before the loop. Nothing was migrated in that case either, so the honest answer is that
+    there is no copy to point at rather than a path that does not exist.
     """
 
-    def __init__(self, message: str, *, version: int, name: str, backup_path: Path) -> None:
+    def __init__(self, message: str, *, version: int, name: str, backup_path: Path | None) -> None:
         super().__init__(message)
         self.version = version
         self.name = name
@@ -1243,6 +1249,20 @@ def run_migrations(
     raises `MigrationNotYetApplicable` stops the run (without error) and leaves it, and
     everything after it, pending.
 
+    **A run that applied nothing removes the backup it took** (`V2-P4-111`). The copy has to be
+    taken before the loop, because a migration announces an unmet precondition by raising from
+    inside `apply()` and there is no way to know in advance which of the pending set will write;
+    so the removal is at the end instead, and only when `applied` is empty. Before this, a store
+    with a permanently-deferring migration wrote one full-size backup **per process start** with
+    nothing ever applied. Measured on a real `state.sqlite3` stuck at `user_version=4` -- its
+    history predates `create_validation_results`, so it has no `validation_results` table for
+    `_rewrite_contract_identities` to alter -- that was 125 identical 139,264-byte files and no
+    terminating condition. The removed file is provably this call's own (`_take_backup` claims
+    its name with `O_CREAT | O_EXCL`) and provably redundant (nothing was applied, so it is
+    byte-for-byte the database it sits beside). A **failed** migration keeps its backup, which is
+    what `MigrationFailedError` points a caller at; that path raises rather than reaching the
+    removal.
+
     Concurrency: `pending` is computed once, from a snapshot taken before any lock is
     held, so two callers racing the same database (e.g. the API and the CLI hitting the
     same `runtime_dir`) can both decide the same migration is pending. `BEGIN IMMEDIATE`
@@ -1269,7 +1289,7 @@ def run_migrations(
                 applied=(),
                 backup_path=None,
             )
-        backup_path = _take_backup(path, current_version=from_version, clock=clock)
+        backup_path: Path | None = _take_backup(path, current_version=from_version, clock=clock)
         logger.info(
             "migration_backup_created",
             extra={"backup_path": str(backup_path), "from_version": from_version},
@@ -1330,6 +1350,26 @@ def run_migrations(
                         "migration_name": migration.name,
                     },
                 )
+        if not applied and backup_path is not None:
+            # `V2-P4-111`. The backup still happens before the loop, because that is the only
+            # place it can happen and still predate a write: a migration announces that its
+            # precondition is unmet by raising from inside `apply()`, so there is no way to know
+            # in advance which of the pending set will write. What changes is that a copy which
+            # protected nothing is removed **by the call that took it**, before that call
+            # returns.
+            #
+            # It is provably safe to remove and provably this call's own: `_take_backup` claims
+            # its filename with `os.O_CREAT | os.O_EXCL`, so no other process shares it, and
+            # nothing was applied, so the database is byte-for-byte what it was when the copy was
+            # taken. It is only ever reached when `applied` is empty -- a failed migration keeps
+            # its backup, which is what `MigrationFailedError` points a caller at, and that path
+            # raises rather than arriving here at all.
+            #
+            # Measured cost of not doing this, on a store whose `_rewrite_contract_identities`
+            # defers permanently: one 139,264-byte file per process start, forever. That was 125
+            # of the 128 files in the user's own `runtime/backups/`.
+            backup_path.unlink(missing_ok=True)
+            backup_path = None
         to_version = _current_version(connection)
         return MigrationRunResult(
             path=path,

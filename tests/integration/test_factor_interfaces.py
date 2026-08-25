@@ -268,6 +268,7 @@ def store_three_tiers(
     transform: Any = CROSS_SECTION_STANDARD,
     neutralization: Any = INDUSTRY_AND_SIZE,
     shapes: Sequence[str] = SHAPES,
+    write_tiers: frozenset[str] = frozenset({"raw", "processed", "neutralized"}),
 ) -> PanelStore:
     """Write one generated panel and one factor's three stored tiers into `runtime_dir/panel`.
 
@@ -292,6 +293,13 @@ def store_three_tiers(
 
     `neutralized_days` defaults to `prediction_days`; naming a subset is how the blocked case is
     built -- a raw tier the neutralised tier does not cover.
+
+    `write_tiers` names which of the three are **stored at all**, and it is a different fixture
+    from `neutralized_days`: a tier left out here has no partition registered under its name,
+    which is the state `V2-P4-067`'s remedy fires on, while `neutralized_days` writes the
+    partition and leaves the requested instants out of it. Both are reachable on a real store
+    and they take different arms of `factor_view._read`, so the two knobs are kept apart rather
+    than folded into one.
     """
     panel = _panel(shapes)
     store = PanelStore(runtime_dir / "panel")
@@ -340,9 +348,11 @@ def store_three_tiers(
                 built_at=as_of,
             )
         )
-    write_factor_panels(store, raws)
-    write_processed_factor_panels(store, processed)
-    if neutralized:
+    if "raw" in write_tiers:
+        write_factor_panels(store, raws)
+    if "processed" in write_tiers:
+        write_processed_factor_panels(store, processed)
+    if neutralized and "neutralized" in write_tiers:
         write_neutralized_factor_panels(store, neutralized)
     return store
 

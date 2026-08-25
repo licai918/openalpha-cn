@@ -171,63 +171,135 @@ def test_a_well_formed_pair_still_reaches_the_panel(tmp_path: Path) -> None:
     assert "partition_missing" in result.stderr
 
 
-UNREMEDIED_TIERS: Final[tuple[str, ...]] = ("processed", "neutralized")
-"""The two tiers `_unbuilt_factor_remedy` deliberately leaves without a command.
+REMEDIED_TIERS: Final[tuple[tuple[str, tuple[str, ...]], ...]] = (
+    ("raw", ()),
+    ("processed", ("--transform", "cross_section_standard/v1")),
+)
+"""Each tier this face can reach a factor read on, and the flags that tier's request needs.
 
-Named here as executable literals rather than in prose because
-`KNOWN_SHORTLIST_VIEW_LIMITATIONS
-.only_the_raw_tiers_unreadable_factor_refusal_names_the_command_that_builds_it` is what records
-the asymmetry, and this repository's registry audit requires such a code to appear in test code
-that runs.
+**The flags are the whole point of this constant, and their absence is what made the test this
+one replaces unable to say anything.** `V2-P4-067(b)`'s ninth-wave acceptance found the boundary
+that pinned `_unbuilt_factor_remedy` to `raw` was justified by a false claim; re-measuring the
+test that held the other two tiers *unremedied* found it never reached a factor read at all.
+Driven with no `--transform`, `openalpha shortlist run --tier processed` exits **3** with
+`a processed-tier screen needs a --transform`, which is `shortlist_request` refusing before any
+store is opened -- so `assert "openalpha factor build" not in result.stderr` was asserted against
+a sentence that could not have contained it under any implementation, and would have stayed green
+whichever way the boundary went. That is the shape this repository keeps finding: the assertion
+exists, and on that fixture it cannot separate the two answers.
+
+**`neutralized` is absent by measurement rather than by omission**, and
+`test_the_neutralized_tier_is_refused_by_this_face_before_any_partition_is_opened` is that
+measurement: `run_shortlist` refuses the tier unconditionally at request time, so no store state
+can put a neutralised read on this face. `_rows_for` carries the remedy on that branch anyway --
+`_declared_transform`'s rule, that a precondition is stated at the read rather than inferred from
+a resolver two calls away, because a `ShortlistRunRequest` is a frozen dataclass and is still
+constructible directly -- and the branch is *not* claimed to be covered here. The factor face
+reaches all three and `tests/integration/test_factor_unbuilt_remedy.py` drives them.
 """
 
 
-def test_the_raw_tiers_unreadable_refusal_names_the_command_that_builds_it(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("tier", "flags"), REMEDIED_TIERS, ids=[tier for tier, _ in REMEDIED_TIERS]
+)
+def test_every_tier_of_an_unbuilt_factor_names_the_command_that_builds_it(
+    tmp_path: Path, tier: str, flags: tuple[str, ...]
 ) -> None:
-    """`V2-P4-067`, the half the row's own docstring claimed was already covered.
+    """`V2-P4-067(b)`, widened from `raw` after the reason for holding back failed.
 
-    `_resolve_instant` refuses a read that *succeeds and returns nothing* with the build command
-    on it. A store with no partition at all never gets there -- the read *raises* first -- and
-    that refusal named no command. Measured before the fix:
-    `... ['partition_missing', 'field_missing']`, and nothing else.
-    """
-    result = CliRunner().invoke(
-        app, _argv(tmp_path / "rt", code_commit=COMMIT, config_digest=DIGEST)
-    )
-    assert "partition_missing" in result.stderr
-    assert "openalpha factor build --factor reversal_1d/v1 --tier raw" in result.stderr
+    `_unbuilt_factor_remedy` shipped raw-only because `neutralized` was said to have "two
+    partition spellings depending on the declared neutralization (`factor_neut_*` and
+    `factor_neutmn_*`)". `neutralized_factor_dataset` is keyed by the definition and takes no
+    neutralisation; `factor_neutmn_*` is the manifest dataset, the structural twin of
+    `factor_procmn_*`, which the same paragraph did not treat as making `processed` ambiguous.
+    All three tiers have one observations dataset per definition, so all three can be asked the
+    `registered_years` question the remedy is gated on.
 
-
-@pytest.mark.parametrize("tier", UNREMEDIED_TIERS)
-def test_the_other_two_tiers_keep_the_unremedied_message_as_declared(
-    tmp_path: Path, tier: str
-) -> None:
-    """The declared boundary, asserted rather than left to the docstring.
-
-    `only_the_raw_tiers_unreadable_factor_refusal_names_the_command_that_builds_it` says the
-    remedy is raw-only because `neutralized` has two partition spellings and asking
-    `registered_years` about the wrong one would hand back a rebuild the caller does not need.
-    A test that only checked the raw tier would stay green if somebody widened it wrongly, so
-    this is the other direction: these two must still refuse *without* a command, and their
-    message must still name the dataset, the year and the instant.
+    Each row exits 1 rather than 3 -- that is what says the request was put and the store was
+    what refused it, which is precisely what the replaced test could not say.
     """
     argv = _argv(tmp_path / "rt", code_commit=COMMIT, config_digest=DIGEST)
     argv[argv.index("--tier") + 1] = tier
+    result = CliRunner().invoke(app, [*argv, *flags])
+
+    assert result.exit_code == 1
+    assert "partition_missing" in result.stderr
+    assert f"openalpha factor build --factor reversal_1d/v1 --tier {tier}" in result.stderr
+
+
+def test_a_read_that_raises_on_a_year_this_panel_lacks_names_no_build_command(
+    tmp_path: Path,
+) -> None:
+    """The same bound on this face, and the same mutant is what found it missing.
+
+    Deleting the `registered_years` clause from `_unbuilt_factor_remedy` -- making the command
+    unconditional -- survived every test on both faces, because every one of them pointed at a
+    store that held nothing. The panel here holds 2026 and the request asks about 2025, so the
+    read raises with the factor demonstrably built: a refusal telling this caller to run
+    `openalpha factor build` would send them to rebuild what they already have, which is exactly
+    `V2-P4-078`'s finding.
+    """
+    from test_factor_interfaces import store_three_tiers
+
+    store_three_tiers(tmp_path)
+    argv = _argv(tmp_path, code_commit=COMMIT, config_digest=DIGEST)
+    argv[argv.index("--year") + 1] = "2025"
+    argv[argv.index("--as-of") + 1] = "2025-01-16T07:00:00+00:00"
+
     result = CliRunner().invoke(app, argv)
-    assert result.exit_code != 0
+
+    assert result.exit_code == 1
+    assert "year=2025" in result.stderr
     assert "openalpha factor build" not in result.stderr
 
 
-def test_the_asymmetry_is_declared_where_a_reader_of_the_module_would_find_it() -> None:
-    """The registry entry backing the boundary above, as an executable literal.
+def test_the_neutralized_tier_is_refused_by_this_face_before_any_partition_is_opened(
+    tmp_path: Path,
+) -> None:
+    """Why `REMEDIED_TIERS` has two rows and not three, as a measurement rather than a note.
+
+    `run_shortlist`'s first statement refuses `tier == "neutralized"` outright -- this face loads
+    no industry and market-cap cross section, so a request contract rather than a partition is
+    what is missing -- and that refusal is `bad_request`. Asserting it here is what keeps the
+    two-row constant above honest: if that guard were ever lifted, this goes red and whoever
+    lifts it is told that a third row is now reachable and owed a test.
+    """
+    argv = _argv(tmp_path / "rt", code_commit=COMMIT, config_digest=DIGEST)
+    argv[argv.index("--tier") + 1] = "neutralized"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            *argv,
+            "--transform",
+            "cross_section_standard/v1",
+            "--neutralization",
+            "industry_and_size/v1",
+        ],
+    )
+
+    assert result.exit_code == REQUEST_FAULT_EXIT
+    assert "a neutralized-tier shortlist needs" in result.stderr
+    assert "partition_missing" not in result.stderr
+
+
+def test_the_boundary_that_survives_is_declared_where_a_reader_would_find_it() -> None:
+    """The registry entry backing the bound above, as an executable literal.
 
     The repository's registry audit reads test *code*, not docstrings, precisely because a
-    limitation cited only in prose is a limitation nobody exercises.
+    limitation cited only in prose is a limitation nobody exercises. What is declared has
+    changed with the boundary: the tier asymmetry is gone and what remains is the *state* the
+    remedy fires on -- "no year of this tier is registered at all" and nothing else -- which is
+    `_unbuilt_dataset_remedy`'s bound and `V2-P4-078`'s finding, and is the one thing about this
+    function a caller still has to know.
     """
+    from openalpha_cn.factor_view import KNOWN_FACTOR_RUN_LIMITATIONS
     from openalpha_cn.shortlist_view import KNOWN_SHORTLIST_VIEW_LIMITATIONS
 
     declared = {limitation.code for limitation in KNOWN_SHORTLIST_VIEW_LIMITATIONS}
-    assert "only_the_raw_tiers_unreadable_factor_refusal_names_the_command_that_builds_it" in (
+    assert "only_the_raw_tiers_unreadable_factor_refusal_names_the_command_that_builds_it" not in (
         declared
     )
+    assert "the_unbuilt_factor_remedy_fires_only_when_no_year_of_the_tier_is_registered" in {
+        limitation.code for limitation in KNOWN_FACTOR_RUN_LIMITATIONS
+    }

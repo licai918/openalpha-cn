@@ -266,10 +266,39 @@ raises `KeyError` on the second.
 | gate verdict (`200` or `409`) | flat clearance: `is_blocked`, `blocks`, `cleared`, `report`, … | no `detail` key |
 | panel refusal (`409`/`422`) | `{"detail": {"reason": …, "message": …}}` | `detail.reason` is the table row above (`panel_unreadable`, `bad_request`) |
 | parameter validation (`422`) | FastAPI's own: `detail` is a **list** of error objects | `isinstance(detail, dict)` is false |
+| declared ceiling (`422`) | `{"detail": {"reason": "declared_ceiling_exceeded", "message": …, "field": …, "limit": …, "received": …}}` | `detail.reason == "declared_ceiling_exceeded"` |
 
 The two panel bodies share no key at all. `detail.message` is a disclosable text: it
 names the exchange, the codes that stood in the way and the remedy, and never this
 service's filesystem layout.
+
+### A `422` never quotes the request back
+
+`V2-P4-040` again, met inside `V2-P4-043`'s own fix. Pydantic's error objects carry
+`input` — the value that was refused — so a collection one item over a declared
+ceiling used to be answered with the collection. Measured: `POST /api/v1/screen` with
+10,001 records (14,771,528 bytes in) replied **13,821,594 bytes**, and
+`POST /api/v1/research/batches` with 10,001 requests replied **9,261,138 bytes**. A
+misspelled top-level key was worse in proportion — two errors, each echoing the whole
+body, **1.87×** the request at only 200 records.
+
+Two rules now bound every `422` this service issues, and neither depends on the size of
+the request:
+
+- **A ceiling this service declares** (`max_length`/`min_length` on a collection) answers
+  with the object in the table above, naming `field`, `limit` and `received`. It is a
+  refusal this service decided, so it is switchable on `detail.reason` exactly as the
+  panel refusals and `POST /api/v1/screen`'s malformed-record refusal are. A ceiling
+  fault reported *alongside* per-item faults is derivative — a body whose items all fail
+  leaves nothing behind and trips `min_length` — so in that case the item faults are the
+  answer and the list shape below is what you get.
+- **Everything else** keeps FastAPI's list, because `loc` plus a small echo is the useful
+  answer to "you sent a string where a float goes". Each entry's `input` is replaced by
+  `"<list of 10001 elided>"` (kind and size) once it exceeds `MAX_ECHOED_INPUT_BYTES`
+  (512), and the list itself stops at `MAX_VALIDATION_ERRORS` (20) followed by one final
+  entry — `{"loc": [], "type": "errors_elided", "msg": "N further validation error(s)
+  were not listed"}` — so a truncated list always says it was truncated. Every entry
+  still carries a `loc`, so the shape rule above is unchanged.
 
 ## Factor declarations
 
