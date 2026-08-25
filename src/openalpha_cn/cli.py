@@ -3240,7 +3240,15 @@ def panel_build(
         # command bounds its session loop with (`_build_sessions`) and the clock the writers run
         # their session census against (`panel_ingest._session_census`, which reads
         # `batch.fetched_at`) are the same rule applied at two layers, and they were being given
-        # two different readings of `datetime.now()`. Within one invocation that is the
+        # two different readings of `datetime.now()`.
+        #
+        # "The same rule" was false for one row and `V2-P4-114` made it true again: `V2-P4-063`
+        # moved this loop onto `panel_ingest._sessions_published_through` and left the census
+        # subtracting a day unconditionally, which is that rule only below 16:30. Both now call
+        # that one function, so the claim is carried by a shared name rather than by two spellings
+        # agreeing -- which is what `_build_sessions`' own docstring says the sharing is for.
+        #
+        # Within one invocation the mismatched clocks are the
         # cross-midnight defect in miniature: a `price` build that starts at 23:34 fetches the
         # sessions up to yesterday and then, if it finishes after 00:39, hands the writer batches
         # stamped with today -- so the census requires a session the loop was never asked for and

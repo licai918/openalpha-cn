@@ -50,19 +50,26 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final
 
 import pytest
 from fastapi.testclient import TestClient
-from panel_fixtures import EXCHANGE, SECURITIES, YEAR
+from panel_fixtures import EXCHANGE, SECURITIES, YEAR, GeneratedPanel
 from test_factor_interfaces import BASELINE, PREDICTION_DAYS, RUN_AS_OF, SHAPES, _panel
 from typer.testing import CliRunner
 
 from openalpha_cn.api.app import create_app
 from openalpha_cn.cli import FACTOR_EXIT, PanelExit, app
 from openalpha_cn.domain.factor import FactorDefinition, FactorField, FactorRegistry
+from openalpha_cn.domain.panel_batch import PanelColumn, TimelineColumns
+from openalpha_cn.domain.stock_universe import (
+    DELISTING_EVENT,
+    LISTING_EVENT,
+    STOCK_BASIC_DATASET,
+)
 from openalpha_cn.factor_view import (
     BUILD_VIEW_SCHEMA_VERSION,
     REQUIREMENT_BUILDERS,
@@ -972,11 +979,27 @@ def test_the_registry_is_read_at_each_prediction_instant_and_not_once_for_the_bu
     2026-01-16T17:00+08, and `delist_date` is exclusive -- the name is listed at the first instant
     and not at the second.
 
-    **It fails in both directions now, where the bound only failed in one.** `universe_counts`
-    reads `[8, 7]`; a registry pinned at `as_ofs[0]` gives `[8, 8]` and one pinned at `as_ofs[-1]`
-    gives `[7, 7]`. Each of the three is measured on this fixture -- the `plain` shape, which has
-    no lifecycle event inside the window at all, answers `[8, 8]` for both instants, which is
-    exactly the mutant's answer and is why the shape has to be added rather than assumed.
+    **It fails in one direction, and `V2-P4-113` corrected the claim that it failed in both.**
+    What stood here said `universe_counts` reads `[8, 7]`, that a registry pinned at `as_ofs[0]`
+    gives `[8, 8]` and one pinned at `as_ofs[-1]` gives `[7, 7]`. Only the first of the three was
+    true. Remeasured on `037ffa8`, mutating this build's registry read alone:
+
+    - `as_of=request.as_ofs[0]` is **red**, but by refusal rather than by a count: the snapshot is
+      dated 2026-01-08 and `listed_on(2026-01-16)` is beyond it, so `_computed` raises and the
+      build is blocked. It never reaches a `universe_counts` at all, so `[8, 8]` was never its
+      answer.
+    - `as_of=request.as_ofs[-1]` is **green over this whole file** -- `36 passed`, identical to
+      baseline. It answers `[8, 7]`, which is the correct answer, not `[7, 7]`.
+
+    The `[7, 7]` was the answer to a different mutation than the one named. What this test covers
+    is therefore the *early* read; the late read is look-ahead and this fixture cannot see it,
+    because `universe_counts` is structurally blind to it.
+    `test_a_registry_read_at_the_last_instant_hands_an_earlier_one_a_security_that_had_not_listed`
+    below is the guard that does see it, and its docstring carries the proof of the blindness.
+
+    The control below stands unchanged and still does its job: the `plain` shape, with no
+    lifecycle event inside the window at all, answers `[8, 8]` for both instants, so the `[8, 7]`
+    above is measuring the read and not the fixture.
     """
     from panel_fixtures import write_generated_panel
     from test_factor_interfaces import SHAPES
@@ -1014,6 +1037,137 @@ def test_the_registry_is_read_at_each_prediction_instant_and_not_once_for_the_bu
     # the answer a build that read the registry once would give -- so the assertion above is
     # measuring the read and not the fixture.
     assert without_the_event["universe_counts"] == [8, 8]
+
+
+LATE_LISTED_SECURITY: Final[str] = "000005.SZ"
+"""A registry-only code whose whole lifecycle falls *between* the two prediction instants.
+
+Registry-only for `universe.delisted_security`'s reason: a code the price grid never quotes puts
+a lifecycle row into `stock_basic` without moving the priced cross section, which
+`write_daily_panel`'s explained-share floor judges. `000004.SZ` is that shape's name, so this one
+takes the next free code.
+"""
+
+LATE_LISTED_ON: Final[date] = date(2026, 1, 12)
+LATE_DELISTED_ON: Final[date] = date(2026, 1, 14)
+"""Both strictly after 2026-01-08 and strictly before 2026-01-16 -- the two instants' own days.
+
+`delist_date` is exclusive, so at 2026-01-16 this name is *known and not listed*: it is in
+`StockUniverse.securities`, and `listed_on` leaves it out. That is the state the assertion below
+counts, and it is reachable at the second instant only.
+"""
+
+
+def _with_a_lifecycle_between_the_instants(panel: GeneratedPanel) -> GeneratedPanel:
+    """`panel` with two extra `stock_basic` rows, appended through the batch's own constructor.
+
+    `dataclasses.replace` rather than a new `PANEL_SHAPES` entry: this form is wanted by exactly
+    one test, and `GeneratedPanel`'s own docstring blesses `replace` on a panel. Every write-time
+    guard still runs -- `write_generated_panel` drives the real `write_stock_universe`.
+    """
+    registry = panel.batch(STOCK_BASIC_DATASET)
+    added = ((LISTING_EVENT, LATE_LISTED_ON), (DELISTING_EVENT, LATE_DELISTED_ON))
+    stamps = tuple(
+        datetime(day.year, day.month, day.day, tzinfo=UTC) - timedelta(hours=8)
+        for _event, day in added
+    )
+    columns = tuple(
+        PanelColumn(
+            column.name,
+            column.kind,
+            column.values
+            + tuple(
+                {
+                    "lifecycle_event": event,
+                    "lifecycle_date": day.isoformat(),
+                    "exchange": EXCHANGE,
+                }[column.name]
+                for event, day in added
+            ),
+        )
+        for column in registry.columns
+    )
+    timeline = TimelineColumns(
+        event_time=registry.timeline.event_time + stamps,
+        available_time=registry.timeline.available_time + stamps,
+        ingested_time=registry.timeline.ingested_time + stamps,
+        revision_time=registry.timeline.revision_time + stamps,
+    )
+    augmented = replace(
+        registry,
+        subjects=(*registry.subjects, LATE_LISTED_SECURITY, LATE_LISTED_SECURITY),
+        columns=columns,
+        timeline=timeline,
+    )
+    return replace(panel, batches={**panel.batches, STOCK_BASIC_DATASET: augmented})
+
+
+def test_a_registry_read_at_the_last_instant_hands_an_earlier_one_a_security_that_had_not_listed(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """The look-ahead direction of the per-instant registry read, which nothing measured before.
+
+    ## What `V2-P4-064` claimed, and what `V2-P4-113` measured
+
+    `test_the_registry_is_read_at_each_prediction_instant_and_not_once_for_the_build` above says
+    it "fails in both directions", with `as_ofs[0]` answering `[8, 8]` and `as_ofs[-1]` answering
+    `[7, 7]`. Both halves of that were remeasured on `037ffa8` and both were wrong. `as_ofs[0]`
+    does go red, but by *refusal* and not by a count -- `listed_on(2026-01-16)` is beyond a
+    snapshot dated 2026-01-08, so the build is blocked. And `as_ofs[-1]` **survives the whole
+    file**: 36 passed, byte-identical to baseline. It answers `[8, 7]`, which is the correct
+    answer.
+
+    ## Why `universe_counts` cannot see a late read, on any fixture
+
+    Not a thin fixture -- a structural blindness, and worth stating because it is what makes the
+    remedy a different assertion rather than a different panel. `stock_basic` is
+    `ClockStrategy.calendar_static`, so `panel_ingest._knowable_through_the_same_day` makes a row
+    dated `D` visible to every `as_of` on `D` and to none before it. `listed_on(day)` keeps an
+    entry when `listed_on <= day` and `day < delisted_on`. So a row can only *change* the answer
+    for `day` when its own date is at or before `day` -- and that is exactly the condition under
+    which it was already visible at `day`'s own instant. Reading the registry *later* therefore
+    cannot move `listed_on(day)` for any earlier `day`, on this fixture or any other. (Reading it
+    *earlier* is a different matter, and the snapshot horizon catches that one.)
+
+    A fixture whose `available_time` trailed its `delist_date` does not reach it either: this
+    dataset's visibility keys off the lifecycle **date** through the census bound, not off the
+    stored `available_time`, so such a row is visible at the earlier instant regardless.
+
+    ## What a late read does move: the subject list
+
+    `_computed` derives `subjects` from `universe.securities`, which is every *visible* row
+    whatever its date -- and that set is not date-filtered, so it is where a late read shows.
+    This name's rows are dated 2026-01-12 and 2026-01-14. At the first instant they are not yet
+    knowable, so the security is not in the registry at all and is scored at neither instant. At
+    the second both are visible, and the name is a subject that `listed_on` excludes -- one
+    `not_in_universe` observation, at the second instant only.
+
+    A registry pinned at `as_ofs[-1]` puts that same name into the **first** instant's subject
+    list, where it is a security that had not listed yet: a name knowable on 2026-01-16 read into
+    a cross section stamped 2026-01-08. `not_in_universe` counts 2 instead of 1, and that is the
+    mutant dying.
+    """
+    from panel_fixtures import generate_panel, write_generated_panel
+
+    runtime_dir = tmp_path_factory.mktemp("late-registry")
+    write_generated_panel(
+        PanelStore(runtime_dir / "panel"),
+        _with_a_lifecycle_between_the_instants(generate_panel(shapes=SHAPES)),
+    )
+
+    report = _sdk(runtime_dir).build_factor_panels(
+        **_build_parameters(
+            tier="raw",
+            transform="",
+            as_ofs=[BUILD_INSTANTS[0], HORIZON_INSTANT],
+            max_staleness_days=30,
+        )
+    )
+
+    # The count the docstring above explains is blind: correct and late-pinned both answer this.
+    assert report.universe_counts == (8, 8)
+    # The one that separates them. One instant knows this name, the other cannot.
+    assert report.coverage["raw"]["not_in_universe"] == 1
 
 
 def test_a_factor_reading_a_dataset_with_no_requirement_builder_is_refused_by_name(

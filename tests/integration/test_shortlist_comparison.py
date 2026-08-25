@@ -42,6 +42,11 @@ from openalpha_cn.domain.run import RunManifest
 from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.sdk import OpenAlphaSDK
+from openalpha_cn.shortlist_view import stable_answer_digest
+from openalpha_cn.storage.shortlists import (
+    SHORTLIST_DOCUMENT_SUFFIX,
+    FileShortlistStore,
+)
 
 COMMIT: Final[str] = "abcdef1234567"
 CONFIG_DIGEST: Final[str] = "d" * 64
@@ -588,3 +593,70 @@ def test_the_json_face_emits_one_deterministic_byte_sequence(
 
     assert first == again
     assert first == json.dumps(json.loads(first), ensure_ascii=False, sort_keys=True)
+
+
+SHANGHAI: Final[str] = "上交所"
+"""An exchange name in the script this product's market actually uses.
+
+`exchange`'s only request-time rule is `shortlist_view`'s "a non-empty name with no surrounding
+whitespace", so this is a value the face accepts, not a value forced past a guard.
+"""
+
+
+def test_the_json_face_prints_a_non_ascii_exchange_as_itself_rather_than_as_escapes(
+    two_days: dict[str, Any], tmp_path: Path
+) -> None:
+    """`ensure_ascii=False` on this command's `json.dumps`, killed rather than assumed equivalent.
+
+    ## The survivor this closes
+
+    A mutation sweep flipped `ensure_ascii` here and pytest stayed green, and the survivor was
+    classified **provably equivalent**. It is not. It is equivalent *on the fixture only*:
+    `EXCHANGE` is `"SZSE"`, every other string in the body is a `ts_code`, a factor key or an
+    ISO instant, and `json.dumps` of an all-ASCII mapping is byte-identical under either setting.
+    The test above cannot see it either, for the same reason -- it re-encodes the parsed body
+    with `ensure_ascii=False` and compares, which on ASCII input is a tautology.
+
+    The mutant is reachable through the ordinary face. `comparison` carries `declaration`
+    verbatim (`shortlist_compare` builds it as `dict(baseline["declaration"])`), `declaration`
+    carries `exchange`, and `exchange` is checked only for being a non-empty unpadded string. So
+    `--exchange 上交所` renders as `\\u4e0a\\u4ea4\\u6240` under the mutant: still valid JSON, no
+    longer the name anybody typed, and unreadable in the terminal this command prints to.
+
+    ## Why the documents are rewritten rather than rebuilt
+
+    A second full panel-and-two-factor build to change one string is the expensive way to ask a
+    cheap question. These are the fixture's own documents, re-addressed after the edit through
+    `stable_answer_digest` -- the same function `held_shortlist` verifies them with, so they are
+    genuine held answers rather than smuggled ones. **Both** sides are moved together on purpose:
+    `declaration` is in `COMPARABLE_KEYS`, so changing one alone would be refused as two answers
+    to two different questions and would never reach the rendering. They are written to a fresh
+    store, leaving the module-scoped fixture exactly as it was found.
+    """
+    source = two_days["runtime_dir"] / "shortlists"
+    store = FileShortlistStore(tmp_path / "shortlists")
+    addresses: list[str] = []
+    for shortlist_id in (two_days["day_one"]["shortlist_id"], two_days["day_two"]["shortlist_id"]):
+        document = json.loads(
+            (source / f"{shortlist_id}{SHORTLIST_DOCUMENT_SUFFIX}").read_text(encoding="utf-8")
+        )
+        answer = document["answer"]
+        assert answer["declaration"]["exchange"] == EXCHANGE, "the fixture stopped being ASCII"
+        answer["declaration"]["exchange"] = SHANGHAI
+        readdressed = stable_answer_digest(
+            {key: value for key, value in answer.items() if key != "shortlist_id"}
+        )
+        answer["shortlist_id"] = readdressed
+        document["shortlist_id"] = readdressed
+        store.put(
+            shortlist_id=readdressed,
+            payload=json.dumps(document, ensure_ascii=False, sort_keys=True),
+        )
+        addresses.append(readdressed)
+
+    code, output = _compare(tmp_path, *addresses)
+
+    assert code == 0, output
+    assert f'"exchange": "{SHANGHAI}"' in output
+    assert "\\u" not in output
+    assert json.loads(output.strip())["declaration"]["exchange"] == SHANGHAI

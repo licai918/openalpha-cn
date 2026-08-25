@@ -688,7 +688,7 @@ def test_a_year_missing_a_session_the_calendar_reports_open_is_refused(tmp_path:
         PanelBatchError,
         match=(
             r"daily year=2026 is missing 1 session\(s\) the SZSE calendar reports open "
-            r"between 2026-01-01 and 2026-08-07: \['2026-06-12'\]"
+            r"between 2026-01-01 and 2026-08-08: \['2026-06-12'\]"
         ),
     ):
         write_daily_panel(
@@ -696,6 +696,80 @@ def test_a_year_missing_a_session_the_calendar_reports_open_is_refused(tmp_path:
             bars=_bar_batches(("20260610", "20260611", "20260615")),
             fundamentals=_valuation_batches(("20260610", "20260611", "20260615")),
             calendar=_calendar(),
+            halts=None,
+        )
+
+
+def test_the_write_time_census_stops_one_session_short_of_nothing_at_all(tmp_path: Path) -> None:
+    """The census bound is 16:30-aware, and until `V2-P4-114` it was a flat `fetched_at - 1 day`.
+
+    ## The hole, and why no fixture in this file could see it
+
+    `V2-P4-063` moved `cli._build_sessions` onto `_sessions_published_through`, which returns the
+    fetch day itself at or after 16:30 Asia/Shanghai and the day before it below. `_session_census`
+    went on subtracting a day unconditionally, and `cli.panel_build` still described the two as
+    "the same rule applied at two layers". Above 16:30 they were one session apart: the build
+    fetched through `D`, `_price_requirement` and `panel doctor` required `D`, and the write-time
+    refusal stopped at `D-1` -- so a partition that had lost exactly the newest session was
+    *accepted at write time* and refused by the reader afterwards.
+
+    Nothing here separated the two rules, and not because the clocks are all below 16:30. This
+    module's `FETCHED_AT` is 2026-08-08T12:00Z, which is 20:00 Asia/Shanghai and well above the
+    bound. The reason is that the census was never *asked* about the fetch day: every other test
+    holds sessions in June and leaves the whole of July and August closed on the calendar, so the
+    one session the two rules disagree about is a day neither rule requires.
+
+    ## What this test does about it
+
+    Opens the fetch day on the calendar and withholds it from the batch, which is the only shape
+    that puts the disagreement inside the census's own question. The two halves are the two sides
+    of 16:30 on the same calendar and the same batch, so the assertion is the *clock* and not the
+    fixture -- the second half is what stops the repair from degenerating into "always require
+    today", which would be a false alarm on every intraday build.
+    """
+    fetch_day = "20260808"
+    calendar = _calendar((*SESSIONS, fetch_day))
+
+    # 20:00 Asia/Shanghai: 2026-08-08 has published, so a partition without it is short.
+    with pytest.raises(
+        PanelBatchError,
+        match=(
+            r"daily year=2026 is missing 1 session\(s\) the SZSE calendar reports open "
+            r"between 2026-01-01 and 2026-08-08: \['2026-08-08'\]"
+        ),
+    ):
+        write_daily_panel(
+            store=_store(tmp_path / "published"),
+            bars=_bar_batches(),
+            fundamentals=_valuation_batches(),
+            calendar=calendar,
+            halts=None,
+        )
+
+    # 08:00 Asia/Shanghai on the same day: it has not published, and requiring it would be the
+    # false alarm the flat rule was written to avoid. The identical batch is accepted.
+    before_the_close = datetime(2026, 8, 8, 0, 0, tzinfo=UTC)
+    reference, _ = write_daily_panel(
+        store=_store(tmp_path / "unpublished"),
+        bars=_bar_batches(fetched_at=before_the_close),
+        fundamentals=_valuation_batches(fetched_at=before_the_close),
+        calendar=calendar,
+        halts=None,
+    )
+
+    assert reference.row_count == 8
+
+    # Exactly `DAILY_AVAILABILITY_TIME`, which is the side of the boundary the constant's own
+    # wording decides: a session becomes knowable **at** 16:30, so 16:30 is published. A `>`
+    # here instead of `>=` is invisible at every other instant of the day and wrong at this one
+    # -- it survived a sweep of this function until this block was added.
+    at_the_close = datetime(2026, 8, 8, 8, 30, tzinfo=UTC)
+    with pytest.raises(PanelBatchError, match=r"between 2026-01-01 and 2026-08-08"):
+        write_daily_panel(
+            store=_store(tmp_path / "on-the-boundary"),
+            bars=_bar_batches(fetched_at=at_the_close),
+            fundamentals=_valuation_batches(fetched_at=at_the_close),
+            calendar=calendar,
             halts=None,
         )
 
@@ -735,7 +809,7 @@ def test_a_calendar_that_does_not_reach_across_the_year_refuses_rather_than_unde
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
-    with pytest.raises(CalendarHorizonError, match=r"2026-01-01\.\.2026-08-07 leaves it"):
+    with pytest.raises(CalendarHorizonError, match=r"2026-01-01\.\.2026-08-08 leaves it"):
         write_daily_panel(
             store,
             bars=_bar_batches(),

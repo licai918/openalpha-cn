@@ -6,6 +6,25 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Added
 
+- **Two guards for quantifiers and gates that prose asserted and nothing measured** (`V2-P4-112`,
+  `V2-P4-115`). `AgentRouter` satisfies an evidence family when **any** declared family is present
+  and a feature dependency only when **every** declared column is, and two docstrings cite
+  `ThemeAgent`'s `{theme, catalyst, disclosure}` as the reason for the asymmetry. The feature half
+  had `test_every_declared_column_must_be_on_the_plane_and_not_merely_one_of_them`; the family half
+  had nothing, because every `evidence_families=` in that file declared exactly one family, and on
+  a single-family declaration `&` and `<=` agree for every run. Mutating `&` to `<=` left the
+  router's own unit file green. Two tests now close it -- one symmetric to the feature half, one
+  routing the real `ThemeAgent` so the citation is executable. (The mutant was already killed
+  incidentally by `test_research_cycle.py`, whose fixture carries exactly one of the three
+  families; what was missing was a *named* guard in the file that owns the rule.)
+  Separately, two mutation survivors from `V2-P4-007/008/009` classified "provably equivalent" were
+  remeasured and are not: a `Literal` member inside a local-variable annotation survives pytest but
+  **`mypy` reports 2 errors**, so it is a sweep-tooling survivor rather than an equivalent mutant --
+  a sweep whose oracle is pytest alone under-reports whenever a second gate ships with the build --
+  and `ensure_ascii=False` on `shortlist compare --json` was equivalent **on the fixture only**,
+  now killed by a test that renders a non-ASCII exchange name. `@dataclass(slots=True)` is the one
+  of the three that really is equivalent.
+
 - **A model plane reachable from a command line, and a prediction store something can fill.**
   `openalpha model evaluate` fits one declaration once per walk-forward fold and reports the
   five statistics `V2-P4-014` measures; `openalpha model daily-run` fits on the outcomes that
@@ -266,6 +285,45 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   otherwise now point at the pytest assertion that does.
 
 ### Fixed
+
+- **The write-time session census stopped one session short of what every other layer required**
+  (`V2-P4-114`). `panel_ingest._session_census` bounded a partition at `fetched_at - 1 day` and
+  justified it with the 16:30 publication rule -- which is that rule only *below* 16:30, and is
+  the sentence `V2-P4-063` deleted from `cli._build_sessions` and left standing here. Above 16:30
+  the two came apart by exactly one session: the build loop fetched through `D`,
+  `_price_requirement` and `panel doctor` required `D`, and the write-time refusal stopped at
+  `D-1`, so a partition that had lost precisely the newest session was **accepted at write time**
+  and refused by the reader afterwards. Measured on a weekday-open January 2026 calendar at
+  `fetched_at=2026-01-20T17:00+08` holding every session but 2026-01-20:
+  `_sessions_published_through` answered `2026-01-20` and the census answered
+  `([], 2026-01-01, 2026-01-19)`. The bound is now that same function rather than arithmetic of
+  its own, so the three layers are one set by construction. Of the eight panel/CLI files, two
+  assertions moved and **both were rendered date literals rather than behaviour** (`2026-08-07`
+  to `2026-08-08`); the missing session `2026-06-12` is found under either rule. `cli.panel_build`'s
+  claim that the two layers apply "the same rule" is true again, and now carried by a shared name.
+  A mutation sweep over the two functions' executable lines, with the baseline proven green
+  first, ran **9 mutants, 8 killed**. One of the kills is new: `>=` to `>` on
+  `DAILY_AVAILABILITY_TIME` had survived, and is invisible at every instant of the day except
+  exactly 16:30 -- the side the constant's own wording decides -- so the test now drives that
+  instant too. The single survivor, `closes_on < opens_on` to `<=`, is **measured unreachable**
+  rather than relabelled: separating the two would need a year-2026 batch fetched
+  2026-01-01T16:30+08 that is *missing* 2026-01-01, and `ColumnarPanelBatch` refuses any row
+  whose availability is after the fetch, so such a batch can carry only the 2026-01-01 row it
+  is supposed to be missing.
+
+- **A registry read pinned at the last prediction instant is look-ahead, and nothing measured it**
+  (`V2-P4-113`). `V2-P4-064` recorded that `factor build`'s per-instant registry read "fails in
+  both directions". Remeasured on `037ffa8`, mutating only that read's `as_of`: pinning at
+  `as_ofs[0]` is red but by *refusal* rather than by a count, and pinning at `as_ofs[-1]` is
+  **green over the whole file** (`36 passed`) and answers `[8, 7]` -- the correct answer. The late
+  read is the look-ahead direction and it was unguarded. `universe_counts` cannot see it on **any**
+  fixture: `stock_basic` is `calendar_static`, so a lifecycle row is visible exactly when its date
+  is at or before the reading day, which is exactly when it can change `listed_on` for that day.
+  What a late read does move is `subjects`, taken from `universe.securities`, which is not
+  date-filtered -- so a new test gives a registry-only security a listing and a termination that
+  both fall *between* the two instants, and the late-pinned read hands the earlier cross section a
+  name that had not listed yet (`not_in_universe` 2 instead of 1). The `V2-P4-064` roadmap row and
+  the citing docstrings in `factor_view._computed` and `test_factor_build.py` are corrected.
 
 - **`--config-digest` is refused when the request is read, not after the store is** (`V2-P4-065`).
   `shortlist_request` had checked `code_commit` at request time since `V2-P4-046`, and the comment
@@ -566,7 +624,15 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   A mutation sweep over the two rows' code ran **341 mutants, 326 killed**; the fifteen
   survivors are seven provably equivalent (`Literal` members inside local-variable *type
   annotations*, `@dataclass(slots=True)`, `ensure_ascii` on an all-ASCII payload) and eight
-  CLI presentation strings. Two survivors were closed by **changing the design rather than
+  CLI presentation strings.
+  **Two of those three "provably equivalent" examples were remeasured under `V2-P4-115` and
+  neither claim held; see that row.** In short: the `Literal` one is killed by `mypy`, which
+  this project ships as a gate, so it is a *sweep-tooling* survivor and not an equivalent
+  mutant — a sweep whose oracle is pytest alone under-reports whenever a second gate is part
+  of the build. The `ensure_ascii` one was equivalent **on the fixture only**, and there is now
+  a test with a non-ASCII exchange that kills it. `@dataclass(slots=True)` is the one of the
+  three that is genuinely equivalent.
+  Two survivors were closed by **changing the design rather than
   adding an assertion**: `schema_version` was removed from `COMPARABLE_KEYS`, where it was
   dead because the shape is refused by name before the two answers are compared with each
   other. And the sweep found a real defect in the refusal it was probing -- `declaration`
