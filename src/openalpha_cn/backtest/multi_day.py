@@ -300,6 +300,33 @@ class PortfolioBacktestRunner:
         precedes portfolio state` -- leaving a report whose equity curve ran backwards in time
         while every transition on those dates read `rejected`. That is a malformed input
         reported as a risk verdict, and the two are not the same answer.
+
+        **Strictly ascending, so two sessions cannot share a date**, which is the defect the
+        single-subject step had by construction and would otherwise have re-entered by the back
+        door. The *first* session may land on `initial.as_of` itself: a book funded on Monday
+        may trade on Monday. `backtest/paper.py` is stricter and requires every session to move
+        the book forward, because re-advancing a paper book through a session it has lived would
+        double every fill on it.
+
+        **A zero-equity opening book is refused by name.** `total_return` divides by
+        `initial.equity`, and until this row a book opened with no cash and no positions --
+        constructible, since `PortfolioState.cash` is only `ge=0` -- reached that division and
+        came back as `decimal.DivisionByZero` from inside a report builder. The refusal is what
+        makes the two remaining zero-guards below (`state.equity == 0` for exposure and
+        `average_equity == 0` for turnover) defensive rather than load-bearing: equity cannot
+        fall to exactly zero from a positive opening, because every mark is `gt=0` and every
+        fill price is positive, so a position always carries value and cash never goes negative.
+
+        `V2-P5-003`'s mutation sweep over this module and `paper.py` ran **66 mutants, 64
+        killed**, and the two survivors are both the turnover guard -- its fallback `Decimal(0)`
+        and its `== 0`. Both are **equivalent, measured rather than labelled**: the fallback is
+        returned only when `average_equity` is zero, which the refusal above makes unreachable;
+        and flipping the comparison to `== 1` needs a book whose opening and closing equity
+        average exactly one *and* which filled something, where the smallest fillable order is
+        a hundred-share board lot costing more than a book worth one yuan has. The exposure
+        guard's own comparison is not in that list because it *is* separable, on a book worth
+        exactly one yuan that holds a position -- see
+        `test_a_fully_invested_book_reports_an_exposure_of_one[a-book-worth-exactly-one]`.
         """
         if not steps:
             raise ValueError("multi-day backtest requires at least one step")
@@ -308,6 +335,8 @@ class PortfolioBacktestRunner:
             raise ValueError("multi-day backtest sessions must be strictly ascending by date")
         if dates[0] < initial.as_of:
             raise ValueError("first backtest session precedes the initial portfolio state")
+        if initial.equity == 0:
+            raise ValueError("multi-day backtest requires an opening book with equity")
 
     @staticmethod
     def _mark_to_market(

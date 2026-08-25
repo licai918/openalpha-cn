@@ -17,10 +17,21 @@ from pydantic import ValidationError
 
 from openalpha_cn.backtest.execution import MarketBar
 from openalpha_cn.backtest.multi_day import (
+    CarriedMark,
+    EquityPoint,
+    PortfolioBacktestReport,
     PortfolioBacktestRunner,
     PortfolioBacktestStep,
+    SubjectAttribution,
 )
-from openalpha_cn.backtest.portfolio import PortfolioLimits, PortfolioOrder, PortfolioState
+from openalpha_cn.backtest.portfolio import (
+    PortfolioLimits,
+    PortfolioOrder,
+    PortfolioPosition,
+    PortfolioState,
+    PositionLot,
+    PositionMark,
+)
 
 
 def bar(subject: str, trade_date: date, close: str, previous_close: str = "10.00") -> MarketBar:
@@ -104,7 +115,7 @@ def test_a_held_name_that_is_not_traded_today_still_re_marks_to_todays_close() -
                     bar("BBB.SZ", DAY_TWO, "20.00", previous_close="10.00"),
                 ),
                 orders=(),
-                benchmark_close=Decimal("100"),
+                benchmark_close=Decimal("105"),
             ),
         ),
     )
@@ -112,9 +123,25 @@ def test_a_held_name_that_is_not_traded_today_still_re_marks_to_todays_close() -
     assert report.final_state.mark("BBB.SZ") == Decimal("20.00")
     assert report.final_state.market_value == Decimal("30000.00")
     assert report.final_state.as_of == DAY_TWO
-    assert len(report.equity_curve) == 2
-    assert report.equity_curve[1].equity > report.equity_curve[0].equity
     assert report.carried_marks == ()
+    # Exact, not `> 0`. A `>` on an exposure is satisfied by a division replaced with a
+    # multiplication (measured: that mutant survived a `> Decimal("0.80")` assertion), and it is
+    # satisfied by an accumulator seeded at one instead of zero. Both are killed by the equality.
+    assert tuple(
+        (point.trade_date, point.equity, point.gross_exposure) for point in report.equity_curve
+    ) == (
+        ("2026-07-24", Decimal("99989.80"), Decimal("0.200020")),
+        ("2026-07-27", Decimal("109989.80"), Decimal("0.272753")),
+    )
+    assert report.max_gross_exposure == Decimal("0.272753")
+    assert report.max_order_notional == Decimal("10000.00")
+    assert report.total_return == Decimal("0.099898")
+    # The benchmark moves, and it has to. With a flat benchmark `total - benchmark` and
+    # `total + benchmark` are the same number, so an `active_return` assertion on a flat
+    # fixture cannot separate the two -- measured: that mutant survived exactly such an
+    # assertion here before the benchmark was given somewhere to go.
+    assert report.benchmark_return == Decimal("0.050000")
+    assert report.active_return == Decimal("0.049898")
 
 
 def test_the_days_re_mark_lands_before_the_days_orders_so_the_cap_sees_todays_price() -> None:
@@ -289,3 +316,215 @@ def test_the_first_session_cannot_precede_the_state_it_starts_from() -> None:
                 ),
             ),
         )
+
+
+def test_two_sessions_dated_the_same_day_are_refused() -> None:
+    """Ascending is not enough; it has to be strict.
+
+    Two steps sharing a date is the single-subject step's defect arriving by the back door --
+    two `EquityPoint`s on one day, the first of them mid-session -- and a `<=` that should have
+    been a `<` is all it takes. Measured: with the comparison relaxed, this input produced a
+    two-point curve both dated `2026-07-24` and every other test in this file stayed green.
+    """
+    same_day = PortfolioBacktestStep(
+        trade_date=DAY_ONE,
+        bars=(bar("AAA.SZ", DAY_ONE, "10.00"),),
+        orders=(),
+        benchmark_close=Decimal("100"),
+    )
+
+    with pytest.raises(ValueError, match="strictly ascending"):
+        PortfolioBacktestRunner().run(initial=OPENING, steps=(same_day, same_day))
+
+
+def test_the_first_session_may_land_on_the_opening_states_own_date() -> None:
+    """A book funded on Monday may trade on Monday, and that is the boundary `backtest/paper.py`
+    deliberately draws differently -- it requires *every* session to move the book forward,
+    because a paper book re-advanced through a session it has lived would double every fill.
+    Both sides of that difference need a test or the two modules can drift into agreeing."""
+    report = PortfolioBacktestRunner().run(
+        initial=PortfolioState(as_of=DAY_ONE, cash=Decimal("100000.00")),
+        steps=(
+            PortfolioBacktestStep(
+                trade_date=DAY_ONE,
+                bars=(bar("AAA.SZ", DAY_ONE, "10.00"),),
+                orders=(buy("a1", "AAA.SZ", 1000),),
+                benchmark_close=Decimal("100"),
+            ),
+        ),
+    )
+
+    assert report.transitions[0].status == "filled"
+    assert report.final_state.equity == Decimal("99994.90")
+
+
+def test_an_opening_book_with_no_equity_is_refused_by_name() -> None:
+    """`PortfolioState.cash` is `ge=0`, so a book with no cash and no positions is constructible,
+    and `total_return` divides by `initial.equity`. Until this row that input came back as
+    `decimal.DivisionByZero` raised from inside a report builder, which tells a caller nothing
+    about what they passed."""
+    with pytest.raises(ValueError, match="opening book with equity"):
+        PortfolioBacktestRunner().run(
+            initial=PortfolioState(as_of=date(2026, 7, 23), cash=Decimal("0")),
+            steps=(
+                PortfolioBacktestStep(
+                    trade_date=DAY_ONE,
+                    bars=(bar("AAA.SZ", DAY_ONE, "10.00"),),
+                    orders=(),
+                    benchmark_close=Decimal("100"),
+                ),
+            ),
+        )
+
+
+def test_a_name_the_execution_policy_refused_earns_no_line_in_the_attribution() -> None:
+    """A rejection is not a trade, and the two are one `and` apart.
+
+    A suspended bar comes back from `AShareExecutionPolicy` as a **rejected** `ExecutionResult`
+    that is nevertheless *not* `None`, carrying `notional=0.00` -- so relaxing
+    `execution is not None and status == "filled"` to an `or` leaves turnover and
+    `max_order_notional` untouched (both add zero) and still opens a `pnl` entry for the refused
+    name, which then appears in `attribution` with `0.00`. Measured: that mutant survived every
+    other assertion in this file.
+    """
+    halted = bar("HALT.SZ", DAY_ONE, "10.00").model_copy(update={"suspended": True})
+    report = PortfolioBacktestRunner().run(
+        initial=OPENING,
+        steps=(
+            PortfolioBacktestStep(
+                trade_date=DAY_ONE,
+                bars=(bar("AAA.SZ", DAY_ONE, "10.00"), halted),
+                orders=(buy("a1", "AAA.SZ", 1000), buy("h1", "HALT.SZ", 1000)),
+                benchmark_close=Decimal("100"),
+            ),
+        ),
+    )
+    refusal = report.transitions[1]
+
+    assert refusal.status == "rejected"
+    assert refusal.reason == "security is suspended"
+    assert refusal.execution is not None
+    assert refusal.execution.notional == Decimal("0.00")
+    assert tuple(item.subject for item in report.attribution) == ("AAA.SZ",)
+
+
+def test_a_run_that_fills_nothing_reports_zeroes_rather_than_floors() -> None:
+    """Every accumulator has to start at zero, and `max()` hides a seed that does not.
+
+    Seeding `max_order_notional` or `max_gross_exposure` at one instead of zero is invisible to
+    any book that trades -- the real figures are larger -- and shows up only on the run that
+    fills nothing. Which is now a run this model can express at all.
+    """
+    report = PortfolioBacktestRunner().run(
+        initial=OPENING,
+        steps=(
+            PortfolioBacktestStep(
+                trade_date=DAY_ONE,
+                bars=(bar("AAA.SZ", DAY_ONE, "10.00"),),
+                orders=(),
+                benchmark_close=Decimal("100"),
+            ),
+        ),
+    )
+
+    assert report.max_order_notional == Decimal("0.00")
+    assert report.max_gross_exposure == Decimal("0.000000")
+    assert report.turnover == Decimal("0.000000")
+    assert report.active_return == Decimal("0.000000")
+    assert report.attribution == ()
+    assert report.transitions == ()
+
+
+def test_every_contract_this_module_publishes_is_frozen_and_forbids_extra_keys() -> None:
+    """The house rule, held as an equality rather than repeated five times by hand.
+
+    Both halves earn their place. `frozen=True` is what makes a `PortfolioBacktestReport` safe to
+    hand around after a run, and `extra="forbid"` is what makes an unfamiliar key in a REST body
+    a `422` rather than a silently dropped field -- and a mutation sweep found **five** config
+    flags on this module whose loss no test could see.
+    """
+    published = (
+        PortfolioBacktestStep,
+        EquityPoint,
+        CarriedMark,
+        SubjectAttribution,
+        PortfolioBacktestReport,
+    )
+
+    assert {model.__name__: model.model_config.get("frozen") for model in published} == {
+        model.__name__: True for model in published
+    }
+    assert {model.__name__: model.model_config.get("extra") for model in published} == {
+        model.__name__: "forbid" for model in published
+    }
+    with pytest.raises(ValidationError):
+        CarriedMark(
+            trade_date="2026-07-24", subject="AAA.SZ", price=Decimal("10"), sessions_carried=0
+        )
+    # `benchmark_close` is bounded `gt=0` and not `gt=1`, which matters for the common case of a
+    # benchmark normalised to start at 1.0 -- a bound of `gt=1` would refuse its first session.
+    assert PortfolioBacktestStep(
+        trade_date=DAY_ONE,
+        bars=(bar("AAA.SZ", DAY_ONE, "10.00"),),
+        orders=(),
+        benchmark_close=Decimal("1"),
+    ).benchmark_close == Decimal("1")
+
+
+@pytest.mark.parametrize(
+    ("quantity", "price", "equity"),
+    [
+        pytest.param(1000, "10.00", "10000.00", id="a-real-book"),
+        pytest.param(1, "1.00", "1.00", id="a-book-worth-exactly-one"),
+    ],
+)
+def test_a_fully_invested_book_reports_an_exposure_of_one(
+    quantity: int, price: str, equity: str
+) -> None:
+    """The upper end of the gross-exposure scale, and the guard underneath it.
+
+    `gross_exposure` is computed under a `state.equity == 0` guard that keeps a divide-by-zero
+    out of a report builder. A book holding everything it has -- no cash, one position -- is
+    where numerator and denominator are equal, and it has to come back as `1` rather than as the
+    guard's fallback.
+
+    The second parameter is a book worth exactly one yuan, and it is not decoration: it is the
+    **only** input on which that guard's *condition* is observable. A mutation sweep flipped
+    `state.equity == 0` to `== 1`, and every other fixture in this file left it alive -- a book
+    worth 10,000 takes the same branch either way, and a book worth 1 with no position gives
+    `0 / 1 == 0`, which is the fallback's value anyway. Equity of exactly 1 *with* a position is
+    the one place the two answers differ.
+    """
+    report = PortfolioBacktestRunner(
+        limits=PortfolioLimits(max_position_weight=Decimal("1"), max_total_exposure=Decimal("1"))
+    ).run(
+        initial=PortfolioState(
+            as_of=date(2026, 7, 23),
+            cash=Decimal("0.00"),
+            positions=(
+                PortfolioPosition(
+                    subject="AAA.SZ",
+                    lots=(
+                        PositionLot(
+                            open_date=date(2026, 7, 22),
+                            quantity=quantity,
+                            cost_basis=Decimal(equity),
+                        ),
+                    ),
+                ),
+            ),
+            marks=(PositionMark(subject="AAA.SZ", price=Decimal(price)),),
+        ),
+        steps=(
+            PortfolioBacktestStep(
+                trade_date=DAY_ONE,
+                bars=(bar("AAA.SZ", DAY_ONE, price),),
+                orders=(),
+                benchmark_close=Decimal("100"),
+            ),
+        ),
+    )
+
+    assert report.final_state.equity == Decimal(equity)
+    assert report.equity_curve[0].gross_exposure == Decimal("1.000000")
+    assert report.max_gross_exposure == Decimal("1.000000")
