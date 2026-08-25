@@ -57,7 +57,13 @@ filesystem path. Local file access remains a CLI responsibility.
   single-position, and total-exposure checks.
 - `GET /api/v1/portfolio/ledger` lists immutable accepted/rejected transitions.
 - `POST /api/v1/backtests/portfolio` returns multi-day return, benchmark,
-  active return, turnover, capacity, and exposure attribution.
+  active return, turnover, capacity, and exposure attribution. **Each `steps[]` entry is one
+  trading session, not one order** (`V2-P5-003`): it carries `trade_date`, the session's `bars`
+  (one per subject, all on that date), the `orders` placed into them (possibly none), and one
+  `benchmark_close`. The book is marked to the session's closes *before* the session's orders
+  run, so a cap is judged on the prices of the day the order was placed. A held name the session
+  serves no bar for keeps its price and is reported in `carried_marks`; an order whose subject
+  has no bar on its session is a `422` rather than a `rejected` transition inside a `200`.
 - `POST /api/v1/backtests/event-study` computes CAR, t-statistic, and a seeded
   Bootstrap confidence interval.
 - `POST /api/v1/backtests/validate` accepts a previously returned research result and a future outcome observation, verifies content-derived IDs, and returns reconciled attribution.

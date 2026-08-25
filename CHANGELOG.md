@@ -4,6 +4,33 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Changed
+
+- **`PortfolioBacktestStep` holds one trading session's whole book, not one order**
+  (`V2-P5-003`). It carried a single `order` and a single `market`, so a K-name book cost K
+  steps -- and the verbosity was the least of it. Three defects were reproduced on the old
+  runner with a two-name book before the change: the equity curve carried **two points dated
+  `2026-07-24`**, the first mid-session; a book **could not be told what a name it holds closed
+  at unless it traded that name**, reporting a market value of `21000.00` against a true
+  `31000`; and the exposure clamp therefore judged buys on **yesterday's** prices, reading
+  `max_gross_exposure` `0.210032` where the truth was `~0.31`. A step is now
+  `trade_date` + `bars` + `orders` + one `benchmark_close`, and the runner **marks the book to
+  the session's closes before it executes that session's orders** -- an ordering that is two
+  different answers on one fixture, refused when marked first and *filled* when marked after.
+  `orders` may be empty, so a session the book merely holds through is finally representable.
+  A held name with **no bar** on a session keeps its price (an A-share halt serves no daily row,
+  so refusing it would make a halt unrepresentable) and is named for keeping it in the new
+  `PortfolioBacktestReport.carried_marks`, with the session and how many consecutive sessions
+  it has now been carried. A mis-ordered series is refused up front instead of arriving as a
+  report whose curve ran backwards while every transition on it read `rejected`.
+  **`max_industry_weight` is unmoved and still a named refusal**: K `MarketBar`s carry no more
+  industry than one does, so this step supplies no exposures and enforces no industry cap.
+  **Both faces changed shape without either file changing a byte** -- `POST
+  /api/v1/backtests/portfolio` and `OpenAlphaSDK.run_portfolio_backtest` are pass-throughs of
+  this model -- and both of them, listed in the seam audit's `F38` among the 22 routes nothing
+  consumes, had **no test at all** until this row; they now have four, driven through
+  `TestClient` and `OpenAlphaSDK`.
+
 ### Added
 
 - **`openalpha portfolio construct` and `OpenAlphaSDK.construct_portfolio`: heuristic target
