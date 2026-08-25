@@ -6,6 +6,51 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Added
 
+- **Benjamini-Hochberg false-discovery control, and the family size it was computed against**
+  (`V2-P5-007`). `backtest/multiple_testing.py` is a pure-stdlib `backtest/` leaf --
+  `math`, `dataclasses` and pydantic, no `openalpha_cn` import at all -- and it does the half of
+  the row that is arithmetic in a sort and two comparisons, which is why it fits inside ADR-0003's
+  nine runtime dependencies where a t-distribution quantile would not. **The half that gets
+  forgotten is the one the contract enforces**: `family_size` is a required, stored field on both
+  the request and the report and is *never* inferred from `len(tests)`, because a q-value without
+  the family it was computed against is not reproducible -- the same two p-values `(0.0625, 0.375)`
+  are `(0.125, 0.375)` and two discoveries under a declared family of two, and `(0.5, 1.0)` and one
+  under a declared family of eight, with nothing about the data moving. Only one direction of a
+  declaration is checkable and it is checked on the contract (`family_size` below the rows handed
+  over is refused, naming both numbers); the anti-conservative direction is not, and
+  `the_family_size_is_declared_and_no_check_can_confirm_it` says so instead of implying a check that
+  does not exist. **The dependence assumption is an input rather than a label**: `dependence` is
+  required with no default, `independent-or-positively-dependent` is BH and `arbitrary` divides
+  every line by `H_m`, and on one family at one rate the two give different rejection sets.
+  `KNOWN_MULTIPLE_TESTING_LIMITATIONS` is the thirty-seventh registry (6 entries).
+- **`openalpha validation statistics` and `OpenAlphaSDK.outcome_statistics`: gross beside net, cost
+  drag in its own column, intervals that say what they assumed, and sample counts**
+  (`V2-P5-008`). `backtest/outcome_statistics.py` aggregates stored `ValidationResult` rows into
+  cohorts -- one signal, one cohort, one hypothesis -- and is the caller `V2-P5-007` needs, since
+  that module computes no p-value and refuses to. Five columns per cohort, each its own
+  `math.fsum` mean and **none derived from the others**, because a derived column cannot disagree
+  with its parents and therefore cannot detect anything: that is the free variable `V2-P5-005` took
+  out of the attribution, kept out of the aggregate. The fifth column is `unexplained_return` and
+  is not in the row -- it is there because dropping it would repeat `V2-P5-006`'s defect one level
+  up, a residual computed and then lost on the way to a product surface.
+  **The interval declares its model.** ADR-0003 rules out a t-quantile, so what ships is a
+  percentile bootstrap carrying `method`, `confidence_level`, `bootstrap_samples`, `random_seed`
+  and `distinct_bootstrap_means` -- the resolution the resampling actually achieved -- and it uses
+  `backtest/event_study.py`'s percentile convention verbatim, held to it by a test that requires
+  the two faces' endpoints to agree bit for bit. **Below two observations there is no interval and
+  no p-value at all**: every resample of a single observation is that observation, so `lower ==
+  upper` at any confidence level, and publishing that would be the statistical form of the invented
+  20/30/50 split. The cohort keeps its five columns and its sample count, `absence_reason` says why
+  in a sentence a report prints, and it stays **outside** the controlled family, because a
+  hypothesis nobody tested is not a hypothesis that failed to reject. The p-value is a sign-flip
+  randomization test against a null carried on every row, enumerated exactly over all `2**n` sign
+  patterns at `n <= 12` and sampled with Phipson and Smyth's `(1 + hits) / (1 + draws)` above it.
+  `KNOWN_OUTCOME_STATISTICS_LIMITATIONS` is the thirty-eighth registry (7 entries); the two
+  registries move `REGISTRY_ENTRY_COUNTS` and `DOCSTRING_TOTALS` from 36 / 334 / 35 / 264 to
+  38 / 347 / 37 / 277. Runtime dependencies stay at **nine**; `lint-imports` stays at
+  **8 kept / 0 broken** -- both new modules join the two `backtest-studies-*` source lists rather
+  than relaxing anything.
+
 - **`openalpha portfolio construct` and `OpenAlphaSDK.construct_portfolio`: heuristic target
   weights over one admitted shortlist** (`V2-P5-001`, the first module of P5). A twelfth
   pure-stdlib `backtest/` leaf, `backtest/portfolio_policy.py`, turns one `as_of`'s ranked list
@@ -39,6 +84,42 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   history.
 
 ### Measured, and it falsifies two premises this work started from
+
+- **A closed-form control that is entirely dyadic cannot see a derived column
+  (`V2-P5-008`).** Every figure in the corpus is exact, and on exact inputs `fmean(gross) + fmean(drag)` and
+  `fmean(net)` are bit-identical -- so an implementation that *derived* the net column passed the
+  whole file. A mutation sweep found it. The fix is one deliberately **non**-dyadic arm
+  (`unrounded`), four ordinary decimal returns whose three roundings do not cancel: derived reads
+  `-0.1282` and measured reads `-0.12819999999999998`, one unit in the last place apart, and the
+  assertion now separates them. The first attempt at that mutant was itself equivalent and is
+  recorded as such: `a - b - c` and `(a - b) + (-c)` are bit-identical *per element*, so only the
+  mean-level derivation is a real defect.
+- **The same corpus cannot see the percentile index either.** `int(0.025 * 1000)` and
+  `int(0.025 * 999)` are 25 and 24, and the alpha cohort's three net returns are an arithmetic
+  progression whose thousand resample means collapse onto **seven** distinct values -- so
+  `means[24]` and `means[25]` are the same number and both conventions publish the same interval.
+  Five geometric points (`2**-2 .. 2**-6`) give 56 distinct resample means, where the two readings
+  are `0.03125` and `0.034375`.
+- **Two contract guards were unreachable from every test that drove the functions.**
+  `CohortStatistics`' "an absence must be named" branch and `OutcomeStatisticsReport`'s
+  "the family holds exactly the tested cohorts" count check were both green under deletion,
+  because the producers never violate them. Both are reachable from a *document*, which is the path
+  a stored report is read back through, and the count check is not redundant with the identifier
+  check beside it: two cohorts sharing one identifier have an identifier *set* of size one, so only
+  the count says that two tested cohorts are being answered by one q-value.
+- **An untested cohort excluded from the family costs nothing arithmetically, which is the
+  opposite of what this module's own docstring first claimed.** It said carrying one in at
+  `p = 1.0` would raise every other cohort's q-value. False in both directions: a stand-in
+  `p = 1.0` can never clear its own line, because every critical value is
+  `rank * rate / (family_size * penalty)` with `rank <= family_size` and `rate < 1` and is
+  therefore strictly below one; and it cannot lower an unclamped q-value above it either, which
+  would need `family_size < reported + 1` while adding the row requires the opposite. The
+  exclusion stands on a reporting argument instead -- a q-value published for a cohort nothing
+  was measured on -- and `test_a_stand_in_p_value_of_one_can_never_clear_its_own_line` is the
+  test the corrected sentence now rests on.
+- **Mutation sweep**: baseline proven green first (72 passed across the two unit modules, the
+  registry audit and the integration module), then **38 mutants, 38 killed**, per-mutant timeout
+  and restore-on-signal, no gate ever run with a mutant on disk.
 
 - **The roadmap's "现金下限" is not a third limit.** Under long-only accounting
   `equity == cash + market_value`, so `cash / equity >= f` and `market_value / equity <= 1 - f`

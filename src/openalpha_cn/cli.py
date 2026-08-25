@@ -25,6 +25,12 @@ from openalpha_cn import __version__
 from openalpha_cn.backtest.factor_experiment import FactorExperimentRecord
 from openalpha_cn.backtest.factor_ic import MINIMUM_IC_SECURITIES, ICMethod
 from openalpha_cn.backtest.factor_redundancy import MINIMUM_REDUNDANCY_SECURITIES
+from openalpha_cn.backtest.multiple_testing import DependenceAssumption
+from openalpha_cn.backtest.outcome_statistics import (
+    OutcomeStatisticsError,
+    OutcomeStatisticsReport,
+    outcome_statistics_view,
+)
 from openalpha_cn.backtest.portfolio import PortfolioLimits
 from openalpha_cn.backtest.portfolio_policy import (
     PortfolioConstruction,
@@ -348,6 +354,27 @@ where the thing that happens is "register today's prediction".
 The two commands are in the order an operator meets them: `evaluate` (would this declaration have
 ordered the market), then `daily-run` (register what it says about today). `predictions` and
 `prediction` are the two reads beside them, `shortlist list`/`shortlist get`'s pair.
+"""
+
+
+validation_app = typer.Typer(
+    help=(
+        "Aggregate stored outcome validations: gross beside net, cost drag in its own column, "
+        "intervals, sample counts and BH-controlled q-values. Start with "
+        "`openalpha validation statistics --help`."
+    )
+)
+app.add_typer(validation_app, name="validation")
+"""`V2-P5-007`/`V2-P5-008`'s command is `openalpha validation statistics`.
+
+A sub-app for `factor`'s, `shortlist`'s, `portfolio`'s and `model`'s reason: `statistics` alone
+would say nothing about which plane it is on, and this repository already computes statistics
+over factors, screens and models. The plane here is the *outcome* plane -- results
+`POST /api/v1/backtests/validate` and `OpenAlphaSDK.validate_outcome` have already written.
+
+Deliberately not a flag on anything that produces one validation. A single result has no sample
+size, no interval and no family, so a `--statistics` switch would have to answer a question its
+own input cannot pose; the aggregate is a different verb over a different number of rows.
 """
 
 
@@ -6076,3 +6103,163 @@ def portfolio_construct_command(
             )
         else:
             _echo_construction(construction)
+
+
+_STATISTICS_SIGNAL_HELP: Final[str] = (
+    "One signal ID, repeatable. Each becomes one cohort and one hypothesis; its rows are the "
+    "validations stored against it."
+)
+_STATISTICS_FAMILY_HELP: Final[str] = (
+    "How many cohorts the study actually tested -- NOT how many --signal flags you passed. "
+    "Required, and may not be below the number tested here (`V2-P5-007`)."
+)
+_STATISTICS_RATE_HELP: Final[str] = (
+    "The false discovery rate the family is controlled at, strictly between 0 and 1."
+)
+_STATISTICS_DEPENDENCE_HELP: Final[str] = (
+    "Declared dependence among the hypotheses. `independent-or-positively-dependent` is "
+    "Benjamini-Hochberg; `arbitrary` adds Benjamini-Yekutieli's harmonic penalty. No default: "
+    "the permissive reading must not be the cheapest one to ask for."
+)
+_STATISTICS_LEVEL_HELP: Final[str] = "Confidence level for the percentile-bootstrap interval."
+_STATISTICS_SAMPLES_HELP: Final[str] = "How many bootstrap resamples the interval is taken over."
+_STATISTICS_SEED_HELP: Final[str] = "Seed for the bootstrap, so the interval is reproducible."
+
+
+def _echo_outcome_statistics(report: OutcomeStatisticsReport) -> None:
+    """Render one report as a table whose columns are the four the row asks for.
+
+    `gross`, `drag` and `net` are printed side by side in that order so the middle column is
+    visibly the difference between the two beside it, which is the whole reason `V2-P5-008`
+    asks for it separately. `n` sits before the interval because an interval read without its
+    sample size is the mistake the interval exists to make hard.
+    """
+    family = report.multiple_testing
+    typer.echo(
+        f"family: {family.family_size} hypotheses tested, {family.reported_hypotheses} reported, "
+        f"{family.withheld_hypotheses} withheld"
+    )
+    procedure = (
+        "Benjamini-Hochberg"
+        if family.dependence == "independent-or-positively-dependent"
+        else "Benjamini-Yekutieli"
+    )
+    typer.echo(
+        f"control: {procedure} at q={family.false_discovery_rate}, "
+        f"dependence={family.dependence} (penalty {family.dependence_penalty:.4f}), "
+        f"{family.discoveries} discoveries"
+    )
+    typer.echo(
+        f"interval: percentile bootstrap, {report.confidence_level:.0%} over "
+        f"{report.bootstrap_samples} resamples from seed {report.random_seed}"
+    )
+    typer.echo("")
+    typer.echo(
+        f"{'cohort':<24}{'n':>4}{'gross':>12}{'drag':>12}{'net':>12}"
+        f"{'unexplained':>14}{'interval':>26}{'q':>10}  verdict"
+    )
+    for cohort in report.cohorts:
+        verdict = report.verdict_for(cohort.cohort_id)
+        if cohort.interval is None:
+            interval = "--"
+            quantile = "--"
+            standing = "not tested"
+        else:
+            interval = f"[{cohort.interval.lower:+.6f}, {cohort.interval.upper:+.6f}]"
+            quantile = "--" if verdict is None else f"{verdict.q_value:.6f}"
+            standing = (
+                "not tested"
+                if verdict is None
+                else ("discovery" if verdict.rejected else "not rejected")
+            )
+        typer.echo(
+            f"{cohort.cohort_id:<24}{cohort.sample_size:>4}"
+            f"{cohort.gross_active_return:>+12.6f}{cohort.cost_drag:>+12.6f}"
+            f"{cohort.net_active_return:>+12.6f}{cohort.unexplained_return:>+14.6f}"
+            f"{interval:>26}{quantile:>10}  {standing}"
+        )
+    for cohort in report.cohorts:
+        if cohort.absence_reason is not None:
+            typer.echo("")
+            typer.echo(f"{cohort.cohort_id}: no interval and no p-value -- {cohort.absence_reason}")
+
+
+@validation_app.command("statistics")
+def validation_statistics_command(
+    signal: Annotated[list[str], typer.Option("--signal", help=_STATISTICS_SIGNAL_HELP)],
+    family_size: Annotated[int, typer.Option("--family-size", help=_STATISTICS_FAMILY_HELP)],
+    dependence: Annotated[str, typer.Option("--dependence", help=_STATISTICS_DEPENDENCE_HELP)],
+    false_discovery_rate: Annotated[
+        float, typer.Option("--false-discovery-rate", help=_STATISTICS_RATE_HELP)
+    ] = 0.10,
+    confidence_level: Annotated[
+        float, typer.Option("--confidence-level", help=_STATISTICS_LEVEL_HELP)
+    ] = 0.95,
+    bootstrap_samples: Annotated[
+        int, typer.Option("--bootstrap-samples", help=_STATISTICS_SAMPLES_HELP)
+    ] = 1000,
+    random_seed: Annotated[int, typer.Option("--random-seed", help=_STATISTICS_SEED_HELP)] = 0,
+    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
+        "./runtime"
+    ),
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit the whole report as data.")
+    ] = False,
+) -> None:
+    """Aggregate stored outcome validations, controlled for multiple testing (`V2-P5-008`, `007`).
+
+    The usual invocation, against signal IDs `openalpha research run` printed::
+
+        openalpha validation statistics --signal sig_a --signal sig_b \
+          --family-size 40 --false-discovery-rate 0.10 \
+          --dependence independent-or-positively-dependent --runtime-dir ./runtime
+
+    **`--family-size` is not the number of `--signal` flags.** It is how many cohorts the study
+    that produced these actually tested, and it is what every q-value is computed against. Forty
+    signals swept and two reported is `--family-size 40`, and the two q-values it produces are
+    twenty times the ones a two-cohort family would give. The only direction this command can
+    check is that the declaration is not *below* the number of cohorts tested here, and it
+    refuses that; the other direction is `the_family_size_is_declared_and_no_check_can_confirm_it`
+    and is printed with the answer in `--json`.
+
+    **Four columns, and the fourth is the point.** `gross` is what the position made against the
+    benchmark, `drag` is the transaction cost as its own negative column, `net` is what was kept,
+    and `unexplained` is the part of it `V2-P5-005`/`006` refuse to attribute -- on a held
+    decision that is the whole selection return, so `unexplained` above `net` is the ordinary
+    reading and not a fault.
+
+    **A cohort with fewer than two observations gets no interval and no p-value.** Every resample
+    of a single observation is that observation, so the interval would have zero width at any
+    confidence level; the absence is printed with its reason, and the cohort is left out of the
+    family rather than being counted as a hypothesis that failed to reject.
+
+    Exits 0 when the report was produced, 3 when the request could not be put -- a signal with
+    nothing stored, a family smaller than the cohorts tested, a dependence that is not one of the
+    two -- and 1 when the runtime directory could not be opened.
+    """
+    with _panel_command("validation statistics"):
+        if dependence not in ("independent-or-positively-dependent", "arbitrary"):
+            raise _panel_fail(
+                PanelExit.bad_request,
+                f"--dependence must be `independent-or-positively-dependent` or `arbitrary`, "
+                f"not {dependence!r}; it decides the correction and has no default",
+            )
+        try:
+            report = OpenAlphaSDK(runtime_dir=runtime_dir).outcome_statistics(
+                signal_ids=tuple(signal),
+                family_size=family_size,
+                false_discovery_rate=false_discovery_rate,
+                dependence=cast(DependenceAssumption, dependence),
+                confidence_level=confidence_level,
+                bootstrap_samples=bootstrap_samples,
+                random_seed=random_seed,
+            )
+        except (OutcomeStatisticsError, ValidationError) as error:
+            raise _panel_fail(PanelExit.bad_request, str(error)) from error
+
+        if json_output:
+            typer.echo(
+                json.dumps(outcome_statistics_view(report), ensure_ascii=False, sort_keys=True)
+            )
+        else:
+            _echo_outcome_statistics(report)

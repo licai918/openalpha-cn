@@ -17,6 +17,15 @@ from openalpha_cn.backtest.multi_day import (
     PortfolioBacktestRunner,
     PortfolioBacktestStep,
 )
+from openalpha_cn.backtest.multiple_testing import DependenceAssumption
+from openalpha_cn.backtest.outcome_statistics import (
+    OutcomeCohort,
+    OutcomeStatisticsError,
+    OutcomeStatisticsReport,
+    OutcomeStatisticsRequest,
+    outcome_statistics_view,
+    report_outcome_statistics,
+)
 from openalpha_cn.backtest.portfolio import (
     PortfolioLimits,
     PortfolioOrder,
@@ -275,6 +284,68 @@ class OpenAlphaSDK:
     def list_validations_by_signal(self, signal_id: str) -> tuple[ValidationResult, ...]:
         """List validation results for one signal, in append order."""
         return self.validation_store.list_by_signal(signal_id)
+
+    def outcome_statistics(
+        self,
+        *,
+        signal_ids: Sequence[str],
+        family_size: int,
+        false_discovery_rate: float,
+        dependence: DependenceAssumption,
+        confidence_level: float = 0.95,
+        bootstrap_samples: int = 1000,
+        random_seed: int = 0,
+    ) -> OutcomeStatisticsReport:
+        """Report gross, net, cost drag, intervals and BH-controlled q-values over stored outcomes.
+
+        `V2-P5-008`, standing on `V2-P5-007`. One signal is one cohort is one hypothesis, read
+        back through `validation_store.list_by_signal` -- the same rows
+        `GET /api/v1/backtests/validations/by-signal/{id}` serves, so the numbers here are
+        aggregates of results a caller can fetch and check individually.
+
+        **`family_size` is required and is not `len(signal_ids)`.** It is how many cohorts the
+        study actually tested, which is the number a caller who swept forty signals and is
+        reporting five must write down; the only direction that can be checked is that it is not
+        below the number of cohorts tested here, and it is checked. `dependence` is required for
+        the same reason `MultipleTestingRequest` requires it: independence is the assumption
+        that rejects more, so it must not also be the default.
+
+        A signal with nothing stored is refused **by name** rather than being dropped. Dropping
+        it would silently shrink the family the caller declared, which is precisely the failure
+        `V2-P5-007` exists to prevent, and would leave a caller unable to tell "no outcomes were
+        recorded for this signal" from "this signal was never asked about".
+        """
+        empty = tuple(
+            signal_id
+            for signal_id in signal_ids
+            if not self.validation_store.list_by_signal(signal_id)
+        )
+        if empty:
+            raise OutcomeStatisticsError(
+                f"no validation results are stored for {', '.join(empty)}; a cohort with no "
+                "observations is not a cohort with a wide interval"
+            )
+        return report_outcome_statistics(
+            OutcomeStatisticsRequest(
+                cohorts=tuple(
+                    OutcomeCohort(
+                        cohort_id=signal_id,
+                        results=self.validation_store.list_by_signal(signal_id),
+                    )
+                    for signal_id in signal_ids
+                ),
+                family_size=family_size,
+                false_discovery_rate=false_discovery_rate,
+                dependence=dependence,
+                confidence_level=confidence_level,
+                bootstrap_samples=bootstrap_samples,
+                random_seed=random_seed,
+            )
+        )
+
+    def outcome_statistics_view(self, report: OutcomeStatisticsReport) -> dict[str, object]:
+        """Render one outcome-statistics report as data, the bytes `--json` emits."""
+        return dict(outcome_statistics_view(report))
 
     # --- the panel plane (V2-P1-016) ----------------------------------------------------------
     #

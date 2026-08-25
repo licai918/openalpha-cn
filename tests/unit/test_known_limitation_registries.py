@@ -140,6 +140,8 @@ from openalpha_cn.backtest.factor_ic import KNOWN_IC_LIMITATIONS
 from openalpha_cn.backtest.factor_portfolio import KNOWN_QUANTILE_PORTFOLIO_LIMITATIONS
 from openalpha_cn.backtest.factor_redundancy import KNOWN_REDUNDANCY_LIMITATIONS
 from openalpha_cn.backtest.factor_tradeability import KNOWN_TRADEABILITY_LIMITATIONS
+from openalpha_cn.backtest.multiple_testing import KNOWN_MULTIPLE_TESTING_LIMITATIONS
+from openalpha_cn.backtest.outcome_statistics import KNOWN_OUTCOME_STATISTICS_LIMITATIONS
 from openalpha_cn.backtest.portfolio_policy import KNOWN_CONSTRUCTION_LIMITATIONS
 from openalpha_cn.backtest.shortlist_gate import KNOWN_SHORTLIST_GATE_LIMITATIONS
 from openalpha_cn.backtest.validation import KNOWN_ATTRIBUTION_LIMITATIONS
@@ -189,6 +191,8 @@ class _Limitation(Protocol):
 LIMITATION_REGISTRIES: Final[dict[str, Sequence[_Limitation]]] = {
     "KNOWN_EXECUTION_LIMITATIONS": KNOWN_EXECUTION_LIMITATIONS,
     "KNOWN_ATTRIBUTION_LIMITATIONS": KNOWN_ATTRIBUTION_LIMITATIONS,
+    "KNOWN_MULTIPLE_TESTING_LIMITATIONS": KNOWN_MULTIPLE_TESTING_LIMITATIONS,
+    "KNOWN_OUTCOME_STATISTICS_LIMITATIONS": KNOWN_OUTCOME_STATISTICS_LIMITATIONS,
     "KNOWN_IC_LIMITATIONS": KNOWN_IC_LIMITATIONS,
     "KNOWN_QUANTILE_PORTFOLIO_LIMITATIONS": KNOWN_QUANTILE_PORTFOLIO_LIMITATIONS,
     "KNOWN_EXPERIMENT_LIMITATIONS": KNOWN_EXPERIMENT_LIMITATIONS,
@@ -533,7 +537,7 @@ def test_the_registry_table_is_every_known_registry_in_the_source_tree() -> None
     }
 
     assert found == set(LIMITATION_REGISTRIES) | set(CODELESS_REGISTRIES)
-    assert len(LIMITATION_REGISTRIES) == 36
+    assert len(LIMITATION_REGISTRIES) == 38
     assert set(LIMITATION_REGISTRIES) & set(CODELESS_REGISTRIES) == set()
 
 
@@ -646,6 +650,8 @@ one of them would appear here and the table would say nothing.
 REGISTRY_ENTRY_COUNTS: Final[dict[str, int]] = {
     "KNOWN_EXECUTION_LIMITATIONS": 3,
     "KNOWN_ATTRIBUTION_LIMITATIONS": 4,
+    "KNOWN_MULTIPLE_TESTING_LIMITATIONS": 6,
+    "KNOWN_OUTCOME_STATISTICS_LIMITATIONS": 7,
     "KNOWN_IC_LIMITATIONS": 5,
     "KNOWN_QUANTILE_PORTFOLIO_LIMITATIONS": 8,
     "KNOWN_EXPERIMENT_LIMITATIONS": 6,
@@ -720,11 +726,11 @@ no longer written in prose at all. `DOCSTRING_TOTALS` below holds them as an equ
 
 DOCSTRING_TOTALS: Final[Mapping[str, int]] = MappingProxyType(
     {
-        "registries": 36,
-        "entries": 334,
+        "registries": 38,
+        "entries": 347,
         "derived_entries": 70,
-        "table_rows": 35,
-        "table_entries": 264,
+        "table_rows": 37,
+        "table_entries": 277,
     }
 )
 """Every number this module would otherwise have stated in prose, as an equality.
