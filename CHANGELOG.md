@@ -11,8 +11,8 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   text was checked before it was believed and **two of its four claims were false on `2746663`**:
   `OutcomeValidator` is *not* "completely absent from the SDK" -- `validate_outcome`,
   `list_validations_by_decision` and `list_validations_by_signal` have all shipped -- and the CLI
-  does not cover "4 of 20 capability domains"; it reached 15 of the 44 shipping routes' capabilities
-  through 25 commands. The two claims that held were `F30` (whose list is **nine** routes, not the
+  does not cover "4 of 20 capability domains"; 25 commands reached the capability of **14**
+  of the 44 shipping routes, and 17 of 47 now. The two claims that held were `F30` (whose list is **nine** routes, not the
   "7" it says) and `F31`, both addressed below. Measured surfaces: **44 routes / 48 SDK methods / 25
   CLI commands** before, **47 / 48 / 29** after.
 - **`POST /api/v1/portfolio/construct`** (`V2-P5-013`). `V2-P5-001` shipped `openalpha portfolio
