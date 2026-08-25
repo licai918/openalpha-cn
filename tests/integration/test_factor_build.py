@@ -1624,3 +1624,108 @@ def test_a_prediction_instant_on_a_closed_exchange_is_blocked_and_not_a_bare_tra
     assert refused["reason"] == "blocked"
     assert "is not an open session" in refused["message"]
     assert "Nothing was written" in refused["message"]
+
+
+# --- V2-P4-109: one exit code, three remedies, and only one of them applies ----------------------
+
+
+UNCLOSED_SESSION_INSTANT: Final[datetime] = datetime(2026, 1, 12, 1, 0, tzinfo=UTC)
+"""09:00 Asia/Shanghai on Monday 2026-01-12 -- an open session, hours before its own 16:30 close.
+
+The Saturday above and this Monday are the two states `V2-P4-108`'s refusal collapsed into one
+sentence, and the difference between them is the whole of `V2-P4-109`: the Saturday will *never*
+become a session and the Monday becomes one that afternoon. `PanelExit`'s own docstring says the
+codes exist so a CI job can tell "re-fetch the data" from "edit the command line", and both of
+these exit `1` with a message listing both remedies.
+"""
+
+
+def test_the_two_states_that_share_exit_one_no_longer_share_a_remedy(
+    panel_only: Path,
+) -> None:
+    """`V2-P4-109`. Same code, same message, opposite answers -- measured before it was split.
+
+    On `daaabf5` both instants below produced the same closing sentence: "Build --tier processed
+    at this instant, or move --as-of to after the session's close, or name the missing year, or
+    fetch the later sessions first." Three of those four are wrong for a Saturday -- the exchange
+    is never going to open on 2026-01-10, so no fetch and no waiting produces that session -- and
+    "fetch the later sessions first" is wrong for the Monday, whose session exists and simply has
+    not published yet.
+
+    The discriminator is `TradingCalendar.day_status`, which is three-valued for exactly this
+    reason and is already loaded by `_neutralized` before the read that raises. Asserted in both
+    directions per instant, because a message that named *every* remedy would satisfy any
+    single-direction check -- which is the message this test replaces.
+    """
+    runner = CliRunner()
+
+    closed = runner.invoke(
+        app,
+        _cli_arguments(
+            panel_only,
+            _build_parameters(
+                tier="neutralized",
+                neutralization="industry_and_size/v1",
+                as_ofs=[NON_SESSION_INSTANT],
+            ),
+        ),
+    )
+    unclosed = runner.invoke(
+        app,
+        _cli_arguments(
+            panel_only,
+            _build_parameters(
+                tier="neutralized",
+                neutralization="industry_and_size/v1",
+                as_ofs=[UNCLOSED_SESSION_INSTANT],
+            ),
+        ),
+    )
+
+    assert closed.exit_code == int(FACTOR_EXIT["blocked"]) == int(PanelExit.unhealthy) == 1
+    assert unclosed.exit_code == int(FACTOR_EXIT["blocked"])
+
+    assert "the exchange was never open on that day" in closed.output
+    assert "fetch the later sessions" not in closed.output
+    assert "wait" not in closed.output.lower()
+
+    assert "has not published yet" in unclosed.output
+    assert "the exchange was never open on that day" not in unclosed.output
+    assert "no fetch and no later run produces one" not in unclosed.output
+    assert "fetch the later sessions" not in unclosed.output
+
+
+def test_the_roadmap_records_the_exit_code_this_command_actually_issues() -> None:
+    """`V2-P4-108`'s row said the fix yields exit `3`. It yields `1`, and always did.
+
+    `FACTOR_EXIT["blocked"]` is `PanelExit.unhealthy`, which is `1`; the envelope name in the row
+    is right and the number beside it was not. Held as a test rather than fixed silently because
+    a roadmap row is what the next reader plans against, and this one would have had them writing
+    `if [ $? -eq 3 ]` for a command that exits `1`.
+    """
+    root = Path(__file__).resolve().parents[2]
+    roadmap = (root / "docs" / "specs" / "v2" / "openalpha-cn-v2-roadmap.md").read_text(
+        encoding="utf-8"
+    )
+    row = next(line for line in roadmap.splitlines() if line.startswith("| `V2-P4-108`"))
+
+    assert int(FACTOR_EXIT["blocked"]) == 1
+    assert f"修后 exit **{int(FACTOR_EXIT['blocked'])}**" in row
+    assert "修后 exit 3" not in row
+
+
+def test_the_shared_exit_code_is_declared_rather_than_left_to_be_discovered() -> None:
+    """The half of `V2-P4-109` that could not be closed, named where a reader of the face looks.
+
+    Splitting the *message* is what this wave did. Splitting the *code* was considered and
+    refused with a reason: `bad_request` means "no amount of re-fetching fixes it", and a day
+    reported `closed` by the loaded calendar can also be a day whose `trade_cal` partition is
+    short -- in which case re-fetching is exactly the remedy. Answering `3` there would tell a CI
+    job to stop retrying a panel that a retry would repair, which is the mistake in the more
+    expensive direction.
+    """
+    from openalpha_cn.factor_view import KNOWN_FACTOR_RUN_LIMITATIONS
+
+    assert "a_closed_day_and_an_unclosed_session_share_one_exit_code" in {
+        limitation.code for limitation in KNOWN_FACTOR_RUN_LIMITATIONS
+    }

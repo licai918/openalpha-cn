@@ -106,7 +106,21 @@ class AgentContext(BaseModel):
 
 
 class ResearchAgent(Protocol):
-    """Extension contract for deterministic or model-backed agents."""
+    """Extension contract for deterministic or model-backed agents.
+
+    **A public extension point, which is what makes the required attributes below a promise
+    about compatibility rather than an internal convention.** Every one of them is checked
+    structurally, once, at `runtime/router.py::_refuse_an_incomplete_declaration` -- the one seam
+    every cycle crosses before any agent runs -- and an implementation short any of them is
+    refused as `MissingAgentDeclarationError`, naming the agent, the attributes and what to
+    declare instead. That check is `V2-P4-008`'s and `V2-P4-010`'s debt paid late: both rows
+    added a required attribute, neither installed a check, and the acceptance measured what a
+    third-party agent written before them actually got -- a bare `AttributeError` naming a Python
+    attribute, from `router.py` in one case and from `engine.py` **after the whole roster had
+    already run** in the other. `REQUIRED_AGENT_DECLARATIONS` is the list, and it is held against
+    the refusal one row per name, so an attribute added here without a check is a red test rather
+    than somebody's broken deployment.
+    """
 
     agent_id: str
     evidence_families: frozenset[str]
@@ -118,6 +132,13 @@ class ResearchAgent(Protocol):
     and the guess it would have to make -- "no features" -- is indistinguishable from the
     misdeclaration `UndeclaredAgentDependencyError` exists to name. An agent that reads no
     panel column declares `frozenset()` and says so; the three baselines do exactly that.
+
+    **Required means refused by name, which it did not until the ninth wave.** Making a
+    Protocol attribute required turned this public extension point breaking, and the router read
+    it unguarded one line above `UndeclaredAgentDependencyError` -- so an agent written before
+    `V2-P4-008` got `AttributeError: 'LegacyAgent' object has no attribute
+    'feature_dependencies'` at `router.py:223` rather than a sentence naming the contract that
+    moved. `MissingAgentDeclarationError` is that sentence.
 
     The empty case is not the same as the empty `evidence_families` case, and the router is
     where the asymmetry lives: an agent declaring **neither** is refused, because nothing can
@@ -131,7 +152,17 @@ class ResearchAgent(Protocol):
     from its own `MarketAgent` with an `isinstance` check, and would then record every *other*
     `ModelProvider`-backed agent as deterministic -- a silent wrong answer about the one fact
     S40 asks a manifest to carry, arrived at by a mechanism that looks like it works. An agent
-    that omits this fails structurally at the point it is handed to the engine instead.
+    that omits this is refused by name at the router before any agent runs
+    (`MissingAgentDeclarationError`).
+
+    **That last sentence used to read "fails structurally at the point it is handed to the
+    engine instead", and it was measured false.** No structural check existed. `ResearchEngine.
+    _pair` reads `agent.provenance` inside a dict comprehension, which runs *after* every
+    selected agent has produced a result: an agent short only this attribute was routed, ran,
+    left a recovery row on disk, and then raised `AttributeError: 'LegacyAgent' object has no
+    attribute 'provenance'` at `engine.py:223`. So the failure was neither structural nor at
+    hand-off, and it happened with a half-finished cycle written. The check the sentence
+    described now exists, at the router, and this is what it says.
     """
 
     def analyze(self, context: AgentContext) -> AgentResult:

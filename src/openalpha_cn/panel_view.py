@@ -408,8 +408,33 @@ def readiness_payload(entries: Sequence[DatasetReadiness]) -> dict[str, object]:
     }
 
 
-def health_report_payload(report: PanelHealthReport) -> dict[str, object]:
+def health_report_payload(
+    report: PanelHealthReport, *, limitation_detail: bool = True
+) -> dict[str, object]:
     """A `PanelHealthReport` as JSON-ready data, losing nothing the report carries.
+
+    `limitation_detail=False` drops each limitation's `detail` paragraph and keeps `code`,
+    `datasets` and `dates` -- `V2-P4-110`. Measured on a generated panel asked about one dataset,
+    the paragraphs were **14,359 of 16,936 bytes (84.8%)** of the answer, and they are static:
+    byte-identical on a healthy panel and a broken one, on the first run and the thousandth,
+    while the findings the caller asked for were 1,340 bytes. The *text* face has rendered them
+    as a count since it was written, for the reason in `cli._echo_report` -- "a human report that
+    buried its own findings under them would teach its readers to skim both" -- and this is the
+    same choice made available to a machine reader.
+
+    **The default is unchanged and that is a decision.** A registry only served when asked for is
+    a registry that stops being read, and the codes are what these entries are *for*. What the
+    parameter removes is the obligation to carry the prose on every poll, not the prose.
+
+    **What it deliberately does not do is narrow the set.** The entries here are already scoped:
+    `panel_doctor.known_limitations` selects on `wanted & set(item.datasets)`, and the rest are
+    `storage_limitations()`, which name no dataset because they hold for every dataset alike.
+    Asked about `index_daily`, four of the ten are that dataset's own and six are the storage
+    plane's; asked about three datasets, twenty-three come back. The acceptance that raised this
+    row read the size as "the whole ledger, unrelated to the dataset asked about", and
+    `tests/integration/test_doctor_report_size.py::
+    test_the_ledger_this_command_returns_is_already_scoped_to_the_datasets_asked_about` holds the
+    measurement that says otherwise, so the narrowing is not attempted a second time.
 
     `counts_by_severity` is total over `panel_doctor.HEALTH_SEVERITIES` rather than built from
     the findings that happen to be present: a severity with no findings must read `0`, not be
@@ -465,8 +490,8 @@ def health_report_payload(report: PanelHealthReport) -> dict[str, object]:
             {
                 "code": limitation.code,
                 "datasets": list(limitation.datasets),
-                "detail": limitation.detail,
                 "dates": [day.isoformat() for day in limitation.dates],
+                **({"detail": limitation.detail} if limitation_detail else {}),
             }
             for limitation in report.limitations
         ],

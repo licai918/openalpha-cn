@@ -897,6 +897,63 @@ def migrate_run(
             typer.echo(f"  {pending_item.version} {pending_item.name}")
 
 
+@migrate_app.command("prune-backups")
+def migrate_prune_backups(
+    runtime_dir: Annotated[Path, typer.Option("--runtime-dir")] = Path("./runtime"),
+    keep: Annotated[
+        int,
+        typer.Option("--keep", min=0, help="How many of the newest backups to keep."),
+    ] = 10,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="List what would be removed without removing it."),
+    ] = False,
+) -> None:
+    """Remove all but the newest `--keep` pre-migration backups under `runtime_dir/backups`.
+
+    **This is the documented cleanup path `V2-P4-111` chose, and choosing it over an automatic
+    retention cap was the whole decision.** A cap enforced inside `run_migrations` would have
+    deleted whatever a user already had the next time they ran anything, and pre-migration
+    backups are the user's data -- the one copy standing between a failed migration and a
+    database. So nothing is removed unless a person runs this, `--dry-run` lists first, and
+    `--keep` is explicit.
+
+    The growth it exists to clean up is fixed at the source: a run that applies nothing now
+    removes the backup it took, so a store whose migration defers permanently stops adding a
+    139,264-byte file per process start. This command is for the pile that accumulated before
+    that -- 128 files and 16 MB in the repository this row was measured in.
+
+    Newest first, by the timestamp in the filename via `Path.stat().st_mtime`: a backup's value
+    decays, and the copy taken before a migration that is still pending is the one an operator
+    might restore from. Files that are not `.bak` are never touched, so a directory somebody has
+    put something else in is left alone rather than tidied.
+
+    Exits 0 whether or not anything was removed. A cleanup command that returned non-zero on an
+    already-clean tree is a command that gets `|| true`-d in the first script that uses it, which
+    is `PanelExit`'s own argument about `panel doctor`'s notices.
+    """
+    backups = runtime_dir / "backups"
+    found = sorted(
+        (path for path in backups.glob("*.bak") if path.is_file()),
+        key=lambda path: (path.stat().st_mtime, path.name),
+        reverse=True,
+    )
+    doomed = found[keep:]
+    if not doomed:
+        typer.echo(f"{len(found)} backup(s) under {backups}, keeping {keep}; nothing to remove")
+        return
+    freed = sum(path.stat().st_size for path in doomed)
+    verb = "would remove" if dry_run else "removed"
+    for path in doomed:
+        if not dry_run:
+            path.unlink()
+        typer.echo(f"{verb} {path.name}")
+    typer.echo(
+        f"{verb} {len(doomed)} of {len(found)} backup(s) ({freed} bytes), keeping the newest "
+        f"{min(keep, len(found))} under {backups}"
+    )
+
+
 @app.command()
 def serve(
     host: Annotated[
@@ -1583,12 +1640,14 @@ def _echo_report(report: PanelHealthReport) -> None:
     if scoped:
         typer.echo(
             f"INFO {len(scoped)} known limitation(s) of these datasets "
-            "(structural, not defects of this fetch); --json carries them in full"
+            "(structural, not defects of this fetch); --json carries them in full, "
+            "--json --no-limitation-detail names them without their prose"
         )
     if plane:
         typer.echo(
             f"INFO {len(plane)} structural boundary(ies) of the panel store itself "
-            "(true of every dataset alike); --json carries them in full"
+            "(true of every dataset alike); --json carries them in full, "
+            "--json --no-limitation-detail names them without their prose"
         )
 
 
@@ -3520,6 +3579,16 @@ def panel_doctor_command(
     json_output: Annotated[
         bool, typer.Option("--json", help="Emit the health report as data.")
     ] = False,
+    limitation_detail: Annotated[
+        bool,
+        typer.Option(
+            "--limitation-detail/--no-limitation-detail",
+            help=(
+                "Whether --json carries each known limitation's prose. --no-limitation-detail "
+                "keeps the code, the datasets and the dates and drops the paragraph."
+            ),
+        ),
+    ] = True,
 ) -> None:
     """Report what is wrong with the stored panel at a stated `as_of`.
 
@@ -3530,6 +3599,14 @@ def panel_doctor_command(
 
     Exits non-zero exactly when the report is not `is_clean` -- one or more `blocking` or
     `warning` findings. A `notice` never does; see `PanelExit` for the measurement behind that.
+
+    **`--json` is mostly the limitation prose and `--no-limitation-detail` is how to decline it**
+    (`V2-P4-110`). Measured on a generated panel asked about `index_daily`: 16,936 bytes out, of
+    which 14,359 (84.8%) were the paragraphs and 1,340 were the findings. The paragraphs do not
+    depend on the panel -- they are the same bytes on every run against every store -- so a
+    caller polling this command was carrying them for nothing. The flag keeps each entry's
+    `code`, `datasets` and `dates` and drops only the paragraph; the default is unchanged,
+    because a registry served only on request is a registry that stops being read.
     """
     with _panel_command("panel doctor"):
         store, request = _panel_request(
@@ -3557,7 +3634,11 @@ def panel_doctor_command(
 
         if json_output:
             typer.echo(
-                json.dumps(health_report_payload(report), ensure_ascii=False, sort_keys=True)
+                json.dumps(
+                    health_report_payload(report, limitation_detail=limitation_detail),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
             )
         else:
             _echo_report(report)

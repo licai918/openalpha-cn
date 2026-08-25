@@ -1,5 +1,6 @@
 """FastAPI application for OpenAlpha CN's versioned public HTTP surface."""
 
+import json
 from collections.abc import Callable, Mapping, Sequence
 from datetime import date, datetime
 from decimal import Decimal
@@ -7,7 +8,9 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Annotated, Any, Final
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -365,6 +368,146 @@ class ResearchIntegrityError(ValueError):
         self.claimed = claimed
         self.derived = derived
         self.subject = subject
+
+
+MAX_ECHOED_INPUT_BYTES: Final[int] = 512
+"""How much of a rejected value a validation refusal may quote back.
+
+`V2-P4-040`'s shape, arriving inside `V2-P4-043`'s own fix. Pydantic's error objects carry
+`input` -- the value that was refused -- and FastAPI serialises it verbatim, so a `too_long` on a
+whole-market collection answered with the whole collection. Measured on `daaabf5`:
+`POST /api/v1/screen` with 10,001 records (14,771,528 bytes in) refused in **13,821,594 bytes**,
+and `POST /api/v1/research/batches` with 10,001 requests in **9,261,138 bytes** -- the same
+defect on a second route, which is why the elision is installed once for the app rather than
+per route.
+
+**The sharper case is not a ceiling at all.** A misspelled top-level key produces two errors
+(`missing` and `extra_forbidden`) and each echoes the entire body, so at *200* records the
+refusal measured 553,037 bytes against a 295,450-byte request -- 1.87x, and growing with the
+number of faults rather than with the ceiling.
+
+512 bytes rather than zero, deliberately. FastAPI's list shape is documented in
+`docs/api/http.md` as the answer to an ordinary parameter fault, and there the echo is the useful
+half: `input: "not-a-number"` beside `loc` is what tells a caller which value to fix. What is
+removed is the echo that is a copy of the request, and the replacement names what it replaced --
+kind and size -- so "you sent a list of ten thousand" is still distinguishable from "you sent a
+string".
+"""
+
+MAX_VALIDATION_ERRORS: Final[int] = 20
+"""How many validation faults one refusal lists before it starts counting instead.
+
+Eliding each `input` bounds an entry; only truncating the list bounds the body.
+`BatchSubmitRequest.requests` validates every item, so a thousand malformed requests is a
+thousand error objects and the list alone reaches megabytes with every echo already gone.
+
+The count of what was not listed is carried as a final entry rather than dropped, because a
+truncated list that did not say so would tell a caller they had fixed everything when they had
+fixed twenty things. That entry carries a `loc` like every other, which is what keeps
+`docs/api/http.md`'s documented discriminator -- `isinstance(detail, dict)` is false, every entry
+has a `loc` -- true of it as well.
+"""
+
+_DECLARED_CEILING_TYPES: Final[frozenset[str]] = frozenset({"too_long", "too_short"})
+"""The pydantic error types that mean "this service declared a bound and you crossed it".
+
+These are the only validation faults that are a refusal **this service decided** rather than a
+mismatch between what arrived and what a type says. `V2-P4-043` added the ceiling precisely so a
+caller would meet a number to aim at, and `docs/api/http.md` makes `detail.reason` the key a
+client switches on for the refusals this service decides -- which `V2-P4-041` built for the same
+route in the same commit. So these take the object shape and everything else keeps FastAPI's
+list; see `_validation_refusal`.
+"""
+
+
+def _elided(value: object) -> object:
+    """`value` as it may appear in a refusal: itself when small, its measurement when not."""
+    try:
+        encoded = json.dumps(value, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):  # pragma: no cover - json refuses very little via `default`
+        return f"<{type(value).__name__} elided>"
+    if len(encoded.encode("utf-8")) <= MAX_ECHOED_INPUT_BYTES:
+        return value
+    measure = len(value) if isinstance(value, list | dict | str | tuple) else len(encoded)
+    return f"<{type(value).__name__} of {measure} elided>"
+
+
+def _declared_ceiling_detail(error: Mapping[str, Any]) -> dict[str, Any]:
+    """One `too_long`/`too_short` fault as this service's own `{"reason", "message"}` refusal.
+
+    `field` is the last **string** element of `loc`, which is the field the ceiling is declared
+    on: `loc` for a body-level collection is `("body", "research")`, and an index would be an
+    `int`. `limit` and `received` are read off pydantic's `ctx` and the input's own length rather
+    than restated from `MAX_BATCH_ITEMS`, so a second ceiling declared anywhere in this module
+    reports its own number instead of this one's.
+    """
+    location = [part for part in error.get("loc", ()) if isinstance(part, str) and part != "body"]
+    field = location[-1] if location else "body"
+    context = error.get("ctx") or {}
+    limit = context.get("max_length", context.get("min_length"))
+    received = len(error["input"]) if isinstance(error.get("input"), list | tuple | dict) else None
+    return {
+        "reason": "declared_ceiling_exceeded",
+        "message": (
+            f"{field} carries {received} items and this service declares a ceiling of {limit}. "
+            f"{error.get('msg', '')} The ceiling is a count rather than a size, so shortening "
+            "the records does not help; send at most the declared number, in more than one "
+            "request if the market is larger than that. This refusal deliberately does not quote "
+            "the body back."
+        ),
+        "field": field,
+        "loc": list(error.get("loc", ())),
+        "limit": limit,
+        "received": received,
+    }
+
+
+def _validation_refusal(error: RequestValidationError) -> JSONResponse:
+    """Every `422` this service's request validation issues, bounded and shaped.
+
+    Two shapes and the split is by what the refusal is *about*, which is the split
+    `docs/api/http.md` already documents rather than a fourth one invented here:
+
+    - a **ceiling this service declares** is one of this service's own semantic refusals, so it
+      takes the `{"reason", "message", ...}` object `_research_refusal` uses on the same route;
+    - everything else keeps FastAPI's list, because `V2-P4-051` measured what it costs a client
+      when two `422` bodies cannot be told apart, and `loc` with a small echo is the useful
+      answer to "you sent a string where a float goes".
+
+    The object shape is taken only when **every** fault is a ceiling fault, and that condition is
+    measured rather than assumed. `BatchSubmitRequest.requests` declares `min_length=1`, and a
+    body whose items all fail their own validation produces a `too_short` *alongside* the item
+    faults -- pydantic counts what survived, which is nothing -- so a rule of "the first ceiling
+    fault wins" answers "you sent too few" to a caller who sent a thousand malformed requests.
+    Measured on five malformed items: `Counter({'missing': 25, 'too_short': 1})`. When a ceiling
+    fault is derivative like that, the item faults are the answer and the list is their shape.
+
+    Where the object shape does apply, the first ceiling fault wins rather than all of them --
+    `screen`'s rule for malformed records: a caller who sent one collection too long wants one
+    sentence, and enumerating every fault in a whole-market body is this row's own defect as a
+    wall of text instead of as a copy.
+    """
+    faults = list(error.errors())
+    ceilings = [fault for fault in faults if fault.get("type") in _DECLARED_CEILING_TYPES]
+    if ceilings and len(ceilings) == len(faults):
+        return JSONResponse(
+            status_code=422, content={"detail": _declared_ceiling_detail(ceilings[0])}
+        )
+    listed = [
+        {**fault, "input": _elided(fault.get("input")), "loc": list(fault.get("loc", ()))}
+        for fault in faults[:MAX_VALIDATION_ERRORS]
+    ]
+    dropped = len(faults) - len(listed)
+    if dropped:
+        listed.append(
+            {
+                "loc": [],
+                "type": "errors_elided",
+                "msg": f"{dropped} further validation error(s) were not listed",
+                "input": None,
+            }
+        )
+    return JSONResponse(status_code=422, content={"detail": jsonable_encoder(listed)})
 
 
 def _research_refusal(error: Exception, *, index: int | None) -> HTTPException:
@@ -1684,6 +1827,7 @@ def create_app(
         calendar: bool,
         session: Annotated[list[date] | None, _PANEL_SESSION_QUERY] = None,
         index_code: Annotated[list[str] | None, _PANEL_INDEX_QUERY] = None,
+        limitation_detail: bool = True,
     ) -> JSONResponse:
         """Report what is wrong with the stored panel at a stated `as_of`.
 
@@ -1695,6 +1839,11 @@ def create_app(
         Always `200` when the request could be put: `is_clean` and a `counts_by_severity` total
         over all three severities are in the body. This endpoint grants nothing, so its status
         code claims nothing -- see `PANEL_HTTP_STATUS`.
+
+        `limitation_detail=false` is `openalpha panel doctor --no-limitation-detail`, and it is
+        here rather than on the CLI alone because the two faces answering differently about the
+        same store is the drift this repository keeps measuring. `V2-P4-110`: the paragraphs were
+        84.8% of a one-dataset report and do not depend on the panel.
         """
         store, request = _panel_query(
             root,
@@ -1720,7 +1869,7 @@ def create_app(
             raise _panel_bad_request(error) from error
         return JSONResponse(
             status_code=PANEL_HTTP_STATUS["answered"],
-            content=health_report_payload(report),
+            content=health_report_payload(report, limitation_detail=limitation_detail),
         )
 
     @application.get("/api/v1/panel/gate")
@@ -2153,6 +2302,18 @@ def create_app(
             content=experiment_view(record, write="unchanged"),
         )
 
+    @application.exception_handler(RequestValidationError)
+    async def validation_refusal(request: Request, error: RequestValidationError) -> JSONResponse:
+        """Bound and shape every request-validation `422` this application issues.
+
+        Registered on the application rather than written into each route, because the defect it
+        answers is a property of the *transport*: any route with a declared collection ceiling
+        refuses by echoing the collection, and two of them do today. A per-route fix would have
+        left `POST /api/v1/research/batches` at 8.83 MiB while `POST /api/v1/screen` was fixed,
+        which is `V2-P4-067(b)`'s shape one wave later. See `_validation_refusal`.
+        """
+        return _validation_refusal(error)
+
     configured_web_dir = web_dir if web_dir is not None else config.web_dir
     if configured_web_dir is not None:
         index = configured_web_dir / "index.html"
@@ -2167,4 +2328,39 @@ def create_app(
     return application
 
 
-app = create_app()
+_app: FastAPI | None = None
+
+
+def __getattr__(name: str) -> FastAPI:
+    """Build the module-scope `app` on first attribute access rather than at import.
+
+    PEP 562. `uvicorn openalpha_cn.api.app:app` -- which is what `openalpha serve` passes and
+    what the `Dockerfile` runs -- imports this module and then reads the attribute, and
+    `from openalpha_cn.api.app import app` is the same two steps; both still get an application.
+    What no longer gets one is `import openalpha_cn.api.app`, which is what a linter, a type
+    checker, a documentation build or an editor's auto-import does, and which had no business
+    creating a database.
+
+    **`V2-P4-111`, and `create_app`'s own docstring is what says this line was wrong.** It makes
+    a point of `app = create_app()` being "filesystem-free for `.env`: importing this module can
+    never read a developer's real `.env`, regardless of the process's current working
+    directory". It was not filesystem-free for `runtime/`: `create_app` calls `build_storage`,
+    which runs migrations and takes a SQLite backup, so a bare import applied migrations and
+    wrote a ~139 KB file into whatever `OPENALPHA_RUNTIME_DIR` pointed at -- the repository
+    itself, by default. Measured: one import moved the file count in the user's own
+    `runtime/backups/` from 126 to 127.
+
+    A module-level `__getattr__` rather than a `lru_cache`d factory function, because the name
+    `openalpha_cn.api.app:app` is a published ASGI entry point: it appears in the `Dockerfile`,
+    in `cli.serve`, and in whatever deployment a user has written. Changing what that string
+    means is a breaking change; changing *when* it is evaluated is not.
+
+    The instance is cached, so repeated access returns one application rather than one per
+    reference -- `app` was a singleton before and the two stores it owns are still opened once.
+    """
+    if name != "app":
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    global _app
+    if _app is None:
+        _app = create_app()
+    return _app

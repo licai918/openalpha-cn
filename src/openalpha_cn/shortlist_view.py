@@ -204,6 +204,7 @@ from openalpha_cn.panel_factors import (
     factor_observation_dataset,
     load_factor_observations,
     load_processed_factor_observations,
+    processed_factor_dataset,
 )
 from openalpha_cn.panel_ingest import (
     load_daily_bars,
@@ -218,6 +219,7 @@ from openalpha_cn.panel_neutralization import (
     FACTOR_NEUTRALIZATIONS,
     NeutralizationEngineError,
     load_neutralized_factor_observations,
+    neutralized_factor_dataset,
 )
 from openalpha_cn.panel_view import PANEL_STORE_PLACEHOLDER, panel_store
 
@@ -468,24 +470,6 @@ class ShortlistViewLimitation:
 
 
 KNOWN_SHORTLIST_VIEW_LIMITATIONS: Final[tuple[ShortlistViewLimitation, ...]] = (
-    ShortlistViewLimitation(
-        code="only_the_raw_tiers_unreadable_factor_refusal_names_the_command_that_builds_it",
-        detail=(
-            "V2-P4-067. When a factor read RAISES rather than returning nothing -- an empty "
-            "store, or a year no partition covers -- the raw tier's refusal now carries "
-            "`openalpha factor build --factor <key> --tier raw --year <year>` and the processed "
-            "and neutralized tiers' refusals carry no command at all. That asymmetry is a "
-            "boundary rather than an oversight: the remedy fires only when no year of the "
-            "factor's partition is registered, and `neutralized` has TWO partition spellings "
-            "depending on the declared neutralization (factor_neut_* and factor_neutmn_*), so "
-            "the registered_years question asked about the wrong one would answer 'nothing is "
-            "stored' for a panel holding the other and hand back a rebuild the caller does not "
-            "need. V2-P4-078 recorded the same trap on the panel plane: a refusal naming a "
-            "command that does not help is worse than one naming none. What is NOT claimed is "
-            "that the other two tiers are unreachable or undiagnosable -- their message still "
-            "names the dataset, the year and the instant; it just stops short of a command."
-        ),
-    ),
     ShortlistViewLimitation(
         code="the_clip_block_is_recovered_from_a_tie_and_may_over_report",
         detail=(
@@ -1337,6 +1321,17 @@ def _rows_for(
     one function that knows which loader answers for which tier -- `factor_ic`'s three public
     wrappers' arrangement, which exists so that a caller cannot hand the processed loader's rows
     to the raw tier's admitted-code table.
+
+    **All three reads carry `_unbuilt_factor_remedy` and the neutralised one is unreachable from
+    any face** -- `run_shortlist`'s first statement refuses `tier == "neutralized"` outright,
+    because this face loads no industry and market-cap cross section. It is written anyway, for
+    `_declared_transform`'s stated reason: a `ShortlistRunRequest` is a frozen dataclass and is
+    still constructible directly, so the read states its own remedy rather than inheriting one
+    from a resolver two calls away. It is *not* claimed to be covered;
+    `tests/integration/test_shortlist_request_time_identity.py::
+    test_the_neutralized_tier_is_refused_by_this_face_before_any_partition_is_opened` pins the
+    guard that makes it unreachable, so lifting that guard fails there rather than shipping an
+    untested arm.
     """
     tier = request.tier
     if tier == "raw":
@@ -1357,6 +1352,7 @@ def _rows_for(
             ),
             store=store,
             what=f"the {transform.qualified_key} rows of {definition.qualified_key}",
+            remedy=_unbuilt_factor_remedy(store, definition=definition, tier="processed"),
         )
         return tuple((row.subject, row.value, row.coverage, row.as_of) for row in processed)
     neutralization = _declared_neutralization(request)
@@ -1366,6 +1362,7 @@ def _rows_for(
         ),
         store=store,
         what=f"the {neutralization.qualified_key} residuals of {definition.qualified_key}",
+        remedy=_unbuilt_factor_remedy(store, definition=definition, tier="neutralized"),
     )
     return tuple((row.subject, row.value, row.coverage, row.as_of) for row in residuals)
 
@@ -2569,30 +2566,53 @@ def _read(
         ) from error
 
 
+FACTOR_TIER_DATASETS: Final[Mapping[str, Callable[[FactorDefinition], str]]] = MappingProxyType(
+    {
+        "raw": factor_observation_dataset,
+        "processed": processed_factor_dataset,
+        "neutralized": neutralized_factor_dataset,
+    }
+)
+"""Each tier's observation dataset, as the one function that names it.
+
+**Restated rather than imported**, `_PANEL_FAULTS`' arrangement and for its reason: this module
+may not import `factor_view` (`lint-imports` keeps the two faces siblings), and a table copied
+between two modules that cannot see each other is held equal by a test that can see both --
+`tests/unit/test_shortlist_view.py::test_both_faces_name_a_tiers_partition_with_the_same_table`.
+The three entries are the same three function objects, so the equality is on identity rather
+than on spelling.
+
+All three take the definition and nothing else. That is the measured fact that widened
+`_unbuilt_factor_remedy` from `raw` to every tier in `V2-P4-067(b)`; see that function.
+"""
+
+
 def _unbuilt_factor_remedy(store: PanelStore, *, definition: FactorDefinition, tier: str) -> str:
     """`_unbuilt_dataset_remedy`'s factor-plane twin, on the same boundary and for its reason.
 
-    Fires only when no year of this factor's observation partition is registered at all. A store
+    Fires only when no year of this tier's observation partition is registered at all. A store
     that holds *some* year of it can be short for reasons this function cannot tell apart -- the
     requested year is absent and the read says so itself -- and a refusal that names a command
     which does not help is worse than one that names none (`V2-P4-078`'s finding, restated here
     because the same trap is one line away).
 
-    **Raw only, deliberately, and this is a boundary rather than an oversight.** `processed` has
-    one dataset name per definition, but `neutralized` has two spellings depending on the
-    declared neutralization (`factor_neut_*` and `factor_neutmn_*`), so a `registered_years`
-    question asked about the wrong one would answer "nothing is stored" for a panel that holds
-    the other and hand the caller a rebuild they do not need. Naming the tier the caller asked
-    for while checking a partition they did not ask about is the exact mistake this function's
-    boundary exists to avoid, so the other two tiers keep the unremedied message and
-    `KNOWN_SHORTLIST_VIEW_LIMITATIONS
-    .only_the_raw_tiers_unreadable_factor_refusal_names_the_command_that_builds_it` says so.
+    **It covered `raw` alone until the P4 ninth-wave acceptance measured the reason it gave.**
+    The reason was that `neutralized` has "two spellings depending on the declared
+    neutralization (`factor_neut_*` and `factor_neutmn_*`)". It has one:
+    `panel_neutralization.neutralized_factor_dataset` takes the *definition* and no
+    neutralisation at all, `factor_neutmn_*` is the manifest dataset rather than a second name
+    for the observations, and `factor_proc_*`/`factor_procmn_*` are the same arrangement one
+    plane down. `processed` was excluded by being bundled into that sentence rather than by a
+    reason of its own -- the same paragraph conceded it "has one dataset name per definition".
+    So all three tiers are named here now, and `factor_view.FACTOR_TIER_DATASETS` is the table
+    both faces look the dataset up in, so neither face can drift to a different rule.
     """
-    if tier != "raw" or store.registered_years(factor_observation_dataset(definition)):
+    dataset = FACTOR_TIER_DATASETS.get(tier)
+    if dataset is None or store.registered_years(dataset(definition)):
         return ""
     return (
-        f". No partition of this factor is registered in this panel at all. Build it first: "
-        f"`openalpha factor build --factor {definition.qualified_key} --tier {tier} "
+        f". No {tier} partition of this factor is registered in this panel at all. Build it "
+        f"first: `openalpha factor build --factor {definition.qualified_key} --tier {tier} "
         f"--year <year>`"
     )
 

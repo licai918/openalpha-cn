@@ -6,6 +6,7 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Added
 
+<<<<<<< HEAD
 - **Two guards for quantifiers and gates that prose asserted and nothing measured** (`V2-P4-112`,
   `V2-P4-115`). `AgentRouter` satisfies an evidence family when **any** declared family is present
   and a feature dependency only when **every** declared column is, and two docstrings cite
@@ -25,6 +26,23 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   now killed by a test that renders a non-ASCII exchange name. `@dataclass(slots=True)` is the one
   of the three that really is equivalent.
 
+=======
+- **`openalpha panel doctor --no-limitation-detail` and `GET /api/v1/panel/health?limitation_detail=false`**
+  (`V2-P4-110`). Measured on a generated panel asked about `index_daily`, the `--json` answer was
+  16,936 bytes of which **14,359 (84.8%) were the limitation paragraphs** and 1,340 were the
+  findings — prose that is byte-identical on a healthy panel and a broken one, on the first run
+  and the thousandth. The text face has rendered them as a count since it was written, for the
+  reason in `_echo_report`; a machine reader had no such choice. Declining keeps each entry's
+  `code`, `datasets` and `dates` and drops only the paragraph, and the default is unchanged —
+  a registry served only on request is a registry that stops being read. **The report was filed
+  as "the whole ledger, unrelated to the dataset asked about" and that half does not survive
+  measurement**: `known_limitations` already selects on `wanted & set(item.datasets)`, so four of
+  the ten are `index_daily`'s own and six are the storage plane's, which name no dataset because
+  they hold for every dataset alike.
+- **`openalpha migrate prune-backups`** (`V2-P4-111`), the documented cleanup path for
+  `runtime/backups/`. `--keep N` (default 10), `--dry-run` to list first, `.bak` files only, and
+  exit `0` whether or not anything was removed.
+>>>>>>> agent-six-defects
 - **A model plane reachable from a command line, and a prediction store something can fill.**
   `openalpha model evaluate` fits one declaration once per walk-forward fold and reports the
   five statistics `V2-P4-014` measures; `openalpha model daily-run` fits on the outcomes that
@@ -286,6 +304,7 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+<<<<<<< HEAD
 - **The write-time session census stopped one session short of what every other layer required**
   (`V2-P4-114`). `panel_ingest._session_census` bounded a partition at `fetched_at - 1 day` and
   justified it with the 16:30 publication rule -- which is that rule only *below* 16:30, and is
@@ -325,6 +344,98 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   name that had not listed yet (`not_in_universe` 2 instead of 1). The `V2-P4-064` roadmap row and
   the citing docstrings in `factor_view._computed` and `test_factor_build.py` are corrected.
 
+=======
+- **`openalpha factor run` never named the command that builds a factor it could not read**
+  (`V2-P4-067(b)`). The row was closed on a fix that landed in `shortlist_view.py`; its own
+  reproduction command goes through `factor_view.py`, which was untouched, so all three tiers on
+  the factor face refused with `the raw reversal_1d/v1 observations could not be read out of
+  <path>: factor_obs_reversal_1d_v1 year=2026 cannot be read at …: ['partition_missing',
+  'field_missing']` and no remedy anywhere in it. All three tiers on **both** faces now carry
+  `openalpha factor build --factor <key> --tier <tier> --year <year>`, on the CLI, the REST body
+  and the SDK, with the store path still absent from the disclosable half.
+  **The raw-only boundary was retired rather than narrowed, because its stated reason was measured
+  false.** It said `neutralized` has "two partition spellings depending on the declared
+  neutralization (`factor_neut_*` and `factor_neutmn_*`)"; `neutralized_factor_dataset` takes the
+  *definition* and no neutralisation at all, `factor_neutmn_*` is the manifest dataset — the
+  structural twin of `factor_procmn_*`, which the same paragraph did not treat as making
+  `processed` ambiguous — and `load_neutralized_factor_observations` says "the neutralisation is a
+  filter here and the factor is the dataset". Residuals written under one neutralisation are read
+  back by a request naming another, and no rebuild is suggested. Two further measurements: the
+  `tier != "raw"` guard that carried the whole justification was **unreachable** (its one call
+  site passed the literal `tier="raw"` from inside `if tier == "raw":`), and the test that pinned
+  the boundary **could not separate the two answers** — driven without `--transform`,
+  `shortlist run --tier processed` exits `3` at request time, so `assert "openalpha factor build"
+  not in result.stderr` was asserted against a sentence that could never contain it.
+  `KNOWN_SHORTLIST_VIEW_LIMITATIONS.only_the_raw_tiers_…` is removed (8 → 7) and
+  `KNOWN_FACTOR_RUN_LIMITATIONS.the_unbuilt_factor_remedy_fires_only_when_no_year_of_the_tier_is_registered`
+  records the boundary that survives (8 → 9): the remedy fires on "no year of this tier is
+  registered" and on nothing else.
+- **A `422` no longer answers with a copy of the request** (`V2-P4-043`'s own fix reproducing
+  `V2-P4-040`'s shape). `max_length=MAX_BATCH_ITEMS` on `ScreeningApiRequest.research` made an
+  over-count a `422` naming the number, and pydantic's `too_long` error carries `input` — the
+  whole rejected collection. Measured: `POST /api/v1/screen` with 10,001 records (14,771,528
+  bytes in) replied **13,821,594 bytes**, and `POST /api/v1/research/batches` with 10,001
+  requests replied **9,261,138 bytes** — the same defect on a second route, which the row
+  neither named nor measured. The sharpest case is not a ceiling at all: a misspelled top-level
+  key is two errors, each echoing the body, so at *200* records the refusal was **1.87×** the
+  request. A ceiling this service declares now answers with the `{"reason", "message", "field",
+  "limit", "received"}` object `V2-P4-041` built for the same route in the same commit, and every
+  other `422` keeps FastAPI's list with each `input` elided past `MAX_ECHOED_INPUT_BYTES` (512)
+  and the list truncated past `MAX_VALIDATION_ERRORS` (20) with a final entry saying how many
+  were dropped. `V2-P4-051`'s documented shape discriminator is unchanged — every entry still
+  carries a `loc` — and `docs/api/http.md` gains the fourth row and both rules. A ceiling fault
+  reported *alongside* per-item faults is derivative (a body whose items all fail leaves nothing
+  and trips `min_length`), measured as `Counter({'missing': 25, 'too_short': 1})`, so the item
+  faults answer in that case.
+- **An agent written against an older `ResearchAgent` crashed instead of being refused**
+  (`V2-P4-008`/`V2-P4-010`). Both rows added a required attribute to a Protocol whose own
+  docstring calls it an extension contract, and neither installed a check.
+  `runtime/router.py:222` read `agent.feature_dependencies` unguarded — one line above
+  `UndeclaredAgentDependencyError`, the named refusal built for this class of failure — so a
+  third-party agent got `AttributeError: 'LegacyAgent' object has no attribute
+  'feature_dependencies'`. **`provenance` was in the same state and worse**: its docstring claims
+  an agent omitting it "fails structurally at the point it is handed to the engine", and there
+  was no such check — `ResearchEngine._pair` reads it inside a dict comprehension *after* every
+  selected agent has run, measured as `AttributeError` at `engine.py:223` **with a recovery row
+  already on disk**. `REQUIRED_AGENT_DECLARATIONS` and `MissingAgentDeclarationError` are the
+  check the contract advertised, at the router, over the whole roster and before any agent runs,
+  naming the agent, the missing attributes and what to declare instead. A `TypeError` and
+  deliberately not a subclass of `UndeclaredAgentDependencyError`: "this object does not
+  implement the current contract" and "this agent can never be satisfied by any run" have
+  different remedies. Nothing is defaulted — the guess `feature_dependencies` would need is
+  indistinguishable from the misdeclaration the sibling refusal exists to name.
+- **`factor build`'s residual refusal named three remedies, two of which could not work**
+  (`V2-P4-109`). A Saturday and a session hours before its own close both exit `1` and both got
+  the same sentence — "move `--as-of` … or fetch the later sessions first" — of which nothing
+  helps a day the exchange is never going to open. `RESIDUAL_REMEDIES` is keyed by
+  `CalendarDayStatus`, which is three-valued for exactly this reason, and the calendar is already
+  loaded before the read that raises. The **exit code is deliberately not split**, recorded as
+  `KNOWN_FACTOR_RUN_LIMITATIONS.a_closed_day_and_an_unclosed_session_share_one_exit_code`
+  (9 → 10): `bad_request` means "no amount of re-fetching fixes it", and a day the loaded
+  calendar reports `closed` can also be a day whose `trade_cal` partition is merely short, for
+  which re-fetching *is* the remedy.
+- **`V2-P4-108`'s roadmap row recorded the wrong exit code.** It said the fix yields `3`; it
+  yields `1` (`FACTOR_EXIT["blocked"]` is `PanelExit.unhealthy`, and `factor build --help` already
+  said "1 when the panel could not answer"). The envelope name was right and the number beside it
+  was not, which is what a reader would have written `if [ $? -eq 3 ]` against.
+- **Importing the API module wrote to the user's runtime directory, and the backups never
+  stopped** (`V2-P4-111`). `app = create_app()` at module scope meant a bare `import
+  openalpha_cn.api.app` ran migrations and wrote a ~139 KB backup, in a function whose docstring
+  makes a point of that line being filesystem-free with respect to `.env`. **The growth had a
+  second cause, and it is the one that mattered**: `run_migrations` took the backup *before* the
+  loop, so a migration that raises `MigrationNotYetApplicable` cost a full copy and applied
+  nothing — on every process start, with no terminating condition. Measured against a copy of a
+  real `state.sqlite3` stuck at `user_version=4` (its history predates `create_validation_results`,
+  so `_rewrite_contract_identities` has no `validation_results` table to alter): three runs,
+  three backups, nothing applied. That is 125 of the 128 files in that repository's
+  `runtime/backups/`. `app` is now built on first attribute access (PEP 562), so
+  `uvicorn openalpha_cn.api.app:app` and `from … import app` are unchanged while a bare import
+  touches nothing; a run that applies nothing removes the backup it took, which is provably its
+  own (`O_CREAT | O_EXCL`) and provably redundant; and a failed migration still keeps the copy
+  `MigrationFailedError` points at. **No existing backup was deleted** — `openalpha migrate
+  prune-backups --keep N [--dry-run]` is the cleanup path, chosen over an automatic retention cap
+  precisely because a cap would have removed a user's existing data on their next command.
+>>>>>>> agent-six-defects
 - **`--config-digest` is refused when the request is read, not after the store is** (`V2-P4-065`).
   `shortlist_request` had checked `code_commit` at request time since `V2-P4-046`, and the comment
   above that check says exactly why: `build_ranking_manifest` "raises the same objection after a
@@ -577,7 +688,11 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   neither is refused by name with `UndeclaredAgentDependencyError` rather than dropped -- the
   fail-open answer is worse than it looks, because `SignalFrame` refuses every non-abstaining
   direction with no `evidence_ids`, so such an agent's only reachable output is an abstention
-  that `_aggregate` would then average into the run.
+  that `_aggregate` would then average into the run. **This entry understated the breaking
+  change and the ninth-wave acceptance measured it**: "an agent declaring an empty
+  `evidence_families` is now refused by name" is not the same statement as "an agent that does
+  not declare `feature_dependencies` at all crashes", which is what a third-party agent written
+  before this row actually got. See `MissingAgentDeclarationError` under Fixed.
 - **`AgentContext` had no handle for anything but evidence** (`V2-P4-009`, S36/S38). It now
   carries `features: FeaturePlane | None`, a `runtime_checkable` Protocol declared beside its
   consumer -- `ShortlistDocumentStore`'s and `ExperimentDocumentStore`'s arrangement -- which
