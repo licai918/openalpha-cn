@@ -66,6 +66,7 @@ export type ValidationResult = {
   benchmark_return: number;
   transaction_cost: number;
   net_active_return: number;
+  unexplained_return: number;
   confidence: number;
   attribution: Array<{
     category: "rule" | "factor" | "agent" | "model";

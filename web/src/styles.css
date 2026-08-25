@@ -473,6 +473,14 @@ code {
   font-weight: 500;
 }
 
+.attribution-residual {
+  border-left-color: var(--muted);
+}
+
+.attribution-residual strong {
+  font-size: 1.5rem;
+}
+
 .attribution-list {
   margin: 0;
   padding: 0;

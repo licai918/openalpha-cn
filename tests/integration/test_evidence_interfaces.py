@@ -235,11 +235,18 @@ def test_api_runs_research_from_structured_evidence(
     assert payload["signal_id"] == response.json()["signal"]["signal_id"]
     assert payload["decision_id"] == response.json()["decision"]["decision_id"]
     assert payload["net_active_return"] == pytest.approx(0.075)
-    assert {term["category"] for term in payload["attribution"]} == {
-        "rule",
-        "factor",
-        "agent",
-    }
+    # `V2-P5-005`: the categories this used to name -- one `rule`, one `factor`, one `agent`,
+    # worth a fixed 20/30/50 of the net -- were invented, and asserting the *set* of them could
+    # not have noticed. The face now reports only what it measured, and says so as a number: a
+    # held position leaves `realized - benchmark` unattributed rather than splitting it.
+    assert [(term["category"], term["name"]) for term in payload["attribution"]] == [
+        ("rule", "transaction-cost")
+    ]
+    assert payload["attribution"][0]["contribution"] == pytest.approx(-0.005)
+    assert payload["unexplained_return"] == pytest.approx(0.08)
+    assert sum(term["contribution"] for term in payload["attribution"]) + payload[
+        "unexplained_return"
+    ] == pytest.approx(payload["net_active_return"])
 
     tampered = response.json()
     tampered["signal"]["signal_id"] = "sig_tampered"

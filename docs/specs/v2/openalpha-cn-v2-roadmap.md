@@ -346,8 +346,8 @@ P3 结束即可独立使用（Jupyter 直连面板 + 因子）
 | `V2-P5-002` | ~~`PortfolioOrder` 增加目标权重；`PortfolioLimits` 扩展行业上限/换手预算/现金下限~~ **已完成** | 结 | 001 | `PortfolioLimits` 由 2 个字段变 **5** 个；`PortfolioOrder.target_weight` 是**声明**不是定价输入 —— 模拟器拒绝「声明目标已超单票上限」的买单，成交后仍照旧校验**实际**权重，两者是不同的事实，在漂移过的账簿上正好不同。**哪个消费者读哪个字段写成集合而不是靠发现**：`LIMITS_ENFORCED_BY_THE_SIMULATOR` 与 `LIMITS_ENFORCED_BY_THE_CONSTRUCTION_POLICY` 对 `PortfolioLimits.model_fields` 做**覆盖**相等，契约上多一个没人读的上限即红 —— 正是 `V2-P4-030` 在风险闸门里抓到四例的那种 fail-open。模拟器不读的两个是**结构性**读不到：`MarketBar` 没有行业、单笔订单没有账簿历史。**本行两条前提被实测证伪**：(a) **「现金下限」不是第三条约束** —— 长仓无杠杆下 `equity == cash + market_value`，`cash/equity >= f` 与 `market_value/equity <= 1-f` 是同一个不等式，30% 现金下限与 70% 敞口上限实测给出**逐字节相同的权重**；字段照发（行要求、且按下限声明意图更易读），但代码不假装两者可叠加，取更紧的那个并在拒绝理由里说明是哪一个绑住的。(b) **它不是对已存行的破坏性变更，且这是量出来的不是假设的** —— `PortfolioTransition` 内嵌本模型且**确实入库**（`single_version()`），故 AGENTS.md 规则 3 适用而 `V2-P4-001` 窗口已关；实测：**旧 payload 原样读回**（默认值补上缺键，`read_versioned` 与账本用的是同一条路径），**会动的是字节** —— `SQLitePortfolioLedger.append` 逐字节比较的 payload 现在带 `"target_weight":null`，故**重放一条旧构建存过的 transition 会触发冲突守卫**。这就是迁移代价：一次账本重写，而不是契约升版（本模型没有第二个版本，且五个 checked-in schema 里没有任何 portfolio 契约）。**依赖方向与本行所写相反**：`001` 的上限裁剪与换手预算需要 `002` 的三个字段才能存在，两行实为一次交付 | 单元：声明目标超上限必须具名拒绝且同一笔在上限内必须成交；现金下限必须在敞口上限放开时独立生效；旧行必须读回、且重放必须撞冲突守卫 | S53, D18 |
 | `V2-P5-003` | 组合级多日回测（现有 `PortfolioBacktestStep` 强制单标的步，K 只股票要 K 步） | 技 | 002 | `backtest/multi_day.py:22,31-35` | S55 |
 | `V2-P5-004` | Paper Portfolio（前瞻模拟，绝不连券商） | 技 | 003 | 复用不可变订单/转换记账 | S57, D19 |
-| `V2-P5-005` | **替换占位归因**：删除 `backtest/validation.py:88-90` 的 20/30/50 硬编码与 `:106-116` 的末项吸收残差技巧 | 技 | P4-001 | 末项吸收是当前对账永远通过的原因 | S65, D21 |
-| `V2-P5-006` | 归因残差显式化（不静默分摊） | 技 | 005 | `domain/validation.py:45-52` 的 `abs_tol=1e-9` 在多项求和下本已脆弱 | S65, D21 |
+| `V2-P5-005` | ~~**替换占位归因**：删除 `backtest/validation.py:88-90` 的 20/30/50 硬编码与 `:106-116` 的末项吸收残差技巧~~ **已修** | 技 | P4-001 | **本行三处行号引用在 `c847295` 上全部过期，已就地更正**：20/30/50 实为 `:201-203`（`:88-90` 是 `observation_from_label` 的函数签名）；末项吸收实为 `:218-229`、关键行 `:221` 的 `agent_total - allocated if is_last else ...`（`:106-116` 是同一函数的 docstring）。**先测量再设计**：契约半边（`unexplained_return` 字段与含残差的对账）`V2-P4-001` 已交付且为真，占位的是**计算**，不是契约。替换后只留两个**可测**项：`transaction-cost`（`-transaction_cost`，零成本时仍发出，否则「本次无成本」与「本构建不建模成本」不可分辨）与仅属空仓决策的 `no-position-versus-benchmark`（值为 `realized_return - benchmark_return`，空仓时恰为 `-benchmark_return`，唯一认领者、无余项）。**持仓决策的整段选股收益进 `unexplained_return`** —— 一个已完成的 `ResearchRunResult` 只带信念、置信度与版本串，没有一个是收益，故任何 rule/factor/agent/model 份额都无法被证明。新增第 35 个注册簿 `KNOWN_ATTRIBUTION_LIMITATIONS`（4 条），两处审计同步（`REGISTRY_ENTRY_COUNTS` 与 `DOCSTRING_TOTALS`：34→35 / 323→327 / 33→34 / 253→257）。**闭式对照两臂**（一臂分辨不出任何东西）：全部取二进分数，故两臂都用 `==` 而非 `approx` —— 持仓臂 `net 0.1796875 / 残差 0.1875 / 单项 −0.0078125`，空仓臂 `net −0.0703125 / 残差 0.0 / 两项`；「全塞进残差」的实现过持仓臂、死在空仓臂，留任何虚构切分的实现死在持仓臂。**变异扫描**（先证基线 `2970 passed, 1 skipped` 再开跑）：**24 个变异体、24 个被杀**；唯一存活体**实测非等价而非贴标签**，见 `006` 行 | S65, D21 |
+| `V2-P5-006` | ~~归因残差显式化（不静默分摊）~~ **已修** | 技 | 005 | **引用同样过期**：`abs_tol=1e-9` 在 `c847295` 上是 `domain/validation.py:82`，`:45` 是 `transaction_cost` 字段。**并证实路线图另一条主张为真**：`V2-P4-001` 自述「说错残差或不说，照样失败，两个方向都断言了」—— 实测 `test_an_unreconciled_attribution_is_still_refused_now_that_a_residual_exists` 确实两个方向都断言。**故 006 的真实缺口不在契约，在生产者与出口**：(a) 生产者从不写残差，每个结果都吃默认 `0.0`，现在按测量值写入；(b) 出口 —— `web/src/types.ts` 从未镜像 `unexplained_return`，`AttributionPanel` 只打印各项与合计，**非零残差会在产品面上被静默丢弃**，已补为 `未归因残差` 一栏并由 `App.test.tsx` 驱动（面上各项合计 +1.50% 对 +7.50% 净主动收益，差额上屏而非并入末项）。**`abs_tol=1e-9` 的脆弱性实测不适用于本实现**：`(realized-benchmark) + (-cost)` 与 `realized-benchmark-cost` **逐位相同**（减即加负、取负精确），故两臂用 `==` 断言。**唯一变异存活体在此**：把空仓项写成 `-benchmark_return` 而非 `realized_return - benchmark_return`，在一切可达取值上同解**除了** `benchmark_return == 0.0` —— 那里前者是 `-0.0`、后者是 `+0.0`，规范 JSON 会写符号、`validation_id` 哈希该 JSON，于是同一结果拿到两个内容地址 （`val_dba127649bf529e77e53d6aa` 对 `val_470895b1ba7335601a265760`）。已补测驱动该差异，扫描转为 24/24 | S65, D21 |
 | `V2-P5-007` | 多重检验控制（BH）+ 记录被检验假设数 | 技 | 006 | 不可省 | S63, D20 |
 | `V2-P5-008` | gross/net 并列 + **cost drag 单列** + 置信区间 + 样本数 | 技 | 007 | 只报 gross/net 会让成本来源不可归因 | S61, S62 |
 | `V2-P5-009` | 分段报告（行业/市值/流动性/市场状态）+ 多市场状态 walk-forward + 基准对照（**等权基线**、naive factor、v1 基线三者并列） | 技 | 008 | 等权基线是最容易被跳过也最能证伪的对照 | S59, S60, S64 |
@@ -2426,8 +2426,11 @@ test_the_enum_serialises_to_the_bare_string_the_literal_did`）。
 **为什么值得一个字段**：`backtest/validation.py` 的末项吸收让对账校验**按构造**永远通过 ——
 它永远不可能失败，因此从未测量过任何东西。残差独立成字段之后，加不起来的项集必须把差额说成一个
 报告能打印的数。**校验仍然是校验**：说错残差或不说，照样失败，两个方向都断言了。
-默认 `0.0` 而非必填，因为今天每个构造点的项集本来就恰好加到 `net_active_return`，`0.0` 是它们的
-**诚实值**；`V2-P5-005`/`006` 才开始产生非零的那一个。
+默认 `0.0` 而非必填，因为当时每个构造点的项集本来就恰好加到 `net_active_return`，`0.0` 是它们的
+**诚实值**。`V2-P5-005`/`006` 已交付，非零的那一个开始出现：`OutcomeValidator` 不再吃这个默认值，
+每个结果都写入测量出来的残差，持仓决策写的是非零的那一个（闭式对照上是 `0.1875` 对 `0.1796875` 的
+净主动收益）。上面「两个方向都断言了」这句**被 `V2-P5-006` 实测复核为真**，也因此定位出真正的缺口
+不在契约而在生产者与产品出口 —— 详见那两行。
 
 #### 三、`horizon` → 可比枚举：收窄到**可数**的那一个单位
 

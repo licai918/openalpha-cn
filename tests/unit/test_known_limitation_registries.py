@@ -142,6 +142,7 @@ from openalpha_cn.backtest.factor_redundancy import KNOWN_REDUNDANCY_LIMITATIONS
 from openalpha_cn.backtest.factor_tradeability import KNOWN_TRADEABILITY_LIMITATIONS
 from openalpha_cn.backtest.portfolio_policy import KNOWN_CONSTRUCTION_LIMITATIONS
 from openalpha_cn.backtest.shortlist_gate import KNOWN_SHORTLIST_GATE_LIMITATIONS
+from openalpha_cn.backtest.validation import KNOWN_ATTRIBUTION_LIMITATIONS
 from openalpha_cn.backtest.walk_forward import KNOWN_WALK_FORWARD_LIMITATIONS
 from openalpha_cn.domain.adjustment import KNOWN_ADJUSTMENT_LIMITATIONS
 from openalpha_cn.domain.alpha_model import KNOWN_ALPHA_MODEL_LIMITATIONS
@@ -187,6 +188,7 @@ class _Limitation(Protocol):
 
 LIMITATION_REGISTRIES: Final[dict[str, Sequence[_Limitation]]] = {
     "KNOWN_EXECUTION_LIMITATIONS": KNOWN_EXECUTION_LIMITATIONS,
+    "KNOWN_ATTRIBUTION_LIMITATIONS": KNOWN_ATTRIBUTION_LIMITATIONS,
     "KNOWN_IC_LIMITATIONS": KNOWN_IC_LIMITATIONS,
     "KNOWN_QUANTILE_PORTFOLIO_LIMITATIONS": KNOWN_QUANTILE_PORTFOLIO_LIMITATIONS,
     "KNOWN_EXPERIMENT_LIMITATIONS": KNOWN_EXPERIMENT_LIMITATIONS,
@@ -643,6 +645,7 @@ one of them would appear here and the table would say nothing.
 
 REGISTRY_ENTRY_COUNTS: Final[dict[str, int]] = {
     "KNOWN_EXECUTION_LIMITATIONS": 3,
+    "KNOWN_ATTRIBUTION_LIMITATIONS": 4,
     "KNOWN_IC_LIMITATIONS": 5,
     "KNOWN_QUANTILE_PORTFOLIO_LIMITATIONS": 8,
     "KNOWN_EXPERIMENT_LIMITATIONS": 6,
