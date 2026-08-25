@@ -29,11 +29,13 @@ from openalpha_cn.domain.stock_universe import UniverseHorizonError
 from openalpha_cn.factor_view import (
     _LABEL_CORPUS_FAULTS,
     _LABEL_CORPUS_REMEDIES,
+    CADENCE_WAIVED_READS,
     FACTOR_DATE_ZONE,
     MISSING_INSTANTS_SHOWN,
     PANEL_STORE_PLACEHOLDER,
     FactorRequestError,
     FactorRunBlockedError,
+    _event_clock_bound,
     _refuse_tiers_over_different_instants,
     _unlabelled_corpus_refusal,
     _without_store_path,
@@ -576,3 +578,63 @@ def test_each_corpus_refusal_names_its_own_dataset_and_its_own_repair(
     assert spells in message
     assert str(raised) in message
     assert "000001.SZ could not be labelled over 2026-01-08..2026-01-09" in message
+
+
+# --- V2-P4-064: which datasets `--max-staleness-days` binds -------------------------------------
+
+
+def test_the_waived_reads_are_a_named_subset_of_the_doctors_event_driven_set() -> None:
+    """`factor_view.CADENCE_WAIVED_READS` held against `panel_doctor.DATASET_CADENCE`'s own.
+
+    Two tables that must not import each other, kept honest by a test that may import both --
+    `FactorPlaneSeal`'s arrangement one plane over, and for the same reason:
+    `tests/unit/test_factor_view_layering.py` pins `factor_view`'s sibling set by equality and
+    `panel_doctor` is deliberately not in it, so that a face does not drag a health report behind
+    it.
+
+    **A containment plus an equality on the complement, which together are an equality.** The
+    containment is the fail-open direction: a dataset waived here that the doctor does not call
+    `event_driven` is a freshness bound silently switched off for something that does publish on a
+    schedule. The complement is stated as a literal so the *other* direction is not a judgement
+    call either -- a sixth `event_driven` dataset declared in `DATASET_CADENCE` turns this red
+    naming itself, which is the moment somebody has to decide whether this face reads it and
+    whether the bar reaches that read. A bare `<=` would go on passing forever.
+
+    Why each of the four is out is in `CADENCE_WAIVED_READS`' own docstring; briefly, two are read
+    on the run path which waives the bound already, one shares a single `max_staleness` argument
+    with a session-cadence dataset inside `panel_neutralization`, and one this face cannot reach.
+
+    `DATASET_CADENCE` is imported inside the test body rather than at module scope, which is this
+    file's arrangement for its other cross-plane reads.
+    """
+    from openalpha_cn.panel_doctor import DATASET_CADENCE
+
+    event_driven = {name for name, cadence in DATASET_CADENCE.items() if cadence == "event_driven"}
+
+    assert event_driven > CADENCE_WAIVED_READS
+    assert event_driven - CADENCE_WAIVED_READS == {
+        "namechange",
+        "suspend_d",
+        "index_member_all",
+        "index_classify",
+    }
+
+
+def test_the_bar_is_taken_off_the_event_clock_and_left_on_every_other_dataset() -> None:
+    """`_event_clock_bound` at both answers, and the second one is the guard.
+
+    The registry read is the one `V2-P4-064` measured, so a fix that returned `None`
+    unconditionally would satisfy that row's own reproduction while switching the flag off for
+    `daily` and the four statement datasets as well. Driven at one dataset from each side of the
+    partition and at the waived input, which must stay waived either way.
+    """
+    from openalpha_cn.domain.daily_prices import DAILY_DATASET
+    from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET
+
+    bar = timedelta(days=5)
+
+    assert _event_clock_bound(STOCK_BASIC_DATASET, bar) is None
+    assert _event_clock_bound(DAILY_DATASET, bar) == bar
+    assert _event_clock_bound("income", bar) == bar
+    assert _event_clock_bound(STOCK_BASIC_DATASET, None) is None
+    assert _event_clock_bound(DAILY_DATASET, None) is None

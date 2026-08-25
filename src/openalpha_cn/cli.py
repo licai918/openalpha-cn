@@ -132,6 +132,7 @@ from openalpha_cn.panel_gate import (
     require_datasets,
 )
 from openalpha_cn.panel_ingest import (
+    _sessions_published_through,
     load_industry_trees,
     load_stock_universe,
     load_suspensions,
@@ -1749,15 +1750,40 @@ def _session_as_of(day: date) -> datetime:
 def _build_sessions(calendar: TradingCalendar, year: int, now: datetime) -> tuple[date, ...]:
     """Every session this build has to fetch, and the bound is not a choice.
 
-    `panel_ingest._session_census` requires a partition to hold every session the calendar
-    reports open between 1 January of its year and the fetch's local date minus one day -- the
-    lower bound because a partition that begins in March is exactly the hole the census exists
-    for, the upper because a session publishes at 16:30 and a fetch earlier that day cannot hold
-    it. A loop over anything narrower is refused by its own writer; a loop over anything wider
-    asks for sessions that have not published.
+    A partition must hold every session the calendar reports open between 1 January of its year
+    and the newest session that had **published** at `now` -- the lower bound because a partition
+    that begins in March is exactly the hole `panel_ingest._session_census` exists for, the upper
+    because a session becomes knowable at `DAILY_AVAILABILITY_TIME` (16:30 Asia/Shanghai) on its
+    own day. A loop over anything narrower leaves a hole the panel's own reader will find; a loop
+    over anything wider asks for sessions that have not published.
+
+    **The upper bound is `panel_ingest._sessions_published_through`, imported rather than
+    restated, and `V2-P4-063` is what restating it cost.** This function used to subtract a day
+    unconditionally, which is that rule only for the part of the day before 16:30. Above it the
+    two came apart by exactly one session, and that session is the one the whole price plane
+    then disagreed about: `_price_requirement` clamps a dataset's `required_dates` at
+    `_sessions_published_through`, so `panel doctor` *required* it; `_read_visible_price_session`
+    refuses only what is past that bound, so a read would have *served* it; and
+    `newest_published_session` resolves a shortlist's pricing session through it, so
+    `shortlist run` *priced* against it.
+
+    Measured on the real corpus (`V2-P4-063`'s own reproduction): `panel build --as-of
+    2026-02-10T09:00Z` (17:00 Asia/Shanghai) stored eleven sessions ending 2026-02-09, and
+    `panel doctor --as-of` the same literal instant answered `BLOCKING ... date_gap: 1 required
+    date(s) are absent from daily, starting at 2026-02-10`, exit 1. Reproduced on the generated
+    fixture by `CLOSE_CLOCK` in `tests/integration/test_cli_panel_horizon.py` -- a different
+    instant and a different dataset, 2026-01-20T17:00+08 and `stk_limit`, because `adj_factor`
+    waives `required_dates` and could not have shown it -- with the identical shape: eleven sessions
+    ending 2026-01-19 against `date_gap ... starting at 2026-01-20`. The product contradicting
+    itself about its own output at its own instant, which in CI is a hard failure with no correct
+    `--as-of` to give it. Three rules against one; the one was here.
+
+    Sharing the function rather than the arithmetic is the point: `min(date(year, 12, 31),
+    published_through)` is `_price_requirement`'s own expression, so what this loop fetches and
+    what a health check requires are now the same set by construction rather than by agreement.
     """
     opens_on = date(year, 1, 1)
-    closes_on = min(date(year, 12, 31), now.astimezone(PANEL_DATE_ZONE).date() - timedelta(days=1))
+    closes_on = min(date(year, 12, 31), _sessions_published_through(now, PANEL_DATE_ZONE))
     if closes_on < opens_on:
         raise _panel_fail(
             PanelExit.bad_request,
@@ -1868,8 +1894,11 @@ def _pinning_remedy(stored: Mapping[str, date]) -> str:
 
     A remedy printed in a refusal is a promise, so it is only made when it can be kept. When
     every stored sibling stops on the same session there is an instant that reproduces it --
-    any instant on the day after, because `_build_sessions` bounds at the local date minus one
-    -- and midday is named to keep it clear of both the 16:30 publication and either midnight.
+    midday on the day after, because `_build_sessions` bounds at the newest session that had
+    published and midday is below the 16:30 publication, so that day's own session is not yet
+    owed. Midday rather than any instant on that day: since `V2-P4-063` the bound reads the
+    clock as well as the date, so an instant on the day after but *at or past* 16:30 would carry
+    the horizon one session further and reproduce nothing.
 
     When they *disagree with each other*, no instant agrees with all of them, and offering the
     oldest one's would produce a build the next sibling refuses. That state cannot be created
@@ -3776,7 +3805,9 @@ def factor_run_command(
         str, typer.Option("--exchange", help=_FACTOR_EXCHANGE_HELP)
     ] = TRADING_CALENDAR_DEFAULT_EXCHANGE,
     as_of: Annotated[str, typer.Option("--as-of", help=_FACTOR_AS_OF_HELP)] = "",
-    code_commit: Annotated[str, typer.Option("--code-commit", help=_CODE_COMMIT_HELP)] = "",
+    code_commit: Annotated[
+        str | None, typer.Option("--code-commit", help=_CODE_COMMIT_HELP)
+    ] = None,
     note: Annotated[str, typer.Option("--note", help=_FACTOR_NOTE_HELP)] = "",
     json_output: Annotated[
         bool, typer.Option("--json", help="Emit the sealed experiment document as data.")
@@ -3831,7 +3862,7 @@ def factor_run_command(
                 min_rebalances=min_rebalances,
                 redundancy_threshold=redundancy_threshold,
                 retention_floor=retention_floor,
-                code_commit=_resolved_code_commit(code_commit or None),
+                code_commit=_resolved_code_commit(code_commit),
             )
             record, write = run_factor_experiment(
                 _panel_store(runtime_dir),
@@ -4231,7 +4262,9 @@ def factor_build_command(
             "--supersedes-neutralized", help=_BUILD_SUPERSEDES_HELP.format(tier="neutralized")
         ),
     ] = None,
-    code_commit: Annotated[str, typer.Option("--code-commit", help=_CODE_COMMIT_HELP)] = "",
+    code_commit: Annotated[
+        str | None, typer.Option("--code-commit", help=_CODE_COMMIT_HELP)
+    ] = None,
     json_output: Annotated[
         bool, typer.Option("--json", help="Emit the build report as data.")
     ] = False,
@@ -4295,7 +4328,7 @@ def factor_build_command(
                 supersedes_raw=supersedes_raw or [],
                 supersedes_processed=supersedes_processed or [],
                 supersedes_neutralized=supersedes_neutralized or [],
-                code_commit=_resolved_code_commit(code_commit or None),
+                code_commit=_resolved_code_commit(code_commit),
             )
             report = build_factor_panels(
                 _panel_store(runtime_dir), request, built_at=_panel_clock()

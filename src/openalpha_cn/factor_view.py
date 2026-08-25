@@ -580,6 +580,29 @@ KNOWN_FACTOR_RUN_LIMITATIONS: Final[tuple[FactorRunLimitation, ...]] = (
             "cannot be price-adjusted' is that rule's own sentence."
         ),
     ),
+    FactorRunLimitation(
+        code="the_freshness_bar_is_waived_by_cadence_only_where_the_read_is_outside_the_engine",
+        detail=(
+            "V2-P4-064 took --max-staleness-days off the registry read (CADENCE_WAIVED_READS) "
+            "and two reads it also reaches keep it. (1) The four quarterly statement datasets "
+            "take the "
+            "caller's session-cadence bar unchanged, so a build of a statement factor under "
+            "--max-staleness-days 5 is refused for a partition whose newest announcement is "
+            "older than five days -- which for a quarterly dataset is most of the year. That "
+            "cannot be waived here: compute_factor._validate_requirements refuses a waived "
+            "max_staleness for every dataset a factor READS, because a waived bound accepts a "
+            "slice reaching arbitrarily far short of as_of while every structural check clears. "
+            "Closing it means a per-cadence bound inside REQUIREMENT_BUILDERS' requirements, "
+            "which is a change to what compute_factor is handed rather than to this flag. (2) "
+            "index_member_all is event-driven and takes the bar anyway, because "
+            "load_industry_market_cap_cross_section states ONE max_staleness for both it and "
+            "daily_basic, which is on the session clock; splitting it is an edit to "
+            "panel_neutralization.py. The generated fixture cannot show (2) -- measured, a "
+            "--tier neutralized build is exit 0 at both 5 and 30 days on it -- because its "
+            "membership partition's newest assignment sits inside the build window, while a real "
+            "corpus's is the last annual constituent review."
+        ),
+    ),
 )
 """What a factor run does not answer, as a closed registry rather than as prose.
 
@@ -950,6 +973,44 @@ and `500 text/plain` from `POST /api/v1/shortlists/run`.
 registry through its own `_read_registry`, and the pin drives **both faces' read seams** with each
 fault type in turn rather than comparing the tuples. See
 `tests/integration/test_partial_registry_faces.py` for the same store met from all three surfaces.
+"""
+
+
+_CROSS_SECTION_FAULTS: Final[tuple[type[Exception], ...]] = (*_PANEL_FAULTS, PriceDataError)
+"""The one further refusal the **neutralisation cross section** can raise (`V2-P4-108`).
+
+`load_industry_market_cap_cross_section` reads `daily_basic` for the day being priced through
+`panel_ingest._read_visible_price_session`, and that door's first guard is the calendar: a day the
+exchange was shut has no cross section to read, and it says so as a `PriceDataError`. That is a
+verdict about the request meeting a stored calendar, and it was not in `_PANEL_FAULTS`, so
+`openalpha factor build --tier neutralized --as-of <a Saturday>` exited **5** -- "a defect in the
+command, not a verdict about the panel ... nothing was checked" -- with the refusal's own sentence
+withheld, because an unanticipated frame can be holding the credential. `V2-P4-060`'s shape, one
+refusal over: the withholding was right and the fault being unanticipated was not.
+
+**Widened at the read rather than in `_PANEL_FAULTS`, and both alternatives were checked rather
+than assumed.**
+
+- **`_PANEL_FAULTS` itself must not grow this.** That tuple guards `compute_factor`, both derived
+  engines and every factor-partition read, and it is *restated* by `shortlist_view` --
+  `tests/unit/test_shortlist_view.py::
+  test_this_face_calls_the_same_panel_faults_unreadable_as_the_factor_face` drives the **union**
+  of the two modules' tuples through **both** faces' `_read`, so a member added here alone turns
+  that pin red on the other face. The pin is right and the arrangement it enforces is
+  `_REGISTRY_FAULTS`' own: the read that can raise a refusal is the read that catches it.
+- **`_REGISTRY_FAULTS` does not widen alongside.** It is `(*_PANEL_FAULTS, ...)`, so it would have
+  inherited this member automatically had the constant grown -- and it should not: `_read_registry`
+  wraps `load_stock_universe`, which reads an event-dated lifecycle partition and asks no calendar
+  whether a day is open. A fault a read cannot raise, listed in that read's tuple, is a dead entry
+  of exactly the kind `test_the_registry_read_is_the_only_site_either_face_widens_for` refuses.
+- **The tier is the whole of the hole**, measured at the same instant: `--tier raw` and
+  `--tier processed` both exit `0` there, because neither reads a session-scoped price partition
+  for the day being priced.
+
+**Whether `shortlist_view` has the same hole is a separate question and is not closed here** --
+that module is not this one's to edit. What can be said from this side: its price reads resolve
+their session through `panel_ingest.newest_published_session`, which returns an **open** session by
+construction, so this particular arm is not reachable the way it is here.
 """
 
 
@@ -2472,6 +2533,66 @@ requirement can state `required_dates` and a factor whose window silently skippe
 a security's return on day t with the market's on day t-1 for the rest of the window.
 """
 
+CADENCE_WAIVED_READS: Final[frozenset[str]] = frozenset({STOCK_BASIC_DATASET})
+"""The reads this face takes off the caller's `--max-staleness-days`, and why it is one name.
+
+`V2-P4-064`. `--max-staleness-days` is a *session* bound -- its own refusal says what it is for,
+"a price panel whose newest session is a month old has missed a month of the market" -- and that
+sentence is only true of a dataset that publishes on every open session. `stock_basic` publishes
+when a security lists or delists, so its age measures the market's own corporate-action calendar
+and not this fetch, and a caller who wanted a five-day bound on the price panel had to set the
+flag to 20--25 days to get any build at all -- which switches off the check the flag exists for.
+Measured on a panel **one day old**: `the security registry cannot be read ...: ['stale'];
+stock_basic reaches 2026-01-19T16:00Z, which is 17 days, 17:00:00 behind ... (tolerance 5 days)`.
+
+**The same repository already gives this answer one command over.**
+`panel_doctor.DATASET_CADENCE` declares five datasets `event_driven` and `freshness_policy`
+returns `max_staleness=None` for that cadence, with the reason on the record: "a year with no
+rows is an ordinary year, not a missed fetch". This is that rule, applied at the one read on this
+face that both takes the caller's bar and is on an event clock.
+
+**One of the five, and the other four are out for four different measured reasons rather than by
+omission.** `test_the_waived_reads_are_a_named_subset_of_the_doctors_event_driven_set` states the
+complement as a literal set and is what turns red if a sixth event-driven dataset is declared:
+
+- `namechange` and `suspend_d` are read on the *run* path only, and every read there passes
+  `max_staleness=None` as a literal already -- `FactorRunRequest` carries no freshness bound at
+  all, and this module's own docstring says why ("A freshness policy for a *run*") -- so the flag
+  never reaches them, and a row here would be a member no call site can use.
+- `index_member_all` is read through `panel_neutralization
+  .load_industry_market_cap_cross_section`, which states **one** `max_staleness` for it and for
+  `daily_basic` together -- and `daily_basic` is on the session clock, so waiving there would
+  waive a bound that is doing its job. Splitting it is an edit to that module.
+- `index_classify` is not reachable from this face at all; `RESEARCH_PLANE_DATASETS` in
+  `tests/unit/test_panel_ingest_import_isolation.py` says so, and this set is written in terms of
+  the constants this module already imports for exactly that reason. Measured rather than
+  reasoned: a draft that imported `INDUSTRY_TREE_DATASET`, `INDUSTRY_MEMBERSHIP_DATASET` and
+  `SUSPENSION_DATASET` to spell a five-member set widened that audit's `named` set past this
+  module's declared `reached` and turned five of its tests red.
+
+**Not the quarterly datasets either, and that is a wall rather than a choice.** `income`,
+`balancesheet`, `cashflow` and `fina_indicator` take the caller's bar unchanged, because
+`compute_factor._validate_requirements` refuses a *waived* `max_staleness` for every dataset a
+factor **reads** -- a waived bound there accepts a slice reaching arbitrarily far short of `as_of`
+while every structural check clears, which is the wall
+`test_the_waiver_this_command_offers_is_refused_by_the_engine_that_reads_the_bound` names. The
+one name above is read *outside* that requirement set, which is what makes waiving it available
+at all; so is `index_member_all`, which is why that one is a shared-argument problem rather than
+an engine one. The statement half and the `index_member_all` half are recorded together as
+`KNOWN_FACTOR_RUN_LIMITATIONS
+.the_freshness_bar_is_waived_by_cadence_only_where_the_read_is_outside_the_engine`.
+"""
+
+
+def _event_clock_bound(dataset: str, requested: timedelta | None) -> timedelta | None:
+    """`requested`, unless `dataset` is one this face reads off an event clock -- then no bound.
+
+    A function rather than a conditional at the call site, so that the rule and the reason live
+    together and a second read added to `CADENCE_WAIVED_READS` needs no second spelling of it.
+    """
+    return None if dataset in CADENCE_WAIVED_READS else requested
+
+
 _CALENDAR_SCOPED_REQUIREMENTS: Final[frozenset[str]] = frozenset(
     {DAILY_DATASET, DAILY_BASIC_DATASET, INDEX_DAILY_DATASET}
 )
@@ -2995,7 +3116,10 @@ def _computed(
     )
     universe = _read_registry(
         lambda: load_stock_universe(
-            store, years=request.years, as_of=as_of, max_staleness=request.max_staleness
+            store,
+            years=request.years,
+            as_of=as_of,
+            max_staleness=_event_clock_bound(STOCK_BASIC_DATASET, request.max_staleness),
         ),
         store=store,
     )
@@ -3117,7 +3241,7 @@ def _neutralized(
             membership_years=request.years,
             max_staleness=request.max_staleness,
         )
-    except _PANEL_FAULTS as error:
+    except _CROSS_SECTION_FAULTS as error:
         message = (
             f"no {neutralization.qualified_key} cross section can be assembled at "
             "{cause}. This is "

@@ -81,6 +81,7 @@ from openalpha_cn.panel_factors import (
     load_factor_observations,
 )
 from openalpha_cn.panel_view import PANEL_STORE_PLACEHOLDER
+from openalpha_cn.runtime.provenance import resolve_code_commit
 from openalpha_cn.sdk import OpenAlphaSDK
 
 COMMIT: Final[str] = "abcdef1234567"
@@ -110,6 +111,23 @@ test_across_the_whole_window_only_the_industry_read_ever_refuses_an_in_year_as_o
 every session of the window now admits a whole build. This constant stays at the horizon because
 it is the instant that cannot stop working for a reason outside this file, which is what makes it
 the control the mid-window build is compared against.
+"""
+
+STALE_PANEL_INSTANT: Final[datetime] = datetime(2026, 1, 17, 9, 0, tzinfo=UTC)
+"""17:00 Asia/Shanghai on the Saturday after the panel's newest session (2026-01-16).
+
+The one instant in this window where `--max-staleness-days` can decide anything, and finding it
+is `V2-P4-064`'s doing. At `BUILD_INSTANTS` the panel is half an hour old, so every legal value
+of the flag clears (`_build_staleness` refuses anything below 1), and once the registry stopped
+taking the bar there was no value left that moved the answer. Here the newest `daily` row is
+1d2h behind, so `1` is refused and `2` builds -- one flag value apart, on one store, at one
+instant.
+
+A **non-session** day rather than a later session: `_price_requirement` extends `required_dates`
+to `_sessions_published_through`, so an `as_of` on the next open session (2026-01-19) makes that
+session *due* and the refusal becomes `date_gap` at every bound -- measured, exit 1 for 1, 2, 3
+and 5 -- which would be the answer moving for a reason that has nothing to do with the flag.
+Saturday leaves the census satisfied and the clock the only thing that has changed.
 """
 
 UNPUBLISHED_INSTANT: Final[datetime] = datetime(2026, 1, 8, 4, 0, tzinfo=UTC)
@@ -431,18 +449,32 @@ def test_the_two_build_faces_store_one_panel_from_one_request(
     assert through_sdk["schema_version"] == BUILD_VIEW_SCHEMA_VERSION
 
 
+STALE_PANEL_ROW: Final[dict[str, Any]] = {
+    "as_ofs": [STALE_PANEL_INSTANT],
+    "tier": "raw",
+    "transform": "",
+}
+"""The `common` half of the `max_staleness_days` row -- see `STALE_PANEL_INSTANT`.
+
+Applied to the baseline **and** to the varied build, which is what keeps the sweep's isolation
+property intact: exactly one parameter still differs between the two answers being compared.
+A row that moved `as_ofs` on the varied side alone would prove that *something* moved and
+nothing about which flag moved it, which is the failure this whole sweep exists to prevent.
+"""
+
+
 @pytest.mark.parametrize(
-    ("parameter", "value"),
+    ("parameter", "value", "common"),
     [
-        ("factor", "momentum_20_sessions/v1"),
-        ("tier", "raw"),
-        ("as_ofs", [BUILD_INSTANTS[0]]),
-        ("years", [YEAR, YEAR - 1]),
-        ("exchange", "SSE"),
-        ("max_staleness_days", 1),
-        ("subjects", [SECURITIES[0], SECURITIES[1]]),
-        ("code_commit", "0f1e2d3c4b5a6978"),
-        ("supersedes_raw", ["fbm_0000000000000000000000ff"]),
+        ("factor", "momentum_20_sessions/v1", {}),
+        ("tier", "raw", {}),
+        ("as_ofs", [BUILD_INSTANTS[0]], {}),
+        ("years", [YEAR, YEAR - 1], {}),
+        ("exchange", "SSE", {}),
+        ("max_staleness_days", 1, STALE_PANEL_ROW),
+        ("subjects", [SECURITIES[0], SECURITIES[1]], {}),
+        ("code_commit", "0f1e2d3c4b5a6978", {}),
+        ("supersedes_raw", ["fbm_0000000000000000000000ff"], {}),
     ],
 )
 def test_every_declared_build_parameter_reaches_the_answer_on_both_faces(
@@ -450,6 +482,7 @@ def test_every_declared_build_parameter_reaches_the_answer_on_both_faces(
     tmp_path_factory: pytest.TempPathFactory,
     parameter: str,
     value: Any,
+    common: dict[str, Any],
 ) -> None:
     """Vary one parameter alone; the answer must move, and both faces must move together.
 
@@ -465,6 +498,16 @@ def test_every_declared_build_parameter_reaches_the_answer_on_both_faces(
     addresses. `--transform` and `--neutralization` have no second declared value and are covered
     by `test_a_tier_option_that_decides_nothing_is_refused_rather_than_ignored` instead, which is
     the shape `VARIATIONS` uses one file over.
+
+    **`common` exists because `V2-P4-064` took one row's reachability away, and putting it back
+    honestly needed a second instant rather than a second parameter.** The 1-day bound used to be
+    a refusal at `BUILD_INSTANTS` -- but the read it refused was the *registry*, which is on an
+    event clock and has no business being judged by a session bound; taking it off that read is
+    the fix. At those instants the price panel is half an hour old, so no legal value of the flag
+    decides anything there any more, and the row would have had to become an exemption --
+    i.e. the one parameter whose reach nothing checks, which is precisely Task 39's finding
+    reappearing inside the test written to prevent it. `common` is applied to **both** sides
+    instead, so the comparison still isolates one parameter; see `STALE_PANEL_ROW`.
     """
     baseline_store = tmp_path_factory.mktemp("baseline")
     varied_store = tmp_path_factory.mktemp("varied")
@@ -473,11 +516,11 @@ def test_every_declared_build_parameter_reaches_the_answer_on_both_faces(
     for target in (baseline_store, varied_store):
         write_generated_panel(PanelStore(target / "panel"), _panel())
 
-    parameters = _build_parameters(**{parameter: value})
+    parameters = _build_parameters(**common, **{parameter: value})
     if parameter == "tier":
         parameters["transform"] = ""
 
-    baseline = sdk_build(panel_only, _build_parameters())
+    baseline = sdk_build(panel_only, _build_parameters(**common))
     varied = sdk_build(baseline_store, parameters)
     through_the_command_line = cli_build(varied_store, parameters)
 
@@ -906,7 +949,7 @@ def test_a_delisted_name_is_evaluated_and_coded_rather_than_dropped(
 def test_the_registry_is_read_at_each_prediction_instant_and_not_once_for_the_build(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
-    """Two instants, one freshness bound, and only the later one is stale.
+    """Two instants, one termination between them, and the universe must shrink at the second.
 
     The calendar and the registry are read inside `_computed`, once per prediction instant, and
     that is not an economy foregone: both loaders take an `as_of`, so reading once at the latest
@@ -914,39 +957,63 @@ def test_the_registry_is_read_at_each_prediction_instant_and_not_once_for_the_bu
     been published when it was stamped, and reading once at the earliest would under-cover the
     later ones.
 
-    **Also written because the mutation survived.** Moving the registry read to
-    `request.as_ofs[0]` left every other test in this file green, because the two baseline instants
-    are consecutive sessions and no bound separates them. Here they are eight days apart under a
-    seven-day bound: the first build is inside it and the second is not, so a build that read the
-    registry once would succeed where this one must be refused. The refusal is required to name
-    the **later** instant's own arithmetic, so a refusal that happened for the earlier instant's
-    reasons would not satisfy it either.
+    **Written because the mutation survived.** Moving the registry read to `request.as_ofs[0]`
+    left every other test in this file green, because the two baseline instants are consecutive
+    sessions and nothing separates them.
+
+    **The separator used to be `--max-staleness-days` and `V2-P4-064` took it away, which is the
+    better outcome.** The old version put the two instants eight days apart under a seven-day
+    bound: the first was inside it, the second was not, and a build that read the registry once
+    would have succeeded where this one had to be refused. That worked only because the *registry*
+    was being judged by a session-cadence bound -- which is the defect `V2-P4-064` fixed, so the
+    guard was resting on it. What replaces it is the substantive consequence rather than a bound:
+    `universe.termination_on_the_newest_session` files a delisting dated 2026-01-16 whose
+    `available_time` is midnight that day, so it is withheld at 2026-01-08T17:00+08 and visible at
+    2026-01-16T17:00+08, and `delist_date` is exclusive -- the name is listed at the first instant
+    and not at the second.
+
+    **It fails in both directions now, where the bound only failed in one.** `universe_counts`
+    reads `[8, 7]`; a registry pinned at `as_ofs[0]` gives `[8, 8]` and one pinned at `as_ofs[-1]`
+    gives `[7, 7]`. Each of the three is measured on this fixture -- the `plain` shape, which has
+    no lifecycle event inside the window at all, answers `[8, 8]` for both instants, which is
+    exactly the mutant's answer and is why the shape has to be added rather than assumed.
     """
     from panel_fixtures import write_generated_panel
+    from test_factor_interfaces import SHAPES
 
     runtime_dir = tmp_path_factory.mktemp("per-instant")
-    write_generated_panel(PanelStore(runtime_dir / "panel"), _panel())
-
-    inside = sdk_build(
-        runtime_dir,
-        _build_parameters(
-            tier="raw", transform="", as_ofs=[BUILD_INSTANTS[0]], max_staleness_days=7
-        ),
+    write_generated_panel(
+        PanelStore(runtime_dir / "panel"),
+        _panel((*SHAPES, "universe.termination_on_the_newest_session")),
     )
+    unterminated = tmp_path_factory.mktemp("no-termination")
+    write_generated_panel(PanelStore(unterminated / "panel"), _panel())
+
     straddling = sdk_build(
         runtime_dir,
         _build_parameters(
             tier="raw",
             transform="",
             as_ofs=[BUILD_INSTANTS[0], HORIZON_INSTANT],
-            max_staleness_days=7,
+            max_staleness_days=30,
+        ),
+    )
+    without_the_event = sdk_build(
+        unterminated,
+        _build_parameters(
+            tier="raw",
+            transform="",
+            as_ofs=[BUILD_INSTANTS[0], HORIZON_INSTANT],
+            max_staleness_days=30,
         ),
     )
 
-    assert "reason" not in inside, inside
-    assert straddling["reason"] == "panel_unreadable"
-    assert HORIZON_INSTANT.isoformat() in straddling["message"]
-    assert BUILD_INSTANTS[0].isoformat() not in straddling["message"]
+    assert "reason" not in straddling, straddling
+    assert straddling["universe_counts"] == [8, 7]
+    # The control: without the lifecycle event the two instants are indistinguishable, which is
+    # the answer a build that read the registry once would give -- so the assertion above is
+    # measuring the read and not the fixture.
+    assert without_the_event["universe_counts"] == [8, 8]
 
 
 def test_a_factor_reading_a_dataset_with_no_requirement_builder_is_refused_by_name(
@@ -1216,3 +1283,190 @@ def test_no_http_route_builds_a_factor_partition(panel_only: Path) -> None:
     assert "/api/v1/factors/build" not in posts
     assert not any("build" in path and "factor" in path for path in posts)
     assert TestClient(application).post("/api/v1/factors/build", json={}).status_code == 404
+
+
+# --- V2-P4-052: `--code-commit ""` means the same thing on both faces ----------------------------
+
+
+def test_an_explicitly_empty_code_commit_is_refused_on_both_build_faces(panel_only: Path) -> None:
+    """`V2-P4-046`'s defect, on the second of the two `factor` commands that carried it.
+
+    An empty-string default plus `_resolved_code_commit(code_commit or None)` gives the parser no
+    value that means "the caller typed an empty one", so `""` collapsed into *omitted* and was
+    resolved from this process's git -- while `factor_build_request`, which the SDK reaches
+    directly, refuses it by name. The artifact that lands is a **stored factor partition** stamped
+    with a commit the caller never declared, and `code_commit` is inside every observation's
+    build column, so the mis-stamp outlives the command that made it.
+
+    **The command line is written out rather than routed through `_cli_arguments`, and that is
+    load-bearing.** That helper drops any parameter whose value is `""` -- which is the right
+    rule for `--neutralization` and `--transform`, the two flags whose empty string means "this
+    tier has none" -- so a test that passed `code_commit=""` through it would have asserted on a
+    command line with no `--code-commit` on it at all, i.e. on the fallback, and would have been
+    green under both the defect and the fix.
+    """
+    arguments = [
+        *_cli_arguments(panel_only, _build_parameters(code_commit=COMMIT)),
+        "--code-commit",
+        "",
+    ]
+
+    result = CliRunner().invoke(app, arguments)
+    refused = sdk_build(panel_only, _build_parameters(code_commit=""))
+
+    assert result.exit_code == int(FACTOR_EXIT["bad_request"]), result.stdout
+    assert "--code-commit must be at least 7 characters" in result.stderr
+    assert refused["reason"] == "bad_request"
+    assert "--code-commit must be at least 7 characters" in refused["message"]
+    with pytest.raises(Exception, match="partition_missing"):
+        load_factor_observations(
+            PanelStore(panel_only / "panel"),
+            FACTOR_DEFINITIONS.get("reversal_1d/v1"),
+            years=(YEAR,),
+            as_of=RUN_AS_OF,
+        )
+
+
+def test_an_omitted_code_commit_still_resolves_from_the_process_on_the_build_face(
+    panel_only: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """The fallback the fix above must not take with it, on this command.
+
+    `--code-commit` is documented as defaulting to the real commit this process runs from, so a
+    fix that refused every falsy value would trade one wrong stamp for a command nobody can run
+    without one.
+
+    **Asserted on the `manifest_id`s rather than on a rendered string, because `build_view` does
+    not render `code_commit` at all.** The address is a content address over every determinant of
+    the build including the commit -- which is
+    `test_the_command_line_build_reproduces_the_fixtures_own_stored_tiers`' own argument -- so
+    driving the same build twice into two stores, once with the resolved commit typed out and once
+    with the flag omitted, and requiring identical addresses says two things at once: the fallback
+    resolved, and it resolved to `resolve_code_commit()` and not to some other value that merely
+    also has seven characters. The negative control is the third build, at this file's literal
+    `COMMIT`, whose addresses must differ -- without it an implementation that ignored the commit
+    entirely would satisfy the equality.
+    """
+    from panel_fixtures import write_generated_panel
+
+    typed_out = tmp_path_factory.mktemp("resolved-commit")
+    write_generated_panel(PanelStore(typed_out / "panel"), _panel())
+    other = tmp_path_factory.mktemp("other-commit")
+    write_generated_panel(PanelStore(other / "panel"), _panel())
+
+    omitted = _build_parameters()
+    del omitted["code_commit"]
+    without = CliRunner().invoke(app, _cli_arguments(panel_only, omitted))
+    declared = CliRunner().invoke(
+        app, _cli_arguments(typed_out, _build_parameters(code_commit=resolve_code_commit()))
+    )
+    unrelated = CliRunner().invoke(
+        app, _cli_arguments(other, _build_parameters(code_commit=COMMIT))
+    )
+
+    assert without.exit_code == int(PanelExit.ok), without.stderr
+    assert declared.exit_code == int(PanelExit.ok), declared.stderr
+    assert unrelated.exit_code == int(PanelExit.ok), unrelated.stderr
+    resolved_ids = json.loads(without.stdout)["manifest_ids"]
+    assert resolved_ids == json.loads(declared.stdout)["manifest_ids"]
+    assert resolved_ids != json.loads(unrelated.stdout)["manifest_ids"]
+
+
+# --- V2-P4-064: one bar, six cadences ------------------------------------------------------------
+
+
+def test_the_event_driven_registry_is_not_bound_by_the_session_cadence_bar(
+    panel_only: Path,
+) -> None:
+    """`--max-staleness-days` is a *session* bound, and `stock_basic` does not publish on sessions.
+
+    `V2-P4-064` measured a factor build refused on a price panel **one day old**:
+    `the security registry cannot be read ...: ['stale']; stock_basic reaches 2026-01-19T16:00Z,
+    which is 17 days, 17:00:00 behind ... (tolerance 5 days)`. The registry is event-driven -- its
+    newest instant is the last time some security listed or delisted -- so its age measures the
+    market's corporate-action calendar and not this fetch. The refusal `_build_staleness` raises
+    when the flag is omitted says what it is for in the opposite terms: "a price panel whose
+    newest session is a month old has missed a month of the market" -- a *session* quantity.
+    Those are two different quantities and one number cannot bound both, so
+    the only way to run the command was to set the bar to 20--25 days, which switches off the
+    check it exists for.
+
+    **The same repository already answers this correctly one command over.** `panel doctor` reads
+    `DATASET_CADENCE`, and a dataset declared `event_driven` gets `max_staleness=None` with the
+    reason on the record -- "a year with no rows is an ordinary year, not a missed fetch".
+    `factor build` read the caller's flag straight through instead.
+
+    **What the generated fixture can and cannot show.** Its registry carries one lifecycle event
+    per security, all dated `LISTED_ON` (2026-01-02), against a build instant of
+    2026-01-08T17:00+08 -- a gap of 6d17h, so a five-day bar separates the two answers. The real
+    corpus's gap was 17d17h at the same bar: the same sign and the same cause, three times the
+    magnitude, because a real registry's newest event is whenever the exchange last admitted or
+    removed a name rather than the first session of the fixture window. What the fixture would not
+    show is a registry that happens to be fresh -- a live build on a day something listed -- which
+    is exactly the day on which this defect is invisible.
+    """
+    result = CliRunner().invoke(
+        app,
+        _cli_arguments(
+            panel_only, _build_parameters(tier="raw", transform="", max_staleness_days=5)
+        ),
+    )
+
+    assert result.exit_code == int(PanelExit.ok), result.output
+    assert json.loads(result.stdout)["coverage"]["raw"] == {"computed": 16}
+
+
+# --- V2-P4-108: a day the exchange was shut is a verdict, not a traceback ------------------------
+
+
+NON_SESSION_INSTANT: Final[datetime] = datetime(2026, 1, 10, 9, 0, tzinfo=UTC)
+"""17:00 Asia/Shanghai on a Saturday inside the generated window.
+
+The neighbouring Monday, 2026-01-12, builds all three tiers at exit `0` -- measured -- so the
+fixture separates "the exchange was shut" from "this panel cannot answer at all"."""
+
+
+def test_a_prediction_instant_on_a_closed_exchange_is_blocked_and_not_a_bare_traceback(
+    panel_only: Path,
+) -> None:
+    """`V2-P4-108`. `--tier neutralized` on a non-session day exited `5` with nothing to act on.
+
+    `_neutralized` catches `_PANEL_FAULTS` around `load_industry_market_cap_cross_section`, and
+    `PriceDataError` was not in that tuple -- so `_read_visible_price_session`'s refusal
+    ("2026-01-10 is not an open session on the SZSE calendar, so there are no daily_basic rows to
+    read for it"), which is a **verdict**, escaped every guard on this face and reached
+    `cli._panel_command` as an unanticipated exception: exit `5`, "a defect in the command, not a
+    verdict about the panel -- nothing was checked", and the exception's own sentence withheld
+    because an unanticipated frame can be holding the credential. The withholding is right; the
+    fault being unanticipated was not. That is `V2-P4-060`'s shape exactly, one refusal over.
+
+    **The tier is the whole of it, and it is measured rather than assumed.** At the same instant
+    `--tier raw` and `--tier processed` both exit `0`: neither reads a session-scoped price
+    partition for the day being priced, so neither can meet this refusal. Only the residual does,
+    through `load_daily_valuations`. A test that drove the default tier would have been green.
+
+    **Pre-existing rather than introduced by `V2-P4-028`.** That issue moved the industry read to
+    a day-scoped door; the `daily_basic` read has been day-scoped since `V2-P4-026` and raises the
+    same refusal from the same function, so the identical call was reachable before either move.
+
+    The message that replaces the traceback is the one this refusal already had --
+    `the_builder_cannot_produce_a_residual_for_a_session_that_has_not_closed`, whose own sentence
+    already said "on a day the exchange was open" -- so what changed is that the arm is reachable,
+    not what it says.
+    """
+    parameters = _build_parameters(
+        tier="neutralized", neutralization="industry_and_size/v1", as_ofs=[NON_SESSION_INSTANT]
+    )
+
+    result = CliRunner().invoke(app, _cli_arguments(panel_only, parameters))
+    refused = sdk_build(panel_only, parameters)
+
+    assert result.exit_code == int(FACTOR_EXIT["blocked"]), result.output
+    assert "unhandled" not in result.output
+    assert "is not an open session" in result.output
+    assert (
+        "the_builder_cannot_produce_a_residual_for_a_session_that_has_not_closed" in result.output
+    )
+    assert refused["reason"] == "blocked"
+    assert "is not an open session" in refused["message"]
+    assert "Nothing was written" in refused["message"]

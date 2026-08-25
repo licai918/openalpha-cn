@@ -267,6 +267,79 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **`openalpha panel build --as-of T` produced a panel that `openalpha panel doctor --as-of T`
+  called `BLOCKING`** (`V2-P4-063`). `cli._build_sessions` bounded the fetch loop at the fetch
+  clock's Asia/Shanghai date **minus one day**, unconditionally. That is
+  `panel_ingest._sessions_published_through` only for the part of the day *before* 16:30
+  (`DAILY_AVAILABILITY_TIME`); above it the two came apart by exactly one session, and that
+  session is the one the rest of the price plane already agreed about — `_price_requirement`
+  clamps a dataset's `required_dates` at it, so a health check **required** it;
+  `_read_visible_price_session` refuses only what is past it, so a read would have **served** it;
+  and `newest_published_session` resolves a shortlist's pricing session through it, so
+  `shortlist run` **priced** against it. Three rules against one, and the one was the build.
+  Measured through `CliRunner` at one instant used twice: build exit `0`, eleven sessions ending
+  2026-01-19; doctor at that same literal instant exit `1`, `blocking date_gap 1 required date(s)
+  are absent from stk_limit, starting at 2026-01-20`. The loop now shares
+  `_sessions_published_through` rather than restating it, and the bound is
+  `min(date(year, 12, 31), published_through)` — `_price_requirement`'s own expression — so what a
+  build fetches and what a health check requires are the same set by construction.
+- **`openalpha factor run` and `openalpha factor build` published artifacts stamped with a commit
+  the caller never declared** (`V2-P4-052`, `V2-P4-046`'s defect on two more commands). Both
+  declared `--code-commit` with an empty-string default and then wrote
+  `_resolved_code_commit(code_commit or None)`, so there was no value the parser could hand back
+  that meant "the caller typed an empty one": `""` collapsed into *omitted* and resolved from the
+  server's git, while the same literal reached the request contract's seven-character rule on the
+  SDK and over HTTP and was a `bad_request`. Measured: `factor run --code-commit ""` exited `0`
+  having **sealed** an experiment, and `factor build --code-commit ""` exited `0` having written
+  four partitions — and `code_commit` is inside every observation's build column, so the mis-stamp
+  outlives the command. Both flags now default to `None`; omitting them still resolves the real
+  commit, which is driven separately on each command.
+- **`--max-staleness-days` refused a factor build on a price panel one day old** (`V2-P4-064`).
+  The flag is a *session* bound — its own refusal says so, "a price panel whose newest session is
+  a month old has missed a month of the market" — and it was applied unchanged to the security
+  registry, which is event-driven: `stock_basic`'s newest instant is the last time a security
+  listed or delisted, so its age measures the market's corporate-action calendar rather than this
+  fetch. The only way to run the command was to widen the bar to 20–25 days, which switches off
+  the check it exists for. `panel doctor` already answers this correctly through
+  `DATASET_CADENCE`, and `factor_view.CADENCE_WAIVED_READS` is now held against that table — a
+  strict containment plus a literal complement, so a sixth `event_driven` dataset turns it red
+  naming itself. What is **not** waived is recorded rather than left to be discovered: the four
+  quarterly statement datasets keep the caller's bar because `compute_factor` refuses a waived
+  one for every dataset a factor reads, and `index_member_all` keeps it because
+  `load_industry_market_cap_cross_section` states one bound for it and `daily_basic` together.
+  Both are `KNOWN_FACTOR_RUN_LIMITATIONS
+  .the_freshness_bar_is_waived_by_cadence_only_where_the_read_is_outside_the_engine`.
+  Two existing guards turned out to be resting on the defect and were re-grounded rather than
+  relaxed: the test that proves the registry is read once per *prediction instant* separated the
+  two instants by this bound, and now separates them by a delisting whose `available_time` falls
+  between them — `universe_counts` reads `[8, 7]`, against `[8, 8]` for a read pinned at the first
+  instant and `[7, 7]` for one pinned at the last, so it fails in both directions where the bound
+  failed in one. And the sweep that requires every declared build parameter to reach the answer
+  had this flag reaching it only by refusing the registry; it now drives the flag at the one
+  instant in the fixture window where a session bound can decide anything — the Saturday after the
+  newest session, where `1` is `stale` and `2` builds.
+- **`openalpha factor build --tier neutralized --as-of <a day the exchange was shut>` exited `5`
+  with a withheld traceback instead of a verdict** (`V2-P4-108`, found by the same acceptance and
+  pre-existing). `_neutralized` catches `_PANEL_FAULTS` around
+  `load_industry_market_cap_cross_section`, and `PriceDataError` — which is what
+  `_read_visible_price_session` raises for a non-session day, and which
+  `cli._PANEL_WRITE_REFUSALS` and `panel_doctor._LOAD_FAILURES` have both called a fact about data
+  for eleven error types — was not in it. So a refusal designed to be an answer reached
+  `cli._panel_command` as an unanticipated exception: "a defect in the command, not a verdict
+  about the panel — nothing was checked", with the refusal's own sentence withheld because an
+  unanticipated frame can be holding the credential. `V2-P4-060`'s shape, one refusal over. Fixed
+  at the read rather than in the constant, which is that issue's own arrangement: `_PANEL_FAULTS`
+  is restated by `shortlist_view` and pinned as a union across both faces' read seams, and the
+  registry read cannot raise this at all. Measured at the same instant: `--tier raw` and
+  `--tier processed` both exit `0`, so the residual is the whole of the hole.
+- **`openalpha panel doctor --dataset index_daily --no-calendar` had a fix with no product-surface
+  test under it** (`V2-P4-087`). The bare `KeyError` was closed when it was found, but the
+  assertion beside it calls `panel_health_report` directly while the report is about a command
+  line — everything between the two is unasserted. The literal command is now driven through
+  `CliRunner`, and the test was checked to separate: removing `_PRICE_SHAPED_FIELDS`' `index_daily`
+  row turns it from exit `1` (an empty store is unhealthy, which is the point of the fallback) to
+  exit `5`.
+
 - **A closed vocabulary with no way to refuse: an undeclared `quality_flags` string answered
   `500 text/plain` on `POST /api/v1/research/run`** (`V2-P4-101`). `V2-P4-030` closed the
   risk-flag set and was right to — a payload writing `future-data` instead of `future_data` used
