@@ -1162,6 +1162,45 @@ class PanelStore:
         _validated_requirement(requirement)
         return evaluate_readiness(requirement, partitions=self._partition_states(requirement))
 
+    def assessed(self, requirement: ReadinessRequirement) -> AssessedPanelRead:
+        """Take the readiness verdict once, and hand back the per-year reads it licenses.
+
+        **`V2-P4-069`.** `read_if_ready` and `read_visible_at` each assess the *whole*
+        requirement and then read *one* year, so a caller walking an N-year history pays N
+        assessments of N partitions. The verdict is identical all N times -- it is a function of
+        the requirement, and the requirement does not change inside the loop -- so the N-1 repeats
+        buy nothing. Measured on a store of 20 securities per partition, which is what says the
+        cost is the catalog and not the data: 8 partitions cost 64 coverage round trips, 16 cost
+        256, and 36 cost **1,296** at **4.087 s**. That 36-partition figure reproduces the one
+        `V2-P4-059` profiled on `V2-P4-004`'s real 5,545-security market -- 4.0 s, 1,296
+        `_read_coverage` calls, against 0.21 s for the Parquet the read actually wanted.
+
+        **Why a new name rather than a faster `read_if_ready`.** `V2-P4-059` looked at this and
+        declined to fix it locally, for a reason that is still right: the alternatives are a
+        cache, which would make a fail-closed gate quietly stop looking, or a narrower
+        per-year requirement, which changes the verdict -- `evaluate_readiness` judges the
+        dataset over every year asked for, so assessing years one at a time would admit a year
+        its siblings' staleness currently blocks. Neither is a speed-up; both are different
+        answers. This is the third option the row asked for, and it moves nothing: `read_if_ready`
+        and `read_visible_at` are now one line each on top of it, still one assessment plus one
+        read, so their fourteen callers see no change at all.
+
+        **What a caller gives up by opening a scope, stated rather than left to be found.**
+        `_partition_states` reads three facts from the *file* -- that it is present, that it
+        carries Parquet's magic at both ends, and what its footer says its row count is -- and
+        inside one scope those are read once, before the first read, instead of before every
+        read. A partition damaged behind the store's back **between** two reads of the same scope
+        is therefore not seen by the gate. Two things bound that. The check still happens before
+        the year it is about is read, because it happens before any of them are; and the scan
+        itself is still wrapped per read, so damage that makes a file unscannable is still a
+        `PanelStorageError` naming the partition rather than a bare DuckDB exception. What is
+        lost is re-checking year `k`'s file after years `0..k-1` have been read, which the
+        per-call door did N times and this does once.
+        """
+        return AssessedPanelRead(
+            store=self, requirement=requirement, readiness=self.assess_readiness(requirement)
+        )
+
     def read_if_ready(
         self,
         requirement: ReadinessRequirement,
@@ -1188,25 +1227,15 @@ class PanelStore:
         file is damaged too. The scan is wrapped: anything DuckDB raises out of it becomes a
         `PanelStorageError` naming the partition, instead of a bare
         `duckdb.InvalidInputException` escaping a method that promises a verdict.
+
+        **One assessment plus one read since `V2-P4-069`, which is what it always was.** The
+        body moved to `AssessedPanelRead.read` and this is now the single-read spelling of it,
+        so nothing here promises anything different: every one of this method's callers gets a
+        verdict taken for their own call. What the split adds is a way for a caller reading N
+        years to say so and pay for one verdict instead of N -- see `assessed`, which carries
+        the measurement and the one thing a scope gives up.
         """
-        if year not in requirement.years:
-            raise PanelStorageError(
-                f"year {year} is not among the years this requirement was assessed over "
-                f"({sorted(set(requirement.years))})"
-            )
-        readiness = self.assess_readiness(requirement)
-        if readiness.state == "blocked":
-            return PanelReadOutcome(readiness=readiness, rows_or_none=None)
-        try:
-            rows = self.query(requirement.dataset, year=year, columns=columns, filters=filters)
-        except PanelStorageError:
-            raise
-        except Exception as error:
-            raise PanelStorageError(
-                f"{requirement.dataset} year={year} passed readiness but could not be read: "
-                f"{type(error).__name__}: {error}"
-            ) from error
-        return PanelReadOutcome(readiness=readiness, rows_or_none=tuple(rows))
+        return self.assessed(requirement).read(year=year, columns=columns, filters=filters)
 
     def read_visible_at(
         self,
@@ -1329,62 +1358,15 @@ class PanelStore:
 
         `columns` need not include `available_time`: the predicate is applied in SQL, over the
         stored column, whether or not the caller projects it.
+
+        **One assessment plus one read since `V2-P4-069`**, for `read_if_ready`'s reason and with
+        the same guarantee: the body is `AssessedPanelRead.read_visible_at` and this is its
+        single-read spelling. Only the partition-scope verdict is shareable across a scope; the
+        slice re-checks and the census aggregate are answers about a row set and still run per
+        year.
         """
-        if year not in requirement.years:
-            raise PanelStorageError(
-                f"year {year} is not among the years this requirement was assessed over "
-                f"({sorted(set(requirement.years))})"
-            )
-        readiness = self.assess_readiness(requirement)
-        found = {issue.code for issue in readiness.issues}
-        if found - ROW_FILTERABLE_ISSUE_CODES:
-            return PanelVisibleReadOutcome(
-                readiness=readiness,
-                as_of=requirement.as_of,
-                rows_or_none=None,
-                withheld_row_count_or_none=None,
-            )
-        pooled_years = (
-            requirement.years
-            if requirement.max_staleness is not None or requirement.required_subjects is not None
-            else (year,)
-        )
-        try:
-            scan = self._scan_visible(
-                requirement.dataset,
-                year=year,
-                answer_years=pooled_years,
-                as_of=requirement.as_of,
-                columns=columns,
-                filters=filters,
-                probe_subjects=requirement.required_subjects,
-            )
-        except PanelStorageError:
-            raise
-        except Exception as error:
-            raise PanelStorageError(
-                f"{requirement.dataset} year={year} passed the structural checks but could not "
-                f"be read at {requirement.as_of.isoformat()}: {type(error).__name__}: {error}"
-            ) from error
-        slice_issues = evaluate_visible_slice(
-            requirement,
-            visible_last_event_time=scan.answer.last_event_time,
-            visible_subjects=scan.answer.subjects,
-        )
-        if slice_issues:
-            return PanelVisibleReadOutcome(
-                readiness=readiness,
-                as_of=requirement.as_of,
-                rows_or_none=None,
-                withheld_row_count_or_none=None,
-                visible_slice_issues=slice_issues,
-            )
-        return PanelVisibleReadOutcome(
-            readiness=readiness,
-            as_of=requirement.as_of,
-            rows_or_none=scan.rows,
-            withheld_row_count_or_none=scan.partition.withheld_row_count,
-            visible_last_event_time_or_none=scan.partition.last_event_time,
+        return self.assessed(requirement).read_visible_at(
+            year=year, columns=columns, filters=filters
         )
 
     def _scan_visible(
@@ -1710,6 +1692,141 @@ class PanelStore:
     ) -> Path | None:
         partition = self._lookup_with_connection(connection, dataset, year)
         return None if partition is None else partition.path
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AssessedPanelRead:
+    """One readiness verdict, and the per-year reads it licenses. `V2-P4-069`.
+
+    Constructed only by `PanelStore.assessed`, which is where the whole argument for it lives:
+    the verdict is a function of the requirement, a caller walking an N-year history holds one
+    requirement, and re-deriving the same verdict N times cost 1,296 catalog round trips and
+    4.087 s on a 36-partition store whose partitions hold 20 rows each.
+
+    `read` and `read_visible_at` are the two doors, unchanged in what they promise. Their
+    `PanelStore` namesakes are now one line on top of this -- `self.assessed(requirement)` and
+    then one read -- so a single-year caller pays exactly what it always did, and only a caller
+    that opens the scope itself sees the difference.
+    """
+
+    store: PanelStore
+    requirement: ReadinessRequirement
+    readiness: DatasetReadiness
+    """The verdict, taken at construction. Not re-derived: that is the entire point."""
+
+    def _year_in_scope(self, year: int) -> ReadinessRequirement:
+        """Refuse a year this scope was not assessed over, and hand back the requirement.
+
+        The same guard both doors carried, at the same place in the sequence -- before any
+        partition is touched -- so a caller still cannot vet one partition and read another.
+        It matters slightly more here than it did on the per-call door, because a scope invites
+        a loop and a loop invites an off-by-one.
+        """
+        if year not in self.requirement.years:
+            raise PanelStorageError(
+                f"year {year} is not among the years this requirement was assessed over "
+                f"({sorted(set(self.requirement.years))})"
+            )
+        return self.requirement
+
+    def read(
+        self,
+        *,
+        year: int,
+        columns: Sequence[str],
+        filters: Mapping[str, object] | None = None,
+    ) -> PanelReadOutcome:
+        """`PanelStore.read_if_ready`'s body, against a verdict already taken.
+
+        A blocked dataset still short-circuits before any scan, and the scan is still wrapped
+        per read: a partition that passes readiness and then fails to open becomes a
+        `PanelStorageError` naming it, not a bare DuckDB exception escaping a method that
+        promises a verdict.
+        """
+        requirement = self._year_in_scope(year)
+        readiness = self.readiness
+        if readiness.state == "blocked":
+            return PanelReadOutcome(readiness=readiness, rows_or_none=None)
+        try:
+            rows = self.store.query(
+                requirement.dataset, year=year, columns=columns, filters=filters
+            )
+        except PanelStorageError:
+            raise
+        except Exception as error:
+            raise PanelStorageError(
+                f"{requirement.dataset} year={year} passed readiness but could not be read: "
+                f"{type(error).__name__}: {error}"
+            ) from error
+        return PanelReadOutcome(readiness=readiness, rows_or_none=tuple(rows))
+
+    def read_visible_at(
+        self,
+        *,
+        year: int,
+        columns: Sequence[str],
+        filters: Mapping[str, object] | None = None,
+    ) -> PanelVisibleReadOutcome:
+        """`PanelStore.read_visible_at`'s body, against a verdict already taken.
+
+        Only the **partition-scope** verdict is shared. `evaluate_visible_slice` judges the rows
+        this call is about to return and still runs per read, as does the census aggregate the
+        pooling is over -- those are answers about a row set, and a row set is per year. Sharing
+        them would be the mistake `V2-P4-034` names one plane up, where a whole-partition sum
+        let a pair of cancelling errors through.
+        """
+        requirement = self._year_in_scope(year)
+        readiness = self.readiness
+        found = {issue.code for issue in readiness.issues}
+        if found - ROW_FILTERABLE_ISSUE_CODES:
+            return PanelVisibleReadOutcome(
+                readiness=readiness,
+                as_of=requirement.as_of,
+                rows_or_none=None,
+                withheld_row_count_or_none=None,
+            )
+        pooled_years = (
+            requirement.years
+            if requirement.max_staleness is not None or requirement.required_subjects is not None
+            else (year,)
+        )
+        try:
+            scan = self.store._scan_visible(
+                requirement.dataset,
+                year=year,
+                answer_years=pooled_years,
+                as_of=requirement.as_of,
+                columns=columns,
+                filters=filters,
+                probe_subjects=requirement.required_subjects,
+            )
+        except PanelStorageError:
+            raise
+        except Exception as error:
+            raise PanelStorageError(
+                f"{requirement.dataset} year={year} passed the structural checks but could not "
+                f"be read at {requirement.as_of.isoformat()}: {type(error).__name__}: {error}"
+            ) from error
+        slice_issues = evaluate_visible_slice(
+            requirement,
+            visible_last_event_time=scan.answer.last_event_time,
+            visible_subjects=scan.answer.subjects,
+        )
+        if slice_issues:
+            return PanelVisibleReadOutcome(
+                readiness=readiness,
+                as_of=requirement.as_of,
+                rows_or_none=None,
+                withheld_row_count_or_none=None,
+                visible_slice_issues=slice_issues,
+            )
+        return PanelVisibleReadOutcome(
+            readiness=readiness,
+            as_of=requirement.as_of,
+            rows_or_none=scan.rows,
+            withheld_row_count_or_none=scan.partition.withheld_row_count,
+            visible_last_event_time_or_none=scan.partition.last_event_time,
+        )
 
 
 def _absent_partition(year: int) -> PartitionState:

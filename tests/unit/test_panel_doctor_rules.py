@@ -536,6 +536,7 @@ def test_the_storage_plane_discloses_every_boundary_it_declares_and_the_report_c
         "a_visibility_filtered_read_replays_a_partition_that_was_not_there_yet",
         "date_gap_clears_on_partition_rows_the_filtered_read_withholds",
         "a_derived_partition_may_outlive_the_build_its_rows_point_at",
+        "an_assessed_read_scope_checks_each_partition_file_once_and_not_once_per_read",
     }
     assert codes <= {item.code for item in KNOWN_PANEL_LIMITATIONS}
     assert all(item.datasets == () for item in KNOWN_PANEL_LIMITATIONS if item.code in codes)

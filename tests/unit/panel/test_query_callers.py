@@ -246,10 +246,18 @@ def test_no_other_function_in_this_module_takes_the_un_gated_door() -> None:
     )
 
 
-GATED_READS: frozenset[str] = frozenset({"read_if_ready", "read_visible_at"})
+GATED_READS: frozenset[str] = frozenset({"read_if_ready", "read_visible_at", "assessed"})
 """The `PanelStore` methods that consult a readiness verdict before returning rows.
 
-Two, and the second is not a relaxation of the first. `read_visible_at` runs the **same**
+Three since `V2-P4-069`, and the third is the same verdict taken once instead of N times.
+`assessed()` runs `assess_readiness` and hands back an `AssessedPanelRead` whose `read` and
+`read_visible_at` are the two doors below with the verdict already in hand -- so a function
+that calls it is reaching rows through the rule table exactly as one calling `read_if_ready`
+is, and a function reaching them any *other* way is still what this file refuses. It is named
+here rather than `AssessedPanelRead.read`, because `read` is not a distinguishing name in a
+tree that also reads files, while `assessed` exists once and is the call that takes the verdict.
+
+The second is not a relaxation of the first. `read_visible_at` runs the **same**
 `evaluate_readiness` over the **same** `PartitionState`s and blocks on every issue
 `read_if_ready` blocks on, substituting a row predicate for a refusal only where the rule table
 found nothing but `ROW_FILTERABLE_ISSUE_CODES`; it then re-decides the two scope-sensitive codes
@@ -261,14 +269,14 @@ allowlist with a separate argument: `tests/unit/panel/test_visible_read_callers.
 """
 
 GATED_READERS: dict[str, tuple[str, ...]] = {
-    "_read_visible_event_dated_rows": ("read_visible_at",),
+    "_read_visible_event_dated_rows": ("assessed", "read_visible_at"),
     "_read_visible_price_session": ("read_visible_at",),
-    "load_adjustment_histories": ("read_if_ready",),
-    "load_index_membership": ("read_if_ready",),
-    "load_index_prices": ("read_if_ready",),
-    "load_industry_histories": ("read_if_ready",),
-    "load_industry_trees": ("read_if_ready",),
-    "load_trading_calendar": ("read_if_ready",),
+    "load_adjustment_histories": ("assessed",),
+    "load_index_membership": ("assessed",),
+    "load_index_prices": ("assessed",),
+    "load_industry_histories": ("assessed",),
+    "load_industry_trees": ("assessed",),
+    "load_trading_calendar": ("assessed",),
 }
 """Every function in `panel_ingest` that reaches rows, and the door it reaches them through.
 
@@ -291,9 +299,19 @@ announcement` dates a filing's availability at midnight on its own `ann_date`, s
 per-event-date census reconciles exactly, and the whole-year refusal was costing
 `panel_doctor._ambiguity_check` every read at an instant inside the year.
 
-**Six rows still take `read_if_ready`, and they are five different reasons rather than one
-backlog.** Written out because "these are the ones nobody has moved yet" is exactly the sentence
-this map exists to stop somebody from having to assume:
+**`V2-P4-069` moved seven of these onto `assessed`, and that is a cost change and not a door
+change.** Every one of them loops over the years of one requirement, and `read_if_ready` and
+`read_visible_at` each assess the *whole* requirement before reading *one* year -- so an N-year
+history cost N assessments of N partitions to reach one verdict N times. Measured: 36 partitions,
+1,296 `_read_coverage` round trips, 4.087 s; after, 36 and 0.727 s. `assessed()` takes the
+verdict once and hands back the same two doors, so what these loaders are gated by has not moved
+at all -- which is why this map records the change rather than being relaxed for it, and why
+`_read_visible_price_session` is still on the bare door: it reads one session of one year, so
+there is no second read for a scope to share the verdict with.
+
+**Six rows still take the un-scoped `read_if_ready` shape, and they are five different reasons
+rather than one backlog.** Written out because "these are the ones nobody has moved yet" is
+exactly the sentence this map exists to stop somebody from having to assume:
 
 - **`load_trading_calendar`** -- `V2-P4-076`'s measurement, unchanged. `calendar_publication`
   makes a year partition's newest availability instant the *earliest* in it, so
@@ -342,6 +360,78 @@ def _plain_calls(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
         for inner in ast.walk(node)
         if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name)
     }
+
+
+PER_CALL_DOORS: frozenset[str] = frozenset({"read_if_ready", "read_visible_at"})
+"""The two doors that assess the whole requirement per call. `assessed` is the third and shares
+one verdict across a scope, so it is not one of these."""
+
+
+def _per_call_doors_on_a_scoped_store(node: ast.AST) -> set[str]:
+    """Doors this function takes on the very object it opened a scope on.
+
+    The receiver is the discriminator, and it has to be: `assessed.read_visible_at(...)` and
+    `store.read_visible_at(...)` are the same attribute name, so a matcher that looked at the
+    name alone would flag the correct code and the bypass identically. This looks for
+    `<recv>.assessed(...)` and then for `<recv>.<per-call door>(...)` on that same `<recv>`,
+    which is exactly the shape of "a scope was opened here and something read around it".
+
+    Residue, in this file's usual terms: a function that opened a scope on one name and read
+    around it through a *different* name bound to the same store is invisible here. That is a
+    reviewable shape in a way the one-line substitution this exists to catch is not.
+    """
+    scoped: set[str] = set()
+    for sub in ast.walk(node):
+        if (
+            isinstance(sub, ast.Call)
+            and isinstance(sub.func, ast.Attribute)
+            and sub.func.attr == "assessed"
+            and isinstance(sub.func.value, ast.Name)
+        ):
+            scoped.add(sub.func.value.id)
+    if not scoped:
+        return set()
+    return {
+        sub.func.attr
+        for sub in ast.walk(node)
+        if isinstance(sub, ast.Call)
+        and isinstance(sub.func, ast.Attribute)
+        and sub.func.attr in PER_CALL_DOORS
+        and isinstance(sub.func.value, ast.Name)
+        and sub.func.value.id in scoped
+    }
+
+
+def test_a_function_that_opens_a_scope_takes_every_read_from_it() -> None:
+    """`V2-P4-069`: opening a scope and then reading around it is the one way to undo the fix
+    while leaving every other check in this file satisfied.
+
+    **Driven by a mutation sweep rather than imagined.** Replacing
+    `assessed.read_visible_at(...)` with `store.read_visible_at(filtered, ...)` inside
+    `_read_visible_event_dated_rows` is *semantically identical* -- same verdict, same rows --
+    and restores the N-squared for the five event-dated loaders, including the 36-year registry
+    read the row was filed about. The map above cannot see it: the function still calls
+    `assessed` on the line before and still calls `read_visible_at`, so its entry is unchanged.
+    Nothing else went red either.
+
+    The invariant that does see it: a function which opens a scope has decided that its reads
+    share one verdict, so it must not also take a per-call door. Structural rather than
+    behavioural on purpose -- the two spellings return the same answer, so no assertion about
+    the answer can separate them, and what differs is the cost.
+    """
+    ingest = ast.parse((SOURCE / "panel_ingest.py").read_text(encoding="utf-8"))
+    offenders = {
+        name: sorted(bypassed)
+        for name, node in _functions(ingest).items()
+        if (bypassed := _per_call_doors_on_a_scoped_store(node))
+    }
+
+    assert offenders == {}, (
+        f"{offenders} open a readiness scope and then also take a per-call door. A scope exists "
+        "so that N reads share one verdict (V2-P4-069); a read taken beside it re-assesses the "
+        "whole requirement and puts the N-squared back, while answering identically -- so no "
+        "test about the answer can catch it and this one has to"
+    )
 
 
 def test_no_loader_reaches_a_partition_outside_this_map() -> None:

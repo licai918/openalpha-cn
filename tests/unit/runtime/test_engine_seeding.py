@@ -15,6 +15,7 @@ from datetime import datetime
 
 import pytest
 
+from openalpha_cn.domain.agent_result import AgentResult
 from openalpha_cn.domain.decision import DecisionLedger
 from openalpha_cn.domain.evidence import EvidenceSnapshot
 from openalpha_cn.domain.run import RunManifest
@@ -59,6 +60,30 @@ class _InertRecoveryStore:
 
     def save(self, state: RunRecoveryState) -> None:
         self._states[state.run_id] = state
+
+    def append_result(
+        self,
+        run_id: str,
+        *,
+        position: int,
+        result: AgentResult,
+        updated_at: datetime,
+    ) -> None:
+        """`V2-P4-020`'s per-agent write, in the smallest form that keeps this double honest.
+
+        Inert as to disk, not as to the invariant: it still refuses a slot out of order, so
+        this file cannot pass on an engine that lost track of which agent it is on.
+        """
+        state = self._states[run_id]
+        assert position == len(state.completed_results)
+        assert state.agent_ids[position] == result.agent_id
+        self._states[run_id] = state.model_copy(
+            update={
+                "completed_results": (*state.completed_results, result),
+                "next_agent_index": position + 1,
+                "updated_at": updated_at,
+            }
+        )
 
 
 def _request(

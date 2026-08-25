@@ -274,6 +274,27 @@ class ResearchEngine:
         selected: tuple[ResearchAgent, ...],
         recovery: RunRecoveryState,
     ) -> tuple[AgentResult, ...]:
+        """Run the graph from where it stopped, recording each agent as it finishes.
+
+        **`V2-P4-020`: the loop no longer rebuilds `state`.** It used to derive a fresh
+        `RunRecoveryState` after every agent -- `model_dump(mode="python")` of everything
+        completed so far, then `model_validate` of everything plus one -- and hand the whole
+        document to `save()`. Both halves grew with what the run had already done, so `N`
+        agents cost `N(N+1)/2` result serialisations twice over. Measured at `be262ea` on
+        empty agents: 78 for `N=12`, 20,100 and 11.74 MB for `N=200`, 80,200 and 46.68 MB for
+        `N=400`; the dump-and-revalidate half alone was 0.327 s at `N=400`.
+
+        `state` is now the state this attempt *started* from and is not reassigned, because
+        nothing in the loop needs a whole one: `append_result` takes the single result and the
+        position the graph declares it at, and the two places that do need a whole state --
+        resuming a failed attempt and recording a failure -- happen at most once per run and
+        build it from `results` explicitly. That also fixes what the failure path was reading:
+        it took `state.completed_results`, which was only right because the previous iteration
+        had just written that field, and it now names `tuple(results)` directly.
+
+        `tests/integration/test_recovery_write_amplification.py` is the measurement kept as
+        the gate, and it counts operations rather than seconds for the usual reason.
+        """
         state = recovery
         if state.status == "failed":
             state = self._updated_recovery(
@@ -293,6 +314,8 @@ class ResearchEngine:
                 self.recovery_store.save(
                     self._updated_recovery(
                         state,
+                        completed_results=tuple(results),
+                        next_agent_index=len(results),
                         status="failed",
                         error_type=type(error).__name__,
                         updated_at=ensure_aware(self.clock()),
@@ -304,15 +327,12 @@ class ResearchEngine:
                     f"agent result ID mismatch: expected {agent.agent_id}, got {result.agent_id}"
                 )
             results.append(result)
-            state = self._updated_recovery(
-                state,
-                completed_results=tuple(results),
-                next_agent_index=index + 1,
-                status="running",
-                error_type=None,
+            self.recovery_store.append_result(
+                state.run_id,
+                position=index,
+                result=result,
                 updated_at=ensure_aware(self.clock()),
             )
-            self.recovery_store.save(state)
         return tuple(results)
 
     @staticmethod

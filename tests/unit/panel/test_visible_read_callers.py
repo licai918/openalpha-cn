@@ -70,10 +70,67 @@ SOURCE = ROOT / "src" / "openalpha_cn"
 FILTERED_READ = "read_visible_at"
 """The `PanelStore` method that answers with a deliberately short partition."""
 
-FILTERED_READ_CALLERS: frozenset[str] = frozenset(
-    {"panel_factors.py", "panel_neutralization.py", "panel_doctor.py", "panel_ingest.py"}
-)
+FILTERED_READ_REACHERS: dict[str, frozenset[str]] = {
+    "panel_factors.py": frozenset(
+        {
+            "_read_dataset",
+            "compute_factor",
+            "load_factor_manifests",
+            "load_factor_observations",
+            "load_factor_transform_manifests",
+            "load_processed_factor_observations",
+        }
+    ),
+    "panel_neutralization.py": frozenset(
+        {"load_factor_neutralization_manifests", "load_neutralized_factor_observations"}
+    ),
+    "panel_doctor.py": frozenset(
+        {"_factor_seal_check", "_held_cross_sections", "_sealed_builds", "panel_health_report"}
+    ),
+    "panel_ingest.py": frozenset(
+        {
+            "_read_visible_event_dated_rows",
+            "_read_visible_membership_rows",
+            "_read_visible_price_session",
+            "load_daily_bars",
+            "load_daily_valuations",
+            "load_industry_cross_section",
+            "load_name_histories",
+            "load_price_limits",
+            "load_statement_histories",
+            "load_stock_universe",
+            "load_suspensions",
+        }
+    ),
+}
+"""Every `src/` **function** that may reach `read_visible_at`, keyed by the file it lives in.
+
+`V2-P4-074`: the allowlist below this used to be scoped to a *file*, and a permission scoped to
+a file is not the thing this module's docstring says it is. "Adding a name here is a deliberate
+act with a review attached" was true only of the first caller in a module; every caller after
+that arrived silently, because the file was already named. `V2-P4-061` added two loaders inside
+`panel_ingest.py` and `V2-P4-083` added a third, and none of the three moved a line in this file
+-- while the parallel narrative in `panel/catalog.py` was updated in the same commit, which is
+what makes it an omission rather than a drawn boundary.
+
+The grain is a function rather than a call site because the two things `V2-P4-061` and
+`V2-P4-083` did were **not** new `read_visible_at` call sites: `panel_ingest.py` has had exactly
+two of those since `V2-P4-027` and still has exactly two. What those issues added were new
+*reachers* of an existing private helper. An allowlist keyed on the syntactic call site would
+have stayed silent through both, so it would have been the same defect one level down. The
+closure below therefore follows intra-module calls, and a loader that newly routes through
+`_read_visible_price_session` has to be written down here.
+
+What the entry does not promise is inter-module reachability: the closure stops at the file, for
+the same reason the allowlist above it does -- a caller in another module cannot reach the method
+without importing a name from a file that is already on this list, and that import is the review.
+"""
+
+FILTERED_READ_CALLERS: frozenset[str] = frozenset(FILTERED_READ_REACHERS)
 """Every `src/` file allowed to call `read_visible_at`, relative to `src/openalpha_cn`.
+
+Derived from `FILTERED_READ_REACHERS` rather than restated, so the two tables cannot disagree
+about which files are granted -- the drift this module already carries three corrections for.
 
 The first entry is the factor engine -- the caller `V2-P3-002` added the method for. Its inputs
 are year partitions being read at a mid-year `as_of`, which `read_if_ready` refuses whole
@@ -104,10 +161,14 @@ refuses a partition whose newest row post-dates `as_of` rather than filtering it
 allowlisted module reads its foreign data at a *stricter* setting than the already-allowlisted
 one reads its own.
 
-**`V2-P4-026` moved one of those two, and only one.** `load_daily_valuations` now takes the
-filtered door through `panel_ingest._read_visible_price_session`; `load_industry_histories` does
-not and is not going to, for the reason the paragraph above gives. The fourth entry below is
-that grant, and this paragraph is the correction of the sentence above it.
+**`V2-P4-026` moved one of those two, and `V2-P4-061` then moved the price side wholesale.**
+`load_daily_valuations` was the first onto the filtered door through
+`panel_ingest._read_visible_price_session`, and `load_daily_bars` and `load_price_limits`
+followed it there -- the three price datasets are now read at one setting, which they have to be,
+because they are read together and a whole-partition refusal on any one of them refuses the
+cross section. `load_industry_histories` did not move and is not going to, for the reason the
+paragraph above gives. The fourth entry below is that grant, and this paragraph is the correction
+of the sentence above it.
 
 **`V2-P4-027` then falsified the second half of that sentence's *reason*, and this paragraph is
 that correction.** `load_industry_histories` is indeed still on the un-gated door and is staying
@@ -168,15 +229,21 @@ The un-filtered door was not an option: `read_if_ready` refuses a year partition
 health report run at any instant inside the year would have been unable to look at the plane at
 all -- which is the state `V2-P3-019` found and is fixing.
 
-**`panel_ingest.py` (`V2-P4-026`, widened by `V2-P4-027`) is the fourth, and its answer is the
-strongest of the four, because for this caller the question has a measured answer rather than an
-argued one.** It has **two** call sites, one per dataset, and each answers the objection with a
-different measurement -- which is the whole shape of this grant and the reason a single sentence
-cannot cover it.
+**`panel_ingest.py` (`V2-P4-026`, widened by `V2-P4-027`, `061`, `076` and `083`) is the fourth,
+and its answer is the strongest of the four, because for this caller the question has a measured
+answer rather than an argued one.** It has exactly **two** `read_visible_at` call sites and has
+had since `V2-P4-027` -- both of them private helpers -- and **eight** loaders reach them, across
+eleven datasets (`load_statement_histories` is one loader over the four in
+`FINANCIAL_STATEMENT_DATASETS`). Each helper answers the objection with a different
+measurement, which is the
+whole shape of this grant and the reason a single sentence cannot cover it; each loader answers
+it with its own dataset's clock, which is why they are enumerated in `FILTERED_READ_REACHERS`
+one by one and not covered by the file's name.
 
-The first is `_read_visible_price_session`, reached only from `load_daily_valuations`,
-and it always passes `filters={"trade_date": <one session>}`. It was the first caller in `src/`
-to pass `filters` at all, and that is the whole of why it is sound:
+The first is `_read_visible_price_session`, reached from `load_daily_bars`,
+`load_daily_valuations` and `load_price_limits` -- one per price dataset, all three since
+`V2-P4-061` -- and it always passes `filters={"trade_date": <one session>}`. It was the first
+caller in `src/` to pass `filters` at all, and that is the whole of why it is sound:
 `providers/tushare.py::_daily_close_timeline` dates every price row's `available_time` at
 `DAILY_AVAILABILITY_TIME` on its own `trade_date`, so one session's rows carry one availability
 instant, and `_build_visible_census_sql` takes the withheld count inside the caller's own
@@ -203,10 +270,39 @@ says exactly how many rows an `as_of` must see. The read counts the visible rows
 event date and refuses on any difference from the census, date by date -- an **equality**, not a
 pair of permitted shapes, and per date rather than per year, for `V2-P4-034`'s reason above.
 
-It had one caller, `load_industry_cross_section`, and since `V2-P4-076` it has four.
-**This module's allowlist is scoped to a file, so the three that were added did not have to
-answer the question above; the answer is written here anyway, per dataset, and
-`V2-P4-074` is the issue filed against the gap itself.**
+It had one caller, `load_industry_cross_section`; `V2-P4-076` took it to four and `V2-P4-083`
+to five.
+
+**`V2-P4-074` was that gap, and this is its fix rather than its description.** The allowlist
+above is scoped to a *file*, so none of those four had to answer the question this module
+exists to put -- `panel_ingest.py` was already granted, and a grant to a file is a grant to
+every function anyone writes in it. That is not what the sentence "adding a name here is a
+deliberate act with a review attached" describes. `FILTERED_READ_REACHERS` is now the
+finer-grained table and `test_every_function_that_reaches_the_filtered_read_is_named_one_by_one`
+is what makes it a gate; the per-dataset answers below were written before it existed and are
+kept, because the table names functions and the objection is about corpora.
+
+**The grain that closed it is the reacher and not the call site, which is a measured
+correction to how the row was filed.** `V2-P4-061` is described as having "added two
+`read_visible_at` callers". It added two *loaders* -- `load_daily_bars` and `load_price_limits`
+-- and no call site: `panel_ingest.py` had two `read_visible_at` calls before it and has two
+after. A call-site-granular allowlist, the first thing the row's acceptance line offers, would
+therefore have stayed **silent through `V2-P4-061` as well**, and would have been the same
+defect one level down. The audit follows intra-module calls for that reason. Running it also
+surfaced a third unreviewed reacher the row does not mention: `load_statement_histories`
+(`V2-P4-083`), whose entry is below.
+
+- **the four `FINANCIAL_STATEMENT_DATASETS`** (`load_statement_histories`, `V2-P4-083`).
+  `ClockStrategy.announcement` sets `event_time == available_time ==` midnight of the row's own
+  `ann_date`, exactly as `calendar_static` does for `stock_basic` and `namechange`, so the bound
+  is `_knowable_through_the_same_day` and the census equality is exact. Withheld against absent
+  has the same second answer `stock_basic` has, arrived at from the other side: this reader
+  already carries an explicit `answerable_through` rather than deriving one from its newest row,
+  so a short read answers **narrowly** -- every day inside the years it covered gets the answer a
+  reader standing on that day would have had -- rather than wrongly. That is the property
+  `load_adjustment_histories` lacks and why that one is still on the whole-partition door:
+  `compress_adjustment_batch` stores a step function, so a withheld row shortens a horizon the
+  census cannot rebuild per security (`V2-P4-079`).
 
 - **`index_member_all`** (`load_industry_cross_section`, `V2-P4-027`/`034`).
   `providers/tushare.py::_taxonomy_backfill_timeline` dates a row's availability at its own
@@ -296,6 +392,82 @@ def _calls(tree: ast.AST, name: str) -> bool:
     )
 
 
+def _defined_functions(tree: ast.AST) -> dict[str, ast.AST]:
+    """Every `def` in the module, nested and method alike, keyed by its **qualified** name.
+
+    Qualified -- `ClassName.method`, `outer.inner` -- rather than bare, because bare is a lossy
+    flattening and the loss would be silent. Measured while writing this: `panel_factors.py`
+    defines `__call__`, `as_of`, `coverage_census` and `values` more than once each, so a
+    dict keyed on the bare name would let one definition's callees stand in for another's, and
+    the closure could then miss a function that really reaches or admit one that does not.
+    """
+    found: dict[str, ast.AST] = {}
+
+    def walk(node: ast.AST, prefix: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
+                qualified = f"{prefix}{child.name}"
+                found[qualified] = child
+                walk(child, f"{qualified}.")
+            elif isinstance(child, ast.ClassDef):
+                walk(child, f"{prefix}{child.name}.")
+
+    walk(tree, "")
+    return found
+
+
+def _called_names(node: ast.AST) -> set[str]:
+    """Every name this function calls, whether through an attribute or bare.
+
+    Deliberately wider than `_calls`, which matches attribute access only. A private helper in
+    the same module is called bare (`_read_visible_price_session(...)`) and a method is called
+    through `self`, so a closure that looked at attribute access alone would follow the second
+    hop and not the first -- which is the hop `V2-P4-061` and `V2-P4-083` both took.
+    """
+    names: set[str] = set()
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Call):
+            func = sub.func
+            if isinstance(func, ast.Attribute):
+                names.add(func.attr)
+            elif isinstance(func, ast.Name):
+                names.add(func.id)
+    return names
+
+
+def _functions_reaching(tree: ast.AST, name: str) -> frozenset[str]:
+    """The transitive closure, within one module, of functions that reach `name`.
+
+    A function is in the set if it calls `name` itself or calls something already in the set.
+    `name` itself is never in the answer -- `read_visible_at` is defined in `panel/store.py`,
+    not in any module this runs over.
+
+    A call site carries a bare name (`_read_visible_price_session(...)`, `self._sealed_builds(...)`)
+    and an AST pass has no types with which to say which definition it means, so a bare name
+    resolves to **every** qualified definition ending in it. That is deliberately the
+    over-approximating direction: for an allowlist, resolving one name to two definitions names
+    an extra function in the table, while resolving it to the wrong one would drop a real
+    reacher and leave the grant silent -- which is the failure `V2-P4-074` is about.
+    """
+    definitions = _defined_functions(tree)
+    by_bare: dict[str, set[str]] = {}
+    for qualified in definitions:
+        by_bare.setdefault(qualified.rsplit(".", 1)[-1], set()).add(qualified)
+    calls = {fn: _called_names(node) for fn, node in definitions.items()}
+
+    reaching = {fn for fn, callees in calls.items() if name in callees}
+    while True:
+        grown = {
+            fn
+            for fn, callees in calls.items()
+            if fn not in reaching
+            and any(by_bare.get(callee, frozenset()) & reaching for callee in callees)
+        }
+        if not grown:
+            return frozenset(reaching)
+        reaching |= grown
+
+
 def _source_modules() -> list[Path]:
     return sorted(SOURCE.rglob("*.py"))
 
@@ -351,6 +523,76 @@ def test_only_the_allowlisted_modules_take_the_visibility_filtered_read() -> Non
         "can tell a withheld row from an absent one, add it to FILTERED_READ_CALLERS and say so "
         "in the diff"
     )
+
+
+def test_every_function_that_reaches_the_filtered_read_is_named_one_by_one() -> None:
+    """`V2-P4-074`: the grant is per function, so a second caller inside a granted file trips it.
+
+    This is the assertion the file-scoped allowlist above could not make. `V2-P4-061` added
+    `load_daily_bars` and `load_price_limits` onto `_read_visible_price_session` and `V2-P4-083`
+    added `load_statement_histories` onto `_read_visible_event_dated_rows`; `panel_ingest.py` was
+    already granted, so all three arrived without a line moving here -- in a file whose stated
+    purpose is that they cannot.
+
+    An **equality** rather than a subset check, in both directions and for two different reasons.
+    A new name that is not listed is the gap this row was filed against. A listed name that no
+    longer reaches is `test_the_allowlist_names_files_that_exist_and_actually_make_the_call`'s
+    reason one grain finer: a permission nobody revoked, sitting under whatever gets written at
+    that name next.
+    """
+    for name, declared in FILTERED_READ_REACHERS.items():
+        tree = ast.parse((SOURCE / name).read_text(encoding="utf-8"))
+        measured = _functions_reaching(tree, FILTERED_READ)
+
+        assert measured == declared, (
+            f"{name}: {sorted(measured - declared)} newly reach {FILTERED_READ}() and "
+            f"{sorted(declared - measured)} no longer do. Every function here hands back a "
+            "partition minus the rows that were not knowable at as_of. Add or remove the name "
+            "in FILTERED_READ_REACHERS and say in the diff what the new one does about "
+            "shortness -- whether it can tell a withheld row from an absent one"
+        )
+
+
+def test_the_closure_follows_the_hop_the_file_scoped_allowlist_missed() -> None:
+    """The sentinel for the test above, and it is not decorative.
+
+    `panel_ingest.py` has had exactly two `read_visible_at` call sites since `V2-P4-027`. If the
+    closure only looked at those, its answer would be `{_read_visible_price_session,
+    _read_visible_event_dated_rows}` -- a set the three loaders `V2-P4-061` and `V2-P4-083` added
+    do not appear in, so the equality above would pass on a tree with the defect still in it.
+    The measured gap between the two sets is what says the closure is doing the work.
+    """
+    tree = ast.parse((SOURCE / "panel_ingest.py").read_text(encoding="utf-8"))
+    direct = {
+        fn for fn, node in _defined_functions(tree).items() if FILTERED_READ in _called_names(node)
+    }
+
+    assert direct == {"_read_visible_price_session", "_read_visible_event_dated_rows"}
+    assert direct < _functions_reaching(tree, FILTERED_READ)
+    assert {"load_daily_bars", "load_price_limits", "load_statement_histories"} <= (
+        _functions_reaching(tree, FILTERED_READ) - direct
+    )
+
+
+def test_the_closure_keys_on_qualified_names_because_bare_ones_collide_here() -> None:
+    """The measurement behind `_defined_functions`' choice, kept because it is the reason.
+
+    The first draft of this audit keyed definitions on the bare name and asserted the modules
+    had no duplicates. They do: `panel_factors.py` defines `__call__`, `as_of`, `coverage_census`
+    and `values` more than once each, across different classes. A bare-keyed dict silently keeps
+    whichever it walked last, so one definition's callees would answer for another's. Nothing
+    reaching `read_visible_at` is currently behind a colliding name -- which is exactly why this
+    has to be checked rather than noticed.
+    """
+    factors = ast.parse((SOURCE / "panel_factors.py").read_text(encoding="utf-8"))
+    qualified = _defined_functions(factors)
+    bare = [name.rsplit(".", 1)[-1] for name in qualified]
+
+    assert len(qualified) > len(set(bare)), (
+        "panel_factors.py no longer defines any name twice, so the qualification this helper "
+        "does is currently buying nothing measurable; keep it, and narrow this test's claim"
+    )
+    assert {"__call__", "as_of"} <= {name for name in bare if bare.count(name) > 1}
 
 
 def test_the_allowlist_names_files_that_exist_and_actually_make_the_call() -> None:

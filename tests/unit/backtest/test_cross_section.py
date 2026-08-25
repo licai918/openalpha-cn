@@ -243,20 +243,27 @@ def test_the_shortlist_ceiling_is_the_batch_the_evidence_plane_will_accept() -> 
     batch cap moves, and `V2-P4-019` is the change it was written for -- it did fire, and this
     is the amended assertion.
 
-    **What changed, and what is deliberately left undone.** The two were equal at 1,000;
-    `V2-P4-019` raised `MAX_BATCH_ITEMS` to 10,000 so a whole market (5,545 listed on
-    2026-08-14, per that same issue's measurement) can be expressed at all. The property that
-    actually protects `run_cycle` -- a full-size shortlist is a batch that constructs -- is
-    unchanged and is still asserted below, now as `<=` rather than `==`, because
-    `MAXIMUM_SHORTLIST` at 1,000 is *inside* the batch cap and therefore safe.
+    **Held as an equality again since `V2-P4-031`, and the equality is the point.** The two
+    were equal at 1,000; `V2-P4-019` raised `MAX_BATCH_ITEMS` to 10,000 so a whole market
+    (5,545 listed on 2026-08-14, per that same issue's measurement) could be expressed at all,
+    was not permitted to touch `backtest/`, and left this side at 1,000 with the assertion
+    weakened to `<=`. That weaker form is true of every number from 1 to 10,000, so it stopped
+    being able to say the thing this test is named for -- the ceiling was no longer *restated*
+    from the batch, it merely did not exceed it, and the wall blocking a whole-market shortlist
+    had moved here without anything saying so.
 
-    What it is no longer is *sufficient*: a caller who wants to score the whole market and
-    hand all of it to the evidence plane is now blocked by this ceiling rather than by the
-    batch's. Raising `MAXIMUM_SHORTLIST` is a one-line change to
-    `src/openalpha_cn/backtest/cross_section.py` (`MAXIMUM_SHORTLIST: Final[int] = 1_000` and
-    the docstring that quotes `max_length=1000`), which `V2-P4-019` was not permitted to make
-    -- `backtest/` was owned by another agent while it ran -- so it is recorded here as the
-    follow-up rather than silently absorbed.
+    **Why 10,000 and not a smaller measured number.** The row asking for this warned against
+    copying the batch cap the way the cross section's *floor* cannot be copied -- `V2-P4-004`
+    measured `N >= 57` from the factory winsorization, so the lower bound is a fact about the
+    statistics rather than about the plane above. The upper bound is the opposite kind of
+    number, and the difference is measurable rather than argued: nothing in this module has a
+    view about how long a shortlist should be, and the run-time rule that does is not a
+    constant at all -- a `shortlist_size` at or above the tradeable count is answered with
+    `cut_exceeds_the_cross_section`, a named coverage code, not a refusal (`MINIMUM_SHORTLIST`
+    records the same reasoning for the floor). So the only thing this ceiling can honestly
+    say is "a batch the evidence plane will accept", and that is `MAX_BATCH_ITEMS` exactly.
+    Any smaller number would be this module inventing a limit it has no measurement for, and
+    would put the wall back where `V2-P4-031` found it.
     """
     request = ResearchRunRequest(
         run_id="run-0001",
@@ -277,7 +284,12 @@ def test_the_shortlist_ceiling_is_the_batch_the_evidence_plane_will_accept() -> 
         updated_at=AS_OF,
     )
     assert len(at_the_ceiling.items) == MAXIMUM_SHORTLIST
-    assert MAXIMUM_SHORTLIST <= MAX_BATCH_ITEMS
+    assert MAXIMUM_SHORTLIST == MAX_BATCH_ITEMS, (
+        f"MAXIMUM_SHORTLIST is {MAXIMUM_SHORTLIST} and MAX_BATCH_ITEMS is {MAX_BATCH_ITEMS}. "
+        "This ceiling is a restatement of the batch the evidence plane accepts, not a "
+        "judgement of its own, so the two move together or the shortlist face becomes the "
+        "wall (V2-P4-031)"
+    )
 
     # The batch's own ceiling still refuses one item past itself. Asserted against the
     # constant rather than a literal, so this half keeps testing the batch's edge wherever

@@ -656,7 +656,7 @@ REGISTRY_ENTRY_COUNTS: Final[dict[str, int]] = {
     "KNOWN_FACTOR_SEAL_LIMITATIONS": 3,
     "KNOWN_SUSPENSION_LIMITATIONS": 9,
     "KNOWN_UNIVERSE_LIMITATIONS": 7,
-    "KNOWN_STORAGE_LIMITATIONS": 5,
+    "KNOWN_STORAGE_LIMITATIONS": 6,
 }
 """How many entries each hand-written registry carries -- an equality, one registry per line.
 
