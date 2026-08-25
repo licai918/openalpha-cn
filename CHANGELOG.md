@@ -492,6 +492,45 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **A migration inserted at an already-used version number froze every database that had
+  crossed it, permanently and silently** (`V2-P5-026`). Measured on a **copy** of the user's own
+  `runtime/state.sqlite3` (the file itself never opened for writing): `user_version = 4`,
+  `schema_migrations` holding `[(1, baseline), (2, demo_add_runs_archived_at),
+  (3, demo_add_runs_archived_at), (4, create_query_path_indexes)]`, no `validation_results`
+  table, and `create_app(runtime_dir=…)` returning `4, 4, 4` across three starts. The cause is a
+  pair of commits six hours apart: `1e54104` shipped the registry with the demo migration at
+  version 2 and that database recorded it there, then `6eba39c` inserted
+  `create_validation_results` **at version 2** and renumbered the demo migration 2 -> 3.
+  `_pending()` filters on `version > user_version` alone, so version 2 sat below the watermark
+  forever, `validation_results` was never created, and `rewrite_contract_identities` -- which is
+  `require_table`-bound to it -- deferred on every process start with no error and no
+  terminating condition. This is the same database whose deferral `V2-P4-111` measured as 125
+  identical backups; that row stopped the backups, this one starts the chain.
+  **Three readings of the symptom were falsified by measurement.** The duplicate is not a
+  constraint failure: `schema_migrations.version` is a PRIMARY KEY and held perfectly -- what
+  repeats is a *name*, at two versions, because the same migration genuinely ran twice under two
+  numbers. The counter and the audit trail do not disagree with each other either: they agree
+  exactly, at a contiguous 1-4; what disagrees is the trail's **names** and the current
+  registry's names for the same numbers, visible only by comparing against the registry. And it
+  is not a one-off: dropping `validation_results` from a healthy database reaches the identical
+  state, which is now a `CliRunner` test.
+  **The repair inspects the schema and invents nothing.** `Migration` gains an `effect_present`
+  predicate restricted to `sqlite_master` / `PRAGMA table_xinfo` -- never either counter, since
+  those two are precisely what cannot be trusted in this state -- and `run_migrations` runs a
+  reconciliation pass before the pending loop: effect absent, run it and record `applied`;
+  effect present, record `verified` and run nothing; **no predicate, stop and report**, because
+  re-running an identity rewrite can corrupt records and recording it unchecked fabricates the
+  history this engine exists to keep. `PRAGMA user_version` is never written by a repair (the
+  version is already passed) and **not one row of `schema_migrations` is deleted or rewritten**
+  -- the stale row is a true statement about an older registry, and `version` being that table's
+  PRIMARY KEY makes correcting it in place impossible anyway, which is why repairs land in a
+  companion `schema_repairs` ledger instead. `openalpha migrate status` reports both, in text
+  and `--json`; `migrate run` says what it repaired. The user's database goes `4 -> 8` on its
+  first start and stays there, and a fresh database's sequence is unchanged (`2`, then `8`, then
+  stable). `test_no_shipped_migration_may_be_renumbered_or_renamed` freezes the version-to-name
+  map so this cannot recur -- the existing "unique and increasing" guard was fully green on the
+  day it happened, because uniqueness is a property of one snapshot and a number's *meaning* is a
+  property held across releases by databases already on disk.
 - **The tradable tier named nothing -- not the rule, not the security** (`V2-P4-066`). A
   whole-market screen answered `5545 listed -> 5542 scored -> 5533 tradeable` and `measured
   tradable=0.9978`, and the words `halted`, `below_board_minimum` and `up_limit` appeared nowhere

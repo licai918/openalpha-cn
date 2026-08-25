@@ -210,6 +210,7 @@ from openalpha_cn.shortlist_view import (
 )
 from openalpha_cn.storage.factor_experiments import ExperimentStoreError, FileExperimentStore
 from openalpha_cn.storage.migrations import (
+    REPAIR_APPLIED,
     MigrationFailedError,
     UnmigratableHorizonError,
     read_status,
@@ -831,7 +832,16 @@ def migrate_status(
         typer.Option("--json", help="Emit a machine-readable status report."),
     ] = False,
 ) -> None:
-    """Show the current schema version and applied/pending migrations."""
+    """Show the current schema version and applied/pending migrations.
+
+    Also reports the two things `V2-P5-026` made visible, both empty on a healthy database:
+    `repaired` lines for versions the counter had skipped and reconciliation has since resolved
+    (`applied` = its effect was missing and was created, `verified` = its effect was already
+    there), and `unrecorded` lines for a version `PRAGMA user_version` claims is behind us that
+    `schema_migrations` has never named and that no schema inspection can settle. An
+    `unrecorded` line is the only shape that needs a person: it means a data-rewrite migration
+    was skipped, and neither re-running it nor recording it would be honest.
+    """
     status = read_status(runtime_dir / "state.sqlite3")
     if json_output:
         payload = {
@@ -842,6 +852,18 @@ def migrate_status(
                 for item in status.applied
             ],
             "pending": [{"version": item.version, "name": item.name} for item in status.pending],
+            "repaired": [
+                {
+                    "version": item.version,
+                    "name": item.name,
+                    "resolution": item.resolution,
+                    "repaired_at": item.repaired_at,
+                }
+                for item in status.repairs
+            ],
+            "unrecorded": [
+                {"version": item.version, "name": item.name} for item in status.unrecorded
+            ],
         }
         typer.echo(json.dumps(payload, ensure_ascii=False, sort_keys=True))
         return
@@ -850,8 +872,19 @@ def migrate_status(
         typer.echo(
             f"applied  {applied_item.version} {applied_item.name} at {applied_item.applied_at}"
         )
+    for repaired_item in status.repairs:
+        typer.echo(
+            f"repaired {repaired_item.version} {repaired_item.name} "
+            f"({repaired_item.resolution}) at {repaired_item.repaired_at}"
+        )
     for pending_item in status.pending:
         typer.echo(f"pending  {pending_item.version} {pending_item.name}")
+    for unrecorded_item in status.unrecorded:
+        typer.echo(
+            f"unrecorded {unrecorded_item.version} {unrecorded_item.name} "
+            "(schema version is past it but nothing recorded it, and its effect cannot be "
+            "established by inspecting the schema)"
+        )
 
 
 @migrate_app.command("run")
@@ -905,7 +938,20 @@ def migrate_run(
         raise typer.Exit(code=1) from error
     result = storage.migration_result
     status = read_status(path)
-    if not result.applied and not status.pending:
+    for repair in result.repairs:
+        # Printed before the migrated/pending lines because it is what made them possible: on
+        # a database whose version numbers were reassigned by a registry reordering, the
+        # skipped migration's effect is the precondition everything above it was waiting on.
+        outcome = (
+            "its effect was missing and has been created"
+            if repair.resolution == REPAIR_APPLIED
+            else "its effect was already present, so nothing was re-run"
+        )
+        typer.echo(
+            f"repaired {repair.version} {repair.name}: schema version was already past it and "
+            f"nothing had recorded it; {outcome}"
+        )
+    if not result.applied and not result.repairs and not status.pending:
         typer.echo(f"schema version {result.to_version} is up to date; nothing to do")
         return
     if result.applied:
@@ -925,6 +971,20 @@ def migrate_run(
         )
         for pending_item in status.pending:
             typer.echo(f"  {pending_item.version} {pending_item.name}")
+    if status.unrecorded:
+        # The one shape reconciliation deliberately refuses to resolve on its own, surfaced
+        # here rather than left in a log line nobody reads. Both available guesses are wrong:
+        # re-running a data rewrite that may already have run can corrupt records, and
+        # recording it unchecked fabricates the very history this engine exists to keep.
+        typer.echo(
+            f"{len(status.unrecorded)} migration(s) are below schema version "
+            f"{status.current_version} but were never recorded, and their effect cannot be "
+            "established by inspecting the schema (they rewrite data, not shape). Restore the "
+            "pre-migration backup under `runtime/backups/` if these records matter, or accept "
+            "the gap knowingly:"
+        )
+        for unrecorded_item in status.unrecorded:
+            typer.echo(f"  {unrecorded_item.version} {unrecorded_item.name}")
 
 
 @migrate_app.command("prune-backups")

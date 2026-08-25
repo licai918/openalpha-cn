@@ -72,6 +72,7 @@ from openalpha_cn.storage.batch import (
 )
 from openalpha_cn.storage.sqlite import (
     RUNS_MODE_COLUMN,
+    RUNS_MODE_INDEX_NAME,
     RUNS_MODE_PAYLOAD_PATH,
     RUNS_TABLE,
     ensure_runs_mode_projection,
@@ -85,6 +86,40 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
     name TEXT NOT NULL,
     applied_at TEXT NOT NULL
 )
+"""
+
+SCHEMA_REPAIRS_TABLE = "schema_repairs"
+"""Companion ledger to `schema_migrations`, written only by `_reconcile` (`V2-P5-026`).
+
+Separate table rather than more rows in `schema_migrations`, and that is forced rather than
+chosen: `schema_migrations.version` is a PRIMARY KEY, so a database that recorded version 2 as
+`demo_add_runs_archived_at` under an older registry **cannot** also record version 2 as
+`create_validation_results`, which is what the current registry calls it. The audit trail's own
+schema encodes the assumption the renumbering broke -- that a version number means one thing
+forever -- and the honest response is not to overwrite a true row but to record the repair
+beside it. Nothing here ever deletes or rewrites a `schema_migrations` row.
+"""
+
+_SCHEMA_REPAIRS_DDL = f"""
+CREATE TABLE IF NOT EXISTS {SCHEMA_REPAIRS_TABLE} (
+    version INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    resolution TEXT NOT NULL,
+    repaired_at TEXT NOT NULL,
+    PRIMARY KEY (version, name)
+)
+"""
+
+REPAIR_APPLIED = "applied"
+"""The migration's effect was **absent** from the schema, so its `apply()` was run for real."""
+
+REPAIR_VERIFIED = "verified"
+"""The migration's effect was **already present** in the schema, so nothing was run.
+
+The distinction is the whole point of recording a resolution rather than a bare row: `applied`
+says work happened, `verified` says the database was already correct and only the audit trail
+was short. Neither claims the migration ran at its own version, which is the fabrication a
+plain `INSERT INTO schema_migrations` would have committed.
 """
 
 
@@ -126,6 +161,24 @@ class Migration:
     version: int
     name: str
     apply: Callable[[sqlite3.Connection], None]
+    effect_present: Callable[[sqlite3.Connection], bool] | None = None
+    """Does this migration's effect already exist in the schema? Inspect, never infer.
+
+    Answers the one question `PRAGMA user_version` and `schema_migrations` between them
+    cannot: *is the thing this migration was supposed to create actually there*. It must
+    decide from `sqlite_master` / `PRAGMA table_info` alone -- never from the version
+    counter, never from the audit trail, since a database needs this predicate precisely
+    when those two have stopped agreeing about what a version number means.
+
+    `None` means "not decidable by inspecting the schema", and it is the correct value for
+    every migration whose effect is a **data** rewrite: `split_batch_task_items` moves rows
+    into a table `SQLiteBatchTaskStore`'s constructor also creates, so that table's presence
+    proves nothing at all about the migration, and `rewrite_contract_identities` /
+    `rewrite_manifest_component_planes` change payload bytes that leave no schema-level trace.
+    `_reconcile` never repairs a `None`, because the only two honest answers it could give --
+    re-run an identity rewrite that may already have run, or record it as done without
+    checking -- are both worse than stopping and saying so.
+    """
 
 
 @dataclass(frozen=True)
@@ -138,6 +191,20 @@ class AppliedMigration:
 
 
 @dataclass(frozen=True)
+class SchemaRepair:
+    """One row of the `schema_repairs` ledger: a version the counter skipped, and its outcome.
+
+    `resolution` is `REPAIR_APPLIED` or `REPAIR_VERIFIED`. `repaired_at` is when the repair
+    was performed -- not a back-dated guess at when the migration "should have" run.
+    """
+
+    version: int
+    name: str
+    resolution: str
+    repaired_at: str
+
+
+@dataclass(frozen=True)
 class MigrationStatus:
     """A read-only snapshot of a database's migration state."""
 
@@ -145,6 +212,14 @@ class MigrationStatus:
     current_version: int
     applied: tuple[AppliedMigration, ...]
     pending: tuple[Migration, ...]
+    repairs: tuple[SchemaRepair, ...] = ()
+    """Rows of `schema_repairs`: versions the counter skipped, and what was done about them."""
+    unrecorded: tuple[Migration, ...] = ()
+    """Migrations at or below `current_version` that the audit trail does not name and that no
+    repair row covers -- i.e. versions `PRAGMA user_version` claims are behind us while
+    `schema_migrations` has never heard of them. Empty on every healthy database. A non-empty
+    entry with `effect_present is None` is the one shape `run_migrations` cannot resolve on its
+    own and reports instead; see `_reconcile`."""
 
 
 @dataclass(frozen=True)
@@ -156,6 +231,10 @@ class MigrationRunResult:
     to_version: int
     applied: tuple[AppliedMigration, ...]
     backup_path: Path | None
+    repairs: tuple[SchemaRepair, ...] = ()
+    """What the reconciliation pass did before the pending loop ran. Empty on every database
+    whose version counter and audit trail agree, which is every database that has only ever
+    been migrated by one registry generation."""
 
 
 def _table_exists(connection: sqlite3.Connection, name: str) -> bool:
@@ -164,6 +243,32 @@ def _table_exists(connection: sqlite3.Connection, name: str) -> bool:
         (name,),
     ).fetchone()
     return row is not None
+
+
+def _index_exists(connection: sqlite3.Connection, name: str) -> bool:
+    row = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
+        (name,),
+    ).fetchone()
+    return row is not None
+
+
+def _column_exists(connection: sqlite3.Connection, table: str, column: str) -> bool:
+    """`PRAGMA table_xinfo`, not `table_info` -- the difference decides a predicate here.
+
+    `table_info` omits **generated** columns, and `runs.mode` is exactly that: a
+    `GENERATED ALWAYS AS ... VIRTUAL` projection of `runs.payload` (see
+    `storage/sqlite.py::RUNS_MODE_COLUMN_DDL`). Written against `table_info` this function
+    answers `False` for `mode` on every database that has it, so
+    `_runs_mode_projection_effect_present` could never report anything but "absent" and every
+    repair of it would re-run DDL and record `REPAIR_APPLIED` about a column that was already
+    there -- a predicate that inspects the schema and still gets the answer wrong, which is the
+    one failure this whole mechanism cannot tolerate. `table_xinfo` lists generated and hidden
+    columns alongside ordinary ones, with the name in the same position.
+    """
+    if not _table_exists(connection, table):
+        return False
+    return any(row[1] == column for row in connection.execute(f"PRAGMA table_xinfo({table})"))
 
 
 def require_table(connection: sqlite3.Connection, name: str) -> None:
@@ -195,6 +300,17 @@ def _baseline_apply(connection: sqlite3.Connection) -> None:
     completely empty, there is nothing for this migration to do beyond being recorded:
     both land on `BASELINE_VERSION`.
     """
+
+
+def _baseline_effect_present(connection: sqlite3.Connection) -> bool:
+    """Always true: `_baseline_apply` writes nothing, so there is nothing that could be absent.
+
+    Declared rather than left `None` because `None` means "unknowable", and this one is
+    knowable -- trivially, for a stated reason. A migration whose effect is the empty set is
+    always already applied.
+    """
+    del connection
+    return True
 
 
 def _create_validation_results_table(connection: sqlite3.Connection) -> None:
@@ -256,6 +372,19 @@ def _create_validation_results_table(connection: sqlite3.Connection) -> None:
     )
 
 
+def _validation_results_effect_present(connection: sqlite3.Connection) -> bool:
+    """The `validation_results` table exists.
+
+    Nothing else in this package creates it -- `storage/validation.py#SQLiteValidationStore`
+    deliberately does not (see the migration's docstring above) -- so its presence is proof
+    that *this* migration ran and its absence is proof that it did not. That exclusivity is
+    what makes this the one predicate in the registry that can be trusted absolutely; the
+    others answer "the schema element is there", this one also answers "and only this
+    migration could have put it there".
+    """
+    return _table_exists(connection, "validation_results")
+
+
 def _create_query_path_indexes(connection: sqlite3.Connection) -> None:
     """Add the three query-path indexes Finding F69 flagged as missing (V2-P0B-015 / task 21).
 
@@ -302,6 +431,25 @@ def _create_query_path_indexes(connection: sqlite3.Connection) -> None:
     )
 
 
+def _query_path_indexes_effect_present(connection: sqlite3.Connection) -> bool:
+    """All three indexes exist. All three, not any -- the migration is one unit.
+
+    Same reasoning as the `require_table` triple above: `schema_migrations` has no
+    per-index-within-a-migration granularity, so a database holding two of the three is not
+    "applied", it is half-applied and needs the third. Answering `True` there would leave the
+    missing index missing forever. Re-running is safe: every statement is
+    `CREATE INDEX IF NOT EXISTS`.
+    """
+    return all(
+        _index_exists(connection, name)
+        for name in (
+            "checkpoints_run_id_idx",
+            "portfolio_transitions_subject_idx",
+            "research_reports_subject_idx",
+        )
+    )
+
+
 def _demo_add_runs_archived_at(connection: sqlite3.Connection) -> None:
     """Demonstration migration (V2-P0B-004's acceptance proof): add `runs.archived_at`.
 
@@ -322,6 +470,17 @@ def _demo_add_runs_archived_at(connection: sqlite3.Connection) -> None:
     if "archived_at" in columns:
         return
     connection.execute("ALTER TABLE runs ADD COLUMN archived_at TEXT")
+
+
+def _runs_archived_at_effect_present(connection: sqlite3.Connection) -> bool:
+    """`runs.archived_at` exists. False when `runs` itself does not, which is the honest answer.
+
+    "The column is not there" is exactly right for a database whose `runs` table has not been
+    created yet -- and `_reconcile` handles the consequence correctly, because re-running
+    `apply()` in that state raises `MigrationNotYetApplicable` through `require_table` and the
+    repair defers like any other unmet precondition rather than failing.
+    """
+    return _column_exists(connection, "runs", "archived_at")
 
 
 class UnmigratableHorizonError(ValueError):
@@ -837,6 +996,22 @@ def _add_runs_mode_projection(connection: sqlite3.Connection) -> None:
     _audit_runs_mode_projection(connection)
 
 
+def _runs_mode_projection_effect_present(connection: sqlite3.Connection) -> bool:
+    """`runs.mode` and its index exist -- and for this migration that is the whole effect.
+
+    A `GENERATED ALWAYS AS ... VIRTUAL` column holds no copy of anything: SQLite recomputes it
+    from `payload` on every read. So unlike the data rewrites (which get `None`), there is no
+    second question here about whether the *values* are current -- there are no stored values.
+    Column plus index present means the query path exists and is correct by construction.
+
+    Both, not either: `ensure_runs_mode_projection` establishes the pair, and a database with
+    the column but not the index still pays the scan Finding F70 was about.
+    """
+    return _column_exists(connection, RUNS_TABLE, RUNS_MODE_COLUMN) and _index_exists(
+        connection, RUNS_MODE_INDEX_NAME
+    )
+
+
 class BatchItemSplitError(ValueError):
     """A stored batch did not survive being split into a header and its item rows.
 
@@ -1111,22 +1286,33 @@ SPLIT_BATCH_TASK_ITEMS_VERSION = 7
 REWRITE_MANIFEST_COMPONENT_PLANES_VERSION = 8
 
 MIGRATIONS: tuple[Migration, ...] = (
-    Migration(version=BASELINE_VERSION, name="baseline", apply=_baseline_apply),
+    Migration(
+        version=BASELINE_VERSION,
+        name="baseline",
+        apply=_baseline_apply,
+        effect_present=_baseline_effect_present,
+    ),
     Migration(
         version=CREATE_VALIDATION_RESULTS_VERSION,
         name="create_validation_results",
         apply=_create_validation_results_table,
+        effect_present=_validation_results_effect_present,
     ),
     Migration(
         version=DEMO_ADD_RUNS_ARCHIVED_AT_VERSION,
         name="demo_add_runs_archived_at",
         apply=_demo_add_runs_archived_at,
+        effect_present=_runs_archived_at_effect_present,
     ),
     Migration(
         version=CREATE_QUERY_PATH_INDEXES_VERSION,
         name="create_query_path_indexes",
         apply=_create_query_path_indexes,
+        effect_present=_query_path_indexes_effect_present,
     ),
+    # The three data rewrites below carry no `effect_present` on purpose -- see that field's
+    # docstring. Their effect is payload bytes and row placement, which `sqlite_master` cannot
+    # see, so the only inspection-based answer available would be a guess.
     Migration(
         version=REWRITE_CONTRACT_IDENTITIES_VERSION,
         name="rewrite_contract_identities",
@@ -1136,6 +1322,7 @@ MIGRATIONS: tuple[Migration, ...] = (
         version=ADD_RUNS_MODE_PROJECTION_VERSION,
         name="add_runs_mode_projection",
         apply=_add_runs_mode_projection,
+        effect_present=_runs_mode_projection_effect_present,
     ),
     Migration(
         version=SPLIT_BATCH_TASK_ITEMS_VERSION,
@@ -1158,6 +1345,178 @@ def _current_version(connection: sqlite3.Connection) -> int:
 def _pending(current_version: int, migrations: Sequence[Migration]) -> tuple[Migration, ...]:
     ordered = sorted(migrations, key=lambda migration: migration.version)
     return tuple(migration for migration in ordered if migration.version > current_version)
+
+
+def _recorded_names(connection: sqlite3.Connection) -> frozenset[str]:
+    """Every migration **name** the audit trail holds, at whatever version it holds it.
+
+    Keyed on name, not version, and that is the correction this whole feature turns on. A
+    version number is a position in one particular registry generation and stops meaning what
+    it meant the moment a migration is inserted below the head; a name is the migration's
+    identity and survives renumbering. Asking "does `schema_migrations` name
+    `create_validation_results` anywhere" gets a stable answer where asking "what is at
+    version 2" gets a stale one.
+    """
+    if not _table_exists(connection, "schema_migrations"):
+        return frozenset()
+    return frozenset(row[0] for row in connection.execute("SELECT name FROM schema_migrations"))
+
+
+def _repaired_names(connection: sqlite3.Connection) -> frozenset[str]:
+    if not _table_exists(connection, SCHEMA_REPAIRS_TABLE):
+        return frozenset()
+    return frozenset(
+        row[0] for row in connection.execute(f"SELECT name FROM {SCHEMA_REPAIRS_TABLE}")
+    )
+
+
+def _unrecorded(
+    connection: sqlite3.Connection, migrations: Sequence[Migration]
+) -> tuple[Migration, ...]:
+    """Migrations the version counter has already passed that nothing has ever recorded.
+
+    The intersection of two facts that should never both hold: `PRAGMA user_version` says the
+    database is at or beyond this migration's version, and neither `schema_migrations` nor
+    `schema_repairs` names it. On every database migrated by a single registry generation this
+    is empty, because the executor writes the audit row and the version bump in one
+    transaction. It becomes non-empty exactly when a migration is *inserted* at a version
+    number some database has already crossed -- the `create_validation_results` reordering
+    (`6eba39c`, which added it at 2 and renumbered `demo_add_runs_archived_at` 2 -> 3) being
+    the one instance this repository has actually shipped.
+
+    Note this is not "the counter and the trail disagree with each other". On the real stuck
+    database they agree perfectly: `user_version` is 4 and the trail holds exactly versions
+    1-4, contiguous. What disagrees is the trail's *names* and the current registry's names for
+    the same numbers, and that is only visible by comparing against the registry -- which is
+    why this takes `migrations` rather than reading the database alone.
+    """
+    current_version = _current_version(connection)
+    known = _recorded_names(connection) | _repaired_names(connection)
+    ordered = sorted(migrations, key=lambda migration: migration.version)
+    return tuple(
+        migration
+        for migration in ordered
+        if migration.version <= current_version and migration.name not in known
+    )
+
+
+def _reconcile(
+    connection: sqlite3.Connection,
+    migrations: Sequence[Migration],
+    *,
+    clock: Callable[[], datetime],
+    backup_path: Path | None,
+) -> tuple[SchemaRepair, ...]:
+    """Resolve every skipped version whose effect the schema can be asked about (`V2-P5-026`).
+
+    For each migration `_unrecorded` reports, in version order, inside its own
+    `BEGIN IMMEDIATE`/`COMMIT` exactly like the pending loop:
+
+    * `effect_present()` is **True** -- the database already has what this migration makes.
+      Nothing runs; a `REPAIR_VERIFIED` row records that it was checked and found present.
+    * `effect_present()` is **False** -- run `apply()` for real, then record `REPAIR_APPLIED`.
+      This is the only path that unsticks the real database: `validation_results` genuinely
+      does not exist there, so the table really is created, and `rewrite_contract_identities`
+      can satisfy its precondition on the very next statement of the same call.
+    * `effect_present` is **None** -- stop. Not decidable by inspection (a data rewrite), and
+      the two available guesses are "re-run an identity rewrite that may already have run" and
+      "record it as done without looking", both worse than the stall they would be curing.
+      It stays in `MigrationStatus.unrecorded` for an operator to read.
+
+    **`PRAGMA user_version` is never written here.** A repaired migration is by definition
+    below the watermark; moving the counter is what "forward-only" forbids, and there is
+    nothing to move it to -- the version is already passed. The counter's meaning is unchanged
+    by a repair, which is precisely why the repair has to be recorded somewhere else to be
+    visible at all.
+
+    Stop-not-skip on `MigrationNotYetApplicable`, matching the pending loop. A gap whose table
+    does not exist yet is the ordinary deferral, and the next `build_storage()` call (which
+    constructs the stores in between) resolves it. Stopping rather than skipping also keeps the
+    gaps in version order relative to each other, which matters for the same reason it matters
+    in the main loop: they are a chain, not an unordered set.
+
+    Idempotent by construction: a resolved migration's name lands in `schema_repairs` and
+    `_unrecorded` never returns it again, so a second call finds no work and writes nothing.
+
+    Concurrency, the same shape the pending loop already handles: `_unrecorded` is a snapshot
+    taken before any lock is held, so two callers racing the same database (the API and the CLI
+    against one `runtime_dir`) can both decide the same migration needs repairing. Each
+    iteration therefore re-reads `schema_repairs` *after* acquiring the write lock and skips a
+    name a winner has already recorded, rather than re-evaluating the predicate against the
+    winner's finished work and colliding on the ledger's primary key.
+    """
+    repairs: list[SchemaRepair] = []
+    for migration in _unrecorded(connection, migrations):
+        if migration.effect_present is None:
+            logger.warning(
+                "migration_repair_undecidable",
+                extra={"migration_version": migration.version, "migration_name": migration.name},
+            )
+            break
+        connection.execute("BEGIN IMMEDIATE")
+        if migration.name in _repaired_names(connection):
+            # A concurrent writer repaired this exact migration while this connection was
+            # blocked waiting for the write lock -- the same lost race the pending loop
+            # guards against, arriving through a different ledger. Without this re-check the
+            # loser would re-evaluate the predicate (now `True`, since the winner created the
+            # effect) and then collide on `schema_repairs`' `(version, name)` primary key,
+            # surfacing a real `sqlite3.IntegrityError` as `MigrationFailedError` about a
+            # database that is in fact healthy and already repaired.
+            connection.execute("ROLLBACK")
+            continue
+        try:
+            present = migration.effect_present(connection)
+            if not present:
+                migration.apply(connection)
+            resolution = REPAIR_VERIFIED if present else REPAIR_APPLIED
+            repaired_at = clock().isoformat()
+            connection.execute(_SCHEMA_REPAIRS_DDL)
+            connection.execute(
+                f"INSERT INTO {SCHEMA_REPAIRS_TABLE} "
+                "(version, name, resolution, repaired_at) VALUES (?, ?, ?, ?)",
+                (migration.version, migration.name, resolution, repaired_at),
+            )
+        except MigrationNotYetApplicable:
+            connection.execute("ROLLBACK")
+            break
+        except Exception as error:
+            connection.execute("ROLLBACK")
+            # Same discipline as the pending loop: never `str(error)` from arbitrary
+            # migration code -- see `logging_setup.py`'s module-level note.
+            logger.error(
+                "migration_repair_failed",
+                extra={
+                    "migration_version": migration.version,
+                    "migration_name": migration.name,
+                    "backup_path": str(backup_path),
+                },
+            )
+            raise MigrationFailedError(
+                f"repair of migration {migration.version} ({migration.name}) failed and was "
+                "rolled back",
+                version=migration.version,
+                name=migration.name,
+                backup_path=backup_path,
+            ) from error
+        else:
+            connection.execute("COMMIT")
+            repairs.append(
+                SchemaRepair(
+                    version=migration.version,
+                    name=migration.name,
+                    resolution=resolution,
+                    repaired_at=repaired_at,
+                )
+            )
+            logger.info(
+                "migration_repaired",
+                extra={
+                    "migration_version": migration.version,
+                    "migration_name": migration.name,
+                    "resolution": resolution,
+                },
+            )
+    return tuple(repairs)
 
 
 def _take_backup(path: Path, *, current_version: int, clock: Callable[[], datetime]) -> Path:
@@ -1222,11 +1581,28 @@ def read_status(path: Path, *, migrations: Sequence[Migration] = MIGRATIONS) -> 
         applied = tuple(
             AppliedMigration(version=row[0], name=row[1], applied_at=row[2]) for row in rows
         )
+        if _table_exists(connection, SCHEMA_REPAIRS_TABLE):
+            repair_rows = connection.execute(
+                f"SELECT version, name, resolution, repaired_at FROM {SCHEMA_REPAIRS_TABLE} "
+                "ORDER BY version"
+            ).fetchall()
+        else:
+            repair_rows = []
+        repairs = tuple(
+            SchemaRepair(version=row[0], name=row[1], resolution=row[2], repaired_at=row[3])
+            for row in repair_rows
+        )
+        unrecorded = _unrecorded(connection, migrations)
     finally:
         connection.close()
     pending = _pending(current_version, migrations)
     return MigrationStatus(
-        path=path, current_version=current_version, applied=applied, pending=pending
+        path=path,
+        current_version=current_version,
+        applied=applied,
+        pending=pending,
+        repairs=repairs,
+        unrecorded=unrecorded,
     )
 
 
@@ -1239,7 +1615,8 @@ def run_migrations(
     """Apply every pending migration, in order, each in its own transaction.
 
     Forward-only and idempotent: already-applied versions (per `PRAGMA user_version`) are
-    never reconsidered. If nothing is pending, this is a fast no-op that opens no write
+    never reconsidered. If nothing is pending **and nothing was skipped** (see the
+    reconciliation paragraph below), this is a fast no-op that opens no write
     transaction and takes no backup. Otherwise, backs up `path` once before applying
     anything, then applies each pending migration inside `BEGIN IMMEDIATE` / `COMMIT`: the
     migration's own DDL/DML, the `schema_migrations` audit row, and the `PRAGMA
@@ -1248,6 +1625,31 @@ def run_migrations(
     re-raised as `MigrationFailedError` naming the pre-migration backup. A migration that
     raises `MigrationNotYetApplicable` stops the run (without error) and leaves it, and
     everything after it, pending.
+
+    **Reconciliation runs before the pending loop** (`V2-P5-026`). "Already applied per
+    `PRAGMA user_version`" is a sound rule only while a version number keeps meaning the same
+    migration for the life of a database, and this repository has already shipped one change
+    that broke that: `6eba39c` inserted `create_validation_results` at version 2 and renumbered
+    `demo_add_runs_archived_at` 2 -> 3. A database that had already crossed version 2 under the
+    old numbering therefore has `create_validation_results` permanently below its watermark and
+    never applies it -- and `rewrite_contract_identities` is `require_table`-bound to the table
+    it would have created, so that database defers at version 5 on **every process start,
+    forever**, with no error and no terminating condition. That is not hypothetical: it is the
+    user's own `state.sqlite3`, at `user_version = 4` since 2026-08-08, and it is the same
+    database whose permanently-deferring migration `V2-P4-111` measured as 125 identical
+    backups.
+
+    `_reconcile` fixes that without inventing history. It asks each skipped migration's
+    `effect_present` predicate whether the thing it makes is *in the schema right now* --
+    `sqlite_master`, not the counter and not the audit trail, because those two are exactly
+    what cannot be trusted in this state -- applies it only when the answer is no, and records
+    what it did in `schema_repairs`. It never writes `PRAGMA user_version` (the version is
+    already passed; there is nothing forward to move to) and never deletes or rewrites a
+    `schema_migrations` row (the stale row is a true statement about an older registry, and
+    `version` being that table's PRIMARY KEY makes correcting it in place impossible anyway).
+    A migration with no predicate is reported, not guessed at. On a database that has only ever
+    seen one registry generation this pass finds nothing and changes nothing, which is why the
+    fresh-install sequence above is unaffected.
 
     **A run that applied nothing removes the backup it took** (`V2-P4-111`). The copy has to be
     taken before the loop, because a migration announces an unmet precondition by raising from
@@ -1281,19 +1683,22 @@ def run_migrations(
         connection.execute(_SCHEMA_MIGRATIONS_DDL)
         from_version = _current_version(connection)
         pending = _pending(from_version, migrations)
-        if not pending:
+        unrecorded = _unrecorded(connection, migrations)
+        if not pending and not unrecorded:
             return MigrationRunResult(
                 path=path,
                 from_version=from_version,
                 to_version=from_version,
                 applied=(),
                 backup_path=None,
+                repairs=(),
             )
         backup_path: Path | None = _take_backup(path, current_version=from_version, clock=clock)
         logger.info(
             "migration_backup_created",
             extra={"backup_path": str(backup_path), "from_version": from_version},
         )
+        repairs = _reconcile(connection, migrations, clock=clock, backup_path=backup_path)
         applied: list[AppliedMigration] = []
         for migration in pending:
             connection.execute("BEGIN IMMEDIATE")
@@ -1350,7 +1755,7 @@ def run_migrations(
                         "migration_name": migration.name,
                     },
                 )
-        if not applied and backup_path is not None:
+        if not applied and not repairs and backup_path is not None:
             # `V2-P4-111`. The backup still happens before the loop, because that is the only
             # place it can happen and still predate a write: a migration announces that its
             # precondition is unmet by raising from inside `apply()`, so there is no way to know
@@ -1377,6 +1782,7 @@ def run_migrations(
             to_version=to_version,
             applied=tuple(applied),
             backup_path=backup_path,
+            repairs=repairs,
         )
     finally:
         connection.close()
