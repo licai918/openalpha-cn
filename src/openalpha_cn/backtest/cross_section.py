@@ -430,18 +430,48 @@ too high on a thin cross section, too low on a whole-market one, and never the m
 so in the same words.
 """
 
-MAXIMUM_SHORTLIST: Final[int] = 1_000
+MAXIMUM_SHORTLIST: Final[int] = 10_000
 """The ceiling under the same field, restated from the evidence plane rather than chosen.
 
-`batch_contracts.BatchResearchTask.items` is `Field(min_length=1, max_length=1000)`, so a batch
-of more than a thousand `ResearchRunRequest`s does not construct -- which makes a shortlist
+`batch_contracts.BatchResearchTask.items` is `Field(min_length=1, max_length=10000)`, so a batch
+of more than ten thousand `ResearchRunRequest`s does not construct -- which makes a shortlist
 longer than that one the second stage cannot accept, whatever anybody intends by it. Restated and
 not imported for `factor_portfolio.BOARD_MINIMUM_QUANTITY`'s reason: `backtest/` is a
 standard-library leaf and the number lives on a pydantic field one plane over. The two are held
 together by `tests/unit/backtest/test_cross_section.py::
 test_the_shortlist_ceiling_is_the_batch_the_evidence_plane_will_accept`, which builds a real
 `BatchResearchTask` at this size and one item above it and requires the second to be refused --
-so `V2-P4-019` raising the batch cap fails here rather than leaving a stale ceiling standing.
+so a change to the batch cap fails here rather than leaving a stale ceiling standing.
+
+**`V2-P4-031` moved it from 1,000, and the delay is the point of the row.** `V2-P4-019` raised
+`MAX_BATCH_ITEMS` tenfold so a whole market -- 5,545 listed on 2026-08-14 -- could be expressed
+at all, and was not permitted to touch `backtest/`; the test above fired, and its amendment
+weakened the assertion to `<=` and recorded the follow-up. For the interval between the two, the
+thing blocking a whole-market shortlist was this constant rather than the batch it claims to
+restate, and `<=` is true of every number from 1 to 10,000, so nothing was left saying so. It is
+an equality again.
+
+**Why the batch cap and not a smaller measured number.** The floor beside this one cannot be
+copied from anywhere -- `V2-P4-004` measured `N >= 57` off the factory winsorization, a fact
+about the statistics -- and the row asking for this change warned that the ceiling needs its own
+evidence rather than the same tenfold. It does, and the evidence says the batch cap: nothing in
+this module has a view about how long a shortlist should be, and the rule that *does* bind is not
+a constant but `cut_exceeds_the_cross_section`, a coverage code answered per run against the
+tradeable count (`MINIMUM_SHORTLIST` records the identical reasoning below its own vacuous
+floor). A smaller number here would be a limit with no measurement behind it.
+
+**Measured against the request-size wall `V2-P4-043` found, because that wall is on another
+route.** That row measured a whole-market `POST /api/v1/screen` at 7.81 MB against an 8 MB
+default cap, and the concern about raising this ceiling was that it would make an unreachable
+path look reachable. It does not: `/api/v1/screen` carries the *already-researched results*
+inline, while `POST /api/v1/shortlists/run` names a stored cross section and carries no names at
+all. Measured on `ShortlistRunApiRequest` at this build: 450 bytes at `shortlist_size=1`, 453 at
+1,000 and 5,545, **454 at 10,000** -- four bytes of growth across the whole range, because the
+size is one integer. The answer grows and the request does not: measured on the eight-name
+fixture panel, 53 bytes per shortlist entry and 191 per admitted candidate, so a shortlist at
+this ceiling extrapolates to roughly 0.5 MB of shortlist and up to 1.9 MB of candidates -- the
+same order as one of `V2-P4-040`'s single batches and an order below the 36.9 MB that row
+reports for twenty of them.
 """
 
 MINIMUM_SCORE_COMPONENTS: Final[int] = 1

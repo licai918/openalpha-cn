@@ -20,6 +20,7 @@ to even construct `ResearchEngine`.
 
 from datetime import datetime
 
+from openalpha_cn.domain.agent_result import AgentResult
 from openalpha_cn.domain.decision import DecisionLedger
 from openalpha_cn.domain.run import RunManifest
 from openalpha_cn.runtime.contracts import ResearchRunRequest, RunConflictError
@@ -27,7 +28,7 @@ from openalpha_cn.runtime.engine import ResearchEngine
 from openalpha_cn.runtime.memory import InMemoryResearchMemory
 from openalpha_cn.runtime.recovery import RecoveryStore
 from openalpha_cn.runtime.repository import RunRepository
-from openalpha_cn.storage.recovery import RunRecoveryState
+from openalpha_cn.storage.recovery import RecoveryConflictError, RunRecoveryState
 
 DIGEST = "b" * 64
 
@@ -71,6 +72,42 @@ class InMemoryRecoveryStore:
 
     def save(self, state: RunRecoveryState) -> None:
         self._states[state.run_id] = state
+
+    def append_result(
+        self,
+        run_id: str,
+        *,
+        position: int,
+        result: AgentResult,
+        updated_at: datetime,
+    ) -> None:
+        """`V2-P4-020`'s third method, implemented here the way a dict can implement it.
+
+        The double is allowed to be O(N) -- rebuilding the state is what a dict-backed store
+        does -- but it must enforce the same two refusals the SQLite one does with its `WHERE`
+        clause, because those are the contract and not an implementation detail: a result
+        offered for a position the graph does not declare it at, or for a position already
+        complete, is refused rather than stored. Without them this double would accept states
+        `SQLiteRecoveryStore` rejects, and the engine's tests would be passing against a
+        looser contract than the shipped one.
+        """
+        state = self._states[run_id]
+        if position != len(state.completed_results):
+            raise RecoveryConflictError(
+                f"recovery slot {position} of {run_id} is not the next one to complete"
+            )
+        if state.agent_ids[position] != result.agent_id:
+            raise RecoveryConflictError(
+                f"recovery slot {position} of {run_id} belongs to "
+                f"{state.agent_ids[position]!r}, not {result.agent_id!r}"
+            )
+        self._states[run_id] = state.model_copy(
+            update={
+                "completed_results": (*state.completed_results, result),
+                "next_agent_index": position + 1,
+                "updated_at": updated_at,
+            }
+        )
 
 
 def _request(

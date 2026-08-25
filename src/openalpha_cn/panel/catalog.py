@@ -610,6 +610,33 @@ KNOWN_STORAGE_LIMITATIONS: Final[tuple[StorageLimitation, ...]] = (
         ),
     ),
     StorageLimitation(
+        code="an_assessed_read_scope_checks_each_partition_file_once_and_not_once_per_read",
+        detail=(
+            "PanelStore.assessed() (V2-P4-069) takes one readiness verdict and hands back the "
+            "per-year reads it licenses, because read_if_ready and read_visible_at each assess "
+            "the WHOLE requirement and then read ONE year -- so an N-year history cost N "
+            "assessments of N partitions for a verdict that is identical all N times. Measured "
+            "on a store of 20 securities per partition, which is what says the cost is the "
+            "catalog and not the data: 36 partitions cost 1,296 _read_coverage round trips and "
+            "4.087 s, and after the change 36 and 0.727 s; 72 cost 72 and 1.256 s, which is the "
+            "linearity rather than a smaller constant. The same shape was profiled by V2-P4-059 "
+            "on the real 5,545-security market as 4.0 s with 1,296 coverage calls against 0.21 "
+            "s of Parquet. WHAT THE SCOPE GIVES UP: _partition_states reads three facts from "
+            "the FILE -- that it is present, that it carries Parquet's magic at both ends, and "
+            "what its footer says its row count is -- and inside one scope those are read once, "
+            "before the first read, instead of before every read. A partition damaged behind "
+            "the store's back BETWEEN two reads of the same scope is therefore not seen by the "
+            "gate, where the per-call door would have seen it. TWO THINGS BOUND IT AND NEITHER "
+            "CLOSES IT: the check still happens before the year it is about is read, because it "
+            "happens before all of them; and the scan is still wrapped per read, so damage that "
+            "makes a file unscannable is a PanelStorageError naming the partition rather than a "
+            "bare DuckDB exception. What is genuinely lost is a row appended to year k's file "
+            "after year 0 was read and before year k is -- the injection V2-P1 measured, in a "
+            "window that is now one loop wide instead of zero. Closing it means re-reading the "
+            "footers per read, which is the N-squared this entry exists to record removing"
+        ),
+    ),
+    StorageLimitation(
         code="date_gap_clears_on_partition_rows_the_filtered_read_withholds",
         detail=(
             "date_gap asks whether every required session is present in the partition's "

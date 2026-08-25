@@ -809,9 +809,9 @@ def load_trading_calendar(
         )
     requirement = trading_calendar_requirement(exchange=exchange, years=requested, as_of=as_of)
     rows: list[tuple[object, ...]] = []
+    assessed = store.assessed(requirement)
     for year in requested:
-        outcome = store.read_if_ready(
-            requirement,
+        outcome = assessed.read(
             year=year,
             columns=CALENDAR_PANEL_COLUMNS,
             filters={SUBJECT_COLUMN_NAME: exchange},
@@ -1089,41 +1089,44 @@ def load_stock_universe(
     that an *ordinary* store no longer produces the state they guard, because the read no longer
     starts after the first listing when the store has the years to start at it.
 
-    ## Cost, measured rather than estimated
+    ## Cost, measured rather than estimated -- and linear since `V2-P4-069`
 
-    Readiness is assessed once per year read, because the filtered door -- like `read_if_ready()`
-    before it -- vets the dataset and reads one partition. `PanelStore.assess_readiness`
-    evaluates the whole requirement each time, so a full-history read re-evaluates every year's
-    catalog rows once per year: N partitions cost N**2 coverage lookups.
+    Readiness used to be assessed once per year read, because the filtered door -- like
+    `read_if_ready()` before it -- vets the dataset and reads one partition, while
+    `PanelStore.assess_readiness` evaluates the *whole* requirement. A full-history read
+    therefore re-evaluated every year's catalog rows once per year: N partitions cost N**2
+    coverage lookups.
 
-    **This paragraph used to say that was milliseconds, and `V2-P4-059` measured it and it is
-    not.** On a 36-year registry over `V2-P4-004`'s 5,545-security market, one call is **4.0 s**,
-    of which 4.6 s of profiled time is 1,296 `_read_coverage` round trips and 0.21 s is the
-    Parquet the read actually wanted. The old claim was true of the fixtures it was written
-    against -- a handful of years -- and a whole history is 36, so the quadratic was invisible
-    until something read one.
+    **The paragraph here used to say that was milliseconds, and `V2-P4-059` measured it and it
+    was not.** On a 36-year registry over `V2-P4-004`'s 5,545-security market, one call was
+    **4.0 s**, of which 4.6 s of profiled time was 1,296 `_read_coverage` round trips and 0.21 s
+    was the Parquet the read actually wanted. The old claim was true of the fixtures it was
+    written against -- a handful of years -- and a whole history is 36, so the quadratic was
+    invisible until something read one.
 
-    Two things follow, and only the first is this function's to fix. The **shape** was already
-    being paid: `cli._stored_universe` and `panel_doctor` have always passed every registered
-    year, so `panel build` and `panel doctor` already spend it once per invocation. What the
-    widening above changes is that `factor build` and `shortlist run` now pay it too, and they
-    pay it **per prediction instant** rather than once. That is the price of the universe being
-    the market rather than one year's listings, and it is the right trade at this size; it would
-    stop being right on a walk-forward with hundreds of instants.
+    **`V2-P4-069` is that fix, and it is one assessment plus N reads exactly as `V2-P4-059`
+    predicted it would have to be.** `PanelStore.assessed()` takes the verdict once and hands
+    back the per-year reads it licenses; this loader opens one scope for the years it is reading
+    and takes them from it. Re-measured on a synthetic store of 20 securities per partition, so
+    the number is unmistakably the catalog and not the data: 36 partitions cost **36** coverage
+    lookups and **0.727 s**, against 1,296 and 4.087 s on the same fixture before the change --
+    and 72 partitions cost 72 and 1.256 s, which is the linearity rather than a smaller constant.
+    (Timed at a load average around 10 with sibling agents on the box, so the seconds are
+    pessimistic; the lookup counts are exact and load-independent, which is why the test that
+    guards this asserts on those.)
 
-    The remedy is one assessment plus N reads, which cannot be done here: the verdict is
-    identical across all 36 calls, but folding it into a single assessment is a change to
-    `read_if_ready`'s contract -- `V2-P1-003`'s readiness surface, shared with fourteen callers
-    and every other dataset -- and doing it locally would mean this one loader stepping around
-    the fail-closed door the others take, losing its damaged-partition wrapping with it. Filed
-    against `PanelStore` rather than worked around here.
+    What that changes for the callers above: `cli._stored_universe` and `panel_doctor` have
+    always passed every registered year, so `panel build` and `panel doctor` spent it once per
+    invocation; the widening in `V2-P4-059/060` made `factor build` and `shortlist run` spend it
+    **per prediction instant**. That was the price of the universe being the market rather than
+    one year's listings, and the note here said it "would stop being right on a walk-forward with
+    hundreds of instants". It no longer becomes wrong there, because the per-instant cost is now
+    linear in the history rather than quadratic.
 
-    **`V2-P4-076` did not fix that and made it fractionally worse, which is stated rather than
-    left to be discovered.** `read_visible_at` runs `assess_readiness` itself, exactly as
-    `read_if_ready` did, so the quadratic is untouched; what the new door adds on top is one
-    partition-scope assessment before the loop and one `read_coverage` per year for the census.
-    On the 36-year registry that is 1,332 coverage lookups against 1,296 and 36 more census
-    reads -- about 3% -- against a refusal it removes outright.
+    **What `V2-P4-076` added on top is unchanged and still paid.** The filtered door needs one
+    `read_coverage` per year for the census reconciliation, which is a per-year answer about a
+    per-year row set and cannot be shared -- `V2-P4-034` is what says why. So a 36-year read is
+    36 partition lookups plus 36 census reads rather than 1,332.
     """
     requested = tuple(sorted(set(years)))
     if not requested:
@@ -1971,8 +1974,9 @@ def load_adjustment_histories(
         )
     requirement = adjustment_requirement(years=requested, as_of=as_of, max_staleness=max_staleness)
     rows: list[tuple[object, ...]] = []
+    assessed = store.assessed(requirement)
     for year in requested:
-        outcome = store.read_if_ready(requirement, year=year, columns=ADJUSTMENT_PANEL_COLUMNS)
+        outcome = assessed.read(year=year, columns=ADJUSTMENT_PANEL_COLUMNS)
         if outcome.is_blocked:
             raise PanelStorageError(
                 f"the adjustment factor series cannot be read at {as_of.isoformat()}: "
@@ -2761,11 +2765,23 @@ def load_daily_bars(
 
     One session per call, because that is the unit every downstream question is asked in: a
     cross section joins against one day's factors and one day's registry membership. Readiness
-    is assessed once per call, which matches `load_trading_calendar`'s shape; a caller walking a
-    year re-evaluates the catalog 244 times, and on catalog metadata rather than Parquet that is
-    milliseconds. Making it one assessment plus N reads is a change to `assess_readiness`'s
-    contract, shared with every other dataset, and belongs with whichever task first has a load
-    that hurts.
+    is assessed once per call, so a caller walking a year re-evaluates the catalog 244 times.
+
+    **This paragraph said that was "milliseconds", and `V2-P4-069` measured it and it is not.**
+    It is the same wrong estimate `load_stock_universe` carried and the same class of error --
+    a cost read off a fixture with one partition in it. Measured on a one-year store of 20
+    securities: `assess_readiness` alone is **22 ms** a call, so the 244 re-evaluations a
+    year-walk performs cost **5.367 s**, against 3.025 s for the 244 `query` calls the walk
+    actually wanted. (Load average 12 with sibling agents running, so pessimistic -- but
+    "milliseconds" for 244 calls needs 22 **microseconds** each, and no amount of contention
+    accounts for three orders of magnitude.)
+
+    Unlike the registry's, this one is *linear* rather than quadratic -- each call assesses the
+    single year it reads -- so `PanelStore.assessed()`, `V2-P4-069`'s remedy, does not remove it:
+    a scope shares one verdict across the years of one requirement, and here every call is a
+    different requirement over a different day. Removing this would mean one requirement over a
+    year of sessions and a caller that wants the whole year at once, which is a different
+    signature and not one any caller has asked for. Left standing, now with a number on it.
     """
     requirement = daily_requirement(
         calendar,
@@ -3289,9 +3305,9 @@ def load_index_membership(
         index_code=index_code, years=requested, as_of=as_of, max_staleness=max_staleness
     )
     rows: list[tuple[object, ...]] = []
+    assessed = store.assessed(requirement)
     for year in requested:
-        outcome = store.read_if_ready(
-            requirement,
+        outcome = assessed.read(
             year=year,
             columns=INDEX_WEIGHT_PANEL_COLUMNS,
             filters={SUBJECT_COLUMN_NAME: index_code},
@@ -3469,8 +3485,9 @@ def load_index_prices(
         date_timezone=date_timezone,
     )
     rows: list[tuple[object, ...]] = []
+    assessed = store.assessed(requirement)
     for year in requested:
-        outcome = store.read_if_ready(requirement, year=year, columns=INDEX_DAILY_PANEL_COLUMNS)
+        outcome = assessed.read(year=year, columns=INDEX_DAILY_PANEL_COLUMNS)
         if outcome.is_blocked:
             raise PanelStorageError(
                 f"the {INDEX_DAILY_DATASET} panel cannot be read at {as_of.isoformat()}: "
@@ -3676,10 +3693,9 @@ def load_industry_histories(
         years=requested, as_of=as_of, max_staleness=max_staleness
     )
     rows: list[tuple[object, ...]] = []
+    assessed = store.assessed(requirement)
     for year in requested:
-        outcome = store.read_if_ready(
-            requirement, year=year, columns=INDUSTRY_MEMBERSHIP_PANEL_COLUMNS
-        )
+        outcome = assessed.read(year=year, columns=INDUSTRY_MEMBERSHIP_PANEL_COLUMNS)
         if outcome.is_blocked:
             raise PanelStorageError(
                 f"the industry classification cannot be read at {as_of.isoformat()}: "
@@ -4090,8 +4106,9 @@ def _read_visible_event_dated_rows(
         )
     filtered = replace(requirement, max_staleness=None)
     rows: list[tuple[object, ...]] = []
+    assessed = store.assessed(filtered)
     for year in requirement.years:
-        outcome = store.read_visible_at(filtered, year=year, columns=(EVENT_TIME_COLUMN, *columns))
+        outcome = assessed.read_visible_at(year=year, columns=(EVENT_TIME_COLUMN, *columns))
         if outcome.is_blocked:
             raise PanelStorageError(
                 f"{what} cannot be read at {as_of.isoformat()}: "
@@ -4244,8 +4261,9 @@ def load_industry_trees(
         years=requested, as_of=as_of, max_staleness=max_staleness
     )
     rows: list[tuple[object, ...]] = []
+    assessed = store.assessed(requirement)
     for year in requested:
-        outcome = store.read_if_ready(requirement, year=year, columns=INDUSTRY_TREE_PANEL_COLUMNS)
+        outcome = assessed.read(year=year, columns=INDUSTRY_TREE_PANEL_COLUMNS)
         if outcome.is_blocked:
             raise PanelStorageError(
                 f"the industry tree cannot be read at {as_of.isoformat()}: "

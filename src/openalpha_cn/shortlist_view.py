@@ -268,7 +268,8 @@ POSITION_CAPITAL_CEILING: Final[Decimal] = Decimal(10) ** 26
 """The first budget whose own fill this build cannot price. Exclusive: a capital must be below it.
 
 `V2-P4-045`. `ShortlistSpec.position_capital` is `Field(gt=0)` and bounded nowhere above, while
-every sibling numeric on this request is bounded on both sides -- `shortlist_size` at 1000, each
+every sibling numeric on this request is bounded on both sides -- `shortlist_size` at 10,000
+(1,000 when this was measured; `V2-P4-031` restated it from the batch cap), each
 weight at 1000, both ratios at 1. Measured through `TestClient` before this constant existed:
 `1e25` answered `200`, `1e26` answered a bare `500` with `text/plain` `Internal Server Error`, and
 so did `1e400`.

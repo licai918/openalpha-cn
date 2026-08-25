@@ -267,6 +267,87 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **Recovery wrote every completed result again after every agent** (`V2-P4-020`).
+  `ResearchEngine` saved the whole accumulated `RunRecoveryState` once per agent, and each save
+  serialised it twice over — `_updated_recovery` round-tripped it through `model_dump` and
+  `model_validate` before `SQLiteRecoveryStore.save`'s own `model_dump_json` ran — so persisting
+  `N` results cost `N(N+1)/2` serialisations. Measured on `be262ea` with empty agents: 12 agents
+  cost the roadmap's 78; 200 cost 20,100 and 11.74 MB of JSON; 400 cost 80,200 and 46.68 MB, of
+  which the dump-and-revalidate half alone was 0.327 s. A run's graph now lives in
+  `run_recovery_results`, one row per agent **slot** carrying the `agent_id` the graph declares
+  there and a `payload` that is `NULL` until that agent completes, and `RecoveryStore` gained
+  `append_result` — one `UPDATE` on the primary key, guarded by `agent_id = ?` and
+  `payload IS NULL`, so a result written into the wrong slot or over a finished one is refused by
+  name rather than found later as a state that no longer validates. `agent_ids`,
+  `completed_results` and `next_agent_index` are derived from those rows on read, which makes
+  `validate_progress`' prefix invariant true by construction. After: one serialisation per result
+  at every size — 0.23 MB at `N=400` against 46.68 MB — and the loop's wall clock flat per agent.
+  **No migration, deliberately**: a row written before the split carries `completed_results`
+  inside its payload and is read whole by the key's presence, and `append_result` converts it in
+  place the first time it finds no slot to claim. `storage/migrations.py`'s
+  `_refuse_uncountable_stored_horizons` now reads both tables, because the recovery plane is the
+  only place a whole `SignalFrame` is stored and it had moved.
+- **A whole-market shortlist was blocked by the shortlist ceiling, not by the batch it restates**
+  (`V2-P4-031`). `V2-P4-019` raised `MAX_BATCH_ITEMS` from 1,000 to 10,000 so a 5,545-security
+  market could be expressed, could not touch `backtest/`, and left `MAXIMUM_SHORTLIST` at 1,000
+  with its test weakened from `==` to `<=` — an assertion true of every number from 1 to 10,000,
+  so nothing was left saying the wall had moved. The two are equal again and the assertion is an
+  equality. **The concern that this would make an unreachable path look reachable is measured and
+  does not hold**: `V2-P4-043`'s 8 MB wall is on `POST /api/v1/screen`, which carries
+  already-researched results inline, while `POST /api/v1/shortlists/run` names a stored cross
+  section — 450 bytes at `shortlist_size=1` and **454 at 10,000**. The answer grows and the
+  request does not: 53 bytes per shortlist entry and 191 per admitted candidate on the fixture
+  panel, so the new ceiling extrapolates to roughly 2.4 MB.
+- **Reading an N-year history assessed readiness N times over N partitions** (`V2-P4-069`).
+  `read_if_ready` and `read_visible_at` each judge the *whole* requirement and then read *one*
+  year, so a full-history read paid N² catalog round trips for a verdict identical all N times.
+  Reproduced on a store of 20 securities per partition, which is what says the cost is the
+  catalog and not the data: 36 partitions cost **1,296** `_read_coverage` calls and **4.087 s** —
+  the same 1,296 and 4.0 s `V2-P4-059` profiled on the real 5,545-security market, where the
+  Parquet the read actually wanted was 0.21 s of it. `PanelStore.assessed()` takes the verdict
+  once and hands back the per-year reads it licenses; the seven `panel_ingest` loaders that walk
+  years take it. After: 36 partitions cost 36 lookups and 0.727 s, and 72 cost 72 and 1.256 s —
+  linear, not a smaller constant. `read_if_ready` and `read_visible_at` are unchanged for their
+  fourteen callers, being one line each on top of it. **Two docstrings that called this
+  "milliseconds" are corrected with numbers**: `load_stock_universe`'s, and `load_daily_bars`',
+  where a caller walking a year of 244 sessions spends **5.367 s** re-assessing (22 ms a call)
+  against 3.025 s of the `query` calls it wanted — that one is linear rather than quadratic and
+  is left standing with a measurement on it. New `KNOWN_STORAGE_LIMITATIONS` entry
+  `an_assessed_read_scope_checks_each_partition_file_once_and_not_once_per_read` records what a
+  scope gives up.
+- **The allowlist whose purpose is reviewing `read_visible_at` callers could not see a new one**
+  (`V2-P4-074`). `FILTERED_READ_CALLERS` is scoped to a *file*, so once `panel_ingest.py` was
+  granted, every later caller written in it arrived without a line moving — which is not what
+  "adding a name here is a deliberate act with a review attached" describes. `V2-P4-061` added
+  `load_daily_bars` and `load_price_limits`, `V2-P4-083` added `load_statement_histories`, and
+  none of the three tripped it. `FILTERED_READ_REACHERS` is the finer table and the file-level
+  allowlist is derived from it. **The row's own framing is corrected by measurement**: those
+  issues added no `read_visible_at` *call sites* — `panel_ingest.py` has had exactly two since
+  `V2-P4-027` and still has two — they added *reachers* of an existing private helper, so the
+  call-site granularity the row's acceptance line offers first would have stayed silent through
+  `V2-P4-061` as well. The audit follows intra-module calls instead, and running it surfaced the
+  third unreviewed reacher the row does not mention. All three are legitimate and each carries
+  its own measured justification; what was missing was the review, not the argument.
+
+  Verified across the four rows by a **52-mutant sweep, 41 killed / 11 survived**, with the
+  baseline proven green on all four target suites before a single mutant was generated. Five
+  survivors landed on docstring prose and are not mutants at all (recorded rather than removed
+  from the denominator); one is the ordering of years inside an error message; one is
+  `read_visible_at`'s `pooled_years` condition, moved verbatim by this branch rather than
+  written by it. The remaining four were all the same defect this project books most often --
+  an assertion that exists but cannot separate the two answers on its fixture -- and all four
+  are now killed. Three mutants pinning the scan to `requirement.years[0]` survived because
+  every partition in the cost fixture held identical values, so "read year `k`" and "read year 0
+  `N` times" returned the same row *count*; the fixture now makes each partition's values name
+  its own year, and a fourth test drives the two un-scoped public doors on a multi-year
+  requirement, which nothing else did. The fourth replaced `assessed.read_visible_at(...)` with
+  `store.read_visible_at(filtered, ...)` inside `_read_visible_event_dated_rows` -- semantically
+  identical, byte-identical answer, and the N-squared quietly back for the very caller
+  `V2-P4-069` was filed about. No assertion about the answer can catch that, so the audit is
+  structural: a function that opens a readiness scope may not also take a per-call door on the
+  same store, discriminated by the *receiver* because `assessed.read_visible_at` and
+  `store.read_visible_at` share an attribute name.
+
 - **A closed vocabulary with no way to refuse: an undeclared `quality_flags` string answered
   `500 text/plain` on `POST /api/v1/research/run`** (`V2-P4-101`). `V2-P4-030` closed the
   risk-flag set and was right to — a payload writing `future-data` instead of `future_data` used

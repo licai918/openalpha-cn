@@ -367,22 +367,41 @@ _UNCOUNTABLE_HORIZON_REMEDY = (
 def _refuse_uncountable_stored_horizons(connection: sqlite3.Connection) -> None:
     """Refuse the whole rewrite if any stored signal carries a now-inadmissible horizon.
 
-    `run_recovery.payload` is the only place in this database a whole `SignalFrame` is
-    stored; everywhere else a signal appears as an ID. Read as raw JSON rather than through
+    The recovery plane is the only place in this database a whole `SignalFrame` is stored;
+    everywhere else a signal appears as an ID. Read as raw JSON rather than through
     `read_versioned`, deliberately: validating the row is exactly what would fail, and the
     point of this pass is to produce a message about horizons instead of one about a regex.
+
+    **Two tables since `V2-P4-020`, and both are read here.** That issue moved a run's
+    completed results out of `run_recovery.payload` and into one row per agent slot in
+    `run_recovery_results`, so a database written after it holds no `completed_results` key
+    at all -- and a pass that kept looking only in the payload would have gone on reporting
+    "no offenders" while every signal it exists to inspect sat one table over. Rows written
+    before the split still carry theirs inline and are still read from there, which is why
+    this looks in both places rather than switching from one to the other.
     """
     offenders: dict[str, set[str]] = {}
-    if not _table_exists(connection, "run_recovery"):
-        return
-    for run_id, payload in connection.execute("SELECT run_id, payload FROM run_recovery"):
-        document = json.loads(payload)
-        if not isinstance(document, dict):
-            continue
-        for result in document.get("completed_results") or ():
-            horizon = (result.get("signal") or {}).get("horizon") if result else None
-            if horizon is not None and not is_countable_horizon(horizon):
-                offenders.setdefault(str(run_id), set()).add(str(horizon))
+
+    def _charge(run_id: object, result: object) -> None:
+        if not isinstance(result, dict):
+            return
+        horizon = (result.get("signal") or {}).get("horizon")
+        if horizon is not None and not is_countable_horizon(horizon):
+            offenders.setdefault(str(run_id), set()).add(str(horizon))
+
+    if _table_exists(connection, "run_recovery"):
+        for run_id, payload in connection.execute("SELECT run_id, payload FROM run_recovery"):
+            document = json.loads(payload)
+            if not isinstance(document, dict):
+                continue
+            for result in document.get("completed_results") or ():
+                _charge(run_id, result)
+    if _table_exists(connection, "run_recovery_results"):
+        rows = connection.execute(
+            "SELECT run_id, payload FROM run_recovery_results WHERE payload IS NOT NULL"
+        )
+        for run_id, payload in rows:
+            _charge(run_id, json.loads(payload))
     if offenders:
         listed = "; ".join(
             f"{run_id}: {sorted(values)}" for run_id, values in sorted(offenders.items())
