@@ -227,6 +227,37 @@ def test_a_renumbered_database_reaches_head_instead_of_stalling_forever(
     assert read_status(path).current_version == REWRITE_MANIFEST_COMPONENT_PLANES_VERSION
 
 
+def test_starting_the_api_against_the_stalled_database_heals_it_and_serves_validations(
+    tmp_path: Path, migration_clock: Callable[[], datetime]
+) -> None:
+    """The path the user is actually on: they start the app, they do not run `migrate run`.
+
+    This is what made the defect so hard to see. `create_app()` against the stalled database
+    **succeeded** -- it just silently never advanced, and the one store whose table was missing
+    is the only one no constructor creates, so `GET /backtests/validations/by-decision/{id}`
+    raised `sqlite3.OperationalError: no such table: validation_results` out of the handler
+    (a 500 to a real client) forever, while every other route kept working. Measured: with
+    reconciliation disabled this test dies on exactly that error, so the endpoint -- not just
+    the schema version -- is what separates the two answers.
+    """
+    from fastapi.testclient import TestClient
+
+    from openalpha_cn.api.app import create_app
+
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    path = runtime_dir / "state.sqlite3"
+    build_stalled_database(path, clock=migration_clock)
+
+    client = TestClient(create_app(runtime_dir=runtime_dir))
+    response = client.get("/api/v1/backtests/validations/by-decision/decision_absent")
+
+    assert response.status_code == 200, response.text
+    assert response.json() == []
+    assert read_status(path).current_version == REWRITE_MANIFEST_COMPONENT_PLANES_VERSION
+    assert [repair.name for repair in read_status(path).repairs] == ["create_validation_results"]
+
+
 def test_the_repair_is_recorded_as_applied_and_only_once(
     tmp_path: Path, migration_clock: Callable[[], datetime]
 ) -> None:
