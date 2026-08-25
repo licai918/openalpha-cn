@@ -10,6 +10,7 @@ from openalpha_cn.api.app import create_app
 from openalpha_cn.cli import app
 from openalpha_cn.providers.base import ProviderMetadata, ProviderRequest
 from openalpha_cn.providers.file import FileProvider
+from openalpha_cn.sdk import OpenAlphaSDK
 
 runner = CliRunner()
 
@@ -83,6 +84,61 @@ def test_cli_and_api_return_the_same_evidence_snapshot(
     assert response.status_code == 200
     assert response.json() == cli_payload
     assert response.json()["items"][0]["evidence_id"].startswith("ev_")
+
+
+def test_the_cli_persists_what_it_built_the_way_the_other_two_faces_do(
+    tmp_path: Path, metadata: ProviderMetadata, frozen_now: datetime
+) -> None:
+    """`V2-P5-013`, closing audit `F31`: one verb, one meaning, on all three faces.
+
+    `openalpha evidence build` printed its snapshots and threw them away, while
+    `OpenAlphaSDK.build_file_evidence` and `POST /api/v1/evidence/build` both appended to the
+    evidence store. Two of three faces agreed and the command line was the odd one out, so a
+    caller who built evidence from the terminal and then queried it found nothing and had no way
+    to tell "the build produced nothing" from "the build discarded it".
+
+    **The read-back is the assertion and the printed payload is not.** The old command already
+    printed the right snapshots -- asserting on stdout was green before this change and after it,
+    which is exactly the shape of test this repository has been caught writing. So the evidence is
+    fetched back through a *second* face (`OpenAlphaSDK.query_evidence` over the same
+    `--runtime-dir`), which is the only thing a store that was never written cannot satisfy.
+
+    The `as_of` handed to the query is a second later than the build's, because
+    `EvidenceSnapshot` visibility is point-in-time and a query at exactly `available_time` is a
+    boundary question this test has no business being about.
+    """
+    source = tmp_path / "events.json"
+    write_source(source)
+    runtime_dir = tmp_path / "runtime"
+
+    result = runner.invoke(
+        app,
+        [
+            "evidence",
+            "build",
+            str(source),
+            "--as-of",
+            frozen_now.isoformat(),
+            "--source-id",
+            "user.file",
+            "--source-license",
+            "user-supplied",
+            "--redistribution",
+            "restricted",
+            "--runtime-dir",
+            str(runtime_dir),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+
+    held = OpenAlphaSDK(runtime_dir=runtime_dir).query_evidence(
+        as_of=frozen_now + timedelta(seconds=1)
+    )
+
+    assert [item.evidence_id for item in held] == [
+        item["evidence_id"] for item in json.loads(result.stdout)["items"]
+    ], "the command printed evidence it did not store, so a later query cannot find it"
+    assert held, "nothing was persisted"
 
 
 def test_api_exposes_health_and_versioned_openapi(

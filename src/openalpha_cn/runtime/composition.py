@@ -52,6 +52,7 @@ from openalpha_cn.runtime.memory import ResearchMemory
 from openalpha_cn.runtime.recovery import RecoveryStore
 from openalpha_cn.storage.batch import SQLiteBatchTaskStore
 from openalpha_cn.storage.factor_experiments import FileExperimentStore
+from openalpha_cn.storage.jobs import SQLiteJobStore
 from openalpha_cn.storage.memory import SQLiteResearchMemory
 from openalpha_cn.storage.migrations import MigrationRunResult, run_migrations
 from openalpha_cn.storage.parquet import ParquetEvidenceStore
@@ -68,7 +69,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class StorageContainer:
-    """All twelve storage components assembled for one shared `runtime_dir`.
+    """All thirteen storage components assembled for one shared `runtime_dir`.
 
     `migration_result` is the outcome of the `run_migrations()` call this function makes
     before constructing any store below -- exposed so a caller that needs to report on
@@ -135,6 +136,23 @@ class StorageContainer:
     `build_storage`'s own `clock` here is what makes a test's fixed clock and a deployment's real
     one the same seam.
     """
+    job_store: SQLiteJobStore
+    """`V2-P5-010`'s durable trading-day schedules and their per-session runs.
+
+    **The thirteenth store, and it was shipped without this wiring rather than with it.**
+    `V2-P5-010` said so in its own row -- no CLI command, no REST route, not in `build_storage`,
+    "出货产品中没有任何东西调用它们" -- and left the caller to a later row. `V2-P5-013` is that row.
+
+    Concrete rather than Protocol-typed, and for `batch_store`'s reason exactly: `openalpha jobs
+    list` and `GET /api/v1/jobs` call `list_jobs()`/`runs()`, while `TradingDayScheduler` (the
+    only *service*-layer consumer) calls neither. A Protocol wide enough for both would hand the
+    scheduler a listing it has no business asking for.
+
+    It shares `state.sqlite3` with the other eight and creates its two tables with `CREATE TABLE
+    IF NOT EXISTS` rather than through a migration -- see `storage/jobs.py`'s module docstring
+    for the measurement behind that, which is that migrations 3 through 8 never run on a fresh
+    database at all, so a ninth adding these tables would never run either.
+    """
     shortlist_store: FileShortlistStore
     """`V2-P4-062`'s stored shortlist answers, under `runtime_dir / "shortlists"`.
 
@@ -151,7 +169,7 @@ class StorageContainer:
 def build_storage(*, runtime_dir: Path, clock: Callable[[], datetime]) -> StorageContainer:
     """Run pending schema migrations, then assemble every storage component once.
 
-    All twelve stores share one `runtime_dir`: eight at its root-level `state.sqlite3`
+    All thirteen stores share one `runtime_dir`: nine at its root-level `state.sqlite3`
     (matching the pre-existing per-store convention), plus the Parquet evidence store
     under `runtime_dir / "evidence"`, the sealed experiment documents under
     `runtime_dir / "experiments"`, `V2-P4-062`'s shortlist answers under
@@ -186,6 +204,7 @@ def build_storage(*, runtime_dir: Path, clock: Callable[[], datetime]) -> Storag
     validation_store: ValidationStore = SQLiteValidationStore(runtime_dir / "state.sqlite3")
     experiment_store = FileExperimentStore(runtime_dir / "experiments")
     shortlist_store = FileShortlistStore(runtime_dir / "shortlists")
+    job_store = SQLiteJobStore(runtime_dir / "state.sqlite3")
     prediction_store = FilePredictionStore(runtime_dir / "predictions", clock=clock)
     batch_store.recover_interrupted(now=clock())
     logger.info(
@@ -208,5 +227,6 @@ def build_storage(*, runtime_dir: Path, clock: Callable[[], datetime]) -> Storag
         experiment_store=experiment_store,
         shortlist_store=shortlist_store,
         prediction_store=prediction_store,
+        job_store=job_store,
         migration_result=migration_result,
     )

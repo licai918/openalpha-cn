@@ -228,6 +228,17 @@ class TradingDayScheduler:
             error_type=error_type,
         )
 
+    def retry(self, job_id: str, session: date, *, now: datetime | None = None) -> JobRun:
+        """Reopen a finished attempt at `session` so it can be run again (`V2-P5-013`).
+
+        A failed run leaves the session owed and its row in place, so without this the job is
+        stuck on it -- and on every session after it, because `due()` counts forward from
+        `last_fired_session`. Stated by a caller rather than taken automatically: a session that
+        fails for a reason time does not fix would otherwise be retried on every wake-up.
+        """
+        instant = now if now is not None else self.clock()
+        return self.store.retry_session(job_id, session, owner=self.owner, now=instant)
+
     def skip_to(self, job_id: str, session: date, *, now: datetime | None = None) -> ScheduledJob:
         """Advance a `SKIP_MISSED` job past `session` without recording a run for it.
 

@@ -6,6 +6,95 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Added
 
+- **The three product faces, measured against each other instead of described** (`V2-P5-013`,
+  closing `F31` and the caller half of `F98`, and re-measuring `F29`/`F30`/`F35`). The row's own
+  text was checked before it was believed and **two of its four claims were false on `2746663`**:
+  `OutcomeValidator` is *not* "completely absent from the SDK" -- `validate_outcome`,
+  `list_validations_by_decision` and `list_validations_by_signal` have all shipped -- and the CLI
+  does not cover "4 of 20 capability domains"; it reached 15 of the 44 shipping routes' capabilities
+  through 25 commands. The two claims that held were `F30` (whose list is **nine** routes, not the
+  "7" it says) and `F31`, both addressed below. Measured surfaces: **44 routes / 48 SDK methods / 25
+  CLI commands** before, **47 / 48 / 29** after.
+- **`POST /api/v1/portfolio/construct`** (`V2-P5-013`). `V2-P5-001` shipped `openalpha portfolio
+  construct` and `OpenAlphaSDK.construct_portfolio` with no REST route. This is the third face and
+  it is three lines of body -- `held_shortlist`, `construct_portfolio`, `construction_view`, the
+  same three the other two call. The request body's `policy` field is
+  `PortfolioConstructionPolicy` **itself** rather than loose numbers the route re-assembles, so the
+  tier-weight validator a caller meets is pydantic's own, once, on all three faces. Held to
+  `V2-P4-101`'s standard rather than to a substring check: the `200` body is asserted **byte-equal**
+  to `openalpha portfolio construct --json`, and both refusals -- a gate-refused shortlist and a
+  declared industry cap over candidates that carry no industry -- are asserted **equal** to the
+  sentence the CLI prints on stderr. `/portfolio/` and not `/portfolios/`, because
+  `portfolio/execute` and `portfolio/ledger` already spell the noun singular, and a second spelling
+  of one noun on one API is the drift this row exists to close rather than to add to.
+- **`openalpha jobs`: the scheduling primitive gets an operator** (`V2-P5-013`, the caller half of
+  `F98`). `V2-P5-010` shipped `job_contracts.py`, `storage/jobs.py` and `scheduler.py` and recorded
+  in its own row that nothing in the shipping product called them -- no CLI command, no route, not
+  in `build_storage`. All three are now closed: `SQLiteJobStore` is the **thirteenth** store in the
+  composition root, `openalpha jobs register|list|due|run` is the face, and `GET /api/v1/jobs` /
+  `GET /api/v1/jobs/{job_id}` are the read half. The API face is read-only **deliberately** -- this
+  service still has no authentication of any kind (audit `F101`'s second sentence, unclosed), so
+  declaring a schedule and taking a lease stay on the machine holding the runtime directory.
+
+  `jobs run` claims the lease and, for each owed session, performs a point-in-time panel health
+  report **at that session's own publication instant**, recording `succeeded` or `failed` under the
+  per-trading-day primary key. One job body rather than a vocabulary of them, and that is a
+  measurement rather than an ambition: every other per-session action in this build takes between
+  eight and twenty declared parameters and `scheduled_jobs` has no column that could hold them --
+  adding one would be a change to a stored contract, which AGENTS.md rule 3 confines to the closed
+  `V2-P4-001` window. It is also the only per-session action that reaches no network, which a job
+  running on a timer had better be.
+
+  **`due` still reads no stored fire time, and the CLI is now where that is provable**: a test
+  writes a `next_fire_time` a year into the future onto the row and asserts the command owes exactly
+  the same sessions, because the answer comes from `newest_published_session` and
+  `last_fired_session` and never from that column.
+
+  **The catch-up stops at the first failed session.** `finish_session` does not advance
+  `last_fired_session` past a failure, but a later success in the same loop would move the watermark
+  over it -- a daily ingest that failed on Monday and succeeded on Wednesday would report itself
+  complete through Wednesday with Monday's hole still open, which is exactly the silent gap a
+  point-in-time panel must not acquire.
+
+### Fixed
+
+- **`openalpha evidence build` printed its snapshots and threw them away** (`V2-P5-013`, closing
+  audit `F31`). `OpenAlphaSDK.build_file_evidence` and `POST /api/v1/evidence/build` both appended
+  to the evidence store; the command line did not. Two faces of three agreed and the terminal was
+  the odd one out, so a caller who built evidence from the command line and then queried it found
+  nothing -- and could not tell "the file produced no events" from "the build discarded them". It
+  now takes `--runtime-dir` (default `./runtime`, the same directory every other command in this
+  CLI means by it) and appends through the composition root. The printed payload is unchanged, so
+  a caller piping it into `jq` keeps working. **The test reads the evidence back through a second
+  face** rather than asserting on stdout, because the old command already printed the right
+  snapshots and a stdout assertion was green before the fix and after it.
+- **`SQLiteJobStore.retry_session` existed only in a docstring, and its absence made a failed
+  session permanently unreachable** (`V2-P5-013`). `finish_session`'s own prose has always said "a
+  retry is an explicit `retry_session`"; there was no such method. A failed run leaves
+  `last_fired_session` where it was, so `due()` keeps owing that session, while its row holds the
+  `PRIMARY KEY`, so `start_session` answers `JobAlreadyRanError` for it **for ever** -- and
+  therefore for every session after it, because `due()` counts forward from `last_fired_session`.
+  Nothing had met it because nothing outside `tests/unit/` had ever called this store; `openalpha
+  jobs run` meets it on an ordinary Tuesday, since a point-in-time health report legitimately fails
+  on a session whose data has not landed. The method reopens a **terminal** run in place -- never a
+  `running` one, which would let two processes hold one trading session at once, and never by
+  delete-and-reinsert, which would vacate the primary key mid-retry. Stated by the operator
+  (`--retry-failed`) rather than taken automatically, because a session that fails for a reason time
+  does not fix would otherwise be retried on every wake-up, for ever.
+
+### Changed
+
+- **`tests/unit/test_surface_parity.py` replaces the prose about which face is missing what**
+  (`V2-P5-013`). Every shipping route is named with the SDK method and CLI command that reach the
+  same capability, or with `None` and a reason; `SDK_ONLY` and `CLI_ONLY` do the same in the other
+  two directions; and all three are **equalities** against the live app, `OpenAlphaSDK` and the
+  Typer tree. A route added on one face and nowhere else is red and names the route. A row naming a
+  method that does not exist is red and names it. A gap that closes without its reason being deleted
+  is red. The five counts are pinned the way `REGISTRY_ENTRY_COUNTS` is, so a surface cannot move
+  without passing through this file. This is the actual lesson of `V2-P5-013`: **the row's claims
+  went stale silently because nothing was checking them**, and the remedy for that is a test rather
+  than a better paragraph.
+
 - **`openalpha portfolio construct` and `OpenAlphaSDK.construct_portfolio`: heuristic target
   weights over one admitted shortlist** (`V2-P5-001`, the first module of P5). A twelfth
   pure-stdlib `backtest/` leaf, `backtest/portfolio_policy.py`, turns one `as_of`'s ranked list

@@ -51,6 +51,19 @@ filesystem path. Local file access remains a CLI responsibility.
 - `GET /api/v1/memory/{subject}` returns durable decision-linked research memory.
 - `GET /api/v1/runs/{run_id}/recovery` exposes the durable node checkpoint used
   to resume an interrupted run; an unknown run returns `404`.
+- `GET /api/v1/jobs` and `GET /api/v1/jobs/{job_id}` read the trading-day
+  schedules this installation holds (`V2-P5-013`). The listing carries the
+  schedules; the single-job route also carries every per-session attempt,
+  ascending by session, because a job accumulates roughly 250 of them a year and
+  a listing that carried them all would grow without bound. A name no schedule is
+  registered under is `404` with a `{reason, message}` **object**, byte-identical
+  to what `openalpha jobs due` prints.
+
+  **Read-only, and deliberately.** Declaring a schedule, taking a lease and
+  running due sessions are `openalpha jobs register` / `openalpha jobs run` on the
+  machine that holds the runtime directory. This service still has no
+  authentication of any kind (audit `F101`), so it serves the operational
+  question -- *is the daily job running* -- and takes no authority.
 - `POST /api/v1/backtests/replay` executes a supplied versioned frozen corpus.
 - `POST /api/v1/portfolio/execute` applies one deterministic A-share portfolio
   transition, including cash, T+1, board-lot, suspension, price-limit, fee, FIFO,

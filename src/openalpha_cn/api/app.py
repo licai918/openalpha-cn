@@ -66,6 +66,7 @@ from openalpha_cn.factor_view import (
     factor_request,
     run_factor_experiment,
 )
+from openalpha_cn.job_contracts import job_not_registered, job_run_view, scheduled_job_view
 from openalpha_cn.logging_setup import configure_logging
 from openalpha_cn.model_view import (
     ModelViewError,
@@ -1663,6 +1664,8 @@ def create_app(
     validation_store = storage.validation_store
     experiment_store = storage.experiment_store
     prediction_store = storage.prediction_store
+    job_store = storage.job_store
+    job_store = storage.job_store
 
     def run_one(request: ResearchRunRequest) -> ResearchRunResult:
         return ResearchEngine(
@@ -1931,6 +1934,51 @@ def create_app(
     def memory_query(subject: str) -> tuple[MemoryEntry, ...]:
         """Return durable decision-linked memory for one subject."""
         return memory.list(subject=subject)
+
+    @application.get("/api/v1/jobs")
+    def job_list() -> dict[str, list[dict[str, object]]]:
+        """Every trading-day schedule this installation holds, by name (`V2-P5-013`).
+
+        `V2-P5-010` shipped the scheduling primitive with no route at all and said so in its own
+        row. This is the read half of the face, and it is **only** the read half, deliberately:
+        this service has no authentication of any kind (audit `F101`'s second sentence, still
+        open), so declaring a schedule and taking a lease stay on the machine that holds the
+        runtime directory, where `openalpha jobs register` and `openalpha jobs run` are. What an
+        unauthenticated reader can have is the answer to *is the daily job running*, which is
+        the operational question and carries no authority.
+
+        Rendered through `job_contracts.scheduled_job_view`, the same function `openalpha jobs
+        list --json` calls, so the two cannot come to describe one schedule two ways --
+        `tests/integration/test_scheduled_job_faces.py` asserts the bodies equal rather than
+        alike.
+        """
+        return {"jobs": [scheduled_job_view(job) for job in job_store.list_jobs()]}
+
+    @application.get("/api/v1/jobs/{job_id}")
+    def job_get(job_id: str) -> dict[str, object]:
+        """One schedule and every per-session attempt it has recorded, ascending by session.
+
+        The runs are on this route and not on the listing above for `GET /api/v1/shortlists`'
+        reason: a job accumulates one row per trading session, so roughly 250 a year, and a
+        listing that carried them all would grow without bound while answering a question
+        ("which schedules exist") that never needed them.
+
+        A name no schedule is registered under is `404` with `_panel_detail`'s `{reason,
+        message}` object -- the shortlist plane's own `not_held` row -- and the message is
+        byte-identical to the one `openalpha jobs due` prints, because both faces call
+        `_job_not_registered`. A bare `"Not Found"` string here would be indistinguishable from
+        the router's answer for a path that does not exist.
+        """
+        job = job_store.get(job_id)
+        if job is None:
+            raise HTTPException(
+                status_code=SHORTLIST_HTTP_STATUS["not_held"],
+                detail=_panel_detail("not_held", job_not_registered(job_id)),
+            )
+        return {
+            "job": scheduled_job_view(job),
+            "runs": [job_run_view(run) for run in job_store.runs(job_id)],
+        }
 
     @application.get("/api/v1/runs/{run_id}/recovery")
     def recovery_query(run_id: str) -> RunRecoveryState:
