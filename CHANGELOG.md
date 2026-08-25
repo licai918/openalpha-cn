@@ -6,6 +6,84 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Added
 
+- **`backtest/paper.py`: a Paper Portfolio whose inability to reach a broker is enforced at
+  run time, not asserted in a comment** (`V2-P5-004`, the thirteenth pure-stdlib `backtest/`
+  leaf). `PaperPortfolio.advance` lives one observed session forward through
+  `PortfolioBacktestRunner` -- so cash, T+1, FIFO, fees and every clamp are the same code a
+  backtest runs -- and does the whole of it inside a CPython audit hook (PEP 578) that refuses
+  eight events: `socket.__new__`, `socket.connect`/`sendto`/`sendmsg`, `subprocess.Popen`,
+  `os.posix_spawn`, `os.exec` and `ctypes.dlopen`. Refusing socket *creation* is what does most
+  of the work -- measured, it covers the three escapes `V2-P4-105` had to reach below the class
+  graph for, including re-wrapping a detached descriptor with `_socket.socket(fileno=fd)`.
+  **The static mechanism was measured and rejected rather than skipped**: `openalpha_cn
+  .backtest`'s own `__init__` reaches `replay -> runtime -> agents -> models ->
+  models/openai_compatible.py`, whose line 11 is `from urllib.request import Request, urlopen`,
+  so importing *any* `backtest/` module already leaves `_socket`, `ssl`, `http.client` and
+  `urllib.request` in `sys.modules` -- a claim about this module's import closure would have
+  been false, and `lint-imports` cannot see a reach made by an object handed in at run time
+  anyway. **That is the case the guard is for**: a caller-supplied `PortfolioLedger` is a
+  `Protocol`, so anything with `append` satisfies it, and a ledger that opens a socket during
+  `advance` is refused *inside its own `append`*. The depth is **thread-local**, unlike
+  `tests/offline_guard.py`'s: a process-wide flag would let a paper session in one FastAPI
+  request refuse a provider fetch in another. The ban costs the legitimate path nothing --
+  measured, a session over a real `SQLitePortfolioLedger` raises only `sqlite3.connect` and
+  `sqlite3.connect/handle`. A paper book **requires** a ledger where a backtest's is optional (a
+  paper trade nobody recorded is not a paper trade), refuses a session that does not move it
+  forward, and refuses one dated after the caller's declared `observed_on`. Every result carries
+  `execution_venue` as a `Literal`, `V2-P5-001`'s idiom, so a record that stopped saying no
+  broker was contacted would not validate. `KNOWN_PAPER_LIMITATIONS` is the thirty-seventh
+  registry (7 entries; `REGISTRY_ENTRY_COUNTS` 35 → 36 rows and 264 → 271 entries,
+  `DOCSTRING_TOTALS` 36 → 37 registries and 334 → 341 entries), runtime dependencies remain
+  **nine**, and `lint-imports` remains **8 kept / 0 broken** -- `paper.py` joined both per-module
+  `backtest-studies-*` source lists on arrival, which is the property that audit exists to
+  create. **It has no command or route of its own yet**: `cli.py`, `sdk.py` and `api/app.py` were
+  held by a sibling, so the exact edit is reported instead, and what is proved here is that a
+  paper book handed `OpenAlphaSDK.portfolio_ledger` itself reads back on
+  `OpenAlphaSDK.list_portfolio_transitions()` and on `GET /api/v1/portfolio/ledger`.
+
+### Changed
+
+- **`PortfolioBacktestStep` holds one trading session's whole book, not one order**
+  (`V2-P5-003`). It carried a single `order` and a single `market`, so a K-name book cost K
+  steps -- and the verbosity was the least of it. Three defects were reproduced on the old
+  runner with a two-name book before the change: the equity curve carried **two points dated
+  `2026-07-24`**, the first mid-session; a book **could not be told what a name it holds closed
+  at unless it traded that name**, reporting a market value of `21000.00` against a true
+  `31000`; and the exposure clamp therefore judged buys on **yesterday's** prices, reading
+  `max_gross_exposure` `0.210032` where the truth was `~0.31`. A step is now
+  `trade_date` + `bars` + `orders` + one `benchmark_close`, and the runner **marks the book to
+  the session's closes before it executes that session's orders** -- an ordering that is two
+  different answers on one fixture, refused when marked first and *filled* when marked after.
+  `orders` may be empty, so a session the book merely holds through is finally representable.
+  A held name with **no bar** on a session keeps its price (an A-share halt serves no daily row,
+  so refusing it would make a halt unrepresentable) and is named for keeping it in the new
+  `PortfolioBacktestReport.carried_marks`, with the session and how many consecutive sessions
+  it has now been carried. A mis-ordered series is refused up front instead of arriving as a
+  report whose curve ran backwards while every transition on it read `rejected`.
+  **`max_industry_weight` is unmoved and still a named refusal**: K `MarketBar`s carry no more
+  industry than one does, so this step supplies no exposures and enforces no industry cap.
+  **Both faces changed shape without either file changing a byte** -- `POST
+  /api/v1/backtests/portfolio` and `OpenAlphaSDK.run_portfolio_backtest` are pass-throughs of
+  this model -- and both of them, listed in the seam audit's `F38` among the 22 routes nothing
+  consumes, had **no test at all** until this row; they now have four, driven through
+  `TestClient` and `OpenAlphaSDK`. A latent crash went with it: an opening book with no cash
+  and no positions is constructible (`PortfolioState.cash` is only `ge=0`) and reached
+  `total_return`'s division, returning `decimal.DivisionByZero` from inside a report builder;
+  it is now refused by name. **Mutation sweep** over `multi_day.py` and `paper.py`, baseline
+  proven green first (`tests/unit` 3071 passed / 1 skipped): **66 mutants, 64 killed**. Both
+  survivors are the turnover zero-guard and both are **equivalent, measured rather than
+  labelled** -- the refusal above makes `average_equity == 0` unreachable, and flipping it to
+  `== 1` needs a book that filled something while averaging one yuan of equity, where the
+  smallest fillable order is a hundred-share board lot. **One gap is left open and stated
+  rather than hidden**: those series refusals reach `POST /api/v1/backtests/portfolio` as an
+  unmapped `ValueError`, so a mis-ordered series comes back `500` where it should be `422`.
+  Nothing is written when it happens -- the series is checked before the first order runs --
+  and the fix is the three-line `except ValueError -> HTTPException(422)` the neighbouring
+  routes already use, measured working; it was not applied because `api/app.py` was held by a
+  concurrent change. `docs/api/http.md` carries the note where a caller looks.
+
+### Added
+
 - **`openalpha portfolio construct` and `OpenAlphaSDK.construct_portfolio`: heuristic target
   weights over one admitted shortlist** (`V2-P5-001`, the first module of P5). A twelfth
   pure-stdlib `backtest/` leaf, `backtest/portfolio_policy.py`, turns one `as_of`'s ranked list
