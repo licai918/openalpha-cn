@@ -18,16 +18,18 @@ about the arithmetic over whatever the gate admitted, which is the half that is 
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final
 
 import pytest
+from fastapi.testclient import TestClient
 from panel_fixtures import EXCHANGE, YEAR, generate_panel, write_generated_panel
 from typer.testing import CliRunner
 
+from openalpha_cn.api.app import create_app
 from openalpha_cn.backtest.portfolio import PortfolioLimits
 from openalpha_cn.backtest.portfolio_policy import PortfolioConstructionPolicy
 from openalpha_cn.cli import PanelExit, app
@@ -391,3 +393,174 @@ def test_a_previous_weight_flag_that_is_not_a_pair_is_refused_before_any_store_i
 
     assert code == int(PanelExit.bad_request)
     assert "SUBJECT=WEIGHT" in output
+
+
+# --- the third face (`V2-P5-013`) ----------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def rest(admitted: tuple[Path, dict[str, Any]]) -> Iterator[TestClient]:
+    """`POST /api/v1/portfolio/construct` over the same runtime directory the CLI just used.
+
+    Module-scoped for the fixture it depends on: nothing below writes to that store, and a
+    per-test `create_app` would re-run the migration engine once per assertion.
+    """
+    root, _ = admitted
+    with TestClient(create_app(runtime_dir=root)) as client:
+        yield client
+
+
+def _rest_body(shortlist_id: str, **limits: str) -> dict[str, Any]:
+    """The CLI invocation `_construct` types, as the request body this route takes.
+
+    The three `limits` keys are stated rather than left to default because `_construct` states
+    them: `--max-position-weight 0.45` is not the shipped default and the other two are, so a
+    body that omitted them would be comparing a 45% cap against a 25% one.
+    """
+    return {
+        "shortlist_id": shortlist_id,
+        "policy": {
+            "tier_weights": list(TIERS),
+            "limits": {
+                "max_position_weight": "0.45",
+                "max_total_exposure": "0.80",
+                "min_cash_weight": "0",
+                **limits,
+            },
+        },
+    }
+
+
+def test_the_rest_route_serves_the_construction_the_cli_and_the_sdk_serve(
+    admitted: tuple[Path, dict[str, Any]], rest: TestClient
+) -> None:
+    """`V2-P5-013`: the third face, and it renders through `construction_view` like the other two.
+
+    Byte equality against the CLI's own `--json`, which is the assertion
+    `test_the_sdk_and_the_cli_serve_one_construction` already makes for the SDK. Two renderings
+    of one answer that disagree about which keys exist is how a caller comes to believe a cap
+    held; a third rendering makes that three ways to be wrong rather than two.
+    """
+    root, answer = admitted
+    _, stdout, _ = _construct(root, answer["shortlist_id"], "--json")
+
+    response = rest.post("/api/v1/portfolio/construct", json=_rest_body(answer["shortlist_id"]))
+
+    assert response.status_code == 200, response.text
+    assert json.dumps(response.json(), ensure_ascii=False, sort_keys=True) == stdout.strip()
+
+
+def test_the_rest_route_refuses_a_gate_refused_shortlist_in_the_cli_s_own_words(
+    tmp_path: Path,
+) -> None:
+    """The refusal, driven on the third face, and asserted *equal* to the first face's.
+
+    Its own runtime directory rather than the module fixture, because the refusal has to come
+    from a shortlist run that was actually refused and the fixture's was admitted.
+
+    The equality is the point rather than the substring. `V2-P4-101` made the API's refusal
+    byte-identical to pydantic's for the same fault and pinned it with an equality assertion
+    against the other route, precisely so the two could not drift into two dialects; a `422`
+    here reading only "cannot construct" would satisfy a substring check on `refused` and lose
+    the sentence that says what to do instead.
+    """
+    _build_panel_and_factor(tmp_path)
+    code, first = _shortlist(tmp_path, evidence=None, researched="0.0")
+    assert code == 0, first
+    shortlisted = [entry["subject"] for entry in first["funnel"]["shortlist"]]
+    invented = tmp_path / "invented.json"
+    invented.write_text(
+        _wire_evidence(shortlisted, run_manifest_id=UNRESOLVABLE_RUN), encoding="utf-8"
+    )
+    refused_code, refused = _shortlist(tmp_path, evidence=invented, researched="1.0")
+    assert (refused_code, refused["admitted"]) == (int(PanelExit.unhealthy), None)
+
+    cli_code, _, cli_output = _construct(tmp_path, refused["shortlist_id"], "--json")
+    with TestClient(create_app(runtime_dir=tmp_path)) as client:
+        response = client.post(
+            "/api/v1/portfolio/construct", json=_rest_body(refused["shortlist_id"])
+        )
+
+    assert cli_code == int(PanelExit.bad_request)
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert isinstance(detail, dict), detail
+    assert detail["reason"] == "bad_request"
+    assert detail["message"] == cli_output.strip(), (
+        "both faces refuse the same construction, so they must say so in the same words"
+    )
+
+
+def test_an_industry_cap_is_refused_on_the_rest_face_in_the_cli_s_own_words(
+    admitted: tuple[Path, dict[str, Any]], rest: TestClient
+) -> None:
+    """The second refusal driven across both faces, so the equality above is not a one-off.
+
+    A single asserted-equal message can be satisfied by a route that hard-codes that one
+    sentence. This one is raised at a different place in `portfolio_policy` and reaches the
+    boundary through the same `except`.
+    """
+    root, answer = admitted
+    _, _, cli_output = _construct(
+        root, answer["shortlist_id"], "--max-industry-weight", "0.20", "--json"
+    )
+
+    response = rest.post(
+        "/api/v1/portfolio/construct",
+        json=_rest_body(answer["shortlist_id"], max_industry_weight="0.20"),
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["message"] == cli_output.strip()
+
+
+def test_a_malformed_address_and_an_absent_one_stay_two_answers_on_this_route(
+    rest: TestClient,
+) -> None:
+    """`404` and `422` are the shortlist plane's own two rows, and this route reuses that table.
+
+    Both are driven, because either alone is green under a build that has no route at all:
+    FastAPI answers an unrouted `POST` with `404` and a `detail` that is the **string**
+    `"Not Found"`. So each assertion checks the envelope *and* that `detail` is this module's
+    `{reason, message}` object, which the router's own 404 is not.
+    """
+    absent = rest.post("/api/v1/portfolio/construct", json=_rest_body("sla_" + "0" * 24))
+    malformed = rest.post("/api/v1/portfolio/construct", json=_rest_body("not-an-address"))
+
+    assert absent.status_code == 404, absent.text
+    assert isinstance(absent.json()["detail"], dict), absent.text
+    assert absent.json()["detail"]["reason"] == "not_held"
+    assert malformed.status_code == 422, malformed.text
+    assert isinstance(malformed.json()["detail"], dict), malformed.text
+    assert malformed.json()["detail"]["reason"] == "bad_request"
+
+
+def test_a_tier_vector_that_does_not_sum_to_one_is_refused_alike_on_both_faces(
+    admitted: tuple[Path, dict[str, Any]], rest: TestClient
+) -> None:
+    """The policy's own validator, met from the command line and over HTTP.
+
+    `PortfolioConstructionPolicy` is the request body's own field rather than a set of loose
+    numbers this route re-assembles, so the sentence a caller reads is pydantic's -- the same
+    one the CLI prints, because the CLI builds the same model. Asserted as containment rather
+    than equality, since pydantic wraps a `model_validator` message with its own `Value error, `
+    prefix on the HTTP face and with a location header on the terminal one.
+    """
+    root, answer = admitted
+    arguments = ["portfolio", "construct", answer["shortlist_id"]]
+    for weight in ("0.5", "0.3"):
+        arguments.extend(["--tier-weight", weight])
+    arguments.extend(["--runtime-dir", str(root), "--json"])
+    cli_code, _, cli_output = _cli(*arguments)
+
+    body = _rest_body(answer["shortlist_id"])
+    body["policy"]["tier_weights"] = ["0.5", "0.3"]
+    response = rest.post("/api/v1/portfolio/construct", json=body)
+
+    assert cli_code == int(PanelExit.bad_request)
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert isinstance(detail, list), "a body pydantic itself rejected is a list of field errors"
+    sentence = "tier weights must sum to exactly 1"
+    assert sentence in detail[0]["msg"]
+    assert sentence in cli_output

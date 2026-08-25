@@ -56,6 +56,19 @@ filesystem path. Local file access remains a CLI responsibility.
   transition, including cash, T+1, board-lot, suspension, price-limit, fee, FIFO,
   single-position, and total-exposure checks.
 - `GET /api/v1/portfolio/ledger` lists immutable accepted/rejected transitions.
+- `POST /api/v1/portfolio/construct` weights one *held* shortlist under a declared
+  heuristic policy (`V2-P5-013`). The body is `{shortlist_id, policy, previous}`,
+  where `policy` is `PortfolioConstructionPolicy` itself -- the same model
+  `OpenAlphaSDK.construct_portfolio` takes and `openalpha portfolio construct`
+  builds from its flags -- and `previous` is a book the **caller** declares, never
+  read from `/api/v1/portfolio/ledger`. The `200` body is byte-identical to
+  `openalpha portfolio construct --json`. A well-formed address this installation
+  does not hold is `404`; a malformed address, a shortlist the gate refused, an
+  admitted list holding no names, and a `max_industry_weight` over candidates that
+  carry no industry are all `422` with a `{reason, message}` **object**; a body
+  pydantic itself rejected (a tier vector that does not sum to one) is `422` with a
+  **list** of field errors. `isinstance(detail, dict)` is the discriminator, exactly
+  as on the shortlist and model routes.
 - `POST /api/v1/backtests/portfolio` returns multi-day return, benchmark,
   active return, turnover, capacity, and exposure attribution.
 - `POST /api/v1/backtests/event-study` computes CAR, t-statistic, and a seeded

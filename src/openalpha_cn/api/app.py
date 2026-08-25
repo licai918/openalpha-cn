@@ -36,6 +36,14 @@ from openalpha_cn.backtest.portfolio import (
     PortfolioState,
     PortfolioTransition,
 )
+from openalpha_cn.backtest.portfolio_policy import (
+    PortfolioConstruction,
+    PortfolioConstructionError,
+    PortfolioConstructionPolicy,
+    candidates_from_shortlist_answer,
+    construct_portfolio,
+    construction_view,
+)
 from openalpha_cn.backtest.replay import ReplayCorpus, ReplayReport, ReplayRunner
 from openalpha_cn.backtest.validation import OutcomeObservation, OutcomeValidator
 from openalpha_cn.config import load_config
@@ -220,6 +228,33 @@ class PortfolioApiRequest(BaseModel):
     order: PortfolioOrder
     market: MarketBar
     limits: PortfolioLimits = PortfolioLimits()
+
+
+class PortfolioConstructionApiRequest(BaseModel):
+    """One held shortlist, one declared policy, and the book being moved from (`V2-P5-013`).
+
+    **`policy` is `PortfolioConstructionPolicy` itself rather than a set of loose numbers this
+    route re-assembles**, which is the whole reason this face could be added as wiring. The SDK
+    takes that exact model as its `policy` argument and the CLI builds it out of its flags, so
+    the tier-weight validator a caller meets here is the one the other two faces meet -- in
+    pydantic's own words, once, rather than restated at a third boundary. A route that took
+    `tier_weights` and five `limits` fields flat would be a second declaration of the same
+    contract, and `V2-P5-013` exists because faces that restate a contract come to disagree
+    about it.
+
+    `previous` is weights the **caller** states. It reaches no ledger, exactly as on the other
+    two faces: see `KNOWN_CONSTRUCTION_LIMITATIONS
+    .the_previous_book_is_declared_by_the_caller_and_never_read_from_a_ledger`. Empty by default,
+    which is the first construction over a book that does not exist yet -- and *not* an implicit
+    "read what I hold", which would make a turnover number depend on a store this request never
+    named.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    shortlist_id: str
+    policy: PortfolioConstructionPolicy
+    previous: dict[str, Decimal] = Field(default_factory=dict)
 
 
 class BatchSubmitRequest(BaseModel):
@@ -1945,6 +1980,60 @@ def create_app(
     ) -> tuple[PortfolioTransition, ...]:
         """List immutable order/execution transitions."""
         return portfolio_ledger.list(subject=subject)
+
+    @application.post("/api/v1/portfolio/construct")
+    def portfolio_construct(request: PortfolioConstructionApiRequest) -> JSONResponse:
+        """Weight one admitted shortlist under a declared heuristic policy (`V2-P5-013`).
+
+        `V2-P5-001` shipped `openalpha portfolio construct` and `OpenAlphaSDK
+        .construct_portfolio` and left this face out; `V2-P5-013`'s measurement is what found
+        it. It is `/api/v1/portfolio/construct` and not `/portfolios/`: `portfolio/execute` and
+        `portfolio/ledger` already spell this noun singular, and a second spelling of one noun on
+        one API is the drift this row exists to close rather than to add to.
+
+        **Three lines of body, and that is the point.** The read is `held_shortlist`, the policy
+        is `construct_portfolio`, and the rendering is `construction_view` -- the same three the
+        CLI and the SDK call, so the three faces cannot come to weight one list three ways.
+        `tests/integration/test_portfolio_construction_interfaces.py` asserts this route's `200`
+        body **byte-equal** to `openalpha portfolio construct --json`, and both refusals below
+        equal to the sentence the CLI prints on stderr.
+
+        ## What each refusal is
+
+        - **`404`** -- `ShortlistNotHeldError`: a well-formed address this installation holds no
+          answer under. Through `_shortlist_refusal`, so it is the same row of
+          `SHORTLIST_HTTP_STATUS` that `GET /api/v1/shortlists/{shortlist_id}` answers with.
+        - **`422` with a `{reason, message}` object** -- a request with no answer:
+          `ShortlistRequestError` for a malformed address, `PortfolioConstructionError` for a
+          shortlist the gate refused (`admitted` is null), for an admitted list holding no names,
+          and for a declared `max_industry_weight` over candidates that carry no industry -- the
+          refusal `V2-P5-001` chose over an unenforceable cap, which arrives here unchanged
+          because it is raised in the shared policy rather than at any one face.
+        - **`422` with a list of field errors** -- a body pydantic itself rejected: a tier vector
+          that does not sum to one, a weight that is not positive, a cap outside `(0, 1]`. Two
+          shapes on one status code is this module's standing arrangement and `isinstance(detail,
+          dict)` is the discriminator; see `SHORTLIST_HTTP_STATUS`.
+
+        `ShortlistStoreError` is deliberately **not** caught. It is a fault in the store rather
+        than in the request, and letting it reach Starlette is the same choice
+        `shortlist_get` above makes one route over.
+        """
+        try:
+            construction: PortfolioConstruction = construct_portfolio(
+                candidates=candidates_from_shortlist_answer(
+                    held_shortlist(shortlist_store, request.shortlist_id)
+                ),
+                policy=request.policy,
+                previous=request.previous,
+            )
+        except ShortlistViewError as error:
+            raise _shortlist_refusal(error) from error
+        except PortfolioConstructionError as error:
+            raise HTTPException(
+                status_code=SHORTLIST_HTTP_STATUS["bad_request"],
+                detail=_panel_detail("bad_request", str(error)),
+            ) from error
+        return JSONResponse(status_code=200, content=construction_view(construction))
 
     @application.post("/api/v1/backtests/portfolio")
     def portfolio_backtest(request: PortfolioBacktestRequest) -> PortfolioBacktestReport:
