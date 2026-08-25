@@ -324,7 +324,7 @@ def test_both_faces_still_answer_for_a_corpus_that_reaches_the_session(tmp_path:
     assert factor_risk_warned_on(None, **arguments) is False  # type: ignore[arg-type]
 
 
-def test_the_known_shortlist_view_limitations_are_the_seven_this_face_declares() -> None:
+def test_the_known_shortlist_view_limitations_are_the_eight_this_face_declares() -> None:
     """Equality rather than membership: a membership assertion can see a code that was renamed and
     never one that was removed. `KNOWN_ADJUSTMENT_LIMITATIONS`' form since `V2-P1-005`.
 
@@ -332,7 +332,9 @@ def test_the_known_shortlist_view_limitations_are_the_seven_this_face_declares()
     and does not prove about the conclusion beside it, and what a content-addressed answer store
     can and cannot say about when an answer was reached. `V2-P4-080` added the seventh, which is
     the residue of its own fix: the refusal it installed fires on a corpus that *shows* a rename
-    this run cannot resolve, and cannot fire on one that shows nothing at all.
+    this run cannot resolve, and cannot fire on one that shows nothing at all. `V2-P4-067` added
+    the eighth, which records that only the raw tier's unreadable-factor refusal names the
+    command that builds it.
     """
     assert {
         "the_clip_block_is_recovered_from_a_tie_and_may_over_report",
@@ -342,8 +344,9 @@ def test_the_known_shortlist_view_limitations_are_the_seven_this_face_declares()
         "a_resolved_run_manifest_is_not_a_resolved_signal",
         "the_stored_answer_is_addressed_by_content_and_not_by_when_it_was_run",
         "a_name_never_announced_inside_the_requested_years_is_screened_as_ordinary",
+        "only_the_raw_tiers_unreadable_factor_refusal_names_the_command_that_builds_it",
     } == SHORTLIST_VIEW_LIMITATION_CODES
-    assert len(KNOWN_SHORTLIST_VIEW_LIMITATIONS) == 7
+    assert len(KNOWN_SHORTLIST_VIEW_LIMITATIONS) == 8
     assert all(limitation.detail.strip() for limitation in KNOWN_SHORTLIST_VIEW_LIMITATIONS)
 
 
@@ -400,8 +403,8 @@ def test_a_calendar_horizon_is_a_bad_request_and_not_a_fact_about_the_panel() ->
         _request(horizon="3m")
 
 
-def test_a_short_code_commit_is_refused_because_different_code_cuts_a_different_list() -> None:
-    with pytest.raises(ShortlistRequestError, match="at least 7 characters"):
+def test_a_code_commit_outside_the_contracts_bounds_is_refused_on_either_side() -> None:
+    with pytest.raises(ShortlistRequestError, match="between 7 and 64 characters"):
         _request(code_commit="abc")
 
 

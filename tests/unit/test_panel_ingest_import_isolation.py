@@ -475,6 +475,7 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_factors.FACTOR_DEFINITIONS",
             "panel_factors.FACTOR_TRANSFORMS",
             "panel_factors.FactorEngineError",
+            "panel_factors.factor_observation_dataset",
             "panel_factors.load_factor_observations",
             "panel_factors.load_processed_factor_observations",
             "panel_ingest.load_daily_bars",
