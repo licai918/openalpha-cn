@@ -26,6 +26,7 @@ from datetime import UTC, datetime
 import pytest
 
 from openalpha_cn.agents.base import AgentContext, AgentProvenance, AgentResult
+from openalpha_cn.agents.baseline import ThemeAgent
 from openalpha_cn.domain.alpha_model import FeatureCrossSection, FeatureRow
 from openalpha_cn.domain.evidence import EvidenceSnapshot
 from openalpha_cn.domain.signal import SignalFrame
@@ -137,6 +138,59 @@ def test_every_declared_column_must_be_on_the_plane_and_not_merely_one_of_them(
 
     assert agent.feature_dependencies & set(one_of_two.feature_ids) != set()
     assert AgentRouter().route(agents=(agent,), evidence=(item,), features=one_of_two) == ()
+
+
+def test_any_declared_family_suffices_and_not_every_one_of_them(
+    evidence: Callable[..., EvidenceSnapshot],
+) -> None:
+    """The any-of quantifier, driven against the all-of one on the same fixture (`V2-P4-112`).
+
+    The counterpart of
+    `test_every_declared_column_must_be_on_the_plane_and_not_merely_one_of_them` above, and
+    it did not exist until `V2-P4-112`. Three families are declared and exactly one arrives,
+    so `& families` selects this agent and a `<= families` rule would drop it -- which is the
+    separation, and the only shape that makes it: every other `evidence_families=` in this
+    file declares exactly one family, and on a single-family declaration the two rules agree
+    for every run. Mutating `route`'s `declared_families & families` to
+    `declared_families <= families` left this whole file green before this test was added.
+    """
+    agent = DeclaringAgent(
+        "theme-agent", evidence_families=frozenset({"theme", "catalyst", "disclosure"})
+    )
+    one_of_three = evidence(kind="theme", facts={"theme": "机器人", "score": 0.82})
+
+    assert agent.evidence_families & _families((one_of_three,)) != set()
+    assert not agent.evidence_families <= _families((one_of_three,))
+    selected = AgentRouter().route(agents=(agent,), evidence=(one_of_three,))
+
+    assert [chosen.agent_id for chosen in selected] == ["theme-agent"]
+
+
+def test_the_shipped_three_family_agent_is_the_reason_the_family_quantifier_is_any(
+    evidence: Callable[..., EvidenceSnapshot],
+) -> None:
+    """This module's docstring cites `ThemeAgent` by name; here it is, actually routed.
+
+    `AgentRouter`'s own docstring justifies `&` over `<=` with a shipped agent -- `ThemeAgent`
+    declares `{"theme", "catalyst", "disclosure"}` and `analyze` filters `_family(item) in
+    self.evidence_families`, so a run carrying only themes is a smaller sample and not a hole.
+    Nothing in this file measured that: the claim was prose about a class the file never
+    imported. Routing the real agent rather than a `DeclaringAgent` mirror is the point --
+    a mirror can drift from the class it mirrors, and this assertion goes red if somebody
+    narrows `ThemeAgent.evidence_families` to one family too.
+
+    The `analyze` half is what makes the any-of rule safe rather than merely permissive:
+    `strength = sum(scores) / len(scores)` divides by `len(items)`, so routing on a family
+    that did arrive is exactly what guarantees the sample is non-empty.
+    """
+    agent = ThemeAgent()
+    only_theme = evidence(kind="theme", facts={"theme": "机器人", "score": 0.82})
+
+    assert len(agent.evidence_families) == 3
+    selected = AgentRouter().route(agents=(agent,), evidence=(only_theme,))
+
+    assert [chosen.agent_id for chosen in selected] == ["theme-agent"]
+    assert not agent.evidence_families <= _families((only_theme,))
 
 
 def test_an_evidence_family_agent_routes_exactly_as_it_did_before_the_plane_existed(

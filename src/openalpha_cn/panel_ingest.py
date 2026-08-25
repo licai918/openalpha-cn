@@ -1717,10 +1717,25 @@ def _session_census(
 
     The **lower** bound is the year's own start, not the batch's first row -- a partition that
     begins in March is exactly the failure this exists for, and clamping at its own first row
-    would define the hole out of existence. The **upper** bound is the day before the fetch, in
-    `date_timezone`: a session publishes at 16:30 local (`DAILY_AVAILABILITY_TIME`), so a fetch
-    earlier that same day cannot hold it and requiring it would be a false alarm on every
-    intraday run.
+    would define the hole out of existence.
+
+    The **upper** bound is `_sessions_published_through(batch.fetched_at)`, and it is that
+    function rather than arithmetic of its own (`V2-P4-114`). A session publishes at 16:30
+    `date_timezone` (`DAILY_AVAILABILITY_TIME`), so *below* that instant the newest requirable
+    session is yesterday's and *at or above* it, it is today's.
+
+    **This used to subtract a day unconditionally, which is that rule only below 16:30 -- the
+    same restatement `V2-P4-063` removed from `cli._build_sessions`, left standing here.** The
+    two are described in `cli.panel_build` as "the same rule applied at two layers", and after
+    `063` they were not: above 16:30 the loop fetched through session `D` and this census stopped
+    requiring at `D-1`, so a partition that lost exactly the newest session was accepted at write
+    time. Measured on a weekday-open January 2026 calendar at `fetched_at=2026-01-20T17:00+08`
+    with every session but 2026-01-20 present: `_sessions_published_through` answered 2026-01-20
+    and this census answered `([], 2026-01-01, 2026-01-19)` -- no missing sessions. The hole sat
+    exactly over the session `V2-P4-063` added, and it was the only layer of the price plane not
+    asking for it: `_price_requirement` clamps `required_dates` at `_sessions_published_through`,
+    so `panel doctor` required `D`, and the build loop fetched `D`. Sharing the function is what
+    makes the three the same set by construction rather than by agreement.
 
     Only the *missing* direction is computed. A session the batch carries that the calendar
     calls closed is left alone, because that is a real and harmless shape -- `000001.SZ` has
@@ -1733,9 +1748,7 @@ def _session_census(
     """
     zone = _resolve_timezone(date_timezone)
     opens_on = date(year, 1, 1)
-    closes_on = min(
-        date(year, 12, 31), batch.fetched_at.astimezone(zone).date() - timedelta(days=1)
-    )
+    closes_on = min(date(year, 12, 31), _sessions_published_through(batch.fetched_at, zone))
     if closes_on < opens_on:
         return None
     observed = set(_stored_dates(_column_values(batch, date_column), date_column))

@@ -3093,11 +3093,25 @@ def _computed(
     readiness question itself. Reading once at the earliest would under-cover the later ones. Per
     instant is the only setting that is right for every instant.
 
-    **How far that is measured, stated rather than implied.** The *registry* half is driven:
-    `tests/integration/test_factor_build.py::
-    test_the_registry_is_read_at_each_prediction_instant_and_not_once_for_the_build` puts two
-    instants eight days apart under a seven-day freshness bound, so a build that read the registry
-    once succeeds where this one must be refused. The *calendar* half is **not separable on any
+    **How far that is measured, stated rather than implied.** The *registry* half is driven by two
+    tests in `tests/integration/test_factor_build.py`, one per direction, and it takes two because
+    the directions fail differently (`V2-P4-113`).
+    `test_the_registry_is_read_at_each_prediction_instant_and_not_once_for_the_build` covers the
+    **early** read: a delisting between the two instants, and a registry pinned at `as_ofs[0]` is
+    refused outright because the second instant's day is beyond the first instant's snapshot.
+    (The sentence that stood here described that test as putting "two instants eight days apart
+    under a seven-day freshness bound" -- its own separator until `V2-P4-064` removed it, and its
+    docstring has said so since. It uses `max_staleness_days=30` and a delisting now.)
+
+    `test_a_registry_read_at_the_last_instant_hands_an_earlier_one_a_security_that_had_not_listed`
+    covers the **late** read, which is the look-ahead one and which nothing measured until
+    `V2-P4-113`. It cannot be measured on `universe_counts`, and not because a fixture is thin:
+    `stock_basic` is `calendar_static`, so a row is visible exactly when its lifecycle date is at
+    or before the reading day, which is exactly when it can change `listed_on` for that day.
+    Reading the registry later therefore cannot move any earlier instant's membership on any
+    fixture. What it does move is `subjects`, taken from `universe.securities`, which is not
+    date-filtered -- so a late read hands an earlier cross section a security whose listing had
+    not happened yet, and that test counts it. The *calendar* half is **not separable on any
     fixture this suite has**, and the reason is a property of the fixture rather than of the code:
     `tests/panel_fixtures.py::_calendar_batch` stamps every session row's `available_time` at
     1 January, so the whole year's calendar is visible from the first instant and a read at any
