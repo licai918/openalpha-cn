@@ -201,6 +201,7 @@ from openalpha_cn.panel_factors import (
     FACTOR_DEFINITIONS,
     FACTOR_TRANSFORMS,
     FactorEngineError,
+    factor_observation_dataset,
     load_factor_observations,
     load_processed_factor_observations,
 )
@@ -467,6 +468,24 @@ class ShortlistViewLimitation:
 
 
 KNOWN_SHORTLIST_VIEW_LIMITATIONS: Final[tuple[ShortlistViewLimitation, ...]] = (
+    ShortlistViewLimitation(
+        code="only_the_raw_tiers_unreadable_factor_refusal_names_the_command_that_builds_it",
+        detail=(
+            "V2-P4-067. When a factor read RAISES rather than returning nothing -- an empty "
+            "store, or a year no partition covers -- the raw tier's refusal now carries "
+            "`openalpha factor build --factor <key> --tier raw --year <year>` and the processed "
+            "and neutralized tiers' refusals carry no command at all. That asymmetry is a "
+            "boundary rather than an oversight: the remedy fires only when no year of the "
+            "factor's partition is registered, and `neutralized` has TWO partition spellings "
+            "depending on the declared neutralization (factor_neut_* and factor_neutmn_*), so "
+            "the registered_years question asked about the wrong one would answer 'nothing is "
+            "stored' for a panel holding the other and hand back a rebuild the caller does not "
+            "need. V2-P4-078 recorded the same trap on the panel plane: a refusal naming a "
+            "command that does not help is worse than one naming none. What is NOT claimed is "
+            "that the other two tiers are unreachable or undiagnosable -- their message still "
+            "names the dataset, the year and the instant; it just stops short of a command."
+        ),
+    ),
     ShortlistViewLimitation(
         code="the_clip_block_is_recovered_from_a_tie_and_may_over_report",
         detail=(
@@ -992,11 +1011,17 @@ def shortlist_request(
             "raise rather than answer. Declare a budget below it -- it is a notional per name "
             "and not a fund size, and nothing here allocates"
         )
-    if len(code_commit.strip()) < 7:
+    if not 7 <= len(code_commit.strip()) <= 64:
         raise ShortlistRequestError(
-            f"--code-commit must be at least 7 characters; got {code_commit!r}. Different code "
-            "may cut a different list from the same rows, so an identity that ignored it would "
-            "claim a reproducibility it cannot deliver"
+            f"--code-commit must be between 7 and 64 characters; got {code_commit!r}. Different "
+            "code may cut a different list from the same rows, so an identity that ignored it "
+            "would claim a reproducibility it cannot deliver"
+        )
+    if not re.fullmatch(r"[0-9a-f]{64}", config_digest.strip()):
+        raise ShortlistRequestError(
+            f"--config-digest must be 64 lowercase hex characters; got {config_digest!r}. "
+            "Different configuration may cut a different list from the same rows, so an identity "
+            "that ignored it would claim a reproducibility it cannot deliver"
         )
     try:
         spec = ShortlistSpec(
@@ -1321,6 +1346,7 @@ def _rows_for(
             ),
             store=store,
             what=f"the raw {definition.qualified_key} observations",
+            remedy=_unbuilt_factor_remedy(store, definition=definition, tier="raw"),
         )
         return tuple((row.subject, row.value, row.coverage, row.as_of) for row in raw)
     transform = _declared_transform(request)
@@ -2501,6 +2527,7 @@ def _read(
     store: PanelStore,
     what: str,
     dataset: str | None = None,
+    remedy: str = "",
     faults: tuple[type[Exception], ...] = _PANEL_FAULTS,
 ) -> _T:
     """Run one panel read, turning its refusal into `ShortlistPanelUnreadableError`.
@@ -2514,15 +2541,25 @@ def _read(
     rather than to all of them.
 
     `dataset` is a key of `SHORTLIST_PANEL_DATASETS` and is what `_unbuilt_dataset_remedy` needs
-    to name a command. It is `None` for the factor-tier reads, which are the other callers here:
-    those already refuse with `openalpha factor build --factor ... --tier ...` on them (see
-    `_resolve_instant`), and a `panel build` line appended to one of them would name the wrong
-    plane.
+    to name a command. It is `None` for the factor-tier reads, because a `panel build` line
+    appended to one of those would name the wrong plane; `remedy` is how those carry theirs
+    instead.
+
+    **`V2-P4-067`: the sentence this docstring used to carry was false for the case that
+    matters.** It said the factor-tier reads "already refuse with `openalpha factor build ...`
+    (see `_resolve_instant`)". `_resolve_instant` refuses when the read *succeeds and returns
+    nothing*; this function refuses when the read *raises*, and a store with no partition at all
+    reaches this one first. Measured through `openalpha shortlist run` against an empty runtime
+    directory: `the raw reversal_1d/v1 observations could not be read out of ...:
+    ['partition_missing', 'field_missing']` -- no command named anywhere in it. The exemption
+    covered the class and left the instance uncovered, which is the shape this repository keeps
+    finding.
     """
     try:
         return reader()
     except faults as error:
-        remedy = "" if dataset is None else _unbuilt_dataset_remedy(store, dataset=dataset)
+        if dataset is not None:
+            remedy = _unbuilt_dataset_remedy(store, dataset=dataset)
         raise ShortlistPanelUnreadableError(
             f"{what} could not be read out of {store.root}: {error}{remedy}",
             disclosable=(
@@ -2530,6 +2567,34 @@ def _read(
                 f"{_without_store_path(str(error), store)}{remedy}"
             ),
         ) from error
+
+
+def _unbuilt_factor_remedy(store: PanelStore, *, definition: FactorDefinition, tier: str) -> str:
+    """`_unbuilt_dataset_remedy`'s factor-plane twin, on the same boundary and for its reason.
+
+    Fires only when no year of this factor's observation partition is registered at all. A store
+    that holds *some* year of it can be short for reasons this function cannot tell apart -- the
+    requested year is absent and the read says so itself -- and a refusal that names a command
+    which does not help is worse than one that names none (`V2-P4-078`'s finding, restated here
+    because the same trap is one line away).
+
+    **Raw only, deliberately, and this is a boundary rather than an oversight.** `processed` has
+    one dataset name per definition, but `neutralized` has two spellings depending on the
+    declared neutralization (`factor_neut_*` and `factor_neutmn_*`), so a `registered_years`
+    question asked about the wrong one would answer "nothing is stored" for a panel that holds
+    the other and hand the caller a rebuild they do not need. Naming the tier the caller asked
+    for while checking a partition they did not ask about is the exact mistake this function's
+    boundary exists to avoid, so the other two tiers keep the unremedied message and
+    `KNOWN_SHORTLIST_VIEW_LIMITATIONS
+    .only_the_raw_tiers_unreadable_factor_refusal_names_the_command_that_builds_it` says so.
+    """
+    if tier != "raw" or store.registered_years(factor_observation_dataset(definition)):
+        return ""
+    return (
+        f". No partition of this factor is registered in this panel at all. Build it first: "
+        f"`openalpha factor build --factor {definition.qualified_key} --tier {tier} "
+        f"--year <year>`"
+    )
 
 
 def _unbuilt_dataset_remedy(store: PanelStore, *, dataset: str) -> str:

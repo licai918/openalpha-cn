@@ -267,6 +267,38 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **`--config-digest` is refused when the request is read, not after the store is** (`V2-P4-065`).
+  `shortlist_request` had checked `code_commit` at request time since `V2-P4-046`, and the comment
+  above that check says exactly why: `build_ranking_manifest` "raises the same objection after a
+  store has already been read and would therefore report a mistyped flag as a fact about the
+  panel". `config_digest` was left on that later path, so a mistyped one came back as *the
+  shortlist could not be joined to the evidence this request supplied* — naming an evidence join
+  for a request that supplied no evidence, quoting the internal `CandidateRankingManifest`, and
+  only after a whole panel read. The separator in the test is an **empty** store rather than a
+  built one: a request-time refusal cannot depend on a panel, so before the fix the empty store
+  answered first (`['partition_missing', 'field_missing']`, exit 1) and the digest was never
+  examined; after it, the digest answers first (exit 3) and no partition is opened. A built panel
+  would have made both orderings refuse and the test could not have told them apart. Six bad
+  inputs are refused by name on all three faces, and a seventh well-formed one must still reach
+  the panel — that row is what separates a real check from one that refuses everything.
+  Adjacent, and fixed with it: `code_commit` was checked only for `< 7` while the contract is
+  `min_length=7, max_length=64`, so a 65-character commit still failed late in the same wrong
+  place.
+- **A factor read that cannot open a partition now names the command that builds it**
+  (`V2-P4-067`). The prefix half was already right at `be262ea` — repaired in passing by
+  `V2-P4-032`/`049` with nothing pinning it, so an audit was added and proved red by writing
+  `rmf_` back into the real file. The second half corrected the row's own diagnosis: `_read`'s
+  docstring claimed the factor-tier reads "already refuse with `openalpha factor build ...` (see
+  `_resolve_instant`)". `_resolve_instant` refuses a read that *succeeds and returns nothing*;
+  an empty store reaches the read that *raises* first, and that refusal named no command at all.
+  The exemption covered the class and left the instance uncovered. `_unbuilt_factor_remedy`
+  copies `_unbuilt_dataset_remedy`'s boundary — it fires only when no year of that factor's
+  partition is registered — and is **raw-only on purpose**: `neutralized` has two partition
+  spellings (`factor_neut_*`, `factor_neutmn_*`), so asking `registered_years` about the wrong
+  one would answer "nothing is stored" for a panel holding the other and hand back a rebuild the
+  caller does not need. Both directions are asserted, and the asymmetry is recorded rather than
+  left in prose.
+
 - **Recovery wrote every completed result again after every agent** (`V2-P4-020`).
   `ResearchEngine` saved the whole accumulated `RunRecoveryState` once per agent, and each save
   serialised it twice over — `_updated_recovery` round-tripped it through `model_dump` and
