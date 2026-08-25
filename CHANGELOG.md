@@ -74,7 +74,13 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   survivors are the turnover zero-guard and both are **equivalent, measured rather than
   labelled** -- the refusal above makes `average_equity == 0` unreachable, and flipping it to
   `== 1` needs a book that filled something while averaging one yuan of equity, where the
-  smallest fillable order is a hundred-share board lot.
+  smallest fillable order is a hundred-share board lot. **One gap is left open and stated
+  rather than hidden**: those series refusals reach `POST /api/v1/backtests/portfolio` as an
+  unmapped `ValueError`, so a mis-ordered series comes back `500` where it should be `422`.
+  Nothing is written when it happens -- the series is checked before the first order runs --
+  and the fix is the three-line `except ValueError -> HTTPException(422)` the neighbouring
+  routes already use, measured working; it was not applied because `api/app.py` was held by a
+  concurrent change. `docs/api/http.md` carries the note where a caller looks.
 
 ### Added
 

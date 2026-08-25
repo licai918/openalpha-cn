@@ -64,6 +64,17 @@ filesystem path. Local file access remains a CLI responsibility.
   run, so a cap is judged on the prices of the day the order was placed. A held name the session
   serves no bar for keeps its price and is reported in `carried_marks`; an order whose subject
   has no bar on its session is a `422` rather than a `rejected` transition inside a `200`.
+  **Known gap, stated because it is a regression and not a design**: the *series* refusals
+  `V2-P5-003` added -- sessions that are not strictly ascending, a first session before the
+  opening state, an opening book with no equity -- are raised by
+  `PortfolioBacktestRunner.run` as `ValueError` **after** request validation has passed, and
+  this route does not map them, so each comes back as a **`500`** where it should be a `422`.
+  The body is correct in every other respect (nothing is written to the ledger: the series is
+  checked before the first order runs) and the fix is the three-line `except ValueError as
+  error: raise HTTPException(status_code=422, detail=str(error)) from error` this file's
+  neighbours already use -- measured to produce `422 multi-day backtest sessions must be
+  strictly ascending by date`. It was not applied because `api/app.py` was held by a
+  concurrent change while `V2-P5-003` landed.
 - `POST /api/v1/backtests/event-study` computes CAR, t-statistic, and a seeded
   Bootstrap confidence interval.
 - `POST /api/v1/backtests/validate` accepts a previously returned research result and a future outcome observation, verifies content-derived IDs, and returns reconciled attribution.
