@@ -110,13 +110,39 @@ def test_the_enum_serialises_to_the_bare_string_the_literal_did() -> None:
     assert b'"mode":"live"' in canonical_json_bytes(_request(RunMode.live).model_dump(mode="json"))
 
 
-def _string_constants_outside_docstrings(path: Path) -> set[str]:
-    """Every `str` literal in `path` that is not a module/class/function docstring.
+def _folded_literal(node: ast.AST) -> str | None:
+    """`node` as the string it spells if it is one written out in full, else `None`.
 
-    Prose has to be excluded or the audit becomes unfalsifiable: this repository documents
-    heavily, and a docstring naming all three original modes is exactly the "the code says it
-    twice, one of them in prose" mistake `test_known_limitation_registries.py` was built to
-    stop counting.
+    Adjacent literals -- `"future" "_data"` -- never reach here: the parser folds them into a
+    single `ast.Constant` before the tree exists, which is why the audit already caught that
+    spelling. `"look_ahead" + "_violation"` is a different node entirely, an `ast.BinOp` whose
+    two halves are each a non-name, and `V2-P4-107` measured what that was worth: it passed.
+
+    Folding it is not a claim to have closed the class. It closes the one spelling that was
+    arbitrarily different from a spelling already caught -- the two mean the same thing to the
+    reader and to the interpreter, and catching one while missing the other was an accident of
+    where CPython does its constant folding rather than a line anybody drew.
+    `test_a_flag_set_assembled_at_run_time_is_invisible_to_this_audit` states what is left.
+    """
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, str) else None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left, right = _folded_literal(node.left), _folded_literal(node.right)
+        return None if left is None or right is None else left + right
+    return None
+
+
+def _string_constants_outside_docstrings(path: Path) -> set[str]:
+    """Every `str` literal in `path` that is not a docstring, with `+`-joined literals folded.
+
+    Prose is excluded so that a module documenting the vocabulary cannot be read as declaring
+    it -- the "the code says it twice, one of them in prose" mistake
+    `test_known_limitation_registries.py` was built to stop counting. `V2-P4-107` measured what
+    the filter is worth on today's tree and the answer is nothing: the comparison is exact
+    equality between a whole `ast.Constant` and a mode name, so a docstring *mentioning* a mode
+    never matches, and counting docstrings moves this audit's answer on no module of `src/`.
+    It is kept for the case that would match -- a docstring that is exactly a mode name -- and
+    `test_a_docstring_that_is_exactly_a_mode_name_is_not_a_declaration` is that case.
     """
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     docstrings: set[int] = set()
@@ -130,11 +156,9 @@ def _string_constants_outside_docstrings(path: Path) -> set[str]:
             ):
                 docstrings.add(id(first.value))
     return {
-        node.value
+        spelled
         for node in ast.walk(tree)
-        if isinstance(node, ast.Constant)
-        and isinstance(node.value, str)
-        and id(node) not in docstrings
+        if id(node) not in docstrings and (spelled := _folded_literal(node)) is not None
     }
 
 
@@ -189,3 +213,46 @@ def test_the_frozen_v1_snapshot_still_refuses_the_modes_v1_never_had() -> None:
             started_at=NOW,
             status="running",
         )
+
+
+def test_a_plus_joined_mode_name_is_folded_into_the_name_it_spells(tmp_path: Path) -> None:
+    """`V2-P4-107` over this audit's copy of the helper, which shares the whole defect.
+
+    `test_risk_flag.py` is where the finding was filed and this is the identical extractor, so
+    the identical escape applied: adjacent literals are folded by the parser and were caught,
+    `"back" + "test"` was not. Both are caught now, and both halves are asserted here rather
+    than in one file only -- a shared defect fixed in one of two copies is a defect that comes
+    back through the copy nobody tested.
+    """
+    names = {mode.value for mode in RunMode}
+    spelled = sorted(names)[:2]
+    assert len(spelled) == 2, "this audit needs two mode names to have anything to fold"
+
+    written_out = tmp_path / "written_out.py"
+    written_out.write_text(f"_legacy = frozenset({{{spelled[0]!r}, {spelled[1]!r}}})\n", "utf-8")
+    assert names & _string_constants_outside_docstrings(written_out) == set(spelled)
+
+    joined = tmp_path / "joined.py"
+    joined.write_text(
+        f"_legacy = frozenset({{{spelled[0][:2]!r} {spelled[0][2:]!r}, "
+        f"{spelled[1][:2]!r} + {spelled[1][2:]!r}}})\n",
+        "utf-8",
+    )
+    assert names & _string_constants_outside_docstrings(joined) == set(spelled), (
+        "a `+`-joined mode name is not folded, so a declaration one token away from the "
+        "spelling this audit catches walks past it -- the V2-P4-107 escape, in this file"
+    )
+
+
+def test_a_docstring_that_is_exactly_a_mode_name_is_not_a_declaration(tmp_path: Path) -> None:
+    """The docstring filter, exercised -- because `src/` does not exercise it.
+
+    Measured by `V2-P4-107`: counting docstrings changes this audit's answer on no module of
+    the tree, because the comparison is exact equality against a whole constant. This is the
+    case where the filter decides something, written here because the repository has none.
+    """
+    names = {mode.value for mode in RunMode}
+    spelled = sorted(names)[:2]
+    module = tmp_path / "prose.py"
+    module.write_text(f'"""{spelled[0]}"""\n_legacy = frozenset({{{spelled[1]!r}}})\n', "utf-8")
+    assert names & _string_constants_outside_docstrings(module) == {spelled[1]}

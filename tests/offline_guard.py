@@ -1,4 +1,4 @@
-"""The offline guarantee: what it refuses, on which families, and the restoration it promises.
+"""The offline guarantee: what it refuses, through which mechanism, and the limits it declares.
 
 A module of its own rather than two lines inside `tests/conftest.py`, because the test that
 proves the guard is live (`tests/unit/test_offline_suite.py`) has to import the exception it
@@ -10,18 +10,17 @@ the import returned the e2e conftest and the unit test failed to collect. `tests
 
 `V2-P4-039` moved the patching itself here too, and that is a second reason of the same kind.
 While it lived inside an autouse fixture there was no moment at which any test could look at
-`socket.socket` **unguarded**, so "deleting the shadow is the only restoration that leaves the
-class exactly as it was found" was a `finally` block nothing could observe -- and a mutation
-that skipped the `delattr` outright left the whole suite green. `refusing_outbound_traffic`
-takes the class it patches, so the round trip can be driven over a throwaway subclass that
-inherits the same methods from the same C base. `tests/import_linter_containment.py::
-raw_lint_imports_disables` is the same problem answered the same way one directory over.
+the guard **off**, so "the restoration leaves the process exactly as it was found" was a
+`finally` block nothing could observe -- and a mutation that skipped the teardown outright left
+the whole suite green. `tests/import_linter_containment.py::raw_lint_imports_disables` is the
+same problem answered the same way one directory over.
 """
 
 from __future__ import annotations
 
 import socket
-from collections.abc import Callable, Iterator
+import sys
+from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any, Final
 
@@ -30,30 +29,69 @@ GUARDED_SOCKET_FAMILIES: Final[frozenset[int]] = frozenset(
 )
 """The two families that reach the network. Everything else -- `AF_UNIX` above all -- is left
 alone: a local socket is not the network, and refusing one would be a guess about what a future
-test needs rather than a rule about what this one forbids."""
+test needs rather than a rule about what this one forbids.
 
-GUARDED_SOCKET_METHODS: Final[tuple[str, ...]] = ("connect", "connect_ex", "sendto", "sendmsg")
-"""Every `socket.socket` method the offline guard shadows: two that connect, two that do not.
+The family check does real work rather than standing in reserve, and that is measurable: the
+audit events below fire on `AF_UNIX` sockets too (measured -- `socket.connect` with
+`('/nope/nope.sock',)`, `socket.sendto` likewise), so this frozenset is the whole of what keeps
+a local socket out of the refusal."""
 
-`V2-P4-039` is why the last two are here. The guard covered `connect`/`connect_ex` only, and a
-datagram opens no connection, so nothing saw one: measured on `146698c`, `sendto` on an
-`AF_INET` socket returned 5 with no refusal while a TCP `connect` from the same test raised.
-The guard is address-blind on purpose -- it refuses by family, not by destination -- so the
-datagram that left was no more refused when aimed at a routable host than at loopback, and a
-green build could have depended on a remote endpoint answering.
+GUARDED_AUDIT_EVENTS: Final[frozenset[str]] = frozenset(
+    {"socket.connect", "socket.sendto", "socket.sendmsg"}
+)
+"""The CPython audit events (PEP 578) this guard refuses, and the reason it is events at all.
 
-**These four are the whole outbound surface, and that is an argument rather than a list.**
-`send`, `sendall` and `socket.sendfile` all require a *connected* socket, and the only way to
-connect one on a guarded family is `connect` or `connect_ex`, which raise -- so guarding them
-would be code no input can reach, and code no input can reach is what hides which line is
-actually doing the work. `sendto` and `sendmsg` are the only two that transmit without
+`V2-P4-105` is why this is no longer a list of method names. Until that issue the guard
+*shadowed* four names on `socket.socket` -- and `socket.socket` is the Python wrapper class,
+which inherits every one of them from the C `_socket.socket` and defines none of its own. The
+base class is untouched by any shadow, `import _socket` is one line, and the technical
+acceptance walked out of the guard three ways from inside a non-e2e test (loopback only):
+
+  - `_socket.socket(...).connect(...)` then `.sendall(...)` -- delivered `b'ESCAPED-TCP'`,
+  - `_socket.socket(...).sendto(...)` -- returned 11, and the listener received `b'ESCAPED-UDP'`,
+  - and the sharpest, needing no import of a fresh class at all: take a **guarded** socket's own
+    file descriptor with `detach()`, re-wrap it with `_socket.socket(..., fileno=fd)`, and it
+    delivered `b'ESCAPED-DETACH'`.
+
+The row's preferred repair was to widen the shadow onto `_socket.socket` itself, and that was
+measured and **cannot be done**: `_socket.socket` is an immutable extension type, and
+`setattr(_socket.socket, "connect", ...)` raises `TypeError: cannot set 'connect' attribute of
+immutable type '_socket.socket'`. No arrangement of names closes this, because the C class is
+reachable by too many spellings that are not names the guard could hold -- `import _socket`,
+`socket.socket.__bases__[0]`, `socket.socket.__mro__[1]`, `type(sock).__mro__[1]`.
+
+So the guard moved **below** the class graph instead of widening across it. Every one of these
+events is raised inside `_socket`'s own C implementation, so a caller reaches them whichever
+class object it got hold of, and all three escapes above are refused by the same three lines.
+Narrowing the *claim* to "outbound TCP through the `socket` wrapper" remains the other repair
+and remains declined, for `V2-P4-039`'s reason: it makes the sentence true by making the
+guarantee smaller, which is the direction every Critical this project has booked already went.
+
+**Three events, not four, and that is a measurement rather than an omission.** CPython raises
+`socket.connect` for `connect_ex` as well as for `connect` -- there is no `socket.connect_ex`
+event -- so the two entry points `V2-P4-039` wrapped separately arrive here as one name, and a
+refusal provoked by `connect_ex` reports itself as `connect`.
+
+**These three are the whole outbound surface, and that is an argument rather than a list.**
+`send`, `sendall` and `socket.sendfile` raise no audit event, and they do not need to: all three
+require a *connected* socket, and the only way to connect one on a guarded family is `connect`
+or `connect_ex`, which raise. `sendto` and `sendmsg` are the only two that transmit without
 connecting. `tests/unit/test_offline_suite.py::
-test_the_guarded_methods_are_the_whole_of_what_leaves_this_process` asserts both halves: these
-four are shadowed and `send`/`sendall` are deliberately not.
+test_the_unaudited_sends_are_unreachable_because_connecting_is_what_is_refused` drives that
+closure over the raw C class rather than asserting it: it connects, is refused, and then watches
+`sendall` fail as an unconnected socket fails while the loopback listener receives nothing.
+"""
 
-Narrowing the *claim* to "outbound TCP" was the other repair the row offered, and it was
-declined: it would have made the sentence true by making the guarantee smaller, which is the
-direction every Critical this project has booked already went.
+UNGUARDED_RESOLUTION_EVENT: Final[str] = "socket.getaddrinfo"
+"""Named here so the boundary `tests/conftest.py` declares is executable rather than prose.
+
+Name resolution is deliberately **not** guarded: `getaddrinfo` alone transfers nothing, and
+refusing it would break `socket.getaddrinfo("localhost", ...)`-style calls inside the standard
+library that never go on to connect. It is also shaped differently from the three above --
+measured, its audit args are `(host, port, family, type, protocol)`, so `args[0]` is a `str`
+and not a socket -- which means adding it to `GUARDED_AUDIT_EVENTS` would not merely widen the
+guard, it would raise `AttributeError` inside an audit hook. `tests/unit/test_offline_suite.py
+::test_name_resolution_is_outside_the_guard_and_stays_outside` pins it.
 """
 
 REFUSAL_MESSAGE: Final[str] = (
@@ -72,62 +110,75 @@ class OfflineSuiteViolation(RuntimeError):
 
     "Open an outbound TCP connection" is what this said until `V2-P4-039`, and it was accurate
     about the guard and wrong about the guarantee: a UDP datagram opens nothing and left the
-    process unrefused. The wording is wider now because the guard is.
+    process unrefused. The wording is wider now because the guard is, and `V2-P4-105` made it
+    true of the C class as well as of the Python wrapper.
     """
 
 
-def _refuse(name: str, wrapped: Callable[..., Any]) -> Callable[..., Any]:
-    """`name`, refused on a guarded family and passed straight through on every other.
+_depth = 0
+"""How many `refusing_outbound_traffic()` blocks are open. Zero means the hook is inert.
 
-    One wrapper over `*args` rather than one per method, because the four differ in where the
-    destination sits -- `connect(address)` takes it first, `sendmsg(buffers, ancdata, flags,
-    address)` fourth -- and agree that it is the last positional argument that is a tuple or a
-    string. The refusal names the destination only to help a reader find the call; **nothing is
-    decided by it**, which is the address-blindness `V2-P4-039` relies on: a datagram at
-    loopback is refused on the same terms as one at a routable host.
+A depth rather than a flag because the autouse fixture holds one for every non-e2e test, and a
+test that opens its own nested block must not switch the guard off when it closes.
+"""
+
+
+def _refuse(event: str, args: tuple[Any, ...]) -> None:
+    """The audit hook: refuse `event` on a guarded family, and be invisible otherwise.
+
+    `args[0]` is read as a socket without a `getattr` default, deliberately. All three events
+    pass one (measured), so a default would be a branch no input reaches -- and if a future
+    CPython ever passed something else, an `AttributeError` out of an audit hook is a loud
+    failure, where a default that happened to name a guarded family would be a silent one.
+
+    The destination is read out of the event's own arguments -- `(self, address)` for all three
+    -- rather than hunted for among `*args` by type, which is what the shadow had to do because
+    `connect(address)` takes it first and `sendmsg(buffers, ancdata, flags, address)` fourth.
+    **Nothing is decided by it**, which is the address-blindness `V2-P4-039` relies on: a
+    datagram at loopback is refused on the same terms as one at a routable host. `sendmsg` on a
+    connected socket passes `None`, and that is reported as `None` rather than guessed at.
     """
+    if event not in GUARDED_AUDIT_EVENTS or _depth == 0:
+        return
+    sock = args[0]
+    if sock.family not in GUARDED_SOCKET_FAMILIES:
+        return
+    destination = args[1] if len(args) > 1 else None
+    raise OfflineSuiteViolation(
+        f"{event}({destination!r}) from a test that is not marked `e2e`. {REFUSAL_MESSAGE}"
+    )
 
-    def _guard(self: socket.socket, *args: Any, **kwargs: Any) -> Any:
-        if self.family in GUARDED_SOCKET_FAMILIES:
-            destination = next(
-                (item for item in reversed(args) if isinstance(item, tuple | str)), None
-            )
-            raise OfflineSuiteViolation(
-                f"socket.{name}({destination!r}) from a test that is not marked `e2e`. "
-                f"{REFUSAL_MESSAGE}"
-            )
-        return wrapped(self, *args, **kwargs)
 
-    return _guard
+sys.addaudithook(_refuse)
+"""Installed once, at import, and **it can never be removed** -- `sys` offers no way to.
+
+That is the price of reaching below the class graph, and it is paid deliberately rather than
+quietly: `_depth` is what turns the guard on and off, and an `e2e` test runs with the hook
+installed and inert. The compensation is that the thing the old design had to restore no longer
+exists -- `socket.socket` is never mutated at all now, so there is no class dict to put back and
+no `delattr` whose omission a mutation could hide.
+
+Measured before choosing it: `tests/unit` runs 33.58s with the hook installed against 35.49s
+without, on the same machine minutes apart -- no cost this suite can distinguish from noise.
+"""
 
 
 @contextmanager
-def refusing_outbound_traffic(target: type = socket.socket) -> Iterator[None]:
-    """Shadow `GUARDED_SOCKET_METHODS` on `target`, and leave the class exactly as found.
+def refusing_outbound_traffic() -> Iterator[None]:
+    """Refuse `GUARDED_AUDIT_EVENTS` on `GUARDED_SOCKET_FAMILIES` for the duration.
 
-    Restored by hand rather than through `monkeypatch` because `socket.socket` inherits every
-    guarded method from the C `_socket.socket` and defines none of its own: `monkeypatch.undo`
-    would put the inherited function back as an attribute *on the Python subclass*, which is a
-    different object graph from the one the test started with. So whether the class owned each
-    name on entry is recorded per name, and a name it did not own is **deleted** rather than
-    reassigned.
-
-    `target` is a parameter for the reason this module's docstring gives -- it is what makes
-    that last sentence a measurement instead of a comment. `tests/unit/test_offline_suite.py::
-    test_the_guard_leaves_a_class_exactly_as_it_found_it` drives the round trip over a
-    throwaway subclass. Measured before it existed: replacing that `delattr` with `pass` left
-    all 59 tests of the three modules `V2-P4-037`/`038`/`039` touch green.
+    Takes no `target` any more, and the loss is worth stating. `V2-P4-039` gave it one so the
+    install/restore round trip could be driven over a throwaway subclass -- the only way to
+    observe a class-shadowing guard from inside a suite where every test already runs under it.
+    There is no class to hand over now, and the same observability problem is answered instead
+    by `tests/unit/test_offline_suite.py::test_the_guard_stops_refusing_once_it_unwinds`, which
+    drives the whole cycle in a child interpreter and watches a loopback datagram be refused
+    inside the block and **delivered** after it. That is a stronger measurement than the
+    subclass round trip was: it observes the guarantee, not the shape of a class dict.
     """
-    installed: dict[str, tuple[Callable[..., Any], bool]] = {}
-    for name in GUARDED_SOCKET_METHODS:
-        original = getattr(target, name)
-        installed[name] = (original, name in vars(target))
-        setattr(target, name, _refuse(name, original))
+    global _depth
+    _depth += 1
     try:
         yield
     finally:
-        for name, (original, had_own) in installed.items():
-            if had_own:
-                setattr(target, name, original)
-            else:
-                delattr(target, name)
+        _depth -= 1

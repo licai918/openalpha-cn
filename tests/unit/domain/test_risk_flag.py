@@ -149,14 +149,60 @@ def test_every_flag_declares_what_it_is_worth_and_cannot_be_added_without_one() 
     )
 
 
-def _string_constants_outside_docstrings(path: Path) -> set[str]:
-    """Every `str` literal in `path` that is not a module/class/function docstring.
+DECLARATION_THRESHOLD: Final[int] = 2
+"""How many flag names one module must spell before the audit calls it a declaration.
 
-    Prose has to be excluded or the audit becomes unfalsifiable: this repository documents the
-    flag vocabulary at length -- `product/governance.py` and `product/screening.py` both name
-    several flags in prose on purpose -- and counting a docstring would make every one of those
-    modules an offender. Lifted from `tests/unit/domain/test_run_mode.py`, which needed the
-    same split for the same reason.
+Two, and the number is the whole of `V2-P4-030`: `RiskGate._blocking_flags` was a two-element
+`frozenset`, so a threshold of three would have let the smallest of the three former
+declarations back in, and a threshold of one would trip on every module that mentions a flag in
+passing. Named rather than written at the comparison so that
+`test_a_flag_set_assembled_at_run_time_is_invisible_to_this_audit` measures the live number: a
+threshold that drifted upward would otherwise leave every assertion in this file green, because
+`domain/risk_flag.py` spells all five names and satisfies any threshold at all.
+"""
+
+
+def _folded_literal(node: ast.AST) -> str | None:
+    """`node` as the string it spells if it is one written out in full, else `None`.
+
+    Adjacent literals -- `"future" "_data"` -- never reach here: the parser folds them into a
+    single `ast.Constant` before the tree exists, which is why the audit already caught that
+    spelling. `"look_ahead" + "_violation"` is a different node entirely, an `ast.BinOp` whose
+    two halves are each a non-name, and `V2-P4-107` measured what that was worth: it passed.
+
+    Folding it is not a claim to have closed the class. It closes the one spelling that was
+    arbitrarily different from a spelling already caught -- the two mean the same thing to the
+    reader and to the interpreter, and catching one while missing the other was an accident of
+    where CPython does its constant folding rather than a line anybody drew.
+    `test_a_flag_set_assembled_at_run_time_is_invisible_to_this_audit` states what is left.
+    """
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, str) else None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left, right = _folded_literal(node.left), _folded_literal(node.right)
+        return None if left is None or right is None else left + right
+    return None
+
+
+def _string_constants_outside_docstrings(path: Path) -> set[str]:
+    """Every `str` literal in `path` that is not a docstring, with `+`-joined literals folded.
+
+    Prose is excluded so that a module documenting the vocabulary cannot be read as declaring
+    it. **How much that is currently worth was measured by `V2-P4-107` and it is less than what
+    stood here**, which said counting docstrings "would make every one of those modules an
+    offender": on this tree it makes none of them one. The comparison is exact equality between
+    a whole `ast.Constant` and a flag name, and a docstring is one long constant that is never
+    equal to `"future_data"` -- `product/governance.py` mentions that flag *inside* a sentence
+    and scores zero either way. Counting docstrings changes the audit's answer on not one module
+    of `src/`, measured both ways.
+
+    It is kept, and narrowly: a one-line docstring that is exactly a flag name would match, and
+    `test_a_docstring_that_is_exactly_a_flag_name_is_not_a_declaration` is that case, driven
+    over source written for it. Without that test this filter is unexercised code carrying a
+    justification the tree does not support, which is the shape of every finding in this file.
+
+    Lifted from `tests/unit/domain/test_run_mode.py`, which needed the same split for the same
+    reason and carries the same correction.
     """
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     docstrings: set[int] = set()
@@ -170,11 +216,9 @@ def _string_constants_outside_docstrings(path: Path) -> set[str]:
             ):
                 docstrings.add(id(first.value))
     return {
-        node.value
+        spelled
         for node in ast.walk(tree)
-        if isinstance(node, ast.Constant)
-        and isinstance(node.value, str)
-        and id(node) not in docstrings
+        if id(node) not in docstrings and (spelled := _folded_literal(node)) is not None
     }
 
 
@@ -185,22 +229,106 @@ def test_no_other_module_declares_the_risk_flag_set() -> None:
     string literals", which is what every one of the three former declarations looked like --
     `RiskGate._blocking_flags` was a two-element `frozenset`, so a threshold of three would have
     let the smallest of them back in. Two is loose enough that a module mentioning a single flag
-    in passing does not trip it, and tight enough that no former declaration could return.
+    in passing does not trip it.
+
+    **"Tight enough that no former declaration could return" is what stood here, and it was
+    false.** `V2-P4-107` measured it: `frozenset({"future" "_data", "look_ahead" +
+    "_violation"})` -- a `RiskGate._blocking_flags` rebuilt in `decisions/risk.py`, one token
+    away from the spelling that is caught -- passed this audit, **1 passed**. Implicit
+    concatenation is folded by the parser and *was* caught; explicit `+` produced an `ast.BinOp`
+    whose two halves are each a non-name, and the two-name threshold saw one. The `blocked` band
+    has exactly two members, so a regressing `_blocking_flags` only ever needed one of its two
+    literals broken to hide.
+
+    `+` is folded now (`_folded_literal`), so that spelling is caught. The class it belongs to is
+    not closed and is not claimed to be: see
+    `test_a_flag_set_assembled_at_run_time_is_invisible_to_this_audit` immediately below, which
+    carries the exact spelling that still evades. This audit guards **drift** -- a declaration
+    that comes back because somebody did not know it had been removed -- and drift is written in
+    literals. It is not evidence about an adversary and this docstring no longer implies it is.
 
     This is `tests/unit/domain/test_run_mode.py::test_no_other_module_declares_the_mode_set`
     with the threshold moved to fit the sets being guarded, and it grants **no** exemption:
     unlike `RunMode`, there is no frozen v1 snapshot that has to restate an older vocabulary,
-    because `SignalFrame` stayed at `signal-frame/v1` through this narrowing.
+    because `SignalFrame` stayed at `signal-frame/v1` through this narrowing. That module shares
+    `_folded_literal` for the same reason and carries the same residual.
     """
     names = {flag.value for flag in RiskFlag}
     declared = {
         path: sorted(names & _string_constants_outside_docstrings(path))
         for path in sorted(SOURCE_ROOT.rglob("*.py"))
-        if len(names & _string_constants_outside_docstrings(path)) >= 2
+        if len(names & _string_constants_outside_docstrings(path)) >= DECLARATION_THRESHOLD
     }
 
     assert set(declared) == {DECLARING_MODULE}
     assert set(declared[DECLARING_MODULE]) == names
+
+
+KNOWN_RUNTIME_ASSEMBLY_EVASION: Final[str] = (
+    "_legacy_blocking = frozenset(\n"
+    '    {"".join(["future", "_data"]), "".join(["look_ahead", "_violation"])}\n'
+    ")\n"
+)
+"""The exact spelling that still walks past the audit above, kept as source rather than prose.
+
+`V2-P4-107` closed `"look_ahead" + "_violation"` and did **not** close this, and the difference
+between the two is worth being precise about rather than waving at. Folding `+` removes an
+inconsistency: adjacent literals and `+`-joined literals spell the same thing to a reader and to
+the interpreter, and only an accident of where CPython folds constants made one visible.
+`"".join([...])` is a different thing -- the string does not exist until the module runs -- and
+an AST audit that tried to follow it would have to become an interpreter. `.replace()`,
+`chr(...)`, an f-string, a `bytes.decode()`, a name looked up out of a dict: the class is
+unbounded, and every member of it is deliberate.
+
+Not a `KNOWN_*` registry entry, and that is deliberate too rather than an omission: every one of
+the thirty-two registries `tests/unit/test_known_limitation_registries.py` holds is a limitation
+of the **shipped product** declared in `src/`, and this is a limitation of a test. The precedent
+is `V2-P4-037`'s own disclosure, which lives in the test module that owns the audit. What is
+different here is that this one is executable -- the string is compiled and measured below -- so
+it cannot rot into a sentence that used to be true, which is the exact failure
+`test_known_limitation_registries.py` exists to stop.
+"""
+
+
+def test_a_flag_set_assembled_at_run_time_is_invisible_to_this_audit(tmp_path: Path) -> None:
+    """The disclosure, measured -- so a reader knows the spelling and cannot be told a fairy tale.
+
+    Three spellings of one declaration, all of which rebuild `RiskGate._blocking_flags` exactly:
+
+      - written out, and the audit sees both names;
+      - `+`-joined, which `V2-P4-107` closed and which the audit now sees;
+      - assembled by `"".join`, which it does not see, and this asserts that it does not.
+
+    Deliberately red the day somebody closes the class. That is the point: a disclosure nothing
+    executes is a sentence that stays on the page after it stops being true, and this file's own
+    docstring carried exactly such a sentence from `V2-P4-030` until the P4 acceptance measured
+    it. If this test fails, the fix is to delete it and rewrite the docstring above, not to make
+    it pass.
+    """
+    names = {flag.value for flag in RiskFlag}
+
+    written_out = tmp_path / "written_out.py"
+    written_out.write_text(
+        '_legacy_blocking = frozenset({"future_data", "look_ahead_violation"})\n',
+        encoding="utf-8",
+    )
+    assert len(names & _string_constants_outside_docstrings(written_out)) >= DECLARATION_THRESHOLD
+
+    joined = tmp_path / "joined.py"
+    joined.write_text(
+        '_legacy_blocking = frozenset({"future" "_data", "look_ahead" + "_violation"})\n',
+        encoding="utf-8",
+    )
+    assert len(names & _string_constants_outside_docstrings(joined)) >= DECLARATION_THRESHOLD, (
+        "this is the V2-P4-107 escape; folding `+` in `_folded_literal` is what closes it"
+    )
+
+    assembled = tmp_path / "assembled.py"
+    assembled.write_text(KNOWN_RUNTIME_ASSEMBLY_EVASION, encoding="utf-8")
+    assert names & _string_constants_outside_docstrings(assembled) == set(), (
+        "the audit now sees a declaration assembled at run time, so the disclosure above is "
+        "out of date and has to be rewritten rather than kept"
+    )
 
 
 # --- both gates read the declaration -------------------------------------------------------
@@ -280,3 +408,25 @@ def test_the_redistribution_flag_this_build_actually_writes_is_declared() -> Non
     assert RiskFlag.redistribution_restricted.severity == "reduced"
     assert RiskFlag.redistribution_unknown.severity == "reduced"
     assert flag_severity("redistribution_restricted") == "reduced"
+
+
+def test_a_docstring_that_is_exactly_a_flag_name_is_not_a_declaration(tmp_path: Path) -> None:
+    """The docstring filter, exercised -- because `src/` does not exercise it.
+
+    Measured by `V2-P4-107`: removing the filter altogether changes the audit's answer on no
+    module in the tree, so it is code that runs and decides nothing, carrying a justification
+    that overstated it. A module whose docstring *is* a flag name is the case where it decides
+    something, and that case has to be written here because the repository does not contain one.
+    """
+    names = {flag.value for flag in RiskFlag}
+    module = tmp_path / "prose.py"
+    module.write_text(
+        '"""future_data"""\n_legacy_blocking = frozenset({"look_ahead_violation"})\n',
+        encoding="utf-8",
+    )
+    found = names & _string_constants_outside_docstrings(module)
+    assert found == {"look_ahead_violation"}
+    assert len(found) < DECLARATION_THRESHOLD, (
+        "the docstring counted towards the threshold, so a module that merely documents the "
+        "vocabulary now reads as declaring it"
+    )
