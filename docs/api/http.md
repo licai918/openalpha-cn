@@ -68,6 +68,22 @@ filesystem path. Local file access remains a CLI responsibility.
 - `POST /api/v1/portfolio/execute` applies one deterministic A-share portfolio
   transition, including cash, T+1, board-lot, suspension, price-limit, fee, FIFO,
   single-position, and total-exposure checks.
+
+  **Two unhappy answers, and they are different kinds** (`V2-P5-013`). A fact about
+  the market the simulator disagrees with -- a suspended bar, a limit-locked price,
+  a subject mismatch, a sell of stock the book does not hold -- is a `200` carrying
+  `status: "rejected"` and a `reason`, and it is still recorded in the ledger. A
+  fault in the *request* is a `422` whose `detail` is a plain string: today the only
+  one is reusing an `order_id` the ledger already holds with different content.
+  Before `V2-P5-013` that second case was an uncaught `ValueError` and answered
+  `500 text/plain`. `POST /api/v1/backtests/portfolio` reaches the same ledger
+  through a series rather than one order and answers **the same sentence**, so one
+  fault does not depend on which door the caller came through.
+
+  `detail` is a bare string on these two routes rather than the `{reason, message}`
+  object the panel, shortlist and model planes use, because those planes have a
+  fault-reason table the object discriminates between and these routes have one
+  refusal.
 - `GET /api/v1/portfolio/ledger` lists immutable accepted/rejected transitions.
 - `POST /api/v1/portfolio/construct` weights one *held* shortlist under a declared
   heuristic policy (`V2-P5-013`). The body is `{shortlist_id, policy, previous}`,

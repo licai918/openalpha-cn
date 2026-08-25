@@ -453,5 +453,18 @@ def test_a_run_still_in_flight_is_not_reopened_by_a_retry(tmp_path: Path) -> Non
     )
     with pytest.raises(LeaseNotHeldError):
         store.retry_session("daily-panel-build", SESSION, owner="worker-b", now=NOW)
+    with pytest.raises(LeaseNotHeldError):
+        # An EXPIRED lease, held by the right owner. Distinct from the case above and not a
+        # duplicate of it: that one fails the `lease_owner = ?` half of the guard and this one
+        # fails the `lease_expires_at > ?` half, and the second half is a *string* comparison
+        # against an ISO-8601 column -- so it is also what fails if the instant is bound as a
+        # `datetime` and SQLite's default adapter writes a space where the stored rows carry a
+        # `T`, which sorts the other way round.
+        store.retry_session(
+            "daily-panel-build",
+            SESSION,
+            owner="worker-a",
+            now=NOW + LEASE + timedelta(seconds=1),
+        )
     with pytest.raises(JobStoreError, match="no run of"):
         store.retry_session("daily-panel-build", date(2026, 8, 21), owner="worker-a", now=NOW)

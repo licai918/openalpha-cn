@@ -2013,13 +2013,37 @@ def create_app(
 
     @application.post("/api/v1/portfolio/execute")
     def portfolio_execute(request: PortfolioApiRequest) -> PortfolioTransition:
-        """Apply A-share execution, T+1, costs, and exposure limits."""
+        """Apply A-share execution, T+1, costs, and exposure limits.
+
+        **The `except` is the whole of `V2-P5-013`'s fix on this route, and it is not
+        decorative.** `SQLitePortfolioLedger.append` raises a bare `ValueError` when an
+        `order_id` is reused with different content, and nothing caught it -- so resubmitting an
+        order under an id the ledger already holds answered `500` `text/plain` `Internal Server
+        Error`. That says "this repository has a defect" for a request the caller fixes by
+        changing one field.
+
+        **Narrow by type and by placement.** Only the *ledger* write is wrapped, not the
+        simulation: `PortfolioSimulator` **returns** its disagreements with the market -- a
+        suspended bar, a limit-locked price, a subject mismatch -- as `accepted: false`
+        transitions with a `reason`, and those are correct `200` answers. Widening this to cover
+        the simulation would report a fact about the market as a bad request, which is
+        `V2-P4-045`'s over-broad catch in a second place.
+
+        `detail` is a plain string here rather than the `{reason, message}` object the panel and
+        shortlist planes use, and that is deliberate: those planes have a fault-reason table
+        (`SHORTLIST_HTTP_STATUS`) whose rows the object discriminates between, and this route has
+        exactly one refusal. Inventing a one-row table to carry it would be a shape a client has
+        to branch on for no information.
+        """
         transition = PortfolioSimulator(limits=request.limits).execute_order(
             state=request.state,
             order=request.order,
             market=request.market,
         )
-        portfolio_ledger.append(transition)
+        try:
+            portfolio_ledger.append(transition)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
         return transition
 
     @application.get("/api/v1/portfolio/ledger")
@@ -2085,11 +2109,33 @@ def create_app(
 
     @application.post("/api/v1/backtests/portfolio")
     def portfolio_backtest(request: PortfolioBacktestRequest) -> PortfolioBacktestReport:
-        """Run a multi-day A-share portfolio report and persist transitions."""
-        return PortfolioBacktestRunner(
-            limits=request.limits,
-            ledger=portfolio_ledger,
-        ).run(initial=request.initial, steps=request.steps)
+        """Run a multi-day A-share portfolio report and persist transitions.
+
+        `portfolio_execute`'s `except` and its reason, on the route that reaches the same ledger
+        through a series rather than through one order -- so one fault cannot answer two ways
+        depending on which door the caller came through. `V2-P5-013`; both are asserted equal in
+        `tests/integration/test_portfolio_route_refusals.py`.
+
+        **Measured before it was believed.** This arrived reported as a regression that
+        `V2-P5-003` introduced with a strictly-ascending-session check. Driven on `2746663`,
+        before any of that row exists, the `500` is already here: `PortfolioBacktestRunner.run`
+        appends every transition to the ledger, so resubmitting a backtest whose orders keep
+        their ids reaches the same bare `ValueError`. That row adds a third road to a fault that
+        already had one. Its check lands in this same `except` when it merges.
+
+        Wrapping the whole `run` rather than the append alone, and that is the one difference
+        from the route above: the runner owns the loop, so there is no seam between "simulate"
+        and "record" to put a narrower guard at. It costs nothing here because the runner's
+        *own* refusals are the same kind of fault -- a step series that cannot be put --
+        while every disagreement with the market is still a returned rejection inside the report.
+        """
+        try:
+            return PortfolioBacktestRunner(
+                limits=request.limits,
+                ledger=portfolio_ledger,
+            ).run(initial=request.initial, steps=request.steps)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
 
     @application.post("/api/v1/backtests/event-study")
     def event_study(request: EventStudyRequest) -> EventStudyReport:

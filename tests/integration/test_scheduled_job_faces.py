@@ -245,6 +245,7 @@ def test_running_a_job_performs_the_work_at_the_owed_session_s_own_instant(
     the first failure, and `last_fired_session` is asserted to still be behind it.
     """
     _register(runtime, "point-in-time-job", "run-each-missed")
+    before = datetime.now(UTC)
 
     first_code, first = _run_job(runtime, "point-in-time-job", CLEAN_AT)
 
@@ -253,7 +254,15 @@ def test_running_a_job_performs_the_work_at_the_owed_session_s_own_instant(
     assert [(a["session"], a["status"]) for a in first["attempts"]] == [
         (CLEAN_SESSION.isoformat(), "succeeded")
     ]
-    assert _stored(runtime, "point-in-time-job").last_fired_session == CLEAN_SESSION
+    stored = _stored(runtime, "point-in-time-job")
+    assert stored.last_fired_session == CLEAN_SESSION
+    assert stored.updated_at >= before, (
+        "the run stamped its bookkeeping with --as-of instead of the wall clock. The two are "
+        "different questions: --as-of decides which sessions had published, and a lease expiry "
+        "or a started_at derived from it puts a live lock's expiry in the past whenever an "
+        "operator asks a point-in-time question about a week that has gone by"
+    )
+    assert stored.lease_owner is None, "the lease was not given back"
 
     second_code, second = _run_job(runtime, "point-in-time-job", LATER_AT)
 
@@ -352,6 +361,7 @@ def test_a_skip_missed_job_advances_past_what_it_skipped_and_records_no_run_for_
     """
     _register(runtime, "snapshot-job", "skip-missed")
     _run_job(runtime, "snapshot-job", CLEAN_AT)
+    before = datetime.now(UTC)
 
     code, skipped = _run_job(runtime, "snapshot-job", LATER_AT)
 
@@ -361,6 +371,15 @@ def test_a_skip_missed_job_advances_past_what_it_skipped_and_records_no_run_for_
     assert skipped["published_through"] == NEWER_SESSION.isoformat()
     assert skipped["claimed"] is True
     assert [a["session"] for a in skipped["attempts"]] == [NEWER_SESSION.isoformat()]
+
+    stored = _stored(runtime, "snapshot-job")
+    assert stored.last_fired_session == GAPPED_SESSION, (
+        "the skipped session was reported but never advanced past, so it stays owed for ever "
+        "and the policy is a log line rather than a decision"
+    )
+    assert stored.updated_at >= before, (
+        "the advance was stamped with --as-of rather than the wall clock"
+    )
 
     store = SQLiteJobStore(runtime / "state.sqlite3")
     assert store.run_for("snapshot-job", GAPPED_SESSION) is None
@@ -445,6 +464,95 @@ def test_a_skip_missed_job_is_told_what_it_would_skip_before_it_runs(runtime: Pa
     assert payload["owed"] == [NEWER_SESSION.isoformat()]
     assert payload["catch_up"] == CatchUpPolicy.SKIP_MISSED.value
 
+    terminal_code, terminal, terminal_output = _cli(
+        "jobs",
+        "due",
+        "due-skip-job",
+        "--year",
+        YEAR,
+        "--exchange",
+        EXCHANGE,
+        "--as-of",
+        LATER_AT,
+        "--runtime-dir",
+        str(runtime),
+    )
+
+    assert terminal_code == 0, terminal_output
+    assert f"would skip {GAPPED_SESSION.isoformat()}" in terminal
+    assert f"owes {NEWER_SESSION.isoformat()}" in terminal
+
+
+def test_the_empty_renderings_say_so_instead_of_printing_a_blank(tmp_path: Path) -> None:
+    """A listing with no schedules and a `due` with nothing owed.
+
+    Its own runtime directory, because the module fixture has schedules in it by the time
+    anything else runs and an empty listing is unreachable there. That is the whole point: a
+    command that printed nothing at all would satisfy every other assertion in this file, and an
+    operator running `openalpha jobs list` on a fresh install would be told nothing about whether
+    the command worked, the store was empty, or the `--runtime-dir` was wrong.
+    """
+    empty_code, empty, empty_output = _cli("jobs", "list", "--runtime-dir", str(tmp_path))
+
+    assert empty_code == 0, empty_output
+    assert "no schedules are declared" in empty
+    assert "openalpha jobs register" in empty
+
+    write_generated_panel(PanelStore(tmp_path / "panel"), generate_panel(shapes=SHAPES))
+    _register(tmp_path, "idle-job", "run-each-missed")
+    _run_job(tmp_path, "idle-job", CLEAN_AT)
+    idle_code, idle, idle_output = _cli(
+        "jobs",
+        "due",
+        "idle-job",
+        "--year",
+        YEAR,
+        "--exchange",
+        EXCHANGE,
+        "--as-of",
+        CLEAN_AT,
+        "--runtime-dir",
+        str(tmp_path),
+    )
+
+    assert idle_code == 0, idle_output
+    assert "owes nothing" in idle
+    assert "owes 2026" not in idle
+
+
+def test_the_terminal_run_report_carries_the_retry_remedy_beside_the_refusal(
+    runtime: Path,
+) -> None:
+    """`already_attempted` names `--retry-failed` on the terminal too, not only in `--json`.
+
+    A refusal that does not say what to do about it is the shape this repository has been caught
+    shipping before -- the remedy is the half the operator needs, and a caller who did not ask
+    for `--json` is exactly the caller who does not know the flag exists.
+    """
+    _register(runtime, "terminal-remedy-job", "run-each-missed")
+    _run_job(runtime, "terminal-remedy-job", CLEAN_AT)
+    _run_job(runtime, "terminal-remedy-job", LATER_AT)
+
+    code, stdout, output = _cli(
+        "jobs",
+        "run",
+        "terminal-remedy-job",
+        "--dataset",
+        DATASET,
+        "--year",
+        YEAR,
+        "--exchange",
+        EXCHANGE,
+        "--as-of",
+        LATER_AT,
+        "--runtime-dir",
+        str(runtime),
+    )
+
+    assert code == int(PanelExit.unhealthy), output
+    assert f"{GAPPED_SESSION.isoformat()} already_attempted" in stdout
+    assert "--retry-failed" in stdout
+
 
 def test_the_json_renderings_are_canonical_and_do_not_escape_a_non_ascii_job_id(
     runtime: Path,
@@ -462,16 +570,37 @@ def test_the_json_renderings_are_canonical_and_do_not_escape_a_non_ascii_job_id(
     ids and cannot see it.
     """
     _register(runtime, "\u65e5\u5ea6\u4f53\u68c0", "run-each-missed")
+    calendar = ["--year", YEAR, "--exchange", EXCHANGE, "--runtime-dir", str(runtime), "--json"]
 
-    code, stdout, output = _cli("jobs", "list", "--runtime-dir", str(runtime), "--json")
-
+    code, listed, output = _cli("jobs", "list", "--runtime-dir", str(runtime), "--json")
     assert code == 0, output
-    rendered = stdout.strip()
-    assert rendered == json.dumps(json.loads(rendered), ensure_ascii=False, sort_keys=True), (
-        "the listing is not canonical, so two runs of one command can differ by key order alone"
+    _, due_raw, due_output = _cli(
+        "jobs", "due", "\u65e5\u5ea6\u4f53\u68c0", "--as-of", CLEAN_AT, *calendar
     )
-    assert "\u65e5\u5ea6\u4f53\u68c0" in rendered
-    assert "\\u65e5" not in rendered
+    assert due_raw.strip(), due_output
+    _, run_raw, run_output = _cli(
+        "jobs",
+        "run",
+        "\u65e5\u5ea6\u4f53\u68c0",
+        "--dataset",
+        DATASET,
+        "--as-of",
+        CLEAN_AT,
+        *calendar,
+    )
+    assert run_raw.strip(), run_output
+
+    for name, rendered in (
+        ("jobs list", listed.strip()),
+        ("jobs due", due_raw.strip()),
+        ("jobs run", run_raw.strip()),
+    ):
+        assert rendered == json.dumps(json.loads(rendered), ensure_ascii=False, sort_keys=True), (
+            f"`openalpha {name} --json` is not canonical, so two runs of one command can differ "
+            "by key order alone"
+        )
+        assert "\u65e5\u5ea6\u4f53\u68c0" in rendered, name
+        assert "\\u65e5" not in rendered, name
 
 
 # --- the terminal renderings ----------------------------------------------------------------
@@ -713,9 +842,22 @@ def test_the_rest_face_serves_one_job_s_runs_and_404s_an_unregistered_one(
 
     assert found.status_code == 200, found.text
     assert found.json()["job"]["last_fired_session"] == CLEAN_SESSION.isoformat()
-    assert [(r["session"], r["status"]) for r in found.json()["runs"]] == [
-        (CLEAN_SESSION.isoformat(), "succeeded")
-    ]
+    runs = found.json()["runs"]
+    assert len(runs) == 1
+    row = runs[0]
+    assert row["session"] == CLEAN_SESSION.isoformat()
+    assert row["status"] == "succeeded"
+    assert row["error_type"] is None
+    assert row["idempotency_key"] == f"rest-runs-job@{CLEAN_SESSION.isoformat()}"
+    # The two instants are asserted as *strings* rather than merely as present, because
+    # `job_run_view` is the only renderer whose output FastAPI would happily encode either way:
+    # a `datetime` left un-`isoformat`ed reaches the wire as a JSON string too, just a different
+    # one, and a test that only checked the key existed could not tell them apart.
+    for key in ("started_at", "finished_at"):
+        assert isinstance(row[key], str), key
+        assert datetime.fromisoformat(row[key]).tzinfo is not None, key
+        assert "T" in row[key], key
+    assert row["owner"]
     assert missing.status_code == 404, missing.text
     assert isinstance(missing.json()["detail"], dict), missing.text
     assert missing.json()["detail"]["reason"] == "not_held"

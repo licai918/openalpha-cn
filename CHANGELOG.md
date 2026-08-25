@@ -58,6 +58,28 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **Two portfolio routes answered `500 text/plain` for a caller's mistake** (`V2-P5-013`).
+  `SQLitePortfolioLedger.append` raises a bare `ValueError` when an `order_id` is reused with
+  different content, and neither `POST /api/v1/portfolio/execute` nor `POST
+  /api/v1/backtests/portfolio` caught it -- so resubmitting an order, or a backtest whose orders
+  keep their ids, told the caller that this repository has a defect. Both now answer `422` with
+  the ledger's own sentence, and the two are asserted **equal**: one fault must not depend on
+  which door the caller came through.
+
+  **The diagnosis moved under measurement.** This arrived reported as a regression `V2-P5-003`
+  introduced with a new strictly-ascending-session check. Driven on `2746663`, before any of that
+  row exists, the `500` is already there by the route above; `V2-P5-003` adds a third road to a
+  fault that already had one, and its check lands in the same `except` when it merges. What let
+  it sit unnoticed is separate and worth naming: `grep -rn "backtests/portfolio" tests/` returned
+  **one** line before this change and it was a row in a route table -- the runner had a
+  library-level test and the route had none.
+
+  **The catch is narrow by type and by placement.** `PortfolioSimulator` *returns* every
+  disagreement with the market as a `200` carrying `status: "rejected"` and a `reason`, and those
+  are still recorded; only the ledger write is wrapped on the single-order route. A control test
+  drives a sell of stock the book does not hold and requires it to stay a `200`, so a later edit
+  cannot widen the catch into "every unhappy answer is a bad request".
+
 - **`openalpha evidence build` printed its snapshots and threw them away** (`V2-P5-013`, closing
   audit `F31`). `OpenAlphaSDK.build_file_evidence` and `POST /api/v1/evidence/build` both appended
   to the evidence store; the command line did not. Two faces of three agreed and the terminal was
