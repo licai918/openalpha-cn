@@ -6,6 +6,86 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Added
 
+- **A frontend coverage gate that measures the source tree instead of the import graph, and
+  a guard that can name the file** (`V2-P5-020`). The row's own text was stale in three
+  places and none of them was the defect. "No component is rendered in isolation" and
+  "`vite.config.ts` has no coverage key" were both already false -- `V2-P5-019` had four
+  panels rendering all nine `PanelState` kinds through a shared contract suite, and the
+  coverage gate had been live since 2026-08-07. **The real hole was the gate's range**:
+  without `coverage.include`, vitest's v8 provider measures only files some test happened
+  to import, so the denominator is chosen by the test suite rather than by the source tree.
+  Measured -- a module dropped into `src/` with two exported functions and no test left
+  every number byte-identical (370/405 statements, 246/294 branches, 80/89 functions,
+  348/376 lines); with `include` the same probe drove all four thresholds red. Two things
+  also left the old denominator's shape: `src/main.tsx` was never counted at all, and
+  `src/test/**` *was* counted -- 52 statements at 50 covered, scoring the tests with the
+  tests. **What no percentage floor can catch, measured**: deleting `ReplayPanel.test.tsx`
+  outright (16 tests, 150 -> 134) moved statements, functions and lines by **exactly zero**
+  (320/356, 64/73, 299/328 unchanged); only branches moved, by 1.06pp. `App.test.tsx`
+  mounts the whole tree, so every panel's lines execute on the way past whether or not
+  anyone asserts anything -- coverage sees execution, not assertion. The converse held too:
+  this row's 31 new tests bought 1 statement, 4 branches, 1 function and 1 line. So the
+  ratchet is set at the rounded-down measured value, **90 / 84 / 89 / 91** (90.16% /
+  84.85% / 89.04% / 91.46%), whose margin in whole units is 0 statements, 2 branches, 0
+  functions, 1 line -- two of four at zero. Re-measured under the *previous* scope for
+  comparability, the same suite reads 91.60 / 85.03 / 91.01 / 92.81, up on all four against
+  `V2-P5-019`'s 91.35 / 83.67 / 89.88 / 92.55: the printed drop is the denominator, not the
+  tests. **The naming half is `web/src/testDiscipline.test.ts`**, because vitest 4.1.10
+  measurably cannot express an aggregate floor and a per-file floor at once --
+  `thresholds.perFile` is global-only, a glob entry's type is `Pick<Thresholds, 100 |
+  "statements" | "functions" | "branches" | "lines">` with no `perFile`, and a glob
+  aggregates rather than checking each file (`"src/components/**": { functions: 60 }` stayed
+  green with `ReplayPanel.tsx` at 50%). That test is a two-way equality: every production
+  module has a co-located test or a stated reason, and an exemption that gains a test or
+  names a vanished module fails just as loudly. It also pins `include`, the exclusion list
+  and the threshold floor, since widening any of them is the cheapest way to turn a red run
+  green. **Three modules that had no co-located test now have one**: `PanelNotice` -- the
+  only place in the repository that emits `role="alert"`, at 100% coverage purely because
+  four panels render it on the way past, with not one assertion of its own; `StatusBar`,
+  the one panel-level component the contract suite cannot reach, whose untested branch was
+  a reachable backend reporting `status="error"`; and `api/client.ts`, pinning task 17's
+  finding that the browser must **not** send `code_commit`/`config_digest` and fabricate
+  provenance. **What is still uncovered, itemised**: all 8 uncovered functions are event
+  handlers (four `AttributionPanel` `onChange`, `EvidencePanel`'s `as_of` `onChange`,
+  `ReplayPanel`'s `onFile`, `App`'s health `.catch` and `startReplay`), and
+  `schemaDrift.ts`'s 17 uncovered statements are almost all defensive `throw`s. Rendering
+  is proven; interaction is untested, which is an honest next row rather than something to
+  bolt on here. No file under `web/src/**` was modified -- only new test files and
+  `vite.config.ts`. `pnpm test` **181 passed / 13 files**; `pnpm lint` and `tsc -b` clean.
+
+- **The feature ledger's correspondence with the test tree made executable, and two totals
+  that were never measurements** (`V2-P5-023`). `features.csv` names test files by path, so
+  a test-tree reorganisation is a three-artifact change -- and only two of the three edges
+  were enforced. `--check` holds `summary.json` and the ledger Markdown byte-for-byte
+  against the CSV, but the CSV -> disk edge sat inside `if status in TRUE_COMPLETE`, so the
+  five `EXCLUDED`/`DEFERRED` rows were exempt from every path check, and three paths are
+  reachable only through them. Measured: deleting `SECURITY.md` outright left `--check`
+  printing `{"unknown": 0, ...}` and **exiting 0**; with the check moved out of that branch
+  the same deletion fails naming the row -- `OA-BOUND-004 references missing evidence:
+  ['SECURITY.md']`. **`unknown` and `unreviewed` were literal zeros** in `_summary`, ranging
+  over nothing since the ledger's first commit, printed by `--check` as findings and set
+  into the released document by `_markdown`. They are computed from the rows now, off the
+  same `TERMINAL_STATUSES` the validator enforces, so loosening that set moves them; both
+  are still 0, the difference being that this is now a measurement. `summary.json` and the
+  ledger Markdown are byte-identical, which is the proof that only the provenance changed.
+  **The row's own counts were stale**: `features.csv` names **182** distinct test files
+  (180 Python plus `web/src/App.test.tsx` and `web/e2e/golden-flow.spec.ts`), not "34+2" --
+  the "2 web" is right and the "34 Python" is off by 5.3x -- and it does not name "all" of
+  them: 283 test files exist on disk and 106 are named nowhere. That gap is deliberately
+  *not* made an equality: this is the **v1** ledger, and v2's P0-P5 tests do not belong in
+  it. **`tests/unit/test_feature_ledger_test_tree.py`** follows `REGISTRY_ENTRY_COUNTS`:
+  exact per-directory counts (20 directories, 182 total) as an equality rather than a floor
+  or a membership test, plus an existence assertion over every row, field and status. Both
+  kinds of move were watched go red -- moving a file without touching the CSV fails naming
+  `OA-PANEL-006 -> tests/unit/domain/test_adjustment.py`, and moving it *with* the CSV
+  updated fails on the counts naming both ends (`tests/unit/domain: 23 != 24`,
+  `tests/unit: 30 != 29`) while the total of 182 stays put, which is what makes the
+  per-directory counts the load-bearing half. What it does not catch is stated in the
+  module docstring rather than left for the next person: a swap inside one directory moves
+  neither count, and is covered for `acceptance_kind="pytest"` rows by
+  `_validate_pytest_acceptance`'s AST check. `pytest tests/unit -q` **3146 passed, 1
+  skipped**; `ruff check`, `ruff format --check` and `mypy src scripts` clean.
+
 <<<<<<< HEAD
 - **`backtest/paper.py`: a Paper Portfolio whose inability to reach a broker is enforced at
   run time, not asserted in a comment** (`V2-P5-004`, the thirteenth pure-stdlib `backtest/`

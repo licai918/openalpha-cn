@@ -30,6 +30,10 @@ TRUE_COMPLETE = {
     "ADAPTER_COMPLETE",
     "ENHANCED_REPLACEMENT",
 }
+# The pre-audit sentinel: a row that was looked at but whose destination could not be
+# decided. It is deliberately absent from `TERMINAL_STATUSES`, so `_load` rejects it and
+# `_summary` counts it (see the note there on why both counts used to be literals).
+UNKNOWN_STATUS = "UNKNOWN"
 
 ACCEPTANCE_KINDS = {"pytest", "ci-job", "not-applicable", "legacy-prose"}
 NOT_APPLICABLE_STATUSES = {"EXCLUDED", "DEFERRED"}
@@ -204,25 +208,31 @@ def _load() -> list[dict[str, str]]:
         if not row["acceptance_test"]:
             raise ValueError(f"{row['feature_id']} has no acceptance test")
         _validate_acceptance(row)
-        if status in TRUE_COMPLETE:
-            missing = [
-                str(path.relative_to(ROOT))
-                for field in ("local_source_evidence", "test_evidence")
-                for path in _paths(row[field])
-                if not path.exists()
-            ]
-            if missing:
-                raise ValueError(f"{row['feature_id']} references missing evidence: {missing}")
-            missing_symbols = [
-                f"{path.relative_to(ROOT)}#{symbol}"
-                for field in ("local_source_evidence", "test_evidence")
-                for path, symbol in _symbol_refs(row[field])
-                if symbol not in _module_symbols(path)
-            ]
-            if missing_symbols:
-                raise ValueError(
-                    f"{row['feature_id']} references undefined symbols: {missing_symbols}"
-                )
+        # Existence and symbol checks run for **every** row, not only the
+        # `TRUE_COMPLETE` ones (V2-P5-023). Until that row, both blocks sat behind
+        # `if status in TRUE_COMPLETE`, so the five `EXCLUDED`/`DEFERRED` rows could
+        # name files that had been moved or deleted and `--check` still exited 0.
+        # Measured before the fix: `SECURITY.md` — named only by `OA-BOUND-004`, an
+        # `EXCLUDED` row — could be deleted outright and `--check` still printed
+        # `{"unknown": 0, ...}` and returned success. A terminal status records where a
+        # feature *went*; it is not a reason to stop checking that its evidence is still
+        # where the ledger says it is.
+        missing = [
+            str(path.relative_to(ROOT))
+            for field in ("local_source_evidence", "test_evidence")
+            for path in _paths(row[field])
+            if not path.exists()
+        ]
+        if missing:
+            raise ValueError(f"{row['feature_id']} references missing evidence: {missing}")
+        missing_symbols = [
+            f"{path.relative_to(ROOT)}#{symbol}"
+            for field in ("local_source_evidence", "test_evidence")
+            for path, symbol in _symbol_refs(row[field])
+            if symbol not in _module_symbols(path)
+        ]
+        if missing_symbols:
+            raise ValueError(f"{row['feature_id']} references undefined symbols: {missing_symbols}")
     return rows
 
 
@@ -232,6 +242,15 @@ def _summary(rows: list[dict[str, str]]) -> dict[str, object]:
     completed = sum(by_status[status] for status in TRUE_COMPLETE)
     total = len(rows)
     legacy_acceptance_rows = sum(1 for row in rows if row["acceptance_kind"] == "legacy-prose")
+    # `unreviewed` and `unknown` were literal `0`s from the ledger's first commit until
+    # V2-P5-023 — two numbers the released artifact and `--check`'s stdout both printed as
+    # findings, which ranged over nothing at all and could not have been anything but zero.
+    # They are now derived from the rows, and from the same `TERMINAL_STATUSES` set the
+    # validator in `_load` enforces, so loosening that set moves these counts instead of
+    # leaving them frozen at a reassuring literal. Both are still 0 today — the difference
+    # is that this is now a measurement rather than an assertion.
+    unreviewed = sum(1 for row in rows if row["coverage_status"] not in TERMINAL_STATUSES)
+    unknown = sum(1 for row in rows if row["coverage_status"] == UNKNOWN_STATUS)
     return {
         "schema_version": "openalpha-feature-coverage/v1",
         "generated_on": "2026-07-24",
@@ -239,8 +258,8 @@ def _summary(rows: list[dict[str, str]]) -> dict[str, object]:
             "all_features": total,
             "true_completed_features": completed,
             "true_completion_rate_pct": round(completed / total * 100, 2),
-            "unreviewed": 0,
-            "unknown": 0,
+            "unreviewed": unreviewed,
+            "unknown": unknown,
             "legacy_acceptance_rows": legacy_acceptance_rows,
         },
         "status_distribution": dict(sorted(by_status.items())),
