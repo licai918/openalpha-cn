@@ -476,7 +476,7 @@ def test_the_rest_route_refuses_a_gate_refused_shortlist_in_the_cli_s_own_words(
     refused_code, refused = _shortlist(tmp_path, evidence=invented, researched="1.0")
     assert (refused_code, refused["admitted"]) == (int(PanelExit.unhealthy), None)
 
-    cli_code, _, cli_output = _construct(tmp_path, refused["shortlist_id"], "--json")
+    cli_code, cli_stdout, cli_output = _construct(tmp_path, refused["shortlist_id"], "--json")
     with TestClient(create_app(runtime_dir=tmp_path)) as client:
         response = client.post(
             "/api/v1/portfolio/construct", json=_rest_body(refused["shortlist_id"])
@@ -487,9 +487,16 @@ def test_the_rest_route_refuses_a_gate_refused_shortlist_in_the_cli_s_own_words(
     detail = response.json()["detail"]
     assert isinstance(detail, dict), detail
     assert detail["reason"] == "bad_request"
-    assert detail["message"] == cli_output.strip(), (
+    # `V2-P5-047`: this compared against `cli_output` -- `Result.output`, i.e. stdout and stderr
+    # together -- which was the whole of what the CLI emitted only while `--json` emitted
+    # *nothing* on a refusal. It now emits the refusal document, so the comparison is made
+    # against the sentence itself rather than against everything the process printed. That is
+    # the stronger reading of the property this test is named for, not a weaker one: the two
+    # faces are held to one sentence, and the CLI's two channels are held to it as well.
+    assert detail["message"] == json.loads(cli_stdout)["detail"], (
         "both faces refuse the same construction, so they must say so in the same words"
     )
+    assert json.loads(cli_stdout)["detail"] in cli_output
 
 
 def test_an_industry_cap_is_refused_on_the_rest_face_in_the_cli_s_own_words(
@@ -502,7 +509,7 @@ def test_an_industry_cap_is_refused_on_the_rest_face_in_the_cli_s_own_words(
     boundary through the same `except`.
     """
     root, answer = admitted
-    _, _, cli_output = _construct(
+    _, cli_stdout, cli_output = _construct(
         root, answer["shortlist_id"], "--max-industry-weight", "0.20", "--json"
     )
 
@@ -512,7 +519,9 @@ def test_an_industry_cap_is_refused_on_the_rest_face_in_the_cli_s_own_words(
     )
 
     assert response.status_code == 422, response.text
-    assert response.json()["detail"]["message"] == cli_output.strip()
+    # `V2-P5-047`, as in the test above: the sentence, not everything the process printed.
+    assert response.json()["detail"]["message"] == json.loads(cli_stdout)["detail"]
+    assert json.loads(cli_stdout)["detail"] in cli_output
 
 
 def test_a_malformed_address_and_an_absent_one_stay_two_answers_on_this_route(

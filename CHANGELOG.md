@@ -451,6 +451,84 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   neither the SDK nor HTTP has a default `run_id` at all, so this collision is reachable only
   from the command line and only the command line has a flag to name.
 
+- **A `date_gap` refusal named no flag, and the flag that fixes it is `--as-of`**
+  (`V2-P5-045`, new row filed by this work). `--as-of` correctly defaults to "now", so a panel
+  built for January fails the moment somebody runs the command in August: `157 required date(s)
+  are absent from daily, starting at 2026-01-19`. That sentence is accurate and useless -- it
+  describes the store, and the store is fine; what is dated wrong is the question. Passing
+  `--as-of` made the identical command exit `0`. `DATE_GAP_REMEDY` now names **both** ways out,
+  because both are real and they are not interchangeable: re-date the question when the panel
+  is deliberately historical, fetch the missing sessions when it has fallen behind. Naming only
+  the second would send somebody replaying January to a paid provider for nothing -- which is
+  exactly the mistake `V2-P5-046` below records. Spelled for each face, `NO_CALENDAR_REMEDY`'s
+  rule, because this detail is serialised verbatim by the HTTP app, the SDK and `panel doctor`
+  alike. **One measurement correction**: the acceptance described this as a stderr refusal; it
+  is a `BLOCKING daily date_gap: …` line on `panel doctor`'s **stdout**, and that command's
+  `--json` was already emitting 21,382 bytes on this path. The missing thing is the same, its
+  channel is not.
+
+- **`subject_missing` printed a count, never the subject, and both remedies it offered were
+  wrong** (`V2-P5-046`, new row filed by this work). `openalpha panel doctor --dataset daily
+  --year 2026 --as-of 2026-01-17T12:00:00+08:00` refused with `1 required subject(s) are absent
+  from trade_cal`, then offered a rebuild or `--no-calendar`. But `trade_cal` **was** built and
+  healthy -- it held `SZSE`. Rebuilding would fetch SSE (paid, slow) and `--no-calendar`
+  discards the check; the fix was `--exchange SZSE`, which the same command accepts and which
+  returns `rc=0 READY daily`. `missing_items` had carried the answer server-side the whole time
+  and the human output printed only its length. Two changes: `subject_gap_issue` now names the
+  absent subjects (capped at `SAMPLE_LIMIT` then counted, because `required_subjects` on an
+  index-membership or universe read is a cross section and an unbounded list would put
+  thousands of codes on one terminal line), and `panel_view._calendar_remedy` offers the
+  narrower way out **only when the store can support it** -- the cause is a `subject_missing`
+  and the census names some other exchange. A genuinely absent partition, a damaged catalog, or
+  a store holding only the exchange already asked for keeps `NO_CALENDAR_REMEDY` unchanged,
+  because building really is the answer there and naming `--exchange` would point at a flag
+  with nothing to put after it. The census crosses the seam as
+  `panel_ingest.stored_calendar_exchanges` rather than being read in `panel_view`, whose row in
+  `RESEARCH_PLANE_DATASETS` says it reaches fifteen datasets and names none.
+
+- **`--json` emitted nothing at all on the refusal path** (`V2-P5-047`, new row filed by this
+  work). The acceptance measured it on one command. Enumerations in this repository have been
+  short before, so the whole surface was measured first: of **33 leaf commands in the live
+  Typer tree, 22 accept `--json`**, and when each was driven into a genuine refusal (not a
+  usage error) **15 exited non-zero having written zero bytes to stdout** -- `data-check`,
+  `factor build`, `factor run`, `jobs due`, `jobs run`, `model daily-run`, `model evaluate`,
+  `panel build`, `panel doctor`, `portfolio construct`, `portfolio turnover-variants`,
+  `shortlist compare`, `shortlist run`, `validation segmented`, `validation statistics`. The
+  other seven never reached a refusal in that sweep, so 15 is a floor on the fault rather than
+  a count of the healthy. `_panel_fail`'s own docstring had stated the rule since the day it
+  was written -- "`--json` output has to stay parseable on stdout even when the command is on
+  its way to a non-zero exit, which is precisely when a caller most needs the structured
+  reasons" -- and wrote that sentence to stderr with nothing on stdout. The fix is at that one
+  funnel: `_panel_command` sets a `ContextVar` and `_panel_fail` reads it, so all 20 commands
+  that route refusals through it are covered at once without threading a flag through eighty
+  call sites. The human sentence stays on stderr unchanged; stdout gains one document carrying
+  `status: refused`, the exit code, and **the same sentence** rather than a second wording of
+  it. The guard walks the live Typer tree with a two-entry exemption list that states why
+  (`doctor` and `migrate status` route no refusals through `_panel_fail` and already print
+  their whole payload). Two earlier versions of that guard read the option declarations from
+  the wrong place and returned an empty set for all 33 commands while passing; the floor
+  assertion in `test_the_json_walk_really_finds_the_measured_surface` is what caught it, and
+  the reading now comes off the built click tree.
+
+- **One integration test wrote a real evidence part and a migration backup into the
+  developer's own `runtime/` on every run of the suite** (`V2-P5-048`, new row filed by this
+  work). Found by tripping it: running `tests/integration` grew a fresh worktree's `runtime/`
+  from nothing to four files. Bisected by pointing `OPENALPHA_RUNTIME_DIR` at a probe
+  directory, one file at a time, down to `test_cli_and_api_return_the_same_evidence_snapshot`
+  in `tests/integration/test_evidence_interfaces.py`, whose `runner.invoke(app, ["evidence",
+  "build", …])` passed no `--runtime-dir`. Eight lines below it, the same test's `create_app(…)`
+  carries a comment saying that default "is the repository's own `runtime/`, so this line
+  initialised real storage and took a migration backup on **every run of the suite**" and calls
+  itself "the last executable `create_app()` in `tests/` with no runtime directory". It was --
+  through *that* face. The `runner.invoke` above it became a writer later, when `V2-P5-013`
+  made `evidence build` persist what it prints. The printed payload is unaffected, so this is
+  pure containment. The class was then swept: of 108 literal `runner.invoke(app, [...])` calls
+  naming one of the 28 commands that take `--runtime-dir`, 11 omitted it, and per-file
+  measurement showed only this one actually writes -- the rest refuse before any store is
+  built, or are `test_cli_runtime_dir_env.py`'s four deliberate omissions, which exist to test
+  the `OPENALPHA_RUNTIME_DIR` fallback. **The files already written are not deleted**, which is
+  `V2-P4-111`'s own rule for the same directory: they are the user's data.
+
 - **Reconciliation only ever checked half of what it claimed to, and the other half was a
   dropped table reported as a healthy database** (`V2-P5-029`, new row filed by this work).
   `V2-P5-026` says it reconciles "by inspecting the schema, never trusting either counter".

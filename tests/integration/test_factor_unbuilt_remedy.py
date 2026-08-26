@@ -232,15 +232,29 @@ def test_a_read_that_raises_on_a_year_this_panel_lacks_names_no_build_command(
     assert "openalpha factor build" not in result.stderr
 
 
-def test_the_json_face_of_a_factor_that_is_not_built_is_still_the_enveloped_refusal(
+def test_the_json_face_of_a_factor_that_is_not_built_carries_the_remedy_on_both_channels(
     tmp_path: Path,
 ) -> None:
-    """`--json` does not turn the refusal into a document, and the remedy is on stderr with it."""
+    """`--json` refuses with a document that carries the same remedy the terminal reads.
+
+    **This asserted `result.stdout.strip() == ""` until `V2-P5-047`**, under the heading
+    "`--json` does not turn the refusal into a document". The half of that claim worth keeping
+    is that a refusal is not an *answer* -- and it still is not: the document says
+    `status: refused` and carries the exit code, which no answer this command produces does, so
+    a parser can never read one for the other. The half that was wrong is that a machine caller
+    got nothing at all, and therefore could not reach the very remedy this module exists to
+    have put in the message. Measured across all twenty-two `--json` commands, fifteen refused
+    with zero bytes on stdout.
+    """
     store_three_tiers(tmp_path, write_tiers=frozenset())
 
     result = CliRunner().invoke(app, _argv(tmp_path, BASELINE))
 
-    assert result.stdout.strip() == ""
+    assert result.exit_code != 0
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "refused"
+    assert payload["exit_code"] == result.exit_code
+    assert REMEDY_PREFIX + "raw" in payload["detail"]
     assert REMEDY_PREFIX + "raw" in result.stderr
 
 

@@ -8,6 +8,7 @@ import sys
 import textwrap
 from collections.abc import Iterator, Mapping, Sequence, Set
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import MAXYEAR, MINYEAR, UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from enum import IntEnum, StrEnum
@@ -1977,6 +1978,44 @@ def _panel_clock() -> datetime:
     return datetime.now(UTC)
 
 
+_PANEL_JSON: Final[ContextVar[bool]] = ContextVar("openalpha_panel_json", default=False)
+"""Whether the command currently running was asked for `--json`. Set by `_panel_command`.
+
+A context variable rather than a parameter threaded through eighty-odd call sites, and the
+choice is about which mistakes each shape allows. `_panel_fail(code, message)` is called from
+`_panel_as_of`, `_panel_sessions`, `_stored_calendar`, `_panel_request`, `_factor_fail` and
+seventy-odd command bodies; adding a `json_output` argument to every one of them would mean
+eighty places that can each be given the wrong value, and a helper two frames down that has no
+way to know it. The flag is a property of *the invocation*, which is exactly what a context
+variable is for -- set once, at the one place that already wraps every one of these commands.
+
+Defaulting to `False` matters: a `_panel_fail` reached outside `_panel_command` behaves exactly
+as it did before `V2-P5-047`, so nothing this context variable does not cover changed. What
+stops a command from quietly relying on that default is
+`test_cli_panel_rules.py::test_every_json_command_answers_a_refusal_with_json`, which walks the
+live tree and requires every `--json` command to pass its flag in.
+"""
+
+
+def _panel_refusal_payload(code: PanelExit, message: str) -> str:
+    """One refusal as the JSON document a `--json` caller gets on stdout.
+
+    Three fields and no more. `detail` is the **same sentence** the human channel prints, not a
+    second wording of it -- two renderings of one refusal that drift is how a caller comes to
+    act on a remedy the other face stopped offering, which is `panel_view.py`'s whole argument
+    for sharing its renderings verbatim across the three faces. `exit_code` is the number the
+    process is about to exit with, so a caller parsing stdout and a caller reading `$?` cannot
+    disagree. `status` is `refused` rather than `error`: this is a verdict the command reached,
+    not a defect in it -- `PanelExit.internal_error` is the row that means the other thing, and
+    it arrives here as an `exit_code` rather than as a different `status`.
+    """
+    return json.dumps(
+        {"status": "refused", "exit_code": int(code), "detail": message},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
 def _panel_fail(code: PanelExit, message: str) -> typer.Exit:
     """Print `message` on stderr and return the `typer.Exit` the caller must raise.
 
@@ -1985,13 +2024,27 @@ def _panel_fail(code: PanelExit, message: str) -> typer.Exit:
     swallow. Always stderr: `--json` output has to stay parseable on stdout even when the
     command is on its way to a non-zero exit, which is precisely when a caller most needs the
     structured reasons.
+
+    **And under `--json` the structured reason is now actually written** (`V2-P5-047`). The
+    paragraph above stated that rule from the day this helper was written and did not implement
+    it: the sentence went to stderr and stdout got nothing, so a machine caller who asked for
+    data was handed a bare exit code. Measured across the twenty-two `--json` commands on
+    `94a0af2`, fifteen exited non-zero having written **zero bytes** to stdout; the final
+    product acceptance found one of them.
+
+    Both channels, not one. The human sentence stays on stderr exactly as it was, so a terminal
+    caller sees no change and a `--json` caller's stdout still holds one document and nothing
+    else -- which is the property that made stderr the right channel for the sentence in the
+    first place.
     """
     typer.echo(message, err=True)
+    if _PANEL_JSON.get():
+        typer.echo(_panel_refusal_payload(code, message))
     return typer.Exit(code=int(code))
 
 
 @contextmanager
-def _panel_command(name: str) -> Iterator[None]:
+def _panel_command(name: str, *, json_output: bool = False) -> Iterator[None]:
     """Wrap one panel command so a defect in it can never be read as a verdict about the panel.
 
     Without this, anything the command did not anticipate -- a `NotADirectoryError` from a
@@ -2007,7 +2060,19 @@ def _panel_command(name: str) -> Iterator[None]:
     re-raised untouched -- both subclass `RuntimeError`, so a bare `except Exception` here would
     otherwise swallow every deliberate exit this module raises and turn `--json` on a blocked
     gate into a crash report.
+
+    **`json_output` is what makes `_panel_fail` answer on both channels** (`V2-P5-047`). This is
+    the one place that already wraps every command whose refusals go through that helper, so it
+    is the one place the flag has to be stated; see `_PANEL_JSON` for why it travels as a
+    context variable rather than as an argument to eighty call sites. The token is reset in a
+    `finally`, so a command that raises and a command that returns leave the same state behind
+    -- `CliRunner` invokes many commands in one process and one leaked `True` would make an
+    unrelated command's refusal print a JSON document nobody asked for.
+
+    It keeps a `False` default so that the internal-error refusal above, and every `_panel_fail`
+    reached from a command with no `--json` at all, behave exactly as they did before.
     """
+    token = _PANEL_JSON.set(json_output)
     try:
         yield
     except (typer.Exit, typer.Abort):
@@ -2021,6 +2086,8 @@ def _panel_command(name: str) -> Iterator[None]:
             "withheld because an unanticipated failure can carry whatever the frame it escaped "
             "was holding, including the credential",
         ) from error
+    finally:
+        _PANEL_JSON.reset(token)
 
 
 def _panel_as_of(value: str) -> datetime:
@@ -3841,7 +3908,7 @@ def panel_build(
     """
     runtime_dir = _resolved_runtime_dir(runtime_dir)
 
-    with _panel_command("panel build"):
+    with _panel_command("panel build", json_output=json_output):
         targets = _build_targets(dataset)
         subjects = _build_subjects(subject or (), targets)
         years = _build_years(year or (), start, end)
@@ -4163,10 +4230,29 @@ def panel_doctor_command(
     caller polling this command was carrying them for nothing. The flag keeps each entry's
     `code`, `datasets` and `dates` and drops only the paragraph; the default is unchanged,
     because a registry served only on request is a registry that stops being read.
+
+    ## Three refusals that named nothing a caller could do (`V2-P5-045`/`046`/`047`)
+
+    All three were measured on **this command** during the final product acceptance, and all
+    three broke the same rule: a refusal must name the flag, the record or the command that
+    fixes it.
+
+    - **`date_gap` named no flag, and the flag is `--as-of`.** It defaults to "now", so a panel
+      built for January fails when the command is run in August -- accurately, and about a store
+      that is not at fault. `panel/catalog.py::DATE_GAP_REMEDY` now names both ways out, because
+      re-dating the question and fetching the gap are different remedies for different panels.
+    - **`subject_missing` printed a count and never the subject**, then offered a rebuild or
+      `--no-calendar`, both wrong for the measured case: `trade_cal` was built and healthy and
+      held `SZSE`, and `--exchange SZSE` -- which this command already accepts -- returns
+      `rc=0 READY daily`. `missing_items` had the answer server-side the whole time.
+      `panel_view::_calendar_remedy` offers the narrower way out when the census supports it.
+    - **`--json` wrote nothing at all on the refusal path**: rc=1, zero bytes. See `_panel_fail`
+      -- the fix is at that one funnel and reaches the other nineteen commands that route their
+      refusals through it, fifteen of which were measured with the same fault.
     """
     runtime_dir = _resolved_runtime_dir(runtime_dir)
 
-    with _panel_command("panel doctor"):
+    with _panel_command("panel doctor", json_output=json_output):
         store, request = _panel_request(
             runtime_dir=runtime_dir,
             dataset=dataset,
@@ -4234,7 +4320,7 @@ def data_check(
     """
     runtime_dir = _resolved_runtime_dir(runtime_dir)
 
-    with _panel_command("data-check"):
+    with _panel_command("data-check", json_output=json_output):
         store, request = _panel_request(
             runtime_dir=runtime_dir,
             dataset=dataset,
@@ -4491,7 +4577,7 @@ def factor_run_command(
     """
     runtime_dir = _resolved_runtime_dir(runtime_dir)
 
-    with _panel_command("factor run"):
+    with _panel_command("factor run", json_output=json_output):
         instant = _panel_as_of(as_of)
         try:
             request = factor_request(
@@ -4677,7 +4763,7 @@ def factor_list_command(
     which is byte-for-byte what `GET /api/v1/factors` serves and what
     `OpenAlphaSDK.factor_catalog()` returns.
     """
-    with _panel_command("factor list"):
+    with _panel_command("factor list", json_output=json_output):
         catalog = factor_catalog()
         if json_output:
             typer.echo(json.dumps(catalog, ensure_ascii=False, sort_keys=True))
@@ -4763,7 +4849,7 @@ def factor_describe_command(
 
     Reads no store, for `factor list`'s reason.
     """
-    with _panel_command("factor describe"):
+    with _panel_command("factor describe", json_output=json_output):
         try:
             entry = factor_entry(
                 factor=factor or None,
@@ -4966,7 +5052,7 @@ def factor_build_command(
     """
     runtime_dir = _resolved_runtime_dir(runtime_dir)
 
-    with _panel_command("factor build"):
+    with _panel_command("factor build", json_output=json_output):
         try:
             request = factor_build_request(
                 factor=factor,
@@ -5254,7 +5340,7 @@ def shortlist_run_command(
     """
     runtime_dir = _resolved_runtime_dir(runtime_dir)
 
-    with _panel_command("shortlist run"):
+    with _panel_command("shortlist run", json_output=json_output):
         instant = _panel_as_of(as_of)
         try:
             request = shortlist_request(
@@ -5357,7 +5443,7 @@ def shortlist_list_command(
     """
     runtime_dir = _resolved_runtime_dir(runtime_dir)
 
-    with _panel_command("shortlist list"):
+    with _panel_command("shortlist list", json_output=json_output):
         held = FileShortlistStore(runtime_dir / "shortlists").list_ids()
         if json_output:
             typer.echo(json.dumps({"shortlist_ids": list(held)}, ensure_ascii=False))
@@ -5413,7 +5499,7 @@ def shortlist_compare_command(
     """
     runtime_dir = _resolved_runtime_dir(runtime_dir)
 
-    with _panel_command("shortlist compare"):
+    with _panel_command("shortlist compare", json_output=json_output):
         try:
             comparison = compare_held_shortlists(
                 FileShortlistStore(runtime_dir / "shortlists"),
@@ -5938,7 +6024,7 @@ def model_evaluate_command(
     """
     runtime_dir = _resolved_runtime_dir(runtime_dir)
 
-    with _panel_command("model evaluate"):
+    with _panel_command("model evaluate", json_output=json_output):
         try:
             request = model_evaluation_request(
                 columns=_model_features(feature),
@@ -6081,7 +6167,7 @@ def model_daily_run_command(
     """
     runtime_dir = _resolved_runtime_dir(runtime_dir)
 
-    with _panel_command("model daily-run"):
+    with _panel_command("model daily-run", json_output=json_output):
         try:
             request = daily_request(
                 columns=_model_features(feature),
@@ -6199,7 +6285,7 @@ def model_predictions_command(
     """
     runtime_dir = _resolved_runtime_dir(runtime_dir)
 
-    with _panel_command("model predictions"):
+    with _panel_command("model predictions", json_output=json_output):
         try:
             held = held_predictions(
                 FilePredictionStore(runtime_dir / "predictions", clock=_panel_clock)
@@ -6513,7 +6599,7 @@ def portfolio_construct_command(
     """
     runtime_dir = _resolved_runtime_dir(runtime_dir)
 
-    with _panel_command("portfolio construct"):
+    with _panel_command("portfolio construct", json_output=json_output):
         limits = PortfolioLimits(
             max_position_weight=_construct_decimal(
                 max_position_weight, flag="--max-position-weight"
@@ -6740,7 +6826,7 @@ def jobs_list_command(
     """
     runtime_dir = _resolved_runtime_dir(runtime_dir)
 
-    with _panel_command("jobs list"):
+    with _panel_command("jobs list", json_output=json_output):
         jobs = _job_store(runtime_dir).list_jobs()
         if json_output:
             typer.echo(
@@ -6788,7 +6874,7 @@ def jobs_due_command(
     """
     runtime_dir = _resolved_runtime_dir(runtime_dir)
 
-    with _panel_command("jobs due"):
+    with _panel_command("jobs due", json_output=json_output):
         instant = _panel_as_of(as_of)
         scheduler = _job_scheduler(runtime_dir, exchange=exchange, years=year, as_of=instant)
         job = scheduler.store.get(job_id)
@@ -6885,7 +6971,7 @@ def jobs_run_command(
     """
     runtime_dir = _resolved_runtime_dir(runtime_dir)
 
-    with _panel_command("jobs run"):
+    with _panel_command("jobs run", json_output=json_output):
         instant = _panel_as_of(as_of)
         store, request = _panel_request(
             runtime_dir=runtime_dir,
@@ -7338,7 +7424,7 @@ def validation_statistics_command(
     """
     runtime_dir = _resolved_runtime_dir(runtime_dir)
 
-    with _panel_command("validation statistics"):
+    with _panel_command("validation statistics", json_output=json_output):
         if dependence not in ("independent-or-positively-dependent", "arbitrary"):
             raise _panel_fail(
                 PanelExit.bad_request,
@@ -7429,7 +7515,7 @@ def validation_segmented_command(
     """
     runtime_dir = _resolved_runtime_dir(runtime_dir)
 
-    with _panel_command("validation segmented"):
+    with _panel_command("validation segmented", json_output=json_output):
         if dependence not in ("independent-or-positively-dependent", "arbitrary"):
             raise _panel_fail(
                 PanelExit.bad_request,
@@ -7539,7 +7625,7 @@ def portfolio_turnover_variants_command(
     """
     runtime_dir = _resolved_runtime_dir(runtime_dir)
 
-    with _panel_command("portfolio turnover-variants"):
+    with _panel_command("portfolio turnover-variants", json_output=json_output):
         if cost_per_unit_turnover and not cost_definition:
             raise _panel_fail(
                 PanelExit.bad_request,

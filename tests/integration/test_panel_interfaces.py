@@ -472,6 +472,13 @@ def test_an_index_the_panel_never_held_is_reported_by_both_readiness_faces(
     Both values are asserted, not just the failing one. `all_ready=False` alone would also be
     produced by a face that dropped the index code and blocked everything; `all_ready=True` for
     the index the panel *does* hold is what shows the parameter arrived and was answered.
+
+    **The detail now names the absent index rather than counting it** (`V2-P5-046`). It used to
+    read `1 required subject(s) are absent from index_weight` and stop, which is the shape the
+    final product acceptance found on `trade_cal`: a count, plus two remedies that were both
+    wrong for it, while `missing_items` had carried the answer the whole time. The equality is
+    kept as an equality -- it is what pins the two faces to one rendering -- and both halves are
+    written out, so a change to either the sentence or the payload has to pass through here.
     """
     seed_panel(tmp_path)
     sdk, client = faces(tmp_path)
@@ -491,7 +498,9 @@ def test_an_index_the_panel_never_held_is_reported_by_both_readiness_faces(
         {
             "code": "subject_missing",
             "dataset": INDEX_WEIGHT_DATASET,
-            "detail": f"1 required subject(s) are absent from {INDEX_WEIGHT_DATASET}",
+            "detail": (
+                f"1 required subject(s) are absent from {INDEX_WEIGHT_DATASET}: {ABSENT_INDEX_CODE}"
+            ),
             "year": None,
             "missing_dates": [],
             "missing_items": [ABSENT_INDEX_CODE],

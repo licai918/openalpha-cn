@@ -44,6 +44,24 @@ def write_source(path: Path) -> None:
 def test_cli_and_api_return_the_same_evidence_snapshot(
     tmp_path: Path, metadata: ProviderMetadata, frozen_now: datetime
 ) -> None:
+    """`V2-P5-048`: `--runtime-dir` here is not optional either, for the reason eight lines down.
+
+    The comment on the `create_app(...)` call in this same test says the default is "the
+    repository's own `runtime/`, so this line initialised real storage and took a migration
+    backup on **every run of the suite**", and calls itself "the last executable `create_app()`
+    in `tests/` with no runtime directory". It was -- and this `runner.invoke` immediately above
+    it was doing the same thing through the other face, because `V2-P5-013` had since made
+    `evidence build` *persist* what it prints. Measured on `94a0af2` with
+    `OPENALPHA_RUNTIME_DIR` pointed at a probe directory: running this one file wrote
+    `state.sqlite3`, a `backups/state.sqlite3.v0.….bak` and
+    `evidence/part-dcaf81407e363fb937766ad0.parquet` into it, and against the real default it
+    is the developer's own `runtime/` that grows -- one content-addressed evidence part and one
+    migration backup, on every run.
+
+    The printed payload is unaffected, which is what makes this a pure containment fix: the
+    assertion below compares the CLI's document to the API's, and where the CLI happened to
+    persist its copy was never part of that comparison.
+    """
     AS_OF = frozen_now
     source = tmp_path / "events.json"
     write_source(source)
@@ -62,6 +80,8 @@ def test_cli_and_api_return_the_same_evidence_snapshot(
             "user-supplied",
             "--redistribution",
             "restricted",
+            "--runtime-dir",
+            str(tmp_path / "cli"),
         ],
     )
     assert cli_result.exit_code == 0, cli_result.stdout

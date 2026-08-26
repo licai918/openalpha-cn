@@ -815,7 +815,12 @@ def test_an_outcome_window_the_two_price_datasets_disagree_about_is_refused_by_n
     del fitted  # ordering only: the shared build must have happened before this spends a run.
     refused = _evaluate(model_panel, floor=NO_FLOOR, horizon=f"{model_panel.contested_horizon}d")
     assert refused.exit_code == EXIT_UNHEALTHY
-    assert refused.stdout == ""
+    # `V2-P5-047`: this read `refused.stdout == ""` until `--json` started answering a refusal
+    # with a document. `_evaluate` passes `--json`, so the document is what a machine caller
+    # gets here; `status: refused` is what tells it apart from an answer, and the sentence it
+    # carries is the same one stderr prints, asserted below.
+    assert refused.payload()["status"] == "refused"
+    assert refused.payload()["detail"] in refused.stderr
     message = refused.stderr
     assert "could not be priced out of" in message
     assert "the implied pre_close from" in message
@@ -1184,10 +1189,15 @@ def test_a_daily_run_about_a_day_the_panel_does_not_reach_is_refused_by_name(
         predict_at=datetime.combine(beyond, SECOND_INSTANT_TIME, tzinfo=PANEL_ZONE),
     )
     assert refused.exit_code == EXIT_UNHEALTHY
-    assert refused.stdout == ""
+    # `V2-P5-047`, as in `_evaluate`'s refusal above: `--json` now answers with a document.
+    assert refused.payload()["status"] == "refused"
+    assert refused.payload()["detail"] in refused.stderr
     assert "date_gap" in refused.stderr
     assert "absent from" in refused.stderr
+    # `V2-P5-045`: the `date_gap` names the clock that decided the required dates.
+    assert "--as-of" in refused.stderr
     assert str(model_panel.runtime_dir) not in refused.stderr
+    assert str(model_panel.runtime_dir) not in refused.stdout
 
 
 def test_the_answer_carries_every_limitation_this_face_declares(fitted: Fitted) -> None:

@@ -1195,6 +1195,35 @@ class PanelVisibleReadOutcome:
         )
 
 
+DATE_GAP_REMEDY: Final[str] = (
+    "The required dates run up to the stated as_of, so a partition that is complete through an "
+    "earlier session fails a question dated later even though nothing about it is wrong: state "
+    "the clock you mean (`--as-of` on the command line, `as_of` over HTTP and in the SDK) or "
+    "fetch the sessions in between (`openalpha panel build`)"
+)
+"""The two ways out of a `date_gap`, named because the finding itself names neither.
+
+`V2-P5-045`, and the measured case is the ordinary one rather than a corner. `--as-of` defaults
+to "now", so a panel built for January is asked about August the moment somebody runs the
+command in August: `157 required date(s) are absent from daily, starting at 2026-01-19`. That
+sentence is **accurate and useless** -- it describes the store, and the store is fine; what is
+dated wrong is the question. Passing `--as-of` made the identical command exit `0`, so the flag
+belongs in the refusal.
+
+Both ways out are named because both are real and they are not interchangeable. Re-dating the
+question is right when the panel is deliberately historical; fetching is right when it has
+fallen behind. A refusal that offered only the second would send somebody replaying January to
+the network for nothing -- which is the mistake `NO_CALENDAR_REMEDY`'s sibling `V2-P5-046`
+records for `subject_missing`, where the only remedies offered were a paid re-fetch and
+discarding the check.
+
+Spelled for each face, `NO_CALENDAR_REMEDY`'s rule (`panel_view.py`): this detail is serialised
+verbatim by `V2-P1-016`'s HTTP app, the SDK and `panel doctor` alike, so a sentence naming only
+the command-line spelling would be wrong on two of the three faces that print it. `panel build`
+is named without its options because which dataset and years to fetch are already in the
+sentence's own subject.
+"""
+
 PARTITION_SCOPE: Final[str] = ""
 """What `evaluate_readiness` judges: every row the catalog says the partition holds.
 
@@ -1315,9 +1344,37 @@ def subject_gap_issue(
     return ReadinessIssue(
         code="subject_missing",
         dataset=dataset,
-        detail=f"{len(missing)} required subject(s) are absent from {dataset}{scope}",
+        detail=(
+            f"{len(missing)} required subject(s) are absent from {dataset}{scope}: "
+            f"{_named_sample(missing)}"
+        ),
         missing_items=missing,
     )
+
+
+SAMPLE_LIMIT: Final[int] = 6
+"""How many absent names a detail spells out before it starts counting instead.
+
+Six rather than all of them, and rather than none. `V2-P5-046` measured what "none" costs: the
+detail read `1 required subject(s) are absent from trade_cal` on a store that held `SZSE` and
+was asked for `SSE`, and the operator was handed a count -- one -- plus two remedies that were
+both wrong for it. **`missing_items` had the answer the whole time**; only the sentence was
+withholding it.
+
+An unbounded list is the other failure, and it is not hypothetical on this field:
+`required_subjects` for an index-membership or universe read is a cross section, so a
+partition-wide miss would put thousands of codes into a line somebody has to read in a
+terminal. Six shows the pattern -- one absent name, a handful of related ones, or "and 2,188
+more" -- which is enough to tell "I asked for the wrong thing" from "the panel is missing a
+lot", and those are the two answers this sentence exists to separate.
+"""
+
+
+def _named_sample(names: Sequence[str]) -> str:
+    """`names` as a readable list, capped at `SAMPLE_LIMIT` with the remainder counted."""
+    head = ", ".join(names[:SAMPLE_LIMIT])
+    remainder = len(names) - SAMPLE_LIMIT
+    return head if remainder <= 0 else f"{head} and {remainder} more"
 
 
 def evaluate_visible_slice(
@@ -1538,7 +1595,7 @@ def evaluate_readiness(
                 dataset=dataset,
                 detail=(
                     f"{len(missing_dates)} required date(s) are absent from {dataset}, "
-                    f"starting at {missing_dates[0].isoformat()}"
+                    f"starting at {missing_dates[0].isoformat()}. {DATE_GAP_REMEDY}"
                 ),
                 missing_dates=missing_dates,
             )

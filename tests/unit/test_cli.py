@@ -19,6 +19,11 @@ from openalpha_cn.providers.base import (
     ProviderMetadata,
     ProviderRequest,
 )
+from openalpha_cn.providers.file import (
+    OPTIONAL_COLUMNS,
+    PAYLOAD_COLUMNS,
+    REQUIRED_COLUMNS,
+)
 
 runner = CliRunner()
 
@@ -1031,24 +1036,42 @@ def test_a_csv_missing_a_required_column_names_the_whole_column_contract(
     file of their own nothing about the other eight -- fix `summary` and the next run names
     `event_time`. So the refusal states the whole contract at once, and it is one line on
     stderr rather than the rich traceback the acceptance measured.
+
+    ## The three clauses are asserted apart, because a mutation sweep proved they had to be
+
+    The first version of this test checked that each column name appeared *somewhere* in the
+    message, and three mutants survived it:
+
+    1. replacing the absent-column list with the word "something" -- the contract clause still
+       names every column, `summary` included, so every assertion held;
+    2. deleting the contract clause entirely -- "this row is missing summary" plus the list of
+       columns the row *does* carry between them mention all nine names, so every assertion
+       held again;
+    3. making `MissingColumnsError` a `KeyError` again, which is the exact defect being fixed
+       (`KeyError.__str__` is `repr`, and the quotes it adds are where `Cannot read ev_bad.csv:
+       'summary'` came from) -- a substring check cannot see a pair of quotes.
+
+    The message has three clauses doing three different jobs, so each is asserted on its own:
+    which columns are absent, what the contract is, and what this row actually carries. The
+    contract clause is built from `REQUIRED_COLUMNS` rather than restated, so a ninth required
+    column reaches the refusal and this assertion in the same commit.
     """
     bad = _EVIDENCE_HEADER.replace("summary,", "") + _evidence_row().replace("first board,", "")
 
     result = _build_evidence(tmp_path, bad, name="ev_bad.csv")
 
     message = _assert_one_line_refusal(result)
-    assert "summary" in message
-    for column in (
-        "subject",
-        "kind",
-        "event_time",
-        "available_time",
-        "ingested_time",
-        "revision_time",
-        "summary",
-    ):
-        assert column in message, f"{column} is not named in: {message}"
-    assert "payload_json" in message
+    assert message.startswith("Cannot read ev_bad.csv: this row is missing summary."), (
+        f"the absent column is not named first, and unquoted: {message}"
+    )
+    assert (
+        f"Every row needs {', '.join(REQUIRED_COLUMNS)} and either "
+        f"{' or '.join(PAYLOAD_COLUMNS)}; {', '.join(OPTIONAL_COLUMNS)} is optional." in message
+    ), f"the column contract is not stated: {message}"
+    assert message.endswith(
+        "This row carries available_time, event_time, ingested_time, kind, payload_json, "
+        "revision_time, source_uri, subject"
+    ), f"the row's own columns are not named: {message}"
 
 
 def test_an_unsupported_evidence_kind_names_the_supported_kinds_on_one_line(
