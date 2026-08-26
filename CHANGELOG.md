@@ -6,6 +6,7 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Added
 
+<<<<<<< HEAD
 - **A frontend coverage gate that measures the source tree instead of the import graph, and
   a guard that can name the file** (`V2-P5-020`). The row's own text was stale in three
   places and none of them was the defect. "No component is rendered in isolation" and
@@ -86,6 +87,63 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   `_validate_pytest_acceptance`'s AST check. `pytest tests/unit -q` **3146 passed, 1
   skipped**; `ruff check`, `ruff format --check` and `mypy src scripts` clean.
 
+=======
+- **前端路由与数据层，以及页面 ① 数据体检、页面 ② 候选清单 + 个股详情**（`V2-P5-014`、`V2-P5-015`、
+  `V2-P5-016`；三行同落，因为分开落不成立 —— 见下）。新增 `web/src/routes.ts`（全部地址的唯一出处）、
+  `web/src/AppRouter.tsx`（`<Routes>` + 导航 + 404 页）、`DataHealthPanel`、`ShortlistIndexPanel`、
+  `ShortlistDetailPanel` 三个纯组件与三个路由容器，`contractState.ts` 增加 `panelHealthStateFrom`
+  与 `shortlistStateFrom`，`api/client.ts` 增加 `getPanelHealth`/`listShortlists`/`getShortlist`。
+  测试 **150 → 261**，覆盖率四项**全部上升**（语句 91.35→92.53、分支 83.67→84.31、函数 89.88→92.30、
+  行 92.55→93.90），`vite.config.ts` 的棘轮按其"只升不降"规则同步抬到 92/84/92/93。
+  - **`014` 留下的两个悬案分别作答，依据是实测而非口味。** ① **React Router 取用**：PRD 决策 24
+    明文要求"Web 应用演进为 4 个路由区域"，这是产品需求不是偏好；且 `019` 所说"单页应用里路由测试
+    分不开『路由生效』与『应用渲染了』"**已随本次三行同落而失效** —— 三个页面在场时，"只渲染地址所指
+    的那一个"是可断言的，实测**一个不做路由的 shell 在 9 条路由测试中失败 7 条**（含全部三条
+    "renders only"）。代价实测：包体 205.74 kB → 245.87 kB（gzip 64.93 → 78.58），传递依赖仅
+    `cookie-es` 一个，`pnpm audit` 高危条数**不变**（三条全部经 `jsdom`/`eslint`/`vite→postcss`
+    的开发依赖进入，与本依赖无关）。② **TanStack Query 不取**，四项实测：**(a) 去重价值为零** ——
+    `client.ts` 六个函数各**恰好一个**调用点，无任何端点被两个组件取用，没有可合并的并发请求；
+    **(b) 状态模型只覆盖 9 分之 3** —— 它能给出 `loading`/`ready`/`failed`，而 `empty`/`degraded`/
+    `stale`/`blocked` 由 `contractState.ts` 从**契约字段**导出，取数库看不见；`succeeded` 需要
+    `useMutation`（第二套模型）；v5 已删除 `idle` 状态，恰好抹掉 `panelState.ts` 特意保留的
+    "还没问"与"正在问"之别；**(c) `stale` 一词语义相反** —— 它的 `isStale` 是"缓存过期，去重取"
+    且**期间照常把 `data` 当成功渲染**，而本仓的 `stale` 是"这答的是旧问题，必须标注"；
+    **(d) 它要加的缓存服务端已有且是内容寻址的** —— `POST /api/v1/shortlists/run` 把答案按
+    `shortlist_id` 存下，`GET /api/v1/shortlists/{id}` 原样奉还（"the body is the stored answer
+    and not a re-run"），客户端缓存只是这份内容寻址存储的一个更弱的副本。包体代价 +33.19 kB
+    （gzip +9.61）。
+  - **两个分类器各有一个"分得开两个答案"的固定夹具**，沿用 `replayStateFrom` 的先例。
+    `panelHealthStateFrom`：一份 `is_clean: true`、三项 severity 计数**全为 0**、数据集
+    `state: "ready"` 的报告，**只因为 `checks_waived` 里有一项而判 `degraded`** —— 序列化器自己
+    说空元组才是"更强的主张"。`shortlistStateFrom`：`is_blocked: true` 且 `funnel.shortlist`
+    **已经算出两个名字**时判 `blocked` 且不渲染任何数据；`admitted: null` 与 `admitted: []`
+    保持为**两个**答案（`blocked` 对 `empty`），即服务端专门重建过的那个区别。实测**一份朴素实现
+    （读 `is_clean` / 读 `funnel.shortlist`）在 15 条中失败 12 条**，两条头号用例都在其中。
+  - 新增 `web/e2e/routing.spec.ts`（深链、地址栏、浏览器后退、未知地址）。**e2e 由 4 条（2×2 项目）
+    改为 6 条（单 chromium 项目）且更快**（2.6s → 2.1s）。
+  - `types.ts` 新增四个镜像（`ReadinessState`、`PanelHealthReport`、`ShortlistIndex`、
+    `ShortlistAnswer`），**均为有意的子集**并按 `ReplayReport` 的既有先例登记进
+    `INTENTIONALLY_UNMAPPED_TYPES`，每条点名其 Python 序列化器 —— `docs/api/schemas/` 的五份
+    契约里没有面板体检报告，也没有候选清单答案，无从对照。守卫先红后绿：四个类型全部被点名。
+
+### Changed
+
+- **删除 `playwright.config.ts` 的 `mobile-chromium`（Pixel 5）项目**（`V2-P5-014`）。它同时与
+  PRD 的**两处**规定冲突：实施决策 15 把本套件限定为"覆盖桌面 golden 流程 …… 移动端宽度流程移出
+  范围"，决策 24 就 Web 应用整体重申"移动端宽度移出范围"，§5.10 的场景 S82 标为 **OUT**。把整条
+  桌面 golden 流程在 393×851 上重放一遍**就是**一条移动端宽度流程，代价是本套件运行时间翻倍。
+  其中值得留下的那半条留下了：`workbench stays within a mobile viewport` 更名为
+  `workbench never scrolls horizontally at the desktop viewport`，断言一字未动 —— 横向溢出在
+  任何宽度上都是真缺陷，旧名字声称的却是一个 PRD 已经移出的范围。
+
+### Fixed
+
+- **`V2-P5-020` 的行文与实测不符，已改**（`V2-P5-014` 顺手）。该行称"当前**无任何组件被隔离渲染**"
+  且 `web/vite.config.ts` **无 coverage 键** —— 两条在 `V2-P5-019` 交付后即为假：`vite.config.ts`
+  自 2026-08-07 起就有 `coverage.thresholds`，四个面板自 `019` 起各有隔离渲染的 `*.test.tsx`。
+
+<<<<<<< HEAD
+>>>>>>> worktree-agent-ae0c15ce187b0def0
 - **`backtest/paper.py`: a Paper Portfolio whose inability to reach a broker is enforced at
   run time, not asserted in a comment** (`V2-P5-004`, the thirteenth pure-stdlib `backtest/`
   leaf). `PaperPortfolio.advance` lives one observed session forward through

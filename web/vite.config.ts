@@ -78,11 +78,29 @@ export default defineConfig({
       // `ReplayPanel.tsx` sat at 50%. Naming a single rotting file is therefore done by
       // `src/testDiscipline.test.ts`, which can say which file, rather than by a
       // percentage that can only say that some percentage moved.
+      // NOTE (integrator, merge of V2-P5-020 with V2-P5-014/015/016): both sides raised
+      //   this ratchet, and their numbers are not comparable -- 020 added `include:` so
+      //   the denominator now holds files nobody imports. Neither side's thresholds
+      //   apply to the union, so the four below are re-measured on the merged tree.
+      // 2026-08-25, V2-P5-014/015/016 (React Router, pages ① and ②, their two
+      //   contract classifiers and the data layer's own tests, 150 → 260 tests):
+      //   statements 92.30%, branches 84.36%, functions 92.14%, lines 93.50%
+      //   →  92 / 84 / 92 / 93. Every metric rose despite ~500 lines of new
+      //   component code, because each page landed with its shared panel-state
+      //   contract suite rather than after it.
+      // 2026-08-25, the merge of the two lines above (integrator). Measured on the union
+      //   under 020's wider `include:` scope, 296 tests / 22 files:
+      //   statements 91.76%, branches 85.10%, functions 92.00%, lines 93.24%
+      //   →  91 / 85 / 92 / 93.
+      //   Statements reads *below* 014/015/016's 92.30% and that is the denominator, not a
+      //   regression: 020 put files nobody imports into the scope, and `routes.ts` joined
+      //   the tree with its own co-located test at this merge rather than an exemption.
+      //   Branches is the metric that actually rose, 84 → 85.
       thresholds: {
-        statements: 90,
-        branches: 84,
-        functions: 89,
-        lines: 91
+        statements: 91,
+        branches: 85,
+        functions: 92,
+        lines: 93
       }
     }
   }

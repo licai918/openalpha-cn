@@ -75,7 +75,12 @@ test("evidence-to-decision flow has no browser errors", async ({ page }) => {
   expect(errors).toEqual([]);
 });
 
-test("workbench stays within a mobile viewport", async ({ page }) => {
+test("workbench never scrolls horizontally at the desktop viewport", async ({ page }) => {
+  // V2-P5-014 renamed this from "stays within a mobile viewport". The assertion is
+  // unchanged and still worth making — a table or a nav bar that pushes the document
+  // sideways is a real defect at any width — but the old name claimed a scope PRD
+  // Decision 15 puts out of range, and it was the only thing justifying the
+  // `mobile-chromium` project that ran every test here a second time at 393×851.
   await page.goto("/");
   const width = await page.evaluate(() => ({
     scroll: document.documentElement.scrollWidth,

@@ -2,9 +2,12 @@ import type {
   Evidence,
   Health,
   OutcomeInput,
+  PanelHealthReport,
   ProviderBatchUpload,
   ReplayReport,
   ResearchResult,
+  ShortlistAnswer,
+  ShortlistIndex,
   ValidationResult
 } from "../types";
 
@@ -98,4 +101,56 @@ export function validateOutcome(
       }
     })
   });
+}
+
+// ---------------------------------------------------------------------------
+// V2-P5-014 data layer: pages ① and ②.
+// ---------------------------------------------------------------------------
+
+/** The question `GET /api/v1/panel/health` requires. Every field here is a declared query
+ * parameter of that endpoint; `dataset` and `year` are repeatable and mandatory. */
+export type PanelHealthQuery = {
+  datasets: string[];
+  years: number[];
+  asOf: string;
+  exchange: string;
+  calendar: boolean;
+};
+
+/**
+ * Ask what is wrong with the stored panel at a stated `as_of`.
+ *
+ * Distinct from `getHealth()`, which is the service's dependency-free liveness probe on
+ * `/health`. These are two different questions on two different paths and the names keep
+ * them apart, because "the API is up" and "the data is fit to read" is exactly the pair a
+ * data-health page exists to stop anyone from conflating.
+ *
+ * Note this endpoint answers `200` for a *filthy* panel as readily as a clean one — the
+ * verdict is `is_clean` in the body, not the status code, which is why `panelHealthStateFrom`
+ * and not `response.ok` is what decides how page ① renders it.
+ */
+export function getPanelHealth(query: PanelHealthQuery): Promise<PanelHealthReport> {
+  const search = new URLSearchParams({
+    as_of: query.asOf,
+    exchange: query.exchange,
+    calendar: String(query.calendar)
+  });
+  for (const dataset of query.datasets) search.append("dataset", dataset);
+  for (const year of query.years) search.append("year", String(year));
+  return requestJson<PanelHealthReport>(`/api/v1/panel/health?${search.toString()}`);
+}
+
+/** Every shortlist answer this installation holds, by content address. */
+export function listShortlists(): Promise<ShortlistIndex> {
+  return requestJson<ShortlistIndex>("/api/v1/shortlists");
+}
+
+/**
+ * One stored shortlist answer, by the `shortlist_id` its own body carried.
+ *
+ * The id is encoded rather than interpolated raw: it arrives from the URL, and a value
+ * containing `/` would otherwise address a different route instead of failing.
+ */
+export function getShortlist(shortlistId: string): Promise<ShortlistAnswer> {
+  return requestJson<ShortlistAnswer>(`/api/v1/shortlists/${encodeURIComponent(shortlistId)}`);
 }
