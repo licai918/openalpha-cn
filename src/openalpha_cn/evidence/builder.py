@@ -82,6 +82,16 @@ _NORMALIZERS: dict[str, tuple[EvidenceFamily, type[_Facts]]] = {
     "catalyst": ("catalyst", _CatalystFacts),
     "capital": ("capital", _CapitalFacts),
 }
+"""Every evidence kind this build normalizes, and the family and facts model each earns.
+
+**It is also the vocabulary `_build_one`'s refusal prints** (`V2-P5-043`). That refusal used to
+be `unsupported evidence kind: filing` and stop there, which names the rejected kind and no way
+out: the seven keys are declared here and nowhere a caller reads, so somebody holding a file of
+their own could only guess. Reading the message off this dict rather than restating the seven
+in a literal is the same rule `_REDISTRIBUTION_FLAGS` above is written for -- an eighth kind
+added here reaches the refusal in the same commit, instead of shipping a message that names
+seven of eight ways out.
+"""
 
 
 class EvidenceBuilder:
@@ -108,7 +118,10 @@ class EvidenceBuilder:
     ) -> EvidenceSnapshot:
         normalizer = _NORMALIZERS.get(record.kind)
         if normalizer is None:
-            raise ValueError(f"unsupported evidence kind: {record.kind}")
+            raise ValueError(
+                f"unsupported evidence kind: {record.kind}; this build normalizes "
+                f"{', '.join(_NORMALIZERS)}"
+            )
         family, facts_model = normalizer
         facts = thaw_json(record.payload)
         facts_model.model_validate(facts)

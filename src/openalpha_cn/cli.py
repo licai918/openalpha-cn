@@ -216,7 +216,7 @@ from openalpha_cn.providers.tushare import (
     UrllibTushareTransport,
 )
 from openalpha_cn.runtime.composition import build_storage
-from openalpha_cn.runtime.contracts import ResearchRunRequest
+from openalpha_cn.runtime.contracts import ResearchRunRequest, RunConflictError
 from openalpha_cn.runtime.provenance import compute_config_digest, resolve_code_commit
 from openalpha_cn.scheduler import ScheduleHorizonError, TradingDayScheduler
 from openalpha_cn.sdk import OpenAlphaSDK
@@ -788,6 +788,95 @@ this command honours it.
 """
 
 
+RUN_ID_DEFAULT: Final[str] = "local-run"
+"""What `--run-id` means when nobody passes it, and it stays a fixed literal.
+
+`V2-P5-044` weighed making it unique -- a timestamp, a uuid4, `f"{subject}-{as_of.date()}"` --
+and kept it fixed. `run_id` is not a label on a run, it is part of the run's identity:
+`RunManifest` stores it, `request_digest` is computed over it, and `refuse_a_restated_request`
+compares the two so that one id can never come to mean two different requests. A default that
+differed every invocation would make **the same command run twice produce two runs**, which is
+the property this repository fails closed on everywhere else -- a rerun that cannot be
+recognised as a rerun is a rerun that cannot be reproduced.
+
+So the collision is real behaviour and not a defect, and what `V2-P5-044` fixes is that the
+refusal never said so. Researching four names -- the minimum the shortlist gate admits -- gave
+`0`, then `RunConflictError: run_id conflicts with an immutable request: local-run` three
+times, behind a traceback naming neither `--run-id` nor why the default collides. `RUN_ID_
+REMEDY` below is what the refusal says instead.
+"""
+
+_RUN_ID_HELP: Final[str] = (
+    "This run's identity, not a label on it: it is hashed into `request_digest`, so reusing "
+    "one for a different request is refused rather than overwritten. Defaults to the fixed "
+    f"literal `{RUN_ID_DEFAULT}` -- fixed so that rerunning one command reproduces one run -- "
+    "which means a second subject researched into the same runtime directory collides unless "
+    "you pass this. One name per subject, `<subject>-<as-of>` for instance."
+)
+"""Carried by `--run-id` because the collision it warns about is the *normal* path.
+
+The shortlist gate admits a shortlist only when enough of its names have been researched, so
+researching several subjects in a row is the ordinary way to use this command, and under the
+fixed default every subject after the first collides. A caller reading `--help` before their
+second run is the cheapest place to say so; `RUN_ID_REMEDY` is the same fact said afterwards.
+"""
+
+RUN_ID_REMEDY: Final[str] = (
+    "`--run-id` defaults to the fixed literal `local-run` on purpose: a run_id is part of this "
+    "run's content-addressed identity, so a default that changed every invocation would make a "
+    "rerun unreproducible. One run researches one subject, so pass `--run-id` with a name of "
+    "your own for each -- `--run-id <subject>-<as-of>`, say. `openalpha research run --help` "
+    "has the option; nothing needs to be deleted first"
+)
+"""The way out of a `run_id` collision, spelled for the one face that can hit it by default.
+
+Deliberately not shared with the SDK or HTTP faces the way `NO_CALENDAR_REMEDY` is: neither of
+those has a default `run_id` at all -- `ResearchRunRequest.run_id` is a mandatory field with no
+default, and both faces make their caller state it -- so this collision is reachable only
+through the command line, and only the command line has a flag to name.
+"""
+
+
+def _one_line(error: ValidationError) -> str:
+    """One pydantic `ValidationError` as a single sentence, not a three-line report.
+
+    `str(ValidationError)` is a header, one indented block per error and a documentation URL --
+    a shape the two `--plan`-reading commands already print, and right there, because a caller
+    debugging a hand-written segmentation plan wants the field paths. It is the wrong shape for
+    the refusals `V2-P5-043` is about: the message is a whole sentence written for a human
+    (`ResearchRunRequest.validate_evidence`'s, for one), and wrapping it in a validation report
+    buries the sentence under the machinery that carried it.
+
+    So the `msg` of each error is joined, with pydantic's own `Value error, ` prefix removed --
+    it is a restatement of `type=value_error`, which is already in the report this does not
+    print. The field path is kept when the error is *about* a field (`evidence.0.subject`) and
+    dropped for a model-level validator, whose `loc` is empty and whose message names its own
+    subject.
+    """
+    parts: list[str] = []
+    for detail in error.errors():
+        message = str(detail.get("msg", "")).removeprefix("Value error, ")
+        location = ".".join(str(item) for item in detail.get("loc", ()))
+        parts.append(f"{location}: {message}" if location else message)
+    return "; ".join(parts) or str(error)
+
+
+def _evidence_fail(message: str) -> typer.Exit:
+    """Print one `evidence build` refusal on stderr and return the exit to raise.
+
+    `_panel_fail`'s shape and its reasons -- returned so every exit is a visible `raise` at its
+    call site, always stderr so a caller piping this command's payload into `jq` gets a
+    refusal on the other channel rather than a broken document on stdout.
+
+    A separate helper rather than `_panel_fail(PanelExit.bad_request, ...)`: `PanelExit`'s 1/3/4/5
+    vocabulary is a promise the four panel-plane commands make to a CI job, and `evidence build`
+    has never made it. It has always exited 1 for every fault, `V2-P5-043` changes the delivery
+    and not the code, and giving it a 3 here would break a job that already branches on 1.
+    """
+    typer.echo(message, err=True)
+    return typer.Exit(code=1)
+
+
 @evidence_app.command("build")
 def evidence_build(
     path: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
@@ -816,6 +905,23 @@ def evidence_build(
 
     The printed payload is unchanged and is still the whole response, so a caller piping this
     into `jq` keeps working; what changed is that the snapshots also survive the process.
+
+    **A malformed file exits `1` with one line on stderr rather than a rich traceback**
+    (`V2-P5-043`). Two faults were measured during the final product acceptance, both of them
+    full tracebacks of `openalpha_cn` frames with the real message only on the last line:
+
+    - a CSV missing a column produced `ProviderFailure: Cannot read ev_bad.csv: 'summary'` -- a
+      `KeyError` repr, naming one absent column and not the contract, so fixing `summary` only
+      bought a refusal about `event_time`. `providers/file.py::REQUIRED_COLUMNS` now states the
+      whole contract and what the row actually carries.
+    - `kind=filing` produced `ValueError: unsupported evidence kind: filing`, naming the
+      rejected kind and no vocabulary. `evidence/builder.py::_NORMALIZERS` is now read into the
+      message, so all seven supported kinds arrive with the refusal.
+
+    Neither message was reworded for its own sake -- `create_app`'s rule for this repository is
+    that a refusal names "the specific variable, never a bare traceback", and these two named
+    neither the variable nor a way out. The exit code is unchanged at `1`, so a CI job already
+    branching on it keeps working.
     """
     runtime_dir = _resolved_runtime_dir(runtime_dir)
 
@@ -832,7 +938,26 @@ def evidence_build(
         failure_semantics="Malformed or unreadable inputs raise ProviderFailure.",
     )
     provider = FileProvider(path=path, metadata=metadata, parquet_reader=read_parquet_records)
-    response = build_provider_evidence(provider=provider, dataset="events", as_of=point_in_time)
+    try:
+        response = build_provider_evidence(provider=provider, dataset="events", as_of=point_in_time)
+    except ProviderFailure as failure:
+        # `str(failure)` -- the failure's own message -- and this is the one boundary in this
+        # module where that is safe. `_probe_report` and `_fetch_panel` withhold it because a
+        # network provider's message can carry the token or the URL query string it was sent
+        # with; the provider here is the `FileProvider` constructed eight lines up, over a path
+        # the caller named, with `credential_env_vars=()` and no transport. Its message is the
+        # file's own name and what was wrong with a row, which is the entire actionable content
+        # of this refusal -- withholding it would leave `evidence build` unable to say anything
+        # at all about a malformed file.
+        raise _evidence_fail(str(failure)) from failure
+    except ValidationError as error:
+        # `ValidationError` is a `ValueError` subclass, so it is caught first to be rendered as
+        # a sentence rather than as pydantic's three-line report; see `_one_line`. Both clauses
+        # are `build_provider_evidence`'s own refusals -- an unsupported kind, facts that do not
+        # satisfy their model -- because that call is the only thing inside this `try`.
+        raise _evidence_fail(_one_line(error)) from error
+    except ValueError as error:
+        raise _evidence_fail(str(error)) from error
     if response.items:
         # Through the composition root rather than `ParquetEvidenceStore(runtime_dir /
         # "evidence")`, v2 hard rule 5: `sdk.py` and `api/app.py` once assembled this store by
@@ -929,7 +1054,7 @@ def research_run(
     runtime_dir: Annotated[
         Path | None, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)
     ] = None,
-    run_id: Annotated[str, typer.Option("--run-id")] = "local-run",
+    run_id: Annotated[str, typer.Option("--run-id", help=_RUN_ID_HELP)] = RUN_ID_DEFAULT,
     mode: Annotated[RunMode, typer.Option("--mode")] = RunMode.live,
     subject: Annotated[str, typer.Option("--subject")] = "",
     as_of: Annotated[str, typer.Option("--as-of")] = "",
@@ -956,13 +1081,58 @@ def research_run(
     this body would also swallow `parse_serialized_evidence`'s own refusals -- a mismatched
     `content_hash`, a non-object item -- and print the risk-flag vocabulary at somebody whose
     problem is a tampered digest.
+
+    ## The three faults `V2-P5-043` and `V2-P5-044` added to that list
+
+    Each was a rich traceback during the final product acceptance, and each is now a stated
+    refusal. They are caught **separately, around the statement that raises each one**, for the
+    reason the paragraph above already gives: one wide `try` would let any of them answer for
+    the others.
+
+    - **A CSV where JSON was expected.** `json.loads` raised `JSONDecodeError` about column 1,
+      which describes the file rather than the mistake -- and the mistake is a natural one,
+      because `evidence build` and this command each take one path and only one of them takes
+      a CSV. The refusal now names the format this argument takes and the command that makes
+      one.
+    - **Evidence spanning subjects.** `ResearchRunRequest` refused correctly and pydantic
+      printed a three-line validation report around it; `--subject` appeared nowhere.
+      `validate_evidence` now names the other subjects the payload carries and `_one_line`
+      renders it as a sentence.
+    - **`--run-id` colliding on the second subject.** `RUN_ID_DEFAULT`'s docstring is the whole
+      argument for keeping that default fixed and what the refusal says instead. Worth stating
+      plainly here: hitting it is the *normal* path, not an edge case, because the shortlist
+      gate admits a shortlist only when enough of its names have been researched.
+
+    A fourth, unmeasured but on the same statement, is `--as-of`: it defaults to `""`, so
+    omitting it reached `datetime.fromisoformat("")`. That is `_panel_as_of`'s refusal one
+    module over, and it is now worded the same way here.
     """
     runtime_dir = _resolved_runtime_dir(runtime_dir)
 
-    raw = json.loads(evidence_path.read_text(encoding="utf-8"))
+    try:
+        raw = json.loads(evidence_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise _evidence_fail(
+            f"{evidence_path.name} is not JSON ({error}). This argument takes the payload "
+            f"`openalpha evidence build` prints -- an object with an `items` array, or that "
+            f"array on its own -- not the CSV, JSONL or Parquet file the evidence was built "
+            f"*from*. Build it first: `openalpha evidence build {evidence_path.name} "
+            f"--as-of <iso> --source-id <id> --source-license <licence> > evidence.json`"
+        ) from error
     raw_items = raw.get("items") if isinstance(raw, dict) else raw
-    evidence = parse_serialized_evidence(raw_items)
-    point_in_time = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
+    try:
+        evidence = parse_serialized_evidence(raw_items)
+    except ValidationError as error:
+        raise _evidence_fail(_one_line(error)) from error
+    except ValueError as error:
+        raise _evidence_fail(str(error)) from error
+    try:
+        point_in_time = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise _evidence_fail(
+            f"--as-of expects an ISO-8601 instant with an offset, e.g. "
+            f"2026-01-17T04:00:00+00:00; got {as_of!r}"
+        ) from error
     sdk = OpenAlphaSDK(runtime_dir=runtime_dir)
     try:
         result = sdk.run_research(
@@ -980,6 +1150,10 @@ def research_run(
     except UndeclaredRiskFlagError as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(code=1) from error
+    except RunConflictError as error:
+        raise _evidence_fail(f"{error}. {RUN_ID_REMEDY}") from error
+    except ValidationError as error:
+        raise _evidence_fail(_one_line(error)) from error
     typer.echo(result.model_dump_json())
 
 

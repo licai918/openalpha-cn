@@ -5,7 +5,7 @@ import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import pytest
 from typer.testing import CliRunner
@@ -937,3 +937,258 @@ def test_doctor_json_exits_non_zero_when_the_report_it_printed_is_not_clean(
     payload = json.loads(result.stdout)
     assert payload["status"] == "error"
     assert payload["checks"]["config"]["ok"] is False
+
+
+# --- `evidence build` and `research run` refuse in one line -------------------------------
+#
+# `V2-P5-043` and `V2-P5-044`. Four faults measured during the final product acceptance, each one
+# a full rich traceback of `openalpha_cn` frames with the real message only on its last line.
+# Every other command the acceptance drove produced a clean one-line refusal; `create_app`'s
+# own docstring is the rule these four broke -- "naming the specific variable, never a bare
+# traceback".
+#
+# Every claim below goes through `CliRunner` against the real `app`, never an internal import,
+# because the fault is in the *delivery*: three of the four messages were already the right
+# message and reached the terminal as a stack trace anyway, so a test that called the raising
+# function directly would have passed against the broken tree.
+
+_EVIDENCE_HEADER: Final[str] = (
+    "subject,kind,event_time,available_time,ingested_time,revision_time,"
+    "source_uri,summary,payload_json\n"
+)
+_EVIDENCE_PAYLOAD: Final[str] = '"{""close"": 12.5, ""pct_change"": 10.0, ""board_count"": 1}"'
+
+
+def _evidence_row(subject: str = "600000.SH", kind: str = "limit_up") -> str:
+    return (
+        f"{subject},{kind},2026-01-05T09:35:00+08:00,2026-01-05T09:40:00+08:00,"
+        f"2026-01-05T09:45:00+08:00,2026-01-05T09:45:00+08:00,"
+        f"https://example.com/a,first board,{_EVIDENCE_PAYLOAD}\n"
+    )
+
+
+def _assert_one_line_refusal(result: Any) -> str:
+    """Assert `result` is a *stated* refusal rather than an escaped exception; return its text.
+
+    `CliRunner` never renders the rich traceback the terminal shows, so "no traceback in
+    stderr" is vacuously true on the broken tree and separates nothing. What does separate
+    them is `result.exception`: a deliberate `typer.Exit` reaches the runner as `SystemExit`
+    and leaves the message on stderr, while an exception that escaped the command body
+    reaches it as its own type with stderr empty -- which is exactly the shape the acceptance
+    measured, one rich traceback per fault with the real message only on its last line.
+    """
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit), (
+        f"{type(result.exception).__name__} escaped the command body instead of being "
+        f"refused by name: {result.exception!r}"
+    )
+    assert result.stdout == ""
+    message = result.stderr.strip()
+    assert message, "a refusal with an empty stderr tells the caller nothing"
+    assert len(message.splitlines()) == 1, f"a refusal is one line, got:\n{message}"
+    return message
+
+
+def _build_evidence(tmp_path: Path, csv_text: str, name: str = "ev.csv") -> Any:
+    source = tmp_path / name
+    source.write_text(csv_text, encoding="utf-8")
+    return runner.invoke(
+        app,
+        [
+            "evidence",
+            "build",
+            str(source),
+            "--as-of",
+            "2026-01-06T00:00:00+08:00",
+            "--source-id",
+            "local",
+            "--source-license",
+            "CC0",
+            "--runtime-dir",
+            str(tmp_path / "runtime"),
+        ],
+    )
+
+
+def _stored_evidence_json(tmp_path: Path, subjects: tuple[str, ...], name: str) -> Path:
+    """Build real evidence for `subjects` and write `research run`'s input file."""
+    rows = "".join(_evidence_row(subject) for subject in subjects)
+    built = _build_evidence(tmp_path, _EVIDENCE_HEADER + rows, name=f"{name}.csv")
+    assert built.exit_code == 0, built.stdout + built.stderr
+    items = json.loads(built.stdout)["items"]
+    assert len(items) == len(subjects)
+    target = tmp_path / f"{name}.json"
+    target.write_text(json.dumps({"items": items}), encoding="utf-8")
+    return target
+
+
+def test_a_csv_missing_a_required_column_names_the_whole_column_contract(
+    tmp_path: Path,
+) -> None:
+    """`ProviderFailure: Cannot read ev_bad.csv: 'summary'` named the column and nothing else.
+
+    A bare `KeyError` repr is the *name of one* missing column, which tells a caller holding a
+    file of their own nothing about the other eight -- fix `summary` and the next run names
+    `event_time`. So the refusal states the whole contract at once, and it is one line on
+    stderr rather than the rich traceback the acceptance measured.
+    """
+    bad = _EVIDENCE_HEADER.replace("summary,", "") + _evidence_row().replace("first board,", "")
+
+    result = _build_evidence(tmp_path, bad, name="ev_bad.csv")
+
+    message = _assert_one_line_refusal(result)
+    assert "summary" in message
+    for column in (
+        "subject",
+        "kind",
+        "event_time",
+        "available_time",
+        "ingested_time",
+        "revision_time",
+        "summary",
+    ):
+        assert column in message, f"{column} is not named in: {message}"
+    assert "payload_json" in message
+
+
+def test_an_unsupported_evidence_kind_names_the_supported_kinds_on_one_line(
+    tmp_path: Path,
+) -> None:
+    """`ValueError: unsupported evidence kind: filing`, as a traceback, naming no vocabulary."""
+    result = _build_evidence(
+        tmp_path, _EVIDENCE_HEADER + _evidence_row(kind="filing"), name="ev_filing.csv"
+    )
+
+    message = _assert_one_line_refusal(result)
+    assert "filing" in message
+    assert (
+        "limit_up, broken_board, consecutive_board, disclosure, theme, catalyst, capital" in message
+    )
+
+
+def test_research_run_handed_a_csv_names_the_format_and_the_command_that_makes_it(
+    tmp_path: Path,
+) -> None:
+    """The acceptance drove `research run` with the CSV it had just built evidence *from*.
+
+    That is the natural mistake: the two commands take a path each, one of them takes a CSV,
+    and nothing on the way in says the other does not. It surfaced as a traceback out of
+    `json.loads` -- a `JSONDecodeError` about column 1, which describes the file rather than
+    the mistake. The refusal now names the format this argument takes and the command that
+    produces one.
+    """
+    source = tmp_path / "ev.csv"
+    source.write_text(_EVIDENCE_HEADER + _evidence_row(), encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "research",
+            "run",
+            str(source),
+            "--subject",
+            "600000.SH",
+            "--as-of",
+            "2026-01-06T00:00:00+08:00",
+            "--runtime-dir",
+            str(tmp_path / "runtime"),
+        ],
+    )
+
+    message = _assert_one_line_refusal(result)
+    assert "ev.csv" in message
+    assert "openalpha evidence build" in message
+
+
+def test_multi_subject_evidence_names_the_subjects_and_the_flag_that_selects_one(
+    tmp_path: Path,
+) -> None:
+    """A pydantic `ValidationError` dump was the whole answer; `--subject` was never named.
+
+    The evidence really is built by `evidence build`, from a real multi-row CSV, so the file
+    this drives is the file a caller actually gets -- not a hand-written payload that could
+    have agreed with a broken reader.
+    """
+    payload = _stored_evidence_json(tmp_path, ("600000.SH", "600519.SH", "000001.SZ"), "multi")
+
+    result = runner.invoke(
+        app,
+        [
+            "research",
+            "run",
+            str(payload),
+            "--subject",
+            "600000.SH",
+            "--as-of",
+            "2026-01-06T00:00:00+08:00",
+            "--runtime-dir",
+            str(tmp_path / "runtime"),
+        ],
+    )
+
+    message = _assert_one_line_refusal(result)
+    assert "--subject" in message
+    assert "600000.SH" in message
+    for other in ("600519.SH", "000001.SZ"):
+        assert other in message, f"{other} is not named in: {message}"
+
+
+def test_the_second_subject_researched_under_the_default_run_id_names_that_flag(
+    tmp_path: Path,
+) -> None:
+    """`V2-P5-044`. The shortlist gate needs researched names, so this is the normal path.
+
+    `--run-id` defaults to the literal `local-run` and **stays** fixed: `run_id` is part of a
+    content-addressed identity, and a random default would make a rerun unreproducible. What
+    changes is the refusal, which used to be `RunConflictError: run_id conflicts with an
+    immutable request: local-run` behind a traceback that never named the flag.
+
+    Two subjects rather than one is the minimum that can separate the two answers: on one
+    subject a unique default and a fixed default both exit 0, so a single-subject fixture
+    would pass against either tree and prove nothing about which one this is.
+    """
+    first = _stored_evidence_json(tmp_path, ("600000.SH",), "one")
+    second = _stored_evidence_json(tmp_path, ("600519.SH",), "two")
+    runtime = str(tmp_path / "runtime")
+
+    def research(path: Path, subject: str) -> Any:
+        return runner.invoke(
+            app,
+            [
+                "research",
+                "run",
+                str(path),
+                "--subject",
+                subject,
+                "--as-of",
+                "2026-01-06T00:00:00+08:00",
+                "--runtime-dir",
+                runtime,
+            ],
+        )
+
+    assert research(first, "600000.SH").exit_code == 0
+    collided = research(second, "600519.SH")
+
+    message = _assert_one_line_refusal(collided)
+    assert "--run-id" in message
+    assert "local-run" in message
+
+    # And the flag the refusal names actually resolves it.
+    resolved = runner.invoke(
+        app,
+        [
+            "research",
+            "run",
+            str(second),
+            "--subject",
+            "600519.SH",
+            "--as-of",
+            "2026-01-06T00:00:00+08:00",
+            "--runtime-dir",
+            runtime,
+            "--run-id",
+            "600519.SH-2026-01-06",
+        ],
+    )
+    assert resolved.exit_code == 0, resolved.stdout + resolved.stderr

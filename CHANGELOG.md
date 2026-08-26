@@ -399,6 +399,58 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **Four refusals on `evidence build` and `research run` arrived as raw Python tracebacks,
+  and none named a way out** (`V2-P5-043`, new row filed by this work). Every other command
+  the final product acceptance drove produced a clean one-line refusal; these four printed a
+  full rich traceback of `openalpha_cn` frames with the real message only on the last line,
+  which is the presentation `create_app`'s own docstring rules out for this repository --
+  "naming the specific variable, never a bare traceback". Reproduced on `94a0af2` through the
+  installed `openalpha` binary, not an internal import, because for three of the four the
+  message was already right and only its delivery was a stack trace.
+  - A CSV missing a column gave `ProviderFailure: Cannot read ev_bad.csv: 'summary'` -- a
+    `KeyError` repr, which names **one** absent column and not the contract, so fixing
+    `summary` only buys a refusal about `event_time`. `providers/file.py::REQUIRED_COLUMNS`
+    now states the eight-column contract, both spellings of the payload column, which column
+    is optional, and **which columns this row actually carries** -- the last of those is what
+    turns a header typo into a diff a caller can read off one line. `MissingColumnsError` is a
+    `LookupError` subclass rather than a `KeyError` precisely because `KeyError.__str__` is
+    `repr()`, which is where those quotes came from; `fetch()`'s clause widened from `KeyError`
+    to its base class, so every fault it already translated still translates.
+  - `kind=filing` gave `ValueError: unsupported evidence kind: filing`, naming none of the
+    seven supported kinds. The message now reads them out of `_NORMALIZERS` itself, so an
+    eighth kind reaches the refusal in the same commit that declares it.
+  - `research run` handed a CSV gave a traceback out of `json.loads`: a `JSONDecodeError`
+    about column 1, which describes the file rather than the mistake -- and the mistake is a
+    natural one, since both commands take one path and only one of them takes a CSV. The
+    refusal names the format this argument takes and the command that produces one.
+  - Multi-subject evidence gave a three-line pydantic report in which `--subject` never
+    appeared. `validate_evidence` now names the other subjects the payload carries; the
+    sentence before the semicolon is unchanged because `sdk.py::export_report` cites it
+    verbatim as the invariant its narrowing rests on.
+
+  The catches are per-statement rather than one wide `try`, for the reason `research_run`'s
+  docstring already gives: a single clause would let any one of them answer for the others.
+  One fault the acceptance did not measure was found on the same statement and fixed with
+  them -- `--as-of` defaults to `""`, so omitting it reached `datetime.fromisoformat("")`.
+  Exit codes are unchanged at `1` throughout.
+
+- **`research run --run-id` defaults to the literal `local-run`, so every subject after the
+  first collides** (`V2-P5-044`, new row filed by this work). Researching four names -- the
+  minimum the shortlist gate admits -- gave `rc=0` and then `rc=1` three times with
+  `RunConflictError: run_id conflicts with an immutable request: local-run`, behind a
+  traceback that never named `--run-id`. **Hitting this is the normal path**, because the
+  shortlist gate admits a shortlist only when enough of its names have been researched.
+  **The default stays fixed** and the argument is on the record in `RUN_ID_DEFAULT`: a
+  `run_id` is not a label on a run but part of its identity -- `RunManifest` stores it,
+  `request_digest` is computed over it, and `refuse_a_restated_request` compares the two so
+  one id can never mean two requests. A default that differed every invocation would make the
+  same command run twice produce two runs, so a rerun could not be recognised as a rerun and
+  therefore could not be reproduced. What changes is the refusal, which now names `--run-id`
+  and says why the default is what it is, plus a `--help` string on the option itself.
+  `RUN_ID_REMEDY` is deliberately **not** shared across faces the way `NO_CALENDAR_REMEDY` is:
+  neither the SDK nor HTTP has a default `run_id` at all, so this collision is reachable only
+  from the command line and only the command line has a flag to name.
+
 - **Reconciliation only ever checked half of what it claimed to, and the other half was a
   dropped table reported as a healthy database** (`V2-P5-029`, new row filed by this work).
   `V2-P5-026` says it reconciles "by inspecting the schema, never trusting either counter".

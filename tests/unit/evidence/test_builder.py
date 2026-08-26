@@ -3,7 +3,7 @@ from datetime import datetime
 import pytest
 
 from openalpha_cn.domain.time import Timeline
-from openalpha_cn.evidence.builder import EvidenceBuilder
+from openalpha_cn.evidence.builder import _NORMALIZERS, EvidenceBuilder
 from openalpha_cn.providers.base import (
     ProviderBatch,
     ProviderMetadata,
@@ -136,3 +136,37 @@ def test_builder_rejects_invalid_or_unknown_evidence_kinds(record, batch) -> Non
             batch=batch(record(kind="vision_only", payload={"claim": "future"})),
             metadata=metadata(),
         )
+
+
+def test_an_unsupported_kind_names_the_seven_kinds_this_build_normalizes(record, batch) -> None:
+    """`V2-P5-043`. The refusal used to be `unsupported evidence kind: filing` and stop there.
+
+    Measured through `openalpha evidence build` on a CSV whose only fault was `kind=filing`: a
+    full rich traceback whose last line named the rejected kind and nothing else. A caller
+    holding a file of their own has no way to learn the vocabulary from that -- the seven keys
+    live in `_NORMALIZERS`, which is not a document anybody outside this repository reads -- so
+    the refusal now carries them, which is this repository's own rule for a refusal
+    (`create_app`: "naming the specific variable, never a bare traceback").
+
+    The vocabulary is asserted against `_NORMALIZERS` itself rather than against a literal, so
+    an eighth kind added there and left out of the message goes red here instead of shipping a
+    refusal that names six of seven ways out.
+    """
+    with pytest.raises(ValueError) as caught:
+        EvidenceBuilder().build(
+            batch=batch(record(kind="filing", payload={"claim": "future"})),
+            metadata=metadata(),
+        )
+
+    message = str(caught.value)
+    assert "unsupported evidence kind: filing" in message
+    assert ", ".join(_NORMALIZERS) in message
+    assert tuple(_NORMALIZERS) == (
+        "limit_up",
+        "broken_board",
+        "consecutive_board",
+        "disclosure",
+        "theme",
+        "catalyst",
+        "capital",
+    )
