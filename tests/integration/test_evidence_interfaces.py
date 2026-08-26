@@ -73,7 +73,13 @@ def test_cli_and_api_return_the_same_evidence_snapshot(
         clock=lambda: AS_OF,
     )
     batch = provider.fetch(ProviderRequest(dataset="events", as_of=AS_OF))
-    response = TestClient(create_app(clock=lambda: AS_OF)).post(
+    # `runtime_dir` is not optional here even though `create_app` gives it a default: the
+    # default is the repository's own `runtime/`, so this line initialised real storage and
+    # took a migration backup on **every run of the suite**. Measured: that directory held
+    # 135 files, and `V2-P4-111` fixed the backup that a no-op migration leaves behind
+    # without touching the reason one was being taken at all. This was the last executable
+    # `create_app()` in `tests/` with no runtime directory.
+    response = TestClient(create_app(runtime_dir=tmp_path / "api", clock=lambda: AS_OF)).post(
         "/api/v1/evidence/build",
         json={
             "metadata": metadata.model_dump(mode="json"),
