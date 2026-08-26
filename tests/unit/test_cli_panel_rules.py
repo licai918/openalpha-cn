@@ -9,10 +9,16 @@ set of independent judgements nobody can total up.
 
 from __future__ import annotations
 
+import inspect
+import json
 from datetime import UTC, datetime
+from typing import Any, Final
 
 import pytest
+import typer
+from typer.main import get_command
 
+from openalpha_cn import cli as cli_module
 from openalpha_cn.cli import (
     _EMPTY_SESSION_IS_ORDINARY,
     _NEEDS_STORED_UNIVERSE,
@@ -25,6 +31,7 @@ from openalpha_cn.cli import (
     PANEL_BUILD_TARGETS,
     PanelExit,
     _resume_evidence,
+    app,
 )
 from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET, AdjustmentError
 from openalpha_cn.domain.daily_prices import (
@@ -380,3 +387,184 @@ def test_the_write_refusals_and_the_doctors_load_failures_are_one_set() -> None:
         FinancialStatementError,
         TradingCalendarError,
     }
+
+
+# --- `--json` answers a refusal with JSON ------------------------------------------------------
+#
+# `V2-P5-047`. The final product acceptance measured this on **one** command -- `panel doctor
+# --json` exited 1 and wrote zero bytes to stdout -- and this repository's enumerations have
+# been short before, so it was measured across the whole surface before being fixed.
+#
+# Driving all twenty-two into a refusal takes twenty-two fixtures, and that is what the
+# behavioural half in `tests/integration/test_cli_panel.py` does for the one the acceptance
+# named. What is asserted here is the *structure* that makes the other twenty-one impossible to
+# forget, and it is asserted against the **live Typer tree** rather than a list, for
+# `test_cli_runtime_dir_env.py`'s stated reason: an enumeration of the affected commands was
+# made by hand once in this repository and named eight of twenty-eight.
+
+
+def _walk_commands(
+    group: typer.Typer, prefix: tuple[str, ...] = ()
+) -> list[tuple[tuple[str, ...], Any]]:
+    """Every ``(command path, callback)`` pair reachable in ``group``.
+
+    `test_cli_runtime_dir_env.py::_walk`'s twin, and deliberately a second copy rather than an
+    import across test modules: that file's guard is about option *defaults* and this one is
+    about refusal *channels*, and a shared helper would make either file's guard silently
+    change when the other's needs moved.
+    """
+    found: list[tuple[tuple[str, ...], Any]] = []
+    for command in group.registered_commands:
+        callback = command.callback
+        if callback is None:
+            continue
+        name = command.name or callback.__name__.replace("_", "-")
+        found.append(((*prefix, name), callback))
+    for sub in group.registered_groups:
+        instance = sub.typer_instance
+        if instance is None:
+            continue
+        name = sub.name or ""
+        found.extend(_walk_commands(instance, (*prefix, name) if name else prefix))
+    return found
+
+
+def _click_options(command: object, prefix: tuple[str, ...] = ()) -> dict[str, frozenset[str]]:
+    """Every leaf command's option strings, off the **built** click tree Typer ships.
+
+    Two earlier readings of this were wrong, and both are recorded because each looks correct:
+
+    1. `parameter.default`, which is where `test_cli_runtime_dir_env.py` looks. Right for that
+       file's question -- the *value* a flag defaults to -- and wrong for this one: the
+       `OptionInfo` lives in `Annotated.__metadata__`, not in the default.
+    2. `OptionInfo.param_decls` off that metadata. It is `()` for every option in this module,
+       because `typer.Option("--json", ...)` puts the string in `OptionInfo.default` -- Typer's
+       own `get_click_param` reads a string default on an annotated option as a declaration.
+       A guard keyed on `param_decls` therefore finds nothing while looking like it looked.
+
+    Both returned an empty set for all thirty-three commands, and the check below would have
+    passed over an empty loop either time. So the reading is taken from the artefact Typer
+    actually builds: `click.Option.opts` is what the user types, whatever internal field the
+    declaration happened to arrive in, and it survives a Typer version that moves it again.
+
+    Duck-typed on `.commands` / `.params` rather than `isinstance(..., click.Group)`, because
+    on Typer 0.27 the built objects are `typer._click.core.Command`, which is **not** a
+    `click.Command` subclass -- an `isinstance` walk returns zero commands and reports success.
+    """
+    subcommands = getattr(command, "commands", None)
+    if subcommands:
+        found: dict[str, frozenset[str]] = {}
+        for name, sub in subcommands.items():
+            found.update(_click_options(sub, (*prefix, name)))
+        return found
+    opts = {opt for param in getattr(command, "params", ()) for opt in getattr(param, "opts", ())}
+    return {" ".join(prefix): frozenset(opts)}
+
+
+def _json_commands() -> dict[str, Any]:
+    """Every ``(command path, callback)`` in the live tree whose command line takes ``--json``.
+
+    The option set comes from the built click tree and the callback from the Typer tree, keyed
+    on the same path. The two walks are asserted equal in
+    `test_the_json_walk_really_finds_the_measured_surface`, so a command visible to one and not
+    the other is a failure rather than a silent omission from this guard.
+    """
+    options = _click_options(get_command(app))
+    return {
+        " ".join(path): callback
+        for path, callback in _walk_commands(app)
+        if "--json" in options.get(" ".join(path), frozenset())
+    }
+
+
+JSON_REFUSAL_EXEMPT: Final[dict[str, str]] = {
+    "doctor": (
+        "Not a panel command and not enveloped by `_panel_command`: it *is* its own report, and "
+        "its non-zero path already prints the whole payload with `status: error` before exiting "
+        "1 -- `test_cli.py::test_doctor_json_exits_non_zero_when_the_report_it_printed_is_not_"
+        "clean` is that claim. There is no refusal here that stdout does not already carry."
+    ),
+    "migrate status": (
+        "Same shape: it reports the schema's state rather than gating on it, prints its payload "
+        "and exits 0 whatever it finds, so it has no refusal path for a structured error to sit "
+        "on."
+    ),
+}
+"""The two `--json` commands that do not route refusals through `_panel_fail`, each with why.
+
+An exemption list rather than a narrower walk, because "which commands are exempt" is exactly
+the judgement that must not be made silently: a twenty-third `--json` command added tomorrow is
+covered by the guard unless somebody writes a sentence here about why it is not.
+"""
+
+
+def test_the_json_walk_really_finds_the_measured_surface() -> None:
+    """Guard the guard: a walk that returned nothing would make the check below vacuous.
+
+    `_json_commands` reaches into Typer's registration internals, and this repository is on
+    Typer 0.27, whose command objects are **not** `click.Group`/`click.Command` subclasses --
+    an earlier version of this probe walked `click` types and found zero commands while
+    reporting success. Twenty is a floor under the twenty-two measured, not an equality: this
+    file has no business going red because a `--json` command was legitimately added.
+    """
+    assert len(_json_commands()) >= 20
+    assert set(JSON_REFUSAL_EXEMPT) <= set(_json_commands())
+    # The two walks must see the same commands, or a command could be missing from this guard
+    # while both halves look healthy on their own.
+    assert set(_click_options(get_command(app))) == {
+        " ".join(path) for path, _ in _walk_commands(app)
+    }
+
+
+def test_every_json_command_answers_a_refusal_with_json() -> None:
+    """A `--json` caller refused must get a parseable reason on stdout, not a bare exit code.
+
+    Measured on `94a0af2` across all twenty-two `--json` commands, each driven into a genuine
+    refusal (not a usage error): **fifteen exited non-zero having written zero bytes to
+    stdout** -- `data-check`, `factor build`, `factor run`, `jobs due`, `jobs run`, `model
+    daily-run`, `model evaluate`, `panel build`, `panel doctor`, `portfolio construct`,
+    `portfolio turnover-variants`, `shortlist compare`, `shortlist run`, `validation segmented`
+    and `validation statistics`. The remaining seven never reached a refusal in that sweep, so
+    the count is a floor on the fault and not a measurement of the healthy ones.
+
+    `_panel_fail`'s own docstring already stated the rule and then did not implement it:
+    "`--json` output has to stay parseable on stdout even when the command is on its way to a
+    non-zero exit, which is precisely when a caller most needs the structured reasons." It
+    wrote the sentence to stderr and nothing to stdout.
+
+    The structural claim is that every non-exempt `--json` command tells `_panel_command`
+    whether `--json` was asked for, which is what lets `_panel_fail` -- the single funnel all
+    eighty-odd refusals in this module go through -- answer on both channels at once. A command
+    that took `--json` and did not pass it would refuse silently on stdout, which is the defect.
+    """
+    source = inspect.getsource(cli_module)
+    offenders: dict[str, str] = {}
+    for path, callback in sorted(_json_commands().items()):
+        if path in JSON_REFUSAL_EXEMPT:
+            continue
+        body = inspect.getsource(callback)
+        if "_panel_command(" not in body:
+            offenders[path] = "does not envelope its body in `_panel_command`"
+        elif "json_output=json_output" not in body:
+            offenders[path] = "does not tell `_panel_command` that `--json` was asked for"
+
+    assert offenders == {}, offenders
+    # And the funnel really is a funnel: every refusal in this module goes through one helper.
+    assert source.count("raise _panel_fail(") >= 60
+
+
+def test_the_json_refusal_payload_names_its_own_exit_code_and_the_sentence() -> None:
+    """The payload is the sentence plus the code, so neither channel is the only one that says it.
+
+    Asserted on the shape rather than through a store because the shape is what a machine
+    caller branches on; `tests/integration/test_cli_panel.py::
+    test_json_on_a_refusal_path_is_json_and_not_nothing` drives it through a real panel.
+    """
+    payload = json.loads(cli_module._panel_refusal_payload(PanelExit.bad_request, "a sentence"))
+
+    assert payload == {
+        "status": "refused",
+        "exit_code": int(PanelExit.bad_request),
+        "detail": "a sentence",
+    }
+    assert payload["exit_code"] != int(PanelExit.ok)

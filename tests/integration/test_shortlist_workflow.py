@@ -232,9 +232,17 @@ def _run_shortlist(
 
     A *gate refusal* exits `1` and still prints the whole verdict, which is the distinction this
     command exists for; a *fault* -- a panel that cannot be read, a request that cannot be put --
-    exits non-zero with a sentence on stderr and no body at all. So the body is parsed when there
-    is one and the raw output is handed back under `output` when there is not, rather than the
-    helper raising `JSONDecodeError` and hiding which of the two happened.
+    exits non-zero with a sentence rather than a verdict. So the body is parsed when there is one
+    and the raw output is handed back under `output` when there is not, rather than the helper
+    raising `JSONDecodeError` and hiding which of the two happened.
+
+    **The two are told apart by the document's own shape, not by whether stdout starts with
+    `{`** (`V2-P5-047`). That was the discriminator until `--json` began answering a fault with a
+    refusal document too, at which point a fault parsed cleanly as a verdict and every caller of
+    this helper silently got the wrong branch -- `KeyError: 'output'` in the one test that read
+    it. `status: refused` is the field the refusal carries and no verdict does, so keying on it
+    separates the two whatever either shape gains later; `output` still carries everything the
+    process printed, so a test asserting on the sentence is unchanged.
     """
     result = CliRunner().invoke(
         app, _shortlist_arguments(runtime_dir, parameters, evidence=evidence)
@@ -242,7 +250,10 @@ def _run_shortlist(
     body = result.stdout.strip()
     if not body.startswith("{"):
         return result.exit_code, {"output": result.output}
-    return result.exit_code, json.loads(body)
+    document = json.loads(body)
+    if document.get("status") == "refused":
+        return result.exit_code, {"output": result.output, "refusal": document}
+    return result.exit_code, document
 
 
 def _rest_body(parameters: Mapping[str, Any]) -> dict[str, Any]:

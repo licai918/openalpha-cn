@@ -5,7 +5,7 @@ import json
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Final, Protocol, cast
 
 from pydantic import JsonValue
 
@@ -18,6 +18,78 @@ from openalpha_cn.providers.base import (
     ProviderRequest,
     utc_now,
 )
+
+REQUIRED_COLUMNS: Final[tuple[str, ...]] = (
+    "subject",
+    "kind",
+    "event_time",
+    "available_time",
+    "ingested_time",
+    "revision_time",
+    "summary",
+)
+"""Every column a row must carry outright, in the order the refusal names them.
+
+Declared rather than left implicit in `_to_record`'s seven `raw[...]` subscripts, because
+`V2-P5-043` measured what those subscripts refuse *with*: a CSV missing `summary` produced
+`ProviderFailure: Cannot read ev_bad.csv: 'summary'` -- a `KeyError` repr, which is the name of
+**one** absent column and no statement of the contract. A caller holding a file of their own
+fixes `summary`, runs again, and is told about `event_time`; there is no run that tells them
+what the file has to look like. The set is small, closed and knowable before the first row is
+read, so it is checked as a set and reported as one.
+"""
+
+PAYLOAD_COLUMNS: Final[tuple[str, ...]] = ("payload", "payload_json")
+"""The two spellings of the eighth required column; a row needs exactly one of them.
+
+`payload` is the native form a JSON/JSONL/Parquet row carries; `payload_json` is the string a
+CSV cell can hold. `_to_record` already accepted either, and the refusal has to say so -- a
+message naming only `payload` would send a CSV author to a column their format cannot express.
+"""
+
+OPTIONAL_COLUMNS: Final[tuple[str, ...]] = ("source_uri",)
+"""Columns a row may carry. Named in the refusal so its absence is not read as the fault.
+
+`_to_record` reads this one through `raw.get`, and a row without it is well formed -- it earns
+`RiskFlag.source_uri_missing` downstream rather than a refusal. Listing the required columns
+without also saying which one is optional would leave a caller who omitted `source_uri`
+unable to tell whether it was the thing that broke.
+"""
+
+
+class MissingColumnsError(LookupError):
+    """A row that does not carry the column contract, reported as a sentence.
+
+    A `LookupError` subclass rather than a `KeyError` so `str(error)` is the sentence itself:
+    `KeyError.__str__` is `repr()` of its single argument, which is exactly how the measured
+    refusal came to read `Cannot read ev_bad.csv: 'summary'` -- quotes included, contract
+    excluded. It is still a `LookupError`, so `fetch()`'s clause covers it and `KeyError`
+    together under one name and no other call site had to learn a new type.
+    """
+
+
+def _refuse_a_row_missing_a_required_column(raw: dict[str, object]) -> None:
+    """Name every absent column and the whole contract, or return.
+
+    Checked before `_to_record`'s subscripts rather than instead of them: the subscripts stay
+    as the backstop for a row shape this predicate cannot anticipate, and what this adds is
+    the *statement* -- which columns are absent, what the full contract is, and what this row
+    actually carries. The last of those three is what turns a header typo (`Summary`,
+    `summary `) from a mystery into a diff a caller can read off one line.
+    """
+    absent = tuple(name for name in REQUIRED_COLUMNS if name not in raw)
+    has_payload = any(name in raw for name in PAYLOAD_COLUMNS)
+    if not absent and has_payload:
+        return
+    missing = [*absent]
+    if not has_payload:
+        missing.append(" or ".join(PAYLOAD_COLUMNS))
+    raise MissingColumnsError(
+        f"this row is missing {', '.join(missing)}. Every row needs "
+        f"{', '.join(REQUIRED_COLUMNS)} and either "
+        f"{' or '.join(PAYLOAD_COLUMNS)}; {', '.join(OPTIONAL_COLUMNS)} "
+        f"is optional. This row carries {', '.join(sorted(raw)) or '<no columns at all>'}"
+    )
 
 
 class ParquetReader(Protocol):
@@ -77,11 +149,17 @@ class FileProvider:
         return self._metadata
 
     def fetch(self, request: ProviderRequest) -> ProviderBatch:
-        """Read and filter visible records or raise a structured failure."""
+        """Read and filter visible records or raise a structured failure.
+
+        `LookupError` rather than `KeyError` in the clause (`V2-P5-043`): it is `KeyError`'s
+        own base class, so every fault this used to translate still translates, and it also
+        covers `MissingColumnsError`, which states the column contract where a bare `KeyError`
+        stated one absent column's `repr`.
+        """
         try:
             raw_records = self._read()
             records = tuple(self._to_record(raw) for raw in raw_records)
-        except (OSError, ValueError, TypeError, KeyError) as error:
+        except (OSError, ValueError, TypeError, LookupError) as error:
             raise ProviderFailure(
                 provider_id=self.metadata.provider_id,
                 category="invalid_response",
@@ -154,6 +232,7 @@ class FileProvider:
 
     @staticmethod
     def _to_record(raw: dict[str, object]) -> ProviderRecord:
+        _refuse_a_row_missing_a_required_column(raw)
         payload = raw.get("payload")
         if payload is None:
             payload_text = raw["payload_json"]

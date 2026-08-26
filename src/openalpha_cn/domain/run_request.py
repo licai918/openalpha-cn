@@ -65,8 +65,21 @@ class ResearchRunRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_evidence(self) -> Self:
-        if any(item.subject != self.subject for item in self.evidence):
-            raise ValueError("all evidence must match the requested subject")
+        intruders = tuple(
+            sorted({item.subject for item in self.evidence if item.subject != self.subject})
+        )
+        if intruders:
+            # `V2-P5-043`: the sentence up to the semicolon is unchanged, because
+            # `sdk.py::export_report`'s docstring cites it verbatim as the invariant its
+            # narrowing rests on. What follows it is the part a caller can act on -- which
+            # other subjects the payload carries, and the option that selects among them.
+            # A count would not do: the remedy is to name one of *these* subjects.
+            raise ValueError(
+                f"all evidence must match the requested subject; --subject is "
+                f"{self.subject!r} and this payload also carries "
+                f"{', '.join(intruders)}. One run researches one subject, so build "
+                f"one payload per subject or pass --subject for one of the above"
+            )
         if any(not item.visible_at(self.as_of) for item in self.evidence):
             # V2-P0B-014: typed, not a bare ValueError -- see LookAheadViolationError's
             # docstring (domain/evidence.py) for why the replay runner needs this to be a

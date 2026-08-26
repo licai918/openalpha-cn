@@ -834,15 +834,44 @@ def test_an_empty_session_is_ordinary_only_for_the_halt_corpus(
 def test_a_refusal_leaves_stdout_parseable_and_says_why_on_stderr(
     tmp_path: Path, scripted_build: ScriptedTushareTransport
 ) -> None:
-    """`_panel_fail` writes to stderr, and that is load-bearing rather than a convention.
+    """`_panel_fail` keeps the prose on stderr, and that is load-bearing rather than convention.
 
-    `--json` promises a machine-readable stdout. A refusal printed there would put a prose
-    sentence in front of the JSON a caller is piping into a parser, on exactly the runs where it
+    `--json` promises a machine-readable stdout. A refusal *sentence* printed there would put
+    prose in front of the JSON a caller is piping into a parser, on exactly the runs where it
     most wants a structured answer -- so a consumer would have to strip prose before parsing,
     which means guessing where it ends. Asserted here because the argument lives in a docstring
     and nothing pinned it.
+
+    **What this asserted before `V2-P5-047` was `result.stdout == ""`, and that was the defect
+    rather than the property.** "Parseable" was being satisfied vacuously: a machine caller who
+    asked for data got a bare exit code and no reason at all, which is the thing the final
+    product acceptance found. The property was always "stdout carries exactly one JSON document
+    and no prose", and an empty stdout is only one way to not violate it -- the useless way. So
+    the assertion is now the property itself: stdout parses whole, in one call, and the sentence
+    a human reads is the same sentence the document carries.
     """
     result = build(tmp_path, UNBUILT_TARGET, extra=["--json"])
+
+    assert result.exit_code == PanelExit.bad_request
+    payload = json.loads(result.stdout)  # whole of stdout, one document, no prose to strip
+    assert payload["status"] == "refused"
+    assert payload["exit_code"] == int(PanelExit.bad_request)
+    assert UNBUILT_TARGET in payload["detail"]
+    assert UNBUILT_TARGET in result.stderr
+    assert payload["detail"] in result.stderr
+
+
+def test_a_refusal_without_json_still_leaves_stdout_completely_empty(
+    tmp_path: Path, scripted_build: ScriptedTushareTransport
+) -> None:
+    """The other half of `V2-P5-047`: a terminal caller sees no change at all.
+
+    The structured document is written **only** when `--json` was asked for. Without this, the
+    same command would start printing a JSON blob at somebody reading a terminal, which is the
+    mirror image of the fault being fixed. Same invocation as the test above minus the flag, so
+    the two differ in exactly the thing under test.
+    """
+    result = build(tmp_path, UNBUILT_TARGET)
 
     assert result.exit_code == PanelExit.bad_request
     assert result.stdout == ""
@@ -1324,3 +1353,185 @@ def test_every_situation_maps_to_the_exit_code_the_table_declares(
         "data-check.runtime_dir_is_a_file": PanelExit.internal_error,
         "click.unknown_flag": CLICK_USAGE_EXIT_CODE,
     }
+
+
+# --- a refusal names what fixes it -------------------------------------------------------------
+#
+# `V2-P5-045` / `V2-P5-046` / `V2-P5-047`. Three faults measured during the final product
+# acceptance, all three on this command and all three the same failure of the repository's own
+# rule: a refusal must name the flag, the record or the command that fixes it. Each is driven
+# here rather than against a helper, because in every case the *report* was already correct and
+# what was missing was in its delivery.
+
+
+def test_a_date_gap_from_a_defaulted_as_of_names_the_clock_that_decided_it(
+    tmp_path: Path,
+) -> None:
+    """`V2-P5-045`. `--as-of` defaults to "now", so a January panel fails when asked in August.
+
+    Measured: `daily cannot be read at <now>: ['date_gap']; 157 required date(s) are absent
+    from daily, starting at 2026-01-19`. Accurate, and it names nothing the caller can do --
+    the panel is not broken, the *question* is dated today. Adding `--as-of` made the identical
+    command succeed, which is why the refusal has to name it.
+
+    The clock is not passed here at all, deliberately: `read_side` supplies `AS_OF` and that is
+    exactly the argument whose absence produces this fault. A fixture that passed a clock could
+    not separate the two answers -- with `AS_OF` the panel is clean and there is no `date_gap`
+    to inspect.
+    """
+    seed_fixture_panel(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "panel",
+            "doctor",
+            "--runtime-dir",
+            str(tmp_path),
+            "--year",
+            str(YEAR),
+            "--exchange",
+            EXCHANGE,
+            "--dataset",
+            DAILY_DATASET,
+        ],
+    )
+
+    assert result.exit_code == PanelExit.unhealthy
+    gaps = [line for line in result.stdout.splitlines() if "date_gap" in line]
+    assert gaps, result.stdout + result.stderr
+    assert all("--as-of" in line for line in gaps), gaps
+
+
+def test_a_date_gap_finding_carries_its_remedy_over_json_too(tmp_path: Path) -> None:
+    """The same sentence on the same finding, so the two faces cannot drift about the remedy."""
+    seed_fixture_panel(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "panel",
+            "doctor",
+            "--json",
+            "--runtime-dir",
+            str(tmp_path),
+            "--year",
+            str(YEAR),
+            "--exchange",
+            EXCHANGE,
+            "--dataset",
+            DAILY_DATASET,
+        ],
+    )
+
+    assert result.exit_code == PanelExit.unhealthy
+    payload = json.loads(result.stdout)
+    gaps = [item for item in payload["findings"] if item["code"] == "date_gap"]
+    assert gaps, payload["findings"]
+    assert all("--as-of" in item["detail"] for item in gaps)
+
+
+def test_a_missing_calendar_subject_names_the_exchange_the_store_actually_holds(
+    tmp_path: Path,
+) -> None:
+    """`V2-P5-046`. `subject_missing` printed a count, and both suggested remedies were wrong.
+
+    Measured: `the SSE calendar cannot be read at ...: ['subject_missing']; 1 required
+    subject(s) are absent from trade_cal. Build it first (...), or state on the record that
+    this run has no calendar (--no-calendar ...)`. But `trade_cal` **was** built and is
+    healthy -- it holds `SZSE`. Rebuilding would fetch SSE (paid, slow) and `--no-calendar`
+    discards the check; the actual fix is `--exchange SZSE`, which the same command accepts.
+    `missing_items` carried the answer server-side and the human output printed only its
+    length.
+
+    `EXCHANGE` is read off the generator rather than restated, and the request deliberately
+    omits `--exchange` so the default (`SSE`) is what the store is asked for -- the fixture is
+    only discriminating because the two differ.
+    """
+    seed_fixture_panel(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "panel",
+            "doctor",
+            "--runtime-dir",
+            str(tmp_path),
+            "--year",
+            str(YEAR),
+            "--as-of",
+            AS_OF.isoformat(),
+            "--dataset",
+            DAILY_DATASET,
+        ],
+    )
+
+    assert result.exit_code != PanelExit.ok
+    message = result.stderr
+    assert "subject_missing" in message
+    assert EXCHANGE in message, f"the stored exchange is not named in: {message}"
+    assert "--exchange" in message, f"the flag that fixes this is not named in: {message}"
+
+    # And the remedy the refusal names actually resolves it, on the same command.
+    fixed = runner.invoke(
+        app,
+        [
+            "panel",
+            "doctor",
+            "--runtime-dir",
+            str(tmp_path),
+            "--year",
+            str(YEAR),
+            "--as-of",
+            AS_OF.isoformat(),
+            "--dataset",
+            DAILY_DATASET,
+            "--exchange",
+            EXCHANGE,
+        ],
+    )
+    assert fixed.exit_code == PanelExit.ok, fixed.stdout + fixed.stderr
+    assert f"READY {DAILY_DATASET}" in fixed.stdout
+
+
+def test_json_on_a_refusal_path_is_json_and_not_nothing(tmp_path: Path) -> None:
+    """`V2-P5-047`. `--json` emitted **zero bytes** on the refusal path: rc=1, no JSON at all.
+
+    A machine caller who asked for data got a bare exit code, which is precisely when it most
+    needs the structured reason -- `_panel_fail`'s own docstring already says so ("--json
+    output has to stay parseable on stdout even when the command is on its way to a non-zero
+    exit, which is precisely when a caller most needs the structured reasons") and then wrote
+    the message to stderr and nothing to stdout.
+
+    Driven on the calendar refusal because that is the one the acceptance measured; the shape
+    is held for every `--json` command by
+    `tests/unit/test_cli_panel_rules.py::test_every_json_command_answers_a_refusal_with_json`.
+    """
+    seed_fixture_panel(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "panel",
+            "doctor",
+            "--json",
+            "--runtime-dir",
+            str(tmp_path),
+            "--year",
+            str(YEAR),
+            "--as-of",
+            AS_OF.isoformat(),
+            "--dataset",
+            DAILY_DATASET,
+        ],
+    )
+
+    assert result.exit_code != PanelExit.ok
+    assert result.stdout.strip(), "--json wrote nothing at all on the refusal path"
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "refused"
+    assert payload["exit_code"] == int(result.exit_code)
+    assert EXCHANGE in payload["detail"]
+    assert "--exchange" in payload["detail"]
+    # The human channel keeps the same sentence, so neither face is the only one that says it.
+    assert payload["detail"] in result.stderr

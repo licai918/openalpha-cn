@@ -358,6 +358,15 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_gate.DependencyClearance",
             "panel_gate.DependencyRequest",
             "panel_ingest.load_trading_calendar",
+            # `V2-P5-046`. `stored_calendar` needs to know which exchanges `trade_cal` actually
+            # holds before it can offer `--exchange` as a remedy, and the census is taken across
+            # this seam rather than in `panel_view` on purpose: this module's row in
+            # `RESEARCH_PLANE_DATASETS` says `named=frozenset()` -- it reaches fifteen datasets
+            # and names none, because it renders other modules' answers -- and a local
+            # `read_coverage(TRADING_CALENDAR_DATASET, ...)` would have made that claim false to
+            # buy one sentence. So the widening is here, where it is one declared name, instead
+            # of in the table that records an architectural property.
+            "panel_ingest.stored_calendar_exchanges",
         }
     ),
     "openalpha_cn.panel_factors": frozenset(

@@ -530,6 +530,146 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **Four refusals on `evidence build` and `research run` arrived as raw Python tracebacks,
+  and none named a way out** (`V2-P5-043`, new row filed by this work). Every other command
+  the final product acceptance drove produced a clean one-line refusal; these four printed a
+  full rich traceback of `openalpha_cn` frames with the real message only on the last line,
+  which is the presentation `create_app`'s own docstring rules out for this repository --
+  "naming the specific variable, never a bare traceback". Reproduced on `94a0af2` through the
+  installed `openalpha` binary, not an internal import, because for three of the four the
+  message was already right and only its delivery was a stack trace.
+  - A CSV missing a column gave `ProviderFailure: Cannot read ev_bad.csv: 'summary'` -- a
+    `KeyError` repr, which names **one** absent column and not the contract, so fixing
+    `summary` only buys a refusal about `event_time`. `providers/file.py::REQUIRED_COLUMNS`
+    now states the eight-column contract, both spellings of the payload column, which column
+    is optional, and **which columns this row actually carries** -- the last of those is what
+    turns a header typo into a diff a caller can read off one line. `MissingColumnsError` is a
+    `LookupError` subclass rather than a `KeyError` precisely because `KeyError.__str__` is
+    `repr()`, which is where those quotes came from; `fetch()`'s clause widened from `KeyError`
+    to its base class, so every fault it already translated still translates.
+  - `kind=filing` gave `ValueError: unsupported evidence kind: filing`, naming none of the
+    seven supported kinds. The message now reads them out of `_NORMALIZERS` itself, so an
+    eighth kind reaches the refusal in the same commit that declares it.
+  - `research run` handed a CSV gave a traceback out of `json.loads`: a `JSONDecodeError`
+    about column 1, which describes the file rather than the mistake -- and the mistake is a
+    natural one, since both commands take one path and only one of them takes a CSV. The
+    refusal names the format this argument takes and the command that produces one.
+  - Multi-subject evidence gave a three-line pydantic report in which `--subject` never
+    appeared. `validate_evidence` now names the other subjects the payload carries; the
+    sentence before the semicolon is unchanged because `sdk.py::export_report` cites it
+    verbatim as the invariant its narrowing rests on.
+
+  The catches are per-statement rather than one wide `try`, for the reason `research_run`'s
+  docstring already gives: a single clause would let any one of them answer for the others.
+  One fault the acceptance did not measure was found on the same statement and fixed with
+  them -- `--as-of` defaults to `""`, so omitting it reached `datetime.fromisoformat("")`.
+  Exit codes are unchanged at `1` throughout.
+
+- **`research run --run-id` defaults to the literal `local-run`, so every subject after the
+  first collides** (`V2-P5-044`, new row filed by this work). Researching four names -- the
+  minimum the shortlist gate admits -- gave `rc=0` and then `rc=1` three times with
+  `RunConflictError: run_id conflicts with an immutable request: local-run`, behind a
+  traceback that never named `--run-id`. **Hitting this is the normal path**, because the
+  shortlist gate admits a shortlist only when enough of its names have been researched.
+  **The default stays fixed** and the argument is on the record in `RUN_ID_DEFAULT`: a
+  `run_id` is not a label on a run but part of its identity -- `RunManifest` stores it,
+  `request_digest` is computed over it, and `refuse_a_restated_request` compares the two so
+  one id can never mean two requests. A default that differed every invocation would make the
+  same command run twice produce two runs, so a rerun could not be recognised as a rerun and
+  therefore could not be reproduced. What changes is the refusal, which now names `--run-id`
+  and says why the default is what it is, plus a `--help` string on the option itself.
+  `RUN_ID_REMEDY` is deliberately **not** shared across faces the way `NO_CALENDAR_REMEDY` is:
+  neither the SDK nor HTTP has a default `run_id` at all, so this collision is reachable only
+  from the command line and only the command line has a flag to name.
+
+- **A `date_gap` refusal named no flag, and the flag that fixes it is `--as-of`**
+  (`V2-P5-045`, new row filed by this work). `--as-of` correctly defaults to "now", so a panel
+  built for January fails the moment somebody runs the command in August: `157 required date(s)
+  are absent from daily, starting at 2026-01-19`. That sentence is accurate and useless -- it
+  describes the store, and the store is fine; what is dated wrong is the question. Passing
+  `--as-of` made the identical command exit `0`. `DATE_GAP_REMEDY` now names **both** ways out,
+  because both are real and they are not interchangeable: re-date the question when the panel
+  is deliberately historical, fetch the missing sessions when it has fallen behind. Naming only
+  the second would send somebody replaying January to a paid provider for nothing -- which is
+  exactly the mistake `V2-P5-046` below records. Spelled for each face, `NO_CALENDAR_REMEDY`'s
+  rule, because this detail is serialised verbatim by the HTTP app, the SDK and `panel doctor`
+  alike. **One measurement correction**: the acceptance described this as a stderr refusal; it
+  is a `BLOCKING daily date_gap: …` line on `panel doctor`'s **stdout**, and that command's
+  `--json` was already emitting 21,382 bytes on this path. The missing thing is the same, its
+  channel is not.
+
+- **`subject_missing` printed a count, never the subject, and both remedies it offered were
+  wrong** (`V2-P5-046`, new row filed by this work). `openalpha panel doctor --dataset daily
+  --year 2026 --as-of 2026-01-17T12:00:00+08:00` refused with `1 required subject(s) are absent
+  from trade_cal`, then offered a rebuild or `--no-calendar`. But `trade_cal` **was** built and
+  healthy -- it held `SZSE`. Rebuilding would fetch SSE (paid, slow) and `--no-calendar`
+  discards the check; the fix was `--exchange SZSE`, which the same command accepts and which
+  returns `rc=0 READY daily`. `missing_items` had carried the answer server-side the whole time
+  and the human output printed only its length. Two changes: `subject_gap_issue` now names the
+  absent subjects (capped at `SAMPLE_LIMIT` then counted, because `required_subjects` on an
+  index-membership or universe read is a cross section and an unbounded list would put
+  thousands of codes on one terminal line), and `panel_view._calendar_remedy` offers the
+  narrower way out **only when the store can support it** -- the cause is a `subject_missing`
+  and the census names some other exchange. A genuinely absent partition, a damaged catalog, or
+  a store holding only the exchange already asked for keeps `NO_CALENDAR_REMEDY` unchanged,
+  because building really is the answer there and naming `--exchange` would point at a flag
+  with nothing to put after it. The census crosses the seam as
+  `panel_ingest.stored_calendar_exchanges` rather than being read in `panel_view`, whose row in
+  `RESEARCH_PLANE_DATASETS` says it reaches fifteen datasets and names none.
+
+- **`--json` emitted nothing at all on the refusal path** (`V2-P5-047`, new row filed by this
+  work). The acceptance measured it on one command. Enumerations in this repository have been
+  short before, so the whole surface was measured first: of **33 leaf commands in the live
+  Typer tree, 22 accept `--json`**, and when each was driven into a genuine refusal (not a
+  usage error) **15 exited non-zero having written zero bytes to stdout** -- `data-check`,
+  `factor build`, `factor run`, `jobs due`, `jobs run`, `model daily-run`, `model evaluate`,
+  `panel build`, `panel doctor`, `portfolio construct`, `portfolio turnover-variants`,
+  `shortlist compare`, `shortlist run`, `validation segmented`, `validation statistics`. The
+  other seven never reached a refusal in that sweep, so 15 is a floor on the fault rather than
+  a count of the healthy. `_panel_fail`'s own docstring had stated the rule since the day it
+  was written -- "`--json` output has to stay parseable on stdout even when the command is on
+  its way to a non-zero exit, which is precisely when a caller most needs the structured
+  reasons" -- and wrote that sentence to stderr with nothing on stdout. The fix is at that one
+  funnel: `_panel_command` sets a `ContextVar` and `_panel_fail` reads it, so all 20 commands
+  that route refusals through it are covered at once without threading a flag through eighty
+  call sites. The human sentence stays on stderr unchanged; stdout gains one document carrying
+  `status: refused`, the exit code, and **the same sentence** rather than a second wording of
+  it. The guard walks the live Typer tree with a two-entry exemption list that states why
+  (`doctor` and `migrate status` route no refusals through `_panel_fail` and already print
+  their whole payload). Two earlier versions of that guard read the option declarations from
+  the wrong place and returned an empty set for all 33 commands while passing; the floor
+  assertion in `test_the_json_walk_really_finds_the_measured_surface` is what caught it, and
+  the reading now comes off the built click tree.
+
+- **One integration test wrote a real evidence part and a migration backup into the
+  developer's own `runtime/` on every run of the suite** (`V2-P5-048`, new row filed by this
+  work). Found by tripping it: running `tests/integration` grew a fresh worktree's `runtime/`
+  from nothing to four files. Bisected by pointing `OPENALPHA_RUNTIME_DIR` at a probe
+  directory, one file at a time, down to `test_cli_and_api_return_the_same_evidence_snapshot`
+  in `tests/integration/test_evidence_interfaces.py`, whose `runner.invoke(app, ["evidence",
+  "build", …])` passed no `--runtime-dir`. Eight lines below it, the same test's `create_app(…)`
+  carries a comment saying that default "is the repository's own `runtime/`, so this line
+  initialised real storage and took a migration backup on **every run of the suite**" and calls
+  itself "the last executable `create_app()` in `tests/` with no runtime directory". It was --
+  through *that* face. The `runner.invoke` above it became a writer later, when `V2-P5-013`
+  made `evidence build` persist what it prints. The printed payload is unaffected, so this is
+  pure containment. The class was then swept: of 108 literal `runner.invoke(app, [...])` calls
+  naming one of the 28 commands that take `--runtime-dir`, 11 omitted it, and per-file
+  measurement showed only this one actually writes -- the rest refuse before any store is
+  built, or are `test_cli_runtime_dir_env.py`'s four deliberate omissions, which exist to test
+  the `OPENALPHA_RUNTIME_DIR` fallback. **The files already written are not deleted**, which is
+  `V2-P4-111`'s own rule for the same directory: they are the user's data.
+
+  **One false positive is recorded here so it is not chased twice.** Re-running the whole
+  integration suite with `OPENALPHA_RUNTIME_DIR` pointed at a probe directory still showed two
+  files landing in it, from `test_transport_hardening.py::test_openalpha_serve_does_not_announce
+  _its_server_software` -- `openalpha serve` takes no `--runtime-dir` and does open the store.
+  That test is **not** a leak: it `monkeypatch.chdir(tmp_path)` first, so the relative `./runtime`
+  default resolves inside its own sandbox. It reached the probe directory only because an
+  exported absolute `OPENALPHA_RUNTIME_DIR` correctly beats a relative default, which is
+  `config.py`'s documented precedence rather than a defect. Verified by running that file with
+  no such variable set and diffing the real `runtime/` by name, size and mtime: identical.
+
 - **Reconciliation only ever checked half of what it claimed to, and the other half was a
   dropped table reported as a healthy database** (`V2-P5-029`, new row filed by this work).
   `V2-P5-026` says it reconciles "by inspecting the schema, never trusting either counter".

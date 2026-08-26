@@ -785,6 +785,37 @@ def trading_calendar_requirement(
     )
 
 
+def stored_calendar_exchanges(store: PanelStore, years: Sequence[int]) -> tuple[str, ...]:
+    """Every exchange `trade_cal` actually holds across `years`, ascending; `()` if unknowable.
+
+    `load_trading_calendar`'s companion, and it lives here rather than beside its one caller for
+    the reason `RESEARCH_PLANE_DATASETS` records: `panel_view` reaches fifteen datasets and
+    **names none**, because it renders other modules' answers instead of deciding a dataset for
+    itself. Reading `TRADING_CALENDAR_DATASET`'s census over there would have made that claim
+    false to buy one sentence. The name belongs to this module, which already owns
+    `trading_calendar_requirement` and the loader whose failure this explains.
+
+    Read off the coverage census -- the catalog, not the Parquet -- so it costs one small
+    lookup per requested year and never opens a partition.
+
+    **Every failure is swallowed into `()` on purpose.** The one caller runs this *inside an
+    exception handler*, while composing the message for a calendar that could not be read, and a
+    store damaged badly enough to refuse a calendar can also refuse a census. Raising here would
+    replace an accurate refusal with an unrelated one; answering `()` makes the caller fall back
+    to the remedy it would have given anyway. That is the same trade `_probe_report` makes at
+    its own boundary -- say less rather than say something wrong.
+    """
+    found: set[str] = set()
+    for year in dict.fromkeys(years):
+        try:
+            coverage = store.read_coverage(TRADING_CALENDAR_DATASET, year)
+        except Exception:  # pragma: no cover - a store too damaged to census its own catalog
+            return ()
+        if coverage is not None:
+            found.update(coverage.subjects)
+    return tuple(sorted(found))
+
+
 def load_trading_calendar(
     store: PanelStore, *, exchange: str, years: Sequence[int], as_of: datetime
 ) -> TradingCalendar:

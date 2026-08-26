@@ -91,7 +91,7 @@ from openalpha_cn.panel_doctor import (
     dataset_health,
 )
 from openalpha_cn.panel_gate import DependencyClearance, DependencyRequest
-from openalpha_cn.panel_ingest import load_trading_calendar
+from openalpha_cn.panel_ingest import load_trading_calendar, stored_calendar_exchanges
 
 
 class PanelViewError(RuntimeError):
@@ -208,14 +208,59 @@ def stored_calendar(
     try:
         return load_trading_calendar(store, exchange=exchange, years=years, as_of=as_of)
     except (TradingCalendarError, PanelStorageError) as error:
+        remedy = _calendar_remedy(store, exchange=exchange, years=years, cause=error)
         raise PanelUnreadableError(
-            f"the {exchange} calendar could not be read out of {store.root}: {error}. "
-            f"{NO_CALENDAR_REMEDY}",
+            f"the {exchange} calendar could not be read out of {store.root}: {error}. {remedy}",
             disclosable=(
                 f"the {exchange} calendar could not be read out of {PANEL_STORE_PLACEHOLDER}: "
-                f"{_without_store_path(str(error), store.root)}. {NO_CALENDAR_REMEDY}"
+                f"{_without_store_path(str(error), store.root)}. {remedy}"
             ),
         ) from error
+
+
+def _calendar_remedy(
+    store: PanelStore, *, exchange: str, years: Sequence[int], cause: Exception
+) -> str:
+    """`NO_CALENDAR_REMEDY`, or the narrower one when the store holds a *different* exchange.
+
+    `V2-P5-046`. The measured refusal was `the SSE calendar cannot be read at ...:
+    ['subject_missing']; 1 required subject(s) are absent from trade_cal`, offering exactly two
+    ways out: rebuild `trade_cal`, or `--no-calendar`. **Both were wrong.** `trade_cal` was
+    built and healthy -- it held `SZSE` -- so rebuilding would have gone to a paid, slow
+    provider for a dataset that is already there, and `--no-calendar` discards the check
+    instead of answering it. The fix was `--exchange SZSE`, which the same command accepts and
+    which returns `rc=0 READY daily`; nothing in the refusal pointed at it.
+
+    So the narrower remedy is offered exactly when the store can support it: the cause is a
+    `subject_missing` (the partition is *there*, the exchange is not in it) **and** the census
+    names at least one exchange that is not the one asked for. Anything else -- a partition
+    genuinely absent, a damaged catalog, a store that holds only the exchange already
+    requested -- keeps `NO_CALENDAR_REMEDY` unchanged, because in those cases building really
+    is the answer and naming `--exchange` would send a caller to a flag with nothing to put
+    after it.
+
+    Keyed on the cause's `subject_missing` code rather than on its type, `_factor_fail`'s rule:
+    `load_trading_calendar` folds every blocking issue into one message, and a remedy chosen by
+    exception type would offer `--exchange` for a missing Parquet file too.
+
+    The census comes across the seam as `panel_ingest.stored_calendar_exchanges` rather than
+    being read here, so this module still **names no dataset of its own** -- the claim
+    `RESEARCH_PLANE_DATASETS` records for it in
+    `tests/unit/test_panel_ingest_import_isolation.py`, and one that a local
+    `read_coverage(TRADING_CALENDAR_DATASET, ...)` would have made false to buy one sentence.
+    """
+    if "subject_missing" not in str(cause):
+        return NO_CALENDAR_REMEDY
+    held = tuple(name for name in stored_calendar_exchanges(store, years) if name != exchange)
+    if not held:
+        return NO_CALENDAR_REMEDY
+    requested = ", ".join(str(year) for year in dict.fromkeys(years))
+    return (
+        f"The calendar dataset is built and holds {', '.join(held)} for {requested}, but not "
+        f"{exchange}. Ask for one it holds (`--exchange {held[0]}` on the command line, "
+        f"`exchange` over HTTP and in the SDK) -- or, if {exchange} is genuinely the one you "
+        f"need, {NO_CALENDAR_REMEDY[0].lower()}{NO_CALENDAR_REMEDY[1:]}"
+    )
 
 
 def panel_request(
