@@ -37,6 +37,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Final
 
+import pytest
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
@@ -113,6 +114,12 @@ def _research_json(runtime: Path, frozen_now: datetime) -> dict[str, Any]:
 
 def _write(path: Path, payload: object) -> Path:
     path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def _write_text(path: Path, body: str) -> Path:
+    """A file whose bytes are stated rather than serialized, for the malformed-input cases."""
+    path.write_text(body, encoding="utf-8")
     return path
 
 
@@ -238,6 +245,10 @@ def test_the_cli_creates_a_report_byte_for_byte_as_the_route_does(
     response = client.post("/api/v1/reports", json={"research": research})
     assert response.status_code == 200, response.text
     assert json.loads(result.stdout) == response.json()
+    assert result.stdout.strip().count("\n") == 0, (
+        "`--json` is piped, so it is one line -- `openalpha report export`'s rule, and the "
+        "assertion that kills a `model_dump_json(indent=…)` this comparison cannot see"
+    )
 
 
 def test_a_report_the_cli_created_is_the_one_its_own_exporter_hands_over(
@@ -271,6 +282,46 @@ def _tampered(research: dict[str, Any]) -> dict[str, Any]:
     """The same result with a `signal_id` that no longer describes its own content."""
     signal = {**research["signal"], "signal_id": "sig_" + "0" * 24}
     return {**research, "signal": signal}
+
+
+@pytest.mark.parametrize(
+    ("name", "body", "expected"),
+    [
+        ("a JSON array", "[]", "must hold one JSON object, not list"),
+        ("a bare string", '"run"', "must hold one JSON object, not str"),
+        ("a number", "7", "must hold one JSON object, not int"),
+        ("not JSON at all", "{not json", "is not valid JSON"),
+    ],
+)
+def test_the_writers_refuse_a_research_file_that_is_not_one_object(
+    tmp_path: Path, name: str, body: str, expected: str
+) -> None:
+    """`--research` naming a readable file that is not a single JSON object.
+
+    **A surviving mutant closed.** Replacing `if not isinstance(payload, dict)` with `if False`
+    left every other test here green: the byte-equality tests all hand the command a well-formed
+    result, so nothing exercised the three ways a file can be readable and still not be a
+    research result. Without the guard a JSON array reaches `parse_research_result`, which
+    subscripts it with `"signal"` and raises `TypeError` -- caught one frame up and re-reported
+    as `malformed_research_result`, which is true but says nothing a reader can act on.
+
+    Separate refusals for unparseable and not-an-object because they need different fixes, and
+    the type is named because "this file is a list" is the whole of what went wrong.
+    """
+    result = runner.invoke(
+        app,
+        [
+            "report",
+            "create",
+            "--research",
+            str(_write_text(tmp_path / "run.json", body)),
+            "--runtime-dir",
+            str(tmp_path / "runtime"),
+        ],
+    )
+
+    assert result.exit_code == 3, f"{name}: {result.output}"
+    assert expected in result.stderr, f"{name}: {result.stderr}"
 
 
 def test_both_writers_refuse_a_tampered_address_in_the_routes_own_words(

@@ -86,17 +86,26 @@ def test_the_version_flag_answers_the_same_bytes_as_the_version_command() -> Non
     assert flag.stdout == command.stdout
 
 
-def test_the_version_flag_is_eager_and_does_not_need_a_subcommand() -> None:
-    """`no_args_is_help=True` makes a bare `openalpha` print help and exit non-zero.
+def test_the_version_flag_answers_without_being_given_a_subcommand() -> None:
+    """`no_args_is_help=True` makes a bare `openalpha` print help and exit `2`.
 
-    So `--version` has to answer *before* Typer looks for a command, or the flag would be
-    accepted and then refused for naming no subcommand. This is the assertion that fails if the
-    callback is ever written without `is_eager=True`.
+    So the property worth pinning is that naming `--version` and nothing else is an answer
+    rather than a usage error -- which is what the reported defect was.
+
+    **This test does not pin `is_eager`, and an earlier version of it claimed to.** A mutation
+    sweep deleting `is_eager=True` from the option left this whole file green, and the installed
+    binary still printed the version; a root callback's parameters are processed before the
+    group looks for a subcommand, so there is nothing for eagerness to get ahead of yet.
+    `_print_version`'s docstring carries the measurement and why the flag is kept anyway.
     """
     result = runner.invoke(app, ["--version"])
 
     assert result.exit_code == 0
     assert "Usage:" not in result.stdout
+    assert runner.invoke(app, []).exit_code == 2, (
+        "a bare `openalpha` must still be a usage error, or this test is comparing --version "
+        "against nothing"
+    )
 
 
 def test_doctor_json_reports_required_runtime_checks() -> None:

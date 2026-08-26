@@ -476,10 +476,21 @@ def _print_version(requested: bool) -> None:
     usage error. The bytes are `version`'s own -- one f-string, called from both places -- so
     the two spellings cannot drift into two renderings of one build number.
 
-    `is_eager` on the option below is load-bearing rather than decoration: `app` is built with
-    `no_args_is_help=True`, so a non-eager flag would be parsed, find no command, and exit `2`
-    for a second reason. `test_the_version_flag_is_eager_and_does_not_need_a_subcommand` is the
-    assertion that fails if it is ever dropped.
+    **`is_eager=True` below is a surviving mutant, reported rather than hidden.** The first
+    version of this docstring called it load-bearing -- `app` is built with
+    `no_args_is_help=True`, so the reasoning went, a non-eager flag would parse, find no command
+    and exit `2` for a second reason -- and a mutation sweep deleting it left the whole CLI
+    suite green. Measured through the installed binary afterwards: `openalpha --version` still
+    prints and still exits `0` without it, because a root callback's own parameters are
+    processed before the group looks for a subcommand at all, so there is nothing here for
+    eagerness to get ahead of.
+
+    It is kept because it is Click's documented idiom for a version flag and because the
+    property it buys becomes real the moment this callback grows a second option that can
+    refuse -- at which point `--version` must answer before that refusal rather than after it.
+    What is **not** kept is the claim that a test pins it: no test can tell the two apart today,
+    and saying otherwise is the kind of unfalsifiable sentence this repository replaces with
+    measurements everywhere else.
     """
     if not requested:
         return
