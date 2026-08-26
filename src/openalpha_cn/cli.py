@@ -1348,7 +1348,7 @@ def report_create_command(
     """
     runtime_dir = _resolved_runtime_dir(runtime_dir)
 
-    with _panel_command("report create"):
+    with _panel_command("report create", json_output=json_output):
         result = _research_result_argument(research)
         report = OpenAlphaSDK(runtime_dir=runtime_dir).create_report(result)
 
@@ -7777,7 +7777,7 @@ def validation_record_command(
     """
     runtime_dir = _resolved_runtime_dir(runtime_dir)
 
-    with _panel_command("validation record"):
+    with _panel_command("validation record", json_output=json_output):
         result = _research_result_argument(research)
         payload = _read_json_document(observation, "--observation")
         try:
