@@ -74,13 +74,28 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 - **`V2-P5-049` — `openalpha --version` exited `2` with `No such option: --version`,** on a
   build whose `openalpha version` printed the number perfectly well. It is the first thing a
   person types. Now an eager root callback that shares `version`'s bytes (asserted byte-equal,
-  because two spellings of one build number is what a second spelling invites). `is_eager` is
-  load-bearing rather than decoration: `app` is built with `no_args_is_help=True`, so a
-  non-eager flag would parse, find no command and exit `2` for a second reason. The callback is
+  because two spellings of one build number is what a second spelling invites). The callback is
   named `_root_options` and not Typer's conventional `main`, which this module already binds to
   its `console_scripts` entry point — defining both left the entry point rebinding over the
   callback, working only because the decorator had already captured the function object, with
-  `ruff` reporting `F811` throughout.
+  `ruff` reporting `F811` throughout. **`is_eager=True` is a reported surviving mutant, and the
+  claim it replaces was this row's own**: the first version of these notes called it
+  load-bearing, reasoning that `no_args_is_help=True` would otherwise make a non-eager flag
+  parse, find no command and exit `2` for a second reason. Deleting it left the whole CLI suite
+  green and the installed binary still printed the version and exited `0` — a root callback's
+  parameters are processed before the group looks for a subcommand, so there is nothing here
+  for eagerness to get ahead of. The flag stays as Click's documented idiom, and the sentence
+  claiming a test pinned it does not.
+
+- **A 12-mutant sweep over the source the three rows above changed**, on a proven-green
+  baseline with a per-mutant timeout, a backup and restore-on-signal. 9/12 killed on the first
+  pass, 11/12 after the survivors were closed. Besides `is_eager`, two were real gaps:
+  `--research` accepting a JSON document that is **not** an object (every byte-equality test
+  hands the command a well-formed result, so nothing exercised a readable file that is a list —
+  without the guard it reaches `parse_research_result`, gets subscripted with `"signal"`, and is
+  re-reported as `malformed_research_result`, which is true and useless), and a pretty-printed
+  `--json` (comparing `json.loads(...)` cannot see whitespace, and `--json` is piped, so it is
+  one line — `report export`'s existing rule, now asserted).
 
 - **A guard that covers the instance and not the class, closed nine times**
   (`V2-P5-030` … `V2-P5-040`, new rows filed by this work). Every item below has the same
