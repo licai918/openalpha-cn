@@ -609,6 +609,16 @@ def test_a_projection_missing_only_its_index_reports_its_effect_absent(
     about the scan the index removes -- a database holding only the column still pays it. A
     predicate joining the two with `or` would call this present, record `verified`, and leave
     the index missing forever, because a repaired name is never reconsidered.
+
+    The three repairs *before* the one under test arrived with `V2-P5-029` and are correct.
+    This fixture writes `schema_migrations` rows for every migration except the target without
+    applying any of them, over `_build_v1_shaped_tables`' v1 schema -- so the trail claims
+    `create_validation_results`, `demo_add_runs_archived_at` and `create_query_path_indexes`
+    ran while the schema shows they did not. That is exactly the damage class reconciliation
+    now inspects for, and before `V2-P5-029` it was invisible only because a recorded name was
+    never asked about. `rewrite_contract_identities` (version 5) is recorded here too and is
+    absent from the list on purpose: it carries no predicate, so it can neither be confirmed
+    nor called damaged.
     """
     path = tmp_path / "state.sqlite3"
     _build_v1_shaped_tables(path)
@@ -636,7 +646,10 @@ def test_a_projection_missing_only_its_index_reports_its_effect_absent(
     result = run_migrations(path, clock=migration_clock, migrations=registry)
 
     assert [(repair.name, repair.resolution) for repair in result.repairs] == [
-        ("add_runs_mode_projection", REPAIR_APPLIED)
+        ("create_validation_results", REPAIR_APPLIED),
+        ("demo_add_runs_archived_at", REPAIR_APPLIED),
+        ("create_query_path_indexes", REPAIR_APPLIED),
+        ("add_runs_mode_projection", REPAIR_APPLIED),
     ]
     connection = sqlite3.connect(path)
     try:
@@ -661,6 +674,10 @@ def test_a_partly_indexed_query_path_migration_reports_its_effect_absent(
     report the effect present, record `verified`, and strand
     `research_reports_subject_idx` -- the full scan Finding F69 named -- with nothing left to
     reconsider it.
+
+    The two repairs before it arrived with `V2-P5-029`, for the reason given at length in
+    `test_a_projection_missing_only_its_index_reports_its_effect_absent`: this fixture records
+    migrations it never applies, which is the damage class reconciliation now inspects for.
     """
     path = tmp_path / "state.sqlite3"
     _build_v1_shaped_tables(path)
@@ -688,7 +705,9 @@ def test_a_partly_indexed_query_path_migration_reports_its_effect_absent(
     result = run_migrations(path, clock=migration_clock, migrations=registry)
 
     assert [(repair.name, repair.resolution) for repair in result.repairs] == [
-        ("create_query_path_indexes", REPAIR_APPLIED)
+        ("create_validation_results", REPAIR_APPLIED),
+        ("demo_add_runs_archived_at", REPAIR_APPLIED),
+        ("create_query_path_indexes", REPAIR_APPLIED),
     ]
     connection = sqlite3.connect(path)
     try:

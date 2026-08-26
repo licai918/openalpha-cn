@@ -111,6 +111,39 @@ def test_no_command_hardcodes_the_runtime_directory_as_an_option_default() -> No
 ENV_VAR: Final[str] = "OPENALPHA_RUNTIME_DIR"
 
 
+def test_every_runtime_dir_option_says_the_environment_variable_decides() -> None:
+    """`--help` is where the operator this defect hurt would go looking.
+
+    Eight of the twenty-eight declared the option with no help string at all, and none of the
+    twenty-eight mentioned `OPENALPHA_RUNTIME_DIR` -- which was accurate while they ignored it,
+    and would be a silent omission now that they do not. The person who needs this sentence is
+    inside the container `Dockerfile` builds, where the variable is exported to `/data` and
+    `docker exec … openalpha migrate status --help` is the only place to find out whether the
+    command honours it.
+
+    Asserted on the rendered help rather than on the constant, because a command can carry the
+    right constant and still not pass it to `typer.Option`, which is exactly the eight-command
+    gap this closes.
+
+    `COLUMNS` is widened because the first run of this test failed on `panel doctor` alone and
+    the cause was the renderer, not the text: that command's option names are long enough that
+    at the 80-column default Rich's help column is narrow enough to hard-wrap
+    `OPENALPHA_RUNTIME_DIR` *inside the token*, which no amount of whitespace-collapsing can
+    put back together. The help string was correct all along, and had this been "fixed" in the
+    source instead of in the fixture, the fix would have been to a defect that did not exist.
+    """
+    missing = []
+    for path, callback in _walk(app):
+        if "runtime_dir" not in inspect.signature(callback).parameters:
+            continue
+        rendered = runner.invoke(app, [*path, "--help"], env={"COLUMNS": "200"}).output
+        # Rich still wraps at word boundaries inside its bordered box, so the variable name is
+        # matched with whitespace collapsed rather than as a literal substring.
+        if ENV_VAR not in " ".join(rendered.split()):
+            missing.append(" ".join(path))
+    assert missing == []
+
+
 @pytest.mark.parametrize(
     "command",
     [

@@ -774,8 +774,18 @@ def doctor(
 _RUNTIME_DIR_HELP: Final[str] = (
     "One installation's whole state. The panel plane is `<runtime-dir>/panel` and sealed "
     "experiments are `<runtime-dir>/experiments`, the same directory `openalpha panel build` "
-    "writes and the HTTP service reads."
+    "writes and the HTTP service reads. Omit it and OPENALPHA_RUNTIME_DIR decides, falling "
+    "back to ./runtime; pass it and it beats both."
 )
+"""Carried by **every** `--runtime-dir` option, and the last sentence is why (`V2-P5-028`).
+
+Eight of the twenty-eight used to declare the option with no help at all, and all twenty-eight
+resolved `./runtime` from a Typer default while never consulting `load_config()`. The sentence
+about precedence is not decoration on the fix: the operator this defect actually hurt is one
+inside the container `Dockerfile` builds, where `OPENALPHA_RUNTIME_DIR=/data` is exported and
+`docker exec … openalpha migrate status --help` is the only place they can find out whether
+this command honours it.
+"""
 
 
 @evidence_app.command("build")
@@ -916,7 +926,9 @@ def _resolved_runtime_dir(explicit: Path | None) -> Path:
 @research_app.command("run")
 def research_run(
     evidence_path: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
-    runtime_dir: Annotated[Path | None, typer.Option("--runtime-dir")] = None,
+    runtime_dir: Annotated[
+        Path | None, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)
+    ] = None,
     run_id: Annotated[str, typer.Option("--run-id")] = "local-run",
     mode: Annotated[RunMode, typer.Option("--mode")] = RunMode.live,
     subject: Annotated[str, typer.Option("--subject")] = "",
@@ -974,7 +986,9 @@ def research_run(
 @replay_app.command("run")
 def replay_run(
     corpus_path: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
-    runtime_dir: Annotated[Path | None, typer.Option("--runtime-dir")] = None,
+    runtime_dir: Annotated[
+        Path | None, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)
+    ] = None,
     code_commit: Annotated[
         str | None, typer.Option("--code-commit", help=_CODE_COMMIT_HELP)
     ] = None,
@@ -1036,7 +1050,9 @@ def report_export_command(
 
 @migrate_app.command("status")
 def migrate_status(
-    runtime_dir: Annotated[Path | None, typer.Option("--runtime-dir")] = None,
+    runtime_dir: Annotated[
+        Path | None, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)
+    ] = None,
     json_output: Annotated[
         bool,
         typer.Option("--json", help="Emit a machine-readable status report."),
@@ -1076,6 +1092,7 @@ def migrate_status(
             "unrecorded": [
                 {"version": item.version, "name": item.name} for item in status.unrecorded
             ],
+            "damaged": [{"version": item.version, "name": item.name} for item in status.damaged],
         }
         typer.echo(json.dumps(payload, ensure_ascii=False, sort_keys=True))
         return
@@ -1091,17 +1108,40 @@ def migrate_status(
         )
     for pending_item in status.pending:
         typer.echo(f"pending  {pending_item.version} {pending_item.name}")
+    for damaged_item in status.damaged:
+        typer.echo(
+            f"damaged  {damaged_item.version} {damaged_item.name} "
+            "(the audit trail records it but its effect is missing from the schema; "
+            "`openalpha migrate run` will recreate it)"
+        )
+    # `unrecorded` covered three different situations with one sentence, and for two of them
+    # that sentence was a claim nothing had measured (`V2-P5-029`). `_reconcile` stops at the
+    # first migration it cannot decide, so an entry behind that stop was never examined at all
+    # -- saying its effect "cannot be established by inspecting the schema" states a result for
+    # an inspection that never ran. Measured: unrecording versions 5 and 6 together printed
+    # that sentence for both, though version 6 carries a perfectly good predicate.
+    blocker = next((item for item in status.unrecorded if item.effect_present is None), None)
     for unrecorded_item in status.unrecorded:
+        if unrecorded_item.effect_present is None:
+            reason = "and its effect cannot be established by inspecting the schema"
+        elif blocker is not None and blocker.version < unrecorded_item.version:
+            reason = (
+                f"and reconciliation stops at {blocker.version} {blocker.name}, which it "
+                "cannot decide, so this one has not been examined"
+            )
+        else:
+            reason = "and `openalpha migrate run` will inspect the schema and resolve it"
         typer.echo(
             f"unrecorded {unrecorded_item.version} {unrecorded_item.name} "
-            "(schema version is past it but nothing recorded it, and its effect cannot be "
-            "established by inspecting the schema)"
+            f"(schema version is past it but nothing recorded it, {reason})"
         )
 
 
 @migrate_app.command("run")
 def migrate_run(
-    runtime_dir: Annotated[Path | None, typer.Option("--runtime-dir")] = None,
+    runtime_dir: Annotated[
+        Path | None, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)
+    ] = None,
     dry_run: Annotated[
         bool,
         typer.Option("--dry-run", help="Show what would be applied without applying it."),
@@ -1123,14 +1163,27 @@ def migrate_run(
     path = runtime_dir / "state.sqlite3"
     if dry_run:
         status = read_status(path)
-        if not status.pending:
+        # `status.damaged` joins this test (`V2-P5-029`) for the same reason it joined
+        # `run_migrations`' early return. Damage leaves `pending` empty, so a preview that
+        # branched on `pending` alone told an operator checking a database with a table missing
+        # that there was "nothing to do" -- the identical defect the real run had before
+        # `test_migrate_run_that_only_repairs_does_not_claim_there_was_nothing_to_do`, left
+        # behind in the surface people consult *before* touching production.
+        if not status.pending and not status.damaged:
             typer.echo(f"schema version {status.current_version} is up to date; nothing to do")
             return
-        typer.echo(
-            f"would apply {len(status.pending)} migration(s) from version {status.current_version}:"
-        )
-        for pending_item in status.pending:
-            typer.echo(f"  {pending_item.version} {pending_item.name}")
+        for damaged_item in status.damaged:
+            typer.echo(
+                f"would repair {damaged_item.version} {damaged_item.name} "
+                "(recorded as applied, but its effect is missing from the schema)"
+            )
+        if status.pending:
+            typer.echo(
+                f"would apply {len(status.pending)} migration(s) "
+                f"from version {status.current_version}:"
+            )
+            for pending_item in status.pending:
+                typer.echo(f"  {pending_item.version} {pending_item.name}")
         return
     try:
         storage = build_storage(runtime_dir=runtime_dir, clock=lambda: datetime.now(UTC))
@@ -1161,9 +1214,17 @@ def migrate_run(
             if repair.resolution == REPAIR_APPLIED
             else "its effect was already present, so nothing was re-run"
         )
+        # The clause about what had been recorded was dropped by `V2-P5-029`. It said "schema
+        # version was already past it and nothing had recorded it", which was true of every
+        # repair while `_unrecorded` was the only way in. It is false for the class that row
+        # added: a damaged migration is one the audit trail *does* record and whose effect the
+        # schema has lost. `SchemaRepair` carries no field distinguishing the two, and
+        # inventing one to feed a sentence would be worse than saying only what both share --
+        # which is the part an operator needs anyway: the version was passed, and here is what
+        # the schema turned out to hold.
         typer.echo(
-            f"repaired {repair.version} {repair.name}: schema version was already past it and "
-            f"nothing had recorded it; {outcome}"
+            f"repaired {repair.version} {repair.name}: schema version was already past it; "
+            f"{outcome}"
         )
     if not result.applied and not result.repairs and not status.pending:
         typer.echo(f"schema version {result.to_version} is up to date; nothing to do")
@@ -1203,7 +1264,9 @@ def migrate_run(
 
 @migrate_app.command("prune-backups")
 def migrate_prune_backups(
-    runtime_dir: Annotated[Path | None, typer.Option("--runtime-dir")] = None,
+    runtime_dir: Annotated[
+        Path | None, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)
+    ] = None,
     keep: Annotated[
         int,
         typer.Option("--keep", min=0, help="How many of the newest backups to keep."),
@@ -3529,7 +3592,9 @@ def panel_build(
     subject: Annotated[
         list[str] | None, typer.Option("--subject", help=_BUILD_SUBJECT_HELP)
     ] = None,
-    runtime_dir: Annotated[Path | None, typer.Option("--runtime-dir")] = None,
+    runtime_dir: Annotated[
+        Path | None, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)
+    ] = None,
     exchange: Annotated[
         str, typer.Option("--exchange", help="Which exchange's calendar to fetch and read.")
     ] = TRADING_CALENDAR_DEFAULT_EXCHANGE,
@@ -3883,7 +3948,9 @@ _CALENDAR_HELP = (
 def panel_doctor_command(
     dataset: Annotated[list[str], typer.Option("--dataset", help=_DATASET_HELP)],
     year: Annotated[list[int], typer.Option("--year", help=_YEAR_HELP)],
-    runtime_dir: Annotated[Path | None, typer.Option("--runtime-dir")] = None,
+    runtime_dir: Annotated[
+        Path | None, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)
+    ] = None,
     session: Annotated[list[str] | None, typer.Option("--session", help=_SESSION_HELP)] = None,
     index_code: Annotated[list[str] | None, typer.Option("--index-code")] = None,
     exchange: Annotated[str, typer.Option("--exchange")] = TRADING_CALENDAR_DEFAULT_EXCHANGE,
@@ -3967,7 +4034,9 @@ def panel_doctor_command(
 def data_check(
     dataset: Annotated[list[str], typer.Option("--dataset", help=_DATASET_HELP)],
     year: Annotated[list[int], typer.Option("--year", help=_YEAR_HELP)],
-    runtime_dir: Annotated[Path | None, typer.Option("--runtime-dir")] = None,
+    runtime_dir: Annotated[
+        Path | None, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)
+    ] = None,
     session: Annotated[list[str] | None, typer.Option("--session", help=_SESSION_HELP)] = None,
     index_code: Annotated[list[str] | None, typer.Option("--index-code")] = None,
     exchange: Annotated[str, typer.Option("--exchange")] = TRADING_CALENDAR_DEFAULT_EXCHANGE,
