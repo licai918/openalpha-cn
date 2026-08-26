@@ -53,6 +53,7 @@ from openalpha_cn.backtest.turnover_variants import (
     TurnoverVariantReport,
     turnover_variant_view,
 )
+from openalpha_cn.backtest.validation import OutcomeObservation
 from openalpha_cn.config import ConfigError, load_config, load_dotenv, load_log_level
 from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET, AdjustmentError
 from openalpha_cn.domain.daily_prices import (
@@ -215,8 +216,12 @@ from openalpha_cn.providers.tushare import (
     TushareTransport,
     UrllibTushareTransport,
 )
+from openalpha_cn.research_result_io import (
+    parse_research_result,
+    research_refusal_detail,
+)
 from openalpha_cn.runtime.composition import build_storage
-from openalpha_cn.runtime.contracts import ResearchRunRequest
+from openalpha_cn.runtime.contracts import ResearchRunRequest, ResearchRunResult
 from openalpha_cn.runtime.provenance import compute_config_digest, resolve_code_commit
 from openalpha_cn.scheduler import ScheduleHorizonError, TradingDayScheduler
 from openalpha_cn.sdk import OpenAlphaSDK
@@ -262,7 +267,12 @@ research_app = typer.Typer(help="Run evidence-linked multi-agent research.")
 app.add_typer(research_app, name="research")
 replay_app = typer.Typer(help="Validate frozen point-in-time replay corpora.")
 app.add_typer(replay_app, name="replay")
-report_app = typer.Typer(help="Export stored evidence-linked research reports.")
+report_app = typer.Typer(
+    help=(
+        "Build evidence-linked research reports and export them, minus every payload their "
+        "licence withholds. Start with `openalpha report create --help`."
+    )
+)
 app.add_typer(report_app, name="report")
 """`V2-P5-022`. A group with one command rather than a top-level `openalpha report-export`, for
 `panel`'s reason one block down: `GET /api/v1/reports` and `POST /api/v1/reports` have had no
@@ -425,9 +435,9 @@ ordered the market), then `daily-run` (register what it says about today). `pred
 
 validation_app = typer.Typer(
     help=(
-        "Aggregate stored outcome validations: gross beside net, cost drag in its own column, "
-        "intervals, sample counts and BH-controlled q-values. Start with "
-        "`openalpha validation statistics --help`."
+        "Record an observed outcome against the decision that predicted it, then aggregate "
+        "what is stored: gross beside net, cost drag in its own column, intervals, sample "
+        "counts and BH-controlled q-values. Start with `openalpha validation record --help`."
     )
 )
 app.add_typer(validation_app, name="validation")
@@ -456,6 +466,50 @@ class Redistribution(StrEnum):
 def version() -> None:
     """Print the installed OpenAlpha CN version."""
     typer.echo(f"OpenAlpha CN {__version__}")
+
+
+def _print_version(requested: bool) -> None:
+    """Answer `--version` before Typer looks for a subcommand, then stop (`V2-P5-049`).
+
+    `openalpha --version` exited `2` with `No such option: --version` on a build whose
+    `openalpha version` printed the number, which is the first thing a person types meeting a
+    usage error. The bytes are `version`'s own -- one f-string, called from both places -- so
+    the two spellings cannot drift into two renderings of one build number.
+
+    `is_eager` on the option below is load-bearing rather than decoration: `app` is built with
+    `no_args_is_help=True`, so a non-eager flag would be parsed, find no command, and exit `2`
+    for a second reason. `test_the_version_flag_is_eager_and_does_not_need_a_subcommand` is the
+    assertion that fails if it is ever dropped.
+    """
+    if not requested:
+        return
+    version()
+    raise typer.Exit(code=0)
+
+
+@app.callback()
+def _root_options(
+    _version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            help="Print the installed OpenAlpha CN version and exit.",
+            callback=_print_version,
+            is_eager=True,
+        ),
+    ] = False,
+) -> None:
+    """Evidence-traceable A-share research.
+
+    **Not named `main`, and that is not a style choice.** This module already has a `main()` --
+    the `console_scripts` entry point that loads `.env` and configures logging before dispatch
+    -- and Typer's own convention for a root callback is exactly that name. Defining it twice
+    left the file with the entry point silently rebinding over the callback; the callback
+    survived only because `@app.callback()` had already captured the function object, so the
+    CLI worked while `ruff` reported `F811` and the package's declared entry point and its
+    root callback shared one name. Measured here rather than reasoned about: this docstring is
+    what `openalpha --help` prints, so it must stay the app's own one-line description.
+    """
 
 
 def _default_providers() -> list[DataProvider]:
@@ -1007,6 +1061,115 @@ def replay_run(
         random_seed=random_seed,
     )
     typer.echo(report.model_dump_json())
+
+
+_WRITER_RESEARCH_HELP: Final[str] = (
+    "Path to one serialized research result -- exactly the JSON `openalpha research run` "
+    'prints, and exactly what `{"research": ...}` carries over REST.'
+)
+
+_RECORD_OBSERVATION_HELP: Final[str] = (
+    "Path to the observed outcome as JSON: `observation_start`, `observation_end`, "
+    "`start_price`, `end_price`, `benchmark_return`, `transaction_cost` and optional "
+    "`data_quality_notes`. `OutcomeObservation`'s own fields, validated by it."
+)
+
+
+def _read_json_document(path: Path, flag: str) -> dict[str, object]:
+    """Read one JSON object off disk, refusing the three ways it can fail to be one.
+
+    Separate refusals for unreadable, unparseable and not-an-object because they need three
+    different fixes, and a single "could not load" would leave a reader guessing which. The
+    path is echoed because it is the caller's own argument, unlike a store location.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise _panel_fail(
+            PanelExit.bad_request, f"{flag} could not be read: {path}: {error}"
+        ) from error
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise _panel_fail(
+            PanelExit.bad_request, f"{flag} is not valid JSON: {path}: {error}"
+        ) from error
+    if not isinstance(payload, dict):
+        raise _panel_fail(
+            PanelExit.bad_request,
+            f"{flag} must hold one JSON object, not {type(payload).__name__}: {path}",
+        )
+    return payload
+
+
+def _research_result_argument(path: Path) -> ResearchRunResult:
+    """`--research` as a verified `ResearchRunResult`, refused in the routes' own words.
+
+    `research_refusal_detail` writes the sentence, which is the point of `V2-P5-047` rather
+    than a detail of it: `POST /api/v1/backtests/validate`, `POST /api/v1/reports` and both
+    commands below refuse an edited content address identically, asserted byte-for-byte by
+    `tests/integration/test_validation_and_report_writer_faces.py`.
+    """
+    payload = _read_json_document(path, "--research")
+    try:
+        return parse_research_result(payload)
+    except (KeyError, TypeError, ValueError) as error:
+        raise _panel_fail(
+            PanelExit.bad_request, research_refusal_detail(error, index=None)["message"]
+        ) from error
+
+
+@report_app.command("create")
+def report_create_command(
+    research: Annotated[Path, typer.Option("--research", help=_WRITER_RESEARCH_HELP)],
+    runtime_dir: Annotated[
+        Path | None, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)
+    ] = None,
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit the stored report as data.")
+    ] = False,
+) -> None:
+    """Build one immutable evidence-linked report from a stored research result.
+
+    `V2-P5-047`. `openalpha report` shipped with `export` and no writer, so the only face that
+    could put a report into the store was `POST /api/v1/reports` or `sdk.create_report` -- and
+    `report export` therefore refused every id a CLI-only operator could think of, correctly and
+    unhelpfully. The whole loop now closes in a terminal::
+
+        openalpha research run ./events.json --runtime-dir ./runtime > run.json
+        openalpha report create --research ./run.json --runtime-dir ./runtime
+        openalpha report export rpt_0123456789abcdef --runtime-dir ./runtime
+
+    **`--research` is a file rather than an id, because a report is built from a result and not
+    looked up from one.** `ResearchReportFactory` reads the signal, the decision and the
+    manifest together; nothing in the store holds that triple under one address, which is why
+    the REST route takes the whole record in its body too. The file is the record `openalpha
+    research run` printed, unedited -- all three of its identifiers are content-derived and all
+    three are re-derived and checked here, so a hand-edited record is refused by name rather
+    than stored under an address that does not describe it.
+
+    Appending is idempotent by the report's own content-derived `report_id`, so running this
+    twice on one result stores one report; a *different* record claiming a stored id is a
+    conflict and is refused.
+
+    Exits 0 when the report was stored, 3 when the request could not be put -- an unreadable or
+    malformed `--research`, an identifier that does not describe its own content -- and 1 when
+    the runtime directory could not be opened.
+    """
+    runtime_dir = _resolved_runtime_dir(runtime_dir)
+
+    with _panel_command("report create"):
+        result = _research_result_argument(research)
+        report = OpenAlphaSDK(runtime_dir=runtime_dir).create_report(result)
+
+        if json_output:
+            typer.echo(report.model_dump_json())
+            return
+        typer.echo(f"report     {report.report_id}")
+        typer.echo(f"subject    {report.subject}")
+        typer.echo(f"action     {report.final_action}")
+        typer.echo(f"evidence   {len(report.evidence_ids)} cited")
+        typer.echo(f"export     `openalpha report export {report.report_id}`")
 
 
 @report_app.command("export")
@@ -7293,6 +7456,83 @@ def validation_segmented_command(
             )
         else:
             _echo_segmented_report(report)
+
+
+@validation_app.command("record")
+def validation_record_command(
+    research: Annotated[Path, typer.Option("--research", help=_WRITER_RESEARCH_HELP)],
+    observation: Annotated[Path, typer.Option("--observation", help=_RECORD_OBSERVATION_HELP)],
+    runtime_dir: Annotated[
+        Path | None, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)
+    ] = None,
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit the stored validation as data.")
+    ] = False,
+) -> None:
+    """Validate one observed outcome against the decision that predicted it, and store it.
+
+    `V2-P5-047`. `openalpha validation` shipped with two aggregate readers and **no writer**, so
+    a CLI-only operator could never put a row into the store the readers read: `statistics` and
+    `segmented` both refuse a signal with nothing stored *by name* (`V2-P5-007`'s rule), which
+    is the correct answer and, with no reachable writer, the only one. The loop now closes in a
+    terminal::
+
+        openalpha research run ./events.json --runtime-dir ./runtime > run.json
+        openalpha validation record --research ./run.json --observation ./outcome.json \
+          --runtime-dir ./runtime
+        openalpha validation statistics --signal sig_… --family-size 1 \
+          --dependence independent-or-positively-dependent --runtime-dir ./runtime
+
+    **Two files rather than a pile of flags, and the reason is `--plan`'s.** An
+    `OutcomeObservation` carries a window, two prices, a benchmark return and a cost, and the
+    numbers only mean anything together -- a half-declared observation assembled from six
+    switches is a shape this command would have to invent a default for, and every default here
+    would be a claim about a market. `openalpha validation segmented` already takes its
+    `SegmentationPlan` this way for the same reason.
+
+    **The attribution is reconciled, not merely stored.** `OutcomeValidator` splits the realized
+    return against the benchmark and the declared cost and carries whatever is left as
+    `unexplained_return` (`V2-P5-006`), which is the column `validation statistics` aggregates
+    into `unexplained`. Appending is idempotent by the content-derived `validation_id`, so
+    recording one outcome twice stores one row.
+
+    Exits 0 when the validation was stored, 3 when the request could not be put -- an unreadable
+    or malformed `--research` or `--observation`, an identifier that does not describe its own
+    content -- and 1 when the runtime directory could not be opened.
+    """
+    runtime_dir = _resolved_runtime_dir(runtime_dir)
+
+    with _panel_command("validation record"):
+        result = _research_result_argument(research)
+        payload = _read_json_document(observation, "--observation")
+        try:
+            observed = OutcomeObservation.model_validate(payload)
+        except ValidationError as error:
+            raise _panel_fail(
+                PanelExit.bad_request, f"--observation is not an outcome observation: {error}"
+            ) from error
+
+        validation = OpenAlphaSDK(runtime_dir=runtime_dir).validate_outcome(
+            research=result, observation=observed
+        )
+
+        if json_output:
+            typer.echo(validation.model_dump_json())
+            return
+        typer.echo(f"signal     {validation.signal_id}")
+        typer.echo(f"decision   {validation.decision_id}")
+        typer.echo(
+            f"window     {validation.observation_start.isoformat()} .. "
+            f"{validation.observation_end.isoformat()}"
+        )
+        typer.echo(f"realized   {validation.realized_return}")
+        typer.echo(f"benchmark  {validation.benchmark_return}")
+        typer.echo(f"cost       {validation.transaction_cost}")
+        typer.echo(f"unexplained {validation.unexplained_return}")
+        typer.echo(
+            "aggregate  `openalpha validation statistics --signal "
+            f"{validation.signal_id} --family-size <n> --dependence <assumption>`"
+        )
 
 
 @portfolio_app.command("turnover-variants")

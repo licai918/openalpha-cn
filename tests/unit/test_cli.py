@@ -69,6 +69,36 @@ def test_version_reports_project_name_and_version() -> None:
     assert result.stdout.strip() == "OpenAlpha CN 1.0.0"
 
 
+def test_the_version_flag_answers_the_same_bytes_as_the_version_command() -> None:
+    """`openalpha --version` is the first thing a person types, and it exited `2` (`V2-P5-049`).
+
+    `No such option: --version`, from a build whose `openalpha version` prints the number
+    perfectly well. Two spellings of one question is not the defect -- one spelling that a
+    universal convention says must work and that this tree answered with a usage error is.
+
+    Asserted **byte-equal** to the subcommand rather than merely "mentions the version": two
+    renderings of one build number is exactly the drift a second spelling invites.
+    """
+    flag = runner.invoke(app, ["--version"])
+    command = runner.invoke(app, ["version"])
+
+    assert flag.exit_code == 0, flag.output
+    assert flag.stdout == command.stdout
+
+
+def test_the_version_flag_is_eager_and_does_not_need_a_subcommand() -> None:
+    """`no_args_is_help=True` makes a bare `openalpha` print help and exit non-zero.
+
+    So `--version` has to answer *before* Typer looks for a command, or the flag would be
+    accepted and then refused for naming no subcommand. This is the assertion that fails if the
+    callback is ever written without `is_eager=True`.
+    """
+    result = runner.invoke(app, ["--version"])
+
+    assert result.exit_code == 0
+    assert "Usage:" not in result.stdout
+
+
 def test_doctor_json_reports_required_runtime_checks() -> None:
     result = runner.invoke(app, ["doctor", "--json"])
 

@@ -1450,6 +1450,16 @@ TOP_LEVEL_MODULES_OUTSIDE_EVERY_PLANE_FAMILY: dict[str, str] = {
         "configuration module that could reach the planes would invert the wiring direction."
     ),
     "openalpha_cn.logging_setup": "process-wide logging configuration, imported by the faces.",
+    "openalpha_cn.research_result_io": (
+        "a transport contract, and `batch_contracts`'s reason with the direction reversed. "
+        "`V2-P5-047` needed `parse_research_result` on two faces at once -- `api/app.py`'s "
+        "three routes and the two new `cli.py` writers -- and `cli.py` has no import edge to "
+        "`openalpha_cn.api` at all (`serve` reaches uvicorn by string), so reaching the parser "
+        "through the route module would have put FastAPI behind every `openalpha version`. It "
+        "is not a plane module: it reads no dataset, holds no panel and touches nothing under "
+        "`panel/`; its whole dependency set is `openalpha_cn.runtime.contracts`, which is also "
+        "why it cannot live under `domain/` -- `domain-purity` forbids that edge."
+    ),
     "openalpha_cn.scheduler": (
         "orchestration, not a plane. It reaches `panel_ingest` for exactly two names -- "
         "`newest_published_session` and `session_publication_instant` -- and that edge is the "
