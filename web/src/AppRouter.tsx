@@ -21,8 +21,15 @@ import { NavLink, Route, Routes, useLocation } from "react-router";
 
 import { App } from "./App";
 import { DataHealthPage } from "./pages/DataHealthPage";
+import { FactorExperimentDetailPage, FactorLabPage } from "./pages/FactorLabPage";
+import { PortfolioPage } from "./pages/PortfolioPage";
 import { ShortlistDetailPage, ShortlistPage } from "./pages/ShortlistPage";
-import { NAV_ITEMS, ROUTES, SHORTLIST_DETAIL_PATTERN } from "./routes";
+import {
+  FACTOR_EXPERIMENT_DETAIL_PATTERN,
+  NAV_ITEMS,
+  ROUTES,
+  SHORTLIST_DETAIL_PATTERN,
+} from "./routes";
 
 /**
  * A location that matches no route.
@@ -73,6 +80,9 @@ export function AppRouter() {
         <Route path={ROUTES.dataHealth} element={<DataHealthPage />} />
         <Route path={ROUTES.shortlists} element={<ShortlistPage />} />
         <Route path={SHORTLIST_DETAIL_PATTERN} element={<ShortlistDetailPage />} />
+        <Route path={ROUTES.factorLab} element={<FactorLabPage />} />
+        <Route path={FACTOR_EXPERIMENT_DETAIL_PATTERN} element={<FactorExperimentDetailPage />} />
+        <Route path={ROUTES.portfolio} element={<PortfolioPage />} />
         <Route path="*" element={<NotFoundPage />} />
       </Routes>
     </>

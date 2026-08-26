@@ -1,8 +1,12 @@
 import type {
   Evidence,
+  FactorExperimentEnvelope,
+  FactorExperimentIndex,
   Health,
   OutcomeInput,
   PanelHealthReport,
+  PortfolioConstructionView,
+  PredictionIndex,
   ProviderBatchUpload,
   ReplayReport,
   ResearchResult,
@@ -153,4 +157,90 @@ export function listShortlists(): Promise<ShortlistIndex> {
  */
 export function getShortlist(shortlistId: string): Promise<ShortlistAnswer> {
   return requestJson<ShortlistAnswer>(`/api/v1/shortlists/${encodeURIComponent(shortlistId)}`);
+}
+
+// ---------------------------------------------------------------------------
+// V2-P5-017 data layer: page ③.
+// ---------------------------------------------------------------------------
+
+/** Every sealed factor experiment this installation holds, by content address, ascending. */
+export function listFactorExperiments(): Promise<FactorExperimentIndex> {
+  return requestJson<FactorExperimentIndex>("/api/v1/factors/experiments");
+}
+
+/**
+ * One sealed experiment, reopened and re-sealed on the way out.
+ *
+ * The server runs the document through `open_experiment` before answering, so a stored
+ * document whose content no longer hashes to its own seal comes back as a refusal rather
+ * than as a record that merely differs. That means a non-`ok` response here can mean "the
+ * artifact on disk was edited", which is why the panel renders the server's own words
+ * instead of a generic "load failed".
+ *
+ * Encoded for `getShortlist`'s reason: the id arrives from the URL.
+ */
+export function getFactorExperiment(experimentId: string): Promise<FactorExperimentEnvelope> {
+  return requestJson<FactorExperimentEnvelope>(
+    `/api/v1/factors/experiments/${encodeURIComponent(experimentId)}`,
+  );
+}
+
+/** The prediction register, in custody order (not digest order — see V2-P4-098). */
+export function listPredictions(): Promise<PredictionIndex> {
+  return requestJson<PredictionIndex>("/api/v1/predictions");
+}
+
+// ---------------------------------------------------------------------------
+// V2-P5-018 data layer: page ④.
+// ---------------------------------------------------------------------------
+
+/** The question `POST /api/v1/portfolio/construct` requires, in the units it wants them. */
+export type PortfolioConstructionQuery = {
+  shortlistId: string;
+  /** Tier weights as decimal **strings**; see the note on `constructPortfolio`. */
+  tierWeights: string[];
+  maxPositionWeight: string;
+  maxTotalExposure: string;
+  minCashWeight: string;
+  turnoverBudget: string | null;
+};
+
+/**
+ * Weight one admitted shortlist under a declared heuristic policy.
+ *
+ * **Every decimal goes out as a JSON string, deliberately.** pydantic parses `"0.1"` into
+ * `Decimal("0.1")` exactly, while the JSON number `0.1` is a float first and a Decimal
+ * second — so sending numbers would put a rounding step in front of the very arithmetic
+ * `construction_view` renders as strings to protect. The request and the response therefore
+ * use the same representation, and nothing in this file converts a weight to a `number`.
+ *
+ * `previous` is deliberately not sent. It is the caller's declaration of the book being
+ * traded away from, and the contract is explicit that it "is declared by the caller and
+ * never read from a ledger" — a browser that invented one would be declaring a position
+ * history the user never stated, and turnover is measured against it. Omitting it means the
+ * turnover reported is turnover from flat, which is a true answer to a stated question.
+ */
+export function constructPortfolio(
+  query: PortfolioConstructionQuery,
+): Promise<PortfolioConstructionView> {
+  return requestJson<PortfolioConstructionView>("/api/v1/portfolio/construct", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      shortlist_id: query.shortlistId,
+      policy: {
+        tier_weights: query.tierWeights,
+        limits: {
+          max_position_weight: query.maxPositionWeight,
+          max_total_exposure: query.maxTotalExposure,
+          min_cash_weight: query.minCashWeight,
+          // `max_industry_weight` is omitted rather than sent as null: the shipped shortlist
+          // face carries no industry on its candidates, so a declared industry cap is
+          // refused with a 422 by `construct_portfolio` itself. Sending one from a browser
+          // would make every construction fail for a reason the user did not choose.
+          turnover_budget: query.turnoverBudget,
+        },
+      },
+    }),
+  });
 }

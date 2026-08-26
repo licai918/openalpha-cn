@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { NAV_ITEMS, ROUTES, SHORTLIST_DETAIL_PATTERN } from "./routes";
+import {
+  FACTOR_EXPERIMENT_DETAIL_PATTERN,
+  NAV_ITEMS,
+  ROUTES,
+  SHORTLIST_DETAIL_PATTERN,
+} from "./routes";
 
 /**
  * `routes.ts`'s co-located test, required by `testDiscipline.test.ts`.
@@ -44,6 +49,42 @@ describe("routes", () => {
       Object.values(ROUTES).flatMap((value) => (typeof value === "string" ? [value] : [])),
     );
     expect(NAV_ITEMS.map((item) => item.path).filter((path) => !declared.has(path))).toEqual([]);
-    expect(NAV_ITEMS.map((item) => item.label)).toEqual(["工作台", "数据体检", "候选清单"]);
+    expect(NAV_ITEMS.map((item) => item.label)).toEqual([
+      "工作台",
+      "数据体检",
+      "候选清单",
+      "因子与模型实验室",
+      "组合与验证",
+    ]);
+  });
+
+  // V2-P5-017. The second builder gets the same three assertions as the first, rather than a
+  // spot check: it is a second copy of the same encoding decision, and the whole reason
+  // `routes.ts` exists is that two declarations of one path drift.
+  it("encodes an experiment id that would otherwise address a different route", () => {
+    const built = ROUTES.factorExperimentDetail("fxp_a/b");
+    expect(built).not.toBe("/factor-lab/fxp_a/b");
+    expect(built).toBe("/factor-lab/fxp_a%2Fb");
+    expect(built.split("/")).toHaveLength(3);
+  });
+
+  it("leaves an ordinary experiment content address untouched", () => {
+    expect(ROUTES.factorExperimentDetail("fxp_3f9c2a")).toBe("/factor-lab/fxp_3f9c2a");
+  });
+
+  it("pairs the experiment builder with the pattern react-router matches", () => {
+    const prefix = FACTOR_EXPERIMENT_DETAIL_PATTERN.slice(
+      0,
+      FACTOR_EXPERIMENT_DETAIL_PATTERN.indexOf(":"),
+    );
+    expect(ROUTES.factorExperimentDetail("x")).toBe(`${prefix}x`);
+  });
+
+  it("gives the two detail patterns different prefixes", () => {
+    // A guard against the copy-paste this file exists to survive: two `:param` patterns that
+    // shared a prefix would have react-router match whichever was declared first for both,
+    // and the symptom would be a factor page rendering under a shortlist address.
+    expect(FACTOR_EXPERIMENT_DETAIL_PATTERN).not.toBe(SHORTLIST_DETAIL_PATTERN);
+    expect(ROUTES.factorExperimentDetail("x")).not.toBe(ROUTES.shortlistDetail("x"));
   });
 });

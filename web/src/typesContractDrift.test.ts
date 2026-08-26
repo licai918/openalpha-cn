@@ -247,6 +247,47 @@ const INTENTIONALLY_UNMAPPED_TYPES: Record<string, string> = {
     "Mirrors GET /api/v1/shortlists/{id} and POST /api/v1/shortlists/run, serialised by " +
     "openalpha_cn.shortlist_view.shortlist_view — versioned by SHORTLIST_VIEW_SCHEMA_VERSION " +
     "in Python, but that version has no checked-in JSON schema under docs/api/schemas/.",
+  // V2-P5-017 / V2-P5-018. Ten more on the same precedent, and the precedent is the whole
+  // reason they are listed rather than checked: `docs/api/schemas/` holds exactly five
+  // documents (evidence-snapshot, signal-frame, decision-ledger, run-manifest,
+  // validation-result) and **none of the routes these mirror declares a `response_model`**
+  // — every one returns `JSONResponse(content=<view function's dict>)`, so the Python view
+  // function *is* the contract and there is no JSON to drift-check against. Each reason
+  // names that function, so a reader can go find the thing this mirror must agree with.
+  FactorTier:
+    "Mirrors openalpha_cn.backtest.factor_ic.FactorTier (Literal['raw','processed'," +
+    "'neutralized']); an enum alias like ReadinessState above, not a message shape.",
+  AttributionVerdict:
+    "Mirrors openalpha_cn.backtest.factor_experiment.AttributionVerdict, the six verdicts one " +
+    "tier step can earn; an enum alias with no checked-in JSON schema declaring it.",
+  FactorTierAttribution:
+    "One cell of the three-tier grid, from openalpha_cn.backtest.factor_experiment." +
+    "TierAttribution, reaching HTTP inside factor_view.experiment_view's `document`; no " +
+    "checked-in JSON schema covers the factor experiment artifact.",
+  FactorTierReport:
+    "One tier row, from openalpha_cn.backtest.factor_experiment.TierReport, reaching HTTP " +
+    "inside factor_view.experiment_view's `document`; no checked-in JSON schema covers it.",
+  FactorExperimentIndex:
+    "Mirrors GET /api/v1/factors/experiments, whose whole body is {experiment_ids: [...]}; " +
+    "declared inline in api/app.py's factor_experiment_list and backed by no JSON schema.",
+  FactorExperimentEnvelope:
+    "Mirrors GET /api/v1/factors/experiments/{id} and POST /api/v1/factors/run, serialised " +
+    "by openalpha_cn.factor_view.experiment_view — versioned by VIEW_SCHEMA_VERSION in " +
+    "Python, but that version has no checked-in JSON schema under docs/api/schemas/.",
+  PredictionIndexEntry:
+    "One row of GET /api/v1/predictions, serialised by openalpha_cn.model_view." +
+    "_prediction_index_entry; versioned by MODEL_VIEW_SCHEMA_VERSION with no checked-in JSON.",
+  PredictionIndex:
+    "Mirrors GET /api/v1/predictions, serialised by openalpha_cn.model_view." +
+    "prediction_index_view; no checked-in JSON schema declares the prediction register.",
+  PortfolioTargetWeight:
+    "One weighted name from openalpha_cn.backtest.portfolio_policy.construction_view's " +
+    "`targets`; the view function is the contract and no JSON schema is checked in for it.",
+  PortfolioConstructionView:
+    "Mirrors POST /api/v1/portfolio/construct, serialised by openalpha_cn.backtest." +
+    "portfolio_policy.construction_view — which emits three keys the PortfolioConstruction " +
+    "model does not declare (invested_weight, targets[].was_adjusted, limitations), so the " +
+    "view function and not the model is what this mirrors; no checked-in JSON schema exists.",
 };
 
 describe("web/src/types.ts declared fields never silently drift from the checked-in contract schemas", () => {
