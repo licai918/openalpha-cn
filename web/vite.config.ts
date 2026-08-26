@@ -29,11 +29,17 @@ export default defineConfig({
       // 2026-08-25, V2-P5-019 (panel-state union + component tests for all four
       //   panels, 53 → 150 tests): statements 91.35%, branches 83.67%,
       //   functions 89.88%, lines 92.55%  →  91 / 83 / 89 / 92.
+      // 2026-08-25, V2-P5-014/015/016 (React Router, pages ① and ②, their two
+      //   contract classifiers and the data layer's own tests, 150 → 260 tests):
+      //   statements 92.30%, branches 84.36%, functions 92.14%, lines 93.50%
+      //   →  92 / 84 / 92 / 93. Every metric rose despite ~500 lines of new
+      //   component code, because each page landed with its shared panel-state
+      //   contract suite rather than after it.
       thresholds: {
-        statements: 91,
-        branches: 83,
-        functions: 89,
-        lines: 92
+        statements: 92,
+        branches: 84,
+        functions: 92,
+        lines: 93
       }
     }
   }

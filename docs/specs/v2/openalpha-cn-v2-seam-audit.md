@@ -95,7 +95,7 @@ Baseline: `main` @ `e5c6b90`
 
 | # | Finding | 证据 | 关闭 issue |
 |---|---|---|---|
-| F37 | 无路由库，1 个页面，前端只消费 28 条路由中的 6 条（21%） | `web/package.json` 依赖只有 `react`/`react-dom`；grep `Router\|useNavigate\|createBrowserRouter` 零命中；`web/src/api/client.ts` 6 个函数 | `V2-P5-014` |
+| F37 | ~~无路由库，1 个页面，前端只消费 28 条路由中的 6 条（21%）~~ **已关闭（`V2-P5-014`）**。现为 `react-router` 8.3.0（传递依赖仅 `cookie-es`）、4 个地址、`client.ts` **9** 个函数；分母实测为 **47** 而非 28，故覆盖率 9/47（19%）—— 分子涨了、比例没涨，因为 `015`–`018` 才是让这个数字动的行。**并附一条方法学更正：本行"grep 零命中"这个证据当时取不到。** 本仓 `web/src/*.tsx` 含中文，`file` 判其为 `data`，而本环境的 `grep` 包装器固定带 `-I`（忽略二进制），于是**对这些文件整体跳过、静默返回零命中** —— 结论恰好为真（当时确实没有路由器），但方法不成立：同一条 grep 在 `App.tsx` 上找 `getHealth` 也是零命中，而该文件第 94 行就有。审计 `web/` 时须加 `-a` | `web/package.json`；`web/src/routes.ts`；`web/src/api/client.ts` | `V2-P5-014` |
 | F38 | 未被消费的 22 条路由 | market/events、themes、deliberate、screen、3×watchlist、3×reports、6×batch、memory、recovery、portfolio execute/ledger、backtests/portfolio、event-study | `V2-P5-015`…`018` |
 | F39 | `web/src/types.ts` 是手工维护的 Python 契约镜像，**已经漂移**，且无漂移测试 | `ResearchResult.signal` 缺 `horizon`（`:29-37`）；`manifest` 缺 `mode`（`:44-47`）；无从 `docs/api/schemas/*.json` 或 `/openapi.json` 生成 | `V2-P0B-016` |
 | F40 | 前端硬编码 provenance 占位值 | `web/src/api/client.ts:54` `mode:"live"`、`:58` `code_commit:"web-development"`、`:59` `config_digest:"0".repeat(64)`、`random_seed:7` | `V2-P0B-009` |

@@ -227,6 +227,26 @@ const INTENTIONALLY_UNMAPPED_TYPES: Record<string, string> = {
     "schema for ReplayReport to drift-check against.",
   OutcomeInput: "UI-only form-input shape for submitting an outcome; not a mirror of any wire contract.",
   ProviderBatchUpload: "UI-only batch-upload form shape; not a mirror of any wire contract.",
+  // V2-P5-014. These four follow ReplayReport's precedent above rather than widening what
+  // this list means: each is a real wire mirror whose contract is simply not checked in as
+  // JSON. `docs/api/schemas/` holds five documents — evidence-snapshot, signal-frame,
+  // decision-ledger, run-manifest and validation-result — and none of them is a panel
+  // health report or a shortlist answer, so there is nothing here to drift-check against.
+  // Each entry names the Python serialiser that *is* the contract, so a reader can find it.
+  ReadinessState:
+    "Mirrors openalpha_cn.panel.catalog.ReadinessState (Literal['ready','blocked']); an enum " +
+    "alias, not a message shape, and no checked-in JSON schema declares it.",
+  PanelHealthReport:
+    "Mirrors GET /api/v1/panel/health, serialised by openalpha_cn.panel_view." +
+    "health_report_payload — only the five schemas under docs/api/schemas/*.json are checked " +
+    "in as contracts, and no JSON schema for the panel health report exists to check against.",
+  ShortlistIndex:
+    "Mirrors GET /api/v1/shortlists, whose whole body is {shortlist_ids: [...]}; declared " +
+    "inline in api/app.py's shortlist_list and backed by no checked-in JSON schema.",
+  ShortlistAnswer:
+    "Mirrors GET /api/v1/shortlists/{id} and POST /api/v1/shortlists/run, serialised by " +
+    "openalpha_cn.shortlist_view.shortlist_view — versioned by SHORTLIST_VIEW_SCHEMA_VERSION " +
+    "in Python, but that version has no checked-in JSON schema under docs/api/schemas/.",
 };
 
 describe("web/src/types.ts declared fields never silently drift from the checked-in contract schemas", () => {
