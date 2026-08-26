@@ -14,12 +14,20 @@ import type {
   ShortlistIndex,
   ValidationResult
 } from "../types";
+import { refusalMessage } from "./refusal";
 
+/**
+ * Every request this client makes, with a refused response turned back into prose.
+ *
+ * The `throw new Error(body)` this used to do put the refusal's raw JSON on the screen,
+ * because all four pages render `error.message` verbatim (`V2-P5-041`). `refusalMessage`
+ * is where the four documented body shapes are read; see `refusal.ts` for the table and
+ * for why the status code is not the discriminator.
+ */
 async function requestJson<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
   const response = await fetch(input, init);
   if (!response.ok) {
-    const body = await response.text();
-    throw new Error(body || `请求失败：HTTP ${response.status}`);
+    throw new Error(refusalMessage(response.status, await response.text()));
   }
   return (await response.json()) as T;
 }

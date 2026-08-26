@@ -270,10 +270,23 @@ const INTENTIONALLY_UNMAPPED_TYPES: Record<string, string> = {
   FactorExperimentIndex:
     "Mirrors GET /api/v1/factors/experiments, whose whole body is {experiment_ids: [...]}; " +
     "declared inline in api/app.py's factor_experiment_list and backed by no JSON schema.",
+  // V2-P5-042 narrowed this entry, because the wide version of it is how `[object Object]`
+  // shipped. The exemption is per *type*, so naming the whole envelope exempted every field
+  // inside it — including `…spec.ic.definition.required_fields`, which read `string[]` while
+  // every server answers `[{"dataset": "daily", "column": "close"}]`. Nothing was checking
+  // it, and the two fixtures were hand-written to agree with the wrong type, so the panel's
+  // own assertion passed. The reason now says which part is checked and where, rather than
+  // implying the whole type is unverifiable.
   FactorExperimentEnvelope:
     "Mirrors GET /api/v1/factors/experiments/{id} and POST /api/v1/factors/run, serialised " +
     "by openalpha_cn.factor_view.experiment_view — versioned by VIEW_SCHEMA_VERSION in " +
-    "Python, but that version has no checked-in JSON schema under docs/api/schemas/.",
+    "Python, but that version has no checked-in JSON schema under docs/api/schemas/. " +
+    "PARTIALLY CHECKED ELSEWHERE: the `spec.ic.definition` block is compared field by " +
+    "field against FactorDefinition's pydantic-generated schema by " +
+    "tests/unit/test_web_factor_definition_mirror.py, which is where `required_fields` is " +
+    "now held. Everything else in the envelope — the write/digest projections, `spec`'s own " +
+    "scalars, `tiers` and `attributions` — remains unchecked, and a new field added there " +
+    "gets no protection from that module.",
   PredictionIndexEntry:
     "One row of GET /api/v1/predictions, serialised by openalpha_cn.model_view." +
     "_prediction_index_entry; versioned by MODEL_VIEW_SCHEMA_VERSION with no checked-in JSON.",
@@ -359,6 +372,34 @@ describe("web/src/types.ts declared fields never silently drift from the checked
     }
 
     expect(problems, problems.join("\n")).toEqual([]);
+  });
+
+  // V2-P5-042. An exemption that says "checked over there instead" is only as true as
+  // "over there" still existing. `FactorExperimentEnvelope`'s reason now points at
+  // `tests/unit/test_web_factor_definition_mirror.py`, and a rename or deletion of that
+  // module would turn the sentence into a claim of coverage that nothing provides —
+  // silently, because prose does not go red. This is the same failure the "no
+  // DriftCheckSpec silently stops checking" test above exists for, one list over.
+  //
+  // Only repository-rooted paths are resolved. Several reasons name a module the short way
+  // (`api/app.py`, meaning `src/openalpha_cn/api/app.py`) or name a glob
+  // (`docs/api/schemas/*.json`); neither is a path this can check, and inventing a rule to
+  // guess at them would fail on prose rather than on drift.
+  it("resolves every repository file an exemption reason points at", () => {
+    const repoRoot = path.resolve(here, "../..");
+    const referenced = /(?:^|[\s(`"])((?:tests|web|docs|src)\/[\w./-]+\.(?:py|ts|tsx|json))/g;
+    const missing: string[] = [];
+
+    for (const [type, reason] of Object.entries(INTENTIONALLY_UNMAPPED_TYPES)) {
+      for (const [, candidate] of reason.matchAll(referenced)) {
+        if (candidate.includes("*")) continue;
+        if (!fs.existsSync(path.join(repoRoot, candidate))) {
+          missing.push(`${type} points at ${candidate}, which does not exist`);
+        }
+      }
+    }
+
+    expect(missing, missing.join("\n")).toEqual([]);
   });
 
   it("every exported type in types.ts is either drift-checked above or explicitly listed as unmapped", () => {

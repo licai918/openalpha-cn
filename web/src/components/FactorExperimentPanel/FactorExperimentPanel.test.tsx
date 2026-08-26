@@ -31,9 +31,15 @@ describe("FactorExperimentPanel", () => {
   it("renders the factor definition rather than only its id", () => {
     render(renderPanel({ kind: "succeeded", data: buildFactorExperiment() }));
     expect(screen.getByText("momentum/v1")).toBeInTheDocument();
-    expect(screen.getByText("price_momentum")).toBeInTheDocument();
+    expect(screen.getByText("momentum_reversal")).toBeInTheDocument();
     expect(screen.getByText("越大越好")).toBeInTheDocument();
-    expect(screen.getByText(/close、adj_factor/)).toBeInTheDocument();
+    // V2-P5-042. Asserted as the **whole** rendered string, qualified by dataset. This read
+    // `/close、adj_factor/` and passed for two releases while the page showed
+    // `所需字段：[object Object]、[object Object]` — because the fixture supplied
+    // `["close","adj_factor"]` to match a `types.ts` that wrongly said `string[]`, so the
+    // regex matched a fixture nobody's server had ever sent. A substring regex over a
+    // hand-written fixture is exactly as strong as the fixture, which here was zero.
+    expect(screen.getByText("所需字段：daily.close、daily.adj_factor")).toBeInTheDocument();
   });
 
   it("marks the acceptance step so the grid is not six equal rows", () => {
@@ -129,9 +135,12 @@ describe("FactorExperimentPanel", () => {
           definition: {
             key: "reversal",
             version: 2,
-            family: "price_reversal",
+            // A second real family, so the two fixtures do not both stand on one value.
+            family: "volatility_liquidity",
             direction: "lower_is_better",
-            required_fields: ["close"],
+            // V2-P5-042: a `FactorField`, as the server sends it. One field here rather
+            // than the fixture's two, so the single-entry join is exercised too.
+            required_fields: [{ dataset: "daily", column: "close" }],
             lookback_sessions: null,
           },
         },
