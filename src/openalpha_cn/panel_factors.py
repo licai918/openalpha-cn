@@ -5977,9 +5977,9 @@ def write_factor_panels(
     **Every guard runs before the first write.** An earlier version checked each partition just
     before writing it and left a refused call having already replaced the observations and not
     the manifests -- two halves of one write disagreeing, which is worse than either outcome and
-    which `test_a_write_that_would_drop_a_stored_build_is_refused` caught. There is still no
-    cross-partition atomicity on offer here; what the ordering buys is that a refusal changes
-    nothing at all.
+    which `test_the_refused_merge_leaves_the_partition_exactly_as_it_found_it` caught. There is
+    still no cross-partition atomicity on offer here; what the ordering buys is that a refusal
+    changes nothing at all.
     """
     if not panels:
         raise FactorEngineError(

@@ -118,8 +118,10 @@ class OfflineSuiteViolation(RuntimeError):
 _depth = 0
 """How many `refusing_outbound_traffic()` blocks are open. Zero means the hook is inert.
 
-A depth rather than a flag because the autouse fixture holds one for every non-e2e test, and a
-test that opens its own nested block must not switch the guard off when it closes.
+A depth rather than a flag because `tests/conftest.py`'s `pytest_runtest_protocol` wrapper holds
+one open around every non-e2e item -- and its `pytest_collection` wrapper holds one around the
+whole import phase -- so a test that opens its own nested block must not switch the guard off
+when it closes.
 """
 
 

@@ -40,14 +40,18 @@ one, and every q-value in all four is computed against a family that excludes th
 So **every bucket of every axis, and every benchmark, enters one family**. There is exactly one
 `OutcomeStatisticsRequest` built here and exactly one `MultipleTestingReport` on the answer.
 `AxisReport` is a view onto that single family and never a family of its own;
-`test_four_axes_are_one_family_and_not_four` drives it by counting `family_size` on the answer
+`test_three_axes_are_one_family_and_not_three` drives it by counting `family_size` on the answer
 against the buckets the axes produced.
 
 `declared_family_size` is still the caller's, checked in the one direction that can be: it may
 not be below the number of hypotheses this report actually tests. A caller who tried nine cuts
 and reports the four that looked best is doing what BH exists to prevent, and only they know
 the nine -- `a_segment_axis_is_whatever_the_caller_declared_and_the_cuts_not_shown_are_invisible`
-says so where the number is computed.
+says so where the number is computed. That direction is why the number the report *uses* is
+the declared one and never `len(cohorts)`: the two agree on every request that declares
+exactly its buckets, so
+`test_a_family_declared_above_the_bucket_count_is_the_number_the_report_uses` declares more
+than it publishes and separates them at both places the number is read.
 
 ## A bucket that could never have rejected is a different fact from one that did not
 

@@ -6,6 +6,126 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Added
 
+- **A guard that covers the instance and not the class, closed nine times**
+  (`V2-P5-030` … `V2-P5-040`, new rows filed by this work). Every item below has the same
+  shape: the property was real, the code was often already correct, and the thing that
+  measured it could only see one spelling of it. Each was reproduced first and watched
+  staying green, then closed and watched going red.
+  - **`V2-P5-030` — unknown API paths answered `405` for every non-`GET` method, and the two
+    owner sets were compared case-sensitively.** Measured through raw ASGI against a
+    `create_app(web_dir=None)` baseline in the same process: `POST`/`PUT`/`PATCH`/`DELETE`/
+    `OPTIONS /api/v1/nope` were `405 application/json` with the build mounted and `404`
+    without it, and `GET /API/v1/nope`, `/api./v1/nope`, `/api /v1/nope`, `/HEALTH/x`,
+    `/Docs/x`, `/OpenAPI.json/x`, `/Assets/missing.js` were all `200 text/html`. Both are the
+    sentence the class docstring says it exists to prevent — "a client-side typo, a stale
+    caller … comes back as an HTML `200`, and a caller that branches on `response.ok` reads a
+    page as a payload" — and `405` additionally asserts the path exists, which for a
+    misspelled or retired route is false in both halves. `/Assets/` is the one that matters
+    most and shows least: macOS is case-insensitive, so it serves the real JS locally while
+    production Linux degrades it to shell HTML for a `<script>` tag. `StaticFiles` checks the
+    method *before* the lookup, so a `405` for a non-client location now replays the request
+    as a `GET` — in starlette's own words rather than a second copy of the lookup rules — and
+    answers `404` when the build holds nothing. `POST /portfolio` stays `405` (the page is
+    there, the verb is wrong) and so does `POST /assets/index-abc123.js` (the file is there).
+    Ownership is decided on a normalised segment (casefold, trailing dots and spaces
+    stripped), deliberately broader than HTTP and asymmetric on purpose: a client area
+    colliding with an owner is caught loudly by an existing test, a reserved namespace
+    answering as a page is caught by nobody. **The audit's `//api/v1/nope` finding is
+    falsified**: raw ASGI shows the server answering `404 application/json`; `httpx` collapses
+    the leading `//` and sends `/v1/nope`, so what was measured was the client. Also deletes
+    the duplicated `job_store = storage.job_store` at `api/app.py:1792-1793`, a merge remnant
+    that had passed ruff, mypy and 3235 unit tests.
+    `tests/unit/test_spa_addressability.py` 17 → 36.
+  - **`V2-P5-031` — the offline guard was inert outside a test function body.** `_depth` was
+    raised by a function-scoped autouse fixture, so module-import time and the setup of every
+    session-, module- and class-scoped fixture ran unguarded — measured with a probe in the
+    real test tree, four phases `NOT REFUSED, connection completed` against one
+    `OfflineSuiteViolation` inside the body. "Fetch it once and reuse it" is the sentence a
+    session-scoped fixture exists to make, and `tests/conftest.py` declared four limits with
+    this one not among them, which is worse than declaring it. The scope was **raised** rather
+    than the limit declared, and that was decided by measurement: no fixture outside
+    `tests/e2e/` is session-scoped at all, all 37 module-scoped ones are offline, and the
+    whole tree collects clean under the guard. It is a `pytest_runtest_protocol` wrapper plus
+    a `pytest_collection` wrapper, not a wider fixture, because broad-scoped fixtures are
+    instantiated before any function-scoped autouse one — a session-scoped guard would hold
+    `_depth` at one while `tests/e2e/`'s own `built_panel` fetched a real panel. The one phase
+    still outside (a session-scoped finaliser) is declared *and* held unreachable by an AST
+    assertion. Driven in a child pytest that loads this repository's own conftest as a plugin:
+    five phases `REFUSED` with it, five `OPEN` without.
+  - **`V2-P5-032` — `tests/unit/test_offline_suite.py` claimed three switches and tested two.**
+    Its sections ran "switch 1" then "switch 3", and outside `tests/e2e/` the string
+    `OPENALPHA_E2E` appeared in exactly two places: a comment in `pyproject.toml` and the
+    docstring sentence claiming it was covered. `require_opt_in` is now driven in a child
+    interpreter with the variable cleared.
+  - **`V2-P5-033` — a ctypes handle loaded before a paper session opens a brand-new socket.**
+    `libc.socket`, `libc.connect` and `libc.send` all happen *inside*
+    `refusing_outward_calls()`, raise no audit event, and deliver — measured, twelve bytes
+    over loopback. Strictly wider than the two "started beforehand" limitations already
+    declared: it needs no connected descriptor and no child process. Putting `ctypes.dlopen`
+    in `OUTWARD_AUDIT_EVENTS` created the impression ctypes was covered; only loading is.
+    Declared as `KNOWN_PAPER_LIMITATIONS`' eighth entry rather than closed, because an audit
+    hook sees what CPython publishes and a raw syscall through a loaded library publishes
+    nothing. The test asserts **the bytes arrive** — asserting a refusal would describe a
+    guarantee this module does not have.
+  - **`V2-P5-034` — the last hand-written limitation registry with no set-literal equality.**
+    `test_known_limitation_registries.py` had already measured and written down that
+    `KNOWN_INDEX_MEMBERSHIP_LIMITATIONS` was one of the two without one; its own test used six
+    `in codes` membership assertions over nine entries, leaving three codes named nowhere in
+    the suite. Now an equality, like every other. **The audit's "exchanging one code between
+    two registries → 7 passed" does not reproduce here**: the exchange dies, but by an
+    unrelated test that happens to index a detail by code, not by a systematic guard — which
+    is the difference this row converts.
+  - **`V2-P5-035` — surface parity checked that names exist, not that they correspond, and was
+    blind to WebSocket routes and Mounts.** Swapping `POST /api/v1/screen`'s SDK method with
+    `GET /api/v1/watchlist`'s left `5 passed`; adding an `@application.websocket(...)` left
+    `5 passed`. Neither a name rule nor a call graph can close the first — the two faces name
+    things by opposite conventions (route endpoint name equals SDK method name in 6 of 48
+    rows) and the SDK is in-process, so there is no edge to follow. What a swap breaks is the
+    **answer's type**: 20 of the 37 paired rows have both sides declaring one, and the other
+    17 are counted rather than skipped. The surviving swap is reported rather than hidden —
+    two methods on one path answering the same type cannot be told apart. `_surface_of` now
+    keys `WEBSOCKET <path>` and `MOUNT <path>`, and is shared with its test rather than
+    re-implemented, because the branch is unreachable through the shipped application. A new
+    test **falsified this work's own first fix**: `web_dir=None` is not enough, because
+    `create_app` still reads `OPENALPHA_WEB_DIR` when `web_dir` is `None`.
+  - **`V2-P5-036` — the conflict-marker gate matched a Markdown heading and missed three real
+    markers.** `Summary` + `=======` (a seven-character setext H1 underline) was **detected**;
+    nine `=` was missed; `||||||| merged common ancestors` was missed; and bare `<<<<<<<` and
+    `>>>>>>>` — which `git` writes when it has no label — were both missed for want of a
+    trailing space. `=======` now counts only in a file that also carries an unambiguous
+    marker, because `git` never writes a separator alone and a setext underline always is
+    alone. Twelve shapes driven, including `cat <<EOF` and six- and eight-character runs.
+  - **`V2-P5-037` — `testDiscipline.test.ts` stat'd filenames, and its floor sat under the
+    floor.** A new `probeDrift.ts` went red and named itself; a `probeDrift.test.ts` holding
+    one `it("works", () => {})` that imported nothing and asserted nothing turned it green at
+    `6 passed`. A co-located test must now import its subject and contain an `expect(` — two
+    static properties, neither a proof, which remove the *empty* file a filename check
+    invites; all 24 already satisfied it. Its threshold floor read `≥90/84/89/91` while
+    `vite.config.ts` shipped `93/87/94/94`, so "only ever up" could be walked back by up to
+    five points with the test green. Now the shipped numbers.
+  - **`V2-P5-039` — `V2-P5-007`'s family-size guard could not separate the two answers.** The
+    code was correct, but all 8 fixtures reaching `report_segmented_outcomes` satisfied
+    `declared_family_size == len(cohorts)`, so recomputing the family from `len(cohorts)`
+    survived at 28 + 13 passed. The same mutant dies 7 times in `multiple_testing.py`. One
+    fixture declaring 14 against seven buckets closes it at both sites: `most_permissive`
+    halves below a four-observation bucket's floor, so the two buckets that sit exactly on the
+    line become incapable and `hypotheses_that_could_ever_reject` goes 4 → 0.
+  - **`V2-P5-040` — the citation audit read 60-odd path-qualified citations and ignored 109
+    bare ones.** Found while correcting `segmented_reporting.py:43`, which cited a test name
+    that has never existed. A bare backticked `test_*` is now held against every name declared
+    under `tests/`, minus the names `src/` declares itself — `test_day_count` and `test_set`
+    are *fields* of shipped models, and prose naming a field is naming a field. Both sides are
+    derived from the tree. It found two more stale citations on the day it was written, in
+    `panel_factors.py` and `storage/migrations.py`. A planned de-duplication step was
+    **measured to remove zero occurrences** and deleted rather than kept as a no-op, and the
+    test that first justified it asserted a per-name partition that does not exist.
+  - **`V2-P5-038` is filed rather than fixed.** `test_feature_ledger_test_tree.py` cannot see a
+    same-directory row swap; the module already declares that residue. This work measured its
+    size — 89 of 185 rows are outside the AST check (`legacy-prose` 85, `ci-job` 1,
+    `not-applicable` 3) — and judged both closures more expensive than the defect: migrating
+    85 rows is a content change, and a 185-entry path literal goes red on every legitimate
+    ledger edit. Recorded as a row rather than left in prose.
+
 - **每个可收藏的 URL 现在在真服务器下也是地址，且未知 `/api/` 路径仍是 JSON 404**
   (`V2-P5-027`, new row filed by this work). `api/app.py` mounted `StaticFiles(html=True)`, whose
   fallback covers only *directory* requests, so **every deep link pages ① through ④ added worked

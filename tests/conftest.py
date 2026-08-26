@@ -16,7 +16,7 @@ V2-P0B-013.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
@@ -299,6 +299,16 @@ def bar() -> Callable[..., MarketBar]:
 #     and is not seen. That is the same class of limit as the child process above: it is
 #     deliberate evasion rather than the drift this guard exists to catch, and no in-process
 #     mechanism available to a test suite closes it.
+#   - It covers an item's whole protocol and the collection phase, and **not** the teardown of a
+#     session-scoped fixture, which runs after the last item's protocol has closed. This limit
+#     is stated as a fifth because until `V2-P5-031` the guard's real scope was far narrower
+#     than any of the four above implied -- it was a function-scoped autouse fixture, so module
+#     import time and every broad-scoped fixture's *setup* were unguarded, and a reader checking
+#     whether "fetch it once in a session fixture" was covered found a list of limits that did
+#     not mention the question. Nothing outside `tests/e2e/` is session-scoped today, and
+#     `tests/unit/test_offline_suite.py::
+#     test_the_scope_the_guard_does_not_reach_is_the_declared_one`
+#     is what keeps that a measurement rather than a hope.
 #
 # `V2-P4-039` widened the first limit from `connect`/`connect_ex` to four method names, and
 # `V2-P4-105` moved it off method names altogether. Shadowing names on `socket.socket` guarded
@@ -312,19 +322,58 @@ def bar() -> Callable[..., MarketBar]:
 # `tests/unit/test_offline_suite.py` proves the guard is live rather than merely installed.
 
 
-@pytest.fixture(autouse=True)
-def _refuse_outbound_connections(request: pytest.FixtureRequest) -> Iterator[None]:
-    """Make anything that leaves this process over IP raise, for every unmarked test.
+@pytest.hookimpl(wrapper=True)
+def pytest_collection(session: pytest.Session) -> Generator[None, object, object]:
+    """Guard the import of every test module, which is where the guard used to begin too late.
 
-    The guard and its unwinding live in `tests/offline_guard.py` rather than here, and that
-    module's docstring says why: inside an autouse fixture there is no moment at which a test
-    can look at the guard off, so the restoration was a `finally` block nothing could observe.
-    This is the whole of what belongs in a fixture -- deciding *whether* a given test is
-    guarded.
+    `V2-P5-031`. Collection is when module bodies run, and a module body is a place a
+    "fetch it once at import" line can be written. Guarding here costs nothing measurable and
+    covers every module in the tree, `tests/e2e/` included: those modules are still *imported*
+    in a default run (only their tests are deselected), and none of them touches the network to
+    be imported -- measured, the whole tree collects clean under the guard.
     """
-    if request.node.get_closest_marker("e2e") is not None:
-        yield
-        return
+    with refusing_outbound_traffic():
+        return (yield)
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_protocol(
+    item: pytest.Item, nextitem: pytest.Item | None
+) -> Generator[None, object, object]:
+    """Guard a whole item -- setup, call and teardown -- rather than only its call phase.
+
+    This was a **function-scoped autouse fixture**, and `V2-P5-031` measured what that left
+    open. `_depth` rose when the fixture ran and fell when it unwound, so everything pytest does
+    around a test was outside the guard:
+
+        module-import-time            -> NOT REFUSED, connection completed
+        session-scoped fixture setup  -> NOT REFUSED, connection completed
+        module-scoped fixture setup   -> NOT REFUSED, connection completed
+        class-scoped fixture setup    -> NOT REFUSED, connection completed
+        inside a test body            -> refused: OfflineSuiteViolation
+
+    "Fetch it once and share it" is the most natural sentence in the language of a session-
+    scoped fixture, and it was the one place the guard could not see. `tests/conftest.py`
+    declared four limits and this was not among them, which is worse than declaring it: a
+    reader checking whether their fixture was covered found a list that did not mention the
+    question.
+
+    A hook wrapper rather than a wider fixture, because a wider fixture cannot express the
+    exemption. Broad-scoped fixtures are instantiated *before* any function-scoped autouse
+    fixture, so a session-scoped guard would be holding `_depth` at one while `tests/e2e/`'s
+    own session-scoped `built_panel` fetched a real panel, and the way back out would be a
+    fixture that decrements a counter another fixture owns. `pytest_runtest_protocol` brackets
+    the entire item, so the broad-scoped fixtures an item pulls in are set up inside its
+    bracket -- guarded for an unmarked item, and never entered at all for an `e2e` one.
+
+    **The limit that remains, stated rather than implied**: a broad-scoped fixture's *teardown*
+    runs when its scope ends, and for a session-scoped one that is after the last item's
+    protocol has closed. Nothing in this tree has a session-scoped finaliser, and
+    `tests/unit/test_offline_suite.py::test_the_scope_the_guard_does_not_reach_is_the_declared_one`
+    is what makes that a measured statement rather than a hopeful one.
+    """
+    if item.get_closest_marker("e2e") is not None:
+        return (yield)
 
     with refusing_outbound_traffic():
-        yield
+        return (yield)
