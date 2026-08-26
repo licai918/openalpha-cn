@@ -86,7 +86,6 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   `_validate_pytest_acceptance`'s AST check. `pytest tests/unit -q` **3146 passed, 1
   skipped**; `ruff check`, `ruff format --check` and `mypy src scripts` clean.
 
-<<<<<<< HEAD
 - **`backtest/paper.py`: a Paper Portfolio whose inability to reach a broker is enforced at
   run time, not asserted in a comment** (`V2-P5-004`, the thirteenth pure-stdlib `backtest/`
   leaf). `PaperPortfolio.advance` lives one observed session forward through
@@ -318,7 +317,6 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   **89.88%**, lines 82.12 -> **92.55%**, with `vite.config.ts`'s ratchet raised to 91/83/89/92
   per its own "only ever up" rule; `pnpm lint` and `tsc -b` clean; `pnpm build` succeeds;
   `pnpm test:e2e` **4 passed** offline.
-=======
 - **Benjamini-Hochberg false-discovery control, and the family size it was computed against**
   (`V2-P5-007`). `backtest/multiple_testing.py` is a pure-stdlib `backtest/` leaf --
   `math`, `dataclasses` and pydantic, no `openalpha_cn` import at all -- and it does the half of
@@ -363,7 +361,6 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   38 / 347 / 37 / 277. Runtime dependencies stay at **nine**; `lint-imports` stays at
   **8 kept / 0 broken** -- both new modules join the two `backtest-studies-*` source lists rather
   than relaxing anything.
->>>>>>> worktree-agent-a0cc49a27e2462e70
 
 - **`openalpha portfolio construct` and `OpenAlphaSDK.construct_portfolio`: heuristic target
   weights over one admitted shortlist** (`V2-P5-001`, the first module of P5). A twelfth

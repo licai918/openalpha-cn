@@ -10,6 +10,7 @@ import tomllib
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from types import ModuleType
+from typing import Final
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -1338,3 +1339,59 @@ def test_adr_0003_still_names_this_file_and_the_count_it_pins() -> None:
         "RUNTIME_DEPENDENCIES above and the ADR have to change together"
     )
     assert len(RUNTIME_DEPENDENCIES) == 9
+
+
+CONFLICT_MARKER_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^(?:<<<<<<< |=======$|>>>>>>> )", re.MULTILINE
+)
+"""A merge that was committed half-resolved, as a pattern over the tracked tree.
+
+Committed conflict markers reached `feat/v2-p0a` **twice** in one day and both times a
+sibling agent found them by reading the file, not by any gate. Nothing else here can see
+them: `verify_publication.py` walks 520 files without looking, `ruff` and `mypy` never open
+`CHANGELOG.md`, and a marker inside a Markdown bullet list changes no rendered output that
+anything asserts on. The pytest suite is the only thing that reads the whole tracked tree,
+so this is where the check belongs.
+
+Scoped to `git ls-files` rather than a walk, because the untracked world holds agent
+scratch space, `.venv` and half-applied patches, none of which is this repository's claim
+about itself. Binary files are skipped by the decode guard rather than by an extension
+list, so a new text format is covered on arrival instead of when somebody remembers it.
+"""
+
+
+def test_no_tracked_file_carries_a_committed_merge_conflict_marker() -> None:
+    """The whole tracked tree, as an equality against the empty set.
+
+    Deliberately not "no `.py` file" or "no source file". Both real occurrences were in
+    `CHANGELOG.md`, which is exactly the kind of file a source-scoped audit skips and a
+    human skims. The two other merges that day left markers in `pyproject.toml` and a test
+    module -- one of which made the TOML unparseable, so `lint-imports` could not report
+    `8 kept, 0 broken` at all, and that was silent until `ruff` refused to read its config.
+    """
+    root = Path(__file__).resolve().parents[2]
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z"],
+        cwd=root,
+        capture_output=True,
+        check=True,
+    ).stdout.split(b"\0")
+
+    offenders: dict[str, list[int]] = {}
+    for raw in tracked:
+        if not raw:
+            continue
+        path = root / raw.decode("utf-8")
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        lines = [
+            number
+            for number, line in enumerate(text.splitlines(), start=1)
+            if CONFLICT_MARKER_PATTERN.match(line)
+        ]
+        if lines:
+            offenders[raw.decode("utf-8")] = lines
+
+    assert offenders == {}, f"committed merge conflict markers: {offenders}"
