@@ -221,9 +221,7 @@ def _schema_kind(
 def _model_properties() -> dict[str, tuple[str, frozenset[str] | None]]:
     schema = FactorDefinition.model_json_schema()
     defs = schema.get("$defs", {})
-    return {
-        name: _schema_kind(node, defs) for name, node in schema["properties"].items()
-    }
+    return {name: _schema_kind(node, defs) for name, node in schema["properties"].items()}
 
 
 def test_the_mirror_this_module_stands_for_is_the_one_on_disk() -> None:

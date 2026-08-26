@@ -87,6 +87,12 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+# RUF001/2/3 flag characters that *look* like ASCII. The product renders Chinese, so a test
+# or docstring quoting what a user actually sees will carry fullwidth punctuation -- and
+# rewriting the quote to satisfy the linter would make it a paraphrase of the output rather
+# than the output. These four are the ones that appear inside quoted product text; anything
+# else confusable still gets flagged.
+allowed-confusables = ["：", "，", "（", "）"]
 
 [tool.mypy]
 python_version = "3.11"
