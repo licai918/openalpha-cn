@@ -708,11 +708,15 @@ def _shortlist(
 ) -> tuple[int, dict[str, Any]]:
     """`openalpha shortlist run --json`, as its exit code and its body.
 
-    A *gate refusal* exits `1` and still prints the whole verdict; a *fault* exits non-zero with a
-    sentence on stderr and no body at all. So the body is parsed when there is one and the raw
-    output comes back under `output` when there is not, rather than this helper raising and hiding
-    which of the two happened -- `tests/integration/test_shortlist_workflow.py::_run_shortlist`'s
-    rule, and the distinction the whole `SHORTLIST_EXIT` table exists for.
+    A *gate refusal* exits `1` and prints the whole verdict; a *fault* exits non-zero and, since
+    `V2-P5-046`, prints a JSON refusal on stdout too. **Both are JSON now**, which is the change
+    that broke this helper: a fault used to write nothing there, so the body did not start with
+    `{` and the raw text came back under `output`. Three tests read that key and raised `KeyError`
+    the first time this suite ran against real rows after the change.
+
+    The two shapes are still told apart rather than merged -- `SHORTLIST_EXIT` exists for that
+    distinction -- but a caller searching for a sentence should use `_said`, which reads
+    whichever field carries it.
 
     `--min-tradable-ratio 0` and `--max-ranking-age-days 3650` are inert on purpose, so that a
     refusal below is the one the test at hand asked for and never a leftover from a 60-name screen
@@ -761,6 +765,22 @@ def _shortlist(
     if not body.startswith("{"):
         return result.exit_code, {"output": f"{result.stdout}\n{result.stderr}"}
     return result.exit_code, json.loads(body)
+
+
+def _said(refused: dict[str, Any]) -> str:
+    """Everything the command told a `--json` caller, whichever of the two shapes it used.
+
+    `detail` for a fault (`V2-P5-046`'s payload), `output` for the pre-JSON fallback that now
+    only fires when stdout is empty, and the whole document for a gate verdict -- which carries
+    its reasons in `blocks` and `measurement` rather than in one sentence. Serialising the
+    verdict is not a shortcut around reading the right field: a test asserting a sentence is
+    asserting the user was told it, and this returns exactly what the user was handed.
+    """
+    if "detail" in refused:
+        return str(refused["detail"])
+    if "output" in refused:
+        return str(refused["output"])
+    return json.dumps(refused, ensure_ascii=False, sort_keys=True)
 
 
 def _subjects(answer: Mapping[str, Any]) -> tuple[str, ...]:
@@ -1341,7 +1361,7 @@ def test_a_security_the_registry_delisted_inside_this_year_is_refused_by_name(
         private_panel, as_of=private_panel.asked_at(first_instant), shortlist_size=1
     )
     assert code == EXIT_UNHEALTHY, refused
-    message = str(refused["output"])
+    message = _said(refused)
     assert "admits no value this screen can order" in message, message
     assert FACTOR in message, message
 
@@ -1387,7 +1407,7 @@ def test_a_processed_screen_of_this_market_is_refused_by_the_transforms_own_floo
         transform=transform,
     )
     assert code == EXIT_UNHEALTHY, refused
-    message = str(refused["output"])
+    message = _said(refused)
     assert "insufficient_cross_section" in message, message
     assert "min_cross_section" in message, message
     assert str(UNIVERSE_SIZE) in message, message
