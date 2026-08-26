@@ -69,6 +69,45 @@ def test_version_reports_project_name_and_version() -> None:
     assert result.stdout.strip() == "OpenAlpha CN 1.0.0"
 
 
+def test_the_version_flag_answers_the_same_bytes_as_the_version_command() -> None:
+    """`openalpha --version` is the first thing a person types, and it exited `2` (`V2-P5-049`).
+
+    `No such option: --version`, from a build whose `openalpha version` prints the number
+    perfectly well. Two spellings of one question is not the defect -- one spelling that a
+    universal convention says must work and that this tree answered with a usage error is.
+
+    Asserted **byte-equal** to the subcommand rather than merely "mentions the version": two
+    renderings of one build number is exactly the drift a second spelling invites.
+    """
+    flag = runner.invoke(app, ["--version"])
+    command = runner.invoke(app, ["version"])
+
+    assert flag.exit_code == 0, flag.output
+    assert flag.stdout == command.stdout
+
+
+def test_the_version_flag_answers_without_being_given_a_subcommand() -> None:
+    """`no_args_is_help=True` makes a bare `openalpha` print help and exit `2`.
+
+    So the property worth pinning is that naming `--version` and nothing else is an answer
+    rather than a usage error -- which is what the reported defect was.
+
+    **This test does not pin `is_eager`, and an earlier version of it claimed to.** A mutation
+    sweep deleting `is_eager=True` from the option left this whole file green, and the installed
+    binary still printed the version; a root callback's parameters are processed before the
+    group looks for a subcommand, so there is nothing for eagerness to get ahead of yet.
+    `_print_version`'s docstring carries the measurement and why the flag is kept anyway.
+    """
+    result = runner.invoke(app, ["--version"])
+
+    assert result.exit_code == 0
+    assert "Usage:" not in result.stdout
+    assert runner.invoke(app, []).exit_code == 2, (
+        "a bare `openalpha` must still be a usage error, or this test is comparing --version "
+        "against nothing"
+    )
+
+
 def test_doctor_json_reports_required_runtime_checks() -> None:
     result = runner.invoke(app, ["doctor", "--json"])
 

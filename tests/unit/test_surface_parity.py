@@ -99,7 +99,11 @@ PARITY: Final[MappingProxyType[str, tuple[str | None, str | None]]] = MappingPro
         # --- studies and validation ------------------------------------------------------
         "POST /api/v1/backtests/event-study": ("run_event_study", None),
         "POST /api/v1/backtests/replay": ("replay", "replay run"),
-        "POST /api/v1/backtests/validate": ("validate_outcome", None),
+        # `V2-P5-047`. The CLI half was `None` and the READMEs claimed 「三个面等价」 over the
+        # flow containing it: `openalpha validation` shipped two aggregate readers and no
+        # writer, so a CLI-only operator's `validation statistics` read a store nothing that
+        # operator could run had ever filled.
+        "POST /api/v1/backtests/validate": ("validate_outcome", "validation record"),
         "GET /api/v1/backtests/validations/by-decision/{decision_id}": (
             "list_validations_by_decision",
             None,
@@ -114,7 +118,10 @@ PARITY: Final[MappingProxyType[str, tuple[str | None, str | None]]] = MappingPro
         "POST /api/v1/watchlist": ("put_watchlist", None),
         "POST /api/v1/watchlist/{subject}/remove": (None, None),
         "GET /api/v1/reports": ("list_reports", None),
-        "POST /api/v1/reports": ("create_report", None),
+        # `V2-P5-047`, the writer half of the same gap. `report export` could name no id a
+        # terminal had produced, because `POST /api/v1/reports` and `sdk.create_report` were
+        # the only two things that could put a report in the store.
+        "POST /api/v1/reports": ("create_report", "report create"),
         "GET /api/v1/reports/{report_id}": (None, None),
         # `V2-P5-022`. The one report route that landed on all three faces at once, and
         # deliberately: an export is the artifact a user hands to somebody else, so a face that
@@ -611,6 +618,13 @@ def test_the_measured_surface_counts_are_the_ones_this_file_was_written_against(
     `OpenAlphaSDK.export_report`, `openalpha report export` -- and left `without_sdk` and
     `rest_only` alone, which is the point: the row shipped one capability on all three faces
     rather than one face and two entries in the gap table.
+
+    `V2-P5-047` moved `cli_commands` 33 -> 35 and nothing else, which is the shape a closed gap
+    has here: `validation record` and `report create` filled the CLI half of two rows that were
+    already in `PARITY` with an SDK method, so no route was added, no reason was written, and
+    two `None`s became commands. This test is how that arrived -- it went red naming
+    `cli_commands` the moment the two commands registered, which is the whole reason the count
+    is pinned rather than derived.
     """
     measured = {
         "routes": len(_routes()),
@@ -623,7 +637,7 @@ def test_the_measured_surface_counts_are_the_ones_this_file_was_written_against(
     assert measured == {
         "routes": 48,
         "sdk_methods": 55,
-        "cli_commands": 33,
+        "cli_commands": 35,
         "without_sdk": 11,
         "rest_only": 9,
     }

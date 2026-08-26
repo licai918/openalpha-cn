@@ -63,9 +63,21 @@ uv run openalpha factor describe --factor return_vol_60/v1  # one declaration, w
 uv run openalpha factor build --factor reversal_1d/v1 --tier processed \
   --transform cross_section_standard/v1 \
   --as-of 2026-01-08T09:00:00+00:00 --as-of 2026-01-09T09:00:00+00:00 \
-  --year 2026 --max-staleness-days 30                     # compute and store the tiers
+  --year 2026 --max-staleness-days 30     # writes raw + processed, and nothing else
+uv run openalpha factor build --factor reversal_1d/v1 --tier neutralized \
+  --transform cross_section_standard/v1 --neutralization industry_and_size/v1 \
+  --as-of 2026-01-08T09:00:00+00:00 --as-of 2026-01-09T09:00:00+00:00 \
+  --year 2026 --max-staleness-days 30     # the third tier, which `factor run` reads
 uv run openalpha factor run --factor reversal_1d/v1 --start 2026-01-08 --end 2026-01-09 ...
 ```
+
+**`factor build` has to run once per tier, and this block said otherwise until `V2-P5-048`
+executed it.** `--tier` names the tier that is *written*, not the tier that is reached: with only
+the `processed` line, the build exits `0` and `factor run --neutralization …` then exits `1` with
+`No neutralized partition of this factor is registered in this panel at all`. `factor run` also
+needs an explicit `--as-of` — omitted, it reads the panel at the wall clock, so whether the
+example works depends on the day you run it. `tests/integration/test_documented_command_lines.py`
+now executes every runnable command line in this file and in `docs/`.
 
 Three faces answer the same questions: `openalpha factor *`, `GET /api/v1/factors` plus
 `POST /api/v1/factors/run`, and `OpenAlphaSDK.factor_catalog()` /
@@ -97,19 +109,27 @@ prediction **before its outcome is known**. Two commands:
 
 ```bash
 uv run openalpha model evaluate --feature reversal_1d/v1@raw \
-  --name reversal-rank --family cross_sectional_rank --horizon 5d --seed 7 \
+  --name reversal-rank --family cross_sectional_rank --horizon 1d --seed 7 \
   --start 2026-01-06 --end 2026-01-14 --year 2026 \
   --folds 2 --test-days-per-fold 2 --embargo-sessions 0 \
-  --min-scored-ratio 0.5 --as-of 2026-01-20T04:00:00+00:00
+  --min-scored-ratio 0.5 --as-of 2027-01-01T00:00:00+08:00
 
 uv run openalpha model daily-run --feature reversal_1d/v1@raw \
   --name reversal-rank --family cross_sectional_rank --horizon 5d --seed 7 \
   --start 2026-01-06 --end 2026-01-14 --year 2026 \
-  --predict-at 2026-01-16T09:00:00+00:00 --min-scored-ratio 0.5
+  --predict-at 2026-01-16T09:00:00+00:00 --min-scored-ratio 0.5 \
+  --as-of 2027-01-01T00:00:00+08:00
 
 uv run openalpha model predictions          # every registered address
 uv run openalpha model prediction prd_…     # one of them, as it was registered
 ```
+
+**These two carried `V2-P4-094`'s broken form until `V2-P5-048` ran them.** That row fixed the
+examples `--help` prints and left the copies here, in `README.md` and in
+`docs/HANDOFF_CURRENT.md` untouched: `--horizon 5d` purges the first fold's training set to
+nothing over these seven prediction days, `--as-of 2026-01-20T04:00:00+00:00` is refused by the
+partition gate, and `daily-run` named no `--as-of` at all. A fix applied to an example's source
+and not to its copies is three of the four documentation defects that row found.
 
 Three faces again: `openalpha model *`, `POST /api/v1/models/{evaluate,daily-run}` plus
 `GET /api/v1/predictions[/{record_id}]`, and `OpenAlphaSDK.evaluate_model()` /
@@ -148,6 +168,34 @@ it, and nothing here defends against whoever owns the disk. Every rendered predi
 sentences in the body, because a one-word badge reads as an attestation this repository cannot
 make. See [the HTTP contract](docs/api/http.md) for the three standings and the nine named
 boundaries.
+
+## The outcome plane, and where the three faces are not equal
+
+Above the portfolio sits the outcome plane: an observed outcome validated against the decision
+that predicted it, and those stored results aggregated with the family size and dependence
+assumption stated. The whole loop runs in a terminal, which it did not before `V2-P5-047`:
+
+```text
+openalpha research run ./events.json > run.json
+openalpha validation record --research ./run.json --observation ./outcome.json
+openalpha validation statistics --signal sig_… --family-size 40 --dependence arbitrary
+
+openalpha report create --research ./run.json
+openalpha report export rpt_…
+```
+
+**`openalpha validation` shipped with two aggregate readers and no writer**, and `openalpha
+report` with an exporter and no writer, so a CLI-only operator read two stores nothing they could
+run had ever filled. Both writers now exist on all three faces and refuse a tampered
+content-address in byte-identical words.
+
+**Where the faces are still not equal, they say so in a test rather than in a paragraph.**
+`tests/unit/test_surface_parity.py` holds the three surfaces as **equalities** — every route with
+the SDK method and CLI command that reach it, plus `SDK_ONLY` and `CLI_ONLY` naming each
+deliberate asymmetry with its reason. `openalpha validation statistics` and `validation
+segmented` are `CLI_ONLY`: their SDK twins exist and no route does yet. `panel build`, `doctor`,
+`jobs register` and `jobs run` must **not** become routes while this API is unauthenticated. A
+command added without updating that table is red and names itself; prose about a gap is not.
 
 ## Development gates
 
