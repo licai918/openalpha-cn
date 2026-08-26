@@ -6,7 +6,6 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Added
 
-<<<<<<< HEAD
 - **A frontend coverage gate that measures the source tree instead of the import graph, and
   a guard that can name the file** (`V2-P5-020`). The row's own text was stale in three
   places and none of them was the defect. "No component is rendered in isolation" and
@@ -87,7 +86,6 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   `_validate_pytest_acceptance`'s AST check. `pytest tests/unit -q` **3146 passed, 1
   skipped**; `ruff check`, `ruff format --check` and `mypy src scripts` clean.
 
-=======
 - **前端路由与数据层，以及页面 ① 数据体检、页面 ② 候选清单 + 个股详情**（`V2-P5-014`、`V2-P5-015`、
   `V2-P5-016`；三行同落，因为分开落不成立 —— 见下）。新增 `web/src/routes.ts`（全部地址的唯一出处）、
   `web/src/AppRouter.tsx`（`<Routes>` + 导航 + 404 页）、`DataHealthPanel`、`ShortlistIndexPanel`、
@@ -142,8 +140,6 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   且 `web/vite.config.ts` **无 coverage 键** —— 两条在 `V2-P5-019` 交付后即为假：`vite.config.ts`
   自 2026-08-07 起就有 `coverage.thresholds`，四个面板自 `019` 起各有隔离渲染的 `*.test.tsx`。
 
-<<<<<<< HEAD
->>>>>>> worktree-agent-ae0c15ce187b0def0
 - **`backtest/paper.py`: a Paper Portfolio whose inability to reach a broker is enforced at
   run time, not asserted in a comment** (`V2-P5-004`, the thirteenth pure-stdlib `backtest/`
   leaf). `PaperPortfolio.advance` lives one observed session forward through

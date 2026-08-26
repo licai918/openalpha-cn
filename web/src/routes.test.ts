@@ -40,8 +40,8 @@ describe("routes", () => {
     // `NAV_ITEMS`'s own docstring says a location reachable only by typing it is a location
     // nobody will find. The reverse is the testable half: a nav entry pointing at a path no
     // route serves is a link to a 404.
-    const declared = new Set(
-      Object.values(ROUTES).filter((value): value is string => typeof value === "string"),
+    const declared = new Set<string>(
+      Object.values(ROUTES).flatMap((value) => (typeof value === "string" ? [value] : [])),
     );
     expect(NAV_ITEMS.map((item) => item.path).filter((path) => !declared.has(path))).toEqual([]);
     expect(NAV_ITEMS.map((item) => item.label)).toEqual(["工作台", "数据体检", "候选清单"]);
