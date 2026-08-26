@@ -1142,6 +1142,43 @@ would silently go back to naming nothing.
 """
 
 
+FACTOR_TIER_BUILD_ARGUMENTS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "raw": " --as-of <instant> --max-staleness-days <days>",
+        "processed": " --as-of <instant> --max-staleness-days <days> --transform <transform>",
+        "neutralized": (
+            " --as-of <instant> --max-staleness-days <days>"
+            " --transform <transform> --neutralization <key>"
+        ),
+    }
+)
+"""What each tier's `factor build` needs beyond `--factor`, `--tier` and `--year`.
+
+**`V2-P5-048`, and it was found by executing the refusal rather than by reading it.** The remedy
+this module prints said `openalpha factor build --factor … --tier <tier> --year <year>` and
+stopped there, and that line does not run for **any** tier. **Three separate flags, found one at
+a time by executing it**, which is why the count is worth writing down: `--as-of` is required, so
+all three exited `2` with `Missing option '--as-of'`; then every tier exited `3` on
+`--max-staleness-days`, which is refused-if-absent rather than Click-required and so is invisible
+to any check that reads `Parameter.required`; then `processed` and `neutralized` exited `3` on
+`--transform is required for --tier processed` and `--neutralization is required for --tier
+neutralized`. All three refusals say in their own text that there is no honest default. A refusal
+that names a remedy is making a claim about that remedy, and this one sent a reader from a
+refusal about a missing partition to three more about missing flags.
+
+The values are angle-bracket placeholders rather than invented literals for exactly the reason
+`factor build` refuses a default: an instant, a transform and a neutralisation are declarations
+about a study, and a message that guessed them would be answering a question it was not asked.
+What the reader gets is the shape of the command with nothing required left out of it, which is
+the most a refusal can honestly offer.
+
+`tests/integration/test_documented_command_lines.py::
+test_the_remedy_a_missing_neutralized_tier_prints_names_every_option_that_tier_requires` holds
+this against the **live parameter list** rather than against a copy of it, so a `factor build`
+option that becomes required with no row here is red.
+"""
+
+
 def _unbuilt_factor_remedy(store: PanelStore, *, definition: FactorDefinition, tier: str) -> str:
     """The `factor build` line for a tier this panel holds no partition of, or `""`.
 
@@ -1165,7 +1202,7 @@ def _unbuilt_factor_remedy(store: PanelStore, *, definition: FactorDefinition, t
     return (
         f". No {tier} partition of this factor is registered in this panel at all. Build it "
         f"first: `openalpha factor build --factor {definition.qualified_key} --tier {tier} "
-        f"--year <year>`"
+        f"--year <year>{FACTOR_TIER_BUILD_ARGUMENTS[tier]}`"
     )
 
 

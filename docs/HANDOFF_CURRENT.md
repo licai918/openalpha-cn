@@ -26,9 +26,18 @@ openalpha panel build --dataset ... --year 2026     # 点时间面板（价量�
 openalpha factor build --factor reversal_1d/v1 --tier processed \
   --transform cross_section_standard/v1 \
   --as-of 2026-01-08T09:00:00+00:00 --as-of 2026-01-09T09:00:00+00:00 \
-  --year 2026 --waive-max-staleness                 # 计算并写入 raw / processed 两档
+  --year 2026 --max-staleness-days 30               # 计算并写入 raw / processed 两档
+openalpha factor build --factor reversal_1d/v1 --tier neutralized \
+  --transform cross_section_standard/v1 --neutralization industry_and_size/v1 \
+  --as-of 2026-01-08T09:00:00+00:00 --as-of 2026-01-09T09:00:00+00:00 \
+  --year 2026 --max-staleness-days 30               # 第三档，`factor run` 要读它
 openalpha factor run --factor reversal_1d/v1 --start 2026-01-08 --end 2026-01-09 ...
 ```
+
+**这个 block 里有两处是被 `V2-P5-048` 逐字跑出来的（两处都是「源头改了、拷贝没改」）。**
+`--waive-max-staleness` 曾经在这里：`V2-P4-100` 实测它 exit 1 并把它从 `factor build --help`
+的示例里去掉，本文件的拷贝原样留着。第二条 `factor build` 也是新加的——`--tier` 只写它点名的
+那一档，只跑 `processed` 那条，`factor run --neutralization …` 随即 exit 1。
 
 三个面等价：`openalpha factor *`、`GET /api/v1/factors` + `POST /api/v1/factors/run`、
 `OpenAlphaSDK.factor_catalog()` / `.run_factor_experiment()`。
@@ -40,12 +49,13 @@ openalpha factor run --factor reversal_1d/v1 --start 2026-01-08 --end 2026-01-09
 
 ```bash
 openalpha model evaluate --feature reversal_1d/v1@raw --name reversal-rank \
-  --family cross_sectional_rank --horizon 5d --seed 7 \
+  --family cross_sectional_rank --horizon 1d --seed 7 \
   --start 2026-01-06 --end 2026-01-14 --year 2026 \
   --folds 2 --test-days-per-fold 2 --embargo-sessions 0 \
-  --min-scored-ratio 0.5 --as-of 2026-01-20T04:00:00+00:00   # 逐折拟合，逐折报数
+  --min-scored-ratio 0.5 --as-of 2027-01-01T00:00:00+08:00   # 逐折拟合，逐折报数
 openalpha model daily-run --feature reversal_1d/v1@raw ... \
-  --predict-at 2026-01-16T09:00:00+00:00 --min-scored-ratio 0.5  # 在结果已知前把预测落库
+  --predict-at 2026-01-16T09:00:00+00:00 --min-scored-ratio 0.5 \
+  --as-of 2027-01-01T00:00:00+08:00                          # 在结果已知前把预测落库
 openalpha model predictions        # 这个 runtime 目录登记过的每一个地址
 openalpha model prediction prd_…   # 其中一条，按它登记时的样子
 ```

@@ -33,6 +33,9 @@ from openalpha_cn.domain.name_history import (
 from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.factor_view import _PANEL_FAULTS as FACTOR_PANEL_FAULTS
 from openalpha_cn.factor_view import _REGISTRY_FAULTS as FACTOR_REGISTRY_FAULTS
+from openalpha_cn.factor_view import (
+    FACTOR_TIER_BUILD_ARGUMENTS as FACTOR_FACE_TIER_BUILD_ARGUMENTS,
+)
 from openalpha_cn.factor_view import FACTOR_TIER_DATASETS as FACTOR_FACE_TIER_DATASETS
 from openalpha_cn.factor_view import FactorPanelUnreadableError
 from openalpha_cn.factor_view import _read as factor_read
@@ -43,6 +46,9 @@ from openalpha_cn.panel_factors import FACTOR_DEFINITIONS
 from openalpha_cn.panel_view import PANEL_STORE_PLACEHOLDER
 from openalpha_cn.shortlist_view import _PANEL_FAULTS as SHORTLIST_PANEL_FAULTS
 from openalpha_cn.shortlist_view import _REGISTRY_FAULTS as SHORTLIST_REGISTRY_FAULTS
+from openalpha_cn.shortlist_view import (
+    FACTOR_TIER_BUILD_ARGUMENTS as SHORTLIST_FACE_TIER_BUILD_ARGUMENTS,
+)
 from openalpha_cn.shortlist_view import FACTOR_TIER_DATASETS as SHORTLIST_FACE_TIER_DATASETS
 from openalpha_cn.shortlist_view import (
     KNOWN_SHORTLIST_VIEW_LIMITATIONS,
@@ -228,6 +234,22 @@ def test_both_faces_name_a_tiers_partition_with_the_same_table() -> None:
     assert set(SHORTLIST_FACE_TIER_DATASETS) == {"raw", "processed", "neutralized"}
     for tier, dataset in FACTOR_FACE_TIER_DATASETS.items():
         assert dataset is SHORTLIST_FACE_TIER_DATASETS[tier]
+
+
+def test_both_faces_spell_a_tiers_build_arguments_the_same_way() -> None:
+    """`FACTOR_TIER_BUILD_ARGUMENTS` is the second table restated across the same wall.
+
+    On **spelling** rather than on identity, unlike the datasets table one test up: these are
+    strings that go into a refusal a person reads, so two copies that drift apart give the same
+    fault two different remedies -- which is worse than the defect `V2-P5-048` closed, because
+    it would be inconsistent as well as wrong.
+
+    The keys are held equal to `FACTOR_TIER_DATASETS`' keys as well, so a fourth tier cannot
+    arrive with a partition to name and no arguments to build it with.
+    """
+    assert SHORTLIST_FACE_TIER_BUILD_ARGUMENTS == FACTOR_FACE_TIER_BUILD_ARGUMENTS
+    assert set(FACTOR_FACE_TIER_BUILD_ARGUMENTS) == set(FACTOR_FACE_TIER_DATASETS)
+    assert all(value.startswith(" --as-of ") for value in FACTOR_FACE_TIER_BUILD_ARGUMENTS.values())
 
 
 def test_a_tier_the_table_does_not_know_gets_no_command_rather_than_a_wrong_one(

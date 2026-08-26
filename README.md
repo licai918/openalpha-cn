@@ -402,21 +402,44 @@ uv run openalpha factor list
 # 2. 一条声明的全文，含它自己承认不度量什么（每条注解 705～4830 字符，一字不删）
 uv run openalpha factor describe --factor return_vol_60/v1
 
-# 3. 计算并写入因子档（raw / processed / neutralized 三档，--tier 指到哪档就写到哪档）
+# 3. 计算并写入因子档。`--tier` **只写到它点名的那一档**：`processed` 写 raw + processed，
+#    不写 neutralized。第 4 步要读三档，所以这条命令要跑两次，一档一次。
 uv run openalpha factor build --factor reversal_1d/v1 --tier processed \
   --transform cross_section_standard/v1 \
   --as-of 2026-01-08T09:00:00+00:00 --as-of 2026-01-09T09:00:00+00:00 \
   --year 2026 --max-staleness-days 30
 
-# 4. 三档实验：IC、分位组合、周转与容量、冗余，六格归因，密封成内容寻址的产物
+uv run openalpha factor build --factor reversal_1d/v1 --tier neutralized \
+  --transform cross_section_standard/v1 --neutralization industry_and_size/v1 \
+  --as-of 2026-01-08T09:00:00+00:00 --as-of 2026-01-09T09:00:00+00:00 \
+  --year 2026 --max-staleness-days 30
+
+# 4. 三档实验：IC、分位组合、周转与容量、冗余，六格归因，密封成内容寻址的产物。
+#    `--as-of` 是**读面板的时刻**，省掉就取墙钟——那样这条命令的成败取决于你哪天跑它。
 uv run openalpha factor run --factor reversal_1d/v1 \
   --start 2026-01-08 --end 2026-01-09 \
   --transform cross_section_standard/v1 --neutralization industry_and_size/v1 \
   --horizon 1d --ic-method spearman --min-securities 4 --min-as-ofs 2 \
   --group-count 2 --min-securities-per-group 2 --position-capital 100000 \
   --min-periods 2 --participation-cap 0.01 --min-rebalances 1 \
-  --redundancy-threshold 0.8 --retention-floor 0.4
+  --redundancy-threshold 0.8 --retention-floor 0.4 \
+  --as-of 2027-01-01T00:00:00+08:00
 ```
+
+**第 3 步必须跑两次，这一点以前没写（`V2-P5-048`）。** 上面两条命令曾经是一条：只有
+`--tier processed` 那条。它 exit 0，而第 4 步随即 exit 1——`No neutralized partition of this
+factor is registered in this panel at all`。因为第 4 步给了 `--neutralization`，它读的是第三档，
+而第 3 步从没写过第三档。**`--tier` 是「写到哪档」而不是「写到哪档为止」**，这是本节自己那句
+「--tier 指到哪档就写到哪档」的实际后果，先前只有描述没有示例。
+
+**第 4 步的 `--as-of` 也是新加的，理由和 `V2-P4-094` 给 `model` 面的一样。** 省掉它就取墙钟，
+于是同一份面板、同一条命令，一月跑得通、八月跑不通：分区门按**整个分区里最新的那一行**判定，
+墙钟落在它之前就是 `not_yet_knowable`，落在最后一个已建会话之后就是 `date_gap`。可达区间是两者
+的交集，而墙钟不在任何一个「没建到今天」的面板的区间里。示例读的是 2026 全年，所以站在它之后。
+
+这两条现在都由 `tests/integration/test_documented_command_lines.py` **逐字执行**：它把本文件和
+`docs/` 里每一行 `openalpha …` 解析出来，能跑的逐字跑并要求 exit 0。一条没跑过的文档命令和其他
+任何断言一样，只是一个声明。
 
 三个面等价：`openalpha factor *` ／ `GET /api/v1/factors` + `POST /api/v1/factors/run` ／
 `OpenAlphaSDK.factor_catalog()` + `.run_factor_experiment()`。`factor build` 只有命令行与
@@ -742,21 +765,30 @@ uv run openalpha factor build --factor reversal_1d/v1 --tier raw \
 
 # 2) 量一个声明：按 walk-forward 切，逐折拟合，逐折报数
 uv run openalpha model evaluate --feature reversal_1d/v1@raw \
-  --name reversal-rank --family cross_sectional_rank --horizon 5d --seed 7 \
+  --name reversal-rank --family cross_sectional_rank --horizon 1d --seed 7 \
   --start 2026-01-06 --end 2026-01-14 --year 2026 \
   --folds 2 --test-days-per-fold 2 --embargo-sessions 0 \
-  --min-scored-ratio 0.5 --as-of 2026-01-20T04:00:00+00:00
+  --min-scored-ratio 0.5 --as-of 2027-01-01T00:00:00+08:00
 
 # 3) 把今天的预测登记下来（结果还没发生）
 uv run openalpha model daily-run --feature reversal_1d/v1@raw \
   --name reversal-rank --family cross_sectional_rank --horizon 5d --seed 7 \
   --start 2026-01-06 --end 2026-01-14 --year 2026 \
-  --predict-at 2026-01-16T09:00:00+00:00 --min-scored-ratio 0.5
+  --predict-at 2026-01-16T09:00:00+00:00 --min-scored-ratio 0.5 \
+  --as-of 2027-01-01T00:00:00+08:00
 
 # 4) 取回来
 uv run openalpha model predictions
 uv run openalpha model prediction prd_0123456789abcdef01234567
 ```
+
+**上面这两条命令曾经是 `V2-P4-094` 修过的那两条的旧版本（`V2-P5-048`）。** 那一行改掉了
+`--help` 里印的两条，而本文件、`README.en.md` 和 `docs/HANDOFF_CURRENT.md` 里的三份拷贝原样留着：
+`--horizon 5d` 在 `2026-01-06..2026-01-14` 的七个预测日上会把第一折的训练集 purge 到空，
+`walk_forward_folds` 直接拒掉；`--as-of 2026-01-20T04:00:00+00:00` 被分区门拒（见上一节
+`factor run` 的 `--as-of`）；而 `daily-run` 整个省掉了 `--as-of`，于是取墙钟。**一个例子的来源
+被修好、拷贝没有，是本轮四个文档缺陷里的三个**，也是
+`tests/integration/test_documented_command_lines.py` 存在的理由：它读文档而不是持有自己的副本。
 
 三个面等价：`openalpha model evaluate|daily-run`、`POST /api/v1/models/{evaluate,daily-run}`、
 `OpenAlphaSDK.evaluate_model()／.run_daily_model()`。三者都经同一个

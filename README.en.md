@@ -63,9 +63,21 @@ uv run openalpha factor describe --factor return_vol_60/v1  # one declaration, w
 uv run openalpha factor build --factor reversal_1d/v1 --tier processed \
   --transform cross_section_standard/v1 \
   --as-of 2026-01-08T09:00:00+00:00 --as-of 2026-01-09T09:00:00+00:00 \
-  --year 2026 --max-staleness-days 30                     # compute and store the tiers
+  --year 2026 --max-staleness-days 30     # writes raw + processed, and nothing else
+uv run openalpha factor build --factor reversal_1d/v1 --tier neutralized \
+  --transform cross_section_standard/v1 --neutralization industry_and_size/v1 \
+  --as-of 2026-01-08T09:00:00+00:00 --as-of 2026-01-09T09:00:00+00:00 \
+  --year 2026 --max-staleness-days 30     # the third tier, which `factor run` reads
 uv run openalpha factor run --factor reversal_1d/v1 --start 2026-01-08 --end 2026-01-09 ...
 ```
+
+**`factor build` has to run once per tier, and this block said otherwise until `V2-P5-048`
+executed it.** `--tier` names the tier that is *written*, not the tier that is reached: with only
+the `processed` line, the build exits `0` and `factor run --neutralization …` then exits `1` with
+`No neutralized partition of this factor is registered in this panel at all`. `factor run` also
+needs an explicit `--as-of` — omitted, it reads the panel at the wall clock, so whether the
+example works depends on the day you run it. `tests/integration/test_documented_command_lines.py`
+now executes every runnable command line in this file and in `docs/`.
 
 Three faces answer the same questions: `openalpha factor *`, `GET /api/v1/factors` plus
 `POST /api/v1/factors/run`, and `OpenAlphaSDK.factor_catalog()` /
@@ -97,19 +109,27 @@ prediction **before its outcome is known**. Two commands:
 
 ```bash
 uv run openalpha model evaluate --feature reversal_1d/v1@raw \
-  --name reversal-rank --family cross_sectional_rank --horizon 5d --seed 7 \
+  --name reversal-rank --family cross_sectional_rank --horizon 1d --seed 7 \
   --start 2026-01-06 --end 2026-01-14 --year 2026 \
   --folds 2 --test-days-per-fold 2 --embargo-sessions 0 \
-  --min-scored-ratio 0.5 --as-of 2026-01-20T04:00:00+00:00
+  --min-scored-ratio 0.5 --as-of 2027-01-01T00:00:00+08:00
 
 uv run openalpha model daily-run --feature reversal_1d/v1@raw \
   --name reversal-rank --family cross_sectional_rank --horizon 5d --seed 7 \
   --start 2026-01-06 --end 2026-01-14 --year 2026 \
-  --predict-at 2026-01-16T09:00:00+00:00 --min-scored-ratio 0.5
+  --predict-at 2026-01-16T09:00:00+00:00 --min-scored-ratio 0.5 \
+  --as-of 2027-01-01T00:00:00+08:00
 
 uv run openalpha model predictions          # every registered address
 uv run openalpha model prediction prd_…     # one of them, as it was registered
 ```
+
+**These two carried `V2-P4-094`'s broken form until `V2-P5-048` ran them.** That row fixed the
+examples `--help` prints and left the copies here, in `README.md` and in
+`docs/HANDOFF_CURRENT.md` untouched: `--horizon 5d` purges the first fold's training set to
+nothing over these seven prediction days, `--as-of 2026-01-20T04:00:00+00:00` is refused by the
+partition gate, and `daily-run` named no `--as-of` at all. A fix applied to an example's source
+and not to its copies is three of the four documentation defects that row found.
 
 Three faces again: `openalpha model *`, `POST /api/v1/models/{evaluate,daily-run}` plus
 `GET /api/v1/predictions[/{record_id}]`, and `OpenAlphaSDK.evaluate_model()` /

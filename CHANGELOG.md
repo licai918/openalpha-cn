@@ -6,6 +6,82 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Added
 
+- **`V2-P5-047` — the CLI got the two writers its own readers had no input without.**
+  `openalpha validation` shipped `statistics` and `segmented` and no writer; `openalpha report`
+  shipped `export` and no writer. Both readers therefore answered a CLI-only operator about a
+  store that operator had no way to fill — `validation statistics` refuses a signal with nothing
+  stored *by name*, correctly and, with no reachable writer, always — while both READMEs
+  asserted 「三个面等价」 over the flow containing them. **The choice between building the
+  writers and correcting the claim was made by measurement, not by preference**:
+  `OutcomeApiRequest.research` and `ReportApiRequest.research` are both `dict[str, Any]`, so
+  neither writer needs the in-process object that is `SDK_ONLY`'s stated reason for the one
+  capability that genuinely cannot have a second face — and `openalpha research run` already
+  prints exactly those bytes, so the loop
+  `research run > run.json → validation record → validation statistics` closes entirely inside
+  a terminal. New: `openalpha validation record --research … --observation …` and
+  `openalpha report create --research …`, both taking their input as files for
+  `validation segmented --plan`'s reason (an observation's window, prices, benchmark and cost
+  only mean anything together, and every default would be a claim about a market).
+  `parse_research_result` and the refusal text moved to a new neutral top-level module,
+  `openalpha_cn.research_result_io`, because `cli.py` has no import edge to `openalpha_cn.api`
+  at all and reaching the parser through the route module would have put FastAPI behind every
+  `openalpha version`; one function now authors the refusal for all three faces.
+  `tests/integration/test_validation_and_report_writer_faces.py` holds CLI `--json` stdout
+  byte-equal to each route's `200` body and CLI stderr byte-equal to `detail.message` for both
+  commands. `tests/unit/test_surface_parity.py` went red naming `cli_commands` 33 → 35 and is
+  synced by measurement: two `None` CLI halves of rows that already carried an SDK method
+  became commands, so no route, reason or gap-table entry moved.
+
+- **`V2-P5-048` — every command line the READMEs and `docs/` print is now executed.**
+  `V2-P4-094` built this shape one channel over, for `openalpha model --help`, on the argument
+  that "a `--help` example that has not been run is a claim like any other". The documents were
+  the same kind of claim and had never been run.
+  `tests/integration/test_documented_command_lines.py` parses every `openalpha …` line out of
+  `README.md`, `README.en.md` and `docs/**/*.md`, checks all 50 against the live parameter list,
+  and executes the reachable subset verbatim against a generated panel. **Four defects, and
+  three of them were the same failure: a fix applied to an example's source and not to its
+  copies.**
+  - **The factor workflow's steps 3 and 4 are printed as consecutive and are not.** `--tier`
+    names the tier that is *written*, not the tier that is reached: step 3 (`--tier processed`)
+    exits `0`, and step 4 (`--neutralization industry_and_size/v1`) then exits `1` with
+    `No neutralized partition of this factor is registered in this panel at all`. Step 3 has to
+    run **twice**, once per tier, which nothing said. Step 4 also named no `--as-of`, so it read
+    the panel at the wall clock and its success depended on the day it was run.
+  - **The refusal above printed a remedy that does not run either, for any tier** — found only
+    by executing it, and **three separate missing flags found one at a time**. `openalpha factor
+    build --factor … --tier <tier> --year <year>` exits `2` on `Missing option '--as-of'`; then
+    `3` on `--max-staleness-days`, which is refused-if-absent rather than Click-required and so
+    is invisible to any check reading `Parameter.required`; then `3` again on `--transform` /
+    `--neutralization`. `FACTOR_TIER_BUILD_ARGUMENTS` now carries each tier's required shape as
+    angle-bracket placeholders (an instant and a neutralisation are declarations about a study
+    that a message must not invent), restated in `factor_view` and `shortlist_view` for
+    `FACTOR_TIER_DATASETS`' reason and held equal by a new test.
+  - **`model evaluate` and `daily-run` carried `V2-P4-094`'s own broken examples** in three
+    places — `README.md`, `README.en.md`, `docs/HANDOFF_CURRENT.md` — because that row changed
+    the two printed by `--help` and left the copies. `--horizon 5d` purges the first fold's
+    training set to nothing over those seven prediction days; `--as-of
+    2026-01-20T04:00:00+00:00` is refused by the partition gate; `daily-run` named no `--as-of`.
+  - **`docs/HANDOFF_CURRENT.md` still carried `--waive-max-staleness`,** which `V2-P4-100`
+    removed from `factor build --help` after measuring that it exits `1`.
+
+  **What the new test cannot see is declared per line** in `NOT_EXECUTED`: the paid provider
+  (`panel build`), a server (`serve`), this machine's credentials (`doctor`), lines whose
+  arguments are illustrative placeholders, and lines that answer about the wall clock so that an
+  exit code would measure the fixture's build window rather than the line. It also cannot see
+  prose — a command that runs while the paragraph beside it says something else is invisible to
+  it, which is exactly the shape `V2-P5-047` corrected.
+
+- **`V2-P5-049` — `openalpha --version` exited `2` with `No such option: --version`,** on a
+  build whose `openalpha version` printed the number perfectly well. It is the first thing a
+  person types. Now an eager root callback that shares `version`'s bytes (asserted byte-equal,
+  because two spellings of one build number is what a second spelling invites). `is_eager` is
+  load-bearing rather than decoration: `app` is built with `no_args_is_help=True`, so a
+  non-eager flag would parse, find no command and exit `2` for a second reason. The callback is
+  named `_root_options` and not Typer's conventional `main`, which this module already binds to
+  its `console_scripts` entry point — defining both left the entry point rebinding over the
+  callback, working only because the decorator had already captured the function object, with
+  `ruff` reporting `F811` throughout.
+
 - **A guard that covers the instance and not the class, closed nine times**
   (`V2-P5-030` … `V2-P5-040`, new rows filed by this work). Every item below has the same
   shape: the property was real, the code was often already correct, and the thing that

@@ -2741,6 +2741,30 @@ All three take the definition and nothing else. That is the measured fact that w
 """
 
 
+FACTOR_TIER_BUILD_ARGUMENTS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "raw": " --as-of <instant> --max-staleness-days <days>",
+        "processed": " --as-of <instant> --max-staleness-days <days> --transform <transform>",
+        "neutralized": (
+            " --as-of <instant> --max-staleness-days <days>"
+            " --transform <transform> --neutralization <key>"
+        ),
+    }
+)
+"""What each tier's `factor build` needs beyond `--factor`, `--tier` and `--year` (`V2-P5-048`).
+
+`FACTOR_TIER_DATASETS`' arrangement and its reason exactly: restated rather than imported
+because this module may not see `factor_view`, and held equal to that module's copy by
+`tests/unit/test_shortlist_view.py::test_both_faces_spell_a_tiers_build_arguments_the_same_way`.
+On **spelling** rather than identity, unlike the table above -- these are strings, and two
+strings that must be one message are exactly the thing a copy lets drift.
+
+`factor_view.FACTOR_TIER_BUILD_ARGUMENTS` carries the measurement behind the values: the remedy
+both faces printed named no `--as-of`, so it exited `2` for every tier before the tier-specific
+`--transform`/`--neutralization` refusals were ever reached.
+"""
+
+
 def _unbuilt_factor_remedy(store: PanelStore, *, definition: FactorDefinition, tier: str) -> str:
     """`_unbuilt_dataset_remedy`'s factor-plane twin, on the same boundary and for its reason.
 
@@ -2767,7 +2791,7 @@ def _unbuilt_factor_remedy(store: PanelStore, *, definition: FactorDefinition, t
     return (
         f". No {tier} partition of this factor is registered in this panel at all. Build it "
         f"first: `openalpha factor build --factor {definition.qualified_key} --tier {tier} "
-        f"--year <year>`"
+        f"--year <year>{FACTOR_TIER_BUILD_ARGUMENTS[tier]}`"
     )
 
 
