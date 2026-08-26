@@ -85,8 +85,9 @@ def _backtest_body(*, quantity: int) -> dict[str, Any]:
         "initial": _state(),
         "steps": [
             PortfolioBacktestStep(
-                order=_order("reused", quantity=quantity),
-                market=_bar(date(2026, 7, 24)),
+                trade_date=date(2026, 7, 24),
+                bars=(_bar(date(2026, 7, 24)),),
+                orders=(_order("reused", quantity=quantity),),
                 benchmark_close=Decimal("100"),
             ).model_dump(mode="json")
         ],
