@@ -130,11 +130,11 @@ Baseline: `main` @ `e5c6b90`
 | # | Finding | 证据 | 关闭 issue |
 |---|---|---|---|
 | F52 | **`.parquet`/`.duckdb`/`.sqlite3`/`.db` 是发布拦截后缀 ⇒ 任何签入的面板 fixture 都会让 `security` job 失败**，面板 fixture 必须运行时生成 | `scripts/verify_publication.py:14-28 BLOCKED_SUFFIXES` | `V2-P1-014` |
-| F53 | `features.csv` 点名全部 34 个 Python 测试文件 + 2 个 web 测试文件 ⇒ **任何测试树重组都是三制品同步变更**，否则 `security` 与 `python` 两个 job 同时红 | `artifacts/openalpha-v1-feature-coverage/features.csv`；`build_feature_coverage.py --check` 要求 `summary.json` 与 ledger md 逐字节一致（`:155-159`） | `V2-P5-023` |
+| F53 | ~~`features.csv` 点名全部 34 个 Python 测试文件 + 2 个 web 测试文件~~ **已在 `V2-P5-023` 关闭，且本条两处数字实测有误**：逐条数是 **182** 个测试文件（180 Python + `web/src/App.test.tsx` + `web/e2e/golden-flow.spec.ts`——「2 个 web」对，「34 个 Python」差 5.3 倍）；「**全部**」不成立，磁盘上 283 个测试文件里被点名的是 182 个，另外 106 个台账一个字都没点。**三制品里已被强制的只有两个**：`summary.json` 与 ledger md 由 `--check` 逐字节钉死，而 `features.csv` → 磁盘那条边此前只对 180 行 `TRUE_COMPLETE` 强制，5 行 `EXCLUDED`/`DEFERRED` 完全豁免（实测删掉 `SECURITY.md`，`--check` 仍退出 0）。现由 `tests/unit/test_feature_ledger_test_tree.py` 以逐目录**精确计数相等** + 全行全字段存在性接住 | `artifacts/openalpha-v1-feature-coverage/features.csv`；`build_feature_coverage.py --check` 要求 `summary.json` 与 ledger md 逐字节一致（`:155-159`）；`tests/unit/test_feature_ledger_test_tree.py` | `V2-P5-023` |
 | F54 | `test_schema_export.py:19` 断言每个 `schema_version.const` **endswith `/v1`** ⇒ 升到 `/v2` 按设计必然失败 | 同上 | `V2-P4-001` |
 | F55 | `test_repository_assets.py` 断言 `quality.yml`/`Dockerfile`/`pnpm-workspace.yaml` 内的字面串，并断言 10 张 SVG **不得**包含 `"Tushare"`/`"AKShare"`/`"规划目标"` ⇒ 改 CI 会让单元测试红 | `:206-223`、`:52-155` | `V2-P0A-009` |
 | F56 | `pyproject.toml` 无 `fail_under`，80% 门只存在于 CI 命令行；本地 `pytest` 完全不收覆盖率 | `[tool.coverage.report]` 无 `fail_under`；`addopts` 无 `--cov` | `V2-P0A-009` |
-| F57 | 前端零覆盖率配置 | `web/vite.config.ts` 的 `test` 块无 `coverage` 键；`pnpm test` 是裸 `vitest run` | `V2-P5-020` |
+| F57 | ~~前端零覆盖率配置~~ **本条实测为假**：`coverage` 键自 `2026-08-07` 就在 `web/vite.config.ts` 里，`V2-P5-019` 还把 ratchet 上调到 91/83/89/92。**真实的缺陷在量程而非存在性**：没有 `coverage.include` 时 v8 只量被测试 import 过的文件，实测往 `src/` 丢一个零测试模块，四个数字逐字节不变（370/405、246/294、80/89、348/376）。已在 `V2-P5-020` 补 `include`/`exclude` 并把 ratchet 按诚实分母重定为 90/84/89/91 | `web/vite.config.ts` 的 `coverage.include`/`exclude`/`thresholds`；`web/src/testDiscipline.test.ts` | `V2-P5-020` |
 
 ### 3.4 台账校验的真实覆盖面 🔴
 
@@ -150,7 +150,7 @@ Baseline: `main` @ `e5c6b90`
 | # | Finding | 证据 | 关闭 issue |
 |---|---|---|---|
 | F62 | ~~只有 1 个面板用判别式 `state` 联合，其余 3 个用 ad-hoc `loading`/`error` 布尔；`degraded`/`stale`/`blocked` 在 `web/src` 中**根本不存在**~~ **已关闭**：四个面板现在都取 `PanelState<T>`（`web/src/panelState.ts`），`role="alert"` 由 `web/src/components/PanelNotice/` 一处发出。**本条原文的「判别式 8 态」不准确**：`EvidencePanel.tsx:9` 上的是**五**态，八态从未在 `web/src` 出现过；八个名字出自 PRD 决策 14，且**不是**那五个的超集（`idle`/`error` 不在其中）。落地为**九**态 = PRD 的八个 + `idle`（与 `empty` 是两个不同答案，不并），`error` 更名 `failed`。三个新态均由真实契约字段构造（`risk_decision === "block"`、`look_ahead_violations > 0`、`redistribution !== "allowed"`、`direction === "abstain"`、`risk_flags`、`failures[]`、空 `attribution`、代次/表单不符），而非只在测试里构造得出的装饰态 | 好模式（审计时）：`EvidencePanel.tsx:9`（`"idle"\|"loading"\|"ready"\|"empty"\|"error"`，分支于 `:66`/`:73`/`:74`/`:77`/`:82`）；其余：`DecisionPanel.tsx:6-7`、`ReplayPanel.tsx:7-8`、`AttributionPanel.tsx:8-9`。**行号均为审计时快照，已被 `V2-P5-019` 改写** | `V2-P5-019` |
-| F63 | **无任何组件被隔离渲染测试**；4 个面板都实现了 `role="alert"` 分支但 `error` 态从未被渲染过；`App.tsx:33-49` 16 个扁平 `useState`、3 组独立 loading/error，无状态机可 fixture | 唯一前端测试文件是 `web/src/App.test.tsx`（2 个测试，全局 fetch stub）。`vite.config.ts` 的 `test.include` 已能收集同级 `*.test.tsx`，无需改配置 | `V2-P5-020` |
+| F63 | ~~**无任何组件被隔离渲染测试**；4 个面板都实现了 `role="alert"` 分支但 `error` 态从未被渲染过~~ **`V2-P5-019` 已让四个面板经共享契约套件逐一渲染九个态；`V2-P5-020` 补上此前唯一三个没有同级测试的模块（`PanelNotice`——全库唯一发 `role="alert"` 处、`StatusBar`、`api/client.ts`）**。**遗留并已具名**：8 个未覆盖函数全部是事件处理器，`schemaDrift.ts` 的 17 条未覆盖语句几乎全是防御性 `throw`——渲染已证明，交互一条未测 | `web/src/test/panelStateContract.tsx`；`web/src/testDiscipline.test.ts`（产品模块 ↔ 同级测试的双向相等） | `V2-P5-020` |
 | F64 | Playwright 只有 1 个文件、无 page object；其 `page.route` **不 stub `/api/v1/backtests/validate`** ⇒ e2e 流程从未走到归因 | `web/e2e/golden-flow.spec.ts:28-57`；`playwright.config.ts` 已有 `chromium`+`mobile-chromium`、`forbidOnly`、`trace` 与 webServer | `V2-P5-021` |
 
 ---
