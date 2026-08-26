@@ -394,9 +394,45 @@ export type FactorExperimentEnvelope = {
           definition: {
             key: string;
             version: number;
-            family: string;
+            /**
+             * The five families `FactorDefinition.family` declares (`V2-P5-042`).
+             *
+             * Mirrored as a literal union rather than `string`, which is what it read. Not a
+             * cosmetic tightening: while it was `string`, both fixtures carried
+             * `price_momentum` / `price_reversal` — values **no server can send**, since the
+             * model constrains this to the five below. The same fixture-versus-reality gap
+             * that made `required_fields` render `[object Object]`, one field over and not yet
+             * visible. As a union, `tsc` refuses an invented value, and
+             * `tests/unit/test_web_factor_definition_mirror.py` keeps the five in step with
+             * the model.
+             */
+            family:
+              | "value"
+              | "quality"
+              | "growth"
+              | "momentum_reversal"
+              | "volatility_liquidity";
             direction: "higher_is_better" | "lower_is_better";
-            required_fields: string[];
+            /**
+             * The panel columns this factor reads, one object per column (`V2-P5-042`).
+             *
+             * Mirrors `openalpha_cn.domain.factor.FactorField`, which declares exactly
+             * `dataset` and `column` and forbids extras. **This read `string[]` and shipped**,
+             * so `FactorExperimentPanel` rendered `所需字段：[object Object]` on every
+             * experiment page. Measured off a live `openalpha serve` rather than inferred:
+             *
+             *     GET /api/v1/factors/experiments/fxp_3c31ffda36fe1d75227eff70
+             *     …"required_fields": [{"column": "close", "dataset": "daily"}]…
+             *
+             * The wrong type survived because `docs/api/schemas/` holds no contract for this
+             * artifact, so `typesContractDrift.test.ts` exempts the whole envelope — and the
+             * two fixtures were hand-written to match the wrong type, which made the panel's
+             * own assertion green. `tests/unit/test_web_factor_definition_mirror.py` is the
+             * check that closes that: it compares this block against `FactorDefinition`'s
+             * pydantic-generated schema, so a mirror that disagrees with the model goes red
+             * without anyone having to write a fixture correctly.
+             */
+            required_fields: { dataset: string; column: string }[];
             lookback_sessions: number | null;
           };
         };

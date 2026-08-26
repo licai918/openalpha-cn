@@ -117,7 +117,15 @@ export function FactorExperimentPanel(props: FactorExperimentPanelProps) {
               </div>
             </dl>
             <p className="empty-state">
-              所需字段：{definition.required_fields.join("、")}
+              {/* `dataset.column`, which is the spelling `openalpha factor list` already
+                  prints ("reads daily.close", `factor_view._decides`). A column name alone
+                  would be ambiguous — `close` exists in more than one dataset — and the
+                  three faces naming one field three ways is the divergence this page's
+                  `[object Object]` was the visible end of (`V2-P5-042`). */}
+              所需字段：
+              {definition.required_fields
+                .map((field) => `${field.dataset}.${field.column}`)
+                .join("、")}
             </p>
           </section>
 

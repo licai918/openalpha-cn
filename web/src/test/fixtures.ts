@@ -373,9 +373,20 @@ export function buildFactorExperiment(
             definition: {
               key: "momentum",
               version: 1,
-              family: "price_momentum",
+              // V2-P5-042: one of `FactorDefinition`'s five declared families. This said
+              // `price_momentum`, which no server can send.
+              family: "momentum_reversal",
               direction: "higher_is_better",
-              required_fields: ["close", "adj_factor"],
+              // V2-P5-042. `FactorField` objects, not strings. This fixture said
+              // `["close", "adj_factor"]` and `types.ts` said `string[]`, so the panel's
+              // own assertion passed while the shipped page rendered `[object Object]`.
+              // Measured off a live `openalpha serve`:
+              //   GET /api/v1/factors/experiments/fxp_3c31ffda36fe1d75227eff70
+              //   … "required_fields": [{"column": "close", "dataset": "daily"}] …
+              required_fields: [
+                { dataset: "daily", column: "close" },
+                { dataset: "daily", column: "adj_factor" },
+              ],
               lookback_sessions: 20,
             },
           },

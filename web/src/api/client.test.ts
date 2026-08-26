@@ -52,6 +52,51 @@ describe("requestJson error handling", () => {
     await expect(getHealth()).rejects.toThrow("证据的 as_of 晚于事件时间");
   });
 
+  // V2-P5-041. The four pages render `error.message` verbatim, so whatever this throws is
+  // literally what a user reads. Before this, a refusal reached the screen as its own JSON
+  // — `{"detail":{"reason":"panel_unreadable","message":"…"}}` — and the server's sentence,
+  // which names the command that fixes the problem, was the part buried in punctuation.
+  // The body below was captured with curl from a running `openalpha serve`.
+  // These two assert the *whole* message with `toBe`, and that is load-bearing rather than
+  // fastidious. Written first as `rejects.toThrow(<the sentence>)`, the panel case passed
+  // against the unfixed client — because the raw blob **contains** the sentence as a
+  // substring, so a substring matcher cannot tell "the message" from "the message wrapped
+  // in JSON punctuation", which is the entire defect. Measured: it went green before a line
+  // of `refusal.ts` was wired in. An equality is the only matcher that can see this bug.
+  it("unwraps a {reason, message} refusal down to the sentence the server wrote", async () => {
+    const sentence =
+      "the XSHG calendar could not be read out of this service's panel store: " +
+      "Build it first (`openalpha panel build --dataset trade_cal --year <year>`)";
+    stubFetch({
+      ok: false,
+      status: 409,
+      text: JSON.stringify({ detail: { reason: "panel_unreadable", message: sentence } }),
+    });
+
+    const error = (await getHealth().catch((caught: unknown) => caught)) as Error;
+
+    expect(error.message).toBe(sentence);
+  });
+
+  it("keeps every refused field addressable when the backend answers pydantic's list", async () => {
+    stubFetch({
+      ok: false,
+      status: 422,
+      text: JSON.stringify({
+        detail: [
+          { type: "missing", loc: ["query", "dataset"], msg: "Field required" },
+          { type: "missing", loc: ["query", "year"], msg: "Field required" },
+        ],
+      }),
+    });
+
+    const error = (await getHealth().catch((caught: unknown) => caught)) as Error;
+
+    // Not one flattened blob: the two fields stay told apart, which is the whole reason
+    // `V2-P4-051` pinned this shape.
+    expect(error.message).toBe("query.dataset：Field required\nquery.year：Field required");
+  });
+
   it("falls back to the status code only when the backend sent no body", async () => {
     stubFetch({ ok: false, status: 503, text: "" });
     await expect(getHealth()).rejects.toThrow("503");

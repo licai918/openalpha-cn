@@ -4,6 +4,46 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Two web-surface defects the product acceptance found, both measured against a running
+  server rather than against the report** (`V2-P5-041`, `V2-P5-042`).
+  - **`V2-P5-041` — all four pages rendered an API refusal as a raw JSON blob.**
+    `web/src/api/client.ts` threw `new Error(await response.text())` and every page renders
+    `error.message` verbatim, so the server's own sentence — the good part, the one that
+    names the command that fixes the problem — reached users buried in punctuation. Now
+    unwrapped in `web/src/api/refusal.ts`, the one module that knows the wire, rather than
+    in each of the four pages. All four documented body shapes are handled: the
+    `{reason, message}` object (including the `declared_ceiling_exceeded` variant),
+    pydantic's field-error **list**, a bare-string `detail`, and a body that is not JSON at
+    all. **The list is not flattened** — `loc` is the only thing that says which field
+    failed, so each entry renders as `body.evidence[1].payload.quality_flags[1]：<msg>` and
+    the `errors_elided` sentinel (empty `loc`) renders as its bare sentence.
+    **The status code is not the discriminator**, and that corrects the report: the panel
+    plane's `panel_unreadable` is a **`409`**, not a `422`, and the same `409` also carries
+    the flat gate verdict, which has no `detail` key. Measured with `curl`, not inferred.
+    One assertion in the new tests was caught being green by construction: written as
+    `rejects.toThrow(<the sentence>)` it passed against the *unfixed* client, because the
+    raw blob contains the sentence as a substring — only an equality can see this bug.
+  - **`V2-P5-042` — `所需字段：[object Object]` on every factor-experiment page.**
+    `types.ts` declared `required_fields: string[]`; every server answers
+    `[{"dataset": "daily", "column": "close"}]`, read off a live
+    `GET /api/v1/factors/experiments/{id}`. The type was the defect, not the render. Three
+    guards were blind to it at once: the drift check exempts `FactorExperimentEnvelope` by
+    *type*, so every field inside it was exempt; the panel's own assertion passed because
+    both fixtures were hand-written to match the wrong type; and the CLI was right the whole
+    time, so the divergence was invisible from Python. A checked-in JSON schema was
+    considered and rejected — the route declares no `response_model`, so a hand-written
+    schema would be a *second* hand-maintained mirror free to drift the same way. Instead
+    `tests/unit/test_web_factor_definition_mirror.py` compares the mirror field by field
+    against `FactorDefinition.model_json_schema()`, which pydantic **generates**; it follows
+    `test_spa_addressability.py`'s precedent, runs in 0.02s, and keeps `pnpm test` offline.
+    The exemption is narrowed to name what is and is not covered, and a new guard fails if a
+    file an exemption points at stops existing. **A third defect of the same family turned up
+    on the way**: `family` was mirrored as `string`, so both fixtures carried
+    `price_momentum` / `price_reversal` — values no server can send. Mirrored as the real
+    five-value union, `tsc` now refuses an invented one.
+
 ### Added
 
 - **A guard that covers the instance and not the class, closed nine times**
