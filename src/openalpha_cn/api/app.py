@@ -15,6 +15,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.responses import Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from openalpha_cn import __version__
@@ -95,6 +97,8 @@ from openalpha_cn.panel_view import (
     panel_store,
     readiness_payload,
 )
+from openalpha_cn.product.export import ReportExport
+from openalpha_cn.product.export import export_report as build_report_export
 from openalpha_cn.product.research import (
     ResearchReport,
     ResearchReportFactory,
@@ -1604,6 +1608,127 @@ def _undeclared_risk_flag_refusal(
     )
 
 
+class SinglePageFallbackFiles(StaticFiles):
+    """Serve the built web app so that every address the client router has is an address.
+
+    `V2-P5-027`. `StaticFiles(html=True)` falls back to `index.html` only for *directory*
+    requests, so an unmatched path is a `404`. Measured on `12532e3` with a `TestClient` over
+    the real `create_app` and a real `pnpm build`: `/` was `200`, and `/data-health`,
+    `/shortlists`, `/shortlists/sl_abc`, `/factor-lab`, `/factor-lab/fxp_abc` and `/portfolio`
+    were all `404`. Every bookmarkable URL pages ① through ④ added worked under `vite dev`,
+    which has its own history fallback, and 404'd under `openalpha serve`. The e2e suite could
+    not see it, because the thing answering in development was the dev server.
+
+    ## The rule
+
+    A `GET`/`HEAD` this build cannot answer is answered with `index.html` at `200`, **unless
+    its first path segment belongs to somebody else**. Two owners exist and neither is written
+    down -- both are derived, so a route family or a build directory added later is covered
+    without anybody remembering this class:
+
+    - `reserved_roots`, the first path segments of the live route table (`api`, `health`,
+      `docs`, `redoc`, `openapi.json` today), passed in by `create_app` after every route is
+      registered. **This is the load-bearing half.** Without it an unknown `/api/v1/...` --
+      a client-side typo, a stale caller, a renamed route -- comes back as an HTML `200`, and
+      a caller that branches on `response.ok` reads a page as a payload. The refusal has to
+      stay in the API's own vocabulary, which is JSON.
+    - the directories inside the build itself (`assets` today). A subresource that is missing
+      is a corrupted deploy; answering it with `text/html` turns a clean `404` into a
+      MIME-type error several layers from the cause.
+
+    ## Unknown non-API paths get the shell, and that is a decision
+
+    `/no-such-page` is served `index.html` at `200`, and `AppRouter`'s `NotFoundPage` renders
+    the `role="alert"` that names the address. The alternative -- refusing at the server --
+    requires this file to hold a second copy of the client's route table, which is exactly the
+    defect `V2-P5-011` measured on `CORS_ALLOWED_METHODS`: two statements of one fact, nothing
+    keeping them equal, and the copy already behind the original. The cost of the choice taken
+    is that a mistyped address is `200` rather than `404`; the cost of the other one is that a
+    *working* page 404s the day someone adds a route to `web/src/routes.ts` and does not think
+    to edit Python. `tests/unit/test_spa_addressability.py` holds the two sides in
+    correspondence so that the collision case -- a client area landing on a reserved segment --
+    goes red naming the segment.
+
+    ## What was measured about `vite dev` rather than copied from it
+
+    `vite 8.1.5`, probed directly: it has **no** extension rule (`/no-such.page` and
+    `/stocks/000001.SZ` are both `200` shell) and it serves the shell for `/assets/missing.js`
+    too; its protection of `/api` comes from `vite.config.ts`'s hand-written proxy list, not
+    from the fallback -- a list that is already missing `/docs` and `/redoc`. So development is
+    followed on addressability and deliberately not followed on those two points, each of which
+    would ship a defect. Nothing here keys on `Accept` either, which `vite` does: a rule that
+    answers `curl` differently from a browser makes an incident unreproducible from a terminal.
+
+    Being a `StaticFiles` subclass rather than a catch-all route is deliberate: the fallback is
+    *how the build is served*, not a capability of this API, so it stays out of the route table
+    that `tests/unit/test_surface_parity.py` counts.
+    """
+
+    def __init__(self, *, directory: Path, reserved_roots: frozenset[str]) -> None:
+        super().__init__(directory=directory, html=True)
+        self._reserved_roots = reserved_roots
+        self._build_roots = frozenset(child.name for child in directory.iterdir() if child.is_dir())
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        """Delegate, and turn only a `404` for a *location* into the shell.
+
+        `404` and not every `HTTPException`: `StaticFiles` refuses a non-`GET`/`HEAD` method
+        with `405` before it ever looks for the file, and `POST /portfolio` answered with a
+        page would be a worse lie than the `405`.
+
+        **This condition is a surviving mutant and that is reported rather than hidden.**
+        Deleting `error.status_code != 404` leaves every test green, and the sweep says so:
+        on `starlette` as it ships here the only other status this call raises is that `405`,
+        and re-entering with `index.html` re-raises the identical `405` because the method is
+        re-checked before the lookup. So the two versions are indistinguishable through the
+        HTTP surface today, and no honest test can separate them. It is kept as the
+        fail-closed shape for a status this library does not raise yet -- a future `403`
+        rendered as a `200` page would be the same defect as the `/api/` one, one layer down.
+        """
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as error:
+            if error.status_code != 404 or not self._is_a_client_location(path):
+                raise
+            return await super().get_response("index.html", scope)
+
+    def _is_a_client_location(self, path: str) -> bool:
+        """Whether this mount-relative path is a place the client router could be showing.
+
+        `path` has already been normalised by `StaticFiles.get_path`, so `.` (the root) and
+        `..` (an escape attempt) are the two non-segment values it can start with; neither is
+        a location, and neither should be dressed up as one.
+        """
+        root = path.split("/", 1)[0]
+        if root in {"", ".", ".."}:
+            return False
+        return root not in self._reserved_roots and root not in self._build_roots
+
+
+def _reserved_root_segments(application: FastAPI) -> frozenset[str]:
+    """The first path segment of every route the application already answers.
+
+    Derived from the live table rather than written down, so `SinglePageFallbackFiles` cannot
+    fall behind a route added next week -- the failure mode this repository has already
+    measured twice, on `CORS_ALLOWED_METHODS` (`V2-P5-011`) and on the citation tables
+    `tests/unit/test_source_cited_tests.py` was written for.
+
+    Call it *after* every route is registered and before the mount is added; `create_app` does.
+
+    `getattr` rather than `route.path`: `application.routes` is typed `list[BaseRoute]`, and
+    `BaseRoute` declares no `path` -- only `Route`, `WebSocketRoute` and `Mount` carry one. A
+    `cast` here would be a claim about a list this function does not own, so the attribute is
+    asked for and the answers that are not strings are skipped.
+    """
+    segments: set[str] = set()
+    for route in application.routes:
+        path = getattr(route, "path", None)
+        if isinstance(path, str) and path.startswith("/"):
+            segments.add(path.split("/")[1])
+    segments.discard("")
+    return frozenset(segments)
+
+
 def create_app(
     *,
     runtime_dir: Path | None = None,
@@ -1847,6 +1972,26 @@ def create_app(
         if report is None:
             raise HTTPException(status_code=404, detail="Report was not found.")
         return report
+
+    @application.get("/api/v1/reports/{report_id}/export")
+    def report_export(report_id: str) -> ReportExport:
+        """Assemble one report's shareable form, with restricted payloads withheld.
+
+        `V2-P5-022`, PRD Implementation Decision 27: 不导出 Tushare 原始 payload. The rule and
+        every word about it live in `product/export.py`; this route resolves the report's
+        evidence at the report's own clock and hands the result to it, exactly as
+        `OpenAlphaSDK.export_report` and `openalpha report export` do.
+
+        A separate address from `GET /api/v1/reports/{report_id}` rather than a `?evidence=1`
+        flag on it, because they are two different artifacts: one is the report, and one is a
+        thing a user may hand to somebody else. A query parameter would let the safe answer and
+        the shareable one be confused for each other in a caller's log.
+        """
+        report = report_store.get(report_id)
+        if report is None:
+            raise HTTPException(status_code=404, detail="Report was not found.")
+        evidence = evidence_store.query(as_of=report.created_at, subject=report.subject)
+        return build_report_export(report=report, evidence=evidence)
 
     @application.post("/api/v1/research/batches", status_code=202)
     def batch_submit(
@@ -2729,7 +2874,10 @@ def create_app(
             raise ValueError(f"web_dir does not contain index.html: {configured_web_dir}")
         application.mount(
             "/",
-            StaticFiles(directory=configured_web_dir, html=True),
+            SinglePageFallbackFiles(
+                directory=configured_web_dir,
+                reserved_roots=_reserved_root_segments(application),
+            ),
             name="web",
         )
 

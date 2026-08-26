@@ -6,6 +6,98 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Added
 
+- **每个可收藏的 URL 现在在真服务器下也是地址，且未知 `/api/` 路径仍是 JSON 404**
+  (`V2-P5-027`, new row filed by this work). `api/app.py` mounted `StaticFiles(html=True)`, whose
+  fallback covers only *directory* requests, so **every deep link pages ① through ④ added worked
+  under `vite dev` and 404'd under the shipped server**. Measured a third time on `12532e3` with a
+  `TestClient` over the real `create_app` and a real `pnpm build`, after two earlier agents
+  measured it independently: `/` was `200`; `/data-health`, `/shortlists`, `/shortlists/sl_abc`,
+  `/factor-lab`, `/factor-lab/fxp_abc` and `/portfolio` were **all `404`**. The e2e suite could not
+  see it -- the thing answering was the dev server, not the application. `SinglePageFallbackFiles`
+  serves the shell for any `GET`/`HEAD` the build cannot answer **unless the first path segment
+  belongs to somebody else**, and both owners are *derived* rather than written down a second
+  time: the live route table's own first segments (`api`, `health`, `docs`, `redoc`,
+  `openapi.json`) and the build's own directories (`assets`). The first is the load-bearing half
+  -- an unknown `/api/v1/...` stays a JSON `404`, so a client-side typo cannot become a page a
+  caller reads as a payload. The second turns a missing subresource back into a clean `404`
+  instead of `text/html` handed to a `<script>`.
+  **Unknown non-API paths get the shell and the router names them**, and the alternative is
+  refused for a stated reason: 404-ing at the server needs Python to hold a second copy of the
+  client's route table, which is the defect `V2-P5-011` measured on `CORS_ALLOWED_METHODS` -- one
+  fact stated twice, nothing keeping the two equal, the copy already behind the original.
+  **Three assumptions about `vite dev` were measured and two were false** (vite 8.1.5, probed with
+  `curl`): it has **no** extension rule at all (`/no-such.page` and `/stocks/000001.SZ` are both
+  `200` shell), it serves the shell for `/assets/missing.js` too, and its protection of `/api`
+  comes from `vite.config.ts`'s hand-written proxy list -- already missing `/docs` and `/redoc` --
+  rather than from the fallback. Development is therefore deliberately *not* copied on those two
+  points. Nothing keys on `Accept` either: a rule that answers `curl` differently from a browser
+  makes an incident unreproducible from a terminal.
+  **The proof runs against the real server.** `web/e2e/production-routing.spec.ts` drives
+  `uvicorn openalpha_cn.api.app:app` -- the `Dockerfile`'s entry point -- over a real `pnpm build`,
+  and **not** `openalpha serve`, because `cli.main()` merges `.env` into the environment and a test
+  harness must not read a developer's real one; `OPENALPHA_RUNTIME_DIR` is a fresh `mktemp -d`, so
+  no run touches the repository's `runtime/`. Reverting the fallback leaves that file **8 red / 3
+  green**, the red being the six deep links plus reload-holds-the-address plus the in-app 404.
+  `tests/unit/test_spa_addressability.py` is 17 further cases over a synthetic build, including the
+  correspondence that a client area landing on a reserved segment goes red naming the segment.
+  `test_surface_parity.py`'s counts are **unmoved**: the fallback is a `StaticFiles` subclass, not
+  a route, because it is *how the build is served* rather than a capability of this API.
+
+- **报告导出：许可过滤后的可分享制品，三张脸一次交付** (`V2-P5-022`).
+  `GET /api/v1/reports/{report_id}/export`, `OpenAlphaSDK.export_report` and
+  `openalpha report export`, all over one implementation in `product/export.py`.
+  PRD `S72`/`S81` and Implementation Decision 27 ask for exactly one thing -- 不导出 Tushare 原始
+  payload -- and **the obstacle recorded against this row, that no licence field reaches pages ③
+  or ④, is true and does not block it**: the row is about *reports*, and a report's evidence is
+  the one place a per-row licence actually travels (`EvidenceSnapshot.source_license` and
+  `redistribution`, written straight off `ProviderMetadata`; all three shipped providers declare
+  `restricted`). No contract change was needed.
+  **What is withheld was measured on the real adapter, not assumed.** `providers/tushare.py:4038`
+  builds `payload=cast(JsonValue, row)` -- the upstream response row verbatim, which is the "原始
+  payload" the decision names. The same constructor builds `summary` as
+  `f"Tushare {kind} record for {subject} on {date}."`, a template written in this repository
+  carrying a dataset name, a subject and a date and **no provider field values**, so the summary is
+  kept and the module says so out loud rather than deciding it quietly.
+  **Withholding is a tag, never an absence.** `ExportedEvidence.body` is a discriminated union
+  rather than a nullable `payload`, because `JsonValue` admits `null`: an unrestricted evidence
+  whose payload *is* `null` and a restricted one whose payload was taken away are byte-identical
+  under any design that signals withholding by absence, and they are different facts. The fixture
+  that separates them is its own test. `unknown` is treated exactly as `restricted` -- not knowing
+  a licence is not a licence -- and a citation the store cannot resolve is reported under
+  `evidence_not_recovered` rather than shortening the list.
+  Measured: 10 unit cases plus 5 integration cases that all start at a `CliRunner`, a `TestClient`
+  over a real `create_app(runtime_dir=…)` or an `OpenAlphaSDK`, over a runtime directory built by
+  real `openalpha evidence build` / `openalpha research run` / `POST /api/v1/reports` calls. The
+  three faces render the export **byte-for-byte identically**, and a marker planted in the
+  restricted provider's row appears in **none** of the three outputs. `test_surface_parity.py`
+  moves 47/54/32 → **48/55/33** with `without_sdk` and `rest_only` unchanged: one capability on
+  three faces, not one face and two gap-table entries.
+
+- **Playwright page objects, four-page money flows, and the assertion `F64` needed** (`V2-P5-021`).
+  Baseline measured: **6 tests / 1 project / 2 spec files / zero page objects**; delivered **25
+  tests / 2 projects / 4 spec files / 6 page-object modules**. `F64`'s two claims are both true --
+  no page object, and `/api/v1/backtests/validate` unstubbed so **the golden flow never reached
+  attribution**. The root cause is not a missing stub line: **no assertion in that suite was ever
+  about a request happening**, so `toBeVisible()` passed whether or not a panel had spoken to the
+  server. `e2e/stubs.ts` therefore counts every `page.route` hit, and `expectRequested("validate")`
+  is the assertion F64's finding actually needed. Stub payloads now come from
+  `src/test/fixtures.ts`, whose own docstring already claimed the e2e specs stubbed the same
+  shapes -- true by intention and false by construction until now.
+  **A measured surprise, kept rather than smoothed over**: the first version asserted each request
+  happened exactly once and went red on three flows at once with `Expected: 1, Received: 2`.
+  `main.tsx` wraps the tree in `<StrictMode>`, which deliberately double-invokes effects in
+  development. Rather than loosening the bound, the two triggers are now distinguished:
+  `expectRequested` (a click; **exactly once**, so a double-submitting button still goes red) and
+  `expectRequestedOnMount` (**≥1 and ≤2**, two-sided, so a fetch loop still goes red).
+  Each page's flow pins its own contract: ① and ④ start `idle` because their endpoints have
+  required parameters the app must not invent, and assert that **nothing was requested** before the
+  user asked; ② and ③ fetch on mount because theirs take none. One case is only expressible in a
+  browser: failing `/api/v1/predictions` must leave the factor-experiment index on screen, which is
+  the claim `FactorLabPage.tsx` makes by *not* using `Promise.all` -- about two in-flight requests
+  rather than two rendered states.
+  Also closed: **`tsc -b` had never read `e2e/`** -- the directory was in none of the three
+  tsconfigs -- so `tsconfig.e2e.json` was added and referenced.
+
 - **页面③因子与模型实验室与页面④组合与验证，含五处具名缺口** (`V2-P5-017`, `V2-P5-018`). The last
   two of PRD Decision 24's four route areas, at `/factor-lab` (+ `/factor-lab/:experimentId`) and
   `/portfolio`. **296 -> 438 tests, 22 -> 30 files**, and the ratchet rose on all four metrics:

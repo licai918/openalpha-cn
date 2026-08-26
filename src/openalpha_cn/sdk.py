@@ -94,6 +94,8 @@ from openalpha_cn.panel.catalog import DatasetReadiness
 from openalpha_cn.panel_doctor import PanelHealthReport, panel_health_report
 from openalpha_cn.panel_gate import DependencyClearance, require_datasets
 from openalpha_cn.panel_view import dataset_readiness, panel_request, panel_store
+from openalpha_cn.product.export import ReportExport
+from openalpha_cn.product.export import export_report as build_report_export
 from openalpha_cn.product.research import (
     ResearchReport,
     ResearchReportFactory,
@@ -270,6 +272,34 @@ class OpenAlphaSDK:
     def list_reports(self, *, subject: str | None = None) -> tuple[ResearchReport, ...]:
         """List generated reports, optionally by subject."""
         return self.report_store.list(subject=subject)
+
+    def export_report(self, report_id: str) -> ReportExport | None:
+        """Assemble one report's shareable form, with restricted payloads withheld.
+
+        `None` -- not an empty export -- when no report has that id, so a caller can tell
+        "there is no such report" from "the report cites nothing this store can produce".
+        `V2-P5-022` and `product/export.py` are where the licence rule itself lives.
+
+        The evidence is fetched at `report.created_at`, which is `decision.created_at`: the
+        clock the report was made against. Any later clock would let evidence that became
+        visible *after* the decision into an artifact describing that decision, which is the
+        look-ahead this repository fails closed on everywhere else.
+
+        **`subject=` is a surviving mutant, reported rather than hidden.** Replacing it with
+        `subject=None` leaves every test green, and it always will: `export_report` filters
+        down to `report.evidence_ids`, so a wider read produces the identical artifact. It is
+        a narrowing for cost, not for correctness, and it is safe only because a report cannot
+        cite evidence outside its own subject -- `ResearchRunRequest` refuses a run whose
+        evidence spans subjects ("all evidence must match the requested subject"), measured
+        while building `tests/integration/test_report_export_interfaces.py`, whose first
+        fixture used two stocks and exited `1`. If that invariant is ever relaxed, this line
+        is the one that has to go with it.
+        """
+        report = self.report_store.get(report_id)
+        if report is None:
+            return None
+        evidence = self.evidence_store.query(as_of=report.created_at, subject=report.subject)
+        return build_report_export(report=report, evidence=evidence)
 
     def validate_outcome(
         self,
