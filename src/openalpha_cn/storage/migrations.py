@@ -33,7 +33,8 @@ pre-existing table (like this module's demo migration) has nothing to alter yet 
 Rather than crash a fresh install, such a migration raises `MigrationNotYetApplicable`: the
 executor stops (does not advance past it, does not record it as applied) and leaves it pending
 for the next invocation, by which point the owning store has created its table. This is not
-speculative -- `test_new_database_lands_on_baseline_and_defers_the_demo_migration` and
+speculative -- `tests/integration/storage/test_migrations.py::
+test_new_database_applies_baseline_and_validation_results_then_defers_the_demo_migration` and
 `test_build_storage_catches_up_the_demo_migration_on_a_second_call` exercise exactly this path.
 """
 

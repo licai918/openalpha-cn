@@ -38,6 +38,16 @@ still a broker; each was measured firing before it was listed, and
 test_every_refused_event_is_one_this_test_provokes_rather_than_a_name_in_reserve` provokes all
 eight on every run so that none of them is a name in reserve.
 
+**`ctypes.dlopen` covers loading and nothing else, and its presence in that list made ctypes
+look covered.** A handle obtained *before* `advance()` calls `libc.socket`/`connect`/`send`
+inside the session without raising a single audit event -- measured, twelve bytes delivered
+over loopback from inside `refusing_outward_calls()`. That is wider than either of the two
+"started beforehand" rows: it needs no connected descriptor and no child process, and every
+socket call happens during the session. It is
+`KNOWN_PAPER_LIMITATIONS.a_shared_library_loaded_before_the_session_opens_its_own_socket`, and
+`test_a_shared_library_loaded_before_the_session_opens_a_socket_the_guard_never_sees` drives
+it rather than describing it.
+
 **The ban costs the legitimate path nothing, measured**: a whole session against a real
 `SQLitePortfolioLedger` raises exactly `sqlite3.connect` and `sqlite3.connect/handle`, and
 neither is on the list.
@@ -214,6 +224,25 @@ KNOWN_PAPER_LIMITATIONS: Final[tuple[PaperLimitation, ...]] = (
             "through an already-open pipe is file I/O to this guard, exactly as the descriptor "
             "case above. Both are the same boundary seen twice: the guard covers what a "
             "session *starts*, not what a process was already holding."
+        ),
+    ),
+    PaperLimitation(
+        code="a_shared_library_loaded_before_the_session_opens_its_own_socket",
+        detail=(
+            "ctypes.dlopen is refused during a session, so a broker library cannot be *loaded* "
+            "from inside one -- and listing it alongside the socket events reads as though "
+            "ctypes were covered. Only loading is. A handle obtained before advance() was "
+            "entered calls libc.socket, libc.connect and libc.send inside the session, none of "
+            "which passes through CPython's socket module and none of which raises any audit "
+            "event, so a brand-new connection is opened and bytes leave the process unrefused. "
+            "Measured, over loopback: 12 bytes delivered from inside refusing_outward_calls(). "
+            "This is strictly wider than the descriptor and child-process rows above, which is "
+            "why it is stated separately rather than folded into them: those two need something "
+            "connected or spawned beforehand, and this one needs only a handle -- every socket "
+            "call happens during the session. No in-process mechanism closes it, because an "
+            "audit hook sees what CPython chooses to publish and a raw syscall through a "
+            "loaded library publishes nothing; a seccomp-style boundary is a property of the "
+            "process a caller starts, not of a library it imports."
         ),
     ),
     PaperLimitation(

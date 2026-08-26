@@ -262,6 +262,44 @@ def test_a_family_declared_before_the_cut_is_refused_by_the_bucket_count() -> No
     assert "multiplies the hypotheses tested" in message
 
 
+def test_a_family_declared_above_the_bucket_count_is_the_number_the_report_uses() -> None:
+    """The cuts not shown are still in the family, and every other fixture here hides that.
+
+    `V2-P5-039`.
+
+    `declared_family_size` is checked in one direction only -- it may not fall below the
+    buckets -- because a caller who tried fourteen cuts and publishes the seven that looked
+    best is the thing BH exists to prevent, and only the caller knows the fourteen. Every
+    other request in this file happens to declare exactly the bucket count, so an
+    implementation that quietly recomputed the family from `len(cohorts)` and threw the
+    declaration away would agree with all of them. This one declares fourteen against seven
+    buckets and separates the two answers at both places the number is used.
+
+    `most_permissive` halves from `7 * 0.125 / 7` to `7 * 0.125 / 14`, which moves it below
+    the floor of a four-observation bucket -- so the two buckets that
+    `test_a_bucket_whose_floor_lands_exactly_on_the_line_is_admitted_and_not_missed` finds
+    exactly on the line are, in the family the caller actually ran, incapable. Declaring the
+    hypotheses you did not publish costs you the resolution to publish the ones you did, and
+    that is the whole point of declaring them.
+    """
+    declared = 2 * WIDE_BUCKETS
+    report = report_segmented_outcomes(_request(declared_family_size=declared))
+
+    assert report.declared_family_size == declared
+    assert report.statistics.multiple_testing.family_size == declared
+    assert report.statistics.multiple_testing.reported_hypotheses == WIDE_BUCKETS
+    assert report.tested_hypotheses == WIDE_BUCKETS
+
+    for axis_id, label in ((INDUSTRY_AXIS, "banks"), (MARKET_REGIME_AXIS, "bull")):
+        segment = _segment(report, axis_id, label)
+        assert segment.capability.sample_size == 4
+        assert segment.capability.smallest_attainable_p_value == 0.125
+        assert segment.capability.most_permissive_critical_value == RATE / 2
+        assert segment.capability.can_ever_reject is False
+
+    assert report.hypotheses_that_could_ever_reject == 0
+
+
 def test_every_bucket_is_a_row_in_the_one_family_and_carries_its_own_verdict() -> None:
     """Each bucket's q-value comes from the single family, keyed by `axis:label`."""
     report = report_segmented_outcomes(_request())

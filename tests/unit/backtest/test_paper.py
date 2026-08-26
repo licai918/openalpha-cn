@@ -18,10 +18,12 @@ FastAPI process cannot refuse an unrelated request's traffic.
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import ctypes.util
 import os
 import socket
+import struct
 import subprocess
 import sys
 import threading
@@ -212,6 +214,74 @@ def test_every_refused_event_is_one_this_test_provokes_rather_than_a_name_in_res
     refuse(lambda: ctypes.CDLL(ctypes.util.find_library("c")), "ctypes.dlopen")
 
     assert provoked == set(OUTWARD_AUDIT_EVENTS)
+
+
+@pytest.mark.skipif(
+    sys.platform not in {"darwin", "linux"},
+    reason="the sockaddr_in layout below is written for BSD and Linux only",
+)
+def test_a_shared_library_loaded_before_the_session_opens_a_socket_the_guard_never_sees() -> None:
+    """`ctypes.dlopen` in `OUTWARD_AUDIT_EVENTS` covers *loading*, and reads as covering ctypes.
+
+    `V2-P5-033`. The two "started beforehand" rows of `KNOWN_PAPER_LIMITATIONS` both need
+    something arranged before `advance()`: a socket already connected, or a child already
+    spawned. This one needs only a **handle**. Every socket call -- create, connect, send --
+    happens inside the session, through `libc` rather than through CPython's socket module, so
+    not one of them raises an audit event and the guard is never consulted.
+
+    Driven rather than declared, and asserted in the direction that hurts: **the bytes arrive**.
+    A test that asserted a refusal would be describing a guarantee this module does not have,
+    and one that merely called `libc.socket` and shrugged would go green on a platform where
+    the call failed for an unrelated reason. The listener is in this process on `127.0.0.1`,
+    so nothing leaves the machine -- and note that this escape is invisible to
+    `tests/offline_guard.py` for the identical reason, which is a limit that guard declares.
+
+    The day an in-process mechanism closes this, the assertion below is what goes red.
+    """
+    library = ctypes.util.find_library("c")
+    assert library is not None, "no libc to load; this test cannot measure what it is about"
+    libc = ctypes.CDLL(library, use_errno=True)
+
+    with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        listener.settimeout(5.0)
+        host, port = listener.getsockname()
+        packed = socket.inet_aton(host)
+        raw = (
+            (
+                struct.pack("BB", 16, socket.AF_INET)
+                if sys.platform == "darwin"
+                else struct.pack("=H", socket.AF_INET)
+            )
+            + struct.pack("!H", port)
+            + packed
+            + b"\x00" * 8
+        )
+        address = (ctypes.c_char * len(raw)).from_buffer_copy(raw)
+
+        with refusing_outward_calls():
+            descriptor = libc.socket(socket.AF_INET, socket.SOCK_STREAM, 0)
+            assert descriptor >= 0, f"libc.socket failed, errno {ctypes.get_errno()}"
+            try:
+                assert libc.connect(descriptor, address, len(raw)) == 0, (
+                    f"libc.connect failed, errno {ctypes.get_errno()}"
+                )
+                sent = libc.send(descriptor, b"BROKER-ORDER", 12, 0)
+            finally:
+                libc.close(descriptor)
+
+        accepted, _ = listener.accept()
+        with contextlib.closing(accepted):
+            accepted.settimeout(5.0)
+            delivered = accepted.recv(64)
+
+    assert sent == 12
+    assert delivered == b"BROKER-ORDER", (
+        "the guard now sees a raw syscall through a pre-loaded library; if that is deliberate, "
+        "delete KNOWN_PAPER_LIMITATIONS"
+        ".a_shared_library_loaded_before_the_session_opens_its_own_socket with it"
+    )
 
 
 def test_the_guard_stops_refusing_once_the_session_unwinds() -> None:
@@ -423,6 +493,7 @@ def test_the_known_limitations_are_declared_and_uniquely_coded() -> None:
     assert set(codes) == {
         "a_descriptor_connected_before_the_session_is_not_seen",
         "a_child_process_started_before_the_session_is_not_seen",
+        "a_shared_library_loaded_before_the_session_opens_its_own_socket",
         "work_handed_to_another_thread_leaves_the_guard_behind",
         "the_audit_hook_can_never_be_uninstalled",
         "the_ledger_is_structurally_typed_so_its_identity_is_the_callers",

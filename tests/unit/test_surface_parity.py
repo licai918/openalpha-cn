@@ -30,12 +30,21 @@ What this file makes impossible is the *silent* kind of drift -- a face that sim
 from __future__ import annotations
 
 import inspect
+import os
+import re
 import tempfile
+import typing
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from types import MappingProxyType
 from typing import Final
+from unittest import mock
 
+import pytest
 import typer
+from fastapi import FastAPI
+from starlette.routing import Mount
 
 from openalpha_cn import cli as cli_module
 from openalpha_cn.api.app import create_app
@@ -229,19 +238,158 @@ before the process exists.
 """
 
 
-def _routes() -> set[str]:
-    with tempfile.TemporaryDirectory() as directory:
-        application = create_app(runtime_dir=Path(directory) / "runtime")
-        found = set()
-        for route in application.routes:
-            path = getattr(route, "path", None)
-            methods = getattr(route, "methods", None)
-            if path is None or methods is None or path in FRAMEWORK_ROUTES:
-                continue
-            found.update(
-                f"{method} {path}" for method in methods if method not in {"HEAD", "OPTIONS"}
-            )
+@contextmanager
+def _application() -> Iterator[FastAPI]:
+    """A real application with storage in a temp directory and **no** build mounted.
+
+    `OPENALPHA_WEB_DIR` is **cleared**, and passing `web_dir=None` is not a substitute for it --
+    measured, and the first version of this helper got exactly that wrong. `create_app` reads the
+    variable through `load_config()` whenever `web_dir` is `None`, because `None` there means
+    "not specified" rather than "no build"; so with the variable exported the application arrives
+    *mounted* either way. Now that `_surface_of` keys `Mount`, that is one extra `MOUNT /` in the
+    table on a developer's machine and none in CI -- the worst shape a count can have.
+    `test_an_exported_web_dir_does_not_change_the_surface_this_file_counts` holds it down, and it
+    is the test that falsified the `web_dir=None` version.
+    """
+    with mock.patch.dict(os.environ), tempfile.TemporaryDirectory() as directory:
+        os.environ.pop("OPENALPHA_WEB_DIR", None)
+        yield create_app(runtime_dir=Path(directory) / "runtime")
+
+
+def _route_entries() -> dict[str, object]:
+    """Every route this application answers, keyed the way `PARITY` writes them.
+
+    **Every route object, not only the ones with `methods`.** Until `V2-P5-035` this skipped
+    anything whose `methods` was `None`, which is `WebSocketRoute` and `Mount` -- so adding an
+    `@application.websocket(...)` left the parity table green and the count unmoved (measured:
+    `5 passed`). A websocket is a capability of this API by any reading, and a mount is a whole
+    sub-application; neither is a thing the three-way difference may be blind to. They are keyed
+    `WEBSOCKET <path>` and `MOUNT <path>`, which are not HTTP methods and cannot collide with
+    one.
+    """
+    with _application() as application:
+        return _surface_of(application)
+
+
+def _surface_of(application: FastAPI) -> dict[str, object]:
+    """The keying itself, over any application, so a test can drive it on one it built.
+
+    Separate from `_route_entries` because the shipped application carries no `WebSocketRoute`
+    and no `Mount`, so the branch that keys them is unreachable through it -- measured: deleting
+    that branch left the whole file green while `_route_entries` was the only caller. A test
+    that re-implemented the keying to prove it works would be a second statement of the same
+    rule, which is what this file exists to stop.
+    """
+    found: dict[str, object] = {}
+    for route in application.routes:
+        path = getattr(route, "path", None)
+        if path is None or path in FRAMEWORK_ROUTES:
+            continue
+        methods = getattr(route, "methods", None)
+        if methods is None:
+            kind = "MOUNT" if isinstance(route, Mount) else "WEBSOCKET"
+            # `application.mount("/", ...)` is stored by starlette with `path == ""`, so the
+            # root mount would key as `MOUNT ` with a trailing space and read as a typo. It is
+            # the one mount this application actually has, so it is the one worth spelling.
+            found[f"{kind} {path or '/'}"] = route
+            continue
+        for method in methods:
+            if method not in {"HEAD", "OPTIONS"}:
+                found[f"{method} {path}"] = route
     return found
+
+
+def _routes() -> set[str]:
+    return set(_route_entries())
+
+
+DOMAIN_TYPE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
+
+TYPE_SCAFFOLDING: Final[frozenset[str]] = frozenset(
+    {
+        "tuple",
+        "list",
+        "dict",
+        "set",
+        "frozenset",
+        "Sequence",
+        "Mapping",
+        "Iterable",
+        "None",
+        "NoneType",
+        "Optional",
+        "Union",
+        "Any",
+        "str",
+        "int",
+        "float",
+        "bool",
+        "Annotated",
+        "Final",
+        "Literal",
+        "typing",
+        "openalpha_cn",
+        "object",
+        "JSONResponse",
+        "Response",
+        "starlette",
+        "responses",
+        "class",
+        "fastapi",
+    }
+)
+"""Names that carry no information about *which* capability an answer belongs to.
+
+`JSONResponse` and `object` are in here for the same reason `dict` is: a route annotated with
+one of them has declined to say what it returns, so there is nothing to hold its SDK twin
+against. Those rows are counted rather than checked -- see
+`test_a_route_and_its_sdk_twin_answer_with_the_same_domain_type`.
+"""
+
+
+def _domain_types(annotation: object) -> frozenset[str]:
+    """The domain type names inside an annotation, with the scaffolding removed."""
+    if annotation is None:
+        return frozenset()
+    text = annotation if isinstance(annotation, str) else str(annotation)
+    return (
+        frozenset(
+            name.split(".")[-1] for name in DOMAIN_TYPE.findall(text.replace("openalpha_cn.", ""))
+        )
+        - TYPE_SCAFFOLDING
+    )
+
+
+def _answer_types(route: object) -> frozenset[str]:
+    model = getattr(route, "response_model", None)
+    if model is None:
+        model = typing.get_type_hints(route.endpoint).get("return")  # type: ignore[attr-defined]
+    return _domain_types(model)
+
+
+def _sdk_answer_types(method: str) -> frozenset[str]:
+    return _domain_types(typing.get_type_hints(getattr(OpenAlphaSDK, method)).get("return"))
+
+
+def _comparable_pairs() -> list[tuple[str, frozenset[str], frozenset[str]]]:
+    """Every parity row where **both** faces say what they answer with.
+
+    A row where either side resolves to nothing after `TYPE_SCAFFOLDING` has no claim to check,
+    so it is left out here and counted by
+    `test_the_rows_this_type_check_cannot_constrain_are_counted_rather_than_skipped` instead --
+    the two together are exactly the paired rows, which is what stops "not comparable" from
+    becoming a quiet exemption.
+    """
+    entries = _route_entries()
+    pairs: list[tuple[str, frozenset[str], frozenset[str]]] = []
+    for route, (method, _) in PARITY.items():
+        if method is None or route not in entries:
+            continue
+        served = _answer_types(entries[route])
+        answered = _sdk_answer_types(method)
+        if served and answered:
+            pairs.append((route, served, answered))
+    return pairs
 
 
 def _sdk_methods() -> set[str]:
@@ -300,6 +448,124 @@ def test_every_named_sdk_method_and_cli_command_actually_exists() -> None:
     assert named_cli <= commands, (
         f"parity names CLI commands that do not exist: {sorted(named_cli - commands)}"
     )
+
+
+def test_an_exported_web_dir_does_not_change_the_surface_this_file_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A build on disk and `OPENALPHA_WEB_DIR` exported must not add a row to the table.
+
+    Now that `_surface_of` keys `Mount`, an application built with a web directory carries
+    `MOUNT /` -- correctly, and `tests/unit/test_spa_addressability.py` is where that is a
+    subject. Here it would be an extra route nobody declared, appearing only for developers who
+    export the variable and never in CI. The `os.environ.pop` in `_application` is what stops
+    it, and this test is what proved it has to be there: with `web_dir=None` alone, which is
+    what stood there first, the assertion below fails.
+    """
+    build = tmp_path / "dist"
+    build.mkdir()
+    (build / "index.html").write_text('<div id="root"></div>', encoding="utf-8")
+    monkeypatch.setenv("OPENALPHA_WEB_DIR", str(build))
+
+    assert not any(key.startswith("MOUNT ") for key in _routes())
+
+    with tempfile.TemporaryDirectory() as directory:
+        mounted = create_app(runtime_dir=Path(directory) / "runtime", web_dir=build)
+    assert "MOUNT /" in _surface_of(mounted), (
+        "this test proves nothing unless a mounted application really does carry MOUNT /"
+    )
+
+
+def test_a_route_and_its_sdk_twin_answer_with_the_same_domain_type() -> None:
+    """A row's two halves must be about one capability, not merely both exist.
+
+    `V2-P5-035`. `test_every_named_sdk_method_and_cli_command_actually_exists` checks a
+    **subset**: every name in the table resolves to something real. Measured, exchanging
+    `POST /api/v1/screen`'s SDK method with `GET /api/v1/watchlist`'s left the whole file at
+    `5 passed` -- both names still existed, the keys were untouched, the derived gap sets were
+    unchanged and every count held. The table said which capability each route reaches, and
+    nothing at all checked that it was telling the truth.
+
+    Two things this deliberately is not. It is **not** a name rule: the two faces name things
+    by opposite conventions (`report_list`/`list_reports`, `panel_gate`/`panel_clearance`), and
+    measured, the route endpoint name equals the SDK method name in 6 of 48 rows. And it is not
+    a call-graph check: `OpenAlphaSDK` is in-process, so a method reaches its capability
+    directly rather than through the route, and there is no edge between them to follow.
+
+    What is left, and what a swap actually breaks, is the **answer's type**. A route that
+    declares a response model and an SDK method that declares a return annotation are both
+    saying what the capability produces, and two faces of one capability produce the same
+    thing. Rows where either side declares nothing that survives `TYPE_SCAFFOLDING` are
+    unconstrained -- counted by the test below, never silently skipped.
+
+    **The surviving swap is reported rather than hidden.** Two methods on one path that answer
+    with the same domain type are indistinguishable here: measured, exchanging
+    `GET /api/v1/reports`'s `list_reports` with `POST /api/v1/reports`'s `create_report` leaves
+    this file at `9 passed`, because both answer about a report. Nothing in a type separates
+    "list them" from "create one", and the only thing that would is an equivalence test at the
+    capability's own integration module -- which is the boundary this file's own header already
+    draws between reachability and equivalence. What is closed is the swap **across**
+    capabilities, which is every swap that changes what the row is about.
+    """
+    mismatched = sorted(
+        f"{route} answers {sorted(served)} but its declared twin answers {sorted(answered)}"
+        for route, served, answered in _comparable_pairs()
+        if not served & answered
+    )
+
+    assert mismatched == [], (
+        "a parity row pairs a route with an SDK method that answers about something else; "
+        "either the row is wrong or the two faces have drifted apart"
+    )
+
+
+def test_the_rows_this_type_check_cannot_constrain_are_counted_rather_than_skipped() -> None:
+    """The residue of the check above, as a number, so it cannot grow quietly.
+
+    A route annotated `-> JSONResponse` and an SDK method annotated `-> None` each decline to
+    say what they produce, so their row has nothing to hold. Seventeen rows are in that state
+    today. Left uncounted, the check above would weaken every time somebody wrote a route
+    without a response model -- the shape of a floor, which `V2-P4-038` measured the worth of.
+
+    The number going **down** is a row that started declaring its type, and is as red as one
+    going up: re-measure and write the new figure, which is the point at which somebody reads
+    this docstring.
+    """
+    entries = _route_entries()
+    paired = [
+        route for route, (method, _) in PARITY.items() if method is not None and route in entries
+    ]
+
+    assert len(paired) == 37
+    assert len(paired) - len(_comparable_pairs()) == 17
+
+
+def test_a_websocket_or_a_mount_is_a_surface_this_table_can_see() -> None:
+    """`V2-P5-035`'s other half: `_routes()` skipped every route object with no `methods`.
+
+    `WebSocketRoute` and `Mount` both have `methods is None`, so both fell out of the table
+    before it was compared to anything. Measured: adding an `@application.websocket("/api/v1/
+    stream")` to `create_app` left this file at `5 passed`, which is a whole capability arriving
+    on the REST face with the parity audit silent.
+
+    Driven on an application built here rather than by mutating `create_app`, so the extraction
+    is what is tested and the shipped application is not disturbed. The shipped one is asserted
+    to carry neither, which is the other direction: `MOUNT /` appears the moment a build is
+    served, and `_application()` clears `OPENALPHA_WEB_DIR` so that it does not appear by
+    accident on a developer's machine and vanish in CI.
+    """
+    probe = FastAPI()
+
+    @probe.websocket("/api/v1/stream")
+    async def stream(websocket: object) -> None:  # pragma: no cover - never connected to
+        raise NotImplementedError
+
+    probe.mount("/static", FastAPI())
+
+    keys = set(_surface_of(probe))
+
+    assert keys == {"WEBSOCKET /api/v1/stream", "MOUNT /static"}
+    assert not any(key.startswith(("WEBSOCKET ", "MOUNT ")) for key in _routes())
 
 
 def test_each_route_without_an_sdk_method_declares_why_it_has_none() -> None:

@@ -672,7 +672,7 @@ REGISTRY_ENTRY_COUNTS: Final[dict[str, int]] = {
     "KNOWN_CONSTRUCTION_LIMITATIONS": 7,
     "KNOWN_SEGMENTED_REPORTING_LIMITATIONS": 7,
     "KNOWN_TURNOVER_VARIANT_LIMITATIONS": 6,
-    "KNOWN_PAPER_LIMITATIONS": 7,
+    "KNOWN_PAPER_LIMITATIONS": 8,
     "KNOWN_WALK_FORWARD_LIMITATIONS": 11,
     "KNOWN_BASELINE_LIMITATIONS": 10,
     "KNOWN_TREE_LIMITATIONS": 7,
@@ -719,10 +719,13 @@ The direction it does not cover is stated rather than left to be discovered: an 
 by a differently-named entry inside one registry leaves the count alone. Nothing here can see
 that, for `V2-P4-092`'s reason one section down -- a binding on names and counts cannot see what
 an entry claims. What does see it is the registry's own module naming all of its codes at once:
-measured by AST, 32 of the 34 have a literal collection somewhere under `tests/` whose members
-are exactly that registry's code set, and `KNOWN_INDEX_MEMBERSHIP_LIMITATIONS` and the derived
-`KNOWN_PANEL_LIMITATIONS` are the two that do not -- which is why the measured probe was built
-on the first of them.
+measured by AST, every hand-written registry now has a literal collection somewhere under
+`tests/` whose members are exactly that registry's code set. `KNOWN_INDEX_MEMBERSHIP_LIMITATIONS`
+was the last one without, which is why the measured probe above was built on it; `V2-P5-034`
+gave it one (`tests/unit/domain/test_index_membership.py::
+test_every_named_limitation_carries_a_measurement`, which held six `in codes` assertions over
+nine entries until then, leaving three codes named nowhere in the suite at all). The derived
+`KNOWN_PANEL_LIMITATIONS` still has none and deliberately so -- see the next paragraph.
 
 `KNOWN_PANEL_LIMITATIONS` is deliberately absent. Its count is not an independent fact: the
 assertion above already pins it at `folded + plane_wide + 1`, so writing 69 here would be a
@@ -738,10 +741,10 @@ no longer written in prose at all. `DOCSTRING_TOTALS` below holds them as an equ
 DOCSTRING_TOTALS: Final[Mapping[str, int]] = MappingProxyType(
     {
         "registries": 41,
-        "entries": 367,
+        "entries": 368,
         "derived_entries": 70,
         "table_rows": 40,
-        "table_entries": 297,
+        "table_entries": 298,
     }
 )
 """Every number this module would otherwise have stated in prose, as an equality.

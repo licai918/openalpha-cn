@@ -3,9 +3,20 @@
 Three switches keep `uv run pytest` from reaching the network, and each is tested here for a
 different failure. The marker deselection is *policy* -- one `addopts` edit undoes it. The
 `OPENALPHA_E2E` requirement is *policy* too. Only the socket guard is a measurement, so it is
-the one this file spends most of its assertions on: an installed fixture that does not
-actually refuse anything is exactly the shape of the twelve Criticals this project has booked,
-where the stated property and the observed behaviour came apart.
+the one this file spends most of its assertions on: an installed guard that does not actually
+refuse anything is exactly the shape of the twelve Criticals this project has booked, where the
+stated property and the observed behaviour came apart.
+
+**The sentence above was itself one of those, until `V2-P5-032`.** It said "each is tested
+here" while the sections ran "switch 1" then "switch 3", and outside `tests/e2e/` the string
+`OPENALPHA_E2E` occurred in exactly two places: a comment in `pyproject.toml`, and this
+paragraph claiming it was covered. A docstring is not a test, and the gap was in the file whose
+job is to say so.
+
+`V2-P5-031` is the other half: the guard was a function-scoped autouse fixture, so it was live
+inside a test body and inert during module import and during every broad-scoped fixture's
+setup. It is a `pytest_runtest_protocol` wrapper now, and the four phases it used to miss are
+measured below.
 
 Deliberately under `tests/unit/`, not `tests/e2e/`: these tests must run in the default suite,
 and every test in `tests/e2e/` is deselected there.
@@ -15,13 +26,16 @@ from __future__ import annotations
 
 import _socket
 import ast
+import os
 import re
 import socket
 import subprocess
 import sys
+import tempfile
 import textwrap
 import tomllib
 from pathlib import Path
+from typing import Final
 
 import pytest
 from offline_guard import (
@@ -85,6 +99,55 @@ def test_every_e2e_module_marks_itself_at_module_level() -> None:
             for node in tree.body
         )
         assert marked, f"{module.relative_to(ROOT)} has no module-level `pytestmark` naming e2e"
+
+
+# --- switch 2: an opted-in run is a deliberate act ----------------------------------------
+
+
+def test_the_second_switch_refuses_an_e2e_run_that_did_not_opt_in() -> None:
+    """`-m e2e` alone must not be enough, and until `V2-P5-032` nothing said so.
+
+    This module's docstring has claimed three switches since it was written, and the sections
+    below it went "switch 1" then "switch 3". Grepped: outside `tests/e2e/` the string
+    `OPENALPHA_E2E` appeared in exactly two places -- a comment in `pyproject.toml` and the
+    docstring sentence above claiming it was tested. The switch was real and the test was not.
+
+    Driven in a child interpreter with the variable cleared, because `require_opt_in` reads
+    `os.environ` at call time and this suite's own process may well have it set: a test that
+    passed only on a machine where it happened to be unset would be the same kind of claim
+    this file exists to stop making.
+    """
+    script = textwrap.dedent(
+        f"""
+        import sys
+        sys.path.insert(0, {str(E2E_ROOT)!r})
+        import pytest
+        from e2e_support import E2E_SWITCH, require_opt_in
+
+        print("SWITCH=" + E2E_SWITCH)
+        try:
+            require_opt_in()
+        except BaseException as exc:
+            print("OUTCOME=" + type(exc).__name__)
+        else:
+            print("OUTCOME=RETURNED")
+        """
+    )
+    environment = {key: value for key, value in os.environ.items() if key != "OPENALPHA_E2E"}
+    finished = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=True,
+        env=environment,
+    )
+
+    assert "SWITCH=OPENALPHA_E2E" in finished.stdout, finished.stderr
+    assert "OUTCOME=Skipped" in finished.stdout, (
+        "with OPENALPHA_E2E unset, `require_opt_in` must stop the run; it returned instead, so "
+        "`-m e2e` on its own would reach Tushare"
+    )
 
 
 # --- switch 3: the socket guard is live ---------------------------------------------------
@@ -221,6 +284,177 @@ def test_a_non_internet_socket_is_left_alone() -> None:
         with pytest.raises(OSError) as caught:
             sock.connect("/openalpha-cn/this/path/does/not/exist.sock")
         assert not isinstance(caught.value, OfflineSuiteViolation)
+
+
+# --- V2-P5-031: the guard covers a whole item, not only its body --------------------------
+
+SCOPE_PROBE: Final[str] = textwrap.dedent(
+    """
+    import socket, threading
+    import pytest
+
+    OUT = []
+
+    def attempt(phase):
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        threading.Thread(target=server.accept, daemon=True).start()
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            client.connect(server.getsockname())
+            OUT.append(phase + "=OPEN")
+        except Exception as exc:
+            OUT.append(phase + "=REFUSED")
+        finally:
+            client.close()
+            server.close()
+
+    attempt("import")
+
+    @pytest.fixture(scope="session")
+    def s():
+        attempt("session")
+
+    @pytest.fixture(scope="module")
+    def m():
+        attempt("module")
+
+    @pytest.fixture(scope="class")
+    def c():
+        attempt("class")
+
+    def test_probe(s, m, c):
+        attempt("call")
+        print("PHASES " + " ".join(OUT))
+    """
+)
+"""A test module that opens a loopback connection at five different points in pytest's cycle.
+
+Loopback only, and it listens on the port it connects to, so nothing leaves the machine even
+when the guard is absent -- which is the case the vacuity test below deliberately runs.
+"""
+
+
+def _run_scope_probe(*, with_the_real_hooks: bool) -> dict[str, str]:
+    """Run `SCOPE_PROBE` in a child pytest and report what each phase got.
+
+    `-p conftest` with `tests/` on `PYTHONPATH` loads **this repository's own**
+    `tests/conftest.py` as a plugin, so what is measured is the shipped hooks rather than a
+    copy of them pasted into a fixture file. `--confcutdir` at the probe's own directory keeps
+    pytest from finding any other `conftest.py`, so the toggle is the only difference between
+    the two runs.
+    """
+    with tempfile.TemporaryDirectory() as directory:
+        probe = Path(directory) / "test_scope_probe.py"
+        probe.write_text(SCOPE_PROBE, encoding="utf-8")
+        finished = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                str(probe),
+                "-q",
+                "-s",
+                "-p",
+                "no:cacheprovider",
+                "-p",
+                "no:randomly",
+                "--confcutdir",
+                directory,
+                *(["-p", "conftest"] if with_the_real_hooks else []),
+            ],
+            cwd=directory,
+            env={
+                **os.environ,
+                "PYTHONPATH": str(ROOT / "tests"),
+                "PYTHONDONTWRITEBYTECODE": "1",
+            },
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=True,
+        )
+    reported = [line for line in finished.stdout.splitlines() if line.startswith("PHASES ")]
+    assert reported, f"the probe printed no phases; stdout was:\n{finished.stdout}"
+    return dict(entry.split("=", 1) for entry in reported[0].removeprefix("PHASES ").split())
+
+
+def test_the_guard_covers_every_phase_of_an_item_and_not_only_its_body() -> None:
+    """`V2-P5-031`: `_depth` used to rise in a function-scoped fixture, which is far too late.
+
+    Measured on `37c4273`, before the guard moved to `pytest_runtest_protocol`:
+
+        module-import-time            -> NOT REFUSED, connection completed
+        session-scoped fixture setup  -> NOT REFUSED, connection completed
+        module-scoped fixture setup   -> NOT REFUSED, connection completed
+        class-scoped fixture setup    -> NOT REFUSED, connection completed
+        inside a test body            -> refused: OfflineSuiteViolation
+
+    Only the last line was ever tested, and only the last line worked. "Fetch it once and reuse
+    it" is the sentence a session-scoped fixture exists to make, so the phase the guard could
+    not see was the phase most likely to reach a network.
+
+    Reverting the hooks to the old autouse fixture turns the first four of these back to
+    `OPEN`, which is what makes this a measurement of the scope rather than of the refusal --
+    `test_an_outbound_tcp_connection_is_refused_from_an_unmarked_test` already covers the body.
+    """
+    phases = _run_scope_probe(with_the_real_hooks=True)
+
+    assert phases == {
+        "import": "REFUSED",
+        "session": "REFUSED",
+        "module": "REFUSED",
+        "class": "REFUSED",
+        "call": "REFUSED",
+    }
+
+
+def test_the_scope_probe_can_tell_an_open_connection_from_a_refused_one() -> None:
+    """The non-vacuity of the test above, and the only place the guard is genuinely absent.
+
+    Without it, a probe that could not connect for some unrelated reason -- no loopback, a
+    listener that never came up -- would report five refusals and the scope assertion would be
+    green while measuring nothing. The same child, the same probe, without `-p conftest`.
+    """
+    phases = _run_scope_probe(with_the_real_hooks=False)
+
+    assert phases == {
+        "import": "OPEN",
+        "session": "OPEN",
+        "module": "OPEN",
+        "class": "OPEN",
+        "call": "OPEN",
+    }
+
+
+def test_the_scope_the_guard_does_not_reach_is_the_declared_one() -> None:
+    """One phase is still outside, and this is what keeps that a measurement.
+
+    `pytest_runtest_protocol` brackets an item, so a fixture whose scope *ends* after the last
+    item's protocol -- a session-scoped finaliser -- tears down unguarded. Rather than declare
+    the limit and hope, this asserts the condition under which it is unreachable: no fixture
+    outside `tests/e2e/` is session-scoped at all, so there is no session-scoped teardown in a
+    default run to be unguarded. A file that adds one goes red here and its author reads this
+    docstring, which is the whole point of writing it down.
+
+    `tests/e2e/` is exempt because its items are not bracketed either way.
+    """
+    session_scoped = sorted(
+        f"{path.relative_to(ROOT)}:{node.lineno}"
+        for path in (ROOT / "tests").rglob("*.py")
+        if E2E_ROOT not in path.parents
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path)))
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        for decorator in node.decorator_list
+        if isinstance(decorator, ast.Call) and 'scope="session"' in ast.unparse(decorator)
+    )
+
+    assert session_scoped == [], (
+        "a session-scoped fixture outside tests/e2e/ tears down after the last item's protocol "
+        "has closed, which is the one phase `pytest_runtest_protocol` does not bracket; either "
+        "narrow its scope or move the network-touching part into the item's own bracket"
+    )
 
 
 # --- V2-P4-105: the guard is below the class graph, not spread across it ------------------
@@ -405,10 +639,11 @@ def test_the_python_wrapper_class_is_not_mutated_by_the_guard_at_all() -> None:
 def test_the_guard_stops_refusing_once_it_unwinds() -> None:
     """The whole cycle -- refused inside, delivered after -- which no in-process test can see.
 
-    Every test in this suite runs inside the autouse guard, so `_depth` never reaches zero here
-    and "the guard unwinds" is unobservable from within, exactly as the class-shadow round trip
-    was before `V2-P4-039` gave it a `target`. A child interpreter is the observation point now,
-    and it is a better one: it watches the *guarantee* rather than the shape of a class dict.
+    Every test in this suite runs inside the guard `tests/conftest.py` holds open around the
+    whole item, so `_depth` never reaches zero here and "the guard unwinds" is unobservable from
+    within, exactly as the class-shadow round trip was before `V2-P4-039` gave it a `target`. A
+    child interpreter is the observation point now, and it is a better one: it watches the
+    *guarantee* rather than the shape of a class dict.
 
     Loopback only, and the child is a plain `sys.executable` with `tests/` on its path -- the
     same shelling-out `tests/unit/test_repository_assets.py` and
@@ -450,10 +685,11 @@ def test_the_guard_stops_refusing_once_it_unwinds() -> None:
 def test_a_nested_block_closing_does_not_switch_the_outer_guard_off() -> None:
     """`_depth` is a count, not a flag, and this is the failure a flag would have.
 
-    The autouse fixture holds one block open for the whole of every non-e2e test, so a test that
-    opens its own -- as `test_the_guard_stops_refusing_once_it_unwinds`'s child does, and as any
-    future test asserting about the guard would -- must not leave the suite unguarded when it
-    closes. With a boolean this test's final assertion delivers a datagram to the listener.
+    `pytest_runtest_protocol` holds one block open around the whole of every non-e2e item, so a
+    test that opens its own -- as `test_the_guard_stops_refusing_once_it_unwinds`'s child does,
+    and as any future test asserting about the guard would -- must not leave the suite unguarded
+    when it closes. With a boolean this test's final assertion delivers a datagram to the
+    listener.
     """
     from offline_guard import refusing_outbound_traffic
 

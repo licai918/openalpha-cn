@@ -864,14 +864,32 @@ def test_the_panel_column_contract_puts_the_index_in_the_subject_column() -> Non
 
 
 def test_every_named_limitation_carries_a_measurement() -> None:
-    """A boundary with no number behind it is a disclaimer, not a disclosure."""
+    """A boundary with no number behind it is a disclaimer, not a disclosure.
+
+    The code set is an **equality**, and it used to be six `in codes` assertions over nine
+    entries. `tests/unit/test_known_limitation_registries.py` states why that matters and had
+    already measured this exact registry as one of the two with no such literal anywhere:
+    "a membership assertion is additive: it can see a code that was renamed and never a code
+    that was removed", and it cannot see one code exchanged for another registry's either,
+    because both names are still string literals somewhere in the suite. Three of the nine
+    were named nowhere at all -- `scheduled_review_takes_effect_before_it_is_published`,
+    `silent_truncation_at_the_response_cap` and `no_revision_history` -- so what stood between
+    this registry and a silent swap was whichever unrelated test happened to index a detail by
+    that code. `V2-P5-034` makes it the systematic thing every other hand-written registry has.
+    """
     codes = {entry.code for entry in KNOWN_INDEX_MEMBERSHIP_LIMITATIONS}
-    assert "weights_drift_between_publications" in codes
-    assert "composition_is_also_forward_filled" in codes
-    assert "a_publication_can_carry_fewer_names_than_the_index_is_called" in codes
-    assert "published_weights_do_not_sum_to_exactly_one_hundred" in codes
-    assert "a_constituent_can_be_missing_from_the_security_registry" in codes
-    assert "publication_lag_is_not_in_the_response" in codes
+
+    assert codes == {
+        "weights_drift_between_publications",
+        "composition_is_also_forward_filled",
+        "scheduled_review_takes_effect_before_it_is_published",
+        "a_publication_can_carry_fewer_names_than_the_index_is_called",
+        "published_weights_do_not_sum_to_exactly_one_hundred",
+        "a_constituent_can_be_missing_from_the_security_registry",
+        "publication_lag_is_not_in_the_response",
+        "silent_truncation_at_the_response_cap",
+        "no_revision_history",
+    }
     for entry in KNOWN_INDEX_MEMBERSHIP_LIMITATIONS:
         assert any(character.isdigit() for character in entry.detail), entry.code
 

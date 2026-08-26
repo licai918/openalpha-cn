@@ -12,6 +12,8 @@ from pathlib import Path
 from types import ModuleType
 from typing import Final
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -1342,9 +1344,9 @@ def test_adr_0003_still_names_this_file_and_the_count_it_pins() -> None:
 
 
 CONFLICT_MARKER_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"^(?:<<<<<<< |=======$|>>>>>>> )", re.MULTILINE
+    r"^(?:<{7}|\|{7}|>{7})(?: .*)?$", re.MULTILINE
 )
-"""A merge that was committed half-resolved, as a pattern over the tracked tree.
+"""The three markers no legitimate line of text can be, as a pattern over the tracked tree.
 
 Committed conflict markers reached `feat/v2-p0a` **twice** in one day and both times a
 sibling agent found them by reading the file, not by any gate. Nothing else here can see
@@ -1357,7 +1359,122 @@ Scoped to `git ls-files` rather than a walk, because the untracked world holds a
 scratch space, `.venv` and half-applied patches, none of which is this repository's claim
 about itself. Binary files are skipped by the decode guard rather than by an extension
 list, so a new text format is covered on arrival instead of when somebody remembers it.
+
+## What `V2-P5-036` changed, and it is three things
+
+The pattern was `^(?:<<<<<<< |=======$|>>>>>>> )`, and measured:
+
+    Summary / =======    (7-char setext H1 underline)  -> DETECTED   <- false positive
+    Summary / =========  (9-char setext H1 underline)  -> missed
+    `||||||| merged common ancestors`                  -> missed
+    `<<<<<<<` with no label                            -> missed
+    `>>>>>>>` with no label                            -> missed
+
+**The trailing space was load-bearing and should not have been.** `git` writes a label after
+`<<<<<<<` and `>>>>>>>` when it has one, and writes the bare marker when it does not -- which
+is what `merge-file` and several editors' resolvers emit. So the two least ambiguous strings in
+the whole problem were being missed for want of a space.
+
+**`|||||||` was absent entirely.** It is the base section `merge.conflictStyle = diff3` and
+`zdiff3` write, and a half-resolved diff3 conflict can leave it behind with nothing else.
+
+**`=======` moved to `AMBIGUOUS_SEPARATOR` below**, because it is the one marker that is also
+ordinary text: a Markdown setext `<h1>` underline of exactly seven `=` is indistinguishable
+from a conflict separator line-for-line. `=======$` therefore made correct Markdown into a red
+build, and this repository is written in Markdown. Nothing in the tree triggered it today,
+which is the only reason it was never paid.
+
+Exactly seven, and the run length needs no lookahead: an eighth `<` is neither a space nor the
+end of the line, so `(?: .*)?$` already refuses it. A mutation sweep showed a `(?!<)` guard here
+made no difference to any of the twelve driven shapes, so it is not carried.
 """
+
+AMBIGUOUS_SEPARATOR: Final[re.Pattern[str]] = re.compile(r"^={7}$", re.MULTILINE)
+"""`=======`, which is a conflict separator **and** a seven-character setext heading rule.
+
+Flagged only in a file that also carries one of the unambiguous markers above, because that is
+the difference between the two readings: a conflict separator never occurs alone -- `git` writes
+it between a `<<<<<<<` and a `>>>>>>>` -- and a setext underline always does.
+
+The direction this gives up is stated rather than discovered: a merge resolved by hand-deleting
+the opening and closing markers and leaving the separator is not caught. That resolution is a
+person editing the file, which is the case this gate was never able to reason about anyway; the
+case it exists for is a marker nobody looked at.
+"""
+
+
+@pytest.mark.parametrize(
+    ("shape", "line", "detected"),
+    [
+        ("labelled open", "<<<<<<< HEAD", True),
+        ("labelled close", ">>>>>>> feat/v2-p0a", True),
+        ("bare open", "<<<<<<<", True),
+        ("bare close", ">>>>>>>", True),
+        ("diff3 base, labelled", "||||||| merged common ancestors", True),
+        ("diff3 base, bare", "|||||||", True),
+        ("eight opens is not a marker", "<<<<<<<<", False),
+        ("six opens is not a marker", "<<<<<<", False),
+        ("a shell heredoc arrow", "cat <<EOF", False),
+        ("a quoted marker inside prose", "the `<<<<<<< HEAD` line", False),
+        ("a seven-character setext rule", "=======", False),
+        ("a nine-character setext rule", "=========", False),
+    ],
+)
+def test_the_marker_pattern_reads_every_shape_git_writes_and_no_shape_it_does_not(
+    shape: str, line: str, detected: bool
+) -> None:
+    """`V2-P5-036`. Each row is a string this gate either must or must not treat as a marker.
+
+    Four of these were wrong before the row. `git` writes `<<<<<<<` and `>>>>>>>` **without** a
+    label when it has none, and the pattern required a trailing space; `|||||||` is what
+    `merge.conflictStyle = diff3` writes for the base section and the pattern had never heard of
+    it; and `=======` was matched unconditionally, so a seven-character Markdown setext heading
+    rule -- correct Markdown, in a repository written in Markdown -- was a red build.
+
+    `=======` is `False` here because it is not a marker **on its own**;
+    `test_a_separator_counts_only_beside_a_marker_that_cannot_be_anything_else` is the other
+    half of that answer and the one that keeps a real conflict caught.
+    """
+    assert bool(CONFLICT_MARKER_PATTERN.match(line)) is detected, shape
+
+
+def test_a_separator_counts_only_beside_a_marker_that_cannot_be_anything_else() -> None:
+    """The `=======` rule, driven on the two documents it has to tell apart.
+
+    They are line-for-line identical on the separator itself, so nothing about that line
+    decides it. What decides it is the company it keeps: `git` never writes a separator without
+    an opening and a closing marker, and a setext underline never comes with either.
+    """
+    conflicted = "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> other\n"
+    markdown = "Summary\n=======\n\nProse under a setext heading.\n"
+
+    assert conflict_marker_lines(conflicted) == [1, 3, 5]
+    assert conflict_marker_lines(markdown) == []
+
+    # A wider separator pattern would start reading ordinary rules as markers, so the widening
+    # is refused here as well as in the file that is clean of them.
+    assert conflict_marker_lines("Summary\n=========\n") == []
+    assert conflict_marker_lines("<<<<<<<\na\n=========\nb\n>>>>>>>\n") == [1, 5]
+
+
+def conflict_marker_lines(text: str) -> list[int]:
+    """The 1-based lines of `text` that are committed conflict markers, and none that are not.
+
+    The combination rule lives here rather than inside the tree walk so that it can be driven
+    on documents built for the purpose -- the tree is (correctly) clean, so the walk alone
+    cannot tell a rule that works from one that never fires. A mutation sweep made that
+    concrete: counting the separator unconditionally, and widening it to `^={3,}$`, both left
+    the walk green.
+
+    A separator counts only in the company of a marker that cannot be anything else. On its own
+    it is a Markdown setext heading rule, and this repository is written in Markdown.
+    """
+    numbered = list(enumerate(text.splitlines(), start=1))
+    markers = [number for number, line in numbered if CONFLICT_MARKER_PATTERN.match(line)]
+    if not markers:
+        return []
+    separators = [number for number, line in numbered if AMBIGUOUS_SEPARATOR.match(line)]
+    return sorted(set(markers + separators))
 
 
 def test_no_tracked_file_carries_a_committed_merge_conflict_marker() -> None:
@@ -1386,11 +1503,7 @@ def test_no_tracked_file_carries_a_committed_merge_conflict_marker() -> None:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
-        lines = [
-            number
-            for number, line in enumerate(text.splitlines(), start=1)
-            if CONFLICT_MARKER_PATTERN.match(line)
-        ]
+        lines = conflict_marker_lines(text)
         if lines:
             offenders[raw.decode("utf-8")] = lines
 

@@ -1608,6 +1608,47 @@ def _undeclared_risk_flag_refusal(
     )
 
 
+def _normalised_segment(segment: str) -> str:
+    """One path segment, reduced to the form the two owner sets are compared in.
+
+    Case-folded, and stripped of trailing dots and spaces. `V2-P5-030`: the owner sets were
+    compared as raw text, so the segments that belong to the API and to the build were claimed
+    under exactly one spelling each. Measured through raw ASGI, against the same
+    `create_app(web_dir=None)` baseline that answers `404 application/json` to every one of
+    them:
+
+        GET /API/v1/nope        -> 200 text/html
+        GET /api./v1/nope       -> 200 text/html
+        GET /api /v1/nope       -> 200 text/html
+        GET /Assets/missing.js  -> 200 text/html
+
+    That is the sentence `SinglePageFallbackFiles` says it exists to prevent, arriving through
+    the door nobody checked: a caller that branches on `response.ok` reads a page as a payload,
+    and a case typo is a client-side typo like any other.
+
+    `/Assets/` is the one that matters most and the one least likely to be noticed, because it
+    is not the same defect on both machines. macOS is case-insensitive, so `/Assets/index.js`
+    resolves to the real file and is never seen; on the Linux the `Dockerfile` ships, the
+    lookup fails and the shell is served as `text/html` to a `<script>` tag -- the MIME-type
+    error the build-directory owner exists to prevent, reproducible only in production.
+
+    **This is deliberately broader than HTTP**, where paths are case-sensitive and
+    `/API/v1/nope` genuinely is a different resource. The asymmetry is what justifies it: a
+    client area whose first segment collides with an owner under this rule is caught, loudly
+    and immediately, by `test_every_client_area_is_an_address_the_production_server_serves`,
+    which asks the server for every segment in `web/src/routes.ts` and requires the shell. A
+    reserved namespace silently answering as a page is caught by nobody, and is read by a
+    caller rather than by a test.
+
+    Trailing dots and spaces go for the same reason and not a different one: they are what a
+    permissive filesystem and a hand-edited config both drop, so `api.` and `api ` are ways of
+    writing `api` that no client meant as a page. A segment that is *only* dots and spaces
+    normalises to the empty string and is not a location at all, which is the same answer
+    `.` and `..` already got.
+    """
+    return segment.rstrip(". ").casefold()
+
+
 class SinglePageFallbackFiles(StaticFiles):
     """Serve the built web app so that every address the client router has is an address.
 
@@ -1624,7 +1665,9 @@ class SinglePageFallbackFiles(StaticFiles):
     A `GET`/`HEAD` this build cannot answer is answered with `index.html` at `200`, **unless
     its first path segment belongs to somebody else**. Two owners exist and neither is written
     down -- both are derived, so a route family or a build directory added later is covered
-    without anybody remembering this class:
+    without anybody remembering this class. Ownership is decided on `_normalised_segment`
+    rather than on raw text, because the sets were compared with `==` until `V2-P5-030` and
+    `/API/v1/nope`, `/api./v1/nope` and `/Assets/missing.js` were therefore all pages:
 
     - `reserved_roots`, the first path segments of the live route table (`api`, `health`,
       `docs`, `redoc`, `openapi.json` today), passed in by `create_app` after every route is
@@ -1635,6 +1678,14 @@ class SinglePageFallbackFiles(StaticFiles):
     - the directories inside the build itself (`assets` today). A subresource that is missing
       is a corrupted deploy; answering it with `text/html` turns a clean `404` into a
       MIME-type error several layers from the cause.
+
+    ## What a method may say, and what it may not
+
+    A non-`GET`/`HEAD` request to a client address is a `405`, because the page is there and
+    the verb is wrong. A non-`GET`/`HEAD` request to anything else is a `404` unless the build
+    really holds it -- `StaticFiles` checks the method before the lookup and would otherwise
+    answer `405` for every unmatched path in every namespace, which asserts existence about
+    paths that do not exist. See `get_response`.
 
     ## Unknown non-API paths get the shell, and that is a decision
 
@@ -1666,31 +1717,69 @@ class SinglePageFallbackFiles(StaticFiles):
 
     def __init__(self, *, directory: Path, reserved_roots: frozenset[str]) -> None:
         super().__init__(directory=directory, html=True)
-        self._reserved_roots = reserved_roots
-        self._build_roots = frozenset(child.name for child in directory.iterdir() if child.is_dir())
+        self._reserved_roots = frozenset(_normalised_segment(root) for root in reserved_roots)
+        self._build_roots = frozenset(
+            _normalised_segment(child.name) for child in directory.iterdir() if child.is_dir()
+        )
 
     async def get_response(self, path: str, scope: Scope) -> Response:
-        """Delegate, and turn only a `404` for a *location* into the shell.
+        """Delegate; turn a `404` for a *location* into the shell and a `405` for nothing into
+        a `404`.
 
-        `404` and not every `HTTPException`: `StaticFiles` refuses a non-`GET`/`HEAD` method
-        with `405` before it ever looks for the file, and `POST /portfolio` answered with a
-        page would be a worse lie than the `405`.
+        Two corrections to `StaticFiles`, and they are about opposite halves of the same
+        sentence -- what exists, and what may be done to it.
 
-        **This condition is a surviving mutant and that is reported rather than hidden.**
-        Deleting `error.status_code != 404` leaves every test green, and the sweep says so:
-        on `starlette` as it ships here the only other status this call raises is that `405`,
-        and re-entering with `index.html` re-raises the identical `405` because the method is
-        re-checked before the lookup. So the two versions are indistinguishable through the
-        HTTP surface today, and no honest test can separate them. It is kept as the
-        fail-closed shape for a status this library does not raise yet -- a future `403`
-        rendered as a `200` page would be the same defect as the `/api/` one, one layer down.
+        **A location gets the shell.** `404` and not every `HTTPException`: `POST /portfolio`
+        answered with a page would be a worse lie than the `405`, because the page really is
+        there and the verb really is wrong. That guard has a surviving mutant and it is
+        reported rather than hidden: deleting `error.status_code == 404` from this branch
+        leaves every test green, because re-entering with `index.html` re-raises the identical
+        `405` -- `starlette` re-checks the method before the lookup. The two versions are
+        indistinguishable through the HTTP surface today and no honest test separates them. It
+        is kept as the fail-closed shape for a status this library does not raise yet.
+
+        **A `405` for something that is not there is a `404`.** `StaticFiles` checks the method
+        *before* the lookup, so every non-`GET`/`HEAD` request to every unmatched path got
+        `405` -- including the API's own namespace. Measured through raw ASGI against a
+        `create_app(web_dir=None)` baseline:
+
+            POST /api/v1/nope   405 application/json   <- with the mount
+            POST /api/v1/nope   404 application/json   <- without it
+
+        Mounting the build changed what a misspelled, renamed or retired API path says about
+        itself, and `405` says the resource exists. A caller that reads `404` as "gone" reads
+        `405` as "still there, wrong verb" and retries a path that will never answer. The
+        class docstring only ever reasoned about `POST /portfolio`, which is the case where
+        `405` is right, and `tests/unit/test_spa_addressability.py` pinned only that one.
+
+        Whether the thing exists is asked by **replaying the request as a `GET`** rather than
+        by a second copy of the lookup rules: a directory with no `index.html` and a file that
+        is really there answer differently, and only `starlette` knows which is which here.
         """
         try:
             return await super().get_response(path, scope)
         except StarletteHTTPException as error:
-            if error.status_code != 404 or not self._is_a_client_location(path):
+            if self._is_a_client_location(path):
+                if error.status_code == 404:
+                    return await super().get_response("index.html", scope)
                 raise
-            return await super().get_response("index.html", scope)
+            if error.status_code == 405 and not await self._a_get_would_have_found_it(path, scope):
+                raise StarletteHTTPException(status_code=404) from error
+            raise
+
+    async def _a_get_would_have_found_it(self, path: str, scope: Scope) -> bool:
+        """Whether this build holds anything at `path`, asked in `starlette`'s own words.
+
+        Called only to decide whether a `405` is a true sentence, and only for paths that are
+        not client locations. The response is built and dropped; `FileResponse` does not read
+        the file to be constructed, so the cost is the `stat` that the refused request would
+        have paid anyway.
+        """
+        try:
+            await super().get_response(path, {**scope, "method": "GET"})
+        except StarletteHTTPException as error:
+            return error.status_code != 404
+        return True
 
     def _is_a_client_location(self, path: str) -> bool:
         """Whether this mount-relative path is a place the client router could be showing.
@@ -1698,9 +1787,15 @@ class SinglePageFallbackFiles(StaticFiles):
         `path` has already been normalised by `StaticFiles.get_path`, so `.` (the root) and
         `..` (an escape attempt) are the two non-segment values it can start with; neither is
         a location, and neither should be dressed up as one.
+
+        The comparison is against `_normalised_segment`, not the raw text -- see that
+        function for what was measured and why the asymmetry justifies it.
         """
-        root = path.split("/", 1)[0]
-        if root in {"", ".", ".."}:
+        raw = path.split("/", 1)[0]
+        if raw in {"", ".", ".."}:
+            return False
+        root = _normalised_segment(raw)
+        if not root:
             return False
         return root not in self._reserved_roots and root not in self._build_roots
 
@@ -1789,7 +1884,6 @@ def create_app(
     validation_store = storage.validation_store
     experiment_store = storage.experiment_store
     prediction_store = storage.prediction_store
-    job_store = storage.job_store
     job_store = storage.job_store
 
     def run_one(request: ResearchRunRequest) -> ResearchRunResult:

@@ -56,6 +56,33 @@ development on the two points where copying it would ship a defect: an unknown `
 stays JSON here, and a missing file under a build directory stays a `404` here. Everywhere
 else the two agree, which is the whole point of the row.
 
+## What the mount changed that nobody had asked it about (`V2-P5-030`)
+
+Everything above was asked with `GET` and with one spelling of each segment. Two questions were
+never put, and the answers to both were wrong. Measured through **raw ASGI** -- building the
+`scope` by hand -- against a `create_app(web_dir=None)` baseline, because `httpx` normalises
+some of these paths before the request is made:
+
+    METHOD    PATH                 WITH MOUNT             NO MOUNT
+    POST      /api/v1/nope         405 application/json   404 application/json
+    DELETE    /api/v1/nope         405                    404
+    OPTIONS   /api/v1/nope         405                    404
+    GET       /API/v1/nope         200 text/html          404
+    GET       /api./v1/nope        200 text/html          404
+    GET       /api /v1/nope        200 text/html          404
+    GET       /Assets/missing.js   200 text/html          404
+
+So mounting the build changed what the API's own namespace answers, in two ways at once: a
+`405` claims the path exists, and a case typo gets a page. Both are the sentence this fallback
+was written to prevent, arriving through doors nobody had opened.
+
+**`//api/v1/nope` is not one of them, and was first reported as though it were.** It looks like
+an HTML `200` through a client; raw ASGI shows the server answering `404 application/json`.
+`httpx` collapses the leading `//` and sends `/v1/nope`, so what the client measured was its
+own URL handling. That is the reason the probes for this row were written against `scope`
+directly, and the reason it is written down here: the next reader of a suspicious `200` should
+check the client before the server.
+
 ## The one thing deliberately not asserted
 
 Nothing here keys on the `Accept` header. `vite` does (`text/html` or `*/*` or absent), and a
@@ -76,7 +103,7 @@ from typing import Final
 import pytest
 from fastapi.testclient import TestClient
 
-from openalpha_cn.api.app import create_app
+from openalpha_cn.api.app import SinglePageFallbackFiles, create_app
 
 REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 CLIENT_ROUTES_MODULE: Final[Path] = REPO_ROOT / "web" / "src" / "routes.ts"
@@ -268,6 +295,198 @@ def test_a_write_to_a_client_address_is_not_answered_with_a_page(client: TestCli
 
     assert response.status_code == 405
     assert SHELL_MARKER not in response.text
+
+
+@pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
+def test_an_unknown_api_path_is_a_refusal_under_every_method_and_never_a_405(
+    client: TestClient, method: str
+) -> None:
+    """`405` says the resource exists and declines the verb. For a typo, both halves are false.
+
+    `test_an_unknown_api_path_stays_a_json_refusal` asks with `GET` and only `GET`, and the
+    class's own reasoning about method handling was written about `POST /portfolio` -- a
+    *client* address, where `405` is the honest answer because the page really is there.
+    Nobody asked the same question about the API's namespace. Measured through raw ASGI against
+    a `create_app(web_dir=None)` baseline:
+
+        POST    /api/v1/nope   405 application/json   <- with the mount
+        POST    /api/v1/nope   404 application/json   <- without it
+
+    So mounting the build changed what a misspelled, renamed or retired API path answers, and
+    changed it into a claim about that path existing. A caller that branches on `404` to mean
+    "this endpoint is gone" reads `405` as "still there, my verb is wrong" and retries forever.
+
+    `OPTIONS` is in the list because a CORS preflight to a wrong path is exactly the shape of
+    this mistake, and `V2-P5-011` is this repository's standing lesson about method surfaces.
+    """
+    response = client.request(method, "/api/v1/no-such-route")
+
+    assert response.status_code == 404, f"{method} -> {response.status_code}"
+    assert response.headers["content-type"].startswith("application/json")
+    assert SHELL_MARKER not in response.text
+
+
+@pytest.mark.parametrize("method", ["POST", "DELETE"])
+def test_a_write_to_a_missing_subresource_is_not_a_405_either(
+    client: TestClient, method: str
+) -> None:
+    """`assets/` is the mount's own namespace, and `missing.js` is still not in it.
+
+    The same lie one namespace over: `405` on a file that does not exist says the deploy is
+    fine and the verb is wrong, when the deploy is broken. The rule that fixes both is that a
+    `405` may only be returned for something that is actually there --
+    `test_a_write_to_a_file_that_is_in_the_build_is_still_a_405` is its other side.
+    """
+    response = client.request(method, "/assets/index-does-not-exist.js")
+
+    assert response.status_code == 404
+    assert SHELL_MARKER not in response.text
+
+
+def test_a_write_to_a_file_that_is_in_the_build_is_still_a_405(client: TestClient) -> None:
+    """The half of the method rule that must not be lost while fixing the other half.
+
+    `index-abc123.js` is really in the build, so "this resource does not take `POST`" is a true
+    sentence about it. An implementation that answered `404` for every non-`GET` under a
+    build directory would pass the two tests above by deleting the distinction they are about.
+    """
+    response = client.post("/assets/index-abc123.js")
+
+    assert response.status_code == 405
+    assert SHELL_MARKER not in response.text
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/API/v1/nope",
+        "/Api/v1/nope",
+        "/api./v1/nope",
+        "/api /v1/nope",
+        "/HEALTH/no-such-thing",
+        "/Docs/no-such-thing",
+        "/OpenAPI.json/no-such-thing",
+    ],
+)
+def test_a_reserved_segment_is_claimed_however_a_sloppy_caller_spelled_it(
+    client: TestClient, path: str
+) -> None:
+    """The owner sets were compared with `==` on the raw segment, so `/API/` was a page.
+
+        GET /API/v1/nope   -> 200 text/html    <- baseline, `create_app(web_dir=None)` gives 404
+        GET /api./v1/nope  -> 200 text/html
+        GET /api /v1/nope  -> 200 text/html
+
+    This is the exact sentence the class docstring says it exists to prevent -- "a client-side
+    typo, a stale caller ... comes back as an HTML `200`, and a caller that branches on
+    `response.ok` reads a page as a payload" -- and a case typo is a client-side typo.
+
+    Matching a *normalised* segment is deliberately broader than HTTP, where paths are
+    case-sensitive and `/API/v1/nope` genuinely is a different resource from `/api/v1/nope`.
+    The trade is deliberate and it is not symmetric: the cost of being broad is that a client
+    area named `Api` would be shadowed, and
+    `test_every_client_area_is_an_address_the_production_server_serves` goes red naming it the
+    day anyone writes one. The cost of being narrow is silent, permanent, and paid by whoever
+    is reading a stack trace about a page that arrived where JSON was expected.
+
+    Trailing dots and spaces are stripped for the same reason and not a different one: they are
+    what a permissive filesystem and a sloppy config file both drop, so `api.` and `api ` are
+    ways of writing `api` that no client meant as a page.
+    """
+    response = client.get(path)
+
+    assert response.status_code == 404, f"{path} -> {response.status_code}"
+    assert SHELL_MARKER not in response.text, f"{path} was served the shell"
+
+
+@pytest.mark.parametrize("path", ["/Assets/missing.js", "/ASSETS/missing.js", "/assets./x.js"])
+def test_a_build_directory_is_claimed_however_it_is_spelled(client: TestClient, path: str) -> None:
+    """The half of the case defect that behaves differently on the developer's machine.
+
+    macOS is case-insensitive, so `/Assets/index-abc123.js` resolves to the real file locally
+    and the fallback is never consulted; on the Linux the `Dockerfile` ships, the lookup fails,
+    `Assets` is not `assets`, and the shell is served with `text/html` for something a
+    `<script>` tag asked for. That is precisely the MIME-type error the class docstring says
+    the build-directory owner exists to prevent, and it is invisible in development.
+
+    Asserted on a name that is missing under either spelling, so the assertion is about the
+    fallback's decision rather than about the filesystem the test happens to run on.
+    """
+    response = client.get(path)
+
+    assert response.status_code == 404, f"{path} -> {response.status_code}"
+    assert SHELL_MARKER not in response.text, f"{path} was served the shell"
+
+
+def test_both_owner_sets_are_normalised_when_they_are_taken_in_and_not_only_on_the_way_out(
+    tmp_path: Path,
+) -> None:
+    """The comparison has two sides, and today's tree only ever exercises one of them.
+
+    Every reserved root the live route table produces is already lower case with no trailing
+    punctuation (`api`, `health`, `docs`, `redoc`, `openapi.json`), and the only build directory
+    is `assets`. So normalising the *incoming* segment is enough on this tree, and a mutation
+    sweep says so: dropping `_normalised_segment` from either set's construction left all of
+    `tests/unit/test_spa_addressability.py` green.
+
+    It is not enough in general, and the failure is the one that matters rather than a
+    cosmetic one. A route registered at `/API/...` would put `API` in the reserved set, an
+    incoming `/api/v1/nope` would normalise to `api`, the two would not match, and **the API's
+    own namespace would start answering as a page** -- the exact defect this class exists to
+    prevent, arriving through the half of the comparison nobody was checking. A bundler that
+    emits `Assets/` does the same to the build side.
+
+    Driven by constructing the class directly, because neither spelling can be reached through
+    `create_app` on this tree and a test that waited for one would be a test that never ran.
+    """
+    build = tmp_path / "dist"
+    (build / "Assets").mkdir(parents=True)
+    (build / "index.html").write_text('<div id="root"></div>', encoding="utf-8")
+    files = SinglePageFallbackFiles(directory=build, reserved_roots=frozenset({"API", "Health."}))
+
+    owned_spellings = (
+        "API/v1/nope",
+        "api/v1/nope",
+        "Health./x",
+        "health/x",
+        "Assets/a.js",
+        "assets/a.js",
+    )
+    for owned in owned_spellings:
+        assert files._is_a_client_location(owned) is False, owned
+    for area in ("portfolio", "data-health", "factor-lab/fxp_abc"):
+        assert files._is_a_client_location(area) is True, area
+
+
+@pytest.mark.parametrize("path", ["/.../nope", "/. . ./nope", "/..../nope"])
+def test_a_segment_that_is_only_punctuation_is_not_a_location(
+    client: TestClient, path: str
+) -> None:
+    """`_normalised_segment` strips trailing dots and spaces, so a segment of nothing else
+    normalises to the empty string -- and the empty string is not a place the router shows.
+
+    `.` and `..` were already refused by name. These are the shapes the normalisation itself
+    creates, and a mutation sweep found nothing holding them: turning the empty-root branch
+    from `False` to `True` left every other case green, because no test asked for a path whose
+    first segment survives `{"", ".", ".."}` and then normalises away.
+    """
+    response = client.get(path)
+
+    assert response.status_code == 404, f"{path} -> {response.status_code}"
+    assert SHELL_MARKER not in response.text
+
+
+def test_a_client_area_is_not_swallowed_by_the_normalisation(client: TestClient) -> None:
+    """Normalising the segment must claim more spellings of the owners and nothing else.
+
+    A rule that casefolded everything into one bucket would start refusing client addresses;
+    this is the non-vacuity of the two tests above, asserted on the areas that must keep
+    working with their own capitalisation intact.
+    """
+    for path in ("/data-health", "/factor-lab/fxp_abc", "/portfolio"):
+        response = client.get(path)
+        assert response.status_code == 200, f"{path} -> {response.status_code}"
+        assert SHELL_MARKER in response.text
 
 
 def test_a_head_request_to_a_client_address_reports_the_shell(client: TestClient) -> None:
