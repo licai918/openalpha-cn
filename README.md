@@ -957,6 +957,84 @@ p 值来自**符号翻转随机化检验**（n ≤ 12 时穷举全部 `2**n` 种
 Benjamini–Yekutieli 的调和惩罚 `H_m`。它改的是算术而不是标签——同一族在 `H_2 = 1.5` 下临界值减半，
 上面那个恰好压线的发现就消失了。宽松的读法不该同时是最省事的那个读法。
 
+## 分段报告：切一刀就是多测一批假设（P5，`V2-P5-009`）
+
+`openalpha validation segmented` 把同一批已落库的 `ValidationResult` 按行业、市值、流动性、
+市场状态分别切开，**四条轴的全部桶加上基准，共用同一个 family**。
+
+```bash
+# --plan 是一份声明文件；--family-size 不是 --signal 的个数，也不是轴的条数
+uv run openalpha validation segmented \
+  --signal sig_0123456789abcdef01234567 --signal sig_89abcdef0123456701234567 \
+  --plan ./segments.json --family-size 22 --dependence arbitrary \
+  --false-discovery-rate 0.10
+```
+
+两个面等价：`openalpha validation segmented` ／ `OpenAlphaSDK.segmented_outcomes()`。
+
+### 一个 family，不是每条轴一个
+
+一个同期群按行业切成六份就是六个假设；再按市值、流动性、市场状态各切一刀，一次研究就在检验二十
+几个。**每条轴各自做一次 BH，等于用一次的代价买到四次看起来显著的机会**，而且四份 q 值各自算在一
+个排除了另外三份的家族里。所以这里只构造一个 `OutcomeStatisticsRequest`、只产出一个
+`MultipleTestingReport`，`AxisReport` 是这一个家族的视图而不是自己的家族。
+
+### 四条轴全是**声明输入**，不只是市场状态
+
+`ValidationResult` 带 `signal_id` 和 `decision_id`，**不带任何证券标识**。所以行业和市值、流动性
+一样查不到——不是 `domain/daily_prices.py` 里没有 `total_mv`／`circ_mv`／`turnover_rate`，是被聚
+合的这条记录不说它是哪只票，没有可 join 的键。`--plan` 因此要求每条轴写明 `definition` 与
+`source`：一个在 100 亿切、一个在当日横截面 70 分位切，是两个不同的研究，只印 `large` 的报告没人
+能复算。本模块**不内置任何分类器、任何规模分界、任何流动性筛**——那些都会是被编出来又当成测量值报
+出去的阈值。某个 signal 在某条轴上没有标签，会被指名拒绝，而不是扫进一个 `unknown` 桶。
+
+### `can_ever_reject`：把「样本量不够」和「确实没 alpha」分开
+
+n 个观测的精确符号翻转检验，可达的最小 p 值是 `2**(1-n)`（观测到的那个符号型及其反号永远命中）；
+family 里最宽的临界值是 `reported * rate / (family_size * penalty)`。**下界高过那条线的桶，在任何
+数据下都不可能成为发现**——它那个很大的 q 值量的是这次研究的分辨率，不是这个分段的能力。分段同时把
+桶变小、把家族变大，两个方向都朝着"测不出来"推，所以这一列正是分段报告最该有的一列。下界不是从代
+数里断言的：十二万分之一都没有——用出厂的 `sign_flip_test` 跑了一万二千组随机样本，没有一个 p 值
+低于它。
+
+### 多市场状态是**实测**出来的，不是跑了几折就算
+
+`spans_multiple_regimes` 数的是**可检验**的状态桶。证据全落在一个状态里的 walk-forward，不管跑了多
+少折都直说它撑不起任何关于状态稳健性的结论。基准按观测窗多重集配对，配得上就发布配对差（策略减基
+准，仍然是同一个 family 里的一行），配不上就具名缺席——两组未配对均值之差不是差值的均值。
+
+## 缓冲版与无缓冲版并列：省下的换手就是离目标的距离（P5，`V2-P5-024`）
+
+`openalpha portfolio turnover-variants` 对同一个已落库榜单同时给出**无缓冲**与**缓冲**两套目标权
+重。两臂都是必填字段，**单臂报告在类型上不可表达**——能只要好看那一半的调用方迟早会只要。
+
+```bash
+uv run openalpha portfolio turnover-variants sl_2026_03_02 \
+  --tier-weight 0.5 --tier-weight 0.3 --tier-weight 0.2 \
+  --buffer 0.01 --previous-weight 000001.SZ=0.05
+```
+
+两个面等价：`openalpha portfolio turnover-variants` ／ `OpenAlphaSDK.turnover_variants()`。
+
+### band 不是 `--turnover-budget`
+
+`V2-P5-001` 的换手预算按比例**阻尼所有名字**，靠让每个都少走一点来压总量；no-trade band 让小于等
+于带宽的变动**完全不交易**，超过的**整笔吃下**。两者换手相同时持有的是不同的账本。同时声明就先预
+算、后 band。
+
+### 省下的和付出的是同一个数
+
+本模块第一版单独报了一列 `tracking_deviation`（离目标账本的距离），当作"省下换手的代价"。**实测
+证明它恒等于 `turnover_reduction`**：banded 权重要么是目标要么是原权重，成交的名字对两个和都贡献
+0，被抑制的名字把整笔变动同时贡献给两边；20 万组随机账本没有反例。派生列无法和父列分歧，因此测不
+出任何东西（`V2-P5-005` 的规矩），所以这一列被删掉，恒等式本身成了结论：**band 省下的每一单位换
+手，就是离排序想要的那个账本的每一单位距离，一比一。**
+
+真正不能从换手推出来的才留成字段：`retained_positions` 指名每一个"自己的排序已经不要、band 却还
+攥着"的仓位；`position_caps_breached` 指名每一条被抑制的那笔交易本该拉回来的上限——**报出来，不修
+复**，修复要花掉 band 刚省下的换手。`--cost-per-unit-turnover` 没有默认值：不声明就只报换手，并说
+明为什么没有金额；编一个费率出来会被乘到报告里每一个换手数字上。
+
 ## 核心独特优势
 
 OpenAlpha CN 整合 TradingAgents 和 AI Hedge Fund 的优势，接入 A 股数据源，更适合 A 股涨停量化分析。OpenAlpha CN 的竞争重点不是复制更多“投资大师人格”，而是：

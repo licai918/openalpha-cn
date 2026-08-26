@@ -32,6 +32,7 @@ from typer.testing import CliRunner
 from openalpha_cn.api.app import create_app
 from openalpha_cn.backtest.portfolio import PortfolioLimits
 from openalpha_cn.backtest.portfolio_policy import PortfolioConstructionPolicy
+from openalpha_cn.backtest.turnover_variants import TurnoverCostModel
 from openalpha_cn.cli import PanelExit, app
 from openalpha_cn.domain.run import RunManifest
 from openalpha_cn.domain.signal import SignalFrame
@@ -564,3 +565,249 @@ def test_a_tier_vector_that_does_not_sum_to_one_is_refused_alike_on_both_faces(
     sentence = "tier weights must sum to exactly 1"
     assert sentence in detail[0]["msg"]
     assert sentence in cli_output
+
+
+# --- V2-P5-024: the buffered arm beside the unbuffered one, on both faces ----------------------
+#
+# The same stored shortlist, the same tier vector and the same 45% cap the construction tests
+# use, so the unbuffered arm here *is* the book those tests already pinned at 40/24/16. Every
+# number below is therefore a statement about the band and nothing else.
+#
+# The previous book is chosen to give four requested moves of four different sizes -- 0.100,
+# 0.020, 0.005 and 0.030 -- because a band set at any one of them then suppresses a known subset
+# and nothing else. Equal moves would make the staircase blind to an off-by-one in the
+# comparison, which is the same trap `tests/unit/backtest/test_turnover_variants.py` documents.
+
+DROPPED_NAME: Final[str] = "999999.SZ"
+"""A held name the shortlist does not admit, so its requested move is its whole weight."""
+
+TURNOVER_STAIRCASE: Final[tuple[tuple[str, str, int], ...]] = (
+    ("0", "0.155000", 4),
+    ("0.005", "0.150000", 3),
+    ("0.020", "0.130000", 2),
+    ("0.030", "0.100000", 1),
+)
+"""`(band, buffered turnover, names traded)`. The row's declared seam is the last rung: the
+buffered arm trades `0.100` where the unbuffered one trades `0.155`, a 35% reduction."""
+
+
+def _previous_book(answer: dict[str, Any]) -> dict[str, str]:
+    """A previous book giving four distinct requested moves against the 40/24/16 target."""
+    ranked = [entry["subject"] for entry in sorted(answer["admitted"], key=lambda row: row["rank"])]
+    return {
+        ranked[0]: "0.300000",  # -> 0.400000, a move of 0.100
+        ranked[1]: "0.235000",  # -> 0.240000, a move of 0.005
+        ranked[2]: "0.140000",  # -> 0.160000, a move of 0.020
+        DROPPED_NAME: "0.030000",  # -> 0,        a move of 0.030
+    }
+
+
+def _variants(root: Path, shortlist_id: str, answer: dict[str, Any], *extra: str):
+    arguments = ["portfolio", "turnover-variants", shortlist_id]
+    for weight in TIERS:
+        arguments.extend(["--tier-weight", weight])
+    for subject, weight in _previous_book(answer).items():
+        arguments.extend(["--previous-weight", f"{subject}={weight}"])
+    arguments.extend(["--runtime-dir", str(root), "--max-position-weight", "0.45", *extra])
+    return _cli(*arguments)
+
+
+@pytest.mark.parametrize(("band", "turnover", "traded"), TURNOVER_STAIRCASE)
+def test_the_cli_buffered_arm_trades_less_than_the_unbuffered_one_at_every_band(
+    admitted: tuple[Path, dict[str, Any]], band: str, turnover: str, traded: int
+) -> None:
+    """`V2-P5-024`'s own declared integration seam: 缓冲版换手显著低于无缓冲版.
+
+    Every rung of the staircase, from the command line, over a really stored shortlist. The two
+    rungs whose band sits exactly on a requested move are where a `<` instead of a `<=` shows up.
+    """
+    root, answer = admitted
+    code, stdout, output = _variants(
+        root, answer["shortlist_id"], answer, "--buffer", band, "--json"
+    )
+
+    assert code == 0, output
+    body = json.loads(stdout.strip())
+    unbuffered, buffered = body["arms"]
+
+    assert unbuffered["label"] == "unbuffered"
+    assert buffered["label"] == "buffered"
+    assert unbuffered["turnover"] == "0.155000"
+    assert buffered["turnover"] == turnover
+    assert buffered["names_traded"] == traded
+    assert unbuffered["names_traded"] == 4
+
+
+def test_the_cli_cannot_be_asked_for_one_arm(admitted: tuple[Path, dict[str, Any]]) -> None:
+    """The row is *默认并列出报*: both arms are on every answer, on both faces."""
+    root, answer = admitted
+    code, stdout, output = _variants(
+        root, answer["shortlist_id"], answer, "--buffer", "0.030", "--json"
+    )
+
+    assert code == 0, output
+    body = json.loads(stdout.strip())
+    assert [arm["label"] for arm in body["arms"]] == ["unbuffered", "buffered"]
+
+    code, terminal, output = _variants(root, answer["shortlist_id"], answer, "--buffer", "0.030")
+    assert code == 0, output
+    assert "unbuffered" in terminal
+    assert "buffered" in terminal
+    assert terminal.splitlines()[0] == "method: heuristic, not optimized"
+
+
+def test_the_terminal_face_says_the_saving_and_the_price_are_the_same_number(
+    admitted: tuple[Path, dict[str, Any]],
+) -> None:
+    """The identity that removed a column, printed where the person reading the numbers is."""
+    root, answer = admitted
+    code, stdout, output = _variants(root, answer["shortlist_id"], answer, "--buffer", "0.030")
+
+    assert code == 0, output
+    assert "the band saved 0.055000 of turnover and put the book exactly 0.055000 away" in stdout
+    assert "these are the same number, one for one" in stdout
+
+
+def test_a_name_the_shortlist_dropped_and_the_band_kept_is_named_on_the_command_line(
+    admitted: tuple[Path, dict[str, Any]],
+) -> None:
+    """A buffered run still holding a name its own ranking no longer admits says which name."""
+    root, answer = admitted
+    code, stdout, output = _variants(root, answer["shortlist_id"], answer, "--buffer", "0.030")
+
+    assert code == 0, output
+    assert f"retained by the band though the ranking dropped it: {DROPPED_NAME}" in stdout
+
+    code, narrow, output = _variants(root, answer["shortlist_id"], answer, "--buffer", "0.020")
+    assert code == 0, output
+    assert "retained by the band" not in narrow
+
+
+def test_no_declared_rate_publishes_no_money_figure_and_says_why(
+    admitted: tuple[Path, dict[str, Any]],
+) -> None:
+    """An invented default would be multiplied by every turnover number printed."""
+    root, answer = admitted
+    code, stdout, output = _variants(root, answer["shortlist_id"], answer, "--buffer", "0.030")
+
+    assert code == 0, output
+    assert "no cost figure --" in stdout
+    assert "would be a number this module invented" in stdout
+
+
+def test_a_declared_rate_costs_both_arms_and_the_saving_between_them(
+    admitted: tuple[Path, dict[str, Any]],
+) -> None:
+    root, answer = admitted
+    code, stdout, output = _variants(
+        root,
+        answer["shortlist_id"],
+        answer,
+        "--buffer",
+        "0.030",
+        "--cost-per-unit-turnover",
+        "0.001",
+        "--cost-definition",
+        "commission and stamp duty",
+        "--json",
+    )
+
+    assert code == 0, output
+    body = json.loads(stdout.strip())
+    assert body["arms"][0]["turnover_cost"] == "0.000155000"
+    assert body["arms"][1]["turnover_cost"] == "0.000100000"
+    assert body["cost_saved"] == "0.000055000"
+    assert body["cost_absence_reason"] is None
+
+
+def test_a_rate_without_a_definition_is_refused_before_any_store_is_opened(
+    admitted: tuple[Path, dict[str, Any]],
+) -> None:
+    """A money figure whose meaning is unrecorded cannot be reproduced or compared."""
+    root, answer = admitted
+    code, _stdout, output = _variants(
+        root,
+        answer["shortlist_id"],
+        answer,
+        "--buffer",
+        "0.030",
+        "--cost-per-unit-turnover",
+        "0.001",
+    )
+
+    assert code == PanelExit.bad_request, output
+    assert "--cost-per-unit-turnover needs --cost-definition" in output
+
+
+def test_a_band_outside_the_unit_interval_is_refused(
+    admitted: tuple[Path, dict[str, Any]],
+) -> None:
+    root, answer = admitted
+    code, _stdout, output = _variants(root, answer["shortlist_id"], answer, "--buffer", "1.5")
+
+    assert code == PanelExit.bad_request, output
+    assert "is not a weight" in output
+
+
+def test_the_sdk_and_the_cli_serve_one_paired_report(
+    admitted: tuple[Path, dict[str, Any]],
+) -> None:
+    """Byte equality, `construction_view`'s rule applied to this face."""
+    root, answer = admitted
+    _code, stdout, _output = _variants(
+        root, answer["shortlist_id"], answer, "--buffer", "0.030", "--json"
+    )
+    sdk = OpenAlphaSDK(runtime_dir=root)
+
+    rendered = sdk.turnover_variant_view(
+        sdk.turnover_variants(
+            shortlist_id=answer["shortlist_id"],
+            policy=PortfolioConstructionPolicy(
+                tier_weights=tuple(Decimal(weight) for weight in TIERS),
+                limits=PortfolioLimits(max_position_weight=Decimal("0.45")),
+            ),
+            buffer=Decimal("0.030"),
+            previous={
+                subject: Decimal(weight) for subject, weight in _previous_book(answer).items()
+            },
+        )
+    )
+
+    assert json.dumps(rendered, ensure_ascii=False, sort_keys=True) == stdout.strip()
+
+
+def test_the_sdk_unbuffered_arm_is_the_book_construct_portfolio_returns(
+    admitted: tuple[Path, dict[str, Any]],
+) -> None:
+    """One construction, seen twice -- so every difference between the arms is the band.
+
+    Constructing separately for each arm would let a second difference in, and the comparison
+    would stop being a comparison of one thing.
+    """
+    root, answer = admitted
+    sdk = OpenAlphaSDK(runtime_dir=root)
+    policy = PortfolioConstructionPolicy(
+        tier_weights=tuple(Decimal(weight) for weight in TIERS),
+        limits=PortfolioLimits(max_position_weight=Decimal("0.45")),
+    )
+    previous = {subject: Decimal(weight) for subject, weight in _previous_book(answer).items()}
+
+    construction = sdk.construct_portfolio(
+        shortlist_id=answer["shortlist_id"], policy=policy, previous=previous
+    )
+    paired = sdk.turnover_variants(
+        shortlist_id=answer["shortlist_id"],
+        policy=policy,
+        buffer=Decimal("0.030"),
+        previous=previous,
+        cost_model=TurnoverCostModel(
+            cost_per_unit_turnover=Decimal("0.001"), definition="commission and stamp duty"
+        ),
+    )
+
+    assert dict(paired.unbuffered.weights) == {
+        target.subject: target.weight for target in construction.targets if target.weight
+    }
+    assert paired.unbuffered.turnover == construction.turnover
+    assert paired.buffered.turnover < paired.unbuffered.turnover
+    assert paired.method == construction.method

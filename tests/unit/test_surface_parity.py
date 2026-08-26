@@ -171,6 +171,14 @@ SDK_ONLY: Final[MappingProxyType[str, str]] = MappingProxyType(
         "outcome_statistics": "`V2-P5-008`'s gross/net table; `openalpha outcome statistics`'s "
         "twin, no route yet",
         "outcome_statistics_view": "a renderer, not a capability",
+        "segmented_outcomes": "`V2-P5-009`'s segmented table over stored validations; "
+        "its whole input is a declared SegmentationPlan and the CLI twin takes it as a "
+        "file, no route yet",
+        "segmented_report_view": "a renderer, not a capability",
+        "turnover_variants": "`V2-P5-024`'s buffered book beside the unbuffered one; "
+        "`openalpha portfolio turnover-variants`'s twin, and unlike "
+        "`construct_portfolio` no route does it yet",
+        "turnover_variant_view": "a renderer, not a capability",
         "shortlist_view": "a renderer, not a capability",
     }
 )
@@ -197,6 +205,11 @@ CLI_ONLY: Final[MappingProxyType[str, str]] = MappingProxyType(
         "panel build": "reaches a paid provider; not exposed unauthenticated",
         "serve": "starts the server, so it cannot be a route on it",
         "shortlist compare": "`compare_shortlists` is the SDK twin; no route",
+        "validation segmented": "`V2-P5-009`'s segmented table -- industry, size, "
+        "liquidity and regime buckets tested in one family; the SDK twin exists and no "
+        "route does yet",
+        "portfolio turnover-variants": "`V2-P5-024`'s buffered arm beside the "
+        "unbuffered one; the SDK twin exists and no route does yet",
         "validation statistics": "`V2-P5-008`'s gross-beside-net table over stored "
         "validations; the SDK twin exists and no route does yet",
         "version": "reports this build; `GET /health` carries the version too",
@@ -334,8 +347,8 @@ def test_the_measured_surface_counts_are_the_ones_this_file_was_written_against(
 
     assert measured == {
         "routes": 47,
-        "sdk_methods": 50,
-        "cli_commands": 30,
+        "sdk_methods": 54,
+        "cli_commands": 32,
         "without_sdk": 11,
         "rest_only": 9,
     }
