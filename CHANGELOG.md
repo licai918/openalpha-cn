@@ -529,6 +529,16 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   the `OPENALPHA_RUNTIME_DIR` fallback. **The files already written are not deleted**, which is
   `V2-P4-111`'s own rule for the same directory: they are the user's data.
 
+  **One false positive is recorded here so it is not chased twice.** Re-running the whole
+  integration suite with `OPENALPHA_RUNTIME_DIR` pointed at a probe directory still showed two
+  files landing in it, from `test_transport_hardening.py::test_openalpha_serve_does_not_announce
+  _its_server_software` -- `openalpha serve` takes no `--runtime-dir` and does open the store.
+  That test is **not** a leak: it `monkeypatch.chdir(tmp_path)` first, so the relative `./runtime`
+  default resolves inside its own sandbox. It reached the probe directory only because an
+  exported absolute `OPENALPHA_RUNTIME_DIR` correctly beats a relative default, which is
+  `config.py`'s documented precedence rather than a defect. Verified by running that file with
+  no such variable set and diffing the real `runtime/` by name, size and mtime: identical.
+
 - **Reconciliation only ever checked half of what it claimed to, and the other half was a
   dropped table reported as a healthy database** (`V2-P5-029`, new row filed by this work).
   `V2-P5-026` says it reconciles "by inspecting the schema, never trusting either counter".
