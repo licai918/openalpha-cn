@@ -169,6 +169,34 @@ sentences in the body, because a one-word badge reads as an attestation this rep
 make. See [the HTTP contract](docs/api/http.md) for the three standings and the nine named
 boundaries.
 
+## The outcome plane, and where the three faces are not equal
+
+Above the portfolio sits the outcome plane: an observed outcome validated against the decision
+that predicted it, and those stored results aggregated with the family size and dependence
+assumption stated. The whole loop runs in a terminal, which it did not before `V2-P5-047`:
+
+```text
+openalpha research run ./events.json > run.json
+openalpha validation record --research ./run.json --observation ./outcome.json
+openalpha validation statistics --signal sig_… --family-size 40 --dependence arbitrary
+
+openalpha report create --research ./run.json
+openalpha report export rpt_…
+```
+
+**`openalpha validation` shipped with two aggregate readers and no writer**, and `openalpha
+report` with an exporter and no writer, so a CLI-only operator read two stores nothing they could
+run had ever filled. Both writers now exist on all three faces and refuse a tampered
+content-address in byte-identical words.
+
+**Where the faces are still not equal, they say so in a test rather than in a paragraph.**
+`tests/unit/test_surface_parity.py` holds the three surfaces as **equalities** — every route with
+the SDK method and CLI command that reach it, plus `SDK_ONLY` and `CLI_ONLY` naming each
+deliberate asymmetry with its reason. `openalpha validation statistics` and `validation
+segmented` are `CLI_ONLY`: their SDK twins exist and no route does yet. `panel build`, `doctor`,
+`jobs register` and `jobs run` must **not** become routes while this API is unauthenticated. A
+command added without updating that table is red and names itself; prose about a gap is not.
+
 ## Development gates
 
 ```bash

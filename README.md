@@ -945,6 +945,26 @@ uv run openalpha portfolio construct sla_0123456789abcdef01234567 \
 组合平面之上是**结果平面**。`openalpha validation statistics` 把已经落库的 `ValidationResult`
 按 signal 聚成同期群，每个同期群就是一个假设。
 
+**先把结果落库——这条命令以前不存在（`V2-P5-047`）。** 下面的聚合命令读的是一个 store，而在
+`validation record` 之前，往那个 store 里写的只有 `POST /api/v1/backtests/validate` 与
+`sdk.validate_outcome` 两个面。于是一个只用命令行的操作者**永远填不满它**，而
+`validation statistics` 对没有存量的 signal 是具名拒绝——正确，且在没有可达写面时是唯一答案。
+
+```bash
+# 一次 research run 的完整输出就是 --research 要的那份 JSON，一字不改
+uv run openalpha research run ./events.json --runtime-dir ./runtime > run.json
+
+# --observation 是 OutcomeObservation 自己的字段：窗口、两个价格、基准收益、交易成本
+uv run openalpha validation record --research ./run.json --observation ./outcome.json \
+  --runtime-dir ./runtime
+```
+
+**两个入参都是文件而不是一堆旗标**，`validation segmented --plan` 的理由：一次观测的窗口、两个
+价格、基准与成本**只有放在一起才有意义**，逐旗标拼出的半份观测会逼这条命令为每个缺口发明一个
+默认值，而这里每个默认值都是一句关于市场的断言。三个面读同一份 `parse_research_result`：内容
+寻址的三个 id 都会被重新推导并校验，一份手改过的记录**按名字**被拒，而那句拒绝在三个面上
+**逐字节相同**（`tests/integration/test_validation_and_report_writer_faces.py` 钉住）。
+
 ```bash
 # signal ID 来自 openalpha research run；--family-size 是「一共检验了几个」，不是 --signal 的个数
 uv run openalpha validation statistics \
@@ -953,7 +973,15 @@ uv run openalpha validation statistics \
   --dependence independent-or-positively-dependent
 ```
 
-两个面等价：`openalpha validation statistics` ／ `OpenAlphaSDK.outcome_statistics()`。
+三个面等价（写面）：`openalpha validation record` ／ `POST /api/v1/backtests/validate` ／
+`OpenAlphaSDK.validate_outcome()`。**读面仍是两个面**：`openalpha validation statistics` ／
+`OpenAlphaSDK.outcome_statistics()`，没有路由——这是**测出来并声明过**的不对称，理由写在
+`tests/unit/test_surface_parity.py` 的 `CLI_ONLY` 里，而不是这句散文里。那份表把三个面持成
+**等式**：加一条命令而不更新它就会变红并点名，本轮 `cli_commands` 33 → 35 正是这样对账的。
+
+`openalpha report create` 是同一个缺口的另一半：`report export` 以前能导出的报告，只有 REST 与
+SDK 放得进去。现在 `openalpha research run > run.json` → `openalpha report create --research
+./run.json` → `openalpha report export rpt_…` 整条链闭合在终端里。
 
 ### gross 与 net 并排，成本自成一列
 

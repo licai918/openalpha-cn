@@ -123,6 +123,15 @@ NOT_EXECUTED: Final[MappingProxyType[str, str]] = MappingProxyType(
         "serve": "starts the server; a test that ran it would not return",
         "evidence build": "takes an events file the surrounding prose describes rather than "
         "ships, and both copies are PowerShell blocks in `docs/api/`",
+        "research run": "`evidence build`'s reason: its argument is an `./events.json` the "
+        "prose describes rather than ships",
+        "validation record": "`--research ./run.json` is the file the `research run` line "
+        "above it writes, so it is unreachable here for that line's reason. Driven end to end "
+        "instead by `tests/integration/test_validation_and_report_writer_faces.py`, which "
+        "builds the research result in process and holds this command byte-equal to "
+        "`POST /api/v1/backtests/validate`",
+        "report create": "`validation record`'s reason exactly -- same `--research ./run.json`, "
+        "same writer-faces test, held byte-equal to `POST /api/v1/reports`",
         "shortlist run": "refuses on this fixture with `researched_ratio_not_measurable`, which "
         "is honest: no evidence run has been made against the generated names, and the "
         "documented line assumes the research plane the section before it describes",
