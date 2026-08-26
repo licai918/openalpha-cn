@@ -262,6 +262,13 @@ research_app = typer.Typer(help="Run evidence-linked multi-agent research.")
 app.add_typer(research_app, name="research")
 replay_app = typer.Typer(help="Validate frozen point-in-time replay corpora.")
 app.add_typer(replay_app, name="replay")
+report_app = typer.Typer(help="Export stored evidence-linked research reports.")
+app.add_typer(report_app, name="report")
+"""`V2-P5-022`. A group with one command rather than a top-level `openalpha report-export`, for
+`panel`'s reason one block down: `GET /api/v1/reports` and `POST /api/v1/reports` have had no
+CLI at all since they shipped (`tests/unit/test_surface_parity.py` lists both as REST-only), so
+the group this command joins is the one those two will land in, and creating it now is cheaper
+than renaming a top-level verb later."""
 migrate_app = typer.Typer(help="Inspect and apply state.sqlite3 schema migrations.")
 app.add_typer(migrate_app, name="migrate")
 panel_app = typer.Typer(help="Build and examine the point-in-time panel plane.")
@@ -939,6 +946,43 @@ def replay_run(
         random_seed=random_seed,
     )
     typer.echo(report.model_dump_json())
+
+
+@report_app.command("export")
+def report_export_command(
+    report_id: Annotated[str, typer.Argument(help="The report's content-derived id, as `rpt_…`.")],
+    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
+        "./runtime"
+    ),
+) -> None:
+    """Print one stored report with its evidence, minus every payload its licence withholds.
+
+    `V2-P5-022`. PRD Implementation Decision 27 asks for exactly one thing here -- 不导出
+    Tushare 原始 payload -- and this is the command that makes it reachable from a terminal:
+
+        openalpha report export rpt_0123456789abcdef --runtime-dir ./runtime > report.json
+
+    What comes out is safe to hand to somebody else. Every evidence item the report cites is
+    listed with its identity, its four clocks, its source, its licence and this repository's own
+    one-line summary of it; the provider's own bytes travel **only** where
+    `redistribution == "allowed"`, and everywhere else their place is held by a record naming
+    the licence that kept them out. All three shipped providers declare `restricted`, so on a
+    real runtime directory the usual answer is that no payload travels and the export says so
+    per item rather than looking empty. The rule itself lives in `product/export.py`.
+
+    Always JSON, `openalpha shortlist get`'s rule: this is a document being handed over, not a
+    verdict this command is reaching, and a second terminal rendering of it would be a second
+    shape for bytes whose whole purpose is to be one shape.
+
+    Exits 0 when the report is held and 1 when no report has that id -- distinguished from an
+    export with nothing in it, which is a report that cites evidence this store can no longer
+    produce and which prints those citations under `evidence_not_recovered`.
+    """
+    export = OpenAlphaSDK(runtime_dir=runtime_dir).export_report(report_id)
+    if export is None:
+        typer.echo(f"No report is stored under {report_id}.", err=True)
+        raise typer.Exit(code=1)
+    typer.echo(export.model_dump_json())
 
 
 @migrate_app.command("status")

@@ -107,6 +107,10 @@ PARITY: Final[MappingProxyType[str, tuple[str | None, str | None]]] = MappingPro
         "GET /api/v1/reports": ("list_reports", None),
         "POST /api/v1/reports": ("create_report", None),
         "GET /api/v1/reports/{report_id}": (None, None),
+        # `V2-P5-022`. The one report route that landed on all three faces at once, and
+        # deliberately: an export is the artifact a user hands to somebody else, so a face that
+        # could produce it without the licence gate would be the whole defect.
+        "GET /api/v1/reports/{report_id}/export": ("export_report", "report export"),
         "GET /api/v1/market/events": (None, None),
         "GET /api/v1/themes": (None, None),
         # --- scheduling (`V2-P5-013`) ----------------------------------------------------
@@ -336,6 +340,11 @@ def test_the_measured_surface_counts_are_the_ones_this_file_was_written_against(
     A number that moves goes red naming which face moved, so a change to any surface has to pass
     through this file rather than around it. Measured on `2746663` before `V2-P5-013`: 43 routes,
     48 SDK methods, 25 CLI commands, with 9 REST-only capabilities.
+
+    `V2-P5-022` moved three of the five by one each -- `GET /api/v1/reports/{report_id}/export`,
+    `OpenAlphaSDK.export_report`, `openalpha report export` -- and left `without_sdk` and
+    `rest_only` alone, which is the point: the row shipped one capability on all three faces
+    rather than one face and two entries in the gap table.
     """
     measured = {
         "routes": len(_routes()),
@@ -346,9 +355,9 @@ def test_the_measured_surface_counts_are_the_ones_this_file_was_written_against(
     }
 
     assert measured == {
-        "routes": 47,
-        "sdk_methods": 54,
-        "cli_commands": 32,
+        "routes": 48,
+        "sdk_methods": 55,
+        "cli_commands": 33,
         "without_sdk": 11,
         "rest_only": 9,
     }
