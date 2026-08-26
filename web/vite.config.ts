@@ -96,11 +96,27 @@ export default defineConfig({
       //   regression: 020 put files nobody imports into the scope, and `routes.ts` joined
       //   the tree with its own co-located test at this merge rather than an exemption.
       //   Branches is the metric that actually rose, 84 → 85.
+      // 2026-08-25, V2-P5-017/018 (pages ③ and ④: two route containers, four panels, three
+      //   contract classifiers and the data layer for five more endpoints, 296 → 438 tests
+      //   / 22 → 30 files). Same `include:` scope as the line above, so these numbers are
+      //   directly comparable to it: statements 93.19%, branches 87.52%, functions 94.41%,
+      //   lines 94.36%  →  93 / 87 / 94 / 94. All four rose.
+      //
+      //   Branches is the one worth recording how. The first green run of this row measured
+      //   83.88% — *below* the 85 inherited floor — because ~500 lines of new panel arrived
+      //   whose nullable fields, enum second-arms and `cancelled` guards no test reached.
+      //   The floor was left alone and the branches were covered instead: one test over the
+      //   weak end of every nullable the factor contract declares, one over a policy with
+      //   every limit undeclared, two over a non-Error rejection, and four that unmount a
+      //   page mid-flight and then let the answer land. One dead branch was deleted rather
+      //   than tested — `STANDING_LABEL[...] ?? entry.standing`, unreachable once the map is
+      //   keyed by the union — because covering an unreachable arm is not possible and
+      //   leaving it lowers the ceiling for everyone after.
       thresholds: {
-        statements: 91,
-        branches: 85,
-        functions: 92,
-        lines: 93
+        statements: 93,
+        branches: 87,
+        functions: 94,
+        lines: 94
       }
     }
   }

@@ -7,7 +7,14 @@
 
 import type {
   Evidence,
+  FactorExperimentEnvelope,
+  FactorTier,
+  FactorTierAttribution,
+  FactorTierReport,
   PanelHealthReport,
+  PortfolioConstructionView,
+  PredictionIndex,
+  PredictionIndexEntry,
   ReplayReport,
   ResearchResult,
   ShortlistAnswer,
@@ -224,6 +231,283 @@ export function buildShortlistAnswer(overrides: Partial<ShortlistAnswer> = {}): 
     evidence_not_shortlisted: [],
     evidence_from_an_unfinished_run: [],
     evidence_without_a_stored_run: [],
+    ...overrides,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// V2-P5-017 / V2-P5-018 fixtures.
+//
+// Same rule as the two above: the default is the *strongest* answer its endpoint can give,
+// so every test has to state the one thing it weakened. A fixture that started degraded
+// would let a classifier pass by returning `degraded` unconditionally.
+// ---------------------------------------------------------------------------
+
+/** One tier row. Defaults to a fully measured row; `coverage` is the knob tests turn. */
+export function buildTierReport(
+  tier: FactorTier,
+  overrides: Partial<FactorTierReport> = {},
+): FactorTierReport {
+  return {
+    tier,
+    source_manifest_ids: [`fbm_${tier}`],
+    ic: {
+      tier,
+      method: "spearman",
+      direction: "higher_is_better",
+      factor_id: "fct_fixture",
+      horizon_sessions: 5,
+      coverage: "measured",
+      measured_count: 60,
+      mean_ic: 0.031,
+      stdev_ic: 0.12,
+      icir: 0.258,
+      positive_count: 38,
+      negative_count: 21,
+      zero_count: 1,
+      sign_consistency: 0.633,
+    },
+    portfolio: {
+      tier,
+      group_count: 5,
+      horizon_sessions: 5,
+      coverage: "measured",
+      measured_count: 60,
+      group_mean_net_returns: [-0.004, -0.001, 0.0005, 0.002, 0.006],
+      group_mean_gross_returns: [-0.003, 0.0, 0.0015, 0.003, 0.007],
+      mean_spread: 0.01,
+      stdev_spread: 0.04,
+      spread_ir: 0.25,
+      hit_rate: 0.58,
+    },
+    turnover: {
+      tier,
+      group_count: 5,
+      rebalances: 12,
+      mean_name_turnover: 0.31,
+      mean_money_turnover: 0.29,
+    },
+    // `null` on raw and present on the other two, exactly as the contract requires.
+    survival:
+      tier === "raw"
+        ? null
+        : {
+            method: "spearman",
+            left_key: "momentum/v1",
+            right_key: "momentum/v1",
+            left_tier: "raw",
+            right_tier: tier,
+            coverage: "measured",
+            measured_count: 60,
+            mean_correlation: 0.82,
+            mean_abs_correlation: 0.84,
+            stdev_correlation: 0.09,
+            verdict: "distinct",
+          },
+    ...overrides,
+  };
+}
+
+/** One grid cell. */
+export function buildAttribution(
+  from_tier: FactorTier,
+  to_tier: FactorTier,
+  statistic: "mean_ic" | "mean_spread",
+  overrides: Partial<FactorTierAttribution> = {},
+): FactorTierAttribution {
+  return {
+    from_tier,
+    to_tier,
+    statistic,
+    retention_floor: 0.6,
+    from_value: 0.04,
+    to_value: 0.031,
+    retention: 0.775,
+    verdict: "survives",
+    ...overrides,
+  };
+}
+
+/**
+ * The six cells in `ATTRIBUTION_CELL_ORDER` — step-major, statistic-minor — all `survives`.
+ *
+ * Built as the full six rather than as a short list because the artifact's own validator
+ * requires exactly these keys in exactly this order, and a fixture that carried three cells
+ * would let a classifier pass against a document the backend would refuse to seal.
+ */
+export function buildAttributionGrid(): FactorTierAttribution[] {
+  const steps: Array<[FactorTier, FactorTier]> = [
+    ["raw", "processed"],
+    ["processed", "neutralized"],
+    ["raw", "neutralized"],
+  ];
+  return steps.flatMap(([from, to]) => [
+    buildAttribution(from, to, "mean_ic"),
+    buildAttribution(from, to, "mean_spread"),
+  ]);
+}
+
+export function buildFactorExperiment(
+  overrides: Partial<FactorExperimentEnvelope["document"]["artifact"]> = {},
+  envelope: Partial<FactorExperimentEnvelope> = {},
+): FactorExperimentEnvelope {
+  return {
+    schema_version: "factor-experiment-view/v1",
+    experiment_id: "fxp_fixture",
+    content_digest: "c".repeat(64),
+    write: "unchanged",
+    ...envelope,
+    document: {
+      schema_version: "factor-experiment-record/v1",
+      sealed_digest: "c".repeat(64),
+      built_at: "2026-08-20T02:00:00Z",
+      note: null,
+      artifact: {
+        schema_version: "factor-experiment-artifact/v1",
+        spec: {
+          retention_floor: 0.6,
+          code_commit: "a1b2c3d",
+          horizon_sessions: 5,
+          ic: {
+            method: "spearman",
+            definition: {
+              key: "momentum",
+              version: 1,
+              family: "price_momentum",
+              direction: "higher_is_better",
+              required_fields: ["close", "adj_factor"],
+              lookback_sessions: 20,
+            },
+          },
+        },
+        tiers: [
+          buildTierReport("raw"),
+          buildTierReport("processed"),
+          buildTierReport("neutralized"),
+        ],
+        attributions: buildAttributionGrid(),
+        ...overrides,
+      },
+    },
+  };
+}
+
+export function buildPredictionEntry(
+  overrides: Partial<PredictionIndexEntry> = {},
+): PredictionIndexEntry {
+  return {
+    record_id: "prd_fixture",
+    standing: "forward",
+    standing_proves:
+      "this store held these bytes before the instant the outcome became knowable, and the " +
+      "batch says it was produced before it too",
+    standing_does_not_prove:
+      "that the batch was produced when it says it was. predicted_at is whatever the caller " +
+      "passed to predict and nothing in this repository can check it",
+    as_of: "2026-08-20T07:00:00Z",
+    recorded_at: "2026-08-20T07:05:00Z",
+    outcome_known_at: "2026-08-27T07:00:00Z",
+    horizon: "5d",
+    artifact_id: "mdl_fixture",
+    model_name: "cross-sectional-rank",
+    offered_count: 300,
+    scored_count: 288,
+    ...overrides,
+  };
+}
+
+export function buildPredictionIndex(entries?: PredictionIndexEntry[]): PredictionIndex {
+  const predictions = entries ?? [buildPredictionEntry()];
+  return {
+    record_ids: predictions.map((entry) => entry.record_id),
+    predictions,
+  };
+}
+
+/**
+ * A clean construction.
+ *
+ * The three weights are `"0.7"`, `"0.2"` and `"0.1"` and `invested_weight` is `"1"`, and the
+ * exact triple is load-bearing rather than decorative. **Measured in this repository's own
+ * node**: summed left to right as they appear in `targets`, `0.7 + 0.2 + 0.1` is
+ * `0.9999999999999999`, so a panel that recomputes the total instead of rendering the
+ * `invested_weight` the contract carries prints a visibly different string. That is the
+ * float hole the serialiser renders every decimal as a string to close, and
+ * `PortfolioConstructionPanel.test.tsx` asserts on it directly.
+ *
+ * The first triple tried here was `0.4 / 0.35 / 0.25`, and it was **discarded on
+ * measurement**: that one sums to exactly `1` in IEEE-754, so the assertion would have
+ * existed while being unable to separate a summing panel from a rendering one. Reordering
+ * matters too — `0.1 + 0.2 + 0.7` is exactly `1` — so these stay in descending rank order,
+ * which is both the order the backend emits and the order that breaks.
+ */
+export function buildPortfolioConstruction(
+  overrides: Partial<PortfolioConstructionView> = {},
+): PortfolioConstructionView {
+  return {
+    schema_version: "portfolio-construction/v1",
+    method: "heuristic, not optimized",
+    policy: {
+      schema_version: "portfolio-construction-policy/v1",
+      tier_weights: ["0.5", "0.3", "0.2"],
+      limits: {
+        max_position_weight: "0.7",
+        max_total_exposure: "1",
+        min_cash_weight: "0",
+        max_industry_weight: null,
+        turnover_budget: null,
+      },
+    },
+    targets: [
+      {
+        subject: "000001.SZ",
+        tier: 1,
+        rank: 1,
+        score: 0.91,
+        industry_code: null,
+        weight: "0.7",
+        untrimmed_weight: "0.8",
+        was_adjusted: true,
+      },
+      {
+        subject: "600519.SH",
+        tier: 1,
+        rank: 2,
+        score: 0.88,
+        industry_code: null,
+        weight: "0.2",
+        untrimmed_weight: "0.2",
+        was_adjusted: false,
+      },
+      {
+        subject: "300750.SZ",
+        tier: 2,
+        rank: 3,
+        score: 0.71,
+        industry_code: null,
+        weight: "0.1",
+        untrimmed_weight: "0.1",
+        was_adjusted: false,
+      },
+    ],
+    invested_weight: "1",
+    cash_weight: "0",
+    unallocated_weight: "0",
+    turnover: "0.62",
+    turnover_before_budget: "0.62",
+    turnover_budget: null,
+    turnover_damping: null,
+    caps_breached_after_turnover_damping: [],
+    limitations: [
+      {
+        code: "the_policy_is_a_heuristic_and_optimises_nothing",
+        detail: "No objective is minimised and no covariance is estimated.",
+      },
+      {
+        code: "no_capacity_liquidity_or_cost_term_enters_a_weight",
+        detail: "No capacity, liquidity or cost term enters a weight.",
+      },
+    ],
     ...overrides,
   };
 }

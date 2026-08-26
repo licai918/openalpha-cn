@@ -15,7 +15,10 @@
 import type { PanelState } from "./panelState";
 import type {
   Evidence,
+  FactorExperimentEnvelope,
   PanelHealthReport,
+  PortfolioConstructionView,
+  PredictionIndex,
   ReplayReport,
   ResearchResult,
   ShortlistAnswer,
@@ -268,4 +271,266 @@ export function markStale<T>(state: PanelState<T>, reason: string): PanelState<T
     case "failed":
       return state;
   }
+}
+
+// =========================================================================================
+// V2-P5-017 / V2-P5-018.
+//
+// Each of the three below replaces a naive version that was written first and measured:
+// 9 of the 19 cases in `contractStateLab.test.ts` failed against it. What each naive
+// version got wrong is recorded on the function it became.
+// =========================================================================================
+
+/**
+ * The one tier step a three-tier report's acceptance criterion is decided on.
+ *
+ * Mirrors `factor_view.ACCEPTANCE_STEP`, whose docstring says it exists because the grid
+ * "treats all three as equals on purpose" while only one carries the finding, and that "a
+ * face that printed six equal rows left the reader to know which". This face is one of
+ * those faces, so it points.
+ */
+const ACCEPTANCE_STEP: readonly [string, string] = ["processed", "neutralized"];
+
+/**
+ * Whether a Decimal-rendered-as-string is zero, without going through a float.
+ *
+ * The naive version of `portfolioConstructionStateFrom` used `if (view.unallocated_weight)`
+ * and degraded every clean construction, because `"0"` is a non-empty string and therefore
+ * truthy. `Number(value) === 0` would have worked for the zeros but re-opens the very hole
+ * the wire format closes — the serialiser renders these as strings precisely so no reader
+ * takes a weight through a float — so the test is on the spelling instead. Python emits an
+ * exact zero as `"0"`, `"0.00"` or `"0E-10"` depending on the arithmetic behind it, and all
+ * three mean the same thing.
+ */
+function isZeroDecimalString(value: string): boolean {
+  const trimmed = value.trim();
+  // A digit must be present, or the empty string would match `0*` vacuously.
+  return /\d/.test(trimmed) && /^[+-]?0*(?:\.0*)?(?:[eE][+-]?\d+)?$/.test(trimmed);
+}
+
+/**
+ * Two things page ③ is asked for that no shipped HTTP contract can answer.
+ *
+ * Named rather than drawn. This repository books an invented number as a defect, and both
+ * of these would be inventions: the data structures exist in the library and reach no face.
+ */
+export const FACTOR_LAB_CONTRACT_GAPS: ReadonlyArray<{ code: string; detail: string }> = [
+  {
+    code: "ic_decay_curve_reaches_no_http_contract",
+    detail:
+      "衰减：`ICDecayCurve` 与 `ICDecayRung` 在 `backtest/factor_ic.py` 里是完整的契约，但实测" +
+      "全库没有任何调用方——它们不进 `FactorExperimentArtifact`，不进任何 view，也不进任何路由。" +
+      "而且客户端拼不出来：一个 `TierReport` 的四项研究被校验器强制同一个 `horizon_sessions`，" +
+      "所以一次实验就是一个 horizon；把多次实验横排也不成立，因为 `ICDecayCurve` 要求各档位于" +
+      "同一样本之上，两次独立运行不保证这一点。故本页不画衰减曲线，只标出本次实验的那一个 horizon。",
+  },
+  {
+    code: "cross_factor_correlation_reaches_no_http_contract",
+    detail:
+      "相关性：唯一能经 HTTP 拿到的相关系数是 `tiers[].survival`，而它是**同一个因子**的 raw 档" +
+      "与本档之间的相关性（左右 `factor_id` 相同），回答的是「中性化之后还剩多少排序」。" +
+      "因子 A 对因子 B 的相关性没有字段：`ICSeriesCorrelation` 与 `RedundancyStudy." +
+      "correlate_ic_series` 同样零调用方，也没有任何路由接受两个因子。故本页把这个数标注为" +
+      "「档位存活相关性」而不是「因子相关性」，两者是不同的问题，用同一个标题就是误报。",
+  },
+];
+
+/** Three things page ④ is asked for that no browser-reachable contract can answer. */
+export const PORTFOLIO_CONTRACT_GAPS: ReadonlyArray<{ code: string; detail: string }> = [
+  {
+    code: "capacity_reaches_no_portfolio_contract",
+    detail:
+      "容量：`/portfolio` 与 `/backtests` 下没有任何路由返回容量字段，而且构建面自己就把这件事" +
+      "写成了一条限制——`no_capacity_liquidity_or_cost_term_enters_a_weight`，即没有任何容量、" +
+      "流动性或成本项进入过权重。真正的容量数字在 `backtest/factor_tradeability.py`，只经" +
+      "`POST /api/v1/factors/run` 出现在**因子实验**上（页面③），它按因子实验计量而不按组合计量，" +
+      "把它搬到本页当作本组合的容量就是换了一个对象作答。",
+  },
+  {
+    code: "paper_portfolio_has_no_http_face",
+    detail:
+      "Paper 净值：`backtest/paper.py` 存在，但实测 `api/app.py` 不 import 它，也没有" +
+      "`POST /api/v1/portfolio/paper/advance` 这条路由——CLI 与 SDK 同样没有对应面。" +
+      "另外全库检索不到 `nav` / `net_value` 任何一个标识符；最接近的是" +
+      "`PortfolioBacktestReport.equity_curve[].equity`，那是回测的权益曲线而不是 paper 账本。" +
+      "paper 账本唯一能经 HTTP 看见的痕迹是它写进同一个 ledger 的成交流水。",
+  },
+  {
+    code: "segmented_report_has_no_http_face",
+    detail:
+      "分段：`backtest/segmented_reporting.py` 与 `OpenAlphaSDK.segmented_outcomes` 都在，" +
+      "`openalpha validation segmented` 也在，但没有任何 HTTP 路由——`api/app.py` 不 import 该模块。" +
+      "同一条缺口也盖住 `outcome_statistics`（V2-P5-008）与其中的 BH 多重检验 `family` 块" +
+      "（V2-P5-007）：三者都是 CLI/SDK 面，浏览器一个都够不着。故本页不显示分段结论。",
+  },
+];
+
+/**
+ * A sealed factor experiment. **An unmeasured grid is not a passing grid.**
+ *
+ * The naive version filtered the grid for `removed`/`reversed` and called everything else a
+ * success. Measured, that answered `succeeded` for an experiment whose six cells were *all*
+ * `not_measured` — and that is not a hypothetical, it is the case
+ * `factor_view.everything_is_unmeasured` exists for. Its docstring calls it "the quietest
+ * bad answer" and records that the acceptance review "named it the most dangerous thing on
+ * this face": such a run exits `0`, answers `200`, and "a reader (or a CI step) that greps
+ * for `removed`, finds nothing and stops has concluded 'this factor survived neutralisation'
+ * about two tiers that never computed a number."
+ *
+ * **The browser is the face with the least protection against it.** The CLI prints a named
+ * line when it is true and `factor run --json` prints the same line on stderr, but the
+ * property is deliberately *not* a field on the envelope, so an HTTP client that does not
+ * recompute it is told nothing at all. Recomputing it is this function's first rule.
+ *
+ * `removed` is emphatically **not** degraded (the fourth test pins this): a measured step
+ * that destroyed the statistic is a report doing its job, and folding it together with "we
+ * could not measure" would delete the distinction the row is about.
+ */
+export function factorExperimentStateFrom(
+  envelope: FactorExperimentEnvelope,
+): PanelState<FactorExperimentEnvelope> {
+  const artifact = envelope.document.artifact;
+
+  if (artifact.tiers.length === 0) {
+    // The artifact's own validator forbids this, so it should be unreachable. Kept because
+    // the alternative — rendering a three-tier comparison with no tiers as a pass — is the
+    // failure mode this whole function exists to refuse.
+    return {
+      kind: "empty",
+      reason: "该实验文档没有携带任何档位，不构成一次三档对比。",
+    };
+  }
+
+  // 1. The quietest bad answer, first, because every rule below reads a number it does not have.
+  if (
+    artifact.attributions.length > 0 &&
+    artifact.attributions.every((cell) => cell.verdict === "not_measured")
+  ) {
+    return {
+      kind: "degraded",
+      data: envelope,
+      reason:
+        "归因网格的六个格子全部为 not_measured：本次实验没有测出任何一个可比较的数，" +
+        "因此「没有出现 removed」不等于「因子通过了中性化」。各档自己的 coverage 码才是原因。",
+    };
+  }
+
+  // 2. The one step the acceptance criterion is decided on. Five surviving cells do not
+  //    substitute for it — that is the separation the third test makes.
+  const acceptance = artifact.attributions.filter(
+    (cell) => cell.from_tier === ACCEPTANCE_STEP[0] && cell.to_tier === ACCEPTANCE_STEP[1],
+  );
+  const unmeasuredAcceptance = acceptance.filter(
+    (cell) => cell.verdict === "not_measured" || cell.verdict === "no_baseline",
+  );
+  if (unmeasuredAcceptance.length > 0) {
+    return {
+      kind: "degraded",
+      data: envelope,
+      reason:
+        `验收判据所在的 processed→neutralized 步骤有 ${unmeasuredAcceptance.length} 个统计量` +
+        `未能作答（${unmeasuredAcceptance.map((cell) => `${cell.statistic}=${cell.verdict}`).join("、")}）；` +
+        "其余格子无论判为什么，都不是这一步的答案。",
+    };
+  }
+
+  // 3. Coverage before the statistic — `panelHealthStateFrom`'s rule. A `null` mean_ic beside
+  //    `insufficient_as_ofs` means nothing was measured, not that the factor scored zero.
+  const uncovered: string[] = [];
+  for (const tier of artifact.tiers) {
+    if (tier.ic.coverage !== "measured") {
+      uncovered.push(`${tier.tier} 档的 IC 未测量（${tier.ic.coverage}）`);
+    }
+    if (tier.portfolio.coverage !== "measured") {
+      uncovered.push(`${tier.tier} 档的分组组合未测量（${tier.portfolio.coverage}）`);
+    }
+  }
+  if (uncovered.length > 0) {
+    return { kind: "degraded", data: envelope, reason: uncovered.join("；") };
+  }
+
+  return { kind: "succeeded", data: envelope };
+}
+
+/**
+ * The prediction register. **A backfill is not an out-of-sample result.**
+ *
+ * The naive version read `scored_count` and called any register with scores `ready`, which
+ * put a recomputation on screen in the same table and the same columns as a genuine forward
+ * prediction. `PREDICTION_STANDING_MEANINGS` is unambiguous about what that costs: a
+ * `backfill` proves "anything at all about foresight" — nothing — and an `unwitnessed`
+ * record's claim "is uncorroborated, which may be a slow disk and may be a backdated
+ * predicted_at, and this record cannot tell you which".
+ *
+ * So anything that is not `forward` degrades the register, and the affected `record_id`s are
+ * listed rather than counted: the third test asserts the untouched record is *not* named, so
+ * a blanket sentence over the whole register fails it.
+ */
+export function predictionRegisterStateFrom(index: PredictionIndex): PanelState<PredictionIndex> {
+  if (index.predictions.length === 0) {
+    return {
+      kind: "empty",
+      reason: "本地还没有任何已登记的预测，因而没有可读的样本外记录。",
+    };
+  }
+
+  const notForward = index.predictions.filter((entry) => entry.standing !== "forward");
+  if (notForward.length > 0) {
+    return {
+      kind: "degraded",
+      data: index,
+      reason:
+        `以下记录不是 forward 立场，不能当作样本外证据阅读：` +
+        `${notForward.map((entry) => `${entry.record_id}（${entry.standing}）`).join("、")}。`,
+    };
+  }
+
+  // `ready` and not `succeeded`: this is a read of a register, not the outcome of a run the
+  // user started — the distinction `panelState.ts` keeps the two kinds apart for.
+  return { kind: "ready", data: index };
+}
+
+/**
+ * A heuristic portfolio construction.
+ *
+ * The naive version had two defects and the tests caught both. It called `targets.length > 0`
+ * a success, so a construction whose declared caps were **left breached** by the turnover
+ * budget rendered as a clean portfolio — the backend ships a limitation for exactly that
+ * case (`the_turnover_budget_can_leave_a_cap_breached_and_says_so_instead_of_retrimming`),
+ * so those weights really do violate a limit the user declared. And it tested
+ * `if (view.unallocated_weight)`, which degraded every clean construction, because the wire
+ * value is the *string* `"0"` and every non-empty string is truthy. See `isZeroDecimalString`.
+ */
+export function portfolioConstructionStateFrom(
+  view: PortfolioConstructionView,
+): PanelState<PortfolioConstructionView> {
+  if (view.targets.length === 0) {
+    return {
+      kind: "empty",
+      reason: "本次构建没有得到任何持仓，全部权重都留在现金里。",
+    };
+  }
+
+  if (view.caps_breached_after_turnover_damping.length > 0) {
+    return {
+      kind: "degraded",
+      data: view,
+      reason:
+        `换手预算缩放之后，以下上限仍被突破：` +
+        `${view.caps_breached_after_turnover_damping.join("、")}。` +
+        "服务端选择如实上报而不是再裁一次，因此屏幕上的权重确实违反了声明的上限。",
+    };
+  }
+
+  if (!isZeroDecimalString(view.unallocated_weight)) {
+    return {
+      kind: "degraded",
+      data: view,
+      reason:
+        `有 ${view.unallocated_weight} 的权重上限吃不下，已作为现金报出而非摊派给最后一名；` +
+        "只看持仓表会少算这一部分。",
+    };
+  }
+
+  return { kind: "succeeded", data: view };
 }

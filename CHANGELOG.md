@@ -6,6 +6,57 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Added
 
+- **页面③因子与模型实验室与页面④组合与验证，含五处具名缺口** (`V2-P5-017`, `V2-P5-018`). The last
+  two of PRD Decision 24's four route areas, at `/factor-lab` (+ `/factor-lab/:experimentId`) and
+  `/portfolio`. **296 -> 438 tests, 22 -> 30 files**, and the ratchet rose on all four metrics:
+  **93 / 87 / 94 / 94** (93.19% / 87.52% / 94.41% / 94.36%), against the merged tree's 91 / 85 /
+  92 / 93. No dependency was added; `pnpm audit --audit-level high` is **byte-identical** to the
+  baseline (still exit 1 through dev-only `jsdom`/`eslint`/`vite->postcss`, unchanged by this row).
+  **The headline is a defect the backend names and only the browser is exposed to.**
+  `factor_view.everything_is_unmeasured` calls a grid whose six cells are all `not_measured` "the
+  quietest bad answer", and records that the acceptance review "named it the most dangerous thing
+  on this face": such a run exits `0`, answers `200`, and "a reader that greps for `removed`, finds
+  nothing and stops has concluded 'this factor survived neutralisation' about two tiers that never
+  computed a number." The CLI prints a named line for it and `--json` prints it on stderr -- but the
+  property is deliberately **not a field on the envelope**, so an HTTP client is told nothing at
+  all. `factorExperimentStateFrom` recomputes it, and refuses the near miss too: a grid where five
+  cells `survive` while the `ACCEPTANCE_STEP` (`processed`->`neutralized`) alone is unmeasured is
+  `degraded`, because that is the one step the acceptance criterion is decided on. `removed` is
+  emphatically **not** degraded -- a measured step that destroyed the statistic is a report doing
+  its job, and folding it in with "we could not measure" would delete the distinction.
+  **All three classifiers were written naive-first and measured: 9 of 19 cases failed**, including
+  the all-unmeasured grid answering `succeeded`, a `backfill` prediction answering `ready`, and --
+  the one worth naming -- `if (view.unallocated_weight)` degrading *every* clean construction,
+  because the wire value is the **string** `"0"` and every non-empty string is truthy.
+  **Page ④'s weights never touch a float.** `construction_view` renders every Decimal as a string
+  so that "`sum(weights) == invested_weight`" stays exactly true, and the panel renders
+  `invested_weight` from the field rather than recomputing it; the request sends decimals as
+  strings too, since pydantic parses `"0.1"` exactly while the JSON number `0.1` is a float first.
+  The fixture that proves it was **corrected on measurement**: the first weight triple (0.4/0.35/
+  0.25) sums to exactly `1` in IEEE-754, so the assertion existed and could not fail. It is now
+  0.7/0.2/0.1, which sums to `0.9999999999999999` in the order the contract emits, and a guard test
+  keeps that property true. **Five named absences, contracts read rather than invented.** Page ③:
+  **衰减** -- `ICDecayCurve`/`ICDecayRung`/`FactorICStudy.decay` are complete contracts with **zero
+  callers anywhere in `src/`**; they reach no artifact, no view and no route, and cannot be rebuilt
+  client-side either, because a `TierReport`'s validator forces one `horizon_sessions` per
+  experiment and `ICDecayCurve` requires its rungs over one sample. **相关性** -- the only
+  correlation on any HTTP body is `tiers[].survival`, which is the *same factor* at raw vs this
+  tier (`left_key == right_key`); cross-factor correlation has no field and `ICSeriesCorrelation`
+  is another zero-caller contract, so the heading says 档位存活相关性 rather than 因子相关性.
+  Page ④: **容量**, **Paper 净值** and **分段** have no browser-reachable route at all --
+  `api/app.py` imports nine `backtest` modules and `paper`, `outcome_statistics`,
+  `multiple_testing` and `segmented_reporting` are **not** among them; `nav`/`net_value` appear
+  nowhere in `src/openalpha_cn/`; and the construction face ships its own denial as
+  `no_capacity_liquidity_or_cost_term_enters_a_weight`. 暴露 is delivered only in its total-exposure
+  form, because `targets[].industry_code` is structurally `null` on the shipped shortlist path
+  (`an_industry_cap_is_unenforceable_on_the_shipped_shortlist_face`). All five are rendered on the
+  page as codes with reasons, and asserted both ways -- the gap named, and the chart absent.
+  **模型样本外指标** is served by the prediction register rather than by an evaluation, because
+  `POST /api/v1/models/evaluate` stores nothing and has no listing or retrieval route; the panel
+  renders `standing_proves`/`standing_does_not_prove` per row, which the serialiser added because a
+  face printing `standing` and stopping "turns a local-first bookkeeping fact into what reads like
+  an attestation, and a column in a table does that at least as fast as a field in a document".
+
 - **A frontend coverage gate that measures the source tree instead of the import graph, and
   a guard that can name the file** (`V2-P5-020`). The row's own text was stale in three
   places and none of them was the defect. "No component is rendered in isolation" and

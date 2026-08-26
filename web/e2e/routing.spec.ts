@@ -27,6 +27,22 @@
 // `V2-P5-014` rather than fixed here, because it is a Python-side change in a file sibling
 // agents are editing. These tests are still correct about the *application* — the router
 // resolves these addresses — they simply cannot see how the app is served.
+//
+// **V2-P5-017 / V2-P5-018 re-measured this for their own two areas rather than assuming the
+// finding carried over**, on a fresh `pnpm build` with the same `TestClient` over the real
+// `create_app(web_dir=web/dist)`. It does carry over, and the new addresses are affected
+// identically:
+//
+//     /factor-lab          -> 404  serves SPA shell: False
+//     /factor-lab/fxp_abc  -> 404  serves SPA shell: False
+//     /portfolio           -> 404  serves SPA shell: False
+//
+// Pages ③ and ④ therefore ship with the same caveat as ① and ②: bookmarkable under
+// `vite dev`, 404 under `openalpha serve`. Neither page's *unit* proof depends on the dev
+// server (both route containers are driven through `MemoryRouter` with a stubbed `fetch` in
+// `src/pages/*.test.tsx`), but their **addressability** is proven only in development, and
+// `V2-P5-021` should not read the four page objects as evidence that the four URLs work in
+// production. One `api/app.py` fallback closes all seven rows at once.
 
 import { expect, test } from "@playwright/test";
 
