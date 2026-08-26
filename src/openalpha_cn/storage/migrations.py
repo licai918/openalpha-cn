@@ -221,6 +221,15 @@ class MigrationStatus:
     `schema_migrations` has never heard of them. Empty on every healthy database. A non-empty
     entry with `effect_present is None` is the one shape `run_migrations` cannot resolve on its
     own and reports instead; see `_reconcile`."""
+    damaged: tuple[Migration, ...] = ()
+    """Migrations the audit trail **does** name whose effect the schema says is gone
+    (`V2-P5-029`). The mirror image of `unrecorded`, and the case that used to be reported as a
+    healthy database: `DROP TABLE validation_results` leaves its `schema_migrations` row
+    untouched, so nothing ever consulted the predicate and `migrate status` printed eight
+    `applied` lines about a database missing one of the eight tables. Only migrations carrying
+    an `effect_present` predicate can appear -- this list means "the schema was asked and
+    answered no", so the three data rewrites, which cannot be asked, are absent from it whether
+    or not they are intact."""
 
 
 @dataclass(frozen=True)
@@ -1401,6 +1410,83 @@ def _unrecorded(
     )
 
 
+def _damaged(
+    connection: sqlite3.Connection, migrations: Sequence[Migration]
+) -> tuple[Migration, ...]:
+    """Migrations history *does* record, whose effect the schema says is not there (`V2-P5-029`).
+
+    The other half of `_unrecorded`, and the half nothing consulted. `_unrecorded` selects on
+    `migration.name not in (recorded | repaired)`, so `effect_present` was only ever asked
+    about migrations the audit trail had never heard of. The complementary class -- the trail
+    names it, the schema has lost it -- went unexamined, which meant that on the one question
+    the trail and the schema can actually disagree about, **the trail always won**.
+
+    That contradicts this feature's own stated rule. `V2-P5-026` gives the predicate exactly
+    one licence, to read `sqlite_master`/`PRAGMA table_xinfo` and to trust *neither* counter;
+    `schema_migrations` is one of the two counters, and a design that skips the check whenever
+    it holds a row is trusting it absolutely. Measured on a database at head with
+    `validation_results` dropped and its audit row left in place, which is what `DROP TABLE`
+    really does: five `migrate run` restarts left `user_version=8`, `recorded=[1..8]`,
+    `pending=[]`, no `schema_repairs` table and no `validation_results` table, with
+    `migrate run` saying "up to date; nothing to do" and `migrate status` printing eight
+    `applied` lines and nothing else. Permanent, silent, and reported as healthy.
+
+    Only migrations with a predicate can appear here, and that is the boundary this class is
+    built around: `damaged` means "the schema was asked and answered no". The three data
+    rewrites carry `effect_present is None` because their effect is payload bytes, so they can
+    never be asked, and calling them damaged would be the same guess `_reconcile` refuses to
+    make in the other direction. Their absence from this list is not a claim that they are
+    intact.
+
+    Note the asymmetry with `_unrecorded`: this function does **not** exclude names already in
+    `schema_repairs`. It must not. The ledger records that a repair happened once; a table
+    dropped again after being repaired is damaged again, and a ledger lookup here would make
+    the second loss invisible forever -- the same class of defect as the one this function
+    exists to close. What stops the second pass is the predicate answering `True`, which is a
+    fact about the database rather than about our own bookkeeping.
+    """
+    current_version = _current_version(connection)
+    recorded = _recorded_names(connection)
+    ordered = sorted(migrations, key=lambda migration: migration.version)
+    return tuple(
+        migration
+        for migration in ordered
+        if migration.version <= current_version
+        and migration.name in recorded
+        and migration.effect_present is not None
+        and not migration.effect_present(connection)
+    )
+
+
+def _repairable(
+    connection: sqlite3.Connection, migrations: Sequence[Migration]
+) -> tuple[tuple[Migration, bool], ...]:
+    """Everything below the watermark that needs looking at, in version order.
+
+    Each pair is `(migration, recorded)`: `False` for a `_unrecorded` gap (history has never
+    named it), `True` for a `_damaged` one (history names it, the schema has lost its effect).
+    The flag decides two things in `_reconcile` that genuinely differ between the two -- which
+    concurrency re-check applies, and whether "the effect is already present" is worth an audit
+    row -- and nothing else.
+
+    **Merged by version rather than concatenated**, which is the whole reason this is a
+    function. `_reconcile` stops at the first migration it cannot decide, so appending the
+    damaged list after the unrecorded one would put every damaged migration behind every
+    undecidable gap regardless of version. Measured shape that would break: a damaged
+    `create_validation_results` (version 2) sitting behind an unrecorded
+    `rewrite_contract_identities` (version 5, no predicate) would never be repaired, even
+    though version 2 is three versions *in front of* the thing that cannot be decided. Version
+    order is the only order in which "stop here" means what the stop is for.
+
+    The two lists cannot overlap: `_unrecorded` requires the name to be absent from
+    `schema_migrations` and `_damaged` requires it to be present.
+    """
+    pairs = [(migration, False) for migration in _unrecorded(connection, migrations)]
+    pairs.extend((migration, True) for migration in _damaged(connection, migrations))
+    pairs.sort(key=lambda pair: pair[0].version)
+    return tuple(pairs)
+
+
 def _reconcile(
     connection: sqlite3.Connection,
     migrations: Sequence[Migration],
@@ -1408,10 +1494,11 @@ def _reconcile(
     clock: Callable[[], datetime],
     backup_path: Path | None,
 ) -> tuple[SchemaRepair, ...]:
-    """Resolve every skipped version whose effect the schema can be asked about (`V2-P5-026`).
+    """Resolve every version whose effect the schema can be asked about (`V2-P5-026`).
 
-    For each migration `_unrecorded` reports, in version order, inside its own
-    `BEGIN IMMEDIATE`/`COMMIT` exactly like the pending loop:
+    For each migration `_repairable` reports -- `_unrecorded` gaps and `_damaged` migrations
+    both, merged in version order -- inside its own `BEGIN IMMEDIATE`/`COMMIT` exactly like
+    the pending loop:
 
     * `effect_present()` is **True** -- the database already has what this migration makes.
       Nothing runs; a `REPAIR_VERIFIED` row records that it was checked and found present.
@@ -1436,8 +1523,19 @@ def _reconcile(
     gaps in version order relative to each other, which matters for the same reason it matters
     in the main loop: they are a chain, not an unordered set.
 
-    Idempotent by construction: a resolved migration's name lands in `schema_repairs` and
-    `_unrecorded` never returns it again, so a second call finds no work and writes nothing.
+    Idempotent by construction, but by two different mechanisms (`V2-P5-029`). A resolved gap's
+    name lands in `schema_repairs` and `_unrecorded` never returns it again. A resolved
+    *damage* is stopped by the predicate answering `True` instead, deliberately and not
+    interchangeably: `_damaged` must keep ignoring `schema_repairs`, or a table dropped a
+    second time after being repaired once would be invisible forever. That in turn is why the
+    `INSERT` below is `ON CONFLICT ... DO UPDATE` -- repairing one migration twice is
+    reachable now, and `schema_repairs`' primary key is `(version, name)`.
+
+    The two also differ on what "already present" means. For a gap it is real news and earns a
+    `REPAIR_VERIFIED` row: history never recorded the migration and now something has checked.
+    For damage it is a lost race -- a concurrent writer recreated the effect between the
+    snapshot and this lock -- and earns nothing, because the audit trail already names that
+    migration and a `verified` row would announce a repair that never happened.
 
     Concurrency, the same shape the pending loop already handles: `_unrecorded` is a snapshot
     taken before any lock is held, so two callers racing the same database (the API and the CLI
@@ -1447,7 +1545,7 @@ def _reconcile(
     winner's finished work and colliding on the ledger's primary key.
     """
     repairs: list[SchemaRepair] = []
-    for migration in _unrecorded(connection, migrations):
+    for migration, recorded in _repairable(connection, migrations):
         if migration.effect_present is None:
             logger.warning(
                 "migration_repair_undecidable",
@@ -1455,7 +1553,7 @@ def _reconcile(
             )
             break
         connection.execute("BEGIN IMMEDIATE")
-        if migration.name in _repaired_names(connection):
+        if not recorded and migration.name in _repaired_names(connection):
             # A concurrent writer repaired this exact migration while this connection was
             # blocked waiting for the write lock -- the same lost race the pending loop
             # guards against, arriving through a different ledger. Without this re-check the
@@ -1467,6 +1565,13 @@ def _reconcile(
             continue
         try:
             present = migration.effect_present(connection)
+            if recorded and present:
+                # A damaged migration whose effect came back between the snapshot and this
+                # lock -- a concurrent writer repaired it. There is nothing to do and nothing
+                # to record: unlike the `_unrecorded` case, the audit trail already names this
+                # migration, so a `verified` row would announce a repair that never happened.
+                connection.execute("ROLLBACK")
+                continue
             if not present:
                 migration.apply(connection)
             resolution = REPAIR_VERIFIED if present else REPAIR_APPLIED
@@ -1474,7 +1579,9 @@ def _reconcile(
             connection.execute(_SCHEMA_REPAIRS_DDL)
             connection.execute(
                 f"INSERT INTO {SCHEMA_REPAIRS_TABLE} "
-                "(version, name, resolution, repaired_at) VALUES (?, ?, ?, ?)",
+                "(version, name, resolution, repaired_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT (version, name) DO UPDATE SET "
+                "resolution = excluded.resolution, repaired_at = excluded.repaired_at",
                 (migration.version, migration.name, resolution, repaired_at),
             )
         except MigrationNotYetApplicable:
@@ -1594,6 +1701,7 @@ def read_status(path: Path, *, migrations: Sequence[Migration] = MIGRATIONS) -> 
             for row in repair_rows
         )
         unrecorded = _unrecorded(connection, migrations)
+        damaged = _damaged(connection, migrations)
     finally:
         connection.close()
     pending = _pending(current_version, migrations)
@@ -1604,6 +1712,7 @@ def read_status(path: Path, *, migrations: Sequence[Migration] = MIGRATIONS) -> 
         pending=pending,
         repairs=repairs,
         unrecorded=unrecorded,
+        damaged=damaged,
     )
 
 
@@ -1685,7 +1794,14 @@ def run_migrations(
         from_version = _current_version(connection)
         pending = _pending(from_version, migrations)
         unrecorded = _unrecorded(connection, migrations)
-        if not pending and not unrecorded:
+        damaged = _damaged(connection, migrations)
+        # `damaged` joins this guard rather than being checked later, and that ordering is
+        # load-bearing: everything below this point is "there is work to do", starting with
+        # `_take_backup`. A repair recreates schema, so it must be backed up first exactly as
+        # a pending migration is -- and before `V2-P5-029` a database whose only fault was a
+        # dropped table returned here, never reached `_reconcile`, and reported "up to date;
+        # nothing to do" on every restart forever.
+        if not pending and not unrecorded and not damaged:
             return MigrationRunResult(
                 path=path,
                 from_version=from_version,

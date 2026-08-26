@@ -399,6 +399,151 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **Reconciliation only ever checked half of what it claimed to, and the other half was a
+  dropped table reported as a healthy database** (`V2-P5-029`, new row filed by this work).
+  `V2-P5-026` says it reconciles "by inspecting the schema, never trusting either counter".
+  Measured, it trusted one of them completely: `_unrecorded()` selects on
+  `migration.name not in (recorded | repaired)`, so `effect_present` was only ever consulted
+  for migrations the audit trail had **never heard of**. The complementary class -- the trail
+  names it, the schema has lost it -- was checked by nothing, which meant that on the one
+  question the trail and the schema can actually disagree about, **the trail always won**.
+  **Measured** on a database at head, dropping `validation_results` and leaving its
+  `schema_migrations` row in place -- which is what `DROP TABLE` really does: after five
+  `migrate run` restarts, `user_version=8`, `recorded=[1..8]`, `pending=[]`, no
+  `schema_repairs` table and no `validation_results` table. `migrate run` said "schema version
+  8 is up to date; nothing to do" every time; `migrate status` printed eight `applied` lines
+  and nothing else. The table was gone permanently and every operator surface called the
+  database healthy -- the same silent stall `V2-P5-026` exists to end, entered by the other
+  door.
+  **The existing fixture was built so the guard had to fire.** Both repair cases in
+  `tests/integration/test_cli_migrate.py` do `DROP TABLE validation_results` **and**
+  `DELETE FROM schema_migrations WHERE version = 2` together, and one documents that pair as
+  "what a dropped table looks like from the engine's side". It is not -- `DROP TABLE` does not
+  touch `schema_migrations`, and deleting the audit row is precisely the condition
+  `_unrecorded` keys on. The half where history lies had never been tested.
+  **The fix.** `_damaged()` finds migrations below the watermark that the trail *does* name,
+  that carry a predicate, and whose predicate answers no. `_repairable()` merges it with
+  `_unrecorded()` **in version order** rather than concatenating -- concatenation would put
+  every damaged migration behind every undecidable gap regardless of version, so a damaged
+  version 2 would be stranded behind an undecidable version 5 three versions in front of it.
+  `run_migrations`' early return gained `and not damaged`, which it must: everything past that
+  return begins with `_take_backup`, and a repair changes schema. `MigrationStatus.damaged` and
+  a `damaged` section in `migrate status` (text and `--json` alike) report it.
+  **Two deliberate boundaries.** `_damaged` does **not** exclude names already in
+  `schema_repairs`: a table dropped again after being repaired once is damaged again, and a
+  ledger lookup there would make the second loss invisible forever -- the very defect being
+  closed. What stops the second pass is the predicate answering `True`, a fact about the
+  database rather than about our own bookkeeping. And the three data rewrites
+  (`effect_present is None`) never appear in `damaged` at all: it means "the schema was asked
+  and answered no", and a migration that cannot be asked can be called neither intact nor
+  damaged -- the same refusal to guess `V2-P5-026` already makes in the other direction.
+  **A hazard this created, found and closed.** `schema_repairs`' primary key is
+  `(version, name)`. Under the old design a migration could never be repaired twice, because a
+  repaired name was excluded from `_unrecorded` forever; checking the effect regardless of the
+  ledger makes it reachable, and a raw `INSERT` would have surfaced `sqlite3.IntegrityError` as
+  `MigrationFailedError` against a database merely damaged twice. Now
+  `ON CONFLICT (version, name) DO UPDATE`, pinned by
+  `test_the_same_migration_can_be_repaired_twice`.
+  **Two existing tests went red and were updated to the new correct answer, not reverted.**
+  `test_a_projection_missing_only_its_index_reports_its_effect_absent` and
+  `test_a_partly_indexed_query_path_migration_reports_its_effect_absent` write
+  `schema_migrations` rows for migrations they never apply, over a v1-shaped schema -- which is
+  exactly the damage class now inspected for, so the additional repairs they now report are
+  correct.
+  **Red first.** The nine assertions that existed while the engine was still unmodified
+  were all red, each for its predicted reason. Four more were added afterwards -- against
+  the `--dry-run` preview, the repair line's wording, and the `<=` boundary -- and rather
+  than a second red run each is pinned by a mutant that reverts exactly the behaviour it
+  tests, all killed. Mutation sweep over everything this work changed in `cli.py` and
+  `storage/migrations.py`: **23 mutants, 23 killed, 0 survived**, on a
+  baseline proved green first, each mutant under a 120-second hard timeout with the sources
+  restored from a `finally`, an `atexit` hook and SIGINT/SIGTERM handlers, and both files
+  byte-compared against pre-sweep copies afterwards. The `<=` boundary case exists *because*
+  of that sweep: `<` survived the first pass, since every other case damages version 2 on a
+  database at version 8 and none of them stood on the watermark -- and `<` would have missed
+  the head migration of every database, which is the most ordinary loss there is.
+  `pytest tests/unit` 3246 passed, 1 skipped; `tests/integration` green; `ruff`/`mypy` clean;
+  the repair path re-verified through the installed `openalpha` binary as well as `CliRunner`.
+
+- **Two sentences `V2-P5-026` states about its own behaviour did not survive measurement**
+  (`V2-P5-029`; both corrected in place in that row rather than restated here).
+  **"Stops and reports, leaving it to a human" stops the reconciliation loop, not the
+  process.** With version 5 (`rewrite_contract_identities`, no predicate) unrecorded,
+  `build_storage` succeeds, `create_app` succeeds and `GET /health` returns
+  `200 {"status":"ok"}`; the only signals are one WARNING log line
+  (`migration_repair_undecidable`) and one line in `status.unrecorded`. **And it blocks every
+  repair behind it, permanently**: unrecording version 6 (`add_runs_mode_projection`, which has
+  a predicate and whose effect really was missing) alongside version 5 left `unrecorded` at
+  `[(5,…),(6,…)]` and `repaired` empty after five `migrate run` calls. The ordering discipline
+  is kept -- repairs are a chain in version order, exactly like the pending loop -- but one
+  false sentence it produced is fixed: `migrate status` used to print "its effect cannot be
+  established by inspecting the schema" for *every* unrecorded entry, which for version 6 was a
+  result reported for an inspection that never ran. The three situations are now worded
+  separately, and an entry that was never examined says which migration is blocking it.
+
+- **`OPENALPHA_RUNTIME_DIR` now reaches the command line, and it was 28 commands that ignored
+  it, not eight** (`V2-P5-028`, new row filed by this work). Every CLI command naming a runtime
+  directory declared `runtime_dir: Annotated[Path, typer.Option("--runtime-dir")] =
+  Path("./runtime")` -- the path was a **Typer option default**, so the option was never
+  "omitted" as far as the body could tell, and `load_config()` was never consulted at all. An
+  exported environment variable lost to a compiled-in default, the exact inversion
+  `config.py`'s module docstring rules out ("an already-exported real environment variable
+  always wins over ... a field's compiled-in default").
+  **The production shape.** `Dockerfile:48` sets `ENV OPENALPHA_RUNTIME_DIR=/data` beside
+  `WORKDIR /data` and `VOLUME ["/data"]`. `uvicorn openalpha_cn.api.app:app` therefore serves
+  `/data/state.sqlite3`, while `docker exec … openalpha migrate status` resolved `./runtime`
+  against the working directory and reported on `/data/runtime/state.sqlite3` -- a file that
+  does not exist. The operator was told "schema version 0, 8 pending" about a database nobody
+  serves, **a decoy appeared on the mounted volume as a side effect**, and `migrate run` would
+  then have migrated the decoy. It also disabled the entire operator surface of `V2-P5-026`:
+  the `repaired`/`unrecorded` sections of `migrate status`, and what `migrate run` reports it
+  repaired, ship only through this command group.
+  **The enumeration this work was handed named eight and was wrong; measured, it is 28** --
+  every command in the file that takes `--runtime-dir`, with no exceptions. The twenty it
+  missed include `report export`, `evidence build`, all four `shortlist` commands, all four
+  `model` commands, all four `jobs` commands, both `factor` commands, both `portfolio` and both
+  `validation` commands. Measured in a scratch working directory with the variable exported,
+  **`openalpha jobs list` -- a command that only reads -- created a decoy database and then
+  migrated it**, logging `migration_applied` for `baseline` and `create_validation_results`
+  against a file nothing serves. So the guard filed here is structural rather than a list of
+  names: `test_no_command_hardcodes_the_runtime_directory_as_an_option_default` walks the live
+  Typer tree and fails on any `--runtime-dir` whose default is a `Path`, which is what a
+  hand-maintained enumeration could not do -- it was made once, by hand, and was 20 short.
+  **The fix.** Every one of the 28 declares `Path | None = None` and opens with
+  `runtime_dir = _resolved_runtime_dir(runtime_dir)`. `None` is the only default that can tell
+  "the caller omitted this" from "the caller asked for `./runtime`", and only the first may
+  fall back to `load_config().runtime_dir`. The helper is **lazy**, mirroring
+  `_resolved_config_digest` directly above it and for that function's stated reason (P0.B
+  Finding 2): `load_config()` validates every `OPENALPHA_*` field atomically, so a caller who
+  passes `--runtime-dir` never touches config validation and an unrelated invalid field -- a
+  non-numeric `OPENALPHA_MAX_REQUEST_BYTES`, say -- can never block them. A caller who omits it
+  does get that validation, and a named `ConfigError` on stderr with exit 1, which is the right
+  trade when the alternative is silently operating on the wrong database. Both halves are
+  asserted against the same broken environment so they cannot drift apart.
+  **Three of the six behavioural cases were dropped for being unable to separate the two
+  answers**, which is the failure mode this repository keeps finding in its own fixtures.
+  `shortlist list`, `model predictions` and `migrate prune-backups` touch an empty runtime
+  directory and create nothing in *either* place, so "no decoy in the cwd" passes on the broken
+  tree too. The parametrized behavioural test therefore covers only the three that genuinely
+  open the database (`migrate status`, `migrate run`, `jobs list` -- measured leaving a decoy
+  before the fix and none after), and `shortlist list` is covered instead by a test that seeds a
+  well-formed content address into the *exported* directory only, making the two answers differ
+  in the output itself. Verified: all seven new assertions fail on the unmodified `cli.py` and
+  the three that pin unchanged behaviour (explicit flag wins; no variable still means
+  `./runtime`) pass on both. `pytest tests/unit` 3246 passed, 1 skipped;
+  `tests/integration/test_cli_migrate.py` 8 passed; `ruff`/`mypy` clean. Reproduced and
+  re-verified through the installed `openalpha` binary, not only `CliRunner`.
+  **The operator half.** All 28 options now carry the same help string and it states the
+  precedence. Eight had no help at all and none named `OPENALPHA_RUNTIME_DIR` -- accurate
+  while they ignored it, a silent omission now that they do not, and
+  `docker exec … openalpha migrate status --help` is the only place the operator inside the
+  container can find out. The guard for it went red on `panel doctor` alone, and the cause
+  was the renderer rather than the text: that command's option names are long enough that at
+  the 80-column default Rich hard-wraps `OPENALPHA_RUNTIME_DIR` *inside the token*. Fixed in
+  the fixture, not the source -- the other way round would have been fixing a defect that
+  did not exist. All 28 were then checked structurally: default `None`, the resolver as the
+  first statement of the body, and `--help` rendering without error.
+
 - **`V2-P5-020` 的行文与实测不符，已改**（`V2-P5-014` 顺手）。该行称"当前**无任何组件被隔离渲染**"
   且 `web/vite.config.ts` **无 coverage 键** —— 两条在 `V2-P5-019` 交付后即为假：`vite.config.ts`
   自 2026-08-07 起就有 `coverage.thresholds`，四个面板自 `019` 起各有隔离渲染的 `*.test.tsx`。
