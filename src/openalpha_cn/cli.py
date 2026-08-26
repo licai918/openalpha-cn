@@ -788,9 +788,9 @@ def evidence_build(
         Redistribution,
         typer.Option("--redistribution"),
     ] = Redistribution.restricted,
-    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
-        "./runtime"
-    ),
+    runtime_dir: Annotated[
+        Path | None, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)
+    ] = None,
 ) -> None:
     """Build evidence from a user-owned CSV, JSON, JSONL, or Parquet file, and store it.
 
@@ -807,6 +807,8 @@ def evidence_build(
     The printed payload is unchanged and is still the whole response, so a caller piping this
     into `jq` keeps working; what changed is that the snapshots also survive the process.
     """
+    runtime_dir = _resolved_runtime_dir(runtime_dir)
+
     point_in_time = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
     metadata = ProviderMetadata(
         provider_id=source_id,
@@ -870,10 +872,51 @@ def _resolved_config_digest(explicit: str | None) -> str:
     return compute_config_digest(config)
 
 
+def _resolved_runtime_dir(explicit: Path | None) -> Path:
+    """Return `explicit` verbatim when given; otherwise ask `load_config()`.
+
+    Every `--runtime-dir` option in this module funnels through here, and every one of
+    them declares `None` -- never a path -- as its Typer default. That is the whole
+    point: a path default makes "the caller omitted this" indistinguishable from "the
+    caller asked for ./runtime", and while they look alike they are not, because
+    `OPENALPHA_RUNTIME_DIR` is only allowed to decide the first.
+
+    **`V2-P5-028`.** Twenty-eight commands previously wrote `= Path("./runtime")` as the
+    option default and never consulted `load_config()` at all, so an exported
+    `OPENALPHA_RUNTIME_DIR` lost to a compiled-in default -- the exact inversion
+    `config.py`'s module docstring rules out ("an already-exported real environment
+    variable always wins over ... a field's compiled-in default"). The production shape
+    of it: `Dockerfile` sets `ENV OPENALPHA_RUNTIME_DIR=/data` next to `WORKDIR /data`
+    and `VOLUME ["/data"]`, so `uvicorn openalpha_cn.api.app:app` serves
+    `/data/state.sqlite3` while `docker exec ... openalpha migrate status` resolved
+    `./runtime` against the working directory and reported on `/data/runtime/…`. That
+    file does not exist, so the operator was told "schema version 0, 8 pending" about a
+    database nobody serves, a decoy was created on the mounted volume as a side effect,
+    and `migrate run` would have gone on to migrate the decoy. Measured before the fix,
+    `openalpha jobs list` -- a command that only reads -- created *and migrated* one.
+
+    Lazy, exactly as `_resolved_config_digest` above is lazy and for the same reason
+    (P0.B Finding 2): `load_config()` validates every `OPENALPHA_*` field atomically, so
+    it is called only when this command genuinely has no other way to know where state
+    lives. A caller who passes `--runtime-dir` never touches config validation, and an
+    unrelated invalid field -- a non-numeric `OPENALPHA_MAX_REQUEST_BYTES`, say -- can
+    therefore never block them. A caller who omits it does get that validation, and a
+    named `ConfigError` on stderr with exit 1 rather than a silent wrong directory,
+    which is the right trade when the alternative is operating on the wrong database.
+    """
+    if explicit is not None:
+        return explicit
+    try:
+        return load_config().runtime_dir
+    except ConfigError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=1) from error
+
+
 @research_app.command("run")
 def research_run(
     evidence_path: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
-    runtime_dir: Annotated[Path, typer.Option("--runtime-dir")] = Path("./runtime"),
+    runtime_dir: Annotated[Path | None, typer.Option("--runtime-dir")] = None,
     run_id: Annotated[str, typer.Option("--run-id")] = "local-run",
     mode: Annotated[RunMode, typer.Option("--mode")] = RunMode.live,
     subject: Annotated[str, typer.Option("--subject")] = "",
@@ -902,6 +945,8 @@ def research_run(
     `content_hash`, a non-object item -- and print the risk-flag vocabulary at somebody whose
     problem is a tampered digest.
     """
+    runtime_dir = _resolved_runtime_dir(runtime_dir)
+
     raw = json.loads(evidence_path.read_text(encoding="utf-8"))
     raw_items = raw.get("items") if isinstance(raw, dict) else raw
     evidence = parse_serialized_evidence(raw_items)
@@ -929,7 +974,7 @@ def research_run(
 @replay_app.command("run")
 def replay_run(
     corpus_path: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
-    runtime_dir: Annotated[Path, typer.Option("--runtime-dir")] = Path("./runtime"),
+    runtime_dir: Annotated[Path | None, typer.Option("--runtime-dir")] = None,
     code_commit: Annotated[
         str | None, typer.Option("--code-commit", help=_CODE_COMMIT_HELP)
     ] = None,
@@ -939,6 +984,8 @@ def replay_run(
     random_seed: Annotated[int, typer.Option("--random-seed")] = 7,
 ) -> None:
     """Run and validate a frozen replay corpus."""
+    runtime_dir = _resolved_runtime_dir(runtime_dir)
+
     report = OpenAlphaSDK(runtime_dir=runtime_dir).replay(
         corpus=ReplayCorpus.load(corpus_path),
         code_commit=_resolved_code_commit(code_commit),
@@ -951,9 +998,9 @@ def replay_run(
 @report_app.command("export")
 def report_export_command(
     report_id: Annotated[str, typer.Argument(help="The report's content-derived id, as `rpt_…`.")],
-    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
-        "./runtime"
-    ),
+    runtime_dir: Annotated[
+        Path | None, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)
+    ] = None,
 ) -> None:
     """Print one stored report with its evidence, minus every payload its licence withholds.
 
@@ -978,6 +1025,8 @@ def report_export_command(
     export with nothing in it, which is a report that cites evidence this store can no longer
     produce and which prints those citations under `evidence_not_recovered`.
     """
+    runtime_dir = _resolved_runtime_dir(runtime_dir)
+
     export = OpenAlphaSDK(runtime_dir=runtime_dir).export_report(report_id)
     if export is None:
         typer.echo(f"No report is stored under {report_id}.", err=True)
@@ -987,7 +1036,7 @@ def report_export_command(
 
 @migrate_app.command("status")
 def migrate_status(
-    runtime_dir: Annotated[Path, typer.Option("--runtime-dir")] = Path("./runtime"),
+    runtime_dir: Annotated[Path | None, typer.Option("--runtime-dir")] = None,
     json_output: Annotated[
         bool,
         typer.Option("--json", help="Emit a machine-readable status report."),
@@ -1003,6 +1052,8 @@ def migrate_status(
     `unrecorded` line is the only shape that needs a person: it means a data-rewrite migration
     was skipped, and neither re-running it nor recording it would be honest.
     """
+    runtime_dir = _resolved_runtime_dir(runtime_dir)
+
     status = read_status(runtime_dir / "state.sqlite3")
     if json_output:
         payload = {
@@ -1050,7 +1101,7 @@ def migrate_status(
 
 @migrate_app.command("run")
 def migrate_run(
-    runtime_dir: Annotated[Path, typer.Option("--runtime-dir")] = Path("./runtime"),
+    runtime_dir: Annotated[Path | None, typer.Option("--runtime-dir")] = None,
     dry_run: Annotated[
         bool,
         typer.Option("--dry-run", help="Show what would be applied without applying it."),
@@ -1067,6 +1118,8 @@ def migrate_run(
     which creates the table, so the *next* invocation of this command (or the next real
     SDK/API startup against the same directory) can actually apply it.
     """
+    runtime_dir = _resolved_runtime_dir(runtime_dir)
+
     path = runtime_dir / "state.sqlite3"
     if dry_run:
         status = read_status(path)
@@ -1150,7 +1203,7 @@ def migrate_run(
 
 @migrate_app.command("prune-backups")
 def migrate_prune_backups(
-    runtime_dir: Annotated[Path, typer.Option("--runtime-dir")] = Path("./runtime"),
+    runtime_dir: Annotated[Path | None, typer.Option("--runtime-dir")] = None,
     keep: Annotated[
         int,
         typer.Option("--keep", min=0, help="How many of the newest backups to keep."),
@@ -1183,6 +1236,8 @@ def migrate_prune_backups(
     already-clean tree is a command that gets `|| true`-d in the first script that uses it, which
     is `PanelExit`'s own argument about `panel doctor`'s notices.
     """
+    runtime_dir = _resolved_runtime_dir(runtime_dir)
+
     backups = runtime_dir / "backups"
     found = sorted(
         (path for path in backups.glob("*.bak") if path.is_file()),
@@ -3474,7 +3529,7 @@ def panel_build(
     subject: Annotated[
         list[str] | None, typer.Option("--subject", help=_BUILD_SUBJECT_HELP)
     ] = None,
-    runtime_dir: Annotated[Path, typer.Option("--runtime-dir")] = Path("./runtime"),
+    runtime_dir: Annotated[Path | None, typer.Option("--runtime-dir")] = None,
     exchange: Annotated[
         str, typer.Option("--exchange", help="Which exchange's calendar to fetch and read.")
     ] = TRADING_CALENDAR_DEFAULT_EXCHANGE,
@@ -3545,6 +3600,8 @@ def panel_build(
     size before it starts (`_echo_budget`) and reports progress with an `eta` while it runs, and
     `--subject` is the lever that turns the registry sweep into a named handful.
     """
+    runtime_dir = _resolved_runtime_dir(runtime_dir)
+
     with _panel_command("panel build"):
         targets = _build_targets(dataset)
         subjects = _build_subjects(subject or (), targets)
@@ -3826,7 +3883,7 @@ _CALENDAR_HELP = (
 def panel_doctor_command(
     dataset: Annotated[list[str], typer.Option("--dataset", help=_DATASET_HELP)],
     year: Annotated[list[int], typer.Option("--year", help=_YEAR_HELP)],
-    runtime_dir: Annotated[Path, typer.Option("--runtime-dir")] = Path("./runtime"),
+    runtime_dir: Annotated[Path | None, typer.Option("--runtime-dir")] = None,
     session: Annotated[list[str] | None, typer.Option("--session", help=_SESSION_HELP)] = None,
     index_code: Annotated[list[str] | None, typer.Option("--index-code")] = None,
     exchange: Annotated[str, typer.Option("--exchange")] = TRADING_CALENDAR_DEFAULT_EXCHANGE,
@@ -3866,6 +3923,8 @@ def panel_doctor_command(
     `code`, `datasets` and `dates` and drops only the paragraph; the default is unchanged,
     because a registry served only on request is a registry that stops being read.
     """
+    runtime_dir = _resolved_runtime_dir(runtime_dir)
+
     with _panel_command("panel doctor"):
         store, request = _panel_request(
             runtime_dir=runtime_dir,
@@ -3908,7 +3967,7 @@ def panel_doctor_command(
 def data_check(
     dataset: Annotated[list[str], typer.Option("--dataset", help=_DATASET_HELP)],
     year: Annotated[list[int], typer.Option("--year", help=_YEAR_HELP)],
-    runtime_dir: Annotated[Path, typer.Option("--runtime-dir")] = Path("./runtime"),
+    runtime_dir: Annotated[Path | None, typer.Option("--runtime-dir")] = None,
     session: Annotated[list[str] | None, typer.Option("--session", help=_SESSION_HELP)] = None,
     index_code: Annotated[list[str] | None, typer.Option("--index-code")] = None,
     exchange: Annotated[str, typer.Option("--exchange")] = TRADING_CALENDAR_DEFAULT_EXCHANGE,
@@ -3930,6 +3989,8 @@ def data_check(
     asks `is_blocked` and reads `cleared_or_none`, never `bool()`, `len()` or iteration, all
     three of which raise here **even when the request cleared**.
     """
+    runtime_dir = _resolved_runtime_dir(runtime_dir)
+
     with _panel_command("data-check"):
         store, request = _panel_request(
             runtime_dir=runtime_dir,
@@ -4144,9 +4205,9 @@ def factor_run_command(
     retention_floor: Annotated[
         float, typer.Option("--retention-floor", help=_FACTOR_RETENTION_FLOOR_HELP)
     ],
-    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
-        "./runtime"
-    ),
+    runtime_dir: Annotated[
+        Path | None, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)
+    ] = None,
     exchange: Annotated[
         str, typer.Option("--exchange", help=_FACTOR_EXCHANGE_HELP)
     ] = TRADING_CALENDAR_DEFAULT_EXCHANGE,
@@ -4185,6 +4246,8 @@ def factor_run_command(
     `factor_view.everything_is_unmeasured` for the one exit-0 answer this command prints a warning
     beside.
     """
+    runtime_dir = _resolved_runtime_dir(runtime_dir)
+
     with _panel_command("factor run"):
         instant = _panel_as_of(as_of)
         try:
@@ -4577,9 +4640,9 @@ def factor_build_command(
     neutralization: Annotated[
         str, typer.Option("--neutralization", help=_FACTOR_NEUTRALIZATION_HELP)
     ] = "",
-    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
-        "./runtime"
-    ),
+    runtime_dir: Annotated[
+        Path | None, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)
+    ] = None,
     exchange: Annotated[
         str, typer.Option("--exchange", help=_FACTOR_EXCHANGE_HELP)
     ] = TRADING_CALENDAR_DEFAULT_EXCHANGE,
@@ -4658,6 +4721,8 @@ def factor_build_command(
     Exits 0 when everything asked for was stored; 1 when the panel could not answer; 3 when the
     request could not be put. `FACTOR_EXIT`'s rows, unchanged.
     """
+    runtime_dir = _resolved_runtime_dir(runtime_dir)
+
     with _panel_command("factor build"):
         try:
             request = factor_build_request(
@@ -4865,9 +4930,9 @@ def shortlist_run_command(
     neutralization: Annotated[
         str, typer.Option("--neutralization", help=_FACTOR_NEUTRALIZATION_HELP)
     ] = "",
-    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
-        "./runtime"
-    ),
+    runtime_dir: Annotated[
+        Path | None, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)
+    ] = None,
     exchange: Annotated[
         str, typer.Option("--exchange", help=_FACTOR_EXCHANGE_HELP)
     ] = TRADING_CALENDAR_DEFAULT_EXCHANGE,
@@ -4944,6 +5009,8 @@ def shortlist_run_command(
     different answers and telling them apart is what this command was written for; see
     `SHORTLIST_EXIT`.
     """
+    runtime_dir = _resolved_runtime_dir(runtime_dir)
+
     with _panel_command("shortlist run"):
         instant = _panel_as_of(as_of)
         try:
@@ -4995,9 +5062,9 @@ _SHORTLIST_ADDRESS_HELP: Final[str] = (
 @shortlist_app.command("get")
 def shortlist_get_command(
     shortlist_id: Annotated[str, typer.Argument(help=_SHORTLIST_ADDRESS_HELP)],
-    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
-        "./runtime"
-    ),
+    runtime_dir: Annotated[
+        Path | None, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)
+    ] = None,
 ) -> None:
     """Print one stored shortlist answer, by the content address its own body carried.
 
@@ -5016,6 +5083,8 @@ def shortlist_get_command(
     a terminal rendering of it would be a second shape for the same bytes. Exits 0 when the answer
     is held, 1 when it is not, 3 when the address is not one.
     """
+    runtime_dir = _resolved_runtime_dir(runtime_dir)
+
     with _panel_command("shortlist get"):
         try:
             answer = held_shortlist(FileShortlistStore(runtime_dir / "shortlists"), shortlist_id)
@@ -5028,9 +5097,9 @@ def shortlist_get_command(
 
 @shortlist_app.command("list")
 def shortlist_list_command(
-    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
-        "./runtime"
-    ),
+    runtime_dir: Annotated[
+        Path | None, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)
+    ] = None,
     json_output: Annotated[
         bool, typer.Option("--json", help="Emit the addresses as data.")
     ] = False,
@@ -5043,6 +5112,8 @@ def shortlist_list_command(
     A directory with nothing in it prints nothing and exits 0, which is the ordinary state of a
     fresh install rather than a fault.
     """
+    runtime_dir = _resolved_runtime_dir(runtime_dir)
+
     with _panel_command("shortlist list"):
         held = FileShortlistStore(runtime_dir / "shortlists").list_ids()
         if json_output:
@@ -5068,9 +5139,9 @@ _SHORTLIST_CURRENT_HELP: Final[str] = (
 def shortlist_compare_command(
     baseline_id: Annotated[str, typer.Argument(help=_SHORTLIST_BASELINE_HELP)],
     current_id: Annotated[str, typer.Argument(help=_SHORTLIST_CURRENT_HELP)],
-    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
-        "./runtime"
-    ),
+    runtime_dir: Annotated[
+        Path | None, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)
+    ] = None,
     json_output: Annotated[
         bool, typer.Option("--json", help="Emit the whole comparison as data.")
     ] = False,
@@ -5097,6 +5168,8 @@ def shortlist_compare_command(
     Exits 0 when the comparison is made, 1 when either address is well formed and nothing is
     held under it, 3 when an address is not one or the two questions differ.
     """
+    runtime_dir = _resolved_runtime_dir(runtime_dir)
+
     with _panel_command("shortlist compare"):
         try:
             comparison = compare_held_shortlists(
@@ -5542,9 +5615,9 @@ def model_evaluate_command(
     min_scored_ratio: Annotated[
         float, typer.Option("--min-scored-ratio", help=_MODEL_SCORED_RATIO_HELP)
     ],
-    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
-        "./runtime"
-    ),
+    runtime_dir: Annotated[
+        Path | None, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)
+    ] = None,
     exchange: Annotated[
         str, typer.Option("--exchange", help=_FACTOR_EXCHANGE_HELP)
     ] = TRADING_CALENDAR_DEFAULT_EXCHANGE,
@@ -5620,6 +5693,8 @@ def model_evaluate_command(
     nothing here controls for having tried ten declarations and kept this one. The `limitations`
     array on `--json` carries all of that in the body.
     """
+    runtime_dir = _resolved_runtime_dir(runtime_dir)
+
     with _panel_command("model evaluate"):
         try:
             request = model_evaluation_request(
@@ -5669,9 +5744,9 @@ def model_daily_run_command(
     min_scored_ratio: Annotated[
         float, typer.Option("--min-scored-ratio", help=_MODEL_SCORED_RATIO_HELP)
     ],
-    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
-        "./runtime"
-    ),
+    runtime_dir: Annotated[
+        Path | None, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)
+    ] = None,
     exchange: Annotated[
         str, typer.Option("--exchange", help=_FACTOR_EXCHANGE_HELP)
     ] = TRADING_CALENDAR_DEFAULT_EXCHANGE,
@@ -5761,6 +5836,8 @@ def model_daily_run_command(
     argument against each. `openalpha model predictions` lists what is held in custody order, so
     a second record for one day is visible rather than silent.
     """
+    runtime_dir = _resolved_runtime_dir(runtime_dir)
+
     with _panel_command("model daily-run"):
         try:
             request = daily_request(
@@ -5815,9 +5892,9 @@ _PREDICTION_ADDRESS_HELP: Final[str] = (
 @model_app.command("prediction")
 def model_prediction_command(
     record_id: Annotated[str, typer.Argument(help=_PREDICTION_ADDRESS_HELP)],
-    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
-        "./runtime"
-    ),
+    runtime_dir: Annotated[
+        Path | None, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)
+    ] = None,
 ) -> None:
     """Print one registered prediction, by the content address its own body carried.
 
@@ -5835,6 +5912,8 @@ def model_prediction_command(
     without a lookup. What it still cannot say is the range it trained over and the instant it
     read the panel at; the `limitations` array names both.
     """
+    runtime_dir = _resolved_runtime_dir(runtime_dir)
+
     with _panel_command("model prediction"):
         try:
             record = held_prediction(
@@ -5849,9 +5928,9 @@ def model_prediction_command(
 
 @model_app.command("predictions")
 def model_predictions_command(
-    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
-        "./runtime"
-    ),
+    runtime_dir: Annotated[
+        Path | None, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)
+    ] = None,
     json_output: Annotated[
         bool,
         typer.Option("--json", help="Emit the register as data: the addresses and one row each."),
@@ -5875,6 +5954,8 @@ def model_predictions_command(
     fresh install rather than a fault -- and is also, for this store, where the *denominator*
     `domain/prediction_record.py` says a multiple-testing policy needs would be counted from.
     """
+    runtime_dir = _resolved_runtime_dir(runtime_dir)
+
     with _panel_command("model predictions"):
         try:
             held = held_predictions(
@@ -6146,9 +6227,9 @@ def portfolio_construct_command(
     previous_weight: Annotated[
         list[str] | None, typer.Option("--previous-weight", help=_CONSTRUCT_PREVIOUS_HELP)
     ] = None,
-    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
-        "./runtime"
-    ),
+    runtime_dir: Annotated[
+        Path | None, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)
+    ] = None,
     json_output: Annotated[
         bool, typer.Option("--json", help="Emit the whole construction as data.")
     ] = False,
@@ -6187,6 +6268,8 @@ def portfolio_construct_command(
     a book that already breached a cap can still breach it, and re-trimming would spend the
     turnover the budget just refused.
     """
+    runtime_dir = _resolved_runtime_dir(runtime_dir)
+
     with _panel_command("portfolio construct"):
         limits = PortfolioLimits(
             max_position_weight=_construct_decimal(
@@ -6353,9 +6436,9 @@ def _job_scheduler(
 def jobs_register_command(
     job_id: Annotated[str, typer.Argument(help=_JOB_ID_HELP)],
     catch_up: Annotated[JobsCatchUp, typer.Option("--catch-up", help=_JOB_CATCH_UP_HELP)],
-    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
-        "./runtime"
-    ),
+    runtime_dir: Annotated[
+        Path | None, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)
+    ] = None,
 ) -> None:
     """Declare a trading-day schedule, or leave the declared one exactly as it is.
 
@@ -6369,6 +6452,8 @@ def jobs_register_command(
     `--catch-up` has no default. It is the one field that decides whether a missed session is
     work or history, and the most permissive answer must not also be the easiest one to get.
     """
+    runtime_dir = _resolved_runtime_dir(runtime_dir)
+
     with _panel_command("jobs register"):
         instant = _panel_clock()
         try:
@@ -6396,9 +6481,9 @@ def jobs_register_command(
 
 @jobs_app.command("list")
 def jobs_list_command(
-    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
-        "./runtime"
-    ),
+    runtime_dir: Annotated[
+        Path | None, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)
+    ] = None,
     json_output: Annotated[
         bool, typer.Option("--json", help="Emit the schedules as data.")
     ] = False,
@@ -6410,6 +6495,8 @@ def jobs_list_command(
     apart means a listing still answers on an installation whose `trade_cal` partition is
     missing -- which is exactly when an operator is looking at it.
     """
+    runtime_dir = _resolved_runtime_dir(runtime_dir)
+
     with _panel_command("jobs list"):
         jobs = _job_store(runtime_dir).list_jobs()
         if json_output:
@@ -6438,9 +6525,9 @@ def jobs_due_command(
         str, typer.Option("--exchange", help=_FACTOR_EXCHANGE_HELP)
     ] = TRADING_CALENDAR_DEFAULT_EXCHANGE,
     as_of: Annotated[str, typer.Option("--as-of", help=_JOB_AS_OF_HELP)] = "",
-    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
-        "./runtime"
-    ),
+    runtime_dir: Annotated[
+        Path | None, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)
+    ] = None,
     json_output: Annotated[bool, typer.Option("--json", help="Emit the answer as data.")] = False,
 ) -> None:
     """Which trading sessions this job owes right now, and which it is about to skip.
@@ -6456,6 +6543,8 @@ def jobs_due_command(
     `--as-of` (`panel_ingest.newest_published_session`, the one function that owns the 16:30
     rule) and which of them this job has already run.
     """
+    runtime_dir = _resolved_runtime_dir(runtime_dir)
+
     with _panel_command("jobs due"):
         instant = _panel_as_of(as_of)
         scheduler = _job_scheduler(runtime_dir, exchange=exchange, years=year, as_of=instant)
@@ -6499,9 +6588,9 @@ def jobs_run_command(
     index_code: Annotated[list[str] | None, typer.Option("--index-code")] = None,
     as_of: Annotated[str, typer.Option("--as-of", help=_JOB_AS_OF_HELP)] = "",
     retry_failed: Annotated[bool, typer.Option("--retry-failed", help=_JOB_RETRY_HELP)] = False,
-    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
-        "./runtime"
-    ),
+    runtime_dir: Annotated[
+        Path | None, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)
+    ] = None,
     json_output: Annotated[
         bool, typer.Option("--json", help="Emit the whole run as data.")
     ] = False,
@@ -6551,6 +6640,8 @@ def jobs_run_command(
     a point-in-time panel must not acquire. So the loop stops, and the sessions after the
     failure stay owed until the failure is dealt with.
     """
+    runtime_dir = _resolved_runtime_dir(runtime_dir)
+
     with _panel_command("jobs run"):
         instant = _panel_as_of(as_of)
         store, request = _panel_request(
@@ -6964,9 +7055,9 @@ def validation_statistics_command(
         int, typer.Option("--bootstrap-samples", help=_STATISTICS_SAMPLES_HELP)
     ] = 1000,
     random_seed: Annotated[int, typer.Option("--random-seed", help=_STATISTICS_SEED_HELP)] = 0,
-    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
-        "./runtime"
-    ),
+    runtime_dir: Annotated[
+        Path | None, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)
+    ] = None,
     json_output: Annotated[
         bool, typer.Option("--json", help="Emit the whole report as data.")
     ] = False,
@@ -7002,6 +7093,8 @@ def validation_statistics_command(
     nothing stored, a family smaller than the cohorts tested, a dependence that is not one of the
     two -- and 1 when the runtime directory could not be opened.
     """
+    runtime_dir = _resolved_runtime_dir(runtime_dir)
+
     with _panel_command("validation statistics"):
         if dependence not in ("independent-or-positively-dependent", "arbitrary"):
             raise _panel_fail(
@@ -7046,9 +7139,9 @@ def validation_segmented_command(
         int, typer.Option("--bootstrap-samples", help=_STATISTICS_SAMPLES_HELP)
     ] = 1000,
     random_seed: Annotated[int, typer.Option("--random-seed", help=_STATISTICS_SEED_HELP)] = 0,
-    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
-        "./runtime"
-    ),
+    runtime_dir: Annotated[
+        Path | None, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)
+    ] = None,
     json_output: Annotated[
         bool, typer.Option("--json", help="Emit the whole report as data.")
     ] = False,
@@ -7091,6 +7184,8 @@ def validation_segmented_command(
     plan, a signal with nothing stored, a family below the buckets tested, an unlabelled signal
     -- and 1 when the runtime directory could not be opened.
     """
+    runtime_dir = _resolved_runtime_dir(runtime_dir)
+
     with _panel_command("validation segmented"):
         if dependence not in ("independent-or-positively-dependent", "arbitrary"):
             raise _panel_fail(
@@ -7157,9 +7252,9 @@ def portfolio_turnover_variants_command(
     cost_definition: Annotated[
         str, typer.Option("--cost-definition", help=_TURNOVER_RATE_DEFINITION_HELP)
     ] = "",
-    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
-        "./runtime"
-    ),
+    runtime_dir: Annotated[
+        Path | None, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)
+    ] = None,
     json_output: Annotated[
         bool, typer.Option("--json", help="Emit the whole report as data.")
     ] = False,
@@ -7199,6 +7294,8 @@ def portfolio_turnover_variants_command(
     shortlist, a band outside `[0, 1]`, a rate without a definition -- and 1 when the store
     could not be opened.
     """
+    runtime_dir = _resolved_runtime_dir(runtime_dir)
+
     with _panel_command("portfolio turnover-variants"):
         if cost_per_unit_turnover and not cost_definition:
             raise _panel_fail(

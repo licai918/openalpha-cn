@@ -279,6 +279,59 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **`OPENALPHA_RUNTIME_DIR` now reaches the command line, and it was 28 commands that ignored
+  it, not eight** (`V2-P5-028`, new row filed by this work). Every CLI command naming a runtime
+  directory declared `runtime_dir: Annotated[Path, typer.Option("--runtime-dir")] =
+  Path("./runtime")` -- the path was a **Typer option default**, so the option was never
+  "omitted" as far as the body could tell, and `load_config()` was never consulted at all. An
+  exported environment variable lost to a compiled-in default, the exact inversion
+  `config.py`'s module docstring rules out ("an already-exported real environment variable
+  always wins over ... a field's compiled-in default").
+  **The production shape.** `Dockerfile:48` sets `ENV OPENALPHA_RUNTIME_DIR=/data` beside
+  `WORKDIR /data` and `VOLUME ["/data"]`. `uvicorn openalpha_cn.api.app:app` therefore serves
+  `/data/state.sqlite3`, while `docker exec … openalpha migrate status` resolved `./runtime`
+  against the working directory and reported on `/data/runtime/state.sqlite3` -- a file that
+  does not exist. The operator was told "schema version 0, 8 pending" about a database nobody
+  serves, **a decoy appeared on the mounted volume as a side effect**, and `migrate run` would
+  then have migrated the decoy. It also disabled the entire operator surface of `V2-P5-026`:
+  the `repaired`/`unrecorded` sections of `migrate status`, and what `migrate run` reports it
+  repaired, ship only through this command group.
+  **The enumeration this work was handed named eight and was wrong; measured, it is 28** --
+  every command in the file that takes `--runtime-dir`, with no exceptions. The twenty it
+  missed include `report export`, `evidence build`, all four `shortlist` commands, all four
+  `model` commands, all four `jobs` commands, both `factor` commands, both `portfolio` and both
+  `validation` commands. Measured in a scratch working directory with the variable exported,
+  **`openalpha jobs list` -- a command that only reads -- created a decoy database and then
+  migrated it**, logging `migration_applied` for `baseline` and `create_validation_results`
+  against a file nothing serves. So the guard filed here is structural rather than a list of
+  names: `test_no_command_hardcodes_the_runtime_directory_as_an_option_default` walks the live
+  Typer tree and fails on any `--runtime-dir` whose default is a `Path`, which is what a
+  hand-maintained enumeration could not do -- it was made once, by hand, and was 20 short.
+  **The fix.** Every one of the 28 declares `Path | None = None` and opens with
+  `runtime_dir = _resolved_runtime_dir(runtime_dir)`. `None` is the only default that can tell
+  "the caller omitted this" from "the caller asked for `./runtime`", and only the first may
+  fall back to `load_config().runtime_dir`. The helper is **lazy**, mirroring
+  `_resolved_config_digest` directly above it and for that function's stated reason (P0.B
+  Finding 2): `load_config()` validates every `OPENALPHA_*` field atomically, so a caller who
+  passes `--runtime-dir` never touches config validation and an unrelated invalid field -- a
+  non-numeric `OPENALPHA_MAX_REQUEST_BYTES`, say -- can never block them. A caller who omits it
+  does get that validation, and a named `ConfigError` on stderr with exit 1, which is the right
+  trade when the alternative is silently operating on the wrong database. Both halves are
+  asserted against the same broken environment so they cannot drift apart.
+  **Three of the six behavioural cases were dropped for being unable to separate the two
+  answers**, which is the failure mode this repository keeps finding in its own fixtures.
+  `shortlist list`, `model predictions` and `migrate prune-backups` touch an empty runtime
+  directory and create nothing in *either* place, so "no decoy in the cwd" passes on the broken
+  tree too. The parametrized behavioural test therefore covers only the three that genuinely
+  open the database (`migrate status`, `migrate run`, `jobs list` -- measured leaving a decoy
+  before the fix and none after), and `shortlist list` is covered instead by a test that seeds a
+  well-formed content address into the *exported* directory only, making the two answers differ
+  in the output itself. Verified: all seven new assertions fail on the unmodified `cli.py` and
+  the three that pin unchanged behaviour (explicit flag wins; no variable still means
+  `./runtime`) pass on both. `pytest tests/unit` 3245 passed, 1 skipped;
+  `tests/integration/test_cli_migrate.py` 8 passed; `ruff`/`mypy` clean. Reproduced and
+  re-verified through the installed `openalpha` binary, not only `CliRunner`.
+
 - **`V2-P5-020` 的行文与实测不符，已改**（`V2-P5-014` 顺手）。该行称"当前**无任何组件被隔离渲染**"
   且 `web/vite.config.ts` **无 coverage 键** —— 两条在 `V2-P5-019` 交付后即为假：`vite.config.ts`
   自 2026-08-07 起就有 `coverage.thresholds`，四个面板自 `019` 起各有隔离渲染的 `*.test.tsx`。
