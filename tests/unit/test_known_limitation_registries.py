@@ -144,7 +144,11 @@ from openalpha_cn.backtest.multiple_testing import KNOWN_MULTIPLE_TESTING_LIMITA
 from openalpha_cn.backtest.outcome_statistics import KNOWN_OUTCOME_STATISTICS_LIMITATIONS
 from openalpha_cn.backtest.paper import KNOWN_PAPER_LIMITATIONS
 from openalpha_cn.backtest.portfolio_policy import KNOWN_CONSTRUCTION_LIMITATIONS
+from openalpha_cn.backtest.segmented_reporting import (
+    KNOWN_SEGMENTED_REPORTING_LIMITATIONS,
+)
 from openalpha_cn.backtest.shortlist_gate import KNOWN_SHORTLIST_GATE_LIMITATIONS
+from openalpha_cn.backtest.turnover_variants import KNOWN_TURNOVER_VARIANT_LIMITATIONS
 from openalpha_cn.backtest.validation import KNOWN_ATTRIBUTION_LIMITATIONS
 from openalpha_cn.backtest.walk_forward import KNOWN_WALK_FORWARD_LIMITATIONS
 from openalpha_cn.domain.adjustment import KNOWN_ADJUSTMENT_LIMITATIONS
@@ -205,6 +209,8 @@ LIMITATION_REGISTRIES: Final[dict[str, Sequence[_Limitation]]] = {
     "KNOWN_CONSTRUCTION_LIMITATIONS": KNOWN_CONSTRUCTION_LIMITATIONS,
     "KNOWN_PAPER_LIMITATIONS": KNOWN_PAPER_LIMITATIONS,
     "KNOWN_SHORTLIST_GATE_LIMITATIONS": KNOWN_SHORTLIST_GATE_LIMITATIONS,
+    "KNOWN_SEGMENTED_REPORTING_LIMITATIONS": KNOWN_SEGMENTED_REPORTING_LIMITATIONS,
+    "KNOWN_TURNOVER_VARIANT_LIMITATIONS": KNOWN_TURNOVER_VARIANT_LIMITATIONS,
     "KNOWN_WALK_FORWARD_LIMITATIONS": KNOWN_WALK_FORWARD_LIMITATIONS,
     "KNOWN_BASELINE_LIMITATIONS": KNOWN_BASELINE_LIMITATIONS,
     "KNOWN_TREE_LIMITATIONS": KNOWN_TREE_LIMITATIONS,
@@ -539,7 +545,7 @@ def test_the_registry_table_is_every_known_registry_in_the_source_tree() -> None
     }
 
     assert found == set(LIMITATION_REGISTRIES) | set(CODELESS_REGISTRIES)
-    assert len(LIMITATION_REGISTRIES) == 39
+    assert len(LIMITATION_REGISTRIES) == 41
     assert set(LIMITATION_REGISTRIES) & set(CODELESS_REGISTRIES) == set()
 
 
@@ -664,6 +670,8 @@ REGISTRY_ENTRY_COUNTS: Final[dict[str, int]] = {
     "KNOWN_RANKING_LIMITATIONS": 7,
     "KNOWN_SHORTLIST_GATE_LIMITATIONS": 7,
     "KNOWN_CONSTRUCTION_LIMITATIONS": 7,
+    "KNOWN_SEGMENTED_REPORTING_LIMITATIONS": 7,
+    "KNOWN_TURNOVER_VARIANT_LIMITATIONS": 6,
     "KNOWN_PAPER_LIMITATIONS": 7,
     "KNOWN_WALK_FORWARD_LIMITATIONS": 11,
     "KNOWN_BASELINE_LIMITATIONS": 10,
@@ -729,11 +737,11 @@ no longer written in prose at all. `DOCSTRING_TOTALS` below holds them as an equ
 
 DOCSTRING_TOTALS: Final[Mapping[str, int]] = MappingProxyType(
     {
-        "registries": 39,
-        "entries": 354,
+        "registries": 41,
+        "entries": 367,
         "derived_entries": 70,
-        "table_rows": 38,
-        "table_entries": 284,
+        "table_rows": 40,
+        "table_entries": 297,
     }
 )
 """Every number this module would otherwise have stated in prose, as an equality.

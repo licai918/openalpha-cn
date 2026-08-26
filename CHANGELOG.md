@@ -6,7 +6,80 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Added
 
-<<<<<<< HEAD
+- **Segmenting a cohort multiplies the hypotheses, and one segmented report is still one family**
+  (`V2-P5-009`). `backtest/segmented_reporting.py` cuts one set of validated outcomes by
+  industry, market capitalisation, liquidity and market regime and tests **every bucket of every
+  axis, plus every baseline, in a single `MultipleTestingReport`**. Reporting each axis as its own
+  family is the defect the module exists to prevent: three cuts of one cohort is however many
+  buckets result, and three separate corrections give three chances to look skilful at the price
+  of one. `declared_family_size` is refused when it is below the buckets actually tested, and the
+  refusal names both numbers.
+  **All four axes are declared inputs, not just the regime.** A `ValidationResult` carries a
+  `signal_id` and no security identifier at all, so an industry or a market capitalisation cannot
+  be looked up for one however much of `domain/daily_prices.py` is populated -- there is no key to
+  join on. `SegmentLabelling` therefore requires a `definition` and a `source` beside the labels,
+  and a signal with no label on a declared axis is refused by name rather than swept into an
+  `unknown` bucket. There is no default regime classifier, no default size break and no default
+  liquidity screen anywhere in the module.
+  **The new column is `can_ever_reject`, and it separates two things a q-value table conflates.**
+  An exact sign-flip test over `n` observations cannot return a p-value below `2**(1 - n)`; the
+  most permissive line anywhere in a family is `reported * rate / (family_size * penalty)`. A
+  bucket whose floor is above that line could not have been a discovery **on any data whatsoever**,
+  so its large q-value measures the study's resolution rather than the segment's skill. The floor
+  is measured, not asserted from the algebra: the shipped `sign_flip_test` was run over twelve
+  thousand random samples at three sample sizes and no p-value fell below it. Segmenting pushes
+  both sides of that inequality at once -- smaller buckets, larger family -- which is exactly why
+  the column earns its place.
+  Regime coverage is measured from the evidence rather than the intention: `spans_multiple_regimes`
+  counts regimes with a *testable* bucket, so a walk-forward whose out-of-sample evidence lies in
+  one regime says so however many folds produced it. A baseline is paired on the multiset of
+  observation windows and yields a paired difference cohort in the same family when it pairs, and
+  a named absence when it does not -- the difference of two unpaired means is not the mean of the
+  differences. `openalpha validation segmented` and `OpenAlphaSDK.segmented_outcomes` are the two
+  faces, both driven end to end over a real store.
+
+- **A turnover band's saving and its price are the same number, and the report says so**
+  (`V2-P5-024`). `backtest/turnover_variants.py` reports a buffered book **beside** the unbuffered
+  one, and `TurnoverVariantReport` carries both arms as required fields -- a one-armed report is
+  unrepresentable rather than discouraged, because *默认并列出报* is the row and a caller who can
+  ask for the flattering half eventually will. The band is a no-trade band and is **not**
+  `V2-P5-001`'s `turnover_budget`: a budget damps every move proportionally, a band leaves each
+  small move untraded and takes each large one whole, and a policy declaring both gets the budget
+  first and the band second.
+  **A measurement falsified this module's own first design and the correction is the headline.**
+  It shipped a `tracking_deviation` column beside `turnover_reduction` as "the price beside the
+  saving". They are provably equal -- a banded weight is either the target or the previous weight,
+  so a traded name contributes zero to both sums and a suppressed name contributes its whole move
+  to both -- and a search over 200,000 random book pairs found no counterexample. A derived column
+  cannot disagree with its parents and therefore cannot detect anything (`V2-P5-005`'s rule), so
+  the column is gone, `deviation_from_intended_book` is a `property`, and the identity is reported
+  as the conclusion: **every unit of turnover a band saves is a unit of distance from the book the
+  ranking asked for, one for one.** What is genuinely not derivable from turnover is stored --
+  `retained_positions` names each position a buffered run still holds that its own ranking no
+  longer admits, and `position_caps_breached` names each limit the suppressed trade would have
+  brought back inside, reported and never repaired. `cost_per_unit_turnover` has no default: with
+  no declared rate the saving is reported in turnover and `cost_absence_reason` says why, because
+  an invented rate would be multiplied by every turnover figure in the report.
+  `openalpha portfolio turnover-variants` and `OpenAlphaSDK.turnover_variants` are the two faces;
+  the row's own declared seam is measured on the command line over a really stored shortlist, where
+  the buffered arm trades `0.100000` against the unbuffered arm's `0.155000`.
+
+  `KNOWN_SEGMENTED_REPORTING_LIMITATIONS` (7 entries) and `KNOWN_TURNOVER_VARIANT_LIMITATIONS`
+  (6 entries) are the fortieth and forty-first registries (`REGISTRY_ENTRY_COUNTS` 38 -> 40 rows
+  and 284 -> 297 entries, `DOCSTRING_TOTALS` 39 -> 41 registries and 354 -> 367 entries);
+  `tests/unit/test_surface_parity.py` moves 50 -> 54 SDK methods and 30 -> 32 CLI commands.
+  Unit suite 3135 -> 3196 passing. Mutation sweeps: 12 mutants / 11 killed over
+  `segmented_reporting` (the twelfth pattern was removed as provably dead code) and 13 / 13 over
+  `turnover_variants`. Runtime dependencies remain **nine**, and `lint-imports` remains
+  **8 kept / 0 broken** -- both new modules join the two `backtest-studies-*` source lists rather
+  than relaxing anything.
+
+- **`CHANGELOG.md`'s committed merge-conflict markers are resolved** (housekeeping, found while
+  closing `V2-P5-009`). `3d3f8c6` carried `<<<<<<< HEAD`, `=======` and `>>>>>>>` in the
+  `[Unreleased] / Added` section with a clean `git status`, so they were in the tree rather than in
+  a live merge. Both sides were additive bullet lists for different rows (`V2-P5-004` against
+  `V2-P5-007`), so both are kept and only the three marker lines are gone; no bullet was dropped.
+
 - **`backtest/paper.py`: a Paper Portfolio whose inability to reach a broker is enforced at
   run time, not asserted in a comment** (`V2-P5-004`, the thirteenth pure-stdlib `backtest/`
   leaf). `PaperPortfolio.advance` lives one observed session forward through
@@ -238,7 +311,6 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   **89.88%**, lines 82.12 -> **92.55%**, with `vite.config.ts`'s ratchet raised to 91/83/89/92
   per its own "only ever up" rule; `pnpm lint` and `tsc -b` clean; `pnpm build` succeeds;
   `pnpm test:e2e` **4 passed** offline.
-=======
 - **Benjamini-Hochberg false-discovery control, and the family size it was computed against**
   (`V2-P5-007`). `backtest/multiple_testing.py` is a pure-stdlib `backtest/` leaf --
   `math`, `dataclasses` and pydantic, no `openalpha_cn` import at all -- and it does the half of
@@ -283,7 +355,6 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   38 / 347 / 37 / 277. Runtime dependencies stay at **nine**; `lint-imports` stays at
   **8 kept / 0 broken** -- both new modules join the two `backtest-studies-*` source lists rather
   than relaxing anything.
->>>>>>> worktree-agent-a0cc49a27e2462e70
 
 - **`openalpha portfolio construct` and `OpenAlphaSDK.construct_portfolio`: heuristic target
   weights over one admitted shortlist** (`V2-P5-001`, the first module of P5). A twelfth

@@ -43,6 +43,21 @@ from openalpha_cn.backtest.portfolio_policy import (
     construction_view,
 )
 from openalpha_cn.backtest.replay import ReplayCorpus, ReplayReport, ReplayRunner
+from openalpha_cn.backtest.segmented_reporting import (
+    BenchmarkCohort,
+    SegmentationPlan,
+    SegmentedReport,
+    SegmentedReportingError,
+    SegmentedReportRequest,
+    report_segmented_outcomes,
+    segmented_report_view,
+)
+from openalpha_cn.backtest.turnover_variants import (
+    TurnoverCostModel,
+    TurnoverVariantReport,
+    report_turnover_variants,
+    turnover_variant_view,
+)
 from openalpha_cn.backtest.validation import OutcomeObservation, OutcomeValidator
 from openalpha_cn.domain.evidence import EvidenceSnapshot
 from openalpha_cn.domain.factor import FactorNote
@@ -346,6 +361,87 @@ class OpenAlphaSDK:
     def outcome_statistics_view(self, report: OutcomeStatisticsReport) -> dict[str, object]:
         """Render one outcome-statistics report as data, the bytes `--json` emits."""
         return dict(outcome_statistics_view(report))
+
+    def segmented_outcomes(
+        self,
+        *,
+        signal_ids: Sequence[str],
+        plan: SegmentationPlan,
+        declared_family_size: int,
+        false_discovery_rate: float,
+        dependence: DependenceAssumption,
+        confidence_level: float = 0.95,
+        bootstrap_samples: int = 1000,
+        random_seed: int = 0,
+    ) -> SegmentedReport:
+        """Cut stored outcomes every declared way, in one family (`V2-P5-009`).
+
+        `outcome_statistics` treats one signal as one cohort as one hypothesis. This cuts the
+        *same* results by industry, market capitalisation, liquidity and market regime, and the
+        thing it exists to get right is that **the cuts do not each get their own family**.
+        Three axes over eight signals is however many buckets result, tested together, because
+        four separate corrections would give four chances to find a rejection at the price of
+        one.
+
+        **Every label is declared and none is derived.** A `ValidationResult` carries a
+        `signal_id` and no ticker, so nothing here can look up an industry or a market
+        capitalisation for a result even though `domain/daily_prices.py` holds `total_mv` and
+        `turnover_rate` -- there is no key to join on. `SegmentationPlan` therefore carries a
+        `definition` and a `source` for every axis, and a signal with no label on a declared
+        axis is refused by name rather than defaulted into an `unknown` bucket, which would
+        invent a segment and then publish statistics for it. See `KNOWN_SEGMENTED_REPORTING_
+        LIMITATIONS.every_segment_label_is_declared_by_the_caller_and_nothing_here_can_check_one`.
+
+        `declared_family_size` is the caller's and is checked only in the direction that can be:
+        not below the buckets this report tests. A benchmark is named by the signal whose stored
+        outcomes are its results, so both arms of every comparison went through the same
+        `OutcomeValidator`, and a benchmark whose observation windows pair with the strategy's
+        also yields a paired difference cohort in the same family.
+
+        A signal with nothing stored is refused by name, `outcome_statistics`' reason exactly.
+        """
+        wanted = tuple(signal_ids) + tuple(benchmark.signal_id for benchmark in plan.benchmarks)
+        empty = tuple(
+            signal_id for signal_id in wanted if not self.validation_store.list_by_signal(signal_id)
+        )
+        if empty:
+            raise SegmentedReportingError(
+                f"no validation results are stored for {', '.join(sorted(set(empty)))}; a "
+                "segment with no observations is not a segment with a wide interval"
+            )
+
+        keys: list[str] = []
+        results: list[ValidationResult] = []
+        for signal_id in signal_ids:
+            for result in self.validation_store.list_by_signal(signal_id):
+                keys.append(signal_id)
+                results.append(result)
+
+        return report_segmented_outcomes(
+            SegmentedReportRequest(
+                results=tuple(results),
+                axes=tuple(axis.expand(keys) for axis in plan.axes),
+                benchmarks=tuple(
+                    BenchmarkCohort(
+                        benchmark_id=benchmark.benchmark_id,
+                        kind=benchmark.kind,
+                        definition=benchmark.definition,
+                        results=self.validation_store.list_by_signal(benchmark.signal_id),
+                    )
+                    for benchmark in plan.benchmarks
+                ),
+                declared_family_size=declared_family_size,
+                false_discovery_rate=false_discovery_rate,
+                dependence=dependence,
+                confidence_level=confidence_level,
+                bootstrap_samples=bootstrap_samples,
+                random_seed=random_seed,
+            )
+        )
+
+    def segmented_report_view(self, report: SegmentedReport) -> dict[str, object]:
+        """Render one segmented report as data, the bytes `--json` emits."""
+        return dict(segmented_report_view(report))
 
     # --- the panel plane (V2-P1-016) ----------------------------------------------------------
     #
@@ -826,6 +922,50 @@ class OpenAlphaSDK:
     def construction_view(self, construction: PortfolioConstruction) -> dict[str, object]:
         """One construction as `openalpha portfolio construct --json` renders it."""
         return construction_view(construction)
+
+    def turnover_variants(
+        self,
+        *,
+        shortlist_id: str,
+        policy: PortfolioConstructionPolicy,
+        buffer: Decimal,
+        previous: Mapping[str, Decimal] | None = None,
+        cost_model: TurnoverCostModel | None = None,
+    ) -> TurnoverVariantReport:
+        """The buffered book and the unbuffered one, side by side and never one alone
+        (`V2-P5-024`).
+
+        The same `held_shortlist` read and the same `construct_portfolio` policy
+        `construct_portfolio` uses, so the unbuffered arm here **is** the book that method
+        returns; the buffered arm is that book seen through a no-trade band of `buffer`.
+
+        **There is no argument that returns one arm.** `TurnoverVariantReport` carries both as
+        required fields, because *默认并列出报* is the row: a caller who can ask for the
+        flattering number will, and a high-turnover factor's gross edge read without its
+        turnover beside it is exactly the misreading `V2-P5-024` names.
+
+        **A band is not the turnover budget `V2-P5-001` already has.** `PortfolioLimits
+        .turnover_budget` damps every move proportionally; a band leaves small moves untraded
+        and takes large ones whole. A policy declaring a budget gets the budget first and the
+        band second, and `KNOWN_TURNOVER_VARIANT_LIMITATIONS
+        .the_buffer_is_a_no_trade_band_and_not_the_turnover_budget_v2_p5_001_already_has` says
+        so on every answer.
+
+        `cost_model` is optional and has no default. Without one, the saving is reported in
+        turnover and `cost_absence_reason` says why there is no figure in money -- an invented
+        rate would be multiplied by every turnover number in the report.
+        """
+        return report_turnover_variants(
+            candidates=candidates_from_shortlist_answer(self.held_shortlist(shortlist_id)),
+            policy=policy,
+            buffer=buffer,
+            previous=previous,
+            cost_model=cost_model,
+        )
+
+    def turnover_variant_view(self, report: TurnoverVariantReport) -> dict[str, object]:
+        """One paired report as `openalpha portfolio turnover-variants --json` renders it."""
+        return dict(turnover_variant_view(report))
 
     def compare_shortlists(self, *, baseline_id: str, current_id: str) -> dict[str, object]:
         """What changed between two held shortlist answers (`V2-P4-007`, S44, S49).

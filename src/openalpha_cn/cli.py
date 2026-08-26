@@ -41,6 +41,18 @@ from openalpha_cn.backtest.portfolio_policy import (
     construction_view,
 )
 from openalpha_cn.backtest.replay import ReplayCorpus
+from openalpha_cn.backtest.segmented_reporting import (
+    SegmentationPlan,
+    SegmentedReport,
+    SegmentedReportingError,
+    segmented_report_view,
+)
+from openalpha_cn.backtest.turnover_variants import (
+    TurnoverCostModel,
+    TurnoverVariantError,
+    TurnoverVariantReport,
+    turnover_variant_view,
+)
 from openalpha_cn.config import ConfigError, load_config, load_dotenv, load_log_level
 from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET, AdjustmentError
 from openalpha_cn.domain.daily_prices import (
@@ -6670,6 +6682,171 @@ _STATISTICS_SAMPLES_HELP: Final[str] = "How many bootstrap resamples the interva
 _STATISTICS_SEED_HELP: Final[str] = "Seed for the bootstrap, so the interval is reproducible."
 
 
+_SEGMENTED_PLAN_HELP: Final[str] = (
+    "Path to the JSON segmentation plan: the axes to cut by, each with the definition and "
+    "source of its labels, and the baselines to report beside. Every label is declared here "
+    "because a stored validation result names no security to derive one from."
+)
+
+_SEGMENTED_FAMILY_HELP: Final[str] = (
+    "How many hypotheses the study actually tested. NOT the number of --signal flags and NOT "
+    "the number of axes: cutting one cohort three ways tests however many buckets result, and "
+    "a family declared before the cut publishes several chances to look skilful at the price "
+    "of one. Refused when below the buckets this report tests."
+)
+
+_TURNOVER_BUFFER_HELP: Final[str] = (
+    "The no-trade band, as a share of equity. A name whose requested move is at or below the "
+    "band is not traded at all; a name above it moves the whole way. This is not "
+    "--turnover-budget, which damps every move proportionally instead."
+)
+
+_TURNOVER_RATE_HELP: Final[str] = (
+    "Cost per unit of turnover, both sides counted. Optional and with no default: without it "
+    "the saving is reported in turnover and the report says why it publishes no figure in "
+    "money, because an invented rate would multiply every turnover number in it."
+)
+
+_TURNOVER_RATE_DEFINITION_HELP: Final[str] = (
+    "What --cost-per-unit-turnover covers -- commission only, commission and stamp duty, an "
+    "impact estimate. Required whenever a rate is given, so a stored report says what its "
+    "money figure meant."
+)
+
+
+def _echo_segmented_report(report: SegmentedReport) -> None:
+    """One segmented report as a table, with the family printed once above all of the axes.
+
+    The family line is **above** the axes and not repeated inside each, because a reader who
+    sees a family line per axis will read four corrections where there is one. The `could` column
+    is the one a plain q-value table has no room for: it says whether the bucket's own sample
+    size could ever have produced a p-value small enough to clear the family's most permissive
+    line, so a large q-value on a two-name bucket reads as resolution rather than as evidence.
+    """
+    family = report.statistics.multiple_testing
+    procedure = (
+        "Benjamini-Hochberg"
+        if family.dependence == "independent-or-positively-dependent"
+        else "Benjamini-Yekutieli"
+    )
+    typer.echo(
+        f"family: ONE family of {family.family_size} across {len(report.axes)} axis/axes -- "
+        f"{report.segment_hypotheses} segment bucket(s) + {report.benchmark_hypotheses} "
+        f"benchmark row(s), {family.reported_hypotheses} reported, "
+        f"{family.withheld_hypotheses} withheld"
+    )
+    typer.echo(
+        f"control: {procedure} at q={family.false_discovery_rate}, "
+        f"dependence={family.dependence} (penalty {family.dependence_penalty:.4f}), "
+        f"{family.discoveries} discoveries"
+    )
+    typer.echo(
+        f"resolution: {report.hypotheses_that_could_ever_reject} of "
+        f"{family.reported_hypotheses} reported row(s) could ever have rejected in this family"
+    )
+    typer.echo(f"regimes: {report.regime_coverage.reason}")
+
+    for axis in report.axes:
+        typer.echo("")
+        typer.echo(f"axis {axis.axis_id} -- {axis.definition} (source: {axis.source})")
+        typer.echo(
+            f"{'  segment':<26}{'n':>4}{'gross':>12}{'drag':>12}{'net':>12}"
+            f"{'q':>10}{'could':>8}  verdict"
+        )
+        for segment in axis.segments:
+            _echo_segment_row(report, segment.label, segment.cohort_id, segment)
+
+    for benchmark in report.benchmarks:
+        typer.echo("")
+        typer.echo(
+            f"benchmark {benchmark.benchmark_id} ({benchmark.kind}) -- {benchmark.definition}"
+        )
+        typer.echo(
+            f"{'  row':<26}{'n':>4}{'gross':>12}{'drag':>12}{'net':>12}"
+            f"{'q':>10}{'could':>8}  verdict"
+        )
+        _echo_segment_row(report, "benchmark", benchmark.cohort_id, benchmark)
+        if benchmark.difference is None:
+            typer.echo(f"  no paired difference -- {benchmark.comparison_absence_reason}")
+        else:
+            _echo_segment_row(
+                report,
+                "strategy - benchmark",
+                benchmark.difference_cohort_id or "",
+                benchmark,
+                difference=True,
+            )
+
+    for axis in report.axes:
+        for segment in axis.segments:
+            if segment.statistics.absence_reason is not None:
+                typer.echo("")
+                typer.echo(
+                    f"{segment.cohort_id}: no interval and no p-value -- "
+                    f"{segment.statistics.absence_reason}"
+                )
+
+
+def _echo_segment_row(
+    report: SegmentedReport,
+    label: str,
+    cohort_id: str,
+    holder: object,
+    *,
+    difference: bool = False,
+) -> None:
+    """One row of the segmented table, for a bucket, a benchmark or a paired difference."""
+    if difference:
+        statistics = holder.difference  # type: ignore[attr-defined]
+        capability = holder.difference_capability  # type: ignore[attr-defined]
+    else:
+        statistics = holder.statistics  # type: ignore[attr-defined]
+        capability = holder.capability  # type: ignore[attr-defined]
+    verdict = report.statistics.verdict_for(cohort_id)
+    quantile = "--" if verdict is None else f"{verdict.q_value:.6f}"
+    standing = (
+        "not tested" if verdict is None else ("discovery" if verdict.rejected else "not rejected")
+    )
+    typer.echo(
+        f"  {label:<24}{statistics.sample_size:>4}"
+        f"{statistics.gross_active_return:>+12.6f}{statistics.cost_drag:>+12.6f}"
+        f"{statistics.net_active_return:>+12.6f}{quantile:>10}"
+        f"{('yes' if capability.can_ever_reject else 'no'):>8}  {standing}"
+    )
+
+
+def _echo_turnover_variants(report: TurnoverVariantReport) -> None:
+    """Both arms, always, with the saving and the distance it bought printed as one line.
+
+    The two arms are printed as two rows of one table rather than as two blocks, because the
+    row this serves is a comparison and a reader who can scroll one arm out of view will.
+    """
+    typer.echo(f"method: {report.method}")
+    typer.echo(f"band: {report.buffer} (no-trade, not a proportional turnover budget)")
+    typer.echo("")
+    typer.echo(f"{'arm':<14}{'turnover':>14}{'traded':>9}{'invested':>14}{'cost':>16}")
+    for arm in (report.unbuffered, report.buffered):
+        cost = "--" if arm.turnover_cost is None else f"{arm.turnover_cost}"
+        typer.echo(
+            f"{arm.label:<14}{arm.turnover!s:>14}{arm.names_traded:>9}"
+            f"{arm.invested_weight!s:>14}{cost:>16}"
+        )
+    typer.echo("")
+    typer.echo(
+        f"the band saved {report.turnover_reduction} of turnover and put the book exactly "
+        f"{report.deviation_from_intended_book} away from the one the ranking asked for -- "
+        "these are the same number, one for one"
+    )
+    if report.cost_saved is None:
+        typer.echo(f"no cost figure -- {report.cost_absence_reason}")
+    else:
+        typer.echo(f"cost saved: {report.cost_saved}")
+    for subject in report.retained_positions:
+        typer.echo(f"retained by the band though the ranking dropped it: {subject}")
+    for subject in report.position_caps_breached:
+        typer.echo(f"position cap still breached after the band: {subject}")
+
+
 def _echo_outcome_statistics(report: OutcomeStatisticsReport) -> None:
     """Render one report as a table whose columns are the four the row asks for.
 
@@ -6807,3 +6984,235 @@ def validation_statistics_command(
             )
         else:
             _echo_outcome_statistics(report)
+
+
+@validation_app.command("segmented")
+def validation_segmented_command(
+    signal: Annotated[list[str], typer.Option("--signal", help=_STATISTICS_SIGNAL_HELP)],
+    plan: Annotated[Path, typer.Option("--plan", help=_SEGMENTED_PLAN_HELP)],
+    family_size: Annotated[int, typer.Option("--family-size", help=_SEGMENTED_FAMILY_HELP)],
+    dependence: Annotated[str, typer.Option("--dependence", help=_STATISTICS_DEPENDENCE_HELP)],
+    false_discovery_rate: Annotated[
+        float, typer.Option("--false-discovery-rate", help=_STATISTICS_RATE_HELP)
+    ] = 0.10,
+    confidence_level: Annotated[
+        float, typer.Option("--confidence-level", help=_STATISTICS_LEVEL_HELP)
+    ] = 0.95,
+    bootstrap_samples: Annotated[
+        int, typer.Option("--bootstrap-samples", help=_STATISTICS_SAMPLES_HELP)
+    ] = 1000,
+    random_seed: Annotated[int, typer.Option("--random-seed", help=_STATISTICS_SEED_HELP)] = 0,
+    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
+        "./runtime"
+    ),
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit the whole report as data.")
+    ] = False,
+) -> None:
+    """Segment stored outcomes by declared cuts, tested in one family (`V2-P5-009`).
+
+    The usual invocation, against signal IDs `openalpha research run` printed::
+
+        openalpha validation segmented --signal sig_a --signal sig_b \
+          --plan ./segments.json --family-size 22 --dependence arbitrary \
+          --false-discovery-rate 0.10 --runtime-dir ./runtime
+
+    **`--family-size` is not the number of `--signal` flags and it is not the number of axes.**
+    Cutting one cohort by industry, by size and by regime tests however many buckets result, and
+    every one of them is a hypothesis. Three axes over eight signals is commonly twenty-plus
+    hypotheses, all in **one** family -- reporting each axis as its own correction would give
+    three chances to find a rejection at the price of one. This command refuses a declaration
+    below the buckets it tests; the other direction is the caller's and is printed with the
+    answer in `--json`.
+
+    **`--plan` is required because nothing here can derive a label.** A stored `ValidationResult`
+    carries a `signal_id` and no ticker, so an industry or a market capitalisation cannot be
+    looked up for it however much of `domain/daily_prices.py` is populated. The plan declares,
+    per axis, the label for every signal **and** the `definition` and `source` behind those
+    labels, so a bucket printed as `large` says what large meant and who said so. A signal with
+    no label on a declared axis is refused by name rather than swept into an `unknown` bucket.
+
+    **The `could` column is what a plain q-value table cannot say.** A bucket of three
+    observations cannot produce a p-value below `2**-2`, and if that is above the family's most
+    permissive critical value the bucket could not have been a discovery on any data at all. Its
+    large q-value then measures the study's resolution, not the segment's skill, and `could`
+    reads `no`.
+
+    **Market regime is a classification the caller defines.** There is no default classifier
+    here. An axis named `market_regime` in the plan gets the coverage line; a run whose testable
+    evidence lies in a single regime reports `spans_multiple_regimes` false however many folds
+    produced it.
+
+    Exits 0 when the report was produced, 3 when the request could not be put -- an unreadable
+    plan, a signal with nothing stored, a family below the buckets tested, an unlabelled signal
+    -- and 1 when the runtime directory could not be opened.
+    """
+    with _panel_command("validation segmented"):
+        if dependence not in ("independent-or-positively-dependent", "arbitrary"):
+            raise _panel_fail(
+                PanelExit.bad_request,
+                f"--dependence must be `independent-or-positively-dependent` or `arbitrary`, "
+                f"not {dependence!r}; it decides the correction and has no default",
+            )
+        try:
+            declared = SegmentationPlan.model_validate_json(plan.read_text(encoding="utf-8"))
+        except OSError as error:
+            raise _panel_fail(
+                PanelExit.bad_request, f"--plan could not be read: {plan}: {error}"
+            ) from error
+        except ValidationError as error:
+            raise _panel_fail(
+                PanelExit.bad_request, f"--plan is not a segmentation plan: {error}"
+            ) from error
+
+        try:
+            report = OpenAlphaSDK(runtime_dir=runtime_dir).segmented_outcomes(
+                signal_ids=tuple(signal),
+                plan=declared,
+                declared_family_size=family_size,
+                false_discovery_rate=false_discovery_rate,
+                dependence=cast(DependenceAssumption, dependence),
+                confidence_level=confidence_level,
+                bootstrap_samples=bootstrap_samples,
+                random_seed=random_seed,
+            )
+        except (SegmentedReportingError, OutcomeStatisticsError, ValidationError) as error:
+            raise _panel_fail(PanelExit.bad_request, str(error)) from error
+
+        if json_output:
+            typer.echo(
+                json.dumps(segmented_report_view(report), ensure_ascii=False, sort_keys=True)
+            )
+        else:
+            _echo_segmented_report(report)
+
+
+@portfolio_app.command("turnover-variants")
+def portfolio_turnover_variants_command(
+    shortlist_id: Annotated[str, typer.Argument(help=_CONSTRUCT_ADDRESS_HELP)],
+    tier_weight: Annotated[list[str], typer.Option("--tier-weight", help=_CONSTRUCT_TIER_HELP)],
+    buffer: Annotated[str, typer.Option("--buffer", help=_TURNOVER_BUFFER_HELP)],
+    max_position_weight: Annotated[
+        str, typer.Option("--max-position-weight", help=_CONSTRUCT_POSITION_HELP)
+    ] = "0.25",
+    max_total_exposure: Annotated[
+        str, typer.Option("--max-total-exposure", help=_CONSTRUCT_EXPOSURE_HELP)
+    ] = "0.80",
+    min_cash_weight: Annotated[
+        str, typer.Option("--min-cash-weight", help=_CONSTRUCT_CASH_HELP)
+    ] = "0",
+    turnover_budget: Annotated[
+        str, typer.Option("--turnover-budget", help=_CONSTRUCT_TURNOVER_HELP)
+    ] = "",
+    previous_weight: Annotated[
+        list[str] | None, typer.Option("--previous-weight", help=_CONSTRUCT_PREVIOUS_HELP)
+    ] = None,
+    cost_per_unit_turnover: Annotated[
+        str, typer.Option("--cost-per-unit-turnover", help=_TURNOVER_RATE_HELP)
+    ] = "",
+    cost_definition: Annotated[
+        str, typer.Option("--cost-definition", help=_TURNOVER_RATE_DEFINITION_HELP)
+    ] = "",
+    runtime_dir: Annotated[Path, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)] = Path(
+        "./runtime"
+    ),
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit the whole report as data.")
+    ] = False,
+) -> None:
+    """The buffered book beside the unbuffered one, always both (`V2-P5-024`).
+
+    The usual invocation, against a shortlist `openalpha shortlist run` held::
+
+        openalpha portfolio turnover-variants sl_2026_03_02 \
+          --tier-weight 0.5 --tier-weight 0.3 --tier-weight 0.2 \
+          --buffer 0.01 --previous-weight 000001.SZ=0.05 --runtime-dir ./runtime
+
+    **There is no flag that prints one arm.** That is the row: a high-turnover factor's gross
+    edge read without its turnover beside it is not executable alpha, and a command that could
+    print the flattering half would eventually be used to.
+
+    **`--buffer` is a no-trade band and `--turnover-budget` is not.** The budget damps every
+    move proportionally to hit a total, so every name trades a little; the band leaves each
+    small move untraded and takes each large one whole. A policy carrying both gets the budget
+    first, inside the construction, and the band second. They are different devices and neither
+    substitutes for the other.
+
+    **The saving and its price are one number, and the command says so.** Every unit of turnover
+    the band saves is a unit of distance between the book you hold and the book the ranking
+    asked for. Two lines you would not get from a weight vector: `retained by the band though
+    the ranking dropped it` names a position a buffered run is still holding that its own
+    ranking no longer admits, and `position cap still breached after the band` names a limit the
+    suppressed trade would have brought back inside -- reported and never repaired, because
+    repairing it would spend the turnover the band was asked to save.
+
+    **`--cost-per-unit-turnover` has no default.** Without it the saving is reported in turnover
+    and the answer says why there is no figure in money. A default rate would be a number this
+    command invented and then multiplied by every turnover figure it printed. When it is given,
+    `--cost-definition` is required so a stored report says what the money meant.
+
+    Exits 0 when both arms were produced, 3 when the request could not be put -- a refused
+    shortlist, a band outside `[0, 1]`, a rate without a definition -- and 1 when the store
+    could not be opened.
+    """
+    with _panel_command("portfolio turnover-variants"):
+        if cost_per_unit_turnover and not cost_definition:
+            raise _panel_fail(
+                PanelExit.bad_request,
+                "--cost-per-unit-turnover needs --cost-definition; a rate whose meaning is not "
+                "recorded produces a money figure nobody can reproduce or compare",
+            )
+        limits = PortfolioLimits(
+            max_position_weight=_construct_decimal(
+                max_position_weight, flag="--max-position-weight"
+            ),
+            max_total_exposure=_construct_decimal(max_total_exposure, flag="--max-total-exposure"),
+            min_cash_weight=_construct_decimal(min_cash_weight, flag="--min-cash-weight"),
+            turnover_budget=(
+                None
+                if not turnover_budget
+                else _construct_decimal(turnover_budget, flag="--turnover-budget")
+            ),
+        )
+        previous = _construct_previous(previous_weight or ())
+        cost_model = (
+            None
+            if not cost_per_unit_turnover
+            else TurnoverCostModel(
+                cost_per_unit_turnover=_construct_decimal(
+                    cost_per_unit_turnover, flag="--cost-per-unit-turnover"
+                ),
+                definition=cost_definition,
+            )
+        )
+        try:
+            policy = PortfolioConstructionPolicy(
+                tier_weights=tuple(
+                    _construct_decimal(weight, flag="--tier-weight") for weight in tier_weight
+                ),
+                limits=limits,
+            )
+            report = OpenAlphaSDK(runtime_dir=runtime_dir).turnover_variants(
+                shortlist_id=shortlist_id,
+                policy=policy,
+                buffer=_construct_decimal(buffer, flag="--buffer"),
+                previous=previous,
+                cost_model=cost_model,
+            )
+        except ShortlistViewError as error:
+            raise _shortlist_fail(error) from error
+        except (
+            TurnoverVariantError,
+            PortfolioConstructionError,
+            ValidationError,
+        ) as error:
+            raise _panel_fail(PanelExit.bad_request, str(error)) from error
+        except ShortlistStoreError as error:
+            raise _panel_fail(PanelExit.unhealthy, str(error)) from error
+
+        if json_output:
+            typer.echo(
+                json.dumps(turnover_variant_view(report), ensure_ascii=False, sort_keys=True)
+            )
+        else:
+            _echo_turnover_variants(report)

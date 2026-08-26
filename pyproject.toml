@@ -301,7 +301,9 @@ source_modules = [
   "openalpha_cn.backtest.paper",
   "openalpha_cn.backtest.portfolio",
   "openalpha_cn.backtest.portfolio_policy",
+  "openalpha_cn.backtest.segmented_reporting",
   "openalpha_cn.backtest.shortlist_gate",
+  "openalpha_cn.backtest.turnover_variants",
   "openalpha_cn.backtest.validation",
   "openalpha_cn.backtest.walk_forward",
 ]
@@ -350,7 +352,9 @@ source_modules = [
   "openalpha_cn.backtest.paper",
   "openalpha_cn.backtest.portfolio",
   "openalpha_cn.backtest.portfolio_policy",
+  "openalpha_cn.backtest.segmented_reporting",
   "openalpha_cn.backtest.shortlist_gate",
+  "openalpha_cn.backtest.turnover_variants",
   "openalpha_cn.backtest.walk_forward",
 ]
 forbidden_modules = ["openalpha_cn.runtime"]
