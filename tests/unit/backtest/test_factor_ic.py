@@ -64,6 +64,7 @@ from openalpha_cn.backtest.factor_ic import (
     ICDecayRung,
     ICObservationPair,
     ICPoint,
+    _centred_unit,
     _pearson,
     _refuse_a_tier_table_that_disagrees_with_its_own_contract,
     _refuse_an_admitted_table_that_admits_a_number_nobody_measured,
@@ -387,6 +388,87 @@ def test_the_raw_census_order_is_the_engines_census_order() -> None:
     """
     assert RAW_COVERAGE_ORDER == FACTOR_COVERAGE_ORDER
     assert TIER_COVERAGE_ORDER["raw"] == FACTOR_COVERAGE_ORDER
+
+
+ORDER_ADVERSARIAL: Final[tuple[tuple[list[float], list[float]], ...]] = (
+    ([1e16, 1e16, 3e16, -7.0, 3e-16], [1.0, 2.0, 3.0, 4.0, 5.0]),
+    ([1.0, 2.0, 3.0, 4.0, 5.0], [1e16, 1e16, 3e16, -7.0, 3e-16]),
+    (
+        [-1.0, 5e8, -1.0, 3e200, 3.0000000000000004e-08, 5.0, -1e100],
+        [-1e-08, -1e200, -7.0, -1e16, 3.0000000000000004e-08, -1e-08, 1e200],
+    ),
+)
+"""Cross sections a plain `sum` adds up differently in the two directions, one per reduction.
+
+`_pearson` reduces three times -- the covariance, and a sum of squares on each side -- and a
+section is only adversarial for the one whose accumulation it happens to disturb. The first two
+are the same section with the arguments swapped, which moves the disturbance from one dispersion
+to the other; the third disturbs the covariance. Each of the three makes `_naive_pearson`
+order-dependent on both interpreters, which is what the second assertion below checks.
+
+**Which reductions this actually guards, measured by mutation rather than claimed.** Replacing
+one `math.fsum` at a time in `_pearson` and running this test:
+
+| replaced             | 3.11       | 3.12   |
+| -------------------- | ---------- | ------ |
+| the covariance       | caught     | caught |
+| `sum(a * a ...)`     | not caught | caught |
+| `sum(b * b ...)`     | not caught | caught |
+
+So the suite catches all three and 3.11 alone catches one, because whether a given section's
+squares accumulate differently is luck that does not survive an interpreter change. That is
+stated rather than rounded up to "both": a reader deciding whether 3.11-only coverage is enough
+should be told what it is.
+
+Adversarial rather than reachable, and said so rather than hidden: no `total_mv` this repository
+fetches is `3e-16` next to `3e16`. But `validate_factor_observation` admits any finite float, and
+a factor definition dividing by a near-zero denominator can produce one, so the shape is
+admissible by contract even though no provider has served it -- the same argument `_pearson`'s
+own docstring makes about `sys.float_info.max`.
+
+**They had to be searched for, and that is the measurement worth keeping.** On CPython 3.12
+`sum()` is Neumaier-compensated, and over 200 random mixed-magnitude sections built for this
+purpose it was order-invariant on **200** of 200 -- against **77** of 200 on 3.11. A section that
+separates the two summations on 3.12 is a needle; these are needles.
+"""
+
+
+def _naive_pearson(xs: Sequence[float], ys: Sequence[float]) -> float:
+    """`_pearson` as it was written before `V2-P5-062`, kept here to be the thing that differs.
+
+    A deliberate copy of three lines, and the only copy: its whole purpose is to be the *old*
+    implementation, so that the test below asserts a difference between two summations rather
+    than asserting that today's code agrees with itself.
+    """
+    ux, uy = _centred_unit(xs), _centred_unit(ys)
+    covariance = sum(a * b for a, b in zip(ux, uy, strict=True))
+    dispersion = math.sqrt(sum(a * a for a in ux)) * math.sqrt(sum(b * b for b in uy))
+    return max(-1.0, min(1.0, covariance / dispersion))
+
+
+@pytest.mark.parametrize(("xs", "ys"), ORDER_ADVERSARIAL)
+def test_the_correlation_does_not_depend_on_the_order_the_cross_section_arrives_in(
+    xs: list[float], ys: list[float]
+) -> None:
+    """`V2-P5-062`. `math.fsum` is exactly rounded, so the answer has no order to depend on.
+
+    The stake is not accuracy. `test_alpha_baseline.py` used to assert the *opposite* of this --
+    that reordering a corpus moves its ICs -- and named the consequence in its own docstring: "a
+    fit that silently moved in the last place would still break every content address
+    `V2-P4-016` builds on it." The answer then was to sort the corpus, which protects the callers
+    who remember to. This is the same guarantee taken one plane down, where no caller has to.
+
+    The second assertion is what stops the first being vacuous, and on 3.12 it is doing most of
+    the work: see `ORDER_ADVERSARIAL` for why a section that can tell `sum` from `math.fsum`
+    there had to be searched for rather than written down.
+    """
+    backwards = (list(reversed(xs)), list(reversed(ys)))
+
+    assert _pearson(xs, ys) == _pearson(*backwards)
+    assert _naive_pearson(xs, ys) != _naive_pearson(*backwards), (
+        "this cross section cannot tell `sum` from `math.fsum` on this interpreter, so the "
+        "assertion above would hold even if `_pearson` had never been made exactly rounded"
+    )
 
 
 def test_a_two_name_cross_section_correlates_perfectly_whatever_the_two_names_did() -> None:

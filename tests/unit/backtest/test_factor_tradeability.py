@@ -533,8 +533,11 @@ def test_the_same_ic_and_the_same_funnel_are_told_apart_by_the_top_groups_execut
     `-0.25`. That is the whole argument for publishing the per-group decomposition rather than a
     coverage number: the finding lives at a level the aggregate averages away.
 
-    The IC is `0.9999999999999998` rather than `1.0`, which is `MINIMUM_IC_SECURITIES`' own
-    measured note about a perfectly ordered cross section and is asserted as the value it is.
+    The IC is `1.0`, and it is asserted as the value it is rather than as `approx(1.0)`. It used
+    to be `0.9999999999999998` here, which `MINIMUM_IC_SECURITIES`' own note about a perfectly
+    ordered cross section still records for a *two-name* section. `V2-P5-062` made `_pearson`
+    exactly rounded, and on this twelve-name section the exactly-rounded answer is one. Asserting
+    the value keeps this test able to see the arithmetic move again.
     """
     section, unimplementable = _acceptance((10, 11, 12))
     control_section, control = _acceptance((1, 2, 3))
@@ -549,7 +552,7 @@ def test_the_same_ic_and_the_same_funnel_are_told_apart_by_the_top_groups_execut
 
     assert section == control_section
     assert point.coverage == "measured"
-    assert point.ic == 0.9999999999999998
+    assert point.ic == 1.0
     assert bad.funnel == good.funnel
     assert bad.funnel.execution_rate == good.funnel.execution_rate == 0.75
     assert bad.top_group_execution_rate == 0.25

@@ -89,10 +89,12 @@ rule for "this correlation is one, at the last bit" -- that module records eight
 two-name pairs coming out `0.9999999999999998`. Measured again here in both directions, because a
 boundary that only fires is a boundary nobody has seen decline:
 
-- 200 random vectors and their exact affine images: `abs(r) == 1.0` exactly on **149** of 200 and
+- 200 random vectors and their exact affine images: `abs(r) == 1.0` exactly on **143** of 200 and
   `round(abs(r), 15) == 1.0` on **200** of 200. The same 200 against their exact *monotone* images
-  through `x**3 + x`: rank correlation exactly 1.0 on **153** of 200, at 15 places on **200** of
-  200. So plain `== 1.0` misses a quarter of the identities it exists to find, which is why the
+  through `x**3 + x`: rank correlation exactly 1.0 on **150** of 200, at 15 places on **200** of
+  200. (Both counts were 149 and 153 until `V2-P5-062` made `_pearson` exactly rounded; the two
+  interpreters this repository supports disagreed on them before that, which is how it surfaced.)
+  So plain `== 1.0` misses a quarter of the identities it exists to find, which is why the
   boundary is a rounding and not an equality.
 - 200 pairs of a vector against itself plus `N(0, 0.001)` noise on a unit scale -- two genuinely
   different numbers that agree to six figures -- reach a largest `abs(r)` of

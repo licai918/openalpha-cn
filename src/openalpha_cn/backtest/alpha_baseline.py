@@ -344,13 +344,24 @@ def rankable(
     reason -- a `TrainingExample`'s values are already the declared columns, while a
     `FeatureRow`'s are the *offered* ones and have to be selected first.
 
-    Sorted, and the sort is not tidiness. `_pearson` sums products in the argument's own order,
-    so an unsorted population makes an answer a function of how the panel happened to hand its
-    rows over, and a permuted training set would produce a different artifact for the same data.
-    Measured over 400 random cross sections per size, a permutation changed the correlation
-    0/400 times at three names, 190/400 at six and 347/400 at sixty --
-    `test_this_corpus_can_tell_a_sorted_fit_from_an_unsorted_one` is what keeps the fixture on
-    the right side of that.
+    Sorted, and the sort is no longer what carries the property it was written to carry. It read:
+    "`_pearson` sums products in the argument's own order, so an unsorted population makes an
+    answer a function of how the panel happened to hand its rows over" -- measured over 400
+    random cross sections per size, a permutation changed the correlation 0/400 times at three
+    names, 190/400 at six and 347/400 at sixty. `V2-P5-062` moved `_pearson` to `math.fsum`,
+    which is exactly rounded, and the same measurement is now **0/400 at every size on both
+    supported interpreters**. A permuted population produces the same artifact because the
+    arithmetic no longer has an order to depend on, not because a caller sorted.
+
+    The sort stays, and not out of caution about that: this function exists so that the fit and
+    the prediction draw the *same* population, and a shared, stated order is the cheapest way for
+    two callers to be checked against each other. Whether anything else downstream is
+    order-sensitive has not been measured, and removing the sort is that question rather than
+    this one. `tests/unit/backtest/test_factor_ic.py::
+    test_the_correlation_does_not_depend_on_the_order_the_cross_section_arrives_in` holds the
+    arithmetic half, and
+    `tests/unit/backtest/test_alpha_baseline.py::
+    test_reordering_this_corpus_does_not_move_a_single_bit_of_its_ics` the composition.
 
     A repeated security would make the sort's tie-break load-bearing; neither caller can hand one
     over, because `TrainingSet` refuses one security twice on one prediction day and

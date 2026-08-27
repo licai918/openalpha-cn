@@ -839,6 +839,26 @@ def _pearson(xs: Sequence[float], ys: Sequence[float]) -> float:
     by computing it -- see `tests/unit/backtest/test_factor_ic.py::
     test_pearson_returns_the_correlation_of_a_cross_section_too_wide_to_add_up`.
 
+    **`math.fsum` and not `sum`, and that is a reproducibility rule rather than an accuracy
+    preference (`V2-P5-062`).** `sum` adds in the argument's order, so a reordered cross section
+    could come out one bit apart -- and `test_alpha_baseline.py` used to *assert* that it did,
+    naming the consequence itself: "a fit that silently moved in the last place would still break
+    every content address `V2-P4-016` builds on it." The answer had been to sort the corpus, which
+    covers the callers that remember to. `fsum` is exactly rounded, so the answer does not depend
+    on the order at all.
+
+    CPython 3.12 is what made this visible rather than merely true. It gave `sum()` Neumaier
+    compensation for floats, so on 3.12 these three sums returned different numbers than on 3.11,
+    and this repository ships a matrix containing both: the same cross section correlated to
+    `1.0` on one supported interpreter and `0.9999999999999998` on the other. `fsum` is exactly
+    rounded on both, measured -- `tests/unit/backtest/test_factor_ic.py::
+    test_the_correlation_does_not_depend_on_the_order_the_cross_section_arrives_in`.
+
+    The overflow discussion above is why this is safe: `_centred_unit` has already reduced both
+    vectors to deviations of order one, so the sums are `O(n)` and `fsum`'s raise-rather-than-
+    saturate behaviour is unreachable here. It is `statistics.fmean` on *unscaled* input that
+    raised, three lines up, and that is where the scaling was put.
+
     Clamped because rounding can put the last bit outside the range -- `1.0000000000000002` for
     two vectors that are exact affine images of each other -- and an IC of more than one is a
     number no reader can interpret and no bounded field can store. The caller has already ruled
@@ -847,8 +867,8 @@ def _pearson(xs: Sequence[float], ys: Sequence[float]) -> float:
     """
     ux = _centred_unit(xs)
     uy = _centred_unit(ys)
-    covariance = sum(a * b for a, b in zip(ux, uy, strict=True))
-    dispersion = math.sqrt(sum(a * a for a in ux)) * math.sqrt(sum(b * b for b in uy))
+    covariance = math.fsum(a * b for a, b in zip(ux, uy, strict=True))
+    dispersion = math.sqrt(math.fsum(a * a for a in ux)) * math.sqrt(math.fsum(b * b for b in uy))
     return max(-1.0, min(1.0, covariance / dispersion))
 
 

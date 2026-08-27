@@ -2178,7 +2178,12 @@ def test_the_register_lists_what_it_holds_in_custody_order_and_not_by_content_ha
     The user's stated need is to show later that they committed first, and the listing was
     `sorted(list_ids())` -- a sort over content digests, which is *uncorrelated* with time and
     therefore actively misleading rather than merely unhelpful. Measured on these five records,
-    the one created third sorted first.
+    the one created **last** sorts first and the one created **first** sorts last: the maximum
+    inversion five records admit. (It was the third that sorted first until `V2-P5-062` made
+    `_pearson` exactly rounded, which moved the predicted values and so the digests over them.
+    The two interpreters in this repository's matrix disagreed about these five ids before that
+    change and agree on them after it, which is the sharper half of what that issue fixed: a
+    content address is not supposed to be a property of the interpreter that computed it.)
 
     The order is the **custody stamp** and not `predicted_at`, and the choice is the same one
     `standing` rests on: `predicted_at` is whatever the caller passed to `predict` and this
@@ -2190,8 +2195,8 @@ def test_the_register_lists_what_it_holds_in_custody_order_and_not_by_content_ha
     assert len(set(made)) == len(CUSTODY_CLOCKS), "five clocks must file five records"
     by_address = sorted(made)
     assert by_address != list(made), "this corpus is expected to misorder under a digest sort"
-    assert by_address[0] == made[2], "the record created third is expected to sort first"
-    assert by_address[-1] == made[1], "the record created second is expected to sort last"
+    assert by_address[0] == made[4], "the record created last is expected to sort first"
+    assert by_address[-1] == made[0], "the record created first is expected to sort last"
 
     held = OpenAlphaSDK(runtime_dir=daily_runtime_dir).held_predictions()
     assert tuple(record.record_id for record in held) == made

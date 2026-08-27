@@ -258,8 +258,8 @@ def test_the_lockstep_boundary_separates_an_exact_image_from_a_very_close_one() 
     assert LOCKSTEP_DECIMAL_PLACES == 15
     assert sum(round(value, LOCKSTEP_DECIMAL_PLACES) == 1.0 for value in exact_affine) == 200
     assert sum(round(value, LOCKSTEP_DECIMAL_PLACES) == 1.0 for value in exact_monotone) == 200
-    assert sum(value == 1.0 for value in exact_affine) == 149
-    assert sum(value == 1.0 for value in exact_monotone) == 153
+    assert sum(value == 1.0 for value in exact_affine) == 143
+    assert sum(value == 1.0 for value in exact_monotone) == 150
     assert sum(round(value, LOCKSTEP_DECIMAL_PLACES) == 1.0 for value in nearly) == 0
     assert max(nearly) == 0.9999998220801101
 
@@ -1703,7 +1703,11 @@ def test_two_factors_can_rank_the_market_apart_and_still_earn_their_ics_on_the_s
         _ic_series(UP, ics), _ic_series(OTHER_UP, [value * 1.4 + 0.005 for value in ics])
     )
 
-    assert cross_section.raw_correlation == 0.0
+    # `pytest.approx` and not `== 0.0`: the docstring's claim is "near zero", and the exact zero
+    # this used to assert was an artifact of `sum`'s accumulation order. `V2-P5-062` made
+    # `_pearson` exactly rounded and the residue became visible -- `-2.9e-18` -- on both
+    # interpreters rather than on one, which is the property that was actually wanted.
+    assert cross_section.raw_correlation == pytest.approx(0.0, abs=1e-15)
     assert cross_section.verdict == "distinct"
     assert series.coverage == "measured" and series.sample_size == 8
     assert series.correlation is not None and series.correlation > 0.9

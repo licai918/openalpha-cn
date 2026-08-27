@@ -400,24 +400,33 @@ def test_a_leaf_value_does_not_move_with_the_order_its_residuals_reach_it_in() -
 
     This is a unit test of `_grow` and the residuals below are **adversarial rather than
     reachable**: `fit` chases rank positions in `[-1, 1]`, so it never hands a node a residual of
-    `1e16`. That is stated rather than hidden, because the reachable half was measured first and
+    `1e300`. That is stated rather than hidden, because the reachable half was measured first and
     could not tell the two functions apart -- no permutation of up to 110,680 realistic residuals
     separated `sum` from `math.fsum`, on any of several shapes tried. What separates them is
-    catastrophic cancellation, and `sum([1e16, 1.0, -1e16, 1.0])` is `1.0` read forwards and
-    `0.0` read backwards on this interpreter while `math.fsum` is `2.0` either way.
+    catastrophic cancellation: `1e300` and `-1e300` annihilate each other exactly, and every tiny
+    residual added *before* that cancellation is annihilated with them, while `math.fsum` keeps
+    all of them whatever order they arrive in.
+
+    The fixture used to be `[1e16, 1.0, -1e16, 1.0]`, and `V2-P5-062` is why it is not any more:
+    Python 3.12 gave `sum()` Neumaier compensation for floats, which makes that list
+    order-independent -- `2.0` either way, the same answer `fsum` gives. The guard at the end
+    said so in its own words on the first 3.12 run this repository ever did. Neumaier is
+    compensated but not exactly rounded, so a list it cannot recover still exists; this one is
+    order-dependent on 3.11 and on 3.12 both, measured, and `math.fsum` is stable on both.
 
     So the property under test is `_grow`'s -- *a leaf value does not depend on the order of
     `members`* -- and `fsum` is what makes it a property rather than a habit.
     """
     from openalpha_cn.backtest.alpha_tree import _grow, _Leaf, _Settings
 
-    residuals = [1e16, 1.0, -1e16, 1.0]
+    residuals = [5e-08, 1e300, 5e-16, -1e300, 1e-16]
     binned = [(0, 0, 0) for _ in residuals]
     settings = _Settings(learning_rate=0.2, max_depth=0, min_leaf_securities=2, tree_count=1)
 
-    ascending = _grow(binned, residuals, list(range(4)), depth=0, settings=settings, width=3)
+    order = list(range(len(residuals)))
+    ascending = _grow(binned, residuals, order, depth=0, settings=settings, width=3)
     descending = _grow(
-        binned, residuals, list(reversed(range(4))), depth=0, settings=settings, width=3
+        binned, residuals, list(reversed(order)), depth=0, settings=settings, width=3
     )
 
     assert isinstance(ascending, _Leaf)

@@ -6,6 +6,39 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **`_pearson` summed with `sum` and not `math.fsum`, so the same cross section correlated
+  differently on the two interpreters this repository supports — and produced different content
+  addresses** (`V2-P5-062`). CPython 3.12 gave float `sum()` Neumaier compensation, and this was
+  the first run of the suite on 3.12 (until `V2-P5-055` it stopped at the type check), so six
+  tests went red there and nowhere else. Three lines of `backtest/factor_ic.py` were the cause:
+  the covariance and both dispersions used `sum`, in a module that uses `fsum` everywhere around
+  them.
+  - **The sharpest evidence was not in a test's tolerance.** In
+    `test_the_register_lists_what_it_holds_in_custody_order_and_not_by_content_hash`, the five
+    records' `prd_*` content addresses *differed between the two interpreters*. After the change
+    they are byte-identical on both. A content address is not supposed to be a property of the
+    interpreter that computed it.
+  - **This repository had already written the sentence.** `alpha_baseline.rankable`'s docstring
+    says the sort is not tidiness, because "`_pearson` sums products in the argument's own order
+    … a fit that silently moved in the last place would still break every content address
+    `V2-P4-016` builds on it", with 190/400 at six names and 347/400 at sixty measured to prove
+    it. The answer chosen then was to make callers sort. The same measurement is now **0/400 at
+    every size on both interpreters**, because the arithmetic no longer has an order to depend
+    on. The sort stays — two callers must draw the same population — but its stated reason has
+    been corrected to what is now true.
+  - Every measurement the change moved was re-measured rather than relaxed: `149 → 143` and
+    `153 → 150` (in `factor_redundancy`'s prose *and* its test), `point.ic 0.9999999999999998 →
+    1.0`, the digest-sort indices `(2, 1) → (4, 0)`, and `raw_correlation == 0.0` to
+    `approx(0.0, abs=1e-15)` — that last because the test's own docstring said "near zero" and
+    the exact zero was an artifact of accumulation order.
+  - Two adversarial fixtures had been *eaten* by 3.12's compensation and no longer separated
+    `sum` from `fsum` at all; both were rebuilt and proved falsifiable by mutation. Over 200
+    random mixed-magnitude cross sections built for the purpose, a `sum`-based `_pearson` was
+    order-invariant on **200** of 200 on 3.12 against **77** of 200 on 3.11 — a section that can
+    tell the two summations apart on 3.12 has to be searched for. Mutating each `fsum` in turn:
+    the covariance is caught on both interpreters, the two dispersions **only on 3.12**. That
+    table is in the fixture's docstring rather than rounded up to "both".
+
 - **Windows ran the suite for the first time and returned 194 failures and 111 errors; 281 of
   those refusals were the offline guard refusing the interpreter's own plumbing**
   (`V2-P5-059`, `V2-P5-060`, `V2-P5-061`). `windows-latest` has been in `quality.yml`'s matrix,

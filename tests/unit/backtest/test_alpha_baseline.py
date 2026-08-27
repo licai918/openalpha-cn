@@ -414,19 +414,29 @@ def test_a_row_missing_one_column_is_outside_every_columns_ranking() -> None:
 # --------------------------------------------------------------------------------------
 
 
-def test_this_corpus_can_tell_a_sorted_fit_from_an_unsorted_one() -> None:
+def test_reordering_this_corpus_does_not_move_a_single_bit_of_its_ics() -> None:
     """The measurement without which the determinism assertion below would be vacuous.
 
-    `_pearson` sums products in the argument's own order. Whether reordering a cross section
-    changes the answer depends on its size, and a three-name corpus never notices -- so this
-    asserts that *this* corpus does, on this exact permutation, before anything claims the sort
-    is what prevents it. The difference is one bit and one bit is the whole point: a fit that
-    silently moved in the last place would still break every content address `V2-P4-016` builds
-    on it.
+    This assertion used to be its own negation, and the reason it flipped is the finding
+    (`V2-P5-062`). It read `day_rank_ics(reversed) != day_rank_ics(ordered)`, because `_pearson`
+    summed products in the argument's own order, and its docstring named the stake exactly: "a
+    fit that silently moved in the last place would still break every content address
+    `V2-P4-016` builds on it." The answer at the time was to sort the corpus -- which protects
+    the callers who remember to sort. `_pearson` now uses `math.fsum`, which is exactly rounded,
+    so the answer does not depend on the order at all and no caller has to remember anything.
+
+    Non-vacuity is not asserted *here*, and that is measured rather than skipped: on CPython 3.12
+    `sum()` is Neumaier-compensated, and on this corpus no reduction of any column separates `sum`
+    from `math.fsum` at all -- so a probe in this file would assert nothing on one of the two
+    interpreters this repository supports. The property lives one plane down, on a cross section
+    built to separate them on both: `tests/unit/backtest/test_factor_ic.py::
+    test_the_correlation_does_not_depend_on_the_order_the_cross_section_arrives_in`. What this
+    test is, then, is the composition's regression check -- `day_rank_ics` over the real corpus --
+    and it says so instead of implying more.
     """
     ordered = sorted(rows_for(0))
 
-    assert day_rank_ics(list(reversed(ordered))) != day_rank_ics(ordered)
+    assert day_rank_ics(list(reversed(ordered))) == day_rank_ics(ordered)
 
 
 def test_a_permuted_training_set_produces_the_same_artifact_bit_for_bit() -> None:
