@@ -56,7 +56,7 @@ bfc = _load_module()
 
 # Directory → number of distinct test files the ledger names in it. Regenerate with
 # `tests/unit/test_feature_ledger_test_tree.py`'s own helpers rather than by hand: run
-# `_ledger_test_files()` and `Counter(str(Path(p).parent) for p in ...)`. Every entry moving
+# `_ledger_test_files()` and `Counter(Path(p).parent.as_posix() for p in ...)`. Every entry moving
 # is a legitimate edit; the point is that it cannot happen *silently*.
 LEDGER_TEST_FILE_COUNTS = {
     "tests": 2,
@@ -133,7 +133,7 @@ def _ledger_test_files() -> set[str]:
 
 
 def test_the_ledger_names_exactly_this_many_test_files_per_directory() -> None:
-    counts = Counter(str(Path(path).parent) for path in _ledger_test_files())
+    counts = Counter(Path(path).parent.as_posix() for path in _ledger_test_files())
 
     assert dict(sorted(counts.items())) == dict(sorted(LEDGER_TEST_FILE_COUNTS.items()))
 

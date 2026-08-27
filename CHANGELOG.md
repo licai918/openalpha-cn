@@ -6,6 +6,36 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **The SPA fallback took a path's first segment by splitting on `/`, and `StaticFiles.get_path`
+  hands it "OS specific path separators" — so on Windows the owner check was inoperative and
+  every request was served the HTML shell** (`V2-P5-064`). With `V2-P5-059`/`060`/`061`/`063`
+  landed, Windows went from 194 failed and 111 errors to **31 failed, 5566 passed** — and 26 of
+  the 31 were in one file, from one line: `raw = path.split("/", 1)[0]`.
+  - Its docstring correctly noted that `StaticFiles.get_path` had already normalised the path.
+    Starlette's docstring for that method says what the normalisation *does*: it returns the
+    path "with OS specific path separators", via
+    `os.path.normpath(os.path.join(*route_path.split("/")))`. On Windows `GET /api/v1/nope`
+    arrives as `api\v1\nope`, nothing splits, the whole string is compared against the owner
+    sets and matches neither — so both of the owners this class derives so carefully, the API's
+    route table and the build's own directories, were dead at once. That is the sentence
+    `V2-P5-027` and `V2-P5-030` exist to prevent, arriving through the separator nobody checked:
+    a missing `/assets/*.js` answering `200 text/html` to a `<script>` tag.
+  - The separators are read from `os` rather than written as `"/\"`, so the code says "whatever
+    this interpreter splits paths on" instead of naming the two platforms somebody thought of;
+    on POSIX `os.altsep` is `None` and the behaviour is byte-for-byte what it was. The split is
+    a function taking the separators as a parameter so the Windows reading is exercised from a
+    POSIX machine — mutation-checked: `PATH_SEPARATORS` as `""` or `"\"` fails 28 tests, and
+    splitting on `/` alone fails the Windows-separator test.
+  - Three more from the same run. `_without_store_path` now spells what survives the placeholder
+    with `/` on every platform: that string is `disclosable`, it crosses a process boundary, and
+    `this service's panel store\adj_factor\2026\data.parquet` is neither a usable path nor an
+    identifier two deployments would agree on. `Counter(str(Path(p).parent) ...)` had keyed a
+    whole ledger by `tests\e2e`; `V2-P5-060`'s audit knew `relative_to` and not `parent`, and is
+    widened — with `resolve`/`absolute` deliberately excluded, because they answer "where is this
+    on *this* machine", which is the one question whose answer must carry the platform's
+    separator. And `find_library("c")` returns `None` on Windows, so `ctypes.dlopen` is provoked
+    through `msvcrt` there rather than subtracted out of the guard's coverage.
+
 - **Three tests treated "this machine" as an invariant: a hardcoded POSIX `PATH`, a hardcoded
   exception class name, and a wall clock calibrated on one laptop** (`V2-P5-063`). All three were
   found by the first Windows run and none of them is a Windows problem.

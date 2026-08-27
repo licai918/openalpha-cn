@@ -70,6 +70,7 @@ pinned in `tests/unit/test_panel_ingest_import_isolation.py` for that reason.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -183,9 +184,18 @@ def _without_store_path(message: str, root: Path) -> str:
     a component is a symlink (every macOS `/var/...` temporary directory, for one), and a cause
     raised from inside `panel/store.py` can carry either. Replacing the shorter first would
     leave the longer one's prefix behind.
+
+    What is left after the replacement is spelled with `/` on every platform (`V2-P5-064`). It
+    is no longer a location -- the location is what the placeholder just took away -- so what
+    remains is the dataset, the year and the file, and this string is `disclosable`: it crosses
+    a process boundary to a caller who is not on this machine and has no use for its separator.
+    Windows produced `this service's panel store\\adj_factor\\2026\\data.parquet`, which is
+    neither a path the reader can use nor an identifier two deployments would agree on.
     """
     for path in sorted({str(root), str(root.resolve())}, key=len, reverse=True):
         message = message.replace(path, PANEL_STORE_PLACEHOLDER)
+    if os.sep != "/":
+        message = message.replace(os.sep, "/")
     return message
 
 

@@ -94,6 +94,7 @@ user sees is still "no such location" rather than a blank page.
 
 from __future__ import annotations
 
+import os
 import re
 import tempfile
 from collections.abc import Iterator
@@ -103,7 +104,12 @@ from typing import Final
 import pytest
 from fastapi.testclient import TestClient
 
-from openalpha_cn.api.app import SinglePageFallbackFiles, create_app
+from openalpha_cn.api.app import (
+    PATH_SEPARATORS,
+    SinglePageFallbackFiles,
+    _first_segment,
+    create_app,
+)
 
 REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 CLIENT_ROUTES_MODULE: Final[Path] = REPO_ROOT / "web" / "src" / "routes.ts"
@@ -516,3 +522,59 @@ def test_serving_without_a_build_leaves_the_api_alone(monkeypatch: pytest.Monkey
 
     assert response.status_code == 404
     assert response.headers["content-type"].startswith("application/json")
+
+
+# --- the separator `StaticFiles` chooses, and the platform it was read on (`V2-P5-064`) -------
+
+WINDOWS_SEPARATORS: Final[str] = "\\/"
+"""What `os.sep + os.altsep` is on Windows, written out so a POSIX machine can use it.
+
+The defect below is unreachable from this platform: `StaticFiles.get_path` normalises with
+`os.path.normpath`, so the path reaching `get_response` carries `/` here and `\\` there. Passing
+the separators in is what makes the Windows reading a thing this suite measures rather than a
+thing CI reports two hours later.
+"""
+
+
+def test_the_first_segment_is_taken_on_whatever_the_platform_splits_paths_on() -> None:
+    """`V2-P5-064`, at the line that had it.
+
+    `_is_a_client_location` read the first segment with `path.split("/", 1)[0]`, under a
+    docstring correctly noting that `StaticFiles.get_path` had already normalised the path --
+    and `starlette`'s own docstring for that method says it returns the path "with OS specific
+    path separators". On Windows nothing splits, the whole string is compared against the owner
+    sets, and every request is served the shell: 26 of the 31 failures in this repository's
+    first green-enough Windows run were this one line.
+
+    The second half is the defect itself, asserted rather than described: with `/` alone, a
+    Windows-shaped path has no first segment to compare.
+    """
+    assert _first_segment("api/v1/nope", "/") == "api"
+    assert _first_segment("api\\v1\\nope", WINDOWS_SEPARATORS) == "api"
+    assert _first_segment("assets\\missing.js", WINDOWS_SEPARATORS) == "assets"
+
+    assert _first_segment("api\\v1\\nope", "/") == "api\\v1\\nope", (
+        "this is the defect: on `/` alone a Windows path is one segment, so it matches neither "
+        "owner set and `_is_a_client_location` calls the API's own namespace a client location"
+    )
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [("", ""), (".", "."), ("..", ".."), ("index.html", "index.html"), ("a\\b", "a\\b")],
+)
+def test_a_path_with_no_separator_is_its_own_first_segment(path: str, expected: str) -> None:
+    """The values `get_path` can hand over that carry no separator at all.
+
+    `a\\b` is here for the POSIX side of the same asymmetry: a backslash is an ordinary
+    character in a POSIX filename, so on this platform it must *not* split -- which is why
+    `PATH_SEPARATORS` is read from `os` rather than written as the union of both platforms.
+    """
+    assert _first_segment(path, "/") == expected
+
+
+def test_the_separators_are_the_ones_this_interpreter_actually_uses() -> None:
+    """Derived, not declared -- and asserted to be, so it cannot quietly become a literal."""
+    assert os.sep + (os.altsep or "") == PATH_SEPARATORS
+    assert "/" in PATH_SEPARATORS
+    assert (PATH_SEPARATORS == "/") == (os.name != "nt")

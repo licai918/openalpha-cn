@@ -678,22 +678,43 @@ def _override_names(pnpm_workspace: str) -> set[str]:
     }
 
 
-def _stringifies_a_relative_path(tree: ast.AST) -> bool:
-    """Whether `tree` spells `str(<anything>.relative_to(...))` as an executable call.
+PATH_PRODUCING_NAMES: Final[frozenset[str]] = frozenset(
+    {"relative_to", "parent", "joinpath", "with_name", "with_suffix"}
+)
+"""The `Path` members that derive a path used as a *value*, where `/` is the only right spelling.
+
+`relative_to` is what `V2-P5-060` found; `parent` is what it missed, and one Windows run later
+`Counter(str(Path(path).parent) for path in ...)` had keyed a whole ledger by `tests\\e2e`.
+
+`resolve` and `absolute` are deliberately absent, and the distinction is the rule rather than an
+exemption: they answer "where is this on *this* machine", which is exactly the question whose
+answer must carry the platform's separator -- all seven sites spelling `str(x.resolve())` in this
+tree feed a prefix replacement against a message holding a real local path, and `.as_posix()`
+there would break them. What the members above produce is a path used as a key, an allowlist
+entry or an identifier, and those are compared against literals written with `/`.
+"""
+
+
+def _stringifies_a_repository_path(tree: ast.AST) -> bool:
+    """Whether `tree` spells `str(<a Path expression>)` as an executable call.
 
     Read from the syntax tree and not with a regex over the source, because the first draft of
     this audit *was* a regex and it flagged its own docstring -- the "the code says it twice, one
     of them in prose" mistake `test_known_limitation_registries.py` was built to stop counting.
     Prose that quotes the idiom in order to forbid it is not the idiom.
     """
+
+    def _is_a_path_expression(node: ast.expr) -> bool:
+        if isinstance(node, ast.Call):
+            return isinstance(node.func, ast.Attribute) and node.func.attr in PATH_PRODUCING_NAMES
+        return isinstance(node, ast.Attribute) and node.attr in PATH_PRODUCING_NAMES
+
     return any(
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
         and node.func.id == "str"
         and len(node.args) == 1
-        and isinstance(argument := node.args[0], ast.Call)
-        and isinstance(argument.func, ast.Attribute)
-        and argument.func.attr == "relative_to"
+        and _is_a_path_expression(node.args[0])
         for node in ast.walk(tree)
     )
 
@@ -720,7 +741,7 @@ def test_no_repository_path_is_compared_in_the_running_platforms_own_separator()
             *(ROOT / "tests").rglob("*.py"),
             *(ROOT / "scripts").rglob("*.py"),
         ]
-        if _stringifies_a_relative_path(
+        if _stringifies_a_repository_path(
             ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         )
     )

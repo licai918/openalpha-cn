@@ -1,6 +1,7 @@
 """FastAPI application for OpenAlpha CN's versioned public HTTP surface."""
 
 import json
+import os
 from collections.abc import Callable, Mapping, Sequence
 from datetime import date, datetime
 from decimal import Decimal
@@ -1488,6 +1489,41 @@ def _undeclared_risk_flag_refusal(
     )
 
 
+PATH_SEPARATORS: Final[str] = os.sep + (os.altsep or "")
+"""The separators `StaticFiles.get_path` can put in the string it hands `get_response`.
+
+`V2-P5-064`. Starlette's own docstring says it returns the path "with **OS specific path
+separators**" -- it is `os.path.normpath(os.path.join(*route_path.split("/")))` -- and
+`_is_a_client_location` read the first segment with `path.split("/", 1)[0]`. On Windows that
+never splits: `GET /api/v1/nope` arrives as `api\\v1\\nope`, the whole string is compared
+against the owner sets, it matches neither, and the request is served the HTML shell.
+
+Every path, on that platform. The two owners this class derives so carefully -- the API's route
+table and the build's own directories -- were both inoperative, and 26 of the 31 failures in
+this repository's first green-enough Windows run were this one line. It is the sentence
+`V2-P5-027` and `V2-P5-030` exist to prevent, arriving through the separator nobody checked: a
+missing `/assets/*.js` answered `200 text/html` to a `<script>` tag, and `POST /api/v1/nope`
+came back as a page.
+
+Taken from `os` rather than written as `"/\\"` so that this says "whatever this interpreter
+splits paths on" rather than naming the two platforms somebody thought of. On POSIX `os.altsep`
+is `None`, so this is `"/"` and the behaviour is byte-for-byte what it was.
+"""
+
+
+def _first_segment(path: str, separators: str = PATH_SEPARATORS) -> str:
+    """`path`'s first segment, split on `separators` rather than on `/` alone.
+
+    `separators` is a parameter so the Windows reading can be exercised from a POSIX machine --
+    `tests/unit/test_spa_addressability.py` passes both, and a branch that only runs on the
+    platform that has the defect is a branch nobody measures.
+    """
+    for index, character in enumerate(path):
+        if character in separators:
+            return path[:index]
+    return path
+
+
 def _normalised_segment(segment: str) -> str:
     """One path segment, reduced to the form the two owner sets are compared in.
 
@@ -1666,12 +1702,14 @@ class SinglePageFallbackFiles(StaticFiles):
 
         `path` has already been normalised by `StaticFiles.get_path`, so `.` (the root) and
         `..` (an escape attempt) are the two non-segment values it can start with; neither is
-        a location, and neither should be dressed up as one.
+        a location, and neither should be dressed up as one. That normalisation also chooses
+        the *platform's* separator, which is why the first segment is taken by
+        `_first_segment` and not by splitting on `/` -- see `PATH_SEPARATORS`.
 
         The comparison is against `_normalised_segment`, not the raw text -- see that
         function for what was measured and why the asymmetry justifies it.
         """
-        raw = path.split("/", 1)[0]
+        raw = _first_segment(path)
         if raw in {"", ".", ".."}:
             return False
         root = _normalised_segment(raw)

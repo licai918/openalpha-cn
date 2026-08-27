@@ -246,10 +246,18 @@ def test_every_refused_event_is_one_this_test_provokes_rather_than_a_name_in_res
     # `subprocess.Popen` that raised, the assertion matched the wrong event, and `ctypes.dlopen`
     # was never provoked at all. macOS resolves it through dyld without a child process, so this
     # test passed locally while proving nothing on the platform the `Dockerfile` ships.
-    libc = ctypes.util.find_library("c")
-    assert libc is not None, "this test provokes `ctypes.dlopen` by loading libc, and found none"
+    #
+    # Windows has no `libc` for `find_library` to find and returns `None` there, which the
+    # assertion below caught on the first run that got this far (`V2-P5-064`). `msvcrt` is that
+    # platform's C runtime and loads, so the event stays provoked rather than being subtracted
+    # into `UNPROVOKABLE_HERE` -- a coverage hole is worth avoiding when the platform can in
+    # fact reach the code.
+    library = ctypes.util.find_library("c") or ("msvcrt" if os.name == "nt" else None)
+    assert library is not None, (
+        "this test provokes `ctypes.dlopen` by loading a C runtime and found none to load"
+    )
 
-    refuse(lambda: ctypes.CDLL(libc), "ctypes.dlopen")
+    refuse(lambda: ctypes.CDLL(library), "ctypes.dlopen")
 
     assert provoked == set(OUTWARD_AUDIT_EVENTS) - UNPROVOKABLE_HERE
 
