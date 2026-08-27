@@ -6,6 +6,28 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **The `pnpm` override written to close CI's dependency-audit gate was what had been holding
+  it open, and the test pinning that override's literal version would have refused the fix**
+  (`V2-P5-053`). `pnpm audit --audit-level high` — the `web` job's own gate — exited `1` on an
+  untouched checkout, on three transitive *dev* advisories that reach no production bundle:
+  `undici` through `vitest > jsdom`, `brace-expansion` through `eslint > minimatch`, `nanoid`
+  through `vite > postcss`. Two independent acceptance passes had handed this back as "needs an
+  exemption decision with an expiry date." It needed no decision. `brace-expansion` was already
+  pinned in `web/pnpm-workspace.yaml` at `5.0.8` — which was the *patched* version when the pin
+  was written. The advisory later moved to `>=5.0.9`, so the override added to close the gate
+  became the thing pinning the vulnerable version in place. A version is a claim about a moment,
+  and nothing re-reads it.
+  `test_quality_workflow_covers_supported_platforms_and_locked_dependencies` had made that
+  moment an invariant — `assert "brace-expansion: 5.0.8" in pnpm_workspace` — so raising the
+  pin failed the suite: the test blocked the security fix it existed to guarantee. Fixed by
+  moving all three overrides to their patched versions and rewriting the assertion to read the
+  *mechanism* (these three packages are pinned) plus the gate that can actually see a new
+  advisory (CI still runs `pnpm audit --audit-level high`). That gate is not run from a unit
+  test: it needs the network, which `tests/conftest.py` refuses outside `tests/e2e`. The new
+  assertion was proved falsifiable by deleting one override. Measured: 8 advisories (5 moderate,
+  3 high) to 1 moderate, `--audit-level high` exit `0`; 459 web tests, `lint`, `tsc -b`, `build`
+  and `pnpm install --frozen-lockfile` all green; `src/` unchanged.
+
 - **Three e2e tests the first paid Tushare run falsified, each rewritten to assert what the
   market actually did** (`V2-P5-050`, `V2-P5-051`, `V2-P5-052`). All three were tests whose
   premise real rows disproved; none of them was a defect in `src/`, and the whole of `src/` is

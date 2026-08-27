@@ -657,6 +657,26 @@ def test_compose_passes_through_declared_provider_credentials() -> None:
         )
 
 
+def _override_names(pnpm_workspace: str) -> set[str]:
+    """Which packages `web/pnpm-workspace.yaml` pins, without reading which version.
+
+    This assertion used to be `"brace-expansion: 5.0.8" in pnpm_workspace`, and that literal
+    became the defect it was written to prevent. 5.0.8 was the *patched* version when the pin
+    was added; the advisory later moved to `>=5.0.9`, so the pin was holding the vulnerable
+    version in place and `pnpm audit --audit-level high` -- CI's own `web` gate -- was exiting
+    1 on an untouched checkout. A test asserting the literal then refused the security fix.
+
+    A version is a claim about a moment and nothing re-reads it. What is durable is that the
+    override *mechanism* is in place for the three packages that need it, and that the gate
+    which can actually see a new advisory is still wired into CI. The gate is not run here:
+    it needs the network, and `tests/conftest.py` refuses that outside `tests/e2e`.
+    """
+    return {
+        match.group(1)
+        for match in re.finditer(r"^  ([A-Za-z0-9@._-]+):", pnpm_workspace, re.MULTILINE)
+    }
+
+
 def test_quality_workflow_covers_supported_platforms_and_locked_dependencies() -> None:
     workflow = (ROOT / ".github" / "workflows" / "quality.yml").read_text(encoding="utf-8")
     pnpm_workspace = (ROOT / "web" / "pnpm-workspace.yaml").read_text(encoding="utf-8")
@@ -673,7 +693,8 @@ def test_quality_workflow_covers_supported_platforms_and_locked_dependencies() -
     assert "pip-audit" in workflow
     assert "verify_publication.py" in workflow
     assert "verify_compose_recovery.py" in workflow
-    assert "brace-expansion: 5.0.8" in pnpm_workspace
+    assert "pnpm audit --audit-level high" in workflow
+    assert _override_names(pnpm_workspace) >= {"brace-expansion", "nanoid", "undici"}
     assert "web/pnpm-workspace.yaml" in dockerfile
 
 
