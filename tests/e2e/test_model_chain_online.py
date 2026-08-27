@@ -162,7 +162,11 @@ from openalpha_cn.domain.daily_prices import (
     pre_close_tolerance,
 )
 from openalpha_cn.domain.prediction_record import PredictionRecord
-from openalpha_cn.model_view import MODEL_VIEW_LIMITATION_CODES, ModelNotHeldError
+from openalpha_cn.model_view import (
+    MODEL_VIEW_LIMITATION_CODES,
+    ModelNotHeldError,
+    held_prediction_view,
+)
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_view import panel_store
 from openalpha_cn.sdk import OpenAlphaSDK
@@ -921,6 +925,31 @@ def test_one_registered_prediction_is_one_document_through_all_three_faces(
     The command line, a real `openalpha serve` child process and the Python API over one store.
     Asserted as whole-body equality rather than field by field, so a key that appears on one face
     and not another is a failure here rather than a difference nobody measured.
+
+    ## What the daily run's own body is, and what it is not (`V2-P5-052`)
+
+    This test used to read `assert over_the_command_line == fitted.first["prediction"]`, and the
+    first paid run of this suite is what measured that the two were **never the same document**.
+    `model_view.held_prediction_view` is `prediction_view` plus `KNOWN_MODEL_VIEW_LIMITATIONS`,
+    and its own docstring says why the split is deliberate: `daily_view` embeds `prediction_view`
+    under a body that already carries the registry once at the top level, so a nested second copy
+    would be the same fifteen paragraphs twice in one answer. So `fitted.first["prediction"]` is
+    `prediction_view(record)` and `fitted.first["limitations"]` is the registry beside it, while
+    the two faces that hand out a record *on its own* render `held_prediction_view(record)`.
+
+    Measured: sixteen keys identical, `limitations` present on the retrieved document and absent
+    from the run's nested one, and **no key differing** -- which is a test comparing two things
+    that were never one object rather than a face divergence. `V2-P4-098` added the key and
+    updated `test_a_second_daily_run_on_a_later_instant_does_not_destroy_the_first` to merge it;
+    this line was left behind, and `bcddd0d`'s own message records that no suite ran on it. The
+    merge below is that sibling's, spelled the same way on purpose.
+
+    **The SDK face is compared through the renderer rather than as a body**, because
+    `held_prediction` hands back the `PredictionRecord` and not a rendering by design -- so
+    "one document through all three faces" is only a claim about the third once the record it
+    returns is put through the same `held_prediction_view` the other two use. Asserting
+    `isinstance` and one field, which is what this test did, would have passed on an SDK reading
+    a different record entirely.
     """
     record_id, _ = fitted.record_ids
 
@@ -943,9 +972,20 @@ def test_one_registered_prediction_is_one_document_through_all_three_faces(
     assert isinstance(held, PredictionRecord)
 
     assert over_the_command_line == over_http
-    assert over_the_command_line == fitted.first["prediction"]
+    # `held_prediction_view` is `prediction_view` plus the registry (`V2-P4-098`), and the daily
+    # run carries that registry once at its own top level rather than inside the nested record.
+    # Spelled exactly as `test_a_second_daily_run_on_a_later_instant_does_not_destroy_the_first`
+    # spells it, because two lines stating one rule are how the faces came apart in the first
+    # place -- see this test's docstring.
+    assert over_the_command_line == {
+        **fitted.first["prediction"],
+        "limitations": fitted.first["limitations"],
+    }
     assert held.record_id == record_id
     assert over_http["standing"] == held.standing
+    # The third face, through the one renderer the rule is about: a record the SDK read out of the
+    # same store, rendered by the same function, has to be the body the other two handed out.
+    assert held_prediction_view(held) == over_the_command_line
 
 
 def test_an_address_nothing_is_held_under_is_a_named_refusal_and_not_an_empty_document(

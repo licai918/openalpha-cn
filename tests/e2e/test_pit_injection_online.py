@@ -712,13 +712,9 @@ def test_a_correction_published_after_the_read_serves_neither_version(
 ) -> None:
     """The panel plane's honest answer to "does the read hand back the pre-correction value".
 
-    It does not, and it does not hand back the corrected one either. `PanelStore.query()` carries
-    no row-level `available_time` predicate -- `panel/catalog.py` leaves that to P2 by name and
-    `test_lookahead_injection.py` records the judgement that it should *not* be taken, because a
-    filtered read hands back a short partition and every consumer above this plane reads
-    shortness as missing data -- so the earlier question is refused for the whole partition
-    instead of being answered from the version that was current then. That is fail-closed, which
-    is the direction this plane is built to fail in, and it is a different contract from
+    It does not, and it does not hand back the corrected one either. The earlier question is
+    refused rather than answered from the version that was current then. That is fail-closed,
+    which is the direction this plane is built to fail in, and it is a different contract from
     `StatementHistory.filing_for`'s, which does answer from the earlier version on a plane
     `panel build` has no target for.
 
@@ -727,6 +723,36 @@ def test_a_correction_published_after_the_read_serves_neither_version(
     census dimension can see and which `domain_rebuild_refused` exists for. Both refusals are
     asserted, because either one alone is consistent with a reader that silently picked a
     version.
+
+    ## Which rule refuses the earlier read, measured rather than assumed (`V2-P5-051`)
+
+    **This test named `not_yet_knowable`, and that rule can no longer reach this dataset.** The
+    reading it recorded -- "`PanelStore.query()` carries no row-level `available_time` predicate
+    ... so the earlier question is refused for the whole partition" -- was `read_if_ready`'s, and
+    `V2-P4-076` took `load_suspensions` off it. `panel_ingest.load_suspensions`' own docstring is
+    the record of the move and of why: a halt on the newest session made every earlier cross
+    section in that year unscreenable. It now reads `_read_visible_event_dated_rows`, which
+    applies the row-level predicate the sentence above says does not exist and then reconciles
+    what survived against the catalog's per-event-date census.
+
+    Measured on the panel this suite fetched, *before* anything was injected: `load_suspensions`
+    answers at 2026-08-24T17:30+08:00 while the `suspend_d` 2026 partition's `max_available_time`
+    is 2026-08-26T16:30+08:00, two days later. Under `read_if_ready` that is textbook
+    `not_yet_knowable` and it does not fire. So the census is not firing *early* and masking the
+    rule this test meant to exercise -- there is no longer a second rule behind it to mask.
+
+    **And the census is the right answer for this injection rather than an accident of ordering.**
+    The two are about different things -- a partition's readiness against a single row's
+    knowability -- but the correction this test files is precisely a row whose knowability
+    contradicts the dataset's own availability rule: `suspend_d` is `ClockStrategy.daily_close`,
+    so a halt dated 2026-04-28 is knowable at that session's 16:30 and cannot legitimately become
+    available four months later. The census sees the partition claim 32 rows on that event date
+    while the visible slice carries 31, and refuses because -- in `load_suspensions`' own words --
+    "an answer short by it is indistinguishable from one where the row does not exist". That is
+    the same fail-closed outcome the paragraph above asks for, reached by the rule that now owns
+    the door. The assertion below therefore pins the census sentence *and* the arithmetic that
+    separates the two answers: a reader that had silently served the pre-correction version would
+    return the corpus rather than raise, and `pytest.raises` is what catches that.
     """
     as_of = read_as_of(built_panel)
     original = read_stored_partition(
@@ -747,10 +773,23 @@ def test_a_correction_published_after_the_read_serves_neither_version(
         later,
     )
 
-    with pytest.raises(PanelStorageError, match=r"not_yet_knowable"):
+    corrected_session = stored_date(original.column(PRICE_DATE_COLUMN).values[index])
+    with pytest.raises(PanelStorageError, match=r"date census counts") as census:
         load_suspensions(
             built_panel.store, years=(built_panel.year,), as_of=as_of, max_staleness=None
         )
+    refusal = str(census.value)
+    # The census has to name the event date of the row this test injected and the arithmetic that
+    # found it, not merely refuse: a partition-wide refusal that happened to fire for some other
+    # reason would satisfy a bare `pytest.raises` and prove nothing about *this* correction. The
+    # count is one because the injection appended exactly one row, so it is a fact about what was
+    # done here rather than about which panel this ran against.
+    assert SUSPENSION_DATASET in refusal, refusal
+    assert corrected_session.isoformat() in refusal, refusal
+    assert "1 row(s) withheld in all" in refusal, refusal
+    # The falsified reading, kept as an assertion so that putting this door back on
+    # `read_if_ready` fails here rather than quietly restoring the wall `V2-P4-076` removed.
+    assert "not_yet_knowable" not in refusal, refusal
     with pytest.raises(SuspensionError, match=r"nothing in the corpus decides between them"):
         load_suspensions(
             built_panel.store, years=(built_panel.year,), as_of=later, max_staleness=None
