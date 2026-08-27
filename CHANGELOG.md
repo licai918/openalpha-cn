@@ -6,6 +6,35 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **CI had never run on this branch, and its first run found two defects that five local gates
+  are structurally unable to see** (`V2-P5-054`, `V2-P5-055`, `V2-P5-056`). `quality.yml` fires
+  on pushes to `main`, on pull requests, and on `workflow_dispatch`. The working branch is 356
+  commits ahead of `origin/main` with no PR, so none of those had happened: `gh run list` for
+  the push target returns empty. Every "green" claimed for this work had been measured locally.
+  Dispatching the workflow manually turned two of those local greens red.
+  - **`V2-P5-055` — the mypy exemption named the package and missed the only file that package
+    types itself with.** Both Python 3.12 jobs exited `2` at *Type check*, on
+    `numpy/__init__.pyi:737: error: Type statement is only supported in Python 3.12 and greater`,
+    with "errors prevented further checking" — so none of our own code was checked at all.
+    `python_version` is pinned to `"3.11"` (correct: the repository supports 3.11), while 3.12
+    resolves `numpy==2.4.6`, whose bundled stub spells a PEP 695 `type` statement. The override
+    for this already existed — `numpy`, `numpy.*`, `follow_imports = "skip"`, under a comment
+    saying third-party stubs may use the executing interpreter's syntax. It had the right intent
+    and the wrong surface: `follow_imports` is not honoured for `.pyi` files unless
+    `follow_imports_for_stubs` says so. Invisible on 3.11, which resolves an older stub, and
+    invisible locally, where numpy is not installed at all and `test_seeding.py` merely skips.
+  - **`V2-P5-056` — the `web` job never installed `uv`, and the `production` Playwright project
+    starts the real ASGI server.** `pnpm test:e2e` died at `/bin/sh: 1: uv: not found`, exit
+    `127`, before a browser opened; the audit, lint, unit-test and build steps were all green.
+    That webServer is `uv run uvicorn openalpha_cn.api.app:app` deliberately — `V2-P5-027` fixed
+    a URL that was bookmarkable only under the dev server, and only the shipped server can show
+    it. The job installed Node, pnpm and Chromium and no Python at all. Locally `uv` is always
+    on `PATH`, so the suite passed for every developer and had never once run here.
+  - A measurement error worth recording with them: `gh run list` without `-R` resolved to
+    `upstream` (`ss8875/…`, whose push URL is deliberately disabled) and listed *that*
+    repository's dependabot history. Read straight, it says CI has been running. `gh` picks a
+    remote when no default repository is set, and the branch's real CI history was empty.
+
 - **The `pnpm` override written to close CI's dependency-audit gate was what had been holding
   it open, and the test pinning that override's literal version would have refused the fix**
   (`V2-P5-053`). `pnpm audit --audit-level high` — the `web` job's own gate — exited `1` on an
