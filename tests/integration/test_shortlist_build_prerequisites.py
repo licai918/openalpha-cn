@@ -99,6 +99,7 @@ from pathlib import Path
 from typing import Any, Final
 
 import pytest
+from cli_help import rendered_help
 from fastapi.testclient import TestClient
 from panel_fixtures import EXCHANGE, SECURITIES, YEAR, generate_panel, write_generated_panel
 from typer.testing import CliRunner
@@ -753,8 +754,7 @@ def test_the_command_names_every_target_it_needs_before_a_refusal_can_be_reached
     collapsed, because the docstring is wrapped to the terminal and a substring of the source
     would not survive that -- and it is the rendered text that has to carry it.
     """
-    rendered = CliRunner().invoke(app, ["shortlist", "run", "--help"]).output
-    collapsed = re.sub(r"\s+", " ", rendered)
+    collapsed = re.sub(r"\s+", " ", rendered_help("shortlist", "run"))
 
     for target in EVERY_TARGET:
         assert f"--dataset {target}" in collapsed, target

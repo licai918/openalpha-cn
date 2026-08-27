@@ -50,6 +50,7 @@ from pathlib import Path
 from typing import Any, Final
 
 import pytest
+from cli_help import rendered_help as shared_rendered_help
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
@@ -129,14 +130,13 @@ def client(tmp_path: Path) -> TestClient:
 
 
 def rendered_help() -> str:
-    """`factor run --help` with the option table's box drawing removed.
+    """`factor run --help` as one line.
 
-    The option help is wrapped inside a bordered table, so a sentence spanning two lines carries
-    a `|` between them and collapsing whitespace alone would not rejoin it. Copied from
-    `test_factor_build.py`'s own help assertion for the same reason.
+    The box drawing and the colour are undone by `tests/cli_help.py`; this collapses. It used to
+    be a copy of `test_factor_build.py`'s own flattening -- said so in its docstring -- and the
+    copy is exactly what `V2-P5-057` was: six spellings, none of them removing ANSI.
     """
-    printed = runner.invoke(app, ["factor", "run", "--help"]).output
-    return re.sub(r"\s+", " ", printed.replace("│", " "))
+    return re.sub(r"\s+", " ", shared_rendered_help("factor", "run"))
 
 
 def test_the_two_floors_this_one_flag_feeds_are_still_different() -> None:

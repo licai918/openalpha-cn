@@ -211,7 +211,15 @@ def test_every_refused_event_is_one_this_test_provokes_rather_than_a_name_in_res
     refuse(lambda: subprocess.Popen(["/bin/echo", "x"]), "subprocess.Popen")
     refuse(lambda: os.posix_spawn("/bin/echo", ["/bin/echo"], os.environ), "os.posix_spawn")
     refuse(lambda: os.execv("/bin/echo", ["/bin/echo"]), "os.exec")
-    refuse(lambda: ctypes.CDLL(ctypes.util.find_library("c")), "ctypes.dlopen")
+    # `find_library` is resolved *outside* `refuse`, and that is the whole of `V2-P5-058`. On
+    # Linux it shells out -- `gcc`/`objdump`/`ld` -- so called inside the guarded block it was
+    # `subprocess.Popen` that raised, the assertion matched the wrong event, and `ctypes.dlopen`
+    # was never provoked at all. macOS resolves it through dyld without a child process, so this
+    # test passed locally while proving nothing on the platform the `Dockerfile` ships.
+    libc = ctypes.util.find_library("c")
+    assert libc is not None, "this test provokes `ctypes.dlopen` by loading libc, and found none"
+
+    refuse(lambda: ctypes.CDLL(libc), "ctypes.dlopen")
 
     assert provoked == set(OUTWARD_AUDIT_EVENTS)
 

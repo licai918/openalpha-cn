@@ -24,6 +24,7 @@ from types import MappingProxyType
 from typing import Any
 
 import pytest
+from cli_help import rendered_help
 from panel_fixtures import AS_OF, EXCHANGE, YEAR, generate_panel, write_generated_panel
 from typer.testing import CliRunner
 
@@ -920,10 +921,10 @@ def test_the_build_help_names_every_target_it_will_accept(tmp_path: Path) -> Non
     the ones a caller had no way to learn about, having been told for two phases that `income`
     "is not one of this command's build targets".
     """
-    result = runner.invoke(app, ["panel", "build", "--help"])
-    rendered = " ".join(result.stdout.split())
+    # The exit code is asserted inside `rendered_help`: a `--help` that did not exit 0 would
+    # leave every loop below matching against an empty string and passing for the wrong reason.
+    rendered = " ".join(rendered_help("panel", "build").split())
 
-    assert result.exit_code == 0
     for target in cli.PANEL_BUILD_TARGETS:
         assert target in rendered, f"{target} is a build target and --help does not name it"
 

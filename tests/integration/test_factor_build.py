@@ -56,6 +56,7 @@ from pathlib import Path
 from typing import Any, Final
 
 import pytest
+from cli_help import rendered_help
 from fastapi.testclient import TestClient
 from panel_fixtures import EXCHANGE, SECURITIES, YEAR, GeneratedPanel
 from test_factor_interfaces import BASELINE, PREDICTION_DAYS, RUN_AS_OF, SHAPES, _panel
@@ -689,10 +690,7 @@ def test_the_tier_option_help_states_the_bound_the_builder_actually_applies(
         "nothing about the retracted bound"
     )
 
-    # The option table is drawn inside a box, so a wrapped option help carries `|` characters
-    # between its lines; collapsing whitespace alone would not rejoin the sentence.
-    printed = CliRunner().invoke(app, ["factor", "build", "--help"]).output
-    rendered = re.sub(r"\s+", " ", printed.replace("│", " "))
+    rendered = re.sub(r"\s+", " ", rendered_help("factor", "build"))
     assert "at or after the panel's own stored horizon" not in rendered
     assert "stored horizon" not in rendered, (
         "the retracted bound must not survive in any spelling on this option"
@@ -847,10 +845,7 @@ def test_the_waiver_this_command_offers_is_refused_by_the_engine_that_reads_the_
     assert bounded.exit_code == 0, bounded.output
     assert json.loads(bounded.output)["coverage"]["raw"] == {"computed": 16}
 
-    # The option table is drawn inside a box, so a wrapped option help carries `|` characters
-    # between its lines; collapsing whitespace alone would not rejoin the sentence.
-    printed = CliRunner().invoke(app, ["factor", "build", "--help"]).output
-    rendered = re.sub(r"\s+", " ", printed.replace("│", " "))
+    rendered = re.sub(r"\s+", " ", rendered_help("factor", "build"))
     assert "there is no third option" not in rendered
     assert "on this face the two options are not two" in rendered
     assert "measured NOT to reach a build" in rendered

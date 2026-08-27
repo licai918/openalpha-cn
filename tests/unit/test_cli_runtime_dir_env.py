@@ -38,6 +38,7 @@ from typing import Any, Final
 
 import pytest
 import typer
+from cli_help import rendered_help
 from typer.models import OptionInfo
 from typer.testing import CliRunner
 
@@ -136,7 +137,7 @@ def test_every_runtime_dir_option_says_the_environment_variable_decides() -> Non
     for path, callback in _walk(app):
         if "runtime_dir" not in inspect.signature(callback).parameters:
             continue
-        rendered = runner.invoke(app, [*path, "--help"], env={"COLUMNS": "200"}).output
+        rendered = rendered_help(*path)
         # Rich still wraps at word boundaries inside its bordered box, so the variable name is
         # matched with whitespace collapsed rather than as a literal substring.
         if ENV_VAR not in " ".join(rendered.split()):

@@ -90,6 +90,7 @@ from pathlib import Path
 from typing import Any, Final
 
 import pytest
+from cli_help import rendered_help
 from fastapi.testclient import TestClient
 from panel_fixtures import (
     ADJ_FACTOR_DATASET,
@@ -2451,7 +2452,7 @@ def test_a_re_run_of_one_day_through_the_command_line_files_a_second_record(
         second["prediction"]["record_id"],
     ], "two records for one prediction day, oldest custody first"
 
-    rendered = CliRunner().invoke(app, DAILY_HELP).output
+    rendered = rendered_help(*DAILY_HELP)
     assert "every invocation of this command files a new record" in re.sub(r"\s+", " ", rendered)
     assert (
         "a_re_run_of_one_day_files_a_second_record_because_predicted_at_reaches_the_address"
@@ -2459,7 +2460,7 @@ def test_a_re_run_of_one_day_through_the_command_line_files_a_second_record(
     ), "a limitation code is one token and rich breaks it across lines; join rather than collapse"
 
 
-DAILY_HELP: Final[list[str]] = ["model", "daily-run", "--help"]
+DAILY_HELP: Final[tuple[str, ...]] = ("model", "daily-run")
 
 
 def test_no_shipped_face_stamps_the_two_instants_from_two_clock_readings(
@@ -2510,7 +2511,7 @@ def test_no_shipped_face_can_name_the_record_a_backfill_supersedes(
     assert answer["prediction"]["supersedes"] is None
     assert "corrects nothing" in answer["prediction"]["standing_does_not_prove"]
 
-    collapsed = re.sub(r"\s+", " ", CliRunner().invoke(app, DAILY_HELP).output)
+    collapsed = re.sub(r"\s+", " ", rendered_help(*DAILY_HELP))
     assert "--supersedes" not in collapsed
     codes = {item["code"] for item in answer["limitations"]}
     assert "the_supersedes_edge_is_unreachable_from_every_face_this_module_serves" in codes

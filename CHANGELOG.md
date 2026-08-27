@@ -6,6 +6,32 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **The first full suite run CI has ever done found two tests that pass locally and prove
+  nothing there** (`V2-P5-057`, `V2-P5-058`). 6 failed, 5580 passed. Neither failure is a defect
+  in `src/`; both are assertions that could not separate the two answers on the platform that
+  matters.
+  - **`V2-P5-057` — six modules each wrote their own undoing of Rich's rendering and not one of
+    them removed ANSI.** On a terminal, `--help` is coloured, and the escape sequences land
+    *inside* the sentence, so a substring that reads plainly to a human stops matching. The six
+    spellings: two collapsed whitespace, three also replaced the option table's `│` (a wrapped
+    option help carries the box rule between its lines), one widened `COLUMNS`, and one joined
+    with no separator because a limitation code is one token Rich breaks across lines. Locally
+    nothing colours the output, so all six passed; CI sets `FORCE_COLOR`. Reproduced locally with
+    `FORCE_COLOR=1`. Fixed the way this repository already fixes copied helpers — one
+    `tests/cli_help.py` doing only what is about *presentation* (strip ANSI, drop the box rule,
+    widen `COLUMNS`, assert `--help` exited 0), plus an AST audit holding the `"--help"` literal
+    to that one module. The join is deliberately left to callers: `"".join` and `" ".join` are
+    claims about what is being matched, and a helper that picked one would have broken the other.
+  - **`V2-P5-058` — `ctypes.dlopen` had never been provoked on Linux; another event was passing
+    in its place.** The test exists to hold `OUTWARD_AUDIT_EVENTS` equal to the set it actually
+    fires, on the argument that an event nothing raises is an event whose guard is unmeasured.
+    What it raised was `subprocess.Popen`: `find_library("c")` was called *inside* the guarded
+    block, and on Linux it shells out to `gcc`/`objdump`, so the guard fired before `ctypes.CDLL`
+    ran at all. macOS resolves through dyld with no child process, so the test passed locally —
+    meaning the `ctypes.dlopen` guard was unmeasured on exactly the platform the `Dockerfile`
+    ships. `find_library` now resolves outside the block, and its result is asserted non-`None`
+    so that `CDLL(None)` cannot pass in its place.
+
 - **CI had never run on this branch, and its first run found two defects that five local gates
   are structurally unable to see** (`V2-P5-054`, `V2-P5-055`, `V2-P5-056`). `quality.yml` fires
   on pushes to `main`, on pull requests, and on `workflow_dispatch`. The working branch is 356
