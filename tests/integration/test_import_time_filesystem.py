@@ -45,6 +45,7 @@ Two changes and one refusal:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -77,6 +78,59 @@ def _deferring(connection: object) -> None:
     raise MigrationNotYetApplicable("this migration is never applicable")
 
 
+BOOTSTRAP_VARIABLES: Final[tuple[str, ...]] = ("SYSTEMROOT", "PATH")
+"""The variables a child interpreter needs merely to start, on the platform running the tests.
+
+`V2-P5-063`. Both probes below run a child with a *replaced* environment, so that the only thing
+steering it is `OPENALPHA_RUNTIME_DIR` and no developer's `OPENALPHA_*` or `.env` can reach it.
+That environment was spelled `{"PATH": "/usr/bin:/bin", ...}` -- a POSIX path written as a
+literal -- and on Windows `python.exe` does not start at all without `SYSTEMROOT`, so the child
+exited 1 before importing anything and the test read that as "the import failed".
+
+Carrying the real `PATH` on Windows is not a hole in the isolation: what these probes have to
+keep out is *configuration*, and `_isolated_environment` asserts the child carries exactly one
+`OPENALPHA_` variable -- the one it sets itself.
+"""
+
+
+def _isolated_environment(runtime: Path) -> dict[str, str]:
+    """The child's whole environment: the runtime directory, and the bootstrap minimum."""
+    environment = {"OPENALPHA_RUNTIME_DIR": str(runtime)}
+    if os.name == "nt":
+        environment.update(
+            {name: os.environ[name] for name in BOOTSTRAP_VARIABLES if name in os.environ}
+        )
+    else:
+        environment["PATH"] = "/usr/bin:/bin"
+
+    assert [name for name in environment if name.startswith("OPENALPHA_")] == [
+        "OPENALPHA_RUNTIME_DIR"
+    ], "the child must carry exactly the one OPENALPHA_ variable this test sets"
+    return environment
+
+
+def _child(script: str, runtime: Path) -> subprocess.CompletedProcess[str]:
+    """Run `script` in a child interpreter, and say *why* if it fails.
+
+    `check=True` raised `CalledProcessError` with the child's stderr captured and then discarded,
+    so the first Windows run of this suite reported only "returned non-zero exit status 1". A
+    failure that names no cause is one somebody has to reproduce before they can read it.
+    """
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        env=_isolated_environment(runtime),
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, (
+        f"the child interpreter exited {completed.returncode}\n"
+        f"--- stdout ---\n{completed.stdout}\n--- stderr ---\n{completed.stderr}"
+    )
+    return completed
+
+
 def test_importing_the_api_module_writes_nothing(tmp_path: Path) -> None:
     """The row's own reproduction, in a subprocess because an import happens once per process.
 
@@ -88,12 +142,7 @@ def test_importing_the_api_module_writes_nothing(tmp_path: Path) -> None:
     """
     runtime = tmp_path / "runtime"
 
-    subprocess.run(
-        [sys.executable, "-c", "import openalpha_cn.api.app"],
-        check=True,
-        env={"PATH": "/usr/bin:/bin", "OPENALPHA_RUNTIME_DIR": str(runtime)},
-        capture_output=True,
-    )
+    _child("import openalpha_cn.api.app", runtime)
 
     assert not runtime.exists(), sorted(path.name for path in runtime.rglob("*"))
 
@@ -115,13 +164,7 @@ def test_asking_the_module_for_its_app_still_builds_one(tmp_path: Path) -> None:
         "print(json.dumps({'before': before, 'after': after, 'routes': len(app.routes) > 10}))\n"
     )
 
-    completed = subprocess.run(
-        [sys.executable, "-c", script],
-        check=True,
-        env={"PATH": "/usr/bin:/bin", "OPENALPHA_RUNTIME_DIR": str(runtime)},
-        capture_output=True,
-        text=True,
-    )
+    completed = _child(script, runtime)
     answer = json.loads(completed.stdout.strip().splitlines()[-1])
 
     assert answer == {"before": False, "after": True, "routes": True}

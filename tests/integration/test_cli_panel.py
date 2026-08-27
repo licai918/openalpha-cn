@@ -882,16 +882,29 @@ def test_a_refusal_without_json_still_leaves_stdout_completely_empty(
 def test_a_command_that_breaks_is_not_reported_as_an_unhealthy_panel(tmp_path: Path) -> None:
     """A defect in the CLI and a panel that failed its check must not be the same exit code.
 
-    Reachable, not hypothetical: `--runtime-dir` naming a regular file raises
-    `NotADirectoryError` out of `PanelStore`, which no branch here anticipates. Without
-    `_panel_command` that reached Typer's own handler, which printed a traceback and exited 1 --
-    `PanelExit.unhealthy`, i.e. "the panel is at fault, re-fetch it" -- for a situation in which
-    nothing was checked at all. The message names the exception's *type* and not its message,
-    for `_fetch_panel`'s reason: an unanticipated failure carries whatever the frame it escaped
-    was holding.
+    Reachable, not hypothetical: `--runtime-dir` naming a regular file raises out of `PanelStore`
+    an error no branch here anticipates. Without `_panel_command` that reached Typer's own
+    handler, which printed a traceback and exited 1 -- `PanelExit.unhealthy`, i.e. "the panel is
+    at fault, re-fetch it" -- for a situation in which nothing was checked at all. The message
+    names the exception's *type* and not its message, for `_fetch_panel`'s reason: an
+    unanticipated failure carries whatever the frame it escaped was holding.
+
+    *Which* type is asked of the platform rather than written down (`V2-P5-063`). POSIX raises
+    `NotADirectoryError` for a file standing where a directory belongs; Windows raises
+    `FileExistsError`, and this assertion spelled the POSIX name as a literal. Provoking the
+    same operation here reads the answer off the running platform instead of enumerating the
+    ones somebody thought of -- and it fails loudly if the operation stops raising at all, which
+    a two-name `or` would have quietly turned into a test of nothing.
     """
     not_a_directory = tmp_path / "runtime"
     not_a_directory.write_text("", encoding="utf-8")
+
+    try:
+        (not_a_directory / "probe").mkdir(parents=True)
+    except OSError as error:
+        expected = type(error).__name__
+    else:  # pragma: no cover - a platform where a file does not block a directory
+        pytest.fail("a regular file no longer stands in the way of a directory on this platform")
 
     result = runner.invoke(
         app,
@@ -908,7 +921,7 @@ def test_a_command_that_breaks_is_not_reported_as_an_unhealthy_panel(tmp_path: P
 
     assert result.exit_code == PanelExit.internal_error
     assert result.exit_code != PanelExit.unhealthy
-    assert "NotADirectoryError" in result.stderr
+    assert expected in result.stderr
     assert "Traceback" not in result.output
 
 

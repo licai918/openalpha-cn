@@ -6,6 +6,29 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **Three tests treated "this machine" as an invariant: a hardcoded POSIX `PATH`, a hardcoded
+  exception class name, and a wall clock calibrated on one laptop** (`V2-P5-063`). All three were
+  found by the first Windows run and none of them is a Windows problem.
+  - `test_import_time_filesystem` *replaces* the child's environment so no developer's
+    `OPENALPHA_*` can reach it, and spelled that as `{"PATH": "/usr/bin:/bin", ...}`. Windows'
+    `python.exe` does not start without `SYSTEMROOT`, so the child exited 1 before importing
+    anything — and `check=True` captured the child's stderr and discarded it, so the failure said
+    only "returned non-zero exit status 1". Fixed by making the failure say why first, then
+    giving the child the platform's bootstrap minimum; the isolation is kept by asserting the
+    child carries exactly one `OPENALPHA_` variable.
+  - `test_a_command_that_breaks_is_not_reported_as_an_unhealthy_panel` asserted
+    `NotADirectoryError`, which is what POSIX raises for a file standing where a directory
+    belongs. Windows raises `FileExistsError`. The test now provokes the same operation and reads
+    the name off the running platform — and fails loudly if it stops raising at all, which a
+    two-name `or` would have quietly turned into a test of nothing.
+  - `test_whole_market_batch_completes` asserted `elapsed < 60.0`, under a comment saying it is a
+    tripwire for an O(N²) regression rather than a benchmark. Sixty seconds is a property of the
+    machine that wrote it: the same run is 14s here and **602s on the Windows runner**, so the
+    tripwire fired on a slow machine — and on a fast enough machine it would equally have gone on
+    *missing* a regression, which is the half nobody would notice. It now compares two sizes:
+    quadratic growth over this span predicts ~123×, linear ~11×, and no clock speed moves the
+    quotient. Measured at 10.4× locally, ceiling 30×, proved able to fire by lowering it to 5×.
+
 - **`_pearson` summed with `sum` and not `math.fsum`, so the same cross section correlated
   differently on the two interpreters this repository supports — and produced different content
   addresses** (`V2-P5-062`). CPython 3.12 gave float `sum()` Neumaier compensation, and this was

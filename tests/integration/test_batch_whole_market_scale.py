@@ -42,12 +42,18 @@ from openalpha_cn.storage.batch import SQLiteBatchTaskStore
 # clear a *measured* market is a different claim from one chosen because it looks big.
 WHOLE_MARKET_LISTED = 5_545
 
-# One whole-market batch's own bookkeeping, with a fake runner, on the machine that wrote
-# this. Pre-fix it was ~33 minutes for this N (measured: 64.8s at N=1,000 with a no-op
-# runner, growing quadratically); post-fix it is ~4s. The budget is generous against the
-# latter and unreachable by the former, which is the point -- it is a regression tripwire
-# for the O(N^2) whole-task rewrite, not a benchmark.
-WHOLE_MARKET_SECONDS_BUDGET = 60.0
+# The tripwire for the O(N^2) whole-task rewrite, expressed as *growth* and not as a clock
+# (`V2-P5-063`). It was `elapsed < 60.0` seconds, measured on the machine that wrote it, where
+# the post-fix run took ~4s against ~33 minutes before. That budget is a property of a laptop:
+# the same run takes 14s on the machine reading this and **602s on the Windows CI runner**, so
+# the ceiling fired on a slow machine rather than on a regression -- and would equally have gone
+# on missing one on a fast enough machine, which is the half nobody would have noticed.
+#
+# Two sizes and a ratio has neither problem. Quadratic growth over this span predicts ~123x and
+# linear ~11x, so the two are four-fold apart and no clock speed moves the quotient. Measured at
+# 10.4x locally -- slightly under linear, because the small run pays the same fixed setup.
+CALIBRATION_ITEMS = 500
+GROWTH_CEILING = 30.0
 
 
 @dataclass(frozen=True)
@@ -193,7 +199,8 @@ def test_whole_market_batch_completes(
     What is under test is the batch's *persistence*, not research: at `5e18791` every one
     of the 2N item transitions re-parsed and re-serialized the entire task, which is
     O(N^2) and measured at ~33 minutes for this N even with a runner that does nothing.
-    The wall-clock assertion is what stops that coming back silently.
+    The growth assertion at the end is what stops that coming back silently -- see
+    `GROWTH_CEILING` for why it is a ratio between two sizes and no longer a wall clock.
     """
     store = SQLiteBatchTaskStore(tmp_path / "state.sqlite3")
     service = BatchResearchService(store=store, runner=_fake_runner, clock=lambda: frozen_now)
@@ -217,7 +224,27 @@ def test_whole_market_batch_completes(
     reopened = SQLiteBatchTaskStore(tmp_path / "state.sqlite3").get("whole-market")
     assert reopened is not None
     assert reopened == completed
-    assert elapsed < WHOLE_MARKET_SECONDS_BUDGET, f"whole-market batch took {elapsed:.1f}s"
+    calibration = BatchResearchService(
+        store=SQLiteBatchTaskStore(tmp_path / "calibration.sqlite3"),
+        runner=_fake_runner,
+        clock=lambda: frozen_now,
+    )
+    calibration.submit(
+        batch_id="calibration",
+        requests=[research_request(index) for index in range(CALIBRATION_ITEMS)],
+        max_concurrency=MAX_BATCH_WORKERS,
+    )
+    calibration_started = time.monotonic()
+    calibration.run("calibration")
+    calibration_elapsed = time.monotonic() - calibration_started
+
+    growth = elapsed / calibration_elapsed
+    times_the_work = WHOLE_MARKET_LISTED / CALIBRATION_ITEMS
+    assert growth < GROWTH_CEILING, (
+        f"{WHOLE_MARKET_LISTED} items took {elapsed:.1f}s against {CALIBRATION_ITEMS} items "
+        f"at {calibration_elapsed:.1f}s -- {growth:.1f}x for {times_the_work:.1f}x the work, "
+        f"where quadratic growth would predict {times_the_work**2:.0f}x"
+    )
 
 
 def test_the_declared_item_ceiling_is_one_the_durable_contract_actually_holds(
