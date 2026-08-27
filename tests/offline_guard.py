@@ -18,6 +18,7 @@ same problem answered the same way one directory over.
 
 from __future__ import annotations
 
+import inspect
 import socket
 import sys
 from collections.abc import Iterator
@@ -125,6 +126,51 @@ when it closes.
 """
 
 
+SOCKETPAIR_CODE: Final[Any] = getattr(socket.socketpair, "__code__", None)
+"""`socket.socketpair`'s own body, which is a Python function on both platforms (measured).
+
+`V2-P5-059`. `socket.socketpair` is never the bare syscall: even where `_socket.socketpair`
+exists, `socket.py` wraps it to hand back two `socket.socket` objects rather than two `_socket`
+ones. So this is a code object everywhere, and the `getattr` default is a guard against a future
+CPython rather than a branch this repository takes. What *differs* is what that body does:
+
+  - on POSIX it delegates to `_socket.socketpair`, a syscall raising none of
+    `GUARDED_AUDIT_EVENTS`, so the check below never decides anything; while
+  - on Windows there is no `socketpair(2)` to delegate to, and the body emulates it -- bind a
+    listener on `127.0.0.1`, connect to it, accept, close the listener.
+
+That `connect` is what 281 of the 305 failures in this suite's first Windows run were:
+`asyncio`'s proactor loop calling `_make_self_pipe`, underneath `TestClient.__enter__`,
+underneath every integration test that drives the ASGI app. None of those tests was reaching the
+network. The guard was refusing the interpreter's own plumbing, and that means **the guard said
+something different on Windows than it says on POSIX** -- which is the defect. The 281 red tests
+were its symptom.
+"""
+
+
+def _inside_socketpair() -> bool:
+    """Whether the call being audited is happening inside `socket.socketpair`'s own body.
+
+    Keyed on the code object's *identity*, never on the address: `V2-P4-039` made this guard
+    deliberately address-blind -- "a datagram at loopback is refused on the same terms as one at a
+    routable host" -- and an exemption spelled `if destination == ("127.0.0.1", ...)` would have
+    repealed that to fix a platform quirk. `test_offline_suite.py` holds both halves: a socketpair
+    is allowed, and a loopback connect written by a test is still refused.
+
+    Walked only on the refusal path, after the event, depth and family checks have all passed, so
+    an audit hook that fires on every socket operation does not pay for it.
+    """
+    if SOCKETPAIR_CODE is None:
+        return False
+
+    frame = inspect.currentframe()
+    while frame is not None:
+        if frame.f_code is SOCKETPAIR_CODE:
+            return True
+        frame = frame.f_back
+    return False
+
+
 def _refuse(event: str, args: tuple[Any, ...]) -> None:
     """The audit hook: refuse `event` on a guarded family, and be invisible otherwise.
 
@@ -144,6 +190,8 @@ def _refuse(event: str, args: tuple[Any, ...]) -> None:
         return
     sock = args[0]
     if sock.family not in GUARDED_SOCKET_FAMILIES:
+        return
+    if _inside_socketpair():
         return
     destination = args[1] if len(args) > 1 else None
     raise OfflineSuiteViolation(

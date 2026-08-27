@@ -398,7 +398,7 @@ def test_no_shipped_path_calls_the_index_membership_door(
     this fails and the door has to be judged on that caller's clock rather than on this sentence.
     """
     callers = sorted(
-        str(path.relative_to(SOURCE))
+        path.relative_to(SOURCE).as_posix()
         for path in sorted(SOURCE.rglob("*.py"))
         if "load_index_membership" in _called_names(path)
     )

@@ -167,9 +167,9 @@ def _reads_by_function(tree: ast.AST, doors: frozenset[str]) -> dict[str, tuple[
 
 def test_only_the_store_itself_reads_a_partition_without_a_readiness_verdict() -> None:
     offenders = {
-        str(path.relative_to(SOURCE))
+        path.relative_to(SOURCE).as_posix()
         for path in sorted(SOURCE.rglob("*.py"))
-        if str(path.relative_to(SOURCE)) not in QUERY_CALLERS
+        if path.relative_to(SOURCE).as_posix() not in QUERY_CALLERS
         and _calls(ast.parse(path.read_text(encoding="utf-8")))
     }
 

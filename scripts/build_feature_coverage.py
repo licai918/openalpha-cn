@@ -218,7 +218,7 @@ def _load() -> list[dict[str, str]]:
         # feature *went*; it is not a reason to stop checking that its evidence is still
         # where the ledger says it is.
         missing = [
-            str(path.relative_to(ROOT))
+            path.relative_to(ROOT).as_posix()
             for field in ("local_source_evidence", "test_evidence")
             for path in _paths(row[field])
             if not path.exists()

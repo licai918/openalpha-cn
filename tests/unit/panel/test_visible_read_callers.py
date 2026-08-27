@@ -510,9 +510,9 @@ def test_the_detector_sees_the_call_shapes_it_claims_to_and_names_the_two_it_doe
 
 def test_only_the_allowlisted_modules_take_the_visibility_filtered_read() -> None:
     offenders = {
-        str(path.relative_to(SOURCE))
+        path.relative_to(SOURCE).as_posix()
         for path in _source_modules()
-        if str(path.relative_to(SOURCE)) not in FILTERED_READ_CALLERS | {"panel/store.py"}
+        if path.relative_to(SOURCE).as_posix() not in FILTERED_READ_CALLERS | {"panel/store.py"}
         and _calls(ast.parse(path.read_text(encoding="utf-8")), FILTERED_READ)
     }
 

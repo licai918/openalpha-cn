@@ -285,7 +285,7 @@ def _documented_lines() -> tuple[DocumentedLine, ...]:
                 _, _, command = _resolve(argv)
                 found.append(
                     DocumentedLine(
-                        document=str(path.relative_to(REPOSITORY_ROOT)),
+                        document=path.relative_to(REPOSITORY_ROOT).as_posix(),
                         line_number=number,
                         command=command,
                         argv=tuple(argv),

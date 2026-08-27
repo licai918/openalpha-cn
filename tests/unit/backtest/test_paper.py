@@ -32,6 +32,7 @@ from contextlib import contextmanager
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
+from typing import Final
 
 import pytest
 from pydantic import ValidationError
@@ -164,6 +165,30 @@ def test_a_ledger_that_reaches_for_a_broker_is_refused_while_the_session_runs() 
     assert ledger.attempts == 1, "the ledger was reached, and refused inside its own append"
 
 
+UNPROVOKABLE_HERE: Final[frozenset[str]] = frozenset(
+    event
+    for event, available in (
+        ("socket.connect", hasattr(socket, "AF_UNIX")),
+        ("socket.sendto", hasattr(socket, "AF_UNIX")),
+        ("socket.sendmsg", hasattr(socket.socket, "sendmsg")),
+        ("os.posix_spawn", hasattr(os, "posix_spawn")),
+    )
+    if not available
+)
+"""The entries of `OUTWARD_AUDIT_EVENTS` this platform gives the test no way to fire.
+
+`V2-P5-061`, and empty on every platform this project ships to. Windows has no `AF_UNIX`, no
+`sendmsg` and no `os.posix_spawn` -- and the three socket events need `AF_UNIX` specifically,
+because `tests/offline_guard.py`'s hook is installed first and answers for `AF_INET` before this
+guard is consulted at all, which the comments below measure.
+
+Subtracted from the equality rather than skipping the whole test, so that `socket.__new__`,
+`subprocess.Popen`, `os.exec` and `ctypes.dlopen` stay measured on Windows too. Naming what
+cannot be reached is the point: an equality quietly relaxed to whatever passed would be the
+"a name in reserve" this test exists to refuse, one level up.
+"""
+
+
 def test_every_refused_event_is_one_this_test_provokes_rather_than_a_name_in_reserve() -> None:
     """`OUTWARD_AUDIT_EVENTS` is held equal to the set this test actually fires.
 
@@ -196,20 +221,25 @@ def test_every_refused_event_is_one_this_test_provokes_rather_than_a_name_in_res
     # that guard deliberately leaves alone, so it is the only family on which *this* guard's
     # answer is the observable one. Which is the difference between the two stated as a fixture:
     # a local socket is not the network, but a broker gateway on a unix socket is a broker.
-    connectable = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    datagram = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-    try:
-        refuse(lambda: connectable.connect("/nonexistent.sock"), "socket.connect")
-        refuse(lambda: datagram.sendto(b"x", "/nonexistent.sock"), "socket.sendto")
-        refuse(lambda: datagram.sendmsg([b"x"], [], 0, "/nonexistent.sock"), "socket.sendmsg")
-    finally:
-        connectable.close()
-        datagram.close()
+    if "socket.connect" not in UNPROVOKABLE_HERE:
+        connectable = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        datagram = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        try:
+            refuse(lambda: connectable.connect("/nonexistent.sock"), "socket.connect")
+            refuse(lambda: datagram.sendto(b"x", "/nonexistent.sock"), "socket.sendto")
+            if "socket.sendmsg" not in UNPROVOKABLE_HERE:
+                refuse(
+                    lambda: datagram.sendmsg([b"x"], [], 0, "/nonexistent.sock"), "socket.sendmsg"
+                )
+        finally:
+            connectable.close()
+            datagram.close()
 
     # A broker reached through a child process or a shared library is still a broker. Each of
     # these is refused *before* the syscall, which is why provoking them here is safe.
     refuse(lambda: subprocess.Popen(["/bin/echo", "x"]), "subprocess.Popen")
-    refuse(lambda: os.posix_spawn("/bin/echo", ["/bin/echo"], os.environ), "os.posix_spawn")
+    if "os.posix_spawn" not in UNPROVOKABLE_HERE:
+        refuse(lambda: os.posix_spawn("/bin/echo", ["/bin/echo"], os.environ), "os.posix_spawn")
     refuse(lambda: os.execv("/bin/echo", ["/bin/echo"]), "os.exec")
     # `find_library` is resolved *outside* `refuse`, and that is the whole of `V2-P5-058`. On
     # Linux it shells out -- `gcc`/`objdump`/`ld` -- so called inside the guarded block it was
@@ -221,7 +251,7 @@ def test_every_refused_event_is_one_this_test_provokes_rather_than_a_name_in_res
 
     refuse(lambda: ctypes.CDLL(libc), "ctypes.dlopen")
 
-    assert provoked == set(OUTWARD_AUDIT_EVENTS)
+    assert provoked == set(OUTWARD_AUDIT_EVENTS) - UNPROVOKABLE_HERE
 
 
 @pytest.mark.skipif(

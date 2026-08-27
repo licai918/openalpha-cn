@@ -204,6 +204,18 @@ def test_a_udp_datagram_is_refused_although_it_opens_no_connection() -> None:
         sock.sendto(b"probe", ("192.0.2.1", 9))
 
 
+HAS_SENDMSG: Final[bool] = hasattr(socket.socket, "sendmsg")
+"""Whether this platform's sockets have `sendmsg` at all -- they do not on Windows.
+
+`V2-P5-061`. `socket.sendmsg` stays in `GUARDED_AUDIT_EVENTS` regardless: the guard names the
+events CPython *can* raise, not the ones this runner happens to be able to provoke, and dropping
+it on Windows would make the guarded set differ by platform for no reason but this file's reach.
+What is skipped below is the provocation, and only the provocation -- the neighbouring `connect`
+and `sendto` assertions run everywhere.
+"""
+
+
+@pytest.mark.skipif(not HAS_SENDMSG, reason="Windows sockets have no `sendmsg` to provoke")
 def test_the_other_unconnected_send_is_refused_too_rather_than_only_the_obvious_one() -> None:
     """`sendmsg` is `sendto`'s second spelling, and it takes its destination in a fourth slot.
 
@@ -237,6 +249,16 @@ def test_the_refusal_names_the_destination_wherever_the_call_puts_it() -> None:
     ):
         datagram.sendto(b"probe", ("192.0.2.2", 9))
 
+
+@pytest.mark.skipif(not HAS_SENDMSG, reason="Windows sockets have no `sendmsg` to provoke")
+def test_the_refusal_reads_the_address_out_of_the_fourth_slot_too() -> None:
+    """The half of the test above that only some platforms can run.
+
+    Split out rather than skipping the whole of it: `connect` first and `sendto` second are what
+    make "one wrapper reports all three" a claim worth asserting, and they are provocable
+    everywhere. Skipping them alongside `sendmsg` would have left the address reporting
+    unmeasured on Windows to no purpose.
+    """
     with (
         socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as fourth_slot,
         pytest.raises(OfflineSuiteViolation, match=re.escape("sendmsg(('192.0.2.3', 9))")),
@@ -704,3 +726,109 @@ def test_a_nested_block_closing_does_not_switch_the_outer_guard_off() -> None:
             sock.sendto(b"NESTED", address)
         with pytest.raises(TimeoutError):
             listener.recv(64)
+
+
+# --- `socket.socketpair`, which Windows spells as a loopback connect (`V2-P5-059`) -------------
+
+
+def _connect_to(address: tuple[str, int]) -> None:
+    """A loopback `connect`, in a function of its own so its code object can stand in for one.
+
+    `_inside_socketpair` matches CPython's `socket.socketpair` by code-object identity, and on
+    this platform that function is a builtin with no body to match. Pointing the constant at
+    *this* function is what lets the Windows-only branch be exercised anywhere -- the mechanism
+    is "the call is happening inside the code object named by `SOCKETPAIR_CODE`", and which
+    function that names is not the part under test.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.connect(address)
+
+
+def test_a_socketpair_is_not_the_network_on_any_platform() -> None:
+    """The contract `V2-P5-059` restores: `socket.socketpair()` reaches nothing, so it is allowed.
+
+    On POSIX this passes without the exemption -- `socketpair(2)` is a syscall and raises none of
+    the guarded events -- and that is the point. The guard has to mean the same thing on both, and
+    before this it did not: under Windows' emulation, 281 tests that never touched the network
+    were refused for `asyncio`'s own self-pipe.
+    """
+    from offline_guard import refusing_outbound_traffic
+
+    with refusing_outbound_traffic():
+        left, right = socket.socketpair()
+        try:
+            left.sendall(b"SELF-PIPE")
+            assert right.recv(16) == b"SELF-PIPE"
+        finally:
+            left.close()
+            right.close()
+
+
+def test_the_exemption_is_the_code_object_and_not_the_loopback_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Windows-only branch, exercised here -- and the address-blindness it must not repeal.
+
+    Two assertions on the same address, differing only in whether `SOCKETPAIR_CODE` names the
+    frame the connect happens in. The first is what Windows does; the second is `V2-P4-039`'s
+    rule, which an exemption written as "allow 127.0.0.1" would have quietly repealed.
+    """
+    import offline_guard
+    from offline_guard import refusing_outbound_traffic
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        address = server.getsockname()
+
+        monkeypatch.setattr(offline_guard, "SOCKETPAIR_CODE", _connect_to.__code__)
+        with refusing_outbound_traffic():
+            _connect_to(address)
+
+        monkeypatch.setattr(offline_guard, "SOCKETPAIR_CODE", None)
+        refused = pytest.raises(OfflineSuiteViolation, match=re.escape("127.0.0.1"))
+        with refusing_outbound_traffic(), refused:
+            _connect_to(address)
+
+
+def test_the_exemption_reaches_a_caller_of_the_exempt_frame_and_not_only_the_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Why the walk goes up the whole stack rather than checking one frame.
+
+    Windows' `socketpair` does not call `connect` from its own frame either -- it calls
+    `csock.connect(...)`, and the audit event is raised from inside the C method with the
+    emulation's frame above it. A check that read only `currentframe().f_back` would pass this
+    file's other test and fail on the platform it was written for.
+    """
+    import offline_guard
+    from offline_guard import refusing_outbound_traffic
+
+    def outer(address: tuple[str, int]) -> None:
+        _connect_to(address)
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        address = server.getsockname()
+
+        monkeypatch.setattr(offline_guard, "SOCKETPAIR_CODE", outer.__code__)
+        with refusing_outbound_traffic():
+            outer(address)
+
+
+def test_the_constant_names_cpythons_own_socketpair_and_not_something_of_ours() -> None:
+    """What the exemption is keyed to, asserted rather than assumed.
+
+    The first draft of this guard claimed `SOCKETPAIR_CODE` would be `None` on POSIX, on the
+    reading that `socket.socketpair` is the bare syscall there. It is not: `socket.py` wraps
+    `_socket.socketpair` on every platform so the caller gets `socket.socket` objects, so the
+    constant is a code object here too and the walk below is live rather than dead. The
+    difference between the platforms is what that body *does*, which
+    `test_a_socketpair_is_not_the_network_on_any_platform` covers.
+    """
+    from offline_guard import SOCKETPAIR_CODE, _inside_socketpair
+
+    assert SOCKETPAIR_CODE is socket.socketpair.__code__
+    assert Path(SOCKETPAIR_CODE.co_filename).name == "socket.py"
+    assert _inside_socketpair() is False

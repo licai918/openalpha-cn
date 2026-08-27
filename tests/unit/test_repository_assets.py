@@ -1,3 +1,4 @@
+import ast
 import hashlib
 import importlib.util
 import json
@@ -314,14 +315,14 @@ def test_dotenv_loading_is_a_single_deliberate_module_not_scattered_parsing() ->
 
     src_root = ROOT / "src"
     pydantic_settings_importers = sorted(
-        str(path.relative_to(ROOT))
+        path.relative_to(ROOT).as_posix()
         for path in src_root.rglob("*.py")
         if "pydantic_settings" in path.read_text(encoding="utf-8")
     )
     assert pydantic_settings_importers == ["src/openalpha_cn/config.py"]
 
     dotenv_package_importers = sorted(
-        str(path.relative_to(ROOT))
+        path.relative_to(ROOT).as_posix()
         for path in src_root.rglob("*.py")
         if re.search(
             r"^\s*(import dotenv\b|from dotenv\b)",
@@ -675,6 +676,56 @@ def _override_names(pnpm_workspace: str) -> set[str]:
         match.group(1)
         for match in re.finditer(r"^  ([A-Za-z0-9@._-]+):", pnpm_workspace, re.MULTILINE)
     }
+
+
+def _stringifies_a_relative_path(tree: ast.AST) -> bool:
+    """Whether `tree` spells `str(<anything>.relative_to(...))` as an executable call.
+
+    Read from the syntax tree and not with a regex over the source, because the first draft of
+    this audit *was* a regex and it flagged its own docstring -- the "the code says it twice, one
+    of them in prose" mistake `test_known_limitation_registries.py` was built to stop counting.
+    Prose that quotes the idiom in order to forbid it is not the idiom.
+    """
+    return any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "str"
+        and len(node.args) == 1
+        and isinstance(argument := node.args[0], ast.Call)
+        and isinstance(argument.func, ast.Attribute)
+        and argument.func.attr == "relative_to"
+        for node in ast.walk(tree)
+    )
+
+
+def test_no_repository_path_is_compared_in_the_running_platforms_own_separator() -> None:
+    """`V2-P5-060`. `str(path.relative_to(root))` spells the separator the platform runs on.
+
+    `a\\b` on Windows, `a/b` everywhere else.
+
+    Every one of these nine sites fed the result to a comparison against a literal written with
+    `/` -- an allowlist of modules, a ledger of documented command lines, a set of offenders --
+    so on Windows each compared a string that could not match and reported the whole set as
+    unlisted. Seven neighbouring sites already spelled `.as_posix()`; the tree was half converted,
+    which is the shape this repository keeps finding: a fix applied to some of the copies.
+
+    `windows-latest` is in `quality.yml`'s matrix and asserted by the test just below, so this is
+    a claim the repository makes rather than a platform it merely tolerates -- and the claim had
+    never been tested, because CI had never run on this branch (`V2-P5-054`).
+    """
+    offenders = sorted(
+        path.relative_to(ROOT).as_posix()
+        for path in [
+            *(ROOT / "src").rglob("*.py"),
+            *(ROOT / "tests").rglob("*.py"),
+            *(ROOT / "scripts").rglob("*.py"),
+        ]
+        if _stringifies_a_relative_path(
+            ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        )
+    )
+
+    assert offenders == []
 
 
 def test_quality_workflow_covers_supported_platforms_and_locked_dependencies() -> None:

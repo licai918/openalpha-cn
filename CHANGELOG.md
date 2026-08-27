@@ -6,6 +6,37 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **Windows ran the suite for the first time and returned 194 failures and 111 errors; 281 of
+  those refusals were the offline guard refusing the interpreter's own plumbing**
+  (`V2-P5-059`, `V2-P5-060`, `V2-P5-061`). `windows-latest` has been in `quality.yml`'s matrix,
+  and asserted by a test, for as long as the matrix has existed. It had never run.
+  - **`V2-P5-059` — the offline guard meant something different on Windows than it means on
+    POSIX.** The stack was `TestClient.__enter__` → anyio's blocking portal → asyncio's proactor
+    loop → `_make_self_pipe` → `socket.socketpair()`, which Windows has no syscall for and
+    CPython therefore emulates by binding a listener on `127.0.0.1` and connecting to it. Not one
+    of those tests was reaching the network. The 281 red tests were the symptom; the defect was
+    the guard. The exemption is keyed on `socket.socketpair`'s code object and walks the stack —
+    the audit event is raised from inside the C method, with the emulation's frame above it — and
+    deliberately not on the address: `V2-P4-039` made this guard address-blind on purpose, and an
+    exemption reading `if destination == ("127.0.0.1", …)` would have repealed that to paper over
+    a platform quirk. A first draft of the fix claimed `socket.socketpair` was a builtin on POSIX
+    with no `__code__`, making the branch dead there; measured, that is wrong — `socket.py` wraps
+    it on both platforms so callers get `socket.socket` objects. What differs is what the body
+    does, not whether it has one.
+  - **`V2-P5-060` — nine sites spelled a repository path in the running platform's own
+    separator and compared it with a literal written using `/`.** On Windows every one of them
+    reported its whole set as unlisted. Seven neighbouring sites already used `.as_posix()`: the
+    tree was half converted. An AST audit now holds it converted — and its own first draft was a
+    regex over source that flagged its own docstring, which is the mistake
+    `test_known_limitation_registries.py` exists to stop counting.
+  - **`V2-P5-061` — two "every entry is provoked" equalities cannot hold where the platform has
+    no `AF_UNIX`, no `sendmsg` and no `os.posix_spawn`.** Skipping the tests would have left
+    `socket.__new__`, `subprocess.Popen`, `os.exec` and `ctypes.dlopen` unmeasured on Windows
+    alongside them, so what the platform cannot fire is now named and subtracted instead.
+    `socket.sendmsg` stays in `GUARDED_AUDIT_EVENTS` regardless: the guard names the events
+    CPython can raise, not the ones a given runner can provoke, and letting the guarded set drift
+    with the environment is the defect `V2-P5-059` had just finished removing.
+
 - **The first full suite run CI has ever done found two tests that pass locally and prove
   nothing there** (`V2-P5-057`, `V2-P5-058`). 6 failed, 5580 passed. Neither failure is a defect
   in `src/`; both are assertions that could not separate the two answers on the platform that
