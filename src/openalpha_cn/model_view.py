@@ -261,7 +261,11 @@ from openalpha_cn.panel_ingest import (
     load_trading_calendar,
 )
 from openalpha_cn.panel_neutralization import FACTOR_NEUTRALIZATIONS, NeutralizationEngineError
-from openalpha_cn.panel_view import PANEL_STORE_PLACEHOLDER, panel_store
+from openalpha_cn.panel_view import (
+    PANEL_STORE_PLACEHOLDER,
+    panel_store,
+    without_store_path,
+)
 
 __all__ = [
     "KNOWN_MODEL_VIEW_LIMITATIONS",
@@ -1596,13 +1600,10 @@ def _outcome_window_refusal(
 def _without_store_path(message: str, store: PanelStore) -> str:
     """`message` with the store's own location replaced by a name for it.
 
-    Both spellings, longest first, `panel_view._without_store_path`'s rule and its measured
-    reason: `Path.resolve()` differs from the configured path wherever a component is a symlink,
-    and replacing the shorter first would leave the longer one's prefix behind.
+    One line, and it used to be a copy of `panel_view.without_store_path`'s body under a
+    docstring that named it -- see `V2-P5-065`, which is what that cost.
     """
-    for path in sorted({str(store.root), str(store.root.resolve())}, key=len, reverse=True):
-        message = message.replace(path, PANEL_STORE_PLACEHOLDER)
-    return message
+    return without_store_path(message, store.root)
 
 
 class _LabelInputs:

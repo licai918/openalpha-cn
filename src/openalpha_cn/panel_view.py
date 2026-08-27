@@ -110,7 +110,7 @@ class PanelViewError(RuntimeError):
       `str(error)` for one reason: an in-process caller (the SDK, the CLI) is already inside
       the process that owns the store, so naming the store's location tells it nothing it did
       not supply, while an HTTP response body hands that location to whoever asked. Nothing
-      built here puts a filesystem path in `disclosable` -- `_without_store_path` takes the
+      built here puts a filesystem path in `disclosable` -- `without_store_path` takes the
       store's own location back out of a cause that interpolated it -- and
       `tests/integration/test_panel_interfaces.py` drives the shapes that could.
     """
@@ -177,8 +177,15 @@ def panel_store(runtime_dir: Path) -> PanelStore:
     return PanelStore(runtime_dir / PANEL_SUBDIRECTORY)
 
 
-def _without_store_path(message: str, root: Path) -> str:
+def without_store_path(message: str, root: Path) -> str:
     """`message` with the store's own location replaced by a name for it.
+
+    **The only implementation, and `V2-P5-065` is why that sentence is here.** Three other view
+    modules carried a byte-identical copy of the loop below, each under a docstring naming *this*
+    function as the rule it was following -- so when the separator normalisation was added here
+    it reached one caller in four, and Windows went on emitting
+    `this service's panel store\\adj_factor\\2026\\data.parquet` from the other three. Knowing
+    you are a copy and saying so is not the same as not being one.
 
     Both spellings, longest first: `Path.resolve()` differs from the configured path wherever
     a component is a symlink (every macOS `/var/...` temporary directory, for one), and a cause
@@ -212,7 +219,7 @@ def stored_calendar(
     The local message names the store; `disclosable` does not. The cause is carried into both,
     because "which of `partition_missing` / `subject_missing` / `field_missing` stood in the
     way" is the actionable half of this refusal -- but it is run through
-    `_without_store_path` first, since a `PanelStorageError` about a registered partition whose
+    `without_store_path` first, since a `PanelStorageError` about a registered partition whose
     Parquet file is gone interpolates that file's path into its own detail.
     """
     try:
@@ -223,7 +230,7 @@ def stored_calendar(
             f"the {exchange} calendar could not be read out of {store.root}: {error}. {remedy}",
             disclosable=(
                 f"the {exchange} calendar could not be read out of {PANEL_STORE_PLACEHOLDER}: "
-                f"{_without_store_path(str(error), store.root)}. {remedy}"
+                f"{without_store_path(str(error), store.root)}. {remedy}"
             ),
         ) from error
 

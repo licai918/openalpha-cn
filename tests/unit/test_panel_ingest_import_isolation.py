@@ -431,6 +431,7 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_neutralization.write_neutralized_factor_panels",
             "panel_view.PANEL_STORE_PLACEHOLDER",
             "panel_view.panel_store",
+            "panel_view.without_store_path",
         }
     ),
     "openalpha_cn.feature_matrix": frozenset(
@@ -472,6 +473,7 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_neutralization.NeutralizationEngineError",
             "panel_view.PANEL_STORE_PLACEHOLDER",
             "panel_view.panel_store",
+            "panel_view.without_store_path",
         }
     ),
     "openalpha_cn.shortlist_compare": frozenset(
@@ -504,6 +506,7 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_neutralization.neutralized_factor_dataset",
             "panel_view.PANEL_STORE_PLACEHOLDER",
             "panel_view.panel_store",
+            "panel_view.without_store_path",
         }
     ),
 }

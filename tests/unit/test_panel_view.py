@@ -10,8 +10,10 @@ builders are pure functions of frozen dataclasses.
 
 from __future__ import annotations
 
+import ast
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Final
 
 import pytest
 
@@ -35,12 +37,12 @@ from openalpha_cn.panel_view import (
     PanelRequestError,
     PanelUnreadableError,
     PanelViewError,
-    _without_store_path,
     clearance_payload,
     health_report_payload,
     panel_request,
     panel_store,
     readiness_payload,
+    without_store_path,
 )
 
 AS_OF = datetime(2026, 1, 17, 4, 0, tzinfo=UTC)
@@ -327,7 +329,7 @@ def test_a_refusal_states_the_store_to_its_own_process_and_not_to_a_caller() -> 
 def test_the_store_location_is_taken_back_out_of_a_cause_that_interpolated_it(
     tmp_path: Path,
 ) -> None:
-    """`_without_store_path` has to remove *both* spellings of the store's location, and the
+    """`without_store_path` has to remove *both* spellings of the store's location, and the
     resolved one first. On macOS every `/var/folders/...` temporary directory resolves to
     `/private/var/folders/...`; a cause raised inside `panel/store.py` can carry either, and
     removing the shorter first would leave `/private` behind in front of the placeholder.
@@ -335,7 +337,7 @@ def test_the_store_location_is_taken_back_out_of_a_cause_that_interpolated_it(
     root = panel_store(tmp_path).root
     resolved = root.resolve()
 
-    cleaned = _without_store_path(
+    cleaned = without_store_path(
         f"registered but missing: {resolved}/daily/2026/data.parquet and {root}/catalog.duckdb",
         root,
     )
@@ -379,3 +381,43 @@ def test_building_the_app_does_not_create_a_panel_directory(tmp_path: Path) -> N
 
     assert not (tmp_path / "panel").exists()
     assert panel_store(tmp_path).root.is_dir()
+
+
+# --- one implementation of the substitution, and an audit that keeps it one (`V2-P5-065`) ------
+
+SOURCE_ROOT: Final[Path] = Path(__file__).resolve().parents[2] / "src" / "openalpha_cn"
+
+
+def _substitutes_the_placeholder(tree: ast.AST) -> bool:
+    """Whether `tree` calls `<something>.replace(..., PANEL_STORE_PLACEHOLDER)`."""
+    return any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "replace"
+        and len(node.args) == 2
+        and isinstance(node.args[1], ast.Name)
+        and node.args[1].id == "PANEL_STORE_PLACEHOLDER"
+        for node in ast.walk(tree)
+    )
+
+
+def test_only_this_module_replaces_the_store_path_with_the_placeholder() -> None:
+    """`V2-P5-065`. Four modules carried this loop; three of them said so and kept it anyway.
+
+    `factor_view`, `model_view` and `shortlist_view` each held a byte-identical copy, each under
+    a docstring naming `panel_view.without_store_path` as "the rule and its measured reason". So
+    when `V2-P5-064` added separator normalisation here, it reached one caller in four, and
+    Windows went on emitting `this service's panel store\\adj_factor\\2026\\data.parquet` from the
+    other three -- which is how the copies were found at all.
+
+    Read from the source tree rather than from a list of modules, for the reason
+    `test_run_mode.py` gives about the same shape: a hand-kept correspondence is what went stale
+    last time. Naming a copy is not the same as not being one, and only this can tell.
+    """
+    implementing = {
+        path.relative_to(SOURCE_ROOT).as_posix()
+        for path in sorted(SOURCE_ROOT.rglob("*.py"))
+        if _substitutes_the_placeholder(ast.parse(path.read_text(encoding="utf-8")))
+    }
+
+    assert implementing == {"panel_view.py"}

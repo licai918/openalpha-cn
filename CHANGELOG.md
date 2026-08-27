@@ -6,6 +6,23 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **Four modules held a byte-identical copy of the store-path substitution, and three of them
+  said so in their docstrings and kept the copy anyway** (`V2-P5-065`). `V2-P5-064` added
+  separator normalisation to `panel_view`'s implementation, and Windows went on emitting
+  `this service's panel store\adj_factor\2026\data.parquet` — because the fix reached one
+  caller in four. `factor_view`, `model_view` and `shortlist_view` each carried the same loop,
+  each under a docstring naming `panel_view._without_store_path` as "the rule and its measured
+  reason". Knowing you are a copy and saying so is not the same as not being one.
+  - Found through Windows, but the defect is platform-independent: any change to this logic
+    would have landed on a quarter of it.
+  - Fixed the way this repository already fixes copied helpers: one implementation,
+    `panel_view.without_store_path`, three one-line delegations, and an AST audit asserting that
+    exactly one module in `src/` calls `x.replace(..., PANEL_STORE_PLACEHOLDER)` — proved able to
+    fail by restoring the copy in `factor_view`.
+  - The new cross-module name was caught immediately by the seam table
+    (`test_panel_ingest_import_isolation`), which requires every module to declare each name it
+    takes across the seam. Three rows updated.
+
 - **The SPA fallback took a path's first segment by splitting on `/`, and `StaticFiles.get_path`
   hands it "OS specific path separators" — so on Windows the owner check was inoperative and
   every request was served the HTML shell** (`V2-P5-064`). With `V2-P5-059`/`060`/`061`/`063`

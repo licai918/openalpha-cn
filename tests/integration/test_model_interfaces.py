@@ -1943,7 +1943,7 @@ def test_a_partition_whose_file_is_gone_is_refused_without_naming_it(
     A mutant replacing `_read`'s `_without_store_path` with the raw error survived two rounds,
     and the reason was the fixture rather than the guard: a year the store never held, an empty
     range and a missing partition all produce messages that name a **dataset** and never a path,
-    so the substitution was invisible. `panel_view._without_store_path`'s own docstring names the
+    so the substitution was invisible. `panel_view.without_store_path`'s own docstring names the
     shape that is not invisible -- *"a `PanelStorageError` about a registered partition whose
     Parquet file is gone interpolates that file's path into its own detail"* -- and this drives
     it: the catalog still has the row, the bytes are not there, and DuckDB says so with an
