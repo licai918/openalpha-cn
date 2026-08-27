@@ -6,6 +6,65 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **Three e2e tests the first paid Tushare run falsified, each rewritten to assert what the
+  market actually did** (`V2-P5-050`, `V2-P5-051`, `V2-P5-052`). All three were tests whose
+  premise real rows disproved; none of them was a defect in `src/`, and the whole of `src/` is
+  unchanged by this entry.
+  - **`V2-P5-050` — the registry wall this repository had been waiting to re-measure is down,
+    and the answer to "which dataset now answers first" is *none of them*.**
+    `test_shortlist_workflow_online.py`'s own docstring predicted this failure and asked for
+    exactly this measurement: its reading that "the registry is what refuses" predated
+    `V2-P4-076`, the test would *skip* rather than fail on a post-`076` panel, and "re-running
+    this suite against a fresh panel is what would settle which dataset now answers first."
+    It did not skip. At 2026-08-24T17:30+08:00 — earlier than `stock_basic`'s own partition
+    availability of 2026-08-25T00:00+08:00 — `factor build` exits `0` over 60 subjects, and
+    **the cross section is point-in-time sound**: the security that *sets* that availability
+    instant (listed 2026-08-25) is absent from the earlier read and present in the later one,
+    `listed_on` raises `UniverseHorizonError` for any day past its snapshot rather than
+    answering, and all sixty stored observations equal the two prior sessions' close ratio under
+    floating-point equality. Sampled across the stored year — the newest six sessions and a spread
+    back to the year's second, 11 of 157 — **all eleven build**, 8 of the 11 screen end to end,
+    and each answer prices its own session with a listed universe growing monotonically with
+    the calendar. The other 146 were not swept, so the claim is "no wall stands anywhere in the
+    sampled span", not "every session is screenable". The three that do not screen fail on the
+    `namechange` corpus's within-year scope, not on any availability wall. `adj_factor` — the one plane
+    `076` deliberately left on `read_if_ready` — does still refuse there, and is now asserted
+    as the one wall still standing; it does not stop the build because neither
+    `factor build --tier raw` nor `load_shortlist_cross_section` reaches it on this path.
+    The rewritten test asserts the withholding is *sound* rather than merely permitted, and
+    each of its assertions was checked against an input that models the failure it catches.
+  - **`V2-P5-051` — a refusal fired, but the test named a rule that can no longer reach the
+    dataset.** `test_a_correction_published_after_the_read_serves_neither_version` expected
+    `not_yet_knowable`; `V2-P4-034`'s per-event-date census answered instead. The census is
+    **correct here, and nothing is being masked behind it**: `V2-P4-076` moved
+    `load_suspensions` off `read_if_ready` entirely, measured before any injection —
+    `load_suspensions` answers at an instant two days *earlier* than the `suspend_d` partition's
+    own `max_available_time`, which under `read_if_ready` is textbook `not_yet_knowable` and
+    does not fire. And the census is the right answer for this injection rather than an
+    accident of ordering: `suspend_d` is `ClockStrategy.daily_close`, so a halt dated
+    2026-04-28 cannot legitimately become available four months later, and the census refuses
+    a partition claiming 32 rows on that event date whose visible slice carries 31. The test's
+    other two assertions — the later clock's `SuspensionError` and `panel doctor`'s
+    `domain_rebuild_refused` naming the security — hold unchanged, which is what localises the
+    failure to the rule name. The rewrite pins the census sentence, the injected row's own
+    event date, and the withheld count that this injection (not this panel) determines, and
+    keeps an `assert "not_yet_knowable" not in refusal` so that putting the door back on
+    `read_if_ready` fails here rather than quietly rebuilding the wall `076` removed.
+  - **`V2-P5-052` — not a face divergence: a test comparing two documents that were never one
+    object.** The field-by-field diff is **16 items identical, one extra key on the left
+    (`limitations`), and zero items differing**; `over_the_command_line == over_http` passes.
+    `model_view.held_prediction_view` is `prediction_view` plus `KNOWN_MODEL_VIEW_LIMITATIONS`
+    by design — `daily_view` embeds the *un*-suffixed `prediction_view` under a body that
+    already carries the registry once, so `fitted.first["prediction"]` and the retrieved
+    document differ by exactly that key. The sibling test in the same file already asserts the
+    correct merge and names `V2-P4-098`; that fix updated the sibling and left this line
+    behind, and `bcddd0d`'s own commit message records that no suite ran on it. The merge is
+    now spelled exactly as the sibling spells it, because one rule in two spellings is how the
+    faces came apart in the first place. **The third face is now actually compared**:
+    `sdk.held_prediction` returns a `PredictionRecord` rather than a rendering, so the old
+    `isinstance` plus one field would have passed on an SDK reading a different record; its
+    record is now put through the same `held_prediction_view` the other two faces use.
+
 - **Two web-surface defects the product acceptance found, both measured against a running
   server rather than against the report** (`V2-P5-041`, `V2-P5-042`).
   - **`V2-P5-041` — all four pages rendered an API refusal as a raw JSON blob.**

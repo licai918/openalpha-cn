@@ -50,8 +50,9 @@ That is `V2-P4-061`'s wall, standing on the datasets that fix did not move. `061
 shortlists could not be compared, yesterday's could not be re-run, and a published list could not
 be audited after the fact" would stop being true, and on the panel above all three were still
 true, because the four planes read beside the prices were not moved with them.
-`test_a_cross_section_earlier_than_the_registrys_own_availability_is_refused` is where that
-finding lives, with its own contrast one instant later.
+`test_a_cross_section_earlier_than_the_registrys_own_availability_withholds_rather_than_refuses`
+is where that finding lives -- as the *pre-`076`* reading it has since replaced, with its own
+contrast one instant later.
 
 **`V2-P4-076` then moved three of those four, and the paragraph above is kept as a dated
 measurement rather than as a standing claim.** `shortlist_view.load_shortlist_cross_section`'s own
@@ -66,12 +67,40 @@ every question this chain asks into an `AdjustmentHorizonError`, and that `Parti
 carries no subject axis to decide it per security. That issue names the two exact edits the move
 needs and neither is this file's.
 
-**Not re-measured against a live panel since `076`.** The transcripts in this section, and
-`test_a_cross_section_earlier_than_the_registrys_own_availability_is_refused`'s own reading that
-the registry is what refuses, date from before it; that test skips when no stored session is
-earlier than `registry_knowable_from`, so a panel on which `076` has moved the wall makes it skip
-rather than fail. Re-running this suite against a fresh panel is what would settle which dataset
-now answers first, and `V2-P4-100` fixed the sentence rather than claiming the measurement.
+**Re-measured against a live panel, and the wall is down (`V2-P5-050`).** The transcripts in this
+section date from before `076`, and so did this file's reading that the registry is what refuses.
+The first paid run of this suite settled the question `V2-P4-100` left open -- "which dataset now
+answers first" -- and the answer is **none of them**. Measured on the panel fetched 2026-08-26:
+
+    stock_basic   partition available from 2026-08-25T00:00+08:00, and no longer a wall:
+                  `_read_visible_event_dated_rows` withholds the one row that sets that
+                  instant (a security listed 2026-08-25) and answers the other 5,888
+    adj_factor    still on `read_if_ready`, still refuses before 2026-08-26T16:30+08:00 --
+                  and is never reached by `factor build --tier raw` or by the shortlist chain
+    suspend_d     moved by `076`; answers at instants two days before its partition's own
+    namechange    moved by `076`; answers
+
+**Eleven of the 157 stored sessions were sampled** -- the newest six, then a spread back to the
+year's second -- and all eleven build, 8 of the 11 screen end to end, and each answer prices its
+own session with a listed universe that grows monotonically with the calendar (5,470 in January to
+5,550 in August). The other 146 were not swept, so "every session is screenable" is *not* the
+claim; what the sample rules out is a wall standing anywhere between January and the newest
+session, which is what the replaced reading asserted. The three that are not screenable fail on
+the *rename corpus's* within-year scope rather than on any availability wall -- a security whose
+first known name takes effect mid-year cannot be dated before it -- which is a corpus-coverage
+question and not a point-in-time one.
+
+`test_a_cross_section_earlier_than_the_registrys_own_availability_withholds_rather_than_refuses`
+is where that finding now lives, and it asserts the withholding is *sound* rather than merely
+permitted: the withheld security is one that had not listed, `listed_on` refuses to answer past
+the snapshot, and the stored observations' `input_session_last` never reaches past the `as_of`.
+
+**What this costs the module below.** `FETCHED_BLOCKING_DATASETS` and `_prediction_instants` still
+derive the screenable instants from partition availability instants, three of which no longer
+gate. That is now a *conservative* choice rather than a necessary one -- the instants it picks are
+screenable, they are simply not the earliest ones. Narrowing it would widen what this module can
+compare (two real sessions rather than two instants inside one), and it is left alone here because
+this run's business was to take the measurement, not to rebuild the fixture on the strength of it.
 
 ## The second finding, which had no instant left at all
 
@@ -206,9 +235,9 @@ from openalpha_cn.domain.name_history import NAMECHANGE_DATASET
 from openalpha_cn.domain.price_limits import SUSPENSION_DATASET
 from openalpha_cn.domain.run import RunManifest
 from openalpha_cn.domain.signal import SignalFrame
-from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET
-from openalpha_cn.panel.store import PanelStore
-from openalpha_cn.panel_ingest import load_stock_universe
+from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET, UniverseHorizonError
+from openalpha_cn.panel.store import PanelStorageError, PanelStore
+from openalpha_cn.panel_ingest import load_adjustment_histories, load_stock_universe
 from openalpha_cn.panel_view import panel_store
 from openalpha_cn.sdk import OpenAlphaSDK
 from openalpha_cn.storage.shortlists import SHORTLIST_ID_PATTERN
@@ -358,10 +387,12 @@ class Screened:
     """The earliest instant `stock_basic` alone may be read at.
 
     Kept beside `knowable_from_every_blocking_partition` rather than folded into it because
-    `test_a_cross_section_earlier_than_the_registrys_own_availability_is_refused` names the
-    registry in its assertion, and the registry is only the *first* of the four to refuse --
-    `FactorPanelReader` reads it before the adjustments, the names and the halts. A test that
-    took the maximum would be asserting a message whichever partition happened to be latest."""
+    `test_a_cross_section_earlier_than_the_registrys_own_availability_withholds_rather_than_refuses`
+    reads the registry on both sides of exactly this instant. It is no longer the instant the
+    registry *refuses* before -- `V2-P4-076` replaced that refusal with a per-row withholding, and
+    `V2-P5-050` measured it -- but it is still the instant the withholding is about, which is what
+    a test separating a withheld row from an answered one needs. A maximum over the four would
+    name whichever partition happened to be latest instead."""
 
     knowable_from_every_blocking_partition: datetime
     """The earliest instant every partition this chain reads through `read_if_ready` may be read
@@ -406,8 +437,15 @@ def _prediction_instants(
     The newest session with an instant at all, scanned from the end -- which on a panel whose
     `adj_factor` and `suspend_d` partitions are whole years is always the newest session and never
     a second one. Written as a scan rather than as `sessions[-1]` so that the *rule* is stated and
-    the "always" is a consequence of it: the refusal that makes it unavoidable is
-    `test_a_cross_section_earlier_than_the_registrys_own_availability_is_refused`.
+    the "always" is a consequence of it.
+
+    **`V2-P5-050` measured that the "always" is now a property of this function's inputs rather
+    than of the market.** `knowable` is a maximum over partition availability instants, and three
+    of the four no longer gate a read at all -- so this scan is *conservative*: the instant it
+    picks is screenable, it is simply not the earliest one that is. Eleven of the panel's 157
+    sessions were sampled and all eleven built, back to the year's second. Narrowing `knowable` to
+    the partitions that still refuse is what would let this module compare two real sessions; see
+    that row for why it was left standing here.
     """
     for session in reversed(sessions):
         first = _instant_for(session, knowable=knowable)
@@ -1263,27 +1301,61 @@ def test_a_published_list_needs_evidence_naming_a_run_this_deployment_holds(
 # --- the refusals a real market produces ---------------------------------------------------------
 
 
-def test_a_cross_section_earlier_than_the_registrys_own_availability_is_refused(
+def test_a_cross_section_earlier_than_the_registrys_own_availability_withholds_rather_than_refuses(
     private_panel: Screened,
 ) -> None:
-    """`V2-P4-061`'s wall, still standing on the dataset that fix did not move.
+    """The measurement this module's docstring asked for, taken: `V2-P4-061`'s wall is down.
 
-    `061` put `daily` and `stk_limit` on `panel_ingest._read_visible_price_session` so that an
-    earlier session could be priced, and stated what the old behaviour cost: "two days' shortlists
-    could not be compared, yesterday's could not be re-run, and a published list could not be
-    audited after the fact". On a real panel all three are still true, because the *registry* is
-    read at the same instant and still goes through `read_if_ready` -- which refuses a whole
-    partition whose newest `available_time` is later than the `as_of`.
+    ## The reading this replaces, and what falsified it (`V2-P5-050`)
 
-    `stock_basic`'s build-year partition carries a row per listing available at that listing's own
-    midnight, and A-shares list on most sessions, so its availability instant is normally the
-    midnight of the panel's newest session or later. Every prediction instant before it is refused
-    for the registry -- not for the prices, which `061` fixed.
+    This test used to assert that the build is **refused**, and read that refusal as "the registry
+    is what refuses": `stock_basic` went through `read_if_ready`, which judges `not_yet_knowable`
+    on a whole partition's newest `available_time`, so every prediction instant before the
+    midnight of the panel's newest listing was refused for the registry -- not for the prices,
+    which `061` had fixed. `V2-P4-076` then moved `stock_basic` onto
+    `panel_ingest._read_visible_event_dated_rows`, and this module's docstring recorded that the
+    reading was **not re-measured since**, that the test would *skip* rather than fail on a panel
+    where the wall had moved, and that "re-running this suite against a fresh panel is what would
+    settle which dataset now answers first". `V2-P4-100` fixed the sentence rather than claiming
+    the measurement.
 
-    **The contrast is in this test.** The same command, the same store, the same market: at the
-    session immediately before the earliest screenable one it is refused by name, and at the
-    screenable instant it exits `0` and writes a partition. The only thing that differs is which
-    side of `stock_basic`'s own availability instant the `as_of` falls on.
+    The first paid run of this suite took it. **It did not skip and it did not refuse.** The panel
+    held 155 stored sessions stamped before `registry_knowable_from` and the build at the newest
+    of them exited `0` over sixty subjects. So the premise is what was wrong, and the answer to
+    "which dataset now answers first" is *none of them*: swept across the stored year, every one
+    of eleven sampled sessions was buildable -- the newest six and a spread back to the year's
+    second, out of 157 stored -- each priced on its own session with a universe that grows
+    monotonically with the calendar (5,470 in January to 5,550 in August).
+
+    ## What is true instead, and why it is not a look-ahead
+
+    `076` replaced a partition-wide refusal with a per-row withholding, and the withholding is
+    correct. Measured at 2026-08-24T17:30+08:00, an instant earlier than the registry's own
+    partition availability of 2026-08-25T00:00+08:00:
+
+    - the registry answers 5,888 securities, and the security whose listing *sets* that
+      availability instant -- one that listed on 2026-08-25, whose row is available at its own
+      midnight -- is **absent**, while at the later instant it is present and the listed set grows
+      by exactly it;
+    - `listed_on` for any day after the read's own raises rather than answering, so the snapshot
+      cannot be mistaken for a standing membership;
+    - the stored observations carry `input_session_first`/`input_session_last` of the two sessions
+      at or before the `as_of`, and all sixty values equal those two sessions' close ratio under
+      **floating-point equality** (and agree with the later session's own stored `pct_chg` to its
+      four-decimal precision), so no bar later than the `as_of` reached the arithmetic.
+
+    **The contrast is still in this test**, and it is what gives the assertions their separating
+    power: the same command, the same store, the same market, one instant apart, and the only
+    thing that changes is whether the security whose availability instant this test is named for
+    is inside the answer. A registry that had gone back to answering from the whole partition
+    would put it in the earlier answer and fail here; one that refused the whole partition again
+    would fail on the exit code.
+
+    `adj_factor` is the plane `076` left on `read_if_ready` deliberately (`V2-P4-086` names the two
+    edits moving it needs), and it does still refuse at the earlier instant: reading the adjustment
+    histories there raises. It is asserted below as the one wall that is still standing, and the
+    reason it does not stop this build is that neither `factor build --tier raw` nor
+    `load_shortlist_cross_section` reaches it on this path.
     """
     first_instant, _second = private_panel.instants
     earlier_sessions = [
@@ -1297,15 +1369,104 @@ def test_a_cross_section_earlier_than_the_registrys_own_availability_is_refused(
             f"{private_panel.registry_knowable_from.isoformat()}, so no security listed inside "
             "the build year late enough to put the registry ahead of the price plane"
         )
-    refused = _build_factor(private_panel, _stamped(earlier_sessions[-1]))
-    assert refused.exit_code == EXIT_UNHEALTHY, refused.stdout[:2000]
-    assert "not_yet_knowable" in refused.stderr, refused.stderr[:2000]
-    assert STOCK_BASIC_DATASET in refused.stderr, refused.stderr[:2000]
+    earlier_instant = _stamped(earlier_sessions[-1])
+    assert earlier_instant < private_panel.registry_knowable_from
+
+    # The registry, read on both sides of its own partition availability instant.
+    earlier_registry = load_stock_universe(
+        private_panel.store, years=(private_panel.year,), as_of=earlier_instant, max_staleness=None
+    )
+    later_registry = load_stock_universe(
+        private_panel.store, years=(private_panel.year,), as_of=first_instant, max_staleness=None
+    )
+    withheld = {entry.ts_code for entry in later_registry.securities} - {
+        entry.ts_code for entry in earlier_registry.securities
+    }
+    assert withheld, (
+        "the registry answered the same securities on both sides of its own availability instant, "
+        "so this panel cannot separate a per-row withholding from a partition-wide read and the "
+        "assertions below would pass on either"
+    )
+    # Every name the earlier read withheld is one that had not listed by then -- which is the
+    # whole of the point-in-time claim, stated over the rows rather than over the partition.
+    for entry in later_registry.securities:
+        if entry.ts_code in withheld:
+            assert entry.listed_on is not None and entry.listed_on > earlier_sessions[-1], (
+                f"{entry.ts_code} was withheld at {earlier_instant.isoformat()} but had already "
+                f"listed on {entry.listed_on}, so the read is short by a row that was knowable"
+            )
+    assert not [
+        entry
+        for entry in earlier_registry.securities
+        if entry.listed_on is not None and entry.listed_on > earlier_sessions[-1]
+    ], "the earlier read carried a security that had not listed yet"
+    # A snapshot rather than a standing membership: the later day is unknown, not equal to today's.
+    with pytest.raises(UniverseHorizonError):
+        earlier_registry.listed_on(private_panel.session)
+
+    # `adj_factor` is the one plane `V2-P4-076` left on `read_if_ready`, and it still refuses here.
+    with pytest.raises(PanelStorageError, match=r"not_yet_knowable") as still_walled:
+        load_adjustment_histories(
+            private_panel.store,
+            years=(private_panel.year,),
+            as_of=earlier_instant,
+            max_staleness=None,
+        )
+    assert ADJ_FACTOR_DATASET in str(still_walled.value)
+
+    # And the build the old reading said was refused: it is answered, over the same subjects, out
+    # of the two sessions before its own `as_of` and no later one.
+    built = _require_built(
+        _build_factor(private_panel, earlier_instant),
+        what=f"a cross section at {earlier_instant.isoformat()}, earlier than the registry's own "
+        f"availability instant {private_panel.registry_knowable_from.isoformat()}",
+    )
+    assert built["as_ofs"] == [earlier_instant.isoformat()]
+    assert built["subject_count"] == UNIVERSE_SIZE
+    assert built["coverage"]["raw"] == {"computed": UNIVERSE_SIZE}
+    observations = next(
+        name.split("@", 1)[0] for name in built["partitions"] if name.startswith("factor_obs_")
+    )
+    _assert_no_session_later_than(
+        private_panel,
+        dataset=observations,
+        through=earlier_sessions[-1],
+        instant=earlier_instant,
+    )
 
     _require_built(
         _build_factor(private_panel, first_instant),
         what=f"the same command one instant later, at {first_instant.isoformat()}",
     )
+
+
+def _assert_no_session_later_than(
+    screened: Screened, *, dataset: str, through: date, instant: datetime
+) -> None:
+    """Every observation `dataset` stores at `instant` read only sessions at or before `through`.
+
+    Read off the written partition rather than off the command's summary, because the summary
+    counts subjects and the question here is which *bars* the arithmetic saw. `input_session_last`
+    is the factor engine's own record of the newest session it consumed, so a build that reached
+    past its own `as_of` is visible here and nowhere else on the body.
+    """
+    path = catalogued_path(screened.store, dataset=dataset, year=screened.year)
+    with duckdb.connect() as connection:
+        rows = connection.execute(
+            "SELECT DISTINCT input_session_first, input_session_last, available_time "
+            f"FROM read_parquet('{path}')",
+        ).fetchall()
+    stamped = [row for row in rows if row[2] == instant]
+    assert stamped, (
+        f"no stored observation carries available_time {instant.isoformat()}; the partition holds "
+        f"{sorted({str(row[2]) for row in rows})}"
+    )
+    for first_session, last_session, _stamp in stamped:
+        assert date.fromisoformat(str(last_session)) <= through, (
+            f"an observation stamped {instant.isoformat()} read {last_session}, later than "
+            f"{through.isoformat()}, which is the newest session that instant could know"
+        )
+        assert date.fromisoformat(str(first_session)) <= through
 
 
 def test_a_security_the_registry_delisted_inside_this_year_is_refused_by_name(
