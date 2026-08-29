@@ -706,16 +706,29 @@ def test_a_partition_file_truncated_behind_the_stores_back_is_rewritten_not_wave
 ) -> None:
     """The footer reconciliation earns its keep here too: a partition whose file has been
     truncated to half its rows no longer satisfies the no-op branch, so re-writing the same
-    content repairs it instead of answering "already written"."""
+    content repairs it instead of answering "already written".
+
+    The truncation goes through a temp file and a `replace` rather than `COPY`-ing the partition
+    over itself (`V2-P5-067`). DuckDB writes the `COPY` output to a temp path and moves it onto
+    the target, and the target is the file `read_parquet` is still scanning -- POSIX renames over
+    an open file happily and Windows answers `IO Error: Could not move file: Access is denied`,
+    so the fixture, not the store, was what failed there. The two steps do the same thing to the
+    partition and say so on both platforms.
+    """
     root = tmp_path / "panel"
     store = PanelStore(root, clock=_frozen_clock)
     store.write_partition(_DATASET, 2024, _COLUMNS, _three_rows())
     target = root / _DATASET / "2024" / "data.parquet"
+    truncated = target.with_name("truncated.parquet")
+    # One parameter per statement, deliberately: with both paths bound to a single `COPY ... TO`
+    # DuckDB binds the destination first, and the original spelling passed the *same* string
+    # twice -- so the ordering was invisible and only surfaced once the two paths differed.
     with duckdb.connect(":memory:") as connection:
         connection.execute(
-            "COPY (SELECT * FROM read_parquet(?) LIMIT 1) TO ? (FORMAT PARQUET)",
-            [str(target), str(target)],
+            "CREATE TABLE head AS SELECT * FROM read_parquet(?) LIMIT 1", [str(target)]
         )
+        connection.execute("COPY head TO ? (FORMAT PARQUET)", [str(truncated)])
+    truncated.replace(target)
     assert len(store.query(_DATASET, year=2024, columns=["ts_code"])) == 1
 
     store.write_partition(_DATASET, 2024, _COLUMNS, _three_rows())
@@ -759,3 +772,47 @@ def test_a_file_that_only_looks_like_parquet_is_rewritten_rather_than_trusted(
 
     assert _readiness(store) == ("ready", [])
     assert len(store.query(_DATASET, year=2024, columns=["ts_code"])) == 3
+
+
+def test_a_read_running_while_a_write_holds_the_catalog_does_not_crash(tmp_path: Path) -> None:
+    """`V2-P5-067`. DuckDB refuses a second connection whose *configuration* differs.
+
+    This module's docstring says `query()` opens the catalog `read_only=True` "so any number of
+    concurrent readers -- same-process threads or separate processes -- can run in parallel".
+    That is true among readers and says nothing about the case that actually breaks: a reader
+    overlapping a **writer**. DuckDB keeps one database instance per file per process and
+    answers a second connect with a different configuration with
+
+        Connection Error: Can't open a connection to same database file with a different
+        configuration than existing connections
+
+    so a `query()` that lands while `write_partition()` holds its read-write connection raises
+    -- an ordinary read request crashing because a build happened to be in flight. Reproduced
+    directly against `duckdb.connect` on macOS before this test was written, so it is not a
+    Windows property; Windows only scheduled it reliably, which is how it was found at all.
+    """
+    store = PanelStore(tmp_path / "panel")
+    store.write_partition(_DATASET, 2024, _COLUMNS, _rows())
+
+    failures: list[str] = []
+
+    def write(index: int) -> None:
+        try:
+            store.write_partition(
+                _DATASET, 2024, _COLUMNS, _rows(closes=(float(index), float(index) + 0.5))
+            )
+        except Exception as error:
+            failures.append(f"write: {type(error).__name__}: {error}")
+
+    def read(_index: int) -> None:
+        try:
+            store.query(_DATASET, year=2024, columns=["ts_code"])
+        except Exception as error:
+            failures.append(f"read: {type(error).__name__}: {error}")
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [executor.submit(write if index % 2 else read, index) for index in range(64)]
+        for future in futures:
+            future.result()
+
+    assert failures == []

@@ -6,6 +6,37 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **An ordinary read crashed if it overlapped a write: the panel catalog's concurrency design
+  assumed a read-only and a read-write DuckDB connection can coexist in one process, and DuckDB
+  refuses that** (`V2-P5-067`). This family had been reported as "needs a Windows machine to
+  diagnose". That was wrong, and it was wrong because the complete error had not been read.
+  Read: `Can't open a connection to same database file with a different configuration than
+  existing connections`. DuckDB keeps one database instance per file per process; `store.py`
+  opens the catalog `read_only=True` at seven sites and read-write at two.
+  - **Reproduced on macOS against `duckdb.connect` directly**, so it is not a platform property.
+    Windows only scheduled it reliably, which is how it surfaced. The new
+    `test_a_read_running_while_a_write_holds_the_catalog_does_not_crash` failed **28 of 64
+    operations** before the fix and passes 3 runs out of 3 after it.
+  - The blast radius is wider than the test that found it: `query()` is read-only and
+    `write_partition()` is read-write, so a read request landing during a panel build raised
+    `ConnectionException` — in the API server, a read failing because a build was in flight.
+    The module docstring's promise that "any number of concurrent readers … can run in parallel"
+    is true among readers and silent about the case that breaks.
+  - Fixed with a readers-writer lock rather than one lock around everything: serialising reads
+    would have traded a crash for a regression
+    (`test_profile_query_survives_eight_concurrent_threads_against_the_same_partition`). What
+    DuckDB forbids is exactly reader-with-writer, and that is all this excludes. Both re-entrancy
+    cases are answered in code rather than documented as hazards — a deadlock left in a storage
+    layer as a comment is a deadlock — and waiting writers are counted so a stream of readers
+    cannot starve a build.
+  - Two test defects in the same family. The truncation fixture ran
+    `COPY (SELECT … read_parquet(?)) TO ?` with **both parameters bound to the same file**;
+    DuckDB writes to a temp path and moves it onto the target, which is the file still being
+    scanned — POSIX renames over an open file, Windows answers `Access is denied`. Giving the
+    two ends different paths then revealed the second defect: DuckDB binds the `TO ?`
+    destination *before* `read_parquet(?)`, which the original could not show because both
+    parameters were the same string. It is now one parameter per statement.
+
 - **The only job that builds the shipped artifact was gated behind a matrix whose individual
   legs `needs` cannot name, and had therefore never run** (`V2-P5-066`). `container` is where the
   `Dockerfile`'s image is built, `deploy/compose.yml`'s stack is started and evidence is proved

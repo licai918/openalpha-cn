@@ -286,8 +286,9 @@ profiling-output filename used to have no per-call uniqueness, so 8 concurrent t
 against the same partition produced 3-6 failures per run across 5 runs; it is now
 `uuid.uuid4()`-suffixed per call).
 
-`write_partition()`'s catalog upsert is guarded by an in-process `threading.Lock`
-(`self._catalog_write_lock`), so concurrent same-process writer *threads* -- the regime
+`write_partition()`'s catalog upsert is guarded by an in-process readers-writer lock
+(`self._catalog_access`, see `_CatalogAccess`), so concurrent same-process writer
+*threads* -- the regime
 `ThreadPoolExecutor`-based callers actually create -- no longer race each other for the
 catalog: the Parquet `COPY` (the expensive part) still runs unlocked and concurrently across
 threads, and only the few-millisecond catalog upsert *and the one `rename(2)` that follows
@@ -346,7 +347,8 @@ A partition write touches two independent systems -- a Parquet file on the files
 row in a DuckDB database -- and nothing in this codebase can put them in one transaction. So
 the question is not whether there is a window, it is which way the window fails. The order is
 now: `COPY` the rows to a per-writer temp file (unlocked, the expensive part), take
-`_catalog_write_lock`, upsert `panel_partitions` and let that connection close, and only then
+`_catalog_access.exclusive()`, upsert `panel_partitions` and let that connection close, and
+only then
 `temporary.replace(target)`.
 
 The previous order was the other one, and it was measured to fail open. Making
@@ -805,6 +807,100 @@ its only two outcomes. Eight bytes per partition per assessment, independent of 
 """
 
 
+class _CatalogAccess:
+    """Readers together, a writer alone -- DuckDB's own rule about this file, as a lock.
+
+    `V2-P5-067`. DuckDB keeps one database instance per file per *process* and refuses a second
+    connection whose configuration differs from the open ones:
+
+        Connection Error: Can't open a connection to same database file with a different
+        configuration than existing connections
+
+    Every catalog read here opens `read_only=True` and every catalog write opens read-write, so
+    a `query()` overlapping a `write_partition()` inside one process raised -- an ordinary read
+    crashing because a build happened to be in flight. Reproduced against `duckdb.connect`
+    directly on macOS, so it is not a platform quirk; Windows only scheduled it reliably, which
+    is how it was found. `test_a_read_running_while_a_write_holds_the_catalog_does_not_crash`
+    failed 28 of 64 operations before this existed.
+
+    This is deliberately *not* one lock around everything. The module docstring promises that
+    "any number of concurrent readers -- same-process threads or separate processes -- can run
+    in parallel", and
+    `test_profile_query_survives_eight_concurrent_threads_against_the_same_partition` holds
+    it; serialising reads would have traded a crash for a regression. What DuckDB forbids is
+    exactly reader-with-writer, and that is what this excludes and all it excludes.
+
+    Two re-entrancy cases are answered rather than documented as hazards, because a deadlock
+    left in a storage layer as a comment is a deadlock:
+
+    * a reader nested inside a reader on one thread takes the lock once, and
+    * a reader reached from inside a writer's own block is let straight through -- that thread
+      already holds the exclusive side, so there is nothing left to exclude it from.
+
+    Neither happens in this module today (measured: no read-only connection site calls another,
+    and `write_partition` calls `_reusable_partition` *before* taking the exclusive side rather
+    than inside it). They are handled so the next caller who does it gets an answer, not a hang.
+    Cross-process coordination is unchanged and still out of scope; see the module docstring's
+    "Concurrency".
+    """
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._readers = 0
+        self._writer = False
+        self._waiting_writers = 0
+        self._local = threading.local()
+
+    @property
+    def _depth(self) -> int:
+        return int(getattr(self._local, "depth", 0))
+
+    @contextmanager
+    def shared(self) -> Iterator[None]:
+        """Hold the catalog open for reading; other readers may hold it at the same time."""
+        if self._depth or getattr(self._local, "writing", False):
+            self._local.depth = self._depth + 1
+            try:
+                yield
+            finally:
+                self._local.depth -= 1
+            return
+
+        with self._condition:
+            # `_waiting_writers` is what stops a steady stream of readers starving a writer
+            # forever; without it a busy panel could never finish a `write_partition`.
+            while self._writer or self._waiting_writers:
+                self._condition.wait()
+            self._readers += 1
+        self._local.depth = 1
+        try:
+            yield
+        finally:
+            self._local.depth = 0
+            with self._condition:
+                self._readers -= 1
+                if not self._readers:
+                    self._condition.notify_all()
+
+    @contextmanager
+    def exclusive(self) -> Iterator[None]:
+        """Hold the catalog open for writing; no reader and no other writer may hold it."""
+        with self._condition:
+            self._waiting_writers += 1
+            while self._writer or self._readers:
+                self._condition.wait()
+            self._waiting_writers -= 1
+            self._writer = True
+        self._local.writing = True
+        try:
+            yield
+        finally:
+            self._local.writing = False
+            with self._condition:
+                self._writer = False
+                self._condition.notify_all()
+
+
 class PanelStore:
     """`dataset/year/`-partitioned Parquet store with a persistent DuckDB catalog.
 
@@ -832,15 +928,16 @@ class PanelStore:
         # concurrently raised `duckdb.IOException` (lock conflict) inside `__init__`,
         # exactly the failure this comment now prevents structurally.
         #
-        # A plain `threading.Lock`, not a duckdb connection: it costs nothing to create
-        # (no I/O, no catalog touched) and only ever guards `write_partition()`'s catalog
-        # upsert and the `rename(2)` that now follows it (see there), plus
-        # `record_coverage()`'s upsert, against *same-process* writer threads -- the
-        # concurrency regime `runtime/batch.py`'s `ThreadPoolExecutor` creates. It cannot, and
-        # is not meant to, coordinate across separate OS processes; see the module
-        # docstring's "Concurrency" section for why that remains a deliberately separate,
-        # still-open concern.
-        self._catalog_write_lock = threading.Lock()
+        # Not a duckdb connection: it costs nothing to create (no I/O, no catalog touched).
+        # It guards `write_partition()`'s catalog upsert and the `rename(2)` that follows it,
+        # and `record_coverage()`'s upsert, against *same-process* writer threads -- the
+        # concurrency regime `runtime/batch.py`'s `ThreadPoolExecutor` creates -- and since
+        # `V2-P5-067` it guards every catalog *read* against those writers too, which is a
+        # DuckDB rule rather than a choice: see `_CatalogAccess`. Readers still run in parallel
+        # with each other. It cannot, and is not meant to, coordinate across separate OS
+        # processes; see the module docstring's "Concurrency" section for why that remains a
+        # deliberately separate, still-open concern.
+        self._catalog_access = _CatalogAccess()
 
     def write_partition(
         self,
@@ -915,7 +1012,7 @@ class PanelStore:
         # writer: without it, two threads could commit A then B and rename B then A, leaving
         # the catalog naming A while the disk holds B. It cannot coordinate across separate
         # OS processes; see the module docstring's "Concurrency" section.
-        with self._catalog_write_lock:
+        with self._catalog_access.exclusive():
             try:
                 with duckdb.connect(str(self.catalog_path)) as connection:
                     self._ensure_catalog_schema(connection)
@@ -994,7 +1091,10 @@ class PanelStore:
         _validate_dataset(dataset)
         if not self.catalog_path.exists():
             return []
-        with duckdb.connect(str(self.catalog_path), read_only=True) as connection:
+        with (
+            self._catalog_access.shared(),
+            duckdb.connect(str(self.catalog_path), read_only=True) as connection,
+        ):
             _check_catalog_schema_version(connection)
             partition_path = self._resolve_partition_path(connection, dataset, year)
             if partition_path is None:
@@ -1040,7 +1140,10 @@ class PanelStore:
         _validate_dataset(dataset)
         if not self.catalog_path.exists():
             raise PanelStorageError(f"no partition registered for {dataset} year={year}")
-        with duckdb.connect(str(self.catalog_path), read_only=True) as connection:
+        with (
+            self._catalog_access.shared(),
+            duckdb.connect(str(self.catalog_path), read_only=True) as connection,
+        ):
             _check_catalog_schema_version(connection)
             partition_path = self._resolve_partition_path(connection, dataset, year)
             if partition_path is None:
@@ -1096,7 +1199,10 @@ class PanelStore:
             raise PanelStorageError(
                 f"no partition registered for {validated.dataset} year={validated.year}"
             )
-        with self._catalog_write_lock, duckdb.connect(str(self.catalog_path)) as connection:
+        with (
+            self._catalog_access.exclusive(),
+            duckdb.connect(str(self.catalog_path)) as connection,
+        ):
             self._ensure_catalog_schema(connection)
             existing = self._lookup_with_connection(connection, validated.dataset, validated.year)
             if existing is None:
@@ -1126,7 +1232,10 @@ class PanelStore:
         _validate_dataset(dataset)
         if not self.catalog_path.exists():
             return None
-        with duckdb.connect(str(self.catalog_path), read_only=True) as connection:
+        with (
+            self._catalog_access.shared(),
+            duckdb.connect(str(self.catalog_path), read_only=True) as connection,
+        ):
             _check_catalog_schema_version(connection)
             return _read_coverage(connection, dataset, year)
 
@@ -1135,7 +1244,10 @@ class PanelStore:
         _validate_dataset(dataset)
         if not self.catalog_path.exists():
             return ()
-        with duckdb.connect(str(self.catalog_path), read_only=True) as connection:
+        with (
+            self._catalog_access.shared(),
+            duckdb.connect(str(self.catalog_path), read_only=True) as connection,
+        ):
             _check_catalog_schema_version(connection)
             if not _table_exists(connection, "panel_partitions"):
                 return ()
@@ -1416,7 +1528,10 @@ class PanelStore:
                 f"{dataset} year={year} passed readiness but the catalog is gone; nothing can "
                 "be read from it"
             )
-        with duckdb.connect(str(self.catalog_path), read_only=True) as connection:
+        with (
+            self._catalog_access.shared(),
+            duckdb.connect(str(self.catalog_path), read_only=True) as connection,
+        ):
             _check_catalog_schema_version(connection)
             partition_path = self._resolve_partition_path(connection, dataset, year)
             if partition_path is None:
@@ -1562,7 +1677,10 @@ class PanelStore:
         if not self.catalog_path.exists():
             return tuple(_absent_partition(year) for year in years)
         states: list[PartitionState] = []
-        with duckdb.connect(str(self.catalog_path), read_only=True) as connection:
+        with (
+            self._catalog_access.shared(),
+            duckdb.connect(str(self.catalog_path), read_only=True) as connection,
+        ):
             _check_catalog_schema_version(connection)
             catalogued = _table_exists(connection, "panel_partitions")
             for year in years:
@@ -1663,7 +1781,10 @@ class PanelStore:
         """
         if not self.catalog_path.exists():
             return None
-        with duckdb.connect(str(self.catalog_path), read_only=True) as connection:
+        with (
+            self._catalog_access.shared(),
+            duckdb.connect(str(self.catalog_path), read_only=True) as connection,
+        ):
             _check_catalog_schema_version(connection)
             existing = self._lookup_with_connection(connection, dataset, year)
             if existing is None or existing.content_hash != content_hash:
