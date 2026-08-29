@@ -294,50 +294,61 @@ def test_the_real_ledger_has_no_unreviewed_or_unknown_rows() -> None:
 
 
 # --- the debt this module cannot check, held so it can only shrink (`V2-P5-038`) --------------
+UNVALIDATED_ACCEPTANCE_ROWS: Final[int] = 85
+"""How many rows carry `acceptance_kind="legacy-prose"`. It may be lowered. It may not be raised.
 
-UNVALIDATED_ACCEPTANCE_CEILING: Final[int] = 85
-"""How many rows may carry `acceptance_kind="legacy-prose"`. It may fall. It may not rise.
-
-`V2-P5-038`. The rows this module counts per directory are checked for *existence* --
-`build_feature_coverage._load` verifies every evidence path on every row, whatever its status --
-but only `acceptance_kind="pytest"` rows are tied to a **named test function**, which
-`_validate_pytest_acceptance` then verifies by AST. For the rest, a swap inside one directory
-(retire the row naming `tests/unit/a.py`, add one naming `tests/unit/b.py`) leaves the counts
+`V2-P5-038`. Every evidence path on every row is checked for existence by
+`build_feature_coverage._load`, whatever the row's acceptance kind -- all 85 of these included,
+`web/` paths and all (measured: pointing `OA-IFACE-006` at a nonexistent `App.test.NOPE.tsx`
+makes `--check` raise). What only `pytest` rows have is a **named test function**, which
+`_validate_pytest_acceptance` verifies by AST. For the rest, a swap inside one directory --
+retire the row naming `tests/unit/a.py`, add one naming `tests/unit/b.py` -- leaves the counts
 above unchanged and every path still on disk.
 
-That row weighed two ways of closing it and found both more expensive than the defect: migrating
-85 rows of prose is a content decision per row, and pinning a 185-item path set would go red on
-every legitimate edit to the ledger -- the shape this repository has already paid for twice, in
+That row weighed two ways of closing it and found both dearer than the defect: migrating 85 rows
+of prose is a content decision per row, and pinning a 185-item path set would go red on every
+legitimate edit to the ledger -- the shape this repository has already paid for twice, in
 `V2-P5-053` (a version literal that blocked its own security fix) and `V2-P5-060` (a hand-kept
 list of spellings that went stale).
 
-A ceiling is the third way, and it is cheap. `summary.json` already records
+An exact count is the third way, and it is cheap. `summary.json` already records
 `legacy_acceptance_rows` and `--check` pins it byte-for-byte, but a pin permits an increase as
-easily as a decrease: update the artifact and it passes. This does not. New work must name a
-test; the debt can only be paid down, and every payment edits this number downward in the same
-commit that earns it.
+easily as a decrease: update the artifact and it passes.
+
+**Why `==` and not `<=`, which is what this was first written as.** A ceiling looks like the
+gentler choice and is the worse one: pay ten rows down and the count is 75 while the ceiling is
+still 85, so ten prose rows can be added back without a single test going red. A guard that
+loosens itself every time somebody does the right thing is a guard nobody will trust in a year.
+The equality costs one line -- lowering this number in the commit that earns it -- and buys a
+figure that is still true when it is read.
+
+**What this does not catch, stated rather than left to be found.** The count is a count: a commit
+that migrates one row to `pytest` *and* adds another as prose nets zero and passes. And the
+number here can be raised by anyone willing to write the diff. What the guard buys is that both
+become visible, deliberate edits to a file under review, instead of a silent drift.
 
 **The floor is not zero, and pretending otherwise would be the wrong guard.** Three rows --
 `OA-IFACE-006`, `OA-IFACE-007`, `OA-OPS-002` -- name `web/src/App.test.tsx` and
 `web/e2e/golden-flow.spec.ts`, which no `pytest` node id can address. They need a fourth
-acceptance kind or they stay prose; either is a decision this ceiling does not prejudge.
+acceptance kind or they stay prose; either is a decision this number does not prejudge.
 """
 
 
-def test_the_unvalidated_acceptance_rows_never_grow() -> None:
-    """The ratchet. A row added as prose fails here; a row migrated away lowers the ceiling.
+def test_the_unvalidated_acceptance_rows_are_the_number_recorded_above() -> None:
+    """The ratchet, as an equality. Adding prose fails; paying prose down fails until recorded.
 
-    The message names the count and the ceiling and not the eighty-odd rows that were already
+    The message names the count and the direction, not the eighty-odd rows that were already
     there -- `git diff` on the CSV names the one that changed, and a failure that prints the
-    whole debt buries the one line the reader needs.
+    whole debt buries the one line the reader needs. It does **not** name the row that moved:
+    this test cannot know which one is new, and an earlier note claiming it did was wrong.
     """
     prose = [row["feature_id"] for row in _rows() if row["acceptance_kind"] == "legacy-prose"]
+    direction = "above" if len(prose) > UNVALIDATED_ACCEPTANCE_ROWS else "below"
 
-    excess = len(prose) - UNVALIDATED_ACCEPTANCE_CEILING
-    assert len(prose) <= UNVALIDATED_ACCEPTANCE_CEILING, (
-        f"{len(prose)} rows carry acceptance_kind=legacy-prose, {excess} "
-        f"above the ceiling of {UNVALIDATED_ACCEPTANCE_CEILING}. A new feature has to name a "
-        f"test rather than describe one; an existing row may only move the other way. "
+    assert len(prose) == UNVALIDATED_ACCEPTANCE_ROWS, (
+        f"{len(prose)} rows carry acceptance_kind=legacy-prose, {direction} the "
+        f"{UNVALIDATED_ACCEPTANCE_ROWS} recorded here. Above: a new feature has to name a test "
+        f"rather than describe one. Below: good -- lower the number in this commit. Either way "
         f"`git diff artifacts/openalpha-v1-feature-coverage/features.csv` names the row."
     )
 

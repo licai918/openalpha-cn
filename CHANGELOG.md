@@ -25,9 +25,22 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
     node id can address; they need a fourth acceptance kind or they stay prose. The ceiling does
     not prejudge that.
   - One clarification the original row overstated: `build_feature_coverage._load` already checks
-    every evidence path and symbol reference on **every** row whatever its acceptance kind, so
-    82 of the 85 prose rows have their paths verified today. What is unchecked is narrower than
-    "89 rows outside AST coverage" — it is that their evidence names a file rather than a test.
+    every evidence path on **every** row whatever its acceptance kind, so **all 85** prose rows
+    have their paths verified today, the three `web/` ones included — measured by pointing
+    `OA-IFACE-006` at a nonexistent `App.test.NOPE.tsx` and watching `--check` raise. What is
+    unchecked is narrower than "89 rows outside AST coverage": it is that their evidence names a
+    file rather than a test.
+  - **Three corrections an independent acceptance pass returned, all applied.** The coverage
+    figure above was first written as 82 of 85 — that number counts how many prose rows name a
+    `tests/*.py` path, which is not the same question. The commit message claimed the failure
+    message names the offending row; it does not, and the test's own docstring says that is
+    deliberate. And the guard was first written as `<=`, which loosens itself: pay ten rows down
+    and the count is 75 against a ceiling of 85, so ten can be added back with nothing going red.
+    A guard that weakens every time somebody does the right thing is the shape this release has
+    spent its length removing, so it is now `==` — growth fails, and so does payment until the
+    number is lowered in the same commit. What it still cannot catch is written into the
+    docstring rather than left to be found: a commit that migrates one row and adds another nets
+    zero, and the number itself can be raised by anyone willing to write the diff.
 
 - **An ordinary read crashed if it overlapped a write: the panel catalog's concurrency design
   assumed a read-only and a read-write DuckDB connection can coexist in one process, and DuckDB
