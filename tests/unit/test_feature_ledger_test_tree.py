@@ -35,6 +35,7 @@ import importlib.util
 from collections import Counter
 from pathlib import Path
 from types import ModuleType
+from typing import Final
 
 import pytest
 
@@ -290,3 +291,54 @@ def test_the_real_ledger_has_no_unreviewed_or_unknown_rows() -> None:
     assert isinstance(totals, dict)
     assert totals["unreviewed"] == 0
     assert totals["unknown"] == 0
+
+
+# --- the debt this module cannot check, held so it can only shrink (`V2-P5-038`) --------------
+
+UNVALIDATED_ACCEPTANCE_CEILING: Final[int] = 85
+"""How many rows may carry `acceptance_kind="legacy-prose"`. It may fall. It may not rise.
+
+`V2-P5-038`. The rows this module counts per directory are checked for *existence* --
+`build_feature_coverage._load` verifies every evidence path on every row, whatever its status --
+but only `acceptance_kind="pytest"` rows are tied to a **named test function**, which
+`_validate_pytest_acceptance` then verifies by AST. For the rest, a swap inside one directory
+(retire the row naming `tests/unit/a.py`, add one naming `tests/unit/b.py`) leaves the counts
+above unchanged and every path still on disk.
+
+That row weighed two ways of closing it and found both more expensive than the defect: migrating
+85 rows of prose is a content decision per row, and pinning a 185-item path set would go red on
+every legitimate edit to the ledger -- the shape this repository has already paid for twice, in
+`V2-P5-053` (a version literal that blocked its own security fix) and `V2-P5-060` (a hand-kept
+list of spellings that went stale).
+
+A ceiling is the third way, and it is cheap. `summary.json` already records
+`legacy_acceptance_rows` and `--check` pins it byte-for-byte, but a pin permits an increase as
+easily as a decrease: update the artifact and it passes. This does not. New work must name a
+test; the debt can only be paid down, and every payment edits this number downward in the same
+commit that earns it.
+
+**The floor is not zero, and pretending otherwise would be the wrong guard.** Three rows --
+`OA-IFACE-006`, `OA-IFACE-007`, `OA-OPS-002` -- name `web/src/App.test.tsx` and
+`web/e2e/golden-flow.spec.ts`, which no `pytest` node id can address. They need a fourth
+acceptance kind or they stay prose; either is a decision this ceiling does not prejudge.
+"""
+
+
+def test_the_unvalidated_acceptance_rows_never_grow() -> None:
+    """The ratchet. A row added as prose fails here; a row migrated away lowers the ceiling.
+
+    The message names the count and the ceiling and not the eighty-odd rows that were already
+    there -- `git diff` on the CSV names the one that changed, and a failure that prints the
+    whole debt buries the one line the reader needs.
+    """
+    prose = [row["feature_id"] for row in _rows() if row["acceptance_kind"] == "legacy-prose"]
+
+    excess = len(prose) - UNVALIDATED_ACCEPTANCE_CEILING
+    assert len(prose) <= UNVALIDATED_ACCEPTANCE_CEILING, (
+        f"{len(prose)} rows carry acceptance_kind=legacy-prose, {excess} "
+        f"above the ceiling of {UNVALIDATED_ACCEPTANCE_CEILING}. A new feature has to name a "
+        f"test rather than describe one; an existing row may only move the other way. "
+        f"`git diff artifacts/openalpha-v1-feature-coverage/features.csv` names the row."
+    )
+
+    assert len(prose) == len(set(prose)), "the ledger has duplicate feature_id values"

@@ -6,6 +6,29 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **The one deliberately-open row now has a ratchet: the unverified part of the feature ledger
+  can shrink and cannot grow** (`V2-P5-038`, step 1 of its plan). 85 of 185 rows carry
+  `acceptance_kind="legacy-prose"`, and only `pytest` rows are tied to a *named test function*
+  that `_validate_pytest_acceptance` verifies by AST — so a swap inside one directory leaves the
+  per-directory counts unchanged. That row had weighed two closes and found both dearer than the
+  defect: migrating 85 rows is a content decision each, and a 185-item path-set literal would go
+  red on every legitimate ledger edit — the shape already paid for twice, in `V2-P5-053` (a
+  version literal that blocked its own security fix) and `V2-P5-060` (a hand-kept list that went
+  stale).
+  - The third way is a ceiling. `summary.json` already records `legacy_acceptance_rows` and
+    `--check` pins it byte-for-byte, but **a pin permits an increase as easily as a decrease** —
+    update the artifact and it passes. `test_the_unvalidated_acceptance_rows_never_grow` does
+    not: new work must name a test, and the debt can only be paid down, in the same commit that
+    earns it.
+  - **The floor is not zero, and the docstring says so.** `OA-IFACE-006`, `OA-IFACE-007` and
+    `OA-OPS-002` name `web/src/App.test.tsx` and `web/e2e/golden-flow.spec.ts`, which no `pytest`
+    node id can address; they need a fourth acceptance kind or they stay prose. The ceiling does
+    not prejudge that.
+  - One clarification the original row overstated: `build_feature_coverage._load` already checks
+    every evidence path and symbol reference on **every** row whatever its acceptance kind, so
+    82 of the 85 prose rows have their paths verified today. What is unchecked is narrower than
+    "89 rows outside AST coverage" — it is that their evidence names a file rather than a test.
+
 - **An ordinary read crashed if it overlapped a write: the panel catalog's concurrency design
   assumed a read-only and a read-write DuckDB connection can coexist in one process, and DuckDB
   refuses that** (`V2-P5-067`). This family had been reported as "needs a Windows machine to
