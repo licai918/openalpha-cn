@@ -157,7 +157,15 @@ jobs:
   container:
     name: Container persistence recovery
     runs-on: ubuntu-latest
-    needs: [python, web, security]
+    # `python` is deliberately not here (`V2-P5-066`). This job is the only place the shipped
+    # artifact -- the image the `Dockerfile` builds and the stack `deploy/compose.yml` starts --
+    # is ever built or started, and it had never once run: the `python` matrix covers
+    # `windows-latest`, `needs` cannot name a single matrix leg, and Windows had been red on
+    # every dispatch, so the production verification was skipped every time. The dependency was
+    # a cost heuristic ("do not spend build minutes on obviously broken code"), never a
+    # correctness gate -- the signal is this job's own result. `web` and `security` still gate
+    # it, and they run over the same tree.
+    needs: [web, security]
 
     steps:
       - name: Check out source

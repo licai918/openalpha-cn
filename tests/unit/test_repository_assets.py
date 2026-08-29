@@ -495,6 +495,41 @@ def test_public_repository_metadata_is_present() -> None:
     assert [name for name in required if not (ROOT / name).is_file()] == []
 
 
+def test_the_container_job_is_not_gated_behind_a_matrix_it_cannot_name_a_leg_of() -> None:
+    """`V2-P5-066`. The only job that builds the shipped artifact had never run.
+
+    `container` is where the `Dockerfile`'s image is built, the `deploy/compose.yml` stack is
+    started and evidence is proved to survive a restart -- the whole of this workflow's
+    production verification. It declared `needs: [python, web, security]`, and `python` is a
+    matrix over `ubuntu-latest` **and** `windows-latest`. `needs` cannot name one leg of a
+    matrix, so a red Windows leg skipped the container job entirely, and Windows was red on
+    every dispatch this repository has ever made: measured, `skipped` on all four.
+
+    The dependency was a cost heuristic -- do not spend build minutes on obviously broken code --
+    and it was silently doing something else: withholding the only evidence that the thing being
+    shipped works. `web` and `security` still gate it and run over the same tree.
+
+    Asserted rather than commented, because the next person to add `python` back would be doing
+    something that looks obviously right.
+    """
+    workflow = (ROOT / ".github" / "workflows" / "quality.yml").read_text(encoding="utf-8")
+    container_job = _workflow_job_block(workflow, "container")
+
+    assert "verify_compose_recovery.py" in container_job, (
+        "this test is about the job that proves restart recovery; it is no longer that job"
+    )
+
+    needs = re.search(r"^\s*needs: \[(?P<names>[^\]]*)\]", container_job, re.MULTILINE)
+    assert needs is not None, "the container job declares no `needs` at all"
+    named = {name.strip() for name in needs.group("names").split(",")}
+
+    assert "python" not in named, (
+        "`python` is a matrix including windows-latest, and `needs` cannot wait on one leg of "
+        "it -- naming it here skips the production verification whenever Windows is red"
+    )
+    assert named == {"web", "security"}
+
+
 def test_container_delivery_has_persistence_and_recovery_verification() -> None:
     compose = (ROOT / "deploy" / "compose.yml").read_text(encoding="utf-8")
     verification = ROOT / "scripts" / "verify_compose_recovery.py"

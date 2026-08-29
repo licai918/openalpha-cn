@@ -6,6 +6,21 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **The only job that builds the shipped artifact was gated behind a matrix whose individual
+  legs `needs` cannot name, and had therefore never run** (`V2-P5-066`). `container` is where the
+  `Dockerfile`'s image is built, `deploy/compose.yml`'s stack is started and evidence is proved
+  to survive a restart — the whole of this workflow's production verification. It declared
+  `needs: [python, web, security]`, and `python` is a matrix over `ubuntu-latest` *and*
+  `windows-latest`. `needs` waits on a job, not on a leg, so a red Windows leg skipped the
+  container job outright — and it was `skipped` on all four dispatches this repository has made.
+  Every "green" reported for this work, ubuntu 3.11 and 3.12 included, had therefore not touched
+  the thing actually being shipped. The dependency was a cost heuristic — don't spend build
+  minutes on obviously broken code — and what it was silently doing instead was withholding the
+  only evidence that the artifact works. `web` and `security` still gate it, over the same tree.
+  Splitting the matrix into two jobs was rejected: GitHub Actions has no YAML anchors, so it
+  would mean copying ten steps, and this release already carries `V2-P5-065` on what copies
+  cost.
+
 - **Four modules held a byte-identical copy of the store-path substitution, and three of them
   said so in their docstrings and kept the copy anyway** (`V2-P5-065`). `V2-P5-064` added
   separator normalisation to `panel_view`'s implementation, and Windows went on emitting
