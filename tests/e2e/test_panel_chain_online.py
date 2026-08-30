@@ -26,6 +26,7 @@ from e2e_support import (
     STORED_DATASETS,
     BuiltPanel,
     catalogued_path,
+    catalogued_row_count,
     knowable_datasets,
     knowable_from,
     last_covered_session,
@@ -956,15 +957,36 @@ def test_the_panel_is_intact_again_once_the_injected_defects_are_restored(
 def test_the_defect_free_panel_still_answers_after_a_partition_was_moved_and_put_back(
     built_panel: BuiltPanel,
 ) -> None:
-    """Byte-for-byte restoration, checked against the catalog's own content hash.
+    """Restoration checked the way readiness checks it: the footer count against the catalog.
 
-    `PartitionRef.content_hash` is recomputed from the file on every readiness assessment, so
-    a restoration that lost a byte would surface as `coverage_stale` rather than as a
-    difference anyone would notice by looking.
+    This docstring used to say "byte-for-byte restoration, checked against the catalog's own
+    content hash", and neither half was true. The assertions were `path.exists()` and
+    `count(*) > 0`, which a partition missing a million rows still satisfies -- demonstrated: a
+    file rewritten one row short passed this test unchanged. And `content_hash` is not
+    recomputed from the file, ever: `_content_hash` has exactly one call site, inside
+    `write_partition`, over the rows in memory. `store.py` says so in as many words -- "nothing
+    in the catalog changes, so no hash comparison can see it" -- so this test's docstring
+    contradicted the module it tests.
+
+    What the store *does* guarantee is what is asserted here, and it is narrower on purpose:
+    Parquet's magic at both ends, and the footer's row count against `panel_partitions`. An
+    in-place edit that moves neither is disclosed as out of reach and is caught a plane up, by
+    `return_path_disagreement` and `close_disagreement` reading the column itself.
     """
     store = built_panel.store
     path = catalogued_path(store, dataset=PRICE_LIMIT_DATASET, year=built_panel.year)
+    catalogued = catalogued_row_count(store, dataset=PRICE_LIMIT_DATASET, year=built_panel.year)
+
     assert path.exists()
+    assert path.read_bytes()[:4] == b"PAR1", "the restored file lost Parquet's leading magic"
+    assert path.read_bytes()[-4:] == b"PAR1", "the restored file lost Parquet's trailing magic"
+
     with duckdb.connect() as reader:
         rows = reader.execute("SELECT count(*) FROM read_parquet(?)", [str(path)]).fetchone()
-    assert rows is not None and rows[0] > 0
+
+    assert rows is not None
+    assert rows[0] == catalogued, (
+        f"the restored {PRICE_LIMIT_DATASET} partition holds {rows[0]} rows and the catalog "
+        f"records {catalogued}; a restoration that changes the count is the fault "
+        f"`partition_row_count_mismatch` exists for, and this test is what catches it early"
+    )

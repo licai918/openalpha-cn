@@ -450,6 +450,25 @@ def require_the_report_matches_what_landed(
         )
 
 
+def catalogued_row_count(store: PanelStore, *, dataset: str, year: int) -> int:
+    """How many rows the *catalog* says one partition holds.
+
+    The sibling of `catalogued_path` and read the same way, out of `panel_partitions`, because
+    the pair of them is what readiness reconciles: `store.py`'s own words are that a partition
+    damaged behind the store's back changes nothing in the catalog, "so no hash comparison can
+    see it", and that readiness therefore asks the file two questions instead -- Parquet's magic
+    at both ends, and the footer's row count against this number.
+    """
+    with duckdb.connect(str(store.catalog_path), read_only=True) as connection:
+        row = connection.execute(
+            "SELECT row_count FROM panel_partitions WHERE dataset = ? AND year = ?",
+            [dataset, year],
+        ).fetchone()
+    if row is None:
+        raise AssertionError(f"the catalog holds no {dataset} partition for {year}")
+    return int(row[0])
+
+
 def catalogued_path(store: PanelStore, *, dataset: str, year: int) -> Path:
     """Where the *catalog* says one partition's Parquet file is.
 

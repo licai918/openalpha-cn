@@ -6,6 +6,29 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **An e2e test titled "byte-for-byte restoration, checked against the catalog's own content
+  hash" never touched a content hash, and its docstring contradicted the module it tests**
+  (`V2-P5-068`). Found by re-running the 60 paid e2e tests against current HEAD — 59 passed, 1
+  legitimate skip, 38:59, reusing the stored panel so no rebuild was paid for.
+  - `test_the_defect_free_panel_still_answers_after_a_partition_was_moved_and_put_back` asserted
+    `path.exists()` and `count(*) > 0`. A partition missing a million rows satisfies both.
+    Demonstrated: `stk_limit/2026` rewritten one row short — 1,190,637 against the catalog's
+    1,190,638, magic and format intact — and the test passed unchanged.
+  - Its second claim, that `content_hash` "is recomputed from the file on every readiness
+    assessment", is also false: `_content_hash` has exactly one call site, inside
+    `write_partition`, over the rows in memory. `store.py` says the opposite in as many words —
+    "nothing in the catalog changes, so no hash comparison can see it".
+  - **No product defect.** The store declares exactly what it guarantees (Parquet magic at both
+    ends, and the footer's row count reconciled against `panel_partitions`) and exactly what is
+    out of reach (an in-place value edit, caught a plane up by `return_path_disagreement` and
+    `close_disagreement`) — disclosed rather than argued. The test now asserts the guarantee that
+    exists, through a new `catalogued_row_count` mirroring `catalogued_path`.
+  - Written test-first with the order deliberately inverted, because a guard's RED cannot be
+    "it passes today": the panel was corrupted first and the old test watched to pass — that is
+    this gap's red — then the assertion written and watched to fail, then the panel restored
+    byte-for-byte and watched to pass. Every Parquet partition is byte-identical to what it was
+    before the run.
+
 - **The one deliberately-open row now has a ratchet: the unverified part of the feature ledger
   can shrink and cannot grow** (`V2-P5-038`, step 1 of its plan). 85 of 185 rows carry
   `acceptance_kind="legacy-prose"`, and only `pytest` rows are tied to a *named test function*
