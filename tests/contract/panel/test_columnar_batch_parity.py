@@ -375,7 +375,7 @@ def test_to_rows_performs_one_transpose_whatever_the_batch_size(
 
 _BENCH_ROWS = 2000
 _MIN_SPEEDUP = 6.0
-_MIN_SPEEDUP_UNDER_A_TRACER = 4.0
+_MIN_SPEEDUP_UNDER_A_TRACER = 3.0
 
 
 def _min_speedup() -> float:
@@ -393,6 +393,27 @@ def _min_speedup() -> float:
     One constant cannot serve both -- 6x is a ~20% cushion untraced and simply unreachable
     traced. So the regime is detected rather than guessed. `sys.gettrace()` is not None under
     `coverage.py` (and under a debugger, which deserves the same treatment).
+
+    **The traced threshold was 4.0 and a third machine broke it (`V2-P5-069`).** The two ranges
+    above come from machines that agree with each other; this repository's matrix contains one
+    that does not. Measured, same commit, `--cov` in every case:
+
+        author's machine       4.88x - 5.23x   (36 samples)
+        this one, macOS arm64  4.70x - 5.00x   (5 samples)
+        windows-latest, 3.12   **3.92x**       (CI, one run)
+
+    A cushion sized against machines that agree is not a cushion. And the precision was never
+    load-bearing: this file already records that reverting `to_rows()` to a per-row comprehension
+    **still measured 6.7x**, above the 6x untraced threshold -- so the ratio does not catch the
+    regression it looks like it guards. What catches that is
+    `test_to_rows_transposes_once_per_call`, structurally, by counting transposes. This number's
+    job is the one it can actually do: notice if the columnar path stops being fundamentally
+    cheaper at all. 3.0 is 23% below the lowest value any machine has produced, and a collapse
+    to parity lands near 1.0 and still fails.
+
+    **The untraced 6.0 is not changed, and what is unknown about it is stated rather than
+    assumed**: CI always runs under `--cov`, so no machine in the matrix has ever exercised it.
+    Its cushion rests on the same two agreeing machines that made the traced one look safe.
     """
     return _MIN_SPEEDUP_UNDER_A_TRACER if sys.gettrace() is not None else _MIN_SPEEDUP
 

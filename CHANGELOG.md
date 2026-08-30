@@ -6,6 +6,26 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **A performance cushion sized against two machines that agree with each other was breached by
+  the third machine in the matrix** (`V2-P5-069`). CI on `7e3d07c` failed Python 3.12 on
+  windows-latest and passed the other six jobs; the same code had passed all seven on `13414d1`,
+  so that green was luck. The failure:
+  `test_the_columnar_path_costs_a_small_fraction_of_the_row_wise_path_per_row` measured `3.92x`
+  against a `4.0x` floor — a 2% miss.
+  - The threshold's reasoning was sound: the author measured 4.88x–5.23x over 36 samples under
+    `--cov` and detects the tracer regime with `sys.gettrace()` rather than guessing. What was
+    unsound is that the cushion was calibrated on machines that agree. Measured now, same
+    commit, `--cov` throughout: author 4.88–5.23, this machine (macOS arm64) **4.70–5.00**,
+    windows-latest 3.12 **3.92**.
+  - **The precision was never load-bearing.** The same file records that reverting `to_rows()`
+    to a per-row comprehension **still measured 6.7x**, above the 6x untraced floor — the ratio
+    does not catch the regression it appears to guard. `test_to_rows_transposes_once_per_call`
+    does, structurally. So the floor now does the job it can do: notice if the columnar path
+    stops being fundamentally cheaper. 3.0 is 23% below the lowest figure any machine has
+    produced, and a collapse to parity lands near 1.0 and still fails.
+  - The untraced 6.0 is left alone, and what is unknown about it is written down instead of
+    assumed: CI always runs under `--cov`, so no machine in the matrix has ever exercised it.
+
 - **An e2e test titled "byte-for-byte restoration, checked against the catalog's own content
   hash" never touched a content hash, and its docstring contradicted the module it tests**
   (`V2-P5-068`). Found by re-running the 60 paid e2e tests against current HEAD — 59 passed, 1
