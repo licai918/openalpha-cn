@@ -6,6 +6,31 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **The constants both faces restate are held equal by a test; the functions both faces restate
+  were not** (`V2-P5-071`). Found by sweeping for this release's recurring shapes rather than by
+  waiting for the next bite: an AST comparison of every function body in `src/` returns six
+  groups that are identical across modules.
+  - Most of that duplication is forced by the layering contracts and the author had already
+    guarded it. `average_ranks` and `panel_factors._average_ranks` exist separately because
+    `backtest` may not import `panel_factors`, and `test_factor_ic.py` pins them as "two
+    implementations of one rule". `FACTOR_TIER_DATASETS` and `FACTOR_TIER_BUILD_ARGUMENTS` are
+    restated across the same wall and pinned by
+    `test_both_faces_spell_a_tiers_build_arguments_the_same_way`, whose docstring says why:
+    "restated rather than imported because this module may not see `factor_view`".
+  - What was pinned to nothing was `_board` and `_unbuilt_factor_remedy` — restated across that
+    same wall, and `shortlist_view._board`'s docstring even points at the other module's
+    reasoning, which is the shape `V2-P5-065` had just removed one plane over. The cost is
+    measured, not hypothetical: `V2-P4-067(b)` was fixed on `shortlist_view` while the row's own
+    reproduction ran through `factor_view`, and the row was closed anyway.
+  - Fixed in the author's idiom rather than by consolidating, which the layering forbids: two
+    equality guards. The board corpus reaches all four boards and both prefix boundaries (`689*`
+    and `301*`, where a two-character prefix would answer wrongly and no happy-path fixture would
+    notice) and asserts it still reaches them, so agreement cannot pass for coverage.
+  - **Not fixed, and said so**: `freeze_payload` on two Pydantic models (consolidating needs a
+    mixin), `note_for` on three `domain` registries (the third is partly covered already), and a
+    three-line constructor shared by two stores. All are the same class with lower stakes; none
+    has an equality guard.
+
 - **112 table rows lost their last column when rendered: two ledger headers were a column
   short, and seven rows carried an unescaped `|` inside inline code** (`V2-P5-070`). Judged by
   GitHub's own renderer rather than by a reading of the spec — `gh api -X POST /markdown -f

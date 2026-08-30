@@ -700,3 +700,91 @@ def test_a_cross_section_with_no_admitted_value_has_no_clip_block() -> None:
     )
 
     assert clipped_from_the_tie_at_the_top(rows, tier="processed") == frozenset()
+
+
+# --- the helpers both faces restate, held equal the way their constants already are ------------
+
+BOARD_CODES: Final[tuple[str, ...]] = (
+    "688981.SH",  # STAR, the one with its own lot rule
+    "300750.SZ",  # ChiNext
+    "430047.BJ",  # Beijing, matched on suffix rather than prefix
+    "600519.SH",  # main
+    "000001.SZ",  # main
+    "689009.SH",  # 68 but not 688 -- the boundary a prefix test can get wrong
+    "301029.SZ",  # 30 but not 300, the same boundary on the other side
+)
+"""Codes that reach all four boards and both prefix boundaries.
+
+`689*` and `301*` are the ones that matter: a copy that drifted to a two-character prefix would
+answer `star`/`growth` for them and no code in a happy-path fixture would notice.
+"""
+
+
+def test_both_faces_classify_a_board_the_same_way() -> None:
+    """`V2-P5-071`. The constants both faces restate are held equal; the functions were not.
+
+    `test_both_faces_spell_a_tiers_build_arguments_the_same_way` above exists because
+    `shortlist_view` may not import `factor_view`, so the tier tables are restated and pinned to
+    each other. `_board` is restated for the same reason and was pinned to nothing at all -- and
+    `shortlist_view._board`'s docstring even points at the other module's for its reasoning,
+    which is the shape `V2-P5-065` had just finished removing one plane over.
+
+    The stake is not hypothetical. `V2-P4-067(b)` was fixed on `shortlist_view` while the row's
+    own reproduction command ran through `factor_view`, and the row was closed anyway.
+    """
+    from openalpha_cn.factor_view import _board as factor_board
+    from openalpha_cn.shortlist_view import _board as shortlist_board
+
+    factor_answers = tuple(factor_board(code) for code in BOARD_CODES)
+    shortlist_answers = tuple(shortlist_board(code) for code in BOARD_CODES)
+
+    assert factor_answers == shortlist_answers, (
+        "the two faces disagree about which board a code belongs to: "
+        + ", ".join(
+            f"{code} -> {left} vs {right}"
+            for code, left, right in zip(
+                BOARD_CODES, factor_answers, shortlist_answers, strict=True
+            )
+            if left != right
+        )
+    )
+    assert set(factor_answers) == {"star", "growth", "bse", "main"}, (
+        "this corpus no longer reaches all four boards, so agreement above proves less"
+    )
+
+
+def test_both_faces_offer_the_same_unbuilt_factor_remedy(tmp_path: Path) -> None:
+    """`V2-P5-071`, the second helper restated across the same wall as the tables above.
+
+    The tables are pinned to each other and this function -- which reads them and builds the
+    sentence a person acts on -- was not, so the two faces could hand the same fault two
+    different remedies while every table matched. That is the defect `V2-P5-048` closed, one
+    level up, and it is exactly what `V2-P4-067(b)` did: the fix landed on this module while the
+    row's own reproduction ran through `factor_view`, and the row was closed anyway.
+    """
+    from openalpha_cn.factor_view import _unbuilt_factor_remedy as factor_remedy
+
+    store = PanelStore(tmp_path / "panel")
+    definition = FACTOR_DEFINITIONS.get("reversal_1d/v1")
+    tiers = (*FACTOR_FACE_TIER_DATASETS, "not-a-tier")
+
+    disagreements = [
+        (tier, left, right)
+        for tier in tiers
+        for left, right in [
+            (
+                factor_remedy(store, definition=definition, tier=tier),
+                unbuilt_factor_remedy(store, definition=definition, tier=tier),
+            )
+        ]
+        if left != right
+    ]
+
+    assert disagreements == [], (
+        "the two faces offer different remedies for the same unbuilt factor: "
+        + "; ".join(f"{tier}: {left!r} vs {right!r}" for tier, left, right in disagreements)
+    )
+    assert any(
+        "openalpha factor build" in factor_remedy(store, definition=definition, tier=tier)
+        for tier in FACTOR_FACE_TIER_DATASETS
+    ), "no tier produced a remedy at all, so the agreement above is between two empty strings"
