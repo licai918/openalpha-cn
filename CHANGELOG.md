@@ -6,6 +6,31 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **112 table rows lost their last column when rendered: two ledger headers were a column
+  short, and seven rows carried an unescaped `|` inside inline code** (`V2-P5-070`). Judged by
+  GitHub's own renderer rather than by a reading of the spec — `gh api -X POST /markdown -f
+  mode=gfm` settles three things: `` `x|y` `` splits into two cells *and* the code span does not
+  form; cells beyond the header's count are dropped silently; and a short row is padded at the
+  **end**.
+  - The root cause was the header, not the rows. The P4 table declared six columns while 92 of
+    its 114 rows carried seven (`ID`, 标题, 类型, 依赖, 说明, **验收**, `PRD`) — so 92 rows'
+    `PRD` reference simply was not on the page. The P5 table had the same defect with the
+    proportions reversed.
+  - **A first attempt made one table worse and was reverted.** The P3 table's 19 rows are all
+    six cells and were correct; matching on the header text alone widened it too. Redone from
+    the backup with the condition that a table is only widened when it actually contains a
+    seven-cell row.
+  - The seven pipe-in-code rows cannot be found by "both neighbouring cells have an odd backtick
+    count" — `` `a|b|c` `` leaves the middle cell with zero. The rule is a **running** backtick
+    parity across cells: odd means the boundary sits inside a code span. After the fix the
+    renderer confirms `` `|||||||` `` and `` `openalpha jobs register|list|due|run` `` come back
+    as whole code spans; the latter had been split across four cells.
+  - **No content was lost, proved character by character**: with separators and whitespace
+    stripped, the seam-audit is identical and the roadmap is exactly +10 characters — the word
+    验收 in two headers (4) and the dashes in two separator rows (6).
+  - The guard was written first and reported 112 immediately. It then caught the row *describing
+    this fix* twice, which contained unescaped pipes of its own.
+
 - **A performance cushion sized against two machines that agree with each other was breached by
   the third machine in the matrix** (`V2-P5-069`). CI on `7e3d07c` failed Python 3.12 on
   windows-latest and passed the other six jobs; the same code had passed all seven on `13414d1`,
