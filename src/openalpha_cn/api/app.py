@@ -2237,7 +2237,10 @@ def create_app(
           shortlist the gate refused (`admitted` is null), for an admitted list holding no names,
           and for a declared `max_industry_weight` over candidates that carry no industry -- the
           refusal `V2-P5-001` chose over an unenforceable cap, which arrives here unchanged
-          because it is raised in the shared policy rather than at any one face.
+          because it is raised in the shared policy rather than at any one face. `V2-P5-072`
+          adds a fourth: a stored answer whose `admitted` ranks tie. A gap in them is renumbered
+          away, because this rank is a position; a tie is refused, because it leaves the order
+          between the tied names undetermined.
         - **`422` with a list of field errors** -- a body pydantic itself rejected: a tier vector
           that does not sum to one, a weight that is not positive, a cap outside `(0, 1]`. Two
           shapes on one status code is this module's standing arrangement and `isinstance(detail,

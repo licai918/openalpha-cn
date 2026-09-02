@@ -259,7 +259,16 @@ class ConstructionCandidate(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
 
     subject: str = Field(min_length=1, max_length=128)
+
     rank: int = Field(ge=1)
+    """This name's position in the list being weighted, which must be dense `1..n` across it.
+
+    Not a rank in some wider list this one was drawn from. `_ordered_candidates` refuses anything
+    else, and `V2-P5-072` is what happens when the distinction is missed: both adapters copied a
+    shortlist-wide rank into it, so every subset the shortlist gate admitted was refused here.
+    The adapters now renumber, and a caller assembling these rows by hand has to do the same.
+    """
+
     score: float
     industry_code: str | None = Field(default=None, min_length=1, max_length=64)
 
@@ -379,10 +388,13 @@ def _renumbered(
       function of the two counts and nothing else" and the pairing slices
       `ordered[position : position + size]`, so a rank value never reaches the cut.
 
-    Any `minimum_researched_ratio` below 1.0 admits a proper subset, whose shortlist ranks
-    necessarily have gaps, and `_ordered_candidates` refuses gaps. Measured before this fix: a
-    real run admitted 34 of 50 and `openalpha portfolio construct` exited 3 on
-    `got [1, 2, 4, 6, ...]`, so the floor was unreachable rather than adjustable.
+    Any `minimum_researched_ratio` below 1.0 admits a proper subset, and a subset's shortlist
+    ranks have a gap as soon as one unresearched name outranks one admitted name -- which is
+    almost always, though not always: if the unresearched are exactly the tail of the shortlist
+    the admitted ranks are 1..k and the old code weighted them fine. `_ordered_candidates`
+    refuses the gap. Measured before this fix: a real run admitted 34 of 50 and `openalpha
+    portfolio construct` exited 3 on `got [1, 2, 4, 6, ...]`. So the floor was reachable only
+    when the missing names happened to fall at the bottom, which is not a floor anyone can set.
 
     The gap refusal stays where it is, guarding a caller who assembles `ConstructionCandidate`
     rows by hand -- the SDK offers exactly that.
@@ -421,6 +433,13 @@ def candidates_from_ranking(ranking: CandidateRanking) -> tuple[ConstructionCand
     (`an_industry_cap_is_unenforceable_on_the_shipped_shortlist_face`). It is passed through
     rather than defaulted, so the day `V2-P5-015` loads exposures the cap starts working with no
     change here.
+
+    **`rank` is rewritten, not copied** (`V2-P5-072`). A `CandidateRanking` excludes its
+    `unresearched` entries while `RankedCandidate.rank` stays the name's rank in the funnel's
+    shortlist, so the ranks arriving here have a gap wherever an unresearched name outranks a
+    researched one. `ConstructionCandidate.rank` is a position in the list being weighted, so
+    `_renumbered` re-emits them as `1..n` in the same order. A tie among the incoming ranks is
+    refused rather than renumbered away.
     """
     return _renumbered(
         tuple(
@@ -451,6 +470,13 @@ def candidates_from_shortlist_answer(
     answers `V2-P4-032` separated on purpose -- and a portfolio built out of a list the gate
     turned down would launder the refusal into a set of weights. An admitted but empty list is
     refused too, with a different sentence, because there is nothing to weight either way.
+
+    **`rank` is rewritten, not copied** (`V2-P5-072`). `admitted[i].rank` is the name's rank in
+    the *whole* shortlist and stays that way in the stored answer; `ConstructionCandidate.rank`
+    is a position in the list being weighted. `_renumbered` re-emits them as `1..n` in the same
+    order, which is what lets an admitted subset -- anything under a `minimum_researched_ratio`
+    below 1.0 -- be weighted at all. A tie among the stored ranks is refused rather than
+    renumbered away, since renumbering would hide it from every later check.
     """
     if "admitted" not in answer:
         raise PortfolioConstructionError(
@@ -650,8 +676,12 @@ def _ordered_candidates(
     if tuple(candidate.rank for candidate in ordered) != expected:
         raise PortfolioConstructionError(
             f"candidate ranks must be exactly 1..{len(ordered)} with no gap and no tie; got "
-            f"{[candidate.rank for candidate in ordered]}. A tier is a contiguous block of ranks, "
-            "so a gap moves a boundary and a tie makes the cut depend on iteration order"
+            f"{[candidate.rank for candidate in ordered]}. This rank is a position in the list "
+            "being weighted, not a rank in some wider list it was drawn from, so a gap means "
+            "these are the wrong quantity -- renumber them, which is what "
+            "`candidates_from_ranking` and `candidates_from_shortlist_answer` do for you. A tie "
+            "is refused outright: it leaves the order between the tied names undetermined, so "
+            "which of them lands in the higher tier would come down to iteration order"
         )
     tier_count = len(policy.tier_weights)
     if len(ordered) < tier_count:

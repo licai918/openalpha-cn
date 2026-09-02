@@ -1,10 +1,24 @@
 """`V2-P5-001` and `V2-P5-002`: the heuristic construction policy and the limits it reads."""
 
+from datetime import UTC, date, datetime
 from decimal import Decimal
+from typing import Final
 
 import pytest
 from pydantic import ValidationError
 
+from openalpha_cn.backtest.candidate_ranking import (
+    CandidateRanking,
+    build_ranking_manifest,
+    rank_candidates,
+)
+from openalpha_cn.backtest.cross_section import (
+    ComponentCrossSection,
+    CrossSectionScreen,
+    ScoreComponent,
+    ShortlistSpec,
+)
+from openalpha_cn.backtest.execution import AShareExecutionPolicy, MarketBar
 from openalpha_cn.backtest.portfolio import (
     LIMITS_ENFORCED_BY_THE_SIMULATOR,
     PortfolioLimits,
@@ -18,10 +32,18 @@ from openalpha_cn.backtest.portfolio_policy import (
     PortfolioConstruction,
     PortfolioConstructionError,
     PortfolioConstructionPolicy,
+    candidates_from_ranking,
     candidates_from_shortlist_answer,
     construct_portfolio,
     construction_view,
 )
+from openalpha_cn.domain.factor import FactorDefinition, FactorField
+from openalpha_cn.domain.factor_neutralization import (
+    IndustryMarketCapCrossSection,
+    SecurityCharacteristic,
+)
+from openalpha_cn.domain.run import RunManifest
+from openalpha_cn.domain.signal import SignalFrame
 
 EVEN_TIERS = (Decimal("0.5"), Decimal("0.3"), Decimal("0.2"))
 
@@ -104,7 +126,16 @@ def test_a_list_shorter_than_the_tier_vector_is_refused_rather_than_leaving_a_ti
         construct_portfolio(candidates=candidates(2), policy=policy())
 
 
-def test_ranks_that_are_not_one_through_n_are_refused_because_a_tier_is_a_block_of_them() -> None:
+def test_ranks_that_are_not_one_through_n_are_refused_because_they_are_positions() -> None:
+    """Renamed in `V2-P5-072`: the old name carried the reason that fix disproved.
+
+    It read `..._because_a_tier_is_a_block_of_them`, and the message said a gap "moves a
+    boundary". It does not -- `_tier_sizes` is a function of the two counts alone and the pairing
+    slices by position, so a gap cannot reach the cut. What a gap actually means is that the
+    caller passed the wrong quantity: a rank in some wider list rather than a position in this
+    one. That is the mistake the two adapters used to make, and this is the guard for a caller
+    who assembles the rows by hand instead of going through them.
+    """
     gapped = (
         ConstructionCandidate(subject="000001.SZ", rank=1, score=1.0),
         ConstructionCandidate(subject="000002.SZ", rank=2, score=0.9),
@@ -489,17 +520,21 @@ def test_the_method_label_is_the_only_one_the_contract_accepts_and_the_record_is
 # --- the seam between an admitted subset and a construction (`V2-P5-072`) ----------------------
 
 
-def _admitted_answer(ranks: tuple[int, ...]) -> dict[str, object]:
+def _admitted_answer(
+    ranks: tuple[int, ...], subjects: tuple[str, ...] | None = None
+) -> dict[str, object]:
     """A `shortlist_view` answer whose `admitted` rows carry `ranks`, in that order.
 
     The shape `candidates_from_shortlist_answer` reads: `admitted` is already in rank order, and
     each row carries the name's rank **within the whole shortlist**. When the gate admits a
     proper subset -- which is what any `minimum_researched_ratio` below 1.0 permits -- those
-    ranks have gaps.
+    ranks carry a gap wherever an unresearched name outranks an admitted one.
     """
+    chosen = subjects or tuple(f"{rank:06d}.SZ" for rank in ranks)
     return {
         "admitted": [
-            {"subject": f"{rank:06d}.SZ", "rank": rank, "score": 1.0 - rank / 100} for rank in ranks
+            {"subject": subject, "rank": rank, "score": 1.0 - rank / 100}
+            for subject, rank in zip(chosen, ranks, strict=True)
         ]
     }
 
@@ -528,9 +563,14 @@ def test_an_admitted_subset_is_weighted_rather_than_refused_for_the_gaps_it_must
 
     Measured end to end before this fix: a real run admitted 34 of 50 researched names and
     `openalpha portfolio construct` exited 3 with
-    `candidate ranks must be exactly 1..34 ... got [1, 2, 4, 6, ...]`. Any
-    `--min-researched-ratio` below 1.0 could therefore never reach a portfolio, which makes the
-    floor unreachable rather than adjustable.
+    `candidate ranks must be exactly 1..34 ... got [1, 2, 4, 6, ...]`.
+
+    A subset does not *always* have a gap -- if the unresearched names are exactly the tail of
+    the shortlist the admitted ranks are 1..k and the old code weighted them -- so the floor was
+    not strictly unreachable. It was reachable only when the missing names happened to fall at
+    the bottom, which no caller can arrange and which is not a floor anyone can set. That
+    correction came from an acceptance review; the original claim of necessity was too strong and
+    is repeated in this commit's own title, which cannot be edited after the push.
     """
     gapped = candidates_from_shortlist_answer(_admitted_answer((1, 2, 4, 6, 7, 9)))
 
@@ -550,20 +590,270 @@ def test_renumbering_the_subset_places_the_same_names_in_the_same_tiers() -> Non
 
     Tiers are cut by *position*: `_tier_sizes` is documented as "a function of the two counts and
     nothing else", and the pairing slices `ordered[position : position + size]`. So the rank
-    values never reach the cut -- they only establish the order that the slicing then walks. A
-    gapped list and its renumbered twin sort into the same order, so they must tier identically,
-    and this asserts that rather than trusting the reading.
+    values never reach the cut -- they only establish the order the slicing then walks, and the
+    same *name* must land in the same tier either way.
+
+    Written this way after an acceptance review found the first version was a tautology. It built
+    two constructions whose names differed -- `_admitted_answer` derived each subject from its
+    rank -- and compared only the tier and weight *lists*, which are `[1, 1, 2, 2, 3, 3]` and
+    equal-within-tier for any six names at all. It stayed green under a mutation that reversed
+    `_renumbered`'s sort, because both arms reversed together. So the twin here holds the subjects
+    fixed and moves only the ranks, the comparison is keyed by subject, and the expected mapping
+    is spelled out rather than only cross-checked, which is what catches a reversal.
     """
-    subset = construct_portfolio(
-        candidates=candidates_from_shortlist_answer(_admitted_answer((1, 2, 4, 6, 7, 9))),
+    names = tuple(f"NAME{index}.SZ" for index in range(1, 7))
+    gapped = construct_portfolio(
+        candidates=candidates_from_shortlist_answer(_admitted_answer((1, 2, 4, 6, 7, 9), names)),
         policy=policy(),
     )
     dense = construct_portfolio(
-        candidates=candidates_from_shortlist_answer(_admitted_answer((1, 2, 3, 4, 5, 6))),
+        candidates=candidates_from_shortlist_answer(_admitted_answer((1, 2, 3, 4, 5, 6), names)),
         policy=policy(),
     )
 
-    assert [target.tier for target in subset.targets] == [target.tier for target in dense.targets]
-    assert [target.weight for target in subset.targets] == [
-        target.weight for target in dense.targets
+    tiers = {target.subject: target.tier for target in gapped.targets}
+    assert tiers == {
+        "NAME1.SZ": 1,
+        "NAME2.SZ": 1,
+        "NAME3.SZ": 2,
+        "NAME4.SZ": 2,
+        "NAME5.SZ": 3,
+        "NAME6.SZ": 3,
+    }, "a reversed or re-keyed renumbering lands these names in different tiers"
+    assert tiers == {target.subject: target.tier for target in dense.targets}
+    assert {target.subject: target.weight for target in gapped.targets} == {
+        target.subject: target.weight for target in dense.targets
+    }
+
+
+def test_renumbering_carries_the_score_each_row_arrived_with() -> None:
+    """`_renumbered` rebuilds every row, so it is the one place a field can silently be dropped.
+
+    Found unguarded by an acceptance review: a mutation adding `1.0` to every score left the whole
+    unit suite green. `score` is not decoration -- it reaches `construction_view` and from there
+    the CLI and the HTTP body -- and `rank` is the only field this function may change.
+    """
+    names = tuple(f"NAME{index}.SZ" for index in range(1, 5))
+    read = candidates_from_shortlist_answer(_admitted_answer((2, 5, 6, 9), names))
+
+    assert {candidate.subject: candidate.score for candidate in read} == {
+        "NAME1.SZ": 1.0 - 2 / 100,
+        "NAME2.SZ": 1.0 - 5 / 100,
+        "NAME3.SZ": 1.0 - 6 / 100,
+        "NAME4.SZ": 1.0 - 9 / 100,
+    }
+
+
+# --- the other seam: an in-process ranking (`V2-P5-072`) -----------------------------------------
+#
+# A real `CandidateRanking` off a real screen, because that is the only way to reach the gapped
+# ranks this seam has to handle: `CandidateRanking.candidates` excludes the `unresearched`, while
+# each `RankedCandidate.rank` stays the name's rank in the funnel's shortlist. Restated here
+# rather than imported -- `test_shortlist_gate` and `test_candidate_ranking` each keep their own
+# for the same reason -- because a test module's fixtures are not importable across the tree.
+
+RANKING_AS_OF: Final[datetime] = datetime(2026, 6, 12, 4, 0, tzinfo=UTC)
+RANKING_SESSION: Final[date] = date(2026, 6, 12)
+RANKING_BUILT_AT: Final[datetime] = datetime(2026, 6, 13, 9, 0, tzinfo=UTC)
+RANKING_COMMIT: Final[str] = "a1b2c3d"
+RANKING_CONFIG: Final[str] = "c" * 64
+RANKING_HORIZON: Final[str] = "5d"
+RANKING_UNIVERSE: Final[tuple[str, ...]] = tuple(f"{index:06d}.SZ" for index in range(1, 9))
+
+RANKING_ALPHA: Final[FactorDefinition] = FactorDefinition(
+    key="probe_alpha",
+    version=1,
+    family="momentum_reversal",
+    direction="higher_is_better",
+    required_fields=(FactorField(dataset="daily", column="close"),),
+    lookback_sessions=1,
+    max_window_sessions=1,
+    lookback_periods=None,
+    max_window_periods=None,
+)
+
+
+def _bar(subject: str) -> MarketBar:
+    price = Decimal("10.0")
+    return MarketBar(
+        subject=subject,
+        trade_date=RANKING_SESSION,
+        board="main",
+        previous_close=price,
+        open=price,
+        high=price,
+        low=price,
+        close=price,
+        suspended=False,
+        is_st=False,
+        up_limit=Decimal("11.0"),
+        down_limit=Decimal("9.0"),
+    )
+
+
+def _spec(shortlist_size: int) -> ShortlistSpec:
+    return ShortlistSpec(
+        components=(ScoreComponent(definition=RANKING_ALPHA, weight=1.0),),
+        tier="raw",
+        shortlist_size=shortlist_size,
+        position_capital=Decimal("100000"),
+    )
+
+
+def _exposures(subjects: tuple[str, ...]) -> IndustryMarketCapCrossSection:
+    """One industry per name, cycling two codes, so a dropped `industry_code` is visible."""
+    return IndustryMarketCapCrossSection(
+        as_of=RANKING_AS_OF,
+        taxonomy="SW2021",
+        industry_level="L1",
+        market_cap_measure="total_mv",
+        characteristics=tuple(
+            SecurityCharacteristic(
+                subject=subject,
+                industry_code="801010.SI" if index % 2 == 0 else "801020.SI",
+                market_cap=1_000_000.0,
+                is_backfilled=False,
+            )
+            for index, subject in enumerate(subjects)
+        ),
+        without_industry=(),
+        without_market_cap=(),
+    )
+
+
+def _ranking(
+    *,
+    shortlist_size: int,
+    researched: tuple[int, ...],
+    with_exposures: bool = False,
+) -> CandidateRanking:
+    """A ranking whose researched names are `researched` (0-based places in the shortlist).
+
+    Passing a non-prefix set is the whole point: `researched=(0, 1, 3, 5)` leaves the candidate
+    ranks at `1, 2, 4, 6`, which is the shape the seam used to hand straight to a refusal.
+    """
+    declared = _spec(shortlist_size)
+    funnel = CrossSectionScreen(declared, execution=AShareExecutionPolicy()).select(
+        as_of=RANKING_AS_OF,
+        universe=RANKING_UNIVERSE,
+        components=[
+            ComponentCrossSection(
+                factor_id=RANKING_ALPHA.factor_id,
+                values=tuple(
+                    (subject, float(len(RANKING_UNIVERSE) - index), "computed")
+                    for index, subject in enumerate(RANKING_UNIVERSE)
+                ),
+                clipped_subjects=frozenset(),
+            )
+        ],
+        bars={subject: _bar(subject) for subject in RANKING_UNIVERSE},
+    )
+    chosen = tuple(funnel.shortlist[place].subject for place in researched)
+    return rank_candidates(
+        manifest=build_ranking_manifest(
+            as_of=RANKING_AS_OF,
+            horizon=RANKING_HORIZON,
+            universe=list(RANKING_UNIVERSE),
+            scoring_policy=declared,
+            code_commit=RANKING_COMMIT,
+            config_digest=RANKING_CONFIG,
+            built_at=RANKING_BUILT_AT,
+        ),
+        funnel=funnel,
+        signals={
+            subject: SignalFrame(
+                subject=subject,
+                as_of=RANKING_AS_OF,
+                direction="bullish",
+                strength=0.4,
+                confidence=0.7,
+                horizon=RANKING_HORIZON,
+                evidence_ids=("evd_000000000000000000000001",),
+            )
+            for subject in chosen
+        },
+        run_manifest_ids={
+            subject: RunManifest(
+                run_id=f"run-{subject}",
+                mode="backtest",
+                as_of=RANKING_AS_OF,
+                code_commit=RANKING_COMMIT,
+                config_digest=RANKING_CONFIG,
+                random_seed=7,
+                started_at=RANKING_AS_OF,
+                finished_at=RANKING_BUILT_AT,
+                status="succeeded",
+            ).run_manifest_id
+            for subject in chosen
+        },
+        exposures=_exposures(RANKING_UNIVERSE) if with_exposures else None,
+        predictions={},
+    )
+
+
+def test_the_in_process_ranking_adapter_renumbers_the_gaps_unresearched_names_leave() -> None:
+    """`V2-P5-072`. The half of that fix an acceptance review found completely unguarded.
+
+    Deleting `_renumbered` from `candidates_from_ranking` left all 3349 unit tests green: nothing
+    in the tree reached that adapter behaviourally, only two string registrations in
+    `test_surface_parity`. The gap on this side is as real as the stored-answer side --
+    `CrossSectionScreen.select` numbers `ShortlistEntry.rank` by position in the shortlist,
+    `rank_candidates` requires `candidate.rank == entry.rank`, and `CandidateRanking.candidates`
+    drops the `unresearched` -- so one unresearched name above an admitted one is enough. This is
+    the seam `OpenAlphaSDK.construct_portfolio_from_ranking` sits on.
+    """
+    ranking = _ranking(shortlist_size=6, researched=(0, 1, 3, 5))
+
+    assert [candidate.rank for candidate in ranking.candidates] == [1, 2, 4, 6], (
+        "the fixture has to produce the gap or this asserts nothing"
+    )
+
+    read = candidates_from_ranking(ranking)
+
+    assert [candidate.rank for candidate in read] == [1, 2, 3, 4]
+    assert [candidate.subject for candidate in read] == [
+        candidate.subject for candidate in ranking.candidates
     ]
+    assert [candidate.score for candidate in read] == [
+        candidate.score for candidate in ranking.candidates
+    ]
+
+
+def test_a_gapped_ranking_reaches_a_construction_rather_than_a_refusal() -> None:
+    """The end of the same path: what `construct_portfolio_from_ranking` does with that subset.
+
+    Before `V2-P5-072` this raised `candidate ranks must be exactly 1..4`, which made every
+    in-process ranking with an unresearched name above an admitted one unweightable.
+    """
+    ranking = _ranking(shortlist_size=6, researched=(0, 1, 3, 5))
+
+    built = construct_portfolio(candidates=candidates_from_ranking(ranking), policy=policy())
+
+    assert [target.subject for target in built.targets] == [
+        candidate.subject for candidate in ranking.candidates
+    ]
+    assert [target.tier for target in built.targets] == [1, 1, 2, 3], (
+        "`_tier_sizes` gives the surplus to the top tier, which four across three makes visible"
+    )
+
+
+def test_renumbering_carries_the_industry_each_row_arrived_with() -> None:
+    """`_renumbered` rebuilds every row, and this is the only face that can carry an industry.
+
+    Found unguarded by an acceptance review: a mutation setting `industry_code=None` in
+    `_renumbered` left every construction test green, because the stored-answer adapter never
+    carries one and this adapter was reached by no behavioural test at all. The cap that reads
+    this field is unenforceable on today's shipped faces, which is precisely why it needs a
+    guard -- nothing else would notice it being dropped before `V2-P5-015` turns it on.
+    """
+    ranking = _ranking(shortlist_size=6, researched=(0, 1, 3, 5), with_exposures=True)
+
+    read = candidates_from_ranking(ranking)
+
+    assert [candidate.industry_code for candidate in read] == [
+        candidate.exposure.industry_code if candidate.exposure else None
+        for candidate in ranking.candidates
+    ]
+    assert set(candidate.industry_code for candidate in read) == {"801010.SI", "801020.SI"}, (
+        "both industries have to appear or an all-None answer would pass"
+    )

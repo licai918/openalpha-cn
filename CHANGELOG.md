@@ -10,7 +10,8 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   weighting, so any admitted subset was refused for the gaps it necessarily has** (`V2-P5-072`).
   Found by running step 5 of the manual against a real 34-name shortlist, not by inspection: the
   admitted ranks are `1, 2, 4, 6, ...` because `researched` keeps only the entries a signal was
-  produced for, so `admitted` is a proper subset of the shortlist and a gap is unavoidable.
+  produced for, so `admitted` is a proper subset of the shortlist and carries a gap wherever an
+  unresearched name outranks an admitted one.
   - `ConstructionCandidate.rank` means "position within the list being weighted". It is used to
     order the list and to cut tiers *by position* -- `_tier_sizes` is, in its own words, "a
     function of the two counts and nothing else", and pairing slices `ordered[position : position
@@ -28,6 +29,33 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
     `candidates_from_shortlist_answer` used to leave the array order alone and copy each stored
     rank, so a payload listing rank 2 first came back `[2, 1]`. It now returns `[1, 2]`. The array
     order reached no weight either way, since `_ordered_candidates` sorts before it cuts.
+  - An independent acceptance review of the commit above found seven defects in it, all fixed
+    here. The three that mattered:
+    - **The other half of the fix was unguarded.** Deleting `_renumbered` from
+      `candidates_from_ranking` left all 3349 unit tests green -- nothing in the tree reached
+      that adapter behaviourally. The gap on that side is as real: `CrossSectionScreen.select`
+      numbers `ShortlistEntry.rank` by position, `rank_candidates` requires
+      `candidate.rank == entry.rank`, and `CandidateRanking.candidates` drops the `unresearched`.
+      It is also the seam `OpenAlphaSDK.construct_portfolio_from_ranking` sits on. Now covered by
+      a real ranking off a real screen, researched at a non-prefix subset so the ranks gap.
+    - **One of the new tests was a tautology.** It claimed to check that renumbering "places the
+      same names in the same tiers" but compared two constructions whose name sets differed, on
+      tier and weight *lists* that are identical for any six names, and stayed green under a
+      mutation reversing the sort. Rewritten to hold the subjects fixed, key the comparison by
+      subject, and pin the expected mapping.
+    - **"A subset necessarily has gaps" is false**, and it was the premise, stated in five
+      places including the commit title. If the unresearched names are exactly the tail of the
+      shortlist, the admitted ranks are `1..k` and the old code weighted them. The floor was
+      reachable only when the missing names happened to fall at the bottom -- not a floor anyone
+      can set, but not strictly unreachable either. Corrected everywhere it can be; the pushed
+      commit title cannot be edited.
+  - The remaining four: the gap refusal still gave the reason this fix disproved ("a gap moves a
+    boundary"), and the test pinning it had that reason in its name -- both now say what a gap
+    actually means, that the rows carry the wrong quantity; neither adapter's docstring nor
+    `ConstructionCandidate.rank` nor `OpenAlphaSDK.construction_candidates` mentioned that `rank`
+    is rewritten -- all four now do; `POST /api/v1/portfolio/construct` did not list the new tie
+    refusal -- it does now; and `_renumbered`'s `score` and `industry_code` passthrough had no
+    test, so mutations dropping either stayed green -- both now guarded.
 
 - **The constants both faces restate are held equal by a test; the functions both faces restate
   were not** (`V2-P5-071`). Found by sweeping for this release's recurring shapes rather than by

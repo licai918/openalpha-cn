@@ -946,7 +946,13 @@ class OpenAlphaSDK:
     def construction_candidates(
         self, result: ShortlistRunResult
     ) -> tuple[ConstructionCandidate, ...]:
-        """The narrowed candidate rows a construction reads, for a caller assembling its own."""
+        """The narrowed candidate rows a construction reads, for a caller assembling its own.
+
+        The `rank` on these rows is a position in this list, renumbered to `1..n` -- not the
+        rank the name held in the funnel's shortlist (`V2-P5-072`). A caller who edits the list
+        has to keep it that way: `construct_portfolio` refuses a gap, because a gap means the
+        rows carry a rank from some wider list rather than a position in this one.
+        """
         return candidates_from_ranking(result.ranking)
 
     def construction_view(self, construction: PortfolioConstruction) -> dict[str, object]:
