@@ -364,6 +364,55 @@ class PortfolioConstruction(BaseModel):
         return sum((target.weight for target in self.targets), start=_ZERO)
 
 
+def _renumbered(
+    candidates: Sequence[ConstructionCandidate],
+) -> tuple[ConstructionCandidate, ...]:
+    """`candidates` in rank order, with `rank` replaced by the position it lands in.
+
+    `V2-P5-072`. The two ranks in this file are not the same quantity, and copying one into the
+    other is what made every admitted subset unweightable:
+
+    * a shortlist's rank is the name's place in the **whole** shortlist -- fourth of fifty -- and
+      is worth keeping in the stored answer, where it stays; while
+    * `ConstructionCandidate.rank` is the name's place in the **list being weighted**. It is only
+      ever used to order that list and then to cut it into tiers by position: `_tier_sizes` is "a
+      function of the two counts and nothing else" and the pairing slices
+      `ordered[position : position + size]`, so a rank value never reaches the cut.
+
+    Any `minimum_researched_ratio` below 1.0 admits a proper subset, whose shortlist ranks
+    necessarily have gaps, and `_ordered_candidates` refuses gaps. Measured before this fix: a
+    real run admitted 34 of 50 and `openalpha portfolio construct` exited 3 on
+    `got [1, 2, 4, 6, ...]`, so the floor was unreachable rather than adjustable.
+
+    The gap refusal stays where it is, guarding a caller who assembles `ConstructionCandidate`
+    rows by hand -- the SDK offers exactly that.
+
+    The tie is refused here instead, because renumbering would otherwise hide it: the ranks this
+    returns are always exactly 1..n, so `_ordered_candidates` could never see the duplicate. And a
+    tie is a real hazard that the position cut cannot absorb the way it absorbs a gap -- two equal
+    ranks leave the sort order undetermined, so which of the pair lands in the higher tier would
+    come down to iteration order.
+    """
+    ordered = sorted(candidates, key=lambda item: item.rank)
+    ranks = [candidate.rank for candidate in ordered]
+    if len(set(ranks)) != len(ranks):
+        tied = sorted({rank for rank in ranks if ranks.count(rank) > 1})
+        raise PortfolioConstructionError(
+            f"candidate ranks must not tie; {tied} each appear more than once in {ranks}. A gap is "
+            "renumbered away because tiers are cut by position, but a tie leaves the order between "
+            "the tied names undetermined, so the tier they land in would depend on iteration order"
+        )
+    return tuple(
+        ConstructionCandidate(
+            subject=candidate.subject,
+            rank=position,
+            score=candidate.score,
+            industry_code=candidate.industry_code,
+        )
+        for position, candidate in enumerate(ordered, start=1)
+    )
+
+
 def candidates_from_ranking(ranking: CandidateRanking) -> tuple[ConstructionCandidate, ...]:
     """The in-process adapter: a `CandidateRanking`'s candidates, narrowed, in rank order.
 
@@ -373,14 +422,18 @@ def candidates_from_ranking(ranking: CandidateRanking) -> tuple[ConstructionCand
     rather than defaulted, so the day `V2-P5-015` loads exposures the cap starts working with no
     change here.
     """
-    return tuple(
-        ConstructionCandidate(
-            subject=candidate.subject,
-            rank=candidate.rank,
-            score=candidate.score,
-            industry_code=None if candidate.exposure is None else candidate.exposure.industry_code,
+    return _renumbered(
+        tuple(
+            ConstructionCandidate(
+                subject=candidate.subject,
+                rank=candidate.rank,
+                score=candidate.score,
+                industry_code=None
+                if candidate.exposure is None
+                else candidate.exposure.industry_code,
+            )
+            for candidate in sorted(ranking.candidates, key=lambda item: item.rank)
         )
-        for candidate in sorted(ranking.candidates, key=lambda item: item.rank)
     )
 
 
@@ -421,7 +474,9 @@ def candidates_from_shortlist_answer(
             "this shortlist was admitted and holds no names, so there is nothing to weight; an "
             "empty admitted list is a gate that ran and passed over nobody, not a refusal"
         )
-    return tuple(_candidate_from_admitted_row(index, row) for index, row in enumerate(admitted))
+    return _renumbered(
+        tuple(_candidate_from_admitted_row(index, row) for index, row in enumerate(admitted))
+    )
 
 
 def _candidate_from_admitted_row(index: int, row: object) -> ConstructionCandidate:

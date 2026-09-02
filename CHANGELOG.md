@@ -6,6 +6,29 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **Portfolio construction read a shortlist-wide rank as a position within the list it was
+  weighting, so any admitted subset was refused for the gaps it necessarily has** (`V2-P5-072`).
+  Found by running step 5 of the manual against a real 34-name shortlist, not by inspection: the
+  admitted ranks are `1, 2, 4, 6, ...` because `researched` keeps only the entries a signal was
+  produced for, so `admitted` is a proper subset of the shortlist and a gap is unavoidable.
+  - `ConstructionCandidate.rank` means "position within the list being weighted". It is used to
+    order the list and to cut tiers *by position* -- `_tier_sizes` is, in its own words, "a
+    function of the two counts and nothing else", and pairing slices `ordered[position : position
+    + size]`. So the refusal's stated reason was half wrong: a gap cannot move a tier boundary; a
+    tie genuinely can, because it makes the cut depend on iteration order.
+  - Both adapters copied the shortlist-wide rank instead. Each now renumbers at the seam:
+    `_renumbered` sorts by the stored rank and re-emits at 1..n.
+  - The tie had to move to the seam with it. Renumbering would otherwise swallow it -- the ranks
+    the seam returns are always exactly 1..n, so the older guard could never see the duplicate --
+    and a tie is not absorbable the way a gap is: two equal ranks leave the order between them
+    undetermined, so which of the pair lands in the higher tier would come down to iteration
+    order. The gap refusal stays where it was, guarding a caller who assembles
+    `ConstructionCandidate` rows by hand, which the SDK offers.
+  - This changes one tested contract, recorded in the test's own docstring:
+    `candidates_from_shortlist_answer` used to leave the array order alone and copy each stored
+    rank, so a payload listing rank 2 first came back `[2, 1]`. It now returns `[1, 2]`. The array
+    order reached no weight either way, since `_ordered_candidates` sorts before it cuts.
+
 - **The constants both faces restate are held equal by a test; the functions both faces restate
   were not** (`V2-P5-071`). Found by sweeping for this release's recurring shapes rather than by
   waiting for the next bite: an AST comparison of every function body in `src/` returns six

@@ -350,8 +350,15 @@ def test_a_shortlist_the_gate_refused_cannot_be_turned_into_a_portfolio() -> Non
         candidates_from_shortlist_answer({"admitted": []})
 
 
-def test_the_stored_answer_adapter_reads_the_order_and_carries_no_industry() -> None:
-    """The measured shape of `shortlist_view`'s `admitted` rows, which carry no industry at all."""
+def test_the_stored_answer_adapter_orders_by_rank_and_carries_no_industry() -> None:
+    """The measured shape of `shortlist_view`'s `admitted` rows, which carry no industry at all.
+
+    This asserted `[2, 1]` until `V2-P5-072` -- the adapter copied each stored rank and left the
+    array order alone, so a payload listing rank 2 first came back that way. It now sorts by the
+    stored rank and renumbers to the position, which is what `ConstructionCandidate.rank` means.
+    The array order never reached a weight either way: `_ordered_candidates` sorts by rank before
+    it cuts, so this is a stricter reading of the same payload rather than a different answer.
+    """
     read = candidates_from_shortlist_answer(
         {
             "admitted": [
@@ -361,8 +368,8 @@ def test_the_stored_answer_adapter_reads_the_order_and_carries_no_industry() -> 
         }
     )
 
-    assert [candidate.rank for candidate in read] == [2, 1]
-    assert {candidate.subject for candidate in read} == {"000001.SZ", "000002.SZ"}
+    assert [candidate.rank for candidate in read] == [1, 2]
+    assert [candidate.subject for candidate in read] == ["000001.SZ", "000002.SZ"]
     assert all(candidate.industry_code is None for candidate in read)
 
 
@@ -477,3 +484,86 @@ def test_the_method_label_is_the_only_one_the_contract_accepts_and_the_record_is
         )
     with pytest.raises(ValidationError):
         rebuilt.method = "approximately optimal"  # type: ignore[misc]
+
+
+# --- the seam between an admitted subset and a construction (`V2-P5-072`) ----------------------
+
+
+def _admitted_answer(ranks: tuple[int, ...]) -> dict[str, object]:
+    """A `shortlist_view` answer whose `admitted` rows carry `ranks`, in that order.
+
+    The shape `candidates_from_shortlist_answer` reads: `admitted` is already in rank order, and
+    each row carries the name's rank **within the whole shortlist**. When the gate admits a
+    proper subset -- which is what any `minimum_researched_ratio` below 1.0 permits -- those
+    ranks have gaps.
+    """
+    return {
+        "admitted": [
+            {"subject": f"{rank:06d}.SZ", "rank": rank, "score": 1.0 - rank / 100} for rank in ranks
+        ]
+    }
+
+
+def test_a_tie_in_the_stored_ranks_is_still_refused_rather_than_renumbered_away() -> None:
+    """`V2-P5-072`: renumbering absorbs the gap on purpose; it must not absorb the tie too.
+
+    Two equal ranks leave the sort order undetermined, so which of the two lands in the higher
+    tier depends on iteration order. That is the hazard `_ordered_candidates` was guarding, and
+    renumbering at the seam would hide it from that guard -- the renumbered ranks are always
+    exactly 1..n. So the seam refuses the tie itself, before it can be smoothed over.
+    """
+    with pytest.raises(PortfolioConstructionError, match="tie"):
+        candidates_from_shortlist_answer(_admitted_answer((1, 3, 3, 7)))
+
+
+def test_an_admitted_subset_is_weighted_rather_than_refused_for_the_gaps_it_must_have() -> None:
+    """`V2-P5-072`. The gate admits a subset; the construction refused every subset it admits.
+
+    `shortlist_view` emits `admitted[i].rank` as the name's rank in the *whole* shortlist, which
+    is worth keeping -- it says this name was fourth of fifty. `ConstructionCandidate.rank` means
+    something else: it is only ever used to order the list and to cut it into tiers by position,
+    and `_ordered_candidates` requires it to be exactly `1..n`. The adapter copied one into the
+    other, so a list the gate had just admitted was refused for gaps that are a *consequence* of
+    admitting it.
+
+    Measured end to end before this fix: a real run admitted 34 of 50 researched names and
+    `openalpha portfolio construct` exited 3 with
+    `candidate ranks must be exactly 1..34 ... got [1, 2, 4, 6, ...]`. Any
+    `--min-researched-ratio` below 1.0 could therefore never reach a portfolio, which makes the
+    floor unreachable rather than adjustable.
+    """
+    gapped = candidates_from_shortlist_answer(_admitted_answer((1, 2, 4, 6, 7, 9)))
+
+    assert [candidate.rank for candidate in gapped] == [1, 2, 3, 4, 5, 6]
+    assert [candidate.subject for candidate in gapped] == [
+        "000001.SZ",
+        "000002.SZ",
+        "000004.SZ",
+        "000006.SZ",
+        "000007.SZ",
+        "000009.SZ",
+    ]
+
+
+def test_renumbering_the_subset_places_the_same_names_in_the_same_tiers() -> None:
+    """The property that makes renumbering safe rather than merely permissive.
+
+    Tiers are cut by *position*: `_tier_sizes` is documented as "a function of the two counts and
+    nothing else", and the pairing slices `ordered[position : position + size]`. So the rank
+    values never reach the cut -- they only establish the order that the slicing then walks. A
+    gapped list and its renumbered twin sort into the same order, so they must tier identically,
+    and this asserts that rather than trusting the reading.
+    """
+    subset = construct_portfolio(
+        candidates=candidates_from_shortlist_answer(_admitted_answer((1, 2, 4, 6, 7, 9))),
+        policy=policy(),
+    )
+    dense = construct_portfolio(
+        candidates=candidates_from_shortlist_answer(_admitted_answer((1, 2, 3, 4, 5, 6))),
+        policy=policy(),
+    )
+
+    assert [target.tier for target in subset.targets] == [target.tier for target in dense.targets]
+    assert [target.weight for target in subset.targets] == [
+        target.weight for target in dense.targets
+    ]
