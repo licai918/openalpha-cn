@@ -138,7 +138,21 @@ E2E_SWITCH: str = "OPENALPHA_E2E"
 """The variable that has to be `1` for anything in this subtree to run. See point 2 above."""
 
 RUNTIME_DIR_VARIABLE: str = "OPENALPHA_E2E_RUNTIME_DIR"
-"""An already-built panel to reuse instead of spending half an hour building one."""
+"""An already-built panel to reuse instead of spending half an hour building one.
+
+**It has a shelf life of one horizon.** Most of this suite reads a reused panel exactly as it
+read it on the day it was built -- see `trading_days_between`'s docstring below for why the
+endpoint is the panel's own last session rather than the wall clock. One test cannot:
+`test_model_chain_online.py::test_a_prediction_about_an_outcome_the_world_has_not_reached_yet_stands_forward`
+needs an outcome the world has not reached, and the outcome of a prediction about the newest
+stored session becomes knowable `HORIZON_SESSIONS + 1` sessions later. Past that instant the
+prediction honestly answers `unwitnessed` and the run stops with an `E2EEnvironmentError` naming
+the remedy: unset this variable and let the fixture build a fresh panel.
+
+Measured 2026-09-09: a panel built 2026-08-29, newest session 2026-08-26, failed that one test
+and passed the other 58. The refusal costs no requests -- that module is `Zero requests` by its
+own docstring -- but it arrives at the end of a 35-minute run, so check the panel's age before
+reusing one that is more than about a week old."""
 
 TOKEN_VARIABLE: str = "TUSHARE_TOKEN"
 """Read only to check that it is *present*. Its value is never read, logged, asserted on or
@@ -259,9 +273,12 @@ class BuiltPanel:
         The right endpoint is the panel's own last session rather than "yesterday", and the
         difference matters twice. It makes the sessions this suite reasons about a property of
         the artifact instead of a property of the clock, so a panel reused through
-        `OPENALPHA_E2E_RUNTIME_DIR` days after it was built answers exactly as it did on the
-        day -- with a wall-clock bound, every session published since the build would read as a
-        hole in the partition and the whole suite would rot after one night. And it keeps the
+        `OPENALPHA_E2E_RUNTIME_DIR` days after it was built answers *this* question exactly as it
+        did on the day -- with a wall-clock bound, every session published since the build would
+        read as a hole in the partition and the whole suite would rot after one night. It is not
+        a general warrant for reuse: a question about an outcome the world has not reached yet is
+        a question about the clock by construction, and that one does expire. See
+        `RUNTIME_DIR_VARIABLE`. And it keeps the
         comparison honest: taking the *endpoint* from the partition and the *listing* from the
         calendar is what makes "does the partition have a hole in it" a real question, where
         taking both from the partition would answer itself.
