@@ -54,8 +54,11 @@ their names at all. It parses every module under this package for a bare `sqlite
 call outside `connection.py` itself, per function rather than per file, which is what actually
 tests that module's own docstring claim that every store's `_connect()` goes through
 `open_state_connection` -- and it catches a bypass no matter what the offending class or
-function is called, which is the one gap the naming-prefix property above admits by design that
-it cannot close.
+function is called, closing one gap the naming-prefix property above admits by design that it
+cannot close on its own. Not every gap at once, though: this audit has a separate blind spot of
+its own (documented where `_bare_sqlite3_connect_call_sites` is defined, below), and a store
+that combines both -- an unprefixed class name, connecting through an aliased `sqlite3` import
+-- passes every check in this file (measured, not assumed).
 
 Per function, not per call site, though: a review measured a hole that grouping alone leaves
 open. Exempting a function by name also silently exempts every *later* bare call added inside

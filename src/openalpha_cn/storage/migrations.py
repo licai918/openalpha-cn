@@ -1,8 +1,10 @@
 """Forward-only SQLite schema-migration engine for the shared `state.sqlite3` (V2-P0B-004).
 
-Why this exists: the nine tables spread across the seven SQLite stores in this package are
-each created by their own store's `CREATE TABLE IF NOT EXISTS` -- table creation is a side
-effect of constructing a store, not a tracked, versioned event. Rows are opaque JSON payloads
+Why this exists: the fifteen tables spread across the ten SQLite stores in this package are
+mostly created by their own store's `CREATE TABLE IF NOT EXISTS` (nine of the ten stores do
+this; the tenth, `SQLiteValidationStore`, creates none -- its table is created by
+`create_validation_results` below instead) -- table creation is usually a side effect of
+constructing a store, not a tracked, versioned event. Rows are opaque JSON payloads
 validated by pydantic models with `extra="forbid"` and a literal `schema_version` -- any new
 field makes old rows unreadable to new code and new rows unreadable to old code, with no code
 path able to tell the two apart. `V2-P4-001` then made three breaking contract changes at once;

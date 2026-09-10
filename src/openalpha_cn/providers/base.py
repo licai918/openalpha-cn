@@ -80,14 +80,13 @@ class ProviderRequest(BaseModel):
         return ensure_aware(value)
 
 
+# `ProviderRecord` inherits `freeze_payload` from `FreezePayloadMixin` (`domain/evidence.py`)
+# rather than declaring its own -- see that mixin's docstring for why the shared
+# implementation lives there and not here. Kept out of `ProviderRecord`'s own docstring
+# because Pydantic copies a model's class docstring verbatim into
+# `model_json_schema()["description"]`, which `/openapi.json` and `/docs` expose publicly.
 class ProviderRecord(FreezePayloadMixin, BaseModel):
-    """One normalized provider row before evidence-specific interpretation.
-
-    Inherits `freeze_payload` from `FreezePayloadMixin` (`domain/evidence.py`) rather than
-    declaring its own: an AST comparison found this model's payload-freezing validator
-    byte-identical to `EvidenceSnapshot`'s, and `FreezePayloadMixin`'s own docstring records why
-    the shared implementation lives there and not here.
-    """
+    """One normalized provider row before evidence-specific interpretation."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
 

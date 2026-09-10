@@ -77,10 +77,13 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
     equality guards. The board corpus reaches all four boards and both prefix boundaries (`689*`
     and `301*`, where a two-character prefix would answer wrongly and no happy-path fixture would
     notice) and asserts it still reaches them, so agreement cannot pass for coverage.
-  - **Not fixed, and said so**: `freeze_payload` on two Pydantic models (consolidating needs a
+  - ~~**Not fixed, and said so**: `freeze_payload` on two Pydantic models (consolidating needs a
     mixin), `note_for` on three `domain` registries (the third is partly covered already), and a
     three-line constructor shared by two stores. All are the same class with lower stakes; none
-    has an equality guard.
+    has an equality guard.~~ **All three settled in the v2 收尾清理 batch**: `freeze_payload` is
+    now `FreezePayloadMixin` (`de27977`); `note_for` is now `NoteLookupMixin` (`247c1d9`); the
+    two 3-line store constructors were adjudicated **not** to merge, with the reasoning recorded
+    in that commit (`fe1d701`).
 
 - **112 table rows lost their last column when rendered: two ledger headers were a column
   short, and seven rows carried an unescaped `|` inside inline code** (`V2-P5-070`). Judged by
