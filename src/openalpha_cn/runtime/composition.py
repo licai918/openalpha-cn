@@ -13,7 +13,7 @@ composition root, each one would need wiring twice, by hand, forever.
 deliberately left out: nothing could fill it until a face above the model and storage planes
 existed, and `model daily-run` is that face. See `StorageContainer.prediction_store`.
 
-Field types mirror the storage-Protocol layer Task 9 (V2-P0B-003) built: six of twelve
+Field types mirror the storage-Protocol layer Task 9 (V2-P0B-003) built: six of fourteen
 fields are typed against the narrowest Protocol their consumers need (`ResearchMemory`,
 `RecoveryStore`, `EvidenceStore`, `WatchlistStore`, `ReportStore`,
 `ValidationStore`) -- because `sdk.py`/`api/app.py` only ever call the methods those
@@ -55,6 +55,7 @@ from openalpha_cn.storage.factor_experiments import FileExperimentStore
 from openalpha_cn.storage.jobs import SQLiteJobStore
 from openalpha_cn.storage.memory import SQLiteResearchMemory
 from openalpha_cn.storage.migrations import MigrationRunResult, run_migrations
+from openalpha_cn.storage.models import SQLiteModelUsageStore
 from openalpha_cn.storage.parquet import ParquetEvidenceStore
 from openalpha_cn.storage.portfolio import SQLitePortfolioLedger
 from openalpha_cn.storage.predictions import FilePredictionStore
@@ -69,7 +70,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class StorageContainer:
-    """All thirteen storage components assembled for one shared `runtime_dir`.
+    """All fourteen storage components assembled for one shared `runtime_dir`.
 
     `migration_result` is the outcome of the `run_migrations()` call this function makes
     before constructing any store below -- exposed so a caller that needs to report on
@@ -148,7 +149,7 @@ class StorageContainer:
     only *service*-layer consumer) calls neither. A Protocol wide enough for both would hand the
     scheduler a listing it has no business asking for.
 
-    It shares `state.sqlite3` with the other eight and creates its two tables with `CREATE TABLE
+    It shares `state.sqlite3` with the other nine and creates its two tables with `CREATE TABLE
     IF NOT EXISTS` rather than through a migration -- see `storage/jobs.py`'s module docstring
     for the measurement behind that, which is that migrations 3 through 8 never run on a fresh
     database at all, so a ninth adding these tables would never run either.
@@ -163,13 +164,57 @@ class StorageContainer:
     and gate leaves -- for a field whose only job here is to be handed to a face that already
     imports both.
     """
+    model_usage_store: SQLiteModelUsageStore
+    """`V2-P0B-011`'s durable per-request LLM provider usage and cost accounting.
+
+    Not the "model" in this file's opening "panel, factor, model, ranking, portfolio" --
+    that third item is the AlphaModel fit/predict plane `prediction_store` fills (see `model
+    daily-run` a few paragraphs up); this store is orthogonal to that plane, an LLM-call
+    governance concern (`models.base.ModelProvider`, `agents/model.py`) rather than a stage
+    of the quant research pipeline. Two different things this package calls "model."
+
+    **The fourteenth store, and it shipped with none of this wiring at all.** `V2-P0B-011`
+    moved the class here, out of `models/governance.py` and into `storage/models.py`, so that
+    `openalpha_cn.models` would stop importing `sqlite3` directly (ADR-0001's
+    `models-no-infra-imports` contract) -- but never added it to this container. That is a
+    different gap from `job_store`'s: `job_store` names its own two-step history above (shipped
+    unwired by `V2-P5-010`, wired by `V2-P5-013`, both in that field's own docstring); no
+    equivalent second step was ever recorded for this one. It surfaced twice, independently:
+    once when the foreign-key-enforcement registry (`tests/integration/storage/
+    test_foreign_key_enforcement.py`) turned out to cover eight of what are now ten
+    `state.sqlite3` stores it discovers by name, `SQLiteModelUsageStore` being one of the two
+    missing entries -- registered there before this field existed, so it has been checked for
+    `PRAGMA foreign_keys` all along, construction site or not -- and again here, where
+    `grep -rn "SQLiteModelUsageStore(" src/` found no construction site anywhere in this
+    package until this field and the line in `build_storage` below.
+
+    Concrete rather than Protocol-typed, but not for `batch_store`'s or `job_store`'s reason --
+    neither has a wider surface here to narrow against. `models.governance.ModelUsageStore`,
+    the Protocol `models/openai_compatible.py`'s `usage_store` parameter is already typed
+    against, declares exactly this class's full public surface (`append`/`list`) -- there is
+    nothing wider a Protocol here would need to hide. It stays concrete because, measured
+    rather than assumed, nothing inside `openalpha_cn` calls through this field to narrow
+    against in the first place: `OpenAICompatibleProvider` -- the one class that would ever
+    call `.append()` on it -- is constructed only in `tests/unit/models/test_model_governance.py`
+    and `tests/unit/models/test_openai_compatible.py`, never in `src/`. The real caller this
+    field exists for is external: a deployer who builds their own LLM-backed agent through
+    `models/openai_compatible.py` and wants the same `runtime_dir`-scoped `state.sqlite3`
+    every other store here already shares, rather than hand-rolling a separate path the way
+    this file's own opening paragraph says `sdk.py`/`api/app.py` used to, by hand, before
+    `build_storage` existed.
+
+    No CLI command, REST route, or SDK method reads or writes through this field today, and
+    that is stated rather than left to be discovered: in `job_store`'s own vocabulary, wiring
+    the store into this container and giving it a "face" are two different rows, and only the
+    first has been asked for so far.
+    """
     migration_result: MigrationRunResult
 
 
 def build_storage(*, runtime_dir: Path, clock: Callable[[], datetime]) -> StorageContainer:
     """Run pending schema migrations, then assemble every storage component once.
 
-    All thirteen stores share one `runtime_dir`: nine at its root-level `state.sqlite3`
+    All fourteen stores share one `runtime_dir`: ten at its root-level `state.sqlite3`
     (matching the pre-existing per-store convention), plus the Parquet evidence store
     under `runtime_dir / "evidence"`, the sealed experiment documents under
     `runtime_dir / "experiments"`, `V2-P4-062`'s shortlist answers under
@@ -205,6 +250,7 @@ def build_storage(*, runtime_dir: Path, clock: Callable[[], datetime]) -> Storag
     experiment_store = FileExperimentStore(runtime_dir / "experiments")
     shortlist_store = FileShortlistStore(runtime_dir / "shortlists")
     job_store = SQLiteJobStore(runtime_dir / "state.sqlite3")
+    model_usage_store = SQLiteModelUsageStore(runtime_dir / "state.sqlite3")
     prediction_store = FilePredictionStore(runtime_dir / "predictions", clock=clock)
     batch_store.recover_interrupted(now=clock())
     logger.info(
@@ -228,5 +274,6 @@ def build_storage(*, runtime_dir: Path, clock: Callable[[], datetime]) -> Storag
         shortlist_store=shortlist_store,
         prediction_store=prediction_store,
         job_store=job_store,
+        model_usage_store=model_usage_store,
         migration_result=migration_result,
     )
