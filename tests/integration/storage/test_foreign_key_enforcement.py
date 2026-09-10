@@ -56,6 +56,15 @@ tests that module's own docstring claim that every store's `_connect()` goes thr
 `open_state_connection` -- and it catches a bypass no matter what the offending class or
 function is called, which is the one gap the naming-prefix property above admits by design that
 it cannot close.
+
+Per function, not per call site, though: a review measured a hole that grouping alone leaves
+open. Exempting a function by name also silently exempts every *later* bare call added inside
+that same function, because the function's name does not change when a second one joins the
+first there -- `_STORE_FACTORIES`-style set-difference on keys sees the same key before and
+after. `_SQLITE3_CONNECT_BYPASS_EXEMPTIONS` now records how many call sites each exemption
+accounts for, not just which function, and `test_sqlite3_connect_bypass_exemptions_have_the_
+call_site_count_they_claim` fails, naming the function, the moment that count stops matching
+what `_bare_sqlite3_connect_call_sites` finds for it, in either direction.
 """
 
 import ast
@@ -194,15 +203,21 @@ def _sqlite_prefixed_class_definitions_in_source() -> set[str]:
 
 class _BareSqlite3ConnectVisitor(ast.NodeVisitor):
     """Collect every bare `sqlite3.connect(...)` call in a module's AST, each tagged with the
-    dotted name of its innermost enclosing function (or method, qualified by its class) --
-    `<module>` for a call sitting at module scope, outside any function at all.
+    full dotted path of *every* enclosing `def`/`class` scope, outermost to innermost -- not
+    merely the name of the innermost one -- and `<module>` for a call sitting at module scope,
+    outside any of them.
 
     A plain `ast.walk` cannot report *which function* a call sits inside, since `ast` nodes
     carry no parent pointer; this visitor tracks that by pushing the name of every `def` (or
     `class`) it descends into onto a stack and popping it back off on the way out, so a call
     found while the stack is `["Migrations", "run_migrations"]` is correctly attributed to
     `Migrations.run_migrations`, not to the module or to some other function defined earlier in
-    the same file.
+    the same file -- and a call nested one level deeper still, inside a closure defined in that
+    same method, would be tagged with the full three-segment chain, not with the closure's own
+    name alone. Measured, not assumed: every real call site `_bare_sqlite3_connect_call_sites`
+    has ever found in this package is a bare module-level function (`_take_backup`,
+    `read_status`, `run_migrations`, all in `migrations.py`), so nothing downstream currently
+    depends on the multi-segment case -- but this is what `_qualname` below actually returns.
     """
 
     def __init__(self) -> None:
@@ -243,8 +258,9 @@ class _BareSqlite3ConnectVisitor(ast.NodeVisitor):
 def _bare_sqlite3_connect_call_sites() -> dict[str, list[int]]:
     """`{"<module qualname>::<function qualname>": [line numbers]}` for every bare
     `sqlite3.connect(...)` call anywhere under `openalpha_cn.storage`, excluding
-    `connection.py` itself -- the one file `connection.py`'s own module docstring names as the
-    single place this package calls `sqlite3.connect()` directly.
+    `connection.py` itself -- the one file whose `open_state_connection` function docstring
+    (not `connection.py`'s module docstring, which ends at line 35 and says nothing of the
+    kind) names it as the single place this package calls `sqlite3.connect()` directly.
 
     `storage/connection.py:44` states plainly: "Every store's `_connect()` in this package
     calls this instead of `sqlite3.connect()`." Nothing tested that claim until this function
@@ -289,18 +305,42 @@ def _bare_sqlite3_connect_call_sites() -> dict[str, list[int]]:
 # one there was. `test_sqlite3_connect_bypass_exemptions_carry_a_real_reason` and
 # `test_sqlite3_connect_bypass_exemptions_name_a_call_site_that_still_exists` below enforce
 # both halves; see them, not this comment, for what is actually checked.
-_SQLITE3_CONNECT_BYPASS_EXEMPTIONS: dict[str, str] = {
+#
+# A review measured a hole the *key* still left open with both of those in place: the key is
+# "<module>::<function>", which exempts a whole function, not the one call site
+# `_bare_sqlite3_connect_call_sites` had found there when the entry was written. Adding a
+# second, new bare `sqlite3.connect()` call inside an already-exempt function -- `read_status`,
+# say, which had exactly one -- changes that function's site *count* from one to two but
+# leaves its *key* untouched, so `set(sites) - set(_SQLITE3_CONNECT_BYPASS_EXEMPTIONS)` (what
+# `test_no_bare_sqlite3_connect_call_outside_connection_py_without_a_named_exemption` checks)
+# never notices: the key was already present on both sides, before and after. Each value here
+# is now `(expected call-site count, reason)` instead of a bare reason string, and
+# `test_sqlite3_connect_bypass_exemptions_have_the_call_site_count_they_claim` below fails,
+# naming the function, the moment `_bare_sqlite3_connect_call_sites` finds a different number
+# of sites for that key than the count recorded here -- whether a new one was added unreviewed
+# or an existing one was removed and the entry was never brought back down to match.
+#
+# The exact line numbers were the other way to pin this down more tightly than a count, and
+# were rejected: every bare call in `migrations.py` sits below roughly 1,700 lines of
+# docstring-heavy code, so an edit to any docstring above it -- unrelated to `sqlite3.connect()`
+# entirely -- would shift every line number below and fail this guard for the wrong reason. A
+# count does not move when unrelated lines do; it changes only when the number of bare calls in
+# that one function actually changes, which is the one thing this guard exists to notice.
+_SQLITE3_CONNECT_BYPASS_EXEMPTIONS: dict[str, tuple[int, str]] = {
     "openalpha_cn.storage.migrations::_take_backup": (
+        2,
         "Uses SQLite's page-level `.backup()` API (source.backup(destination)), not SQL DML on "
-        "either connection -- `PRAGMA foreign_keys` has no write for it to apply to."
+        "either connection -- `PRAGMA foreign_keys` has no write for it to apply to.",
     ),
     "openalpha_cn.storage.migrations::read_status": (
+        1,
         "Read-only by its own docstring ('never takes a backup, never opens a write "
-        "transaction'); `PRAGMA foreign_keys` only changes the outcome of a write."
+        "transaction'); `PRAGMA foreign_keys` only changes the outcome of a write.",
     ),
     "openalpha_cn.storage.migrations::run_migrations": (
+        1,
         "Needs isolation_level=None for its own manual BEGIN IMMEDIATE / COMMIT / ROLLBACK, "
-        "which open_state_connection(path, *, timeout=10) does not accept."
+        "which open_state_connection(path, *, timeout=10) does not accept.",
     ),
 }
 
@@ -517,6 +557,14 @@ def test_no_bare_sqlite3_connect_call_outside_connection_py_without_a_named_exem
     (needs `isolation_level=None` for manual transaction control). Before that dict held those
     three entries, this test failed naming exactly those three functions -- see
     task-5-report.md's second follow-up section for the measured red.
+
+    What this test alone does not catch, stated rather than assumed: it compares only which
+    *functions* are exempted, not how many call sites within them are. A second, new bare call
+    added inside an already-exempt function leaves the function's key unchanged on both sides
+    of this test's set difference, so this test alone stays green.
+    `test_sqlite3_connect_bypass_exemptions_have_the_call_site_count_they_claim` below is what
+    catches that; see its docstring and `_SQLITE3_CONNECT_BYPASS_EXEMPTIONS`'s own comment for
+    the measured hole and the fix.
     """
     sites = _bare_sqlite3_connect_call_sites()
     unexempted = sorted(set(sites) - set(_SQLITE3_CONNECT_BYPASS_EXEMPTIONS))
@@ -537,7 +585,9 @@ def test_sqlite3_connect_bypass_exemptions_carry_a_real_reason() -> None:
     test exists to close.
     """
     blank = sorted(
-        name for name, reason in _SQLITE3_CONNECT_BYPASS_EXEMPTIONS.items() if not reason.strip()
+        name
+        for name, (_count, reason) in _SQLITE3_CONNECT_BYPASS_EXEMPTIONS.items()
+        if not reason.strip()
     )
     assert not blank, (
         f"these _SQLITE3_CONNECT_BYPASS_EXEMPTIONS entries have a blank (or whitespace-only) "
@@ -561,6 +611,46 @@ def test_sqlite3_connect_bypass_exemptions_name_a_call_site_that_still_exists() 
         f"these _SQLITE3_CONNECT_BYPASS_EXEMPTIONS keys no longer name a function with a bare "
         f"sqlite3.connect() call: {stale}. Remove the entry -- its bypass was fixed, or never "
         f"existed at this name."
+    )
+
+
+def test_sqlite3_connect_bypass_exemptions_have_the_call_site_count_they_claim() -> None:
+    """Fail, naming names, if a `_SQLITE3_CONNECT_BYPASS_EXEMPTIONS` entry's recorded call-site
+    count no longer matches how many bare `sqlite3.connect()` sites
+    `_bare_sqlite3_connect_call_sites` actually finds for that function.
+
+    A review measured the hole this closes: the dict above used to key only on
+    `"<module>::<function>"`, so a *second*, unreviewed bare call added inside an already-exempt
+    function -- `read_status`, say, which had exactly one -- left
+    `test_no_bare_sqlite3_connect_call_outside_connection_py_without_a_named_exemption` green,
+    because that test's `set(sites) - set(_SQLITE3_CONNECT_BYPASS_EXEMPTIONS)` compares only
+    *keys*, and the key `"openalpha_cn.storage.migrations::read_status"` was already present on
+    both sides, before and after the new call was added. Measured directly: with a second bare
+    `sqlite3.connect(path).close()` added inside `read_status` and no other change, the full
+    test file still passed -- this test did not exist yet to say otherwise.
+
+    This test compares *counts* instead of only keys: it fails the moment
+    `len(_bare_sqlite3_connect_call_sites()[key])` stops equalling the count recorded next to
+    that key's reason, in either direction -- a new, unreviewed call raises the actual count
+    above what was claimed, and a call that was since rewritten to use `open_state_connection`
+    (dropping the function to one fewer bare call, without the entry being brought back down to
+    match) lowers it. A key missing from `_bare_sqlite3_connect_call_sites()` entirely is
+    `test_sqlite3_connect_bypass_exemptions_name_a_call_site_that_still_exists` above's job, not
+    this one's, so this test only compares counts for keys both sides still agree exist.
+    """
+    sites = _bare_sqlite3_connect_call_sites()
+    miscounted = sorted(
+        key
+        for key, (expected_count, _reason) in _SQLITE3_CONNECT_BYPASS_EXEMPTIONS.items()
+        if key in sites and len(sites[key]) != expected_count
+    )
+    assert not miscounted, (
+        f"these _SQLITE3_CONNECT_BYPASS_EXEMPTIONS entries claim a different number of bare "
+        f"sqlite3.connect() call sites than _bare_sqlite3_connect_call_sites() finds for them "
+        f"now: {miscounted}. A higher actual count than claimed means a new, unreviewed call "
+        f"was added to an already-exempt function -- read it and decide whether it belongs, "
+        f"then update the count. A lower one means the entry is now over-broad -- update the "
+        f"count to match."
     )
 
 
