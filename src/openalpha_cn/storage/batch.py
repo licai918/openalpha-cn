@@ -133,8 +133,9 @@ class SQLiteBatchTaskStore:
         The one cross-store guarantee here that *does* warrant one shared implementation --
         `PRAGMA foreign_keys` -- is tested once, by name, in
         `tests/integration/storage/test_foreign_key_enforcement.py`, whose `_STORE_FACTORIES`
-        registry covers eight of this package's ten stores today (not yet `models.py`'s or
-        `jobs.py`'s -- a coverage gap tracked as its own task, not this one). That is still
+        registry covers all ten of this package's stores. It covered eight when this note was
+        written; `models.py`'s and `jobs.py`'s were added afterwards, along with a guard that
+        discovers stores from the package so an eleventh cannot go unregistered. That is still
         the shape a real fix takes: a registry and a parametrized behavioral test, not a
         two-class hierarchy built from whichever pair an AST diff happened to name. Revisit
         this note if a *behavior* -- not matching text -- needs to run identically across

@@ -413,7 +413,7 @@ def _create_query_path_indexes(connection: sqlite3.Connection) -> None:
     side effect, so on a genuinely empty database none of them exist yet. All three
     `require_table` guards run before any `CREATE INDEX`, so a database that happens to
     have, say, `checkpoints` but not yet `portfolio_transitions` -- not reachable through
-    `build_storage()`, which constructs all eight `state.sqlite3` stores together right
+    `build_storage()`, which constructs all ten `state.sqlite3` stores together right
     after migrations run, but not ruled out for a hand-built or historical database --
     defers the whole migration rather than indexing two of the three tables and never
     getting a second chance at the third (`schema_migrations` has no per-index-within-a-
