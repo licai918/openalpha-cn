@@ -160,7 +160,13 @@ from typing import Final, Literal, Self, get_args
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
 from openalpha_cn.domain._identity import stable_model_id
-from openalpha_cn.domain.factor import FactorError, FactorNote, cross_section_digest, validate_notes
+from openalpha_cn.domain.factor import (
+    FactorError,
+    FactorNote,
+    NoteLookupMixin,
+    cross_section_digest,
+    validate_notes,
+)
 from openalpha_cn.domain.factor_transform import (
     PROCESSED_COVERAGE_CODES,
     PROCESSED_VALUE_CODES,
@@ -596,7 +602,7 @@ class FactorNeutralizationSpec(BaseModel):
 
 
 @dataclass(frozen=True, slots=True)
-class FactorNeutralizationRegistry:
+class FactorNeutralizationRegistry(NoteLookupMixin):
     """Every neutralisation this build knows, refusing the two shapes `FactorRegistry` refuses.
 
     A frozen tuple rather than a decorator-populated dict, for `FactorRegistry`'s reason: a
@@ -628,18 +634,6 @@ class FactorNeutralizationRegistry:
             role="neutralisation",
             error=FactorNeutralizationError,
         )
-
-    def note_for(self, qualified_key: str) -> str | None:
-        """The prose about `key/vN`, or `None` when this registry carries none for it.
-
-        `FactorRegistry.note_for`'s contract, including that an undeclared handle is refused by
-        `get` rather than answered `None`.
-        """
-        self.get(qualified_key)
-        for note in self.notes:
-            if note.subject == qualified_key:
-                return note.summary
-        return None
 
     @property
     def qualified_keys(self) -> tuple[str, ...]:

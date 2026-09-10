@@ -78,12 +78,17 @@ from openalpha_cn.domain.factor import (
     FactorNote,
     FactorObservation,
     FactorRegistry,
+    NoteLookupMixin,
     cross_section_digest,
     set_digest,
     validate_factor_observation,
 )
-from openalpha_cn.domain.factor_neutralization import processed_observation_digest
+from openalpha_cn.domain.factor_neutralization import (
+    FactorNeutralizationRegistry,
+    processed_observation_digest,
+)
 from openalpha_cn.domain.factor_transform import (
+    FactorTransformRegistry,
     ProcessedFactorObservation,
     observation_digest,
 )
@@ -740,6 +745,36 @@ def test_a_registry_with_no_note_answers_none_and_still_refuses_an_unknown_handl
     assert partly_written.note_for("alpha_probe/v1") == "only this one is written about"
     with pytest.raises(FactorError, match="is not a declared factor; this build knows"):
         registry.note_for("ghost/v1")
+
+
+def test_note_for_is_one_implementation_the_three_registries_all_inherit() -> None:
+    """An AST comparison found `FactorRegistry.note_for`, `FactorTransformRegistry.note_for` and
+    `FactorNeutralizationRegistry.note_for` byte-identical. `V2-P5-071` recorded the same finding
+    and merged nothing here, because that issue's own two merges were forced apart by an
+    `import-linter` contract and this trio is not under one -- all three already live inside
+    `openalpha_cn.domain`.
+
+    `is` rather than `==`: three independently written bodies that agree on every case the other
+    `note_for` tests probe are still three call sites to keep in sync by hand, and nothing above
+    would tell that apart from one shared implementation. `is` cannot be fooled that way -- either
+    the three classes name the same function object or they do not.
+
+    `is` alone still passes for a different accident: the same function object assigned to each
+    class's own attribute three times (`FactorRegistry.note_for = shared`, spelled out three
+    times), which is still three statements an editor has to keep in sync. The loop below rules
+    that out by reading each class's own `__dict__` -- which a merely-assigned attribute would
+    populate exactly like a restated `def` would -- rather than the attribute lookup that
+    inheritance also satisfies: none of the three may define `note_for` for itself.
+    """
+    assert FactorRegistry.note_for is NoteLookupMixin.note_for
+    assert FactorTransformRegistry.note_for is NoteLookupMixin.note_for
+    assert FactorNeutralizationRegistry.note_for is NoteLookupMixin.note_for
+
+    for registry_type in (FactorRegistry, FactorTransformRegistry, FactorNeutralizationRegistry):
+        assert "note_for" not in vars(registry_type), (
+            f"{registry_type.__name__} defines its own note_for instead of inheriting "
+            "NoteLookupMixin's"
+        )
 
 
 def test_a_note_refuses_to_be_empty_on_either_half() -> None:

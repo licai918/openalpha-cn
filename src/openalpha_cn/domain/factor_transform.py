@@ -142,6 +142,7 @@ from openalpha_cn.domain.factor import (
     FactorError,
     FactorNote,
     FactorObservation,
+    NoteLookupMixin,
     cross_section_digest,
     validate_notes,
 )
@@ -703,7 +704,7 @@ class FactorTransformSpec(BaseModel):
 
 
 @dataclass(frozen=True, slots=True)
-class FactorTransformRegistry:
+class FactorTransformRegistry(NoteLookupMixin):
     """Every transform this build knows, refusing the two shapes `FactorRegistry` refuses.
 
     A frozen tuple rather than a decorator-populated dict, for `FactorRegistry`'s reason: a
@@ -716,6 +717,11 @@ class FactorTransformRegistry:
     what matters rather than their storage -- they would be the part not shared. Concrete and
     twenty lines is the trade this repository makes elsewhere (`ContractVersions` and
     `MIGRATIONS` are two hand-written tuples for the same reason).
+
+    `note_for` is the one method that paragraph does not cover: unlike `__post_init__`, `get` and
+    `by_id`, it never read `specs` or the spec type, so there was nothing about it that differed
+    between the three registries to keep concrete. `NoteLookupMixin` shares that one method; this
+    class still declares everything else itself.
     """
 
     specs: tuple[FactorTransformSpec, ...]
@@ -741,18 +747,6 @@ class FactorTransformRegistry:
             role="transform",
             error=FactorTransformError,
         )
-
-    def note_for(self, qualified_key: str) -> str | None:
-        """The prose about `key/vN`, or `None` when this registry carries none for it.
-
-        `FactorRegistry.note_for`'s contract, including that an undeclared handle is refused by
-        `get` rather than answered `None`.
-        """
-        self.get(qualified_key)
-        for note in self.notes:
-            if note.subject == qualified_key:
-                return note.summary
-        return None
 
     @property
     def qualified_keys(self) -> tuple[str, ...]:

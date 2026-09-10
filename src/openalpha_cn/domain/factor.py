@@ -206,7 +206,7 @@ from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 from datetime import date, datetime
 from hashlib import sha256
-from typing import Final, Literal, Self, get_args
+from typing import Final, Literal, Protocol, Self, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
@@ -934,8 +934,71 @@ def validate_notes(
         )
 
 
+class _NotedRegistry(Protocol):
+    """The shape `NoteLookupMixin.note_for` needs from whatever it is mixed into.
+
+    A `Protocol` rather than a shared base class, so `FactorRegistry`, `FactorTransformRegistry`
+    and `FactorNeutralizationRegistry` stay three independent frozen dataclasses and commit to
+    sharing only the one method that turned out to be one function typed three times. `notes` is
+    a read-only `@property` here rather than a plain attribute -- a plain Protocol attribute
+    reads as settable to mypy, every real host is `frozen=True`, and a plain attribute failed
+    strict mode on exactly that mismatch against a read-only field.
+    """
+
+    @property
+    def notes(self) -> tuple[FactorNote, ...]:
+        """The prose this registry carries, in declared order."""
+
+    def get(self, qualified_key: str) -> object:
+        """Refuse `qualified_key` if this registry does not declare it.
+
+        The return value is not used by `note_for` -- the call exists only so that refusal fires
+        before anything else does.
+        """
+
+
+class NoteLookupMixin:
+    """Supplies `note_for` to a frozen dataclass that offers `get` and `notes`.
+
+    `FactorRegistry.note_for`, `FactorTransformRegistry.note_for` and
+    `FactorNeutralizationRegistry.note_for` were three function bodies an AST comparison found
+    byte-identical. `V2-P5-071` found the same six groups and left this one alone: that issue's
+    own two merges (`_board`/`average_ranks`) were pinned apart by equality guards rather than
+    merged, because an `import-linter` contract stood between their two hosts. No such contract
+    stands between these three -- all of them already live inside `openalpha_cn.domain` -- so
+    pinning a third restatement equal to the other two would have manufactured the very layering
+    excuse this trio is not under. One implementation, inherited three times, is the merge that
+    excuse was blocking everywhere else.
+
+    This does not revisit `FactorTransformRegistry`'s own reason for staying a written-out
+    dataclass rather than one made generic over `FactorRegistry` -- see that class's docstring.
+    That decision is about the registry's storage and its two refusals (empty, repeated key),
+    which do differ enough between the three specs to be worth keeping concrete. `note_for` never
+    touched `specs` or the spec type, so it is the one piece with nothing left to keep separate.
+
+    `__slots__ = ()` declares no state of its own, so mixing this into a
+    `@dataclass(frozen=True, slots=True)` host does not hand it back a `__dict__`.
+    """
+
+    __slots__ = ()
+
+    def note_for(self: _NotedRegistry, qualified_key: str) -> str | None:
+        """The prose about `key/vN`, or `None` when this registry carries none for it.
+
+        `None` rather than a refusal: a registry with no notes is legitimate (see
+        `validate_notes`), so "there is nothing written about this factor" is an answer and not a
+        fault. Asking about a factor the registry does not declare is a fault, and `get` is where
+        it is refused -- reached first, so a typo in the handle does not read as absent prose.
+        """
+        self.get(qualified_key)
+        for note in self.notes:
+            if note.subject == qualified_key:
+                return note.summary
+        return None
+
+
 @dataclass(frozen=True, slots=True)
-class FactorRegistry:
+class FactorRegistry(NoteLookupMixin):
     """Every factor this build knows, keyed two ways and refusing two shapes.
 
     A plain frozen collection rather than a mutable module-level dict with a `@register`
@@ -981,20 +1044,6 @@ class FactorRegistry:
                 "name make a lookup arbitrary -- bump `version` on the restatement"
             )
         validate_notes(self.notes, declared=tuple(keys), role="factor")
-
-    def note_for(self, qualified_key: str) -> str | None:
-        """The prose about `key/vN`, or `None` when this registry carries none for it.
-
-        `None` rather than a refusal: a registry with no notes is legitimate (see
-        `validate_notes`), so "there is nothing written about this factor" is an answer and not a
-        fault. Asking about a factor the registry does not declare is a fault, and `get` is where
-        it is refused -- reached first, so a typo in the handle does not read as absent prose.
-        """
-        self.get(qualified_key)
-        for note in self.notes:
-            if note.subject == qualified_key:
-                return note.summary
-        return None
 
     @property
     def qualified_keys(self) -> tuple[str, ...]:
