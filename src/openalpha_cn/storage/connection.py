@@ -22,10 +22,16 @@ pragma" -- a property that silently stops being true the moment a future table a
 key of its own and its store's author copies one of the eight `_connect()` methods that never
 had it.
 
-One function, not a class: every caller already owns its own `sqlite3.Connection` lifecycle
-(`contextlib.closing`, its own `timeout=10`, its own WAL/journal-mode setup immediately after
-opening) -- this only needed to stop being copy-pasted, not to grow a new abstraction layer
-around connection management.
+One function, not a class: each caller already owns its own `sqlite3.Connection` lifecycle
+(`contextlib.closing`, its own `timeout=10`, and -- for the eight that open a connection while
+constructing -- its own WAL/journal-mode setup immediately after opening). This only needed to
+stop being copy-pasted, not to grow a new abstraction layer around connection management.
+
+"Each" and not "every": `SQLiteValidationStore` sets `journal_mode` nowhere in its file. It
+opens no connection while constructing and none of its methods asks for WAL, so it inherits
+whatever mode another store already put on the shared `state.sqlite3` -- WAL is a sticky
+file-level property, not a per-connection one, which is why nothing has ever failed over it.
+Measured 2026-09-10: `grep -c "journal_mode\|WAL" storage/validation.py` returns 0.
 """
 
 import sqlite3

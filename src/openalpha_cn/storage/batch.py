@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS batch_task_items (
     PRIMARY KEY (batch_id, position)
 )
 """
-"""The per-item table's DDL, shared with `storage/migrations.py::split_batch_task_items`.
+"""The per-item table's DDL, shared with `storage/migrations.py::_split_batch_task_items`.
 
 One statement, one owner: the migration that back-fills this table and the constructor that
 creates it on a fresh database must not be able to disagree about its shape. Same reasoning
