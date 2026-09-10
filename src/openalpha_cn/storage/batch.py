@@ -114,26 +114,28 @@ class SQLiteBatchTaskStore:
         settled decision at a narrower and more arbitrary scope than the one that made it.
 
         What diverges starting the very next line is not incidental either: this store
-        creates three tables plus an index plus the shared `BATCH_TASK_ITEMS_DDL` in one
-        `executescript()`, because `BatchResearchTask` state is split precisely to make
-        per-item updates O(1) (see the module docstring's measurements). `SQLiteResearchMemory`
-        creates one table and one index for a flat, append-once ledger with its own conflict
-        rule. A base `__init__` usable by both would have to take the DDL as a constructor
-        argument to do anything beyond these four lines -- which relocates the duplication
-        into a parameter rather than removing it, and leaves both classes exactly as free to
-        change their own schemas independently as they are today. That independence is not
-        theoretical: this store's schema has already changed once, in the split-payload
-        migration the module docstring measures, without touching `SQLiteResearchMemory` at
-        all.
+        creates three tables plus an index across two calls: `batch_tasks`, `batch_events`,
+        and the index in one `executescript()`, then `batch_task_items` in a separate
+        `execute(BATCH_TASK_ITEMS_DDL)` call -- because `BatchResearchTask` state is split
+        precisely to make per-item updates O(1) (see the module docstring's measurements).
+        `SQLiteResearchMemory` creates one table and one index for a flat, append-once ledger
+        with its own conflict rule. A base `__init__` usable by both would have to take the DDL
+        as a constructor argument to do anything beyond these four lines -- which relocates the
+        duplication into a parameter rather than removing it, and leaves both classes exactly as
+        free to change their own schemas independently as they are today. That independence is
+        not theoretical: this store's schema has already changed once, in the split-payload
+        migration the module docstring measures, without touching `SQLiteResearchMemory` at all.
 
         The one cross-store guarantee here that *does* warrant one shared implementation --
         `PRAGMA foreign_keys` -- is tested once, by name, across all eight stores, in
         `tests/integration/storage/test_foreign_key_enforcement.py`. That is the shape a real
         fix takes: a registry and a parametrized behavioral test, not a two-class hierarchy
         built from whichever pair an AST diff happened to name. Revisit this note if a
-        *behavior* -- not matching text -- needs to run identically across construction; that
-        argues for extending `open_state_connection` or a sibling helper the way task 21 did,
-        covering every store that shares the prefix, not merely the two named here.
+        *behavior* -- not matching text -- needs to run identically across construction: a
+        construction-time migration hook or health check every store must run, or a ninth
+        store about to copy these same four lines. That argues for extending
+        `open_state_connection` or a sibling helper the way task 21 did, covering every
+        store that shares the prefix, not merely the two named here.
         """
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
