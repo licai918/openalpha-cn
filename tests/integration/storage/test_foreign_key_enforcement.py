@@ -20,6 +20,15 @@ was a coverage gap, not a live defect, and completing the registry was the whole
 `test_store_factories_registry_has_no_undiscovered_state_sqlite3_stores` below exists so the
 next store to arrive fails loudly, by class name, instead of leaving the count wrong a third
 time.
+
+A follow-up review of that guard found it was keyed on the wrong property -- "the class defines
+its own `_connect` and that method's bytecode names `open_state_connection`" -- which five
+synthetic store shapes could dodge four different ways (missing `_connect` entirely, an
+inherited one, one that delegates instead of calling `open_state_connection` itself, and one
+that lives in an undiscovered submodule). `_state_sqlite3_store_classes` below is now keyed on
+this package's own `SQLite`-prefixed naming convention instead, which none of those four shapes
+can dodge because none of them change the class's name; its docstring has the full account of
+the five attacks and exactly what the new property does and does not catch.
 """
 
 import importlib
@@ -60,51 +69,87 @@ _STORE_FACTORIES = {
     "SQLiteModelUsageStore": SQLiteModelUsageStore,
 }
 
+# Classes in `openalpha_cn.storage` whose name matches the `SQLite`-prefix naming convention
+# every real `state.sqlite3` store in this package uses, but that are deliberately not one of
+# the ten stores `_STORE_FACTORIES` tracks -- named individually, with a reason, so this dict
+# cannot become a silent catch-all the way the discovery predicate it patches around used to be.
+# Empty today: no `SQLite`-prefixed class in this package is anything other than a real
+# state.sqlite3 store (verified by `_state_sqlite3_store_classes` returning exactly the ten
+# `_STORE_FACTORIES` names above, no more and no fewer -- see task-5-report.md's follow-up
+# section). The dict stays here, empty, rather than not existing, so the day a `SQLite`-prefixed
+# non-store class is added, naming it here is the obvious next step instead of a new blind spot.
+_NOT_A_STATE_SQLITE3_STORE: dict[str, str] = {}
+
 
 def _state_sqlite3_store_classes() -> dict[str, type]:
-    """Discover, from the package itself, every class that opens `state.sqlite3` connections.
+    """Discover, from the package itself, every class that is a `state.sqlite3` store.
 
-    Task 5: `_STORE_FACTORIES` above is a hand-written list, and it had silently fallen behind
-    -- `SQLiteJobStore` (`jobs.py`) and `SQLiteModelUsageStore` (`models.py`) both opened
-    connections this file never checked. Re-typing a second hand-written list of class names
-    to check the first one against would only move the drift, not close it, so this instead
-    walks `openalpha_cn.storage`'s actual submodules with `pkgutil.iter_modules` -- the same
-    set `import`ing the package for real would see -- and inspects what it finds.
+    A follow-up review attacked this function's previous version -- "a class counts as a store
+    if it defines its own `_connect` in `__dict__` and that method's bytecode names
+    `open_state_connection`" -- with five synthetic store shapes placed as real files under
+    `openalpha_cn/storage/`, run through this function, and deleted again. Measured, in order:
 
-    A class counts as a "state.sqlite3 store" here if it defines its own `_connect` method
-    (not inherited) whose body calls `open_state_connection`, the one function every such
-    connection in this package is required to go through (`storage/connection.py`). That is
-    the property this whole test file exists to check, so keying discovery on it -- rather
-    than on some incidental shape -- is what makes the two outliers `storage/connection.py`'s
-    own docstring calls out come out right instead of getting misclassified:
+    1. A store with **no** `_connect` at all, opening `sqlite3.connect()` directly with foreign
+       keys left off -- the case that matters most, because it is exactly what
+       `storage/connection.py`'s own docstring warns this package is one copy-paste away from:
+       an author who never knew `_connect`/`open_state_connection` was a convention to follow
+       in the first place. Old result: **not discovered** -- nothing in `__dict__` named
+       `_connect` to inspect.
+    2. A store whose `_connect` is inherited from a base class rather than defined on the store
+       itself. Old result: **not discovered** -- `candidate.__dict__.get("_connect")` looks at
+       the class's own `__dict__` only, deliberately not the resolved (MRO-walked) attribute,
+       so the subclass came back empty-handed; only the *base* class showed up, under its own
+       name, when the base itself also happened to satisfy the check.
+    3. A store whose `_connect` calls `self._helper()` (or a module-level function), which is
+       what actually calls `open_state_connection`. Old result: **not discovered** --
+       `open_state_connection` never appears in `_connect`'s own `co_names`, only its helper's,
+       and the old check never looked past the one method.
+    4. A store defined in a submodule (`storage/foo/bar.py`) and re-exported from
+       `foo/__init__.py`. Old result: **not discovered** -- `pkgutil.iter_modules` lists only
+       one level of `storage/`'s own path, so `foo/bar.py` was never visited as a module in its
+       own right, and the re-export visible on `foo/__init__` was correctly filtered out by the
+       `candidate.__module__ != module.__name__` check below (it truthfully is not defined
+       there), leaving no module under which it was ever credited.
+    5. A store with `_connect = lambda self: open_state_connection(self.path)`. Old result:
+       **discovered correctly** -- a lambda is a plain function object with a `__code__`, found
+       in its own class's `__dict__`, so this shape was never the problem.
 
-    - `SQLiteValidationStore.__init__` opens **no** connection at all (its table is created
-      by a `storage/migrations.py` migration, not the constructor) -- a guard keyed on "the
-      constructor opens a connection" would miss it entirely.
-    - `SQLiteJobStore.__init__` does open one, but through a different idiom than the other
-      constructor-opening stores: a single `with closing(self._connect()) as connection:`
-      block ending in an explicit `connection.commit()`, rather than the
-      `with closing(self._connect()) as connection, connection:` double-context most others
-      use, whose own `__exit__` commits automatically -- a guard keyed on that specific shape
-      would miss it too.
+    The property this function is keyed on now does not read `_connect` at all, so none of the
+    first four holes apply to it: **the class's name starts with the literal prefix `SQLite`.**
+    Every one of the ten current stores is named that way (`SQLiteRunRepository`,
+    `SQLiteJobStore`, ...); every class in this package that is not one of the ten --
+    the file/DuckDB-backed stores (`FileExperimentStore`, `FilePredictionStore`,
+    `FileShortlistStore`, `ParquetEvidenceStore`) and every exception, dataclass or result type
+    the package also defines (`JobStoreError`, `RunRecoveryState`, `Migration`, ...) -- is not.
+    `_NOT_A_STATE_SQLITE3_STORE` above is the named, individual escape hatch for the day a
+    `SQLite`-prefixed class exists here that is deliberately not one of the ten; there is no
+    such class today, which is why the dict above is empty rather than pre-populated.
 
-    Both still define the one-line `_connect(self) -> sqlite3.Connection: return
-    open_state_connection(self.path)` every other store does, so keying on `_connect`'s body
-    finds all ten uniformly, `storage/product.py`'s two classes included (counting classes,
-    not files, is what makes those two show up separately rather than as one).
+    Told just as plainly, what this still does **not** catch: a future `state.sqlite3`-backed
+    store whose class is named without the `SQLite` prefix -- a plain `JobStore`, say, copied in
+    without following this package's own convention. None of the five attacks above exercise
+    that gap (all five keep the prefix, varying only how `_connect` is shaped), so re-keying
+    discovery this way closes every hole the review measured without claiming to close a sixth,
+    untested one. The convention itself is a matter for code review, not for this function.
+
+    Mechanically: walks `openalpha_cn.storage`'s actual submodules with `pkgutil.walk_packages`
+    -- recursive, unlike `iter_modules`, so attack 4's submodule is now visited as a module in
+    its own right -- and, per module, keeps a class only when `candidate.__module__` equals the
+    module being inspected, so a class merely imported into a module (a re-export, or an
+    unrelated import like `pathlib.Path`) is credited to the module that actually defines it,
+    never double-counted and never dropped between two modules that both decline to claim it.
     """
     discovered: dict[str, type] = {}
-    for module_info in pkgutil.iter_modules(
+    for module_info in pkgutil.walk_packages(
         storage_package.__path__, prefix=f"{storage_package.__name__}."
     ):
         module = importlib.import_module(module_info.name)
         for name, candidate in inspect.getmembers(module, inspect.isclass):
             if candidate.__module__ != module.__name__:
-                continue  # imported into this module, not defined in it -- already seen there
-            connect = candidate.__dict__.get("_connect")
-            if connect is None:
+                continue  # imported into this module, not defined in it -- credited elsewhere
+            if not name.startswith("SQLite"):
                 continue
-            if "open_state_connection" not in connect.__code__.co_names:
+            if name in _NOT_A_STATE_SQLITE3_STORE:
                 continue
             discovered[name] = candidate
     return discovered
@@ -120,6 +165,10 @@ def test_store_factories_registry_has_no_undiscovered_state_sqlite3_stores() -> 
     (`_state_sqlite3_store_classes`, above) and compares it against the registry, so an
     eleventh store missing from `_STORE_FACTORIES` fails *this* test by class name instead of
     leaving `test_every_store_connection_enforces_foreign_keys` silently short one case.
+
+    A follow-up review found the original version of `_state_sqlite3_store_classes` missed most
+    ways an eleventh store could actually be written; see that function's docstring for the
+    five measured attacks and the naming-convention property discovery is keyed on now instead.
     """
     missing = sorted(set(_state_sqlite3_store_classes()) - set(_STORE_FACTORIES))
     assert not missing, (
@@ -127,6 +176,36 @@ def test_store_factories_registry_has_no_undiscovered_state_sqlite3_stores() -> 
         "open_state_connection() but are missing from _STORE_FACTORIES above, so "
         f"test_every_store_connection_enforces_foreign_keys never checks them: {missing}. "
         "Add each one to _STORE_FACTORIES."
+    )
+
+
+def test_store_factories_registry_has_no_entries_that_are_no_longer_state_sqlite3_stores() -> None:
+    """Fail, naming names, if a `_STORE_FACTORIES` entry no longer matches a discovered class.
+
+    The complementary direction to the test above: `discovered - registered` (above) catches an
+    undiscovered store missing from the registry; `registered - discovered` (here) catches a
+    registry entry that no longer corresponds to anything `_state_sqlite3_store_classes` still
+    finds -- for example, a store renamed away from the `SQLite` prefix, or moved into
+    `_NOT_A_STATE_SQLITE3_STORE`, without its `_STORE_FACTORIES` entry being removed to match.
+
+    What this does **not** cover, on purpose, measured rather than assumed: a registered store
+    whose connection behavior regresses without its name changing. Temporarily editing
+    `SQLiteJobStore._connect` to bypass `open_state_connection` (a bare, foreign-keys-off
+    `sqlite3.connect()` instead) leaves both this test and the one above green, because naming
+    is the only property either direction of this comparison looks at now -- neither one
+    touches `_connect` at all. `test_every_store_connection_enforces_foreign_keys[SQLiteJobStore]`
+    is what catches that regression: it opens a real connection through the registered factory
+    and asserts `PRAGMA foreign_keys` itself, independent of how discovery works. Deleting a
+    store class outright is covered even more bluntly, and needs no test of its own: this file's
+    own module-level `from openalpha_cn.storage.jobs import SQLiteJobStore` (and the other nine)
+    fails at import/collection time, before any test in this file runs at all.
+    """
+    extra = sorted(set(_STORE_FACTORIES) - set(_state_sqlite3_store_classes()))
+    assert not extra, (
+        "these _STORE_FACTORIES entries no longer match any state.sqlite3 store class "
+        f"discovered in openalpha_cn.storage: {extra}. Either the class was renamed away from "
+        "the `SQLite` prefix, or it was added to _NOT_A_STATE_SQLITE3_STORE -- update "
+        "_STORE_FACTORIES (or the class) to match."
     )
 
 
