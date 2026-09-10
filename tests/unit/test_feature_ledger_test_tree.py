@@ -294,7 +294,7 @@ def test_the_real_ledger_has_no_unreviewed_or_unknown_rows() -> None:
 
 
 # --- the debt this module cannot check, held so it can only shrink (`V2-P5-038`) --------------
-UNVALIDATED_ACCEPTANCE_ROWS: Final[int] = 75
+UNVALIDATED_ACCEPTANCE_ROWS: Final[int] = 74
 """How many rows carry `acceptance_kind="legacy-prose"`. It may be lowered. It may not be raised.
 
 `V2-P5-038`. Every evidence path on every row is checked for existence by

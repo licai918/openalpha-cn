@@ -8,7 +8,7 @@
 - 当前真实完成: 180 (97.3%)
 - `UNREVIEWED=0`
 - `UNKNOWN=0`
-- `legacy_acceptance_rows=75` (历史散文验收、尚未绑定为可执行 pytest/CI 断言)
+- `legacy_acceptance_rows=74` (历史散文验收、尚未绑定为可执行 pytest/CI 断言)
 
 ## 状态分布
 
@@ -72,7 +72,7 @@
 | `OA-BT-005` | backtest | A-share execution constraints | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/backtest/execution.py#AShareExecutionPolicy` | `tests/unit/backtest/test_execution.py` | `legacy-prose` | `Forbidden buys and sells return explicit reasons.` |
 | `OA-BT-006` | backtest | A-share transaction costs | `NATIVE_COMPLETE` | `src/openalpha_cn/backtest/execution.py#CostSchedule` | `tests/unit/backtest/test_execution.py` | `legacy-prose` | `Buy and sell cost fixtures match configured rules.` |
 | `OA-BT-007` | backtest | Outcome validation | `NATIVE_COMPLETE` | `src/openalpha_cn/backtest/validation.py#OutcomeValidator` | `tests/unit/backtest/test_validation.py` | `pytest` | `tests/unit/backtest/test_validation.py::test_a_held_position_leaves_its_whole_selection_return_unexplained` |
-| `OA-BT-008` | backtest | Rule factor agent attribution | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/backtest/validation.py#OutcomeValidator` | `tests/unit/backtest/test_validation.py` | `legacy-prose` | `Attribution sum equals net active return.` |
+| `OA-BT-008` | backtest | Rule-category return attribution | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/backtest/validation.py#OutcomeValidator` | `tests/unit/backtest/test_validation.py` | `pytest` | `tests/unit/backtest/test_validation.py::test_no_contribution_is_a_fraction_of_the_net_active_return` |
 | `OA-BT-009` | backtest | Portfolio cash and holdings simulator | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/backtest/portfolio.py#PortfolioSimulator` | `tests/unit/backtest/test_portfolio.py;tests/integration/test_portfolio_interfaces.py` | `legacy-prose` | `Buy/sell transitions reconcile cash, FIFO basis, costs, T+1, and exposure limits.` |
 | `OA-IFACE-001` | interface | Versioned REST API | `NATIVE_COMPLETE` | `src/openalpha_cn/api/app.py#create_app` | `tests/integration/test_evidence_interfaces.py` | `legacy-prose` | `OpenAPI lists every v1 route and golden flow passes.` |
 | `OA-IFACE-002` | interface | Python SDK | `NATIVE_COMPLETE` | `src/openalpha_cn/sdk.py#OpenAlphaSDK` | `tests/integration/test_sdk_golden_path.py` | `legacy-prose` | `SDK completes the frozen golden path.` |

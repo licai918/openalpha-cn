@@ -35,7 +35,7 @@
   },
   "totals": {
     "all_features": 185,
-    "legacy_acceptance_rows": 75,
+    "legacy_acceptance_rows": 74,
     "true_completed_features": 180,
     "true_completion_rate_pct": 97.3,
     "unknown": 0,
