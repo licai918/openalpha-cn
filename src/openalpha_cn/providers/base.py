@@ -16,7 +16,8 @@ from pydantic import (
 )
 
 from openalpha_cn.domain._identity import stable_model_id
-from openalpha_cn.domain.json_value import canonical_json_bytes, freeze_json, thaw_json
+from openalpha_cn.domain.evidence import FreezePayloadMixin
+from openalpha_cn.domain.json_value import canonical_json_bytes, thaw_json
 from openalpha_cn.domain.panel_batch import ColumnarPanelBatch
 from openalpha_cn.domain.time import Timeline, ensure_aware, is_visible_at
 from openalpha_cn.domain.versioning import ContractVersions
@@ -79,8 +80,14 @@ class ProviderRequest(BaseModel):
         return ensure_aware(value)
 
 
-class ProviderRecord(BaseModel):
-    """One normalized provider row before evidence-specific interpretation."""
+class ProviderRecord(FreezePayloadMixin, BaseModel):
+    """One normalized provider row before evidence-specific interpretation.
+
+    Inherits `freeze_payload` from `FreezePayloadMixin` (`domain/evidence.py`) rather than
+    declaring its own: an AST comparison found this model's payload-freezing validator
+    byte-identical to `EvidenceSnapshot`'s, and `FreezePayloadMixin`'s own docstring records why
+    the shared implementation lives there and not here.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
 
@@ -91,12 +98,6 @@ class ProviderRecord(BaseModel):
     source_uri: str | None = Field(default=None, max_length=2048)
     summary: str = Field(min_length=1, max_length=4000)
     payload: JsonValue
-
-    @model_validator(mode="after")
-    def freeze_payload(self) -> Self:
-        canonical_json_bytes(self.payload)
-        object.__setattr__(self, "payload", freeze_json(self.payload))
-        return self
 
     @field_serializer("payload")
     def serialize_payload(self, value: JsonValue) -> JsonValue:

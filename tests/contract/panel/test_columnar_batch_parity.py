@@ -43,10 +43,10 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from openalpha_cn.domain import evidence as domain_evidence
 from openalpha_cn.domain import panel_batch as panel_batch_module
 from openalpha_cn.domain.panel_batch import ColumnarPanelBatch, PanelColumn, TimelineColumns
 from openalpha_cn.domain.time import Timeline
-from openalpha_cn.providers import base as providers_base
 from openalpha_cn.providers.base import ProviderBatch, ProviderRecord, ProviderRequest
 
 AS_OF = datetime(2024, 6, 28, 12, 0, tzinfo=UTC)
@@ -241,15 +241,29 @@ class _CountingJson:
 
 
 def _row_wise_serialization_count(availables: list[datetime], monkeypatch: object) -> int:
+    """Count `canonical_json_bytes` calls made while building a row-wise batch.
+
+    Patched on `domain_evidence` (`openalpha_cn.domain.evidence`), not on `providers_base` --
+    `ProviderRecord.freeze_payload` is inherited from `FreezePayloadMixin`, which is *defined*
+    in `domain/evidence.py` (the two byte-identical `freeze_payload` bodies `V2-P5-071` found
+    and left unmerged were later consolidated there; see that class's own docstring). A
+    function's free-variable lookups resolve against the module its `def` actually lives in,
+    never the class or module it is attached to by inheritance, so patching
+    `providers_base.canonical_json_bytes` -- correct before that merge -- silently stopped
+    intercepting anything the moment `freeze_payload` moved: `ProviderRecord` still calls the
+    same function, just via a name bound in `domain_evidence`'s globals instead of
+    `providers_base`'s. Measured directly: patching `providers_base` here made this test report
+    `[0, 0]` instead of a row-count-scaling series.
+    """
     calls = {"count": 0}
-    real = providers_base.canonical_json_bytes
+    real = domain_evidence.canonical_json_bytes
 
     def _counting(value: object) -> bytes:
         calls["count"] += 1
         return real(value)
 
     assert isinstance(monkeypatch, pytest.MonkeyPatch)
-    monkeypatch.setattr(providers_base, "canonical_json_bytes", _counting)
+    monkeypatch.setattr(domain_evidence, "canonical_json_bytes", _counting)
     _row_wise_rejects(availables, AS_OF)
     monkeypatch.undo()
     return calls["count"]

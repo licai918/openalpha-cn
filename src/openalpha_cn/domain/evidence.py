@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from hashlib import sha256
-from typing import Literal, Self
+from typing import Literal, Protocol
 
 from pydantic import (
     BaseModel,
@@ -46,7 +46,82 @@ class LookAheadViolationError(ValueError):
     """
 
 
-class EvidenceSnapshot(BaseModel):
+class _FrozenPayloadHost(Protocol):
+    """The shape `FreezePayloadMixin.freeze_payload` needs from whatever it is mixed into.
+
+    `payload` is a plain attribute here, not a read-only `@property` the way
+    `NoteLookupMixin`'s `_NotedRegistry.notes` (`domain/factor.py`) is. That distinction mattered
+    there because mypy treats a `@dataclass(frozen=True)` field as a read-only descriptor for
+    Protocol matching, and a plain Protocol variable demands a *settable* host -- a mismatch
+    strict mode reported as "expected settable variable, got read-only attribute". Neither host
+    here is a dataclass: both `ProviderRecord` and `EvidenceSnapshot` are Pydantic `BaseModel`s
+    with `model_config = ConfigDict(frozen=True, ...)`, and this project enables no
+    `pydantic.mypy` plugin (no `plugins` entry under `[tool.mypy]`), so mypy has no special
+    knowledge of Pydantic's own frozen config -- it sees `payload: JsonValue` on each host as an
+    ordinary settable class attribute, exactly as it would on an unfrozen one. A plain Protocol
+    variable therefore matches both hosts structurally. Verified with a standalone
+    `mypy --strict` probe before writing this, rather than assumed from `NoteLookupMixin`'s
+    precedent -- the two mixins' hosts are a different kind of class and the same shape does not
+    automatically transfer.
+    """
+
+    payload: JsonValue
+
+
+class FreezePayloadMixin:
+    """Supplies `freeze_payload` to a Pydantic model with a `payload: JsonValue` field.
+
+    `ProviderRecord.freeze_payload` (`providers/base.py`) and this class's `freeze_payload` were
+    two function bodies an AST comparison found byte-identical. `V2-P5-071` recorded the same
+    finding and merged nothing, noting only that "consolidating needs a mixin" -- this is that
+    mixin.
+
+    No `import-linter` contract forces the two hosts apart the way one forced `_board` and
+    `average_ranks` into two restatements pinned equal by a test instead of merged (see that
+    commit's own reasoning). `providers/base.py` already imports several names from
+    `openalpha_cn.domain` (`_identity`, `json_value`, `panel_batch`, `time`, `versioning`), and
+    `domain-purity` (`pyproject.toml`) only forbids the reverse -- `openalpha_cn.domain`
+    importing a sibling subpackage such as `openalpha_cn.providers`. Living here, in `domain`,
+    and imported by `providers/base.py` is therefore the one direction this contract allows;
+    defining it in `providers` and having this module import it back would break `domain-purity`
+    the instant `EvidenceSnapshot` needed it.
+
+    Placed in `domain/evidence.py` rather than a new module, mirroring where `NoteLookupMixin`
+    lives (`domain/factor.py`, alongside `FactorRegistry`, one of its own three hosts): one
+    shared method does not earn a module of its own when one of its two hosts already has a
+    home that satisfies the layering rule.
+
+    `__slots__ = ()` declares no state of its own -- the same reasoning `NoteLookupMixin` uses,
+    though it buys nothing for these two hosts specifically: `pydantic.BaseModel.__slots__`
+    already includes `"__dict__"`, so a Pydantic model carries one regardless of what is mixed
+    into it (checked directly: `BaseModel.__slots__` names it). Declared anyway because it costs
+    nothing and keeps this mixin safe if it is ever combined with a `__slots__`-based host
+    instead of a Pydantic one.
+    """
+
+    __slots__ = ()
+
+    @model_validator(mode="after")
+    def freeze_payload(self: _FrozenPayloadHost) -> _FrozenPayloadHost:
+        """Freeze `payload` into a deeply immutable structure, refusing one that cannot be
+        canonically serialized.
+
+        `mode="after"` validators are collected from a Pydantic model's whole MRO, so declaring
+        this once here registers it for both `ProviderRecord` and `EvidenceSnapshot` without
+        either subclass writing its own wrapper. `canonical_json_bytes(self.payload)` runs first
+        and its return value is discarded -- its only job here is to raise on a payload
+        `json.dumps(..., allow_nan=False)` cannot serialize (a `NaN`/`Infinity` float, or a
+        non-JSON-shaped value) before the line below commits to freezing it. The write goes
+        through `object.__setattr__` rather than plain assignment because both hosts are
+        `ConfigDict(frozen=True)`, which would otherwise reject the very mutation this validator
+        exists to perform.
+        """
+        canonical_json_bytes(self.payload)
+        object.__setattr__(self, "payload", freeze_json(self.payload))
+        return self
+
+
+class EvidenceSnapshot(FreezePayloadMixin, BaseModel):
     """One immutable evidence item with stable identity and four time clocks."""
 
     model_config = ConfigDict(
@@ -65,12 +140,6 @@ class EvidenceSnapshot(BaseModel):
     redistribution: Literal["allowed", "restricted", "unknown"]
     summary: str = Field(min_length=1, max_length=4000)
     payload: JsonValue
-
-    @model_validator(mode="after")
-    def freeze_payload(self) -> Self:
-        canonical_json_bytes(self.payload)
-        object.__setattr__(self, "payload", freeze_json(self.payload))
-        return self
 
     @field_serializer("payload")
     def serialize_payload(self, value: JsonValue) -> JsonValue:
