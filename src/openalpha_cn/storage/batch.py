@@ -97,19 +97,23 @@ class SQLiteBatchTaskStore:
         (`V2-P5-071`, `docs/specs/v2/openalpha-cn-v2-roadmap.md:413`, left for a later call:
         "storage 两个 3 行构造函数 ... 是否补由用户定"). Both classes were read in full, not
         just the matching lines, before answering. Verdict: incidental resemblance, not a
-        shared abstraction -- and not a close call, either. `portfolio.py`, `recovery.py`, one
-        of `product.py`'s two stores, and (one call away, through a same-purpose
-        `_initialize()`) `sqlite.py` and product.py's other store all open this same way.
-        Seven of this package's eight `state.sqlite3` stores share this exact sequence --
-        only `validation.py` defers connection-opening past construction -- so a base class
-        built from this pair would privilege two of seven identical call sites for no reason
-        specific to either one.
+        shared abstraction -- and not a close call, either. `models.py`, `portfolio.py`,
+        `recovery.py`, one of `product.py`'s two stores, and (one call away, through a
+        same-purpose `_initialize()`) `sqlite.py` and product.py's other store all open this
+        same way. Eight of this package's ten `state.sqlite3` stores share this exact
+        sequence -- one of the remaining two, `validation.py`, defers connection-opening past
+        construction entirely; the other, `jobs.py`, opens its connection with a related but
+        distinct idiom instead: a single context manager (`with closing(self._connect()) as
+        connection:`, not the two-context-manager `as connection, connection:` form the other
+        eight share) ending in a manual `commit()` -- so a base class built from this pair
+        would privilege two of eight identical call sites for no reason specific to either
+        one.
 
         `storage/connection.py` already reasoned about this exact boilerplate, for task 21,
         and stopped at extracting `open_state_connection()` -- the one line (`PRAGMA
         foreign_keys`) that must not silently drift by copy-paste -- deliberately leaving WAL
         setup and schema creation to each store, because every caller already owns its own
-        connection lifecycle. Reopening that with a base class here, for two of the seven
+        connection lifecycle. Reopening that with a base class here, for two of the eight
         stores sharing the prefix, would not be new information; it would be relitigating a
         settled decision at a narrower and more arbitrary scope than the one that made it.
 
@@ -127,15 +131,18 @@ class SQLiteBatchTaskStore:
         migration the module docstring measures, without touching `SQLiteResearchMemory` at all.
 
         The one cross-store guarantee here that *does* warrant one shared implementation --
-        `PRAGMA foreign_keys` -- is tested once, by name, across all eight stores, in
-        `tests/integration/storage/test_foreign_key_enforcement.py`. That is the shape a real
-        fix takes: a registry and a parametrized behavioral test, not a two-class hierarchy
-        built from whichever pair an AST diff happened to name. Revisit this note if a
-        *behavior* -- not matching text -- needs to run identically across construction: a
-        construction-time migration hook or health check every store must run, or a ninth
-        store about to copy these same four lines. That argues for extending
-        `open_state_connection` or a sibling helper the way task 21 did, covering every
-        store that shares the prefix, not merely the two named here.
+        `PRAGMA foreign_keys` -- is tested once, by name, in
+        `tests/integration/storage/test_foreign_key_enforcement.py`, whose `_STORE_FACTORIES`
+        registry covers eight of this package's ten stores today (not yet `models.py`'s or
+        `jobs.py`'s -- a coverage gap tracked as its own task, not this one). That is still
+        the shape a real fix takes: a registry and a parametrized behavioral test, not a
+        two-class hierarchy built from whichever pair an AST diff happened to name. Revisit
+        this note if a *behavior* -- not matching text -- needs to run identically across
+        construction: a construction-time migration hook or health check every store must
+        run, or a ninth store about to copy these same four lines and join the eight that
+        already share them. That argues for extending `open_state_connection` or a sibling
+        helper the way task 21 did, covering every store that shares the prefix, not merely
+        the two named here.
         """
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)

@@ -18,7 +18,7 @@ class SQLiteResearchMemory:
         The four lines through the WAL pragma are byte-identical to
         `SQLiteBatchTaskStore.__init__` (`storage/batch.py:91`) -- an AST duplicate sweep
         flagged the pair (`V2-P5-071`). See that method's docstring for the full reasoning;
-        short version: this is this package's shared store-opening idiom (seven of its eight
+        short version: this is this package's shared store-opening idiom (eight of its ten
         `state.sqlite3` stores use it), already reasoned about once in `storage/connection.py`
         (task 21) and deliberately left un-abstracted beyond `open_state_connection()`. What
         follows immediately -- one table, one index, for a flat, append-once ledger with its
