@@ -1270,6 +1270,119 @@ def test_no_source_file_raises_a_syntax_or_deprecation_warning_when_compiled() -
     )
 
 
+_MULTIPROCESSING_PRIMITIVE_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "Process",
+        "Queue",
+        "JoinableQueue",
+        "SimpleQueue",
+        "Pipe",
+        "Lock",
+        "RLock",
+        "Condition",
+        "Semaphore",
+        "BoundedSemaphore",
+        "Event",
+        "Barrier",
+        "Value",
+        "Array",
+        "Manager",
+        "Pool",
+    }
+)
+"""Every per-context constructor `multiprocessing.context.BaseContext` exposes.
+`Process`/`Queue`/`Barrier` are the three this repository builds today (see the test below),
+but the audit checks the whole family so a newly added primitive is not exempt merely for
+being new."""
+
+
+def _multiprocessing_call_sites_outside_an_explicit_context(tree: ast.AST) -> list[int]:
+    """1-indexed line numbers of every multiprocessing primitive constructor called
+    directly off the `multiprocessing` module (`multiprocessing.Process(...)`, however the
+    module is aliased) or off a name imported straight from `multiprocessing` or one of its
+    submodules (`from multiprocessing import Queue`, then a bare `Queue(...)`), instead of
+    off an explicit `multiprocessing.get_context(...)` object.
+
+    A name merely imported for a type annotation (`barrier: Barrier`, or `Queue[tuple[str,
+    str]]` in a signature) is a `Name`/`Subscript` used as an annotation, never a `Call`, so
+    it is never flagged by itself -- only an actual construction is. A call off any other
+    attribute base (`ctx.Process(...)`, or the chained
+    `multiprocessing.get_context("spawn").Process(...)`) is exactly the pattern this audit
+    requires and is never flagged.
+    """
+    module_aliases: set[str] = set()
+    direct_names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "multiprocessing":
+                    module_aliases.add(alias.asname or alias.name)
+        elif isinstance(node, ast.ImportFrom) and (
+            node.module == "multiprocessing"
+            or (node.module is not None and node.module.startswith("multiprocessing."))
+        ):
+            for alias in node.names:
+                if alias.name in _MULTIPROCESSING_PRIMITIVE_NAMES:
+                    direct_names.add(alias.asname or alias.name)
+
+    offending_lines: list[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        built_off_the_module = (
+            isinstance(func, ast.Attribute)
+            and func.attr in _MULTIPROCESSING_PRIMITIVE_NAMES
+            and isinstance(func.value, ast.Name)
+            and func.value.id in module_aliases
+        )
+        built_from_a_direct_import = isinstance(func, ast.Name) and func.id in direct_names
+        if built_off_the_module or built_from_a_direct_import:
+            offending_lines.append(node.lineno)
+    return offending_lines
+
+
+def test_every_multiprocessing_primitive_in_tests_uses_an_explicit_context() -> None:
+    """`V2-P5-063` already found this repository's tests treating "this machine" as an
+    invariant three times over (a hardcoded POSIX `PATH`, a hardcoded exception class name,
+    a wall clock calibrated on one laptop); `multiprocessing`'s own default *start method*
+    is exactly that same kind of default -- `fork` on Linux, `spawn` on macOS and Windows
+    today, and `spawn` everywhere from Python 3.14 -- so a `Process`/`Queue`/`Barrier` built
+    from the bare `multiprocessing` module (or a name imported straight from it) silently
+    inherits whichever one the machine running the test happens to default to.
+
+    That default-dependence was not hypothetical: on ubuntu-latest + Python 3.12, CI's
+    `fork` default raised a `DeprecationWarning` ("this process is multi-threaded, use of
+    fork() may lead to deadlocks in the child") from three tests, and separately made
+    `test_catalog_persists_across_a_fresh_process_after_the_writer_exits`'s "fresh process"
+    premise false there -- a forked child is a copy of its parent's memory, not a new
+    interpreter. Both are fixed by routing every construction in
+    `tests/integration/panel/test_panel_store.py` and
+    `tests/integration/storage/test_migrations.py` through one
+    `multiprocessing.get_context("spawn")` per file. This guard is not scoped to those two
+    files specifically: the next offender is exactly as likely to be a new file nobody
+    thought to point back here.
+
+    Mutation: change any `ctx.Process(...)`/`ctx.Queue()`/`ctx.Barrier(...)` call in either
+    file back to `multiprocessing.Process(...)`/`multiprocessing.Queue()`/
+    `multiprocessing.Barrier(...)` and this test must fail, naming that file and line.
+    """
+    offenders: list[str] = []
+    for path in [
+        *(ROOT / "src").rglob("*.py"),
+        *(ROOT / "tests").rglob("*.py"),
+        *(ROOT / "scripts").rglob("*.py"),
+    ]:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for line in _multiprocessing_call_sites_outside_an_explicit_context(tree):
+            offenders.append(f"{path.relative_to(ROOT).as_posix()}:{line}")
+
+    assert offenders == [], (
+        "multiprocessing primitive(s) built outside an explicit "
+        "multiprocessing.get_context(...) -- see this test's docstring: " + ", ".join(offenders)
+    )
+
+
 def test_quality_workflow_covers_supported_platforms_and_locked_dependencies() -> None:
     workflow = (ROOT / ".github" / "workflows" / "quality.yml").read_text(encoding="utf-8")
     pnpm_workspace = (ROOT / "web" / "pnpm-workspace.yaml").read_text(encoding="utf-8")

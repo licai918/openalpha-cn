@@ -188,6 +188,12 @@ def _assert_catalog_row_count(store: PanelStore, dataset: str, *, expected: int)
 # already established for `SQLiteRunRepository`'s own concurrency proof) to demonstrate the
 # catalog file genuinely persists, and that concurrent readers do not fail each other.
 
+ctx = multiprocessing.get_context("spawn")
+"""Builds every `Queue`/`Barrier`/`Process` below -- never the platform default (`fork` on
+Linux): a default-context `Queue` handed to a spawn-context `Process` can fail to pickle, and
+`fork` would make "real, separate interpreters" above untrue on Linux, since a forked child
+copies its parent's memory instead of launching a fresh interpreter."""
+
 
 def _writer_worker(root_str: str, queue: Queue[tuple[str, str]]) -> None:
     store = PanelStore(Path(root_str))
@@ -229,18 +235,16 @@ def test_catalog_persists_across_a_fresh_process_after_the_writer_exits(tmp_path
     opens the same `root` and reads the data back -- proof the catalog is a real file, not
     an in-memory structure scoped to one process's lifetime."""
     root = tmp_path / "panel"
-    queue: multiprocessing.Queue[tuple[str, str]] = multiprocessing.Queue()
-    writer = multiprocessing.Process(target=_writer_worker, args=(str(root), queue))
+    queue: multiprocessing.Queue[tuple[str, str]] = ctx.Queue()
+    writer = ctx.Process(target=_writer_worker, args=(str(root), queue))
     writer.start()
     writer.join(timeout=15)
     assert writer.exitcode == 0, f"writer process crashed: exitcode={writer.exitcode}"
     assert queue.get(timeout=5) == ("writer", "ok")
 
-    reader_queue: multiprocessing.Queue[tuple[str, str]] = multiprocessing.Queue()
-    barrier = multiprocessing.Barrier(1)
-    reader = multiprocessing.Process(
-        target=_reader_worker, args=(str(root), barrier, reader_queue, "reader")
-    )
+    reader_queue: multiprocessing.Queue[tuple[str, str]] = ctx.Queue()
+    barrier = ctx.Barrier(1)
+    reader = ctx.Process(target=_reader_worker, args=(str(root), barrier, reader_queue, "reader"))
     reader.start()
     reader.join(timeout=15)
     assert reader.exitcode == 0, f"reader process crashed: exitcode={reader.exitcode}"
@@ -258,12 +262,10 @@ def test_concurrent_read_only_queries_from_separate_processes_do_not_fail_each_o
     store = PanelStore(root)
     store.write_partition("prices_daily", 2024, _COLUMNS, _rows())
 
-    barrier = multiprocessing.Barrier(3)
-    queue: multiprocessing.Queue[tuple[str, str]] = multiprocessing.Queue()
+    barrier = ctx.Barrier(3)
+    queue: multiprocessing.Queue[tuple[str, str]] = ctx.Queue()
     readers = [
-        multiprocessing.Process(
-            target=_reader_worker, args=(str(root), barrier, queue, f"reader{i}")
-        )
+        ctx.Process(target=_reader_worker, args=(str(root), barrier, queue, f"reader{i}"))
         for i in range(3)
     ]
     for process in readers:

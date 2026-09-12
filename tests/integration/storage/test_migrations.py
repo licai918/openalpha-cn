@@ -823,10 +823,17 @@ _RACE_MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=_RACE_VERSION, name="race_baseline", apply=_race_sleepy_apply),
 )
 
+ctx = multiprocessing.get_context("spawn")
+"""Builds every `Barrier`/`Queue`/`Process` below -- never the platform default (`fork` on
+Linux): a default-context `Queue` handed to a spawn-context `Process` can fail to pickle, and
+`fork` would make `_race_worker`'s own "real, separate OS process" docstring untrue on Linux,
+since a forked child copies its parent's memory instead of launching a fresh interpreter."""
+
 
 def _race_worker(path_str: str, barrier, queue, now: datetime) -> None:
-    """Run in a real, separate OS process (multiprocessing's `spawn` start method on this
-    platform launches a fresh interpreter, not a thread) against the same database file
+    """Run in a real, separate OS process (built from an explicit
+    `multiprocessing.get_context("spawn")`, so it launches a fresh interpreter -- not a
+    thread, and not the platform-default `fork` on Linux) against the same database file
     as its sibling worker.
 
     `now` is `migration_now`'s already-*resolved* value, not the fixture itself: a spawned
@@ -869,12 +876,10 @@ def test_concurrent_run_migrations_does_not_report_a_false_failure(
     path = tmp_path / "state.sqlite3"
     with sqlite3.connect(path) as setup_connection:
         setup_connection.execute(_SCHEMA_MIGRATIONS_DDL)
-    barrier = multiprocessing.Barrier(2)
-    queue: multiprocessing.Queue = multiprocessing.Queue()
+    barrier = ctx.Barrier(2)
+    queue: multiprocessing.Queue = ctx.Queue()
     processes = [
-        multiprocessing.Process(
-            target=_race_worker, args=(str(path), barrier, queue, migration_now)
-        )
+        ctx.Process(target=_race_worker, args=(str(path), barrier, queue, migration_now))
         for _ in range(2)
     ]
     for process in processes:

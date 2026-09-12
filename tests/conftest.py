@@ -275,10 +275,16 @@ def bar() -> Callable[..., MarketBar]:
 # implied:
 #
 #   - It refuses `GUARDED_AUDIT_EVENTS` on `AF_INET`/`AF_INET6` sockets **in this process**. A
-#     child process (`subprocess`, `multiprocessing`) gets a fresh interpreter and is not
-#     guarded; `tests/unit/test_repository_assets.py` shells out to `git` and
-#     `tests/integration/storage/test_migrations.py` spawns a writer, and neither is a network
-#     call. `tests/e2e/` reaches Tushare exactly this way, through the real `openalpha` binary.
+#     child process gets a fresh interpreter and is not guarded: `subprocess` always launches
+#     one, and so does `multiprocessing` when it uses the `spawn` start method -- which this
+#     repository's own multiprocessing tests choose explicitly
+#     (`multiprocessing.get_context("spawn")`), never the platform default (`fork` on Linux,
+#     which copies the parent process instead of starting a fresh interpreter).
+#     `tests/unit/test_repository_assets.py` shells out to `git`, and
+#     `tests/integration/storage/test_migrations.py` and
+#     `tests/integration/panel/test_panel_store.py` each spawn worker processes this way; none
+#     of that is a network call. `tests/e2e/` reaches Tushare exactly this way, through the
+#     real `openalpha` binary.
 #   - It does not intercept name resolution. `getaddrinfo` alone transfers nothing, and refusing
 #     it would break `socket.getaddrinfo("localhost", ...)`-style calls inside the standard
 #     library that never go on to connect. This limit is unchanged by `V2-P4-105` and is not
