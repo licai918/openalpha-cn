@@ -8,7 +8,7 @@ the two files that produce it: `deploy/compose.yml` and the `Dockerfile`.
 three by nothing at all.
 
 This module is the static half: what the two files *declare*. It cannot see what Compose makes of
-the file (interpolation, override files, `extends`), the image the Dockerfile builds, or the
+the file (interpolation, another file passed with `-f`), the image the Dockerfile builds, or the
 kernel's view of the running process. That is the runtime half,
 `scripts/verify_compose_recovery.py`, which judges the container Compose actually starts -- from
 `/proc/<pid>/status`, `/proc/self/mounts`, real write attempts and the account files -- and which
@@ -26,10 +26,13 @@ not indented under their key. A rewrite of the file into a construct the reader 
 therefore turns these tests red rather than green, and
 `test_the_reader_refuses_what_it_does_not_understand` holds that.
 
-What the reader cannot do is interpret the file the way Compose does. It does not substitute
-`${VARIABLES}`, apply a `compose.override.yml`, or know that Compose also accepts `True` for `true`
-(this reader calls that a broken claim: a false alarm, never a false pass). The running container is
-the judge of those, and the runtime half judges it.
+What the reader cannot do is interpret the file the way Compose does, and each way that shows is
+one of three kinds. The two keys that make Compose merge in configuration from elsewhere, `extends`
+and `volumes_from`, are refused in the openalpha service the way a merge key is refused in the
+file (`test_a_service_that_takes_configuration_from_elsewhere_is_refused`). A value Compose accepts
+in another spelling -- `True` for `true`, or a `${VARIABLE}` standing for one -- fails its claim: a
+false alarm, not a false pass. And a second file handed to Compose alongside this one is not read
+here at all. The running container is the judge of all three, and the runtime half judges it.
 """
 
 from __future__ import annotations
@@ -169,11 +172,21 @@ def _read_compose(text: str) -> dict[str, object]:
     return document
 
 
+# Keys with which Compose fills the service in from somewhere this module does not read.
+_CONFIGURATION_FROM_ELSEWHERE = ("extends", "volumes_from")
+
+
 def _service(compose_text: str) -> dict[str, object]:
     services = _read_compose(compose_text).get("services")
     assert isinstance(services, dict), "deploy/compose.yml has no `services:` mapping"
     service = services.get("openalpha")
     assert isinstance(service, dict), "deploy/compose.yml has no `openalpha` service"
+    elsewhere = [key for key in _CONFIGURATION_FROM_ELSEWHERE if key in service]
+    if elsewhere:
+        raise ComposeSubsetError(
+            f"the openalpha service takes configuration from elsewhere ({', '.join(elsewhere)}), "
+            "which Compose merges in and this module cannot see"
+        )
     return service
 
 
@@ -354,6 +367,25 @@ def test_the_reader_refuses_what_it_does_not_understand(text: str) -> None:
     could read as the claim holding when it does not."""
     with pytest.raises(ComposeSubsetError):
         _read_compose(text)
+
+
+@pytest.mark.parametrize(
+    "addition",
+    [
+        pytest.param("    extends:\n      service: hardened\n", id="extends"),
+        pytest.param("    volumes_from:\n      - sidecar\n", id="volumes_from"),
+    ],
+)
+def test_a_service_that_takes_configuration_from_elsewhere_is_refused(addition: str) -> None:
+    """The D9 review measured both leaving every compose claim above holding while Compose's own
+    reading of the file changed: `extends` of a sibling that adds `cap_add`, and `volumes_from` a
+    second container's mounts. Like a merge key, each is refused rather than read around."""
+    mutant = _replaced("    init: true\n", "    init: true\n" + addition)(
+        COMPOSE_FILE.read_text(encoding="utf-8")
+    )
+
+    with pytest.raises(ComposeSubsetError):
+        _service(mutant)
 
 
 def test_container_delivery_has_persistence_and_recovery_verification() -> None:

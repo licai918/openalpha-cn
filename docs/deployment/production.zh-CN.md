@@ -130,7 +130,8 @@ docker compose -f deploy/compose.yml up -d --build --wait
 - 只读根文件系统；
 - `cap_drop: ALL`；
 - `no-new-privileges:true`；
-- 仅 `/data` 可持久写入，`/tmp` 为受限 tmpfs（64 MiB，`nosuid`、`nodev`、`noexec`）；
+- 仅 `/data` 可持久写入，`/tmp` 为受限 tmpfs（64 MiB，`nosuid`、`nodev`、`noexec`；后三项是 Docker
+  给每个 tmpfs 的默认挂载选项，compose 没有声明）；
 - CSP、禁止 iframe、MIME 嗅探、Referrer/Permissions/COOP/COEP/CORP/HSTS 响应头，按名**替换**而非追加，
   路由无法给同一个策略头再加一个值（`V2-P5-012`）；
 - 32 MiB 请求上限，两道闸：声明了 `Content-Length` 的在读体之前拒，未声明长度的（chunked）边收边计数、
@@ -142,9 +143,11 @@ docker compose -f deploy/compose.yml up -d --build --wait
 - `openalpha serve` 与容器 `CMD` 一样不发 `server:` 头（`V2-P5-012`）；
 - CORS 只允许本地 Vite 开发源，方法覆盖 `GET/HEAD/POST/PUT/PATCH/DELETE`，不带凭据（`V2-P5-011`）。
 
-前五条是容器本身的属性，各有两层核对。`tests/unit/test_container_security_posture.py` 核对
-`deploy/compose.yml` 与 `Dockerfile` 的声明：按结构读取而不是子串匹配，注释掉或挪走的键不算数，
-遇到读取器不认识的 YAML 写法直接报错，`Dockerfile` 除 `/data` 外不许声明任何卷。
+前五条是容器本身的属性，都在 Compose 实际起的容器里核对；除 `/tmp` 的 `nosuid`、`nodev`、`noexec`
+（compose 里没有它们，只有运行时看得到）外，也都核对文件里的声明。`tests/unit/test_container_security_posture.py`
+核对 `deploy/compose.yml` 与 `Dockerfile` 的声明：按结构读取而不是子串匹配，注释掉或挪走的键不算数，
+遇到读取器不认识的 YAML 写法、或服务用 `extends`/`volumes_from` 从别处拿配置，直接报错；
+`Dockerfile` 除 `/data` 外不许声明任何卷。
 `scripts/verify_compose_recovery.py`（CI 的 `container` 任务运行它）核对 Compose 实际起的容器：服务进程树
 与探针进程的 `/proc/<pid>/status`（四个 uid、四个 gid 都是 `10001`，五个能力集全为 0，`NoNewPrivs` 为 1），
 `/proc/self/mounts` 与真实写入（在 `/` 建文件得到 `EROFS`，`/data` 与 `/tmp` 可写，`/tmp` 带上述挂载选项；
