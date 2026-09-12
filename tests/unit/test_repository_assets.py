@@ -918,9 +918,9 @@ def _line_of_the_invalid_escape(source: str, exc: SyntaxError) -> int:
 
     Escalating that warning to an error and letting `compile()` raise it reports where
     the *enclosing string literal starts* (`exc.lineno`), not the line the backslash is
-    actually on, on Python 3.11 -- measured against this repository's own instance,
-    `storage/connection.py`'s `\\|` on line 34 inside a docstring that opens on line 1:
-    3.11's `exc.lineno` is 1, 3.12's is already the true 34.
+    actually on, on Python 3.11. Measured against this repository's own instance before
+    `19ed73b` fixed it -- `storage/connection.py`'s `\\|` on line 34, inside a docstring
+    that opens on line 1 -- 3.11's `exc.lineno` was 1 and 3.12's the true 34.
 
     Returns `_located_invalid_escape_line(source)` when that finds the offender, and
     `exc.lineno` otherwise. An earlier version matched `exc.msg`'s quoted text as a
@@ -941,31 +941,45 @@ def _line_of_the_invalid_escape(source: str, exc: SyntaxError) -> int:
 def _describe_where(source: str, exc: SyntaxError) -> str:
     """Where to send the reader for `exc`, and how sure that line is.
 
-    Three cases get three sentences: the offender was located and `compile()` agrees;
-    it was located on a different line from the one `compile()` reports (3.11 reports
-    where the enclosing literal begins); or `_located_invalid_escape_line` could not find
-    it, in which case `compile()`'s number is passed on as exactly that and marked
-    unconfirmed. The third exists because a review measured the alternative, confirmed
-    here on 3.11.14: `\\x` followed by non-hex on line 2 of a three-line literal makes
-    `compile()` report line 3 -- the closing quotes, neither the literal's start nor the
-    offender -- and a bare `line 3` read as confirmed.
+    Four cases, four wordings:
+
+    * the offender was located and `compile()` agrees -- `line N`;
+    * it was located on a different line from the one `compile()` reports (3.11 reports
+      where the enclosing literal begins) -- `line L (compile() itself reports line N,
+      ...)`;
+    * the error is about an escape but `_located_invalid_escape_line` could not find it
+      -- `compile()`'s number, passed on as exactly that and marked unconfirmed. Measured
+      on 3.11.14: `\\x` followed by non-hex on line 2 of a three-line literal makes
+      `compile()` report line 3, the closing quotes, and a bare `line 3` read as
+      confirmed;
+    * the error has nothing to do with escapes (an unmatched bracket, say) -- `line N`,
+      `compile()`'s own position for an ordinary syntax error, with no escape hypothesis
+      attached. A review found the previous wording pointed such an error at a malformed
+      escape that did not exist.
+
+    Whether an error is "about an escape" is read from `exc.msg`. Measured on 3.11.14,
+    every escape error tried says so ("invalid escape sequence '\\q'", "... truncated
+    \\xXX escape", "... malformed \\N character escape", "... invalid \\x escape at
+    position 0") and neither ordinary syntax error tried does ("unmatched ')'", "'(' was
+    never closed").
     """
     if exc.lineno is None:
         return "an unreported line (no SyntaxError position available)"
     located = _located_invalid_escape_line(source)
-    if located is None:
+    if located is not None:
+        if located != exc.lineno:
+            return (
+                f"line {located} (compile() itself reports line {exc.lineno}, "
+                "where the enclosing string literal begins)"
+            )
+        return f"line {located}"
+    if "escape" in (exc.msg or ""):
         return (
-            f"line {exc.lineno} as compile() reports it, unconfirmed: no invalid escape "
-            "sequence could be located in this file's string literals (a malformed \\x, "
-            "\\N, \\u or \\U escape, for one, raises its own SyntaxError at a line that can "
-            "differ from the offender's)"
+            f"line {exc.lineno} as compile() reports it, unconfirmed: the offending escape "
+            "could not be located more precisely (a malformed \\x, \\N, \\u or \\U escape "
+            "raises its own SyntaxError, at a line that can differ from the offender's)"
         )
-    if located != exc.lineno:
-        return (
-            f"line {located} (compile() itself reports line {exc.lineno}, "
-            "where the enclosing string literal begins)"
-        )
-    return f"line {located}"
+    return f"line {exc.lineno}"
 
 
 def _syntax_error_from_compiling(source: str) -> SyntaxError:
@@ -1118,14 +1132,29 @@ def test_the_line_helper_rejects_a_unicode_escape_inside_a_multi_line_bytes_lite
 
 
 def test_a_located_escape_is_described_at_its_own_line() -> None:
-    """`_describe_where` leads with the located line, whatever `compile()` reported."""
+    """`_describe_where` leads with the located line and quotes `compile()`'s own number.
+
+    Exact equality rather than a prefix: a review found that `.startswith("line 3")` let
+    through a wording that cites the located line twice -- "line 3 (compile() itself
+    reports line 3, ...)" -- and so contradicts itself. On 3.11 `compile()` reports line 1
+    here, where the literal begins; an interpreter that reports the true line 3 gets no
+    parenthetical at all.
+    """
     source = (
         '"""\nline with a valid escaped backslash then q: \\\\q\n'
         'real invalid escape is here: \\q\n"""\n'
     )
     exc = _syntax_error_from_compiling(source)
     assert _located_invalid_escape_line(source) == 3
-    assert _describe_where(source, exc).startswith("line 3")
+    expected = (
+        "line 3"
+        if exc.lineno == 3
+        else (
+            f"line 3 (compile() itself reports line {exc.lineno}, "
+            "where the enclosing string literal begins)"
+        )
+    )
+    assert _describe_where(source, exc) == expected
 
 
 def test_a_malformed_hex_escape_is_described_as_unlocated_rather_than_confirmed() -> None:
@@ -1135,14 +1164,30 @@ def test_a_malformed_hex_escape_is_described_as_unlocated_rather_than_confirmed(
     warning `_located_invalid_escape_line` locates, and that scan treats `\\x` as valid
     without checking the digits after it -- so it returns `None` here. Measured on
     3.11.14, `compile()` then reports line 3, the closing quotes: neither the literal's
-    start (1) nor the offender (2). Before this, the guard printed that as a bare
-    `line 3`, which reads as confirmed.
+    start (1) nor the offender (2). The line in the message is pinned to `exc.lineno`
+    itself, because a review found that asserting only the word "unconfirmed" let a
+    hard-coded, wrong line number through -- the very failure this message exists to
+    prevent.
     """
     source = 'x = """line one\nline two: \\xzz\n"""\n'
     exc = _syntax_error_from_compiling(source)
     assert _located_invalid_escape_line(source) is None
     assert _line_of_the_invalid_escape(source, exc) == exc.lineno
-    assert "unconfirmed" in _describe_where(source, exc)
+    assert _describe_where(source, exc).startswith(
+        f"line {exc.lineno} as compile() reports it, unconfirmed:"
+    )
+
+
+def test_a_syntax_error_unrelated_to_escapes_carries_no_escape_hypothesis() -> None:
+    """An ordinary syntax error is described at `compile()`'s own line, and nothing more.
+
+    A review fed unmatched brackets to the previous `_describe_where` and got the same
+    "unconfirmed ... a malformed \\x, \\N, \\u or \\U escape ..." sentence it prints for a
+    real malformed escape -- pointing the reader at an escape that does not exist.
+    """
+    for source in ("x = 1)\n", "x = (1, 2\n"):
+        exc = _syntax_error_from_compiling(source)
+        assert _describe_where(source, exc) == f"line {exc.lineno}"
 
 
 def test_line_of_the_invalid_escape_finds_an_offender_in_an_f_strings_literal_part() -> None:
