@@ -89,7 +89,7 @@ BATCH_BOUNDS: Final[dict[str, int]] = {
 def _integer_literals(relative: str) -> list[tuple[int, int]]:
     """Every integer literal in the module, as (value, line number). `True`/`False` excluded."""
     path = PACKAGE_ROOT / relative
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     return [
         (node.value, node.lineno)
         for node in ast.walk(tree)

@@ -513,7 +513,7 @@ def test_only_the_allowlisted_modules_take_the_visibility_filtered_read() -> Non
         path.relative_to(SOURCE).as_posix()
         for path in _source_modules()
         if path.relative_to(SOURCE).as_posix() not in FILTERED_READ_CALLERS | {"panel/store.py"}
-        and _calls(ast.parse(path.read_text(encoding="utf-8")), FILTERED_READ)
+        and _calls(ast.parse(path.read_text(encoding="utf-8"), filename=str(path)), FILTERED_READ)
     }
 
     assert offenders == set(), (
@@ -605,7 +605,9 @@ def test_the_allowlist_names_files_that_exist_and_actually_make_the_call() -> No
     for name in FILTERED_READ_CALLERS:
         path = SOURCE / name
         assert path.is_file(), f"FILTERED_READ_CALLERS names {name}, which does not exist"
-        assert _calls(ast.parse(path.read_text(encoding="utf-8")), FILTERED_READ), (
+        assert _calls(
+            ast.parse(path.read_text(encoding="utf-8"), filename=str(path)), FILTERED_READ
+        ), (
             f"FILTERED_READ_CALLERS names {name}, which no longer calls {FILTERED_READ}(); "
             "remove the entry rather than leaving the exemption standing"
         )

@@ -1059,7 +1059,7 @@ def _importlinter_imports() -> frozenset[tuple[str, str, tuple[str, ...]]]:
     found: set[tuple[str, str, tuple[str, ...]]] = set()
     for path in sorted(TESTS_ROOT.rglob("*.py")):
         relative = path.relative_to(ROOT).as_posix()
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))):
             if isinstance(node, ast.Import):
                 found.update(
                     (relative, alias.name, ())
@@ -1376,7 +1376,7 @@ def _order_intent_declarations() -> set[tuple[str, str]]:
     found: set[tuple[str, str]] = set()
     for suffix in ORDER_INTENT_SUFFIXES:
         for path in sorted(package_root.rglob(suffix)):
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             parts = path.relative_to(package_root).with_suffix("").parts
             module = ".".join(("openalpha_cn", *parts))
             declarations = _documented_declarations(tree)

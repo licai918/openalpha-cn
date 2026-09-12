@@ -370,7 +370,7 @@ def test_the_doctor_can_count_ambiguous_filings_at_an_instant_inside_the_year(
 
 
 def _module_functions(path: Path) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     return {
         node.name: node
         for node in ast.walk(tree)
@@ -379,7 +379,7 @@ def _module_functions(path: Path) -> dict[str, ast.FunctionDef | ast.AsyncFuncti
 
 
 def _called_names(path: Path) -> set[str]:
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     return {
         node.func.id
         for node in ast.walk(tree)

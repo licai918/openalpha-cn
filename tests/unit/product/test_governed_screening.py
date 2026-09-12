@@ -954,7 +954,7 @@ def executable_string_constants(path: Path) -> set[str]:
     function or trails an attribute -- identified by position rather than by content, which is
     `tests/unit/test_known_limitation_registries.py::_docstring_constants`' rule.
     """
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     docstrings: set[int] = set()
     for node in ast.walk(tree):
         body = getattr(node, "body", None)

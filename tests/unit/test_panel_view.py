@@ -417,7 +417,9 @@ def test_only_this_module_replaces_the_store_path_with_the_placeholder() -> None
     implementing = {
         path.relative_to(SOURCE_ROOT).as_posix()
         for path in sorted(SOURCE_ROOT.rglob("*.py"))
-        if _substitutes_the_placeholder(ast.parse(path.read_text(encoding="utf-8")))
+        if _substitutes_the_placeholder(
+            ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        )
     }
 
     assert implementing == {"panel_view.py"}

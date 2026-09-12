@@ -170,7 +170,7 @@ def test_only_the_store_itself_reads_a_partition_without_a_readiness_verdict() -
         path.relative_to(SOURCE).as_posix()
         for path in sorted(SOURCE.rglob("*.py"))
         if path.relative_to(SOURCE).as_posix() not in QUERY_CALLERS
-        and _calls(ast.parse(path.read_text(encoding="utf-8")))
+        and _calls(ast.parse(path.read_text(encoding="utf-8"), filename=str(path)))
     }
 
     assert offenders == set(), (
@@ -191,7 +191,7 @@ def test_the_allowlist_names_files_that_exist_and_actually_make_the_call() -> No
     for name in QUERY_CALLERS:
         path = SOURCE / name
         assert path.is_file(), f"QUERY_CALLERS names {name}, which does not exist"
-        assert _calls(ast.parse(path.read_text(encoding="utf-8"))), (
+        assert _calls(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))), (
             f"QUERY_CALLERS names {name}, which no longer calls any of {sorted(UNGATED_READS)}; "
             "remove the entry rather than leaving the exemption standing"
         )
