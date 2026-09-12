@@ -254,9 +254,12 @@ def _process_problems(pid: str, status: str) -> list[str]:
                 f"{process}: {key} is {' '.join(ids) or 'missing'}, not {expected} as its real, "
                 "effective, saved and filesystem id"
             )
-    extra = sorted(set(fields.get("Groups", "").split()) - {str(SERVICE_GID)})
-    if extra:
-        problems.append(f"{process}: Groups adds {' '.join(extra)} to {SERVICE_GID}")
+    groups = fields.get("Groups", "").split()
+    if set(groups) - {str(SERVICE_GID)}:
+        problems.append(
+            f"{process}: Groups is {' '.join(groups)}, and {SERVICE_GID} is the only group it "
+            "may carry"
+        )
     # All five sets, and `CapBnd` is the one that carries `cap_drop: ALL`: a non-root process's
     # effective and permitted sets are emptied by the kernel at exec whatever Compose drops.
     for key in _CAPABILITY_SETS:

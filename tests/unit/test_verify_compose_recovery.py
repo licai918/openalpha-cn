@@ -353,7 +353,10 @@ _NOLOGIN_ACCOUNT = "openalpha:x:10001:10001::/nonexistent:/usr/sbin/nologin"
         pytest.param(_in_process("7", Uid="10002\t10002\t10002\t10002"), "Uid", id="uid-10002"),
         pytest.param(_in_process("7", Uid="10001\t0\t0\t0"), "Uid", id="effective-uid-root"),
         pytest.param(_in_process("7", Gid="10002\t10002\t10002\t10002"), "Gid", id="gid-10002"),
-        pytest.param(_in_process("7", Groups="10001 100 "), "Groups", id="supplementary-group"),
+        pytest.param(
+            _in_process("7", Groups="10001 100 "), "Groups is 10001 100,", id="supplementary-group"
+        ),
+        pytest.param(_in_process("7", Groups="10002 "), "Groups is 10002,", id="other-group-only"),
         pytest.param(
             _in_process("7", CapBnd=_DOCKER_DEFAULT_BOUNDING_SET), "CapBnd", id="cap_drop-removed"
         ),
