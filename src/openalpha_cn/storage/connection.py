@@ -31,7 +31,7 @@ stop being copy-pasted, not to grow a new abstraction layer around connection ma
 opens no connection while constructing and none of its methods asks for WAL, so it inherits
 whatever mode another store already put on the shared `state.sqlite3` -- WAL is a sticky
 file-level property, not a per-connection one, which is why nothing has ever failed over it.
-Measured 2026-09-10: `grep -c "journal_mode\|WAL" storage/validation.py` returns 0.
+Measured 2026-09-10: `grep -c "journal_mode\\|WAL" storage/validation.py` returns 0.
 """
 
 import sqlite3

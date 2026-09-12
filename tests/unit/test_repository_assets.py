@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tomllib
+import warnings
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from types import ModuleType
@@ -782,6 +783,84 @@ def test_no_repository_path_is_compared_in_the_running_platforms_own_separator()
     )
 
     assert offenders == []
+
+
+_INVALID_ESCAPE_SEQUENCE_MESSAGE = re.compile(r"invalid escape sequence '(.+)'")
+
+
+def _line_of_the_invalid_escape(source: str, exc: SyntaxError) -> int:
+    """Best-effort real line number for an "invalid escape sequence" `SyntaxError`.
+
+    Escalating that warning to an error and letting `compile()` raise it reports where
+    the *enclosing string literal starts* (`exc.lineno`), not the line the backslash is
+    actually on, on Python 3.11 -- measured against this repository's own instance,
+    `storage/connection.py`'s `\\|` on line 34 inside a docstring that opens on line 1:
+    3.11's `exc.lineno` is 1, 3.12's is already the true 34. `exc.msg` names the exact
+    offending text ("invalid escape sequence '\\|'") on both versions, so scanning the
+    lines the token spans (`exc.lineno` through `exc.end_lineno`) for that literal
+    substring recovers line 34 on 3.11 too, without reimplementing CPython's own
+    escape-sequence grammar. Falls back to `exc.lineno` if a future CPython words the
+    message differently or the scan finds nothing.
+    """
+    match = _INVALID_ESCAPE_SEQUENCE_MESSAGE.search(exc.msg or "")
+    reported_line = exc.lineno or 1
+    if match is None:
+        return reported_line
+
+    needle = match.group(1)
+    lines = source.splitlines()
+    last_line = exc.end_lineno or len(lines)
+    for lineno in range(reported_line, last_line + 1):
+        if 1 <= lineno <= len(lines) and needle in lines[lineno - 1]:
+            return lineno
+    return reported_line
+
+
+def test_no_source_file_raises_a_syntax_or_deprecation_warning_when_compiled() -> None:
+    """CPython warns -- `DeprecationWarning` on 3.11, `SyntaxWarning` on 3.12 -- on
+    constructs it plans to reject outright in a future version, an invalid escape
+    sequence (e.g. an ordinary, non-raw `"...\\|..."`) among them. `pyproject.toml`
+    configures no `filterwarnings` at all (measured: `grep filterwarnings
+    pyproject.toml` finds nothing), so today neither category can ever fail a test on
+    its own. This test escalates both to errors itself, so the category this repository
+    cannot otherwise detect fails loudly here instead of waiting for the CPython version
+    that turns the warning into a hard `SyntaxError` and `import openalpha_cn...` stops
+    working outright.
+
+    Mutation: introduce an invalid escape sequence (e.g. `"\\d"`) into a non-raw string
+    anywhere under `src/`, `tests/` or `scripts/` and this test must fail, naming that
+    file and line.
+    """
+    offenders: list[str] = []
+    for path in [
+        *(ROOT / "src").rglob("*.py"),
+        *(ROOT / "tests").rglob("*.py"),
+        *(ROOT / "scripts").rglob("*.py"),
+    ]:
+        source = path.read_text(encoding="utf-8")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", SyntaxWarning)
+            warnings.simplefilter("error", DeprecationWarning)
+            try:
+                compile(source, str(path), "exec")
+            except (SyntaxError, Warning) as exc:
+                relative_path = path.relative_to(ROOT).as_posix()
+                if isinstance(exc, SyntaxError) and exc.lineno is not None:
+                    real_line = _line_of_the_invalid_escape(source, exc)
+                    where = (
+                        f"line {real_line} (compile() itself reports line {exc.lineno}, "
+                        "where the enclosing string literal begins)"
+                        if real_line != exc.lineno
+                        else f"line {exc.lineno}"
+                    )
+                else:
+                    where = "an unreported line (no SyntaxError position available)"
+                offenders.append(f"{relative_path}, {where}: {exc}")
+
+    assert offenders == [], (
+        "compiling with SyntaxWarning/DeprecationWarning escalated to errors failed for: "
+        + "; ".join(offenders)
+    )
 
 
 def test_quality_workflow_covers_supported_platforms_and_locked_dependencies() -> None:
