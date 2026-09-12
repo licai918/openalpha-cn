@@ -311,7 +311,7 @@ Proposed 版按可分发开源平台撰写。个人自用场景下，下列能�
 | S62 | Confidence intervals, effect sizes and sample counts | **IN** | |
 | S63 | Multiple-testing controls for broad factor and model searches | **IN** | **不可省** |
 | S64 | Performance segmented by industry, size, liquidity and market regime | **IN** | |
-| S65 | Rule, factor, model and Agent attribution reconciled to final result | **IN** | **替换 `validation.py:88-90` 占位实现** |
+| S65 | Rule, factor, model and Agent attribution reconciled to final result | **IN-降级** | 规则类目两项条款 IN；因子/模型/Agent 结构性从不产生而非被收窄，见 `KNOWN_ATTRIBUTION_LIMITATIONS`（`validation.py:49`） |
 | S66 | All validation artifacts linked to their `RunManifest` | **IN** | |
 
 ### 5.9 运维与安全（S67–S72）
