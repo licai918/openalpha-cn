@@ -55,8 +55,25 @@ ENV PATH="/app/.venv/bin:${PATH}" \
     NUMEXPR_NUM_THREADS=1
 
 WORKDIR /app
-RUN addgroup --system --gid 10001 openalpha \
-    && adduser --system --uid 10001 --ingroup openalpha --home /nonexistent openalpha \
+# The service account is a regular account, not a system one. `adduser --system` asks for a uid
+# at or below SYS_UID_MAX (999), and 10001 is chosen to sit far from that range, so the line this
+# replaces contradicted itself and useradd said so on every build ("uid 10001 is greater than
+# SYS_UID_MAX 999"). What --system supplied without saying so is spelled out instead: a home at
+# /nonexistent that is never created, a nologin shell, a password field that is a bare lock ('!',
+# no hash behind it), and neither of the two things /etc/login.defs gives every regular account
+# unless told otherwise -- password aging (the PASS_* keys) and a 65,536-id subordinate uid/gid
+# range for user namespaces (the SUB_* keys). Measured against the image the --system line built,
+# the openalpha entries of passwd, group, shadow, gshadow, subuid and subgid are identical. Debian's
+# `adduser` without --system is not the fix: it also puts the account in the `users` group, and
+# it has no way to decline the subordinate range.
+RUN groupadd --gid 10001 openalpha \
+    && useradd --uid 10001 --gid openalpha \
+        --home-dir /nonexistent --no-create-home \
+        --shell /usr/sbin/nologin \
+        --password '!' \
+        --key PASS_MIN_DAYS=-1 --key PASS_MAX_DAYS=-1 --key PASS_WARN_AGE=-1 \
+        --key SUB_UID_COUNT=0 --key SUB_GID_COUNT=0 \
+        openalpha \
     && mkdir /data \
     && chown openalpha:openalpha /data
 COPY --from=python-builder --chown=openalpha:openalpha /build/.venv /app/.venv
