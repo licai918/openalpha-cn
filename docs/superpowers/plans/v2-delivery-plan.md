@@ -65,6 +65,37 @@ PRD 的 S65 行标 `IN`，而同表 S54 已标降级——对齐。
 后两类改正；属实且有真覆盖测试的可顺带迁移。此前约 22 行已被 C4、C7 查过，可引用其报告快速复核。
 棘轮 `UNVALIDATED_ACCEPTANCE_ROWS` 按实测数更新，保持 `==`。
 
+### Task 9（D9）：部署文档声称的容器安全属性，逐条要有东西验证
+
+由收尾阶段查 CI 非 Python 腿发现。起因是 container 腿的一条 warning，查下去是一组没被验证的安全声称。
+
+**(a) 那条 warning。** `Dockerfile:58-59`：
+`RUN addgroup --system --gid 10001 openalpha && adduser --system --uid 10001 --ingroup openalpha --home /nonexistent openalpha`。
+`--system`（系统账户，uid 应 ≤ `SYS_UID_MAX` 999）与 `--uid 10001`（刻意避开宿主系统 uid 的安全做法）自相矛盾，
+CI 构建日志：`useradd warning: openalpha's uid 10001 is greater than SYS_UID_MAX 999`。`addgroup` 那一步未报警，
+但同样是"系统组 + 高 gid"的矛盾。runtime 基础镜像 `python:3.12-slim-bookworm`（Debian）。
+Debian 的 `adduser --system` 默认给 `/usr/sbin/nologin`、禁用密码、不建 home——**去掉 `--system` 时这些必须显式补回**，
+否则安全姿态会悄悄退化。必须保持不变：uid 10001、gid 10001、home `/nonexistent`（不创建）、shell nologin、无密码。
+
+**(b) 文档声称、却没有任何东西验证的属性。** `docs/deployment/production.zh-CN.md` §8「安全边界」：
+| 声称 | `deploy/compose.yml` 里有 | 有测试钉住 |
+|---|---|---|
+| UID/GID `10001` | Dockerfile `USER 10001:10001`（compose 无 `user:`） | **无** |
+| 只读根文件系统 | `read_only: true`（:11） | 子串断言（`test_repository_assets.py:539`） |
+| `cap_drop: ALL` | ✓（:57-58） | **无** |
+| `no-new-privileges:true` | ✓（:59-60） | 子串断言（:540） |
+| 仅 `/data` 可写、`/tmp` 受限 tmpfs | ✓（:39、:55-56） | `/data` 有（:538），**tmpfs 无** |
+全仓库搜 `10001`、`cap_drop`、`tmpfs`、`security_opt`：tests/ 与 scripts/ 里零命中（`10001` 唯一命中是无关的 `min_cross_section=10001`）。
+`scripts/verify_compose_recovery.py`（CI container 任务的唯一运行时验证）**不检查用户身份**。
+
+**现有断言的弱点**：`"read_only: true" in compose` 是子串匹配——注释掉写成 `# read_only: true` 或挪到别处都照绿。
+要么解析 YAML，要么如实写明这层局限；由实现者权衡并说明。
+
+**TDD 顺序**：先写刻画测试钉住现有姿态（今天应为绿）→ 变异确认它会红（uid 改 10002、删 `cap_drop`）→
+再去掉 `--system` 矛盾（刻画测试保持绿、构建日志里 warning 消失）。
+运行时验证（真实镜像上 `id -u`/`id -g` = 10001、根文件系统不可写、`/proc/self/status` 的 `CapEff` 为 0）应放进
+`verify_compose_recovery.py`：它通过 `_compose()` 驱动唯一服务 `openalpha`。本地 Docker 29.2.1 可用、75 GiB 空闲，可本地构建前后对比。
+
 ## 不在本批（需要你决定）
 - `TERMINAL_STATUSES` 缺一个表示「已窄化」的值——状态表的设计决定，不是一行能顺手发明的。
 - FK 守卫三条残留（等量替换、别名×不守命名约定相乘、九个 store 只断言 pragma 读回值）——已具名记录，风险低。
