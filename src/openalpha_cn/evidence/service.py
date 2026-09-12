@@ -93,6 +93,15 @@ class SerializedEvidenceMismatchError(ValueError):
     (`api/app.py`) can hand every structural fault to pydantic and let exactly this one through.
     Before the type existed that validator had one `except ValueError` for both, and a tampered
     item reached the client as `extra_forbidden` rather than as this refusal.
+
+    The message names the offending item's own position in the array, e.g. `"evidence[1]: ..."`
+    (`D10` review Minor-1, `.superpowers/sdd/d10-review.md`). Before that report, a mismatch was
+    reported with no index, and -- worse -- an unrelated structural fault sitting *earlier* in
+    the same array could hide the mismatch entirely: `parse_serialized_evidence` built one item
+    at a time and stopped at the first fault of *either* kind, so a structural fault at index 0
+    meant the tampered item at index 1 was never even reached, and the caller fell back to
+    `EvidenceSnapshot`'s own `extra="forbid"`, reporting `extra_forbidden` instead of this
+    refusal. See `parse_serialized_evidence` for how that is now avoided.
     """
 
 
@@ -100,29 +109,56 @@ def parse_serialized_evidence(value: object) -> tuple[EvidenceSnapshot, ...]:
     """Verify serialized IDs/hashes and return trusted evidence models.
 
     A supplied `evidence_id` or `content_hash` that does not match the recomputed one raises
-    `SerializedEvidenceMismatchError`; anything structural raises a plain `ValueError`, pydantic's
-    `ValidationError` included.
+    `SerializedEvidenceMismatchError`, naming the item's own index in `value`; anything
+    structural raises a plain `ValueError`, pydantic's `ValidationError` included.
+
+    A mismatch is found **wherever it sits**, scanning left to right: an item that fails to
+    validate structurally is remembered (only the first such fault) and skipped rather than
+    raised on the spot, so a later item is still reached and checked for a mismatch. Only if the
+    whole array turns up no mismatch is that remembered structural fault finally raised -- at
+    which point it is exactly the fault `EvidenceSnapshot.model_validate` itself raised, so a
+    caller falling back to field validation on the untouched body (`ResearchApiRequest
+    .verify_serialized_evidence`, `api/app.py`) sees the same thing it always has. A mismatch
+    found anywhere always wins over a structural fault found anywhere else, and the first
+    mismatch found (lowest index) is the one reported -- consistent with this repository's other
+    per-array refusals (`research_result_io.research_refusal_detail` also reports only the first
+    faulty record).
+
+    One item can still defeat this: a structurally invalid item's `evidence_id`/`content_hash`
+    cannot be checked at all, because computing what they *should* be needs a successfully
+    validated model. An item that is both edited and missing a required field is therefore
+    reported structurally, not as a mismatch, exactly as before this change.
     """
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
         raise ValueError("serialized evidence must be an array")
     verified: list[EvidenceSnapshot] = []
-    for raw in value:
+    structural_fault: ValueError | None = None
+    for index, raw in enumerate(value):
         if isinstance(raw, EvidenceSnapshot):
             verified.append(raw)
             continue
         if not isinstance(raw, Mapping):
-            raise ValueError("serialized evidence items must be objects")
+            if structural_fault is None:
+                structural_fault = ValueError("serialized evidence items must be objects")
+            continue
         clean = dict(raw)
         supplied_id = clean.pop("evidence_id", None)
         supplied_hash = clean.pop("content_hash", None)
-        item = EvidenceSnapshot.model_validate(clean)
+        try:
+            item = EvidenceSnapshot.model_validate(clean)
+        except ValueError as error:
+            if structural_fault is None:
+                structural_fault = error
+            continue
         if supplied_id is not None and supplied_id != item.evidence_id:
             raise SerializedEvidenceMismatchError(
-                "serialized evidence_id does not match evidence content"
+                f"evidence[{index}]: serialized evidence_id does not match evidence content"
             )
         if supplied_hash is not None and supplied_hash != item.content_hash:
             raise SerializedEvidenceMismatchError(
-                "serialized content_hash does not match evidence content"
+                f"evidence[{index}]: serialized content_hash does not match evidence content"
             )
         verified.append(item)
+    if structural_fault is not None:
+        raise structural_fault
     return tuple(verified)

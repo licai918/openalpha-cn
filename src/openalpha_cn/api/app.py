@@ -219,16 +219,22 @@ class ResearchApiRequest(ResearchRunRequest):
 
         The mismatch is re-raised, so pydantic reports it as one `value_error` at
         `["body", "evidence"]` carrying `parse_serialized_evidence`'s own sentence -- the one
-        `openalpha research run` prints. This was one `except ValueError: return value`, and
-        pydantic's `ValidationError` is itself a `ValueError`, so the one clause caught both: a
-        tampered item fell back to field validation and was refused only as `extra_forbidden` on
-        the two fields this service writes itself.
+        `openalpha research run` prints, now naming the offending item's own index within
+        `evidence` (`"evidence[1]: ..."`, `D10` review Minor-1). This was one
+        `except ValueError: return value`, and pydantic's `ValidationError` is itself a
+        `ValueError`, so the one clause caught both: a tampered item fell back to field
+        validation and was refused only as `extra_forbidden` on the two fields this service
+        writes itself.
 
-        Every other fault still falls back, because the field's own validation addresses it --
-        `["body", "evidence", 1, "summary"]` -- where the parser, building one item at a time,
-        has lost the index. The body goes back unchanged, so an item still carrying an
-        identifier meets `EvidenceSnapshot`'s `extra="forbid"` there: it can get in only through
-        the check above, which is why the fallback does not strip them either.
+        Every *other* fault still falls back, because the field's own validation addresses it --
+        `["body", "evidence", 1, "summary"]` -- with the index pydantic's own per-item tuple
+        validation supplies. `parse_serialized_evidence` itself no longer loses that index for a
+        structural fault the way it once did for everything: it now remembers the first one and
+        keeps scanning, so a mismatch elsewhere in the same array is still found and still wins
+        over it -- only when the whole array has no mismatch does the remembered structural fault
+        reach here to trigger this fallback. The body goes back unchanged on fallback, so an item
+        still carrying an identifier meets `EvidenceSnapshot`'s `extra="forbid"` there: it can get
+        in only through the check above, which is why the fallback does not strip them either.
         """
         try:
             return parse_serialized_evidence(value)

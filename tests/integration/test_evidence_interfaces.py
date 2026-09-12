@@ -476,7 +476,7 @@ def test_the_rest_research_route_recomputes_supplied_identifiers_before_acceptin
     assert [(fault["type"], fault["loc"]) for fault in faults] == [
         ("value_error", ["body", "evidence"])
     ], faults
-    assert faults[0]["msg"].removeprefix("Value error, ") == refusal
+    assert faults[0]["msg"].removeprefix("Value error, ") == f"evidence[0]: {refusal}"
     assert client.get("/api/v1/runs/tampered-round-trip/recovery").status_code == 404
 
 
@@ -581,10 +581,13 @@ def test_every_face_refuses_one_tampered_payload_and_those_that_verify_it_say_so
         (fault["loc"], fault["msg"].removeprefix("Value error, "))
         for fault in batch.json()["detail"]
     ]
-    assert said_by_run == [(["body", "evidence"], CONTENT_HASH_REFUSAL)], said_by_run
-    assert (["body", "requests", 0, "evidence"], CONTENT_HASH_REFUSAL) in said_by_batch, (
-        said_by_batch
+    assert said_by_run == [(["body", "evidence"], f"evidence[0]: {CONTENT_HASH_REFUSAL}")], (
+        said_by_run
     )
+    assert (
+        ["body", "requests", 0, "evidence"],
+        f"evidence[0]: {CONTENT_HASH_REFUSAL}",
+    ) in said_by_batch, said_by_batch
 
     evidence_path = tmp_path / "evidence.json"
     evidence_path.write_text(json.dumps({"items": [tampered]}), encoding="utf-8")
@@ -618,3 +621,83 @@ def test_every_face_refuses_one_tampered_payload_and_those_that_verify_it_say_so
     assert {error["loc"][0] for error in typed_door.value.errors()} == {"evidence"}
     with pytest.raises(ValueError, match=re.escape(CONTENT_HASH_REFUSAL)):
         parse_serialized_evidence([tampered])
+
+
+# --- Minor-1 (`D10` review, `.superpowers/sdd/d10-review.md`): order independence ---------------
+
+
+def test_a_structural_fault_before_a_tampered_item_no_longer_hides_the_mismatch(
+    tmp_path: Path, metadata: ProviderMetadata, frozen_now: datetime
+) -> None:
+    """`parse_serialized_evidence` builds one item at a time and used to stop at the first
+    fault it met, whatever kind it was. A structurally invalid item ahead of a tampered one
+    meant the *structural* fault was raised first, `ResearchApiRequest.verify_serialized_evidence`
+    fell back to field validation on the untouched body, and the tampered item -- now judged only
+    by `EvidenceSnapshot`'s own `extra="forbid"` -- was reported as `extra_forbidden` on its
+    `evidence_id`/`content_hash` instead of by the mismatch sentence. That is exactly the
+    fallback `OA-EVID-003` exists to close off; it was only reopened when a structural fault
+    happened to sit earlier in the array.
+
+    `[missing-summary item, tampered item]` must still find the mismatch and report only it,
+    naming the tampered item's own position in `evidence` (`1`), and must not also report the
+    missing-summary item as `extra_forbidden` or anything else.
+    """
+    source = tmp_path / "events.json"
+    write_source(source)
+    client = TestClient(create_app(runtime_dir=tmp_path / "runtime", clock=lambda: frozen_now))
+    [item] = _built_items(client, source, metadata, frozen_now)
+    unsummarised = {key: value for key, value in item.items() if key != "summary"}
+    tampered = _edit_the_content_hash(item)
+
+    response = client.post(
+        "/api/v1/research/run",
+        json=_research_body(
+            [unsummarised, tampered], run_id="structural-then-tampered", as_of=frozen_now
+        ),
+    )
+
+    assert response.status_code == 422, response.text
+    faults = response.json()["detail"]
+    assert isinstance(faults, list), faults
+    assert [(fault["type"], fault["loc"]) for fault in faults] == [
+        ("value_error", ["body", "evidence"])
+    ], faults
+    assert (
+        faults[0]["msg"].removeprefix("Value error, ") == f"evidence[1]: {CONTENT_HASH_REFUSAL}"
+    ), faults
+    assert client.get("/api/v1/runs/structural-then-tampered/recovery").status_code == 404
+
+
+def test_a_tampered_item_before_a_structural_fault_now_names_its_own_index(
+    tmp_path: Path, metadata: ProviderMetadata, frozen_now: datetime
+) -> None:
+    """The reverse order already reported the mismatch sentence -- the tampered item is the
+    first one `parse_serialized_evidence` meets, so the structural fault behind it was never
+    reached -- but the sentence named no index. `[tampered item, missing-summary item]` must
+    keep reporting exactly the mismatch, now naming the tampered item's own index (`0`), so a
+    caller does not have to guess which of several items was the one that failed to verify.
+    """
+    source = tmp_path / "events.json"
+    write_source(source)
+    client = TestClient(create_app(runtime_dir=tmp_path / "runtime", clock=lambda: frozen_now))
+    [item] = _built_items(client, source, metadata, frozen_now)
+    unsummarised = {key: value for key, value in item.items() if key != "summary"}
+    tampered = _edit_the_content_hash(item)
+
+    response = client.post(
+        "/api/v1/research/run",
+        json=_research_body(
+            [tampered, unsummarised], run_id="tampered-then-structural", as_of=frozen_now
+        ),
+    )
+
+    assert response.status_code == 422, response.text
+    faults = response.json()["detail"]
+    assert isinstance(faults, list), faults
+    assert [(fault["type"], fault["loc"]) for fault in faults] == [
+        ("value_error", ["body", "evidence"])
+    ], faults
+    assert (
+        faults[0]["msg"].removeprefix("Value error, ") == f"evidence[0]: {CONTENT_HASH_REFUSAL}"
+    ), faults
+    assert client.get("/api/v1/runs/tampered-then-structural/recovery").status_code == 404

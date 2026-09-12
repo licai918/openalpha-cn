@@ -148,13 +148,29 @@ class EvidenceSnapshot(FreezePayloadMixin, BaseModel):
     @computed_field(return_type=str)  # type: ignore[prop-decorator]
     @property
     def content_hash(self) -> str:
-        """Return the SHA-256 digest of the canonical structured payload."""
+        """Return the SHA-256 digest of the canonical `payload` -- covers `payload` alone.
+
+        Every other field on this model -- `subject`, `kind`, `source_id`, `source_uri`,
+        `source_license`, `redistribution`, `summary`, `schema_version`, and all four
+        `timeline` clocks -- can change without moving this digest. `evidence_id` below folds
+        this digest into a wider (but still partial) identity.
+        """
         return sha256(canonical_json_bytes(self.payload)).hexdigest()
 
     @computed_field(return_type=str)  # type: ignore[prop-decorator]
     @property
     def evidence_id(self) -> str:
-        """Return a stable evidence ID derived from provenance and content."""
+        """Return a stable evidence ID over `subject`, `kind`, `source_id`,
+        `timeline.available_time`, and `content_hash` -- so, transitively, `payload` too.
+
+        Not covered, and so free to change without moving this ID: `schema_version` (a fixed
+        literal today, so this is moot), `summary`, `source_uri`, `source_license`,
+        `redistribution`, and `timeline.event_time`/`ingested_time`/`revision_time`. A caller
+        that recomputes and compares this ID -- as `parse_serialized_evidence`
+        (`evidence/service.py`) does for a serialized snapshot handed back to the REST research
+        routes -- will not notice an edit confined to those fields; see `docs/api/http.md` for
+        what that means there.
+        """
         identity = "|".join(
             [
                 self.subject,

@@ -38,6 +38,62 @@ filesystem path. Local file access remains a CLI responsibility.
   `["body", "evidence", 1, "payload", "quality_flags", 1]` (`V2-P4-101`). It answered
   `500 text/plain` until that issue: `EvidenceSnapshot.payload` is an unschema'd `JsonValue`, so
   pydantic cannot check the flag and the refusal is raised further in, by `agents/baseline.py`.
+
+  **Serialized evidence can be handed straight back to `evidence`** (`OA-EVID-003`). What
+  `POST /api/v1/evidence/build` returns — each item still carrying its own `evidence_id` and
+  `content_hash` — is exactly what this field accepts, and both identifiers are recomputed from
+  the rest of the item and compared to what was sent, rather than trusted. An item with **no**
+  identifiers at all is accepted too: there is nothing to compare, and either way both are
+  derived from the item's own content, which is what content-addressing means rather than a gap
+  in the check. `POST /api/v1/research/batches` verifies the same way, because every entry in
+  its `requests` array is this same request model.
+
+  A mismatch is `422` with a **field-error list**, one entry, `type` `value_error`: `loc` is
+  `["body", "evidence"]` on this route and `["body", "requests", i, "evidence"]` on
+  `/research/batches` for its `i`-th request, and `msg` names the item and the reason —
+  `Value error, evidence[1]: serialized content_hash does not match evidence content` (or the
+  `evidence_id` form), `1` being that item's own position inside `evidence`, never the
+  request's. No run starts:
+
+  ```json
+  {"detail": [{
+    "type": "value_error",
+    "loc": ["body", "evidence"],
+    "msg": "Value error, evidence[1]: serialized content_hash does not match evidence content",
+    "input": "<list of 2 elided>",
+    "ctx": {"error": {}}
+  }]}
+  ```
+
+  The check is done by hand, ahead of pydantic's own per-item validation, so **only the first
+  mismatch is reported**, scanning left to right — and it is found wherever it sits, even behind
+  an unrelated structural fault earlier in the same array (a missing field, an extra one, the
+  wrong type). That used to hide the mismatch behind whichever fault came first: a structurally
+  broken item ahead of a tampered one made this check stop before ever reaching the tampered
+  item, which then fell back to `EvidenceSnapshot`'s own `extra="forbid"` and was reported as
+  `extra_forbidden` rather than by this sentence. Absent any mismatch anywhere in the array, a
+  structural fault keeps its own `["body", "evidence", j, ...]` address, from pydantic's own
+  validation of the untouched body — which is also where an item still carrying an identifier
+  meets that same `extra="forbid"`, since nothing strips one out except the check above.
+
+  **What the two identifiers actually cover** (`domain/evidence.py`). `evidence_id` is derived
+  from `subject`, `kind`, `source_id`, `timeline.available_time`, and `content_hash` — so,
+  transitively, `payload` too. `content_hash` covers `payload` alone. **Neither covers**
+  `summary`, `source_uri`, `source_license`, `redistribution`, or
+  `timeline.event_time`/`ingested_time`/`revision_time`. A client that edits any of those and
+  sends both identifiers back exactly as it received them is accepted: recomputing from the
+  edited item truly does reproduce the same values, because those fields were never part of
+  either identity. That is a property of the identity scheme, not a gap in this check, and
+  changing which fields the scheme covers is a separate decision this fix does not make.
+
+  `docs/api/schemas/evidence-snapshot-v1.json` marks both fields `readOnly`. That still holds —
+  a client never computes either one, and nothing here asks it to — but it is not a statement
+  that this pair of routes refuses to see them on input. They are the one place a client
+  legitimately sends a document carrying fields it did not compute, because what it sends back
+  is a document *this service* already emitted, and re-deriving both from the rest of it is
+  exactly how that copy is checked for tampering. Outside these two routes, `EvidenceSnapshot`
+  keeps its own `extra="forbid"` with no such check: `POST /api/v1/backtests/replay`'s corpus,
+  for instance, refuses a serialized item that still carries either field as `extra_forbidden`.
 - `POST /api/v1/research/batches` queues bounded concurrent research;
   `GET /api/v1/research/batches/{batch_id}` and `/events` expose durable state
   and progress; `/cancel` and `/retry` are explicit control operations. A failed item's
