@@ -824,17 +824,18 @@ _RACE_MIGRATIONS: tuple[Migration, ...] = (
 )
 
 ctx = multiprocessing.get_context("spawn")
-"""Builds every `Barrier`/`Queue`/`Process` below -- never the platform default (`fork` on
-Linux): a default-context `Queue` handed to a spawn-context `Process` can fail to pickle, and
-`fork` would make `_race_worker`'s own "real, separate OS process" docstring untrue on Linux,
-since a forked child copies its parent's memory instead of launching a fresh interpreter."""
+"""Builds every `Barrier`/`Queue`/`Process` below -- never the platform default (on Linux, `fork`
+before Python 3.14 and `forkserver` from it): a default-context `Queue` handed to a spawn-context
+`Process` can fail to pickle, and `fork` would make `_race_worker`'s own "real, separate OS
+process" docstring untrue, since a forked child copies its parent's memory instead of launching a
+fresh interpreter."""
 
 
 def _race_worker(path_str: str, barrier, queue, now: datetime) -> None:
     """Run in a real, separate OS process (built from an explicit
     `multiprocessing.get_context("spawn")`, so it launches a fresh interpreter -- not a
-    thread, and not the platform-default `fork` on Linux) against the same database file
-    as its sibling worker.
+    thread, and not a `fork` of this process, Linux's default before Python 3.14) against the
+    same database file as its sibling worker.
 
     `now` is `migration_now`'s already-*resolved* value, not the fixture itself: a spawned
     child re-imports this module fresh and has no pytest fixture graph to draw from, so the

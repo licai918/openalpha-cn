@@ -1339,91 +1339,104 @@ adds lands in neither set and fails that test instead of silently being neither 
 exempted."""
 
 
+_NON_SPAWN_CONTEXT_CLASS_NAMES: Final[frozenset[str]] = frozenset(
+    {"DefaultContext", "ForkContext", "ForkServerContext"}
+)
+"""Every concrete context class `multiprocessing.context` can define other than `SpawnContext`:
+building one directly (`multiprocessing.context.ForkContext()`) chooses a start method as surely
+as `get_context("fork")` does, and `DefaultContext` wraps the platform default. The test further
+below measures this set against the running interpreter, which is what lets it claim "every"."""
+
+_PROCESS_POOL_EXECUTOR_PATHS: Final[frozenset[str]] = frozenset(
+    {"concurrent.futures.ProcessPoolExecutor", "concurrent.futures.process.ProcessPoolExecutor"}
+)
+"""Both dotted paths `ProcessPoolExecutor` is reachable at: the module that defines it and the
+package that re-exports it."""
+
+
 def _multiprocessing_call_sites_outside_an_explicit_context(tree: ast.AST) -> list[int]:
-    """1-indexed line numbers of every call site this audit judges hazardous, each reached
-    through the `multiprocessing`/`concurrent.futures` module (however aliased) or a name
-    imported straight from it:
+    """1-indexed line numbers of every call this audit judges hazardous.
 
-    - A primitive constructor (`_MULTIPROCESSING_PRIMITIVE_NAMES`) called directly off the
-      module (`multiprocessing.Process(...)`) or off a name imported straight from it or one
-      of its submodules (`from multiprocessing import Queue`, then a bare `Queue(...)`). A call
-      off any other attribute base (`ctx.Process(...)`, or the chained
-      `multiprocessing.get_context("spawn").Process(...)`) is exactly the pattern this audit
-      requires and is never flagged this way.
-    - `get_context(...)`, reached the same two ways, unless its start-method argument is the
-      literal string "spawn" passed positionally or as `method="spawn"`. No argument (the
-      platform default), a different literal ("fork", "forkserver"), and a non-literal
-      expression are all indistinguishable from "might not be spawn" to a check that never
-      runs the code, so all three are flagged.
-    - `set_start_method(...)`, reached the same two ways: flagged outright, whatever its
-      argument, "spawn" included. This repository's own pattern is one explicit
-      `ctx = multiprocessing.get_context("spawn")` per file with every primitive built from
-      `ctx` (see the test further below), never mutating the process-wide default start method
-      that `set_start_method` exists to change -- so a call to it is itself the offense this
-      audit cares about, not a wrong argument to it.
-    - `concurrent.futures.ProcessPoolExecutor(...)` -- module attribute, a `concurrent.futures`
-      submodule alias, or a name imported straight from it -- with no `mp_context=` keyword at
-      all: the same implicit-start-method hazard as a bare `multiprocessing.Process(...)`,
-      reached through a different door. Only the keyword's presence is checked, not that its
-      value is non-`None` or an explicit spawn context, so `ProcessPoolExecutor(mp_context=
-      None)` passes even though `None` falls back to the platform default exactly like
-      omitting the keyword does; `mp_context` passed positionally is not recognised either.
-      This repository has no `ProcessPoolExecutor` call today (see the tests further below).
+    Every name an import binds is resolved to the dotted path it stands for: `import
+    multiprocessing as mp` binds `mp` to `multiprocessing`; `import multiprocessing.context`
+    binds `multiprocessing` to the package itself, exactly as `import multiprocessing` does;
+    `from multiprocessing import pool` binds `pool` to `multiprocessing.pool`. A call's target
+    is resolved through any chain of attribute accesses off such a name, so
+    `multiprocessing.pool.Pool` resolves the same whichever of those spellings reached it. A
+    call whose target resolves inside the `multiprocessing` package -- `multiprocessing.dummy`
+    excepted, which is `threading` behind the same API, with no start method to inherit -- is
+    hazardous when its final name is:
 
-    A name merely imported for a type annotation (`barrier: Barrier`, or `Queue[tuple[str,
-    str]]` in a signature) is a `Name`/`Subscript` used as an annotation, never a `Call`, so it
-    is never flagged by itself -- only an actual construction is.
+    - a primitive constructor (`_MULTIPROCESSING_PRIMITIVE_NAMES`) or a context class other
+      than `SpawnContext` (`_NON_SPAWN_CONTEXT_CLASS_NAMES`), whichever submodule it is reached
+      through;
+    - `get_context`, unless its start-method argument is the literal string "spawn", passed
+      positionally or as `method="spawn"`. No argument (the platform default), another literal
+      ("fork", "forkserver", `None`) and a non-literal expression are all indistinguishable from
+      "might not be spawn" to a check that never runs the code, so all are flagged;
+    - `set_start_method`, whatever its argument, "spawn" included. This repository's pattern is
+      one explicit `ctx = multiprocessing.get_context("spawn")` per file with every primitive
+      built from `ctx` (see the test further below), never a mutated process-wide default, so
+      the call is itself the offense.
 
-    Two limits hold regardless of the above, both by construction rather than oversight:
+    A call whose target resolves to `ProcessPoolExecutor` (`_PROCESS_POOL_EXECUTOR_PATHS`) is
+    hazardous unless it is given an `mp_context` -- by keyword, or as its second positional
+    argument -- that is not the literal `None`: omitting it, or passing `None`, falls back to the
+    platform's default start method exactly as a bare `multiprocessing.Process(...)` does. A
+    context passed there is judged where it was built, by the `get_context` rule above.
 
-    - No scope resolution. `from multiprocessing import Queue` used only for an annotation,
-      alongside an unrelated function-local class also named `Queue` that is actually called,
-      reads as one name binding and the unrelated call is flagged. Neither file this audit
-      currently covers does this; real scope analysis (which binding is live at which call
-      site) is out of proportion to the hazard this audit exists for.
-    - No value tracing. A primitive, context, or executor built from something that arrived by
-      another route -- a function parameter, an attribute of some other object, a helper
-      function's return value -- cannot be judged by a check that only ever looks at names and
-      literals. This audit recognises exactly the shapes enumerated above; anything reached
-      some other way passes it unexamined, which is a narrower guarantee than "every hazardous
-      construction is caught."
+    What is built off a context object never resolves to a path at all -- `ctx.Process(...)`
+    starts from a name no import binds, and the chained
+    `multiprocessing.get_context("spawn").Process(...)` from a call -- so it is never flagged:
+    that is exactly the pattern this audit requires. A name merely imported for a type
+    annotation (`barrier: Barrier`, or `Queue[tuple[str, str]]` in a signature) is a
+    `Name`/`Subscript`, never a `Call`, so it is never flagged by itself either.
+
+    Three limits hold regardless, all by construction rather than oversight:
+
+    - No scope resolution. A name counts at every call site in the file if any import anywhere
+      in it binds the name to a hazardous path, never only whichever import is read last. So
+      `from multiprocessing import Queue` used only for an annotation, alongside an unrelated
+      function-local `Queue` that is actually called, flags the unrelated call. Neither file
+      this audit currently covers does this; real scope analysis is out of proportion to the
+      hazard this audit exists for.
+    - No value tracing. A primitive, context or executor reached some other way -- a function
+      parameter, an attribute of some other object, a helper's return value, a class stored in
+      a variable before it is called -- cannot be judged by a check that only looks at names
+      and literals. This audit recognises exactly the shapes enumerated above; anything else
+      passes it unexamined, which is a narrower guarantee than "every hazardous construction is
+      caught."
+    - It demands this repository's spelling, not merely a safe construction. A submodule class
+      given an explicit context of its own (`multiprocessing.queues.Queue(ctx=ctx)`,
+      `multiprocessing.pool.Pool(context=ctx)`) is still flagged, because `ctx.Queue()` and
+      `ctx.Pool()` say the same thing in the one spelling this audit accepts; and a class whose
+      context argument is optional but whose name is not a primitive's
+      (`multiprocessing.managers.SyncManager()`) is not recognised at all.
     """
-    module_aliases: set[str] = set()
-    direct_primitive_names: set[str] = set()
-    direct_get_context_names: set[str] = set()
-    direct_set_start_method_names: set[str] = set()
-    futures_parent_aliases: set[str] = set()
-    futures_module_aliases: set[str] = set()
-    direct_process_pool_executor_names: set[str] = set()
-
+    paths_bound_to: dict[str, set[str]] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name == "multiprocessing":
-                    module_aliases.add(alias.asname or alias.name)
-                elif alias.name == "concurrent.futures":
-                    if alias.asname is None:
-                        futures_parent_aliases.add("concurrent")
-                    else:
-                        futures_module_aliases.add(alias.asname)
-        elif isinstance(node, ast.ImportFrom):
-            is_top_level = node.module == "multiprocessing"
-            is_multiprocessing_or_a_submodule = is_top_level or (
-                node.module is not None and node.module.startswith("multiprocessing.")
-            )
-            is_concurrent_futures = node.module == "concurrent.futures"
+                if alias.asname is not None:
+                    paths_bound_to.setdefault(alias.asname, set()).add(alias.name)
+                else:
+                    package = alias.name.partition(".")[0]
+                    paths_bound_to.setdefault(package, set()).add(package)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module is not None:
             for alias in node.names:
-                bound_name = alias.asname or alias.name
-                if is_multiprocessing_or_a_submodule and (
-                    alias.name in _MULTIPROCESSING_PRIMITIVE_NAMES
-                ):
-                    direct_primitive_names.add(bound_name)
-                if is_top_level and alias.name == "get_context":
-                    direct_get_context_names.add(bound_name)
-                if is_top_level and alias.name == "set_start_method":
-                    direct_set_start_method_names.add(bound_name)
-                if is_concurrent_futures and alias.name == "ProcessPoolExecutor":
-                    direct_process_pool_executor_names.add(bound_name)
+                paths_bound_to.setdefault(alias.asname or alias.name, set()).add(
+                    f"{node.module}.{alias.name}"
+                )
+
+    def _dotted_paths(target: ast.expr) -> set[str]:
+        attributes: list[str] = []
+        while isinstance(target, ast.Attribute):
+            attributes.append(target.attr)
+            target = target.value
+        if not isinstance(target, ast.Name):
+            return set()
+        suffix = "".join(f".{attribute}" for attribute in reversed(attributes))
+        return {path + suffix for path in paths_bound_to.get(target.id, set())}
 
     def _has_the_literal_spawn_argument(call: ast.Call) -> bool:
         if call.args:
@@ -1434,75 +1447,46 @@ def _multiprocessing_call_sites_outside_an_explicit_context(tree: ast.AST) -> li
                 return isinstance(keyword.value, ast.Constant) and keyword.value.value == "spawn"
         return False
 
-    def _built_as_a_process_pool_executor(func: ast.expr) -> bool:
-        if isinstance(func, ast.Name):
-            return func.id in direct_process_pool_executor_names
-        if not (isinstance(func, ast.Attribute) and func.attr == "ProcessPoolExecutor"):
+    def _passes_an_mp_context_other_than_none(call: ast.Call) -> bool:
+        supplied: ast.expr | None = None
+        leading = call.args[:2]
+        if len(leading) == 2 and not any(isinstance(arg, ast.Starred) for arg in leading):
+            supplied = leading[1]
+        for keyword in call.keywords:
+            if keyword.arg == "mp_context":
+                supplied = keyword.value
+        return supplied is not None and not (
+            isinstance(supplied, ast.Constant) and supplied.value is None
+        )
+
+    def _is_hazardous(call: ast.Call, path: str) -> bool:
+        if path in _PROCESS_POOL_EXECUTOR_PATHS:
+            return not _passes_an_mp_context_other_than_none(call)
+        if not path.startswith("multiprocessing.") or path.startswith("multiprocessing.dummy."):
             return False
-        base = func.value
-        if isinstance(base, ast.Name):
-            return base.id in futures_module_aliases
+        name = path.rpartition(".")[2]
+        if name == "get_context":
+            return not _has_the_literal_spawn_argument(call)
         return (
-            isinstance(base, ast.Attribute)
-            and base.attr == "futures"
-            and isinstance(base.value, ast.Name)
-            and base.value.id in futures_parent_aliases
+            name == "set_start_method"
+            or name in _MULTIPROCESSING_PRIMITIVE_NAMES
+            or name in _NON_SPAWN_CONTEXT_CLASS_NAMES
         )
 
-    offending_lines: list[int] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-
-        built_off_the_module = (
-            isinstance(func, ast.Attribute)
-            and func.attr in _MULTIPROCESSING_PRIMITIVE_NAMES
-            and isinstance(func.value, ast.Name)
-            and func.value.id in module_aliases
-        )
-        built_from_a_direct_import = (
-            isinstance(func, ast.Name) and func.id in direct_primitive_names
-        )
-        if built_off_the_module or built_from_a_direct_import:
-            offending_lines.append(node.lineno)
-            continue
-
-        calls_get_context = (
-            isinstance(func, ast.Attribute)
-            and func.attr == "get_context"
-            and isinstance(func.value, ast.Name)
-            and func.value.id in module_aliases
-        ) or (isinstance(func, ast.Name) and func.id in direct_get_context_names)
-        if calls_get_context:
-            if not _has_the_literal_spawn_argument(node):
-                offending_lines.append(node.lineno)
-            continue
-
-        calls_set_start_method = (
-            isinstance(func, ast.Attribute)
-            and func.attr == "set_start_method"
-            and isinstance(func.value, ast.Name)
-            and func.value.id in module_aliases
-        ) or (isinstance(func, ast.Name) and func.id in direct_set_start_method_names)
-        if calls_set_start_method:
-            offending_lines.append(node.lineno)
-            continue
-
-        if _built_as_a_process_pool_executor(func) and not any(
-            keyword.arg == "mp_context" for keyword in node.keywords
-        ):
-            offending_lines.append(node.lineno)
-
-    return sorted(offending_lines)
+    return sorted(
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and any(_is_hazardous(node, path) for path in _dotted_paths(node.func))
+    )
 
 
 def test_every_multiprocessing_primitive_in_tests_uses_an_explicit_context() -> None:
     """`V2-P5-063` already found this repository's tests treating "this machine" as an
     invariant three times over (a hardcoded POSIX `PATH`, a hardcoded exception class name,
     a wall clock calibrated on one laptop); `multiprocessing`'s own default *start method*
-    is exactly that same kind of default -- `fork` on Linux, `spawn` on macOS and Windows
-    today, and `spawn` everywhere from Python 3.14 -- so a `Process`/`Queue`/`Barrier` built
+    is exactly that same kind of default -- `spawn` on macOS and Windows, but on Linux `fork`
+    before Python 3.14 and `forkserver` from it -- so a `Process`/`Queue`/`Barrier` built
     from the bare `multiprocessing` module (or a name imported straight from it) silently
     inherits whichever one the machine running the test happens to default to.
 
@@ -1520,8 +1504,9 @@ def test_every_multiprocessing_primitive_in_tests_uses_an_explicit_context() -> 
     `src/`, `tests/`, `scripts/` alike, so a future offender in a new file is caught by the
     same pass, not a special case someone has to remember to point back here. What counts as
     an offense is exactly what the helper above enumerates, including its own stated limits
-    (no scope resolution, no value tracing) -- this test's guarantee is that enumeration, not
-    a claim that every hazardous construction anywhere is caught.
+    (no scope resolution, no value tracing, this repository's one spelling demanded) -- this
+    test's guarantee is that enumeration, not a claim that every hazardous construction
+    anywhere is caught.
 
     Mutation: change any `ctx.Process(...)`/`ctx.Queue()`/`ctx.Barrier(...)` call in either
     file back to `multiprocessing.Process(...)`/`multiprocessing.Queue()`/
@@ -1577,12 +1562,12 @@ def test_multiprocessing_primitive_names_cover_every_context_constructor() -> No
 def test_multiprocessing_call_site_audit_flags_get_context_with_no_argument() -> None:
     """The Critical this whole pass exists for, reproduced against the real detection function:
     `multiprocessing.get_context()` with no argument returns whatever start method the platform
-    defaults to (`fork` on Linux) -- exactly the hazard this repository's own tests were
-    rewritten to remove -- and the original version of this audit did not flag it, only ever
-    checking that a primitive was built through *some* object, never that the object was an
-    explicit spawn context. Measured against the helper before this fix: `offenders == []` for
-    this exact source, `ctx.Queue()` included, because `Queue` is called off a plain local
-    name, not off the module or a direct import.
+    defaults to (on Linux, `fork` before Python 3.14 and `forkserver` from it) -- exactly the
+    hazard this repository's own tests were rewritten to remove -- and the original version of
+    this audit did not flag it, only ever checking that a primitive was built through *some*
+    object, never that the object was an explicit spawn context. Measured against the helper
+    before this fix: `offenders == []` for this exact source, `ctx.Queue()` included, because
+    `Queue` is called off a plain local name, not off the module or a direct import.
     """
     source = r"""import multiprocessing
 
@@ -1598,10 +1583,11 @@ ctx.Queue()
 def test_multiprocessing_call_site_audit_flags_get_context_called_with_fork() -> None:
     """The reviewer's second probe: an explicit call to `get_context` that names a real,
     documented start method is not automatically safe -- `"fork"` reintroduces exactly the
-    hazard `V2-P5-063`'s fix removed. Measured against the helper before this fix:
-    `offenders == []`, because the original check only asked whether a primitive was built
-    through *some* object, never whether that object came from `get_context("spawn")`
-    specifically.
+    hazard this repository's two multiprocessing test files were rewritten to remove (see
+    `test_every_multiprocessing_primitive_in_tests_uses_an_explicit_context`). Measured
+    against the helper before this fix: `offenders == []`, because the original check only
+    asked whether a primitive was built through *some* object, never whether that object came
+    from `get_context("spawn")` specifically.
     """
     source = r"""import multiprocessing
 
@@ -1802,6 +1788,186 @@ def use_a_local_queue():
     offenders = _multiprocessing_call_sites_outside_an_explicit_context(tree)
 
     assert offenders == []
+
+
+def test_multiprocessing_call_site_audit_sees_the_package_bound_by_a_submodule_import() -> None:
+    """`import multiprocessing.context` (no `as`) binds the bare name `multiprocessing` to the
+    package itself, exactly as `import multiprocessing` does, so every rule applies to calls off
+    that name. Measured against the helper before this fix: `offenders == []` for this exact
+    source, because only an import spelled exactly `multiprocessing` was recognised as binding
+    the package.
+    """
+    source = r"""import multiprocessing.context
+
+multiprocessing.get_context("fork")
+multiprocessing.Queue()
+"""
+    tree = ast.parse(source, filename="<probe>")
+    offenders = _multiprocessing_call_sites_outside_an_explicit_context(tree)
+
+    assert offenders == [3, 4]
+
+
+def test_multiprocessing_call_site_audit_sees_a_primitive_reached_through_a_submodule() -> None:
+    """`multiprocessing.pool.Pool(...)`, and `pool.Pool(...)` after `from multiprocessing import
+    pool`, build the same default-context `Pool` as `from multiprocessing.pool import Pool` --
+    and that spelling was already flagged. Measured against the helper before this fix:
+    `offenders == []`, because a primitive was only recognised called directly off the package
+    name, never through an attribute chain or a bound submodule.
+    """
+    source = r"""import multiprocessing
+from multiprocessing import pool
+
+multiprocessing.pool.Pool(2)
+pool.Pool(2)
+"""
+    tree = ast.parse(source, filename="<probe>")
+    offenders = _multiprocessing_call_sites_outside_an_explicit_context(tree)
+
+    assert offenders == [4, 5]
+
+
+def test_multiprocessing_call_site_audit_ignores_the_thread_backed_dummy_package() -> None:
+    """`multiprocessing.dummy` is `threading` behind the multiprocessing API: its `Process` is a
+    thread and its `Pool` a thread pool, so there is no start method to inherit and no `ctx` to
+    build them from instead. Measured against the helper before this fix: line 5 was flagged,
+    because a primitive name imported from any `multiprocessing.*` submodule counted, `dummy`
+    included.
+    """
+    source = r"""import multiprocessing.dummy
+from multiprocessing.dummy import Process
+
+multiprocessing.dummy.Pool(2)
+Process(target=int)
+"""
+    tree = ast.parse(source, filename="<probe>")
+    offenders = _multiprocessing_call_sites_outside_an_explicit_context(tree)
+
+    assert offenders == []
+
+
+def test_multiprocessing_call_site_audit_sees_every_import_route_to_process_pool_executor() -> None:
+    """`ProcessPoolExecutor` is defined in `concurrent.futures.process` and re-exported by
+    `concurrent.futures`; all three spellings below construct that one class with the platform's
+    default start method. Measured against the helper before this fix: `offenders == []`,
+    because only `import concurrent.futures` spelled exactly that way, and `from
+    concurrent.futures import ...`, were recognised.
+    """
+    source = r"""import concurrent.futures.process
+from concurrent import futures
+from concurrent.futures.process import ProcessPoolExecutor
+
+concurrent.futures.ProcessPoolExecutor()
+futures.ProcessPoolExecutor()
+ProcessPoolExecutor()
+"""
+    tree = ast.parse(source, filename="<probe>")
+    offenders = _multiprocessing_call_sites_outside_an_explicit_context(tree)
+
+    assert offenders == [5, 6, 7]
+
+
+def test_multiprocessing_call_site_audit_flags_an_mp_context_of_none() -> None:
+    """`mp_context=None` is the default spelled out: `ProcessPoolExecutor` then falls back to the
+    platform's default start method exactly as if the argument were omitted, so writing it is no
+    escape. Measured against the helper before this fix: only line 4 was flagged -- the
+    keyword's mere presence satisfied the rule on line 3, and the second positional argument
+    (which is `mp_context`) was never looked at.
+    """
+    source = r"""from concurrent.futures import ProcessPoolExecutor
+
+ProcessPoolExecutor(mp_context=None)
+ProcessPoolExecutor(2, None)
+"""
+    tree = ast.parse(source, filename="<probe>")
+    offenders = _multiprocessing_call_sites_outside_an_explicit_context(tree)
+
+    assert offenders == [3, 4]
+
+
+def test_multiprocessing_call_site_audit_accepts_an_mp_context_passed_positionally() -> None:
+    """`mp_context` is `ProcessPoolExecutor`'s second positional parameter; passing the spawn
+    context there is the same explicit choice as passing it by keyword. Measured against the
+    helper before this fix: line 5 was flagged, because only the keyword spelling counted.
+    """
+    source = r"""import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
+
+ctx = multiprocessing.get_context("spawn")
+ProcessPoolExecutor(2, ctx)
+"""
+    tree = ast.parse(source, filename="<probe>")
+    offenders = _multiprocessing_call_sites_outside_an_explicit_context(tree)
+
+    assert offenders == []
+
+
+def test_multiprocessing_call_site_audit_counts_a_name_bound_by_any_import_in_the_file() -> None:
+    """With no scope resolution, a name counts at every call site in the file if any import
+    anywhere in it binds the name to a multiprocessing primitive -- never only whichever import
+    happens to be read last. Here a function-local `from queue import Queue` rebinds `Queue`
+    after the module-level multiprocessing import: the module-level `Queue()` on line 3 must
+    still be flagged, and so is the thread-safe one on line 8 (the known false positive the
+    helper's docstring names). Resolving each name to its last-read binding alone would drop
+    line 3 silently. Green before this fix too; it pins that property through the rewrite.
+    """
+    source = r"""from multiprocessing import Queue
+
+Queue()
+
+
+def f():
+    from queue import Queue
+    return Queue()
+"""
+    tree = ast.parse(source, filename="<probe>")
+    offenders = _multiprocessing_call_sites_outside_an_explicit_context(tree)
+
+    assert offenders == [3, 8]
+
+
+def test_multiprocessing_call_site_audit_flags_a_non_spawn_context_class_built_directly() -> None:
+    """`multiprocessing.context.ForkContext()` is `get_context("fork")` by another spelling, and
+    `DefaultContext` wraps the platform default; building either directly is flagged just as the
+    equivalent `get_context(...)` call is, while `SpawnContext()` is accepted. What is then built
+    off the returned object (`.Process(...)`, `.Queue()`) has a call, not a name, as its base, so
+    it is judged at the context class alone. Measured against the helper before this fix:
+    `offenders == []`.
+    """
+    source = r"""from multiprocessing import context
+
+context.ForkContext().Process(target=int)
+context.SpawnContext().Queue()
+"""
+    tree = ast.parse(source, filename="<probe>")
+    offenders = _multiprocessing_call_sites_outside_an_explicit_context(tree)
+
+    assert offenders == [3]
+
+
+def test_non_spawn_context_class_names_cover_every_concrete_context_class() -> None:
+    """`_NON_SPAWN_CONTEXT_CLASS_NAMES` is hand-written; like the primitive set above, it is
+    measured against the running interpreter instead of trusted. Every `BaseContext` subclass
+    `multiprocessing.context` defines on this platform, other than `SpawnContext` itself, must be
+    in it. Windows defines only `DefaultContext` and `SpawnContext`, so the check is that the set
+    contains whatever this platform defines, not that the two are equal.
+
+    Mutation: delete `"ForkContext"` from the set and this test fails on Linux and macOS.
+    """
+    context_module = multiprocessing.context
+    defined = {
+        name
+        for name, value in vars(context_module).items()
+        if isinstance(value, type)
+        and issubclass(value, context_module.BaseContext)
+        and value not in (context_module.BaseContext, context_module.SpawnContext)
+    }
+
+    assert defined - _NON_SPAWN_CONTEXT_CLASS_NAMES == set(), (
+        "multiprocessing.context defines non-spawn context class(es) "
+        "_NON_SPAWN_CONTEXT_CLASS_NAMES does not name: "
+        + ", ".join(sorted(defined - _NON_SPAWN_CONTEXT_CLASS_NAMES))
+    )
 
 
 def test_quality_workflow_covers_supported_platforms_and_locked_dependencies() -> None:

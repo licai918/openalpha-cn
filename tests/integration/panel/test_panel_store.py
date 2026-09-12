@@ -189,10 +189,10 @@ def _assert_catalog_row_count(store: PanelStore, dataset: str, *, expected: int)
 # catalog file genuinely persists, and that concurrent readers do not fail each other.
 
 ctx = multiprocessing.get_context("spawn")
-"""Builds every `Queue`/`Barrier`/`Process` below -- never the platform default (`fork` on
-Linux): a default-context `Queue` handed to a spawn-context `Process` can fail to pickle, and
-`fork` would make "real, separate interpreters" above untrue on Linux, since a forked child
-copies its parent's memory instead of launching a fresh interpreter."""
+"""Builds every `Queue`/`Barrier`/`Process` below -- never the platform default (on Linux, `fork`
+before Python 3.14 and `forkserver` from it): a default-context `Queue` handed to a spawn-context
+`Process` can fail to pickle, and `fork` would make "real, separate interpreters" above untrue,
+since a forked child copies its parent's memory instead of launching a fresh interpreter."""
 
 
 def _writer_worker(root_str: str, queue: Queue[tuple[str, str]]) -> None:

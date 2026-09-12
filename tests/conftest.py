@@ -278,8 +278,9 @@ def bar() -> Callable[..., MarketBar]:
 #     child process gets a fresh interpreter and is not guarded: `subprocess` always launches
 #     one, and so does `multiprocessing` when it uses the `spawn` start method -- which this
 #     repository's own multiprocessing tests choose explicitly
-#     (`multiprocessing.get_context("spawn")`), never the platform default (`fork` on Linux,
-#     which copies the parent process instead of starting a fresh interpreter).
+#     (`multiprocessing.get_context("spawn")`), never the platform default (on Linux, `fork`
+#     before Python 3.14, which copies the parent process instead of starting a fresh
+#     interpreter, and `forkserver` from it).
 #     `tests/unit/test_repository_assets.py` shells out to `git`, and
 #     `tests/integration/storage/test_migrations.py` and
 #     `tests/integration/panel/test_panel_store.py` each spawn worker processes this way; none
