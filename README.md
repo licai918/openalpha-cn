@@ -1149,7 +1149,7 @@ Pydantic Schema、请求大小限制与安全响应头后，分别流向证据�
 
 ### API 关系图 03｜单次与批量研究如何汇入同一内核
 
-`POST /api/v1/research/run` 直接运行一次研究；批量 API 则把最多 1000 个不可变请求放入
+`POST /api/v1/research/run` 直接运行一次研究；批量 API 则把最多 10,000 个不可变请求放入
 持久队列，以 1–8 的受控并发逐项调用同一 `run_cycle`。证据感知路由选择市场、题材和
 资金 Agent，节点级 Checkpoint 支持恢复，聚合后的 `SignalFrame` 经过风险门生成
 `ResearchRunResult`，同时持久化运行清单、决策账本、研究记忆和恢复状态。

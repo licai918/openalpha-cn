@@ -35,6 +35,7 @@ from openalpha_cn.config import OpenAlphaConfig, load_config
 ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 HTTP_DOC: Final[Path] = ROOT / "docs" / "api" / "http.md"
 CHANGELOG: Final[Path] = ROOT / "CHANGELOG.md"
+README: Final[Path] = ROOT / "README.md"
 NOW: Final[datetime] = datetime(2026, 7, 24, 10, 0, tzinfo=UTC)
 
 
@@ -46,6 +47,11 @@ def http_doc() -> str:
 @pytest.fixture
 def changelog() -> str:
     return CHANGELOG.read_text(encoding="utf-8")
+
+
+@pytest.fixture
+def readme() -> str:
+    return README.read_text(encoding="utf-8")
 
 
 def _batch_body(*, batch_id: str, max_concurrency: int) -> dict[str, object]:
@@ -210,3 +216,57 @@ def test_the_shipped_container_can_carry_a_whole_market_batch() -> None:
         f"service declares measured {measured_whole_market_batch_bytes}"
     )
     assert configured >= MAX_BATCH_ITEMS, "sanity: the ceiling is bytes, not items"
+
+
+BATCH_SENTENCE_ITEM_CAP: Final[re.Pattern[str]] = re.compile(
+    r"批量\s*API\s*则把最多\s*([\d,]+)\s*个不可变请求放入"
+)
+"""Anchors on the Chinese prose either side of the number in `README.md`'s API-relationship
+section (currently :1152), not on the number itself and not on a line number.
+
+`test_the_worker_ceiling_the_api_enforces_is_the_one_the_http_doc_states` above only asserts
+``str(MAX_BATCH_ITEMS) in http_doc or "10,000" in http_doc`` -- true the moment the right digits
+appear *anywhere* in `docs/api/http.md`. This module's own docstring calls that "the honest
+limit of the check" (see `test_every_deployment_that_sets_the_ceiling_sets_the_one_this_service_
+declares`'s docstring): a correct number stated two paragraphs away from an unrelated stale claim
+would still satisfy it. `README.md` was outside every check in this file, and the stale claim was
+real, not hypothetical: `README.md:1152` has said "最多 1000 个" since the day it was written
+(`8d13065`, 2026-07-27 -- 1,000 really was `MAX_BATCH_ITEMS` then) and was never updated when
+`dd4af2a` (`V2-P4-019`, 2026-08-18) raised the constant tenfold to make a whole-market batch
+expressible. Ten weeks stale, not merely never-true -- confirmed with `git log -S`/`git show`
+against both commits -- and nothing that reads `README.md` caught it.
+"""
+
+
+def test_the_readme_batch_api_sentence_states_the_current_item_ceiling(readme: str) -> None:
+    """The one sentence in `README.md` that states the batch item cap must state it correctly.
+
+    Unlike the HTTP-doc check above, this does not accept the right number appearing *somewhere*
+    in the file -- it locates the specific sentence that makes the claim (by its surrounding
+    prose, not by line number) and reads *its* number back.
+
+    If `BATCH_SENTENCE_ITEM_CAP` cannot find that sentence at all, the assertion below fails
+    loudly rather than silently passing over nothing to check: a reword that drops the anchor
+    phrase must break this test, not silently disable it.
+
+    The same sentence also states the worker-concurrency range as "1-8 的受控并发"; that is
+    correct (`MAX_BATCH_WORKERS = 8`, `Field(ge=1, le=MAX_BATCH_WORKERS)` on both
+    `max_concurrency` fields) and was already fixed by a prior change, so it is deliberately left
+    alone here and this test does not touch it. It is the only other number in the sentence.
+
+    `README.en.md` makes no equivalent claim -- it states no batch item number at all -- so there
+    is nothing for this test to check there.
+    """
+    match = BATCH_SENTENCE_ITEM_CAP.search(readme)
+    assert match, (
+        "could not find README.md's batch-API item-cap sentence (looked for the pattern "
+        r"'批量 API 则把最多 <N> 个不可变请求放入', currently at :1152). Either the wording "
+        "changed -- update BATCH_SENTENCE_ITEM_CAP to match the new phrasing -- or the claim was "
+        "removed, in which case this test should be removed with it, not left passing vacuously."
+    )
+    stated_cap = int(match.group(1).replace(",", ""))
+    assert stated_cap == MAX_BATCH_ITEMS, (
+        f"README.md's batch-API sentence states an item cap of {stated_cap}, but MAX_BATCH_ITEMS "
+        f"is {MAX_BATCH_ITEMS}. V2-P4-019 raised the constant tenfold; update the README sentence "
+        "to match rather than the other way around."
+    )
