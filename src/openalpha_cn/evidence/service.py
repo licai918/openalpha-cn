@@ -82,8 +82,27 @@ def build_provider_evidence(
     return build_evidence(EvidenceBuildRequest(metadata=provider.metadata, batch=batch))
 
 
+class SerializedEvidenceMismatchError(ValueError):
+    """A serialized evidence item whose supplied `evidence_id` or `content_hash` does not match it.
+
+    `OA-EVID-003`. `parse_serialized_evidence` raises this for the one refusal that is about
+    identity, and a plain `ValueError` -- pydantic's `ValidationError` among them -- for every
+    structural fault. A `ValueError` subclass for `LookAheadViolationError`'s reason
+    (`domain/evidence.py`): a caller already catching `ValueError`, `openalpha research run` among
+    them, keeps catching it unchanged, while `ResearchApiRequest.verify_serialized_evidence`
+    (`api/app.py`) can hand every structural fault to pydantic and let exactly this one through.
+    Before the type existed that validator had one `except ValueError` for both, and a tampered
+    item reached the client as `extra_forbidden` rather than as this refusal.
+    """
+
+
 def parse_serialized_evidence(value: object) -> tuple[EvidenceSnapshot, ...]:
-    """Verify serialized IDs/hashes and return trusted evidence models."""
+    """Verify serialized IDs/hashes and return trusted evidence models.
+
+    A supplied `evidence_id` or `content_hash` that does not match the recomputed one raises
+    `SerializedEvidenceMismatchError`; anything structural raises a plain `ValueError`, pydantic's
+    `ValidationError` included.
+    """
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
         raise ValueError("serialized evidence must be an array")
     verified: list[EvidenceSnapshot] = []
@@ -98,8 +117,12 @@ def parse_serialized_evidence(value: object) -> tuple[EvidenceSnapshot, ...]:
         supplied_hash = clean.pop("content_hash", None)
         item = EvidenceSnapshot.model_validate(clean)
         if supplied_id is not None and supplied_id != item.evidence_id:
-            raise ValueError("serialized evidence_id does not match evidence content")
+            raise SerializedEvidenceMismatchError(
+                "serialized evidence_id does not match evidence content"
+            )
         if supplied_hash is not None and supplied_hash != item.content_hash:
-            raise ValueError("serialized content_hash does not match evidence content")
+            raise SerializedEvidenceMismatchError(
+                "serialized content_hash does not match evidence content"
+            )
         verified.append(item)
     return tuple(verified)

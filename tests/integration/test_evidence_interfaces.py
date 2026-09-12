@@ -1,15 +1,21 @@
 import json
+import re
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from typer.testing import CliRunner
 
 from openalpha_cn.api.app import create_app
 from openalpha_cn.cli import app
+from openalpha_cn.evidence import parse_serialized_evidence
 from openalpha_cn.providers.base import ProviderMetadata, ProviderRequest
 from openalpha_cn.providers.file import FileProvider
+from openalpha_cn.runtime.contracts import ResearchRunRequest
 from openalpha_cn.sdk import OpenAlphaSDK
 
 runner = CliRunner()
@@ -354,3 +360,261 @@ def test_api_runs_research_from_structured_evidence(
     assert detail["index"] is None
     assert detail["field"] == "research.signal.signal_id"
     assert detail["claimed"] != detail["derived"]
+
+
+# --- serialized evidence handed back to the research route (`OA-EVID-003`) ---------------------
+
+# `parse_serialized_evidence`'s own two sentences (`evidence/service.py`). `openalpha research run`
+# has always printed them verbatim; the tests below hold the REST route to the same words.
+EVIDENCE_ID_REFUSAL = "serialized evidence_id does not match evidence content"
+CONTENT_HASH_REFUSAL = "serialized content_hash does not match evidence content"
+
+
+def _built_items(
+    client: TestClient, source: Path, metadata: ProviderMetadata, as_of: datetime
+) -> list[dict[str, Any]]:
+    """What `POST /api/v1/evidence/build` hands a client: items still carrying both identifiers."""
+    provider = FileProvider(path=source, metadata=metadata, clock=lambda: as_of)
+    batch = provider.fetch(ProviderRequest(dataset="events", as_of=as_of))
+    built = client.post(
+        "/api/v1/evidence/build",
+        json={
+            "metadata": metadata.model_dump(mode="json"),
+            "batch": batch.model_dump(mode="json", exclude_computed_fields=True),
+        },
+    )
+    assert built.status_code == 200, built.text
+    items: list[dict[str, Any]] = built.json()["items"]
+    assert all({"evidence_id", "content_hash"} <= set(item) for item in items), items
+    return items
+
+
+def _research_body(evidence: object, *, run_id: str, as_of: datetime) -> dict[str, Any]:
+    return {
+        "run_id": run_id,
+        "mode": "live",
+        "subject": "000001.SZ",
+        "as_of": as_of.isoformat(),
+        "evidence": evidence,
+        "code_commit": "0123456789abcdef",
+        "config_digest": "e" * 64,
+        "random_seed": 7,
+    }
+
+
+def _edit_a_fact(item: dict[str, Any]) -> dict[str, Any]:
+    """The content edited and both identifiers left as they were.
+
+    A fact rather than `summary`, deliberately: `content_hash` digests `payload` alone and
+    `evidence_id` adds only subject, kind, source_id and available_time, so an edited `summary`
+    leaves both identifiers true and no recomputation can see it (measured:
+    `parse_serialized_evidence` accepts one).
+    """
+    payload = item["payload"]
+    return {**item, "payload": {**payload, "facts": {**payload["facts"], "close": 99.0}}}
+
+
+def _edit_the_evidence_id(item: dict[str, Any]) -> dict[str, Any]:
+    return {**item, "evidence_id": "ev_" + "0" * 24}
+
+
+def _edit_the_content_hash(item: dict[str, Any]) -> dict[str, Any]:
+    return {**item, "content_hash": "0" * 64}
+
+
+@pytest.mark.parametrize(
+    ("tamper", "refusal"),
+    [
+        pytest.param(_edit_a_fact, EVIDENCE_ID_REFUSAL, id="fact-edited-identifiers-kept"),
+        pytest.param(_edit_the_evidence_id, EVIDENCE_ID_REFUSAL, id="evidence_id-edited"),
+        pytest.param(_edit_the_content_hash, CONTENT_HASH_REFUSAL, id="content_hash-edited"),
+    ],
+)
+def test_the_rest_research_route_recomputes_supplied_identifiers_before_accepting_them(
+    tmp_path: Path,
+    metadata: ProviderMetadata,
+    frozen_now: datetime,
+    tamper: Callable[[dict[str, Any]], dict[str, Any]],
+    refusal: str,
+) -> None:
+    """`OA-EVID-003`: API output is taken back as input, and a tampered copy fails the recompute.
+
+    `ResearchApiRequest.verify_serialized_evidence` wrapped `parse_serialized_evidence` in
+    `except ValueError: return value`, and pydantic's `ValidationError` is itself a `ValueError`,
+    so that one clause caught the parser's mismatch refusal along with every structural fault.
+    The tampered item was still refused -- it fell back to field validation, where
+    `EvidenceSnapshot`'s `extra="forbid"` rejected its `evidence_id` and `content_hash` -- but
+    the client was told `Extra inputs are not permitted` about two fields this service writes
+    itself, rather than that they do not describe the content beside them.
+
+    The untampered round trip runs first in every case and is the control: a route refusing
+    *every* serialized item would satisfy the refusal half on its own. The refusal is then held
+    to exactly one fault -- the parser's sentence at `["body", "evidence"]`, not
+    `extra_forbidden` -- and to having started no run.
+    """
+    source = tmp_path / "events.json"
+    write_source(source)
+    client = TestClient(create_app(runtime_dir=tmp_path / "runtime", clock=lambda: frozen_now))
+    [item] = _built_items(client, source, metadata, frozen_now)
+    tampered = tamper(item)
+    assert tampered != item
+
+    accepted = client.post(
+        "/api/v1/research/run",
+        json=_research_body([item], run_id="verified-round-trip", as_of=frozen_now),
+    )
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["signal"]["evidence_ids"] == [item["evidence_id"]]
+
+    refused = client.post(
+        "/api/v1/research/run",
+        json=_research_body([tampered], run_id="tampered-round-trip", as_of=frozen_now),
+    )
+    assert refused.status_code == 422, refused.text
+    faults = refused.json()["detail"]
+    assert isinstance(faults, list), faults
+    assert [(fault["type"], fault["loc"]) for fault in faults] == [
+        ("value_error", ["body", "evidence"])
+    ], faults
+    assert faults[0]["msg"].removeprefix("Value error, ") == refusal
+    assert client.get("/api/v1/runs/tampered-round-trip/recovery").status_code == 404
+
+
+def test_the_rest_research_route_accepts_evidence_with_its_identifiers_or_without_them(
+    tmp_path: Path, metadata: ProviderMetadata, frozen_now: datetime
+) -> None:
+    """The two shapes a client legitimately sends, pinned apart from the refusal above.
+
+    With both identifiers is exactly what `POST /api/v1/evidence/build` returned. Without them is
+    a record a caller wrote by hand: there is nothing to verify, and both identifiers are derived
+    from its content -- which is what content addressing means, not a gap in the check. Both must
+    reach the same cited evidence.
+    """
+    source = tmp_path / "events.json"
+    write_source(source)
+    client = TestClient(create_app(runtime_dir=tmp_path / "runtime", clock=lambda: frozen_now))
+    [item] = _built_items(client, source, metadata, frozen_now)
+    bare = {key: value for key, value in item.items() if key not in {"evidence_id", "content_hash"}}
+
+    for run_id, evidence in (("with-identifiers", [item]), ("without-identifiers", [bare])):
+        response = client.post(
+            "/api/v1/research/run", json=_research_body(evidence, run_id=run_id, as_of=frozen_now)
+        )
+        assert response.status_code == 200, (run_id, response.text)
+        assert response.json()["signal"]["evidence_ids"] == [item["evidence_id"]], run_id
+
+
+def test_a_structural_fault_in_serialized_evidence_keeps_its_field_level_address(
+    tmp_path: Path, metadata: ProviderMetadata, frozen_now: datetime
+) -> None:
+    """Only the mismatch stopped falling back; every structural fault still gets its address.
+
+    The parser builds one item at a time, so a fault it raises has already lost its index; the
+    route hands the body back to the field's own validation, which names the item and the field.
+    The broken item sits at index 1 behind a good one so that a constant `0` cannot pass, and a
+    non-object item is included because narrowing the catch to pydantic's `ValidationError` --
+    the other way to stop swallowing the mismatch -- would answer that one at
+    `["body", "evidence"]`, with no index.
+
+    Deliberately not asserted either way: the `extra_forbidden` the fallback also reports for the
+    `evidence_id`/`content_hash` those items carry. The body goes back unchanged on purpose, since
+    that is what keeps an item with an identifier from getting in by any road but the check, and
+    stripping them to quiet the noise would trade that guarantee for a tidier message.
+    """
+    source = tmp_path / "events.json"
+    write_source(source)
+    client = TestClient(create_app(runtime_dir=tmp_path / "runtime", clock=lambda: frozen_now))
+    [item] = _built_items(client, source, metadata, frozen_now)
+    unsummarised = {key: value for key, value in item.items() if key != "summary"}
+
+    for evidence, address in (
+        ([item, unsummarised], ["body", "evidence", 1, "summary"]),
+        ([item, 7], ["body", "evidence", 1]),
+        ("not-an-array", ["body", "evidence"]),
+    ):
+        response = client.post(
+            "/api/v1/research/run",
+            json=_research_body(evidence, run_id="structural-fault", as_of=frozen_now),
+        )
+        assert response.status_code == 422, response.text
+        faults = response.json()["detail"]
+        assert isinstance(faults, list), faults
+        assert address in [fault["loc"] for fault in faults], (address, faults)
+        assert not [fault for fault in faults if "does not match" in fault["msg"]], faults
+
+
+def test_every_face_refuses_one_tampered_payload_and_those_that_verify_it_say_so_alike(
+    tmp_path: Path, metadata: ProviderMetadata, frozen_now: datetime
+) -> None:
+    """One edited `content_hash`, handed to every door this repository has for serialized evidence.
+
+    `openalpha research run` always reported the parser's own sentence: `cli.py` catches
+    `ValidationError` and `ValueError` separately, and its docstring says why. The REST route now
+    reports the same sentence on both of its doors, because `/research/batches` validates each
+    request with the same `ResearchApiRequest`.
+
+    The SDK has no door that takes a supplied identifier. `run_research` and `run_batch` are typed
+    on `ResearchRunRequest`, whose `EvidenceSnapshot` derives both identifiers and refuses one it
+    is handed, so a tampered identifier cannot reach the SDK and there is no check there to
+    swallow. What the SDK side has is the helper `openalpha_cn.evidence` exports for callers
+    holding serialized evidence -- the function the other two faces call -- and its sentence is
+    asserted here so the three cannot drift apart.
+    """
+    source = tmp_path / "events.json"
+    write_source(source)
+    client = TestClient(create_app(runtime_dir=tmp_path / "api", clock=lambda: frozen_now))
+    [item] = _built_items(client, source, metadata, frozen_now)
+    tampered = _edit_the_content_hash(item)
+    body = _research_body([tampered], run_id="tampered-everywhere", as_of=frozen_now)
+
+    run = client.post("/api/v1/research/run", json=body)
+    batch = client.post(
+        "/api/v1/research/batches",
+        json={"batch_id": "tampered-everywhere", "requests": [body], "max_concurrency": 1},
+    )
+    assert run.status_code == 422, run.text
+    assert batch.status_code == 422, batch.text
+    said_by_run = [
+        (fault["loc"], fault["msg"].removeprefix("Value error, ")) for fault in run.json()["detail"]
+    ]
+    said_by_batch = [
+        (fault["loc"], fault["msg"].removeprefix("Value error, "))
+        for fault in batch.json()["detail"]
+    ]
+    assert said_by_run == [(["body", "evidence"], CONTENT_HASH_REFUSAL)], said_by_run
+    assert (["body", "requests", 0, "evidence"], CONTENT_HASH_REFUSAL) in said_by_batch, (
+        said_by_batch
+    )
+
+    evidence_path = tmp_path / "evidence.json"
+    evidence_path.write_text(json.dumps({"items": [tampered]}), encoding="utf-8")
+    cli = runner.invoke(
+        app,
+        [
+            "research",
+            "run",
+            str(evidence_path),
+            "--runtime-dir",
+            str(tmp_path / "cli"),
+            "--run-id",
+            "tampered-everywhere",
+            "--mode",
+            "live",
+            "--subject",
+            "000001.SZ",
+            "--as-of",
+            frozen_now.isoformat(),
+            "--code-commit",
+            "0123456789abcdef",
+            "--config-digest",
+            "e" * 64,
+        ],
+    )
+    assert cli.exit_code == 1, cli.output
+    assert CONTENT_HASH_REFUSAL in cli.output
+
+    with pytest.raises(ValidationError) as typed_door:
+        ResearchRunRequest.model_validate(body)
+    assert {error["loc"][0] for error in typed_door.value.errors()} == {"evidence"}
+    with pytest.raises(ValueError, match=re.escape(CONTENT_HASH_REFUSAL)):
+        parse_serialized_evidence([tampered])

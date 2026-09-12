@@ -8,7 +8,7 @@
 - 当前真实完成: 180 (97.3%)
 - `UNREVIEWED=0`
 - `UNKNOWN=0`
-- `legacy_acceptance_rows=62` (历史散文验收、尚未绑定为可执行 pytest/CI 断言)
+- `legacy_acceptance_rows=61` (历史散文验收、尚未绑定为可执行 pytest/CI 断言)
 
 ## 状态分布
 
@@ -29,7 +29,7 @@
 | `OA-TIME-003` | temporal | Point-in-time visibility | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/domain/time.py#is_visible_at` | `tests/unit/domain/test_time.py;tests/unit/domain/test_evidence.py` | `pytest` | `tests/unit/domain/test_evidence.py::test_evidence_visibility_uses_information_availability` |
 | `OA-EVID-001` | evidence | Immutable evidence snapshot | `NATIVE_COMPLETE` | `src/openalpha_cn/domain/evidence.py#EvidenceSnapshot` | `tests/unit/domain/test_evidence.py` | `legacy-prose` | `Mutation is rejected and serialization is stable.` |
 | `OA-EVID-002` | evidence | Content-addressed evidence | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/domain/evidence.py#EvidenceSnapshot` | `tests/unit/domain/test_evidence.py` | `legacy-prose` | `Equal content produces equal IDs and tampering is detected.` |
-| `OA-EVID-003` | evidence | Serialized evidence verification | `NATIVE_COMPLETE` | `src/openalpha_cn/evidence/service.py#parse_serialized_evidence` | `tests/integration/test_evidence_interfaces.py` | `legacy-prose` | `Tampered identifiers fail validation.` |
+| `OA-EVID-003` | evidence | Serialized evidence verification | `NATIVE_COMPLETE` | `src/openalpha_cn/evidence/service.py#parse_serialized_evidence;src/openalpha_cn/api/app.py#verify_serialized_evidence` | `tests/integration/test_evidence_interfaces.py` | `pytest` | `tests/integration/test_evidence_interfaces.py::test_the_rest_research_route_recomputes_supplied_identifiers_before_accepting_them` |
 | `OA-EVID-004` | evidence | Limit-up normalization | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/evidence/builder.py#EvidenceBuilder` | `tests/unit/evidence/test_builder.py` | `pytest` | `tests/unit/evidence/test_builder.py::test_builder_normalizes_all_v1_a_share_evidence_families` |
 | `OA-EVID-005` | evidence | Broken-board normalization | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/evidence/builder.py#EvidenceBuilder` | `tests/unit/evidence/test_builder.py` | `pytest` | `tests/unit/evidence/test_builder.py::test_builder_normalizes_all_v1_a_share_evidence_families` |
 | `OA-EVID-006` | evidence | Consecutive-board normalization | `ENHANCED_REPLACEMENT` | `src/openalpha_cn/evidence/builder.py#EvidenceBuilder` | `tests/unit/evidence/test_builder.py` | `pytest` | `tests/unit/evidence/test_builder.py::test_builder_normalizes_all_v1_a_share_evidence_families` |

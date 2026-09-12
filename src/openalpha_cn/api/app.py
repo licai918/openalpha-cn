@@ -58,6 +58,7 @@ from openalpha_cn.domain.validation import ValidationResult
 from openalpha_cn.evidence.service import (
     EvidenceBuildRequest,
     EvidenceBuildResponse,
+    SerializedEvidenceMismatchError,
     build_evidence,
     parse_serialized_evidence,
 )
@@ -214,8 +215,25 @@ class ResearchApiRequest(ResearchRunRequest):
     @field_validator("evidence", mode="before")
     @classmethod
     def verify_serialized_evidence(cls, value: Any) -> Any:
+        """Refuse a supplied identifier that does not describe its evidence (`OA-EVID-003`).
+
+        The mismatch is re-raised, so pydantic reports it as one `value_error` at
+        `["body", "evidence"]` carrying `parse_serialized_evidence`'s own sentence -- the one
+        `openalpha research run` prints. This was one `except ValueError: return value`, and
+        pydantic's `ValidationError` is itself a `ValueError`, so the one clause caught both: a
+        tampered item fell back to field validation and was refused only as `extra_forbidden` on
+        the two fields this service writes itself.
+
+        Every other fault still falls back, because the field's own validation addresses it --
+        `["body", "evidence", 1, "summary"]` -- where the parser, building one item at a time,
+        has lost the index. The body goes back unchanged, so an item still carrying an
+        identifier meets `EvidenceSnapshot`'s `extra="forbid"` there: it can get in only through
+        the check above, which is why the fallback does not strip them either.
+        """
         try:
             return parse_serialized_evidence(value)
+        except SerializedEvidenceMismatchError:
+            raise
         except ValueError:
             return value
 

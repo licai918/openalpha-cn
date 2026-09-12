@@ -294,11 +294,11 @@ def test_the_real_ledger_has_no_unreviewed_or_unknown_rows() -> None:
 
 
 # --- the debt this module cannot check, held so it can only shrink (`V2-P5-038`) --------------
-UNVALIDATED_ACCEPTANCE_ROWS: Final[int] = 62
+UNVALIDATED_ACCEPTANCE_ROWS: Final[int] = 61
 """How many rows carry `acceptance_kind="legacy-prose"`. It may be lowered. It may not be raised.
 
 `V2-P5-038`. Every evidence path on every row is checked for existence by
-`build_feature_coverage._load`, whatever the row's acceptance kind -- all 62 of these included,
+`build_feature_coverage._load`, whatever the row's acceptance kind -- all 61 of these included,
 `web/` paths and all (measured: pointing `OA-IFACE-006` at a nonexistent `App.test.NOPE.tsx`
 makes `--check` raise). What only `pytest` rows have is a **named test function**, which
 `_validate_pytest_acceptance` verifies by AST. For the rest, a swap inside one directory --
