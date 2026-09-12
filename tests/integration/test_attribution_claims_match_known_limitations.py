@@ -10,18 +10,19 @@ Two couplings, both anchored on `KNOWN_ATTRIBUTION_LIMITATIONS` in
    generically: one whose story names attribution and an absent category may not be `IN`
    either. A story ID may appear on one row only, so a second row cannot shadow the first.
 
-2. **User-facing prose.** `README.md`, `README.en.md` and `docs/why-openalpha-cn.zh-CN.md` may
-   not present an absent category as attribution the product delivers. `README.md` links
-   `why-openalpha` from its header and from its body; `README.en.md` does not link it.
-   `d4af27c` fixed this overclaim in both READMEs and in `docs/marketing/` without a test;
-   `9eb8368` fixed it in `why-openalpha` and added this module.
+2. **User-facing prose.** `README.md`, `README.en.md`, `docs/why-openalpha-cn.zh-CN.md` and
+   `docs/marketing/openalpha-cn-100-promotion-plans.zh-CN.md` may not present an absent
+   category as attribution the product delivers. `README.md` links `why-openalpha` from its
+   header and from its body; `README.en.md` does not link it. `d4af27c` fixed this overclaim
+   in both READMEs and in the marketing pack without a test; `9eb8368` fixed it in
+   `why-openalpha` and added this module; `D7` added the marketing pack to `GUARDED_FILES`.
+   There the guard flagged one clause, "不把市场上涨全部算成 Agent 功劳", which implied the
+   rest of the move was the Agent's credit; it was reworded, not allowlisted.
 
-   **`docs/marketing/` is not guarded, and extending `GUARDED_FILES` to it is `D7`'s step.**
-   `D7` has to run this guard over that directory and handle every clause it flags: fix the
-   claim, or -- for a true non-claim only -- add an `ALLOWLIST` entry with its reason. Some
-   claims there are invisible to this guard by design, because they carry neither 归因 nor
-   "attribution" -- "差异来自哪个规则或 Agent", or a decomposition list that names 因子. Those
-   need a manual review; this guard will never report them.
+   Some claims are invisible to this guard by design, because they carry neither 归因 nor
+   "attribution". The marketing pack had two, found by reading and reworded in `D7`:
+   "差异来自哪个规则或 Agent" and a list that "将结果拆成...规则、因子与标的暴露". Prose of that
+   shape needs a manual review; this guard will never report it.
 
 **How the guard in (2) reads a document.**
 
@@ -50,7 +51,7 @@ Two couplings, both anchored on `KNOWN_ATTRIBUTION_LIMITATIONS` in
   true. `test_every_allowlist_entry_exempts_exactly_one_flagged_clause` fails on an entry that
   matches no clause, matches several, or exempts a category its clause no longer presents, so
   stale entries cannot pile up. With the prose test, that makes the allowlist the census:
-  every clause the guard flags in the three files is either fixed or listed there.
+  every clause the guard flags in the guarded files is either fixed or listed there.
 
 **What it cannot see.** `test_the_guards_stated_blind_spots_are_real` measures each of these.
 
@@ -86,10 +87,10 @@ PRD: Final[Path] = ROOT / "docs" / "specs" / "v2" / "openalpha-cn-v2-prd.md"
 README: Final[Path] = ROOT / "README.md"
 README_EN: Final[Path] = ROOT / "README.en.md"
 WHY_OPENALPHA: Final[Path] = ROOT / "docs" / "why-openalpha-cn.zh-CN.md"
+MARKETING: Final[Path] = ROOT / "docs" / "marketing" / "openalpha-cn-100-promotion-plans.zh-CN.md"
 
-GUARDED_FILES: Final[tuple[Path, ...]] = (README, README_EN, WHY_OPENALPHA)
-"""User-facing prose checked by part (2). Adding `docs/marketing/` is `D7`'s step -- see the
-module docstring."""
+GUARDED_FILES: Final[tuple[Path, ...]] = (README, README_EN, WHY_OPENALPHA, MARKETING)
+"""User-facing prose checked by part (2): both READMEs, `why-openalpha` and the marketing pack."""
 
 CATEGORY_VOCABULARY: Final[tuple[str, ...]] = get_args(
     AttributionTerm.model_fields["category"].annotation
@@ -369,14 +370,16 @@ ALLOWLIST: Final[tuple[AllowedClause, ...]] = (
 """The guarded files' true non-claims. An entry is for a clause that is true as written, never
 for a claim waiting to be fixed.
 
-When this list was written the guard flagged exactly these three clauses in the three files:
-the two `factor run` sentences, where "factor" is a command's name and the attribution is the
-factor experiment's six-cell step grid, and `README.en.md`'s four-clock feature sentence.
+When this list was written the guard flagged exactly these three clauses in the three files it
+read then: the two `factor run` sentences, where "factor" is a command's name and the
+attribution is the factor experiment's six-cell step grid, and `README.en.md`'s four-clock
+feature sentence. Adding the marketing pack in `D7` flagged one more clause, which was reworded
+rather than listed.
 """
 
 
 def test_user_facing_docs_do_not_present_an_absent_attribution_category_as_delivered() -> None:
-    """`README.md`, `README.en.md` and `docs/why-openalpha-cn.zh-CN.md` must not overclaim.
+    """The four `GUARDED_FILES` must not present an absent category as delivered attribution.
 
     Every clause the guard flags in them is a violation unless an `ALLOWLIST` entry for that
     file matches it, and then only for the categories the entry names. `why-openalpha`'s 验证改进
