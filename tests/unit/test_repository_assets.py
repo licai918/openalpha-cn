@@ -534,16 +534,6 @@ def test_the_container_job_is_not_gated_behind_a_matrix_it_cannot_name_a_leg_of(
     assert named == {"web", "security"}
 
 
-def test_container_delivery_has_persistence_and_recovery_verification() -> None:
-    compose = (ROOT / "deploy" / "compose.yml").read_text(encoding="utf-8")
-    verification = ROOT / "scripts" / "verify_compose_recovery.py"
-
-    assert "openalpha-runtime:/data" in compose
-    assert "read_only: true" in compose
-    assert "no-new-privileges:true" in compose
-    assert verification.is_file()
-
-
 def test_dockerfile_pins_blas_and_openmp_thread_counts_for_deterministic_reductions() -> None:
     """ADR-0003's determinism hazard: without pinning `OMP_NUM_THREADS`/
     `OPENBLAS_NUM_THREADS`, BLAS/OpenMP floating-point reduction order changes with

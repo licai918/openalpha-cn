@@ -93,7 +93,7 @@ docker compose -f deploy/compose.yml up -d --wait
 uv run python scripts/verify_compose_recovery.py
 ```
 
-脚本使用唯一临时 Compose 项目，写入合成证据、重启、复查同一 `evidence_id`，最后只删除它自己创建的临时容器、网络和卷。
+脚本使用唯一临时 Compose 项目：先在运行中的容器里核对 §8 列出的容器安全边界，再写入合成证据、重启、复查同一 `evidence_id`，最后只删除它自己创建的临时容器、网络和卷。
 
 ### 备份
 
@@ -130,7 +130,7 @@ docker compose -f deploy/compose.yml up -d --build --wait
 - 只读根文件系统；
 - `cap_drop: ALL`；
 - `no-new-privileges:true`；
-- 仅 `/data` 可持久写入，`/tmp` 为受限 tmpfs；
+- 仅 `/data` 可持久写入，`/tmp` 为受限 tmpfs（64 MiB，`nosuid`、`nodev`、`noexec`）；
 - CSP、禁止 iframe、MIME 嗅探、Referrer/Permissions/COOP/COEP/CORP/HSTS 响应头，按名**替换**而非追加，
   路由无法给同一个策略头再加一个值（`V2-P5-012`）；
 - 32 MiB 请求上限，两道闸：声明了 `Content-Length` 的在读体之前拒，未声明长度的（chunked）边收边计数、
@@ -141,6 +141,15 @@ docker compose -f deploy/compose.yml up -d --build --wait
   `test_every_deployment_that_sets_the_ceiling_sets_the_one_this_service_declares` 钉住；
 - `openalpha serve` 与容器 `CMD` 一样不发 `server:` 头（`V2-P5-012`）；
 - CORS 只允许本地 Vite 开发源，方法覆盖 `GET/HEAD/POST/PUT/PATCH/DELETE`，不带凭据（`V2-P5-011`）。
+
+前五条是容器本身的属性，各有两层核对。`tests/unit/test_container_security_posture.py` 核对
+`deploy/compose.yml` 与 `Dockerfile` 的声明：按结构读取而不是子串匹配，注释掉或挪走的键不算数，
+遇到读取器不认识的 YAML 写法直接报错。`scripts/verify_compose_recovery.py`（CI 的 `container` 任务运行它）
+核对 Compose 实际起的容器：服务进程树与探针进程的 `/proc/<pid>/status`（四个 uid、四个 gid 都是
+`10001`，五个能力集全为 0，`NoNewPrivs` 为 1），`/proc/self/mounts` 与真实写入（在 `/` 建文件得到
+`EROFS`，`/data` 与 `/tmp` 可写，`/tmp` 带上述挂载选项，除 `/data` 外服务账户写不了任何持久文件系统），
+以及 `openalpha` 账户（uid/gid `10001`，home 为 `/nonexistent` 且不存在，shell 为 `/usr/sbin/nologin`，
+`/etc/shadow` 里只有锁定标记、没有口令散列）。
 
 若跨机器开放，必须在反向代理增加 TLS、认证、授权、限流、审计日志和网络 ACL。当前 API 不能裸露到公网。
 HSTS 头应用已自己发出，但按 RFC 6797 §7.2，非安全传输下用户代理必须忽略它 —— 换言之它只在反向代理已经终结
