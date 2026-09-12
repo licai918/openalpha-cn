@@ -83,7 +83,7 @@ mounts = []
 for line in read("/proc/self/mounts").splitlines():
     _, target, fstype, options = line.split()[:4]
     target = re.sub(r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), target)
-    mounts.append([target, fstype, options.split(","), os.access(target, os.W_OK)])
+    mounts.append([target, fstype, options.split(",")])
 
 print(json.dumps({
     "self": str(os.getpid()),
@@ -277,20 +277,25 @@ def _process_problems(pid: str, status: str) -> list[str]:
     return problems
 
 
-def _mount_table(mounts: Sequence[Sequence[Any]]) -> dict[str, tuple[str, frozenset[str], bool]]:
-    """`{mount point: (filesystem, options, writable by the service's account)}`. A later mount
-    on the same point hides an earlier one, so the last entry for a point is the one in effect."""
-    return {
-        str(target): (str(fstype), frozenset(options), bool(writable))
-        for target, fstype, options, writable in mounts
-    }
+def _mount_table(mounts: Sequence[Sequence[Any]]) -> dict[str, tuple[str, frozenset[str]]]:
+    """`{mount point: (filesystem, options)}`. A later mount on the same point hides an earlier
+    one, so the last entry for a point is the one in effect."""
+    return {str(target): (str(fstype), frozenset(options)) for target, fstype, options in mounts}
 
 
-def _writable_persistent_mounts(table: Mapping[str, tuple[str, frozenset[str], bool]]) -> list[str]:
+def _persistent_mounts_not_read_only(table: Mapping[str, tuple[str, frozenset[str]]]) -> list[str]:
+    """Every mount of a persistent filesystem whose options do not say `ro`.
+
+    Judged on the mount, not on whether the service's account may write the mount point, because
+    the second can hold while the first fails. `VOLUME ["/data", "/app"]` in the Dockerfile mounts
+    a persistent volume at `/app` whose root belongs to root -- `WORKDIR /app` made it -- and whose
+    `/app/.venv` belongs to 10001: the mount point refuses the account, the virtualenv does not,
+    and the review of this check measured the write surviving a restart.
+    """
     return sorted(
         target
-        for target, (fstype, _, writable) in table.items()
-        if writable and fstype not in VOLATILE_FILESYSTEMS
+        for target, (fstype, options) in table.items()
+        if fstype not in VOLATILE_FILESYSTEMS and "ro" not in options
     )
 
 
@@ -322,11 +327,13 @@ def _filesystem_problems(writes: Mapping[str, str], mounts: Sequence[Sequence[An
         problems.append(f"the /tmp tmpfs lacks {', '.join(missing)}")
     if writes.get("/tmp") != "ok":
         problems.append(f"creating a file in /tmp gave {writes.get('/tmp', 'no answer')}")
-    others = [target for target in _writable_persistent_mounts(table) if target != "/data"]
+    # `/` has its own rule above; `/data` is the one persistent filesystem meant to be written.
+    others = [
+        target for target in _persistent_mounts_not_read_only(table) if target not in ("/", "/data")
+    ]
     if others:
         problems.append(
-            "the service's account can write persistent filesystems besides /data: "
-            + ", ".join(others)
+            "persistent filesystems besides /data are mounted read-write: " + ", ".join(others)
         )
     return problems
 
@@ -387,7 +394,7 @@ def _posture_summary(report: Mapping[str, Any]) -> dict[str, Any]:
         ],
         "writes": dict(report["writes"]),
         "tmp": None if tmp is None else ",".join([tmp[0], *sorted(TMP_OPTIONS & tmp[1])]),
-        "writable_persistent_mounts": _writable_persistent_mounts(table),
+        "rw_persistent_mounts": _persistent_mounts_not_read_only(table),
         "account": report["passwd"][0] if report["passwd"] else None,
     }
 

@@ -144,10 +144,12 @@ docker compose -f deploy/compose.yml up -d --build --wait
 
 前五条是容器本身的属性，各有两层核对。`tests/unit/test_container_security_posture.py` 核对
 `deploy/compose.yml` 与 `Dockerfile` 的声明：按结构读取而不是子串匹配，注释掉或挪走的键不算数，
-遇到读取器不认识的 YAML 写法直接报错。`scripts/verify_compose_recovery.py`（CI 的 `container` 任务运行它）
-核对 Compose 实际起的容器：服务进程树与探针进程的 `/proc/<pid>/status`（四个 uid、四个 gid 都是
-`10001`，五个能力集全为 0，`NoNewPrivs` 为 1），`/proc/self/mounts` 与真实写入（在 `/` 建文件得到
-`EROFS`，`/data` 与 `/tmp` 可写，`/tmp` 带上述挂载选项，除 `/data` 外服务账户写不了任何持久文件系统），
+遇到读取器不认识的 YAML 写法直接报错，`Dockerfile` 除 `/data` 外不许声明任何卷。
+`scripts/verify_compose_recovery.py`（CI 的 `container` 任务运行它）核对 Compose 实际起的容器：服务进程树
+与探针进程的 `/proc/<pid>/status`（四个 uid、四个 gid 都是 `10001`，五个能力集全为 0，`NoNewPrivs` 为 1），
+`/proc/self/mounts` 与真实写入（在 `/` 建文件得到 `EROFS`，`/data` 与 `/tmp` 可写，`/tmp` 带上述挂载选项；
+除 `/data` 外，每个持久文件系统的挂载——根文件系统、`/etc/hosts` 一类的绑定挂载、任何卷——选项里都是 `ro`，
+tmpfs、proc、sysfs 这类内存或内核视图不在此列），
 以及 `openalpha` 账户（uid/gid `10001`，home 为 `/nonexistent` 且不存在，shell 为 `/usr/sbin/nologin`，
 `/etc/shadow` 里只有锁定标记、没有口令散列）。
 

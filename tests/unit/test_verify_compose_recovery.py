@@ -219,48 +219,41 @@ def _shipped_report() -> dict[str, Any]:
         "processes": {pid: _status(pid) for pid in _SHIPPED_PROCESSES},
         "writes": {"/": "EROFS", "/data": "ok", "/tmp": "ok"},
         "mounts": [
-            ["/", "overlay", ["ro", "relatime", "nouserxattr"], False],
-            ["/proc", "proc", ["rw", "nosuid", "nodev", "noexec", "relatime"], False],
-            ["/dev", "tmpfs", ["rw", "nosuid", "size=65536k", "mode=755", "inode64"], False],
+            ["/", "overlay", ["ro", "relatime", "nouserxattr"]],
+            ["/proc", "proc", ["rw", "nosuid", "nodev", "noexec", "relatime"]],
+            ["/dev", "tmpfs", ["rw", "nosuid", "size=65536k", "mode=755", "inode64"]],
             [
                 "/dev/pts",
                 "devpts",
                 ["rw", "nosuid", "noexec", "relatime", "gid=5", "mode=620", "ptmxmode=666"],
-                False,
             ],
-            ["/sys", "sysfs", _PROC_READ_ONLY, False],
-            [
-                "/sys/fs/cgroup",
-                "cgroup2",
-                [*_PROC_READ_ONLY, "nsdelegate", "memory_recursiveprot"],
-                False,
-            ],
-            ["/dev/mqueue", "mqueue", ["rw", "nosuid", "nodev", "noexec", "relatime"], True],
-            ["/dev/shm", "tmpfs", _TMPFS, True],
+            ["/sys", "sysfs", _PROC_READ_ONLY],
+            ["/sys/fs/cgroup", "cgroup2", [*_PROC_READ_ONLY, "nsdelegate", "memory_recursiveprot"]],
+            ["/dev/mqueue", "mqueue", ["rw", "nosuid", "nodev", "noexec", "relatime"]],
+            ["/dev/shm", "tmpfs", _TMPFS],
             [
                 "/usr/sbin/docker-init",
                 "ext4",
                 ["ro", "relatime", "discard", "errors=remount-ro", "commit=30"],
-                False,
             ],
-            ["/tmp", "tmpfs", _TMPFS, True],
-            ["/data", "ext4", ["rw", "relatime"], True],
-            ["/etc/resolv.conf", "ext4", ["ro", "relatime"], False],
-            ["/etc/hostname", "ext4", ["ro", "relatime"], False],
-            ["/etc/hosts", "ext4", ["ro", "relatime"], False],
-            ["/proc/bus", "proc", _PROC_READ_ONLY, False],
-            ["/proc/fs", "proc", _PROC_READ_ONLY, False],
-            ["/proc/irq", "proc", _PROC_READ_ONLY, False],
-            ["/proc/sys", "proc", _PROC_READ_ONLY, False],
-            ["/proc/sysrq-trigger", "proc", _PROC_READ_ONLY, False],
-            ["/proc/acpi", "tmpfs", _MASK_READ_ONLY, False],
-            ["/proc/interrupts", "tmpfs", _PROC_MASK, True],
-            ["/proc/kcore", "tmpfs", _PROC_MASK, True],
-            ["/proc/keys", "tmpfs", _PROC_MASK, True],
-            ["/proc/latency_stats", "tmpfs", _PROC_MASK, True],
-            ["/proc/scsi", "tmpfs", _MASK_READ_ONLY, False],
-            ["/proc/timer_list", "tmpfs", _PROC_MASK, True],
-            ["/sys/firmware", "tmpfs", _MASK_READ_ONLY, False],
+            ["/tmp", "tmpfs", _TMPFS],
+            ["/data", "ext4", ["rw", "relatime"]],
+            ["/etc/resolv.conf", "ext4", ["ro", "relatime"]],
+            ["/etc/hostname", "ext4", ["ro", "relatime"]],
+            ["/etc/hosts", "ext4", ["ro", "relatime"]],
+            ["/proc/bus", "proc", _PROC_READ_ONLY],
+            ["/proc/fs", "proc", _PROC_READ_ONLY],
+            ["/proc/irq", "proc", _PROC_READ_ONLY],
+            ["/proc/sys", "proc", _PROC_READ_ONLY],
+            ["/proc/sysrq-trigger", "proc", _PROC_READ_ONLY],
+            ["/proc/acpi", "tmpfs", _MASK_READ_ONLY],
+            ["/proc/interrupts", "tmpfs", _PROC_MASK],
+            ["/proc/kcore", "tmpfs", _PROC_MASK],
+            ["/proc/keys", "tmpfs", _PROC_MASK],
+            ["/proc/latency_stats", "tmpfs", _PROC_MASK],
+            ["/proc/scsi", "tmpfs", _MASK_READ_ONLY],
+            ["/proc/timer_list", "tmpfs", _PROC_MASK],
+            ["/sys/firmware", "tmpfs", _MASK_READ_ONLY],
         ],
         "passwd": ["openalpha:x:10001:10001::/nonexistent:/usr/sbin/nologin"],
         "group": ["openalpha:x:10001:"],
@@ -363,28 +356,28 @@ _NOLOGIN_ACCOUNT = "openalpha:x:10001:10001::/nonexistent:/usr/sbin/nologin"
         pytest.param(_in_process("7", CapAmb="0000000000000400"), "CapAmb", id="ambient-cap"),
         pytest.param(_in_process("1", NoNewPrivs="0"), "NoNewPrivs", id="no-new-privileges-off"),
         pytest.param(
-            _both(_write("/", "EACCES"), _mount("/", ["/", "overlay", ["rw", "relatime"], False])),
+            _both(_write("/", "EACCES"), _mount("/", ["/", "overlay", ["rw", "relatime"]])),
             "EROFS",
             id="read_only-removed",
         ),
         pytest.param(_write("/data", "EACCES"), "/data", id="data-unwritable"),
         pytest.param(_mount("/data", None), "/data", id="data-not-a-volume"),
         pytest.param(
-            _mount("/tmp", ["/tmp", "tmpfs", [o for o in _TMPFS if o != "size=65536k"], True]),
+            _mount("/tmp", ["/tmp", "tmpfs", [o for o in _TMPFS if o != "size=65536k"]]),
             "size=65536k",
             id="tmp-unbounded",
         ),
         pytest.param(
-            _mount("/tmp", ["/tmp", "tmpfs", [o for o in _TMPFS if o != "noexec"], True]),
+            _mount("/tmp", ["/tmp", "tmpfs", [o for o in _TMPFS if o != "noexec"]]),
             "noexec",
             id="tmp-executable",
         ),
         pytest.param(_mount("/tmp", None), "/tmp", id="tmp-not-a-tmpfs"),
         pytest.param(_write("/tmp", "ENOSPC"), "/tmp", id="tmp-unwritable"),
         pytest.param(
-            _mount("/app/logs", ["/app/logs", "ext4", ["rw", "relatime"], True]),
+            _mount("/app/logs", ["/app/logs", "ext4", ["rw", "relatime"]]),
             "/app/logs",
-            id="second-writable-persistent-mount",
+            id="second-rw-persistent-mount",
         ),
         pytest.param(
             _field("passwd", [_NOLOGIN_ACCOUNT.replace(":10001:10001:", ":10002:10001:")]),
@@ -468,6 +461,22 @@ def test_a_writable_root_filesystem_is_caught_by_its_errno_not_by_the_write_fail
     assert any("EROFS" in problem and "EACCES" in problem for problem in problems), problems
 
 
+def test_a_read_write_volume_is_caught_by_its_mount_options_not_by_its_root_directory(
+    module: ModuleType,
+) -> None:
+    """The D9 review's counterexample: `VOLUME ["/data", "/app"]` in the Dockerfile mounts a
+    persistent volume at `/app` whose root belongs to root -- `WORKDIR /app` made it -- while
+    `/app/.venv` inside it belongs to 10001. The account cannot write the mount point, so a check
+    of the mount point passed; it can write `/app/.venv`, and the review measured that the write
+    survives a restart. What gives the volume away is that it is mounted `rw`."""
+    report = _shipped_report()
+    report["mounts"].append(["/app", "ext4", ["rw", "relatime"]])
+
+    problems = module._posture_problems(report, _SHIPPED_SHADOW)
+
+    assert any("/app" in problem for problem in problems), problems
+
+
 def _fake_stack(
     module: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
@@ -524,4 +533,4 @@ def test_main_reports_the_posture_it_checked_next_to_the_recovery_it_proved(
     printed = json.loads(capsys.readouterr().out)
     assert printed["status"] == "ok"
     assert printed["posture"]["writes"] == {"/": "EROFS", "/data": "ok", "/tmp": "ok"}
-    assert printed["posture"]["writable_persistent_mounts"] == ["/data"]
+    assert printed["posture"]["rw_persistent_mounts"] == ["/data"]

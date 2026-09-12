@@ -34,6 +34,7 @@ the judge of those, and the runtime half judges it.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable
 from pathlib import Path
@@ -419,9 +420,29 @@ def _account_is_10001(stage: list[tuple[str, str]]) -> bool:
     return {kind for kind, _ in ids} == {"uid", "gid"} and {value for _, value in ids} == {"10001"}
 
 
+def _volumes_declared(stage: list[tuple[str, str]]) -> list[str]:
+    """Every path a `VOLUME` in the stage names, in either of the two forms Docker accepts."""
+    volumes: list[str] = []
+    for name, arguments in stage:
+        if name == "VOLUME":
+            volumes.extend(
+                json.loads(arguments) if arguments.startswith("[") else arguments.split()
+            )
+    return volumes
+
+
+def _only_the_data_volume(stage: list[tuple[str, str]]) -> bool:
+    """A `VOLUME` is a persistent mount every container of the image gets, whether compose.yml
+    names it or not, filled from the image with the image's ownership. The D9 review's
+    `VOLUME ["/data", "/app"]` made `/app/.venv` a persistent directory the account owns while
+    every compose claim above still held."""
+    return _volumes_declared(stage) == ["/data"]
+
+
 SECTION_8_DOCKERFILE_CLAIMS: dict[str, Callable[[list[tuple[str, str]]], bool]] = {
     "the process runs as USER 10001:10001": _runs_as_10001,
     "the account it runs as is uid 10001 in gid 10001": _account_is_10001,
+    "the image declares no volume but /data": _only_the_data_volume,
 }
 
 
@@ -456,6 +477,16 @@ def test_the_dockerfile_declares_every_container_property_section_8_claims(claim
             "the account it runs as is uid 10001 in gid 10001",
             _replaced("--gid 10001", "--gid 10002"),
             id="account-gid-10002",
+        ),
+        pytest.param(
+            "the image declares no volume but /data",
+            _replaced('VOLUME ["/data"]\n', 'VOLUME ["/data", "/app"]\n'),
+            id="volume-app",
+        ),
+        pytest.param(
+            "the image declares no volume but /data",
+            _replaced('VOLUME ["/data"]\n', "VOLUME /data /app\n"),
+            id="volume-app-shell-form",
         ),
     ],
 )
