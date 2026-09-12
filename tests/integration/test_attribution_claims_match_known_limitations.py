@@ -25,22 +25,21 @@ Two couplings, both anchored on `KNOWN_ATTRIBUTION_LIMITATIONS` in
 
 **How the guard in (2) reads a document.**
 
-- *Blocks.* A paragraph, a list item and a blockquote are each one block, with their
-  soft-wrapped continuation lines folded back in: indented or lazy (unindented)
-  continuations, after any list marker (`-`, `*`, `+`, `1.`, `1)`), and lists nested under an
-  item, which fold into that item. A table row, a heading and each line of a fenced code block
-  are blocks of their own. A line break folds away to nothing when either side of it is
-  non-ASCII -- a wrap between two Chinese characters, even inside 归因, is no word boundary --
-  and to one space between two ASCII characters.
-- *Clauses.* Each block is split after `。`, after a full-width semicolon, exclamation mark or
-  question mark, after an ASCII `;`, and at an English sentence end: `.`, `!` or `?`, then a
-  space, then anything but a lowercase letter -- so "e.g. factor" stays whole.
+- *Blocks and clauses* come from `tests/prose_clauses.py`, the reader
+  `tests/integration/test_usage_claims_match_the_shipped_paths.py` shares. Its docstring states
+  how a block's soft-wrapped lines are folded back and where a clause ends. In short: a
+  paragraph, a list item (with the items nested under it) and a blockquote are one block each;
+  a table row, a heading and each line of a fenced code block are blocks of their own; a block
+  is split into clauses after `。`, a full-width or ASCII semicolon, a full-width `!` or `?`, and
+  at an English sentence end. The reader tests below -- block forms, wrap widths, sentence ends,
+  the line a clause reports -- are that reader's measurements.
 - *Claims.* A clause is a claim when it holds an attribution marker (归因, or "attribution" in
   any case, matched as a substring, so "attributions" counts), names at least one absent
   category, and holds no absence phrase. An absence phrase exempts only the clause it sits in,
   and exempts nothing when a negation (非, 不是, "not", "never", "n't") directly precedes it.
-- *Category markers* are `CATEGORY_MARKERS`: Chinese words as substrings, English words in any
-  case with an optional plural `s`, bounded by ASCII-letter lookarounds instead of `\\b`.
+- *Category markers* are `CATEGORY_MARKERS`, each matched by `prose_clauses.marker_pattern`:
+  Chinese words as substrings, English words in any case with an optional plural `s`, bounded
+  by ASCII-letter lookarounds instead of `\\b`.
   Python's `\\b` treats a CJK character as a word character, so "因子与Agent归因" never
   matched under it. The lookarounds also let "per-agent" and "agent_id" name `agent`.
 - *Threshold one.* One absent category is enough. Marketing's attribution claims mostly name a
@@ -70,12 +69,13 @@ Two couplings, both anchored on `KNOWN_ATTRIBUTION_LIMITATIONS` in
 from __future__ import annotations
 
 import re
-from bisect import bisect_right
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, get_args
+
+from prose_clauses import clauses, holds_unnegated_phrase, marker_pattern
 
 from openalpha_cn.backtest.validation import KNOWN_ATTRIBUTION_LIMITATIONS
 from openalpha_cn.domain.validation import AttributionTerm
@@ -267,20 +267,8 @@ produced, not merely narrowed". A fixed list measured against that usage, not a 
 negation detector -- see the module docstring for both directions of error.
 """
 
-NEGATION_BEFORE: Final[re.Pattern[str]] = re.compile(
-    r"(?:非|不是)\s*$|(?<![A-Za-z])(?:not|never)\s+$|n't\s+$", re.IGNORECASE
-)
-"""A negation that ends directly before an absence phrase: 并非结构性不产生 says the opposite."""
-
-
-def _category_pattern(marker: str) -> re.Pattern[str]:
-    if marker.isascii():
-        return re.compile(rf"(?<![A-Za-z]){re.escape(marker)}s?(?![A-Za-z])", re.IGNORECASE)
-    return re.compile(re.escape(marker))
-
-
 CATEGORY_PATTERNS: Final[dict[str, tuple[re.Pattern[str], ...]]] = {
-    category: tuple(_category_pattern(marker) for marker in markers)
+    category: tuple(marker_pattern(marker) for marker in markers)
     for category, markers in CATEGORY_MARKERS.items()
 }
 
@@ -300,14 +288,7 @@ def _named_categories(text: str, categories: Iterable[str]) -> frozenset[str]:
 
 def _states_absence(clause: str) -> bool:
     """Whether `clause` holds one of `ABSENCE_PHRASES` with no negation directly before it."""
-    lowered = clause.lower()
-    for phrase in ABSENCE_PHRASES:
-        found = lowered.find(phrase.lower())
-        while found != -1:
-            if NEGATION_BEFORE.search(lowered, 0, found) is None:
-                return True
-            found = lowered.find(phrase.lower(), found + 1)
-    return False
+    return holds_unnegated_phrase(clause, ABSENCE_PHRASES)
 
 
 def _overclaimed_categories(clause: str, absent: frozenset[str]) -> frozenset[str]:
@@ -325,14 +306,6 @@ def _overclaimed_categories(clause: str, absent: frozenset[str]) -> frozenset[st
 
 
 @dataclass(frozen=True, slots=True)
-class Clause:
-    """One clause of a document, with the 1-based line it starts on."""
-
-    line: int
-    text: str
-
-
-@dataclass(frozen=True, slots=True)
 class FlaggedClause:
     """A clause the guard reads as a claim, with the absent categories it presents."""
 
@@ -341,133 +314,10 @@ class FlaggedClause:
     categories: frozenset[str]
 
 
-_FENCE: Final[re.Pattern[str]] = re.compile(r"\s*(?:```|~~~)")
-_HEADING: Final[re.Pattern[str]] = re.compile(r"[ \t]{0,3}#{1,6}(?:[ \t]|$)")
-_LIST_ITEM: Final[re.Pattern[str]] = re.compile(
-    r"(?P<indent>[ \t]*)(?:[-*+]|[0-9]{1,9}[.)])(?:[ \t]+|$)"
-)
-_QUOTE: Final[re.Pattern[str]] = re.compile(r"[ \t]*> ?")
-
-_CJK_CLAUSE_ENDS: Final[str] = (
-    "。\N{FULLWIDTH SEMICOLON}\N{FULLWIDTH EXCLAMATION MARK}\N{FULLWIDTH QUESTION MARK}"
-)
-_CLAUSE_END: Final[re.Pattern[str]] = re.compile(
-    rf"(?<=[{_CJK_CLAUSE_ENDS};])\s*|(?<=[.!?])\s(?![a-z])"
-)
-
-
-def _opens_block(raw: str) -> bool:
-    return bool(
-        raw.strip().startswith("|")
-        or _FENCE.match(raw)
-        or _HEADING.match(raw)
-        or _LIST_ITEM.match(raw)
-    )
-
-
-def _blocks(lines: list[tuple[int, str]]) -> list[list[tuple[int, str]]]:
-    """Group `(line number, raw line)` pairs into blocks of `(line number, text)` pieces.
-
-    A blank line closes a block. A table row, a heading and each line inside a fenced code block
-    are blocks of their own. A list marker opens a new block unless it is indented deeper than
-    the item the current block opened with, in which case it is a nested item and stays in that
-    block; the marker itself is dropped. Any other line continues the current block, whatever
-    its indentation. A blockquote's lines, and the lazy lines that continue it, are stripped of
-    one `>` and grouped by this same function.
-    """
-    blocks: list[list[tuple[int, str]]] = []
-    current: list[tuple[int, str]] = []
-    quoted: list[tuple[int, str]] = []
-    item_indent: int | None = None
-    in_fence = False
-
-    def close() -> None:
-        nonlocal item_indent
-        if current:
-            blocks.append(current.copy())
-            current.clear()
-        item_indent = None
-
-    def close_quote() -> None:
-        if quoted:
-            blocks.extend(_blocks(quoted.copy()))
-            quoted.clear()
-
-    for number, raw in lines:
-        stripped = raw.strip()
-        if in_fence:
-            if _FENCE.match(raw):
-                in_fence = False
-            elif stripped:
-                blocks.append([(number, stripped)])
-            continue
-        quote = _QUOTE.match(raw)
-        if quote is not None:
-            close()
-            quoted.append((number, raw[quote.end() :]))
-            continue
-        if quoted and stripped and not _opens_block(raw):
-            quoted.append((number, raw))
-            continue
-        close_quote()
-        item = _LIST_ITEM.match(raw)
-        if not stripped:
-            close()
-        elif _FENCE.match(raw):
-            close()
-            in_fence = True
-        elif stripped.startswith("|") or _HEADING.match(raw):
-            close()
-            blocks.append([(number, stripped)])
-        elif item is not None:
-            indent = len(item["indent"].expandtabs(4))
-            if item_indent is None or indent <= item_indent:
-                close()
-                item_indent = indent
-            current.append((number, raw[item.end() :].strip()))
-        else:
-            current.append((number, stripped))
-    close_quote()
-    close()
-    return blocks
-
-
-def _fold(pieces: list[tuple[int, str]]) -> tuple[str, list[int], list[int]]:
-    """One block's pieces as a single line, with each piece's start offset and line number."""
-    text = ""
-    offsets: list[int] = []
-    numbers: list[int] = []
-    for number, piece in pieces:
-        words = " ".join(piece.split())
-        if not words:
-            continue
-        if text and text[-1].isascii() and words[0].isascii():
-            text += " "
-        offsets.append(len(text))
-        numbers.append(number)
-        text += words
-    return text, offsets, numbers
-
-
-def _clauses(document: str) -> list[Clause]:
-    """`document` read as clauses: blocks folded back together, then split at clause ends."""
-    clauses: list[Clause] = []
-    for block in _blocks(list(enumerate(document.splitlines(), start=1))):
-        text, offsets, numbers = _fold(block)
-        ends = [(end.start(), end.end()) for end in _CLAUSE_END.finditer(text)]
-        start = 0
-        for stop, resume in [*ends, (len(text), len(text))]:
-            clause = text[start:stop].strip()
-            if clause:
-                clauses.append(Clause(numbers[bisect_right(offsets, start) - 1], clause))
-            start = resume
-    return clauses
-
-
 def _flagged_clauses(document: str, absent: frozenset[str]) -> list[FlaggedClause]:
     """Every clause of `document` that presents one of `absent` as delivered attribution."""
     flagged: list[FlaggedClause] = []
-    for clause in _clauses(document):
+    for clause in clauses(document):
         categories = _overclaimed_categories(clause.text, absent)
         if categories:
             flagged.append(FlaggedClause(clause.line, clause.text, categories))
@@ -576,7 +426,7 @@ def test_every_allowlist_entry_exempts_exactly_one_flagged_clause() -> None:
             continue
         matches = [
             clause
-            for clause in _clauses(entry.path.read_text(encoding="utf-8"))
+            for clause in clauses(entry.path.read_text(encoding="utf-8"))
             if entry.excerpt in clause.text
         ]
         if len(matches) != 1:

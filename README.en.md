@@ -42,7 +42,7 @@ OpenAlpha CN competes on verifiability rather than the number of agent personas:
 - deterministic operation without an LLM, plus schema validation and bounded retries when a model is used;
 - durable node checkpoints that reject changed requests or graph signatures;
 - bounded concurrent batches with progress, cancellation, retry, and restart recovery;
-- classified model retry plus persistent token and configured-cost accounting;
+- classified model retry, plus a token and configured-cost usage ledger that no shipped path writes to: only a provider built with a usage store records into it;
 - one research core shared by the live, replay, backtest, paper and daily modes;
 - A-share T+1, board lot, suspension, limit-lock, and transaction-cost constraints;
 - immutable cash/lot/mark/fee/PnL portfolio transitions with exposure clamps;
