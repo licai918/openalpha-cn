@@ -70,8 +70,8 @@ LEDGER_TEST_FILE_COUNTS = {
     "tests/replay": 1,
     "tests/unit": 29,
     "tests/unit/agents": 2,
-    "tests/unit/backtest": 14,
-    "tests/unit/domain": 24,
+    "tests/unit/backtest": 15,
+    "tests/unit/domain": 25,
     "tests/unit/evidence": 1,
     "tests/unit/models": 2,
     "tests/unit/panel": 3,
@@ -81,7 +81,7 @@ LEDGER_TEST_FILE_COUNTS = {
     "web/e2e": 1,
     "web/src": 1,
 }
-LEDGER_TEST_FILE_TOTAL = 184
+LEDGER_TEST_FILE_TOTAL = 186
 
 FIELDNAMES = [
     "feature_id",
@@ -294,11 +294,11 @@ def test_the_real_ledger_has_no_unreviewed_or_unknown_rows() -> None:
 
 
 # --- the debt this module cannot check, held so it can only shrink (`V2-P5-038`) --------------
-UNVALIDATED_ACCEPTANCE_ROWS: Final[int] = 50
+UNVALIDATED_ACCEPTANCE_ROWS: Final[int] = 38
 """How many rows carry `acceptance_kind="legacy-prose"`. It may be lowered. It may not be raised.
 
 `V2-P5-038`. Every evidence path on every row is checked for existence by
-`build_feature_coverage._load`, whatever the row's acceptance kind -- all 50 of these included,
+`build_feature_coverage._load`, whatever the row's acceptance kind -- all 38 of these included,
 `web/` paths and all (measured: pointing `OA-IFACE-006` at a nonexistent `App.test.NOPE.tsx`
 makes `--check` raise). What only `pytest` rows have is a **named test function**, which
 `_validate_pytest_acceptance` verifies by AST. For the rest, a swap inside one directory --
