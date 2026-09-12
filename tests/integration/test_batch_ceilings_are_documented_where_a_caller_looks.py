@@ -13,9 +13,17 @@ whether a whole-market request can be *put*, and the `413` never named it.
 **Why the doc assertions are pinned to the live constants rather than to literals.** A test that
 grepped for the string `"8"` would keep passing after someone changed the ceiling and left the
 prose behind -- which is precisely the failure mode this row *is*. Every number asserted here is
-read from `batch_contracts`/`config` at run time and then required to appear in the prose, and
-each is paired with the live `422`/`413` from a real request, so the documentation and the
-behaviour cannot drift apart without one of these going red.
+read from `batch_contracts`/`config` at run time and then required to appear in the prose.
+
+**Which ceilings a real request drives, and where.** Only the worker ceiling is driven through
+the API in this module: `test_the_worker_ceiling_the_api_enforces_is_the_one_the_http_doc_states`
+posts `MAX_BATCH_WORKERS + 1` and reads the `422`, then posts `MAX_BATCH_WORKERS` and reads the
+`202`. The item cap and the byte ceiling are checked here against `batch_contracts` and `config`
+only. Their live refusals are in other modules: `test_validation_refusal_size.py` posts
+`MAX_BATCH_ITEMS + 1` batch requests and reads the `422` that names the limit, and
+`test_request_body_ceiling.py::test_the_413_names_the_variable_that_raises_the_ceiling` draws
+the `413` against a 512-byte configured ceiling and asserts it names
+`OPENALPHA_MAX_REQUEST_BYTES`.
 """
 
 from __future__ import annotations
@@ -27,6 +35,7 @@ from typing import Final
 
 import pytest
 from fastapi.testclient import TestClient
+from prose_clauses import clauses
 
 from openalpha_cn.api.app import create_app
 from openalpha_cn.batch_contracts import MAX_BATCH_ITEMS, MAX_BATCH_WORKERS
@@ -36,6 +45,7 @@ ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 HTTP_DOC: Final[Path] = ROOT / "docs" / "api" / "http.md"
 CHANGELOG: Final[Path] = ROOT / "CHANGELOG.md"
 README: Final[Path] = ROOT / "README.md"
+README_EN: Final[Path] = ROOT / "README.en.md"
 NOW: Final[datetime] = datetime(2026, 7, 24, 10, 0, tzinfo=UTC)
 
 
@@ -52,6 +62,11 @@ def changelog() -> str:
 @pytest.fixture
 def readme() -> str:
     return README.read_text(encoding="utf-8")
+
+
+@pytest.fixture
+def readme_en() -> str:
+    return README_EN.read_text(encoding="utf-8")
 
 
 def _batch_body(*, batch_id: str, max_concurrency: int) -> dict[str, object]:
@@ -263,7 +278,8 @@ BATCH_WORKER_RANGE: Final[re.Pattern[str]] = re.compile(
 
 Starting from the item-cap clause's own closing words is what ties this to the one sentence. The
 other places `README.md` states a concurrency range -- its feature table and its feature list --
-use different words and are not read by this module.
+use different words; `test_every_worker_range_the_readmes_state_is_the_one_the_api_enforces`
+reads those, and this sentence's range again, by a looser rule.
 
 That range went stale once already, in exactly the way the item cap did. It said 1-32 from
 `8d13065`, when the bound was the literal `le=32` on both `max_concurrency` fields. `dd4af2a`
@@ -368,3 +384,123 @@ def test_the_readme_batch_api_sentence_states_the_current_worker_ceiling(readme:
                 "than the other way around."
             )
     assert not problems, "\n".join(problems)
+
+
+WORKER_RANGE_IN_PROSE: Final[re.Pattern[str]] = re.compile(
+    rf"(?<![A-Za-z0-9_.])([0-9]+)\s*(?:[{re.escape(RANGE_JOINERS)}]|到|至)\s*([0-9]+)"
+    r"(?![A-Za-z0-9_.])"
+)
+"""Any `<a>-<b>` range in ASCII digits, joined by one of `RANGE_JOINERS`, by 到 or by 至.
+
+Looser than `STATED_RANGE` on purpose: it runs over every README clause about concurrency, and a
+range written `1到8` there must be read and checked rather than skipped. The ASCII-only
+lookarounds keep an identifier such as `V2-P4-019` from reading as the range 4-19.
+"""
+
+CONCURRENCY_WORDS: Final[tuple[str, ...]] = ("并发", "concurren", "worker")
+"""What puts a README clause in scope for the worker-range check, matched case-insensitively."""
+
+
+def _worker_range_mentions(document: str) -> list[tuple[int, int, int, str]]:
+    """Every range in a clause of `document` that names concurrency: line, floor, ceiling, clause.
+
+    Clauses come from `tests/prose_clauses.py`, so a range and its 并发 split by a soft wrap are
+    read as one clause.
+    """
+    found: list[tuple[int, int, int, str]] = []
+    for clause in clauses(document):
+        if any(word in clause.text.lower() for word in CONCURRENCY_WORDS):
+            found.extend(
+                (clause.line, int(match[1]), int(match[2]), clause.text)
+                for match in WORKER_RANGE_IN_PROSE.finditer(clause.text)
+            )
+    return found
+
+
+def _worker_range_problems(documents: dict[str, str]) -> list[str]:
+    """One message per range in `documents` that is not 1 to `MAX_BATCH_WORKERS`."""
+    return [
+        f"{name}:{line} states a batch concurrency range of {floor}-{ceiling}, but "
+        f"max_concurrency accepts 1-{MAX_BATCH_WORKERS} (Field(ge=1, le=MAX_BATCH_WORKERS)): "
+        f"{clause!r}"
+        for name, document in documents.items()
+        for line, floor, ceiling, clause in _worker_range_mentions(document)
+        if (floor, ceiling) != (1, MAX_BATCH_WORKERS)
+    ]
+
+
+def _worker_range_failures(readme: str, readme_en: str) -> list[str]:
+    """Why the two READMEs fail the worker-range check, or an empty list if they pass.
+
+    `README.md` must yield at least one range, and every range in either README must be 1 to
+    `MAX_BATCH_WORKERS`.
+    """
+    if not _worker_range_mentions(readme):
+        return [
+            "no worker range found in any README.md clause about concurrency; the feature table, "
+            "the feature list and the batch-API sentence each stated 1-8 when this was written"
+        ]
+    return _worker_range_problems({"README.md": readme, "README.en.md": readme_en})
+
+
+def test_every_worker_range_the_readmes_state_is_the_one_the_api_enforces(
+    readme: str, readme_en: str
+) -> None:
+    """Every worker range either README states is 1 to `MAX_BATCH_WORKERS`, wherever it sits.
+
+    `README.md` states the range three times today -- the feature table, the feature list and the
+    batch-API sentence -- and until `D7` nothing read the first two. A clause is in scope when it
+    names 并发, "concurren..." or "worker...", and every range in it is read. `README.en.md`
+    states no worker range today, so it adds nothing until it does.
+
+    Finding no range in `README.md` fails: a change that stops this reader seeing the ranges it
+    sees today has to break the test, not empty it. What it cannot see: a worker count written
+    without a range ("最多 8 路并发", "up to 8 workers"), or a range in a clause that names none
+    of `CONCURRENCY_WORDS`; `test_the_worker_range_reader_reads_what_its_docstring_says`
+    measures both.
+    """
+    failures = _worker_range_failures(readme, readme_en)
+    assert not failures, "\n".join(failures)
+
+
+def test_the_worker_range_reader_reads_what_its_docstring_says() -> None:
+    """Stale ranges in each form must be reported; counts, other ranges and identifiers must not.
+
+    This is what holds the check itself. The real READMEs state 1-8 everywhere and `README.en.md`
+    states no range, so the test above cannot tell a check of both bounds from a check of one,
+    cannot show that `README.en.md` is read at all, and cannot show that a `README.md` with no
+    range fails; the `whole` cases below do.
+    """
+    dash = RANGE_JOINERS[1]
+    stale = {
+        "a stale ceiling": f"持久批量队列 1{dash}32 并发、逐项进度",
+        "a stale floor": f"持久任务队列支持 2{dash}8 并发。",
+        "a range written with 到": "持久任务队列支持 1到32 路并发。",
+        "English, soft-wrapped": "- bounded batches of 1-32\n  concurrent requests;\n",
+    }
+    missed = [label for label, text in stale.items() if not _worker_range_problems({label: text})]
+    ignored = {
+        "a count without a range": "最多 8 路并发。",
+        "an English count without a range": "up to 8 workers.",
+        "a range in a clause about something else": f"每批 1{dash}32 个标的。",
+        "an identifier": "V2-P4-019 lowered the worker ceiling.",
+    }
+    wrongly = {
+        label: _worker_range_mentions(text)
+        for label, text in ignored.items()
+        if _worker_range_mentions(text)
+    }
+    valid = f"持久任务队列支持 1{dash}{MAX_BATCH_WORKERS} 并发。"
+    whole = {
+        "a README.md with no range": ("持久任务队列支持并发。", ""),
+        "a stale range in README.en.md": (
+            valid,
+            "- bounded batches of 1-32 concurrent requests;\n",
+        ),
+    }
+    unreported = [label for label, (md, en) in whole.items() if not _worker_range_failures(md, en)]
+    clean = _worker_range_failures(valid, "")
+    assert not missed and not wrongly and not unreported and not clean, (
+        f"missed stale ranges: {missed}; misread: {wrongly}; whole-check cases not reported: "
+        f"{unreported}; a clean pair reported: {clean}"
+    )
