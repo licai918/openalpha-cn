@@ -88,7 +88,7 @@ def test_every_e2e_module_marks_itself_at_module_level() -> None:
     modules = sorted(E2E_ROOT.glob("test_*.py"))
     assert modules, "tests/e2e/ holds no test module; this guard would then prove nothing"
     for module in modules:
-        tree = ast.parse(module.read_text(encoding="utf-8"))
+        tree = ast.parse(module.read_text(encoding="utf-8"), filename=str(module))
         marked = any(
             isinstance(node, ast.Assign)
             and any(

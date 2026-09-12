@@ -136,7 +136,8 @@ def test_each_batch_bound_is_written_as_a_literal_exactly_once() -> None:
 
 def _bound_names(relative: str) -> tuple[set[str], set[str]]:
     """(names imported from a `BOUND_SOURCES` module, names assigned at module level)."""
-    tree = ast.parse((PACKAGE_ROOT / relative).read_text(encoding="utf-8"))
+    path = PACKAGE_ROOT / relative
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
 
     imported = {
         alias.asname or alias.name

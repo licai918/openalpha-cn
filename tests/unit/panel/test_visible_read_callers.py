@@ -541,7 +541,8 @@ def test_every_function_that_reaches_the_filtered_read_is_named_one_by_one() -> 
     that name next.
     """
     for name, declared in FILTERED_READ_REACHERS.items():
-        tree = ast.parse((SOURCE / name).read_text(encoding="utf-8"))
+        path = SOURCE / name
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         measured = _functions_reaching(tree, FILTERED_READ)
 
         assert measured == declared, (
