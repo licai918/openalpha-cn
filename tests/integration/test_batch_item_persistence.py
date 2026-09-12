@@ -219,6 +219,13 @@ def test_cancelling_mid_run_stops_items_that_have_not_started(
     Asserted on the events as well as the statuses, because the resurrected item would end
     `succeeded` -- a state `cancel()` never produces -- but only the event stream shows that
     it was *started* at all.
+
+    `finished.items[0]` is asserted explicitly, and not folded into the `items[1:]` check
+    above: without it, this test cannot tell "item 0's runner finished and its result was
+    kept" from a hypothetical regression that rolls a started item back to `cancelled` once
+    it notices `cancel()` was called mid-flight. Both scenarios produce exactly one
+    `item_started` event and five `cancelled` neighbours, so `finished.status` and the event
+    count are silent about the difference; only `items[0]`'s own status and result are not.
     """
     store = SQLiteBatchTaskStore(tmp_path / "state.sqlite3")
     service: BatchResearchService
@@ -254,3 +261,8 @@ def test_cancelling_mid_run_stops_items_that_have_not_started(
     assert [event.run_id for event in started] == ["item-000000"]
     assert [item.status for item in finished.items[1:]] == ["cancelled"] * 5
     assert finished.status == "cancelled"
+    succeeded = [event for event in store.list_events("items") if event.kind == "item_succeeded"]
+    assert [event.run_id for event in succeeded] == ["item-000000"]
+    assert finished.items[0].status == "succeeded"
+    assert finished.items[0].result is not None
+    assert finished.items[0].result.decision_id == "dec-0"
