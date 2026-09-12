@@ -858,40 +858,32 @@ def _first_invalid_escape_line(token_text: str, start_row: int, *, is_bytes: boo
     return None
 
 
-def _line_of_the_invalid_escape(source: str, exc: SyntaxError) -> int:
-    """Best-effort real line number for an "invalid escape sequence" `SyntaxError`.
+def _located_invalid_escape_line(source: str) -> int | None:
+    """The 1-indexed line of the first invalid escape sequence in `source`'s string
+    literals, or `None` if this scan cannot find one.
 
-    Escalating that warning to an error and letting `compile()` raise it reports where
-    the *enclosing string literal starts* (`exc.lineno`), not the line the backslash is
-    actually on, on Python 3.11 -- measured against this repository's own instance,
-    `storage/connection.py`'s `\\|` on line 34 inside a docstring that opens on line 1:
-    3.11's `exc.lineno` is 1, 3.12's is already the true 34.
+    Tokenizes `source` (`tokenize.generate_tokens`) and runs `_first_invalid_escape_line`
+    over each string/bytes token's own source text and, on Python 3.12, over each
+    `FSTRING_MIDDLE` chunk of an f-string's literal part. A token whose prefix contains
+    `r`/`R` is skipped: there is no escape processing in a raw string, so `compile()`
+    never warns about one.
 
-    Method: tokenize `source` (`tokenize.generate_tokens`) and re-derive, from each
-    string/bytes/f-string token's own source text, which backslash `compile()` actually
-    warned about, using `_first_invalid_escape_line` above -- rather than the previous
-    version of this helper, which matched `exc.msg`'s quoted text as a substring of the
-    lines `exc.lineno`..`exc.end_lineno` span. A *valid* escaped backslash defeats that:
-    `\\q` is a substring of `\\\\q`, so that search stopped at a valid pair one line
-    early. A token whose prefix contains `r`/`R` is skipped outright -- there is no
-    escape processing in a raw string, so `compile()` never warns about one. On Python
-    3.12, an f-string's literal text arrives as separate `FSTRING_MIDDLE` tokens rather
-    than inside one `STRING` token; that branch is guarded by `_FSTRING_START`/
-    `_FSTRING_MIDDLE`/`_FSTRING_END` being `None` on 3.11 (see their own docstring
-    above) and, since this repository's own interpreter here is 3.11, is verified only
-    by CI, never locally.
+    `None` is an answer, not an error. It means the offender -- if there is one -- is
+    outside what this scan recognises: a malformed `\\x`, `\\N`, `\\u` or `\\U` escape is
+    `compile()`'s own unconditional `SyntaxError`, and this scan treats those four as
+    valid without checking what follows them; or the `SyntaxError` was not about an
+    escape at all; or `source` does not tokenize. A caller that reports a line must say
+    so when this returns `None` rather than present `compile()`'s number as confirmed --
+    see `_describe_where`.
 
-    Returns the first invalid escape found, scanning the file in source order -- which
-    is also the one `compile()` itself reports (`exc.msg`) when a file has more than
-    one, because `compile()` raises on the first it finds and never reaches the rest;
-    that one-offender-per-run limit is `compile()`'s, not this helper's to lift. Falls
-    back to `exc.lineno` if the token scan finds nothing (the `SyntaxError` was not
-    about an escape sequence at all -- this helper does not re-validate what follows
-    `\\x`, `\\N`, `\\u` or `\\U`, since a malformed one is its own, unconditional
-    `SyntaxError`, not the warning this helper locates) or if `source` does not
-    tokenize cleanly.
+    Known limit, reasoned rather than measured (3.12 cannot run here): 3.12 splits an
+    f-string's literal text into `FSTRING_MIDDLE` chunks that end where a `{` or `}`
+    token begins, so in `f"text\\{expr}"` the chunk can end in a bare backslash, and
+    `_first_invalid_escape_line` never flags a backslash with nothing after it. That
+    `\\{` would then be missed and this returns `None`, which `_describe_where` reports
+    as unlocated rather than as a confirmed line. On 3.11 an f-string is one `STRING`
+    token and `\\{` is found.
     """
-    reported_line = exc.lineno or 1
     fstring_raw_stack: list[bool] = []
     try:
         for token in tokenize.generate_tokens(io.StringIO(source).readline):
@@ -917,8 +909,63 @@ def _line_of_the_invalid_escape(source: str, exc: SyntaxError) -> int:
                 if line is not None:
                     return line
     except (tokenize.TokenError, SyntaxError):
-        return reported_line
-    return reported_line
+        return None
+    return None
+
+
+def _line_of_the_invalid_escape(source: str, exc: SyntaxError) -> int:
+    """Best-effort real line number for an "invalid escape sequence" `SyntaxError`.
+
+    Escalating that warning to an error and letting `compile()` raise it reports where
+    the *enclosing string literal starts* (`exc.lineno`), not the line the backslash is
+    actually on, on Python 3.11 -- measured against this repository's own instance,
+    `storage/connection.py`'s `\\|` on line 34 inside a docstring that opens on line 1:
+    3.11's `exc.lineno` is 1, 3.12's is already the true 34.
+
+    Returns `_located_invalid_escape_line(source)` when that finds the offender, and
+    `exc.lineno` otherwise. An earlier version matched `exc.msg`'s quoted text as a
+    substring of the lines `exc.lineno`..`exc.end_lineno` span, and a *valid* escaped
+    backslash defeats that: `\\q` is a substring of `\\\\q`, so the search stopped at a
+    valid pair one line early. This returns an `int` either way, so a caller that needs
+    to know whether the line was *located* or merely *fallen back to* must call
+    `_located_invalid_escape_line` itself -- `_describe_where` does.
+
+    The first invalid escape in source order is also the one `compile()` reports when a
+    file has more than one: it raises on the first it finds and never reaches the rest,
+    a one-offender-per-run limit that is `compile()`'s, not this helper's to lift.
+    """
+    located = _located_invalid_escape_line(source)
+    return located if located is not None else (exc.lineno or 1)
+
+
+def _describe_where(source: str, exc: SyntaxError) -> str:
+    """Where to send the reader for `exc`, and how sure that line is.
+
+    Three cases get three sentences: the offender was located and `compile()` agrees;
+    it was located on a different line from the one `compile()` reports (3.11 reports
+    where the enclosing literal begins); or `_located_invalid_escape_line` could not find
+    it, in which case `compile()`'s number is passed on as exactly that and marked
+    unconfirmed. The third exists because a review measured the alternative, confirmed
+    here on 3.11.14: `\\x` followed by non-hex on line 2 of a three-line literal makes
+    `compile()` report line 3 -- the closing quotes, neither the literal's start nor the
+    offender -- and a bare `line 3` read as confirmed.
+    """
+    if exc.lineno is None:
+        return "an unreported line (no SyntaxError position available)"
+    located = _located_invalid_escape_line(source)
+    if located is None:
+        return (
+            f"line {exc.lineno} as compile() reports it, unconfirmed: no invalid escape "
+            "sequence could be located in this file's string literals (a malformed \\x, "
+            "\\N, \\u or \\U escape, for one, raises its own SyntaxError at a line that can "
+            "differ from the offender's)"
+        )
+    if located != exc.lineno:
+        return (
+            f"line {located} (compile() itself reports line {exc.lineno}, "
+            "where the enclosing string literal begins)"
+        )
+    return f"line {located}"
 
 
 def _syntax_error_from_compiling(source: str) -> SyntaxError:
@@ -976,7 +1023,9 @@ def test_raw_strings_are_never_flagged_even_with_warnings_escalated_to_errors() 
     """Raw strings never warn -- there is no escape processing inside them at all, so
     `_line_of_the_invalid_escape`'s own skip of any token whose prefix contains `r`/`R`
     is answering a question `compile()` never raises for this source in the first
-    place. Pinned directly against `compile()`, not just against the helper.
+    place. This pins `compile()` alone and never calls the helper;
+    `test_the_line_helper_skips_a_raw_string_that_precedes_the_real_offender` is what
+    pins the helper's own skip.
     """
     source = r"""r"\d"
 """
@@ -1036,6 +1085,64 @@ def test_backslash_capital_n_is_invalid_in_bytes_but_a_named_escape_in_str() -> 
     str_source = r"""x = "\N{BULLET}"
 """
     _assert_compiles_without_a_warning(str_source)
+
+
+def test_the_line_helper_skips_a_raw_string_that_precedes_the_real_offender() -> None:
+    """The helper's own raw-prefix skip, pinned through the helper itself.
+
+    `test_raw_strings_are_never_flagged_even_with_warnings_escalated_to_errors` above
+    pins `compile()` alone and never calls the helper, so a review found that deleting
+    the skip left every helper test green. This source separates the two: the raw
+    `r"\\p"` on line 1 has no escape processing, and the real offender is the ordinary
+    `"\\q"` on line 2. Without the skip the scan reads `\\p` inside the raw string as the
+    offender and returns 1.
+    """
+    source = 'x = r"\\p"\ny = "\\q"\n'
+    exc = _syntax_error_from_compiling(source)
+    assert _line_of_the_invalid_escape(source, exc) == 2
+
+
+def test_the_line_helper_rejects_a_unicode_escape_inside_a_multi_line_bytes_literal() -> None:
+    """`\\N`, `\\u` and `\\U` are invalid inside `bytes`, pinned where a fallback cannot pass.
+
+    `test_backslash_capital_n_is_invalid_in_bytes_but_a_named_escape_in_str` above uses a
+    one-line `b"\\N"`, so even a scan that finds nothing falls back to `exc.lineno` --
+    already the right answer on one line -- and a review found that making `bytes`
+    accept these three left every helper test green. Here the offender sits on line 3
+    of a literal that opens on line 1, so on Python 3.11 only a scan that rejects `\\N`
+    inside `bytes` returns 3.
+    """
+    source = "x = b'''\nline one\nline two: \\N here\n'''\n"
+    exc = _syntax_error_from_compiling(source)
+    assert _line_of_the_invalid_escape(source, exc) == 3
+
+
+def test_a_located_escape_is_described_at_its_own_line() -> None:
+    """`_describe_where` leads with the located line, whatever `compile()` reported."""
+    source = (
+        '"""\nline with a valid escaped backslash then q: \\\\q\n'
+        'real invalid escape is here: \\q\n"""\n'
+    )
+    exc = _syntax_error_from_compiling(source)
+    assert _located_invalid_escape_line(source) == 3
+    assert _describe_where(source, exc).startswith("line 3")
+
+
+def test_a_malformed_hex_escape_is_described_as_unlocated_rather_than_confirmed() -> None:
+    """A hard `SyntaxError` the scan cannot see must not be reported as a confirmed line.
+
+    `\\x` followed by non-hex is `compile()`'s own unconditional `SyntaxError`, not the
+    warning `_located_invalid_escape_line` locates, and that scan treats `\\x` as valid
+    without checking the digits after it -- so it returns `None` here. Measured on
+    3.11.14, `compile()` then reports line 3, the closing quotes: neither the literal's
+    start (1) nor the offender (2). Before this, the guard printed that as a bare
+    `line 3`, which reads as confirmed.
+    """
+    source = 'x = """line one\nline two: \\xzz\n"""\n'
+    exc = _syntax_error_from_compiling(source)
+    assert _located_invalid_escape_line(source) is None
+    assert _line_of_the_invalid_escape(source, exc) == exc.lineno
+    assert "unconfirmed" in _describe_where(source, exc)
 
 
 def test_line_of_the_invalid_escape_finds_an_offender_in_an_f_strings_literal_part() -> None:
@@ -1106,14 +1213,8 @@ def test_no_source_file_raises_a_syntax_or_deprecation_warning_when_compiled() -
                 compile(source, str(path), "exec")
             except (SyntaxError, Warning) as exc:
                 relative_path = path.relative_to(ROOT).as_posix()
-                if isinstance(exc, SyntaxError) and exc.lineno is not None:
-                    real_line = _line_of_the_invalid_escape(source, exc)
-                    where = (
-                        f"line {real_line} (compile() itself reports line {exc.lineno}, "
-                        "where the enclosing string literal begins)"
-                        if real_line != exc.lineno
-                        else f"line {exc.lineno}"
-                    )
+                if isinstance(exc, SyntaxError):
+                    where = _describe_where(source, exc)
                 else:
                     where = "an unreported line (no SyntaxError position available)"
                 offenders.append(f"{relative_path}, {where}: {exc}")
