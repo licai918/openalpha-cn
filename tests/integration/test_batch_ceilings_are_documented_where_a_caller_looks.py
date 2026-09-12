@@ -218,55 +218,153 @@ def test_the_shipped_container_can_carry_a_whole_market_batch() -> None:
     assert configured >= MAX_BATCH_ITEMS, "sanity: the ceiling is bytes, not items"
 
 
-BATCH_SENTENCE_ITEM_CAP: Final[re.Pattern[str]] = re.compile(
-    r"批量\s*API\s*则把最多\s*([\d,]+)\s*个不可变请求放入"
-)
-"""Anchors on the Chinese prose either side of the number in `README.md`'s API-relationship
-section (currently :1152), not on the number itself and not on a line number.
+def _wrap_tolerant(phrase: str) -> str:
+    """`phrase` as a pattern that still matches after a reflow puts whitespace inside it.
 
-`test_the_worker_ceiling_the_api_enforces_is_the_one_the_http_doc_states` above only asserts
-``str(MAX_BATCH_ITEMS) in http_doc or "10,000" in http_doc`` -- true the moment the right digits
-appear *anywhere* in `docs/api/http.md`. This module's own docstring calls that "the honest
-limit of the check" (see `test_every_deployment_that_sets_the_ceiling_sets_the_one_this_service_
-declares`'s docstring): a correct number stated two paragraphs away from an unrelated stale claim
-would still satisfy it. `README.md` was outside every check in this file, and the stale claim was
-real, not hypothetical: `README.md:1152` has said "最多 1000 个" since the day it was written
-(`8d13065`, 2026-07-27 -- 1,000 really was `MAX_BATCH_ITEMS` then) and was never updated when
-`dd4af2a` (`V2-P4-019`, 2026-08-18) raised the constant tenfold to make a whole-market batch
-expressible. Ten weeks stale, not merely never-true -- confirmed with `git log -S`/`git show`
-against both commits -- and nothing that reads `README.md` caught it.
+    `README.md` is hard-wrapped, so a line break -- plus the next line's indentation -- can land
+    between any two characters of a Chinese sentence without changing what it says. The spaces
+    `phrase` does contain are made optional for the same reason.
+    """
+    return r"\s*".join(re.escape(char) for char in phrase if not char.isspace())
+
+
+BATCH_ITEM_CAP: Final[re.Pattern[str]] = re.compile(
+    _wrap_tolerant("批量 API 则把最多")
+    + r"(?P<stated>[^。]*?)"
+    + _wrap_tolerant("个不可变请求放入")
+)
+"""The item-cap clause of `README.md`'s batch-API sentence ("API 关系图 03"), found by its words.
+
+It anchors on the prose either side of the number, never on the number or on a line number.
+What sits between the anchors is captured loosely -- anything short of the sentence's `。` --
+and parsed strictly by the test, so a malformed number fails as a malformed number rather than
+as a missing sentence.
+
+**Why `README.md` needs its own check.**
+`test_the_worker_ceiling_the_api_enforces_is_the_one_the_http_doc_states` asserts only
+``str(MAX_BATCH_ITEMS) in http_doc or "10,000" in http_doc``: true the moment the right digits
+appear *anywhere* in `docs/api/http.md`, including two paragraphs away from a stale claim. And
+until `e758f0a` nothing in this module read `README.md` at all.
+
+**The stale claim was real.** The sentence said "最多 1000 个" from the day it was written
+(`8d13065`, 2026-07-27), and it was true then: the cap was the literal `max_length=1000` on the
+batch request and task models -- `MAX_BATCH_ITEMS` did not exist yet. `dd4af2a` (`V2-P4-019`,
+2026-08-18) introduced `MAX_BATCH_ITEMS = 10_000` to make a whole-market batch expressible, and
+the sentence kept saying 1000 until `e758f0a` (2026-09-12): stale for 25 days, about 3.6 weeks,
+rather than never true. `git show` of those three commits is the evidence.
 """
+
+BATCH_WORKER_RANGE: Final[re.Pattern[str]] = re.compile(
+    _wrap_tolerant("个不可变请求放入持久队列，以")
+    + r"(?P<stated>[^。]*?)"
+    + _wrap_tolerant("的受控并发")
+)
+"""The concurrency range the same sentence states, anchored on the words after its item cap.
+
+Starting from the item-cap clause's own closing words is what ties this to the one sentence. The
+other places `README.md` states a concurrency range -- its feature table and its feature list --
+use different words and are not read by this module.
+
+That range went stale once already, in exactly the way the item cap did. It said 1-32 from
+`8d13065`, when the bound was the literal `le=32` on both `max_concurrency` fields. `dd4af2a`
+(2026-08-18) introduced `MAX_BATCH_WORKERS = 8`, and the sentence kept saying 32 until `74cee0f`
+(2026-09-10), with no test reading the number. (`README.md` writes the range with an en dash,
+U+2013.)
+"""
+
+WELL_FORMED_COUNT: Final[re.Pattern[str]] = re.compile(
+    r"[1-9][0-9]{0,2}(?:,[0-9]{3})+|[1-9][0-9]{0,2}(?:_[0-9]{3})+|[1-9][0-9]*"
+)
+"""A count as prose writes it: ASCII digits, ungrouped or grouped in threes by `,` or by `_`.
+
+Used with `fullmatch`, so `10000`, `10,000` and `10_000` are read, and `1,0000`, `100,00`,
+`10 000`, a full-width comma and `一万` are not. Stripping separators and calling `int()` instead
+would read `1,0000` as 10000 -- a number the sentence does not state -- and would raise
+`ValueError` on a bare `,`.
+"""
+
+RANGE_JOINERS: Final[str] = "".join(("-", chr(0x2013), chr(0x2014), "~", chr(0xFF5E)))
+"""A hyphen, an en dash, an em dash, a tilde and a full-width tilde.
+
+Spelled with `chr` because ruff's RUF001 refuses the literal dash and full-width tilde as
+look-alikes of `-` and `~`.
+"""
+
+STATED_RANGE: Final[re.Pattern[str]] = re.compile(
+    rf"([1-9][0-9]*)\s*[{re.escape(RANGE_JOINERS)}]\s*([1-9][0-9]*)"
+)
+"""`<floor>-<ceiling>` in ASCII digits, joined by any one of `RANGE_JOINERS`."""
 
 
 def test_the_readme_batch_api_sentence_states_the_current_item_ceiling(readme: str) -> None:
-    """The one sentence in `README.md` that states the batch item cap must state it correctly.
+    """Every copy of `README.md`'s batch-API item-cap clause states `MAX_BATCH_ITEMS`.
 
-    Unlike the HTTP-doc check above, this does not accept the right number appearing *somewhere*
-    in the file -- it locates the specific sentence that makes the claim (by its surrounding
-    prose, not by line number) and reads *its* number back.
+    Unlike the HTTP-doc check above, the right digits elsewhere in the file do not count: each
+    clause is found by its own words and *its* number is read back. Every occurrence is read,
+    not only the first, so a correct copy cannot vouch for a stale one further down.
 
-    If `BATCH_SENTENCE_ITEM_CAP` cannot find that sentence at all, the assertion below fails
-    loudly rather than silently passing over nothing to check: a reword that drops the anchor
-    phrase must break this test, not silently disable it.
-
-    The same sentence also states the worker-concurrency range as "1-8 的受控并发"; that is
-    correct (`MAX_BATCH_WORKERS = 8`, `Field(ge=1, le=MAX_BATCH_WORKERS)` on both
-    `max_concurrency` fields) and was already fixed by a prior change, so it is deliberately left
-    alone here and this test does not touch it. It is the only other number in the sentence.
-
-    `README.en.md` makes no equivalent claim -- it states no batch item number at all -- so there
-    is nothing for this test to check there.
+    Finding no such clause fails too: a reword that drops the anchor words has to break this
+    test, not disable it. `README.en.md` states no batch item number, so it has nothing to read.
     """
-    match = BATCH_SENTENCE_ITEM_CAP.search(readme)
-    assert match, (
-        "could not find README.md's batch-API item-cap sentence (looked for the pattern "
-        r"'批量 API 则把最多 <N> 个不可变请求放入', currently at :1152). Either the wording "
-        "changed -- update BATCH_SENTENCE_ITEM_CAP to match the new phrasing -- or the claim was "
-        "removed, in which case this test should be removed with it, not left passing vacuously."
+    occurrences = list(BATCH_ITEM_CAP.finditer(readme))
+    assert occurrences, (
+        "could not find README.md's batch-API item-cap clause (the words "
+        "'批量 API 则把最多 <N> 个不可变请求放入'). Either the wording changed -- update "
+        "BATCH_ITEM_CAP to match it -- or the claim was removed, in which case remove this test "
+        "with it rather than leave it passing over nothing."
     )
-    stated_cap = int(match.group(1).replace(",", ""))
-    assert stated_cap == MAX_BATCH_ITEMS, (
-        f"README.md's batch-API sentence states an item cap of {stated_cap}, but MAX_BATCH_ITEMS "
-        f"is {MAX_BATCH_ITEMS}. V2-P4-019 raised the constant tenfold; update the README sentence "
-        "to match rather than the other way around."
+    problems: list[str] = []
+    for occurrence in occurrences:
+        stated = " ".join(occurrence["stated"].split())
+        line = readme.count("\n", 0, occurrence.start("stated")) + 1
+        if WELL_FORMED_COUNT.fullmatch(stated) is None:
+            problems.append(
+                f"README.md:{line} gives the batch item cap as {stated!r}, which is not a count "
+                "this test reads (ASCII digits, ungrouped or grouped in threes by ',' or '_': "
+                "10000, 10,000, 10_000)."
+            )
+            continue
+        stated_cap = int(stated.replace(",", "").replace("_", ""))
+        if stated_cap != MAX_BATCH_ITEMS:
+            problems.append(
+                f"README.md:{line} states a batch item cap of {stated_cap}, but MAX_BATCH_ITEMS is "
+                f"{MAX_BATCH_ITEMS}. V2-P4-019 raised the constant tenfold; update the sentence to "
+                "the constant rather than the other way around."
+            )
+    assert not problems, "\n".join(problems)
+
+
+def test_the_readme_batch_api_sentence_states_the_current_worker_ceiling(readme: str) -> None:
+    """The same sentence's concurrency range is 1 to `MAX_BATCH_WORKERS`, at every copy of it.
+
+    The floor is the `ge=1` both `max_concurrency` fields declare beside `le=MAX_BATCH_WORKERS`
+    (`api/app.py`, `batch_contracts.py`). As with the item cap, finding no such range fails
+    rather than passes, and a range this test cannot read fails as unreadable.
+    """
+    occurrences = list(BATCH_WORKER_RANGE.finditer(readme))
+    assert occurrences, (
+        "could not find the concurrency range in README.md's batch-API sentence (the words "
+        "'个不可变请求放入持久队列，以 <floor>-<ceiling> 的受控并发'). Either the wording "
+        "changed -- update BATCH_WORKER_RANGE to match it -- or the claim was removed, in which "
+        "case remove this test with it."
     )
+    problems: list[str] = []
+    for occurrence in occurrences:
+        stated = " ".join(occurrence["stated"].split())
+        line = readme.count("\n", 0, occurrence.start("stated")) + 1
+        bounds = STATED_RANGE.fullmatch(stated)
+        if bounds is None:
+            problems.append(
+                f"README.md:{line} gives the batch concurrency range as {stated!r}, which is not "
+                "a '<floor>-<ceiling>' range of ASCII digits this test reads."
+            )
+            continue
+        floor, ceiling = int(bounds[1]), int(bounds[2])
+        if (floor, ceiling) != (1, MAX_BATCH_WORKERS):
+            problems.append(
+                f"README.md:{line} states a batch concurrency range of {floor}-{ceiling}, but "
+                f"max_concurrency accepts 1-{MAX_BATCH_WORKERS} "
+                "(Field(ge=1, le=MAX_BATCH_WORKERS)). Update the sentence to the constant rather "
+                "than the other way around."
+            )
+    assert not problems, "\n".join(problems)
