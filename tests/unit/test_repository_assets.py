@@ -2520,6 +2520,65 @@ def test_publication_gate_accepts_tracked_release_sources() -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+_PUBLIC_METADATA: Final[tuple[str, ...]] = (
+    "LICENSE",
+    "README.md",
+    "README.en.md",
+    "SECURITY.md",
+    "THIRD_PARTY_NOTICES.md",
+)
+"""The five files `verify_publication.py` refuses to publish without, as its `required` list."""
+
+
+def _scratch_publication_repository(tmp_path: Path) -> Path:
+    """A throwaway git repository under `tmp_path` holding a copy of the gate and nothing else.
+
+    M9 (D13): the tests that drive the gate's refusals used to write their probes into this
+    checkout -- `publication-gate-secret-probe.txt` and a nested `publication-gate-probe/` at
+    `ROOT` -- and scan it. Two runs in one checkout then saw each other's probes (the pass-
+    branch test above lists untracked files too), and a run killed before its `finally` left
+    the probe behind for the next scan. A copy of the script scans the repository it sits in:
+    `ROOT` is `Path(__file__).resolve().parents[1]` and `git ls-files` runs from there, so the
+    copy at `<scratch>/scripts/` reads `<scratch>` and cannot see this checkout. The gate's own
+    bytes are not changed, and neither is what it does to the real repository.
+
+    The five required metadata files are present, so a scan reports only what a test adds.
+    `core.excludesFile` points at an empty file because a user-level excludes file (git reads
+    `~/.config/git/ignore` when that setting is unset) could otherwise hide a probe from
+    `--exclude-standard` on one machine and not another.
+    """
+    repository = tmp_path / "scratch-repository"
+    (repository / "scripts").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repository)], check=True, capture_output=True)
+    no_excludes = tmp_path / "no-excludes"
+    no_excludes.write_text("", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(repository), "config", "core.excludesFile", str(no_excludes)],
+        check=True,
+        capture_output=True,
+    )
+    shutil.copyfile(
+        ROOT / "scripts" / "verify_publication.py",
+        repository / "scripts" / "verify_publication.py",
+    )
+    for name in _PUBLIC_METADATA:
+        (repository / name).write_text(f"{name}\n", encoding="utf-8")
+    return repository
+
+
+def _publication_scan(repository: Path) -> tuple[int, dict[str, object]]:
+    """Run the gate copy inside `repository` the way CI runs the real one, and parse its report."""
+    result = subprocess.run(
+        [sys.executable, "scripts/verify_publication.py", "--json"],
+        cwd=repository,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    report: dict[str, object] = json.loads(result.stdout)
+    return result.returncode, report
+
+
 def test_publication_gate_survives_a_nested_checkout_and_says_it_skipped_it(
     tmp_path: Path,
 ) -> None:
@@ -2536,32 +2595,25 @@ def test_publication_gate_survives_a_nested_checkout_and_says_it_skipped_it(
     scan that quietly declines to read something and still answers "ok" is the failure mode
     every registry in this repository exists to prevent.
 
-    The probe sits at the repository root and **not** under `.claude/`, which is where the
-    harness actually puts its worktrees. That directory is ignored now, so `git ls-files
-    --others --exclude-standard` never mentions it and there is nothing for this test to
-    observe -- it went red the moment the ignore landed, which is the correct signal and the
-    reason the probe moved rather than the assertion weakening. An ignored directory is not a
-    skip; it is not a candidate. What still has to hold is the case the ignore does not cover:
-    somebody clones a repository into the working tree, git lists that directory and nothing
-    else about it, and the scan must survive it and say so.
+    The probe is a scratch repository under `tmp_path`, not this checkout (see
+    `_scratch_publication_repository`). It used to sit at this checkout's root, which is also
+    where it had moved from `.claude/`: that directory is ignored here, so `git ls-files
+    --others --exclude-standard` never mentions a worktree under it -- an ignored directory is
+    not a skip, it is not a candidate. The scratch repository has no ignore file at all, so
+    what this holds is the case an ignore does not cover: somebody clones a repository into the
+    working tree, git lists that directory and nothing else about it, and the scan must survive
+    it and say so.
     """
-    nested = ROOT / "publication-gate-probe"
+    repository = _scratch_publication_repository(tmp_path)
+    nested = repository / "publication-gate-probe"
     subprocess.run(["git", "init", "-q", str(nested)], check=True, capture_output=True)
-    try:
-        (nested / "decoy.parquet").write_bytes(b"a blocked suffix the outer scan must not see")
-        result = subprocess.run(
-            [sys.executable, "scripts/verify_publication.py", "--json"],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert result.returncode == 0, result.stdout + result.stderr
-        report = json.loads(result.stdout)
-        assert "publication-gate-probe" in report["nested_checkouts"]
-        assert report["blockers"] == []
-    finally:
-        shutil.rmtree(nested, ignore_errors=True)
+    (nested / "decoy.parquet").write_bytes(b"a blocked suffix the outer scan must not see")
+
+    returncode, report = _publication_scan(repository)
+
+    assert returncode == 0, report
+    assert report["nested_checkouts"] == ["publication-gate-probe"]
+    assert report["blockers"] == []
 
 
 def test_publication_gate_blocks_a_listed_directory_that_is_not_a_checkout(
@@ -2600,39 +2652,114 @@ def test_publication_gate_blocks_sqlite_backup_files() -> None:
     assert ".bak" in module.BLOCKED_SUFFIXES
 
 
-def test_publication_gate_blocks_a_file_shaped_like_a_leaked_credential(tmp_path: Path) -> None:
-    """`test_publication_gate_accepts_tracked_release_sources` only drives the pass branch: it
-    proves today's tracked files hold nothing `SECRET_PATTERNS` recognizes, which is exactly the
-    result a scanner that matched nothing at all would also give. This drives the reject branch:
-    an untracked probe file at the repository root, holding a string shaped like a real AWS
-    access key, and asserts the scanner actually refuses it.
+_SECRET_SHAPES: Final[dict[str, str]] = {
+    "private-key": "-----BEGIN " + "RSA PRIVATE KEY-----",
+    "github-token": "ghp_" + "A" * 36,
+    "aws-access-key": "AKIA" + "FAKE" * 4,
+    "local-user-path": "C:" + "\\Users\\" + "someone",
+}
+"""Text shaped like what each `SECRET_PATTERNS` entry matches, keyed by the entry's name.
 
-    The probe string is assembled by concatenation (`"AKIA" + "FAKE" * 4`) precisely so this
-    module's own source text never carries `SECRET_PATTERNS["aws-access-key"]`'s match as one
-    contiguous literal -- `verify_publication.py` scans this very file on every tracked-source
-    run, `test_publication_gate_accepts_tracked_release_sources` included, and a literal fake key
-    sitting here would trip that test rather than this one.
-    """
-    probe = ROOT / "publication-gate-secret-probe.txt"
-    fake_access_key = "AKIA" + "FAKE" * 4  # 20 chars: AKIA + 16 of [0-9A-Z], never a real key
-    probe.write_text(f"not a real key: {fake_access_key}\n", encoding="utf-8")
-    try:
-        result = subprocess.run(
-            [sys.executable, "scripts/verify_publication.py", "--json"],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            check=False,
+Every shape is assembled from pieces, so this module's own source never holds a match as one
+contiguous literal: `test_publication_gate_accepts_tracked_release_sources` scans this file with
+the real gate, and a literal fake key here would trip that test instead of these. None of them is
+a real credential -- the AWS one is `AKIA` plus sixteen letters spelling FAKE four times.
+"""
+
+_OVERSIZED_BYTES: Final[int] = 50 * 1024 * 1024 + 1
+"""One byte over the 50 MiB budget the gate's refusal names ("file exceeds 50 MiB Git budget").
+
+A literal rather than `MAX_GIT_FILE_BYTES + 1`, so raising the budget moves this test's verdict
+instead of moving the probe along with it. The file is written sparse, so it costs no disk.
+"""
+
+_PUBLICATION_REFUSALS: Final[dict[str, dict[str, tuple[bytes | int, str]]]] = {
+    "secrets": {
+        **{
+            f"{name}.txt": (f"not a real credential: {shape}\n".encode(), f"matched {name}")
+            for name, shape in _SECRET_SHAPES.items()
+        },
+        **{
+            f"leaked{suffix}": (b"placeholder key material\n", f"blocked suffix {suffix}")
+            for suffix in (".key", ".pem", ".p12", ".pfx")
+        },
+    },
+    "runtime-databases": {
+        name: (b"placeholder database bytes\n", f"blocked suffix {Path(name).suffix}")
+        for name in (
+            "state.sqlite3",
+            "state.sqlite",
+            "state.db",
+            "panel.duckdb",
+            "evidence.parquet",
+            "state.sqlite3.bak",
         )
-        report = json.loads(result.stdout)
-        assert result.returncode == 1, result.stdout + result.stderr
-        assert report["status"] == "blocked"
-        assert {
-            "path": "publication-gate-secret-probe.txt",
-            "reason": "matched aws-access-key",
-        } in report["blockers"]
-    finally:
-        probe.unlink(missing_ok=True)
+    },
+    "installers": {
+        name: (b"placeholder installer bytes\n", f"blocked suffix {Path(name).suffix.lower()}")
+        for name in (
+            "OpenAlpha-Setup.exe",
+            "OpenAlpha.msi",
+            "OpenAlpha.dmg",
+            "OpenAlpha-x86_64.AppImage",
+        )
+    },
+    "oversized": {"oversized.txt": (_OVERSIZED_BYTES, "file exceeds 50 MiB Git budget")},
+}
+"""What each of `OA-OPS-009`'s four refusals is driven with: file name -> (content, reason).
+
+Content is the bytes to write, or an `int` for a sparse file of that many bytes. The reason is
+the gate's own wording for the blocker it must report for that file.
+"""
+
+
+@pytest.mark.parametrize("category", sorted(_PUBLICATION_REFUSALS))
+def test_publication_gate_refuses_secrets_runtime_databases_installers_and_oversized_files(
+    category: str, tmp_path: Path
+) -> None:
+    """`OA-OPS-009`'s four refusals, each driven through the reject branch (final review I3).
+
+    The row used to cite only `test_publication_gate_accepts_tracked_release_sources`, which
+    asserts `returncode == 0` over this checkout: the pass branch, which a gate that refused
+    nothing would pass as well. Each case here writes one category's files into a scratch
+    repository and requires exactly the blockers the gate names for them -- none missing, and
+    none extra, so a probe that tripped some other rule cannot stand in for the one under test:
+
+    * `secrets`: one file per `SECRET_PATTERNS` entry, holding text shaped like what it
+      matches, and one per key-material suffix (`.key`, `.pem`, `.p12`, `.pfx`);
+    * `runtime-databases`: `.sqlite3`, `.sqlite`, `.db`, `.duckdb`, `.parquet`, and the `.bak`
+      `storage/migrations.py` writes before a migration;
+    * `installers`: `.exe`, `.msi`, `.dmg`, and `.AppImage` spelled as it ships, which the gate
+      lowercases before it compares;
+    * `oversized`: a sparse file one byte over 50 MiB.
+
+    Measured in D13: deleting any one of those nineteen rules -- a pattern, a suffix or the
+    size check -- turns its case red, and so does raising `MAX_GIT_FILE_BYTES` or dropping the
+    `.lower()`.
+
+    What this cannot see: a secret in a shape `SECRET_PATTERNS` does not describe, a file with
+    an unlisted suffix, and anything a `.gitignore` hides from `git ls-files --exclude-standard`
+    in a real checkout -- the scratch repository has no ignore file, so every probe here is a
+    candidate. `OA-BOUND-004` cites this test for its `secrets` case.
+    """
+    repository = _scratch_publication_repository(tmp_path)
+    expected: list[tuple[str, str]] = []
+    for name, (content, reason) in _PUBLICATION_REFUSALS[category].items():
+        path = repository / name
+        if isinstance(content, int):
+            with path.open("wb") as handle:
+                handle.truncate(content)
+        else:
+            path.write_bytes(content)
+        expected.append((name, reason))
+
+    returncode, report = _publication_scan(repository)
+
+    assert returncode == 1, report
+    assert report["status"] == "blocked"
+    blockers = report["blockers"]
+    assert isinstance(blockers, list)
+    assert sorted((item["path"], item["reason"]) for item in blockers) == sorted(expected)
 
 
 def test_feature_coverage_artifacts_are_reconciled() -> None:
