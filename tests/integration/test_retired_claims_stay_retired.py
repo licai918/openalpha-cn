@@ -36,10 +36,10 @@ phrasings that were retired, not a detector of the claim: the same claim in othe
 another verb, another order, or its halves in two clauses -- passes, and
 `test_the_retired_claims_blind_spot_is_real` holds one such paraphrase per entry. Most patterns
 do not read negation either: "不能分别启停" is read as the claim it denies. A span built from
-`_NO_DENIAL` or `_NO_COMMA_OR_DENIAL` stops at 不, 未 or 没, so the entries that use one pass a
-denial written inside their span; a denial written before a pattern's first word still reads as
-the claim unless the pattern looks behind for it, and a claim whose span holds 不可变 is missed
-by the entries that use one. A premise reads one fact,
+`_NO_DENIAL` or `_NO_COMMA_OR_DENIAL` stops at 不, 未, 没 or 无, so an entry that uses one passes
+a denial written inside its span; a denial written before a pattern's first word still reads as
+the claim unless the pattern looks behind for it, and a claim whose span holds 不可变 or 无 in
+another sense is missed by the entries that use one. A premise reads one fact,
 not the whole of `refuted_by`, so a premise that stays quiet does not prove the claim still
 false, and the ledger's premise sees a call, a bound alias and a `getattr` with the literal name
 of `append_decision`, never a name built at run time. The diagrams' two generators are read
@@ -98,10 +98,10 @@ _FACE: Final[str] = r"(?<![A-Za-z])(?:SDK|CLI)(?![A-Za-z])"
 _NO_COMMA: Final[str] = r"[^。;\N{FULLWIDTH SEMICOLON}，,]"
 """One character that ends no sentence and no phrase: what a pattern may span inside one phrase."""
 
-_NO_DENIAL: Final[str] = r"[^。;\N{FULLWIDTH SEMICOLON}不未没]"
-"""One character that ends no sentence and denies nothing: a span that stops at 不, 未 or 没."""
+_NO_DENIAL: Final[str] = r"[^。;\N{FULLWIDTH SEMICOLON}不未没无]"
+"""One character that ends no sentence and denies nothing: a span stops at 不, 未, 没 or 无."""
 
-_NO_COMMA_OR_DENIAL: Final[str] = r"[^。;\N{FULLWIDTH SEMICOLON}，,不未没]"
+_NO_COMMA_OR_DENIAL: Final[str] = r"[^。;\N{FULLWIDTH SEMICOLON}，,不未没无]"
 """The same inside one phrase: a span that stops at a comma too."""
 
 
@@ -834,9 +834,9 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     RetiredClaim(
         name="the SDK and the CLI pass through the FastAPI boundary",
         pattern=re.compile(
-            rf"{_FACE}{_NOT_END}*(?:最终)?(?:进入|经过|通过|走)同一\s*FastAPI"
-            rf"|四类入口{_NOT_END}*FastAPI"
-            rf"|{_FACE}[^.;]*(?:through|via|behind)\s+(?:the\s+)?(?:same\s+)?FastAPI",
+            rf"{_FACE}{_NO_COMMA}*(?:最终)?(?:进入|经过|通过|走)同一\s*FastAPI"
+            rf"|四类入口{_NO_COMMA}*(?:最终)?(?:进入|经过|通过|走)同一\s*FastAPI"
+            rf"|{_FACE}[^.;,]*(?:through|via|behind)\s+(?:the\s+)?(?:same\s+)?FastAPI",
             re.IGNORECASE,
         ),
         refuted_by=(
@@ -858,10 +858,10 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
         name="replay executes the A-share trading rules",
         pattern=re.compile(
             rf"(?:T\+1|整手|停牌|涨跌停){_NOT_END}{{0,30}}(?:也在|进入同一路径)回放"
-            rf"|回放{_NOT_END}{{0,12}}(?:继续|也)?执行{_NOT_END}{{0,8}}T\+1"
+            rf"|回放{_NO_DENIAL}{{0,12}}(?:继续|也)?执行{_NOT_END}{{0,8}}T\+1"
             rf"|run_cycle`?{_NOT_END}{{0,12}}(?:再叠加|并执行){_NOT_END}{{0,8}}T\+1"
             rf"|无论哪条路径{_NOT_END}{{0,6}}都要经过"
-            rf"|回放{_NOT_END}{{0,8}}(?:加入|叠加)\s*T\+1"
+            rf"|回放{_NO_DENIAL}{{0,8}}(?:加入|叠加)\s*T\+1"
             r"|结果还会经过\s*T\+1"
         ),
         refuted_by=(
@@ -893,9 +893,10 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
         name="a rejected order is linked to its decision",
         pattern=re.compile(
             rf"拒单(?:也)?关联决策|拒单[，,]\s*记录{_NOT_END}{{0,12}}关联决策"
-            rf"|(?:执行失败|拒单|成交){_NO_COMMA}{{0,6}}纳入证据链"
+            rf"|(?:执行失败|拒单|成交){_NO_COMMA_OR_DENIAL}{{0,6}}纳入证据链"
             rf"|沿\s*(?:运行\s*|任务\s*)?ID{_NO_COMMA}{{0,6}}(?:找到|定位|返回|回到)"
-            rf"|组合账本{_NO_COMMA}{{0,10}}稳定\s*ID\s*关联|组合执行{_NO_COMMA}{{0,10}}(?:回溯|追溯)"
+            rf"|组合账本{_NO_COMMA_OR_DENIAL}{{0,10}}稳定\s*ID\s*关联"
+            rf"|组合执行{_NO_COMMA_OR_DENIAL}{{0,10}}(?:回溯|追溯)"
             r"|reject\w*(?:\s+\w+){0,3}\s+(?:linked|tied)\s+to\s+(?:\w+\s+)?decision",
             re.IGNORECASE,
         ),
@@ -921,11 +922,12 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     RetiredClaim(
         name="the report center holds committee, portfolio and statistical results",
         pattern=re.compile(
-            rf"(?:组合执行|统计结果){_NOT_END}{{0,20}}写入报告中心"
-            rf"|(?:多日组合|事件统计){_NOT_END}{{0,12}}反馈回报告中心"
+            rf"(?:组合执行|统计结果){_NO_DENIAL}{{0,20}}写入报告中心"
+            rf"|(?:多日组合|事件统计){_NO_DENIAL}{{0,12}}反馈回报告中心"
             rf"|(?:委员会|风险门|组合){_NOT_END}{{0,16}}结果都能进入报告"
-            rf"|(?:委员会|组合验证){_NOT_END}{{0,16}}新结果{_NOT_END}{{0,8}}报告中心"
-            rf"|继续进入{_NO_COMMA}{{0,20}}报告中心|报告{_NO_COMMA}{{0,6}}展示{_NO_COMMA}{{0,8}}实际结果"
+            rf"|(?:委员会|组合验证){_NO_DENIAL}{{0,16}}新结果{_NO_DENIAL}{{0,8}}报告中心"
+            rf"|继续进入{_NO_COMMA}{{0,20}}报告中心"
+            rf"|报告{_NO_COMMA_OR_DENIAL}{{0,6}}展示{_NO_COMMA}{{0,8}}实际结果"
             rf"|统计结果{_NO_COMMA}{{0,4}}都写进{_NO_COMMA}{{0,6}}记录"
         ),
         refuted_by=(
@@ -953,6 +955,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     RetiredClaim(
         name="browser flows are tested at mobile width",
         pattern=re.compile(
+            r"(?<!移除)(?<!删除)(?<!去掉)(?<!移除了)(?<!删除了)"
             rf"移动(?:浏览器|视口|端|设备){_NOT_END}{{0,12}}(?:流程|Playwright)"
             r"|(?:桌面|desktop)\s*(?:/|和|与|and)\s*(?:移动|mobile)",
             re.IGNORECASE,
@@ -1006,7 +1009,8 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     RetiredClaim(
         name="the container recovery check deletes and recreates the container",
         pattern=re.compile(
-            r"容器删除、重建|删除、重建后|验证关键状态真的能恢复|(?:deleted|removed) and recreated",
+            r"容器删除、重建|(?<!没有)(?<!不)(?<!未)删除、重建后|验证关键状态真的能恢复"
+            r"|(?:deleted|removed) and recreated",
             re.IGNORECASE,
         ),
         refuted_by=(
@@ -1068,7 +1072,8 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     RetiredClaim(
         name="the batch task center is still missing or deferred",
         pattern=re.compile(
-            rf"(?:仍缺少|缺少)大规模批量任务中心|大规模批量任务中心{_NOT_END}{{0,20}}(?:延后|缺少|缺失)"
+            r"(?:仍缺少|缺少)大规模批量任务中心"
+            rf"|大规模批量任务中心{_NO_COMMA}{{0,20}}(?:延后|缺少|缺失)"
         ),
         refuted_by=(
             "The batch task center shipped: BatchResearchService (runtime/batch.py) behind POST "
@@ -1095,7 +1100,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     ),
     RetiredClaim(
         name="every diagram matches the current source",
-        pattern=re.compile(r"每张图都对应当前源码"),
+        pattern=re.compile(r"每张图都对应当前源码(?![里中]?的?生成器)"),
         refuted_by=(
             "tests/unit/test_repository_assets.py::"
             "test_the_committed_diagrams_are_what_their_generators_write holds each SVG equal to "
@@ -1271,7 +1276,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     ),
     RetiredClaim(
         name="portfolio records can be looked up by a batch's task ID",
-        pattern=re.compile(rf"组合记录{_NOT_END}{{0,4}}沿任务\s*ID"),
+        pattern=re.compile(rf"组合记录{_NO_DENIAL}{{0,4}}沿任务\s*ID"),
         refuted_by=(
             "GET /api/v1/research/batches/{batch_id} returns the batch's items, each with its "
             "request, status and result reference -- decision_id, signal_id, final_action "
@@ -1845,6 +1850,25 @@ TRUE_SENTENCES_THAT_SHARE_THE_WORDS: Final[tuple[str, ...]] = (
     "SQLite 状态 \N{MIDDLE DOT} 重启后重新排队",
     "REST 经 FastAPI \N{MIDDLE DOT} SDK / CLI 进程内",
     "三重验证回答：是否有效、为何有效、下一轮改什么",
+    "SDK 与 CLI 在进程内调用服务，只有 REST 调用方经过同一 FastAPI 边界。",
+    "The SDK and the CLI call services in process, and only REST callers go through the "
+    "FastAPI boundary.",
+    "四类入口里只有 REST 与 Web 经过 FastAPI。",
+    "V2-P5-014 已移除移动端 Playwright 项目。",
+    "V2-P5-014 移除了移动端 Playwright 项目。",
+    "回放不执行 T+1，组合执行才会。",
+    "回放不叠加 T+1 等交易规则。",
+    "拒单不纳入证据链，只写进组合账本。",
+    "组合账本不按稳定 ID 关联决策。",
+    "组合执行无法回溯到决策。",
+    "组合执行与统计结果不写入报告中心。",
+    "多日组合报告不会反馈回报告中心。",
+    "委员会的新结果不会进入报告中心。",
+    "报告不展示这一判断的实际结果。",
+    "CI 只重启容器，没有删除、重建后再检查。",
+    "大规模批量任务中心已经出厂，图形化 Agent 编排延后。",
+    "每张图都对应当前源码里的生成器，由同步测试钉住。",
+    "组合记录不能沿任务 ID 查询。",
 )
 """True or unrelated sentences that share a retired pattern's words. The review of `D13` measured
 the first six being caught (its M1): client holds cli, 移动平均 holds 移动, and a rejection and a
@@ -1887,7 +1911,11 @@ rules. The last eight probe the diagram texts its fourth commit retired, each th
 generator now draws or the nearest true use of the retired words: three votes that never
 abstain, a portfolio verb that exists, knowability answered at load, a backtest on a path of its
 own, three products drawn apart, a restart that requeues, the faces' transport, and three
-validations."""
+validations. The last eighteen are its fifth commit's probes of the older entries, each a
+natural true sentence in their words that its pattern caught until the pattern was narrowed:
+the review's two (an in-process SDK and CLI, a removed mobile project) in three and two
+wordings, then denials inside a replay, rejection, report, container or portfolio-record span,
+a comma after a batch center that shipped, and a diagram tied to its generator."""
 
 
 def test_the_retired_patterns_pass_the_true_sentences_that_share_their_words() -> None:
