@@ -4,6 +4,7 @@ import importlib.util
 import io
 import json
 import multiprocessing
+import os
 import re
 import shlex
 import shutil
@@ -2707,10 +2708,7 @@ def _without_git_variables() -> dict[str, str]:
     carry configuration that outranks a repository's own, and `GIT_DIR`/`GIT_WORK_TREE` point
     git at another repository; a scratch repository answers to none of them. Names are compared
     upper-cased because Windows does not distinguish the case of environment variable names.
-    Imported here rather than at the top of the module, whose import block other channels edit.
     """
-    import os
-
     return {
         name: value for name, value in os.environ.items() if not name.upper().startswith("GIT_")
     }
