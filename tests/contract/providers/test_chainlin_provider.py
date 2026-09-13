@@ -1,5 +1,5 @@
-from datetime import datetime
-from typing import Any
+from datetime import datetime, timedelta
+from typing import Any, Final
 
 import pytest
 
@@ -30,8 +30,25 @@ class FakeChainLinTransport:
         return self.response
 
 
+EVENT_BEFORE_NOW: Final[timedelta] = timedelta(hours=3)
+"""How long before `frozen_now` the fixture's record happened."""
+
+AVAILABLE_BEFORE_NOW: Final[timedelta] = timedelta(hours=2)
+"""How long before `frozen_now` it became available."""
+
+REVISED_BEFORE_NOW: Final[timedelta] = timedelta(hours=1)
+"""How long before `frozen_now` it was revised, which is after it became available."""
+
+
 @pytest.fixture
 def payload(frozen_now: datetime):
+    """A one-record chainlin-data/v1 response whose three clocks are three different instants.
+
+    All three were `frozen_now`, so the contract test could not tell a client that read
+    `revision_time` into `available_time`, or `event_time` into it, from one that read each
+    clock into its own field. An hour apart, and each before the request's `as_of`, they can.
+    """
+
     def _make() -> dict[str, Any]:
         return {
             "schema_version": "chainlin-data/v1",
@@ -39,9 +56,9 @@ def payload(frozen_now: datetime):
                 {
                     "subject": "000001.SZ",
                     "kind": "limit_up",
-                    "event_time": frozen_now.isoformat(),
-                    "available_time": frozen_now.isoformat(),
-                    "revision_time": frozen_now.isoformat(),
+                    "event_time": (frozen_now - EVENT_BEFORE_NOW).isoformat(),
+                    "available_time": (frozen_now - AVAILABLE_BEFORE_NOW).isoformat(),
+                    "revision_time": (frozen_now - REVISED_BEFORE_NOW).isoformat(),
                     "source_uri": "chainlin://limit-up/000001.SZ",
                     "summary": "涨停一板",
                     "payload": {"close": 10.5, "board_count": 1},
@@ -72,8 +89,8 @@ def test_chainlin_contract_preserves_pit_license_and_bearer_auth(
     )
 
     assert batch.status == "success"
-    assert batch.records[0].timeline.available_time == frozen_now
-    assert batch.records[0].timeline.revision_time == frozen_now
+    assert batch.records[0].timeline.available_time == frozen_now - AVAILABLE_BEFORE_NOW
+    assert batch.records[0].timeline.revision_time == frozen_now - REVISED_BEFORE_NOW
     assert provider.metadata.redistribution == "restricted"
     assert transport.request is not None
     assert transport.request["headers"]["Authorization"] == "Bearer secret"

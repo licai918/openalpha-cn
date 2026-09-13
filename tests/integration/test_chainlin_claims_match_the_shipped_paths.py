@@ -471,9 +471,9 @@ def test_no_document_says_the_contract_tests_hold_clocks_they_do_not_assert() ->
 
     `README.md:67` said Bearer auth, "四时钟 PIT" and revisions all had frozen contract tests.
     `tests/contract/providers/test_chainlin_provider.py` asserts `available_time` and
-    `revision_time`, and its fixture gives event, available and revision time one instant. Only
-    四时钟 is read: a clause naming single clocks the tests do not assert passes, which the last
-    assertion measures.
+    `revision_time`, against a fixture that gives event, available and revision time an instant
+    each, so a client that swaps two of them fails there. Only 四时钟 is read: a clause naming
+    single clocks the tests do not assert passes, which the last assertion measures.
     """
     asserted = _asserted_clocks(CONTRACT_TEST)
     assert asserted, "no clock is read in ChainLin's contract tests, so the scan has gone blind"
