@@ -1,4 +1,4 @@
-"""User-facing prose may not present a model call, or model usage recording, as shipped.
+"""User-facing prose may not present model calls, usage records or capability selection as shipped.
 
 **The code fact these guards stand on**, measured at `2d197af`, re-measured at `ea88999`, and held
 by the premise test below rather than by this paragraph. The usage ledger exists: `build_storage`
@@ -15,14 +15,14 @@ model at all. The one model call under `src/` is `StructuredSignalAgent.analyze`
 pass in, as `OpenAlphaSDK(agents=...)` accepts. So "Token and estimated cost are recorded" is
 true of a component a deployer can wire, and false of the product as it ships.
 
-Three couplings, all standing on that one fact:
+Four couplings. The first three stand on that one fact, the fourth on a narrower one:
 
 1. **The premise.** `test_no_shipped_path_calls_a_model_or_records_usage` reads the syntax tree
    of every `.py` file under `src/` and `scripts/`, counts the places that could make a model
    call or usage recording reachable -- per module, enclosing scope and kind -- and holds the
    counts equal to `USAGE_SITES`, where each place carries the reason it neither calls a model
    nor records usage. The day a shipped path starts doing either in a way the scan reads, that
-   test fails and asks for the documents to be rewritten -- and for the two prose guards below
+   test fails and asks for the documents to be rewritten -- and for the prose guards below
    to be retired or inverted -- instead of those guards silently blocking claims that have
    become true. The ways the scan cannot read are listed below; a change made one of those ways
    passes it.
@@ -36,13 +36,24 @@ Three couplings, all standing on that one fact:
    `d4af27c` corrected that one sentence without a test; this module is the test.
 
 3. **A model call in prose.** The same four files may not present what a model client does
-   once called -- classified retry, backoff, capability registration, schema validation of a
-   model's output, a hallucination to diagnose -- as something the product does, unless the
-   same clause says no shipped path calls a model. `README.md`'s model bullets are the model of
-   a true sentence: they say what happens once a model provider is wired in code, and that no
-   shipped path calls one.
+   once called -- classified retry, backoff, schema validation of a model's output, a
+   hallucination to diagnose -- as something the product does, unless the same clause says no
+   shipped path calls a model. `README.md`'s model bullets are the model of a true sentence:
+   they say what happens once a model provider is wired in code, and that no shipped path calls
+   one.
 
-**How the guards in (2) and (3) read a document.**
+4. **Capability selection in prose.** The same four files may not present model capability
+   registration, or an endpoint chosen by a model's capabilities, as something code does,
+   unless the same clause says no code selects by them. This stands on a narrower fact, and
+   saying that no shipped path calls a model does not answer it: nothing registers or selects
+   once a provider is wired either. `ModelRegistry` is constructed nowhere under `src/` or
+   `scripts/` (the premise test holds that), no module under `src/` reads a model's
+   `capabilities` (measured at `d4ef5e4`; no test holds it), and
+   `OpenAICompatibleProvider.generate_json` posts to the one `base_url` it was built with.
+   `D12` made five such claims conditional on wiring a provider in code, which left them false
+   (the review of `D12`, Important 1), and section 040 made one with no condition at all.
+
+**How the guards in (2), (3) and (4) read a document.**
 
 - *Blocks and clauses* come from `tests/prose_clauses.py`, the reader
   `test_attribution_claims_match_known_limitations.py` shares; its docstring states how a block
@@ -66,27 +77,40 @@ Three couplings, all standing on that one fact:
     ordinary README English: a `## Usage` heading, a `usage: openalpha [-h]` line.
 - *Model-call markers.* A clause names a model call when it names a model (`MODEL_WORDS`: 模型,
   or "LLM" or "model" as an English word) and one of `MODEL_CALL_BEHAVIOURS`: 401, 408, 429 or
-  5xx, 重试, 退避, 能力注册, 注册表, 幻觉, or "retry", "backoff", "registry", "schema".
-- *Claims.* A clause that names usage recording is a claim unless it holds `USAGE_CONDITION`
-  or `MODEL_CALL_CONDITION`; a clause that names a model call is a claim unless it holds
-  `MODEL_CALL_CONDITION`. A condition counts only where no negation directly precedes it
-  (`prose_clauses.holds_unnegated_match`), and only as a whole phrase -- 出厂路径, 不, then the
-  verb for what the path does not do -- so a clause that only begins 出厂路径不需要 states no
-  condition, which the first version of the usage guard accepted. A condition exempts only the
-  clause it sits in.
-- *Allowlists.* `ALLOWLIST` and `MODEL_CALL_ALLOWLIST` hold the true non-claims each guard's
-  markers catch -- a statement about the test suite, a topic named as a channel suggestion, a
-  list of questions, a general statement about multi-agent systems -- each pinned to one clause
-  by that clause's whole text as the shared reader produces it (soft wraps folded, runs of
-  whitespace collapsed), with a short excerpt that only finds the clause, and the reason the
-  clause is true. A clause is exempt only while its text equals the pinned text, so any change
-  to its words -- a claim appended, a word swapped -- ends the exemption and the guard's prose
-  test fails on it until someone re-reads the clause and re-pins it or rewrites it, which
-  `test_a_claim_written_into_an_allowlisted_clause_ends_its_exemption` measures for both
-  guards. `test_every_allowlist_entry_exempts_exactly_one_flagged_clause` fails on an entry
-  whose excerpt finds no clause or several, whose clause no longer reads as pinned, or whose
-  clause the guard no longer flags. With each prose test, that makes each allowlist a census:
-  every clause a guard flags in the four files is either rewritten or listed there.
+  5xx, 重试, 退避, 幻觉, or "retry", "backoff", "schema".
+- *Capability markers.* A clause names capability selection when it holds `CAPABILITY_CLAIM`
+  -- 能力 and 注册 within eight characters, so 模型能力由治理层注册 counts; 注册 then 能力;
+  注册表; 按 ... 能力 ... 选; 能力选择; "registry"; or "capability" before a word of selecting or
+  registering -- and names a model or a capability (`CAPABILITY_CONTEXT`), so the
+  `pnpm audit --registry` line in `README.md` names none.
+- *Claims.* A clause that names usage recording is a claim unless it holds `USAGE_CONDITION`, a
+  clause that names a model call unless it holds `MODEL_CALL_CONDITION`, and a clause that
+  names capability selection unless it holds `CAPABILITY_CONDITION`; each condition exempts its
+  own class only. Until `D13` `MODEL_CALL_CONDITION` exempted a usage marker as well, and
+  sections 005 and 061 of the marketing pack, which had lost the `usage_store` condition,
+  passed on 出厂路径不调用模型 alone. A condition counts only where no negation directly
+  precedes it (`prose_clauses.holds_unnegated_match`), and only as a whole phrase -- 出厂路径,
+  不, then the verb for what the path does not do -- so a clause that only begins
+  出厂路径不需要 states no condition, which the first version of the usage guard accepted.
+  Where that verb takes an object, the condition counts only with the object it is about, so
+  出厂路径不写入密钥 and "no shipped path sends a model key anywhere" state none; both guards
+  accepted them until the review of `D12` measured them (its M-4). A condition exempts only
+  the clause it sits in.
+- *Allowlists.* `ALLOWLIST`, `MODEL_CALL_ALLOWLIST` and `CAPABILITY_ALLOWLIST` hold the true
+  non-claims each guard's markers catch -- a statement about the test suite, a topic named as a
+  channel suggestion, a list of questions, a general statement about multi-agent systems --
+  each pinned to one clause by that clause's whole text as the shared reader produces it (soft
+  wraps folded, runs of whitespace collapsed), with a short excerpt that only finds the clause,
+  and the reason the clause is true. A clause is exempt only while its text equals the pinned
+  text, so any change to its words -- a claim appended, a word swapped -- ends the exemption and
+  the guard's prose test fails on it until someone re-reads the clause and re-pins it or
+  rewrites it, which `test_a_claim_written_into_an_allowlisted_clause_ends_its_exemption`
+  measures for every entry. `test_every_allowlist_entry_exempts_exactly_one_flagged_clause`
+  fails on an entry whose excerpt finds no clause or several, whose clause no longer reads as
+  pinned, or whose clause the guard no longer flags. With each prose test, that makes each
+  allowlist a census: every clause a guard flags in the four files is either rewritten or
+  listed there. A guard's `diagram_allowlist` pins a unit an embedded diagram draws the same
+  way, and `test_every_diagram_allowlist_entry_exempts_exactly_one_flagged_unit` holds it.
 
 **What the usage guard cannot see.** `test_the_usage_guards_stated_blind_spots_are_real`
 measures each of these.
@@ -100,8 +124,8 @@ measures each of these.
 - The other direction: a credential token beside an accounting word is read as usage
   ("Token 持久保存在环境变量里。" is flagged), a transaction cost spelled other than 交易成本
   beside a bearer and a measuring verb is read as a model cost ("佣金成本随每个 Agent 的成交一起
-  记录。" is flagged), and a condition worded outside `USAGE_CONDITION` and
-  `MODEL_CALL_CONDITION` is read as a claim.
+  记录。" is flagged), and a condition worded outside `USAGE_CONDITION` is read as a claim --
+  since `D13` that includes 出厂路径不调用模型 on its own.
 
 **What the model-call guard cannot see.**
 `test_the_model_call_guards_stated_blind_spots_are_real` measures each of these.
@@ -113,10 +137,26 @@ measures each of these.
 - A model presupposed without a behaviour word passes: "用户无法判断是模型限流还是任务卡死。", and
   so do governance named without one ("模型治理也能通过公开接口管理。") and structured output named
   without the word schema ("模型输出统一为结构化结果。").
+- A model named only by its provider class, its vendor or a product is no model word:
+  "OpenAI-compatible Provider 对 408、429、5xx 分类重试。",
+  "DeepSeek、Qwen 端点返回 429 时自动退避。", "The OpenAI-compatible provider retries 429s
+  with backoff." and "GPT 请求失败会指数退避。" all pass. `README.md` calls the client
+  "OpenAI-compatible Provider"; the review of `D12` found no clause of these shapes in the four
+  files (its M-3).
 - A claim split across two blocks is read as two halves, each innocent.
 - The other direction: a retry of something else beside an unrelated model word is read as a
   model call ("批量队列支持失败重试，RunManifest 记录模型版本。" is flagged), and a condition
   worded outside `MODEL_CALL_CONDITION` is read as a claim.
+
+**What the capability guard cannot see.**
+`test_the_capability_guards_stated_blind_spots_are_real` measures each of these.
+
+- A choice made by capability, worded without a marker: "模型元数据决定调用哪个端点。" passes.
+- A claim split across two clauses is read as two halves, each innocent:
+  "模型侧维护一份能力清单。注册后按它选端点。" passes.
+- The other direction: a registry of something else beside a model word is read as a claim
+  ("模型版本登记在 RunManifest 的注册表里。" is flagged), and a condition worded outside
+  `CAPABILITY_CONDITION` is read as a claim.
 
 **What the premise test reads.** Seven names, `SHIPPED_PATH_NAMES` -- `OpenAICompatibleProvider`,
 `ModelUsageRecord`, `StructuredSignalAgent`, `ModelRegistry`, `generate_json`, the provider's
@@ -138,14 +178,25 @@ measures each of these.
 - A docstring is never counted: it can name all seven and call nothing.
 - *Counts, not presence.* A second construction in a scope that already names the provider
   changes that scope's count and fails exactly as a new scope does.
+- *Calls.* A call whose callee is one of the seven -- bare, through an import binding, or as an
+  attribute -- counts again as a kind of its own (`CALLED_KINDS`), so a construction is a site
+  its bare name is not. An `__all__` entry traded for a construction in the same scope used to
+  leave the count unchanged (the review of `D12`, M-1).
 
 **What the premise test cannot see.** It reads names and literals, never values or behaviour.
 
 - A name built at run time -- `importlib` with a computed module or attribute name,
   `getattr(obj, "generate" + "_json")` -- or a table name assembled from pieces.
-- A value traced through anything but an import. `record_type = governance.ModelUsageRecord` is
-  counted where the attribute is named, and `record_type(**fields)` is not counted at all, so a
-  call through a local binding adds nothing to its scope's count.
+- A value traced through anything but an import of one of the seven. An import is resolved
+  only when the imported name's own last part is one of them, so `from openalpha_cn.agents
+  import DEFAULT_MODEL_AGENT` binds nothing the scan tracks, whatever that name holds.
+  `record_type = governance.ModelUsageRecord` is counted where the attribute is named, and
+  `record_type(**fields)` is not counted at all, so a call through a local binding adds nothing
+  to its scope's count.
+- A use traded for another in the same scope when neither is a call: an `__all__` entry removed
+  and `PROVIDERS = {"openai-compatible": OpenAICompatibleProvider}` added keeps the scope's
+  count of the name, and a caller that builds through `PROVIDERS[...](...)` names nothing
+  tracked. `test_the_premise_scans_stated_blind_spot_is_real` measures it.
 - A model or a ledger reached without these seven names: an agent that posts to an HTTP endpoint
   itself, a provider class written anew under another name, a record rebuilt by `model_copy`
   from one read back, or usage written to a table other than `model_usage`.
@@ -157,7 +208,9 @@ reads, one synthetic module per shape, and
 `test_the_premise_goes_red_on_each_injection_the_review_measured` appends each injection the
 review of `D7` measured -- seven of which the first version of this scan passed -- and each
 model-call entry point to a real module under `src/`, and a usage write to one under
-`scripts/`, and requires the premise to fail every time.
+`scripts/`, and requires the premise to fail every time;
+`test_the_premise_goes_red_on_the_double_swap_the_review_of_d12_measured` does the same for
+the review of `D12`'s double swap across three real modules.
 """
 
 from __future__ import annotations
@@ -173,7 +226,7 @@ from typing import Final
 
 import pytest
 from diagram_text import diagram_strings, diagram_units
-from prose_clauses import clauses, holds_unnegated_match, marker_pattern
+from prose_clauses import Clause, clauses, holds_unnegated_match, marker_pattern
 
 ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 
@@ -213,6 +266,20 @@ SHIPPED_PATH_NAMES: Final[dict[str, str]] = {
 """Each name through which a shipped path could reach a model call or the usage ledger, and the
 kind of site a place that names it is. The provider, the record and the two stores are the usage
 half; the agent, the registry and `generate_json` are the model-call entry points."""
+
+CALLED_KINDS: Final[dict[str, str]] = {
+    PROVIDER_NAMED: "constructs the provider",
+    RECORD_NAMED: "constructs a usage record",
+    AGENT_NAMED: "constructs the model-backed agent",
+    REGISTRY_NAMED: "constructs the model registry",
+    MODEL_CALL_NAMED: "calls the model",
+    PROVIDER_STORE_NAMED: "calls the provider's usage store",
+    RUNTIME_STORE_NAMED: "calls the runtime's usage store",
+}
+"""The kind a call counts as when its callee resolves to one of `SHIPPED_PATH_NAMES`, by the kind
+of the name it calls. A call is counted on top of the name, so a construction is a site the name
+alone is not: the review of `D12` traded an `__all__` entry for a construction in the same scope,
+the scope's count of the name stayed the same, and the premise stayed green (its M-1)."""
 
 USAGE_TABLE: Final[re.Pattern[str]] = re.compile(r"(?<![A-Za-z0-9_])model_usage(?![A-Za-z0-9_])")
 
@@ -313,6 +380,18 @@ class _ShippedPathScan(ast.NodeVisitor):
                 return SHIPPED_PATH_NAMES[last]
         return None
 
+    def visit_Call(self, node: ast.Call) -> None:
+        """A call of one of the names counts as `CALLED_KINDS`' kind too, on top of the name."""
+        callee = node.func
+        kind: str | None = None
+        if isinstance(callee, ast.Name):
+            kind = self._name_kind(callee.id)
+        elif isinstance(callee, ast.Attribute):
+            kind = SHIPPED_PATH_NAMES.get(callee.attr)
+        if kind is not None:
+            self._found(CALLED_KINDS[kind])
+        self.generic_visit(node)
+
     def visit_Name(self, node: ast.Name) -> None:
         kind = self._name_kind(node.id)
         if kind is not None:
@@ -409,6 +488,9 @@ USAGE_SITES: Final[dict[UsageSite, Counted]] = {
         "it), so this runs only for an agent a user builds and passes as "
         "`OpenAlphaSDK(agents=...)`.",
     ),
+    _site(
+        "agents/model.py", "StructuredSignalAgent.analyze", CALLED_KINDS[MODEL_CALL_NAMED]
+    ): Counted(1, "The same `self.provider.generate_json(...)`, counted again as a call."),
     _site("models/__init__.py", "<module>", PROVIDER_NAMED): Counted(
         2,
         "The package re-exports the provider class: an import and its `__all__` entry. Nothing "
@@ -443,6 +525,11 @@ USAGE_SITES: Final[dict[UsageSite, Counted]] = {
     _site(
         "models/openai_compatible.py", "OpenAICompatibleProvider._record_usage", RECORD_NAMED
     ): Counted(1, "The one writer builds its record here; see the entry above."),
+    _site(
+        "models/openai_compatible.py",
+        "OpenAICompatibleProvider._record_usage",
+        CALLED_KINDS[RECORD_NAMED],
+    ): Counted(1, "The same construction of the one writer's record, counted again as a call."),
     _site("runtime/composition.py", "StorageContainer", RUNTIME_STORE_NAMED): Counted(
         1,
         "The container's field. No CLI command, REST route or SDK method reads it: no other "
@@ -513,9 +600,10 @@ def test_no_shipped_path_calls_a_model_or_records_usage() -> None:
         "OpenAICompatibleProvider or StructuredSignalAgent, hands a provider a usage store or "
         "writes model_usage rows, the prose guards' premise is false: rewrite the model and "
         "usage sentences in the four guarded documents to say what the shipped path does now, "
-        "and retire or invert test_user_facing_docs_do_not_present_a_model_call_as_shipped and "
-        "test_user_facing_docs_do_not_present_usage_recording_as_shipped. If the place calls "
-        "and records nothing, record it in USAGE_SITES with its count and the reason."
+        "and retire or invert test_user_facing_docs_do_not_present_a_model_call_as_shipped, "
+        "test_user_facing_docs_do_not_present_usage_recording_as_shipped and, if a registry is "
+        "built, test_user_facing_docs_do_not_present_capability_selection_as_shipped. If the "
+        "place calls and records nothing, record it in USAGE_SITES with its count and the reason."
     )
 
 
@@ -529,14 +617,22 @@ SCAN_CASES: Final[dict[str, tuple[str, Counter[UsageSite]]]] = {
         "def build():\n"
         "    return OpenAICompatibleProvider(provider_id='p', model='m',\n"
         "        base_url='https://example.test', api_key_env=None)\n",
-        _counted(("<module>", PROVIDER_NAMED, 1), ("build", PROVIDER_NAMED, 1)),
+        _counted(
+            ("<module>", PROVIDER_NAMED, 1),
+            ("build", PROVIDER_NAMED, 1),
+            ("build", CALLED_KINDS[PROVIDER_NAMED], 1),
+        ),
     ),
     "an aliased import, and a call through the alias": (
         "from openalpha_cn.models import OpenAICompatibleProvider as Provider\n\n"
         "def build():\n"
         "    return Provider(provider_id='p', model='m', base_url='https://example.test',\n"
         "        api_key_env=None)\n",
-        _counted(("<module>", PROVIDER_NAMED, 1), ("build", PROVIDER_NAMED, 1)),
+        _counted(
+            ("<module>", PROVIDER_NAMED, 1),
+            ("build", PROVIDER_NAMED, 1),
+            ("build", CALLED_KINDS[PROVIDER_NAMED], 1),
+        ),
     ),
     "an attribute of the package": (
         "import openalpha_cn.models as models\n\n"
@@ -559,7 +655,7 @@ SCAN_CASES: Final[dict[str, tuple[str, Counter[UsageSite]]]] = {
     ),
     "a record built directly": (
         "def log(store, **fields):\n    store.append(ModelUsageRecord(**fields))\n",
-        _counted(("log", RECORD_NAMED, 1)),
+        _counted(("log", RECORD_NAMED, 1), ("log", CALLED_KINDS[RECORD_NAMED], 1)),
     ),
     "a record built by a classmethod": (
         "class Meter:\n"
@@ -570,12 +666,16 @@ SCAN_CASES: Final[dict[str, tuple[str, Counter[UsageSite]]]] = {
     "a record built through a module": (
         "from openalpha_cn.models import governance\n\n"
         "def log(store, **fields):\n    store.append(governance.ModelUsageRecord(**fields))\n",
-        _counted(("log", RECORD_NAMED, 1)),
+        _counted(("log", RECORD_NAMED, 1), ("log", CALLED_KINDS[RECORD_NAMED], 1)),
     ),
     "a record built under an alias": (
         "from openalpha_cn.models.governance import ModelUsageRecord as UsageRow\n\n"
         "def log(store, **fields):\n    store.append(UsageRow(**fields))\n",
-        _counted(("<module>", RECORD_NAMED, 1), ("log", RECORD_NAMED, 1)),
+        _counted(
+            ("<module>", RECORD_NAMED, 1),
+            ("log", RECORD_NAMED, 1),
+            ("log", CALLED_KINDS[RECORD_NAMED], 1),
+        ),
     ),
     "a record class bound to a local first (only the binding counts)": (
         "def log(store, **fields):\n"
@@ -626,18 +726,33 @@ SCAN_CASES: Final[dict[str, tuple[str, Counter[UsageSite]]]] = {
         "def ask(provider):\n"
         "    provider.generate_json(system='s', user='u', schema={})\n"
         "    return getattr(provider, 'generate_json')(system='s', user='u', schema={})\n",
-        _counted(("ask", MODEL_CALL_NAMED, 2)),
+        _counted(("ask", MODEL_CALL_NAMED, 2), ("ask", CALLED_KINDS[MODEL_CALL_NAMED], 1)),
     ),
     "the model-backed agent built under an alias": (
         "from openalpha_cn.agents import StructuredSignalAgent as ModelAgent\n\n"
         "def build(provider):\n"
         "    return ModelAgent(agent_id='a', evidence_families=frozenset(), provider=provider)\n",
-        _counted(("<module>", AGENT_NAMED, 1), ("build", AGENT_NAMED, 1)),
+        _counted(
+            ("<module>", AGENT_NAMED, 1),
+            ("build", AGENT_NAMED, 1),
+            ("build", CALLED_KINDS[AGENT_NAMED], 1),
+        ),
     ),
     "the model registry built": (
         "from openalpha_cn.models.governance import ModelRegistry\n\n"
         "def registry():\n    return ModelRegistry(())\n",
-        _counted(("<module>", REGISTRY_NAMED, 1), ("registry", REGISTRY_NAMED, 1)),
+        _counted(
+            ("<module>", REGISTRY_NAMED, 1),
+            ("registry", REGISTRY_NAMED, 1),
+            ("registry", CALLED_KINDS[REGISTRY_NAMED], 1),
+        ),
+    ),
+    "a construction in place of a re-export (the review of D12's double swap)": (
+        "from openalpha_cn.models.openai_compatible import OpenAICompatibleProvider\n\n"
+        "__all__ = ['ModelProvider']\n"
+        "DEFAULT_PROVIDER = OpenAICompatibleProvider(provider_id='p', model='m',\n"
+        "    base_url='https://example.test', api_key_env=None)\n",
+        _counted(("<module>", PROVIDER_NAMED, 2), ("<module>", CALLED_KINDS[PROVIDER_NAMED], 1)),
     ),
     "what names nothing it could call or write": (
         '"""Mentions OpenAICompatibleProvider, ModelUsageRecord, generate_json and\n'
@@ -796,6 +911,70 @@ def test_the_premise_goes_red_on_each_injection_the_review_measured() -> None:
     assert not passed, f"the premise stayed green on: {passed}"
 
 
+DOUBLE_SWAP: Final[dict[str, tuple[str, str]]] = {
+    "src/openalpha_cn/models/__init__.py": (
+        '    "OpenAICompatibleProvider",\n',
+        "\n\nDEFAULT_PROVIDER = OpenAICompatibleProvider(provider_id='p', model='m',\n"
+        "    base_url='https://example.test', api_key_env=None)\n",
+    ),
+    "src/openalpha_cn/agents/__init__.py": (
+        '    "StructuredSignalAgent",\n',
+        "\n\nDEFAULT_MODEL_AGENT = StructuredSignalAgent(agent_id='a',\n"
+        "    evidence_families=frozenset(), provider=None)\n",
+    ),
+}
+"""The review of `D12`'s M-1, per module: the `__all__` entry removed, and a module-scope
+construction appended in its place. With `sdk.py` importing `DEFAULT_MODEL_AGENT`, an SDK built on
+that agent would call a model."""
+
+
+def test_the_premise_goes_red_on_the_double_swap_the_review_of_d12_measured() -> None:
+    """Two re-exports traded for two constructions, and the SDK importing one of them.
+
+    Each scope keeps its count of every name -- a construction takes the place of an `__all__`
+    entry -- so the scan as `D12` wrote it stayed green, which the review of `D12` measured on
+    disk. A call whose callee resolves to one of `SHIPPED_PATH_NAMES` is now a kind of its own
+    (`CALLED_KINDS`), so the two constructions are two new sites. Applied in memory, as the
+    injections above are.
+    """
+    sources = dict(_non_test_sources())
+    swapped = dict(sources)
+    for path, (entry, construction) in DOUBLE_SWAP.items():
+        assert sources[path].count(entry) == 1, f"{entry!r} is not in {path} exactly once"
+        swapped[path] = sources[path].replace(entry, "", 1) + construction
+    sdk = "src/openalpha_cn/sdk.py"
+    swapped[sdk] = sources[sdk] + "\n\nfrom openalpha_cn.agents import DEFAULT_MODEL_AGENT\n"
+    assert _premise_problems(_usage_sites(swapped.items())), (
+        "the premise stayed green on the double swap"
+    )
+
+
+def test_the_premise_scans_stated_blind_spot_is_real() -> None:
+    """The trade the module docstring says the scan cannot see, measured: a re-export swapped for
+    a table entry in the same scope, and a caller that reaches the provider through the table.
+
+    `models/__init__.py` keeps its count of the provider's name -- a table value takes the place
+    of the `__all__` entry -- and `sdk.py` names only `PROVIDERS`, which is none of the seven. A
+    change that turns this red has closed the blind spot: delete this test and the sentence in
+    the docstring together.
+    """
+    sources = dict(_non_test_sources())
+    models, sdk = "src/openalpha_cn/models/__init__.py", "src/openalpha_cn/sdk.py"
+    entry = '    "OpenAICompatibleProvider",\n'
+    assert sources[models].count(entry) == 1, f"{entry!r} is not in {models} exactly once"
+    swapped = {
+        **sources,
+        models: sources[models].replace(entry, "", 1)
+        + "\n\nPROVIDERS = {'openai-compatible': OpenAICompatibleProvider}\n",
+        sdk: sources[sdk] + "\n\nfrom openalpha_cn.models import PROVIDERS\n\n"
+        "_PROBE = PROVIDERS['openai-compatible'](provider_id='p', model='m',\n"
+        "    base_url='https://example.test', api_key_env=None)\n",
+    }
+    assert not _premise_problems(_usage_sites(swapped.items())), (
+        "the table swap is now seen: update the module docstring and delete this test"
+    )
+
+
 # --- Part 2: user-facing prose may not present usage recording or a model call as shipped -----
 
 USAGE_TERMS: Final[tuple[str, ...]] = (
@@ -856,24 +1035,47 @@ ENGLISH_RECORDING: Final[re.Pattern[str]] = re.compile(
 )
 """English words that present a cost or a usage as kept, matched as word starts."""
 
+_CONDITION_END: Final[str] = (
+    r"(?=\s*(?:[，。、,.;:：)）|!?\N{FULLWIDTH SEMICOLON}\N{FULLWIDTH EXCLAMATION MARK}"
+    r"\N{FULLWIDTH QUESTION MARK}]|\N{EM DASH}|--|$))"
+)
+"""Where a condition whose verb takes an object must end: at punctuation, a table cell's edge, a
+dash or the end of the clause, so that the verb's object is the one the condition is about."""
+
 USAGE_CONDITION: Final[re.Pattern[str]] = re.compile(
-    r"出厂路径(?:都)?不(?:会)?(?:替你)?(?:自动)?(?:记账|生成账单|写入|记录|入账)"
-    r"|no shipped path (?:writes|records)",
+    "出厂路径(?:都)?不(?:会)?(?:替你)?(?:自动)?"
+    f"(?:记账|生成账单|入账|(?:写入|记录)(?:这张表|账本|用量|任何用量|模型用量)?{_CONDITION_END})"
+    f"|no shipped path (?:writes|records)(?: to)?{_CONDITION_END}"
+    "|no shipped path (?:writes|records) (?:to )?(?:the (?:ledger|table)|(?:any |model )?usage)"
+    "(?![A-Za-z])",
     re.IGNORECASE,
 )
-"""A statement that no shipped path records usage: 出厂路径, 不, then a recording verb (记账,
-生成账单, 写入, 记录, 入账), with 都, 会, 替你 or 自动 allowed between; or "no shipped path writes"
-or "... records". A whole phrase, not a prefix, so 出厂路径不需要额外配置 states nothing. The
-wordings these documents used when this was written, not a general detector."""
+"""A statement that no shipped path records usage: 出厂路径, 不, then 记账, 生成账单 or 入账,
+or 写入 or 记录 whose only object is the ledger's own (这张表, 账本, 用量) before the phrase ends,
+with 都, 会, 替你 or 自动 allowed between; or "no shipped path writes" or "records", with "to"
+allowed, ending the phrase or followed by the ledger, the table or usage.
+
+A whole phrase, not a prefix, so 出厂路径不需要额外配置 states nothing. And a verb with another
+object states nothing either: 出厂路径不写入密钥 and "No shipped path records your API key" say
+something about secrets, and both guards accepted such a phrase until the review of `D12`
+measured it (its M-4). The wordings these documents use, not a general detector."""
 
 MODEL_CALL_CONDITION: Final[re.Pattern[str]] = re.compile(
-    r"出厂路径(?:都)?不(?:会)?(?:调用|发起)(?:任何)?(?:大)?模型"
-    r"|no shipped path (?:calls|makes|sends) (?:a |any )?(?:model|llm)",
+    "出厂路径(?:都)?不(?:会)?(?:调用|发起)(?:任何)?(?:大)?模型"
+    r"(?![一-鿿]|\s*(?:api\s*)?(?:keys?|credentials?|secrets?)(?![A-Za-z]))"
+    "|no shipped path (?:calls|makes|sends) (?:a |any )?(?:models?|llms?)(?: calls?)?"
+    f"(?:{_CONDITION_END}|(?= at all))",
     re.IGNORECASE,
 )
-"""A statement that no shipped path calls a model: 出厂路径, 不, 调用 or 发起, then 模型; or
-"no shipped path calls a model" and its near variants. It exempts a usage marker too, since a
-path that calls no model records no usage."""
+"""A statement that no shipped path calls a model: 出厂路径, 不, 调用 or 发起, then 模型 as the
+object and not as the first half of another noun (出厂路径不调用模型密钥 states nothing); or "no
+shipped path calls a model" and its near variants, ending the phrase ("... sends a model key
+anywhere" states nothing, the review of `D12`'s M-4).
+
+It exempts a model-call marker only. Until `D13` it exempted a usage marker too, and a path that
+calls no model does record nothing -- but the clause then says nothing about the `usage_store` a
+wired provider needs before it records, and sections 005 and 061 of the marketing pack, having
+lost that condition, passed on this one (the review of `D12`, Important 1)."""
 
 
 def _names_usage_recording(clause: str) -> bool:
@@ -897,11 +1099,11 @@ def _names_usage_recording(clause: str) -> bool:
 
 
 def _is_usage_claim(clause: str) -> bool:
-    """Whether one clause presents usage recording without saying no shipped path does it."""
-    return _names_usage_recording(clause) and not (
-        holds_unnegated_match(clause, USAGE_CONDITION)
-        or holds_unnegated_match(clause, MODEL_CALL_CONDITION)
-    )
+    """Whether one clause presents usage recording without saying no shipped path records it.
+
+    Only `USAGE_CONDITION` exempts it; `MODEL_CALL_CONDITION` did until `D13` (see there).
+    """
+    return _names_usage_recording(clause) and not holds_unnegated_match(clause, USAGE_CONDITION)
 
 
 MODEL_WORDS: Final[re.Pattern[str]] = re.compile(
@@ -911,12 +1113,16 @@ MODEL_WORDS: Final[re.Pattern[str]] = re.compile(
 so "AlphaModel" and "LLMOps" name no model."""
 
 MODEL_CALL_BEHAVIOURS: Final[re.Pattern[str]] = re.compile(
-    r"(?<![0-9])(?:401|408|429|5xx)(?![0-9])|重试|退避|能力注册|注册表|幻觉"
-    r"|(?<![A-Za-z])(?:retr(?:y|ies|ied)|backoff|registry|schema)",
+    r"(?<![0-9])(?:401|408|429|5xx)(?![0-9])|重试|退避|幻觉"
+    r"|(?<![A-Za-z])(?:retr(?:y|ies|ied)|backoff|schema)",
     re.IGNORECASE,
 )
 """What a model client does once it is called: the HTTP statuses it classifies, retry and
-backoff, the capability registry, schema validation, and a hallucination to diagnose."""
+backoff, schema validation, and a hallucination to diagnose.
+
+The capability registry was among these until `D13`. It is not something a called client does
+-- no code registers a capability or selects by one, wired or not -- so it has a guard of its
+own, `CAPABILITY_CLAIM`, which no statement about model calls exempts."""
 
 
 def _names_model_call(clause: str) -> bool:
@@ -928,6 +1134,54 @@ def _names_model_call(clause: str) -> bool:
 def _is_model_call_claim(clause: str) -> bool:
     """Whether one clause presents model-call behaviour without saying no shipped path calls."""
     return _names_model_call(clause) and not holds_unnegated_match(clause, MODEL_CALL_CONDITION)
+
+
+_NO_BREAK: Final[str] = r"[^，。、,;：:\N{FULLWIDTH SEMICOLON}]"
+"""One character that is no comma, colon or semicolon: what a capability phrase may span."""
+
+CAPABILITY_CLAIM: Final[re.Pattern[str]] = re.compile(
+    rf"能力{_NO_BREAK}{{0,8}}注册|注册{_NO_BREAK}{{0,4}}能力|注册表"
+    rf"|按{_NO_BREAK}{{0,6}}能力{_NO_BREAK}{{0,6}}选|能力{_NO_BREAK}{{0,2}}选择"
+    r"|(?<![A-Za-z])registr(?:y|ies)(?![A-Za-z])"
+    r"|(?<![A-Za-z])capabilit(?:y|ies)(?![A-Za-z])[^.;]{0,40}?"
+    r"(?<![A-Za-z])(?:select|choos|resolv|rout|regist)",
+    re.IGNORECASE,
+)
+"""Capability registration, or a choice made by capability.
+
+The markers: 能力 and 注册 within eight characters (能力注册, 模型能力由治理层注册), 注册 then
+能力, 注册表, 按 ... 能力 ... 选, 能力选择, "registry", and "capability" followed by a word of
+selecting, choosing, resolving, routing or registering."""
+
+CAPABILITY_CONTEXT: Final[re.Pattern[str]] = re.compile(
+    r"模型|能力|(?<![A-Za-z])(?:llms?|models?|capabilit(?:y|ies))(?![A-Za-z])", re.IGNORECASE
+)
+"""What makes a registry a model's: a model or a capability named in the same clause, so
+`pnpm audit --registry https://registry.npmjs.org` names none."""
+
+CAPABILITY_CONDITION: Final[re.Pattern[str]] = re.compile(
+    r"没有(?:任何)?代码(?:会)?据此(?:选择|挑选|路由)"
+    r"|no code (?:selects|chooses|routes)[^.;]{0,30}? by (?:it|them)(?![A-Za-z])",
+    re.IGNORECASE,
+)
+"""A statement that nothing chooses by a registered capability: 没有代码据此选择 (任何 and 会
+allowed, 挑选 or 路由 for 选择), or "no code selects ... by it". The wordings these documents use,
+not a general detector. Neither `MODEL_CALL_CONDITION` nor `USAGE_CONDITION` stands in for it:
+wiring a provider in code registers nothing and selects nothing."""
+
+
+def _names_capability_selection(clause: str) -> bool:
+    return (
+        CAPABILITY_CLAIM.search(clause) is not None
+        and CAPABILITY_CONTEXT.search(clause) is not None
+    )
+
+
+def _is_capability_claim(clause: str) -> bool:
+    """Whether one clause presents capability registration or selection as something code does."""
+    return _names_capability_selection(clause) and not holds_unnegated_match(
+        clause, CAPABILITY_CONDITION
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1026,20 +1280,49 @@ MODEL_CALL_ALLOWLIST: Final[tuple[AllowedClause, ...]] = (
 )
 """The model-call guard's true non-claims, pinned the same way as `ALLOWLIST`.
 
-When this guard was written it flagged 29 clauses in the four files: these two, and 27 claims,
-which were rewritten -- two of them only matched 结构化输出, which named the agents' SignalFrame
-output and is not among `MODEL_CALL_BEHAVIOURS`, so they are no longer flagged at all.
+At `ea88999` the guard as `D12` committed it flags 27 clauses in the four files: these two, and
+25 claims, all of which `D12` rewrote (re-measured in `D13`). The 29 this docstring used to give
+came from a draft that also read 结构化输出: it flagged two clauses more, lines 316 (a channel
+suggestion) and 470 (an attribution caveat) of the marketing pack, neither of them a claim, and
+the marker was dropped rather than the two pinned.
 """
+
+CAPABILITY_ALLOWLIST: Final[tuple[AllowedClause, ...]] = ()
+"""The capability guard's true non-claims: none. Every clause it flagged at `d4ef5e4`
+(`PRE_D13_CAPABILITY_CLAIMS`) was a claim, and each was rewritten."""
+
+USAGE_DIAGRAM_ALLOWLIST: Final[tuple[AllowedClause, ...]] = (
+    AllowedClause(
+        path=ROOT / "scripts" / "generate_brain_diagrams.py",
+        excerpt="Token / 尝试次数账本",
+        clause=(
+            "模型治理边界，OPTIONAL MODEL ENHANCEMENT，需代码接入 \N{MIDDLE DOT} Schema 校验 "
+            "\N{MIDDLE DOT} 408/429/5xx 重试，Token / 尝试次数账本 \N{MIDDLE DOT} "
+            "出厂路径不调用模型"
+        ),
+        reason=(
+            "brain-03's 模型治理边界 box as D12 rewrote it names the ledger beside "
+            "出厂路径不调用模型 and promises nothing about when a row is written, so it is true as "
+            "drawn. Since D13 MODEL_CALL_CONDITION no longer exempts a usage marker, so the usage "
+            "guard reads it as a claim. Rewording the box into a USAGE_CONDITION form, such as "
+            "出厂路径不记账, retires this entry."
+        ),
+    ),
+)
+"""The usage guard's true non-claims among the units the embedded diagrams draw, pinned the same
+way, by the generator's path and the unit's whole text."""
 
 
 @dataclass(frozen=True, slots=True)
 class ProseGuard:
-    """One prose guard over `GUARDED_FILES`: what it reads as a claim, and what it pins."""
+    """One prose guard over `GUARDED_FILES` and the embedded diagrams: what it reads as a claim,
+    and what it pins in each."""
 
     claim: str
     is_claim: Callable[[str], bool]
     allowlist: tuple[AllowedClause, ...]
     remedy: str
+    diagram_allowlist: tuple[AllowedClause, ...] = ()
 
 
 USAGE_GUARD: Final[ProseGuard] = ProseGuard(
@@ -1048,8 +1331,9 @@ USAGE_GUARD: Final[ProseGuard] = ProseGuard(
     allowlist=ALLOWLIST,
     remedy=(
         "Say in the same clause that no shipped path records it -- USAGE_CONDITION, as section "
-        "057 does, or MODEL_CALL_CONDITION -- or reword the claim."
+        "057 does -- or reword the claim. Saying no shipped path calls a model is not enough."
     ),
+    diagram_allowlist=USAGE_DIAGRAM_ALLOWLIST,
 )
 
 MODEL_CALL_GUARD: Final[ProseGuard] = ProseGuard(
@@ -1062,7 +1346,22 @@ MODEL_CALL_GUARD: Final[ProseGuard] = ProseGuard(
     ),
 )
 
-GUARDS: Final[dict[str, ProseGuard]] = {"usage": USAGE_GUARD, "model-call": MODEL_CALL_GUARD}
+CAPABILITY_GUARD: Final[ProseGuard] = ProseGuard(
+    claim="capability registration or capability-based selection",
+    is_claim=_is_capability_claim,
+    allowlist=CAPABILITY_ALLOWLIST,
+    remedy=(
+        "Say in the same clause that no code selects by it -- CAPABILITY_CONDITION, as "
+        "README.md's model row does -- or drop the claim: ModelRegistry is constructed nowhere "
+        "and nothing reads a model's capabilities, whether or not a provider is wired."
+    ),
+)
+
+GUARDS: Final[dict[str, ProseGuard]] = {
+    "usage": USAGE_GUARD,
+    "model-call": MODEL_CALL_GUARD,
+    "capability": CAPABILITY_GUARD,
+}
 
 
 def _guarded_documents() -> dict[Path, str]:
@@ -1103,16 +1402,35 @@ def test_user_facing_docs_do_not_present_a_model_call_as_shipped() -> None:
     """Every clause the model-call guard flags is a violation unless `MODEL_CALL_ALLOWLIST` pins
     it.
 
-    Written against 27 clauses that presented classified retry, capability registration, schema
-    validation or a model to diagnose as what the product does: `README.md`'s model rows and
-    bullets and its fourth advantage, `README.en.md`'s two model bullets, `why-openalpha`'s
-    研究运行 row, and 20 clauses of the marketing pack, section 097's hook among them. No shipped
-    path calls a model -- the premise test above holds that -- so each is true only of a
-    provider a user wires in code.
+    Written against the 25 claims it flags at `ea88999` beside its two pins, re-measured in
+    `D13` (this docstring said 27 and 20): `README.md`'s model row, two model bullets and fourth
+    advantage, `README.en.md`'s two model bullets, `why-openalpha`'s 研究运行 row, and 18 clauses
+    of the marketing pack, section 097's hook among them. Each presented classified retry,
+    capability registration, schema validation or a model to diagnose as what the product does.
+    No shipped path calls a model -- the premise test above holds that -- so each is true only
+    of a provider a user wires in code. Capability registration left this guard in `D13` for a
+    guard of its own.
     """
     violations = _violations(_guarded_documents(), MODEL_CALL_GUARD)
     assert not violations, (
         "\n".join(violations) + f"\n{MODEL_CALL_GUARD.remedy} Pin a MODEL_CALL_ALLOWLIST entry "
+        "only for a clause that is true as written."
+    )
+
+
+def test_user_facing_docs_do_not_present_capability_selection_as_shipped() -> None:
+    """Every clause the capability guard flags is a violation unless `CAPABILITY_ALLOWLIST` pins
+    it.
+
+    Written against the six clauses of `PRE_D13_CAPABILITY_CLAIMS`: `README.md`'s model row and
+    model bullet, and sections 005, 034, 040 and 061 of the marketing pack. `ModelRegistry` is
+    constructed nowhere under `src/` or `scripts/` -- the premise test above holds that -- and
+    `OpenAICompatibleProvider` posts to the one `base_url` it was built with, so no code
+    registers a capability or selects an endpoint by one, whether or not a provider is wired.
+    """
+    violations = _violations(_guarded_documents(), CAPABILITY_GUARD)
+    assert not violations, (
+        "\n".join(violations) + f"\n{CAPABILITY_GUARD.remedy} Pin a CAPABILITY_ALLOWLIST entry "
         "only for a clause that is true as written."
     )
 
@@ -1123,8 +1441,8 @@ def test_each_prose_test_fails_on_a_claim_it_exists_to_catch(
 ) -> None:
     """A prose test that stopped reading its guard's verdicts would still pass on today's
     documents, which hold no claim. This hands each prose test the real documents plus one claim
-    of its kind -- `README.md`'s model row as it stood before `D7` or before `D12` -- appended to
-    `README.md`, and requires the prose test to fail."""
+    of its kind -- `README.md`'s model row or bullet as it stood before `D7`, `D12` or `D13` --
+    appended to `README.md`, and requires the prose test to fail."""
     claim, prose_test = {
         "usage": (
             PRE_D7_CLAIMS["README.md:17"],
@@ -1133,6 +1451,10 @@ def test_each_prose_test_fails_on_a_claim_it_exists_to_catch(
         "model-call": (
             PRE_D12_MODEL_CALL_CLAIMS["README.md:17"],
             test_user_facing_docs_do_not_present_a_model_call_as_shipped,
+        ),
+        "capability": (
+            PRE_D13_CAPABILITY_CLAIMS["README.md:37"],
+            test_user_facing_docs_do_not_present_capability_selection_as_shipped,
         ),
     }[name]
     documents = _guarded_documents()
@@ -1146,12 +1468,14 @@ def _allowlist_problems(
     documents: dict[Path, str],
     guard: ProseGuard,
     allowlist: Iterable[AllowedClause] | None = None,
+    reader: Callable[[str], list[Clause]] = clauses,
 ) -> list[str]:
     """Why each entry of `guard`'s allowlist no longer describes one flagged clause.
 
     The excerpt must find exactly one clause of the entry's file, that clause must still read
     exactly as pinned, and the guard must still flag it. `allowlist` replaces the guard's own
-    entries, for the self-test below.
+    entries, for the self-test below and for a diagram allowlist, whose files are generators
+    read with `reader=diagram_units`.
     """
     problems: list[str] = []
     for entry in guard.allowlist if allowlist is None else allowlist:
@@ -1160,7 +1484,7 @@ def _allowlist_problems(
             problems.append(f"{label} is for a file the guard does not read")
             continue
         matches = [
-            clause for clause in clauses(documents[entry.path]) if entry.excerpt in clause.text
+            clause for clause in reader(documents[entry.path]) if entry.excerpt in clause.text
         ]
         if len(matches) != 1:
             problems.append(
@@ -1236,6 +1560,10 @@ ALLOWLIST_INSERTIONS: Final[dict[str, dict[str, str]]] = {
         "zh": "，模型调用按 408、429 与 5xx 分类重试",
         "en": ", and every model call is retried on 408, 429 and 5xx",
     },
+    "capability": {
+        "zh": "，模型能力由治理层注册",
+        "en": ", and each model is chosen by its registered capabilities",
+    },
 }
 """A claim of each guard's kind to write into a pinned clause, straight after its excerpt, by
 the clause's language. None holds a clause end, so the claim lands inside the pinned clause."""
@@ -1276,10 +1604,12 @@ def test_the_usage_guard_tells_a_claim_from_a_stated_condition() -> None:
 
     The four claims after the negated condition are the review of `D7`'s false negatives, and
     the three after them its Minor finding M-1: a prefix of a condition that states no
-    condition. Among the non-claims, the four after the credential are the lines that review
-    required the cost rule to leave alone, the two after them hold each half of the cost rules
-    to its other half, and the last three are its Minor finding M-2 and the model-call
-    condition that exempts a usage marker.
+    condition. The five after those are the review of `D12`'s M-4, a condition verb with another
+    object, and the last two are what `D13` stopped `MODEL_CALL_CONDITION` from exempting, the
+    second in the shape of section 005 at `d4ef5e4`. Among the non-claims, the four after the
+    credential are the lines the review of `D7` required the cost rule to leave alone, the two
+    after them hold each half of the cost rules to its other half, `## Usage` and the `usage:`
+    line are that review's Minor finding M-2, and the last two are true sentences `D13` wrote.
     """
     claims = (
         "Token 与估算成本持续入账。",
@@ -1297,6 +1627,14 @@ def test_the_usage_guard_tells_a_claim_from_a_stated_condition() -> None:
         "Token 与估算成本持续入账，出厂路径不需要额外配置。",
         "出厂路径不依赖大模型密钥，接入模型后 Token 与估算成本持续入账。",
         "No shipped path needs an API key, and every call's token usage is recorded.",
+        "Token 与估算成本持续入账，出厂路径不写入密钥。",
+        "Token 与估算成本持续入账，出厂路径不记录密钥。",
+        "No shipped path records your API key, and every call's token usage is recorded.",
+        "No shipped path writes secrets to disk, and model costs are recorded per run.",
+        "出厂路径不会记录你的密钥，每次调用的 Token 与成本都自动入账。",
+        "Token 与估算成本另有账本，出厂路径不调用模型。",
+        "模型侧的 Token、尝试次数与估算成本账本要在代码中接入模型 Provider 才会用上，"
+        "出厂路径不调用模型。",
     )
     non_claims = (
         "模型调用的 Token 与估算成本另有账本，但要接入自带用量追踪的 Provider 才会写入，"
@@ -1319,7 +1657,10 @@ def test_the_usage_guard_tells_a_claim_from_a_stated_condition() -> None:
         "对提示词工程、模型路由、成本优化和 Agent 评测都很有价值。",
         "## Usage",
         "usage: openalpha [-h] [--json]",
-        "Token 与估算成本另有账本，出厂路径不调用模型。",
+        "for a model provider you construct in your own code (no shipped path calls a model): "
+        "classified retry, and a token and configured-cost usage ledger that no shipped path "
+        "writes to -- only a provider built with a usage store records into it;",
+        "Token 与成本账本要接自带用量追踪的 Provider 才写入，出厂路径不记账\N{FULLWIDTH SEMICOLON}",
     )
     missed = [claim for claim in claims if not _is_usage_claim(claim)]
     wrongly = [text for text in non_claims if _is_usage_claim(text)]
@@ -1329,10 +1670,14 @@ def test_the_usage_guard_tells_a_claim_from_a_stated_condition() -> None:
 def test_the_model_call_guard_tells_a_claim_from_a_stated_condition() -> None:
     """Minimal clauses in the shapes the model-call guard exists to tell apart, each alone.
 
-    The four claims after the English ones each name a single behaviour -- a status code, 退避,
-    能力注册, 注册表 -- so dropping any one of those markers shows here. The last three claims
-    carry a condition that does not count: negated, a prefix that states no condition, and an
-    English sentence that says something else about the shipped path.
+    Seven claims each name a single behaviour -- 429, 退避 and 幻觉, and 401, 408, 5xx and
+    "backoff", which no test pinned until the review of `D12` measured that deleting any of them
+    passed (its M-2) -- so dropping any one of those markers shows here; 重试, "retry" and
+    "schema" are each pinned alone by `PRE_D12_MODEL_CALL_CLAIMS`. The last five claims carry a
+    condition that does not count: negated, a prefix that states no condition, an English
+    sentence that says something else about the shipped path, and -- the review of `D12`'s M-4
+    -- a condition verb whose object is not a model. The last non-claim names a registry and no
+    behaviour: capability registration left this guard in `D13`.
     """
     claims = (
         "模型调用按 408、429、5xx 分类重试。",
@@ -1341,13 +1686,16 @@ def test_the_model_call_guard_tells_a_claim_from_a_stated_condition() -> None:
         "The LLM's output gets schema validation and bounded retries.",
         "模型请求遇到 429 时自动等待。",
         "模型调用失败时指数退避。",
-        "模型侧还有能力注册。",
-        "模型注册表区分能力。",
-        "模型能力注册表描述结构化输出支持。",
         "你可以判断失败来自模型幻觉。",
+        "模型调用遇到 401 立即失败。",
+        "模型请求遇到 408 时等待。",
+        "模型端点返回 5xx 时等待。",
+        "Model calls use exponential backoff.",
         "并非出厂路径不调用模型，模型调用按 429 退避。",
         "出厂路径不依赖模型密钥，模型调用按 429 退避。",
         "No shipped path needs a model key, and model calls retry on 429.",
+        "模型调用按 429 分类退避，出厂路径不调用模型密钥。",
+        "No shipped path sends a model key anywhere, and model calls retry on 429.",
     )
     non_claims = (
         "在代码中接入模型 Provider 后，对 408、429、5xx 分类重试，出厂路径不调用模型。",
@@ -1359,9 +1707,48 @@ def test_the_model_call_guard_tells_a_claim_from_a_stated_condition() -> None:
         "对提示词工程、模型路由、成本优化和 Agent 评测都很有价值。",
         "AlphaModel 的预测批次按 schema 校验。",
         "OpenAlpha CN 保存每个 Agent 的结构化输出，因子、智能体与模型份额结构性不产生。",
+        "for a model provider you construct in your own code (no shipped path calls a model): "
+        "classified retry, and a token and configured-cost usage ledger that no shipped path "
+        "writes to -- only a provider built with a usage store records into it;",
+        "模型客户端库定义了能力注册表与能力元数据，但没有代码据此选择端点。",
     )
     missed = [claim for claim in claims if not _is_model_call_claim(claim)]
     wrongly = [text for text in non_claims if _is_model_call_claim(text)]
+    assert not missed and not wrongly, f"read as no claim: {missed}; read as a claim: {wrongly}"
+
+
+def test_the_capability_guard_tells_a_claim_from_a_stated_condition() -> None:
+    """Minimal clauses in the shapes the capability guard exists to tell apart, each alone.
+
+    The first seven claims each name one marker -- 能力注册, 注册表, 注册 then 能力, 按 ... 能力
+    ... 选, 能力选择, "registry", and "capability" before a verb of registering -- so dropping
+    any one of them shows here; the eighth is section 040's wording at `d4ef5e4`. The next two
+    carry a condition that is not this guard's -- wiring a provider registers nothing, so neither
+    出厂路径不调用模型 nor a usage condition exempts -- and the last is negated. Among the
+    non-claims, the first is the wording `README.md` uses now, and the rest name a registry, or
+    a capability, that is no model's.
+    """
+    claims = (
+        "模型侧还有能力注册。",
+        "模型注册表按厂商分组。",
+        "为每个模型注册能力。",
+        "按模型能力挑选端点。",
+        "模型的能力选择由元数据决定。",
+        "The model registry lists each endpoint.",
+        "Capabilities are registered once a model provider is wired.",
+        "模型能力由治理层注册。",
+        "模型侧的能力注册要在代码中接入模型 Provider 才会用上，出厂路径不调用模型。",
+        "Token 账本与能力注册表都已就绪，出厂路径不会自动记账。",
+        "并非没有代码据此选择端点，模型按能力注册表挑选。",
+    )
+    non_claims = (
+        "模型客户端库定义了能力注册表与能力元数据，但没有代码据此选择端点。",
+        "pnpm audit --audit-level high --registry https://registry.npmjs.org",
+        "后者探的是 provider 凭证与能力，前者读的是面板本身。",
+        "OpenAlpha CN 登记已知限制的注册表有 35 个。",
+    )
+    missed = [claim for claim in claims if not _is_capability_claim(claim)]
+    wrongly = [text for text in non_claims if _is_capability_claim(text)]
     assert not missed and not wrongly, f"read as no claim: {missed}; read as a claim: {wrongly}"
 
 
@@ -1487,6 +1874,95 @@ def test_the_model_call_claims_this_guard_was_written_for_are_flagged() -> None:
     assert not missed, f"the guard no longer flags a pre-D12 model-call claim: {missed}"
 
 
+PRE_D13_USAGE_CLAIMS: Final[dict[str, str]] = {
+    "README.en.md:45": (
+        "- for a model provider wired in through the SDK, since no shipped path calls a model: "
+        "classified retry, and a token and configured-cost usage ledger that only a provider "
+        "built with a usage store writes to;\n"
+    ),
+    "marketing:44": (
+        "模型侧的能力注册与 Token、尝试次数、估算成本账本要在代码中接入模型 Provider 才会用上，"
+        "出厂路径不调用模型。\n"
+    ),
+    "marketing:240": (
+        "在代码中接入模型 Provider 后，模型调用按 408、429、5xx 分类重试，尝试、Token 与成本另有"
+        "账本，出厂路径不调用模型\N{FULLWIDTH SEMICOLON}\n"
+    ),
+    "marketing:290": (
+        "在代码中接入模型 Provider 后，408、429、5xx 按策略重试，401 立即失败，Token、尝试次数和"
+        "按用户单价估算的成本另有账本，出厂路径不调用模型。\n"
+    ),
+    "marketing:298": (
+        "在代码中接入模型 Provider 后，408、429 与 5xx 才执行有界指数退避、认证失败立即终止，"
+        "每次尝试、Token 和估算成本另有账本，出厂路径不调用模型。\n"
+    ),
+    "marketing:412": (
+        "链邻 Provider 的数据入口、批量任务的进度和恢复也有记录，模型调用的 Token 与重试次数要在"
+        "代码中接入模型才可能入账，出厂路径不调用模型。\n"
+    ),
+    "marketing:494": (
+        "链邻数据接口错误会明确分类，证据不足会 abstain，模型 Token 与重试次数要在代码中接入模型"
+        "才可能入账、出厂路径不调用模型，批量任务中断也能恢复。\n"
+    ),
+    "marketing:504": (
+        "模型侧的能力注册、分类退避与 Token 成本账本要在代码中接入模型 Provider 才会用上，"
+        "出厂路径不调用模型。\n"
+    ),
+    "marketing:536": (
+        "OpenAlpha CN 将并发设置在 1\N{EN DASH}8 的有界范围，任务中心负责调度，链邻 Provider "
+        "执行客户端速率控制，模型侧的 429 等错误分类退避要在代码中接入模型才会用上，每次尝试与 "
+        "Token 成本也才可能入账，出厂路径不调用模型。\n"
+    ),
+}
+"""Usage clauses as they stood at `d4ef5e4`, verbatim: the whole line for `README.en.md`, and for
+the marketing bodies the clause the claim sits in. Each passed only on 出厂路径不调用模型 or "no
+shipped path calls a model", which since `D13` exempts no usage marker; sections 005 and 061 had
+also lost the `usage_store` condition they carried at `ea88999`."""
+
+
+def test_the_usage_claims_d13_found_are_flagged() -> None:
+    """The usage guard's retroactive power over what `D13` found, held."""
+    missed = [label for label, text in PRE_D13_USAGE_CLAIMS.items() if not _flagged_clauses(text)]
+    assert not missed, f"the usage guard no longer flags a pre-D13 usage claim: {missed}"
+
+
+PRE_D13_CAPABILITY_CLAIMS: Final[dict[str, str]] = {
+    "README.md:17": (
+        "| 模型治理 | 能力注册与 408/429/5xx 分类重试要在代码中接入模型 Provider 才会用上，"
+        "出厂路径不调用模型\N{FULLWIDTH SEMICOLON}Token/尝试次数/估算成本账本要在构造 Provider "
+        "时传入 `usage_store` 才会写入，出厂路径不会自动记账 |\n"
+    ),
+    "README.md:37": (
+        "- **模型治理边界**：在代码中接入模型 Provider 后按模型能力选择兼容端点，对 408/429/5xx "
+        "分类重试，出厂路径不调用模型\N{FULLWIDTH SEMICOLON}Token、尝试次数与按用户单价估算的成本"
+        "有持久账本，但要在构造 Provider 时传入 `usage_store` 才会写入，出厂路径不会自动记账。\n"
+    ),
+    "marketing:44": PRE_D13_USAGE_CLAIMS["marketing:44"],
+    "marketing:282": (
+        "在代码中接入 OpenAI-compatible 模型后，才有 Schema 校验、有界重试和能力注册，"
+        "出厂路径不调用模型。\n"
+    ),
+    "marketing:330": (
+        "链邻数据通过统一 Provider 生成证据，模型能力由治理层注册，调用成本要接入自带用量追踪的 "
+        "Provider 才会入账，出厂路径不会自动记账。\n"
+    ),
+    "marketing:504": PRE_D13_USAGE_CLAIMS["marketing:504"],
+}
+"""Capability clauses as they stood at `d4ef5e4`, verbatim: whole lines for `README.md`, and for
+the marketing bodies the clause the claim sits in. `D12` made five of them conditional on wiring
+a provider in code, which does not make them true; section 040's carried no condition at all."""
+
+
+def test_the_capability_claims_this_guard_was_written_for_are_flagged() -> None:
+    """The capability guard's retroactive power, held: every pre-D13 claim must be flagged."""
+    missed = [
+        label
+        for label, text in PRE_D13_CAPABILITY_CLAIMS.items()
+        if not _flagged_clauses(text, _is_capability_claim)
+    ]
+    assert not missed, f"the capability guard no longer flags a pre-D13 claim: {missed}"
+
+
 WRAPPED_CLAIMS: Final[dict[str, str]] = {
     "plain paragraph, wrapped inside 估算成本": "模型侧持久记录 Token 与估\n算成本，便于复盘。\n",
     "bullet, wrapped between the token and its accounting word": (
@@ -1533,9 +2009,7 @@ def test_the_usage_guards_stated_blind_spots_are_real() -> None:
     flagged = {
         "a credential token beside an accounting word": "Token 持久保存在环境变量里。",
         "a transaction cost not spelled 交易成本": "佣金成本随每个 Agent 的成交一起记录。",
-        "a condition worded outside USAGE_CONDITION and MODEL_CALL_CONDITION": (
-            "Token 与估算成本持续入账，但默认不开启。"
-        ),
+        "a condition worded outside USAGE_CONDITION": ("Token 与估算成本持续入账，但默认不开启。"),
     }
     closed = {
         label: _flagged_texts(text) for label, text in unflagged.items() if _flagged_texts(text)
@@ -1551,7 +2025,8 @@ def test_the_model_call_guards_stated_blind_spots_are_real() -> None:
     """Each limit the module docstring states for the model-call guard, measured.
 
     The first `unflagged` row is section 097's body as it stood at `ea88999`: its registry and
-    retry claim sat one clause after its model word, and was rewritten by hand.
+    retry claim sat one clause after its model word, and was rewritten by hand. The last four
+    are the review of `D12`'s M-3: a model named only by its provider class, vendor or product.
     """
     unflagged = {
         "a claim whose model word is in the clause before": (
@@ -1565,6 +2040,10 @@ def test_the_model_call_guards_stated_blind_spots_are_real() -> None:
         "structured output without the word schema": "模型输出统一为结构化结果。",
         "governance named without a behaviour": "模型治理也能通过公开接口管理。",
         "a claim split across a blank line": "模型调用\n\n按 429 分类退避。\n",
+        "a model named by provider class": "OpenAI-compatible Provider 对 408、429、5xx 分类重试。",
+        "a model named by vendor": "DeepSeek、Qwen 端点返回 429 时自动退避。",
+        "an English provider class": "The OpenAI-compatible provider retries 429s with backoff.",
+        "a model named by product": "GPT 请求失败会指数退避。",
     }
     flagged = {
         "a batch retry beside an unrelated model word": (
@@ -1581,6 +2060,32 @@ def test_the_model_call_guards_stated_blind_spots_are_real() -> None:
     }
     opened = [
         label for label, text in flagged.items() if not _flagged_texts(text, _is_model_call_claim)
+    ]
+    assert not closed and not opened, (
+        f"a stated blind spot is now flagged: {closed}; a stated misreading no longer happens: "
+        f"{opened} -- update the docstring with it"
+    )
+
+
+def test_the_capability_guards_stated_blind_spots_are_real() -> None:
+    """Each limit the module docstring states for the capability guard, measured."""
+    unflagged = {
+        "a choice worded without a marker": "模型元数据决定调用哪个端点。",
+        "a claim split across two clauses": "模型侧维护一份能力清单。注册后按它选端点。",
+    }
+    flagged = {
+        "a registry of something else beside a model word": (
+            "模型版本登记在 RunManifest 的注册表里。"
+        ),
+        "a condition worded outside CAPABILITY_CONDITION": "模型按能力注册表选端点，但默认不开启。",
+    }
+    closed = {
+        label: _flagged_texts(text, _is_capability_claim)
+        for label, text in unflagged.items()
+        if _flagged_texts(text, _is_capability_claim)
+    }
+    opened = [
+        label for label, text in flagged.items() if not _flagged_texts(text, _is_capability_claim)
     ]
     assert not closed and not opened, (
         f"a stated blind spot is now flagged: {closed}; a stated misreading no longer happens: "
@@ -1606,12 +2111,16 @@ def _diagram_sources() -> dict[str, str]:
 
 
 def _diagram_violations(guard: ProseGuard, sources: dict[str, str]) -> list[str]:
-    """One message per clause of a drawing call or data row that `guard` reads as a claim."""
+    """One message per clause of a drawing call or data row that `guard` reads as a claim and its
+    `diagram_allowlist` does not pin, by the generator's path and the unit's whole text."""
+    pinned = {
+        (entry.path.relative_to(ROOT).as_posix(), entry.clause) for entry in guard.diagram_allowlist
+    }
     return [
         f"{label}:{unit.line} draws {guard.claim} as shipped: {unit.text!r}"
         for label, source in sources.items()
         for unit in diagram_units(source)
-        if guard.is_claim(unit.text)
+        if guard.is_claim(unit.text) and (label, unit.text) not in pinned
     ]
 
 
@@ -1619,14 +2128,16 @@ def _diagram_violations(guard: ProseGuard, sources: dict[str, str]) -> list[str]
 def test_the_embedded_diagrams_do_not_present_a_model_call_or_usage_recording_as_shipped(
     name: str,
 ) -> None:
-    """Both prose guards over the words the embedded diagrams draw, one unit per drawing call.
+    """Every prose guard over the words the embedded diagrams draw, one unit per drawing call.
 
     Written against brain-03's 模型治理边界 box, which read "能力注册 · Schema 校验 · 408/429/5xx
-    重试" and "Token / 尝试次数 / 估算成本持久化" as system behaviour. No allowlist applies here.
-    That box must still be read, so a reader or generator list gone blind fails rather than
-    passes. Three other cost words the diagrams drew as shipped -- "agent_outputs / routing_path
-    / 成本" in brain-03, "Retry / Recovery · 成本账本" in brain-01 and "同一成本与恢复语义" in
-    brain-05 -- carry no marker either guard reads, and were rewritten by hand.
+    重试" and "Token / 尝试次数 / 估算成本持久化" as system behaviour. Only a guard's
+    `diagram_allowlist` applies here: one entry, the usage guard's pin on that box as `D12`
+    rewrote it. The box must still be read, so a reader or generator list gone blind fails rather
+    than passes. Three other cost words the diagrams drew as shipped -- "agent_outputs /
+    routing_path / 成本" in brain-03, "Retry / Recovery · 成本账本" in brain-01 and
+    "同一成本与恢复语义" in brain-05 -- carry no marker these guards read, and were rewritten by
+    hand.
     """
     guard = GUARDS[name]
     sources = _diagram_sources()
@@ -1638,6 +2149,23 @@ def test_the_embedded_diagrams_do_not_present_a_model_call_or_usage_recording_as
         "\n".join(violations) + f"\n{guard.remedy} Fix the generator, then regenerate the SVG "
         "with the generator itself."
     )
+
+
+def test_every_diagram_allowlist_entry_exempts_exactly_one_flagged_unit() -> None:
+    """A diagram pin is held to its unit the way a prose pin is held to its clause.
+
+    A pinned box that was reworded, fixed, deleted or drawn twice fails here, and one that was
+    reworded fails the diagram test above as well, because its new text is pinned by no entry.
+    """
+    sources = {ROOT / label: source for label, source in _diagram_sources().items()}
+    problems = [
+        problem
+        for guard in GUARDS.values()
+        for problem in _allowlist_problems(
+            sources, guard, guard.diagram_allowlist, reader=diagram_units
+        )
+    ]
+    assert not problems, "\n".join(problems)
 
 
 PRE_D12_DIAGRAM_BOX: Final[str] = (
