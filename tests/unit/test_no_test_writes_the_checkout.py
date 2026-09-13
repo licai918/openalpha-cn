@@ -1332,11 +1332,14 @@ def _run_the_hooks_over(
     `OPENALPHA_CHECKOUT_GUARD`, and `PY_COLORS=0`: a developer running this file under `--cov`,
     in `report` mode or with colour forced must not change what the child is asked to prove.
     `environment` is applied last. Anything a test puts under `tmp_path / "checkout"` first --
-    a stale basetemp -- is kept, because the checkout is laid out around it.
+    a stale basetemp -- is kept, because the checkout is laid out around it. `tests/` is aged
+    again once the probe is written into it, so an entry the probe creates and removes there moves
+    its modification time visibly on any clock.
     """
     checkout = tmp_path / "checkout"
     _scratch_checkout(checkout)
     (checkout / "tests" / "test_probe.py").write_text(probe, encoding="utf-8")
+    _aged(checkout / "tests")
     child = {
         name: value
         for name, value in os.environ.items()
@@ -1491,6 +1494,92 @@ def test_leaving_out_a_run_s_own_output_hides_nothing_a_test_wrote(tmp_path: Pat
         "while the tests ran, created and removed something in src/package/ -- its modification "
         "time moved and its listing did not",
         "while the tests ran, created .grimp_cache at the checkout root",
+    ], output
+
+
+REPORTS_IN_DIRECTORIES_NOT_MADE_YET: Final[tuple[str, ...]] = (
+    "--cov=tests",
+    "--cov-report=xml:reports/coverage.xml",
+    "--cov-report=html:build/htmlcov",
+)
+"""File reports whose destinations stand in directories no run has made yet. coverage.py makes
+every missing directory on the way to what it writes, and so does pytest's junit plugin."""
+
+
+@pytest.mark.parametrize("junitxml", ["reports/junit.xml", "tests/reports/nightly/junit.xml"])
+def test_a_directory_a_run_makes_for_its_own_report_is_not_a_write_to_the_checkout(
+    tmp_path: Path, junitxml: str
+) -> None:
+    """D14 fix review m-1: each of these failed a run whose every test had passed.
+
+    Measured on the code before this, over a probe that writes only its `tmp_path`: the reports
+    under `reports/` gave `created reports at the checkout root`, `build/htmlcov` gave `created
+    build at the checkout root`, and `tests/reports/nightly/junit.xml` gave `created directory
+    tests/reports/` and `created directory tests/reports/nightly/`. A fresh checkout -- every CI
+    run -- has none of those directories, so a CI line naming one would fail every time.
+    """
+    checkout = tmp_path / "checkout"
+
+    finished = _run_the_hooks_over(
+        tmp_path, TMP_PATH_PROBE, *REPORTS_IN_DIRECTORIES_NOT_MADE_YET, f"--junitxml={junitxml}"
+    )
+    output = finished.stdout + finished.stderr
+
+    assert finished.returncode == 0, output
+    assert "1 passed" in output, output
+    assert _reported(output) == [], output
+    assert [
+        report
+        for report in (junitxml, "reports/coverage.xml", "build/htmlcov/index.html")
+        if not (checkout / report).is_file()
+    ] == []
+
+
+PLANTS_BESIDE_ITS_REPORT: Final[str] = textwrap.dedent(
+    """
+    from pathlib import Path
+
+    CHECKOUT = Path(__file__).resolve().parents[1]
+
+
+    def test_plants_a_module_where_the_report_will_go():
+        directory = CHECKOUT / "tests" / "unit" / "reports"
+        directory.mkdir()
+        (directory / "planted.py").write_text("x = 1\\n", encoding="utf-8")
+
+
+    def test_plants_a_probe_module_two_levels_up_and_deletes_it():
+        probe = CHECKOUT / "tests" / "_layering_gate_probe.py"
+        probe.write_text("import sqlite3\\n", encoding="utf-8")
+        probe.unlink()
+    """
+)
+
+
+def test_a_directory_made_for_a_report_is_the_run_s_own_and_nothing_else_is(
+    tmp_path: Path,
+) -> None:
+    """m-1's non-vacuity: only the directories made for a report are left out.
+
+    `tests/unit/` stands already and the report is to go in `tests/unit/reports/`, which does not.
+    The probe makes that directory itself, before the report is written, and plants a module in
+    it; then it creates and removes a module in `tests/`, whose listing nothing else changes. Both
+    are still named: a directory made for a report does not make what else is in it the run's,
+    and the walk up from a report stops at the first directory that stood already.
+    """
+    (tmp_path / "checkout" / "tests" / "unit").mkdir(parents=True)
+
+    finished = _run_the_hooks_over(
+        tmp_path, PLANTS_BESIDE_ITS_REPORT, "--junitxml=tests/unit/reports/junit.xml"
+    )
+    output = finished.stdout + finished.stderr
+
+    assert finished.returncode == 1, output
+    assert "2 passed" in output, output
+    assert _reported(output) == [
+        "while the tests ran, created tests/unit/reports/planted.py",
+        "while the tests ran, created and removed something in tests/ -- its modification time "
+        "moved and its listing did not",
     ], output
 
 

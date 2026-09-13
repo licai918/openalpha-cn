@@ -52,7 +52,11 @@ What it ignores, because the interpreter and the runner write these as a matter 
   configuration puts them when none is (`htmlcov/`, `coverage.xml`, `coverage.json`,
   `coverage.lcov` by default), and `annotate`'s `*,cover` beside each source. D14 I-1: before these
   were read, each failed a run whose every test had passed the first time its target appeared in
-  the checkout, and a basetemp under `tests/` failed every run.
+  the checkout, and a basetemp under `tests/` failed every run. So do the directories one of them
+  needs and the session began without, which its writer makes on the way -- those directories
+  themselves, not whatever else turns up in them. D14 fix review m-1: until they did,
+  `--junitxml=reports/junit.xml` failed every run in a fresh checkout with `created reports at the
+  checkout root`, and `--junitxml=tests/reports/junit.xml` with `created directory tests/reports/`.
 
 What fails a session although no test caused it -- the guard sees that a path changed, never who
 changed it:
@@ -147,10 +151,20 @@ class RunOutputs:
     suffixes: frozenset[str] = frozenset()
     """Endings of the file names the run writes beside its sources, wherever those are."""
 
+    made_for_them: frozenset[str] = frozenset()
+    """Directories between the root and one of `paths` that did not exist when the session began.
+
+    Whoever writes an output makes them first -- pytest's junit plugin and coverage.py both make
+    every missing directory on the way. Only each directory itself is the run's own: a file found
+    in one that is not among `paths` is still a change.
+    """
+
     def cover(self, path: str) -> bool:
-        """Whether `path` is one of these outputs or lies inside one."""
-        return path.endswith(tuple(self.suffixes)) or any(
-            path == output or path.startswith(f"{output}/") for output in self.paths
+        """Whether `path` is one of these outputs, lies inside one, or was made to hold one."""
+        return (
+            path in self.made_for_them
+            or path.endswith(tuple(self.suffixes))
+            or any(path == output or path.startswith(f"{output}/") for output in self.paths)
         )
 
     def one_is_directly_in(self, directory: str) -> bool:
@@ -186,7 +200,9 @@ def run_outputs(config: pytest.Config) -> RunOutputs:
     started from, as each of those writers resolves them, except pytest's cache directory, which
     pytest resolves against the root -- and which does not exist as a setting at all when the
     cache plugin is off (`-p no:cacheprovider`), and then writes nothing. A target outside the
-    root is nothing this guard watches.
+    root is nothing this guard watches. The directories a target inside it needs and does not have
+    yet, as they stand when this is called -- as the session starts -- are the run's as well
+    (`RunOutputs.made_for_them`).
     """
     started = config.invocation_params.dir
     targets: list[Path] = []
@@ -214,17 +230,35 @@ def run_outputs(config: pytest.Config) -> RunOutputs:
     if data_file:
         targets.append(_target(str(data_file), started))
     root = Path(os.path.realpath(config.rootpath))
-    paths = {
-        real.relative_to(root).as_posix()
+    inside = [
+        real
         for real in (Path(os.path.realpath(target)) for target in targets)
         if real != root and real.is_relative_to(root)
-    }
-    return RunOutputs(paths=frozenset(paths), suffixes=frozenset(suffixes))
+    ]
+    return RunOutputs(
+        paths=frozenset(real.relative_to(root).as_posix() for real in inside),
+        suffixes=frozenset(suffixes),
+        made_for_them=frozenset(
+            directory.relative_to(root).as_posix()
+            for real in inside
+            for directory in _directories_to_make(real, root)
+        ),
+    )
 
 
 def _target(value: str, base: Path) -> Path:
     candidate = Path(os.path.expandvars(os.path.expanduser(value)))
     return candidate if candidate.is_absolute() else base / candidate
+
+
+def _directories_to_make(path: Path, root: Path) -> list[Path]:
+    """The directories between `root` and `path` that do not exist yet, nearest first."""
+    missing: list[Path] = []
+    for directory in path.parents:
+        if directory == root or directory.exists():
+            break
+        missing.append(directory)
+    return missing
 
 
 def snapshot(root: Path) -> Snapshot:
