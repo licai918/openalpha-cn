@@ -29,24 +29,31 @@ hands one to, a helper's or a fixture's return value, and a name imported from a
 `tarfile.open` and `zipfile.ZipFile` in any mode that writes, and `os.open` with a flag that writes;
 `shutil`'s copies, `move` and `rmtree`; `os`'s removals, renames, links and `makedirs`;
 `tempfile`'s constructors given `dir=`; `logging`'s file handlers; `numpy.save` and its siblings; a
-table's own writers (`to_csv`, `to_parquet`, `write_csv` and the rest); and `sqlite3.connect` and
-`duckdb.connect`, which create what they open. And two caches a library keeps in the *working
-directory*: `grimp.build_graph` without `cache_dir=None`, and the import linter without
-`no_cache=True`. The first is how `.grimp_cache/` came to stand at the root. D14 review m-3 measured
-eight writers unread while this paragraph said "every call that can write a file": the `gzip`,
-`zipfile` and `tarfile` openers, `io.FileIO`, `os.open`, `logging.FileHandler`, the unbound
-`Path.write_text` and `DataFrame.to_csv`.
+table's own writers (`to_csv`, `to_parquet`, `write_csv`, `to_string` and the rest); and
+`sqlite3.connect` and `duckdb.connect`, which create what they open. And two caches a library keeps
+in the *working directory*: `grimp.build_graph` without `cache_dir=None`, and the import linter
+without `no_cache=True`. The first is how `.grimp_cache/` came to stand at the root. D14 review m-3
+measured eight writers unread while this paragraph said "every call that can write a file": the
+`gzip`, `zipfile` and `tarfile` openers, `io.FileIO`, `os.open`, `logging.FileHandler`, the unbound
+`Path.write_text` and `DataFrame.to_csv`. D14 fix review m-3 then measured reads taken for writes:
+`tarfile.open(p, "r:xz")`, the `x` of whose compression was read as an exclusive create; `os.open`
+given `0` or `O_CLOEXEC`, neither of which names a flag that writes; and a store's `write_json`
+keyed by `"manifest.json"`. A mode is now what comes before its `:` or `|`; `os.open`'s flags
+write only if a part of them can; and a writer by a name a store or a formatter has too -- the
+`write_*` family and `to_string` -- writes only to a destination built as a path. It found
+`to_html(buf=...)` unread as well, and `buf` is read now.
 
 What the reading cannot see, stated: a writer that is not in that list -- another library's own
 save function, a `COPY ... TO` or a `VACUUM INTO` inside an SQL string, `os.write` on a descriptor
-opened somewhere it does not read, a method reached through `getattr`; a path assembled from pieces
-it does not follow -- an attribute of an object handed in, a method's return value, a string built
-at run time; a write made by a subprocess or by the code under test (`subprocess.run(...,
-cwd=ROOT)` is not read as a write, because nearly all of them only read); and a call that forwards
-`**kwargs`, which is checked where the keywords are spelled instead. It is flow-insensitive, so a
-name bound once to a checkout path and once to `tmp_path` reads as the first everywhere, and it
-reads a relative literal as the root's even after a test changed its working directory. Both err
-towards a finding.
+opened somewhere it does not read, a method reached through `getattr`; a `write_*` or `to_string`
+given its destination as a string literal, taken for a key -- `frame.write_csv("out.csv")` writes
+the root unseen; a path assembled from pieces it does not follow -- an attribute of an object
+handed in, a method's return value, a string built at run time; a write made by a subprocess or by
+the code under test (`subprocess.run(..., cwd=ROOT)` is not read as a write, because nearly all of
+them only read); and a call that forwards `**kwargs`, which is checked where the keywords are
+spelled instead. It is flow-insensitive, so a name bound once to a checkout path and once to
+`tmp_path` reads as the first everywhere, and it reads a relative literal as the root's even after
+a test changed its working directory. Both err towards a finding.
 
 **The measuring** (`tests/checkout_guard.py`, wired into `tests/conftest.py`): a snapshot of the
 checkout when a session starts, when collection finishes and when it ends, and a failed run for any
@@ -180,20 +187,69 @@ WRITING_FLAGS: Final[frozenset[str]] = frozenset(
 )
 """The `os.open` flags that write, or make a file that was not there."""
 
+READING_FLAGS: Final[frozenset[str]] = frozenset(
+    {
+        "O_ASYNC",
+        "O_BINARY",
+        "O_CLOEXEC",
+        "O_DIRECT",
+        "O_DIRECTORY",
+        "O_DSYNC",
+        "O_EVTONLY",
+        "O_EXLOCK",
+        "O_LARGEFILE",
+        "O_NDELAY",
+        "O_NOATIME",
+        "O_NOCTTY",
+        "O_NOFOLLOW",
+        "O_NOFOLLOW_ANY",
+        "O_NOINHERIT",
+        "O_NONBLOCK",
+        "O_PATH",
+        "O_RANDOM",
+        "O_RDONLY",
+        "O_RSYNC",
+        "O_SEQUENTIAL",
+        "O_SHLOCK",
+        "O_SHORT_LIVED",
+        "O_SYMLINK",
+        "O_SYNC",
+        "O_TEXT",
+    }
+)
+"""The `os.open` flags that write nothing of themselves: the read-only access mode, and the
+modifiers that change how a file is opened rather than whether it is written."""
+
+
+def _bits(flags: frozenset[str]) -> int:
+    bits = 0
+    for flag in flags:
+        bits |= getattr(os, flag, 0)
+    return bits
+
+
+WRITING_BITS: Final[int] = _bits(WRITING_FLAGS)
+"""`WRITING_FLAGS` as this platform numbers them, for flags given as a number."""
+
 
 def _flags_can_write(flags: ast.expr | None) -> bool:
     """Whether `os.open`'s flags can write.
 
-    An expression naming no flag this knows, such as a variable or a bare number, counts as writing.
+    They cannot when each part of them, joined with `|`, is one of `READING_FLAGS` or a number with
+    none of `WRITING_BITS` -- `0`, `os.O_RDONLY`, `os.O_RDONLY | os.O_CLOEXEC`. A flag this does
+    not know, and anything else, such as a variable or a call, counts as writing.
     """
     if flags is None:
         return False
-    named = {
-        node.attr if isinstance(node, ast.Attribute) else node.id
-        for node in ast.walk(flags)
-        if isinstance(node, ast.Attribute | ast.Name)
-    }
-    return bool(named & WRITING_FLAGS) or not named & (WRITING_FLAGS | {"O_RDONLY"})
+    if isinstance(flags, ast.BinOp) and isinstance(flags.op, ast.BitOr):
+        return _flags_can_write(flags.left) or _flags_can_write(flags.right)
+    if isinstance(flags, ast.Attribute):
+        return flags.attr not in READING_FLAGS
+    if isinstance(flags, ast.Name):
+        return flags.id not in READING_FLAGS
+    if isinstance(flags, ast.Constant) and type(flags.value) is int:
+        return bool(flags.value & WRITING_BITS)
+    return True
 
 
 TABLE_WRITERS: Final[frozenset[str]] = frozenset(
@@ -210,6 +266,14 @@ TABLE_WRITERS: Final[frozenset[str]] = frozenset(
         "to_pickle",
         "to_stata",
         "to_xml",
+    }
+)
+"""A table's own writers in pandas' spelling -- DuckDB's relation has `to_csv` and `to_parquet`
+too -- called on it with a destination first, which a string names as well as a path does."""
+
+SHARED_NAME_WRITERS: Final[frozenset[str]] = frozenset(
+    {
+        "to_string",
         "write_avro",
         "write_csv",
         "write_excel",
@@ -219,8 +283,9 @@ TABLE_WRITERS: Final[frozenset[str]] = frozenset(
         "write_parquet",
     }
 )
-"""A table's own writers -- pandas', polars' and a DuckDB relation's spellings -- called on it with
-a destination first."""
+"""A table's own writers by names a store, a cache or a formatter has too: polars' and a DuckDB
+relation's `write_*`, and pandas' `to_string`. Called with a string, such a method is as likely
+to take a key or a format as a path, so only a destination built as a path is read as one."""
 
 FIRST_ARGUMENT_WRITES: Final[frozenset[str]] = frozenset(
     {
@@ -662,9 +727,13 @@ class _Module:
                 return function.attr, f"{ast.unparse(receiver)} -> {ast.unparse(call.args[0])}"
             if function.attr == "open" and self.rooted(receiver, scope) and _writing(call, 0):
                 return "open for writing", ast.unparse(receiver)
-            if function.attr in TABLE_WRITERS:
-                target = _argument(call, 0, "path_or_buf", "path", "excel_writer", "file")
-                if target is not None and self.rooted(target, scope):
+            if function.attr in TABLE_WRITERS | SHARED_NAME_WRITERS:
+                target = _argument(call, 0, "path_or_buf", "path", "excel_writer", "file", "buf")
+                if (
+                    target is not None
+                    and self.rooted(target, scope)
+                    and (function.attr in TABLE_WRITERS or not _is_text(target))
+                ):
                     return function.attr, ast.unparse(target)
         if name in OPENERS:
             target = _argument(call, 0, "file", "filename", "name")
@@ -731,13 +800,25 @@ def _argument(call: ast.Call, position: int, *keywords: str) -> ast.expr | None:
 
 
 def _writing(call: ast.Call, position: int) -> bool:
-    """Whether an `open` call's mode can write: a mode it cannot read is taken as one that can."""
+    """Whether an `open` call's mode can write: a mode it cannot read is taken as one that can.
+
+    The mode is what comes before a `:` or a `|`: `tarfile.open` puts its compression after one,
+    and the `x` in `r:xz` is not an exclusive create.
+    """
     mode = _argument(call, position, "mode")
     if mode is None:
         return False
     if isinstance(mode, ast.Constant) and isinstance(mode.value, str):
-        return any(flag in mode.value for flag in "wax+")
+        access = mode.value.replace("|", ":").partition(":")[0]
+        return any(flag in access for flag in "wax+")
     return True
+
+
+def _is_text(node: ast.expr) -> bool:
+    """A string spelled out in the source, or an f-string that begins as one."""
+    if isinstance(node, ast.JoinedStr):
+        return bool(node.values) and isinstance(node.values[0], ast.Constant)
+    return isinstance(node, ast.Constant) and isinstance(node.value, str)
 
 
 def _forwards(call: ast.Call) -> bool:
@@ -986,6 +1067,33 @@ READING_PROBE: Final[str] = textwrap.dedent(
         numpy.save(ROOT / "array.npy", array)
 
 
+    def renders_a_table_there(frame):
+        frame.to_html(buf=ROOT / "frame.html")
+
+
+    def prints_a_table_there(frame):
+        frame.to_string(ROOT / "frame.txt")
+
+
+    def writes_a_table_through_a_path_it_built(frame):
+        frame.write_parquet(ROOT / "frame.parquet")
+
+
+    def opens_a_descriptor_by_number_for_writing():
+        os.close(os.open(ROOT / "x.bin", 1))
+
+
+    def opens_a_descriptor_with_flags_it_was_handed(flags):
+        os.close(os.open(ROOT / "x.bin", flags))
+
+
+    def writes_a_compressed_tar_archive():
+        import tarfile
+
+        with tarfile.open(ROOT / "x.tar.xz", "w:xz") as archive:
+            archive.add(__file__)
+
+
     def writes_only_its_tmp_path(tmp_path):
         (tmp_path / "a.txt").write_text("x", encoding="utf-8")
         shutil.copy2(ROOT / "pyproject.toml", tmp_path / "pyproject.toml")
@@ -1020,6 +1128,34 @@ READING_PROBE: Final[str] = textwrap.dedent(
 
     def lints_without_a_cache():
         contained_lint_imports(config_filename=str(ROOT / "pyproject.toml"), no_cache=True)
+
+
+    def reads_an_xz_tar_without_writing():
+        import tarfile
+
+        with tarfile.open(ROOT / "x.tar.xz", "r:xz") as archive:
+            archive.getnames()
+
+
+    def streams_an_xz_tar_without_writing():
+        import tarfile
+
+        with tarfile.open(ROOT / "x.tar.xz", "r|xz") as stream:
+            stream.getnames()
+
+
+    def opens_a_descriptor_by_number_without_writing():
+        os.close(os.open(ROOT / "x.bin", 0))
+
+
+    def opens_a_descriptor_close_on_exec_without_writing():
+        os.close(os.open(ROOT / "x.bin", os.O_CLOEXEC))
+
+
+    def keys_a_store_by_name_and_prints_a_table_without_writing(store, frame):
+        store.write_json("manifest.json", {})
+        store.write_csv(f"prices-{2024}.csv", [])
+        frame.to_string()
     """
 )
 """One function per way the reading says it follows a path or recognises a write, and controls."""
@@ -1030,9 +1166,11 @@ def test_the_reading_sees_every_write_it_names_and_none_into_tmp_path() -> None:
 
     Every function in `READING_PROBE` whose name does not say `tmp_path`, `without` or `hands`
     writes inside the checkout in one of the shapes the module docstring lists, and must be found;
-    the controls write only `tmp_path`, only read the checkout -- an archive opened for reading, a
-    descriptor opened `O_RDONLY` -- or turn the cache off, and must not be.
-    `hands_a_helper_the_root` writes nothing itself: the finding is the helper's.
+    the controls write only `tmp_path`, only read the checkout, or turn the cache off, and must
+    not be. The reads include those D14 fix review m-3 measured read as writes: an `xz` tar
+    opened `r:xz` or `r|xz`, whose compression's name has an `x` in it; `os.open` given `0` or
+    `O_CLOEXEC`, neither of which names a flag that writes; and a store's `write_json` keyed by a
+    name. `hands_a_helper_the_root` writes nothing itself: the finding is the helper's.
     `rewrites_a_document` is the case `tests/checkout_guard.py`'s docstring points at, a write under
     `docs/` the snapshot cannot see.
     """
@@ -1074,6 +1212,12 @@ def test_the_reading_sees_every_write_it_names_and_none_into_tmp_path() -> None:
         "writes_through_the_unbound_method",
         "writes_a_table_there",
         "saves_an_array_there",
+        "renders_a_table_there",
+        "prints_a_table_there",
+        "writes_a_table_through_a_path_it_built",
+        "opens_a_descriptor_by_number_for_writing",
+        "opens_a_descriptor_with_flags_it_was_handed",
+        "writes_a_compressed_tar_archive",
     }
 
 
