@@ -22,7 +22,15 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
-from checkout_guard import Snapshot, changes, snapshot
+from checkout_guard import (
+    MODE_VARIABLE,
+    RunOutputs,
+    Snapshot,
+    changes,
+    checkout_mode,
+    run_outputs,
+    snapshot,
+)
 from offline_guard import refusing_outbound_traffic
 
 from openalpha_cn.backtest.execution import MarketBar
@@ -464,14 +472,27 @@ def pytest_unconfigure(config: pytest.Config) -> None:
 # `tests/unit/test_no_test_writes_the_checkout.py` reads the test tree for writes like those. The
 # four hooks below measure a run for them instead: a `checkout_guard.snapshot` when the session
 # starts, another when collection has finished and a last one when the session ends, and any
-# `checkout_guard.changes` between them fail the run however its tests went. `tests/
-# checkout_guard.py` says what a snapshot holds, what it ignores and why, and the one thing it
-# cannot tell apart -- another process writing the same checkout meanwhile, which it reports too.
+# `checkout_guard.changes` between them fail the run however its tests went. What the run writes
+# because its own options said so -- a junit or coverage report, a basetemp, pytest's cache -- is
+# read off those options when the session starts (`checkout_guard.run_outputs`) and left out.
+# `tests/checkout_guard.py` says what a snapshot holds and ignores, and what fails a session
+# although no test caused it: the guard sees that a path changed, never who changed it.
+#
+# `OPENALPHA_CHECKOUT_GUARD=report` downgrades the failure to the same report and leaves the exit
+# status to the tests; unset, the mode is `fail`, which is what CI runs, and any other value is a
+# usage error. It is a downgrade and not an off switch on purpose: `--noconftest`, the only way
+# out before it, took the `GIT_*` protection and the offline guard with it.
 #
 # The root measured is `config.rootpath`, the project pytest was started on, which is this
 # checkout whenever pytest is run on it. A child pytest a test starts with `-p conftest` and its
 # own `--rootdir` measures that directory instead, which is how
 # `tests/unit/test_no_test_writes_the_checkout.py` drives these hooks without writing here.
+
+_CHECKOUT_MODE = pytest.StashKey[str]()
+"""`fail` or `report`, from `OPENALPHA_CHECKOUT_GUARD`, read once when the session starts."""
+
+_CHECKOUT_OUTPUTS = pytest.StashKey[RunOutputs]()
+"""Where this run writes because its own options said so, read once when the session starts."""
 
 _CHECKOUT_SNAPSHOTS = pytest.StashKey[dict[str, Snapshot]]()
 """The snapshots taken so far in this run, keyed by the instant each was taken at."""
@@ -481,8 +502,11 @@ _CHECKOUT_WRITES = pytest.StashKey[list[str]]()
 
 
 def pytest_sessionstart(session: pytest.Session) -> None:
-    """Snapshot the checkout before collection imports a single test module."""
-    session.config.stash[_CHECKOUT_SNAPSHOTS] = {"start": snapshot(session.config.rootpath)}
+    """Read the mode and this run's own outputs, and snapshot the checkout before collection."""
+    config = session.config
+    config.stash[_CHECKOUT_MODE] = checkout_mode()
+    config.stash[_CHECKOUT_OUTPUTS] = run_outputs(config)
+    config.stash[_CHECKOUT_SNAPSHOTS] = {"start": snapshot(config.rootpath)}
 
 
 def pytest_collection_finish(session: pytest.Session) -> None:
@@ -493,40 +517,58 @@ def pytest_collection_finish(session: pytest.Session) -> None:
 
 
 def pytest_sessionfinish(session: pytest.Session) -> None:
-    """Compare the snapshots, and make a run that wrote the checkout a failed run."""
-    taken = session.config.stash.get(_CHECKOUT_SNAPSHOTS, None)
+    """Compare the snapshots; in `fail` mode, make a run that wrote the checkout a failed run."""
+    config = session.config
+    taken = config.stash.get(_CHECKOUT_SNAPSHOTS, None)
     if taken is None:
         return
-    finished = snapshot(session.config.rootpath)
+    outputs = config.stash[_CHECKOUT_OUTPUTS]
+    finished = snapshot(config.rootpath)
     collected = taken.get("collected")
     if collected is None:
         written = [
-            f"before collection finished, {change}" for change in changes(taken["start"], finished)
+            f"before collection finished, {change}"
+            for change in changes(taken["start"], finished, outputs)
         ]
     else:
         written = [
-            *(f"while collecting, {change}" for change in changes(taken["start"], collected)),
-            *(f"while the tests ran, {change}" for change in changes(collected, finished)),
+            *(
+                f"while collecting, {change}"
+                for change in changes(taken["start"], collected, outputs)
+            ),
+            *(f"while the tests ran, {change}" for change in changes(collected, finished, outputs)),
         ]
     if not written:
         return
-    session.config.stash[_CHECKOUT_WRITES] = written
-    if session.exitstatus in (pytest.ExitCode.OK, pytest.ExitCode.NO_TESTS_COLLECTED):
+    config.stash[_CHECKOUT_WRITES] = written
+    failing = config.stash[_CHECKOUT_MODE] == "fail"
+    if failing and session.exitstatus in (pytest.ExitCode.OK, pytest.ExitCode.NO_TESTS_COLLECTED):
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
 def pytest_terminal_summary(
     terminalreporter: pytest.TerminalReporter, config: pytest.Config
 ) -> None:
-    """Say what was written and where, under a heading of its own, above the counts."""
+    """Say what changed and where, under a heading of its own, above the counts."""
     written = config.stash.get(_CHECKOUT_WRITES, [])
     if not written:
         return
-    terminalreporter.section("this run wrote the checkout it ran from", red=True, bold=True)
+    reporting = config.stash.get(_CHECKOUT_MODE, "fail") == "report"
+    markup = {"yellow": True} if reporting else {"red": True}
+    terminalreporter.section("this run wrote the checkout it ran from", bold=True, **markup)
     for line in written:
-        terminalreporter.write_line(line, red=True)
+        terminalreporter.write_line(line, **markup)
     terminalreporter.write_line(
-        f"(under {config.rootpath}) The run fails for this however its tests went: a test writes "
-        "its tmp_path, never the checkout. A second run, an editor or a formatter writing the "
-        "same checkout meanwhile is reported the same way -- see tests/checkout_guard.py."
+        f"(under {config.rootpath}) Each of these changed while this run was in progress. A test "
+        "that writes ought to write its tmp_path; but an editor, a formatter, git or a second run "
+        "working in this checkout meanwhile changes them too, and so does an output of this run "
+        "that tests/checkout_guard.py does not read -- its docstring lists what fails a run "
+        "although no test caused it."
+    )
+    terminalreporter.write_line(
+        f"{MODE_VARIABLE}=report: reported only; the exit status is the tests' own."
+        if reporting
+        else f"The run fails for this whatever its tests did. {MODE_VARIABLE}=report prints the "
+        "same and leaves the exit status to the tests; a suite you mean to edit during is better "
+        "run in a worktree of its own."
     )

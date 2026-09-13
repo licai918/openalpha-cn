@@ -58,6 +58,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Final
 
+import pytest
 from checkout_guard import changes, snapshot
 
 ROOT: Final[Path] = Path(__file__).resolve().parents[2]
@@ -901,11 +902,14 @@ def _aged(*paths: Path) -> None:
 
 
 def _scratch_checkout(root: Path) -> Path:
-    """`root` laid out like a checkout -- one module under `src/`, an empty `tests/` -- aged."""
+    """`root` laid out like a checkout -- one module under `src/`, a `tests/` -- all of it aged.
+
+    Laid out around whatever is already there, so a caller can put a stale directory in first.
+    """
     module = root / "src" / "package" / "module.py"
-    module.parent.mkdir(parents=True)
+    module.parent.mkdir(parents=True, exist_ok=True)
     module.write_text("x = 1\n", encoding="utf-8")
-    (root / "tests").mkdir()
+    (root / "tests").mkdir(exist_ok=True)
     _aged(module, module.parent, root / "src", root / "tests")
     return module
 
@@ -989,23 +993,45 @@ TMP_PATH_PROBE: Final[str] = textwrap.dedent(
 )
 
 
-def _run_the_hooks_over(tmp_path: Path, probe: str) -> subprocess.CompletedProcess[str]:
+GUARD_MODE_VARIABLE: Final[str] = "OPENALPHA_CHECKOUT_GUARD"
+"""The one switch the guard has, spelled here as a developer types it rather than imported."""
+
+
+def _run_the_hooks_over(
+    tmp_path: Path,
+    probe: str,
+    *options: str,
+    environment: Mapping[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     """Run `probe` in a child pytest whose root is a scratch checkout, with the real conftest.
 
     `-p conftest` with `tests/` on `PYTHONPATH` loads this repository's own `tests/conftest.py`
     -- `tests/unit/test_offline_suite.py::_run_scope_probe`'s arrangement -- and `--rootdir` makes
-    the scratch checkout the root its hooks measure. `--basetemp` sits beside the checkout, not in
-    it, so a probe's own `tmp_path` is not a write to what is measured.
+    the scratch checkout the root its hooks measure. Unless `options` name one, `--basetemp` sits
+    beside the checkout, not in it, so a probe's own `tmp_path` is not a write to what is measured.
+
+    The child gets none of this process's coverage variables and none of its
+    `OPENALPHA_CHECKOUT_GUARD`, and `PY_COLORS=0`: a developer running this file under `--cov`,
+    in `report` mode or with colour forced must not change what the child is asked to prove.
+    `environment` is applied last. Anything a test puts under `tmp_path / "checkout"` first --
+    a stale basetemp -- is kept, because the checkout is laid out around it.
     """
     checkout = tmp_path / "checkout"
     _scratch_checkout(checkout)
     (checkout / "tests" / "test_probe.py").write_text(probe, encoding="utf-8")
-    environment = {
-        **os.environ,
-        "PYTHONPATH": str(TESTS_ROOT),
-        "PYTHONDONTWRITEBYTECODE": "1",
+    child = {
+        name: value
+        for name, value in os.environ.items()
+        if not name.startswith(("COV_CORE_", "COVERAGE_"))
+        and name not in {"PYTEST_ADDOPTS", GUARD_MODE_VARIABLE}
     }
-    environment.pop("PYTEST_ADDOPTS", None)
+    child.update({"PYTHONPATH": str(TESTS_ROOT), "PYTHONDONTWRITEBYTECODE": "1", "PY_COLORS": "0"})
+    child.update(environment or {})
+    basetemp = (
+        []
+        if any(option.startswith("--basetemp") for option in options)
+        else [f"--basetemp={tmp_path / 'basetemp'}"]
+    )
     return subprocess.run(
         [
             sys.executable,
@@ -1021,15 +1047,25 @@ def _run_the_hooks_over(tmp_path: Path, probe: str) -> subprocess.CompletedProce
             str(checkout),
             "--confcutdir",
             str(checkout),
-            f"--basetemp={tmp_path / 'basetemp'}",
+            *basetemp,
+            *options,
         ],
         cwd=checkout,
-        env=environment,
+        env=child,
         capture_output=True,
         text=True,
         timeout=300,
         check=False,
     )
+
+
+def _reported(output: str) -> list[str]:
+    """The guard's own lines out of a child's output: each change, with its window."""
+    return [
+        line
+        for line in output.splitlines()
+        if line.startswith(("while collecting, ", "while the tests ran, ", "before collection"))
+    ]
 
 
 def test_a_run_that_writes_the_checkout_fails_although_every_test_in_it_passed(
@@ -1059,3 +1095,127 @@ def test_a_run_that_writes_only_its_tmp_path_passes(tmp_path: Path) -> None:
     assert finished.returncode == 0, output
     assert "1 passed" in output, output
     assert "this run wrote the checkout" not in output
+
+
+RUN_OUTPUT_OPTIONS: Final[tuple[str, ...]] = (
+    "--cov=tests",
+    "--cov-report=html",
+    "--cov-report=xml",
+    "--cov-report=json",
+    "--cov-report=lcov",
+    "--junitxml=report.xml",
+)
+"""Every file report a run can be asked for, each at its default place: the root it measures.
+
+`htmlcov/`, `coverage.xml`, `coverage.json` and `coverage.lcov` are coverage.py's defaults, and
+pytest-cov writes them as its `pytest_runtestloop` wrapper finishes; the junit plugin writes in its
+own `pytest_sessionfinish`, which pluggy calls before this conftest's. All of it lands before the
+last snapshot is taken."""
+
+REPORTS_THE_OPTIONS_WRITE: Final[tuple[str, ...]] = (
+    "htmlcov/index.html",
+    "coverage.xml",
+    "coverage.json",
+    "coverage.lcov",
+    "report.xml",
+)
+
+
+@pytest.mark.parametrize("basetemp", ["bt", "tests/bt"])
+def test_a_run_s_own_reports_and_basetemp_are_not_writes_to_the_checkout(
+    tmp_path: Path, basetemp: str
+) -> None:
+    """I-1: each of these used to fail a run whose every test had passed.
+
+    Measured on the code before this, one option at a time, each over a probe that writes only its
+    `tmp_path`: `--cov-report=html` gave `created htmlcov at the checkout root` and exit 1, and
+    `--cov-report=xml`, `--junitxml=report.xml` and a first `--basetemp=bt` did the same for their
+    own targets. `--basetemp=tests/bt` failed on *every* run, because pytest empties a given
+    basetemp and makes it again: the second run named `tests/` created-and-removed and the old
+    basetemp's file rewritten. So the basetemp is made stale here before the run, which is the
+    second run's shape, and every report is asserted to exist afterwards -- the green is about
+    leaving them out, not about their never having been written.
+    """
+    checkout = tmp_path / "checkout"
+    (checkout / basetemp / "stale").mkdir(parents=True)
+
+    finished = _run_the_hooks_over(
+        tmp_path, TMP_PATH_PROBE, *RUN_OUTPUT_OPTIONS, f"--basetemp={basetemp}"
+    )
+    output = finished.stdout + finished.stderr
+
+    assert finished.returncode == 0, output
+    assert "1 passed" in output, output
+    assert _reported(output) == [], output
+    assert [path for path in REPORTS_THE_OPTIONS_WRITE if not (checkout / path).is_file()] == []
+    assert not (checkout / basetemp / "stale").exists(), "pytest did not empty the given basetemp"
+
+
+def test_leaving_out_a_run_s_own_output_hides_nothing_a_test_wrote(tmp_path: Path) -> None:
+    """The exclusion's non-vacuity: the same options over a probe that does write the checkout.
+
+    Every write the probe makes is still named, in its window, and nothing the run wrote for its
+    own options is -- a basetemp emptied and made again under `tests/` included, which the probe's
+    fourth test, writing only its `tmp_path`, is there to cause.
+    """
+    (tmp_path / "checkout" / "tests" / "bt" / "stale").mkdir(parents=True)
+
+    finished = _run_the_hooks_over(
+        tmp_path, WRITING_PROBE + TMP_PATH_PROBE, *RUN_OUTPUT_OPTIONS, "--basetemp=tests/bt"
+    )
+    output = finished.stdout + finished.stderr
+
+    assert finished.returncode == 1, output
+    assert "4 passed" in output, output
+    assert _reported(output) == [
+        "while collecting, created tests/written-while-collecting.txt",
+        "while the tests ran, rewrote src/package/module.py",
+        "while the tests ran, created and removed something in src/package/ -- its modification "
+        "time moved and its listing did not",
+        "while the tests ran, created .grimp_cache at the checkout root",
+    ], output
+
+
+FAILING_TEST: Final[str] = textwrap.dedent(
+    """
+
+
+    def test_fails_on_its_own_account():
+        raise AssertionError("a failure that is the test's own")
+    """
+)
+
+
+@pytest.mark.parametrize(
+    ("probe", "exit_code", "counts"),
+    [(WRITING_PROBE, 0, "3 passed"), (WRITING_PROBE + FAILING_TEST, 1, "1 failed, 3 passed")],
+    ids=["every-test-passes", "a-test-fails"],
+)
+def test_report_mode_prints_the_same_writes_and_leaves_the_exit_status_to_the_tests(
+    tmp_path: Path, probe: str, exit_code: int, counts: str
+) -> None:
+    """`OPENALPHA_CHECKOUT_GUARD=report` is a downgrade, not an off switch.
+
+    The section is printed as in the default `fail` mode, and the exit status is what the tests
+    made it -- in both directions, so a mode that turned every run green could not pass here.
+    """
+    finished = _run_the_hooks_over(tmp_path, probe, environment={GUARD_MODE_VARIABLE: "report"})
+    output = finished.stdout + finished.stderr
+
+    assert finished.returncode == exit_code, output
+    assert counts in output, output
+    assert "this run wrote the checkout it ran from" in output, output
+    assert "while the tests ran, rewrote src/package/module.py" in _reported(output), output
+    assert f"{GUARD_MODE_VARIABLE}=report: reported only" in output, output
+
+
+def test_an_unknown_guard_mode_is_refused_before_anything_runs(tmp_path: Path) -> None:
+    """A mistyped mode is a usage error, rather than a silent `fail` or a silent `report`."""
+    finished = _run_the_hooks_over(
+        tmp_path, TMP_PATH_PROBE, environment={GUARD_MODE_VARIABLE: "warn"}
+    )
+    output = finished.stdout + finished.stderr
+
+    assert finished.returncode == pytest.ExitCode.USAGE_ERROR, output
+    assert all(word in output for word in (GUARD_MODE_VARIABLE, "'fail'", "'report'")), output
+    assert "passed" not in output, output
