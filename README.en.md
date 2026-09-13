@@ -41,7 +41,7 @@ OpenAlpha CN competes on verifiability rather than the number of agent personas:
 - content-addressed evidence and strict anti-look-ahead rules;
 - deterministic operation without an LLM: no shipped path calls a model, and a model reaches a run only inside an agent you build in your own code (one you pass to the SDK as `agents=`, for instance) — `StructuredSignalAgent` validates the reply against its schema and retries an invalid one within a bounded budget;
 - durable node checkpoints that reject changed requests or graph signatures;
-- bounded concurrent batches with progress, cancellation, retry, and restart recovery;
+- bounded concurrent batches with progress, cancellation and retry, whose interrupted items are requeued after a restart;
 - for a model provider you construct in your own code (no shipped path calls a model): classified retry, and a token and configured-cost usage ledger that no shipped path writes to — only a provider built with a usage store records into it;
 - one research core, `run_cycle`, shared by live research and replay (validation, the multi-day portfolio backtest and `model daily-run` take their own paths);
 - A-share T+1, board lot, suspension, limit-lock, and transaction-cost constraints;

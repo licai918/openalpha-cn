@@ -620,6 +620,125 @@ def _a_missing_chainlin_key_is_still_authentication() -> str | None:
     return "a missing ChainLin key no longer raises authentication: re-read doctor --probe"
 
 
+def _callee(node: ast.Call) -> str:
+    """The name a call calls: `f` for `f(...)`, `m` for `x.m(...)`, and "" for anything else."""
+    if isinstance(node.func, ast.Name):
+        return node.func.id
+    if isinstance(node.func, ast.Attribute):
+        return node.func.attr
+    return ""
+
+
+RUNNING_CALLS: Final[frozenset[str]] = frozenset(
+    {"run", "run_cycle", "runner", "retry", "submit", "execute", "start"}
+)
+"""What a restart would call to run the work it requeues."""
+
+
+def _a_restart_still_only_requeues() -> str | None:
+    tree = ast.parse((SRC / "storage" / "batch.py").read_text(encoding="utf-8"))
+    recover = next(
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "recover_interrupted"
+        ),
+        None,
+    )
+    if recover is None:
+        return "storage/batch.py no longer defines recover_interrupted: re-read the restart path"
+    requeues = any(
+        isinstance(node, ast.Constant) and node.value == "queued" for node in ast.walk(recover)
+    )
+    runs = sorted(
+        {
+            _callee(node)
+            for node in ast.walk(recover)
+            if isinstance(node, ast.Call) and _callee(node) in RUNNING_CALLS
+        }
+    )
+    if requeues and not runs:
+        return None
+    return f"recover_interrupted requeues: {requeues}, and now calls {runs}"
+
+
+PRODUCT_COMMANDS: Final[frozenset[str]] = frozenset({"screen", "watchlist", "batch", "batches"})
+"""CLI command or group names that would reach the screening, watchlist or batch services."""
+
+
+def _the_cli_still_has_no_product_command() -> str | None:
+    tree = ast.parse((SRC / "cli.py").read_text(encoding="utf-8"))
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and _callee(node) == "add_typer":
+            names.update(
+                str(keyword.value.value)
+                for keyword in node.keywords
+                if keyword.arg == "name" and isinstance(keyword.value, ast.Constant)
+            )
+        elif isinstance(node, ast.FunctionDef):
+            for decorator in node.decorator_list:
+                if isinstance(decorator, ast.Call) and _callee(decorator) == "command":
+                    first = decorator.args[0] if decorator.args else None
+                    names.add(
+                        str(first.value)
+                        if isinstance(first, ast.Constant)
+                        else node.name.replace("_", "-")
+                    )
+    reached = sorted(names & PRODUCT_COMMANDS)
+    return None if not reached else f"the CLI now has the commands {reached}"
+
+
+def _usage_is_still_recorded_once_per_call() -> str | None:
+    tree = ast.parse((SRC / "models" / "openai_compatible.py").read_text(encoding="utf-8"))
+    records = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and _callee(node) == "_record_usage"
+    ]
+    looped = [
+        loop.lineno
+        for loop in ast.walk(tree)
+        if isinstance(loop, ast.While | ast.For)
+        and any(inner in records for inner in ast.walk(loop))
+    ]
+    if len(records) == 1 and not looped:
+        return None
+    return f"_record_usage is now called {len(records)} times, inside the loops at {looped}"
+
+
+LINK_WORDS: Final[tuple[str, ...]] = ("evidence", "report", "run", "decision", "signal", "screen")
+"""Words a field that linked a watchlist entry to the research record would hold."""
+
+
+def _a_watchlist_entry_still_links_nothing() -> str | None:
+    fields = _class_field_names(SRC / "domain" / "watchlist.py", "WatchlistEntry")
+    linked = [field for field in fields if any(word in field for word in LINK_WORDS)]
+    return None if not linked else f"WatchlistEntry now holds {linked}"
+
+
+def _class_field_annotation(path: Path, name: str, field: str) -> str:
+    """The annotation of `field` on class `name` in `path`, as source text."""
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == name:
+            for statement in node.body:
+                if (
+                    isinstance(statement, ast.AnnAssign)
+                    and isinstance(statement.target, ast.Name)
+                    and statement.target.id == field
+                ):
+                    return ast.unparse(statement.annotation)
+    raise AssertionError(f"{name}.{field} is not defined in {path.relative_to(ROOT)}")
+
+
+def _the_routing_path_still_holds_only_ids() -> str | None:
+    annotation = _class_field_annotation(
+        SRC / "domain" / "decision.py", "DecisionLedger", "routing_path"
+    )
+    return None if annotation == "tuple[str, ...]" else f"routing_path is now {annotation}"
+
+
 # --- The retired claims -----------------------------------------------------------------------
 
 
@@ -640,7 +759,10 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
         name="the committee's parts switch on and off one by one",
         pattern=re.compile(
             r"(?:独立|分别|单独)(?:启停|开关|关闭)|能单独做对照"
-            r"|(?<![A-Za-z])(?:independently|separately|individually)\s+(?:toggl|enabl|disabl|switch)",
+            r"|(?<![A-Za-z])(?:independently|separately|individually)\s+(?:toggl|enabl|disabl|switch)"
+            r"|完整委员会|可消融\s*Bull\s*/\s*Bear"
+            rf"|(?:Bull\s*/\s*Bear|辩论){_NO_COMMA}{{0,4}}(?:与|和)\s*风险委员会"
+            rf"{_NO_COMMA}{{0,4}}可消融",
             re.IGNORECASE,
         ),
         refuted_by=(
@@ -649,7 +771,8 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "OpenAlphaSDK.deliberate passes only those two (sdk.py:236-243), and POST "
             "/api/v1/research/deliberate accepts only signal and agent_results "
             "(api/app.py:314-320). AblationResult(enabled=True) is written, never computed "
-            "(agents/committee.py:176-177). Only the whole committee, per call, is optional."
+            "(agents/committee.py:176-177). Only the whole committee, per call, is optional, and "
+            "its ablation compares the signal before and after all of it (:178-181)."
         ),
         retired=(
             "**双委员会研判**：Bull/Bear 研究辩论与激进/中性/保守风险委员会均可独立启停，"
@@ -664,6 +787,9 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "让研究者比较单 Agent、辩论版和委员会版结果。",
             "真正可比的是整条链路：Bull/Bear 和三态风险委员会可独立关闭，"
             "结合事件统计和多日组合报告比较增量。",
+            "可消融 Bull/Bear 研究辩论",
+            "Bull/Bear 与风险委员会也可消融比较",
+            "确定性基线、单 Agent 与完整委员会可以做消融对照",
         ),
         paraphrase="委员会里的多空辩论和风险视角可以各自打开或关上。",
         premise=_the_committee_still_takes_no_switch,
@@ -861,18 +987,42 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     ),
     RetiredClaim(
         name="interrupted batch work continues by itself after a restart",
-        pattern=re.compile(rf"启动时{_NOT_END}{{0,12}}(?:并|自动)继续(?:处理|执行)"),
+        pattern=re.compile(
+            rf"启动时{_NOT_END}{{0,12}}(?:并|自动)继续(?:处理|执行)"
+            r"|(?:重试|取消|并发|进度|上限)\s*(?:和|与|、)\s*(?:进程)?重启恢复"
+            r"|(?:进程)?重启后还能恢复|批量任务中断(?:后还能|也能|后可)恢复"
+            rf"|中断重启(?:会|就)?{_NO_COMMA}{{0,6}}继续"
+            r"|(?:retry|cancellation),?\s+and\s+restart\s+recovery",
+            re.IGNORECASE,
+        ),
         refuted_by=(
             "Every start requeues the interrupted items -- build_storage calls "
             "recover_interrupted (runtime/composition.py:255), which sets each running item back "
             "to queued (storage/batch.py:391-413) -- and nothing runs them until a caller posts "
-            "POST /api/v1/research/batches/{batch_id}/retry (api/app.py:2105-2112)."
+            "POST /api/v1/research/batches/{batch_id}/retry (api/app.py:2105-2112), a route "
+            "with no SDK method and no CLI command (tests/unit/test_surface_parity.py:75). A run "
+            "resumes from its next agent only when it is run again under the same run_id "
+            "(runtime/engine.py:288-298, :351)."
         ),
         retired=(
             "OpenAlpha CN 将批次、项目、进度和终态保存到 SQLite，启动时识别被中断任务并继续处理"
             "\N{FULLWIDTH SEMICOLON}",
+            "1\N{EN DASH}8 并发、逐项进度、协作式取消、重试与重启恢复",
+            "持久任务队列支持 1\N{EN DASH}8 并发、逐项进度、协作式取消、失败重试和进程重启恢复",
+            "任务、并发上限、逐项进度、取消、重试和重启恢复均持久化",
+            "SQLite 批量队列支持并发、进度、取消、重试和重启恢复",
+            "持久批量队列限制 1\N{EN DASH}8 并发，支持进度、取消、重试和重启恢复",
+            "批量任务中断后还能恢复",
+            "中断重启会从下一节点继续",
+            "支持合作式取消、失败重试与重启恢复",
+            "批量任务中断也能恢复",
+            "支持 1\N{EN DASH}8 并发、逐项进度、合作式取消、失败重试和进程重启恢复",
+            "进程重启后还能恢复",
+            "系统同时支持失败重试、并发上限和重启恢复",
+            "bounded concurrent batches with progress, cancellation, retry, and restart recovery",
         ),
         paraphrase="进程重启后，没跑完的批量任务会自己接着跑。",
+        premise=_a_restart_still_only_requeues,
     ),
     RetiredClaim(
         name="the batch task center is still missing or deferred",
@@ -1052,18 +1202,24 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     ),
     RetiredClaim(
         name="a batch item runs the whole research chain",
-        pattern=re.compile(rf"每个任务仍(?:执行完整|保留){_NOT_END}{{0,24}}(?:双委员会|组合)"),
+        pattern=re.compile(
+            rf"每个任务仍(?:执行完整|保留){_NOT_END}{{0,24}}(?:双委员会|组合)"
+            rf"|研究结论{_NO_COMMA}{{0,6}}受到{_NO_COMMA}{{0,16}}交易规则"
+        ),
         refuted_by=(
             "A batch item runs runner(item.request) (runtime/batch.py:290), and the shipped "
             "runners run ResearchEngine.run_cycle alone (api/app.py:1831-1843; sdk.py:216-234 "
             "through run_research): agents over the request's evidence, the risk gate and the "
             "decision ledger (runtime/engine.py:87-200). The committee, the portfolio and the "
             "validations are calls of their own, and an item's result is a decision_id, a "
-            "signal_id and a final_action (batch_contracts.py:132-139)."
+            "signal_id and a final_action (batch_contracts.py:132-139). No research conclusion "
+            "passes a trading rule on the way: T+1, board lot, suspension and limit rules are "
+            "PortfolioSimulator's, applied to an order a caller executes."
         ),
         retired=(
             "每个任务仍执行完整证据、Agent、双委员会、风险、组合与验证链",
             "每个任务仍保留四时钟证据、结构化信号、风险与组合记录",
+            "研究结论继续受到四时钟、风险门和交易规则约束",
         ),
         paraphrase="批量里的每一项都会跑完委员会和组合核算。",
         premise=_a_batch_result_still_names_only_a_decision,
@@ -1367,6 +1523,84 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
         paraphrase="doctor 报 authentication 就说明服务器拒绝了你的 key。",
         premise=_a_missing_chainlin_key_is_still_authentication,
     ),
+    RetiredClaim(
+        name="REST, the SDK and the CLI reach the same product services",
+        pattern=re.compile(
+            r"(?<![A-Za-z])(?:REST|API)(?:\s*API)?\s*、\s*(?:Python\s*)?SDK\s*(?:与|和)\s*"
+            r"(?:Typer\s*)?CLI\s*调用同一批(?:后端)?服务(?!\s*[，,]\s*但)"
+        ),
+        refuted_by=(
+            "tests/unit/test_surface_parity.py::PARITY gives the six batch routes (:70-75), "
+            "POST /api/v1/screen (:116) and the three watchlist routes (:117-119) no CLI "
+            "command, and cli.py registers no screen, watchlist or batch command; of the report "
+            "routes the CLI has create and export alone (:124, :129). The three faces call one "
+            "set of services only where each of them reaches it."
+        ),
+        retired=(
+            "REST、Python SDK 与 CLI 调用同一批后端服务",
+            "API、SDK 与 CLI 调用同一批服务，Web 只接入其中一部分",
+        ),
+        paraphrase="命令行能做的事和 REST 一样多。",
+        premise=_the_cli_still_has_no_product_command,
+    ),
+    RetiredClaim(
+        name="every attempt of a model call is written to the usage ledger",
+        pattern=re.compile(
+            rf"(?<!不是)(?<!并非)每(?:一)?次尝试{_NO_COMMA}{{0,40}}(?:账本|入账|记账|记录|写入)"
+        ),
+        refuted_by=(
+            "OpenAICompatibleProvider.generate_json retries inside one while loop and calls "
+            "_record_usage once, after a response has decoded (models/openai_compatible.py:"
+            "186-215); the one ModelUsageRecord it appends carries the attempt count "
+            "(:237-248, models/governance.py:61). A failed attempt writes nothing."
+        ),
+        retired=(
+            "每次尝试、Token 和估算成本另有账本",
+            "每次尝试与 Token 成本要接自带用量追踪的 Provider 才会入账",
+        ),
+        paraphrase="模型每重试一回，账本里就多一行。",
+        premise=_usage_is_still_recorded_once_per_call,
+    ),
+    RetiredClaim(
+        name="the watchlist links its subjects to evidence and reports",
+        pattern=re.compile(
+            rf"观察池{_NOT_END}{{0,16}}接住{_NO_COMMA}{{0,6}}(?:证据|报告)"
+            rf"|观察池{_NOT_END}{{0,6}}并(?:把它)?(?:连接|关联|接入)到?"
+            rf"{_NO_COMMA}{{0,4}}(?:证据|报告)"
+            rf"|观察池{_NOT_END}{{0,4}}再由报告中心"
+            rf"|观察池后{_NOT_END}{{0,12}}生成{_NO_COMMA}{{0,8}}报告"
+        ),
+        refuted_by=(
+            "WatchlistEntry holds subject, tags, note, created_at and updated_at "
+            "(domain/watchlist.py:23-30), and put, list and remove are the whole surface of its "
+            "store (storage/product.py:34-50): no evidence, report, run or screening id. A "
+            "report is built from a ResearchRunResult (product/reporting.py:55), never from a "
+            "watchlist entry."
+        ),
+        retired=(
+            "这个项目的观察池不只是记住代码，还能接住后续证据和报告",
+            "OpenAlpha CN 独立实现 SQLite 持久观察池，并把它连接到证据和报告链",
+            "筛选结果可以进入持久观察池，再由报告中心固化",
+            "筛选结果进入观察池后，还可以继续生成新的版本化报告",
+        ),
+        paraphrase="加进观察池的股票会自动带上它的证据和报告。",
+        premise=_a_watchlist_entry_still_links_nothing,
+    ),
+    RetiredClaim(
+        name="the routing path records why a role was chosen",
+        pattern=re.compile(
+            rf"(?:路由路径|routing_path|路由){_NO_DENIAL}{{0,24}}(?:为何|为什么)(?:选择|选中)"
+        ),
+        refuted_by=(
+            "DecisionLedger.routing_path is a tuple of agent ids, 'risk-gate' last "
+            "(domain/decision.py:55, runtime/engine.py:163), and AgentRouter.route hands back "
+            "the selected agents alone (runtime/router.py:281): no reason for a selection is "
+            "kept."
+        ),
+        retired=("路由路径被写进决策记录，后续可以检查为何选择某个角色",),
+        paraphrase="决策记录里写着每个角色被叫来的理由。",
+        premise=_the_routing_path_still_holds_only_ids,
+    ),
 )
 """Each family of wordings `D13` retired, the code fact that refutes it, and what it retired."""
 
@@ -1503,6 +1737,20 @@ TRUE_SENTENCES_THAT_SHARE_THE_WORDS: Final[tuple[str, ...]] = (
     "链邻缺 key 时 doctor --probe 不会对每一个已声明的数据集发请求。",
     "接入模型时不强制 Schema，包进 StructuredSignalAgent 才校验。",
     "模型端点不只在 SDK 代码里接入，引擎也直接接收 Agent。",
+    "批量任务重启后，被中断的项重新排队，调用方再发一次重试才继续。",
+    "Compose 重启恢复测试只重启容器，再读回证据。",
+    "中断后再运行同一个 run_id，会从下一节点继续。",
+    "REST API、Python SDK 与 CLI 调用同一批服务，但覆盖的面不同。",
+    "用量账本在调用成功后记一行，行里带着尝试次数。",
+    "不是每次尝试都入账，成功后才记一行。",
+    "观察池只存标的、标签和备注，报告由研究运行结果生成。",
+    "观察池里的标的再跑一次研究，就能生成一份新的报告。",
+    "持久观察池、内容寻址且关联证据的报告中心。",
+    "路由路径写进决策记录，可以查到选中了哪些角色。",
+    "路由路径不记录为何选择某个角色。",
+    "研究结论受到四时钟和风险门约束，订单再受交易规则约束。",
+    "委员会整体可消融，Bull/Bear 与三视角风险投票在一次调用里完成。",
+    "双委员会可消融。",
 )
 """True or unrelated sentences that share a retired pattern's words. The review of `D13` measured
 the first six being caught (its M1): client holds cli, 移动平均 holds 移动, and a rejection and a
@@ -1532,11 +1780,16 @@ nearest true use of its words: a manifest whose prompt field is stated empty aft
 run_cycle shared by live research and replay only, a model wrapped in StructuredSignalAgent and
 handed to an engine, a probe conditioned on credentials, limitations on single answers, trading
 constraints that portfolio execution counts, a ledger with source, entry and test evidence, a
-transition for every order, and a table of seven. The last ten are `D14`'s probes of its own new
-entries, each the most natural true sentence in their words, and each but the last of them was
-caught before its pattern was narrowed: five hold a denial inside the span a pattern crosses,
-three hold one just before a pattern's first word, one names a rejected credential without
-equating it with authentication, and one holds the manifest's field name in lower case."""
+transition for every order, and a table of seven. The ten after them are `D14`'s probes of the
+entries its second commit added, each the most natural true sentence in their words; all but
+the one in lower case were caught before the patterns were narrowed: five hold a denial inside
+the span a pattern crosses, three hold one just before a pattern's first word, one names a
+rejected credential without equating it with authentication, and one holds the manifest's field
+name in lower case. The last fourteen probe what its third commit added or broadened: the true
+wording of each rewrite, and for each narrowing the sentence it is narrowed against -- 重启恢复
+with no list word before it, a hedge after 调用同一批服务, 不是 before 每次尝试, 关联 with no 并
+before it, a denial inside a routing span, and a comma between a conclusion and the trading
+rules."""
 
 
 def test_the_retired_patterns_pass_the_true_sentences_that_share_their_words() -> None:
