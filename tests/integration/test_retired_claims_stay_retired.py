@@ -23,6 +23,12 @@ another verb, another order, or its halves in two clauses -- passes, and
 not read negation either: "不能分别启停" is read as the claim it denies. A premise reads one fact,
 not the whole of `refuted_by`, so a premise that stays quiet does not prove the claim still
 false. The embedded diagrams are not read.
+
+**The other direction.** A pattern can also catch a true sentence that shares its words: "REST
+clients" held "cli" until SDK and CLI were matched as words, and 移动平均 held 移动. There is no
+allowlist, so such a pattern is narrowed, never pinned, and its `retired` wordings must still
+match; `test_the_retired_patterns_pass_the_true_sentences_that_share_their_words` holds the
+sentences the review of `D13` measured being caught.
 """
 
 from __future__ import annotations
@@ -30,11 +36,13 @@ from __future__ import annotations
 import ast
 import inspect
 import re
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+import pytest
 from prose_clauses import clauses
 
 from openalpha_cn.agents.committee import DeliberationCommittee
@@ -55,6 +63,9 @@ GUARDED_FILES: Final[tuple[Path, ...]] = (README, README_EN, WHY_OPENALPHA, MARK
 
 _NOT_END: Final[str] = r"[^。;\N{FULLWIDTH SEMICOLON}]"
 """One character that ends no sentence: what a pattern may span between its words."""
+
+_FACE: Final[str] = r"(?<![A-Za-z])(?:SDK|CLI)(?![A-Za-z])"
+"""SDK or CLI as a word of its own, so client, clients and Click are not read as CLI."""
 
 
 # --- Reading the code facts -------------------------------------------------------------------
@@ -199,14 +210,60 @@ def _the_workbench_still_skips_the_product_routes() -> str | None:
     return None if not called else f"the React workbench now names {called}"
 
 
-def _compose_recovery_still_only_restarts() -> str | None:
-    source = (ROOT / "scripts" / "verify_compose_recovery.py").read_text(encoding="utf-8")
-    only_restarts = (
-        '"restart", "openalpha"' in source and '"rm"' not in source and "recreate" not in source
+CHECK_COMPOSE_VERBS: Final[tuple[str, ...]] = ("up", "restart")
+"""The compose verbs `verify_compose_recovery.py::main` runs before its check today: the stack
+brought up once, then restarted."""
+
+
+def _compose_calls_before_teardown(source: str) -> list[tuple[str, ...]]:
+    """The string arguments of each `_compose` call `main()` makes outside a `finally`, in source
+    order. Its first three arguments -- the compose command, the project and the environment --
+    are names, not strings, and are left out."""
+    tree = ast.parse(source, filename="scripts/verify_compose_recovery.py")
+    main = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "main"
     )
-    if only_restarts:
+    teardown = {
+        id(inner)
+        for node in ast.walk(main)
+        if isinstance(node, ast.Try)
+        for statement in node.finalbody
+        for inner in ast.walk(statement)
+    }
+    calls = sorted(
+        (
+            node
+            for node in ast.walk(main)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_compose"
+            and id(node) not in teardown
+        ),
+        key=lambda call: (call.lineno, call.col_offset),
+    )
+    return [
+        tuple(
+            argument.value
+            for argument in call.args[3:]
+            if isinstance(argument, ast.Constant) and isinstance(argument.value, str)
+        )
+        for call in calls
+    ]
+
+
+def _compose_recovery_still_only_restarts() -> str | None:
+    """Outside its `finally`, `main()` brings the stack up once and restarts it, and runs no other
+    compose verb. Read from the syntax tree: the `compose down` in `finally` is the teardown after
+    the check, so the words down or up anywhere in the file say nothing about the check."""
+    source = (ROOT / "scripts" / "verify_compose_recovery.py").read_text(encoding="utf-8")
+    calls = _compose_calls_before_teardown(source)
+    verbs = tuple(call[0] for call in calls if call)
+    if verbs == CHECK_COMPOSE_VERBS:
         return None
-    return "scripts/verify_compose_recovery.py no longer only restarts the container"
+    return (
+        f"scripts/verify_compose_recovery.py's main() now runs compose {calls} before its check: "
+        "re-read whether it deletes and recreates the container"
+    )
 
 
 def _the_batch_service_still_ships() -> str | None:
@@ -280,9 +337,9 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     RetiredClaim(
         name="the SDK and the CLI pass through the FastAPI boundary",
         pattern=re.compile(
-            rf"(?:SDK|CLI){_NOT_END}*(?:最终)?(?:进入|经过|通过|走)同一\s*FastAPI"
+            rf"{_FACE}{_NOT_END}*(?:最终)?(?:进入|经过|通过|走)同一\s*FastAPI"
             rf"|四类入口{_NOT_END}*FastAPI"
-            r"|(?:SDK|CLI)[^.;]*(?:through|via|behind)\s+(?:the\s+)?(?:same\s+)?FastAPI",
+            rf"|{_FACE}[^.;]*(?:through|via|behind)\s+(?:the\s+)?(?:same\s+)?FastAPI",
             re.IGNORECASE,
         ),
         refuted_by=(
@@ -334,8 +391,8 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     RetiredClaim(
         name="a rejected order is linked to its decision",
         pattern=re.compile(
-            rf"拒单{_NOT_END}*关联决策"
-            r"|reject\w*[^.;]*(?:linked|tied)\s+to\s+(?:the\s+|its\s+|a\s+)?decision",
+            rf"拒单(?:也)?关联决策|拒单[，,]\s*记录{_NOT_END}{{0,12}}关联决策"
+            r"|reject\w*(?:\s+\w+){0,3}\s+(?:linked|tied)\s+to\s+(?:\w+\s+)?decision",
             re.IGNORECASE,
         ),
         refuted_by=(
@@ -380,7 +437,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     RetiredClaim(
         name="browser flows are tested at mobile width",
         pattern=re.compile(
-            rf"移动(?:浏览器|视口|端)?{_NOT_END}{{0,12}}(?:流程|Playwright)"
+            rf"移动(?:浏览器|视口|端|设备){_NOT_END}{{0,12}}(?:流程|Playwright)"
             r"|(?:桌面|desktop)\s*(?:/|和|与|and)\s*(?:移动|mobile)",
             re.IGNORECASE,
         ),
@@ -624,3 +681,69 @@ def test_the_retired_claims_blind_spot_is_real() -> None:
     """
     caught = [claim.name for claim in RETIRED_CLAIMS if claim.pattern.search(claim.paraphrase)]
     assert not caught, f"a paraphrase is now caught, so the stated blind spot moved: {caught}"
+
+
+TRUE_SENTENCES_THAT_SHARE_THE_WORDS: Final[tuple[str, ...]] = (
+    "REST clients reach the service through the FastAPI boundary.",
+    "A browser client goes via the same FastAPI app as curl.",
+    "HTTP client 经过同一 FastAPI 边界。",
+    "移动平均因子的计算流程见 factor list。",
+    "资金在板块间移动的流程可以回放。",
+    "拒单只记录原因，报告单独关联决策。",
+)
+"""True or unrelated sentences that share a retired pattern's words, each of which the review of
+`D13` measured being caught (its M1): client holds cli, 移动平均 holds 移动, and a rejection and a
+report's decision can sit in one clause."""
+
+
+def test_the_retired_patterns_pass_the_true_sentences_that_share_their_words() -> None:
+    """The other direction from the blind spot: a pattern must not catch a true sentence.
+
+    There is no allowlist, so a pattern that catches one of these is narrowed, not pinned; its
+    `retired` wordings must still match.
+    """
+    caught = [
+        f"{claim.name}: {sentence!r}"
+        for sentence in TRUE_SENTENCES_THAT_SHARE_THE_WORDS
+        for clause in clauses(sentence)
+        for claim in RETIRED_CLAIMS
+        if claim.pattern.search(clause.text)
+    ]
+    assert not caught, "a retired pattern caught a true sentence:\n" + "\n".join(caught)
+
+
+COMPOSE_RESTART: Final[str] = (
+    '        _compose(compose_command, project, env, "restart", "openalpha")\n'
+)
+"""The one compose call `verify_compose_recovery.py::main` makes between building the evidence and
+reading it back."""
+
+REAL_RECREATES: Final[dict[str, str]] = {
+    "compose down, then up": (
+        '        _compose(compose_command, project, env, "down")\n'
+        '        _compose(compose_command, project, env, "up", "--detach", "--wait")\n'
+    ),
+    "up with --force-recreate": (
+        '        _compose(compose_command, project, env, "up", "--detach", '
+        '"--force-recreate", "--wait")\n'
+    ),
+}
+"""The natural ways to make the check a real delete-and-recreate, each added after the restart."""
+
+
+@pytest.mark.parametrize("name", REAL_RECREATES)
+def test_the_compose_premise_reports_a_real_delete_and_recreate(
+    name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The day the check deletes and recreates the container the claim is true, and the premise
+    must say so. `main()` already runs `compose down` as its teardown in `finally`, so the words
+    alone cannot tell a real recreate from the teardown. The script is rewritten into `tmp_path`,
+    never in the checkout."""
+    source = (ROOT / "scripts" / "verify_compose_recovery.py").read_text(encoding="utf-8")
+    assert source.count(COMPOSE_RESTART) == 1, "the restart call moved: update COMPOSE_RESTART"
+    script = tmp_path / "scripts" / "verify_compose_recovery.py"
+    script.parent.mkdir()
+    recreated = source.replace(COMPOSE_RESTART, COMPOSE_RESTART + REAL_RECREATES[name])
+    script.write_text(recreated, encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "ROOT", tmp_path)
+    assert _compose_recovery_still_only_restarts() is not None, f"the premise missed {name}"
