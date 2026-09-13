@@ -12,11 +12,12 @@ ten embedded diagrams draw, read from their generators by `tests/diagram_text.py
    identity. `payload` is named `content_hash` there, the digest of it that the ID folds in. At
    `d4ef5e4` the identity was `subject`, `kind`, `source_id`, `available_time` and
    `content_hash`, and brain-02 drew `evidence_id = hash(source_uri + content_hash)`:
-   `source_uri` moves nothing, and three of the five were missing.
-2. **Retry-After.** A mention of the header (`Retry-After` or `retry_after`, in any case) is
-   allowed only while some module under `src/` reads it. A reader is a string literal naming the
-   header, in any case, passed to a call, used as a subscript or compared. brain-02 drew
-   "错误分类与 Retry-After", and nothing under `src/` names the header.
+   `source_uri` moves nothing, and four of the five were missing.
+2. **Retry-After.** A mention of the header (`Retry-After` or `retry_after`, in any case, with
+   any hyphen or dash where `-` goes) is allowed only while some module under `src/` reads it. A
+   reader is a string literal naming the header, in any case, passed to a call, compared, or used
+   as a subscript that is read; a subscript that assigns or deletes the header writes it. brain-02
+   drew "错误分类与 Retry-After", and nothing under `src/` names the header.
 3. **The evidence tool.** `EvidenceLookupTool`, or any of `EVIDENCE_TOOL_NAMES`, may be mentioned
    only while some module under `src/openalpha_cn` outside the `tools` package imports it.
    brain-02 drew "只读证据工具", brain-03 "EvidenceLookupTool 只读查询", and four marketing
@@ -35,16 +36,15 @@ that honours the header itself, which no scan of `src/` can show.
 
 - A statement about identity in any shape but the formula -- "evidence_id 由 source_uri 派生" --
   is not read, and neither is a formula written with full-width parentheses, nor one with a
-  prefix before the function, the way the code builds the ID (`domain/evidence.py:183`):
+  prefix before the function, the way the code builds the ID (`EvidenceSnapshot.evidence_id`):
   `IDENTITY_FORMULA` wants a function right after the `=`, so neither
   `evidence_id = "ev_" + sha256(...)` nor `evidence_id = f"ev_{sha256(...)}"` is read.
-- The header spelled without a separator (`RetryAfter`), or with a non-breaking hyphen (U+2011)
-  where `-` goes, is not a mention of it.
+- The header spelled without a separator (`RetryAfter`) is not a mention of it.
 - A tool worded outside `EVIDENCE_TOOL_NAMES` is not a mention of it, such as 只读查询接口 or
   "lookup 工具".
 - A reader of the header built from pieces (`"Retry" + "-After"`), or a library the code calls
   that honours the header itself, is not seen. And any literal that names the header in a call
-  counts as a reader, even one that only logs it.
+  counts as a reader, even one that only logs it or writes it (`headers.setdefault(...)`).
 - An import of the tool through `importlib`, or by a computed name, is not seen. And an import
   is all that is checked, not whether a shipped path calls the tool.
 - Text a generator computes at run time is not read (`tests/diagram_text.py`).
@@ -289,17 +289,22 @@ def test_every_identity_formula_names_exactly_what_moves_the_evidence_id() -> No
 
 # --- 2. The Retry-After header ----------------------------------------------------------------
 
-RETRY_AFTER_MENTION: Final[re.Pattern[str]] = re.compile(r"retry[-_]after", re.IGNORECASE)
-"""A mention of the header in prose or a diagram: `Retry-After` or `retry_after`, in any case.
-Not "retry after" with a space, which is English, not the header."""
+RETRY_AFTER_MENTION: Final[re.Pattern[str]] = re.compile(
+    r"retry[-_\u2010-\u2015\u2212\ufe58\ufe63\uff0d]after", re.IGNORECASE
+)
+"""A mention of the header in prose or a diagram: `Retry-After` or `retry_after`, in any case,
+with an ASCII hyphen, an underscore or any Unicode hyphen or dash between the words (U+2010 to
+U+2015, the minus sign, the small em dash, the small and the full-width hyphen-minus). Not
+"retry after" with a space, which is English, not the header."""
 
 RETRY_AFTER_HEADER: Final[re.Pattern[str]] = re.compile(r"retry-after", re.IGNORECASE)
 """The header's own name, which a reader has to spell out whole."""
 
 
 def _retry_after_readers(package: Path) -> list[str]:
-    """Each place a module under `package` passes the header's name to a call, a subscript or a
-    comparison, as `path:line`."""
+    """Each place a module under `package` passes the header's name to a call or a comparison, or
+    reads it through a subscript, as `path:line`. A subscript that assigns or deletes it is not a
+    read."""
     readers: list[str] = []
     for path in sorted(package.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -307,7 +312,7 @@ def _retry_after_readers(package: Path) -> list[str]:
             candidates: list[ast.expr] = []
             if isinstance(node, ast.Call):
                 candidates = [*node.args, *(keyword.value for keyword in node.keywords)]
-            elif isinstance(node, ast.Subscript):
+            elif isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load):
                 candidates = [node.slice]
             elif isinstance(node, ast.Compare):
                 candidates = [node.left, *node.comparators]
@@ -453,7 +458,8 @@ def test_every_mention_marker_is_needed() -> None:
 
     Every sentence in `TOOL_NAME_SENTENCES` is caught by its own entry and by no other, so
     dropping any entry from `EVIDENCE_TOOL_NAMES` fails here. `Retry-After` and `retry_after` are
-    both mentions of the header, in any case; "retry after" with a space is English and is not.
+    both mentions of the header, in any case, and so is the header written with a Unicode hyphen
+    or dash; "retry after" with a space is English and is not.
     """
     assert set(TOOL_NAME_SENTENCES) == set(EVIDENCE_TOOL_NAMES), (
         f"TOOL_NAME_SENTENCES holds {sorted(TOOL_NAME_SENTENCES)}, EVIDENCE_TOOL_NAMES "
@@ -463,7 +469,16 @@ def test_every_mention_marker_is_needed() -> None:
         catching = [other for other in EVIDENCE_TOOL_NAMES if other.lower() in sentence.lower()]
         assert catching == [name], f"{sentence!r} is caught by {catching}, not by {name!r} alone"
         assert _evidence_tool_mentions({"d": sentence}, {}), f"{sentence!r} was not read"
-    mentions = ("Provider 读取 Retry-After。", "It reads RETRY_AFTER.", "retry-after is parsed.")
+    mentions = (
+        "Provider 读取 Retry-After。",
+        "It reads RETRY_AFTER.",
+        "retry-after is parsed.",
+        "Provider 读取 Retry\N{HYPHEN}After。",
+        "Provider 读取 Retry\N{NON-BREAKING HYPHEN}After。",
+        "Provider 读取 Retry\N{EN DASH}After。",
+        "Provider 读取 Retry\N{MINUS SIGN}After。",
+        "Provider 读取 Retry\N{FULLWIDTH HYPHEN-MINUS}After。",
+    )
     missed = [text for text in mentions if not _retry_after_mentions({"d": text}, {})]
     assert not missed, f"a spelling of the header was not read as a mention: {missed}"
     english = "We retry after a short wait."
@@ -536,6 +551,8 @@ def test_the_reader_and_importer_scans_find_what_their_docstrings_say(tmp_path: 
         "api/subscript.py": 'value = response.headers["retry-after"]\n',
         "api/compare.py": 'found = name == "RETRY-AFTER"\n',
         "api/docstring.py": '"""Honours Retry-After."""\n',
+        "api/write.py": 'response.headers["Retry-After"] = "5"\n',
+        "api/delete.py": 'del response.headers["Retry-After"]\n',
     }
     for relative, text in files.items():
         (package / relative).parent.mkdir(parents=True, exist_ok=True)
@@ -575,7 +592,6 @@ def test_the_stated_blind_spots_are_real(tmp_path: Path) -> None:
     assert not read_anyway, f"a stated blind spot of the identity check is now read: {read_anyway}"
     unseen_mentions = {
         "RetryAfter": ("Provider 读取 RetryAfter。", _retry_after_mentions),
-        "U+2011": ("Provider 读取 Retry\N{NON-BREAKING HYPHEN}After。", _retry_after_mentions),
         "只读查询接口": ("Agent 通过只读查询接口获取证据。", _evidence_tool_mentions),
         "lookup 工具": ("Agent 通过 lookup 工具获取证据。", _evidence_tool_mentions),
     }
@@ -599,9 +615,13 @@ def test_the_stated_blind_spots_are_real(tmp_path: Path) -> None:
     assert not _retry_after_readers(package), "a reader built from pieces is now seen"
     assert not _evidence_tool_importers(package), "an importlib import of the tool is now seen"
     (package / "api" / "log.py").write_text('logger.info("Retry-After")\n', encoding="utf-8")
-    assert _retry_after_readers(package) == ["openalpha_cn/api/log.py:1"], (
-        "a logging call naming the header is no longer counted as a reader"
+    (package / "api" / "writes.py").write_text(
+        'response.headers.setdefault("Retry-After", "5")\n', encoding="utf-8"
     )
+    assert _retry_after_readers(package) == [
+        "openalpha_cn/api/log.py:1",
+        "openalpha_cn/api/writes.py:1",
+    ], "a call that only logs or writes the header is no longer counted as a reader"
 
     synonyms = "evidence_id = hash(主体 | 类型 | source_id | available_time | content_hash)"
     assert _identity_problems([("synonyms", 1, synonyms)], identity)[0], (
