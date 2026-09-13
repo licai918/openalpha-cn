@@ -608,12 +608,13 @@ def _diagram_ceiling_problems(sources: dict[str, str]) -> list[str]:
 
     Each string literal is read alone (`diagram_strings`): a worker range in one that names 并发,
     并行, "concurren..." or "worker...", and an item range in one that reads `1-<n> 个不可变请求`.
-    Finding neither kind fails too, so a reader gone blind cannot pass.
+    Finding neither kind fails too, so a reader gone blind cannot pass. Each generator is read with
+    its path as `filename`, so one that stops parsing is named in the SyntaxError.
     """
     worker_ranges: list[tuple[str, int, int, int]] = []
     item_caps: list[tuple[str, int, int]] = []
     for name, source in sources.items():
-        for string in diagram_strings(source):
+        for string in diagram_strings(source, filename=name):
             if any(word in string.text.lower() for word in CONCURRENCY_WORDS):
                 for match in WORKER_RANGE_IN_PROSE.finditer(string.text):
                     floor, ceiling = (int(bound) for bound in match.groups() if bound is not None)
@@ -668,3 +669,14 @@ def test_the_diagram_ceiling_reader_reports_what_its_docstring_says() -> None:
     assert not _diagram_ceiling_problems({"current.py": current}), "current ceilings reported"
     assert len(_diagram_ceiling_problems({"stale.py": stale})) == 2, "a stale ceiling unreported"
     assert len(_diagram_ceiling_problems({"blind.py": blind})) == 2, "an empty read passed"
+
+
+def test_the_diagram_ceiling_read_names_the_generator_it_could_not_parse() -> None:
+    """`_diagram_ceiling_problems` hands `ast.parse` each generator's path as `filename`.
+
+    A generator that stops parsing is then named in the SyntaxError instead of `<unknown>`.
+    """
+    label = "scripts/generate_broken_diagrams.py"
+    with pytest.raises(SyntaxError) as raised:
+        _diagram_ceiling_problems({label: 'svg.card(lines=("1-8 并发",\n'})
+    assert raised.value.filename == label, f"the read named its source as {raised.value.filename!r}"

@@ -1464,18 +1464,26 @@ def test_each_prose_test_fails_on_a_claim_it_exists_to_catch(
         prose_test()
 
 
+def _read_prose(text: str, *, filename: str) -> list[Clause]:
+    """A document's clauses. `filename` is taken so a prose read and a diagram read are one call;
+    a document has no syntax tree to name it in."""
+    del filename
+    return clauses(text)
+
+
 def _allowlist_problems(
     documents: dict[Path, str],
     guard: ProseGuard,
     allowlist: Iterable[AllowedClause] | None = None,
-    reader: Callable[[str], list[Clause]] = clauses,
+    reader: Callable[..., list[Clause]] = _read_prose,
 ) -> list[str]:
     """Why each entry of `guard`'s allowlist no longer describes one flagged clause.
 
     The excerpt must find exactly one clause of the entry's file, that clause must still read
     exactly as pinned, and the guard must still flag it. `allowlist` replaces the guard's own
     entries, for the self-test below and for a diagram allowlist, whose files are generators
-    read with `reader=diagram_units`.
+    read with `reader=diagram_units`. The reader is given the file's path as `filename`, which
+    `diagram_units` hands `ast.parse`.
     """
     problems: list[str] = []
     for entry in guard.allowlist if allowlist is None else allowlist:
@@ -1483,9 +1491,8 @@ def _allowlist_problems(
         if entry.path not in documents:
             problems.append(f"{label} is for a file the guard does not read")
             continue
-        matches = [
-            clause for clause in reader(documents[entry.path]) if entry.excerpt in clause.text
-        ]
+        read = reader(documents[entry.path], filename=entry.path.relative_to(ROOT).as_posix())
+        matches = [clause for clause in read if entry.excerpt in clause.text]
         if len(matches) != 1:
             problems.append(
                 f"{label} matches {len(matches)} clauses, at lines {[c.line for c in matches]}; "
@@ -2110,6 +2117,19 @@ def _diagram_sources() -> dict[str, str]:
     }
 
 
+def _diagram_units_by_generator(sources: dict[str, str]) -> list[tuple[str, Clause]]:
+    """Every drawing unit of `sources`, each with the generator it came from.
+
+    The generator's path goes to `ast.parse` as `filename`, so a generator that stops parsing is
+    named in the SyntaxError instead of `<unknown>`.
+    """
+    return [
+        (label, unit)
+        for label, source in sources.items()
+        for unit in diagram_units(source, filename=label)
+    ]
+
+
 def _diagram_violations(guard: ProseGuard, sources: dict[str, str]) -> list[str]:
     """One message per clause of a drawing call or data row that `guard` reads as a claim and its
     `diagram_allowlist` does not pin, by the generator's path and the unit's whole text."""
@@ -2118,8 +2138,7 @@ def _diagram_violations(guard: ProseGuard, sources: dict[str, str]) -> list[str]
     }
     return [
         f"{label}:{unit.line} draws {guard.claim} as shipped: {unit.text!r}"
-        for label, source in sources.items()
-        for unit in diagram_units(source)
+        for label, unit in _diagram_units_by_generator(sources)
         if guard.is_claim(unit.text) and (label, unit.text) not in pinned
     ]
 
@@ -2141,9 +2160,9 @@ def test_the_embedded_diagrams_do_not_present_a_model_call_or_usage_recording_as
     """
     guard = GUARDS[name]
     sources = _diagram_sources()
-    assert any(
-        "模型治理边界" in unit.text for source in sources.values() for unit in diagram_units(source)
-    ), "brain-03's 模型治理边界 panel, which this test was written against, is no longer read"
+    assert any("模型治理边界" in unit.text for _, unit in _diagram_units_by_generator(sources)), (
+        "brain-03's 模型治理边界 panel, which this test was written against, is no longer read"
+    )
     violations = _diagram_violations(guard, sources)
     assert not violations, (
         "\n".join(violations) + f"\n{guard.remedy} Fix the generator, then regenerate the SVG "
@@ -2166,6 +2185,33 @@ def test_every_diagram_allowlist_entry_exempts_exactly_one_flagged_unit() -> Non
         )
     ]
     assert not problems, "\n".join(problems)
+
+
+BROKEN_GENERATOR: Final[str] = 'svg.panel(1, 2, title="模型治理边界",\n'
+"""A generator cut off inside a drawing call, which `ast.parse` refuses."""
+
+
+def test_a_diagram_read_names_the_generator_it_could_not_parse() -> None:
+    """Both diagram reads hand `ast.parse` the generator's path as `filename`.
+
+    A generator that stops parsing is then named in the SyntaxError instead of `<unknown>`: the
+    diagram test reads two generators one after the other, and the pin census reads the pinned
+    one. `tests/diagram_text.py` took `filename` for exactly this.
+    """
+    label = "scripts/generate_broken_diagrams.py"
+    pin = replace(USAGE_DIAGRAM_ALLOWLIST[0], path=ROOT / label)
+    reads: dict[str, Callable[[], object]] = {
+        "_diagram_violations": lambda: _diagram_violations(USAGE_GUARD, {label: BROKEN_GENERATOR}),
+        "_allowlist_problems": lambda: _allowlist_problems(
+            {ROOT / label: BROKEN_GENERATOR}, USAGE_GUARD, (pin,), reader=diagram_units
+        ),
+    }
+    named: dict[str, str | None] = {}
+    for name, read in reads.items():
+        with pytest.raises(SyntaxError) as raised:
+            read()
+        named[name] = raised.value.filename
+    assert named == dict.fromkeys(reads, label), f"a diagram read named its source as {named}"
 
 
 PRE_D12_DIAGRAM_BOX: Final[str] = (
