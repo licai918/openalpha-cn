@@ -1,6 +1,6 @@
 """User-facing attribution claims must not overstate what `OutcomeValidator` produces.
 
-Two couplings, both anchored on `KNOWN_ATTRIBUTION_LIMITATIONS` in
+Three couplings, all anchored on `KNOWN_ATTRIBUTION_LIMITATIONS` in
 `src/openalpha_cn/backtest/validation.py` rather than on a hand-written category list:
 
 1. **The PRD.** `docs/specs/v2/openalpha-cn-v2-prd.md` must have exactly one `S65` row ("Rule,
@@ -23,6 +23,18 @@ Two couplings, both anchored on `KNOWN_ATTRIBUTION_LIMITATIONS` in
    "attribution". The marketing pack had two, found by reading and reworded in `D7`:
    "差异来自哪个规则或 Agent" and a list that "将结果拆成...规则、因子与标的暴露". Prose of that
    shape needs a manual review; this guard will never report it.
+
+3. **The embedded diagrams.** The words the ten diagrams `README.md` embeds draw are read from
+   their generators' string literals (`tests/diagram_text.py`) under part (2)'s rule: each
+   literal alone, split into clauses the way a document is. Not by `diagram_units`, which joins
+   every string of one drawing call into one text: at `d4ef5e4` that made api-01's row of five
+   lanes one clause holding "Agent" from the research lane and 归因 from the validation lane,
+   flagged for agent although no lane claims it. Nor a literal read whole: api-05's subtitle and
+   brain-05's feedback line each end their 归因 clause with a semicolon before
+   "不自动训练模型", and read whole each would be flagged for model. At `d4ef5e4` this reading
+   flagged one clause, api-05's "规则 / 因子 / Agent 归因", which `D13` rewrote together with
+   the paraphrase drawn beside it that no marker reads ("哪条规则、因子或 Agent 贡献了结果"). No
+   allowlist applies to the diagrams.
 
 **How the guard in (2) reads a document.**
 
@@ -60,7 +72,8 @@ Two couplings, both anchored on `KNOWN_ATTRIBUTION_LIMITATIONS` in
   test, that makes the allowlist the census: every clause the guard flags in the guarded files
   is either fixed or listed there.
 
-**What it cannot see.** `test_the_guards_stated_blind_spots_are_real` measures each of these.
+**What it cannot see.** `test_the_guards_stated_blind_spots_are_real` measures each of the
+first five, and `test_the_diagram_readings_stated_limits_are_real` the split claim in the last.
 
 - Within a single clause, one absence phrase exempts every category named in it:
   "因子归因已交付，模型结构性从不产生而非被收窄。" passes.
@@ -72,6 +85,9 @@ Two couplings, both anchored on `KNOWN_ATTRIBUTION_LIMITATIONS` in
   `agent`.
 - `ABSENCE_PHRASES` is the fixed list of wordings this repository uses; a caveat worded any
   other way is read as a claim.
+- In the diagrams (part 3), a claim drawn across two literals -- a panel's title and one of its
+  lines, or two of its lines -- is read as two halves, each innocent. Text a generator computes
+  at run time, such as an f-string's values, is not read at all (`tests/diagram_text.py`).
 """
 
 from __future__ import annotations
@@ -569,6 +585,140 @@ def test_a_claim_written_into_an_allowlisted_clause_ends_its_exemption() -> None
             still_exempt.append(entry.excerpt)
     assert not still_exempt, (
         f"a claim written into these pinned clauses went unreported: {still_exempt}"
+    )
+
+
+# --- Part 3: the embedded diagrams may not draw an absent category as delivered ---------------
+
+DIAGRAM_GENERATORS: Final[tuple[Path, ...]] = (
+    ROOT / "scripts" / "generate_brain_diagrams.py",
+    ROOT / "scripts" / "generate_api_relationship_diagrams.py",
+)
+"""The generators of the ten diagrams `README.md` embeds; `tests/unit/test_repository_assets.py`
+holds every committed SVG equal to what they write, so their literals are the diagrams' words."""
+
+
+def _diagram_sources() -> dict[str, str]:
+    return {
+        path.relative_to(ROOT).as_posix(): path.read_text(encoding="utf-8")
+        for path in DIAGRAM_GENERATORS
+    }
+
+
+def _diagram_clauses(sources: dict[str, str]) -> list[tuple[str, int, str]]:
+    """Each clause of each string literal in `sources`, as `(generator, line, clause)`.
+
+    A literal is read alone (`diagram_strings`) and split into clauses the way part (2) splits a
+    document, so the clause rule is the same in both places.
+    """
+    return [
+        (label, literal.line, clause.text)
+        for label, source in sources.items()
+        for literal in diagram_strings(source, filename=label)
+        for clause in clauses(literal.text)
+    ]
+
+
+def _diagram_attribution_violations(sources: dict[str, str]) -> list[str]:
+    """One message per clause of a generator literal that draws an absent category as delivered."""
+    violations: list[str] = []
+    for label, line, clause in _diagram_clauses(sources):
+        categories = _overclaimed_categories(clause, ABSENT_CATEGORIES)
+        if categories:
+            violations.append(
+                f"{label}:{line} draws {sorted(categories)} as delivered attribution: {clause!r}"
+            )
+    return violations
+
+
+def test_the_embedded_diagrams_do_not_draw_an_absent_attribution_category_as_delivered() -> None:
+    """Part (2)'s rule over the words the ten embedded diagrams draw.
+
+    Written against api-05's 结果归因 card, which drew "规则 / 因子 / Agent 归因" one paragraph
+    below `README.md`'s statement that factor and Agent attribution are never produced. No
+    allowlist applies here: at `d4ef5e4` that card was the only clause this reading flagged. The
+    diagrams draw 归因 in several other literals, and at least one of them must still be read, so
+    a reader gone blind fails rather than passes.
+    """
+    sources = _diagram_sources()
+    assert any(_names_attribution(clause) for _, _, clause in _diagram_clauses(sources)), (
+        "no diagram literal holds 归因 or 'attribution'; several did when this was written, so "
+        "the reader has gone blind"
+    )
+    violations = _diagram_attribution_violations(sources)
+    assert not violations, (
+        "\n".join(violations) + "\nFix the generator, then regenerate the SVG with the generator "
+        "itself."
+    )
+
+
+PRE_D13_API_05_CARD: Final[str] = (
+    "(\n"
+    "    1054,\n"
+    '    "结果归因",\n'
+    '    "POST /api/v1/backtests/validate",\n'
+    '    ("研究结果 + 未来观察", "重算 signal / decision ID", "规则 / 因子 / Agent 归因"),\n'
+    '    COLORS["teal"],\n'
+    ")\n"
+)
+"""api-05's 结果归因 column as `scripts/generate_api_relationship_diagrams.py` drew it at
+`d4ef5e4`, verbatim."""
+
+
+def test_the_diagram_reading_flags_the_card_it_was_written_for() -> None:
+    """The retroactive power over the diagrams, held: the pre-D13 card is one claim."""
+    violations = _diagram_attribution_violations({"d4ef5e4 api-05": PRE_D13_API_05_CARD})
+    assert violations == [
+        "d4ef5e4 api-05:5 draws ['agent', 'factor'] as delivered attribution: "
+        "'规则 / 因子 / Agent 归因'"
+    ], f"the pre-D13 card was read as {violations}"
+
+
+D4EF5E4_API_05_SUBTITLE: Final[str] = (
+    "四类验证 API 各自回答可复现性、组合表现、事件显著性和结果归因\N{FULLWIDTH SEMICOLON}"
+    "反馈由研究者显式采纳，不自动训练模型。"
+)
+"""api-05's subtitle at `d4ef5e4`: its 归因 clause ends before 模型 is named."""
+
+D4EF5E4_BRAIN_05_FEEDBACK: Final[str] = (
+    "人工复核归因 → 调整数据质量规则 / AgentRouter / RiskGate 阈值 → 进入下一轮证据与配置"
+    "\N{FULLWIDTH SEMICOLON}不自动训练模型"
+)
+"""brain-05's feedback line at `d4ef5e4`, the same shape."""
+
+
+def test_the_diagram_readings_stated_limits_are_real() -> None:
+    """Each limit of part (3) the module docstring states, measured.
+
+    A claim drawn across two literals -- a panel's title and one of its lines -- is read as two
+    halves, each innocent. A paraphrase without 归因, like api-05's "哪条规则、因子或 Agent 贡献了
+    结果" at `d4ef5e4`, is never a claim. And a literal is split into clauses: read whole, the two
+    non-claims below would be flagged for model, and split they are not.
+    """
+    unflagged = {
+        "a claim across a panel's title and its line": (
+            'svg.panel(title="因子与 Agent", lines=("归因已交付",))\n'
+        ),
+        "a paraphrase without 归因": (
+            'svg.card(lines=("是否显著\N{FULLWIDTH QUESTION MARK}'
+            "哪条规则、因子或 Agent 贡献了结果\N{FULLWIDTH QUESTION MARK}"
+            '",))\n'
+        ),
+        "api-05's subtitle": f"svg.card(subtitle={D4EF5E4_API_05_SUBTITLE!r})\n",
+        "brain-05's feedback line": f"svg.text(374, 658, {D4EF5E4_BRAIN_05_FEEDBACK!r})\n",
+    }
+    wrongly = {
+        label: violations
+        for label, source in unflagged.items()
+        if (violations := _diagram_attribution_violations({label: source}))
+    }
+    assert not wrongly, f"a stated limit of the diagram reading no longer holds: {wrongly}"
+    read_whole = {
+        text: sorted(_overclaimed_categories(text, ABSENT_CATEGORIES))
+        for text in (D4EF5E4_API_05_SUBTITLE, D4EF5E4_BRAIN_05_FEEDBACK)
+    }
+    assert all(categories == ["model"] for categories in read_whole.values()), (
+        f"the docstring says each would be flagged for model if read whole; got {read_whole}"
     )
 
 

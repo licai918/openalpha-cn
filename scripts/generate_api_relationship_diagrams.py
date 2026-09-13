@@ -724,7 +724,7 @@ def validation_loop() -> str:
             1054,
             "结果归因",
             "POST /api/v1/backtests/validate",
-            ("研究结果 + 未来观察", "重算 signal / decision ID", "规则 / 因子 / Agent 归因"),
+            ("研究结果 + 未来观察", "重算 signal / decision ID", "规则类目两项条款 · 显式残差"),
             COLORS["teal"],
         ),
     )
@@ -747,7 +747,7 @@ def validation_loop() -> str:
         title="验证结果汇总层",
         lines=(
             "ReplayReport + PortfolioBacktestReport + EventStudyReport + ValidationResult",
-            "共同回答：当时是否可知？是否可成交？是否显著？哪条规则、因子或 Agent 贡献了结果？",
+            "共同回答：当时是否可知？是否可成交？是否显著？成本与空仓机会成本各占多少、残差多大？",
         ),
         color=COLORS["indigo"],
         fill="#EEF1FF",
