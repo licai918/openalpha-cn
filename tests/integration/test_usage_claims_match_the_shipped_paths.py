@@ -2563,9 +2563,13 @@ def test_the_diagram_reader_reads_what_its_docstring_says() -> None:
     """A data row with its nested lines is one unit; a panel's title and lines are one unit; a
     sentence end splits a unit; a nested call is a unit of its own; no docstring is read.
 
-    `diagram_strings` returns every literal alone, docstrings excepted.
+    `diagram_strings` returns every literal alone, docstrings excepted. Both reads are given the
+    constant's name as `filename`, so a `DIAGRAM_SOURCE` that stops parsing is named in the
+    SyntaxError rather than as `<unknown>`.
     """
-    units = sorted(clause.text for clause in diagram_units(DIAGRAM_SOURCE))
+    units = sorted(
+        clause.text for clause in diagram_units(DIAGRAM_SOURCE, filename="DIAGRAM_SOURCE")
+    )
     expected_units = sorted(
         (
             "02，研究编排，持久批量队列 1-8 并发，run_cycle",
@@ -2576,7 +2580,9 @@ def test_the_diagram_reader_reads_what_its_docstring_says() -> None:
             "内层",
         )
     )
-    strings = sorted(clause.text for clause in diagram_strings(DIAGRAM_SOURCE))
+    strings = sorted(
+        clause.text for clause in diagram_strings(DIAGRAM_SOURCE, filename="DIAGRAM_SOURCE")
+    )
     expected_strings = sorted(
         (
             "02",
