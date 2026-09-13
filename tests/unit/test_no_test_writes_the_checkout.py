@@ -1098,10 +1098,43 @@ def _scratch_checkout(root: Path) -> Path:
     """
     module = root / "src" / "package" / "module.py"
     module.parent.mkdir(parents=True, exist_ok=True)
-    module.write_text("x = 1\n", encoding="utf-8")
+    module.write_bytes(b"x = 1\n")
     (root / "tests").mkdir(exist_ok=True)
     _aged(module, module.parent, root / "src", root / "tests")
     return module
+
+
+def _windows_text_mode(
+    self: Path,
+    data: str,
+    encoding: str | None = None,
+    errors: str | None = None,
+    newline: str | None = None,
+) -> int:
+    """What Windows text mode does to `Path.write_text`: each "\\n" is written as "\\r\\n"."""
+    if newline is None:
+        text = data.replace("\n", "\r\n")
+    elif newline in ("", "\n"):
+        text = data
+    else:
+        text = data.replace("\n", newline)
+    self.write_bytes(text.encode(encoding or "utf-8", errors or "strict"))
+    return len(data)
+
+
+def test_the_scratch_checkout_holds_the_same_bytes_whatever_text_mode_the_platform_has(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D14 fix review I-1: the module was written with `write_text`, so as CRLF on Windows.
+
+    Seven bytes there and six everywhere else, so the same-size rewrite below was not the same size
+    on Windows, and its test failed its own precondition before it reached its Windows branch -- on
+    both Windows legs of CI. A fixture whose bytes or length a test measures is written as bytes;
+    this holds the one every snapshot test starts from to that, under Windows' translation.
+    """
+    monkeypatch.setattr(Path, "write_text", _windows_text_mode)
+
+    assert _scratch_checkout(tmp_path).read_bytes() == b"x = 1\n"
 
 
 def test_a_write_that_put_back_the_bytes_it_found_is_still_a_write(tmp_path: Path) -> None:
