@@ -1119,10 +1119,20 @@ def _line_of_the_invalid_escape(source: str, exc: SyntaxError) -> int:
     return located if located is not None else (exc.lineno or 1)
 
 
+_HARD_ESCAPE_ERROR_PREFIXES: Final[tuple[str, ...]] = ("(unicode error)", "(value error)")
+"""Message prefixes of the escape errors `compile()` raises outright rather than warns about.
+
+Its decoder's own error for a `\\x`, `\\N`, `\\u` or `\\U` escape it cannot decode in a `str` or
+an f-string begins `(unicode error)`, and for a `\\x` it cannot decode in `bytes`, `(value
+error)` -- measured on 3.11.14, 3.12.12 and 3.14.5, where the invalid-escape warning escalated
+to an error carries neither prefix.
+"""
+
+
 def _describe_where(source: str, exc: SyntaxError) -> str:
     """Where to send the reader for `exc`, and how sure that line is.
 
-    Five cases, five wordings, decided in this order:
+    Six cases, five wordings, decided in this order:
 
     * the error has nothing to do with escapes (an unmatched bracket, say) -- `line N`,
       `compile()`'s own position for an ordinary syntax error, with no escape hypothesis
@@ -1132,6 +1142,14 @@ def _describe_where(source: str, exc: SyntaxError) -> str:
       (measured on 3.11.14, 3.12.12 and 3.14.5). A review found this answering "line 2"
       there, with a reason that was not the reason; an earlier one found such an error
       pointed at a malformed escape that did not exist;
+    * the error is one `compile()` raises outright for an escape it cannot decode -- its
+      message begins with one of `_HARD_ESCAPE_ERROR_PREFIXES` -- and gets the last case's
+      unconfirmed wording without the scan being consulted. The scan treats `\\x`, `\\N`,
+      `\\u` and `\\U` as valid without reading what follows them, so any escape it finds is
+      a different one: for `x = "\\xzz"` on line 1 and `z = "\\q"` on line 3, `compile()`
+      stops at line 1 and the scan finds line 3 (measured on 3.11.14, 3.12.12 and 3.14.5),
+      and D13's final review found this answering "line 3 (compile() itself reports line
+      1)" -- the `\\q` that `compile()` never reached;
     * the offender was located and `compile()` agrees -- `line N`;
     * it was located on a different line, and `compile()`'s line is the one the enclosing
       string literal begins on -- what 3.11 reports, and CI's 3.12.3 for a plain
@@ -1159,13 +1177,17 @@ def _describe_where(source: str, exc: SyntaxError) -> str:
     \\xXX escape", "... malformed \\N character escape", "... invalid \\x escape at
     position 0"), so does 3.14.5's rewording (`"\\q" is an invalid escape sequence. ...`),
     and neither ordinary syntax error tried does ("unmatched ')'", "'(' was never
-    closed").
+    closed"). Whether it is one `compile()` raised outright is read from the same message's
+    first words.
     """
     if exc.lineno is None:
         return "an unreported line (no SyntaxError position available)"
-    if "escape" not in (exc.msg or ""):
+    message = exc.msg or ""
+    if "escape" not in message:
         return f"line {exc.lineno}"
-    located = _locate_invalid_escape(source)
+    located = (
+        None if message.startswith(_HARD_ESCAPE_ERROR_PREFIXES) else _locate_invalid_escape(source)
+    )
     if located is None:
         return (
             f"line {exc.lineno} as compile() reports it, unconfirmed: this scan did not find "
@@ -1387,6 +1409,34 @@ def test_a_malformed_hex_escape_is_described_as_unlocated_rather_than_confirmed(
     assert _describe_where(source, exc).startswith(
         f"line {exc.lineno} as compile() reports it, unconfirmed:"
     )
+
+
+def test_a_hard_escape_error_is_not_located_at_an_escape_compile_never_reached() -> None:
+    """`compile()`'s own hard escape error is described as unlocated, whatever else the scan finds.
+
+    A malformed `\\x`, `\\N`, `\\u` or `\\U` escape is not the warning the scan locates but an
+    error the decoder raises, and the scan treats all four as valid without reading what follows
+    them. D13's final review put one on line 1 and a warning-only `\\q` on line 3: `compile()`
+    stops at the first and reports line 1, the scan finds the second, and `_describe_where`
+    answered "line 3 (compile() itself reports line 1)" -- sending the reader to an escape
+    `compile()` never reached. Measured on 3.11.14, 3.12.12 and 3.14.5, the message begins
+    `(unicode error)` for a `str` or an f-string and `(value error)` for `bytes`, and compile()
+    reports the line of the literal holding the malformed escape: 1 here, and 2 for the
+    f-string.
+    """
+    for source in (
+        'x = "\\xzz"\ny = 1\nz = "\\q"\n',
+        'x = "\\N{NO SUCH NAME}"\ny = 1\nz = "\\q"\n',
+        'x = b"\\xzz"\ny = 1\nz = "\\q"\n',
+        'v = 1\nx = f"{v}\\xzz"\nz = "\\q"\n',
+    ):
+        exc = _syntax_error_from_compiling(source)
+        assert (exc.msg or "").startswith(("(unicode error)", "(value error)")), exc.msg
+        assert _located_invalid_escape_line(source) == 3
+        assert exc.lineno != 3, exc.lineno
+        assert _describe_where(source, exc).startswith(
+            f"line {exc.lineno} as compile() reports it, unconfirmed:"
+        ), source
 
 
 def test_a_syntax_error_unrelated_to_escapes_carries_no_escape_hypothesis() -> None:
