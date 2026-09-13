@@ -15,28 +15,38 @@ under `tmp_path` (`tests/scratch_package.py`) and build their graphs with `cache
 Two halves keep it that way.
 
 **The reading** (`_checkout_writes`): every `*.py` under `tests/`, `tests/e2e/` included, is parsed
-and every call that can write a file is checked against where its target comes from. A target is
+and each call of the kinds below is checked against where its target comes from. A target is
 *in the checkout* when it derives from `__file__`, a module's `__file__` or `__path__`,
 `Path.cwd()`/`os.getcwd()`, `importlib.resources.files`, or a relative path literal -- the last
 three because pytest runs from the root -- through names bound at module and function level, `/`,
 `.parent` and `.parents[...]`, `resolve()` and the other methods that return a path, `str()`,
 `os.path.join`, containers and loops over them, a helper's parameter a call in the same module
 hands one to, a helper's or a fixture's return value, and a name imported from another module under
-`tests/` that is one there. The writes: `write_text`, `write_bytes`, `touch`, `mkdir`, `rmdir`,
-`unlink`, `chmod`, `symlink_to`, `hardlink_to`, and `rename`/`replace` with one argument (`Path`'s,
-not `str`'s); `open` and `Path.open` in any mode that writes; `shutil`'s copies, `move` and
-`rmtree`; `os`'s removals, renames, links and `makedirs`; `tempfile`'s constructors given `dir=`;
-`sqlite3.connect` and `duckdb.connect`, which create what they open. And two caches a library
-keeps in the *working directory*: `grimp.build_graph` without `cache_dir=None`, and the import
-linter without `no_cache=True`. The first is how `.grimp_cache/` came to stand at the root.
+`tests/` that is one there. The writes it knows: `write_text`, `write_bytes`, `touch`, `mkdir`,
+`rmdir`, `unlink`, `chmod`, `symlink_to`, `hardlink_to`, and `rename`/`replace` with one argument
+(`Path`'s, not `str`'s), called on a path or through the `Path` class unbound; `open`, `Path.open`,
+`io.open`, `io.FileIO`, `codecs.open`, the `gzip`, `bz2` and `lzma` openers and file classes,
+`tarfile.open` and `zipfile.ZipFile` in any mode that writes, and `os.open` with a flag that writes;
+`shutil`'s copies, `move` and `rmtree`; `os`'s removals, renames, links and `makedirs`;
+`tempfile`'s constructors given `dir=`; `logging`'s file handlers; `numpy.save` and its siblings; a
+table's own writers (`to_csv`, `to_parquet`, `write_csv` and the rest); and `sqlite3.connect` and
+`duckdb.connect`, which create what they open. And two caches a library keeps in the *working
+directory*: `grimp.build_graph` without `cache_dir=None`, and the import linter without
+`no_cache=True`. The first is how `.grimp_cache/` came to stand at the root. D14 review m-3 measured
+eight writers unread while this paragraph said "every call that can write a file": the `gzip`,
+`zipfile` and `tarfile` openers, `io.FileIO`, `os.open`, `logging.FileHandler`, the unbound
+`Path.write_text` and `DataFrame.to_csv`.
 
-What the reading cannot see, stated: a path assembled from pieces it does not follow -- an
-attribute of an object handed in, a method's return value, a string built at run time; a write made
-by a subprocess or by the code under test (`subprocess.run(..., cwd=ROOT)` is not read as a write,
-because nearly all of them only read); and a call that forwards `**kwargs`, which is checked where
-the keywords are spelled instead. It is flow-insensitive, so a name bound once to a checkout path
-and once to `tmp_path` reads as the first everywhere, and it reads a relative literal as the root's
-even after a test changed its working directory. Both err towards a finding.
+What the reading cannot see, stated: a writer that is not in that list -- another library's own
+save function, a `COPY ... TO` or a `VACUUM INTO` inside an SQL string, `os.write` on a descriptor
+opened somewhere it does not read, a method reached through `getattr`; a path assembled from pieces
+it does not follow -- an attribute of an object handed in, a method's return value, a string built
+at run time; a write made by a subprocess or by the code under test (`subprocess.run(...,
+cwd=ROOT)` is not read as a write, because nearly all of them only read); and a call that forwards
+`**kwargs`, which is checked where the keywords are spelled instead. It is flow-insensitive, so a
+name bound once to a checkout path and once to `tmp_path` reads as the first everywhere, and it
+reads a relative literal as the root's even after a test changed its working directory. Both err
+towards a finding.
 
 **The measuring** (`tests/checkout_guard.py`, wired into `tests/conftest.py`): a snapshot of the
 checkout when a session starts, when collection finishes and when it ends, and a failed run for any
@@ -145,12 +155,84 @@ RECEIVER_WRITES: Final[frozenset[str]] = frozenset(
 RECEIVER_MOVES: Final[frozenset[str]] = frozenset({"rename", "replace"})
 """`Path.rename`/`Path.replace` take one argument; `str.replace` takes two or three."""
 
-OPENERS: Final[Mapping[str, int]] = {"open": 1, "io.open": 1, "codecs.open": 1}
-"""Each module-level `open`, and the position its `mode` takes."""
+OPENERS: Final[Mapping[str, int]] = {
+    "open": 1,
+    "io.open": 1,
+    "codecs.open": 1,
+    "io.FileIO": 1,
+    "gzip.open": 1,
+    "gzip.GzipFile": 1,
+    "bz2.open": 1,
+    "bz2.BZ2File": 1,
+    "lzma.open": 1,
+    "lzma.LZMAFile": 1,
+    "tarfile.open": 1,
+    "tarfile.TarFile": 1,
+    "zipfile.ZipFile": 1,
+}
+"""Each call that opens a file by name and takes a `mode`, and the position its `mode` takes.
+
+Every one of them reads when no mode is given, so a call naming none is not a write."""
+
+DESCRIPTOR_OPENERS: Final[frozenset[str]] = frozenset({"os.open"})
+WRITING_FLAGS: Final[frozenset[str]] = frozenset(
+    {"O_APPEND", "O_CREAT", "O_EXCL", "O_RDWR", "O_TRUNC", "O_WRONLY"}
+)
+"""The `os.open` flags that write, or make a file that was not there."""
+
+
+def _flags_can_write(flags: ast.expr | None) -> bool:
+    """Whether `os.open`'s flags can write.
+
+    An expression naming no flag this knows, such as a variable or a bare number, counts as writing.
+    """
+    if flags is None:
+        return False
+    named = {
+        node.attr if isinstance(node, ast.Attribute) else node.id
+        for node in ast.walk(flags)
+        if isinstance(node, ast.Attribute | ast.Name)
+    }
+    return bool(named & WRITING_FLAGS) or not named & (WRITING_FLAGS | {"O_RDONLY"})
+
+
+TABLE_WRITERS: Final[frozenset[str]] = frozenset(
+    {
+        "to_csv",
+        "to_excel",
+        "to_feather",
+        "to_hdf",
+        "to_html",
+        "to_json",
+        "to_latex",
+        "to_markdown",
+        "to_parquet",
+        "to_pickle",
+        "to_stata",
+        "to_xml",
+        "write_avro",
+        "write_csv",
+        "write_excel",
+        "write_ipc",
+        "write_json",
+        "write_ndjson",
+        "write_parquet",
+    }
+)
+"""A table's own writers -- pandas', polars' and a DuckDB relation's spellings -- called on it with
+a destination first."""
 
 FIRST_ARGUMENT_WRITES: Final[frozenset[str]] = frozenset(
     {
         "duckdb.connect",
+        "logging.FileHandler",
+        "logging.handlers.RotatingFileHandler",
+        "logging.handlers.TimedRotatingFileHandler",
+        "logging.handlers.WatchedFileHandler",
+        "numpy.save",
+        "numpy.savetxt",
+        "numpy.savez",
+        "numpy.savez_compressed",
         "os.chmod",
         "os.makedirs",
         "os.mkdir",
@@ -553,6 +635,10 @@ class _Module:
             if found is not None:
                 yield CheckoutWrite(self.relative, scope.name, call.lineno, *found)
 
+    def _is_a_path_class(self, node: ast.AST) -> bool:
+        name = self.qualified(node)
+        return name is not None and name.rsplit(".", 1)[-1] in PATH_CLASSES
+
     def _write(self, call: ast.Call, scope: _Scope) -> tuple[str, str] | None:
         function = call.func
         name = self.qualified(function)
@@ -560,6 +646,13 @@ class _Module:
             receiver = function.value
             if function.attr in RECEIVER_WRITES and self.rooted(receiver, scope):
                 return function.attr, ast.unparse(receiver)
+            if (
+                function.attr in RECEIVER_WRITES
+                and self._is_a_path_class(receiver)
+                and call.args
+                and self.rooted(call.args[0], scope)
+            ):
+                return f"{ast.unparse(function)}, unbound", ast.unparse(call.args[0])
             if (
                 function.attr in RECEIVER_MOVES
                 and len(call.args) == 1
@@ -569,13 +662,25 @@ class _Module:
                 return function.attr, f"{ast.unparse(receiver)} -> {ast.unparse(call.args[0])}"
             if function.attr == "open" and self.rooted(receiver, scope) and _writing(call, 0):
                 return "open for writing", ast.unparse(receiver)
+            if function.attr in TABLE_WRITERS:
+                target = _argument(call, 0, "path_or_buf", "path", "excel_writer", "file")
+                if target is not None and self.rooted(target, scope):
+                    return function.attr, ast.unparse(target)
         if name in OPENERS:
-            target = _argument(call, 0, "file", "filename")
+            target = _argument(call, 0, "file", "filename", "name")
             if target is not None and self.rooted(target, scope) and _writing(call, OPENERS[name]):
+                return "open for writing", ast.unparse(target)
+        if name in DESCRIPTOR_OPENERS:
+            target = _argument(call, 0, "path")
+            if (
+                target is not None
+                and self.rooted(target, scope)
+                and _flags_can_write(_argument(call, 1, "flags"))
+            ):
                 return "open for writing", ast.unparse(target)
         targets: list[ast.expr | None] = []
         if name in FIRST_ARGUMENT_WRITES:
-            targets = [_argument(call, 0, "path", "database")]
+            targets = [_argument(call, 0, "path", "database", "filename", "file")]
         elif name in SECOND_ARGUMENT_WRITES:
             targets = [_argument(call, 1, "dst")]
         elif name in EITHER_ARGUMENT_WRITES:
@@ -825,6 +930,62 @@ READING_PROBE: Final[str] = textwrap.dedent(
         contained_lint_imports(config_filename=str(ROOT / "pyproject.toml"))
 
 
+    def rewrites_a_document():
+        (ROOT / "docs" / "notes.md").write_text("x", encoding="utf-8")
+
+
+    def writes_a_gzip_file():
+        import gzip
+
+        with gzip.open(ROOT / "x.gz", "wt", encoding="utf-8") as handle:
+            handle.write("x")
+
+
+    def writes_a_zip_archive():
+        import zipfile
+
+        with zipfile.ZipFile(ROOT / "x.zip", "w") as archive:
+            archive.writestr("x", "x")
+
+
+    def writes_a_tar_archive():
+        import tarfile
+
+        with tarfile.open(ROOT / "x.tar", "w") as archive:
+            archive.add(__file__)
+
+
+    def logs_to_a_file_there():
+        import logging
+
+        logging.getLogger("probe").addHandler(logging.FileHandler(ROOT / "probe.log"))
+
+
+    def opens_a_descriptor_for_writing():
+        os.close(os.open(ROOT / "x.bin", os.O_WRONLY | os.O_CREAT))
+
+
+    def writes_through_a_raw_file_object():
+        import io
+
+        with io.FileIO(ROOT / "x.raw", "w") as handle:
+            handle.write(b"x")
+
+
+    def writes_through_the_unbound_method():
+        Path.write_text(ROOT / "x.txt", "x", encoding="utf-8")
+
+
+    def writes_a_table_there(frame):
+        frame.to_csv(ROOT / "frame.csv")
+
+
+    def saves_an_array_there(array):
+        import numpy
+
+        numpy.save(ROOT / "array.npy", array)
+
+
     def writes_only_its_tmp_path(tmp_path):
         (tmp_path / "a.txt").write_text("x", encoding="utf-8")
         shutil.copy2(ROOT / "pyproject.toml", tmp_path / "pyproject.toml")
@@ -836,6 +997,21 @@ READING_PROBE: Final[str] = textwrap.dedent(
         with (ROOT / "pyproject.toml").open("rb") as handle:
             handle.read()
         sqlite3.connect(":memory:")
+
+
+    def reads_archives_and_descriptors_and_writes_only_its_tmp_path(tmp_path, frame):
+        import gzip
+        import logging
+        import zipfile
+
+        with gzip.open(ROOT / "x.gz", "rt", encoding="utf-8") as handle:
+            handle.read()
+        with zipfile.ZipFile(ROOT / "x.zip") as archive:
+            archive.namelist()
+        os.close(os.open(ROOT / "x.bin", os.O_RDONLY))
+        logging.getLogger("probe").addHandler(logging.FileHandler(tmp_path / "probe.log"))
+        frame.to_csv(tmp_path / "frame.csv")
+        Path.write_text(tmp_path / "x.txt", "x", encoding="utf-8")
 
 
     def builds_a_graph_without_a_cache():
@@ -854,8 +1030,11 @@ def test_the_reading_sees_every_write_it_names_and_none_into_tmp_path() -> None:
 
     Every function in `READING_PROBE` whose name does not say `tmp_path`, `without` or `hands`
     writes inside the checkout in one of the shapes the module docstring lists, and must be found;
-    the three controls write only `tmp_path`, only read the checkout, or turn the cache off, and
-    must not be. `hands_a_helper_the_root` writes nothing itself -- the finding is the helper's.
+    the controls write only `tmp_path`, only read the checkout -- an archive opened for reading, a
+    descriptor opened `O_RDONLY` -- or turn the cache off, and must not be.
+    `hands_a_helper_the_root` writes nothing itself: the finding is the helper's.
+    `rewrites_a_document` is the case `tests/checkout_guard.py`'s docstring points at, a write under
+    `docs/` the snapshot cannot see.
     """
     found = _checkout_writes(
         {"tests/probe_support.py": SUPPORT_PROBE, "tests/unit/test_probe.py": READING_PROBE}
@@ -885,6 +1064,16 @@ def test_the_reading_sees_every_write_it_names_and_none_into_tmp_path() -> None:
         "writes_what_an_imported_helper_returned",
         "builds_a_cached_graph",
         "lints_with_the_cache_on",
+        "rewrites_a_document",
+        "writes_a_gzip_file",
+        "writes_a_zip_archive",
+        "writes_a_tar_archive",
+        "logs_to_a_file_there",
+        "opens_a_descriptor_for_writing",
+        "writes_through_a_raw_file_object",
+        "writes_through_the_unbound_method",
+        "writes_a_table_there",
+        "saves_an_array_there",
     }
 
 

@@ -77,7 +77,9 @@ running -- measured, the session passed and the file appeared two seconds later;
 under the root rewritten in place; on Windows, a same-size rewrite with its modification time put
 back; and anything outside `src/`, `tests/` and the root's own listing -- a test that rewrote a
 file under `docs/`, or wrote inside a directory that already stands at the root, such as
-`runtime/`, is seen by neither half.
+`runtime/`. That last is the one place the other half decides: the reading sees such a write when
+its path is one the reading follows -- `(ROOT / "docs" / "notes.md").write_text(...)` is a case of
+its own test -- and not when a subprocess, or a path it does not follow, makes it.
 """
 
 from __future__ import annotations
