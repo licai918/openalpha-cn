@@ -1235,9 +1235,12 @@ UNREAD_BY_UNITS: Final[dict[str, str]] = {
 drawn, but never read into one unit."""
 
 
-def _joined(source: str) -> bool:
-    """Whether some unit of `source` holds both 链邻 and 已接入."""
-    return any("链邻" in unit.text and "已接入" in unit.text for unit in diagram_units(source))
+def _joined(label: str, source: str) -> bool:
+    """Whether some unit of `source` holds both 链邻 and 已接入; a report names `label`."""
+    return any(
+        "链邻" in unit.text and "已接入" in unit.text
+        for unit in diagram_units(source, filename=label)
+    )
 
 
 def test_diagram_units_read_through_what_their_docstring_says() -> None:
@@ -1247,7 +1250,7 @@ def test_diagram_units_read_through_what_their_docstring_says() -> None:
     name and a `.format` template, and `diagram_units` read none of them. It now reads all but the
     name, which `test_diagram_units_leave_unread_what_their_docstring_says` holds unread.
     """
-    missed = [label for label, source in READ_THROUGH.items() if not _joined(source)]
+    missed = [label for label, source in READ_THROUGH.items() if not _joined(label, source)]
     assert not missed, f"diagram_units did not read through: {missed}"
 
 
@@ -1258,11 +1261,11 @@ def test_diagram_units_leave_unread_what_their_docstring_says() -> None:
     A case that starts being read has closed a blind spot: change that docstring with it. The
     last one holds a table read row by row, which a table read whole would join.
     """
-    read = [label for label, source in UNREAD_BY_UNITS.items() if _joined(source)]
+    read = [label for label, source in UNREAD_BY_UNITS.items() if _joined(label, source)]
     assert not read, f"a stated blind spot of diagram_units is now read: {read}"
     unread = [
         label
         for label, source in UNREAD_BY_UNITS.items()
-        if not any("已接入" in string.text for string in diagram_strings(source))
+        if not any("已接入" in string.text for string in diagram_strings(source, filename=label))
     ]
     assert not unread, f"diagram_strings missed a literal in: {unread}"
