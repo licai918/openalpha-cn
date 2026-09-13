@@ -33,7 +33,7 @@
 - **结构化决策链**：用 `SignalFrame`、`DecisionLedger`、风险门和显式弃权替代无法审计的自由文本结论。
 - **双委员会研判**：Bull/Bear 研究辩论与激进/中性/保守三视角风险投票在同一次委员会评审里完成；整个委员会是一次可选的显式调用（`POST /api/v1/research/deliberate`、`OpenAlphaSDK.deliberate`），不能只开其中一方，输出附带消融对照：委员会前后的方向、强度与置信度变化。
 - **批量研究编排**：持久任务队列支持 1–8 并发、逐项进度、协作式取消、失败重试和进程重启恢复。
-- **模型可插拔**：无 LLM 时可确定性运行，出厂路径不调用模型，模型只能经由你在代码里构造、以 `agents=` 交给 SDK 的 Agent 进入研究，其中 `StructuredSignalAgent` 按 Schema 校验模型输出，并对不合格的输出做有界重试。
+- **模型可插拔**：无 LLM 时可确定性运行，出厂路径不调用模型，模型要经由你在代码里构造的 Agent 进入研究（例如以 `agents=` 交给 SDK），其中 `StructuredSignalAgent` 按 Schema 校验模型输出，并对不合格的输出做有界重试。
 - **模型治理边界**：模型客户端库定义了能力注册表与能力元数据，但没有代码据此选择端点，出厂路径与接入 Provider 之后都一样；在代码中接入模型 Provider 后对 408/429/5xx 分类重试，出厂路径不调用模型；Token、尝试次数与按用户单价估算的成本有持久账本，但要在构造 Provider 时传入 `usage_store` 才会写入，出厂路径不会自动记账。
 - **安全 BYOK**：内置 OpenAI-compatible Provider 类，可在 SDK 代码中指向 OpenAI、DeepSeek、Qwen、Ollama 或用户自建兼容端点；密钥只从构造时指定的环境变量读取，出厂路径不读取任何模型密钥。
 
@@ -1121,7 +1121,7 @@ OpenAlpha CN 的公开 API 不是一组彼此孤立的地址，而是围绕同�
 ### API 关系图 01｜四类入口共享五条功能链
 
 REST 调用方（React 工作台也是其中之一）经过同一 FastAPI 公共边界，请求在那里经过
-Pydantic Schema、请求大小限制与安全响应头；Python SDK 与 CLI 命令不走 HTTP，在进程内直接
+Pydantic Schema、请求大小限制与安全响应头；Python SDK 与 CLI 命令不经这道 HTTP 边界，在进程内直接
 调用同一批服务（`openalpha serve` 只是启动上面这道 REST 边界）。功能分为证据、研究、研究
 产品、组合和验证五条链，各入口覆盖的面不同；运行数据统一沉淀到 Parquet 与 SQLite WAL，
 而不是由各入口维护不同状态。

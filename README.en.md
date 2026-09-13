@@ -39,7 +39,7 @@ OpenAlpha CN competes on verifiability rather than the number of agent personas:
 - A-share-native limit-up, broken-board, consecutive-board, theme, catalyst, disclosure, and capital evidence;
 - separate event, availability, ingestion, and revision clocks;
 - content-addressed evidence and strict anti-look-ahead rules;
-- deterministic operation without an LLM: no shipped path calls a model, and a model reaches a run only as an agent you build in your own code and pass to the SDK as `agents=` — `StructuredSignalAgent` validates the reply against its schema and retries an invalid one within a bounded budget;
+- deterministic operation without an LLM: no shipped path calls a model, and a model reaches a run only inside an agent you build in your own code (one you pass to the SDK as `agents=`, for instance) — `StructuredSignalAgent` validates the reply against its schema and retries an invalid one within a bounded budget;
 - durable node checkpoints that reject changed requests or graph signatures;
 - bounded concurrent batches with progress, cancellation, retry, and restart recovery;
 - for a model provider you construct in your own code (no shipped path calls a model): classified retry, and a token and configured-cost usage ledger that no shipped path writes to — only a provider built with a usage store records into it;
@@ -168,8 +168,9 @@ before the instant the outcome became knowable. It does **not** mean the batch w
 it says it was: `predicted_at` is whatever the caller passed to `predict`, nothing here can check
 it, and nothing here defends against whoever owns the disk. Every rendered prediction carries both
 sentences in the body, because a one-word badge reads as an attestation this repository cannot
-make. See [the HTTP contract](docs/api/http.md) for the three standings and the sixteen named
-boundaries.
+make. See [the HTTP contract](docs/api/http.md) for the three standings; the sixteen named
+boundaries are the `limitations` every model answer carries, the list
+`openalpha_cn.model_view.KNOWN_MODEL_VIEW_LIMITATIONS` holds.
 
 ## The outcome plane, and where the three faces are not equal
 

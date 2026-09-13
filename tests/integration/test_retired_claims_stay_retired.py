@@ -3,14 +3,17 @@
 `D13` found each of these in `README.md`, `README.en.md`, `docs/why-openalpha-cn.zh-CN.md` or the
 marketing pack at `d4ef5e4`, checked it against the code, and rewrote it. The final review had
 verified the first classes itself (its I4); the rest came from its sub-audits and were checked
-against the code before anything was rewritten. An entry of `RETIRED_CLAIMS` holds:
+against the code before anything was rewritten. The classes its rebase round added came from the
+independent review of `D13` and the rebase brief, checked the same way. An entry of
+`RETIRED_CLAIMS` holds:
 
 - `pattern`: the family of wordings that was retired, searched in every clause of the four
   documents as `tests/prose_clauses.py` reads them;
-- `refuted_by`: the code fact that makes those wordings false, with file:line at `d4ef5e4`;
-- `retired`: what it retired, verbatim from `d4ef5e4` -- the clause, or the part of it the claim
-  sits in -- each of which the pattern must still match, so a pattern cannot be loosened into
-  matching nothing;
+- `refuted_by`: the code fact that makes those wordings false, with file:line at the revision
+  where `D13` found them: `d4ef5e4`, or `c99b46b` for what its rebase round added;
+- `retired`: what it retired, verbatim from that revision -- the clause, or the part of it the
+  claim sits in -- each of which the pattern must still match, so a pattern cannot be loosened
+  into matching nothing;
 - `premise`, where the fact is cheap to read off the code: a check that returns a message the day
   the code starts to support the claim, so a claim that has become true is reported as true
   instead of being blocked;
@@ -48,7 +51,9 @@ from prose_clauses import clauses
 from openalpha_cn.agents.committee import DeliberationCommittee
 from openalpha_cn.domain.portfolio import PortfolioOrder, PortfolioTransition
 from openalpha_cn.domain.report import ResearchReport
+from openalpha_cn.model_view import KNOWN_MODEL_VIEW_LIMITATIONS
 from openalpha_cn.runtime.batch import BatchResearchService
+from openalpha_cn.runtime.engine import ResearchEngine
 from openalpha_cn.sdk import OpenAlphaSDK
 
 ROOT: Final[Path] = Path(__file__).resolve().parents[2]
@@ -284,6 +289,32 @@ def _the_sdk_still_takes_no_provider() -> str | None:
     parameters = [*inspect.signature(OpenAlphaSDK.__init__).parameters]
     taken = [name for name in parameters if "provider" in name or "model" in name]
     return None if not taken else f"OpenAlphaSDK now takes {taken}"
+
+
+def _the_cli_still_reaches_tushare_over_http() -> str | None:
+    imported = _imports_under(SRC / "cli.py", ("openalpha_cn.providers.tushare",))
+    if "openalpha_cn.providers.tushare.UrllibTushareTransport" in imported:
+        return None
+    return (
+        "cli.py no longer imports UrllibTushareTransport: re-read whether any CLI command still "
+        "makes an HTTP request"
+    )
+
+
+def _the_engine_still_takes_its_agents() -> str | None:
+    if "agents" in inspect.signature(ResearchEngine.__init__).parameters:
+        return None
+    return "ResearchEngine no longer takes agents: a model may now reach a run only through the SDK"
+
+
+def _the_http_contract_still_names_few_boundaries() -> str | None:
+    http = (ROOT / "docs" / "api" / "http.md").read_text(encoding="utf-8")
+    if any(item.code not in http for item in KNOWN_MODEL_VIEW_LIMITATIONS):
+        return None
+    return (
+        "docs/api/http.md now names every KNOWN_MODEL_VIEW_LIMITATIONS code: the pointer to it "
+        "may hold"
+    )
 
 
 # --- The retired claims -----------------------------------------------------------------------
@@ -570,19 +601,21 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
         paraphrase="OpenAlpha CN 已经把权限控制做好了。",
     ),
     RetiredClaim(
-        name="a model provider is wired in through the SDK and gets schema validation there",
+        name="wiring a model provider in brings schema validation with it",
         pattern=re.compile(
             r"wired in through the SDK|在\s*SDK\s*代码中接入模型\s*Provider"
-            r"|Schema\s*与重试由治理层",
+            r"|Schema\s*与重试由治理层"
+            rf"|接入{_NOT_END}{{0,30}}模型后[，,]?\s*才有\s*Schema\s*校验",
             re.IGNORECASE,
         ),
         refuted_by=(
             "OpenAlphaSDK.__init__ takes runtime_dir, clock, agents and features, and no provider "
-            "(sdk.py:131-137): a model reaches a run only inside an agent passed as agents=. "
-            "Schema validation is StructuredSignalAgent.analyze's "
-            "StructuredAgentPayload.model_validate (agents/model.py:85-111); the provider only "
-            "checks that the reply is a JSON object (models/openai_compatible.py:209-214), and "
-            "models/governance.py holds the retry policy, not schema validation (:37-47)."
+            "(sdk.py:131-137): a model reaches a run only inside an agent, which the SDK takes "
+            "as agents=. Schema validation is StructuredSignalAgent.analyze's "
+            "StructuredAgentPayload.model_validate (agents/model.py:85-111); the provider sends "
+            "the schema as its response_format (models/openai_compatible.py:164-177) and only "
+            "checks that the reply is a JSON object (:209-214), and models/governance.py holds "
+            "the retry policy, not schema validation (:37-47)."
         ),
         retired=(
             "deterministic operation without an LLM: no shipped path calls a model, and a model "
@@ -591,9 +624,70 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "在 SDK 代码中接入模型 Provider 后才强制结构化输出、Schema 校验和有界重试。",
             "模型可以在 SDK 代码中通过 OpenAI-compatible BYOK 接入，Schema 与重试由治理层处理，"
             "出厂路径不调用模型。",
+            "在代码中接入 OpenAI-compatible 模型后，才有 Schema 校验和有界重试，出厂路径不调用模型",
         ),
         paraphrase="通过 SDK 挂上的模型 Provider 自带 Schema 校验。",
         premise=_the_sdk_still_takes_no_provider,
+    ),
+    RetiredClaim(
+        name="the SDK and the CLI make no HTTP request",
+        pattern=re.compile(
+            rf"{_FACE}{_NOT_END}{{0,12}}不走\s*HTTP"
+            rf"|{_FACE}[^.;]{{0,30}}(?:makes?|sends?)\s+no\s+HTTP",
+            re.IGNORECASE,
+        ),
+        refuted_by=(
+            "`openalpha doctor` (cli.py:720) runs `_probe_report` (:669) under --probe, which "
+            "fetches through `_probe_once` (:625) from every provider it probes; `openalpha panel "
+            "build` reads Tushare through `_panel_transport()`, a UrllibTushareTransport "
+            "(cli.py:2145-2153) that calls urllib.request.urlopen (providers/tushare.py:460-474). "
+            "What the SDK and the CLI commands skip is the REST boundary: neither imports the "
+            "FastAPI app."
+        ),
+        retired=("Python SDK 与 CLI 命令不走 HTTP",),
+        paraphrase="SDK 和 CLI 从来不发网络请求。",
+        premise=_the_cli_still_reaches_tushare_over_http,
+    ),
+    RetiredClaim(
+        name="a model reaches a run only through the SDK",
+        pattern=re.compile(
+            rf"只能经由{_NOT_END}{{0,30}}交给\s*SDK"
+            r"|only as an agent[^.;]{0,40}pass(?:ed)? to the SDK",
+            re.IGNORECASE,
+        ),
+        refuted_by=(
+            "ResearchEngine takes its agents itself (runtime/engine.py:56-73); the SDK is one "
+            "caller that builds an engine with them (sdk.py:196-206), the REST batch runner "
+            "builds its own (api/app.py:1831-1843), and BatchResearchService runs whatever "
+            "runner it is given (runtime/batch.py:290). A model reaches a run inside an agent, "
+            "whichever of these composes it."
+        ),
+        retired=(
+            "模型只能经由你在代码里构造、以 `agents=` 交给 SDK 的 Agent 进入研究",
+            "a model reaches a run only as an agent you build in your own code and pass to the SDK "
+            "as `agents=`",
+        ),
+        paraphrase="只有 SDK 能让模型参与研究。",
+        premise=_the_engine_still_takes_its_agents,
+    ),
+    RetiredClaim(
+        name="docs/api/http.md lists the named boundaries a model answer carries",
+        pattern=re.compile(
+            r"http\.md\)?[^.;]{0,60}(?:nine|sixteen|[0-9]+)\s+named\s+boundar", re.IGNORECASE
+        ),
+        refuted_by=(
+            "docs/api/http.md names 3 of the 16 codes of KNOWN_MODEL_VIEW_LIMITATIONS "
+            "(model_view.py:492); every model answer carries the whole list as its limitations "
+            "(model_view.py:2437, :2586, :2760)."
+        ),
+        retired=(
+            "See [the HTTP contract](docs/api/http.md) for the three standings and the nine named "
+            "boundaries.",
+            "See [the HTTP contract](docs/api/http.md) for the three standings and the sixteen "
+            "named boundaries.",
+        ),
+        paraphrase="The HTTP document is where every named boundary is spelled out.",
+        premise=_the_http_contract_still_names_few_boundaries,
     ),
 )
 """Each family of wordings `D13` retired, the code fact that refutes it, and what it retired."""
@@ -690,10 +784,12 @@ TRUE_SENTENCES_THAT_SHARE_THE_WORDS: Final[tuple[str, ...]] = (
     "移动平均因子的计算流程见 factor list。",
     "资金在板块间移动的流程可以回放。",
     "拒单只记录原因，报告单独关联决策。",
+    "See [the HTTP contract](docs/api/http.md) for the full argument and for the named boundaries.",
 )
-"""True or unrelated sentences that share a retired pattern's words, each of which the review of
-`D13` measured being caught (its M1): client holds cli, 移动平均 holds 移动, and a rejection and a
-report's decision can sit in one clause."""
+"""True or unrelated sentences that share a retired pattern's words. The review of `D13` measured
+the first six being caught (its M1): client holds cli, 移动平均 holds 移动, and a rejection and a
+report's decision can sit in one clause. The last is README.en.md:100's pointer to a factor run's
+named boundaries, which states no count; the first draft of the boundaries pattern caught it."""
 
 
 def test_the_retired_patterns_pass_the_true_sentences_that_share_their_words() -> None:
