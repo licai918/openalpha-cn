@@ -36,6 +36,7 @@
       .subtitle { font-size: 16px; font-weight: 480; }
       .micro { font-size: 11px; font-weight: 760; letter-spacing: 1.25px; }
       .cardTitle { font-size: 20px; font-weight: 720; }
+      .cardTitleTight { font-size: 17px; font-weight: 720; }
       .body { font-size: 14px; font-weight: 490; }
       .small { font-size: 12px; font-weight: 520; }
       .mono { font-size: 12px; font-weight: 680; font-family: Geist Mono, "Noto Sans Mono CJK SC", monospace; }
@@ -95,7 +96,7 @@
   <rect x="596" y="260" width="208" height="120" rx="18" fill="#13243A" stroke="#FB7185" stroke-opacity=".34" />
   <text x="620" y="289" class="micro" fill="#FB7185" text-anchor="start" opacity="1">BEAR / 反方</text>
   <text x="620" y="322" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">风险证据链</text>
-  <text x="620" y="352" class="body" fill="#96A8BE" text-anchor="start" opacity="1">反例 · 失效 · 流动性</text>
+  <text x="620" y="352" class="body" fill="#96A8BE" text-anchor="start" opacity="1">看空 Agent · 证据 · 得分</text>
   <rect x="822" y="260" width="150" height="120" rx="18" fill="#13243A" stroke="#FBBF24" stroke-opacity=".34" />
   <text x="846" y="289" class="micro" fill="#FBBF24" text-anchor="start" opacity="1">RISK PANEL</text>
   <text x="846" y="320" class="body" fill="#F4F7FB" text-anchor="start" opacity="1">激进/中性/保守</text>

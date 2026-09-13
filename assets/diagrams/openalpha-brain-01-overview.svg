@@ -36,6 +36,7 @@
       .subtitle { font-size: 16px; font-weight: 480; }
       .micro { font-size: 11px; font-weight: 760; letter-spacing: 1.25px; }
       .cardTitle { font-size: 20px; font-weight: 720; }
+      .cardTitleTight { font-size: 17px; font-weight: 720; }
       .body { font-size: 14px; font-weight: 490; }
       .small { font-size: 12px; font-weight: 520; }
       .mono { font-size: 12px; font-weight: 680; font-family: Geist Mono, "Noto Sans Mono CJK SC", monospace; }
@@ -101,7 +102,7 @@
   <text x="398" y="469" class="micro" fill="#FBBF24" text-anchor="start" opacity="1">03 / 决策约束</text>
   <text x="398" y="502" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">DeliberationOutcome</text>
   <text x="398" y="531" class="body" fill="#96A8BE" text-anchor="start" opacity="1">Bull / Bear · 三态风控</text>
-  <text x="398" y="555" class="body" fill="#96A8BE" text-anchor="start" opacity="1">显式弃权 · 一次可选调用</text>
+  <text x="398" y="555" class="body" fill="#96A8BE" text-anchor="start" opacity="1">输入弃权原样保留 · 一次可选调用</text>
   <rect x="716" y="440" width="322" height="174" rx="22" fill="#0C1928" stroke="#263A52" filter="url(#shadow)" />
   <rect x="717" y="441" width="320" height="172" rx="21" fill="none" stroke="#FFFFFF" stroke-opacity=".035" />
   <rect x="716" y="462" width="3" height="130" rx="1.5" fill="#38BDF8" />
@@ -111,7 +112,7 @@
   <text x="740" y="555" class="body" fill="#96A8BE" text-anchor="start" opacity="1">组合报告 · 结构化筛选</text>
   <path d="M696 331L716 331" fill="none" stroke="#A78BFA" stroke-width="2.2" marker-end="url(#arrow)" />
   <path d="M877 418V430H535V440" fill="none" stroke="#FBBF24" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrow)" opacity="1" />
-  <path d="M696 527L716 527" fill="none" stroke="#38BDF8" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrow)" />
+  <path d="M958 418L958 440" fill="none" stroke="#38BDF8" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrow)" />
   <path d="M877 614V650H535V625" fill="none" stroke="#FBBF24" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrow)" opacity="1" />
   <rect x="566" y="636" width="312" height="28" rx="14" fill="#FBBF24" fill-opacity="0.12" stroke="#FBBF24" stroke-opacity=".38" />
   <text x="722.0" y="655" class="small" fill="#FBBF24" text-anchor="middle" opacity="1">统计证据反哺规则 · 不自动训练模型</text>

@@ -47,7 +47,7 @@ OpenAlpha CN competes on verifiability rather than the number of agent personas:
 - A-share T+1, board lot, suspension, limit-lock, and transaction-cost constraints;
 - immutable cash/lot/mark/fee/PnL portfolio transitions with exposure clamps;
 - multi-day portfolio reports and event-study significance inference;
-- ablatable bull/bear and three-perspective risk committee;
+- an optional bull/bear and three-perspective risk committee, run as one call: its ablation reports how far the debate moved the signal, and the three risk votes are returned beside it rather than inside that comparison;
 - evidence-linked decisions with attribution limited to two exact rule-category terms
   (transaction cost, forgone-benchmark opportunity cost); factor, agent, and model
   attribution are structurally never produced, not merely narrowed, with the remainder
@@ -81,11 +81,12 @@ needs an explicit `--as-of` — omitted, it reads the panel at the wall clock, s
 example works depends on the day you run it. `tests/integration/test_documented_command_lines.py`
 now executes every runnable command line in this file and in `docs/`.
 
-Three faces answer the same questions: `openalpha factor *`, `GET /api/v1/factors` plus
-`POST /api/v1/factors/run`, and `OpenAlphaSDK.factor_catalog()` /
-`.run_factor_experiment()`. `factor build` is on the command line and in the SDK only,
-matching `panel build`: it writes panel partitions and the service ships with no
-authentication of its own.
+`factor list` and `factor run` answer on three faces: `openalpha factor list` /
+`openalpha factor run`, `GET /api/v1/factors` plus `POST /api/v1/factors/run`, and
+`OpenAlphaSDK.factor_catalog()` / `.run_factor_experiment()`. `factor build` is on the
+command line and in the SDK only: it writes panel partitions and the service ships with no
+authentication of its own. `factor describe` is on the command line and in the SDK
+(`describe_factor`) with no route, and `panel build` is on the command line alone.
 
 `factor run` prints three tier rows and a six-cell attribution grid. **The six cells are
 not equals**: `processed->neutralized` is the step the acceptance criterion is read off —

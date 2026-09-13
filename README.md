@@ -66,9 +66,13 @@ OpenAlpha CN 不是把智能体角色堆在一起，而是把 **A 股事实、�
 
 **链邻数据接口 API** 已具备合同优先的 BYOK 客户端，Bearer 认证、PIT（可见与修订时间）、客户端限流和失败分类都有冻结合约测试。配置服务地址与 Token 后，出厂路径只有 `openalpha doctor` 用它报告凭据、`--probe` 时探测连通性；`evidence build`、`panel build` 与 REST 证据路由都不调用它，要从链邻取数需在自己的代码里调用客户端；仓库不内置或转售链邻商业数据。
 
-五张图共用同一条“研究闭环导航”。图中 **实线表示系统自动执行或持久化**，**虚线表示调用方显式组合或人工反馈**；每一图都交付一个可以被下一图消费、也可以独立复核的结构化产物：
+五张图共用同一条“研究闭环导航”。图中 **实线表示系统自动执行或持久化**，**虚线表示调用方显式组合或人工反馈**；每一图都交付一个可以独立复核的结构化产物，研究结果之后的几步由调用方分别发起：
 
-`市场事实 → EvidenceSnapshot → ResearchRunResult → DeliberationOutcome / PortfolioTransition → ValidationResult → 人工审阅后反馈到下一轮证据与规则`
+- `市场事实 → EvidenceSnapshot → ResearchRunResult`：证据构建与 `run_cycle` 由系统执行，运行与决策落库；
+- `ResearchRunResult →（可选）DeliberationOutcome`：委员会是一次可选调用，结果只交还调用方；
+- `调用方订单 → PortfolioTransition`：订单要调用方另行提交，研究结果不会自动变成订单；
+- `ResearchRunResult + 观察 → ValidationResult`：结果验证由调用方发起；
+- 人工审阅这些产物后，再反馈到下一轮证据与规则。
 
 ### 01｜系统总览：一条由证据 ID 与不可变账本闭合的研究链
 
@@ -242,7 +246,7 @@ uv run openalpha doctor
 uv run openalpha serve
 ```
 
-`openalpha doctor --probe` 在凭证齐全时对**每一个**已声明的数据集发一次最小请求，并按数据集记录结果
+`openalpha doctor --probe` 对已配置的 provider（链邻要配服务地址，AKShare 要装 akshare extra，否则按数据集报 `not_configured` 或 `configuration`）在凭证齐全时对它声明的**每一个**数据集发一次最小请求，并按数据集记录结果
 （Tushare 现为 16/16；面板专供的四个走 `fetch_panel`，需要 `index_code`/`ts_code`/报告期年
 的六个由 provider 自己给出最小主体）。报 `authentication` 时命令**非零退出**（端点拒绝了凭证会这样；链邻只配服务地址、没配 key 时也这样，而且一个请求都不发），
 `--json` 也一样——它不再在打印完 payload 之后直接返回；而「这个接口这个账号取不到」
@@ -441,9 +445,11 @@ factor is registered in this panel at all`。因为第 4 步给了 `--neutraliza
 `docs/` 里每一行 `openalpha …` 解析出来，能跑的逐字跑并要求 exit 0。一条没跑过的文档命令和其他
 任何断言一样，只是一个声明。
 
-三个面等价：`openalpha factor *` ／ `GET /api/v1/factors` + `POST /api/v1/factors/run` ／
-`OpenAlphaSDK.factor_catalog()` + `.run_factor_experiment()`。`factor build` 只有命令行与
-SDK 两个面，与 `panel build` 一致——它写面板分区，而服务本身不带鉴权。
+`factor list` 与 `factor run` 三面等价：`openalpha factor list` + `openalpha factor run` ／
+`GET /api/v1/factors` + `POST /api/v1/factors/run` ／ `OpenAlphaSDK.factor_catalog()` +
+`.run_factor_experiment()`。`factor build` 只有命令行与 SDK 两个面——它写面板分区，而服务本身
+不带鉴权；`factor describe` 也只有命令行与 SDK（`describe_factor`），没有路由；`panel build`
+只有命令行一个面，没有 SDK 方法。
 
 ### 怎么读那张六格网格
 
@@ -1103,7 +1109,7 @@ OpenAlpha CN 整合 TradingAgents 和 AI Hedge Fund 的优势，接入 A 股数�
 2. 证据首次可知时间与防未来函数；
 3. 每个结论、决策、回放和归因都能追溯；
 4. 无 LLM 也能确定性运行；出厂路径不调用模型，在代码中把模型包进 `StructuredSignalAgent` 时，输出按 Schema 校验并有界重试；
-5. 实时研究与回放共用同一核心 `run_cycle`，API、SDK、CLI、Web 各自覆盖其中一部分；
+5. 实时研究与回放共用同一核心 `run_cycle`，四个入口都能发起单次研究与回放，其余能力各入口覆盖不同（REST、SDK 与 CLI 的逐条差异见 `tests/unit/test_surface_parity.py`，Web 只接入部分 REST 接口）；
 6. 功能状态必须有源码和测试证据，愿景、Stub、按钮不算完成。
 
 源码审计基线、差异化结论和后续边界见[竞争优势说明](docs/why-openalpha-cn.zh-CN.md)。
@@ -1112,8 +1118,8 @@ OpenAlpha CN 整合 TradingAgents 和 AI Hedge Fund 的优势，接入 A 股数�
 
 OpenAlpha CN 的公开 API 不是一组彼此孤立的地址，而是围绕同一份可验证数据逐层展开：
 调用方先把合法来源的数据整理为统一 Provider 合同，系统再生成时间点证据；单次研究和批量
-研究复用同一 `ResearchEngine.run_cycle`；研究结果由调用方显式送入委员会、筛选、报告、
-观察池或组合核算；最后由回放、事件统计、组合报告和结果归因完成验证闭环。
+研究复用同一 `ResearchEngine.run_cycle`；研究结果由调用方显式送入委员会、筛选或报告，
+观察池按标的另行登记，组合核算要调用方另交订单；最后由回放、事件统计、组合报告和结果归因完成验证闭环。
 
 图中**实线表示服务端自动调用或持久化**，**虚线表示调用方显式组合或人工反馈**。这个区别
 非常重要：研究结果不会自动变成组合订单，验证结果也不会自动训练模型。
@@ -1123,8 +1129,9 @@ OpenAlpha CN 的公开 API 不是一组彼此孤立的地址，而是围绕同�
 REST 调用方（React 工作台也是其中之一）经过同一 FastAPI 公共边界，请求在那里经过
 Pydantic Schema、请求大小限制与安全响应头；Python SDK 与 CLI 命令不经这道 HTTP 边界，在进程内直接
 调用同一批服务（`openalpha serve` 只是启动上面这道 REST 边界）。功能分为证据、研究、研究
-产品、组合和验证五条链，各入口覆盖的面不同；运行数据统一沉淀到 Parquet 与 SQLite WAL，
-而不是由各入口维护不同状态。
+产品、组合和验证五条链，各入口覆盖的面不同；运行数据落在同一个运行目录：
+证据用 Parquet，运行、决策、批量与组合账本等在 SQLite 库里，候选榜、预测与因子实验是内容寻址的
+JSON 文档；回放写进 SDK 与 REST 各自的回放库。
 
 <p align="center">
   <img

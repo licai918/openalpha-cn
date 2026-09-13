@@ -14,18 +14,21 @@ a committee every result passes through, a committee outcome written to the Deci
 a risk gate that constrains the portfolio. The final review of the whole `D13` batch found those
 three reworded in five more sections that none of their patterns read; `D14` broadened them into
 families of words that occur together, added the classes that review and `D14`'s own sweep of
-the four documents and both generators named, and retired every wording that sweep found. An
-entry of `RETIRED_CLAIMS` holds:
+the four documents and both generators named, and retired every wording that sweep found. The
+review of `D14` found more wordings of those families, in the documents and in the generators, and
+one class none of them held, a custom agent's research replayed; `D14`'s fix round retired them
+and added that class. An entry of `RETIRED_CLAIMS` holds:
 
 - `pattern`: the family of wordings that was retired, searched in every clause of the four
   documents as `tests/prose_clauses.py` reads them;
 - `refuted_by`: the code fact that makes those wordings false, with file:line at the revision it
   was checked at: `d4ef5e4`, `c99b46b` for the classes the rebase round added, `07f5c80` for the
   three the final round added, `20fec55` for what `D14`'s first two commits added, or `43b40a7`
-  for what its later commits added -- between the two, only `cli.py` from :4914 on and a
-  docstring in `backtest/replay.py` moved;
+  for what its later commits and its fix round added -- between the two, only `cli.py` from
+  :4914 on and a docstring in `backtest/replay.py` moved;
 - `retired`: what it retired, verbatim -- the clause, or the part of it the claim sits in -- as it
-  stood at `d4ef5e4`, on `16db458` for `D13`'s own five, or at `20fec55` for what `D14` retired;
+  stood at `d4ef5e4`, on `16db458` for `D13`'s own five, or at `20fec55` for what `D14` retired,
+  and at `29e26f3` for the four wordings its fix round retired that `D14` had written itself;
   the pattern must still match each of them, so a pattern cannot be loosened into matching
   nothing;
 - `premise`, where the fact is cheap to read off the code: a check that returns a message the day
@@ -37,7 +40,10 @@ entry of `RETIRED_CLAIMS` holds:
 phrasings that were retired, not a detector of the claim: the same claim in other words --
 another verb, another order, or its halves in two clauses -- passes, and
 `test_the_retired_claims_blind_spot_is_real` holds one such paraphrase per entry. The review of
-`D14` wrote 36 natural rewrites of these claims and 30 of them passed. A reworded claim is
+`D14` wrote 36 natural rewrites of these claims and 30 of them passed, and the census of the four
+documents and both generators at `29e26f3`, where every clause and every string literal passed
+every pattern, named eighty-eight more false or overstated passages -- sentences, command lines
+and drawings. A reworded claim is
 therefore left to review and to the census of the documents, not to a pattern: a pattern is not
 widened to catch a paraphrase whose words a true sentence shares, and when a pattern catches a
 true sentence the pattern is narrowed. Most spans of the entries `D14` added or broadened stop
@@ -57,7 +63,8 @@ between two boxes, is not read.
 clients" held "cli" until SDK and CLI were matched as words, and 移动平均 held 移动. There is no
 allowlist, so such a pattern is narrowed, never pinned, and its `retired` wordings must still
 match; `test_the_retired_patterns_pass_the_true_sentences_that_share_their_words` holds the
-sentences the review of `D13` measured being caught.
+true sentences the reviews of `D13` and `D14` and the census measured being caught, and a probe
+for each narrowing since.
 """
 
 from __future__ import annotations
@@ -76,6 +83,7 @@ from diagram_text import diagram_strings
 from prose_clauses import clauses
 
 from openalpha_cn.agents.committee import DeliberationCommittee, RiskVote
+from openalpha_cn.backtest.replay import ReplayRunner
 from openalpha_cn.batch_contracts import BatchResultRef
 from openalpha_cn.decisions.risk import RiskGate
 from openalpha_cn.domain.portfolio import PortfolioOrder, PortfolioTransition
@@ -830,6 +838,20 @@ def _nothing_is_called_portfolio_compose() -> str | None:
     return None if not found else f"something is called compose now: {found}"
 
 
+def _replay_still_runs_only_the_built_in_agents() -> str | None:
+    built = [*inspect.signature(ReplayRunner.__init__).parameters]
+    run = [*inspect.signature(ReplayRunner.run).parameters]
+    if built == ["self", "code_commit", "config_digest", "random_seed"] and run == [
+        "self",
+        "corpus",
+        "state_path",
+        "validation_store",
+        "clock",
+    ]:
+        return None
+    return f"ReplayRunner now takes {built} and runs with {run}: re-read which agents it runs"
+
+
 # --- The retired claims -----------------------------------------------------------------------
 
 
@@ -849,9 +871,11 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     RetiredClaim(
         name="the committee's parts switch on and off one by one",
         pattern=re.compile(
-            r"(?:独立|分别|单独)(?:启停|开关|关闭)|能单独做对照"
+            r"(?<!不能)(?<!不可)(?<!不可以)(?<!无法)(?<!没法)(?<!不会)"
+            r"(?:独立|分别|单独)(?:启停|开关|关闭)|(?<![不未没无])能单独做对照"
             r"|(?<![A-Za-z])(?:independently|separately|individually)\s+(?:toggl|enabl|disabl|switch)"
-            r"|可消融\s*Bull\s*/\s*Bear"
+            r"|可消融\s*Bull\s*/\s*Bear|ablatable\s+bull\s*/\s*bear"
+            r"|(?<!不是)(?<!并非)可消融\s*(?:三态)?风险委员会"
             rf"|(?:与|和)\s*完整委员会{_NO_COMMA_OR_DENIAL}{{0,8}}消融"
             rf"|(?:Bull\s*/\s*Bear|辩论){_NO_COMMA}{{0,4}}(?:与|和)\s*风险委员会"
             rf"(?:(?!整体){_NO_COMMA_OR_DENIAL}){{0,4}}可消融",
@@ -882,6 +906,8 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "可消融 Bull/Bear 研究辩论",
             "Bull/Bear 与风险委员会也可消融比较",
             "确定性基线、单 Agent 与完整委员会可以做消融对照",
+            "ablatable bull/bear and three-perspective risk committee",
+            "把两类优势结合成可消融风险委员会",
         ),
         paraphrase="委员会里的多空辩论和风险视角可以各自打开或关上。",
         premise=_the_committee_still_takes_no_switch,
@@ -916,7 +942,8 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
         pattern=re.compile(
             rf"(?:T\+1|整手|停牌|涨跌停){_NOT_END}{{0,30}}(?:也在|进入同一路径)回放"
             rf"|回放{_NO_DENIAL}{{0,12}}(?:继续|也)?执行{_NOT_END}{{0,8}}T\+1"
-            rf"|run_cycle`?{_NOT_END}{{0,12}}(?:再叠加|并执行){_NOT_END}{{0,8}}T\+1"
+            rf"|(?<!不在)(?<!不在\s)(?<!不会在)(?<!不会在\s)run_cycle`?{_NO_DENIAL}{{0,12}}"
+            rf"(?:再叠加|并执行){_NOT_END}{{0,8}}T\+1"
             rf"|无论哪条路径{_NOT_END}{{0,6}}都要经过"
             rf"|回放{_NO_DENIAL}{{0,8}}(?:加入|叠加)\s*T\+1"
             r"|结果还会经过\s*T\+1"
@@ -953,8 +980,8 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             rf"|(?:执行失败|拒单|成交){_NO_COMMA_OR_DENIAL}{{0,6}}纳入证据链"
             rf"|(?<!并非)(?<!不是)(?:任何|所有|全部|每个)(?:异常|故障|错误|失败)"
             rf"{_NO_COMMA_OR_DENIAL}{{0,6}}沿\s*(?:运行\s*|任务\s*)?ID"
-            rf"|沿\s*(?:运行\s*|任务\s*)?ID{_NO_COMMA_OR_DENIAL}{{0,6}}"
-            rf"找到{_NO_COMMA}{{0,4}}(?:故障|错误)"
+            rf"|沿\s*(?:(?:运行|任务|订单)\s*(?:或|与|和|/)?\s*){{0,3}}ID"
+            rf"{_NO_COMMA_OR_DENIAL}{{0,6}}找到{_NO_COMMA}{{0,4}}(?:故障|错误)"
             rf"|组合账本{_NO_COMMA_OR_DENIAL}{{0,10}}稳定\s*ID\s*关联"
             rf"|组合执行{_NO_COMMA_OR_DENIAL}{{0,6}}关联链?"
             rf"{_NO_COMMA_OR_DENIAL}{{0,4}}(?:回溯|追溯)"
@@ -972,6 +999,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "\N{FULLWIDTH SEMICOLON}",
             "组合层的拒单也关联决策与 A 股规则。",
             "最终你可以沿运行 ID 找到故障发生在哪一层",
+            "最终你可以沿运行或订单 ID 找到故障发生在哪一层",
             "OpenAlpha CN 则把 A 股执行失败纳入证据链",
             "任何异常都能沿 ID 返回具体节点",
             "证据、风险决定和组合账本都有稳定 ID 关联",
@@ -991,6 +1019,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             rf"(?:统计|回放|组合){_NO_COMMA_OR_DENIAL}{{0,6}}报告中心"
             rf"|报告{_NO_COMMA_OR_DENIAL}{{0,6}}展示{_NO_COMMA}{{0,8}}实际结果"
             rf"|统计结果{_NO_COMMA_OR_DENIAL}{{0,4}}都写进{_NO_COMMA}{{0,6}}记录"
+            rf"|(?<![不未没无])便于对比{_NO_COMMA}{{0,4}}Agent\s*或委员会的增量"
         ),
         refuted_by=(
             "ResearchReport holds one research run: run_id, subject, created_at, title, summary, "
@@ -999,7 +1028,9 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "ResearchRunResult (product/reporting.py:52-55). No committee outcome, portfolio "
             "transition or statistic is a field of it. EventStudyReport and "
             "PortfolioBacktestReport are handed back to the caller and stored nowhere: no storage "
-            "module names them (backtest/event_study.py:40, backtest/multi_day.py:176)."
+            "module names them (backtest/event_study.py:40, backtest/multi_day.py:176). The "
+            "committee's before-and-after delta is only in the AblationResult its own call "
+            "returns (agents/committee.py:176-182)."
         ),
         retired=(
             "研究结论、风险决定、组合执行和统计结果共同写入报告中心，"
@@ -1010,6 +1041,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "自定义结果继续进入风险门、账本、回放、统计和报告中心",
             "后续报告与验证再展示这一判断的实际结果",
             "最终 Agent 输出、风险决策、组合成交和统计结果都写进可追踪记录",
+            "便于对比不同 Agent 或委员会的增量",
         ),
         paraphrase="报告中心还会收录组合成交与统计检验。",
         premise=_a_report_still_holds_one_research_run,
@@ -1040,15 +1072,22 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
         pattern=re.compile(
             r"同一能力通过|工作台共享(?:同一后端能力|证据)|真走同一条链|入口用的是同一套能力"
             r"|四类入口共享五条"
-            rf"|(?<![A-Za-z])(?:API|SDK|CLI|Web)(?![A-Za-z]){_NOT_END}{{0,12}}共享同一合同"
+            rf"|(?<![A-Za-z])(?:API|SDK|CLI|Web)(?![A-Za-z]){_NO_DENIAL}{{0,12}}共享同一合同"
             r"|(?:同一核心路径|同一路径)贯通\s*(?:API|REST)"
             r"|(?:API|REST)\s*/\s*SDK\s*/\s*CLI\s*/\s*Web\s*同(?:一)?契约"
+            r"|三个面等价\s*[：:]\s*`?openalpha\s+factor\s+\*"
+            r"|Three faces answer the same questions:\s*`?openalpha\s+factor\s+\*"
+            rf"|两个面{_NOT_END}{{0,4}}与\s*`?panel build`?\s*一致"
+            r"|in the SDK only,?\s+matching\s+`?panel build"
         ),
         refuted_by=(
             "tests/unit/test_surface_parity.py::PARITY maps 48 routes: 28 have no CLI command "
             "and 11 no SDK method (measured at d4ef5e4), each gap named there; and the React "
             "workbench calls none of the batch, screening, watchlist or report routes (web/src). "
-            "The faces share the services each of them calls, not one set of capabilities."
+            "The faces share the services each of them calls, not one set of capabilities. "
+            "`factor describe` and `panel build` are CLI_ONLY, and no SDK method builds a panel: "
+            "`describe_factor` is the one's SDK twin, and the other has none "
+            "(tests/unit/test_surface_parity.py:186, :218, :225)."
         ),
         retired=(
             "**多入口一致**：同一能力通过 REST API、Python SDK、CLI 和响应式 React "
@@ -1064,6 +1103,10 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "API、SDK、CLI、Web 共享同一合同",
             "同一核心路径贯通 API、SDK、CLI、Web 与回放",
             "API / SDK / CLI / Web 同契约",
+            "三个面等价：`openalpha factor *`",
+            "`factor build` 只有命令行与 SDK 两个面，与 `panel build` 一致",
+            "Three faces answer the same questions: `openalpha factor *`",
+            "`factor build` is on the command line and in the SDK only, matching `panel build`",
         ),
         paraphrase="四个入口能做的事一模一样。",
         premise=_the_workbench_still_skips_the_product_routes,
@@ -1071,7 +1114,10 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     RetiredClaim(
         name="the container recovery check deletes and recreates the container",
         pattern=re.compile(
-            r"容器删除、重建|(?<!没有)(?<![不未非无])删除、重建后|验证关键状态真的能恢复"
+            r"(?<!不会把)(?<!不把)(?<!没有把)(?<!未把)容器删除、重建"
+            r"|(?<!没有)(?<![不未非无])"
+            r"(?<!不会把容器)(?<!不把容器)(?<!没有把容器)(?<!未把容器)删除、重建后"
+            r"|验证关键状态真的能恢复"
             r"|(?:deleted|removed) and recreated",
             re.IGNORECASE,
         ),
@@ -1093,9 +1139,9 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     RetiredClaim(
         name="interrupted batch work continues by itself after a restart",
         pattern=re.compile(
-            rf"启动时{_NOT_END}{{0,12}}(?:并|自动)继续(?:处理|执行)"
+            rf"启动时{_NO_DENIAL}{{0,12}}(?:并|自动)继续(?:处理|执行)"
             r"|(?:重试|取消|并发|进度|上限|状态)\s*(?:和|与|、)\s*(?:进程)?重启恢复"
-            r"|(?:Checkpoint|WAL)\s*\N{MIDDLE DOT}\s*宕机恢复"
+            r"|(?:Checkpoint|WAL)\s*\N{MIDDLE DOT}\s*(?:宕机|灾难)恢复"
             r"|(?:进程)?重启后还能恢复|批量任务中断(?:后还能|也能|后可)恢复"
             rf"|中断重启(?:会|就)?{_NO_COMMA_OR_DENIAL}{{0,6}}继续"
             r"|(?:retry|cancellation),?\s+and\s+restart\s+recovery",
@@ -1128,6 +1174,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "bounded concurrent batches with progress, cancellation, retry, and restart recovery",
             "SQLite 状态与重启恢复",
             "Checkpoint \N{MIDDLE DOT} 宕机恢复",
+            "Checkpoint \N{MIDDLE DOT} SQLite WAL \N{MIDDLE DOT} 灾难恢复",
         ),
         paraphrase="进程重启后，没跑完的批量任务会自己接着跑。",
         premise=_a_restart_still_only_requeues,
@@ -1136,7 +1183,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
         name="the batch task center is still missing or deferred",
         pattern=re.compile(
             r"(?:仍缺少|缺少)大规模批量任务中心"
-            rf"|大规模批量任务中心{_NO_COMMA}{{0,20}}(?:延后|缺少|缺失)"
+            rf"|大规模批量任务中心{_NO_COMMA_OR_DENIAL}{{0,20}}(?:延后|缺少|缺失)"
         ),
         refuted_by=(
             "The batch task center shipped: BatchResearchService (runtime/batch.py) behind POST "
@@ -1150,14 +1197,26 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     ),
     RetiredClaim(
         name="upstream feature counts no document in the repository gives",
-        pattern=re.compile(r"257\s*项上游功能|51\.36\s*%"),
+        pattern=re.compile(
+            r"(?<![不没无]到\s)(?<![不没无]到)(?<!没有\s)(?<!没有)257\s*项上游功能|51\.36\s*%"
+            r"|(?<![不没非])(?<!没有)(?<!不是)每(?:个|项)上游(?:功能|能力)"
+            rf"{_NO_COMMA_OR_DENIAL}{{0,12}}(?:去向|台账)"
+            rf"|源码审计{_NO_COMMA_OR_DENIAL}{{0,4}}逐项对账"
+        ),
         refuted_by=(
             "Nothing in the repository gives these counts: "
             "docs/audits/three-upstream-source-audit-20260724.md, the audit the note cites, states "
             "no total, and the feature ledger counts OpenAlpha's own rows "
-            "(artifacts/openalpha-v1-feature-coverage/summary.json), not upstream features."
+            "(artifacts/openalpha-v1-feature-coverage/summary.json), not upstream features: "
+            "features.csv holds 185 rows and every feature_id is an OA- id. The audit reconciles "
+            "the upstreams in eight capability-domain rows (its :26-37), not feature by feature."
         ),
-        retired=("共识别 257 项上游功能，原规划真实覆盖 132 项（51.36%），未审计和未知均为 0。",),
+        retired=(
+            "共识别 257 项上游功能，原规划真实覆盖 132 项（51.36%），未审计和未知均为 0。",
+            "表示每个上游功能都有明确去向",
+            "每项上游能力最终都进入唯一 ID 台账",
+            "TradingAgents 和 AI Hedge Fund 的能力边界通过源码审计被逐项对账",
+        ),
         paraphrase="上游一共有两百多项功能，原计划覆盖了一半左右。",
         premise=_the_upstream_counts_are_still_unsourced,
     ),
@@ -1293,11 +1352,12 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     RetiredClaim(
         name="every validation runs through run_cycle",
         pattern=re.compile(
-            rf"所有验证{_NOT_END}{{0,12}}同一个\s*`?run_cycle"
-            r"|(?:验证|回测|daily|paper)\s*共用\s*`?run_cycle"
+            rf"(?<!并非)(?<!不是)所有验证{_NO_COMMA_OR_DENIAL}{{0,12}}同一个\s*`?run_cycle"
+            r"|(?:验证|回测|daily|paper)\s*共用\s*`?run_cycle`?(?!\s*的说法)"
             r"|research core shared by(?:(?!\b(?:not|never|neither|nor)\b)[^.;]){0,40}"
             r"(?:backtest|paper|daily)"
-            rf"|backtest{_NOT_END}{{0,20}}(?:都经过|共用|共享)同一|用同一路径回答"
+            rf"|backtest{_NO_DENIAL}{{0,20}}(?:都经过|共用|共享)同一|用同一路径回答"
+            rf"|(?:统计|组合){_NO_COMMA_OR_DENIAL}{{0,12}}只消费{_NO_COMMA}{{0,4}}(?:可复核)?账本"
         ),
         refuted_by=(
             "In backtest/ only replay.py calls run_cycle (backtest/replay.py:263-264); the "
@@ -1305,7 +1365,9 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             ":204) and never calls it, and the event study is EventStudy().analyze "
             "(sdk.py:245-247). `model daily-run` builds its RunManifest(mode=daily) itself "
             "(model_view.py:2261-2274), and paper and daily have no runtime behaviour "
-            "(domain/run_mode.py:41-43)."
+            "(domain/run_mode.py:41-43). The event study takes the caller's return windows "
+            "(backtest/event_study.py:10-31) and the multi-day backtest the caller's initial "
+            "state and steps (backtest/multi_day.py:87-121); neither reads a ledger."
         ),
         retired=(
             "所有验证仍使用四时钟证据和同一个 `run_cycle`",
@@ -1314,6 +1376,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "无论 live、replay 还是 backtest，研究请求都经过同一证据路由、"
             "Agent 聚合、风险门和持久化路径",
             "用同一路径回答：是否有效、为何有效、下一轮改什么",
+            "统计、组合与产物层只消费可复核账本",
         ),
         paraphrase="每一种回测都走同一个研究循环。",
         premise=_the_portfolio_backtest_still_skips_run_cycle,
@@ -1321,7 +1384,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     RetiredClaim(
         name="a batch item runs the whole research chain",
         pattern=re.compile(
-            rf"每个任务仍(?:执行完整|保留){_NOT_END}{{0,24}}(?:双委员会|组合)"
+            rf"每个任务仍(?:执行完整|保留){_NO_COMMA_OR_DENIAL}{{0,24}}(?:双委员会|组合)"
             rf"|研究结论{_NO_COMMA_OR_DENIAL}{{0,6}}受到{_NO_COMMA}{{0,16}}交易规则"
         ),
         refuted_by=(
@@ -1361,18 +1424,21 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
         pattern=re.compile(
             rf"保守视角优先{_NOT_END}{{0,8}}(?:回撤|流动性)|中性视角平衡"
             rf"|风险视角再讨论{_NOT_END}{{0,6}}(?:敞口|流动性)|从不同风险偏好"
+            rf"|(?:反例|失效){_NO_COMMA_OR_DENIAL}{{0,8}}流动性"
         ),
         refuted_by=(
             "The three votes read the same flags (agents/committee.py:137-153): the aggressive "
             "vote reduces only on a severe flag, and the neutral and conservative votes are one "
             "expression -- block on a severe flag, reduce on any flag -- with the same reasons "
-            "(:143-152). No vote reads drawdown, liquidity or return."
+            "(:143-152). No vote reads drawdown, liquidity or return. The debate's two cases "
+            "hold side, agent_ids, evidence_ids and weighted_score (:30-36), and nothing else."
         ),
         retired=(
             "中性视角平衡收益风险",
             "保守视角优先回撤与流动性",
             "激进、中性、保守风险视角再讨论敞口与流动性。",
             "激进、中性、保守风险委员会再从不同风险偏好评审",
+            "反例 \N{MIDDLE DOT} 失效 \N{MIDDLE DOT} 流动性",
         ),
         paraphrase="保守的那一票更看重回撤。",
         premise=_the_neutral_and_conservative_votes_still_agree,
@@ -1402,8 +1468,12 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             rf"(?<![不无未没])(?:都要|必须|还要|须|需要?)经过{_NO_COMMA}{{0,20}}委员会"
             rf"|所有输出{_NO_COMMA_OR_DENIAL}{{0,12}}进入{_NO_COMMA}{{0,20}}委员会"
             r"|(?<![不无未没])经过双委员会"
-            rf"|委员会{_NO_COMMA}{{0,2}}(?:与|和)\s*风险门{_NO_COMMA}{{0,4}}审查"
+            rf"|委员会{_NO_COMMA}{{0,2}}(?:与|和)\s*风险门{_NO_COMMA_OR_DENIAL}{{0,4}}"
+            r"(?:审查|负责把|共同形成|共同给出)"
             rf"|委员会{_NO_COMMA_OR_DENIAL}{{0,6}}给出上游判断|回放{_NOT_END}{{0,30}}委员会则给出"
+            r"|ResearchRunResult\s*\N{RIGHTWARDS ARROW}\s*DeliberationOutcome"
+            rf"{_NOT_END}{{0,30}}"
+            r"\N{RIGHTWARDS ARROW}\s*ValidationResult"
         ),
         refuted_by=(
             "ResearchEngine.run_cycle routes, runs the agents, aggregates their signals and runs "
@@ -1412,7 +1482,9 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "the run's signal and agent results -- OpenAlphaSDK.deliberate (sdk.py:236-243) or "
             "POST /api/v1/research/deliberate (api/app.py:1946-1952); the CLI has no command for "
             "it -- and the A-share trading rules apply only when a caller executes an order "
-            "(sdk.py:1195-1210)."
+            "(sdk.py:1195-1210). OutcomeValidator.validate takes a ResearchRunResult and an "
+            "observation (backtest/validation.py:235-238), and nothing in src/ takes a "
+            "DeliberationOutcome."
         ),
         retired=(
             "最终还要经过 Bull/Bear 辩论、三态风险委员会和 A 股成交约束",
@@ -1424,6 +1496,11 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "四时钟证据、Bull/Bear 与风险委员会共同给出上游判断",
             "数据端的四时钟确保回放只看到当时可知的涨停与公告证据，"
             "Agent 与风险委员会则给出可追踪判断",
+            "双委员会与风险门负责把分歧压缩成可审计动作",
+            "双委员会和风险门共同形成可审计结果",
+            "市场事实 \N{RIGHTWARDS ARROW} EvidenceSnapshot \N{RIGHTWARDS ARROW} "
+            "ResearchRunResult \N{RIGHTWARDS ARROW} DeliberationOutcome / PortfolioTransition "
+            "\N{RIGHTWARDS ARROW} ValidationResult",
         ),
         paraphrase="每个研究结果都要过一遍委员会。",
         premise=_the_engine_still_calls_no_committee,
@@ -1438,6 +1515,8 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             rf"|委员会{_NOT_END}{{0,24}}DecisionLedger{_NOT_END}{{0,20}}再把"
             rf"|(?<!并非)(?<!不是)所有结果{_NO_COMMA_OR_DENIAL}{{0,6}}进入{_NO_COMMA}{{0,8}}账本"
             rf"|委员会{_NO_COMMA_OR_DENIAL}{{0,24}}(?:回溯|追溯)"
+            rf"|委员会{_NO_COMMA_OR_DENIAL}{{0,12}}(?:全部|都)留下{_NO_COMMA_OR_DENIAL}{{0,4}}证据引用"
+            rf"|委员会结果{_NOT_END}{{0,16}}要到各自的接口(?:查看|查询)"
         ),
         refuted_by=(
             "A DecisionLedger is built only in ResearchEngine.run_cycle "
@@ -1445,7 +1524,9 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "(:163), and it is stored by the one append_decision call there is (:400). "
             "OpenAlphaSDK.deliberate and POST /api/v1/research/deliberate hand the "
             "DeliberationOutcome back to the caller and store nothing (sdk.py:236-243, "
-            "api/app.py:1946-1952)."
+            "api/app.py:1946-1952), and no route, SDK method or command reads one back. A "
+            "RiskVote holds no evidence field (agents/committee.py:39-44), and a ledger's "
+            "AgentDecision holds an agent's signal_id and no evidence (domain/decision.py:14-22)."
         ),
         retired=(
             "Bull/Bear 和风险委员会也输出结构化结果，最终写入 DecisionLedger",
@@ -1454,6 +1535,8 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "分别保存",
             "最后，所有结果进入决策与报告账本",
             "四时钟、模型与 Prompt 版本、双委员会、风险和组合执行都能沿关联链回溯",
+            "Agent、Bull/Bear、风险委员会与最终决策全部留下证据引用",
+            "委员会结果与组合执行不写进报告，要到各自的接口查看",
         ),
         paraphrase="决策账本里也能查到委员会的每一票。",
         premise=_only_the_engine_appends_a_decision,
@@ -1629,6 +1712,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
         pattern=re.compile(
             r"凭证被端点拒绝\s*[（(]\s*`?authentication"
             r"|(?<!不)会对\s*\**每一个\**\s*已声明的数据集"
+            r"|doctor\s+--probe`?\s*在凭证齐全时对\s*\**每一个\**\s*已声明的数据集"
         ),
         refuted_by=(
             "ChainLinDataProvider.fetch raises category='authentication' when its key is "
@@ -1636,11 +1720,15 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "_probe_report fetches every dataset of a provider whose base URL is set "
             "(cli.py:669-696). With a ChainLin base URL and no key, doctor --probe sends no "
             "request, reports authentication for every dataset, and exits non-zero "
-            "(PROBE_FAILURE_STATES, cli.py:634)."
+            "(PROBE_FAILURE_STATES, cli.py:634). A provider that is not set up sends none "
+            "either: ChainLin without a base URL reports not_configured for every dataset "
+            "(cli.py:685-686), and AKShare without its optional extra fails configuration "
+            "before a request (providers/akshare.py:146-157)."
         ),
         retired=(
             "凭证被端点拒绝（`authentication`）时命令**非零退出**",
             "`openalpha doctor --probe` 会对**每一个**已声明的数据集发一次最小请求",
+            "`openalpha doctor --probe` 在凭证齐全时对**每一个**已声明的数据集发一次最小请求",
         ),
         paraphrase="doctor 报 authentication 就说明服务器拒绝了你的 key。",
         premise=_a_missing_chainlin_key_is_still_authentication,
@@ -1693,13 +1781,16 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             rf"|观察池{_NOT_END}{{0,4}}再由报告中心"
             rf"|观察池后{_NOT_END}{{0,12}}生成{_NO_COMMA}{{0,8}}报告"
             r"|筛选\s*\N{RIGHTWARDS ARROW}\s*观察池\s*\N{RIGHTWARDS ARROW}"
+            rf"(?!{_NO_COMMA}{{0,8}}(?:并不|并非|不是))"
+            rf"|研究结果{_NO_COMMA_OR_DENIAL}{{0,12}}送入{_NO_COMMA_OR_DENIAL}{{0,16}}观察池"
         ),
         refuted_by=(
             "WatchlistEntry holds subject, tags, note, created_at and updated_at "
             "(domain/watchlist.py:23-30), and put, list and remove are the whole surface of its "
             "store (storage/product.py:34-50): no evidence, report, run or screening id. A "
             "report is built from a ResearchRunResult (product/reporting.py:55), never from a "
-            "watchlist entry."
+            "watchlist entry, and POST /api/v1/watchlist takes a WatchlistEntry, not a research "
+            "result (api/app.py:1972-1976)."
         ),
         retired=(
             "这个项目的观察池不只是记住代码，还能接住后续证据和报告",
@@ -1707,6 +1798,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "筛选结果可以进入持久观察池，再由报告中心固化",
             "筛选结果进入观察池后，还可以继续生成新的版本化报告",
             "筛选 \N{RIGHTWARDS ARROW} 观察池 \N{RIGHTWARDS ARROW} 不可变报告",
+            "研究结果由调用方显式送入委员会、筛选、报告、观察池或组合核算",
         ),
         paraphrase="加进观察池的股票会自动带上它的证据和报告。",
         premise=_a_watchlist_entry_still_links_nothing,
@@ -1741,7 +1833,10 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     ),
     RetiredClaim(
         name="a portfolio compose command or route exists",
-        pattern=re.compile(r"portfolio\s+compose", re.IGNORECASE),
+        pattern=re.compile(
+            r"(?<!没有叫\s)(?<!没有叫)(?<!没有\s)(?<!没有)(?<!不叫\s)(?<!并无\s)portfolio\s+compose",
+            re.IGNORECASE,
+        ),
         refuted_by=(
             "Nothing is called compose: the CLI's portfolio group holds construct and "
             "turnover-variants (cli.py:6718, :7816), and a transition is made by POST "
@@ -1763,6 +1858,27 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
         ),
         retired=("共同回答：当时是否可知\N{FULLWIDTH QUESTION MARK}",),
         paraphrase="四份报告一起告诉你证据在决策时是不是看得到。",
+    ),
+    RetiredClaim(
+        name="a custom agent's research is replayed",
+        pattern=re.compile(
+            rf"自定义\s*(?:结果|Agent){_NO_COMMA_OR_DENIAL}{{0,16}}(?:并)?可回放"
+            rf"|输出仍会进入{_NO_COMMA_OR_DENIAL}{{0,16}}回放链"
+        ),
+        refuted_by=(
+            "ReplayRunner takes code_commit, config_digest and random_seed and no agents "
+            "(backtest/replay.py:133-142), and builds each case's engine as "
+            "partial(ResearchEngine, clock=...) (:248-253), so a replay runs the built-in "
+            "baseline agents (runtime/engine.py:71). OpenAlphaSDK.replay, POST "
+            "/api/v1/backtests/replay and `openalpha replay run` pass none either "
+            "(sdk.py:1250-1259, api/app.py:2183-2193, cli.py:1249-1254)."
+        ),
+        retired=(
+            "自定义结果同样经过风险门、写进账本并可回放",
+            "输出仍会进入统一证据、风险、账本和回放链",
+        ),
+        paraphrase="你写的 Agent 也能拿冻结语料重放一遍。",
+        premise=_replay_still_runs_only_the_built_in_agents,
     ),
 )
 """Each family of wordings `D13` retired, the code fact that refutes it, and what it retired."""
@@ -1883,7 +1999,7 @@ TRUE_SENTENCES_THAT_SHARE_THE_WORDS: Final[tuple[str, ...]] = (
     "The research core shared by live research and replay is run_cycle.",
     "在代码中把模型包进 StructuredSignalAgent 时，输出按 Schema 校验并有界重试。",
     "模型要包进 StructuredSignalAgent 再以 agents= 交给引擎。",
-    "doctor --probe 在凭证齐全时对每一个已声明的数据集发一次最小请求。",
+    "doctor --probe 对已配置的 provider、在凭证齐全时对它声明的每一个数据集发一次最小请求。",
     "Each single model answer carries the limitations list; the prediction listing carries none.",
     "组合执行计入 A 股交易约束与成本。",
     "台账的每项功能都有源码、入口和测试证据。",
@@ -1911,7 +2027,7 @@ TRUE_SENTENCES_THAT_SHARE_THE_WORDS: Final[tuple[str, ...]] = (
     "持久观察池、内容寻址且关联证据的报告中心。",
     "路由路径写进决策记录，可以查到选中了哪些角色。",
     "路由路径不记录为何选择某个角色。",
-    "研究结论受到四时钟和风险门约束，订单再受交易规则约束。",
+    "研究结论受到可得时间和风险门约束，订单再受交易规则约束。",
     "委员会整体可消融，Bull/Bear 与三视角风险投票在一次调用里完成。",
     "双委员会可消融。",
     "激进 \N{MIDDLE DOT} 中性 \N{MIDDLE DOT} 保守三票，"
@@ -1922,7 +2038,7 @@ TRUE_SENTENCES_THAT_SHARE_THE_WORDS: Final[tuple[str, ...]] = (
     "筛选 \N{MIDDLE DOT} 观察池 \N{MIDDLE DOT} 不可变报告",
     "SQLite 状态 \N{MIDDLE DOT} 重启后重新排队",
     "REST 经 FastAPI \N{MIDDLE DOT} SDK / CLI 进程内",
-    "三重验证回答：是否有效、为何有效、下一轮改什么",
+    "三重验证回答：是否显著、组合表现如何、记录是否一致",
     "SDK 与 CLI 在进程内调用服务，只有 REST 调用方经过同一 FastAPI 边界。",
     "The SDK and the CLI call services in process, and only REST callers go through the "
     "FastAPI boundary.",
@@ -1998,6 +2114,49 @@ TRUE_SENTENCES_THAT_SHARE_THE_WORDS: Final[tuple[str, ...]] = (
     "观察池并不能接住证据和报告。",
     "One research core shared by live research and replay, not by the backtest or daily runs.",
     "中断重启不会自己继续，要调用方再次运行。",
+    "委员会与风险门并不负责把分歧压缩成动作。",
+    "委员会与风险门不审查组合，组合由下单时的交易规则检查。",
+    "并不是每个上游功能都有去向，台账数的是自有能力。",
+    "研究结果不能直接送入观察池，观察池只收标的。",
+    "The committee is one optional call whose ablation compares the signal before and after it.",
+    "SQLite WAL \N{MIDDLE DOT} 同一 runtime_dir",
+    "事件统计与多日组合用调用方提供的收益与订单。",
+    "回测共用 run_cycle 的说法不成立，多日组合回测直接驱动组合模拟器。",
+    "所有验证都不走同一个 run_cycle。",
+    "backtest 与 replay 不共享同一套执行路径。",
+    "每个任务仍保留四时钟证据，但不跑双委员会和组合。",
+    "每个任务仍保留请求里的四时钟证据，组合与委员会另行调用。",
+    "回放不在 run_cycle 之后再叠加 T+1。",
+    "启动时不会自动继续执行被中断的项，只把它们重新排队。",
+    "CI 不会把容器删除、重建后再验证，只重启一次再读回证据。",
+    "大规模批量任务中心不再缺失，图形化 Agent 编排仍延后。",
+    "并非所有验证都经过同一个 `run_cycle`：只有回放会先跑它。",
+    "CLI 与 Web 并不共享同一合同：CLI 没有批量命令，Web 不调用产品路由。",
+    "台账里找不到 257 项上游功能这类数字。",
+    "筛选 \N{RIGHTWARDS ARROW} 观察池 \N{RIGHTWARDS ARROW} 报告并不是一条自动的链。",
+    "委员会不能单独关闭 Bull/Bear，只能整体不调用。",
+    "三个风险视角不能分别启停。",
+    "没有叫 portfolio compose 的命令或路由。",
+    "出厂路径没有 portfolio compose，组合执行走 /portfolio/execute。",
+    "委员会的输出并不都留下证据引用，三票没有证据字段。",
+    "委员会结果只在调用时交还、不落库，组合执行记在组合账本、可按标的查询。",
+    "ResearchRunResult \N{RIGHTWARDS ARROW} ValidationResult 由调用方发起，"
+    "ResearchRunResult \N{RIGHTWARDS ARROW} DeliberationOutcome 是另一次可选调用。",
+    "factor list 与 factor run 三面等价，"
+    "factor describe 只有命令行与 SDK，panel build 只有命令行。",
+    "`factor build` is on the command line and in the SDK only; `panel build` is on the command "
+    "line alone.",
+    "源码审计不是逐项对账，而是按八个能力域对账。",
+    "报告不便于对比不同 Agent 或委员会的增量，委员会调用前后的差值只在它自己的消融输出里。",
+    "反例一方不看流动性，只有 Agent、证据与加权得分。",
+    "出厂回放只跑内置的三个基线 Agent，不接收自定义 Agent。",
+    "自定义 Agent 可以经 SDK 的 agents= 进入 run_cycle，但出厂回放只跑内置基线。",
+    "自定义 Agent 不会进入出厂回放，回放只跑内置基线。",
+    "自定义 Agent 的结果不可回放，出厂回放只跑内置基线。",
+    "辩论与三票不能单独做对照，委员会只能整体与基线比较。",
+    "回放的 run_cycle 之后不会再叠加 T+1。",
+    "自定义 Agent 的输出仍会进入统一的证据链，但不会进入回放链。",
+    "这不是可消融风险委员会，三票不进消融差值。",
 )
 """True or unrelated sentences that share a retired pattern's words. The review of `D13` measured
 the first six being caught (its M1): client holds cli, 移动平均 holds 移动, and a rejection and a
@@ -2048,7 +2207,14 @@ a comma after a batch center that shipped, and a diagram tied to its generator. 
 fifty-six come from the review of `D14` (its m-2): its thirty-nine true sentences, verbatim, of
 which it measured thirty-one being caught, and seventeen natural denials `D14`'s fix round wrote
 for the spans those thirty-nine did not reach. All of them but the review's eight that passed
-were caught until their patterns were narrowed."""
+were caught until their patterns were narrowed. The next seven probe what the fix round broadened
+for that review's I-1 and I-2, each a true wording beside a retired one; one of them, 委员会与风险门
+不审查组合, was caught by the older 审查 branch until that branch took the new one's span, which
+stops at a denial. The next seventeen are the census's, at `29e26f3`: true sentences its six
+reports wrote in the families' words, which the patterns caught until each was narrowed. The last
+sixteen probe what the fix round added or narrowed beyond those: each is the wording a rewrite now
+uses, a true sentence holding both of a branch's words, or a denial a span or a lookbehind must
+stop at."""
 
 
 def test_the_retired_patterns_pass_the_true_sentences_that_share_their_words() -> None:

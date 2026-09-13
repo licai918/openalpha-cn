@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900" role="img" aria-labelledby="title desc">
   <title id="title">把证据规模化为可反驳、可审计的结构化观点</title>
-  <desc id="desc">单次与批量任务复用同一研究内核；角色由证据类型路由，模型只在治理边界内增强，不替代确定性基线。</desc>
+  <desc id="desc">单次与批量任务复用同一研究内核；角色由证据类型路由，模型只在治理边界内增强；不传入 Agent 时运行确定性基线。</desc>
   <defs>
     <linearGradient id="bgGradient" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#091727" />
@@ -36,6 +36,7 @@
       .subtitle { font-size: 16px; font-weight: 480; }
       .micro { font-size: 11px; font-weight: 760; letter-spacing: 1.25px; }
       .cardTitle { font-size: 20px; font-weight: 720; }
+      .cardTitleTight { font-size: 17px; font-weight: 720; }
       .body { font-size: 14px; font-weight: 490; }
       .small { font-size: 12px; font-weight: 520; }
       .mono { font-size: 12px; font-weight: 680; font-family: Geist Mono, "Noto Sans Mono CJK SC", monospace; }
@@ -51,7 +52,7 @@
   <rect x="64" y="42" width="42" height="4" rx="2" fill="#A78BFA" filter="url(#softGlow)" />
   <text x="64" y="72" class="eyebrow" fill="#A78BFA">OPENALPHA CN · RESEARCH OS / 03</text>
   <text x="64" y="115" class="title" fill="#F4F7FB">研究编排｜把证据规模化为可反驳、可审计的结构化观点</text>
-  <text x="64" y="148" class="subtitle" fill="#96A8BE">单次与批量任务复用同一研究内核；角色由证据类型路由，模型只在治理边界内增强，不替代确定性基线。</text>
+  <text x="64" y="148" class="subtitle" fill="#96A8BE">单次与批量任务复用同一研究内核；角色由证据类型路由，模型只在治理边界内增强；不传入 Agent 时运行确定性基线。</text>
   <g transform="translate(1210 50)" opacity=".92">
     <circle cx="44" cy="30" r="28" fill="#A78BFA" opacity=".09" />
     <path d="M18 42L40 20L56 32L75 11" fill="none" stroke="#A78BFA" stroke-width="2.2" />

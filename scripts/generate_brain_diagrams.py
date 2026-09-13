@@ -87,6 +87,7 @@ class Svg:
       .subtitle { font-size: 16px; font-weight: 480; }
       .micro { font-size: 11px; font-weight: 760; letter-spacing: 1.25px; }
       .cardTitle { font-size: 20px; font-weight: 720; }
+      .cardTitleTight { font-size: 17px; font-weight: 720; }
       .body { font-size: 14px; font-weight: 490; }
       .small { font-size: 12px; font-weight: 520; }
       .mono { font-size: 12px; font-weight: 680; font-family: Geist Mono, "Noto Sans Mono CJK SC", monospace; }
@@ -357,7 +358,7 @@ def overview() -> None:
             "03",
             "决策约束",
             "DeliberationOutcome",
-            ("Bull / Bear · 三态风控", "显式弃权 · 一次可选调用"),
+            ("Bull / Bear · 三态风控", "输入弃权原样保留 · 一次可选调用"),
             AMBER,
         ),
         (
@@ -378,7 +379,7 @@ def overview() -> None:
         )
     svg.arrow(696, 331, 716, 331, color=VIOLET)
     svg.path("M877 418V430H535V440", color=AMBER, dashed=True)
-    svg.arrow(696, 527, 716, 527, color=BLUE, dashed=True)
+    svg.arrow(958, 418, 958, 440, color=BLUE, dashed=True)
     svg.path("M877 614V650H535V625", color=AMBER, dashed=True)
     svg.pill(566, 636, 312, "统计证据反哺规则 · 不自动训练模型", color=AMBER)
     svg.arrow(339, 331, 374, 331, color=CYAN, label="规范化", label_y=315)
@@ -536,7 +537,7 @@ def agents() -> None:
         index=3,
         eyebrow="研究编排",
         title="把证据规模化为可反驳、可审计的结构化观点",
-        subtitle="单次与批量任务复用同一研究内核；角色由证据类型路由，模型只在治理边界内增强，不替代确定性基线。",
+        subtitle="单次与批量任务复用同一研究内核；角色由证据类型路由，模型只在治理边界内增强；不传入 Agent 时运行确定性基线。",
         accent=VIOLET,
     )
     svg.legend()
@@ -699,7 +700,7 @@ def decision() -> None:
     )
     svg.text(620, 289, "BEAR / 反方", css="micro", color=CORAL)
     svg.text(620, 322, "风险证据链", css="cardTitle", color=TEXT)
-    svg.text(620, 352, "反例 · 失效 · 流动性", css="body", color=MUTED)
+    svg.text(620, 352, "看空 Agent · 证据 · 得分", css="body", color=MUTED)
     svg.raw(
         f'  <rect x="822" y="260" width="150" height="120" rx="18" fill="{PANEL_SOFT}" stroke="{AMBER}" stroke-opacity=".34" />'
     )
@@ -769,8 +770,8 @@ def validation() -> None:
     svg = Svg(
         index=5,
         eyebrow="验证与反馈",
-        title="三重验证回答：是否有效、为何有效、下一轮改什么",
-        subtitle="实时研究与历史回放共享 run_cycle；统计、组合与产物层只消费可复核账本，反馈必须经人工审阅后进入规则。",
+        title="三重验证回答：是否显著、组合表现如何、记录是否一致",
+        subtitle="实时研究与历史回放共享 run_cycle；事件统计与多日组合用调用方提供的收益与订单，反馈经人工审阅后进入规则。",
         accent=BLUE,
     )
     svg.legend()
@@ -803,6 +804,7 @@ def validation() -> None:
         title="ResearchEngine.run_cycle",
         label="SAME EXECUTION PATH",
         color=VIOLET,
+        title_size="cardTitleTight",
         lines=(
             "同一 AgentRouter",
             "同一 RiskGate",
@@ -837,7 +839,7 @@ def validation() -> None:
         svg.text(x + 22, y + 84, detail, css="small", color=MUTED)
     svg.path("M606 360H625V284H644", color=CYAN, dashed=True)
     svg.arrow(606, 401, 644, 406, color=VIOLET, dashed=True)
-    svg.path("M606 442H625V528H644", color=CORAL)
+    svg.path("M606 442H625V528H644", color=CORAL, dashed=True)
 
     svg.section_label(1031, 214, "C", "研究产品与交付", AMBER)
     svg.panel(
@@ -853,13 +855,12 @@ def validation() -> None:
             "SQLite 持久观察池",
             "内容寻址不可变报告中心",
             "REST 全部 · SDK 大部分 · CLI 仅报告",
-            "Checkpoint · SQLite WAL · 灾难恢复",
-            "报告 / 指标 / 归因保留 provenance",
+            "SQLite WAL · 同一 runtime_dir",
+            "Compose 部署时落在持久卷",
+            "筛选与报告带 run / decision / signal ID",
+            "观察池只存标的 · 标签 · 备注",
         ),
     )
-    svg.path("M982 284H1002V330H1020", color=AMBER, dashed=True)
-    svg.arrow(982, 406, 1020, 406, color=AMBER, dashed=True)
-    svg.path("M982 528H1002V482H1020", color=AMBER, dashed=True)
 
     svg.raw(
         f'  <rect x="348" y="608" width="1028" height="62" rx="19" fill="{AMBER}" fill-opacity=".075" stroke="{AMBER}" stroke-opacity=".30" />'

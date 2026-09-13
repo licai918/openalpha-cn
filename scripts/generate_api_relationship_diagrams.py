@@ -461,7 +461,7 @@ def research_orchestration() -> str:
     svg = Svg(
         index=3,
         title="研究编排链｜单次与批量 API 汇入同一 run_cycle",
-        subtitle="单次、批量与回放的研究请求，都经过同一证据路由、Agent 聚合、风险门和持久化路径。",
+        subtitle="单次与批量研究请求经过同一证据路由、Agent 聚合、风险门和持久化路径；回放走同一 run_cycle，但写进独立的回放库。",
     )
     svg.card(
         x=64,
@@ -755,7 +755,7 @@ def validation_loop() -> str:
         y=540,
         width=1184,
         height=116,
-        title="验证结果汇总层",
+        title="四份报告各自返回 · 由调用方对照阅读",
         lines=(
             "ReplayReport + PortfolioBacktestReport + EventStudyReport + ValidationResult",
             "共同回答：能否复现？是否可成交？是否显著？成本与空仓机会成本各占多少、残差多大？",
@@ -764,7 +764,7 @@ def validation_loop() -> str:
         fill="#EEF1FF",
     )
     for x, _, _, _, color in columns:
-        svg.arrow(path=f"M {x + 143} 474 L {x + 143} 532", color=color)
+        svg.arrow(path=f"M {x + 143} 474 L {x + 143} 532", color=color, dashed=True)
     svg.card(
         x=394,
         y=670,
