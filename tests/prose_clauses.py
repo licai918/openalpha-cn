@@ -1,21 +1,20 @@
 """User-facing markdown read back as clauses, for the tests that hold prose to the code.
 
-Two guards read documents with this one reader:
-`tests/integration/test_attribution_claims_match_known_limitations.py` (no attribution category
-the code never produces may be presented as delivered) and
-`tests/integration/test_usage_claims_match_the_shipped_paths.py` (no model usage recording may be
-presented as something a shipped path does). Each guard decides what a *claim* is. This module
-decides only what a *clause* is and how a marker word or a negated phrase is matched, so a change
-to either is made in one place and moves both guards at once. Its mechanics are measured by the
-attribution guard's reader tests, which drive it through that guard's classifier: each block
-form folded back across a line break; each list marker (`-`, `*`, `+`, `1.`, `1)`), headings of
-level 2, 4 and 6, and both fence forms opening a block of their own; every wrap width from 20 to
-80; each clause end; glued and hyphenated English words; and negation -- 非, 不是, "not", "n't"
-and "never" directly before a phrase, a negation elsewhere in the clause, and a second copy of
-the phrase. The one space a fold leaves between two ASCII words is held by `README.en.md`'s
-pinned four-clock sentence, which a second space would stop matching. Not measured: whitespace
-at a clause's edges, and a list item directly after a quote, which the recursive grouping of the
-quote's own lines splits off whether or not the item closes the quote first.
+The tests that hold user-facing documents to the code read them with this one reader, and
+`tests/diagram_text.py` uses it to split the words a diagram draws into clauses the same way;
+`grep -l prose_clauses tests` lists every importer. Each guard decides what a *claim* is. This
+module decides only what a *clause* is and how a marker word or a negated phrase is matched, so a
+change to either is made in one place and moves every importer at once. Its mechanics are
+measured by the attribution guard's reader tests, which drive it through that guard's
+classifier: each block form folded back across a line break; each list marker (`-`, `*`, `+`,
+`1.`, `1)`), headings of level 2, 4 and 6, and both fence forms opening a block of their own;
+every wrap width from 20 to 80; each clause end; glued and hyphenated English words; and
+negation -- 非, 不是, "not", "n't" and "never" directly before a phrase, a negation elsewhere
+in the clause, and a second copy of the phrase. The one space a fold leaves between two ASCII
+words is held by `README.en.md`'s pinned four-clock sentence, which a second space would stop
+matching. Not measured: whitespace at a clause's edges, and a list item directly after a quote,
+which the recursive grouping of the quote's own lines splits off whether or not the item closes
+the quote first.
 
 - *Blocks.* A paragraph, a list item and a blockquote are each one block, with their
   soft-wrapped continuation lines folded back in: indented or lazy (unindented)
